@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    name: lint (pre-commit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: pre-commit/action@v3.0.1
+
+  typecheck:
+    name: typecheck (mypy + tsc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+      - name: install backend
+        run: uv sync --project apps/backend --group dev
+      - name: mypy
+        run: uv run --project apps/backend mypy --config-file apps/backend/pyproject.toml apps/backend
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: install frontend
+        run: npm ci
+      - name: tsc
+        run: npm run typecheck:frontend
+
+  unit:
+    name: unit tests (pytest + vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+      - name: install backend
+        run: uv sync --project apps/backend --group dev
+      - name: pytest
+        run: uv run --project apps/backend pytest -c apps/backend/pyproject.toml tests/unit -q
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: install frontend
+        run: npm ci
+      - name: vitest
+        run: npm run test:unit:frontend
+
+  migration-check:
+    name: migration-check (alembic single head)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+      - name: install backend
+        run: uv sync --project apps/backend --group dev
+      - name: alembic heads
+        run: uv run --project apps/backend alembic -c apps/backend/alembic.ini heads
+
+  integration:
+    name: integration tests (pytest vs Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: caresetu
+          POSTGRES_PASSWORD: caresetu
+          POSTGRES_DB: caresetu
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U caresetu -d caresetu"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+      - name: install backend
+        run: uv sync --project apps/backend --group dev
+      - name: pytest integration
+        run: uv run --project apps/backend pytest -c apps/backend/pyproject.toml tests/integration -q
+        env:
+          DATABASE_URL: postgresql+asyncpg://caresetu:caresetu@localhost:5432/caresetu
+
+  # e2e (playwright) job lands in PHASE-1 alongside the first E2E spec and app
+  # routes (roadmap §3.2). Until then there are no tests to run.
+
+  scan:
+    name: security scan (gitleaks + bandit + pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: install backend
+        run: uv sync --project apps/backend --group dev
+      - name: bandit
+        run: uvx bandit -c apps/backend/pyproject.toml -r apps/backend -q
+      - name: pip-audit
+        run: uvx pip-audit --path apps/backend/.venv
+      - name: npm audit
+        run: npm audit --audit-level=high

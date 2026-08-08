@@ -1,0 +1,34 @@
+* text=auto
+
+# Text files normalized to LF in the repo (no Windows/Linux churn in CI)
+*.py text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.ini text eol=lf
+*.cfg text eol=lf
+*.mako text eol=lf
+*.sh text eol=lf
+*.lock text eol=lf
+*.example text eol=lf
+
+# Windows shell scripts
+*.ps1 text eol=crlf
+
+# Binaries / artifacts
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.pdf binary
