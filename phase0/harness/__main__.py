@@ -14,6 +14,7 @@ Examples:
     python -m phase0.harness --provider whisper --limit 2
     python -m phase0.harness --provider nim --limit 2
     python -m phase0.harness --provider gemini --output phase0/runs/mine.json
+    python -m phase0.harness --compare
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
+from phase0.harness.compare import compare_runs, render_comparison
 from phase0.harness.models import RunReport
 from phase0.harness.providers.gemini import GeminiProvider
 from phase0.harness.providers.nim import LICENSING_CAVEAT, NimProvider
@@ -141,7 +143,23 @@ def main() -> None:
         default=30.0,
         help="settle time on HTTP 429 quota errors (s)",
     )
+    parser.add_argument(
+        "--compare",
+        action="store_true",
+        help="emit the cross-provider comparison table from recorded runs and exit",
+    )
+    parser.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="directory of recorded run JSONs (default phase0/runs)",
+    )
     args = parser.parse_args()
+
+    if args.compare:
+        runs_dir = args.runs_dir or _default_runs_dir()
+        print(render_comparison(compare_runs(runs_dir)))
+        return
 
     corpus = load_corpus()
     selected = [clip.clip_id for clip in corpus.clips]
@@ -177,8 +195,7 @@ def main() -> None:
         probe_usage = probe.get("usage")
 
     if args.output is None:
-        run_dir = Path(__file__).resolve().parents[1] / "runs"
-        args.output = run_dir / f"{report_timestamp()}.json"
+        args.output = _default_runs_dir() / f"{report_timestamp()}.json"
 
     report = run_corpus(
         gateway=provider,
@@ -193,6 +210,10 @@ def main() -> None:
         print(f"caveat:        {LICENSING_CAVEAT}")
     if probe_usage is not None and args.provider == "gemini":
         print(f"probe usage:   in={probe_usage.input_tokens} out={probe_usage.output_tokens}")
+
+
+def _default_runs_dir() -> Path:
+    return Path(__file__).resolve().parents[1] / "runs"
 
 
 def report_timestamp() -> str:

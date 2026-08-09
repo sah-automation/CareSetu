@@ -131,7 +131,8 @@ phase0/harness/
 ├── metrics.py        # WER/CER via jiwer + field-level F1 + AMB-006 calibration
 ├── gate.py           # low-confidence forced-review usage gate (AMB-006)
 ├── runner.py         # corpus → both legs → aggregated report (JSON output)
-├── __main__.py       # CLI entrypoint
+├── compare.py        # cross-provider comparison table from recorded runs (#11)
+├── __main__.py       # CLI entrypoint (runs + --compare)
 └── providers/
     ├── gemini.py     # Gemini free/cheap tier (httpx, no new dependency)
     ├── whisper.py    # OpenAI Whisper ASR + chat structuring (httpx, no new dependency)
@@ -202,6 +203,27 @@ structuring chat model via `WHISPER_CHAT_MODEL`), `NVIDIA_API_KEY` for
 `--provider nim` (ASR model via `NIM_ASR_MODEL`, structuring chat model via
 `NIM_CHAT_MODEL`, hosted base URL via `NIM_BASE_URL`). Each run writes a JSON
 report to `phase0/runs/<timestamp>.json` (gitignored).
+
+### Compare (issue #11)
+
+Once at least one provider has recorded runs, emit the apples-to-apples
+comparison table — transcription quality, structuring accuracy, flag
+calibration, and per-intake cost, per provider:
+
+```bash
+python -m phase0.harness --compare                # default phase0/runs/
+python -m phase0.harness --compare --runs-dir some/other/runs
+```
+
+The table is generated only from the recorded run JSONs (`phase0/runs/*.json`,
+the `report_to_json` schema), never eyeballed or re-scored from raw
+transcripts. One row per provider (latest run by `generated_at`, run file
+named for provenance); a provider with no recorded run is an explicit
+`no data` row, not a guess. Per-intake cost is the mean recorded cost per
+billed clip across both legs; the `calls` column restates the per-call ceiling
+the run itself records — Gemini's multimodal single-call finding collapses to
+one call, Whisper/NIM's 2-leg pipeline to two. The NIM production-licensing
+caveat is surfaced in the output.
 
 ### Caveats
 
