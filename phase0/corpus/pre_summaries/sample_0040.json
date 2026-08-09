@@ -1,0 +1,63 @@
+{
+  "clip_id": "sample_0040",
+  "cohort": "heavy_local",
+  "field_set_version": "1.0.0",
+  "chief_complaint": "pain in the leg/limb (ongoing treatment)",
+  "onset": null,
+  "duration": null,
+  "location": "leg/limb (foot area, Omnigel applied on foot)",
+  "severity": null,
+  "nature": null,
+  "associated_symptoms": [],
+  "aggravating_factors": [],
+  "relieving_factors": [],
+  "known_medications": [
+    {
+      "name": "Tendo Life",
+      "strength": null,
+      "frequency": "once a day",
+      "route": "oral",
+      "duration": null,
+      "note": "to be replaced by Tendo Shot"
+    },
+    {
+      "name": "Omnigel gel",
+      "strength": null,
+      "frequency": null,
+      "route": "topical",
+      "duration": null,
+      "note": "on the foot; to be stopped"
+    },
+    {
+      "name": "Tendo Shot",
+      "strength": null,
+      "frequency": "twice a day",
+      "route": null,
+      "duration": null,
+      "note": "new prescription"
+    }
+  ],
+  "allergies": [],
+  "past_history": [],
+  "family_history": [],
+  "vitals": {
+    "temperature": null,
+    "blood_pressure": null,
+    "pulse": null,
+    "spo2": null,
+    "height_cm": null,
+    "weight_kg": null,
+    "bmi": null,
+    "other": []
+  },
+  "labs_ordered": [],
+  "diagnosis_impression": null,
+  "advice": [
+    "switch from Tendo Life to Tendo Shot twice a day",
+    "stop Omnigel gel",
+    "stop heat therapy"
+  ],
+  "follow_up": null,
+  "clinical_notes": "Dialogue: patient asks whether to continue exercise and heat therapy; doctor adjusts treatment: Tendo Shot twice a day replacing Tendo Life, stop Omnigel on the foot and stop heat therapy.",
+  "extraction_notes": "Medication changes and advice unambiguous; underlying condition implied by the treatment rather than named."
+}

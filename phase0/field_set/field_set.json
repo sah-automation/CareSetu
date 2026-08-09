@@ -1,0 +1,166 @@
+{
+  "field_set_version": "1.0.0",
+  "name": "Phase 7 Provisional Pre-Summary Field Set",
+  "description": "Provisional structured pre-summary schema seeded from the Phase 0 Daltonganj Hindi corpus. This version is the reference ground-truth schema for corpus pre-summaries; it seeds the Phase 7 pre-summary schema (FEAT-007). Provisional and versioned; a stable schema is defined at PHASE-7.",
+  "status": "provisional",
+  "created_by": "John (author) / Sonu (reviewer)",
+  "fields": [
+    {
+      "name": "clip_id",
+      "type": "string",
+      "required": true,
+      "description": "Corpus clip identifier, e.g. sample_0002. Matches manifest clip_id."
+    },
+    {
+      "name": "cohort",
+      "type": "enum",
+      "required": true,
+      "enum": ["urban_hindi", "peri_urban", "heavy_local"],
+      "description": "Dialect cohort assigned to the clip."
+    },
+    {
+      "name": "field_set_version",
+      "type": "string",
+      "required": true,
+      "description": "Version of this field set used to author the pre-summary."
+    },
+    {
+      "name": "chief_complaint",
+      "type": "string|null",
+      "required": true,
+      "description": "Primary presenting complaint stated in the recording. null when not stated in the clip."
+    },
+    {
+      "name": "onset",
+      "type": "string|null",
+      "required": true,
+      "description": "When the complaint started, verbatim where possible (e.g. '4 days ago', 'this morning')."
+    },
+    {
+      "name": "duration",
+      "type": "string|null",
+      "required": true,
+      "description": "How long the complaint has persisted."
+    },
+    {
+      "name": "location",
+      "type": "string|null",
+      "required": true,
+      "description": "Body part/region involved."
+    },
+    {
+      "name": "severity",
+      "type": "string|null",
+      "required": true,
+      "description": "Patient-stated or inferred intensity."
+    },
+    {
+      "name": "nature",
+      "type": "string|null",
+      "required": true,
+      "description": "Character/quality of the complaint (burning, dull, intermittent, etc.)."
+    },
+    {
+      "name": "associated_symptoms",
+      "type": "array<string>",
+      "required": true,
+      "description": "Other symptoms reported alongside the chief complaint."
+    },
+    {
+      "name": "aggravating_factors",
+      "type": "array<string>",
+      "required": true,
+      "description": "Factors that worsen the complaint."
+    },
+    {
+      "name": "relieving_factors",
+      "type": "array<string>",
+      "required": true,
+      "description": "Factors that relieve the complaint."
+    },
+    {
+      "name": "known_medications",
+      "type": "array<object>",
+      "required": true,
+      "description": "Medications mentioned (current or prescribed). Each item: {name, strength, frequency, route, duration, note}.",
+      "item": {
+        "name": "string|null",
+        "strength": "string|null",
+        "frequency": "string|null",
+        "route": "string|null",
+        "duration": "string|null",
+        "note": "string|null"
+      }
+    },
+    {
+      "name": "allergies",
+      "type": "array<string>",
+      "required": true,
+      "description": "Known allergies reported in the clip."
+    },
+    {
+      "name": "past_history",
+      "type": "array<string>",
+      "required": true,
+      "description": "Patient's own past/chronic conditions and ongoing treatments."
+    },
+    {
+      "name": "family_history",
+      "type": "array<string>",
+      "required": true,
+      "description": "Family medical history mentioned in the clip."
+    },
+    {
+      "name": "vitals",
+      "type": "object",
+      "required": true,
+      "description": "Vitals/measurements read out in the clip. Unmeasured keys are null.",
+      "item": {
+        "temperature": "string|null",
+        "blood_pressure": "string|null",
+        "pulse": "string|null",
+        "spo2": "string|null",
+        "height_cm": "string|null",
+        "weight_kg": "string|null",
+        "bmi": "string|null",
+        "other": "array<string>"
+      }
+    },
+    {
+      "name": "labs_ordered",
+      "type": "array<string>",
+      "required": true,
+      "description": "Investigations/tests ordered in the clip."
+    },
+    {
+      "name": "diagnosis_impression",
+      "type": "string|null",
+      "required": true,
+      "description": "Doctor's stated diagnosis or clinical impression."
+    },
+    {
+      "name": "advice",
+      "type": "array<string>",
+      "required": true,
+      "description": "Doctor's advice/instructions given in the clip."
+    },
+    {
+      "name": "follow_up",
+      "type": "string|null",
+      "required": true,
+      "description": "Follow-up instructions, if any."
+    },
+    {
+      "name": "clinical_notes",
+      "type": "string",
+      "required": true,
+      "description": "Free-text clinical context: consultation stage, who is speaking, non-clinical observations relevant to structuring."
+    },
+    {
+      "name": "extraction_notes",
+      "type": "string",
+      "required": true,
+      "description": "Structuring confidence notes: which fields are unambiguous, which are partial, and known gaps."
+    }
+  ]
+}

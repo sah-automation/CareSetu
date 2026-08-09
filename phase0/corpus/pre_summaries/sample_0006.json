@@ -1,0 +1,39 @@
+{
+  "clip_id": "sample_0006",
+  "cohort": "urban_hindi",
+  "field_set_version": "1.0.0",
+  "chief_complaint": null,
+  "onset": null,
+  "duration": null,
+  "location": null,
+  "severity": null,
+  "nature": null,
+  "associated_symptoms": [],
+  "aggravating_factors": [],
+  "relieving_factors": [],
+  "known_medications": [],
+  "allergies": [],
+  "past_history": [],
+  "family_history": [],
+  "vitals": {
+    "temperature": null,
+    "blood_pressure": null,
+    "pulse": null,
+    "spo2": null,
+    "height_cm": null,
+    "weight_kg": null,
+    "bmi": null,
+    "other": []
+  },
+  "labs_ordered": [],
+  "diagnosis_impression": "possibly stress-related or migraine",
+  "advice": [
+    "stay hydrated",
+    "eat meals on time",
+    "get 6 to 8 hours of sleep",
+    "avoid alcohol"
+  ],
+  "follow_up": null,
+  "clinical_notes": "Dialogue: doctor explains a complaint (nature not named in this clip) could be stress related or migraine; gives lifestyle advice.",
+  "extraction_notes": "Chief complaint implied (migraine/headache context) but not explicitly named in the clip; lifestyle advice unambiguous."
+}

@@ -1,0 +1,43 @@
+{
+  "clip_id": "sample_0019",
+  "cohort": "urban_hindi",
+  "field_set_version": "1.0.0",
+  "chief_complaint": "fever",
+  "onset": null,
+  "duration": null,
+  "location": null,
+  "severity": null,
+  "nature": null,
+  "associated_symptoms": [],
+  "aggravating_factors": [],
+  "relieving_factors": [],
+  "known_medications": [
+    {
+      "name": "Augmentin",
+      "strength": "625",
+      "frequency": "one tablet morning and evening",
+      "route": "oral",
+      "duration": "one week",
+      "note": null
+    }
+  ],
+  "allergies": [],
+  "past_history": [],
+  "family_history": [],
+  "vitals": {
+    "temperature": "104 F",
+    "blood_pressure": null,
+    "pulse": null,
+    "spo2": null,
+    "height_cm": "170",
+    "weight_kg": "80",
+    "bmi": null,
+    "other": ["OFC around 23 cm"]
+  },
+  "labs_ordered": [],
+  "diagnosis_impression": "viral fever",
+  "advice": ["use the medicines for one week"],
+  "follow_up": null,
+  "clinical_notes": "Dialogue: doctor records vitals, states diagnosis of viral fever and prescribes Augmentin 625 for one week.",
+  "extraction_notes": "Diagnosis, vitals and prescription unambiguous; onset/duration not stated."
+}

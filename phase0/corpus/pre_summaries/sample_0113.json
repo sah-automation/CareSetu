@@ -1,0 +1,36 @@
+{
+  "clip_id": "sample_0113",
+  "cohort": "heavy_local",
+  "field_set_version": "1.0.0",
+  "chief_complaint": null,
+  "onset": null,
+  "duration": null,
+  "location": null,
+  "severity": null,
+  "nature": null,
+  "associated_symptoms": [],
+  "aggravating_factors": [],
+  "relieving_factors": [],
+  "known_medications": [],
+  "allergies": [],
+  "past_history": [],
+  "family_history": [],
+  "vitals": {
+    "temperature": null,
+    "blood_pressure": null,
+    "pulse": null,
+    "spo2": null,
+    "height_cm": null,
+    "weight_kg": null,
+    "bmi": null,
+    "other": [
+      "cardiac examination: S1S2 normal, no murmurs; respiratory examination: clear"
+    ]
+  },
+  "labs_ordered": [],
+  "diagnosis_impression": null,
+  "advice": ["take a deeper breath during examination"],
+  "follow_up": null,
+  "clinical_notes": "Dialogue during physical examination: cardiac exam normal (S1S2, no murmurs), respiratory exam clear; doctor asks the patient to breathe more deeply.",
+  "extraction_notes": "Examination findings recorded in vitals.other; chief complaint not discussed in this clip."
+}

@@ -1,0 +1,71 @@
+{
+  "clip_id": "sample_0029",
+  "cohort": "heavy_local",
+  "field_set_version": "1.0.0",
+  "chief_complaint": "knee pain",
+  "onset": null,
+  "duration": null,
+  "location": "knee",
+  "severity": null,
+  "nature": null,
+  "associated_symptoms": [],
+  "aggravating_factors": [],
+  "relieving_factors": [],
+  "known_medications": [
+    {
+      "name": "Tendo Life",
+      "strength": null,
+      "frequency": "once a day",
+      "route": "oral (tablet)",
+      "duration": null,
+      "note": "was taking; to be replaced"
+    },
+    {
+      "name": "collagen shots",
+      "strength": null,
+      "frequency": null,
+      "route": null,
+      "duration": null,
+      "note": "mentioned by patient"
+    },
+    {
+      "name": "Omnigel gel",
+      "strength": null,
+      "frequency": null,
+      "route": "topical",
+      "duration": null,
+      "note": "on the knee; to be stopped"
+    },
+    {
+      "name": "Tendo Shot",
+      "strength": null,
+      "frequency": "twice a day",
+      "route": null,
+      "duration": null,
+      "note": "new prescription replacing Tendo Life"
+    }
+  ],
+  "allergies": [],
+  "past_history": [],
+  "family_history": [],
+  "vitals": {
+    "temperature": null,
+    "blood_pressure": null,
+    "pulse": null,
+    "spo2": null,
+    "height_cm": null,
+    "weight_kg": null,
+    "bmi": null,
+    "other": []
+  },
+  "labs_ordered": [],
+  "diagnosis_impression": null,
+  "advice": [
+    "stop Omnigel gel",
+    "switch from Tendo Life to Tendo Shot twice a day",
+    "continue heat therapy"
+  ],
+  "follow_up": null,
+  "clinical_notes": "Dialogue: patient lists current knee treatment (Tendo Life once a day, collagen shots, heat therapy, Omnigel gel on the knee) and asks whether to continue; doctor says stop Omnigel and replace Tendo Life with Tendo Shot twice a day.",
+  "extraction_notes": "Medication changes unambiguous; knee pain is the underlying complaint (implied by the knee treatment)."
+}

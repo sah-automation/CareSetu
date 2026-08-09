@@ -1,0 +1,54 @@
+{
+  "clip_id": "sample_0123",
+  "cohort": "heavy_local",
+  "field_set_version": "1.0.0",
+  "chief_complaint": null,
+  "onset": null,
+  "duration": null,
+  "location": null,
+  "severity": null,
+  "nature": null,
+  "associated_symptoms": [],
+  "aggravating_factors": [],
+  "relieving_factors": [],
+  "known_medications": [
+    {
+      "name": "Metformin (likely Glycomet GP1)",
+      "strength": null,
+      "frequency": null,
+      "route": "oral",
+      "duration": null,
+      "note": "for diabetes; exact brand to be confirmed"
+    },
+    {
+      "name": null,
+      "strength": null,
+      "frequency": null,
+      "route": "oral",
+      "duration": "three years",
+      "note": "blood pressure medication"
+    }
+  ],
+  "allergies": [],
+  "past_history": [
+    "diabetes mellitus",
+    "hypertension (three years, on medication)"
+  ],
+  "family_history": [],
+  "vitals": {
+    "temperature": null,
+    "blood_pressure": null,
+    "pulse": null,
+    "spo2": null,
+    "height_cm": null,
+    "weight_kg": null,
+    "bmi": null,
+    "other": []
+  },
+  "labs_ordered": [],
+  "diagnosis_impression": null,
+  "advice": [],
+  "follow_up": null,
+  "clinical_notes": "Dialogue: medication and history review; patient takes Metformin (thinks the brand is Glycomet GP1 but is unsure) for diabetes and a blood pressure medication for three years.",
+  "extraction_notes": "Past history clear; exact diabetes drug brand uncertain (patient does not remember)."
+}

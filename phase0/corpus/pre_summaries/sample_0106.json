@@ -1,0 +1,51 @@
+{
+  "clip_id": "sample_0106",
+  "cohort": "peri_urban",
+  "field_set_version": "1.0.0",
+  "chief_complaint": "fever",
+  "onset": null,
+  "duration": null,
+  "location": null,
+  "severity": null,
+  "nature": null,
+  "associated_symptoms": [],
+  "aggravating_factors": [],
+  "relieving_factors": [],
+  "known_medications": [
+    {
+      "name": null,
+      "strength": null,
+      "frequency": "twice a day, morning and night",
+      "route": "oral",
+      "duration": "five days",
+      "note": "unspecified tablet, after meals"
+    },
+    {
+      "name": "Dolo 500",
+      "strength": "500 mg tablet",
+      "frequency": "twice a day, morning and night",
+      "route": "oral",
+      "duration": "three days",
+      "note": "for fever, after food"
+    }
+  ],
+  "allergies": [],
+  "past_history": [],
+  "family_history": [],
+  "vitals": {
+    "temperature": null,
+    "blood_pressure": null,
+    "pulse": null,
+    "spo2": null,
+    "height_cm": null,
+    "weight_kg": null,
+    "bmi": null,
+    "other": []
+  },
+  "labs_ordered": [],
+  "diagnosis_impression": null,
+  "advice": ["take after meals"],
+  "follow_up": null,
+  "clinical_notes": "Dialogue, doctor prescribing: one unspecified tablet twice a day after meals for five days and Dolo 500 mg twice a day for three days for fever.",
+  "extraction_notes": "Prescriptions unambiguous; the name of the first tablet is not spoken in the clip."
+}

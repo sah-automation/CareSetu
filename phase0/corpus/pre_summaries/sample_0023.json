@@ -1,0 +1,43 @@
+{
+  "clip_id": "sample_0023",
+  "cohort": "urban_hindi",
+  "field_set_version": "1.0.0",
+  "chief_complaint": "fever with cold and whole body pain",
+  "onset": "recurred after transient relief from Calpol",
+  "duration": null,
+  "location": "whole body",
+  "severity": "significant body pain",
+  "nature": "recurrent fever",
+  "associated_symptoms": ["cold", "whole body pain"],
+  "aggravating_factors": [],
+  "relieving_factors": ["Calpol (partial, transient relief)"],
+  "known_medications": [
+    {
+      "name": "Calpol",
+      "strength": null,
+      "frequency": null,
+      "route": "oral",
+      "duration": null,
+      "note": "took earlier, gave partial relief then fever returned"
+    }
+  ],
+  "allergies": [],
+  "past_history": [],
+  "family_history": ["brother had viral fever one week ago"],
+  "vitals": {
+    "temperature": null,
+    "blood_pressure": null,
+    "pulse": null,
+    "spo2": null,
+    "height_cm": null,
+    "weight_kg": null,
+    "bmi": null,
+    "other": []
+  },
+  "labs_ordered": [],
+  "diagnosis_impression": null,
+  "advice": [],
+  "follow_up": null,
+  "clinical_notes": "Dialogue: patient reports fever that returns after Calpol relief, with cold and severe body pain; denies travel or outside food; notes brother had viral fever a week ago.",
+  "extraction_notes": "Complaint, course and exposure history clear; possible viral exposure from brother noted."
+}

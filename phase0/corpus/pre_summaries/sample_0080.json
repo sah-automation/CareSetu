@@ -1,0 +1,37 @@
+{
+  "clip_id": "sample_0080",
+  "cohort": "urban_hindi",
+  "field_set_version": "1.0.0",
+  "chief_complaint": null,
+  "onset": null,
+  "duration": null,
+  "location": null,
+  "severity": null,
+  "nature": null,
+  "associated_symptoms": [],
+  "aggravating_factors": [],
+  "relieving_factors": [],
+  "known_medications": [],
+  "allergies": [],
+  "past_history": [],
+  "family_history": [],
+  "vitals": {
+    "temperature": null,
+    "blood_pressure": null,
+    "pulse": "normal, 72 bpm",
+    "spo2": "normal",
+    "height_cm": null,
+    "weight_kg": null,
+    "bmi": null,
+    "other": ["other vitals normal"]
+  },
+  "labs_ordered": [],
+  "diagnosis_impression": null,
+  "advice": [
+    "do steam inhalation before sleeping",
+    "wear a mask (cause unknown)"
+  ],
+  "follow_up": "come back after one week",
+  "clinical_notes": "Dialogue: doctor reviews normal vitals (heart rate 72 bpm, normal SpO2), advises steam inhalation before sleep and mask use as the cause is unknown, and plans a one-week follow-up.",
+  "extraction_notes": "Vitals and advice clear; chief complaint (respiratory, implied by mask/steam advice) not explicitly named in this clip."
+}

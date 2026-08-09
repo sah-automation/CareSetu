@@ -1,0 +1,54 @@
+{
+  "clip_id": "sample_0050",
+  "cohort": "heavy_local",
+  "field_set_version": "1.0.0",
+  "chief_complaint": null,
+  "onset": null,
+  "duration": null,
+  "location": null,
+  "severity": null,
+  "nature": null,
+  "associated_symptoms": [],
+  "aggravating_factors": [],
+  "relieving_factors": [],
+  "known_medications": [
+    {
+      "name": null,
+      "strength": null,
+      "frequency": null,
+      "route": null,
+      "duration": "ongoing, six years",
+      "note": "diabetes medication"
+    },
+    {
+      "name": null,
+      "strength": null,
+      "frequency": null,
+      "route": null,
+      "duration": "ongoing, three years",
+      "note": "blood pressure medication"
+    }
+  ],
+  "allergies": [],
+  "past_history": [
+    "diabetes mellitus, diagnosed six years ago, on medication since",
+    "hypertension, three years, on medication since"
+  ],
+  "family_history": ["father: diabetes", "mother: blood pressure problem"],
+  "vitals": {
+    "temperature": null,
+    "blood_pressure": null,
+    "pulse": null,
+    "spo2": null,
+    "height_cm": null,
+    "weight_kg": null,
+    "bmi": null,
+    "other": []
+  },
+  "labs_ordered": [],
+  "diagnosis_impression": null,
+  "advice": [],
+  "follow_up": null,
+  "clinical_notes": "Dialogue: medical and family history review; patient has diabetes (six years) and hypertension (three years), both on medication; father had diabetes and mother has a blood pressure problem.",
+  "extraction_notes": "Past and family history unambiguous; drug names are not mentioned in this clip."
+}
