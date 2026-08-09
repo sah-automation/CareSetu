@@ -1,0 +1,43 @@
+{
+  "clip_id": "sample_0001",
+  "cohort": "peri_urban",
+  "field_set_version": "1.0.0",
+  "chief_complaint": "skin infection",
+  "onset": null,
+  "duration": null,
+  "location": "skin",
+  "severity": null,
+  "nature": null,
+  "associated_symptoms": [],
+  "aggravating_factors": [],
+  "relieving_factors": [],
+  "known_medications": [
+    {
+      "name": "sunscreen",
+      "strength": null,
+      "frequency": null,
+      "route": "topical",
+      "duration": null,
+      "note": "two sunscreens prescribed"
+    }
+  ],
+  "allergies": [],
+  "past_history": [],
+  "family_history": [],
+  "vitals": {
+    "temperature": null,
+    "blood_pressure": null,
+    "pulse": null,
+    "spo2": null,
+    "height_cm": null,
+    "weight_kg": null,
+    "bmi": null,
+    "other": []
+  },
+  "labs_ordered": [],
+  "diagnosis_impression": "full infection (skin)",
+  "advice": [],
+  "follow_up": null,
+  "clinical_notes": "Dialogue: doctor states the patient has a full skin infection, gives medication and prescribes two sunscreens.",
+  "extraction_notes": "Diagnosis and treatment clear; complaint details and duration not stated."
+}

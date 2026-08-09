@@ -1,0 +1,402 @@
+{
+  "manifest_version": "1.0.0",
+  "description": "Phase 0 reference corpus manifest",
+  "corpus_source": "eka_medical_dataset (external public corpus; see README for provenance)",
+  "field_set_version": "1.0.0",
+  "total_clips": 43,
+  "cohort_counts": {
+    "urban_hindi": 15,
+    "peri_urban": 11,
+    "heavy_local": 17
+  },
+  "total_duration_seconds": 756.1,
+  "clips": [
+    {
+      "clip_id": "sample_0001",
+      "cohort": "peri_urban",
+      "audio_path": "corpus/audio/sample_0001.wav",
+      "transcript_path": "corpus/transcripts/sample_0001.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0001.json",
+      "duration_s": 11.7,
+      "word_count": 31
+    },
+    {
+      "clip_id": "sample_0002",
+      "cohort": "urban_hindi",
+      "audio_path": "corpus/audio/sample_0002.wav",
+      "transcript_path": "corpus/transcripts/sample_0002.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0002.json",
+      "duration_s": 20.7,
+      "word_count": 59
+    },
+    {
+      "clip_id": "sample_0003",
+      "cohort": "urban_hindi",
+      "audio_path": "corpus/audio/sample_0003.wav",
+      "transcript_path": "corpus/transcripts/sample_0003.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0003.json",
+      "duration_s": 15.2,
+      "word_count": 54
+    },
+    {
+      "clip_id": "sample_0004",
+      "cohort": "peri_urban",
+      "audio_path": "corpus/audio/sample_0004.wav",
+      "transcript_path": "corpus/transcripts/sample_0004.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0004.json",
+      "duration_s": 11,
+      "word_count": 31
+    },
+    {
+      "clip_id": "sample_0006",
+      "cohort": "urban_hindi",
+      "audio_path": "corpus/audio/sample_0006.wav",
+      "transcript_path": "corpus/transcripts/sample_0006.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0006.json",
+      "duration_s": 20.4,
+      "word_count": 48
+    },
+    {
+      "clip_id": "sample_0007",
+      "cohort": "heavy_local",
+      "audio_path": "corpus/audio/sample_0007.wav",
+      "transcript_path": "corpus/transcripts/sample_0007.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0007.json",
+      "duration_s": 11.4,
+      "word_count": 20
+    },
+    {
+      "clip_id": "sample_0008",
+      "cohort": "heavy_local",
+      "audio_path": "corpus/audio/sample_0008.wav",
+      "transcript_path": "corpus/transcripts/sample_0008.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0008.json",
+      "duration_s": 12.6,
+      "word_count": 37
+    },
+    {
+      "clip_id": "sample_0010",
+      "cohort": "urban_hindi",
+      "audio_path": "corpus/audio/sample_0010.wav",
+      "transcript_path": "corpus/transcripts/sample_0010.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0010.json",
+      "duration_s": 6.1,
+      "word_count": 23
+    },
+    {
+      "clip_id": "sample_0011",
+      "cohort": "heavy_local",
+      "audio_path": "corpus/audio/sample_0011.wav",
+      "transcript_path": "corpus/transcripts/sample_0011.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0011.json",
+      "duration_s": 12.8,
+      "word_count": 37
+    },
+    {
+      "clip_id": "sample_0012",
+      "cohort": "heavy_local",
+      "audio_path": "corpus/audio/sample_0012.wav",
+      "transcript_path": "corpus/transcripts/sample_0012.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0012.json",
+      "duration_s": 12.4,
+      "word_count": 40
+    },
+    {
+      "clip_id": "sample_0015",
+      "cohort": "urban_hindi",
+      "audio_path": "corpus/audio/sample_0015.wav",
+      "transcript_path": "corpus/transcripts/sample_0015.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0015.json",
+      "duration_s": 16.3,
+      "word_count": 38
+    },
+    {
+      "clip_id": "sample_0016",
+      "cohort": "heavy_local",
+      "audio_path": "corpus/audio/sample_0016.wav",
+      "transcript_path": "corpus/transcripts/sample_0016.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0016.json",
+      "duration_s": 21.7,
+      "word_count": 63
+    },
+    {
+      "clip_id": "sample_0018",
+      "cohort": "urban_hindi",
+      "audio_path": "corpus/audio/sample_0018.wav",
+      "transcript_path": "corpus/transcripts/sample_0018.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0018.json",
+      "duration_s": 20.7,
+      "word_count": 75
+    },
+    {
+      "clip_id": "sample_0019",
+      "cohort": "urban_hindi",
+      "audio_path": "corpus/audio/sample_0019.wav",
+      "transcript_path": "corpus/transcripts/sample_0019.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0019.json",
+      "duration_s": 25,
+      "word_count": 83
+    },
+    {
+      "clip_id": "sample_0020",
+      "cohort": "urban_hindi",
+      "audio_path": "corpus/audio/sample_0020.wav",
+      "transcript_path": "corpus/transcripts/sample_0020.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0020.json",
+      "duration_s": 25,
+      "word_count": 109
+    },
+    {
+      "clip_id": "sample_0021",
+      "cohort": "urban_hindi",
+      "audio_path": "corpus/audio/sample_0021.wav",
+      "transcript_path": "corpus/transcripts/sample_0021.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0021.json",
+      "duration_s": 25,
+      "word_count": 90
+    },
+    {
+      "clip_id": "sample_0022",
+      "cohort": "urban_hindi",
+      "audio_path": "corpus/audio/sample_0022.wav",
+      "transcript_path": "corpus/transcripts/sample_0022.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0022.json",
+      "duration_s": 10.6,
+      "word_count": 28
+    },
+    {
+      "clip_id": "sample_0023",
+      "cohort": "urban_hindi",
+      "audio_path": "corpus/audio/sample_0023.wav",
+      "transcript_path": "corpus/transcripts/sample_0023.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0023.json",
+      "duration_s": 25,
+      "word_count": 97
+    },
+    {
+      "clip_id": "sample_0026",
+      "cohort": "heavy_local",
+      "audio_path": "corpus/audio/sample_0026.wav",
+      "transcript_path": "corpus/transcripts/sample_0026.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0026.json",
+      "duration_s": 12.2,
+      "word_count": 33
+    },
+    {
+      "clip_id": "sample_0029",
+      "cohort": "heavy_local",
+      "audio_path": "corpus/audio/sample_0029.wav",
+      "transcript_path": "corpus/transcripts/sample_0029.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0029.json",
+      "duration_s": 24.8,
+      "word_count": 68
+    },
+    {
+      "clip_id": "sample_0033",
+      "cohort": "heavy_local",
+      "audio_path": "corpus/audio/sample_0033.wav",
+      "transcript_path": "corpus/transcripts/sample_0033.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0033.json",
+      "duration_s": 21.3,
+      "word_count": 65
+    },
+    {
+      "clip_id": "sample_0038",
+      "cohort": "peri_urban",
+      "audio_path": "corpus/audio/sample_0038.wav",
+      "transcript_path": "corpus/transcripts/sample_0038.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0038.json",
+      "duration_s": 22.8,
+      "word_count": 56
+    },
+    {
+      "clip_id": "sample_0040",
+      "cohort": "heavy_local",
+      "audio_path": "corpus/audio/sample_0040.wav",
+      "transcript_path": "corpus/transcripts/sample_0040.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0040.json",
+      "duration_s": 22.5,
+      "word_count": 84
+    },
+    {
+      "clip_id": "sample_0044",
+      "cohort": "peri_urban",
+      "audio_path": "corpus/audio/sample_0044.wav",
+      "transcript_path": "corpus/transcripts/sample_0044.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0044.json",
+      "duration_s": 10.3,
+      "word_count": 27
+    },
+    {
+      "clip_id": "sample_0050",
+      "cohort": "heavy_local",
+      "audio_path": "corpus/audio/sample_0050.wav",
+      "transcript_path": "corpus/transcripts/sample_0050.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0050.json",
+      "duration_s": 25,
+      "word_count": 96
+    },
+    {
+      "clip_id": "sample_0051",
+      "cohort": "peri_urban",
+      "audio_path": "corpus/audio/sample_0051.wav",
+      "transcript_path": "corpus/transcripts/sample_0051.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0051.json",
+      "duration_s": 16.5,
+      "word_count": 53
+    },
+    {
+      "clip_id": "sample_0053",
+      "cohort": "peri_urban",
+      "audio_path": "corpus/audio/sample_0053.wav",
+      "transcript_path": "corpus/transcripts/sample_0053.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0053.json",
+      "duration_s": 12.8,
+      "word_count": 37
+    },
+    {
+      "clip_id": "sample_0054",
+      "cohort": "peri_urban",
+      "audio_path": "corpus/audio/sample_0054.wav",
+      "transcript_path": "corpus/transcripts/sample_0054.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0054.json",
+      "duration_s": 11.1,
+      "word_count": 38
+    },
+    {
+      "clip_id": "sample_0070",
+      "cohort": "peri_urban",
+      "audio_path": "corpus/audio/sample_0070.wav",
+      "transcript_path": "corpus/transcripts/sample_0070.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0070.json",
+      "duration_s": 13,
+      "word_count": 43
+    },
+    {
+      "clip_id": "sample_0072",
+      "cohort": "heavy_local",
+      "audio_path": "corpus/audio/sample_0072.wav",
+      "transcript_path": "corpus/transcripts/sample_0072.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0072.json",
+      "duration_s": 10.8,
+      "word_count": 24
+    },
+    {
+      "clip_id": "sample_0073",
+      "cohort": "heavy_local",
+      "audio_path": "corpus/audio/sample_0073.wav",
+      "transcript_path": "corpus/transcripts/sample_0073.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0073.json",
+      "duration_s": 24,
+      "word_count": 77
+    },
+    {
+      "clip_id": "sample_0075",
+      "cohort": "peri_urban",
+      "audio_path": "corpus/audio/sample_0075.wav",
+      "transcript_path": "corpus/transcripts/sample_0075.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0075.json",
+      "duration_s": 20.6,
+      "word_count": 73
+    },
+    {
+      "clip_id": "sample_0076",
+      "cohort": "urban_hindi",
+      "audio_path": "corpus/audio/sample_0076.wav",
+      "transcript_path": "corpus/transcripts/sample_0076.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0076.json",
+      "duration_s": 25,
+      "word_count": 90
+    },
+    {
+      "clip_id": "sample_0077",
+      "cohort": "urban_hindi",
+      "audio_path": "corpus/audio/sample_0077.wav",
+      "transcript_path": "corpus/transcripts/sample_0077.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0077.json",
+      "duration_s": 25,
+      "word_count": 99
+    },
+    {
+      "clip_id": "sample_0080",
+      "cohort": "urban_hindi",
+      "audio_path": "corpus/audio/sample_0080.wav",
+      "transcript_path": "corpus/transcripts/sample_0080.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0080.json",
+      "duration_s": 25,
+      "word_count": 77
+    },
+    {
+      "clip_id": "sample_0081",
+      "cohort": "urban_hindi",
+      "audio_path": "corpus/audio/sample_0081.wav",
+      "transcript_path": "corpus/transcripts/sample_0081.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0081.json",
+      "duration_s": 20.5,
+      "word_count": 58
+    },
+    {
+      "clip_id": "sample_0087",
+      "cohort": "peri_urban",
+      "audio_path": "corpus/audio/sample_0087.wav",
+      "transcript_path": "corpus/transcripts/sample_0087.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0087.json",
+      "duration_s": 10.3,
+      "word_count": 35
+    },
+    {
+      "clip_id": "sample_0106",
+      "cohort": "peri_urban",
+      "audio_path": "corpus/audio/sample_0106.wav",
+      "transcript_path": "corpus/transcripts/sample_0106.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0106.json",
+      "duration_s": 14.6,
+      "word_count": 44
+    },
+    {
+      "clip_id": "sample_0108",
+      "cohort": "heavy_local",
+      "audio_path": "corpus/audio/sample_0108.wav",
+      "transcript_path": "corpus/transcripts/sample_0108.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0108.json",
+      "duration_s": 19.4,
+      "word_count": 75
+    },
+    {
+      "clip_id": "sample_0113",
+      "cohort": "heavy_local",
+      "audio_path": "corpus/audio/sample_0113.wav",
+      "transcript_path": "corpus/transcripts/sample_0113.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0113.json",
+      "duration_s": 10.1,
+      "word_count": 21
+    },
+    {
+      "clip_id": "sample_0117",
+      "cohort": "heavy_local",
+      "audio_path": "corpus/audio/sample_0117.wav",
+      "transcript_path": "corpus/transcripts/sample_0117.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0117.json",
+      "duration_s": 25,
+      "word_count": 88
+    },
+    {
+      "clip_id": "sample_0123",
+      "cohort": "heavy_local",
+      "audio_path": "corpus/audio/sample_0123.wav",
+      "transcript_path": "corpus/transcripts/sample_0123.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0123.json",
+      "duration_s": 16.3,
+      "word_count": 62
+    },
+    {
+      "clip_id": "sample_0126",
+      "cohort": "heavy_local",
+      "audio_path": "corpus/audio/sample_0126.wav",
+      "transcript_path": "corpus/transcripts/sample_0126.txt",
+      "pre_summary_path": "corpus/pre_summaries/sample_0126.json",
+      "duration_s": 13.6,
+      "word_count": 55
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "clip_id": "sample_0012",
+  "cohort": "heavy_local",
+  "field_set_version": "1.0.0",
+  "chief_complaint": null,
+  "onset": null,
+  "duration": null,
+  "location": null,
+  "severity": null,
+  "nature": null,
+  "associated_symptoms": [],
+  "aggravating_factors": [],
+  "relieving_factors": [],
+  "known_medications": [],
+  "allergies": [],
+  "past_history": [],
+  "family_history": [],
+  "vitals": {
+    "temperature": null,
+    "blood_pressure": null,
+    "pulse": null,
+    "spo2": null,
+    "height_cm": null,
+    "weight_kg": null,
+    "bmi": null,
+    "other": []
+  },
+  "labs_ordered": [],
+  "diagnosis_impression": null,
+  "advice": [
+    "drink three to four litres of water per day (patient currently drinks about two)"
+  ],
+  "follow_up": null,
+  "clinical_notes": "Dialogue: doctor advises drinking more water (three to four litres a day); patient currently drinks about two litres; patient thanks the doctor.",
+  "extraction_notes": "Advice unambiguous; chief complaint is not stated in this clip (hydration advice is part of a wider plan)."
+}

@@ -1,0 +1,38 @@
+{
+  "clip_id": "sample_0021",
+  "cohort": "urban_hindi",
+  "field_set_version": "1.0.0",
+  "chief_complaint": null,
+  "onset": null,
+  "duration": null,
+  "location": null,
+  "severity": null,
+  "nature": null,
+  "associated_symptoms": [],
+  "aggravating_factors": [],
+  "relieving_factors": [],
+  "known_medications": [],
+  "allergies": [],
+  "past_history": [],
+  "family_history": [],
+  "vitals": {
+    "temperature": null,
+    "blood_pressure": null,
+    "pulse": null,
+    "spo2": null,
+    "height_cm": null,
+    "weight_kg": null,
+    "bmi": null,
+    "other": []
+  },
+  "labs_ordered": ["CBC test"],
+  "diagnosis_impression": null,
+  "advice": [
+    "rest for one week",
+    "take leave from office for one week",
+    "follow the prescribed medicines"
+  ],
+  "follow_up": "get the CBC test after one week",
+  "clinical_notes": "Dialogue, review of systems: patient denies smoking, alcohol and diabetes; no other medical condition reported; doctor advises one week of rest and orders a CBC test.",
+  "extraction_notes": "Social and medical history clear (no smoking/alcohol/diabetes); chief complaint not restated in this clip."
+}

@@ -1,0 +1,43 @@
+{
+  "clip_id": "sample_0044",
+  "cohort": "peri_urban",
+  "field_set_version": "1.0.0",
+  "chief_complaint": null,
+  "onset": null,
+  "duration": null,
+  "location": null,
+  "severity": null,
+  "nature": null,
+  "associated_symptoms": [],
+  "aggravating_factors": [],
+  "relieving_factors": [],
+  "known_medications": [
+    {
+      "name": "Dolo 650 (paracetamol)",
+      "strength": "650 mg tablet",
+      "frequency": "twice a day, morning and night",
+      "route": "oral",
+      "duration": "five days",
+      "note": "after food"
+    }
+  ],
+  "allergies": [],
+  "past_history": [],
+  "family_history": [],
+  "vitals": {
+    "temperature": null,
+    "blood_pressure": null,
+    "pulse": null,
+    "spo2": null,
+    "height_cm": null,
+    "weight_kg": null,
+    "bmi": null,
+    "other": []
+  },
+  "labs_ordered": [],
+  "diagnosis_impression": null,
+  "advice": ["take after food"],
+  "follow_up": null,
+  "clinical_notes": "Dialogue, doctor prescribing: Dolo 650 twice a day after food for five days.",
+  "extraction_notes": "Prescription unambiguous; chief complaint (fever/pain) not named in this clip."
+}

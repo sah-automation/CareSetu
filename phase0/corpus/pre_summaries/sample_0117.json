@@ -1,0 +1,38 @@
+{
+  "clip_id": "sample_0117",
+  "cohort": "heavy_local",
+  "field_set_version": "1.0.0",
+  "chief_complaint": "frequent urination (possibly diabetes-related)",
+  "onset": null,
+  "duration": null,
+  "location": null,
+  "severity": null,
+  "nature": "frequent urination",
+  "associated_symptoms": [],
+  "aggravating_factors": [],
+  "relieving_factors": [],
+  "known_medications": [],
+  "allergies": [],
+  "past_history": ["diabetes"],
+  "family_history": [],
+  "vitals": {
+    "temperature": null,
+    "blood_pressure": null,
+    "pulse": null,
+    "spo2": null,
+    "height_cm": null,
+    "weight_kg": null,
+    "bmi": null,
+    "other": []
+  },
+  "labs_ordered": ["complete body health check-up", "serum creatinine"],
+  "diagnosis_impression": "frequent urination likely related to diabetes",
+  "advice": [
+    "do not self-medicate for a few days",
+    "complete the full antibiotic course this time",
+    "keep a notebook of daily sugar readings"
+  ],
+  "follow_up": null,
+  "clinical_notes": "Dialogue: doctor orders a full body check-up and serum creatinine, advises completing the antibiotic course, warns against self-medication, and asks the patient to log sugar readings; links frequent urination to diabetes.",
+  "extraction_notes": "Advice, labs and impression clear; antibiotic name not stated in this clip."
+}

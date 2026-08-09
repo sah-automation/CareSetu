@@ -1,0 +1,51 @@
+{
+  "clip_id": "sample_0003",
+  "cohort": "urban_hindi",
+  "field_set_version": "1.0.0",
+  "chief_complaint": "itching with pain at the affected site",
+  "onset": null,
+  "duration": null,
+  "location": "skin",
+  "severity": null,
+  "nature": "itching",
+  "associated_symptoms": ["pain", "itching"],
+  "aggravating_factors": ["rubbing"],
+  "relieving_factors": [],
+  "known_medications": [
+    {
+      "name": null,
+      "strength": null,
+      "frequency": null,
+      "route": null,
+      "duration": null,
+      "note": "many medicines used previously, names not stated"
+    },
+    {
+      "name": "Fluconazole",
+      "strength": null,
+      "frequency": null,
+      "route": null,
+      "duration": null,
+      "note": "mentioned by doctor, context suggests prescription"
+    }
+  ],
+  "allergies": [],
+  "past_history": [],
+  "family_history": [],
+  "vitals": {
+    "temperature": null,
+    "blood_pressure": null,
+    "pulse": null,
+    "spo2": null,
+    "height_cm": null,
+    "weight_kg": null,
+    "bmi": null,
+    "other": []
+  },
+  "labs_ordered": [],
+  "diagnosis_impression": "probable fungal skin condition (antifungal Fluconazole mentioned)",
+  "advice": [],
+  "follow_up": null,
+  "clinical_notes": "Dialogue: doctor asks about pain/itching and whether patient rubs the area; patient confirms itching and heavy prior use of medicines; doctor intends to examine.",
+  "extraction_notes": "Complaint, aggravating factor and prior medication use clear; severity and duration not stated."
+}

@@ -39,3 +39,10 @@ Thumbs.db
 
 # Local tooling
 .actrc
+
+# Phase 0 raw audio dump (external source; committed corpus lives in phase0/corpus/)
+/audio/
+/gcm-diagnose.log
+
+# Phase 0 harness run outputs (live evaluation reports)
+/phase0/runs/

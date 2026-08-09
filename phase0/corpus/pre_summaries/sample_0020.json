@@ -1,0 +1,47 @@
+{
+  "clip_id": "sample_0020",
+  "cohort": "urban_hindi",
+  "field_set_version": "1.0.0",
+  "chief_complaint": "intermittent fever",
+  "onset": null,
+  "duration": null,
+  "location": null,
+  "severity": null,
+  "nature": "intermittent",
+  "associated_symptoms": [],
+  "aggravating_factors": [],
+  "relieving_factors": [],
+  "known_medications": [
+    {
+      "name": "Voveran",
+      "strength": "5 mg injection",
+      "frequency": "once",
+      "route": "injection",
+      "duration": null,
+      "note": "to be taken now from the nurse"
+    }
+  ],
+  "allergies": [],
+  "past_history": [],
+  "family_history": [],
+  "vitals": {
+    "temperature": null,
+    "blood_pressure": null,
+    "pulse": null,
+    "spo2": null,
+    "height_cm": null,
+    "weight_kg": null,
+    "bmi": null,
+    "other": []
+  },
+  "labs_ordered": [],
+  "diagnosis_impression": null,
+  "advice": [
+    "do not eat outside food",
+    "avoid oily food",
+    "eat home-cooked food"
+  ],
+  "follow_up": null,
+  "clinical_notes": "Dialogue: doctor diagnoses intermittent fever, orders a Voveran 5 mg injection, gives dietary advice; patient reports no smoking.",
+  "extraction_notes": "Diagnosis and treatment unambiguous; duration/onset not stated; smoking denied."
+}
