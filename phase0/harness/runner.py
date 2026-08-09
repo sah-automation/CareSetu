@@ -225,7 +225,7 @@ def run_corpus(
     corpus: Corpus,
     clip_ids: Iterable[str] | None = None,
     output_path: Path | None = None,
-    gemini_findings: dict[str, Any] | None = None,
+    provider_findings: dict[str, Any] | None = None,
     concurrency: int = 1,
     structure: bool = True,
 ) -> RunReport:
@@ -305,7 +305,7 @@ def run_corpus(
         bar_passes=passes,
         bar_failures=failures,
         totals=totals,
-        gemini_findings=gemini_findings or {},
+        provider_findings=provider_findings or {},
         per_clip_structuring=per_clip_structuring,
         structuring=structuring,
         structuring_bar_passes=structuring_passes,
@@ -359,7 +359,7 @@ def report_to_json(report: RunReport) -> dict[str, Any]:
         "calibration": _calibration_to_json(report.calibration),
         "gate_validated": report.gate_validated,
         "totals": _usage_to_json(report.totals),
-        "gemini_findings": _findings_to_json(report.gemini_findings),
+        "provider_findings": _findings_to_json(report.provider_findings),
     }
 
 
@@ -450,6 +450,7 @@ def _usage_to_json(usage: Usage | None) -> dict[str, Any] | None:
         "output_tokens": usage.output_tokens,
         "cost_inr": usage.cost_inr,
         "tier": usage.tier,
+        "latency_ms": usage.latency_ms,
     }
 
 

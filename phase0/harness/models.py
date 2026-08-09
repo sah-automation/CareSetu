@@ -210,7 +210,7 @@ class RunReport:
     bar_passes: bool
     bar_failures: list[str]
     totals: Usage
-    gemini_findings: dict[str, Any] = field(default_factory=dict)
+    provider_findings: dict[str, Any] = field(default_factory=dict)
     per_clip_structuring: dict[str, PerClipStructuring] = field(default_factory=dict)
     structuring: StructuringSummary | None = None
     structuring_bar_passes: bool = False

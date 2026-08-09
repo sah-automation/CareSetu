@@ -11,7 +11,10 @@ deterministic and unit-tested without network.
 Examples:
     python -m phase0.harness --provider gemini --limit 3
     python -m phase0.harness --provider gemini --cohort heavy_local
+    python -m phase0.harness --provider whisper --limit 2
+    python -m phase0.harness --provider nim --limit 2
     python -m phase0.harness --provider gemini --output phase0/runs/mine.json
+    python -m phase0.harness --compare
 """
 
 from __future__ import annotations
@@ -21,17 +24,32 @@ import asyncio
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+from phase0.harness.compare import compare_runs, render_comparison
 from phase0.harness.models import RunReport
 from phase0.harness.providers.gemini import GeminiProvider
+from phase0.harness.providers.nim import LICENSING_CAVEAT, NimProvider
+from phase0.harness.providers.whisper import WhisperProvider
 from phase0.harness.runner import run_corpus
 from phase0.loader import load_corpus
 
 
-def _provider_from_cli(args: argparse.Namespace) -> GeminiProvider:
+def _provider_from_cli(args: argparse.Namespace) -> GeminiProvider | WhisperProvider | NimProvider:
     if args.provider == "gemini":
         return GeminiProvider(
+            max_retries=args.max_retries,
+            retry_backoff_seconds=args.retry_backoff,
+            quota_backoff_seconds=args.quota_backoff,
+        )
+    if args.provider == "whisper":
+        return WhisperProvider(
+            max_retries=args.max_retries,
+            retry_backoff_seconds=args.retry_backoff,
+            quota_backoff_seconds=args.quota_backoff,
+        )
+    if args.provider == "nim":
+        return NimProvider(
             max_retries=args.max_retries,
             retry_backoff_seconds=args.retry_backoff,
             quota_backoff_seconds=args.quota_backoff,
@@ -93,7 +111,7 @@ def _print_summary(report: RunReport, output: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="CareSetu Phase 0 evaluation harness")
-    parser.add_argument("--provider", default="gemini", choices=["gemini"])
+    parser.add_argument("--provider", default="gemini", choices=["gemini", "whisper", "nim"])
     parser.add_argument("--limit", type=int, default=None, help="max clips to score")
     parser.add_argument(
         "--cohort", action="append", default=[], help="score only this cohort (repeatable)"
@@ -125,7 +143,23 @@ def main() -> None:
         default=30.0,
         help="settle time on HTTP 429 quota errors (s)",
     )
+    parser.add_argument(
+        "--compare",
+        action="store_true",
+        help="emit the cross-provider comparison table from recorded runs and exit",
+    )
+    parser.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="directory of recorded run JSONs (default phase0/runs)",
+    )
     args = parser.parse_args()
+
+    if args.compare:
+        runs_dir = args.runs_dir or _default_runs_dir()
+        print(render_comparison(compare_runs(runs_dir)))
+        return
 
     corpus = load_corpus()
     selected = [clip.clip_id for clip in corpus.clips]
@@ -142,27 +176,44 @@ def main() -> None:
 
     findings: dict[str, Any] = {}
     probe_usage = None
+    if args.provider == "nim":
+        # NIM's hosted preview is prototyping-only; production requires NVIDIA
+        # AI Enterprise licensing. Recorded in the run output so a free-tier
+        # NIM dependency is never mistaken for a production pricing reality.
+        findings["nim_licensing_caveat"] = LICENSING_CAVEAT
     if args.provider == "gemini" and not args.no_probe and selected:
+        # The single-call probe is Gemini-specific: Whisper is ASR-only and
+        # keeps the 2-call transcribe → structure pipeline. The provider is a
+        # GeminiProvider by construction here, so a cast narrows the union.
         probe_clip = corpus.clips[0]
-        probe = asyncio.run(provider.probe_single_call(probe_clip.audio_path, probe_clip.clip_id))
+        probe = asyncio.run(
+            cast(GeminiProvider, provider).probe_single_call(
+                probe_clip.audio_path, probe_clip.clip_id
+            )
+        )
         findings["multimodal_single_call"] = probe
         probe_usage = probe.get("usage")
 
     if args.output is None:
-        run_dir = Path(__file__).resolve().parents[1] / "runs"
-        args.output = run_dir / f"{report_timestamp()}.json"
+        args.output = _default_runs_dir() / f"{report_timestamp()}.json"
 
     report = run_corpus(
         gateway=provider,
         corpus=corpus,
         clip_ids=selected,
         output_path=args.output,
-        gemini_findings=findings,
+        provider_findings=findings,
         concurrency=args.concurrency,
     )
     _print_summary(report, args.output)
+    if args.provider == "nim":
+        print(f"caveat:        {LICENSING_CAVEAT}")
     if probe_usage is not None and args.provider == "gemini":
         print(f"probe usage:   in={probe_usage.input_tokens} out={probe_usage.output_tokens}")
+
+
+def _default_runs_dir() -> Path:
+    return Path(__file__).resolve().parents[1] / "runs"
 
 
 def report_timestamp() -> str:
