@@ -4,14 +4,15 @@
 
 ## Doc inventory
 
-| File                                     | Purpose                                                                                                     | Read when                                               | ~Tokens  |
-| :--------------------------------------- | :---------------------------------------------------------------------------------------------------------- | :------------------------------------------------------ | :------- |
-| `CONTEXT.md` (this file)                 | Navigation guide — what to read/skip                                                                        | Always (first)                                          | ~0.5K    |
-| `docs/prd/project-prd.md`                | WHAT we build: epics, features (`FEAT-xxx`), NFRs, risks                                                    | Every build; the §4.x section for the features in scope | ~13K     |
-| `docs/architecture/system-context.md`    | External actors (`ACT-xxx`) + third-party integrations (`EXT-001..004`)                                     | When touching integrations, actors, or boundary rules   | ~6K      |
-| `docs/architecture/internal-modules.md`  | HOW modules work: per-module specs (`MOD-001..011`), sync matrix §4.1, event registry §4.2, traceability §5 | Every build; specs for the modules you touch            | ~14K     |
-| `docs/roadmap/implementation-roadmap.md` | IN WHAT ORDER we build: per-phase specs (`PHASE-0..14`), phased traceability §3                             | Every build; the section for the current phase          | ~16K     |
-| `docs/standards/*`                       | Top-level rules per area (coding, api, integrations, errors, security, AI)                                  | The relevant standard before working in its area        | ~2K each |
+| File                                     | Purpose                                                                                                              | Read when                                               | ~Tokens  |
+| :--------------------------------------- | :------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------ | :------- |
+| `CONTEXT.md` (this file)                 | Navigation guide — what to read/skip                                                                                 | Always (first)                                          | ~0.5K    |
+| `docs/prd/project-prd.md`                | WHAT we build: epics, features (`FEAT-xxx`), NFRs, risks                                                             | Every build; the §4.x section for the features in scope | ~13K     |
+| `docs/architecture/system-context.md`    | External actors (`ACT-xxx`) + third-party integrations (`EXT-001..004`)                                              | When touching integrations, actors, or boundary rules   | ~6K      |
+| `docs/architecture/internal-modules.md`  | HOW modules work: per-module specs (`MOD-001..011`), sync matrix §4.1, event registry §4.2, traceability §5          | Every build; specs for the modules you touch            | ~14K     |
+| `docs/roadmap/implementation-roadmap.md` | IN WHAT ORDER we build: per-phase specs (`PHASE-0..14`), phased traceability §3                                      | Every build; the section for the current phase          | ~16K     |
+| `docs/standards/*`                       | Top-level rules per area (coding, api, integrations, errors, security, AI)                                           | The relevant standard before working in its area        | ~2K each |
+| `docs/agents/briefs/*`                   | Per-ticket **context packs** (read-list, do-not-read, baseline/done-verify) — the contract for implementing a ticket | The ticket's own brief, before anything else            | ~2K each |
 
 ## Build-session protocol
 
