@@ -120,12 +120,33 @@ def render_comparison(rows: list[ComparisonRow]) -> str:
         "---: | ---: | ---: | ---: | ---: |",
         *[_render_row(row) for row in rows],
     ]
+    warning = _coverage_warning(rows)
+    if warning is not None:
+        lines.append("")
+        lines.append(f"Warning: {warning}")
     caveats = [row.licensing_caveat for row in rows if row.licensing_caveat is not None]
     if caveats:
         lines.append("")
         lines.append("Caveats")
         lines.extend(f"- {caveat}" for caveat in dict.fromkeys(caveats))
     return "\n".join(lines)
+
+
+def _coverage_warning(rows: list[ComparisonRow]) -> str | None:
+    """Warn when the compared runs were not scored on the same corpus coverage.
+
+    The comparison is apples-to-apples only when every provider ran the same
+    clips; a partial run (e.g. a ``--limit`` transcription check) would
+    otherwise be silently compared against a full-corpus run.
+    """
+    scored = {row.provider: row.scored for row in rows if row.scored is not None}
+    if len(scored) < 2 or len(set(scored.values())) <= 1:
+        return None
+    detail = ", ".join(f"{provider}={value}" for provider, value in sorted(scored.items()))
+    return (
+        f"runs were scored on different corpus coverage ({detail}); "
+        "the comparison is not apples-to-apples"
+    )
 
 
 def _latest_run(runs: list[tuple[Path, dict[str, Any]]]) -> tuple[Path, dict[str, Any]]:
@@ -192,7 +213,9 @@ def _row_from_run(path: Path, run: dict[str, Any]) -> ComparisonRow:
         median_cer=_as_float(overall.get("median_cer")),
         p90_cer=_as_float(overall.get("p90_cer")),
         structuring_f1=_as_float(structuring_overall.get("f1")),
-        structuring_n=_as_int(structuring.get("scored")),
+        structuring_n=(
+            None if structuring.get("skipped") is True else _as_int(structuring.get("scored"))
+        ),
         silent_error_rate=_as_float(calibration.get("silent_error_rate")),
         flag_precision=_as_float(calibration.get("flag_precision")),
         flag_recall=_as_float(calibration.get("flag_recall")),

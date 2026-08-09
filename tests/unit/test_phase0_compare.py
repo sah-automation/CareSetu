@@ -235,6 +235,9 @@ def test_calls_per_intake_reflects_the_recorded_pipeline_shape(tmp_path: Path) -
     assert rows["gemini"].calls_per_intake == 1  # multimodal single-call probe
     assert rows["whisper"].calls_per_intake == 1  # transcription-only run
     assert rows["nim"].calls_per_intake is None  # run with no structuring section
+    # A skipped structuring leg is "no data", never a fabricated zero (T4c brief).
+    assert rows["whisper"].structuring_n is None
+    assert rows["nim"].structuring_n is None
 
 
 def test_calls_per_intake_reads_legacy_gemini_findings_key(tmp_path: Path) -> None:
@@ -250,6 +253,35 @@ def test_calls_per_intake_reads_legacy_gemini_findings_key(tmp_path: Path) -> No
     gemini = next(row for row in compare_runs(tmp_path) if row.provider == "gemini")
 
     assert gemini.calls_per_intake == 1
+
+
+def test_compare_warns_when_runs_have_different_corpus_coverage(tmp_path: Path) -> None:
+    _write_run(tmp_path, _full_gemini_run(), "20260810T100000Z.json")
+    partial = _copy_run(_full_gemini_run())
+    partial["provider"] = "whisper"
+    partial["model"] = "whisper-1"
+    partial["generated_at"] = "2026-08-11T09:00:00+00:00"
+    partial["coverage"] = {"clips_attempted": 2, "clips_scored": 2, "clips_failed": 0}
+    _write_run(tmp_path, partial, "20260811T090000Z.json")
+
+    rendered = render_comparison(compare_runs(tmp_path))
+
+    assert "not apples-to-apples" in rendered
+    assert "gemini=12" in rendered
+    assert "whisper=2" in rendered
+
+
+def test_compare_does_not_warn_on_matching_corpus_coverage(tmp_path: Path) -> None:
+    _write_run(tmp_path, _full_gemini_run(), "20260810T100000Z.json")
+    same = _copy_run(_full_gemini_run())
+    same["provider"] = "whisper"
+    same["model"] = "whisper-1"
+    same["generated_at"] = "2026-08-11T09:00:00+00:00"
+    _write_run(tmp_path, same, "20260811T090000Z.json")
+
+    rendered = render_comparison(compare_runs(tmp_path))
+
+    assert "Warning:" not in rendered
 
 
 def test_render_comparison_emits_a_table_covering_all_providers(tmp_path: Path) -> None:

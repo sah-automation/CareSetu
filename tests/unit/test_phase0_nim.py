@@ -57,8 +57,15 @@ def test_parse_chat_content_raises_on_empty_choices() -> None:
 
 def test_parse_chat_content_raises_on_api_error() -> None:
     response = {"error": {"message": "Invalid API key provided"}}
-    with pytest.raises(RuntimeError, match="Invalid API key"):
+    with pytest.raises(RuntimeError, match="API error"):
         parse_chat_content(response)
+
+
+def test_parse_chat_content_raises_on_detail_payload_without_leaking_it() -> None:
+    response = {"detail": "राम की बीमारी के बारे में गलत जानकारी"}
+    with pytest.raises(RuntimeError, match="API error") as excinfo:
+        parse_chat_content(response)
+    assert "राम" not in str(excinfo.value)
 
 
 def test_parse_chat_usage_extracts_token_counts() -> None:
@@ -251,3 +258,32 @@ async def test_structure_records_chat_usage_and_confidence(
     assert result.usage.output_tokens == 5
     assert result.usage.cost_inr == pytest.approx(0.0)
     assert result.usage.latency_ms == 7
+
+
+class _StubHttpResponse:
+    """Minimal httpx.Response stand-in for exercising the ``_post`` retry loop."""
+
+    def __init__(self, status_code: int, text: str) -> None:
+        self.status_code = status_code
+        self.text = text
+
+    def json(self) -> dict[str, object]:
+        return {}
+
+
+async def test_post_withholds_error_response_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _provider(monkeypatch)
+    provider.max_retries = 1
+    provider.retry_backoff_seconds = 0.0
+    provider.quota_backoff_seconds = 0.0
+
+    async def fake_send(client: object) -> _StubHttpResponse:
+        # A provider error body derived from the transcript may carry PHI
+        # (error-handling-observability §2); it must never reach the exception.
+        return _StubHttpResponse(500, '{"error": {"message": "राम की बीमारी"}}')
+
+    with pytest.raises(RuntimeError, match="HTTP 500") as excinfo:
+        await provider._post(fake_send)  # type: ignore[arg-type]
+    assert "राम" not in str(excinfo.value)

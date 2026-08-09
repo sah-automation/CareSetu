@@ -158,9 +158,21 @@ def parse_transcribe_response(response: dict[str, Any]) -> str:
 def parse_chat_content(response: dict[str, Any]) -> str:
     """Extract the assistant message content from a chat completions response."""
     if "error" in response:
-        raise RuntimeError(f"NIM API error: {response['error']}")
+        # Redact free text: the provider payload may carry PHI
+        # (error-handling-observability §2). Keep only non-PHI metadata.
+        meta = response["error"]
+        label = ""
+        if isinstance(meta, dict):
+            bits = [
+                str(part)
+                for part in (meta.get("type"), meta.get("code"))
+                if isinstance(part, str) and part
+            ]
+            if bits:
+                label = f" ({', '.join(bits)})"
+        raise RuntimeError(f"NIM API error{label}")
     if "detail" in response:
-        raise RuntimeError(f"NIM API error: {response['detail']}")
+        raise RuntimeError("NIM API error")
     choices = response.get("choices")
     if not choices:
         raise RuntimeError("NIM returned no choices")
@@ -276,17 +288,17 @@ class NimProvider:
                     # Rate limits reset over minutes; wait a long settle, not
                     # the short transient backoff.
                     last_error = RuntimeError(
-                        f"NIM HTTP {response.status_code}: {response.text[:200]}"
+                        f"NIM HTTP {response.status_code} (response body withheld)"
                     )
                     await asyncio.sleep(self.quota_backoff_seconds)
                     continue
                 if response.status_code in _TRANSIENT_STATUS_CODES:
                     last_error = RuntimeError(
-                        f"NIM HTTP {response.status_code}: {response.text[:200]}"
+                        f"NIM HTTP {response.status_code} (response body withheld)"
                     )
                     await asyncio.sleep(self.retry_backoff_seconds * (2**attempt))
                     continue
-                raise RuntimeError(f"NIM HTTP {response.status_code}: {response.text[:200]}")
+                raise RuntimeError(f"NIM HTTP {response.status_code} (response body withheld)")
             except (httpx.HTTPError, httpx.TimeoutException) as exc:
                 last_error = exc
                 await asyncio.sleep(self.retry_backoff_seconds * (2**attempt))
