@@ -133,7 +133,8 @@ phase0/harness/
 ├── runner.py         # corpus → both legs → aggregated report (JSON output)
 ├── __main__.py       # CLI entrypoint
 └── providers/
-    └── gemini.py     # Gemini free/cheap tier (httpx, no new dependency)
+    ├── gemini.py     # Gemini free/cheap tier (httpx, no new dependency)
+    └── whisper.py    # OpenAI Whisper ASR + chat structuring (httpx, no new dependency)
 ```
 
 ### The structuring leg and `AMB-006` semantics (issue #5)
@@ -183,13 +184,18 @@ python -m phase0.harness --provider gemini --limit 2
 # one cohort
 python -m phase0.harness --provider gemini --cohort heavy_local
 
+# Whisper smoke (2-clip, ASR-only 2-call pipeline)
+python -m phase0.harness --provider whisper --limit 2
+
 # full corpus, gentle on the free tier
 python -m phase0.harness --provider gemini --concurrency 1 --max-retries 5 --quota-backoff 30
 ```
 
-Requires `GEMINI_API_KEY` (exported or in the repo root `.env`; model via
-`GEMINI_MODEL`). Each run writes a JSON report to `phase0/runs/<timestamp>.json`
-(gitignored).
+Requires the provider's API key (exported or in the repo root `.env`):
+`GEMINI_API_KEY` for `--provider gemini` (model via `GEMINI_MODEL`),
+`OPENAI_API_KEY` for `--provider whisper` (ASR model via `WHISPER_MODEL`,
+structuring chat model via `WHISPER_CHAT_MODEL`). Each run writes a JSON
+report to `phase0/runs/<timestamp>.json` (gitignored).
 
 ### Caveats
 
@@ -209,5 +215,4 @@ Requires `GEMINI_API_KEY` (exported or in the repo root `.env`; model via
   that signal is trustworthy at 0.70; if it is not (silent-error bound or
   precision/recall missing the mark), that is the spike finding to tune in
   PHASE-7.
-- **Remaining providers (Whisper, NIM) are ticket #6**, building on this same
-  port.
+- **Remaining provider (NIM) is issue T4b**, building on this same port.

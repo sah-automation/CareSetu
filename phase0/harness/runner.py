@@ -450,6 +450,7 @@ def _usage_to_json(usage: Usage | None) -> dict[str, Any] | None:
         "output_tokens": usage.output_tokens,
         "cost_inr": usage.cost_inr,
         "tier": usage.tier,
+        "latency_ms": usage.latency_ms,
     }
 
 

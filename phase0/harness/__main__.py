@@ -11,6 +11,7 @@ deterministic and unit-tested without network.
 Examples:
     python -m phase0.harness --provider gemini --limit 3
     python -m phase0.harness --provider gemini --cohort heavy_local
+    python -m phase0.harness --provider whisper --limit 2
     python -m phase0.harness --provider gemini --output phase0/runs/mine.json
 """
 
@@ -21,17 +22,24 @@ import asyncio
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from phase0.harness.models import RunReport
 from phase0.harness.providers.gemini import GeminiProvider
+from phase0.harness.providers.whisper import WhisperProvider
 from phase0.harness.runner import run_corpus
 from phase0.loader import load_corpus
 
 
-def _provider_from_cli(args: argparse.Namespace) -> GeminiProvider:
+def _provider_from_cli(args: argparse.Namespace) -> GeminiProvider | WhisperProvider:
     if args.provider == "gemini":
         return GeminiProvider(
+            max_retries=args.max_retries,
+            retry_backoff_seconds=args.retry_backoff,
+            quota_backoff_seconds=args.quota_backoff,
+        )
+    if args.provider == "whisper":
+        return WhisperProvider(
             max_retries=args.max_retries,
             retry_backoff_seconds=args.retry_backoff,
             quota_backoff_seconds=args.quota_backoff,
@@ -93,7 +101,7 @@ def _print_summary(report: RunReport, output: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="CareSetu Phase 0 evaluation harness")
-    parser.add_argument("--provider", default="gemini", choices=["gemini"])
+    parser.add_argument("--provider", default="gemini", choices=["gemini", "whisper"])
     parser.add_argument("--limit", type=int, default=None, help="max clips to score")
     parser.add_argument(
         "--cohort", action="append", default=[], help="score only this cohort (repeatable)"
@@ -143,8 +151,15 @@ def main() -> None:
     findings: dict[str, Any] = {}
     probe_usage = None
     if args.provider == "gemini" and not args.no_probe and selected:
+        # The single-call probe is Gemini-specific: Whisper is ASR-only and
+        # keeps the 2-call transcribe → structure pipeline. The provider is a
+        # GeminiProvider by construction here, so a cast narrows the union.
         probe_clip = corpus.clips[0]
-        probe = asyncio.run(provider.probe_single_call(probe_clip.audio_path, probe_clip.clip_id))
+        probe = asyncio.run(
+            cast(GeminiProvider, provider).probe_single_call(
+                probe_clip.audio_path, probe_clip.clip_id
+            )
+        )
         findings["multimodal_single_call"] = probe
         probe_usage = probe.get("usage")
 

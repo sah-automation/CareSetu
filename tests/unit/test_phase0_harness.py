@@ -117,6 +117,7 @@ def test_runner_persists_run_output(
     assert payload["totals"]["cost_inr"] == 0.0
     assert payload["totals"]["input_tokens"] == 200
     assert payload["totals"]["output_tokens"] == 100
+    assert payload["transcription"]["per_clip"][0]["usage"]["latency_ms"] == 10
 
 
 def test_runner_records_failed_clip_and_excludes_from_scoring(
