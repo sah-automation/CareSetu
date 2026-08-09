@@ -134,7 +134,8 @@ phase0/harness/
 ├── __main__.py       # CLI entrypoint
 └── providers/
     ├── gemini.py     # Gemini free/cheap tier (httpx, no new dependency)
-    └── whisper.py    # OpenAI Whisper ASR + chat structuring (httpx, no new dependency)
+    ├── whisper.py    # OpenAI Whisper ASR + chat structuring (httpx, no new dependency)
+    └── nim.py        # NVIDIA NIM canary-1b-asr + catalog LLM (httpx, no new dependency)
 ```
 
 ### The structuring leg and `AMB-006` semantics (issue #5)
@@ -187,6 +188,9 @@ python -m phase0.harness --provider gemini --cohort heavy_local
 # Whisper smoke (2-clip, ASR-only 2-call pipeline)
 python -m phase0.harness --provider whisper --limit 2
 
+# NIM smoke (2-clip, canary-1b-asr + catalog LLM, 2-call pipeline)
+python -m phase0.harness --provider nim --limit 2
+
 # full corpus, gentle on the free tier
 python -m phase0.harness --provider gemini --concurrency 1 --max-retries 5 --quota-backoff 30
 ```
@@ -194,7 +198,9 @@ python -m phase0.harness --provider gemini --concurrency 1 --max-retries 5 --quo
 Requires the provider's API key (exported or in the repo root `.env`):
 `GEMINI_API_KEY` for `--provider gemini` (model via `GEMINI_MODEL`),
 `OPENAI_API_KEY` for `--provider whisper` (ASR model via `WHISPER_MODEL`,
-structuring chat model via `WHISPER_CHAT_MODEL`). Each run writes a JSON
+structuring chat model via `WHISPER_CHAT_MODEL`), `NVIDIA_API_KEY` for
+`--provider nim` (ASR model via `NIM_ASR_MODEL`, structuring chat model via
+`NIM_CHAT_MODEL`, hosted base URL via `NIM_BASE_URL`). Each run writes a JSON
 report to `phase0/runs/<timestamp>.json` (gitignored).
 
 ### Caveats
@@ -205,8 +211,14 @@ report to `phase0/runs/<timestamp>.json` (gitignored).
   across days — per the roadmap's Phase 0 risk plan.
 - **Multimodal single call:** Gemini accepts audio + a structuring prompt in one
   `generateContent` call (verified live, recorded in each report as
-  `gemini_findings`), so the per-intake cost ceiling restates as one call
+  `provider_findings`), so the per-intake cost ceiling restates as one call
   rather than two.
+- **NIM is prototyping-only:** the hosted NVIDIA NIM preview is free for
+  development; production use requires NVIDIA AI Enterprise licensing. The
+  caveat is recorded in every NIM run's output (`provider_findings`), so a
+  free-tier NIM dependency is never mistaken for a production pricing reality.
+- **Whisper/NIM are 2-call pipelines:** their ASR legs are ASR-only, so
+  per-intake cost is two calls (transcribe + structure), unlike Gemini's one.
 - **Metrics are deterministic:** WER/CER come from `jiwer` over a
   Devanagari-aware normalization (danda etc. are punctuation, not words);
   aggregation is median + nearest-rank p90. Field F1 and the calibration are
@@ -215,4 +227,3 @@ report to `phase0/runs/<timestamp>.json` (gitignored).
   that signal is trustworthy at 0.70; if it is not (silent-error bound or
   precision/recall missing the mark), that is the spike finding to tune in
   PHASE-7.
-- **Remaining provider (NIM) is issue T4b**, building on this same port.
