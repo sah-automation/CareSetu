@@ -27,7 +27,7 @@ dev = [
 addopts = "-ra --strict-markers"
 testpaths = ["tests/unit", "tests/integration"]
 asyncio_mode = "auto"
-pythonpath = ["."]
+pythonpath = [".", "../.."]
 
 [tool.coverage.run]
 source = ["apps/backend"]
