@@ -107,3 +107,40 @@ Reference structured pre-summary against the field set. **Only what is spoken in
 ## Ground-truth quality process
 
 - Every transcript and pre-summary was authored by **John** and independently reviewed by **Sonu**; the per-clip record is in `REVIEW_LEDGER.md`. This satisfies the double-authoring criterion for this research corpus.
+
+## Evaluation harness (`phase0/harness/`)
+
+Throwaway research code (issue #4) that runs the **transcription leg** of the acceptance bar over this corpus: audio → transcript via a provider, scored as WER (median ≤ 20%, p90 ≤ 35%) and CER per cohort and overall, with tokens + INR recorded per call. It is the seed of the future `MOD-005` AI gateway port:
+
+```
+phase0/harness/
+├── gateway.py        # provider-agnostic port (transcribe → structure, typed, async)
+├── models.py         # DTOs: Usage / TranscribeResult / StructureResult / RunReport
+├── metrics.py        # WER/CER via jiwer, median/p90 (nearest-rank), acceptance bar
+├── runner.py         # corpus → scores → aggregated report (JSON output)
+├── __main__.py       # CLI entrypoint
+└── providers/
+    └── gemini.py     # Gemini free/cheap tier (httpx, no new dependency)
+```
+
+### Run
+
+```bash
+# 2-clip smoke run (proves the pipe, cheap)
+python -m phase0.harness --provider gemini --limit 2
+
+# one cohort
+python -m phase0.harness --provider gemini --cohort heavy_local
+
+# full corpus, gentle on the free tier
+python -m phase0.harness --provider gemini --concurrency 1 --max-retries 5 --quota-backoff 30
+```
+
+Requires `GEMINI_API_KEY` (exported or in the repo root `.env`; model via `GEMINI_MODEL`). Each run writes a JSON report to `phase0/runs/<timestamp>.json` (gitignored).
+
+### Caveats
+
+- **Free-tier quota:** a full 43-clip run in one burst trips the free-tier 429 quota; the runner records per-clip failures and continues, but a complete verdict may need a small paid allowance (`NFR-001` headroom) or runs spread across days — per the roadmap's Phase 0 risk plan.
+- **Multimodal single call:** Gemini accepts audio + a structuring prompt in one `generateContent` call (verified live, recorded in each report as `gemini_findings`), so the per-intake cost ceiling restates as one call rather than two.
+- **Metrics are deterministic:** WER/CER come from `jiwer` over a Devanagari-aware normalization (danda etc. are punctuation, not words); aggregation is median + nearest-rank p90.
+- **Structing accuracy, field F1, `AMB-006` calibration, and the remaining providers (Whisper, NIM) are later tickets** (#5, #6) building on this same port.
