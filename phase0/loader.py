@@ -166,6 +166,14 @@ class Corpus:
     clips: tuple[Clip, ...]
     pre_summaries: tuple[PreSummary, ...]
 
+    def clip_by_id(self) -> dict[str, Clip]:
+        """Index clips by id — the runner's hot lookup, built once per run."""
+        return {clip.clip_id: clip for clip in self.clips}
+
+    def pre_summary_by_id(self) -> dict[str, PreSummary]:
+        """Index ground-truth pre-summaries by clip id, built once per run."""
+        return {summary.clip_id: summary for summary in self.pre_summaries}
+
 
 @dataclass(frozen=True)
 class PhiFinding:

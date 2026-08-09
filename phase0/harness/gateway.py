@@ -3,7 +3,7 @@
 The seam that mirrors the future MOD-005 AI gateway: every candidate provider
 (transcribe → structure, typed, async) plugs in here, so the Phase 7 winner's
 adapter can be adopted through the same interface. Throwaway research code for
-PHASE-0 (issue #2 / #4); not production.
+PHASE-0 (issues #2 / #4 / #5); not production.
 """
 
 from __future__ import annotations
@@ -22,7 +22,8 @@ class Gateway(Protocol):
     finding is recorded per-provider, not as a second port method.
     """
 
-    name: str
+    @property
+    def name(self) -> str: ...
 
     async def transcribe(self, audio_path: Path, clip_id: str) -> TranscribeResult: ...
 

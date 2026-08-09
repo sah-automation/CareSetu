@@ -1,9 +1,12 @@
-"""Phase 0 harness — CLI entrypoint (issue #4).
+"""Phase 0 harness — CLI entrypoint (issues #4 / #5).
 
-Runs the transcription leg of the acceptance bar over the committed corpus
-through a provider and persists a JSON run report. Live provider runs are
-gated on the provider's API key; the metrics/runner itself is deterministic
-and unit-tested without network.
+Runs the acceptance bar over the committed corpus through a provider and
+persists a JSON run report: the transcription leg (WER/CER) and, on the
+well-formed subset, the structuring leg (field-level F1), the AMB-006
+calibration (low-confidence flag at 0.70, silent-error bound, flag
+precision/recall), and the forced-review gate validation. Live provider runs
+are gated on the provider's API key; the metrics/runner itself is
+deterministic and unit-tested without network.
 
 Examples:
     python -m phase0.harness --provider gemini --limit 3
@@ -52,6 +55,35 @@ def _print_summary(report: RunReport, output: Path) -> None:
         f"  {'overall':<14} n={overall.sample_size:<3} median_wer={overall.median_wer} "
         f"p90_wer={overall.p90_wer} median_cer={overall.median_cer} p90_cer={overall.p90_cer}"
     )
+    if report.structuring_skipped:
+        print("structuring bar:   SKIPPED (transcription-only run)")
+    else:
+        print("structuring bar:   " + ("PASS" if report.structuring_bar_passes else "FAIL"))
+        for failure in report.structuring_bar_failures:
+            print(f"  - {failure}")
+        if report.structuring is not None:
+            overall_f1 = report.structuring.overall
+            print(
+                f"  well-formed n={report.structuring.sample_size} "
+                f"overall F1={overall_f1.f1:.3f} "
+                f"(p={overall_f1.precision:.3f} r={overall_f1.recall:.3f})"
+            )
+        calibration = report.calibration
+        if calibration is not None:
+            rate = calibration.silent_error_rate
+            print(
+                f"  calibration: threshold={calibration.threshold} flagged={calibration.flagged} "
+                f"unflagged={calibration.unflagged} silent_error_rate="
+                f"{'n/a' if rate is None else f'{rate:.4f}'} "
+                f"precision={calibration.flag_precision} recall={calibration.flag_recall} "
+                f"bar={'PASS' if calibration.passes_silent_error_bar else 'FAIL'}"
+            )
+    if report.structuring_skipped:
+        print("  forced-review gate: SKIPPED (structuring leg not run)")
+    elif report.gate_validated:
+        print("  forced-review gate: validated")
+    else:
+        print("  forced-review gate: NOT validated")
     print(
         f"tokens:        in={report.totals.input_tokens} out={report.totals.output_tokens} "
         f"cost_inr={report.totals.cost_inr} tier={report.totals.tier}"

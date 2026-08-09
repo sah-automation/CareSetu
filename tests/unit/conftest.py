@@ -2,9 +2,9 @@
 
 import pytest
 
-from phase0.loader import load_corpus
+from phase0.loader import Corpus, load_corpus
 
 
 @pytest.fixture(scope="session")
-def corpus():  # type: ignore[no-untyped-def]
+def corpus() -> Corpus:
     return load_corpus()

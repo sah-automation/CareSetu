@@ -11,6 +11,7 @@ from phase0.harness.models import Usage
 from phase0.harness.providers.gemini import (
     build_transcribe_request,
     compute_cost_inr,
+    extract_confidence,
     parse_generate_response,
     parse_usage,
 )
@@ -93,3 +94,20 @@ def test_compute_cost_inr_zero_for_no_tokens() -> None:
     )
     cost = compute_cost_inr(usage, price_per_1m_inr=100.0, price_per_1m_out_inr=300.0)
     assert cost == pytest.approx(0.0)
+
+
+# --- structuring confidence (issue #5) ------------------------------------------
+
+
+def test_extract_confidence_reads_self_report() -> None:
+    assert extract_confidence({"structuring_confidence": 0.82}) == pytest.approx(0.82)
+
+
+def test_extract_confidence_clamps_into_range() -> None:
+    assert extract_confidence({"structuring_confidence": 1.5}) == pytest.approx(1.0)
+    assert extract_confidence({"structuring_confidence": -0.2}) == pytest.approx(0.0)
+
+
+def test_extract_confidence_missing_or_invalid_is_none() -> None:
+    assert extract_confidence({}) is None
+    assert extract_confidence({"structuring_confidence": "oops"}) is None

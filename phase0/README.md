@@ -51,15 +51,15 @@ The whole corpus + ground truth loads in a single call (Python 3.11+, stdlib onl
 ```python
 from phase0.loader import load_corpus, scan_phi
 
-corpus = load_corpus()          # field set + manifest + all pre-summaries
-print(corpus.field_set.version) # "1.0.0"
-print(len(corpus.clips))        # 43
+corpus = load_corpus()  # field set + manifest + all pre-summaries
+print(corpus.field_set.version)  # "1.0.0"
+print(len(corpus.clips))  # 43
 
 for clip, summary in zip(corpus.clips, corpus.pre_summaries):
     assert clip.clip_id == summary.clip_id
     assert clip.cohort == summary.cohort
 
-findings = scan_phi(corpus)     # heuristic PHI guard; 0 expected
+findings = scan_phi(corpus)  # heuristic PHI guard; 0 expected
 ```
 
 The unit test `tests/unit/test_corpus_fixtures.py` asserts exactly this contract and runs via `npm run test:unit:backend`.
@@ -110,23 +110,74 @@ Reference structured pre-summary against the field set. **Only what is spoken in
 
 ## Evaluation harness (`phase0/harness/`)
 
-Throwaway research code (issue #4) that runs the **transcription leg** of the acceptance bar over this corpus: audio → transcript via a provider, scored as WER (median ≤ 20%, p90 ≤ 35%) and CER per cohort and overall, with tokens + INR recorded per call. It is the seed of the future `MOD-005` AI gateway port:
+Throwaway research code (issues #4 / #5) that runs both legs of the
+acceptance bar over this corpus:
+
+- **Transcription leg** (issue #4): audio → transcript via a provider, scored
+  as WER (median ≤ 20%, p90 ≤ 35%) and CER per cohort and overall, with tokens
+  and INR recorded per call.
+- **Structuring leg** (issue #5): transcript → structured pre-summary via the
+  same provider, scored as **field-level F1 (≥ 90%)** against the ground-truth
+  pre-summaries **on the well-formed subset** (clips whose WER cleared the
+  0.20 transcription floor), plus the **AMB-006 calibration** and the
+  **forced-review gate** validation.
+
+It is the seed of the future `MOD-005` AI gateway port:
 
 ```
 phase0/harness/
 ├── gateway.py        # provider-agnostic port (transcribe → structure, typed, async)
 ├── models.py         # DTOs: Usage / TranscribeResult / StructureResult / RunReport
-├── metrics.py        # WER/CER via jiwer, median/p90 (nearest-rank), acceptance bar
-├── runner.py         # corpus → scores → aggregated report (JSON output)
+├── metrics.py        # WER/CER via jiwer + field-level F1 + AMB-006 calibration
+├── gate.py           # low-confidence forced-review usage gate (AMB-006)
+├── runner.py         # corpus → both legs → aggregated report (JSON output)
 ├── __main__.py       # CLI entrypoint
 └── providers/
     └── gemini.py     # Gemini free/cheap tier (httpx, no new dependency)
 ```
 
+### The structuring leg and `AMB-006` semantics (issue #5)
+
+- **Well-formed subset:** a clip is scoreable for structuring when its
+  transcription WER ≤ `TRANSCRIPTION_FLOOR_WER` (0.20). Structuring is only
+  run (and only scored) on those clips, so extraction is not punished for ASR
+  garbage-in.
+- **Field-level F1:** every extractive field of the provisional field set is
+  canonicalized (scalars → one normalized token, lists → one per item,
+  `known_medications` → one per med with sub-fields joined, `vitals` → one
+  `key=value` per measurement, with `other` contributing one `other=…` token
+  per item so ordering does not affect the score) and scored as
+  precision/recall/F1 against the ground truth, micro-averaged over the
+  subset. `clinical_notes`, `extraction_notes`, and metadata are not
+  extractions and are excluded.
+- **`low_confidence` flag:** derived from the provider's structuring
+  confidence vs. the `AMB_006_THRESHOLD` (0.70) — strictly below is flagged;
+  an unknown (missing) confidence is treated as flagged ("never present
+  unverified output as final"). The provider self-reports the confidence as a
+  `structuring_confidence` key alongside the field-set object; the flag is
+  deliberately independent of the _measured_ F1 so the calibration is not
+  circular.
+- **Calibration proof:** over the well-formed subset, a _silent error_ is a
+  clinically-significant field error (the field set's clinical-action subset:
+  chief complaint, severity, medications, allergies, vitals, labs, diagnosis,
+  advice, follow-up) on an **unflagged** pre-summary. The report states the
+  silent-error rate on unflagged items (bound ≤ 2%), the flag precision/recall
+  vs. measured accuracy, and the verdict — the testable core of the
+  "never present as verified" rule. With **no unflagged pre-summaries** the
+  bound has no evidence to certify, so the verdict is FAIL as _unproven_ (never
+  a vacuous pass).
+- **Forced-review gate:** `gate.py` implements the `[Draft] → [Reviewed] →
+[Final]` lifecycle; a `low_confidence` pre-summary is unusable as
+  `rx_draft` / `consult` input until `mark_reviewed` records a timestamped,
+  attributed doctor review. Each run re-validates the semantics on the sample
+  (`gate_validated` in the report); the recorded clear is attributed to the
+  synthetic `harness-reviewer` at the run timestamp — the harness proves the
+  state machine, a production deployment records the actual doctor.
+
 ### Run
 
 ```bash
-# 2-clip smoke run (proves the pipe, cheap)
+# 2-clip smoke run (proves both legs, cheap)
 python -m phase0.harness --provider gemini --limit 2
 
 # one cohort
@@ -136,11 +187,27 @@ python -m phase0.harness --provider gemini --cohort heavy_local
 python -m phase0.harness --provider gemini --concurrency 1 --max-retries 5 --quota-backoff 30
 ```
 
-Requires `GEMINI_API_KEY` (exported or in the repo root `.env`; model via `GEMINI_MODEL`). Each run writes a JSON report to `phase0/runs/<timestamp>.json` (gitignored).
+Requires `GEMINI_API_KEY` (exported or in the repo root `.env`; model via
+`GEMINI_MODEL`). Each run writes a JSON report to `phase0/runs/<timestamp>.json`
+(gitignored).
 
 ### Caveats
 
-- **Free-tier quota:** a full 43-clip run in one burst trips the free-tier 429 quota; the runner records per-clip failures and continues, but a complete verdict may need a small paid allowance (`NFR-001` headroom) or runs spread across days — per the roadmap's Phase 0 risk plan.
-- **Multimodal single call:** Gemini accepts audio + a structuring prompt in one `generateContent` call (verified live, recorded in each report as `gemini_findings`), so the per-intake cost ceiling restates as one call rather than two.
-- **Metrics are deterministic:** WER/CER come from `jiwer` over a Devanagari-aware normalization (danda etc. are punctuation, not words); aggregation is median + nearest-rank p90.
-- **Structing accuracy, field F1, `AMB-006` calibration, and the remaining providers (Whisper, NIM) are later tickets** (#5, #6) building on this same port.
+- **Free-tier quota:** a full 43-clip run in one burst trips the free-tier 429
+  quota; the runner records per-clip failures and continues, but a complete
+  verdict may need a small paid allowance (`NFR-001` headroom) or runs spread
+  across days — per the roadmap's Phase 0 risk plan.
+- **Multimodal single call:** Gemini accepts audio + a structuring prompt in one
+  `generateContent` call (verified live, recorded in each report as
+  `gemini_findings`), so the per-intake cost ceiling restates as one call
+  rather than two.
+- **Metrics are deterministic:** WER/CER come from `jiwer` over a
+  Devanagari-aware normalization (danda etc. are punctuation, not words);
+  aggregation is median + nearest-rank p90. Field F1 and the calibration are
+  pure set matching against the committed ground truth.
+- **Confidence is provider-self-reported:** the calibration measures whether
+  that signal is trustworthy at 0.70; if it is not (silent-error bound or
+  precision/recall missing the mark), that is the spike finding to tune in
+  PHASE-7.
+- **Remaining providers (Whisper, NIM) are ticket #6**, building on this same
+  port.

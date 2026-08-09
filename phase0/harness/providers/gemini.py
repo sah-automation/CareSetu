@@ -22,11 +22,11 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
-from phase0.harness.models import StructureResult, TranscribeResult, Usage
+from phase0.harness.models import PreSummaryData, StructureResult, TranscribeResult, Usage
 
 _API_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 _TRANSIENT_STATUS_CODES = (500, 502, 503)
@@ -49,9 +49,13 @@ _STRUCTURE_PROMPT = (
     '"associated_symptoms", "aggravating_factors", "relieving_factors", '
     '"known_medications", "allergies", "past_history", "family_history", '
     '"vitals", "labs_ordered", "diagnosis_impression", "advice", "follow_up", '
-    '"clinical_notes", "extraction_notes". Record only what is actually '
-    "spoken: unstated string fields are null, unstated list fields are []. "
-    "Never invent facts."
+    '"clinical_notes", "extraction_notes", "structuring_confidence". Record '
+    "only what is actually spoken: unstated string fields are null, unstated "
+    'list fields are []. Never invent facts. "structuring_confidence" is a '
+    "number from 0 to 1 stating how confident you are that the extraction "
+    "captures everything stated in the transcript and nothing else — lower it "
+    "when fields are ambiguous, partially stated, or the transcript is noisy. "
+    "It is the AMB-006 calibration signal, so do not game it."
 )
 
 
@@ -160,6 +164,22 @@ def compute_cost_inr(usage: Usage, price_per_1m_inr: float, price_per_1m_out_inr
     return numerator / 1_000_000
 
 
+def extract_confidence(structured: dict[str, Any]) -> float | None:
+    """Read the model's self-reported structuring confidence (0..1).
+
+    Clamped into range; missing or non-numeric values become ``None``, which
+    the AMB-006 flag treats as low confidence (untrustworthy).
+    """
+    value = structured.get("structuring_confidence")
+    if value is None:
+        return None
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return None
+    return min(1.0, max(0.0, confidence))
+
+
 class GeminiProvider:
     """Gemini free/cheap-tier adapter implementing the Gateway port."""
 
@@ -263,12 +283,18 @@ class GeminiProvider:
         }
         response = await self._post(payload)
         raw = parse_generate_response(response)
-        structured = json.loads(raw)
-        if not isinstance(structured, dict):
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
             raise RuntimeError("Gemini structure response was not a JSON object")
+        # structuring_confidence is the AMB-006 signal, not a field-set field.
+        confidence = extract_confidence(parsed)
+        parsed.pop("structuring_confidence", None)
+        # The field-set shape is asserted, not validated: scoring treats missing
+        # keys as empty, and the runner flags a response with no field-set keys.
+        structured = cast(PreSummaryData, parsed)
         return StructureResult(
             structured=structured,
-            confidence=None,
+            confidence=confidence,
             usage=self._usage_from_response(response, response.get("_latency_ms", 0)),
         )
 
