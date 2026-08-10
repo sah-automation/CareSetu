@@ -39,7 +39,7 @@ The cross-reference matrices are **embedded in** `docs/architecture/internal-mod
 
 ## Language (glossary)
 
-Vocabulary resolved by the AMB-006 decision (ADR-0001). Terms added here are the canonical names — don't drift to synonyms.
+Vocabulary resolved by the AMB-006 decision (ADR-0001) and the Phase 1 foundation decisions (ADR-0002, ADR-0003). Terms added here are the canonical names — don't drift to synonyms.
 
 **pre-summary**:
 The AI-generated clinical summary draft produced by the `transcribe → structure → pre-summary` pipeline; always a draft for a licensed doctor, never presented as verified.
@@ -72,3 +72,41 @@ _Avoid_: good clips, qualifying set
 **silent-error bound**:
 The ≤ 2% rate of clinically-significant field errors on unflagged pre-summaries, certified over the well-formed subset — the testable core of "never present unverified output as final".
 _Avoid_: error budget
+
+### Event bus & module seams
+
+**outbox**:
+A per-module database table written in the same transaction as a state change; the dispatcher claims and fans out its rows. Rows are deleted after successful fan-out to all subscribers - the subscriber's ledger, not the outbox, records delivery.
+_Avoid_: event queue
+
+**dispatcher**:
+The async worker loop that polls each module's outbox, durably claims pending rows as `inflight`, and fans them out to in-process subscribers. Pure transport - it never authors events and never touches domain tables.
+_Avoid_: event bus process
+
+**event bus**:
+The informal name for the async seam; there is no broker. It is dispatcher fan-out over per-module outboxes with at-least-once delivery and subscriber-side dedupe.
+_Avoid_: message broker
+
+**idempotent subscriber**:
+A module that records `event_id` in its own `consumed_events` ledger before applying effects, so that replay of a delivered event is a no-op.
+_Avoid_: replay-safe handler
+
+**round-trip**:
+The end-to-end proof of the async seam: publish → dispatcher claim → fan-out → subscriber ledger → replay the same `event_id` → exactly one ledger row. The Phase 1 definition-of-done for the outbox/dispatcher contract.
+_Avoid_: outbox test (when meaning the seam proof)
+
+**module isolation rule**:
+No cross-schema imports, no cross-schema SQL, no cross-schema foreign keys; the only legal cross-module seams are `facade.py` (sync) and outbox events (async). The dispatcher and migration harness are the sole cross-schema readers, and only of outbox/schema plumbing, never domain tables.
+_Avoid_: bounded-context separation (when meaning this CI-enforced rule)
+
+**edge**:
+The deployment boundary - the reverse proxy (Caddy/nginx) that terminates TLS at the VM perimeter. Distinct from the in-app gateway.
+_Avoid_: gateway
+
+**gateway**:
+The in-app FastAPI middleware stack where caller identity is established (JWT-verify, RBAC scope, rate-limit), in front of every route. Distinct from the edge.
+_Avoid_: API proxy
+
+**audit event**:
+`audit.event` - published by each owning module into its own outbox in the same transaction as the audited change, and consumed by MOD-011 which appends to the audit schema. Never synthesized by the dispatcher.
+_Avoid_: audit log entry
