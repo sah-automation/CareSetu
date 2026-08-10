@@ -42,6 +42,12 @@ OUTBOX_STATUSES: tuple[str, ...] = (
     "dead_letter",
 )
 
+OUTBOX_STATUS_PENDING = "pending"
+OUTBOX_STATUS_INFLIGHT = "inflight"
+OUTBOX_STATUS_DISPATCHED = "dispatched"
+OUTBOX_STATUS_FAILED = "failed"
+OUTBOX_STATUS_DEAD_LETTER = "dead_letter"
+
 _OUTBOX_STATUS_LIST = ", ".join(f"'{status}'" for status in OUTBOX_STATUSES)
 
 
@@ -61,7 +67,7 @@ def outbox_table(table_name: str, schema: str) -> Table:
         Column("event_type", String(100), nullable=False),
         Column("payload", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
         Column("occurred_at", DateTime(timezone=True), nullable=False),
-        Column("status", String(20), nullable=False, server_default="pending"),
+        Column("status", String(20), nullable=False, server_default=OUTBOX_STATUS_PENDING),
         Column("attempts", Integer, nullable=False, server_default=text("0")),
         Column("next_attempt_at", DateTime(timezone=True), nullable=True),
         CheckConstraint(

@@ -73,3 +73,40 @@ def test_register_same_handler_for_different_event_types_is_allowed() -> None:
 
     assert registry.handlers_for("phase1.round_trip") == (_handler_a,)
     assert registry.handlers_for("patient.registered") == (_handler_a,)
+
+
+def test_payload_model_registration_round_trips() -> None:
+    registry = HandlerRegistry()
+
+    registry.register_payload_model("phase1.round_trip", SamplePayload)
+
+    assert registry.payload_model_for("phase1.round_trip") is SamplePayload
+
+
+def test_payload_model_for_unknown_event_type_is_none() -> None:
+    assert HandlerRegistry().payload_model_for("phase1.round_trip") is None
+
+
+def test_register_payload_model_rejects_non_domain_action_event_type() -> None:
+    registry = HandlerRegistry()
+
+    with pytest.raises(ValueError):
+        registry.register_payload_model("no_dot", SamplePayload)
+
+
+def test_register_payload_model_twice_for_one_event_type_is_rejected() -> None:
+    registry = HandlerRegistry()
+
+    registry.register_payload_model("phase1.round_trip", SamplePayload)
+
+    with pytest.raises(ValueError):
+        registry.register_payload_model("phase1.round_trip", SamplePayload)
+
+
+def test_payload_model_registration_is_independent_per_event_type() -> None:
+    registry = HandlerRegistry()
+
+    registry.register_payload_model("phase1.round_trip", SamplePayload)
+
+    assert registry.payload_model_for("phase1.round_trip") is SamplePayload
+    assert registry.payload_model_for("patient.registered") is None
