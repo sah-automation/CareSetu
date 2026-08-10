@@ -1,15 +1,17 @@
-"""PHASE-1 T3a: dispatcher poll-loop pure contracts (ticket #22).
+"""PHASE-1 T3a/T3b: dispatcher poll-loop pure contracts (tickets #22, #23).
 
 Pins the database-free parts of the poll loop: reconstructing a typed
 ``Envelope`` from an outbox row (row contract carries no ``producer``/
 ``schema_version``; the JSONB payload is validated into the registered payload
-model, never passed as a raw dict) and the poll loop's stop semantics. The
-claim/reclaim/delete SQL and the drain behaviour are exercised against the
-native PostgreSQL in ``tests/integration/test_dispatcher.py``.
+model, never passed as a raw dict), the poll loop's stop semantics, and the
+T3b retry/dead-letter helpers (exponential-backoff delay and the
+pending-vs-dead-letter decision at the ``max_attempts`` cap). The
+claim/reclaim/delete/retry SQL and the drain behaviour are exercised against
+the native PostgreSQL in ``tests/integration/test_dispatcher.py``.
 """
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel
@@ -19,9 +21,12 @@ from bus.dispatcher import (
     DispatcherConfig,
     OutboxRow,
     OutboxTable,
+    backoff_delay,
     envelope_from_row,
+    retry_status_after_failure,
     run_poll_loop,
 )
+from bus.outbox_ddl import OUTBOX_STATUS_DEAD_LETTER, OUTBOX_STATUS_PENDING
 from bus.registry import HandlerRegistry
 
 
@@ -37,6 +42,7 @@ def _row() -> OutboxRow:
         payload={"round_trip_id": str(uuid4())},
         occurred_at=datetime(2026, 8, 11, 12, 0, tzinfo=UTC),
         next_attempt_at=datetime(2026, 8, 11, 12, 1, tzinfo=UTC),
+        attempts=0,
     )
 
 
@@ -78,3 +84,40 @@ def test_run_poll_loop_returns_immediately_when_stop_event_is_set() -> None:
             stop_event=stop_event,
         )
     )
+
+
+def test_backoff_delay_doubles_exponentially_with_each_attempt() -> None:
+    config = DispatcherConfig(backoff_base_seconds=2.0)
+
+    assert backoff_delay(1, config) == timedelta(seconds=2)
+    assert backoff_delay(2, config) == timedelta(seconds=4)
+    assert backoff_delay(3, config) == timedelta(seconds=8)
+    assert backoff_delay(4, config) == timedelta(seconds=16)
+
+
+def test_backoff_delay_with_zero_base_is_immediate() -> None:
+    config = DispatcherConfig(backoff_base_seconds=0.0)
+
+    assert backoff_delay(1, config) == timedelta(seconds=0)
+    assert backoff_delay(5, config) == timedelta(seconds=0)
+
+
+def test_retry_status_below_cap_is_pending() -> None:
+    config = DispatcherConfig(max_attempts=5)
+
+    for attempt in range(1, 5):
+        assert retry_status_after_failure(attempt, config) == OUTBOX_STATUS_PENDING
+
+
+def test_retry_status_at_cap_is_dead_letter() -> None:
+    config = DispatcherConfig(max_attempts=5)
+
+    assert retry_status_after_failure(5, config) == OUTBOX_STATUS_DEAD_LETTER
+    assert retry_status_after_failure(6, config) == OUTBOX_STATUS_DEAD_LETTER
+
+
+def test_retry_status_respects_custom_cap() -> None:
+    config = DispatcherConfig(max_attempts=3)
+
+    assert retry_status_after_failure(2, config) == OUTBOX_STATUS_PENDING
+    assert retry_status_after_failure(3, config) == OUTBOX_STATUS_DEAD_LETTER

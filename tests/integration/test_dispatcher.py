@@ -1,16 +1,20 @@
-"""PHASE-1 T3a: dispatcher poll loop against the native PostgreSQL (ticket #22).
+"""PHASE-1 T3a/T3b: dispatcher poll loop against the native PostgreSQL (tickets #22, #23).
 
 Proves the poll loop's external behaviour (issue #16, ADR-0002 §2) against a
 throwaway schema/outbox materialized through the Phase 1 helper: pending rows
 are durably claimed ``inflight`` then deleted after a full successful fan-out,
 stale ``inflight`` rows are reclaimed after the claim timeout, a partial
-fan-out leaves the row for reclaim, outbox tables are discovered by list rather
-than hardcoded modules, and the dispatcher touches outbox tables only - never
-domain tables. Runs against the local native PostgreSQL and skips cleanly when
-it is unreachable, like the rest of the integration suite.
+fan-out schedules an exponential-backoff retry and dead-letters once the 5-attempt
+cap is reached while a healthy sibling subscriber still receives the event,
+outbox tables are discovered by list rather than hardcoded modules, and the
+dispatcher touches outbox tables only - never domain tables. Runs against the
+local native PostgreSQL and skips cleanly when it is unreachable, like the rest
+of the integration suite.
 """
 
 import asyncio
+import logging
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -36,6 +40,8 @@ THROWAWAY_OUTBOX = "t3a_outbox"
 DOMAIN_TABLE = "t3a_domain_patients"
 
 CONFIG = DispatcherConfig()
+MAX_ATTEMPTS = CONFIG.max_attempts
+POLL_TIMES_UP_TO_CAP = MAX_ATTEMPTS + 1
 
 
 class RoundTripPayload(BaseModel):
@@ -75,7 +81,7 @@ async def _outbox_rows(database_url: str, schema: str) -> list[dict[str, Any]]:
         async with engine.connect() as connection:
             result = await connection.execute(
                 text(
-                    f"SELECT id, event_id, status, next_attempt_at "
+                    f"SELECT id, event_id, status, attempts, next_attempt_at "
                     f'FROM "{schema}"."{THROWAWAY_OUTBOX}"'
                 )
             )
@@ -166,6 +172,15 @@ def _idempotent_registry(database_url: str, schema: str) -> HandlerRegistry:
 
 
 def _poll(database_url: str, schema: str, registry: HandlerRegistry) -> Any:
+    return _poll_with(database_url, schema, registry, CONFIG)
+
+
+def _poll_with(
+    database_url: str,
+    schema: str,
+    registry: HandlerRegistry,
+    config: DispatcherConfig,
+) -> Any:
     engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
     try:
         return asyncio.run(
@@ -173,7 +188,7 @@ def _poll(database_url: str, schema: str, registry: HandlerRegistry) -> Any:
                 engine,
                 OutboxTable(schema, THROWAWAY_OUTBOX),
                 registry,
-                CONFIG,
+                config,
             )
         )
     finally:
@@ -258,7 +273,7 @@ def test_fresh_inflight_row_is_not_reclaimed(
     assert rows[0]["next_attempt_at"] is not None
 
 
-def test_partial_failure_leaves_row_inflight_not_deleted(
+def test_partial_failure_schedules_backoff_retry_not_delete(
     database_url: str, reachable_db: None, throwaway_schema: str
 ) -> None:
     asyncio.run(_materialize(database_url, throwaway_schema))
@@ -274,11 +289,150 @@ def test_partial_failure_leaves_row_inflight_not_deleted(
     assert result.claimed == 1
     assert result.fanned_out == 1
     assert result.deleted == 0
+    assert result.retried == 1
+    assert result.dead_lettered == 0
     rows = asyncio.run(_outbox_rows(database_url, throwaway_schema))
     assert len(rows) == 1
     assert rows[0]["event_id"] == envelope.event_id
-    assert rows[0]["status"] == "inflight"
-    assert rows[0]["next_attempt_at"] is not None
+    assert rows[0]["status"] == "pending"
+    assert rows[0]["attempts"] == 1
+    assert rows[0]["next_attempt_at"] > datetime.now(UTC)
+
+
+def _poll_times(
+    database_url: str,
+    schema: str,
+    registry: HandlerRegistry,
+    times: int,
+    config: DispatcherConfig,
+) -> list[Any]:
+    results = []
+    for _ in range(times):
+        result = _poll_with(database_url, schema, registry, config)
+        results.append(result)
+        if result.dead_lettered:
+            break
+    return results
+
+
+def test_failing_subscriber_retries_then_dead_letters_after_cap(
+    database_url: str,
+    reachable_db: None,
+    throwaway_schema: str,
+    caplog: Any,
+) -> None:
+    asyncio.run(_materialize(database_url, throwaway_schema))
+    envelope = _envelope()
+    asyncio.run(_publish(database_url, throwaway_schema, envelope))
+    config = DispatcherConfig(backoff_base_seconds=0.0)
+
+    with caplog.at_level(logging.ERROR, logger="bus.dispatcher"):
+        results = _poll_times(
+            database_url,
+            throwaway_schema,
+            _registry(database_url, throwaway_schema, _failing_subscriber()),
+            times=POLL_TIMES_UP_TO_CAP,
+            config=config,
+        )
+
+    retried = sum(result.retried for result in results)
+    dead_lettered = sum(result.dead_lettered for result in results)
+    assert retried == 4
+    assert dead_lettered == 1
+    rows = asyncio.run(_outbox_rows(database_url, throwaway_schema))
+    assert len(rows) == 1
+    assert rows[0]["status"] == "dead_letter"
+    assert rows[0]["attempts"] == 5
+    assert any("dead-lettered" in record.getMessage() for record in caplog.records)
+
+
+def test_failing_subscriber_does_not_block_healthy_sibling(
+    database_url: str, reachable_db: None, throwaway_schema: str
+) -> None:
+    asyncio.run(_materialize(database_url, throwaway_schema))
+    envelope = _envelope()
+    asyncio.run(_publish(database_url, throwaway_schema, envelope))
+    config = DispatcherConfig(backoff_base_seconds=0.0)
+    registry = HandlerRegistry()
+    registry.register_payload_model("phase1.round_trip", RoundTripPayload)
+    registry.register("phase1.round_trip", _failing_subscriber())
+    registry.register(
+        "phase1.round_trip",
+        _idempotent_subscriber(database_url, throwaway_schema),
+    )
+
+    results = _poll_times(
+        database_url,
+        throwaway_schema,
+        registry,
+        times=POLL_TIMES_UP_TO_CAP,
+        config=config,
+    )
+
+    assert sum(result.retried for result in results) == 4
+    assert sum(result.dead_lettered for result in results) == 1
+    assert asyncio.run(_ledger_count(database_url, throwaway_schema)) == 1
+    rows = asyncio.run(_outbox_rows(database_url, throwaway_schema))
+    assert len(rows) == 1
+    assert rows[0]["status"] == "dead_letter"
+    assert rows[0]["attempts"] == 5
+
+
+def test_healthy_subscriber_success_independent_of_failing_sibling(
+    database_url: str, reachable_db: None, throwaway_schema: str
+) -> None:
+    asyncio.run(_materialize(database_url, throwaway_schema))
+    envelope = _envelope()
+    asyncio.run(_publish(database_url, throwaway_schema, envelope))
+    registry = HandlerRegistry()
+    registry.register_payload_model("phase1.round_trip", RoundTripPayload)
+    registry.register(
+        "phase1.round_trip",
+        _idempotent_subscriber(database_url, throwaway_schema),
+    )
+    registry.register("phase1.round_trip", _failing_subscriber())
+
+    result = _poll(
+        database_url,
+        throwaway_schema,
+        registry,
+    )
+
+    assert result.fanned_out == 1
+    assert result.deleted == 0
+    assert result.retried == 1
+    assert asyncio.run(_ledger_count(database_url, throwaway_schema)) == 1
+    rows = asyncio.run(_outbox_rows(database_url, throwaway_schema))
+    assert rows[0]["attempts"] == 1
+
+
+def test_dead_lettered_row_is_not_claimed_again(
+    database_url: str, reachable_db: None, throwaway_schema: str
+) -> None:
+    asyncio.run(_materialize(database_url, throwaway_schema))
+    envelope = _envelope()
+    asyncio.run(_publish(database_url, throwaway_schema, envelope))
+    config = DispatcherConfig(backoff_base_seconds=0.0)
+    _poll_times(
+        database_url,
+        throwaway_schema,
+        _registry(database_url, throwaway_schema, _failing_subscriber()),
+        times=POLL_TIMES_UP_TO_CAP,
+        config=config,
+    )
+
+    result = _poll(
+        database_url,
+        throwaway_schema,
+        _registry(database_url, throwaway_schema, _failing_subscriber()),
+    )
+
+    assert result.claimed == 0
+    assert result.fanned_out == 0
+    assert result.deleted == 0
+    rows = asyncio.run(_outbox_rows(database_url, throwaway_schema))
+    assert len(rows) == 1
+    assert rows[0]["status"] == "dead_letter"
 
 
 def test_row_without_registered_payload_model_is_left_for_reclaim(

@@ -1,4 +1,4 @@
-"""Dispatcher poll loop over discovered outbox tables (ADR-0002, PHASE-1 T3a #22).
+"""Dispatcher poll loop over discovered outbox tables (ADR-0002, PHASE-1 T3a #22 / T3b #23).
 
 The at-least-once seam's delivery side: a single async loop that polls every
 outbox table it is told about, durably claims pending rows ``inflight`` before
@@ -27,12 +27,22 @@ A row is deleted only when the fan-out actually reached a subscriber and every
 handler succeeded - deleting without a subscriber would destroy the event with
 no ``consumed_events`` delivery record. A row that cannot be delivered as a
 typed envelope (no registered payload model) or has no registered handlers is a
-configuration error: it is logged and left for reclaim, never deleted. A
-partial fan-out (one failed subscriber) also leaves the row ``inflight``; its
-deadline ages it back through the reclaim path, which is the honest at-least-
-once behaviour before T3b (#23) layers attempts/backoff and ``dead_letter`` on
-top. Deletion is guarded on the claimed deadline so a slow worker cannot delete
-a row a sibling worker already reclaimed and re-claimed.
+configuration error: it is logged and left for reclaim, never deleted.
+
+Failure semantics (T3b, #23): a partial fan-out (one or more registered
+subscribers failed) is a failed attempt. The dispatcher increments the row's
+``attempts`` and either schedules an exponential-backoff retry - returning the
+row to ``pending`` with ``next_attempt_at = now + backoff``, which composes
+with the same eligibility predicate as a freshly published row - or, once the
+incremented count reaches ``max_attempts``, marks it ``dead_letter`` and emits
+an alert log line (structured, no payload content). Each subscriber's outcome
+is isolated by ``dispatch``: one failing subscriber never prevents its siblings
+from receiving the event, and a sibling's success is independent of another
+subscriber's outcome.
+
+Both the delete and the retry/dead-letter update are guarded on the claimed
+deadline (``status='inflight'`` + ``next_attempt_at``) so a slow worker cannot
+clobber a row a sibling worker already reclaimed and re-claimed.
 """
 
 import asyncio
@@ -52,6 +62,7 @@ from sqlalchemy.sql.selectable import Select
 from bus.dispatch import dispatch
 from bus.envelope import Envelope
 from bus.outbox_ddl import (
+    OUTBOX_STATUS_DEAD_LETTER,
     OUTBOX_STATUS_INFLIGHT,
     OUTBOX_STATUS_PENDING,
     outbox_table,
@@ -80,6 +91,8 @@ class OutboxRow:
     ``payload`` is the raw JSONB shape from the row until ``envelope_from_row``
     validates it into the event type's registered Pydantic model - the
     dispatcher is transport and never interprets the payload itself.
+    ``attempts`` is the row's completed-delivery-attempt count as claimed; the
+    retry path (T3b, #23) increments it on a partial fan-out.
     """
 
     id: UUID
@@ -88,15 +101,24 @@ class OutboxRow:
     payload: dict[str, Any]
     occurred_at: datetime
     next_attempt_at: datetime
+    attempts: int
 
 
 @dataclass(frozen=True)
 class DispatcherConfig:
-    """Tuning knobs for the poll loop (defaults suit the Phase 1 worker)."""
+    """Tuning knobs for the poll loop (defaults suit the Phase 1 worker).
+
+    ``max_attempts`` is the delivery-attempt cap from ADR-0002: a row whose
+    partial fan-out reaches this count is dead-lettered rather than retried.
+    ``backoff_base_seconds`` scales the exponential backoff between retries
+    (``base * 2**(attempt-1)`` seconds before attempt ``attempt``).
+    """
 
     poll_interval_seconds: float = 1.0
     claim_timeout_seconds: float = 60.0
     batch_size: int = 100
+    max_attempts: int = 5
+    backoff_base_seconds: float = 1.0
 
 
 DEFAULT_DISPATCHER_CONFIG = DispatcherConfig()
@@ -111,6 +133,8 @@ class TablePollResult:
     claimed: int
     fanned_out: int
     deleted: int
+    retried: int = 0
+    dead_lettered: int = 0
 
 
 async def discover_outbox_tables(
@@ -202,6 +226,7 @@ async def claim_pending_rows(
             target.c.payload,
             target.c.occurred_at,
             target.c.next_attempt_at,
+            target.c.attempts,
         )
     )
     result = await connection.execute(statement)
@@ -217,6 +242,7 @@ def _to_outbox_row(mapping: RowMapping) -> OutboxRow:
         payload=cast(dict[str, Any], mapping["payload"]),
         occurred_at=cast(datetime, mapping["occurred_at"]),
         next_attempt_at=cast(datetime, mapping["next_attempt_at"]),
+        attempts=cast(int, mapping["attempts"]),
     )
 
 
@@ -264,20 +290,78 @@ async def delete_outbox_row(
     return bool(result.rowcount)
 
 
+def backoff_delay(attempt: int, config: DispatcherConfig) -> timedelta:
+    """The exponential-backoff delay before delivery attempt ``attempt`` (1-based).
+
+    ``base * 2**(attempt - 1)`` seconds: attempt 1 (the first retry after the
+    initial failure) waits ``base``, attempt 2 waits ``2*base``, and so on.
+    """
+    return timedelta(seconds=config.backoff_base_seconds * (2 ** (attempt - 1)))
+
+
+def retry_status_after_failure(attempt: int, config: DispatcherConfig) -> str:
+    """The status a failed delivery attempt leads to (ADR-0002, T3b #23).
+
+    ``pending`` schedules an exponential-backoff retry; ``dead_letter`` is the
+    terminal state once the attempt count reaches ``config.max_attempts``.
+    """
+    if attempt >= config.max_attempts:
+        return OUTBOX_STATUS_DEAD_LETTER
+    return OUTBOX_STATUS_PENDING
+
+
+async def record_failed_attempt(
+    connection: AsyncConnection,
+    target: Table,
+    row: OutboxRow,
+    config: DispatcherConfig,
+) -> str | None:
+    """Increment ``attempts`` and either schedule a backoff retry or dead-letter.
+
+    The update is guarded on the row's current claim (``status='inflight'`` and
+    the claimed deadline) mirroring ``delete_outbox_row``: a worker whose claim
+    lapsed and was re-claimed by a sibling must not clobber that sibling's row.
+    Returns the resulting status (``pending`` for a retry, ``dead_letter`` at
+    the cap) or ``None`` when the guard did not match because the row was
+    re-claimed elsewhere.
+    """
+    next_attempt = row.attempts + 1
+    status = retry_status_after_failure(next_attempt, config)
+    deadline = (
+        None
+        if status == OUTBOX_STATUS_DEAD_LETTER
+        else func.now() + backoff_delay(next_attempt, config)
+    )
+    result = await connection.execute(
+        update(target)
+        .where(
+            target.c.id == row.id,
+            target.c.status == OUTBOX_STATUS_INFLIGHT,
+            target.c.next_attempt_at == row.next_attempt_at,
+        )
+        .values(status=status, attempts=next_attempt, next_attempt_at=deadline)
+        .returning(target.c.status)
+    )
+    mapping = result.mappings().first()
+    return None if mapping is None else str(mapping["status"])
+
+
 async def process_outbox_table(
     engine: AsyncEngine,
     table: OutboxTable,
     registry: HandlerRegistry,
     config: DispatcherConfig,
 ) -> TablePollResult:
-    """One poll pass over ``table``: reclaim, claim, fan out, delete.
+    """One poll pass over ``table``: reclaim, claim, fan out, delete/retry.
 
     Reclaim and claim share one transaction (the reclaim's re-pended rows are
     immediately claimable). Each claimed row is reconstructed into a typed
-    envelope, fanned out via ``dispatch``, and deleted only when every
-    registered subscriber handler succeeded. The dispatcher touches ``table``
-    (and each subscriber's own ledger, which handlers write themselves) - never
-    domain tables.
+    envelope and fanned out via ``dispatch``; a row whose every registered
+    subscriber handler succeeded is deleted, and a partial fan-out is recorded
+    as a failed attempt - scheduled for an exponential-backoff retry or
+    dead-lettered once ``max_attempts`` is reached (T3b, #23). The dispatcher
+    touches ``table`` (and each subscriber's own ledger, which handlers write
+    themselves) - never domain tables.
     """
     target = outbox_table(table.table_name, table.schema)
     async with engine.begin() as connection:
@@ -286,6 +370,8 @@ async def process_outbox_table(
 
     fanned_out = 0
     deleted = 0
+    retried = 0
+    dead_lettered = 0
     for row in claimed_rows:
         payload_model = registry.payload_model_for(row.event_type)
         if payload_model is None:
@@ -322,11 +408,29 @@ async def process_outbox_table(
                         row.event_id,
                     )
         else:
-            logger.warning(
-                "fan-out incomplete for outbox row %s (%s); leaving it for reclaim",
-                row.event_id,
-                row.event_type,
-            )
+            async with engine.begin() as connection:
+                outcome = await record_failed_attempt(connection, target, row, config)
+            if outcome == OUTBOX_STATUS_DEAD_LETTER:
+                dead_lettered += 1
+                logger.error(
+                    "outbox row %s (%s) dead-lettered after %d attempts",
+                    row.event_id,
+                    row.event_type,
+                    row.attempts + 1,
+                )
+            elif outcome == OUTBOX_STATUS_PENDING:
+                retried += 1
+                logger.warning(
+                    "fan-out incomplete for outbox row %s (%s); retrying in %.1fs",
+                    row.event_id,
+                    row.event_type,
+                    backoff_delay(row.attempts + 1, config).total_seconds(),
+                )
+            else:
+                logger.info(
+                    "outbox row %s was re-claimed by another worker; not recording failure",
+                    row.event_id,
+                )
 
     return TablePollResult(
         table=table,
@@ -334,6 +438,8 @@ async def process_outbox_table(
         claimed=len(claimed_rows),
         fanned_out=fanned_out,
         deleted=deleted,
+        retried=retried,
+        dead_lettered=dead_lettered,
     )
 
 
