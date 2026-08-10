@@ -68,7 +68,7 @@ def _probe_reachability(database_url: str) -> None:
 def test_upgrade_head_then_downgrade_base_round_trips(database_url: str) -> None:
     _probe_reachability(database_url)
     config = _alembic_config(database_url)
-    expected = {r.revision for r in ScriptDirectory.from_config(config).walk_revisions()}
+    expected = set(ScriptDirectory.from_config(config).get_heads())
 
     assert asyncio.run(_version_nums(database_url)) == [], (
         "database must start with no migration applied"
