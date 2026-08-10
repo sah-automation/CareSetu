@@ -17,7 +17,6 @@ import asyncio
 from typing import Any
 from uuid import UUID, uuid4
 
-import pytest
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -30,7 +29,6 @@ from bus.outbox_ddl import materialize_consumed_events, materialize_outbox
 from bus.outbox_writer import write_outbox
 from bus.registry import Handler, HandlerRegistry
 
-THROWAWAY_SCHEMA = "t2c_throwaway"
 THROWAWAY_OUTBOX = "t2c_throwaway_outbox"
 
 
@@ -38,83 +36,50 @@ class RoundTripPayload(BaseModel):
     round_trip_id: UUID
 
 
-def _probe_reachability(database_url: str) -> None:
-    async def probe() -> None:
-        engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
-        try:
-            async with engine.connect() as connection:
-                await connection.execute(text("SELECT 1"))
-        finally:
-            await engine.dispose()
-
-    try:
-        asyncio.run(probe())
-    except Exception:
-        pytest.skip(f"PostgreSQL unreachable at {database_url} - install/start the native service")
-
-
-async def _create_throwaway_schema(database_url: str) -> None:
+async def _materialize(database_url: str, schema: str) -> None:
     engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
     try:
         async with engine.begin() as connection:
-            await connection.execute(text(f'CREATE SCHEMA "{THROWAWAY_SCHEMA}"'))
+            await materialize_outbox(connection, schema, THROWAWAY_OUTBOX)
+            await materialize_consumed_events(connection, schema)
     finally:
         await engine.dispose()
 
 
-async def _drop_throwaway_schema(database_url: str) -> None:
+async def _publish(database_url: str, schema: str, envelope: Envelope[BaseModel]) -> None:
     engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
     try:
         async with engine.begin() as connection:
-            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{THROWAWAY_SCHEMA}" CASCADE'))
+            await write_outbox(connection, schema, THROWAWAY_OUTBOX, envelope)
     finally:
         await engine.dispose()
 
 
-async def _materialize(database_url: str) -> None:
-    engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
-    try:
-        async with engine.begin() as connection:
-            await materialize_outbox(connection, THROWAWAY_SCHEMA, THROWAWAY_OUTBOX)
-            await materialize_consumed_events(connection, THROWAWAY_SCHEMA)
-    finally:
-        await engine.dispose()
-
-
-async def _publish(database_url: str, envelope: Envelope[BaseModel]) -> None:
-    engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
-    try:
-        async with engine.begin() as connection:
-            await write_outbox(connection, THROWAWAY_SCHEMA, THROWAWAY_OUTBOX, envelope)
-    finally:
-        await engine.dispose()
-
-
-async def _outbox_rows(database_url: str) -> list[dict[str, Any]]:
+async def _outbox_rows(database_url: str, schema: str) -> list[dict[str, Any]]:
     engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
     try:
         async with engine.connect() as connection:
             result = await connection.execute(
-                text(f'SELECT event_id, status FROM "{THROWAWAY_SCHEMA}"."{THROWAWAY_OUTBOX}"')
+                text(f'SELECT event_id, status FROM "{schema}"."{THROWAWAY_OUTBOX}"')
             )
             return [dict(mapping) for mapping in result.mappings().all()]
     finally:
         await engine.dispose()
 
 
-async def _ledger_rows(database_url: str) -> int:
+async def _ledger_rows(database_url: str, schema: str) -> int:
     engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
     try:
         async with engine.connect() as connection:
             count = await connection.scalar(
-                text(f'SELECT COUNT(*) FROM "{THROWAWAY_SCHEMA}".consumed_events')
+                text(f'SELECT COUNT(*) FROM "{schema}".consumed_events')
             )
             return int(count or 0)
     finally:
         await engine.dispose()
 
 
-def _idempotent_subscriber(database_url: str) -> Handler:
+def _idempotent_subscriber(database_url: str, schema: str) -> Handler:
     """A handler that records its ledger row inside its own processing transaction.
 
     Mirrors ADR-0002 §3: the subscriber's ``consumed_events`` row is its delivery
@@ -128,7 +93,7 @@ def _idempotent_subscriber(database_url: str) -> Handler:
             async with engine.connect() as connection, connection.begin():
                 await record_consumed_event(
                     connection,
-                    THROWAWAY_SCHEMA,
+                    schema,
                     envelope,
                     handler_result={"delivered": True},
                 )
@@ -138,41 +103,34 @@ def _idempotent_subscriber(database_url: str) -> Handler:
     return handler
 
 
-def test_round_trip_publish_dispatch_replay_dedupes(database_url: str) -> None:
-    _probe_reachability(database_url)
+def test_round_trip_publish_dispatch_replay_dedupes(
+    database_url: str, reachable_db: None, throwaway_schema: str
+) -> None:
+    asyncio.run(_materialize(database_url, throwaway_schema))
 
-    created = False
-    try:
-        asyncio.run(_create_throwaway_schema(database_url))
-        created = True
-        asyncio.run(_materialize(database_url))
+    envelope = Envelope[RoundTripPayload](
+        event_id=uuid4(),
+        event_type="phase1.round_trip",
+        producer="phase1",
+        payload=RoundTripPayload(round_trip_id=uuid4()),
+    )
 
-        envelope = Envelope[RoundTripPayload](
-            event_id=uuid4(),
-            event_type="phase1.round_trip",
-            producer="phase1",
-            payload=RoundTripPayload(round_trip_id=uuid4()),
-        )
+    # Publish: exactly one pending outbox row lands in the same transaction.
+    asyncio.run(_publish(database_url, throwaway_schema, envelope))
+    outbox_rows = asyncio.run(_outbox_rows(database_url, throwaway_schema))
+    assert len(outbox_rows) == 1
+    assert outbox_rows[0]["event_id"] == envelope.event_id
+    assert outbox_rows[0]["status"] == "pending"
 
-        # Publish: exactly one pending outbox row lands in the same transaction.
-        asyncio.run(_publish(database_url, envelope))
-        outbox_rows = asyncio.run(_outbox_rows(database_url))
-        assert len(outbox_rows) == 1
-        assert outbox_rows[0]["event_id"] == envelope.event_id
-        assert outbox_rows[0]["status"] == "pending"
+    # Dispatch/fan-out: the idempotent subscriber records its ledger row.
+    registry = HandlerRegistry()
+    registry.register("phase1.round_trip", _idempotent_subscriber(database_url, throwaway_schema))
 
-        # Dispatch/fan-out: the idempotent subscriber records its ledger row.
-        registry = HandlerRegistry()
-        registry.register("phase1.round_trip", _idempotent_subscriber(database_url))
+    first_delivery = asyncio.run(dispatch(registry, envelope))
+    assert first_delivery.all_succeeded
+    assert asyncio.run(_ledger_rows(database_url, throwaway_schema)) == 1
 
-        first_delivery = asyncio.run(dispatch(registry, envelope))
-        assert first_delivery.all_succeeded
-        assert asyncio.run(_ledger_rows(database_url)) == 1
-
-        # Replay the same event_id: still exactly one ledger row.
-        replay = asyncio.run(dispatch(registry, envelope))
-        assert replay.all_succeeded
-        assert asyncio.run(_ledger_rows(database_url)) == 1
-    finally:
-        if created:
-            asyncio.run(_drop_throwaway_schema(database_url))
+    # Replay the same event_id: still exactly one ledger row.
+    replay = asyncio.run(dispatch(registry, envelope))
+    assert replay.all_succeeded
+    assert asyncio.run(_ledger_rows(database_url, throwaway_schema)) == 1

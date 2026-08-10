@@ -16,7 +16,6 @@ PostgreSQL is unreachable, like the rest of the integration suite.
 import asyncio
 from pathlib import Path
 
-import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import text
@@ -29,7 +28,6 @@ from bus.outbox_ddl import materialize_consumed_events, materialize_outbox
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_INI = REPO_ROOT / "apps" / "backend" / "alembic.ini"
 
-THROWAWAY_SCHEMA = "t1b_throwaway"
 THROWAWAY_OUTBOX = "t1b_throwaway_outbox"
 
 OUTBOX_COLUMNS = {
@@ -49,21 +47,6 @@ def _alembic_config(database_url: str) -> Config:
     config = Config(str(ALEMBIC_INI))
     config.set_main_option("sqlalchemy.url", database_url)
     return config
-
-
-def _probe_reachability(database_url: str) -> None:
-    async def probe() -> None:
-        engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
-        try:
-            async with engine.connect() as connection:
-                await connection.execute(text("SELECT 1"))
-        finally:
-            await engine.dispose()
-
-    try:
-        asyncio.run(probe())
-    except Exception:
-        pytest.skip(f"PostgreSQL unreachable at {database_url} - install/start the native service")
 
 
 async def _schema_names(database_url: str) -> set[str]:
@@ -110,36 +93,19 @@ async def _column_names(database_url: str, schema: str, table: str) -> set[str]:
         await engine.dispose()
 
 
-async def _create_throwaway_schema(database_url: str) -> None:
+async def _materialize_template(database_url: str, schema: str) -> None:
     engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
     try:
         async with engine.begin() as connection:
-            await connection.execute(text(f'CREATE SCHEMA "{THROWAWAY_SCHEMA}"'))
+            await materialize_outbox(connection, schema, THROWAWAY_OUTBOX)
+            await materialize_consumed_events(connection, schema)
     finally:
         await engine.dispose()
 
 
-async def _drop_throwaway_schema(database_url: str) -> None:
-    engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
-    try:
-        async with engine.begin() as connection:
-            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{THROWAWAY_SCHEMA}" CASCADE'))
-    finally:
-        await engine.dispose()
-
-
-async def _materialize_template(database_url: str) -> None:
-    engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
-    try:
-        async with engine.begin() as connection:
-            await materialize_outbox(connection, THROWAWAY_SCHEMA, THROWAWAY_OUTBOX)
-            await materialize_consumed_events(connection, THROWAWAY_SCHEMA)
-    finally:
-        await engine.dispose()
-
-
-def test_upgrade_head_creates_all_eleven_module_schemas(database_url: str) -> None:
-    _probe_reachability(database_url)
+def test_upgrade_head_creates_all_eleven_module_schemas(
+    database_url: str, reachable_db: None
+) -> None:
     config = _alembic_config(database_url)
 
     upgraded = False
@@ -148,9 +114,12 @@ def test_upgrade_head_creates_all_eleven_module_schemas(database_url: str) -> No
         upgraded = True
 
         schemas = asyncio.run(_schema_names(database_url))
-        assert set(MODULE_SCHEMAS) <= schemas, (
-            f"expected all 11 module schemas after upgrade, missing: "
-            f"{set(MODULE_SCHEMAS) - schemas}"
+        system_schemas = {"public", "information_schema"}
+        non_system = {s for s in schemas if not s.startswith("pg_") and s not in system_schemas}
+        assert non_system == set(MODULE_SCHEMAS), (
+            f"expected exactly the 11 module schemas after upgrade, missing: "
+            f"{set(MODULE_SCHEMAS) - non_system}, "
+            f"unexpected: {non_system - set(MODULE_SCHEMAS)}"
         )
 
         tables = asyncio.run(_module_schema_table_names(database_url))
@@ -163,24 +132,13 @@ def test_upgrade_head_creates_all_eleven_module_schemas(database_url: str) -> No
             command.downgrade(config, "base")
 
 
-def test_outbox_template_materializes_throwaway_tables(database_url: str) -> None:
-    _probe_reachability(database_url)
+def test_outbox_template_materializes_throwaway_tables(
+    database_url: str, reachable_db: None, throwaway_schema: str
+) -> None:
+    asyncio.run(_materialize_template(database_url, throwaway_schema))
 
-    created = False
-    try:
-        asyncio.run(_create_throwaway_schema(database_url))
-        created = True
-        asyncio.run(_materialize_template(database_url))
+    outbox_columns = asyncio.run(_column_names(database_url, throwaway_schema, THROWAWAY_OUTBOX))
+    assert outbox_columns == OUTBOX_COLUMNS
 
-        outbox_columns = asyncio.run(
-            _column_names(database_url, THROWAWAY_SCHEMA, THROWAWAY_OUTBOX)
-        )
-        assert outbox_columns == OUTBOX_COLUMNS
-
-        ledger_columns = asyncio.run(
-            _column_names(database_url, THROWAWAY_SCHEMA, "consumed_events")
-        )
-        assert ledger_columns == LEDGER_COLUMNS
-    finally:
-        if created:
-            asyncio.run(_drop_throwaway_schema(database_url))
+    ledger_columns = asyncio.run(_column_names(database_url, throwaway_schema, "consumed_events"))
+    assert ledger_columns == LEDGER_COLUMNS
