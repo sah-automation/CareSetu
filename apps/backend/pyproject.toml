@@ -49,6 +49,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RUF"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
+plugins = ["pydantic.mypy"]
 
 [tool.bandit]
 exclude_dirs = ["tests", "alembic", ".venv", "venv"]
