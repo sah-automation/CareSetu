@@ -10,7 +10,10 @@ Locally that database is the native PostgreSQL service created for CareSetu
 a GitHub-hosted service container and sets ``DATABASE_URL``.
 """
 
+import asyncio
 import os
+import uuid
+from collections.abc import Iterator
 
 import pytest
 import pytest_asyncio
@@ -44,3 +47,59 @@ async def db_engine(database_url: str) -> AsyncEngine:
         pytest.skip(f"PostgreSQL unreachable at {database_url} — install/start the native service")
     yield engine
     await engine.dispose()
+
+
+@pytest.fixture
+def reachable_db(database_url: str) -> None:
+    """Skip the test when the native PostgreSQL is unreachable.
+
+    The session-scoped ``db_engine`` already gates the suite; this per-test
+    probe keeps each test's skip local and explicit.
+    """
+
+    async def probe() -> None:
+        engine = create_async_engine(database_url, poolclass=NullPool)
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(text("SELECT 1"))
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(probe())
+    except Exception:
+        pytest.skip(f"PostgreSQL unreachable at {database_url} - install/start the native service")
+
+
+@pytest.fixture
+def throwaway_schema(database_url: str) -> Iterator[str]:
+    """A private schema created for the test and dropped in teardown.
+
+    Each test gets a unique name so sibling tests can run against the same
+    native database without colliding.
+    """
+    schema = f"t_{uuid.uuid4().hex[:12]}"
+
+    async def create() -> None:
+        engine = create_async_engine(database_url, poolclass=NullPool)
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+        finally:
+            await engine.dispose()
+
+    async def drop() -> None:
+        engine = create_async_engine(database_url, poolclass=NullPool)
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(create())
+    except Exception:
+        pytest.skip(f"PostgreSQL unreachable at {database_url} - install/start the native service")
+
+    yield schema
+    asyncio.run(drop())

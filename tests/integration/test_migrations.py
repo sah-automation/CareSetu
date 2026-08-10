@@ -10,7 +10,6 @@ the native PostgreSQL is unreachable, like the rest of the integration suite.
 import asyncio
 from pathlib import Path
 
-import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
@@ -50,23 +49,9 @@ async def _version_nums(database_url: str) -> list[str]:
         await engine.dispose()
 
 
-def _probe_reachability(database_url: str) -> None:
-    async def probe() -> None:
-        engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
-        try:
-            async with engine.connect() as connection:
-                await connection.execute(text("SELECT 1"))
-        finally:
-            await engine.dispose()
-
-    try:
-        asyncio.run(probe())
-    except Exception:
-        pytest.skip(f"PostgreSQL unreachable at {database_url} - install/start the native service")
-
-
-def test_upgrade_head_then_downgrade_base_round_trips(database_url: str) -> None:
-    _probe_reachability(database_url)
+def test_upgrade_head_then_downgrade_base_round_trips(
+    database_url: str, reachable_db: None
+) -> None:
     config = _alembic_config(database_url)
     expected = set(ScriptDirectory.from_config(config).get_heads())
 
