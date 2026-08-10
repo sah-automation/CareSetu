@@ -129,7 +129,7 @@ C4Component
   Rel(m9, db, "settlement schema")
   Rel(m10, db, "notify schema")
   Rel(m11, db, "audit schema")
-  Rel(dispatcher, db, "poll outbox tables; append audit events")
+  Rel(dispatcher, db, "poll outbox tables only; never authors events")
   Rel(m5, obj, "audio / photo refs")
   Rel(m7, obj, "report uploads")
   Rel(m6, obj, "doctor input media")
