@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from bus.envelope import Envelope
-from bus.outbox_ddl import outbox_table
+from bus.outbox_ddl import OUTBOX_STATUS_PENDING, outbox_table
 
 
 async def write_outbox(
@@ -35,7 +35,7 @@ async def write_outbox(
             event_type=envelope.event_type,
             payload=envelope.payload.model_dump(mode="json"),
             occurred_at=envelope.occurred_at,
-            status="pending",
+            status=OUTBOX_STATUS_PENDING,
             attempts=0,
         )
     )
