@@ -40,6 +40,9 @@ show_missing = true
 target-version = "py311"
 line-length = 100
 
+[tool.ruff.lint.isort]
+known-first-party = ["bus"]
+
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RUF"]
 
