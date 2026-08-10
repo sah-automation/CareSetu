@@ -1,4 +1,4 @@
-"""Phase 0 harness — CLI entrypoint (issues #4 / #5).
+"""Phase 0 harness - CLI entrypoint (issues #4 / #5).
 
 Runs the acceptance bar over the committed corpus through a provider and
 persists a JSON run report: the transcription leg (WER/CER) and, on the
@@ -15,6 +15,7 @@ Examples:
     python -m phase0.harness --provider nim --limit 2
     python -m phase0.harness --provider gemini --output phase0/runs/mine.json
     python -m phase0.harness --compare
+    python -m phase0.harness --spike-report
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from phase0.harness.compare import compare_runs, render_comparison
+from phase0.harness.cost import build_spike_report, render_spike_report
 from phase0.harness.models import RunReport
 from phase0.harness.providers.gemini import GeminiProvider
 from phase0.harness.providers.nim import LICENSING_CAVEAT, NimProvider
@@ -149,6 +151,11 @@ def main() -> None:
         help="emit the cross-provider comparison table from recorded runs and exit",
     )
     parser.add_argument(
+        "--spike-report",
+        action="store_true",
+        help="emit the launch-phase cost model + go/no-go spike report from recorded runs and exit",
+    )
+    parser.add_argument(
         "--runs-dir",
         type=Path,
         default=None,
@@ -159,6 +166,11 @@ def main() -> None:
     if args.compare:
         runs_dir = args.runs_dir or _default_runs_dir()
         print(render_comparison(compare_runs(runs_dir)))
+        return
+
+    if args.spike_report:
+        runs_dir = args.runs_dir or _default_runs_dir()
+        print(render_spike_report(build_spike_report(runs_dir)))
         return
 
     corpus = load_corpus()
