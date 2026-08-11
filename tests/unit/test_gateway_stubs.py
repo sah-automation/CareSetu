@@ -9,7 +9,12 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
-from app.config import DEFAULT_TEST_PRINCIPAL_HEADER, Settings, get_settings
+from app.config import (
+    DEFAULT_APP_ENVIRONMENT,
+    DEFAULT_TEST_PRINCIPAL_HEADER,
+    Settings,
+    get_settings,
+)
 from app.gateway.principal import Principal
 from app.main import create_app
 
@@ -58,7 +63,7 @@ def test_jwt_verify_disabled_ignores_test_header() -> None:
 
 
 def test_jwt_verify_attaches_typed_principal_from_test_header() -> None:
-    settings = Settings(gateway_jwt_verify_enabled=True)
+    settings = Settings(gateway_jwt_verify_enabled=True, app_environment="test")
     client = _probe_client(settings)
 
     response = client.get("/probe", headers={DEFAULT_TEST_PRINCIPAL_HEADER: "patient-123"})
@@ -70,7 +75,7 @@ def test_jwt_verify_attaches_typed_principal_from_test_header() -> None:
 
 
 def test_jwt_verify_missing_header_attaches_anonymous_principal() -> None:
-    settings = Settings(gateway_jwt_verify_enabled=True)
+    settings = Settings(gateway_jwt_verify_enabled=True, app_environment="test")
     client = _probe_client(settings)
 
     response = client.get("/probe")
@@ -106,18 +111,58 @@ def test_settings_default_to_stubs_disabled() -> None:
     assert settings.gateway_jwt_verify_enabled is False
     assert settings.gateway_rate_limit_enabled is False
     assert settings.gateway_jwt_test_header == DEFAULT_TEST_PRINCIPAL_HEADER
+    assert settings.app_environment == DEFAULT_APP_ENVIRONMENT
 
 
 def test_settings_read_gateway_flags_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_ENVIRONMENT", "test")
     monkeypatch.setenv("GATEWAY_JWT_VERIFY_ENABLED", "true")
     monkeypatch.setenv("GATEWAY_RATE_LIMIT_ENABLED", "1")
     monkeypatch.setenv("GATEWAY_JWT_TEST_HEADER", "X-Probe-Header")
 
     settings = get_settings()
 
+    assert settings.app_environment == "test"
     assert settings.gateway_jwt_verify_enabled is True
     assert settings.gateway_rate_limit_enabled is True
     assert settings.gateway_jwt_test_header == "X-Probe-Header"
+
+
+_GUARD_ERROR = "requires a dev/test marker: set APP_ENVIRONMENT to 'dev' or 'test'"
+
+
+def test_settings_guard_refuses_backdoor_without_dev_test_marker() -> None:
+    with pytest.raises(ValueError, match=_GUARD_ERROR):
+        Settings(gateway_jwt_verify_enabled=True)
+
+
+def test_settings_load_refuses_backdoor_without_dev_test_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("APP_ENVIRONMENT", raising=False)
+    monkeypatch.setenv("GATEWAY_JWT_VERIFY_ENABLED", "true")
+
+    with pytest.raises(ValueError, match=_GUARD_ERROR):
+        get_settings()
+
+
+def test_settings_disabled_backdoor_needs_no_dev_test_marker() -> None:
+    settings = Settings(gateway_jwt_verify_enabled=False)
+
+    assert settings.gateway_jwt_verify_enabled is False
+
+
+@pytest.mark.parametrize("environment", ["dev", "test"])
+def test_settings_guard_allows_backdoor_in_dev_test_environment(environment: str) -> None:
+    settings = Settings(gateway_jwt_verify_enabled=True, app_environment=environment)
+
+    assert settings.gateway_jwt_verify_enabled is True
+
+
+def test_settings_guard_accepts_marker_case_insensitively() -> None:
+    settings = Settings(gateway_jwt_verify_enabled=True, app_environment="  Dev ")
+
+    assert settings.gateway_jwt_verify_enabled is True
 
 
 def test_principal_is_a_typed_model() -> None:
