@@ -11,6 +11,8 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from app.config import Settings, get_settings
+from app.gateway.jwt_verify import JWTVerifyMiddleware
+from app.gateway.rate_limit import RateLimitMiddleware
 
 
 class HealthResponse(BaseModel):
@@ -28,6 +30,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     resolved_settings = settings if settings is not None else get_settings()
     app = FastAPI(title="CareSetu API", version="0.1.0")
     app.state.settings = resolved_settings
+
+    # Gateway middleware stack (PHASE-1 T7b, #29). Both stubs are disabled by
+    # default; the order is the contract Phase 2 fills in - caller identity is
+    # established (jwt_verify, outermost) before per-identity rate limiting
+    # (rate_limit), so later limits can key off the Principal.
+    app.add_middleware(
+        RateLimitMiddleware,
+        enabled=resolved_settings.gateway_rate_limit_enabled,
+    )
+    app.add_middleware(
+        JWTVerifyMiddleware,
+        enabled=resolved_settings.gateway_jwt_verify_enabled,
+        test_header=resolved_settings.gateway_jwt_test_header,
+    )
 
     @app.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
