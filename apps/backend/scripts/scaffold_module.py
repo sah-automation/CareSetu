@@ -30,6 +30,11 @@ _MODULE_SPEC_TUPLES: Sequence[tuple[str, str, str]] = (
     ("consent", "Consent management", "MOD-004"),
     ("intake", "Intake workflows", "MOD-005"),
     ("care", "Care planning", "MOD-006"),
+    ("diagnostics", "Diagnostics and lab reports", "MOD-007"),
+    ("fulfillment", "Pharmacy fulfillment", "MOD-008"),
+    ("settlement", "Settlement and payments", "MOD-009"),
+    ("notify", "Notifications", "MOD-010"),
+    ("audit", "Audit", "MOD-011"),
 )
 
 MODULE_SPECS: dict[str, ModuleSpec] = {

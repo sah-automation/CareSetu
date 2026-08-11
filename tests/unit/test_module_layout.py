@@ -1,8 +1,8 @@
-"""PHASE-1 T5a: module scaffold batch 1 - hexagonal layout + namespace prefixes (#24).
+"""PHASE-1 T5a/T5b: module scaffold - hexagonal layout + namespace prefixes (#24, #25).
 
 Asserts the generator can emit a module package into a throwaway directory and
-that the six batch-1 modules are scaffolded under ``apps/backend/modules/``
-with the hexagonal layout from coding-standards §2 (``domain/``, ``adapters/``,
+that all eleven modules are scaffolded under ``apps/backend/modules/`` with the
+hexagonal layout from coding-standards §2 (``domain/``, ``adapters/``,
 ``schema/``, ``facade.py``, ``outbox.py``). Also guards the table namespace
 prefix rule (every table starts with ``<module>_``, e.g. ``consent_consents``)
 that the T6a boundary checker (#26) will enforce over the real module tree.
@@ -13,7 +13,19 @@ from pathlib import Path
 
 from scripts.scaffold_module import MODULE_SPECS, MODULES_PACKAGE, scaffold_module
 
-BATCH_1 = ("iam", "partner", "health", "consent", "intake", "care")
+ALL_MODULES = (
+    "iam",
+    "partner",
+    "health",
+    "consent",
+    "intake",
+    "care",
+    "diagnostics",
+    "fulfillment",
+    "settlement",
+    "notify",
+    "audit",
+)
 EXPECTED_DIRS = ("domain", "adapters", "schema")
 EXPECTED_FILES = (
     "facade.py",
@@ -51,14 +63,14 @@ def test_generator_emits_hexagonal_layout(tmp_path: Path) -> None:
     assert "iam_identities = Table(" in models_text
 
 
-def test_batch1_modules_scaffolded() -> None:
-    for name in BATCH_1:
+def test_all_modules_scaffolded() -> None:
+    for name in ALL_MODULES:
         assert name in MODULE_SPECS, f"{name} missing from generator registry"
         _assert_hexagonal_layout(MODULES_PACKAGE / name)
 
 
 def test_table_namespace_prefixes() -> None:
-    for name in BATCH_1:
+    for name in ALL_MODULES:
         models = importlib.import_module(f"modules.{name}.schema.models")
         metadata = models.MODULE_METADATA
         assert metadata.tables, f"{name}: schema defines no tables"
@@ -68,14 +80,14 @@ def test_table_namespace_prefixes() -> None:
 
 
 def test_outbox_table_name_constant() -> None:
-    for name in BATCH_1:
+    for name in ALL_MODULES:
         outbox = importlib.import_module(f"modules.{name}.outbox")
         constant = getattr(outbox, f"{name.upper()}_OUTBOX_TABLE")
         assert constant == f"{name}_outbox"
 
 
 def test_domain_error_class_exists() -> None:
-    for name in BATCH_1:
+    for name in ALL_MODULES:
         exceptions = importlib.import_module(f"modules.{name}.domain.exceptions")
         error_class = getattr(exceptions, f"{name.title()}Error")
         assert issubclass(error_class, Exception)
