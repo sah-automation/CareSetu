@@ -10,7 +10,7 @@ Global dev tooling (gitleaks, pre-commit, ruff, mypy, bandit, pip-audit, uv, sha
 - `npm run lint` — pre-commit (gitleaks, ruff, bandit, prettier, whitespace)
 - `npm run typecheck` — mypy `--strict` (backend) + `tsc --noEmit` (frontend)
 - `npm run scan` — gitleaks + bandit + pip-audit
-- `npm run migration-check` — alembic single-head gate
+- `npm run migration-check` — alembic single-head gate + cross-schema-FK scan
 
 ### Build sessions
 

@@ -44,3 +44,10 @@ repos:
         additional_dependencies: []
         pass_filenames: false
         always_run: true
+      - id: check-migrations-fk
+        name: migration cross-schema FK checker (ADR-0003)
+        entry: python apps/backend/scripts/check_migrations_fk.py
+        language: python
+        additional_dependencies: []
+        pass_filenames: false
+        always_run: true

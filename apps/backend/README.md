@@ -10,5 +10,5 @@ npm run test:integration     # pytest — tests/integration (needs a local nativ
 npm run lint:backend         # ruff check
 npm run typecheck:backend    # mypy strict
 npm run scan:backend         # bandit
-npm run migration-check      # alembic single-head gate
+npm run migration-check      # alembic single-head gate + cross-schema-FK scan
 ```
