@@ -2,7 +2,7 @@
 useDefault = true
 
 [allowlist]
-description = "Allowlist for synthetic/sample files only — never real secrets"
+description = "Allowlist for synthetic/sample files only - never real secrets"
 paths = [
   '''(^|/)\.env\.example$''',
   '''(^|/)\.gitleaks\.toml$''',

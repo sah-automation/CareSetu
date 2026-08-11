@@ -1,4 +1,4 @@
-"""Phase 0 harness — provider-agnostic gateway port.
+"""Phase 0 harness - provider-agnostic gateway port.
 
 The seam that mirrors the future MOD-005 AI gateway: every candidate provider
 (transcribe → structure, typed, async) plugs in here, so the Phase 7 winner's

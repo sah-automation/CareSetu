@@ -1,4 +1,4 @@
-# Requirements Gathering Document (RGD) — CareSetu
+# Requirements Gathering Document (RGD) - CareSetu
 
 **Document Version:** 1.0
 **Date:** 2026-08-07
@@ -23,7 +23,7 @@
 
 ### Must Have
 
-- **[REQ-003 | Status: Active | Source: Founder | Created: v0.1 | Updated: v0.1] [Must Have]**: Primary patient access channel is web-based (mobile web/PWA, no install, works over 4G). Stated "for now" — future channels deferred (see REQ-040). [IDEA] [Elicitation Confidence: High]
+- **[REQ-003 | Status: Active | Source: Founder | Created: v0.1 | Updated: v0.1] [Must Have]**: Primary patient access channel is web-based (mobile web/PWA, no install, works over 4G). Stated "for now" - future channels deferred (see REQ-040). [IDEA] [Elicitation Confidence: High]
 - **[REQ-004 | Status: Active | Source: Founder | Created: v0.1 | Updated: v0.1] [Must Have]**: Consultation model: AI-generated asynchronous clinical pre-summary from structured symptom intake; the actual doctor-patient consult happens off-platform. [IDEA] [Elicitation Confidence: High]
 - **[REQ-005 | Status: Active | Source: Founder | Created: v0.1 | Updated: v0.1] [Must Have]**: Compliance posture: pure facilitator. Platform verifies and displays partner credentials; regulated acts (consult, e-prescription, dispensing/delivery, lab testing) stay with licensed partners. [IDEA] [Elicitation Confidence: High]
 - **[REQ-006 | Status: Active | Source: Founder | Created: v0.1 | Updated: v0.1] [Must Have]**: Patient-facing experience supports English + Hindi at launch. [IDEA] [Elicitation Confidence: High]
@@ -36,7 +36,7 @@
 - **[REQ-021 | Status: Active | Source: Founder | Created: v0.1 | Updated: v0.1] [Must Have]**: Patient data: central longitudinal health record per patient on-platform; patient consents per action (record access, sharing with doctor/lab/pharmacy). [IDEA] [Elicitation Confidence: High]
 - **[REQ-022 | Status: Active | Source: Founder | Created: v0.1 | Updated: v0.1] [Must Have]**: Doctor pool: general physicians / GPs plus local specialists, specialists onboarded as available. [IDEA] [Elicitation Confidence: High]
 - **[REQ-023 | Status: Active | Source: Founder | Created: v0.1 | Updated: v0.4] [Must Have]**: Post-consult e-prescription: doctor submits a voice note or photo; AI drafts the prescription; doctor reviews and approves before issuance. (Closes ISSUE-001) [IDEA] [Elicitation Confidence: High]
-- **[REQ-028 | Status: Active | Source: Founder | Created: v0.1 | Updated: v0.1] [Must Have]**: Partner onboarding: gated — credentials verified (manual or automated) before the partner goes live. Registration remains open (REQ-011); activation gated. (Closes ISSUE-002) [IDEA] [Elicitation Confidence: High]
+- **[REQ-028 | Status: Active | Source: Founder | Created: v0.1 | Updated: v0.1] [Must Have]**: Partner onboarding: gated - credentials verified (manual or automated) before the partner goes live. Registration remains open (REQ-011); activation gated. (Closes ISSUE-002) [IDEA] [Elicitation Confidence: High]
 - **[REQ-035 | Status: Active | Source: Founder | Created: v0.1 | Updated: v0.3] [Must Have]**: Chronic care loop (launch scope): daily BP/sugar metric logging and follow-up interactions happen on the web app; WhatsApp sends notifications only (dosage reminders, 30/90-day re-test nudges). (Supersedes REQ-034, REQ-018) [IDEA] [Elicitation Confidence: High]
 
 ### Deferred
@@ -58,12 +58,12 @@
 
 ## 4. Operational Workflows, Edge Cases & Error Scenarios
 
-- **[REQ-024 | Status: Active | Source: Founder | Created: v0.1 | Updated: v0.1] [Must Have]**: Diagnostics pickup: hybrid — on-platform booking where a partner lab / pickup point is available; direct patient-to-lab arrangement as fallback. [IDEA] [Elicitation Confidence: High]
+- **[REQ-024 | Status: Active | Source: Founder | Created: v0.1 | Updated: v0.1] [Must Have]**: Diagnostics pickup: hybrid - on-platform booking where a partner lab / pickup point is available; direct patient-to-lab arrangement as fallback. [IDEA] [Elicitation Confidence: High]
 - **[REQ-025 | Status: Active | Source: Founder | Created: v0.1 | Updated: v0.1] [Must Have]**: Lab report return: lab or patient uploads (whoever has it first), filed into the patient's central record. Must include protection against wrong/mismatched report upload. [IDEA] [Elicitation Confidence: High]
 - **[REQ-027 | Status: Active | Source: Founder | Created: v0.1 | Updated: v0.1] [Must Have]**: Medicine fulfillment: approved e-prescription routed to patient's chosen / nearest partner chemist; chemist prepares and delivers via own rider; payment platform-facilitated or cash/UPI on delivery. [IDEA] [Elicitation Confidence: High]
 - **[REQ-029 | Status: Active | Source: Founder | Created: v0.1 | Updated: v0.1] [Must Have]**: Settlement model: cash/UPI at point of service is primary; platform-facilitated payments handled on a case-by-case basis. [IDEA] [Elicitation Confidence: High]
 - **[REQ-030 | Status: Active | Source: Founder | Created: v0.1 | Updated: v0.3] [Must Have]**: Payments (revised): direct/cash (cash/UPI) is primary; platform-facilitated payment preferred only where fraud risk between the two parties is higher. (Supersedes REQ-009; resolves CONFLICT-001) [IDEA] [Elicitation Confidence: High]
-- **[REQ-031 | Status: Active | Source: Founder | Created: v0.1 | Updated: v0.1] [Must Have]**: Out-of-stock handling: patient is notified and chooses — accept partial fulfillment or cancel. [IDEA] [Elicitation Confidence: High]
+- **[REQ-031 | Status: Active | Source: Founder | Created: v0.1 | Updated: v0.1] [Must Have]**: Out-of-stock handling: patient is notified and chooses - accept partial fulfillment or cancel. [IDEA] [Elicitation Confidence: High]
 - **[REQ-032 | Status: Active | Source: Founder | Created: v0.1 | Updated: v0.1] [Must Have]**: Cancellations: policy inherits the relevant partner's (doctor/lab/chemist) policy, shown clearly to the patient at booking time; platform assumes no responsibility for cancellation/refund disputes. [IDEA] [Elicitation Confidence: High]
 - **[REQ-033 | Status: Active | Source: Founder | Created: v0.1 | Updated: v0.1] [Must Have]**: Critical lab values: no automated escalation at launch; reports are filed, interpretation left to patient/doctor. [IDEA] [Elicitation Confidence: High]
 - **[REQ-036 | Status: Active | Source: Founder | Created: v0.1 | Updated: v0.1] [Must Have]**: Refunds: the partner refunds the patient directly; the platform does not hold or process refunds. (Closes ISSUE-003) [IDEA] [Elicitation Confidence: High]
@@ -71,12 +71,12 @@
 
 ## 5. Captured Perceived Risks
 
-- **[RISK-001 | Category: Financial | Source: Founder | Related IDs: REQ-030]**: Payment fraud between patient and partner — stated motivation for preferring platform-facilitated payment in select transactions. [Status: Open]
+- **[RISK-001 | Category: Financial | Source: Founder | Related IDs: REQ-030]**: Payment fraud between patient and partner - stated motivation for preferring platform-facilitated payment in select transactions. [Status: Open]
 - **[RISK-002 | Category: Data integrity / clinical safety | Source: Founder | Related IDs: REQ-025]**: Wrong/mismatched lab report attached to the wrong patient. [Status: Open]
 
 ## 6. Potential Conflicts Register (For Downstream Analysis)
 
-- **[CONFLICT-001 | Related IDs: REQ-009, REQ-029, REQ-030 | Status: Pending Analysis]**: Literal inconsistency between `REQ-009` ("prioritize platform-facilitated payments") and `REQ-029` ("cash/UPI at point of service primary") over which payment mode is primary. **Discovery resolution note:** register records this as reconciled in-session — REQ-009 superseded by REQ-030 (direct/cash primary; platform-facilitated only where fraud risk higher). Since REQ-009 is now `Superseded` (Section 9), no literal conflict remains between active items; `conflict-gap-analysis-in-rgd` to confirm.
+- **[CONFLICT-001 | Related IDs: REQ-009, REQ-029, REQ-030 | Status: Pending Analysis]**: Literal inconsistency between `REQ-009` ("prioritize platform-facilitated payments") and `REQ-029` ("cash/UPI at point of service primary") over which payment mode is primary. **Discovery resolution note:** register records this as reconciled in-session - REQ-009 superseded by REQ-030 (direct/cash primary; platform-facilitated only where fraud risk higher). Since REQ-009 is now `Superseded` (Section 9), no literal conflict remains between active items; `conflict-gap-analysis-in-rgd` to confirm.
 
 ## 7. Decision & Open Issues Register
 
@@ -92,8 +92,8 @@
 
 ## 8. Categorized Inventory Matrix
 
-- **Facts:** None captured — the register contains no `[FACT]` items; all captures derive from a single Founder voice.
-- **Assumptions:** NFR-001, NFR-002, NFR-003, NFR-004 — most likely to be revised under future stakeholder elicitation.
+- **Facts:** None captured - the register contains no `[FACT]` items; all captures derive from a single Founder voice.
+- **Assumptions:** NFR-001, NFR-002, NFR-003, NFR-004 - most likely to be revised under future stakeholder elicitation.
 - **Ideas:** REQ-001, REQ-002, REQ-003, REQ-004, REQ-005, REQ-006, REQ-007, REQ-008, REQ-010, REQ-011, REQ-012, REQ-013, REQ-014, REQ-015, REQ-020, REQ-021, REQ-022, REQ-023, REQ-024, REQ-025, REQ-026, REQ-027, REQ-028, REQ-029, REQ-030, REQ-031, REQ-032, REQ-033, REQ-035, REQ-036, REQ-037
 - **Future Possibilities:** REQ-038 (ABHA integration), REQ-039 (future monetization), REQ-040 (channels beyond web)
 
@@ -108,8 +108,8 @@
 
 ## 10. Out of Scope / Unelicited Sections
 
-- **[Not Yet Elicited]** — discovery is complete across Phases 1–3 but with a single stakeholder source. All captures are tagged `Source: Founder`. Unexplored / not-yet-elicited areas for future sessions:
-  - **Supply-side partners** (doctors, labs, chemists) — validate onboarding (REQ-028), fulfillment (REQ-024/027/031/037), and settlement (REQ-029/030/036) assumptions they carry.
-  - **Patients** — validate channel model (REQ-003 web-first, REQ-035 WhatsApp-notify), language (REQ-006), and consent UX (REQ-021).
-  - **Compliance / regulatory** — validate pure-facilitator posture (REQ-005) and DPDP baseline (NFR-002).
-- **[Schema flag]** — per-item `Updated` versions were not tracked in the source register; `Updated` values here reflect supersession timing from Section 9. Confirm during audit.
+- **[Not Yet Elicited]** - discovery is complete across Phases 1–3 but with a single stakeholder source. All captures are tagged `Source: Founder`. Unexplored / not-yet-elicited areas for future sessions:
+  - **Supply-side partners** (doctors, labs, chemists) - validate onboarding (REQ-028), fulfillment (REQ-024/027/031/037), and settlement (REQ-029/030/036) assumptions they carry.
+  - **Patients** - validate channel model (REQ-003 web-first, REQ-035 WhatsApp-notify), language (REQ-006), and consent UX (REQ-021).
+  - **Compliance / regulatory** - validate pure-facilitator posture (REQ-005) and DPDP baseline (NFR-002).
+- **[Schema flag]** - per-item `Updated` versions were not tracked in the source register; `Updated` values here reflect supersession timing from Section 9. Confirm during audit.

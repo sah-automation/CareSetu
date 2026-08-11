@@ -1,4 +1,4 @@
-# Unit tests — backend domain core
+# Unit tests - backend domain core
 
 Pure domain-logic tests: state machines, validation, business rules. No I/O, no database. The one exception is the app-shell boot test (`test_app_shell.py`, ticket #28) which proves the FastAPI shell serves `/health` without touching any infrastructure.
 

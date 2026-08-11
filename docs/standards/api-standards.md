@@ -1,6 +1,6 @@
 # API Standards
 
-**Scope:** The public HTTP surface — conventions every endpoint must follow.
+**Scope:** The public HTTP surface - conventions every endpoint must follow.
 **Upstream:** `NFR-002`, `NFR-SEC-002/003/004`, `FEAT-001`..`FEAT-020`, whitebox §4.1 sync matrix.
 
 ---
@@ -33,7 +33,7 @@ Every error response uses one envelope:
 
 ## 3. Validation & Schemas
 
-- Every request/response is a Pydantic v2 model — no raw `dict` handlers.
+- Every request/response is a Pydantic v2 model - no raw `dict` handlers.
 - Validation errors return `422` with a `details` list; unknown/extra fields rejected (strict mode).
 - IDs are opaque strings (`uuid4`); amounts in integer paise; timestamps as ISO-8601 UTC (`Z`).
 
@@ -46,12 +46,12 @@ Every error response uses one envelope:
 ## 5. Idempotency & Retries
 
 - Mutations accept `Idempotency-Key` header; duplicate keys return the original result without re-execution.
-- `POST /v1/settlements/facilitated` and all webhook-facing paths MUST be idempotent — see third-party-integration-standards.
+- `POST /v1/settlements/facilitated` and all webhook-facing paths MUST be idempotent - see third-party-integration-standards.
 - Clients may retry on network failure/`5xx` with backoff; never on `4xx`.
 
 ## 6. Auth, RBAC & Rate Limiting
 
 - JWT (issued by `MOD-001`) on every authenticated call; **all** authorization enforced at the edge + re-checked in the facade.
-- Role scopes: patient (own record), partner (own scope), operator (all records) — `NFR-SEC-003`.
+- Role scopes: patient (own record), partner (own scope), operator (all records) - `NFR-SEC-003`.
 - Rate-limit at the edge: OTP/auth/intake endpoints get the strictest limits (`NFR-SEC-004`); limits are per identity or per IP with `429` + `Retry-After`.
-- Telemetry events emitted per PRD event names (`directory_search`, `intake_started`, …) — never invent new event names; register additions in the whitebox §4.2 registry.
+- Telemetry events emitted per PRD event names (`directory_search`, `intake_started`, …) - never invent new event names; register additions in the whitebox §4.2 registry.

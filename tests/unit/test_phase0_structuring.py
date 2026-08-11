@@ -1,11 +1,11 @@
-"""Phase 0 harness — structuring metric + AMB-006 calibration tests (issue #5).
+"""Phase 0 harness - structuring metric + AMB-006 calibration tests (issue #5).
 
 Covers the structuring leg of the acceptance bar: field-level precision /
 recall / F1 against the ground-truth pre-summaries, the well-formed-subset
 definition, the ``low_confidence`` flag at the 0.70 threshold, the
 silent-error calibration (<= 2% on unflagged pre-summaries, with flag
 precision/recall), and the structuring bar (F1 >= 90%). Deterministic by
-construction — hand-computed expectations, no providers, no network.
+construction - hand-computed expectations, no providers, no network.
 """
 
 import pytest

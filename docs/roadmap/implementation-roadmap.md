@@ -1,6 +1,6 @@
 # Project Phase Division & Implementation Roadmap
 
-**System Name:** CareSetu — zero-inventory, pure-facilitator care-loop aggregator (Daltonganj beachhead)
+**System Name:** CareSetu - zero-inventory, pure-facilitator care-loop aggregator (Daltonganj beachhead)
 **Document Version:** 1.0 (Baseline)
 **Date:** 2026-08-07
 **Lead Architect / TPM:** Engineering / Architecture (derived from PRD v1.0, System Context v1.0, Internal Modules v1.0)
@@ -12,12 +12,12 @@
 
 ### 1.1 Rationale for small-phase decomposition
 
-CareSetu is a 20-feature, 11-module, 4-integration system with one dominating constraint: **`NFR-001` (total monthly operating + hosting + AI spend ≤ ₹2,000)**. That cost floor forces a modular monolith on a single VM + one PostgreSQL instance — which in turn makes a **single, small-AI-context-window, independently verifiable phase sequence** the only safe way to build it. Every phase is a slice that:
+CareSetu is a 20-feature, 11-module, 4-integration system with one dominating constraint: **`NFR-001` (total monthly operating + hosting + AI spend ≤ ₹2,000)**. That cost floor forces a modular monolith on a single VM + one PostgreSQL instance - which in turn makes a **single, small-AI-context-window, independently verifiable phase sequence** the only safe way to build it. Every phase is a slice that:
 
-- **Builds, tests, and verifies independently** — no phase depends on the _outputs_ of an unbuilt phase to prove its own correctness (dependencies are limited to the _schemas/facades_ of already-built phases).
+- **Builds, tests, and verifies independently** - no phase depends on the _outputs_ of an unbuilt phase to prove its own correctness (dependencies are limited to the _schemas/facades_ of already-built phases).
 - **Introduces a versioned, idempotent schema delta** on the single PostgreSQL instance (11 private schemas, migration harness from Phase 1).
-- **De-risks the cost floor early** — the cheapest de-risking spikes (Hindi ASR, outbox round-trip) happen in Phase 0–1, before any LLM or provider spend is committed.
-- **Matches the whitebox build order** — foundation/auth → trusted data engine → onboarding/directory → core workflows → integrations → events → admin/observability.
+- **De-risks the cost floor early** - the cheapest de-risking spikes (Hindi ASR, outbox round-trip) happen in Phase 0–1, before any LLM or provider spend is committed.
+- **Matches the whitebox build order** - foundation/auth → trusted data engine → onboarding/directory → core workflows → integrations → events → admin/observability.
 
 **Dependency spine (build order):**
 
@@ -55,7 +55,7 @@ PHASE-14 E2E + Observability + Release ◄─ all phases
 | **`PHASE-9`**  | Diagnostics Booking & Report Match/Filing       | `MOD-007` booking, order-ID+patient match, wrong-upload protection, lab channel (`FEAT-010`, `FEAT-011`)                                            | Book → collect → upload → match → file/reject        |
 | **`PHASE-10`** | Pharmacy Fulfillment & Delivery                 | `MOD-008` routing, fulfilment status, out-of-stock / delivery-failure choices, chemist channel (`FEAT-012`, `FEAT-013`)                             | Approved rx → route → deliver + failure workflows    |
 | **`PHASE-11`** | Settlement, Cancellations & Refunds             | `MOD-009` outcome recording, `EXT-004` UPI exception path (HMAC/idempotent), policies, partner-direct refunds (`FEAT-016`, `FEAT-017`)              | Settlement recording + facilitated-payment exception |
-| **`PHASE-12`** | Chronic Care Loop — Metrics & Follow-Ups        | `MOD-003` chronic metrics + follow-up plans + due-eval scheduler (`FEAT-018`)                                                                       | Daily BP/sugar logging + follow-up nudges            |
+| **`PHASE-12`** | Chronic Care Loop - Metrics & Follow-Ups        | `MOD-003` chronic metrics + follow-up plans + due-eval scheduler (`FEAT-018`)                                                                       | Daily BP/sugar logging + follow-up nudges            |
 | **`PHASE-13`** | WhatsApp Notifications                          | `MOD-010` templates (hi/en), `EXT-003` signed callbacks, retry, in-app inbox (`FEAT-019`)                                                           | Dosage reminders + 30/90-day nudges delivered        |
 | **`PHASE-14`** | End-to-End Integration, Observability & Release | Full care-loop E2E (`KPI-001`), audit wiring, cost telemetry (`KPI-007`), backup/restore drill, launch env                                          | Verified full loop + Daltonganj release readiness    |
 
@@ -81,7 +81,7 @@ PHASE-14 E2E + Observability + Release ◄─ all phases
 
 #### 2. Deferred / Out-of-Scope Items
 
-- No production wiring, no `intake` schema, no budget-meter implementation — only a throwaway prototype against provider sandboxes.
+- No production wiring, no `intake` schema, no budget-meter implementation - only a throwaway prototype against provider sandboxes.
 - No e-prescription drafting validation here (deferred to `PHASE-8`).
 
 #### 3. Data Schema & Entity Delta (Phase Data Model)
@@ -113,14 +113,14 @@ PHASE-14 E2E + Observability + Release ◄─ all phases
 ### 2.1 Phase 1: Modular-Monolith Foundation & CI
 
 - **Phase ID:** `PHASE-1-FOUNDATION`
-- **Phase Strategic Objective:** Stand up the cost-floor modular monolith skeleton — monorepo, one FastAPI backend + async worker + shared Next.js frontend, single PostgreSQL with the 11-schema baseline, transactional-outbox round-trip, edge/gateway skeleton, and a CI/CD pipeline that enforces module isolation.
+- **Phase Strategic Objective:** Stand up the cost-floor modular monolith skeleton - monorepo, one FastAPI backend + async worker + shared Next.js frontend, single PostgreSQL with the 11-schema baseline, transactional-outbox round-trip, edge/gateway skeleton, and a CI/CD pipeline that enforces module isolation.
 - **Release Readiness Criteria:** CI green on `lint` / `unit` / `migration-check` / `integration`; an **outbox → dispatcher → idempotent subscriber round-trip test** passes end-to-end; a hello-world route on each of the three frontends renders under the 1.5 MB page budget (`NFR-003`); the local native PostgreSQL (no Docker) serves integration tests; backup scaffolding job exists (`NFR-004` floor).
 
 #### 1. In-Scope Modules & Features
 
 | PRD Feature ID                                  | Feature Name         | Internal Module ID (Mod 6)                                                   | External Interface ID (Mod 5) |
 | :---------------------------------------------- | :------------------- | :--------------------------------------------------------------------------- | :---------------------------- |
-| — (infrastructure phase; no `FEAT-xxx` claimed) | All module scaffolds | `MOD-001`…`MOD-011` (empty bounded-context packages, facades, outbox tables) | —                             |
+| - (infrastructure phase; no `FEAT-xxx` claimed) | All module scaffolds | `MOD-001`…`MOD-011` (empty bounded-context packages, facades, outbox tables) | -                             |
 
 #### 2. Deferred / Out-of-Scope Items
 
@@ -136,9 +136,9 @@ PHASE-14 E2E + Observability + Release ◄─ all phases
 
 #### 4. Infrastructure, DevOps & Environment Targets
 
-- **Hosting / Cloud Provisioning:** Local native PostgreSQL (no Docker); staging VM with TLS termination (Caddy/nginx) behind the edge.
-- **CI/CD Requirements:** GitHub Actions pipeline — lint (incl. **CI-enforced no-cross-schema-import rule**), unit tests, migration apply + seed on a throwaway DB, integration round-trip test; deploy to staging on merge to `main`.
-- **Local test harness (established here):** pytest + vitest unit suites, integration tests vs a native PostgreSQL (no Docker), **Playwright** feature E2Es (roadmap §3.2), `gitleaks`/`bandit`/`pip-audit` security scans, `alembic` single-head `migration-check`, all gated locally by **pre-commit** and runnable in CI via the same commands (`npm run test|lint|typecheck|scan|migration-check`; `.github/workflows/ci.yml`). See `docs/standards/coding-standards.md` §6.
+- **Hosting / Cloud Provisioning:** Local native PostgreSQL (no Docker). The staging VM with TLS termination (Caddy/nginx) behind the edge is **deferred** until a server is provisioned (see the CI/CD note below).
+- **CI/CD Requirements:** GitHub Actions pipeline - lint (incl. **CI-enforced no-cross-schema-import rule**), unit tests, migration apply + seed on a throwaway DB, integration round-trip test. Verification stays on `main` via this pipeline alone; deploy-to-staging-on-merge and the staging-branch flow are future options once a staging server is provisioned.
+- **Local test harness (established here):** pytest + vitest unit suites, integration tests vs a native PostgreSQL (no Docker), the **Playwright** E2E harness (established here; the first E2E spec and CI job land in Phase 2 with the patient auth routes, per roadmap §3.2 and the `.github/workflows/ci.yml` comment), `gitleaks`/`bandit`/`pip-audit` security scans, `alembic` single-head `migration-check`, all gated locally by **pre-commit** and runnable in CI via the same commands (`npm run test|lint|typecheck|scan|migration-check`; `.github/workflows/ci.yml`). See `docs/standards/coding-standards.md` §6.
 
 #### 5. Phase Dependency & Risk Matrix
 
@@ -158,7 +158,7 @@ PHASE-14 E2E + Observability + Release ◄─ all phases
 ### 2.2 Phase 2: Patient Identity & Phone-OTP Authentication
 
 - **Phase ID:** `PHASE-2-IAM-AUTH`
-- **Phase Strategic Objective:** Deliver the patient identity core — phone-OTP registration with duplicate resolution, session JWT issuance/validation, RBAC scope enforcement at the edge — so every later phase has a trustworthy caller identity (`FEAT-001`).
+- **Phase Strategic Objective:** Deliver the patient identity core - phone-OTP registration with duplicate resolution, session JWT issuance/validation, RBAC scope enforcement at the edge - so every later phase has a trustworthy caller identity (`FEAT-001`).
 - **Release Readiness Criteria:** E2E: register → OTP (mocked SMS) → verify → authenticated session → access a protected route; duplicate phone re-registration resolves to the existing identity; OTP single-use, 5-min TTL, ≥ 60 s resend cooldown; `validate_token` p95 < 100 ms; `patient_auth_failed` and consent/access-denial attempts written to audit events.
 
 #### 1. In-Scope Modules & Features
@@ -170,7 +170,7 @@ PHASE-14 E2E + Observability + Release ◄─ all phases
 #### 2. Deferred / Out-of-Scope Items
 
 - Partner credential accounts & operator MFA (Phase 5).
-- Stronger-than-OTP identity (open `GAP-001` — OTP baseline kept).
+- Stronger-than-OTP identity (open `GAP-001` - OTP baseline kept).
 - Any record/consent behavior (Phase 3).
 
 #### 3. Data Schema & Entity Delta (Phase Data Model)
@@ -202,7 +202,7 @@ PHASE-14 E2E + Observability + Release ◄─ all phases
 ### 2.3 Phase 3: Longitudinal Record & Consent Engine
 
 - **Phase ID:** `PHASE-3-RECORD-CONSENT`
-- **Phase Strategic Objective:** Build the trusted data core — the patient's single longitudinal record plus the per-action consent registry that gates every share — establishing the `check_consent` hot path every later module will call (`FEAT-002`).
+- **Phase Strategic Objective:** Build the trusted data core - the patient's single longitudinal record plus the per-action consent registry that gates every share - establishing the `check_consent` hot path every later module will call (`FEAT-002`).
 - **Release Readiness Criteria:** On `patient.registered` (from Phase 2), a record shell + empty consent profile are created; consent request→grant→revoke→version transitions persist and are immediately effective; `check_consent` returns deny without a live grant (p95 < 50 ms); 100% of consent/record-access actions are emitted as audit events (`KPI-006`); the record is only readable by its owner or a live-consent counterparty.
 
 #### 1. In-Scope Modules & Features
@@ -213,9 +213,9 @@ PHASE-14 E2E + Observability + Release ◄─ all phases
 
 #### 2. Deferred / Out-of-Scope Items
 
-- Append-only audit _engine_ (Phase 4) — this phase only emits audit events.
+- Append-only audit _engine_ (Phase 4) - this phase only emits audit events.
 - Chronic metrics & follow-ups (Phase 12); record entries from prescriptions/reports (phases 8–9 events).
-- Deletion/retention/portability decisions (open `GAP-005`/`GAP-013` — record retained for account life; operator-mediated deletion).
+- Deletion/retention/portability decisions (open `GAP-005`/`GAP-013` - record retained for account life; operator-mediated deletion).
 
 #### 3. Data Schema & Entity Delta (Phase Data Model)
 
@@ -246,7 +246,7 @@ PHASE-14 E2E + Observability + Release ◄─ all phases
 ### 2.4 Phase 4: Append-Only Audit Trail & Access History
 
 - **Phase ID:** `PHASE-4-AUDIT-ENGINE`
-- **Phase Strategic Objective:** Deliver the compliance backbone — an append-only, hash-chained audit engine with tamper detection, plus the patient access-history view, so every regulated act across the system can be demonstrated (`FEAT-003`, `FEAT-020`).
+- **Phase Strategic Objective:** Deliver the compliance backbone - an append-only, hash-chained audit engine with tamper detection, plus the patient access-history view, so every regulated act across the system can be demonstrated (`FEAT-003`, `FEAT-020`).
 - **Release Readiness Criteria:** Audit events from IAM (auth failures/OTP), consent lifecycle, and record access are appended with `prev_hash` linkage; UPDATE/DELETE on `audit_events` is rejected at the DB level and the attempt recorded as a tamper event; operator audit query (RBAC all-records) and patient `get_access_history` (own record only) return complete, ordered results; tamper-detection E2E test passes.
 
 #### 1. In-Scope Modules & Features
@@ -258,18 +258,18 @@ PHASE-14 E2E + Observability + Release ◄─ all phases
 
 #### 2. Deferred / Out-of-Scope Items
 
-- Audit wiring for prescription/report/settlement/notification acts — built in their owning phases (8, 9, 11, 13), all funneling into the engine built here.
-- Audit retention/expiry decision (open `GAP-011` — retained; expiry carried forward).
+- Audit wiring for prescription/report/settlement/notification acts - built in their owning phases (8, 9, 11, 13), all funneling into the engine built here.
+- Audit retention/expiry decision (open `GAP-011` - retained; expiry carried forward).
 
 #### 3. Data Schema & Entity Delta (Phase Data Model)
 
 - **Databases Introduced/Updated:** PostgreSQL `audit` schema.
-- **Tables / Entities Created/Modified:** `audit_events` (event_type, actor_id, target_id, scope, timestamp, prev_hash, hash — append-only, DB-level revoke of UPDATE/DELETE), `tamper_attempts`, `audit_outbox`.
+- **Tables / Entities Created/Modified:** `audit_events` (event_type, actor_id, target_id, scope, timestamp, prev_hash, hash - append-only, DB-level revoke of UPDATE/DELETE), `tamper_attempts`, `audit_outbox`.
 - **Migration Scripts:** `v3.0__init_audit.sql` (+ DB permission statements enforcing append-only).
 
 #### 4. Infrastructure, DevOps & Environment Targets
 
-- **Hosting / Cloud Provisioning:** None new — rides the Phase 1 stack; audit appends share the daily-backup durability floor (`NFR-004`).
+- **Hosting / Cloud Provisioning:** None new - rides the Phase 1 stack; audit appends share the daily-backup durability floor (`NFR-004`).
 - **CI/CD Requirements:** Hash-chain integrity test (replay all events, verify chain), tamper test, RBAC tests for `query_audit` / `get_access_history`.
 
 #### 5. Phase Dependency & Risk Matrix
@@ -290,7 +290,7 @@ PHASE-14 E2E + Observability + Release ◄─ all phases
 ### 2.5 Phase 5: Partner Onboarding & Gated Activation
 
 - **Phase ID:** `PHASE-5-PARTNER-ONBOARDING`
-- **Phase Strategic Objective:** Let doctors, labs, and chemists register openly and be activated only after credential verification, with an operator console to run the gate — so no unverified partner can ever receive patients (`FEAT-014`, `FEAT-015`).
+- **Phase Strategic Objective:** Let doctors, labs, and chemists register openly and be activated only after credential verification, with an operator console to run the gate - so no unverified partner can ever receive patients (`FEAT-014`, `FEAT-015`).
 - **Release Readiness Criteria:** Partner register → submit credentials → `[Under Verification]` → operator approve/reject → `[Active]`/`[Rejected]`; rejected partners notified of the specific failure; activation state published as `partner.activated`/`partner.rejected` and consumed by `MOD-001` (role grant/deny); every operator decision audited; verification queue sortable by registration age (KPI-004 input); operator login requires MFA.
 
 #### 1. In-Scope Modules & Features
@@ -298,13 +298,13 @@ PHASE-14 E2E + Observability + Release ◄─ all phases
 | PRD Feature ID | Feature Name                                 | Internal Module ID (Mod 6)                 | External Interface ID (Mod 5) |
 | :------------- | :------------------------------------------- | :----------------------------------------- | :---------------------------- |
 | `FEAT-014`     | Open Registration & Gated Activation         | `MOD-002` (Partner) + `MOD-001` (accounts) | `ACT-002/003/004` (partners)  |
-| `FEAT-015`     | Operator Console — Verification & Moderation | `MOD-002` (Partner) + `MOD-011` (Audit)    | `ACT-005` (Operator)          |
+| `FEAT-015`     | Operator Console - Verification & Moderation | `MOD-002` (Partner) + `MOD-011` (Audit)    | `ACT-005` (Operator)          |
 
 #### 2. Deferred / Out-of-Scope Items
 
 - Directory search / profiles (Phase 6).
 - Automated credential expiry/revocation detection (Phase 6).
-- Verification mechanism beyond baseline (`AMB-003` — automated checks + manual review for flagged cases).
+- Verification mechanism beyond baseline (`AMB-003` - automated checks + manual review for flagged cases).
 
 #### 3. Data Schema & Entity Delta (Phase Data Model)
 
@@ -335,7 +335,7 @@ PHASE-14 E2E + Observability + Release ◄─ all phases
 ### 2.6 Phase 6: Provider Directory & Profiles
 
 - **Phase ID:** `PHASE-6-DIRECTORY`
-- **Phase Strategic Objective:** Let patients find and trust providers — distance-sorted search over **activated-only** partners with verified credential display, and automatic deactivation when a credential expires or is revoked (`FEAT-004`, `FEAT-005`).
+- **Phase Strategic Objective:** Let patients find and trust providers - distance-sorted search over **activated-only** partners with verified credential display, and automatic deactivation when a credential expires or is revoked (`FEAT-004`, `FEAT-005`).
 - **Release Readiness Criteria:** Search within Daltonganj + peri-urban returns only `[Active]` partners, sorted by distance (p95 < 250 ms cached); profile shows verified credentials + "verified" indicator; on credential expiry/revocation the partner is deindexed and the indicator removed; empty state shows "no providers found" + adjacent-area results; `directory_search` / `provider_selected` / `credential_invalidated` events emitted.
 
 #### 1. In-Scope Modules & Features
@@ -348,7 +348,7 @@ PHASE-14 E2E + Observability + Release ◄─ all phases
 #### 2. Deferred / Out-of-Scope Items
 
 - Ratings/reviews, consultation slots, availability calendars.
-- Multi-city geo expansion (`ISSUE-004` — Daltonganj only at launch).
+- Multi-city geo expansion (`ISSUE-004` - Daltonganj only at launch).
 
 #### 3. Data Schema & Entity Delta (Phase Data Model)
 
@@ -380,13 +380,13 @@ PHASE-14 E2E + Observability + Release ◄─ all phases
 
 - **Phase ID:** `PHASE-7-INTAKE-AI`
 - **Phase Strategic Objective:** Capture symptoms by voice or text in English/Hindi and turn them into a structured, consent-gated, budget-metered clinical pre-summary that the doctor will review before consulting (`FEAT-006`, `FEAT-007`).
-- **Release Readiness Criteria:** Voice and text intake both captured (`intake_started`/`intake_captured`), upload-resilient (auto-retry ×3, unusable audio prompts re-record); AI pipeline transcribe→structure produces a pre-summary; low-confidence output is flagged "low confidence — verify" and forces doctor review; `EXT-002` call timeouts ≤ 30 s and degrade gracefully (never block the loop); every LLM egress is consent-gated via `check_consent` + PHI-minimized (never the full record) and lands in audit; AI spend metered against `NFR-001`.
+- **Release Readiness Criteria:** Voice and text intake both captured (`intake_started`/`intake_captured`), upload-resilient (auto-retry ×3, unusable audio prompts re-record); AI pipeline transcribe→structure produces a pre-summary; low-confidence output is flagged "low confidence - verify" and forces doctor review; `EXT-002` call timeouts ≤ 30 s and degrade gracefully (never block the loop); every LLM egress is consent-gated via `check_consent` + PHI-minimized (never the full record) and lands in audit; AI spend metered against `NFR-001`.
 
 #### 1. In-Scope Modules & Features
 
 | PRD Feature ID | Feature Name                       | Internal Module ID (Mod 6) | External Interface ID (Mod 5) |
 | :------------- | :--------------------------------- | :------------------------- | :---------------------------- |
-| `FEAT-006`     | Symptom Intake — Voice & Text      | `MOD-005` (Intake & AI)    | `ACT-001` (Patient)           |
+| `FEAT-006`     | Symptom Intake - Voice & Text      | `MOD-005` (Intake & AI)    | `ACT-001` (Patient)           |
 | `FEAT-007`     | AI Clinical Pre-Summary Generation | `MOD-005` (Intake & AI)    | `EXT-002` (LLM/AI Provider)   |
 
 _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade for the e-prescription drafting input.
@@ -426,7 +426,7 @@ _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade f
 ### 2.8 Phase 8: Care Case, Consult Handshake & E-Prescription
 
 - **Phase ID:** `PHASE-8-CARE-RX`
-- **Phase Strategic Objective:** Orchestrate the off-platform consult handshake into an on-platform e-prescription that is only ever issued under a licensed doctor's explicit approval — the highest-regulatory-stakes slice (`FEAT-008`, `FEAT-009`).
+- **Phase Strategic Objective:** Orchestrate the off-platform consult handshake into an on-platform e-prescription that is only ever issued under a licensed doctor's explicit approval - the highest-regulatory-stakes slice (`FEAT-008`, `FEAT-009`).
 - **Release Readiness Criteria:** Doctor marks consult complete only after a finalized pre-summary (else blocked); case moves Pre-Summary → Consult Complete → Prescription Pending; AI draft produced from voice note/photo; doctor edits recorded (`edited_yn`) and approval issues the prescription timestamped + attributed; reject path recorded; **hard gate test: zero prescriptions issued without doctor approval** (`REQ-023`); `prescription.approved` event published for downstream phases.
 
 #### 1. In-Scope Modules & Features
@@ -434,12 +434,12 @@ _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade f
 | PRD Feature ID | Feature Name                                   | Internal Module ID (Mod 6)    | External Interface ID (Mod 5) |
 | :------------- | :--------------------------------------------- | :---------------------------- | :---------------------------- |
 | `FEAT-008`     | Consult Orchestration & Off-Platform Handshake | `MOD-006` (Care Case & Rx)    | `ACT-002` (Doctor)            |
-| `FEAT-009`     | E-Prescription — AI Draft & Doctor Approval    | `MOD-006` + `MOD-005` (draft) | `ACT-002`, `EXT-002`          |
+| `FEAT-009`     | E-Prescription - AI Draft & Doctor Approval    | `MOD-006` + `MOD-005` (draft) | `ACT-002`, `EXT-002`          |
 
 #### 2. Deferred / Out-of-Scope Items
 
-- Patient-initiated handshake (open `CFL-003` — doctor-initiated baseline kept).
-- Regulatory sign-off beyond the baseline (open `CFL-002`/`RISK-EVAL-003` — AI as drafting assistant under doctor authority).
+- Patient-initiated handshake (open `CFL-003` - doctor-initiated baseline kept).
+- Regulatory sign-off beyond the baseline (open `CFL-002`/`RISK-EVAL-003` - AI as drafting assistant under doctor authority).
 
 #### 3. Data Schema & Entity Delta (Phase Data Model)
 
@@ -471,7 +471,7 @@ _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade f
 ### 2.9 Phase 9: Diagnostics Booking & Report Match/Filing
 
 - **Phase ID:** `PHASE-9-DIAGNOSTICS`
-- **Phase Strategic Objective:** Let patients book diagnostics (home pickup / partner lab / direct fallback) and guarantee a lab report is matched to its order and patient before it ever touches the record — the `KPI-003` zero-mis-attachment slice (`FEAT-010`, `FEAT-011`).
+- **Phase Strategic Objective:** Let patients book diagnostics (home pickup / partner lab / direct fallback) and guarantee a lab report is matched to its order and patient before it ever touches the record - the `KPI-003` zero-mis-attachment slice (`FEAT-010`, `FEAT-011`).
 - **Release Readiness Criteria:** Booking on-platform (home pickup / pickup point) routed to an activated lab; direct patient-to-lab fallback recorded; sample-collected → result-pending transitions; upload (lab or patient) matched via order-ID + patient confirmation; mismatch is rejected visibly and never filed; matched report filed into the patient's record via event; **mis-attachment E2E test = 0**; upload scanning at the edge; `report.filed` / `report.rejected_mismatch` events published.
 
 #### 1. In-Scope Modules & Features
@@ -483,8 +483,8 @@ _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade f
 
 #### 2. Deferred / Out-of-Scope Items
 
-- Lab-report baseline parsing (`REQ-026` — filing only at launch).
-- Critical-value escalation (`REQ-033` — interpretation left to patient/doctor).
+- Lab-report baseline parsing (`REQ-026` - filing only at launch).
+- Critical-value escalation (`REQ-033` - interpretation left to patient/doctor).
 
 #### 3. Data Schema & Entity Delta (Phase Data Model)
 
@@ -528,7 +528,7 @@ _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade f
 
 #### 2. Deferred / Out-of-Scope Items
 
-- Time-bound partner-action SLA (open `GAP-007` — no commitment time; latency measured).
+- Time-bound partner-action SLA (open `GAP-007` - no commitment time; latency measured).
 - Geofenced auto-routing to the nearest chemist (route_basis supports both chosen and nearest).
 
 #### 3. Data Schema & Entity Delta (Phase Data Model)
@@ -560,7 +560,7 @@ _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade f
 ### 2.11 Phase 11: Settlement, Cancellations & Refunds
 
 - **Phase ID:** `PHASE-11-SETTLEMENT`
-- **Phase Strategic Objective:** Record direct cash/UPI settlement outcomes (the primary path), support the platform-facilitated UPI exception on a fraud-risk signal, and keep cancellations/refunds entirely partner-direct — the platform holds no funds and processes no refunds (`FEAT-016`, `FEAT-017`).
+- **Phase Strategic Objective:** Record direct cash/UPI settlement outcomes (the primary path), support the platform-facilitated UPI exception on a fraud-risk signal, and keep cancellations/refunds entirely partner-direct - the platform holds no funds and processes no refunds (`FEAT-016`, `FEAT-017`).
 - **Release Readiness Criteria:** Direct settlement outcome recorded (`settlement_recorded`); facilitated path only when both parties opt in + risk signal, with `EXT-004` initiation + HMAC-verified, idempotent webhook (no double charge; replay-safe); gateway unavailable → fallback to direct cash/UPI with a risk note; cancellation policy displayed before booking; cancellation → `[Order: Cancelled]` → partner-direct refund recorded; `RISK-001` mitigated by direct-payment-primary posture.
 
 #### 1. In-Scope Modules & Features
@@ -573,7 +573,7 @@ _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade f
 #### 2. Deferred / Out-of-Scope Items
 
 - Partner-issued receipts / reconciliation detail beyond recording (open `GAP-010`).
-- Fraud-risk trigger tuning beyond the baseline (open `AMB-004`/`CFL-001` — opt-in + risk signal).
+- Fraud-risk trigger tuning beyond the baseline (open `AMB-004`/`CFL-001` - opt-in + risk signal).
 
 #### 3. Data Schema & Entity Delta (Phase Data Model)
 
@@ -602,10 +602,10 @@ _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade f
 
 ---
 
-### 2.12 Phase 12: Chronic Care Loop — Metrics & Follow-Ups
+### 2.12 Phase 12: Chronic Care Loop - Metrics & Follow-Ups
 
 - **Phase ID:** `PHASE-12-CHRONIC-CARE`
-- **Phase Strategic Objective:** Turn the platform into a continuous-care differentiator — daily BP/sugar logging stored in the longitudinal record, out-of-range surfacing with **no automated clinical action**, and follow-up plans that emit re-test nudges (`FEAT-018`).
+- **Phase Strategic Objective:** Turn the platform into a continuous-care differentiator - daily BP/sugar logging stored in the longitudinal record, out-of-range surfacing with **no automated clinical action**, and follow-up plans that emit re-test nudges (`FEAT-018`).
 - **Release Readiness Criteria:** Enrolled patient logs BP and/or sugar; values persist in the record and render on the tracking view; out-of-range values stored + surfaced, no automated clinical action (`REQ-033`); follow-up plans (30d/90d) evaluate and emit `follow_up.due` events; `metric.logged` / `metric_out_of_range` / `follow_up.due` events published (consumed by Phase 13).
 
 #### 1. In-Scope Modules & Features
@@ -617,7 +617,7 @@ _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade f
 #### 2. Deferred / Out-of-Scope Items
 
 - WhatsApp nudges/dosage reminders (Phase 13).
-- On-platform doctor Q&A as the follow-up counterparty (open `CFL-004`/`AMB-005` — self-service baseline).
+- On-platform doctor Q&A as the follow-up counterparty (open `CFL-004`/`AMB-005` - self-service baseline).
 
 #### 3. Data Schema & Entity Delta (Phase Data Model)
 
@@ -648,7 +648,7 @@ _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade f
 ### 2.13 Phase 13: WhatsApp Notifications
 
 - **Phase ID:** `PHASE-13-NOTIFICATIONS`
-- **Phase Strategic Objective:** Deliver dosage reminders and 30/90-day re-test nudges on WhatsApp in the patient's language — **notifications only**, no interaction or transaction there (`REQ-035`) — with signed delivery callbacks and graceful failure (`FEAT-019`).
+- **Phase Strategic Objective:** Deliver dosage reminders and 30/90-day re-test nudges on WhatsApp in the patient's language - **notifications only**, no interaction or transaction there (`REQ-035`) - with signed delivery callbacks and graceful failure (`FEAT-019`).
 - **Release Readiness Criteria:** Templates (dosage_reminder, retest_30, retest_90; hi/en) configured against `EXT-003`; scheduling from rx dosage schedules + `follow_up.due`; send → delivery-status callback (signature-verified) → Delivered/Failed; failure logged, retried at next slot, repeated failure prompts number confirmation; **inbound non-template messages never trigger clinical/transactional workflows** (hard test); in-app inbox mirrors sends; every send recorded in audit.
 
 #### 1. In-Scope Modules & Features
@@ -708,7 +708,7 @@ _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade f
 
 #### 3. Data Schema & Entity Delta (Phase Data Model)
 
-- **Databases Introduced/Updated:** PostgreSQL `ops` schema (telemetry only — non-domain).
+- **Databases Introduced/Updated:** PostgreSQL `ops` schema (telemetry only - non-domain).
 - **Tables / Entities Created/Modified:** `cost_meters` (monthly spend per provider vs `NFR-001` budget), `restore_validations` (monthly drill log), `e2e_runs` (loop-stage timestamps for `KPI-008`).
 - **Migration Scripts:** `v13.0__ops_telemetry.sql`.
 
@@ -739,29 +739,29 @@ _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade f
 
 | PRD Feature ID                                    | Module ID                                  | Phase Assigned | Data Schema Impact                                                                            | Infra Impact                              | Status    |
 | :------------------------------------------------ | :----------------------------------------- | :------------- | :-------------------------------------------------------------------------------------------- | :---------------------------------------- | :-------- |
-| `FEAT-001` (registration & identity)              | `MOD-001`                                  | Phase 2        | `iam` — identities, otp_challenges, sessions, role_grants                                     | SMS/OTP adapter + edge JWT/RBAC           | Scheduled |
-| `FEAT-002` (record & consent)                     | `MOD-003`, `MOD-004`                       | Phase 3        | `health` — patient_records, record_entries; `consent` — consents, consent_events, egress_log  | Redis consent cache                       | Scheduled |
-| `FEAT-003` (own record & access view)             | `MOD-003`, `MOD-011`                       | Phase 4        | `health` — record_access_history; `audit` — audit_events                                      | None new                                  | Scheduled |
-| `FEAT-004` (directory & search)                   | `MOD-002`                                  | Phase 6        | `partner` — directory_index, service_areas                                                    | Redis search cache; geo index             | Scheduled |
-| `FEAT-005` (profiles & credentials)               | `MOD-002`                                  | Phase 6        | `partner` — partner_credentials (expiry/revoked)                                              | Credential-expiry deactivation            | Scheduled |
-| `FEAT-006` (symptom intake)                       | `MOD-005`                                  | Phase 7        | `intake` — intakes, media_refs                                                                | Object storage `intake/`                  | Scheduled |
-| `FEAT-007` (AI pre-summary)                       | `MOD-005`                                  | Phase 7        | `intake` — pre_summaries, ai_jobs                                                             | LLM adapter + budget meter                | Scheduled |
-| `FEAT-008` (consult handshake)                    | `MOD-006`                                  | Phase 8        | `care` — cases                                                                                | Doctor channel                            | Scheduled |
-| `FEAT-009` (e-prescription)                       | `MOD-006`, `MOD-005`                       | Phase 8        | `care` — prescriptions, rx_items, rx_approvals, doctor_inputs                                 | Object storage `rx_input/`; approval gate | Scheduled |
-| `FEAT-010` (diagnostics booking)                  | `MOD-007`                                  | Phase 9        | `diagnostics` — diagnostic_orders, sample_pickups                                             | Lab channel                               | Scheduled |
-| `FEAT-011` (report match & filing)                | `MOD-007`                                  | Phase 9        | `diagnostics` — lab_reports, report_uploads, upload_matches                                   | Upload scanning; `reports/` bucket        | Scheduled |
-| `FEAT-012` (fulfilment routing)                   | `MOD-008`                                  | Phase 10       | `fulfillment` — fulfillment_orders, fulfillment_events                                        | Chemist channel                           | Scheduled |
-| `FEAT-013` (out-of-stock / delivery failure)      | `MOD-008`                                  | Phase 10       | `fulfillment` — out_of_stock_items, patient_choices                                           | Latency measurement (KPI-008)             | Scheduled |
-| `FEAT-014` (open registration & gated activation) | `MOD-002`, `MOD-001`                       | Phase 5        | `partner` — partner_profiles, partner_credentials, partner_verifications; `iam` — role_grants | Operator Console route group              | Scheduled |
-| `FEAT-015` (operator console)                     | `MOD-002`, `MOD-011`                       | Phase 5        | `partner` — partner_verifications; `iam` — MFA                                                | Operator MFA                              | Scheduled |
-| `FEAT-016` (settlement & payments)                | `MOD-009`, `MOD-011`                       | Phase 11       | `settlement` — settlements, payment_intents, webhook_events                                   | UPI adapter + HMAC webhooks               | Scheduled |
-| `FEAT-017` (cancellations & refunds)              | `MOD-009`                                  | Phase 11       | `settlement` — cancellations, refund_records, cancellation_policies                           | Policy display cache                      | Scheduled |
-| `FEAT-018` (chronic metrics & follow-ups)         | `MOD-003`, `MOD-010`                       | Phase 12       | `health` — chronic_metrics, follow_up_plans                                                   | Scheduler due-eval job                    | Scheduled |
-| `FEAT-019` (WhatsApp notifications)               | `MOD-010`                                  | Phase 13       | `notify` — notifications, notification_schedules, delivery_logs                               | WhatsApp adapter + signed callbacks       | Scheduled |
-| `FEAT-020` (audit trail & consent lifecycle)      | `MOD-011`, `MOD-004`                       | Phase 4        | `audit` — audit_events, tamper_attempts                                                       | Append-only DB policy                     | Scheduled |
-| `NFR-001` (cost floor)                            | all modules                                | Phase 1, 7, 14 | `intake` — ai_jobs; `ops` — cost_meters                                                       | Budget meters + cost alerts               | Scheduled |
+| `FEAT-001` (registration & identity)              | `MOD-001`                                  | Phase 2        | `iam` - identities, otp_challenges, sessions, role_grants                                     | SMS/OTP adapter + edge JWT/RBAC           | Scheduled |
+| `FEAT-002` (record & consent)                     | `MOD-003`, `MOD-004`                       | Phase 3        | `health` - patient_records, record_entries; `consent` - consents, consent_events, egress_log  | Redis consent cache                       | Scheduled |
+| `FEAT-003` (own record & access view)             | `MOD-003`, `MOD-011`                       | Phase 4        | `health` - record_access_history; `audit` - audit_events                                      | None new                                  | Scheduled |
+| `FEAT-004` (directory & search)                   | `MOD-002`                                  | Phase 6        | `partner` - directory_index, service_areas                                                    | Redis search cache; geo index             | Scheduled |
+| `FEAT-005` (profiles & credentials)               | `MOD-002`                                  | Phase 6        | `partner` - partner_credentials (expiry/revoked)                                              | Credential-expiry deactivation            | Scheduled |
+| `FEAT-006` (symptom intake)                       | `MOD-005`                                  | Phase 7        | `intake` - intakes, media_refs                                                                | Object storage `intake/`                  | Scheduled |
+| `FEAT-007` (AI pre-summary)                       | `MOD-005`                                  | Phase 7        | `intake` - pre_summaries, ai_jobs                                                             | LLM adapter + budget meter                | Scheduled |
+| `FEAT-008` (consult handshake)                    | `MOD-006`                                  | Phase 8        | `care` - cases                                                                                | Doctor channel                            | Scheduled |
+| `FEAT-009` (e-prescription)                       | `MOD-006`, `MOD-005`                       | Phase 8        | `care` - prescriptions, rx_items, rx_approvals, doctor_inputs                                 | Object storage `rx_input/`; approval gate | Scheduled |
+| `FEAT-010` (diagnostics booking)                  | `MOD-007`                                  | Phase 9        | `diagnostics` - diagnostic_orders, sample_pickups                                             | Lab channel                               | Scheduled |
+| `FEAT-011` (report match & filing)                | `MOD-007`                                  | Phase 9        | `diagnostics` - lab_reports, report_uploads, upload_matches                                   | Upload scanning; `reports/` bucket        | Scheduled |
+| `FEAT-012` (fulfilment routing)                   | `MOD-008`                                  | Phase 10       | `fulfillment` - fulfillment_orders, fulfillment_events                                        | Chemist channel                           | Scheduled |
+| `FEAT-013` (out-of-stock / delivery failure)      | `MOD-008`                                  | Phase 10       | `fulfillment` - out_of_stock_items, patient_choices                                           | Latency measurement (KPI-008)             | Scheduled |
+| `FEAT-014` (open registration & gated activation) | `MOD-002`, `MOD-001`                       | Phase 5        | `partner` - partner_profiles, partner_credentials, partner_verifications; `iam` - role_grants | Operator Console route group              | Scheduled |
+| `FEAT-015` (operator console)                     | `MOD-002`, `MOD-011`                       | Phase 5        | `partner` - partner_verifications; `iam` - MFA                                                | Operator MFA                              | Scheduled |
+| `FEAT-016` (settlement & payments)                | `MOD-009`, `MOD-011`                       | Phase 11       | `settlement` - settlements, payment_intents, webhook_events                                   | UPI adapter + HMAC webhooks               | Scheduled |
+| `FEAT-017` (cancellations & refunds)              | `MOD-009`                                  | Phase 11       | `settlement` - cancellations, refund_records, cancellation_policies                           | Policy display cache                      | Scheduled |
+| `FEAT-018` (chronic metrics & follow-ups)         | `MOD-003`, `MOD-010`                       | Phase 12       | `health` - chronic_metrics, follow_up_plans                                                   | Scheduler due-eval job                    | Scheduled |
+| `FEAT-019` (WhatsApp notifications)               | `MOD-010`                                  | Phase 13       | `notify` - notifications, notification_schedules, delivery_logs                               | WhatsApp adapter + signed callbacks       | Scheduled |
+| `FEAT-020` (audit trail & consent lifecycle)      | `MOD-011`, `MOD-004`                       | Phase 4        | `audit` - audit_events, tamper_attempts                                                       | Append-only DB policy                     | Scheduled |
+| `NFR-001` (cost floor)                            | all modules                                | Phase 1, 7, 14 | `intake` - ai_jobs; `ops` - cost_meters                                                       | Budget meters + cost alerts               | Scheduled |
 | `NFR-002` (security & privacy)                    | `MOD-001`, `MOD-003`, `MOD-004`, `MOD-011` | Phase 2, 3, 4  | `iam`, `health`, `consent`, `audit`                                                           | TLS 1.2+; RBAC at edge                    | Scheduled |
-| `NFR-003` (performance)                           | Gateway + all modules                      | Phase 1, 14    | —                                                                                             | Page-budget + latency budgets             | Scheduled |
+| `NFR-003` (performance)                           | Gateway + all modules                      | Phase 1, 14    | -                                                                                             | Page-budget + latency budgets             | Scheduled |
 | `NFR-004` (availability & durability)             | `MOD-003` + shared infra                   | Phase 1, 14    | all schemas (RPO ≤ 24 h)                                                                      | Daily backup + monthly restore drill      | Scheduled |
 | `NFR-D01` (auditability)                          | `MOD-011`                                  | Phase 4        | `audit`                                                                                       | Append-only engine                        | Scheduled |
 | `NFR-D02` (data governance)                       | `MOD-004`, `MOD-011`                       | Phase 3, 4     | `consent`, `audit`                                                                            | Consent versioning + egress log           | Scheduled |
@@ -785,15 +785,15 @@ _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade f
 | Module                          | Primary Build Phase | First Consumed By                  | Traceability Note                                |
 | :------------------------------ | :------------------ | :--------------------------------- | :----------------------------------------------- |
 | `MOD-001` (IAM)                 | Phase 2             | all phases (edge scope)            | Facade extended Phase 5 (partner/operator roles) |
-| `MOD-002` (Partner & Directory) | Phase 5             | Phase 6 (search)                   | —                                                |
-| `MOD-003` (LHR)                 | Phase 3             | Phase 4, 12 (access view, metrics) | —                                                |
-| `MOD-004` (Consent)             | Phase 3             | all sharing phases (7, 8, 9)       | —                                                |
-| `MOD-005` (Intake & AI)         | Phase 7             | Phase 8 (rx draft)                 | —                                                |
-| `MOD-006` (Care & Rx)           | Phase 8             | Phase 10 (routing), 13 (schedules) | —                                                |
-| `MOD-007` (Diagnostics)         | Phase 9             | Phase 11 (order context)           | —                                                |
-| `MOD-008` (Fulfillment)         | Phase 10            | Phase 13 (status notifications)    | —                                                |
-| `MOD-009` (Settlement)          | Phase 11            | Phase 14 (audit completeness)      | —                                                |
-| `MOD-010` (Notifications)       | Phase 13            | —                                  | Consumes Phase 8/12 events                       |
+| `MOD-002` (Partner & Directory) | Phase 5             | Phase 6 (search)                   | -                                                |
+| `MOD-003` (LHR)                 | Phase 3             | Phase 4, 12 (access view, metrics) | -                                                |
+| `MOD-004` (Consent)             | Phase 3             | all sharing phases (7, 8, 9)       | -                                                |
+| `MOD-005` (Intake & AI)         | Phase 7             | Phase 8 (rx draft)                 | -                                                |
+| `MOD-006` (Care & Rx)           | Phase 8             | Phase 10 (routing), 13 (schedules) | -                                                |
+| `MOD-007` (Diagnostics)         | Phase 9             | Phase 11 (order context)           | -                                                |
+| `MOD-008` (Fulfillment)         | Phase 10            | Phase 13 (status notifications)    | -                                                |
+| `MOD-009` (Settlement)          | Phase 11            | Phase 14 (audit completeness)      | -                                                |
+| `MOD-010` (Notifications)       | Phase 13            | -                                  | Consumes Phase 8/12 events                       |
 | `MOD-011` (Audit)               | Phase 4             | all phases (audit.event)           | Engine precedes consumers                        |
 
 ---
@@ -803,9 +803,9 @@ _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade f
 - [x] **Every `FEAT-001`–`FEAT-020` assigned to exactly one phase** (§3.1).
 - [x] **Every `MOD-001`–`MOD-011` has a primary build phase** and every consumer is ordered after its producer (§2 spine, §3.3).
 - [x] **Every `EXT-001`–`EXT-004` and `ACT-001`–`ACT-005` placed** with its owning phase (§3.2).
-- [x] **Every phase is small and independently verifiable** — each has explicit release-readiness criteria, schema delta, infra targets, and no dependency on an unbuilt phase's outputs.
+- [x] **Every phase is small and independently verifiable** - each has explicit release-readiness criteria, schema delta, infra targets, and no dependency on an unbuilt phase's outputs.
 - [x] **Every phase details its data-schema & entity delta** with versioned migrations (`v0.0` → `v13.0`).
-- [x] **Phases ordered by dependency** — foundation/auth → data engine → onboarding/directory → core workflows → integrations → events → admin/observability.
+- [x] **Phases ordered by dependency** - foundation/auth → data engine → onboarding/directory → core workflows → integrations → events → admin/observability.
 - [x] **Cost floor preserved throughout** (`NFR-001`): single VM + one PostgreSQL, no paid frameworks, LLM budget-metered, spike before any AI spend.
 - [x] **Deferred items explicit** (`REQ-026`, `REQ-038/039/040`, open `CFL`/`GAP`/`AMB` decisions) and not silently dropped.
 

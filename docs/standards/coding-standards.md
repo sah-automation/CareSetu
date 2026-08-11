@@ -9,19 +9,19 @@
 
 - **Backend:** Python 3.11+ (asyncio), FastAPI, Pydantic v2, SQLAlchemy 2.0 (async only).
 - **Frontend:** Next.js / React, one codebase with role-scoped route groups (Patient / Partner / Operator).
-- **No paid proprietary frameworks** — `NFR-001`. Everything used must be OSS/free-tier.
+- **No paid proprietary frameworks** - `NFR-001`. Everything used must be OSS/free-tier.
 - If a new dependency is needed, it must be justified against the cost floor before adding.
 
 ## 2. Module Structure (per `MOD-xxx`)
 
-Every module follows hexagonal layout — pure domain core + adapters:
+Every module follows hexagonal layout - pure domain core + adapters:
 
 ```
 <module>/
   domain/        # pure logic, state machines, no I/O, no FastAPI
   adapters/      # routers, event handlers, external-provider clients
   schema/        # SQLAlchemy models for THIS module's schema only
-  facade.py      # typed public API (sync) — the only legal import target
+  facade.py      # typed public API (sync) - the only legal import target
   outbox.py      # transactional outbox writer
 ```
 
@@ -40,7 +40,7 @@ Every module follows hexagonal layout — pure domain core + adapters:
 
 - All business state transitions are explicit state machines (see module specs §3). No `if/else` sprawl over statuses.
 - A state change writes its event to the module's outbox **in the same DB transaction** as the change.
-- Validate pre-conditions (e.g. no prescription without doctor approval — `REQ-023`) in the domain core, never in the router.
+- Validate pre-conditions (e.g. no prescription without doctor approval - `REQ-023`) in the domain core, never in the router.
 
 ## 5. Migrations & Schema
 
@@ -68,13 +68,13 @@ Every module follows hexagonal layout — pure domain core + adapters:
 | Migration gate | `alembic` single-head check + cross-schema-FK scan                          | `npm run migration-check`                                         |
 | Security scan  | `gitleaks` (secret), `bandit` (static), `pip-audit` (deps)                  | `npm run scan`                                                    |
 
-- **pre-commit is the gate on every commit** — gitleaks, ruff, bandit, prettier, whitespace run there; CI runs the same plus typecheck/unit/integration/migration-check/e2e (`.github/workflows/ci.yml`).
+- **pre-commit is the gate on every commit** - gitleaks, ruff, bandit, prettier, whitespace run there; CI runs the same plus typecheck/unit/integration/migration-check/e2e (`.github/workflows/ci.yml`).
 - Integration tests need a local native PostgreSQL (no Docker); the suite connects to `TEST_DATABASE_URL`/`DATABASE_URL` and skips cleanly when the DB is unreachable (setup: `tests/integration/README.md`).
 - `apps/backend/pyproject.toml` holds all backend tool config; the backend venv lives at `D:\Dev\venvs\backend-env` (uv sync via `UV_PROJECT_ENVIRONMENT`).
 
 ## 7. Data Durability
 
-- Backups ≥ daily (RPO ≤ 24h) — `NFR-004`; restore drill validated at least monthly.
+- Backups ≥ daily (RPO ≤ 24h) - `NFR-004`; restore drill validated at least monthly.
 - All PHI writes go to the object store or the owning module's schema; media refs only in SQL.
 
 ## 8. Readability & Debuggability
@@ -82,7 +82,7 @@ Every module follows hexagonal layout — pure domain core + adapters:
 Code must be easy to understand, navigate, and debug **by a human**, without an agent.
 
 - **Traceability by construction:** a human can navigate PRD feature → module → file. Every module and router carries its `MOD-xxx` / `FEAT-xxx` ids in a header comment, matching the whitebox doc.
-- **Small, single-purpose functions:** one responsibility per function, shallow nesting, no long `if/else` chains (state machines replace status branching — §4).
+- **Small, single-purpose functions:** one responsibility per function, shallow nesting, no long `if/else` chains (state machines replace status branching - §4).
 - **Name for the reader:** names carry intent; avoid abbreviations, magic numbers, and terse one-liners. Complex logic gets a short docstring explaining _why_, not just _what_.
 - **Debuggability:** a failure must be reproducible from `trace_id` + structured logs alone (see `error-handling-observability.md`). No silent swallowing of errors; expected outcomes are typed results, not bare `pass`/`except`.
 - **Local reasoning:** keep modules and files small enough that the whole flow fits one screen where possible; split large facades along their state machines.

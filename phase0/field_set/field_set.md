@@ -1,4 +1,4 @@
-# Provisional Phase 7 Pre-Summary Field Set — v1.0.0
+# Provisional Phase 7 Pre-Summary Field Set - v1.0.0
 
 > Status: **provisional**. Versioned at `phase0/field_set/field_set.json` (machine-readable) and this file (human-readable). This set is seeded from what the Phase 0 corpus actually contains and the PRD `FEAT-007` pre-summary concept. The schema is finalized at PHASE-7.
 
@@ -16,7 +16,7 @@
 - One pre-summary JSON file per clip, placed at `phase0/corpus/pre_summaries/<clip_id>.json`.
 - The pre-summary records **only what is said in the clip's recording/transcript**. Unstated fields are `null` (string fields) or `[]` (array fields). Never fill a field from outside knowledge.
 - The corpus is **PHI-free**: no name, address, phone, or other identifier fields exist. Do not add any.
-- `clinical_notes` and `extraction_notes` are always populated — they capture context and structuring confidence and are the seed for the Phase 7 `low_confidence` semantics (`AMB-006`).
+- `clinical_notes` and `extraction_notes` are always populated - they capture context and structuring confidence and are the seed for the Phase 7 `low_confidence` semantics (`AMB-006`).
 
 ## Field reference
 

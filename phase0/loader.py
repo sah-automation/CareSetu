@@ -167,7 +167,7 @@ class Corpus:
     pre_summaries: tuple[PreSummary, ...]
 
     def clip_by_id(self) -> dict[str, Clip]:
-        """Index clips by id — the runner's hot lookup, built once per run."""
+        """Index clips by id - the runner's hot lookup, built once per run."""
         return {clip.clip_id: clip for clip in self.clips}
 
     def pre_summary_by_id(self) -> dict[str, PreSummary]:

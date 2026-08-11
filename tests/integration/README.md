@@ -1,4 +1,4 @@
-# Integration tests — facade + schema vs a real Postgres
+# Integration tests - facade + schema vs a real Postgres
 
 Test module facades (`facade.py`) and schema against a live PostgreSQL. Contract tests mock external providers.
 

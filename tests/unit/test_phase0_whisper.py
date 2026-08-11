@@ -1,7 +1,7 @@
 """Phase 0 Whisper provider tests (issue #9).
 
 Tests the OpenAI Whisper adapter's pure request-building, response-parsing, and
-cost computation — deterministic, no network. The port methods are exercised
+cost computation - deterministic, no network. The port methods are exercised
 against a stubbed HTTP layer; the live end-to-end path is covered by the CLI
 run (gated on OPENAI_API_KEY), not by CI.
 """

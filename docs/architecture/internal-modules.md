@@ -10,7 +10,7 @@
 
 ## 1. Architectural Strategy & Decomposition Style
 
-**Strategy: Modular Monolith with Event-Driven Seams** (single FastAPI deployable, one PostgreSQL instance, one async worker process). The dominant constraint is `NFR-001` (total monthly operating + hosting + AI spend ≤ ₹2,000) — microservices or managed brokers would multiply hosting cost and violate the cost floor. Instead, the monolith preserves **strict module isolation** so it can be re-cut into services later without redesign, while running today on a single VM + single Postgres + optional Redis.
+**Strategy: Modular Monolith with Event-Driven Seams** (single FastAPI deployable, one PostgreSQL instance, one async worker process). The dominant constraint is `NFR-001` (total monthly operating + hosting + AI spend ≤ ₹2,000) - microservices or managed brokers would multiply hosting cost and violate the cost floor. Instead, the monolith preserves **strict module isolation** so it can be re-cut into services later without redesign, while running today on a single VM + single Postgres + optional Redis.
 
 **Core design principles:**
 
@@ -21,19 +21,19 @@
 - **Cost-first Infrastructure.** No paid frameworks (`NFR-001`). PostgreSQL on the same VM; object storage (S3-compatible) for PHI media; Redis optional and replaceable by SQL-backed caches.
 - **PHI minimisation & consent gating.** No module ever egresses PHI without a consent check against `MOD-004` and an audit append to `MOD-011` (`NFR-SEC-006`, `FEAT-002`, `FEAT-020`).
 
-**Frontend strategy.** Three Next.js (React) channels — Patient Web App (PWA), Partner Web App, Operator Console — share one codebase / one deployment with role-scoped route groups to honour the ₹2,000 cost floor. They are containers (channels), not domain modules; all business state lives behind the backend modules.
+**Frontend strategy.** Three Next.js (React) channels - Patient Web App (PWA), Partner Web App, Operator Console - share one codebase / one deployment with role-scoped route groups to honour the ₹2,000 cost floor. They are containers (channels), not domain modules; all business state lives behind the backend modules.
 
 **Explicitly carried forward / not claimed by any module (per blackbox §3.2 & PRD §3.2):**
 
-- `REQ-026` lab-report baseline parsing — deferred; `FEAT-011` is filing-only.
-- `REQ-038` ABHA integration, `REQ-039` monetization, `REQ-040` native/WhatsApp-first channels — out of scope (`[FUTURE]`).
+- `REQ-026` lab-report baseline parsing - deferred; `FEAT-011` is filing-only.
+- `REQ-038` ABHA integration, `REQ-039` monetization, `REQ-040` native/WhatsApp-first channels - out of scope (`[FUTURE]`).
 - Open decisions `CFL-002/003/004`, `GAP-001/004/007/010/011/013`, `AMB-002/003/004/006` keep their PRD baseline assumptions; module behaviour is defined on those baselines and re-cut only when decided (see §5 note).
 
 ---
 
 ## 2. C4 Model - Level 2 & 3: Internal Container & Component Diagram
 
-### 2.1 Level 2 — Container diagram
+### 2.1 Level 2 - Container diagram
 
 ```mermaid
 C4Container
@@ -76,7 +76,7 @@ C4Container
   Rel(upi, backend, "HMAC-signed webhook", "payment status (fraud-risk exception path only)")
 ```
 
-### 2.2 Level 3 — Backend component diagram
+### 2.2 Level 3 - Backend component diagram
 
 ```mermaid
 C4Component
@@ -151,7 +151,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 
 #### 1. Data Ownership & Storage Isolation
 
-- **Storage Type:** Relational — PostgreSQL schema `iam`: `identities` (phone_e164 unique, status), `otp_challenges` (OTP hashed, single-use, TTL 5 min, cooldown), `sessions` (jti, expiry, scope), `role_grants` (patient/partner/operator), `audit_outbox`.
+- **Storage Type:** Relational - PostgreSQL schema `iam`: `identities` (phone_e164 unique, status), `otp_challenges` (OTP hashed, single-use, TTL 5 min, cooldown), `sessions` (jti, expiry, scope), `role_grants` (patient/partner/operator), `audit_outbox`.
 - **Caching Strategy:** Session/scope claims cached in Redis (TTL); OTP resend cooldown & brute-force counters in Redis (fallback to SQL counters if Redis absent).
 - **Data Isolation Rule:** Private `iam` schema; no other module reads `iam` tables. Identity resolution, token validation, and role/scope checks are exported via the IAM facade only.
 
@@ -163,7 +163,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 
 #### 3. Core Business Logic & State Machines
 
-- **Identity state machine:** `[Unverified] → [Active] → [Suspended]`; re-registration with existing phone resolves to the existing identity (never a duplicate — `FEAT-001` Rule 1, baseline `GAP-001`).
+- **Identity state machine:** `[Unverified] → [Active] → [Suspended]`; re-registration with existing phone resolves to the existing identity (never a duplicate - `FEAT-001` Rule 1, baseline `GAP-001`).
 - **OTP challenge machine:** `[Pending] → [Verified] | [Expired] | [Failed]`; single-use, 5-minute TTL, in-app resend cooldown ≥ 60 s, values hashed at rest and never logged.
 
 #### 4. High-Level Tech Stack & Framework Constraints
@@ -189,7 +189,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 
 #### 1. Data Ownership & Storage Isolation
 
-- **Storage Type:** Relational — PostgreSQL schema `partner`: `partner_profiles` (type: doctor|lab|chemist), `partner_credentials` (registration/license refs, verified flag, expiry), `partner_verifications` (queue, status, decision), `directory_index` (geo, specialties, active flag), `service_areas`, `partner_outbox`.
+- **Storage Type:** Relational - PostgreSQL schema `partner`: `partner_profiles` (type: doctor|lab|chemist), `partner_credentials` (registration/license refs, verified flag, expiry), `partner_verifications` (queue, status, decision), `directory_index` (geo, specialties, active flag), `service_areas`, `partner_outbox`.
 - **Caching Strategy:** Directory index / search results cached in Redis (TTL, invalidated on activation/revocation); only **activated** partners appear in search (`FEAT-004` Rule 1, `REQ-028`).
 - **Data Isolation Rule:** Private `partner` schema; directory reads by patients go through the `MOD-002` search facade, never direct SQL.
 
@@ -209,7 +209,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 - **Language/Runtime:** Python 3.11+ (asyncio).
 - **Framework:** FastAPI + Pydantic v2 + SQLAlchemy 2.0 (async).
 - **Persistence Layer:** PostgreSQL (`partner` schema); Redis for search index.
-- **Constraint:** Geospatial search within Daltonganj + peri-urban scope (`REQ-008`) — PostGIS optional, SQL range/point fallback at cost floor.
+- **Constraint:** Geospatial search within Daltonganj + peri-urban scope (`REQ-008`) - PostGIS optional, SQL range/point fallback at cost floor.
 
 #### 5. Module NFR Allocation
 
@@ -222,12 +222,12 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 ### 3.3 Module: `MOD-003` Longitudinal Health Record (LHR)
 
 - **Module ID:** `MOD-003`
-- **Primary Scope:** The patient's single longitudinal record — record entries, chronic metric logging (BP/sugar), follow-up plans, record access history, and the patient's own-record view (`FEAT-003`). It stores but never _shares_: all sharing is consent-gated via `MOD-004`.
+- **Primary Scope:** The patient's single longitudinal record - record entries, chronic metric logging (BP/sugar), follow-up plans, record access history, and the patient's own-record view (`FEAT-003`). It stores but never _shares_: all sharing is consent-gated via `MOD-004`.
 - **Traceability Link:** `FEAT-002`(record), `FEAT-003`, `FEAT-018`(metrics), `NFR-002`, `NFR-004`, `REQ-021`
 
 #### 1. Data Ownership & Storage Isolation
 
-- **Storage Type:** Relational — PostgreSQL schema `health`: `patient_records`, `record_entries` (clinical entries attached from other modules via events), `chronic_metrics` (bp/sugar, timestamp, out-of-range flag), `follow_up_plans`, `record_access_history`; PHI media refs point into object storage (owned prefixes).
+- **Storage Type:** Relational - PostgreSQL schema `health`: `patient_records`, `record_entries` (clinical entries attached from other modules via events), `chronic_metrics` (bp/sugar, timestamp, out-of-range flag), `follow_up_plans`, `record_access_history`; PHI media refs point into object storage (owned prefixes).
 - **Caching Strategy:** Read-heavy own-record views cached in Redis; record-access gating cached via `MOD-004` consent status.
 - **Data Isolation Rule:** Private `health` schema; the ONLY legal readers are the record owner (`FEAT-003` Rule 1) or a partner with a live consent grant checked against `MOD-004`; never queried directly by other modules.
 
@@ -251,7 +251,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 #### 5. Module NFR Allocation
 
 - **Latency SLA:** Own-record view p95 < 250 ms; `read_consented_history` p95 < 300 ms (includes consent check).
-- **Availability Target:** Best-effort (`NFR-004`); **durability floor applies here** — daily backup (RPO ≤ 24 h), monthly restore validation (`GAP-012`).
+- **Availability Target:** Best-effort (`NFR-004`); **durability floor applies here** - daily backup (RPO ≤ 24 h), monthly restore validation (`GAP-012`).
 - **Per-Module NFRs:** 100% of record accesses logged (`KPI-006`); only owner/consented-partner reads (RBAC + consent, `NFR-002`).
 
 ---
@@ -259,14 +259,14 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 ### 3.4 Module: `MOD-004` Consent & Access Control
 
 - **Module ID:** `MOD-004`
-- **Primary Scope:** The consent registry and per-action consent lifecycle — request, grant, revoke, versioning — plus the **egress authorization gate**: any PHI share or egress (to partners or to `EXT-002`) is authorised only with a live recorded consent, and every authorization is logged.
+- **Primary Scope:** The consent registry and per-action consent lifecycle - request, grant, revoke, versioning - plus the **egress authorization gate**: any PHI share or egress (to partners or to `EXT-002`) is authorised only with a live recorded consent, and every authorization is logged.
 - **Traceability Link:** `FEAT-002`(consent), `FEAT-020`(consent lifecycle), `NFR-SEC-006`, `NFR-D02`, `NFR-002`, `KPI-006`
 
 #### 1. Data Ownership & Storage Isolation
 
-- **Storage Type:** Relational — PostgreSQL schema `consent`: `consents` (patient_id, counterparty_type/id, record_scope, status, version), `consent_events` (requested/granted/revoked), `egress_log` (what PHI left the boundary, when, to whom, via which action).
+- **Storage Type:** Relational - PostgreSQL schema `consent`: `consents` (patient_id, counterparty_type/id, record_scope, status, version), `consent_events` (requested/granted/revoked), `egress_log` (what PHI left the boundary, when, to whom, via which action).
 - **Caching Strategy:** Consent-status cache in Redis (keyed patient+scope+counterparty), invalidated on grant/revoke; revocation is immediately effective.
-- **Data Isolation Rule:** Private `consent` schema; no module reads consent tables directly — they call `check_consent()`. `MOD-003` and `MOD-005` MUST pass a live consent before any share/egress (`NFR-SEC-006`).
+- **Data Isolation Rule:** Private `consent` schema; no module reads consent tables directly - they call `check_consent()`. `MOD-003` and `MOD-005` MUST pass a live consent before any share/egress (`NFR-SEC-006`).
 
 #### 2. Inbound & Outbound Interfaces
 
@@ -301,7 +301,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 
 #### 1. Data Ownership & Storage Isolation
 
-- **Storage Type:** Relational — PostgreSQL schema `intake`: `intakes` (mode voice|text, language, status), `pre_summaries` (structured fields, confidence, review state), `ai_jobs` (provider, tokens, ₹cost, status), `media_refs`; audio/photos in object storage under `intake/` and `rx_input/` prefixes.
+- **Storage Type:** Relational - PostgreSQL schema `intake`: `intakes` (mode voice|text, language, status), `pre_summaries` (structured fields, confidence, review state), `ai_jobs` (provider, tokens, ₹cost, status), `media_refs`; audio/photos in object storage under `intake/` and `rx_input/` prefixes.
 - **Caching Strategy:** Pre-summaries cached for doctor view; AI cost meter counters in Redis (persisted to `ai_jobs`).
 - **Data Isolation Rule:** Private `intake` schema; other modules read pre-summaries only via the facade.
 
@@ -313,8 +313,8 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 
 #### 3. Core Business Logic & State Machines
 
-- **Intake machine:** `[Captured] → [Structuring] → [Ready for Review] | [Re-record]` (poor/too-short audio prompts re-record, never silent proceed — `FEAT-006`, `NFR-PERF-002`).
-- **Pre-summary machine:** `[Draft] → [Reviewed] → [Final]`; low confidence (< threshold, `AMB-006`) forces `[Review required]` — flagged "low confidence — verify" and never presented as verified (`FEAT-007`).
+- **Intake machine:** `[Captured] → [Structuring] → [Ready for Review] | [Re-record]` (poor/too-short audio prompts re-record, never silent proceed - `FEAT-006`, `NFR-PERF-002`).
+- **Pre-summary machine:** `[Draft] → [Reviewed] → [Final]`; low confidence (< threshold, `AMB-006`) forces `[Review required]` - flagged "low confidence - verify" and never presented as verified (`FEAT-007`).
 - **LLM degradation:** ≤ 30 s timeout, 3 retries with backoff; on timeout/failure/low confidence → degrade to forced doctor review; external failure never blocks the care loop (`NFR-PERF-003`).
 
 #### 4. High-Level Tech Stack & Framework Constraints
@@ -322,7 +322,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 - **Language/Runtime:** Python 3.11+ (asyncio).
 - **Framework:** FastAPI + Pydantic v2; `httpx` for LLM calls.
 - **Persistence Layer:** PostgreSQL (`intake` schema); object storage for media.
-- **Constraint:** `EXT-002` freemium tier; hard token/₹ budget meter enforced (`NFR-001`, `NFR-COST-001`); egress carries only intake/prescription context — never the full record (`NFR-SEC-006`).
+- **Constraint:** `EXT-002` freemium tier; hard token/₹ budget meter enforced (`NFR-001`, `NFR-COST-001`); egress carries only intake/prescription context - never the full record (`NFR-SEC-006`).
 
 #### 5. Module NFR Allocation
 
@@ -340,7 +340,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 
 #### 1. Data Ownership & Storage Isolation
 
-- **Storage Type:** Relational — PostgreSQL schema `care`: `cases` (patient, doctor, stage), `prescriptions` (status, issued_at, attributed_doctor), `rx_items` (name, dose, duration), `rx_approvals` (doctor_id, edited_yn, decision, reason), `doctor_inputs` (voice_note/photo refs); doctor input media in object storage.
+- **Storage Type:** Relational - PostgreSQL schema `care`: `cases` (patient, doctor, stage), `prescriptions` (status, issued_at, attributed_doctor), `rx_items` (name, dose, duration), `rx_approvals` (doctor_id, edited_yn, decision, reason), `doctor_inputs` (voice_note/photo refs); doctor input media in object storage.
 - **Caching Strategy:** Doctor's pending-cases list cached in Redis; prescription (post-approval) cached for fulfilment read.
 - **Data Isolation Rule:** Private `care` schema; `MOD-008` reads approved prescriptions via the facade.
 
@@ -373,12 +373,12 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 ### 3.7 Module: `MOD-007` Diagnostics & Lab Reports
 
 - **Module ID:** `MOD-007`
-- **Primary Scope:** Diagnostics booking (home pickup / partner lab / direct fallback), sample pickup orchestration, lab report upload, **order-ID + patient matching before filing** (wrong-upload protection, `RISK-002`), and filing into the patient's record. Filing only — no baseline parsing (`REQ-026` deferred).
+- **Primary Scope:** Diagnostics booking (home pickup / partner lab / direct fallback), sample pickup orchestration, lab report upload, **order-ID + patient matching before filing** (wrong-upload protection, `RISK-002`), and filing into the patient's record. Filing only - no baseline parsing (`REQ-026` deferred).
 - **Traceability Link:** `FEAT-010`, `FEAT-011`, `ACT-001`, `ACT-003`, `NFR-SEC-004`, `RISK-002`, `GAP-004`/`GAP-008`
 
 #### 1. Data Ownership & Storage Isolation
 
-- **Storage Type:** Relational — PostgreSQL schema `diagnostics`: `diagnostic_orders` (patient, lab, mode, state), `sample_pickups`, `lab_reports` (status, matched, filed), `report_uploads` (uploader_type lab|patient, checksums), `upload_matches` (match_method); report files in object storage under `reports/` (scan before filing).
+- **Storage Type:** Relational - PostgreSQL schema `diagnostics`: `diagnostic_orders` (patient, lab, mode, state), `sample_pickups`, `lab_reports` (status, matched, filed), `report_uploads` (uploader_type lab|patient, checksums), `upload_matches` (match_method); report files in object storage under `reports/` (scan before filing).
 - **Caching Strategy:** Pending-order lists for labs; report status cached.
 - **Data Isolation Rule:** Private `diagnostics` schema; filed reports are handed to `MOD-003` via event, never written into `health` directly by `MOD-007`.
 
@@ -391,7 +391,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 #### 3. Core Business Logic & State Machines
 
 - **Order machine:** `[Order: Booked] → [Order: Sample Collected] → [Order: Result Pending] → [Order: Result Filed]`; `[Booked] → [Cancelled]` (via `MOD-009`).
-- **Report machine:** `[Report: Uploaded] → [Report: Matched] → [Report: Filed]` | `[Report: Rejected]` — matching = order-ID binding + patient confirmation (baseline `GAP-004`/`GAP-008`); a mismatch is rejected visibly and never filed (`FEAT-011`, `RISK-002`).
+- **Report machine:** `[Report: Uploaded] → [Report: Matched] → [Report: Filed]` | `[Report: Rejected]` - matching = order-ID binding + patient confirmation (baseline `GAP-004`/`GAP-008`); a mismatch is rejected visibly and never filed (`FEAT-011`, `RISK-002`).
 
 #### 4. High-Level Tech Stack & Framework Constraints
 
@@ -416,7 +416,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 
 #### 1. Data Ownership & Storage Isolation
 
-- **Storage Type:** Relational — PostgreSQL schema `fulfillment`: `fulfillment_orders` (rx_id, chemist_id, route_basis, state), `fulfillment_events` (preparing/out_for_delivery/delivered), `out_of_stock_items` (item_ids), `patient_choices` (partial|cancel, off_platform|platform retry).
+- **Storage Type:** Relational - PostgreSQL schema `fulfillment`: `fulfillment_orders` (rx_id, chemist_id, route_basis, state), `fulfillment_events` (preparing/out_for_delivery/delivered), `out_of_stock_items` (item_ids), `patient_choices` (partial|cancel, off_platform|platform retry).
 - **Caching Strategy:** Fulfilment status cache for patient/chemist status views.
 - **Data Isolation Rule:** Private `fulfillment` schema; reads the approved prescription only via `MOD-006` facade.
 
@@ -448,12 +448,12 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 ### 3.9 Module: `MOD-009` Settlement & Payments
 
 - **Module ID:** `MOD-009`
-- **Primary Scope:** Recording settlement outcomes (cash/UPI direct — the primary path), the **platform-facilitated UPI exception** for fraud-risk cases (both parties opt-in + risk signal, baseline `AMB-004`/`CFL-001`), cancellation policy display & records, partner-direct refund records, and UPI webhook verification with idempotency. **Platform holds no funds and processes no refunds** (`REQ-036`).
+- **Primary Scope:** Recording settlement outcomes (cash/UPI direct - the primary path), the **platform-facilitated UPI exception** for fraud-risk cases (both parties opt-in + risk signal, baseline `AMB-004`/`CFL-001`), cancellation policy display & records, partner-direct refund records, and UPI webhook verification with idempotency. **Platform holds no funds and processes no refunds** (`REQ-036`).
 - **Traceability Link:** `FEAT-016`, `FEAT-017`, `ACT-001`, `ACT-003`, `ACT-004`, `EXT-004`, `NFR-SEC-005`, `RISK-001`
 
 #### 1. Data Ownership & Storage Isolation
 
-- **Storage Type:** Relational — PostgreSQL schema `settlement`: `settlements` (order_ref, type cash|upi|platform_facilitated, amount_paise, status), `payment_intents` (idempotency_key, payment_ref, upi status), `webhook_events` (HMAC-verified, dedupe on payment_ref), `cancellations` (cancelled_by), `refund_records` (partner-direct), `cancellation_policies` (per partner/service).
+- **Storage Type:** Relational - PostgreSQL schema `settlement`: `settlements` (order_ref, type cash|upi|platform_facilitated, amount_paise, status), `payment_intents` (idempotency_key, payment_ref, upi status), `webhook_events` (HMAC-verified, dedupe on payment_ref), `cancellations` (cancelled_by), `refund_records` (partner-direct), `cancellation_policies` (per partner/service).
 - **Caching Strategy:** Cancellation policies cached (display at booking); settlement status cached.
 - **Data Isolation Rule:** Private `settlement` schema; order context fetched from `MOD-006`/`MOD-007` facades.
 
@@ -466,7 +466,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 #### 3. Core Business Logic & State Machines
 
 - **Settlement machine:** `[Settlement: Direct] | [Settlement: Platform-Facilitated] → [Settlement: Completed]`; facilitated path requires opt-in + risk signal (`FEAT-016` Scenario 2).
-- **Payment-intent machine:** `[Initiated] → [Success] | [Failed] → [Reconciled]` (webhook + polling); idempotency key per order — no double charge; on gateway unavailability → fall back to direct cash/UPI with a risk note (`PRD §5.2`).
+- **Payment-intent machine:** `[Initiated] → [Success] | [Failed] → [Reconciled]` (webhook + polling); idempotency key per order - no double charge; on gateway unavailability → fall back to direct cash/UPI with a risk note (`PRD §5.2`).
 - **Cancellation machine:** `[Order: Active] → [Order: Cancelled] → [Refund: Partner-Direct]`; policy shown before booking (`FEAT-017`).
 
 #### 4. High-Level Tech Stack & Framework Constraints
@@ -487,19 +487,19 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 ### 3.10 Module: `MOD-010` Notifications
 
 - **Module ID:** `MOD-010`
-- **Primary Scope:** WhatsApp template notifications (**notifications only** — no interaction/transaction there, `REQ-035`): dosage reminders, 30/90-day re-test nudges, in-app notification inbox, language per patient (`REQ-006`), scheduling, delivery callbacks (signed webhook), and failure retry.
+- **Primary Scope:** WhatsApp template notifications (**notifications only** - no interaction/transaction there, `REQ-035`): dosage reminders, 30/90-day re-test nudges, in-app notification inbox, language per patient (`REQ-006`), scheduling, delivery callbacks (signed webhook), and failure retry.
 - **Traceability Link:** `FEAT-019`, `FEAT-018`(nudges), `ACT-001`, `EXT-003`, `NFR-SEC-005`, `REQ-035`
 
 #### 1. Data Ownership & Storage Isolation
 
-- **Storage Type:** Relational — PostgreSQL schema `notify`: `notifications` (type dosage|retest_30|retest_90|in_app, channel wa|inapp, status), `notification_schedules` (due timestamps), `delivery_logs` (message_id, status, error_code).
+- **Storage Type:** Relational - PostgreSQL schema `notify`: `notifications` (type dosage|retest_30|retest_90|in_app, channel wa|inapp, status), `notification_schedules` (due timestamps), `delivery_logs` (message_id, status, error_code).
 - **Caching Strategy:** Template/language config cached; patient contact cache.
 - **Data Isolation Rule:** Private `notify` schema; patient contact (phone + language) fetched via `MOD-001` facade.
 
 #### 2. Inbound & Outbound Interfaces
 
 - **Inbound Sync APIs:** `schedule_notification(patient, type, due)`, `send_now(patient, type, params)`, `list_inbox(patient)`, `mark_read(notification)`.
-- **Inbound Events Subscribed / Webhooks:** `EXT-003` delivery-status callback (signature-verified; delivery-status only — must never trigger clinical/transactional workflows, `REQ-035`); `prescription.approved` (dosage schedule), `follow_up.due`, `out_of_stock.notified`, `delivery.failure`, `order.delivered`, `case.consult_complete`.
+- **Inbound Events Subscribed / Webhooks:** `EXT-003` delivery-status callback (signature-verified; delivery-status only - must never trigger clinical/transactional workflows, `REQ-035`); `prescription.approved` (dosage schedule), `follow_up.due`, `out_of_stock.notified`, `delivery.failure`, `order.delivered`, `case.consult_complete`.
 - **Outbound Events Published:** `notification.sent`, `notification.delivered`, `notification.failed`.
 
 #### 3. Core Business Logic & State Machines
@@ -530,20 +530,20 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 
 #### 1. Data Ownership & Storage Isolation
 
-- **Storage Type:** Relational — PostgreSQL schema `audit`: `audit_events` (event_type, actor_id, target_id, scope, timestamp, prev_hash, hash) — **append-only** (DB-level revoke of UPDATE/DELETE + hash-chain verification); `tamper_attempts`.
+- **Storage Type:** Relational - PostgreSQL schema `audit`: `audit_events` (event_type, actor_id, target_id, scope, timestamp, prev_hash, hash) - **append-only** (DB-level revoke of UPDATE/DELETE + hash-chain verification); `tamper_attempts`.
 - **Caching Strategy:** None (write-only hot path; read via queries).
-- **Data Isolation Rule:** Private `audit` schema; modules NEVER write into `audit` tables directly — they publish `audit.event` to the outbox, `MOD-011` consumes and appends.
+- **Data Isolation Rule:** Private `audit` schema; modules NEVER write into `audit` tables directly - they publish `audit.event` to the outbox, `MOD-011` consumes and appends.
 
 #### 2. Inbound & Outbound Interfaces
 
 - **Inbound Sync APIs:** `query_audit(actor, filters, page)` (operator, RBAC all-records), `get_access_history(patient_id)` (patient, own record).
-- **Inbound Events Subscribed:** `audit.event` from every module (via outbox) — covers consent lifecycle, record access, prescription issuance/rejection, report filing/rejection, settlement, notifications, partner decisions, auth failures.
+- **Inbound Events Subscribed:** `audit.event` from every module (via outbox) - covers consent lifecycle, record access, prescription issuance/rejection, report filing/rejection, settlement, notifications, partner decisions, auth failures.
 - **Outbound Events Published:** `audit.tamper_detected` (alerting/telemetry).
 
 #### 3. Core Business Logic & State Machines
 
 - **Log rule:** append-only; any attempt to modify/delete an existing record is rejected and the attempt itself recorded as a tamper event (`FEAT-020` Scenario 2).
-- **Retention:** per compliance decision — open `GAP-011` (baseline: retained; expiry carried forward).
+- **Retention:** per compliance decision - open `GAP-011` (baseline: retained; expiry carried forward).
 
 #### 4. High-Level Tech Stack & Framework Constraints
 
@@ -569,17 +569,17 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 | :------------------------- | :------------------------------ | :----------------------------- | :---------------------------------------- | :-------------------------------------------------------------------- | :---------------------------- |
 | API Gateway / Edge         | `MOD-001` (IAM)                 | Internal HTTP / in-process     | JWT claims + scope                        | Token validation & RBAC scope resolution on every request             | `NFR-SEC-002/003`, `FEAT-001` |
 | `MOD-003` (LHR)            | `MOD-004` (Consent)             | Internal API                   | ConsentRequest                            | `check_consent(patient, scope, counterparty)` before any record share | `FEAT-002`, `NFR-SEC-006`     |
-| `MOD-006` (Care)           | `MOD-005` (Intake)              | Internal API                   | PreSummary DTO                            | `get_finalized_pre_summary` — gate handshake on reviewed summary      | `FEAT-008`                    |
+| `MOD-006` (Care)           | `MOD-005` (Intake)              | Internal API                   | PreSummary DTO                            | `get_finalized_pre_summary` - gate handshake on reviewed summary      | `FEAT-008`                    |
 | `MOD-006` (Care)           | `MOD-003` (LHR)                 | Internal API                   | RecordEntry[]                             | `read_consented_history` for rx drafting context (consent-gated)      | `FEAT-009`                    |
 | `MOD-006` (Care)           | `MOD-001` (IAM)                 | Internal API                   | Actor DTO                                 | Resolve doctor identity & verify active partner role                  | `FEAT-009`, `NFR-SEC-003`     |
-| `MOD-008` (Fulfillment)    | `MOD-006` (Care)                | Internal API                   | RxDTO (items, patient)                    | `get_approved_prescription` — routing source of truth                 | `FEAT-012`                    |
+| `MOD-008` (Fulfillment)    | `MOD-006` (Care)                | Internal API                   | RxDTO (items, patient)                    | `get_approved_prescription` - routing source of truth                 | `FEAT-012`                    |
 | `MOD-008` (Fulfillment)    | `MOD-001` (IAM)                 | Internal API                   | Actor DTO                                 | Resolve chemist identity & verify active role                         | `FEAT-012`, `NFR-SEC-003`     |
 | `MOD-007` (Diagnostics)    | `MOD-001` (IAM)                 | Internal API                   | Actor DTO                                 | Resolve lab identity & verify active role                             | `FEAT-010`, `NFR-SEC-003`     |
 | `MOD-007` (Diagnostics)    | `MOD-003` (LHR)                 | Internal API                   | PatientDTO                                | Resolve consented patient for order→patient binding                   | `FEAT-011`                    |
 | `MOD-009` (Settlement)     | `MOD-006`/`MOD-007` (Care/Diag) | Internal API                   | OrderDTO                                  | `get_order_context(order_ref)` for settlement amount/reference        | `FEAT-016`                    |
-| `MOD-010` (Notify)         | `MOD-001` (IAM)                 | Internal API                   | ContactDTO                                | `resolve_contact` — phone + language for template send                | `FEAT-019`                    |
-| `MOD-010` (Notify)         | `MOD-006` (Care)                | Internal API                   | RxScheduleDTO                             | `get_rx_schedule` — dosage reminder scheduling                        | `FEAT-019`                    |
-| `MOD-010` (Notify)         | `MOD-003` (LHR)                 | Internal API                   | FollowUpPlanDTO                           | `get_follow_up_plan` — re-test nudge scheduling                       | `FEAT-018`                    |
+| `MOD-010` (Notify)         | `MOD-001` (IAM)                 | Internal API                   | ContactDTO                                | `resolve_contact` - phone + language for template send                | `FEAT-019`                    |
+| `MOD-010` (Notify)         | `MOD-006` (Care)                | Internal API                   | RxScheduleDTO                             | `get_rx_schedule` - dosage reminder scheduling                        | `FEAT-019`                    |
+| `MOD-010` (Notify)         | `MOD-003` (LHR)                 | Internal API                   | FollowUpPlanDTO                           | `get_follow_up_plan` - re-test nudge scheduling                       | `FEAT-018`                    |
 | `MOD-005` (Intake)         | `MOD-001` (IAM)                 | Internal API                   | PatientDTO                                | Resolve patient identity for intake attribution                       | `FEAT-006`                    |
 | `MOD-002` (Partner)        | `MOD-001` (IAM)                 | Internal API                   | CredentialAccountDTO                      | `create_credential_account` / activate role on gated activation       | `FEAT-014/015`                |
 | Operator / Patient channel | `MOD-011` (Audit)               | Gateway → Internal API         | AuditQuery                                | `query_audit` (operator) / `get_access_history` (patient)             | `FEAT-003`, `FEAT-020`        |
@@ -642,37 +642,37 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 
 | PRD Feature ID                                    | External Integration / Actor ID (Mod 5) | Internal Module ID (Mod 6)                 | Database / Storage Entity                                                      | Status                        |
 | :------------------------------------------------ | :-------------------------------------- | :----------------------------------------- | :----------------------------------------------------------------------------- | :---------------------------- |
-| `FEAT-001` (registration & identity)              | `ACT-001`, `EXT-001` (SMS/OTP)          | `MOD-001` (IAM)                            | `iam` — identities, otp_challenges, sessions                                   | Aligned                       |
-| `FEAT-002` (consent lifecycle)                    | `ACT-001`                               | `MOD-004` (Consent)                        | `consent` — consents, consent_events, egress_log                               | Aligned                       |
-| `FEAT-002` (longitudinal record)                  | `ACT-001`                               | `MOD-003` (LHR)                            | `health` — patient_records, record_entries                                     | Aligned                       |
-| `FEAT-003` (own record & access view)             | `ACT-001`, `ACT-005`                    | `MOD-003` (LHR) + `MOD-011` (Audit)        | `health` — record_access_history; `audit` — audit_events                       | Aligned                       |
-| `FEAT-004` (directory & search)                   | `ACT-001`                               | `MOD-002` (Partner/Directory)              | `partner` — directory_index                                                    | Aligned                       |
-| `FEAT-005` (profiles & credentials)               | `ACT-001`, `ACT-002/003/004`            | `MOD-002` (Partner/Directory)              | `partner` — partner_profiles, partner_credentials                              | Aligned                       |
-| `FEAT-006` (symptom intake)                       | `ACT-001`                               | `MOD-005` (Intake & AI)                    | `intake` — intakes, media_refs                                                 | Aligned                       |
-| `FEAT-007` (AI pre-summary)                       | `ACT-001`, `EXT-002` (LLM)              | `MOD-005` (Intake & AI)                    | `intake` — pre_summaries, ai_jobs                                              | Aligned                       |
-| `FEAT-008` (consult handshake)                    | `ACT-002`                               | `MOD-006` (Care & Rx)                      | `care` — cases                                                                 | Aligned                       |
-| `FEAT-009` (e-prescription)                       | `ACT-002`, `EXT-002` (LLM draft)        | `MOD-006` (Care & Rx) + `MOD-005` (draft)  | `care` — prescriptions, rx_items, rx_approvals                                 | Aligned                       |
-| `FEAT-010` (diagnostics booking)                  | `ACT-001`, `ACT-003`                    | `MOD-007` (Diagnostics)                    | `diagnostics` — diagnostic_orders, sample_pickups                              | Aligned                       |
-| `FEAT-011` (report filing & match)                | `ACT-001`, `ACT-003`                    | `MOD-007` (Diagnostics)                    | `diagnostics` — lab_reports, report_uploads, upload_matches                    | Aligned                       |
-| `FEAT-012` (fulfilment routing)                   | `ACT-004`                               | `MOD-008` (Fulfillment)                    | `fulfillment` — fulfillment_orders, fulfillment_events                         | Aligned                       |
-| `FEAT-013` (out-of-stock / delivery failure)      | `ACT-001`, `ACT-004`                    | `MOD-008` (Fulfillment)                    | `fulfillment` — out_of_stock_items, patient_choices                            | Aligned                       |
-| `FEAT-014` (open registration & gated activation) | `ACT-002/003/004`                       | `MOD-002` (Partner) + `MOD-001` (accounts) | `partner` — partner_verifications; `iam` — role_grants                         | Aligned                       |
-| `FEAT-015` (operator console)                     | `ACT-005`                               | `MOD-002` (Partner) + `MOD-011` (Audit)    | `partner` — partner_verifications; `audit` — audit_events                      | Aligned                       |
-| `FEAT-016` (settlement & payments)                | `ACT-001/003/004`, `EXT-004` (UPI GW)   | `MOD-009` (Settlement) + `MOD-011` (Audit) | `settlement` — settlements, payment_intents, webhook_events                    | Aligned                       |
-| `FEAT-017` (cancellations & refunds)              | `ACT-001`                               | `MOD-009` (Settlement)                     | `settlement` — cancellations, refund_records, cancellation_policies            | Aligned                       |
-| `FEAT-018` (chronic metric logging & follow-ups)  | `ACT-001`                               | `MOD-003` (LHR) + `MOD-010` (Notify)       | `health` — chronic_metrics, follow_up_plans; `notify` — notification_schedules | Aligned                       |
-| `FEAT-019` (WhatsApp notifications)               | `ACT-001`, `EXT-003` (WhatsApp)         | `MOD-010` (Notify)                         | `notify` — notifications, delivery_logs                                        | Aligned                       |
-| `FEAT-020` (audit trail & consent lifecycle)      | `ACT-005`                               | `MOD-011` (Audit) + `MOD-004` (Consent)    | `audit` — audit_events, tamper_attempts; `consent` — consent_events            | Aligned                       |
-| `NFR-001` (cost floor)                            | all `EXT-001..004`                      | all modules (budget meters)                | `intake` — ai_jobs; cost telemetry                                             | Aligned                       |
+| `FEAT-001` (registration & identity)              | `ACT-001`, `EXT-001` (SMS/OTP)          | `MOD-001` (IAM)                            | `iam` - identities, otp_challenges, sessions                                   | Aligned                       |
+| `FEAT-002` (consent lifecycle)                    | `ACT-001`                               | `MOD-004` (Consent)                        | `consent` - consents, consent_events, egress_log                               | Aligned                       |
+| `FEAT-002` (longitudinal record)                  | `ACT-001`                               | `MOD-003` (LHR)                            | `health` - patient_records, record_entries                                     | Aligned                       |
+| `FEAT-003` (own record & access view)             | `ACT-001`, `ACT-005`                    | `MOD-003` (LHR) + `MOD-011` (Audit)        | `health` - record_access_history; `audit` - audit_events                       | Aligned                       |
+| `FEAT-004` (directory & search)                   | `ACT-001`                               | `MOD-002` (Partner/Directory)              | `partner` - directory_index                                                    | Aligned                       |
+| `FEAT-005` (profiles & credentials)               | `ACT-001`, `ACT-002/003/004`            | `MOD-002` (Partner/Directory)              | `partner` - partner_profiles, partner_credentials                              | Aligned                       |
+| `FEAT-006` (symptom intake)                       | `ACT-001`                               | `MOD-005` (Intake & AI)                    | `intake` - intakes, media_refs                                                 | Aligned                       |
+| `FEAT-007` (AI pre-summary)                       | `ACT-001`, `EXT-002` (LLM)              | `MOD-005` (Intake & AI)                    | `intake` - pre_summaries, ai_jobs                                              | Aligned                       |
+| `FEAT-008` (consult handshake)                    | `ACT-002`                               | `MOD-006` (Care & Rx)                      | `care` - cases                                                                 | Aligned                       |
+| `FEAT-009` (e-prescription)                       | `ACT-002`, `EXT-002` (LLM draft)        | `MOD-006` (Care & Rx) + `MOD-005` (draft)  | `care` - prescriptions, rx_items, rx_approvals                                 | Aligned                       |
+| `FEAT-010` (diagnostics booking)                  | `ACT-001`, `ACT-003`                    | `MOD-007` (Diagnostics)                    | `diagnostics` - diagnostic_orders, sample_pickups                              | Aligned                       |
+| `FEAT-011` (report filing & match)                | `ACT-001`, `ACT-003`                    | `MOD-007` (Diagnostics)                    | `diagnostics` - lab_reports, report_uploads, upload_matches                    | Aligned                       |
+| `FEAT-012` (fulfilment routing)                   | `ACT-004`                               | `MOD-008` (Fulfillment)                    | `fulfillment` - fulfillment_orders, fulfillment_events                         | Aligned                       |
+| `FEAT-013` (out-of-stock / delivery failure)      | `ACT-001`, `ACT-004`                    | `MOD-008` (Fulfillment)                    | `fulfillment` - out_of_stock_items, patient_choices                            | Aligned                       |
+| `FEAT-014` (open registration & gated activation) | `ACT-002/003/004`                       | `MOD-002` (Partner) + `MOD-001` (accounts) | `partner` - partner_verifications; `iam` - role_grants                         | Aligned                       |
+| `FEAT-015` (operator console)                     | `ACT-005`                               | `MOD-002` (Partner) + `MOD-011` (Audit)    | `partner` - partner_verifications; `audit` - audit_events                      | Aligned                       |
+| `FEAT-016` (settlement & payments)                | `ACT-001/003/004`, `EXT-004` (UPI GW)   | `MOD-009` (Settlement) + `MOD-011` (Audit) | `settlement` - settlements, payment_intents, webhook_events                    | Aligned                       |
+| `FEAT-017` (cancellations & refunds)              | `ACT-001`                               | `MOD-009` (Settlement)                     | `settlement` - cancellations, refund_records, cancellation_policies            | Aligned                       |
+| `FEAT-018` (chronic metric logging & follow-ups)  | `ACT-001`                               | `MOD-003` (LHR) + `MOD-010` (Notify)       | `health` - chronic_metrics, follow_up_plans; `notify` - notification_schedules | Aligned                       |
+| `FEAT-019` (WhatsApp notifications)               | `ACT-001`, `EXT-003` (WhatsApp)         | `MOD-010` (Notify)                         | `notify` - notifications, delivery_logs                                        | Aligned                       |
+| `FEAT-020` (audit trail & consent lifecycle)      | `ACT-005`                               | `MOD-011` (Audit) + `MOD-004` (Consent)    | `audit` - audit_events, tamper_attempts; `consent` - consent_events            | Aligned                       |
+| `NFR-001` (cost floor)                            | all `EXT-001..004`                      | all modules (budget meters)                | `intake` - ai_jobs; cost telemetry                                             | Aligned                       |
 | `NFR-002` (security & privacy)                    | `ACT-001..005`                          | `MOD-001`, `MOD-003`, `MOD-004`, `MOD-011` | `iam`, `health`, `consent`, `audit`                                            | Aligned                       |
-| `NFR-003` (performance)                           | —                                       | Gateway + all modules (latency budgets)    | —                                                                              | Aligned                       |
-| `NFR-004` (availability & durability)             | —                                       | `MOD-003` + shared infra (backups)         | `health` + all schemas (RPO ≤ 24 h)                                            | Aligned                       |
-| `NFR-D01` (auditability)                          | —                                       | `MOD-011` (Audit)                          | `audit`                                                                        | Aligned                       |
-| `NFR-D02` (data governance)                       | —                                       | `MOD-004` (Consent) + `MOD-011` (Audit)    | `consent`, `audit`                                                             | Aligned                       |
-| `REQ-026` (lab baseline parsing)                  | —                                       | — (deferred; `FEAT-011` is filing-only)    | —                                                                              | Carried forward / Not claimed |
-| `REQ-038` (ABHA)                                  | —                                       | — (`[FUTURE]`)                             | —                                                                              | Out of scope / Not claimed    |
-| `REQ-039` (monetization)                          | —                                       | — (`[FUTURE]`)                             | —                                                                              | Out of scope / Not claimed    |
-| `REQ-040` (native / WhatsApp-first channels)      | —                                       | — (`[FUTURE]`)                             | —                                                                              | Out of scope / Not claimed    |
+| `NFR-003` (performance)                           | -                                       | Gateway + all modules (latency budgets)    | -                                                                              | Aligned                       |
+| `NFR-004` (availability & durability)             | -                                       | `MOD-003` + shared infra (backups)         | `health` + all schemas (RPO ≤ 24 h)                                            | Aligned                       |
+| `NFR-D01` (auditability)                          | -                                       | `MOD-011` (Audit)                          | `audit`                                                                        | Aligned                       |
+| `NFR-D02` (data governance)                       | -                                       | `MOD-004` (Consent) + `MOD-011` (Audit)    | `consent`, `audit`                                                             | Aligned                       |
+| `REQ-026` (lab baseline parsing)                  | -                                       | - (deferred; `FEAT-011` is filing-only)    | -                                                                              | Carried forward / Not claimed |
+| `REQ-038` (ABHA)                                  | -                                       | - (`[FUTURE]`)                             | -                                                                              | Out of scope / Not claimed    |
+| `REQ-039` (monetization)                          | -                                       | - (`[FUTURE]`)                             | -                                                                              | Out of scope / Not claimed    |
+| `REQ-040` (native / WhatsApp-first channels)      | -                                       | - (`[FUTURE]`)                             | -                                                                              | Out of scope / Not claimed    |
 
 ---
 
@@ -683,7 +683,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 - [x] **Every `ACT-001`–`ACT-005` connects** through a channel → gateway → module with RBAC scope (`NFR-SEC-003`).
 - [x] **Every module spec block complete** (5-point block, §3.1–§3.11).
 - [x] **End-to-end matrix 1:1** features → integrations → modules → storage (§5).
-- [x] **No cross-module direct DB access** — all inter-module flow is facade API (sync) or outbox events (async); DB-per-module schema isolation (§1, §3).
+- [x] **No cross-module direct DB access** - all inter-module flow is facade API (sync) or outbox events (async); DB-per-module schema isolation (§1, §3).
 
 ---
 

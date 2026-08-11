@@ -1,9 +1,9 @@
-"""Phase 0 harness — transcription metric tests (issue #4).
+"""Phase 0 harness - transcription metric tests (issue #4).
 
 Covers the transcription leg of the acceptance bar: WER/CER via jiwer
 (the standard metric library), Devanagari-aware text normalization, and
 the median / p90 aggregation the bar is judged on. Deterministic by
-construction — hand-computed expectations, no providers, no network.
+construction - hand-computed expectations, no providers, no network.
 """
 
 import statistics

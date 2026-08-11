@@ -1,7 +1,7 @@
 """Phase 0 Gemini provider tests (issue #4).
 
 Tests the Gemini adapter's pure request-building, response-parsing, and cost
-computation — deterministic, no network. The live end-to-end path is covered
+computation - deterministic, no network. The live end-to-end path is covered
 by the CLI run (gated on GEMINI_API_KEY), not by CI.
 """
 

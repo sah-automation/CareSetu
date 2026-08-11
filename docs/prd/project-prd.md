@@ -1,4 +1,4 @@
-# Product Requirement Document (PRD) — CareSetu
+# Product Requirement Document (PRD) - CareSetu
 
 **Product Name:** CareSetu
 **Document Version:** 1.0 (Baseline)
@@ -15,18 +15,18 @@
 ### 1.1 Problem Statement
 
 - Patients in Tier 3/4 Indian cities face a fragmented, hyper-local care journey: symptom onset → finding a doctor → booking a lab → getting a prescription → buying medicine. Each step is a separate, offline, trust-dependent interaction with no shared record and no continuity. Existing aggregators are transactional "booking directories" and do not serve the chronic-care segment (BP/sugar management) that dominates this demographic.
-- CareSetu connects patients, doctors, local diagnostic labs, and retail chemists as a **zero-inventory aggregator** that digitizes the complete care loop — symptom intake → consultation → diagnostics → e-prescription → hyper-local delivery — with a continuous, AI-assisted chronic care loop as its differentiator.
+- CareSetu connects patients, doctors, local diagnostic labs, and retail chemists as a **zero-inventory aggregator** that digitizes the complete care loop - symptom intake → consultation → diagnostics → e-prescription → hyper-local delivery - with a continuous, AI-assisted chronic care loop as its differentiator.
 - **Scope note:** $0 monetization initially (portfolio / open-architecture project); the product's requirements cover the full product, not an MVP cut.
 
 ### 1.2 Vision & Business Objectives
 
-- **Vision:** Become the continuous care platform for Tier 3/4 India — the patient's single trusted entry point for the whole care loop, anchored by a lifelong longitudinal health record.
+- **Vision:** Become the continuous care platform for Tier 3/4 India - the patient's single trusted entry point for the whole care loop, anchored by a lifelong longitudinal health record.
 - **Business objectives (all traced):**
   1. Prove the full care loop end-to-end in one beachhead city (Daltonganj, Jharkhand) before replicating (`REQ-002`, `REQ-008`).
-  2. Maintain a pure-facilitator compliance posture — regulated acts stay with licensed partners (`REQ-005`).
+  2. Maintain a pure-facilitator compliance posture - regulated acts stay with licensed partners (`REQ-005`).
   3. Build the chronic-care loop as the durable differentiator, not the booking directory (`REQ-015`).
   4. Operate at near-zero developer and operational hosting cost (`NFR-001`).
-  5. Geographic expansion beyond Daltonganj is **undecided** (`ISSUE-004`) — see Section 7.
+  5. Geographic expansion beyond Daltonganj is **undecided** (`ISSUE-004`) - see Section 7.
 
 ### 1.3 Key Performance Indicators (KPIs) & Success Metrics
 
@@ -39,7 +39,7 @@
 | **[KPI-003]** Lab report mis-attachment rate                                                                         | 0                  | 0 (every upload matched to correct patient + order) | Upload-match audit events        |
 | **[KPI-004]** Partner activation cycle time (registration → live)                                                    | N/A                | ≤ 48 hours median                                   | Operator-console timestamps      |
 | **[KPI-005]** Chronic-care weekly active loggers (patients logging ≥ 1 metric this week ÷ enrolled)                  | 0                  | ≥ 50%                                               | Metric-logging events            |
-| **[KPI-006]** Consent actions granted/revoked — 100% recorded per action                                             | 0                  | 100% of consent actions logged                      | Consent audit events             |
+| **[KPI-006]** Consent actions granted/revoked - 100% recorded per action                                             | 0                  | 100% of consent actions logged                      | Consent audit events             |
 | **[KPI-007]** Monthly operating + hosting cost (incl. AI/LLM spend)                                                  | N/A                | ≤ ₹2,000/month at launch scale                      | Billing telemetry                |
 | **[KPI-008]** Median loop completion time (intake → delivery)                                                        | N/A                | ≤ 7 days (proposed, off-platform consult dominates) | Stage timestamp deltas           |
 
@@ -62,23 +62,23 @@
 ### 3.1 In-Scope (Complete Product)
 
 - **EPIC-01:** Patient identity, longitudinal health record, per-action consent.
-- **EPIC-02:** Provider discovery — directory search and profiles with displayed credentials.
+- **EPIC-02:** Provider discovery - directory search and profiles with displayed credentials.
 - **EPIC-03:** Symptom intake (voice + text, English + Hindi) and AI clinical pre-summary.
 - **EPIC-04:** Consultation orchestration (off-platform consult handshake) and on-platform e-prescription (AI draft, doctor approval).
 - **EPIC-05:** Diagnostics booking, sample pickup, lab report filing with wrong-upload protection.
 - **EPIC-06:** Medicine fulfillment routing to partner chemists; out-of-stock and delivery-failure handling.
-- **EPIC-07:** Partner onboarding — open registration, gated activation, operator verification console.
+- **EPIC-07:** Partner onboarding - open registration, gated activation, operator verification console.
 - **EPIC-08:** Payments, settlement, cancellations, and partner-direct refunds.
-- **EPIC-09:** Chronic care loop — metric logging, follow-ups, WhatsApp notifications.
+- **EPIC-09:** Chronic care loop - metric logging, follow-ups, WhatsApp notifications.
 - **EPIC-10:** Compliance, audit trail, and consent lifecycle (DPDP baseline).
 - Cross-cutting: web-first channel (`REQ-003`), English + Hindi patient UI (`REQ-006`), best-effort availability with a durability floor (`NFR-004`).
 
 ### 3.2 Out-of-Scope / Deferred
 
-- **`REQ-026` — Lab-report baseline parsing** (deferred; launch = report filing only). Feature `FEAT-011` excludes parsing/flagging against baselines.
-- **`REQ-038` — ABHA integration** (post-launch future goal, `[Could Have]`, `[FUTURE]`).
-- **`REQ-039` — Future monetization** (commission / subscription / freemium; model deferred and unspecified).
-- **`REQ-040` — Non-web patient channels** (native app, WhatsApp-first; `[Could Have]`, `[FUTURE]`). WhatsApp is used for **notifications only** at launch (`REQ-035`).
+- **`REQ-026` - Lab-report baseline parsing** (deferred; launch = report filing only). Feature `FEAT-011` excludes parsing/flagging against baselines.
+- **`REQ-038` - ABHA integration** (post-launch future goal, `[Could Have]`, `[FUTURE]`).
+- **`REQ-039` - Future monetization** (commission / subscription / freemium; model deferred and unspecified).
+- **`REQ-040` - Non-web patient channels** (native app, WhatsApp-first; `[Could Have]`, `[FUTURE]`). WhatsApp is used for **notifications only** at launch (`REQ-035`).
 - No revenue/fee capture is in scope (`REQ-020`).
 
 ---
@@ -105,7 +105,7 @@ _Traceability: `REQ-021`, `REQ-003`, `NFR-002`, `GAP-001`, `GAP-005`, `GAP-013`,
   - **Given** I am a first-time patient on the web app
   - **When** I register with my phone number and verify it
   - **Then** a stable patient identity is created and I can access the platform
-- **Scenario 2: Edge Case — Duplicate / re-registration**
+- **Scenario 2: Edge Case - Duplicate / re-registration**
   - **Given** I already have an account and I attempt to register with the same phone number
   - **When** I submit registration
   - **Then** the system links me to my existing record instead of creating a duplicate, and I am prompted to authenticate
@@ -113,7 +113,7 @@ _Traceability: `REQ-021`, `REQ-003`, `NFR-002`, `GAP-001`, `GAP-005`, `GAP-013`,
 **Business Rules & State Transitions:**
 
 - **Rule 1:** One stable identity per phone number; re-registration resolves to the existing identity.
-- **Rule 2:** Identity verification method (OTP vs. stronger) is **open** — see `GAP-001` in Section 7.1. Baseline: phone OTP verification.
+- **Rule 2:** Identity verification method (OTP vs. stronger) is **open** - see `GAP-001` in Section 7.1. Baseline: phone OTP verification.
 - **State Change:** `[State: Unverified]` → `[State: Active]` → `[State: Suspended]`.
 
 **Telemetry & Event Tracking:**
@@ -134,11 +134,11 @@ _Traceability: `REQ-021`, `REQ-003`, `NFR-002`, `GAP-001`, `GAP-005`, `GAP-013`,
 
 **Acceptance Criteria (BDD / Gherkin):**
 
-- **Scenario 1: Happy Path — consent before sharing**
+- **Scenario 1: Happy Path - consent before sharing**
   - **Given** I have an active identity and a record with entries
   - **When** a doctor/lab/pharmacy requests access to a specific part of my record
   - **Then** I am asked to consent to that specific action before any data is shared, and the consent is recorded
-- **Scenario 2: Edge Case — consent revoked**
+- **Scenario 2: Edge Case - consent revoked**
   - **Given** I previously granted consent to a partner
   - **When** I revoke that consent
   - **Then** the system stops future sharing with that partner and records the revocation; previously shared data handling is per the retention rule (open under `GAP-005`/`GAP-013`)
@@ -146,7 +146,7 @@ _Traceability: `REQ-021`, `REQ-003`, `NFR-002`, `GAP-001`, `GAP-005`, `GAP-013`,
 **Business Rules & State Transitions:**
 
 - **Rule 1:** No record access or sharing without a recorded per-action consent.
-- **Rule 2:** Record deletion/retention/portability rules are **open** — see `GAP-005`/`GAP-013` in Section 7.1. Baseline: record retained for the life of the account; deletion requested via operator.
+- **Rule 2:** Record deletion/retention/portability rules are **open** - see `GAP-005`/`GAP-013` in Section 7.1. Baseline: record retained for the life of the account; deletion requested via operator.
 - **State Change:** `[Consent: Requested]` → `[Consent: Granted]` → `[Consent: Revoked]`.
 
 **Telemetry & Event Tracking:**
@@ -171,7 +171,7 @@ _Traceability: `REQ-021`, `REQ-003`, `NFR-002`, `GAP-001`, `GAP-005`, `GAP-013`,
   - **Given** I am authenticated as the record owner
   - **When** I open my record
   - **Then** I see all record entries and an access history listing actor, scope, and timestamp
-- **Scenario 2: Edge Case — another identity attempts access**
+- **Scenario 2: Edge Case - another identity attempts access**
   - **Given** an identity that is not the record owner requests the record
   - **When** the request is made
   - **Then** access is denied and the attempt is written to the audit log (`FEAT-020`)
@@ -207,7 +207,7 @@ _Traceability: `REQ-001`, `REQ-008`, `REQ-022`, `REQ-005`, `GAP-009`_
   - **Given** I am in Daltonganj or its peri-urban area
   - **When** I search for a GP near me
   - **Then** I see active GP profiles sorted by distance, each showing specialty and consultation type
-- **Scenario 2: Edge Case — no results**
+- **Scenario 2: Edge Case - no results**
   - **Given** no provider matches my filters in my area
   - **When** I search
   - **Then** I see an empty state with a clear "no providers found" message and adjacent providers across the wider area
@@ -239,7 +239,7 @@ _Traceability: `REQ-001`, `REQ-008`, `REQ-022`, `REQ-005`, `GAP-009`_
   - **Given** a provider has passed activation (`REQ-028`)
   - **When** I view their profile
   - **Then** I see their verified credentials (registration/license) and a "verified" indicator
-- **Scenario 2: Edge Case — credentials expired / revoked**
+- **Scenario 2: Edge Case - credentials expired / revoked**
   - **Given** a provider's credential is expired or revoked after activation
   - **When** the credential expiry is detected
   - **Then** the provider is deactivated from search and their verified indicator is removed
@@ -260,7 +260,7 @@ _Traceability: `REQ-001`, `REQ-008`, `REQ-022`, `REQ-005`, `GAP-009`_
 
 _Traceability: `REQ-006`, `REQ-007`, `REQ-004`, `NFR-003`, `AMB-006`, `RISK-EVAL-006`_
 
-#### Feature 4.3.1: Symptom Intake — Voice & Text
+#### Feature 4.3.1: Symptom Intake - Voice & Text
 
 - **Feature ID:** `FEAT-006`
 - **Traceability:** `REQ-006`, `REQ-007`, `NFR-003`
@@ -272,11 +272,11 @@ _Traceability: `REQ-006`, `REQ-007`, `REQ-004`, `NFR-003`, `AMB-006`, `RISK-EVAL
 
 **Acceptance Criteria (BDD / Gherkin):**
 
-- **Scenario 1: Happy Path — voice intake**
+- **Scenario 1: Happy Path - voice intake**
   - **Given** I am on the symptom intake screen
   - **When** I record a spoken description in Hindi
   - **Then** the description is captured and queued for structuring into the clinical pre-summary
-- **Scenario 2: Edge Case — audio too poor / too short to transcribe**
+- **Scenario 2: Edge Case - audio too poor / too short to transcribe**
   - **Given** my recording is below a minimum usable quality or length
   - **When** intake is attempted
   - **Then** I am asked to re-record or type, and the system does not silently proceed
@@ -309,15 +309,15 @@ _Traceability: `REQ-006`, `REQ-007`, `REQ-004`, `NFR-003`, `AMB-006`, `RISK-EVAL
   - **Given** I have captured a structured intake
   - **When** the AI processes it
   - **Then** a clinical pre-summary with structured fields is produced and marked for doctor review
-- **Scenario 2: Edge Case — low AI confidence**
+- **Scenario 2: Edge Case - low AI confidence**
   - **Given** the AI confidence for structuring is below the acceptance threshold
   - **When** the pre-summary is generated
-  - **Then** the item is flagged "low confidence — verify" and a doctor must review before it is treated as structured
+  - **Then** the item is flagged "low confidence - verify" and a doctor must review before it is treated as structured
 
 **Business Rules & State Transitions:**
 
 - **Rule 1:** The pre-summary is asynchronous and precedes the (off-platform) consult (`REQ-004`).
-- **Rule 2:** Extraction accuracy bar and low-confidence fallback are **open** — see `AMB-006` in Section 7.1. Baseline: flag below-confidence results; never present as verified.
+- **Rule 2:** Extraction accuracy bar and low-confidence fallback are **open** - see `AMB-006` in Section 7.1. Baseline: flag below-confidence results; never present as verified.
 - **State Change:** `[Summary: Draft]` → `[Summary: Reviewed]` → `[Summary: Final]`.
 
 **Telemetry & Event Tracking:**
@@ -343,11 +343,11 @@ _Traceability: `REQ-004`, `REQ-013`, `REQ-023`, `REQ-005`, `CFL-002`, `CFL-003`,
 
 **Acceptance Criteria (BDD / Gherkin):**
 
-- **Scenario 1: Happy Path — doctor-initiated handshake (baseline)**
+- **Scenario 1: Happy Path - doctor-initiated handshake (baseline)**
   - **Given** a patient has a reviewed clinical pre-summary and a consult occurred off-platform
   - **When** the doctor opens the patient's record on-platform and marks the consult complete
   - **Then** the platform moves the case to the e-prescription stage and notifies the patient
-- **Scenario 2: Edge Case — no pre-summary before handshake**
+- **Scenario 2: Edge Case - no pre-summary before handshake**
   - **Given** a doctor attempts to complete a consult for a patient without a reviewed pre-summary
   - **When** the handshake is submitted
   - **Then** the platform requires the pre-summary to be finalized before the prescription stage opens
@@ -363,7 +363,7 @@ _Traceability: `REQ-004`, `REQ-013`, `REQ-023`, `REQ-005`, `CFL-002`, `CFL-003`,
 - `consult_marked_complete`: `case_id`, `doctor_id`, `patient_id`, `timestamp`
 - `case_stage_changed`: `case_id`, `from_stage`, `to_stage`, `timestamp`
 
-#### Feature 4.4.2: E-Prescription — AI Draft & Doctor Approval
+#### Feature 4.4.2: E-Prescription - AI Draft & Doctor Approval
 
 - **Feature ID:** `FEAT-009`
 - **Traceability:** `REQ-013`, `REQ-023`, `REQ-005`, `CFL-002`, `RISK-EVAL-003`
@@ -379,7 +379,7 @@ _Traceability: `REQ-004`, `REQ-013`, `REQ-023`, `REQ-005`, `CFL-002`, `CFL-003`,
   - **Given** the case is in the Prescription Pending stage
   - **When** I submit a voice note or photo and approve the AI-drafted prescription
   - **Then** the approved e-prescription is issued on-platform, timestamped, and attributed to me
-- **Scenario 2: Edge Case — doctor edits before approval**
+- **Scenario 2: Edge Case - doctor edits before approval**
   - **Given** the AI draft contains an item I disagree with
   - **When** I edit the draft
   - **Then** the prescription records my edits and is issued only with my explicit approval
@@ -414,11 +414,11 @@ _Traceability: `REQ-012`, `REQ-024`, `REQ-025`, `REQ-033`, `REQ-026`, `RISK-002`
 
 **Acceptance Criteria (BDD / Gherkin):**
 
-- **Scenario 1: Happy Path — on-platform booking**
+- **Scenario 1: Happy Path - on-platform booking**
   - **Given** a partner lab / pickup point serves my area
   - **When** I book a test with home pickup
   - **Then** the order is routed to the partner lab and a pickup is arranged on-platform
-- **Scenario 2: Edge Case — no partner availability (fallback)**
+- **Scenario 2: Edge Case - no partner availability (fallback)**
   - **Given** no partner lab / pickup point is available on-platform for my area
   - **When** I request diagnostics
   - **Then** the platform supports a direct patient-to-lab arrangement and records the outcome for the patient's record
@@ -447,11 +447,11 @@ _Traceability: `REQ-012`, `REQ-024`, `REQ-025`, `REQ-033`, `REQ-026`, `RISK-002`
 
 **Acceptance Criteria (BDD / Gherkin):**
 
-- **Scenario 1: Happy Path — matched upload**
+- **Scenario 1: Happy Path - matched upload**
   - **Given** a diagnostic order exists and a report is uploaded (by lab or patient, whoever has it first)
   - **When** the upload matches the order and patient identifiers
   - **Then** the report is filed into the patient's record against that order
-- **Scenario 2: Edge Case — mismatched upload**
+- **Scenario 2: Edge Case - mismatched upload**
   - **Given** an uploaded report does not match the order/patient identifiers
   - **When** the upload is attempted
   - **Then** the report is rejected with a visible mismatch error and is not filed
@@ -459,8 +459,8 @@ _Traceability: `REQ-012`, `REQ-024`, `REQ-025`, `REQ-033`, `REQ-026`, `RISK-002`
 **Business Rules & State Transitions:**
 
 - **Rule 1:** Every upload must be matched to an order and patient before filing (`RISK-002` mitigation).
-- **Rule 2:** **Open decision `GAP-004`/`GAP-008`:** the matching mechanism (order-id binding vs. manual confirmation) is unconfirmed; the platform must support _some_ binding — baseline is order-ID + patient confirmation. See Section 7.1.
-- **Rule 3:** Filing only — no baseline parsing (deferred, `REQ-026`); no critical-value escalation (`REQ-033`).
+- **Rule 2:** **Open decision `GAP-004`/`GAP-008`:** the matching mechanism (order-id binding vs. manual confirmation) is unconfirmed; the platform must support _some_ binding - baseline is order-ID + patient confirmation. See Section 7.1.
+- **Rule 3:** Filing only - no baseline parsing (deferred, `REQ-026`); no critical-value escalation (`REQ-033`).
 - **State Change:** `[Report: Uploaded]` → `[Report: Matched]` → `[Report: Filed]` | `[Report: Rejected]`.
 
 **Telemetry & Event Tracking:**
@@ -491,14 +491,14 @@ _Traceability: `REQ-010`, `REQ-014`, `REQ-027`, `REQ-031`, `REQ-037`, `GAP-007`_
   - **Given** an approved e-prescription exists
   - **When** the prescription is routed to the patient's chosen / nearest chemist
   - **Then** the chemist prepares the order and delivers it via their own rider; the platform records fulfillment status
-- **Scenario 2: Edge Case — item unavailable at the routed chemist**
+- **Scenario 2: Edge Case - item unavailable at the routed chemist**
   - **Given** the routed chemist cannot fill an item
   - **When** the chemist updates the order
   - **Then** the out-of-stock workflow (`FEAT-013`) starts
 
 **Business Rules & State Transitions:**
 
-- **Rule 1:** Zero platform inventory — every item fulfilled by partner chemists (`REQ-010`, `REQ-014`).
+- **Rule 1:** Zero platform inventory - every item fulfilled by partner chemists (`REQ-010`, `REQ-014`).
 - **Rule 2:** Routing is to the patient's chosen or nearest chemist (`REQ-027`).
 - **State Change:** `[Rx: Approved]` → `[Rx: Routed]` → `[Rx: Preparing]` → `[Rx: Out for Delivery]` → `[Rx: Delivered]`.
 
@@ -519,11 +519,11 @@ _Traceability: `REQ-010`, `REQ-014`, `REQ-027`, `REQ-031`, `REQ-037`, `GAP-007`_
 
 **Acceptance Criteria (BDD / Gherkin):**
 
-- **Scenario 1: Happy Path — out-of-stock choice**
+- **Scenario 1: Happy Path - out-of-stock choice**
   - **Given** an item is out of stock at the routed chemist
   - **When** I am notified
   - **Then** I choose to accept partial fulfillment or cancel, and the choice is recorded
-- **Scenario 2: Edge Case — delivery/pickup failure**
+- **Scenario 2: Edge Case - delivery/pickup failure**
   - **Given** a delivery or pickup attempt fails
   - **When** the failure is recorded
   - **Then** I choose between retrying off-platform (direct with the partner) or returning to the platform for a retry/reroute
@@ -563,7 +563,7 @@ _Traceability: `REQ-011`, `REQ-028`, `REQ-005`, `GAP-002`, `AMB-003`, `NFR-001`_
   - **Given** I am an independent local doctor, registered lab, or retail chemist
   - **When** I register and submit my credentials
   - **Then** my profile enters verification; I am not searchable until activated
-- **Scenario 2: Edge Case — credentials fail verification**
+- **Scenario 2: Edge Case - credentials fail verification**
   - **Given** my submitted credentials are invalid or unverifiable
   - **When** verification runs
   - **Then** my activation is rejected and I am notified of the specific failure
@@ -579,7 +579,7 @@ _Traceability: `REQ-011`, `REQ-028`, `REQ-005`, `GAP-002`, `AMB-003`, `NFR-001`_
 - `partner_registered`: `partner_id`, `partner_type`, `timestamp`
 - `partner_verification_started` / `partner_activated` / `partner_rejected`: `partner_id`, `reason`, `timestamp`
 
-#### Feature 4.7.2: Operator Console — Verification & Moderation
+#### Feature 4.7.2: Operator Console - Verification & Moderation
 
 - **Feature ID:** `FEAT-015`
 - **Traceability:** `REQ-028`, `GAP-002`, `AMB-003`, `NFR-001`
@@ -595,14 +595,14 @@ _Traceability: `REQ-011`, `REQ-028`, `REQ-005`, `GAP-002`, `AMB-003`, `NFR-001`_
   - **Given** a partner is Under Verification
   - **When** I review their credentials
   - **Then** I can approve or reject activation, and the partner's status updates accordingly
-- **Scenario 2: Edge Case — verification backlog**
+- **Scenario 2: Edge Case - verification backlog**
   - **Given** a backlog of pending verifications
   - **When** I view the queue
   - **Then** I can prioritize by age of registration to meet the activation cycle target (KPI-004)
 
 **Business Rules & State Transitions:**
 
-- **Rule 1:** **Open decision `AMB-003`:** the verification mechanism (fully automated vs. automated + manual review) is undecided — it directly affects operator headcount under `NFR-001`. Baseline: automated checks with manual review for flagged cases.
+- **Rule 1:** **Open decision `AMB-003`:** the verification mechanism (fully automated vs. automated + manual review) is undecided - it directly affects operator headcount under `NFR-001`. Baseline: automated checks with manual review for flagged cases.
 - **State Change:** N/A (operator workflow).
 
 **Telemetry & Event Tracking:**
@@ -628,11 +628,11 @@ _Traceability: `REQ-029`, `REQ-030`, `REQ-032`, `REQ-036`, `RISK-001`, `AMB-004`
 
 **Acceptance Criteria (BDD / Gherkin):**
 
-- **Scenario 1: Happy Path — direct settlement**
+- **Scenario 1: Happy Path - direct settlement**
   - **Given** a service is completed (delivery, pickup, or consult-related handoff)
   - **When** the patient pays cash/UPI at the point of service
   - **Then** settlement completes directly with the partner; the platform records only the outcome
-- **Scenario 2: Edge Case — fraud-risk case (platform-facilitated)**
+- **Scenario 2: Edge Case - fraud-risk case (platform-facilitated)**
   - **Given** a transaction meets the fraud-risk threshold
   - **When** the patient chooses platform-facilitated payment
   - **Then** the platform facilitates the payment, records it, and notes the facilitation reason
@@ -661,18 +661,18 @@ _Traceability: `REQ-029`, `REQ-030`, `REQ-032`, `REQ-036`, `RISK-001`, `AMB-004`
 
 **Acceptance Criteria (BDD / Gherkin):**
 
-- **Scenario 1: Happy Path — cancellation policy shown at booking**
+- **Scenario 1: Happy Path - cancellation policy shown at booking**
   - **Given** I am about to book a service
   - **When** the booking screen loads
   - **Then** the relevant partner's cancellation policy is displayed clearly before I confirm
-- **Scenario 2: Edge Case — refund after cancellation**
+- **Scenario 2: Edge Case - refund after cancellation**
   - **Given** a cancellation triggers a refund
   - **When** the cancellation is recorded
   - **Then** the partner refunds the patient directly; the platform does not hold or process the refund
 
 **Business Rules & State Transitions:**
 
-- **Rule 1:** Policy inheritance — each partner's policy applies to their services (`REQ-032`).
+- **Rule 1:** Policy inheritance - each partner's policy applies to their services (`REQ-032`).
 - **Rule 2:** Platform assumes no responsibility for cancellation/refund disputes (`REQ-032`); platform holds/processes no refunds (`REQ-036`).
 - **State Change:** `[Order: Active]` → `[Order: Cancelled]` → `[Refund: Partner-Direct]`.
 
@@ -700,11 +700,11 @@ _Traceability: `REQ-015`, `REQ-035`, `REQ-006`, `CFL-004`, `AMB-005`_
 
 **Acceptance Criteria (BDD / Gherkin):**
 
-- **Scenario 1: Happy Path — daily metric logging**
+- **Scenario 1: Happy Path - daily metric logging**
   - **Given** I am enrolled in chronic care
   - **When** I log my BP and/or sugar for the day
   - **Then** the values are stored in my longitudinal record and shown on my tracking view
-- **Scenario 2: Edge Case — out-of-range value**
+- **Scenario 2: Edge Case - out-of-range value**
   - **Given** a logged value is outside a safe range
   - **When** I log it
   - **Then** the value is stored and surfaced to my care loop, with no automated clinical action (interpretation left to the patient/doctor per `REQ-033`)
@@ -733,18 +733,18 @@ _Traceability: `REQ-015`, `REQ-035`, `REQ-006`, `CFL-004`, `AMB-005`_
 
 **Acceptance Criteria (BDD / Gherkin):**
 
-- **Scenario 1: Happy Path — dosage reminder**
+- **Scenario 1: Happy Path - dosage reminder**
   - **Given** I have an active prescription with a dosage schedule
   - **When** a reminder time arrives
   - **Then** I receive a WhatsApp notification in my chosen language (English or Hindi)
-- **Scenario 2: Edge Case — notification channel unavailable**
+- **Scenario 2: Edge Case - notification channel unavailable**
   - **Given** WhatsApp notification delivery fails (e.g., number not registered)
   - **When** the notification attempt completes
   - **Then** the failure is logged and the next notification is retried or the patient is prompted to confirm their number
 
 **Business Rules & State Transitions:**
 
-- **Rule 1:** WhatsApp sends **notifications only** — no interaction or transaction occurs there (`REQ-035`).
+- **Rule 1:** WhatsApp sends **notifications only** - no interaction or transaction occurs there (`REQ-035`).
 - **Rule 2:** Notification language follows the patient's language setting (`REQ-006`).
 - **State Change:** `[Notify: Scheduled]` → `[Notify: Sent]` → `[Notify: Delivered/Failed]`.
 
@@ -771,11 +771,11 @@ _Traceability: `REQ-005`, `NFR-002`, `GAP-011`, `GAP-013`_
 
 **Acceptance Criteria (BDD / Gherkin):**
 
-- **Scenario 1: Happy Path — audit completeness**
+- **Scenario 1: Happy Path - audit completeness**
   - **Given** any regulated act occurs (prescription issued, consent granted/revoked, record accessed, report filed)
   - **When** the act is recorded
   - **Then** the event is written to an append-only audit log with actor, timestamp, and scope
-- **Scenario 2: Edge Case — tamper attempt**
+- **Scenario 2: Edge Case - tamper attempt**
   - **Given** an attempt to modify or delete an audit record
   - **When** the attempt is made
   - **Then** the log rejects the modification and the attempt itself is recorded
@@ -795,12 +795,12 @@ _Traceability: `REQ-005`, `NFR-002`, `GAP-011`, `GAP-013`_
 
 ## 5. System Workflows & Edge Cases
 
-### 5.1 End-to-End Operational Workflow — Full Care Loop (Daltonganj)
+### 5.1 End-to-End Operational Workflow - Full Care Loop (Daltonganj)
 
 1. **Patient registers and authenticates** (`FEAT-001`); a stable identity is created.
-2. **Patient discovers a provider** — GP, lab, or chemist — via the directory (`FEAT-004`); sees verified credentials (`FEAT-005`).
+2. **Patient discovers a provider** - GP, lab, or chemist - via the directory (`FEAT-004`); sees verified credentials (`FEAT-005`).
 3. **Patient submits symptoms** by voice or text in English/Hindi (`FEAT-006`); the AI generates a clinical pre-summary (`FEAT-007`).
-4. **Patient and doctor consult off-platform** (`REQ-004`); the doctor marks the consult complete on-platform (`FEAT-008`) — the handshake seam is the open `CFL-003` decision.
+4. **Patient and doctor consult off-platform** (`REQ-004`); the doctor marks the consult complete on-platform (`FEAT-008`) - the handshake seam is the open `CFL-003` decision.
 5. **Doctor issues an e-prescription**: AI drafts from a voice note/photo; the doctor reviews and approves (`FEAT-009`).
 6. **Patient books diagnostics** (home pickup or partner lab/pickup point; direct fallback) (`FEAT-010`).
 7. **Lab returns the report**; the upload is matched to the order and patient before filing (`FEAT-011`).
@@ -812,8 +812,8 @@ _Traceability: `REQ-005`, `NFR-002`, `GAP-011`, `GAP-013`_
 
 | Error Trigger                                         | System Response / Error Message                    | Recovery Action                                                                           |
 | :---------------------------------------------------- | :------------------------------------------------- | :---------------------------------------------------------------------------------------- |
-| Network timeout during intake upload                  | "Connection lost — retry" message                  | Auto-retry up to 3 times with backoff; prompt to re-record if audio unusable (`FEAT-006`) |
-| AI structuring confidence below threshold             | Pre-summary flagged "low confidence — verify"      | Forced doctor review before use (`FEAT-007`)                                              |
+| Network timeout during intake upload                  | "Connection lost - retry" message                  | Auto-retry up to 3 times with backoff; prompt to re-record if audio unusable (`FEAT-006`) |
+| AI structuring confidence below threshold             | Pre-summary flagged "low confidence - verify"      | Forced doctor review before use (`FEAT-007`)                                              |
 | Lab report upload mismatch                            | "This report does not match the order/patient"     | Reject and do not file; patient/lab re-upload (`FEAT-011`)                                |
 | Out-of-stock at routed chemist                        | "Item unavailable" notification with options       | Patient chooses partial fulfillment or cancel (`FEAT-013`)                                |
 | Delivery/pickup failure                               | "Delivery failed" notification with options        | Patient chooses off-platform or platform retry/reroute (`FEAT-013`)                       |
@@ -842,19 +842,19 @@ _Traceability: `REQ-005`, `NFR-002`, `GAP-011`, `GAP-013`_
 
 > Carried forward from the Conflict & Gap Report. Each is flagged inline at the affected feature with its **baseline assumption** in use until the stakeholder decides.
 
-- **`CFL-002` / `RISK-EVAL-003`** — Regulatory posture of AI-drafted e-prescriptions under the pure-facilitator model; compliance stakeholder `[Not Yet Elicited]`. **Baseline:** AI as drafting assistant under doctor's authority (`FEAT-009`).
-- **`CFL-003` / `GAP-003`** — Who triggers the off-platform consult → on-platform prescription handshake. **Baseline:** doctor-initiated (`FEAT-008`).
-- **`CFL-004` / `AMB-005`** — Counterparty of chronic-care "follow-up interactions." **Baseline:** patient self-service logging + nudges; doctor interaction stays off-platform (`FEAT-018`).
-- **`GAP-001`** — Patient identity strength (OTP vs. stronger verification). **Baseline:** phone OTP (`FEAT-001`).
-- **`GAP-004` / `GAP-008`** — Report→order→patient matching mechanism. **Baseline:** order-ID binding + patient confirmation (`FEAT-011`).
-- **`GAP-007`** — Time-bound partner-action SLA. **Baseline:** none; latency measured (KPI-008 input) (`FEAT-013`).
-- **`GAP-010`** — Payment capture/receipt/reconciliation detail. **Baseline:** platform records settlement outcome; partner issues receipts (`FEAT-016`).
-- **`GAP-011` / `GAP-012` / `GAP-013` / `GAP-005`** — Audit retention, DR policy, consent lifecycle, retention/deletion — compliance decisions needed (Section 6 NFR-D01/D02).
-- **`AMB-002`** — Acceptance bar for "full care loop proven" (defines KPI-001/008 targets). **Baseline:** proposed targets in Section 1.3.
-- **`AMB-003`** — Verification mechanism (automated vs. manual). **Baseline:** automated checks + manual review for flagged cases (`FEAT-015`).
-- **`AMB-004` / `CFL-001`** — Fraud-risk trigger for platform-facilitated payment; consolidation of REQ-029/REQ-030/REQ-027. **Baseline:** opt-in + risk signal (`FEAT-016`).
-- **`AMB-006`** — Structured-extraction accuracy threshold and low-confidence fallback. **Baseline:** flag below-confidence results (`FEAT-007`).
-- **`ISSUE-004`** — Geographic expansion intent beyond Daltonganj: undecided. No downstream dependency at launch.
+- **`CFL-002` / `RISK-EVAL-003`** - Regulatory posture of AI-drafted e-prescriptions under the pure-facilitator model; compliance stakeholder `[Not Yet Elicited]`. **Baseline:** AI as drafting assistant under doctor's authority (`FEAT-009`).
+- **`CFL-003` / `GAP-003`** - Who triggers the off-platform consult → on-platform prescription handshake. **Baseline:** doctor-initiated (`FEAT-008`).
+- **`CFL-004` / `AMB-005`** - Counterparty of chronic-care "follow-up interactions." **Baseline:** patient self-service logging + nudges; doctor interaction stays off-platform (`FEAT-018`).
+- **`GAP-001`** - Patient identity strength (OTP vs. stronger verification). **Baseline:** phone OTP (`FEAT-001`).
+- **`GAP-004` / `GAP-008`** - Report→order→patient matching mechanism. **Baseline:** order-ID binding + patient confirmation (`FEAT-011`).
+- **`GAP-007`** - Time-bound partner-action SLA. **Baseline:** none; latency measured (KPI-008 input) (`FEAT-013`).
+- **`GAP-010`** - Payment capture/receipt/reconciliation detail. **Baseline:** platform records settlement outcome; partner issues receipts (`FEAT-016`).
+- **`GAP-011` / `GAP-012` / `GAP-013` / `GAP-005`** - Audit retention, DR policy, consent lifecycle, retention/deletion - compliance decisions needed (Section 6 NFR-D01/D02).
+- **`AMB-002`** - Acceptance bar for "full care loop proven" (defines KPI-001/008 targets). **Baseline:** proposed targets in Section 1.3.
+- **`AMB-003`** - Verification mechanism (automated vs. manual). **Baseline:** automated checks + manual review for flagged cases (`FEAT-015`).
+- **`AMB-004` / `CFL-001`** - Fraud-risk trigger for platform-facilitated payment; consolidation of REQ-029/REQ-030/REQ-027. **Baseline:** opt-in + risk signal (`FEAT-016`).
+- **`AMB-006`** - Structured-extraction accuracy threshold and low-confidence fallback. **Baseline:** flag below-confidence results (`FEAT-007`).
+- **`ISSUE-004`** - Geographic expansion intent beyond Daltonganj: undecided. No downstream dependency at launch.
 
 ### 7.2 Risk Register & Operational Mitigations
 
@@ -877,28 +877,28 @@ _Traceability: `REQ-005`, `NFR-002`, `GAP-011`, `GAP-013`_
 | `FEAT-002`              | `REQ-021`                       | `GAP-005`, `GAP-013`                        | Baseline Approved (open decision)              |
 | `FEAT-003`              | `REQ-021`                       | `GAP-011`                                   | Baseline Approved (open decision)              |
 | `FEAT-004`              | `REQ-001`, `REQ-008`, `REQ-022` | `GAP-009`                                   | Baseline Approved                              |
-| `FEAT-005`              | `REQ-005`, `REQ-028`            | —                                           | Baseline Approved                              |
-| `FEAT-006`              | `REQ-006`, `REQ-007`            | —                                           | Baseline Approved                              |
+| `FEAT-005`              | `REQ-005`, `REQ-028`            | -                                           | Baseline Approved                              |
+| `FEAT-006`              | `REQ-006`, `REQ-007`            | -                                           | Baseline Approved                              |
 | `FEAT-007`              | `REQ-004`, `REQ-007`            | `AMB-006`, `RISK-EVAL-006`                  | Baseline Approved (open decision)              |
 | `FEAT-008`              | `REQ-002`, `REQ-004`, `REQ-013` | `CFL-003`, `GAP-003`                        | Baseline Approved (open decision)              |
 | `FEAT-009`              | `REQ-013`, `REQ-023`, `REQ-005` | `CFL-002`, `RISK-EVAL-003`                  | Baseline Approved (open decision)              |
-| `FEAT-010`              | `REQ-012`, `REQ-024`, `REQ-033` | —                                           | Baseline Approved                              |
+| `FEAT-010`              | `REQ-012`, `REQ-024`, `REQ-033` | -                                           | Baseline Approved                              |
 | `FEAT-011`              | `REQ-025`, `REQ-033`            | `RISK-002`, `GAP-004`, `GAP-008`            | Baseline Approved (open decision)              |
-| `FEAT-012`              | `REQ-010`, `REQ-014`, `REQ-027` | —                                           | Baseline Approved                              |
+| `FEAT-012`              | `REQ-010`, `REQ-014`, `REQ-027` | -                                           | Baseline Approved                              |
 | `FEAT-013`              | `REQ-031`, `REQ-037`            | `GAP-007`                                   | Baseline Approved (open decision)              |
-| `FEAT-014`              | `REQ-011`, `REQ-028`, `REQ-005` | —                                           | Baseline Approved                              |
+| `FEAT-014`              | `REQ-011`, `REQ-028`, `REQ-005` | -                                           | Baseline Approved                              |
 | `FEAT-015`              | `REQ-028`                       | `GAP-002`, `AMB-003`                        | Baseline Approved (open decision)              |
 | `FEAT-016`              | `REQ-029`, `REQ-030`            | `RISK-001`, `AMB-004`, `CFL-001`, `GAP-010` | Baseline Approved (open decision)              |
-| `FEAT-017`              | `REQ-032`, `REQ-036`            | —                                           | Baseline Approved                              |
+| `FEAT-017`              | `REQ-032`, `REQ-036`            | -                                           | Baseline Approved                              |
 | `FEAT-018`              | `REQ-015`, `REQ-035`            | `CFL-004`, `AMB-005`                        | Baseline Approved (open decision)              |
-| `FEAT-019`              | `REQ-035`, `REQ-006`            | —                                           | Baseline Approved                              |
+| `FEAT-019`              | `REQ-035`, `REQ-006`            | -                                           | Baseline Approved                              |
 | `FEAT-020`              | `NFR-002`, `REQ-005`            | `GAP-011`, `GAP-013`                        | Baseline Approved (open decision)              |
-| `REQ-020`               | `REQ-020`                       | —                                           | Addressed — no revenue capture in scope (§3.2) |
-| `REQ-026`               | `REQ-026`                       | —                                           | Out-of-Scope / Deferred (launch = filing only) |
-| `REQ-038`               | `REQ-038`                       | —                                           | Out-of-Scope / Future (`[FUTURE]`)             |
-| `REQ-039`               | `REQ-039`                       | —                                           | Out-of-Scope / Future (`[FUTURE]`)             |
-| `REQ-040`               | `REQ-040`                       | —                                           | Out-of-Scope / Future (`[FUTURE]`)             |
-| `NFR-001`               | `NFR-001`                       | —                                           | Baseline Approved (Section 6)                  |
+| `REQ-020`               | `REQ-020`                       | -                                           | Addressed - no revenue capture in scope (§3.2) |
+| `REQ-026`               | `REQ-026`                       | -                                           | Out-of-Scope / Deferred (launch = filing only) |
+| `REQ-038`               | `REQ-038`                       | -                                           | Out-of-Scope / Future (`[FUTURE]`)             |
+| `REQ-039`               | `REQ-039`                       | -                                           | Out-of-Scope / Future (`[FUTURE]`)             |
+| `REQ-040`               | `REQ-040`                       | -                                           | Out-of-Scope / Future (`[FUTURE]`)             |
+| `NFR-001`               | `NFR-001`                       | -                                           | Baseline Approved (Section 6)                  |
 | `NFR-002`               | `NFR-002`                       | `GAP-011`, `GAP-013`                        | Baseline Approved (Section 6)                  |
-| `NFR-003`               | `NFR-003`                       | —                                           | Baseline Approved (Section 6)                  |
+| `NFR-003`               | `NFR-003`                       | -                                           | Baseline Approved (Section 6)                  |
 | `NFR-004`               | `NFR-004`                       | `GAP-012`                                   | Baseline Approved (Section 6)                  |

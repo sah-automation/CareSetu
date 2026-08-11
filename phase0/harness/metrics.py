@@ -1,4 +1,4 @@
-"""Phase 0 harness — transcription + structuring metrics (issues #4 / #5).
+"""Phase 0 harness - transcription + structuring metrics (issues #4 / #5).
 
 The transcription leg of the acceptance bar is computed with jiwer (the
 standard metric library): WER is the primary metric, CER the fallback where
@@ -38,7 +38,7 @@ from phase0.harness.models import (
 )
 from phase0.loader import COHORTS, PreSummary
 
-# Devanagari danda/abbreviation sign plus common punctuation — all speech-neutral.
+# Devanagari danda/abbreviation sign plus common punctuation - all speech-neutral.
 _PUNCTUATION_RE = re.compile(r"[।॥,;:!?\.…\u2019\u2018\"\u201c\u201d()\[\]{}\u2013\u2014-]")
 _WHITESPACE_RE = re.compile(r"\s+")
 
@@ -71,7 +71,7 @@ def compute_wer(reference: str, hypothesis: str) -> float:
 
 
 def compute_cer(reference: str, hypothesis: str) -> float:
-    """Character error rate (0..1) via jiwer — the WER fallback."""
+    """Character error rate (0..1) via jiwer - the WER fallback."""
     reference = normalize_text(reference)
     hypothesis = normalize_text(hypothesis)
     if reference == "":
@@ -173,7 +173,7 @@ TRANSCRIPTION_FLOOR_WER = 0.20
 
 # AMB-006 constant: one global structuring-confidence threshold. A
 # pre-summary whose provider confidence is strictly below this is flagged
-# "low confidence — verify" and gated on doctor review.
+# "low confidence - verify" and gated on doctor review.
 AMB_006_THRESHOLD = 0.70
 
 STRUCTURING_F1_TARGET = 0.90
@@ -228,7 +228,7 @@ def is_well_formed(wer: float | None) -> bool:
 def low_confidence(confidence: float | None) -> bool:
     """The AMB-006 flag: fires when structuring confidence is below threshold.
 
-    Unknown confidence (``None``) is treated as low — "never present
+    Unknown confidence (``None``) is treated as low - "never present
     unverified output as final" (FEAT-007 / AMB-006).
     """
     return confidence is None or confidence < AMB_006_THRESHOLD
@@ -239,7 +239,7 @@ def field_tokens(field_name: str, value: FieldValue) -> frozenset[str]:
 
     Scalars normalize to one token, lists to one token per item,
     ``known_medications`` to one token per medication (sub-fields joined), and
-    ``vitals`` to one ``key=value`` token per non-null measurement — the
+    ``vitals`` to one ``key=value`` token per non-null measurement - the
     ``other`` list contributes one ``other=...`` token per item, so ordering
     does not affect the score. Null / empty values canonicalize to the empty
     set.
@@ -469,7 +469,7 @@ def calibrate(rows: Sequence[PerClipStructuring]) -> CalibrationReport:
     accuracy so the 0.70 threshold can be tuned at PHASE-7.
 
     With no unflagged pre-summaries the silent-error bound has no evidence to
-    certify — the verdict is FAIL as *unproven*, never a vacuous pass. Rows
+    certify - the verdict is FAIL as *unproven*, never a vacuous pass. Rows
     carrying an ``error`` (provider failures) are excluded by the caller
     before calibration.
     """
