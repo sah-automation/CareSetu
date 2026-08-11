@@ -4,7 +4,9 @@ Walks the module import graph and rejects module-to-module imports of
 ``domain``/``schema``/``adapters`` (and of any other non-``facade`` cross-module
 target); allows cross-module imports only via ``facade.py``; whitelists the
 transport carve-out (the dispatcher in ``bus/`` and the migration harness in
-``alembic/``) for outbox/schema plumbing only (ADR-0003 §3); and asserts the
+``alembic/``) for outbox/schema plumbing only (ADR-0003 §3); whitelists the
+worker composition root in ``worker/`` for one seam and one seam only - a
+module's ``adapters`` ``register_handlers`` (PHASE-1 T4, #30); and asserts the
 table namespace prefixes (``consent_consents``, ``care_prescriptions``, ...)
 plus the per-module outbox table name (coding-standards §2).
 
@@ -31,9 +33,10 @@ from pathlib import Path
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 MODULES_PACKAGE_NAME = "modules"
 DEFAULT_MODULES_PACKAGE = BACKEND_ROOT / MODULES_PACKAGE_NAME
-DEFAULT_CARVE_OUT_RELATIVE_ROOTS = ("bus", "alembic")
+DEFAULT_CARVE_OUT_RELATIVE_ROOTS = ("bus", "alembic", "worker")
 DEFAULT_CARVE_OUT_ROOTS = tuple(BACKEND_ROOT / root for root in DEFAULT_CARVE_OUT_RELATIVE_ROOTS)
 SCHEMA_PLUMBING_PACKAGES = ("schema", "outbox")
+COMPOSITION_ROOT_NAMES = ("worker",)
 
 
 @dataclass(frozen=True)
@@ -58,21 +61,24 @@ def _module_names(modules_package: Path) -> tuple[str, ...]:
 def _iter_checked_files(
     modules_package: Path,
     carve_out_roots: Sequence[Path],
-) -> Iterable[tuple[Path, str | None, bool]]:
-    """Yield ``(file, current_module, is_carve_out)`` for every ``.py`` file to check.
+) -> Iterable[tuple[Path, str | None, str | None]]:
+    """Yield ``(file, current_module, carve_out_root)`` for every ``.py`` file to check.
 
-    ``current_module`` is ``None`` for transport files that belong to no module.
+    ``current_module`` is the owning module for files inside ``modules_package``
+    and ``None`` for transport files. ``carve_out_root`` is ``None`` for module
+    files and the carve-out directory's name (``"bus"``, ``"worker"``, ...) for
+    transport files, so the allowance rules can distinguish the composition root.
     """
     for module_name in _module_names(modules_package):
         for file in (modules_package / module_name).rglob("*.py"):
             if "__pycache__" in file.parts:
                 continue
-            yield file, module_name, False
+            yield file, module_name, None
     for root in carve_out_roots:
         for file in root.rglob("*.py"):
             if "__pycache__" in file.parts:
                 continue
-            yield file, None, True
+            yield file, None, root.name
 
 
 def _import_specs(tree: ast.Module) -> Iterable[tuple[ast.Import | ast.ImportFrom, int, list[str]]]:
@@ -130,7 +136,7 @@ def _deepest_existing_module(
 def _violation_message(
     parts: Sequence[str],
     current_module: str | None,
-    is_carve_out: bool,
+    carve_out_root: str | None,
     package_name: str,
 ) -> str | None:
     """The rule violation for one resolved import target, or ``None`` when legal."""
@@ -145,7 +151,12 @@ def _violation_message(
         return f"module package import is not facade-only: {'.'.join(parts)}"
     if sub[0] == "facade":
         return None
-    if is_carve_out and sub[0] in SCHEMA_PLUMBING_PACKAGES:
+    if carve_out_root in COMPOSITION_ROOT_NAMES:
+        # The composition root's only module seam is adapters (register_handlers,
+        # PHASE-1 T4 #30); schema/outbox/facade/domain imports from it are forbidden.
+        if sub[0] == "adapters":
+            return None
+    elif carve_out_root is not None and sub[0] in SCHEMA_PLUMBING_PACKAGES:
         return None
     return f"forbidden cross-module import of {package_name}.{target_module}.{sub[0]}"
 
@@ -156,7 +167,7 @@ def _check_file_imports(
     source: str,
     package_parts: list[str],
     current_module: str | None,
-    is_carve_out: bool,
+    carve_out_root: str | None,
     modules_package: Path,
     package_name: str,
 ) -> list[BoundaryViolation]:
@@ -168,7 +179,7 @@ def _check_file_imports(
             resolved = _deepest_existing_module(candidate, modules_package, package_name)
             if resolved is None:
                 continue
-            message = _violation_message(resolved, current_module, is_carve_out, package_name)
+            message = _violation_message(resolved, current_module, carve_out_root, package_name)
             if message is None:
                 continue
             segment = ast.get_source_segment(source, node) or ".".join(resolved)
@@ -203,7 +214,9 @@ def check_module_boundaries(
     deterministic and the unit tests can assert on exact violations.
     """
     violations: list[BoundaryViolation] = []
-    for file, current_module, is_carve_out in _iter_checked_files(modules_package, carve_out_roots):
+    for file, current_module, carve_out_root in _iter_checked_files(
+        modules_package, carve_out_roots
+    ):
         source = file.read_text(encoding="utf-8")
         try:
             tree = ast.parse(source, filename=str(file))
@@ -218,7 +231,7 @@ def check_module_boundaries(
                 source,
                 [] if package_parts is None else package_parts,
                 current_module,
-                is_carve_out,
+                carve_out_root,
                 modules_package,
                 package_name,
             )

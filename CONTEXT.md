@@ -96,7 +96,7 @@ The end-to-end proof of the async seam: publish → dispatcher claim → fan-out
 _Avoid_: outbox test (when meaning the seam proof)
 
 **module isolation rule**:
-No cross-schema imports, no cross-schema SQL, no cross-schema foreign keys; the only legal cross-module seams are `facade.py` (sync) and outbox events (async). The dispatcher and migration harness are the sole cross-schema readers, and only of outbox/schema plumbing, never domain tables.
+No cross-schema imports, no cross-schema SQL, no cross-schema foreign keys; the only legal cross-module seams are `facade.py` (sync) and outbox events (async). The dispatcher and migration harness are the sole cross-schema readers, and only of outbox/schema plumbing, never domain tables. The worker (PHASE-1 T4, #30) is the composition root that runs the dispatcher; its only module import is each module's `adapters.register_handlers` at boot.
 _Avoid_: bounded-context separation (when meaning this CI-enforced rule)
 
 **edge**:
