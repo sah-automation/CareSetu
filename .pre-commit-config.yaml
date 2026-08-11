@@ -58,3 +58,10 @@ repos:
         additional_dependencies: []
         pass_filenames: false
         always_run: true
+      - id: check-backup-config
+        name: daily backup scaffold lint (PHASE-1 T8b #32)
+        entry: python apps/backend/scripts/check_backup_config.py
+        language: python
+        additional_dependencies: []
+        pass_filenames: false
+        always_run: true

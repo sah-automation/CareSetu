@@ -106,6 +106,62 @@ jobs:
         env:
           DATABASE_URL: postgresql+asyncpg://caresetu:caresetu@localhost:5432/caresetu
 
+  backup-smoke:
+    name: backup smoke (pg_dump vs throwaway DB)
+    runs-on: ubuntu-latest
+    env:
+      PGPASSWORD: caresetu
+      BACKUP_PASSPHRASE: backup-smoke-passphrase
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: caresetu
+          POSTGRES_PASSWORD: caresetu
+          POSTGRES_DB: caresetu
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U caresetu -d caresetu"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: install postgres client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: seed a throwaway source database
+        run: |
+          createdb -h localhost -U caresetu caresetu_backup_src
+          psql -h localhost -U caresetu -d caresetu_backup_src -c \
+            "CREATE TABLE smoke_test (id integer PRIMARY KEY, note text); \
+             INSERT INTO smoke_test VALUES (1, 'daily');"
+      - name: run the committed backup script
+        run: bash deploy/cron/backup.sh
+        env:
+          PGHOST: localhost
+          PGPORT: "5432"
+          PGDATABASE: caresetu_backup_src
+          PGUSER: caresetu
+          BACKUP_DIR: ${{ runner.temp }}/backups
+      - name: assert a non-empty encrypted dump exists
+        run: |
+          test -s "$(ls -1 "$BACKUP_DIR"/caresetu-*.enc | head -n1)"
+        env:
+          BACKUP_DIR: ${{ runner.temp }}/backups
+      - name: decrypt the dump and restore it to verify the row round-trips
+        run: |
+          DUMP="$(ls -1 "$BACKUP_DIR"/caresetu-*.enc | head -n1)"
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:BACKUP_PASSPHRASE \
+            -in "$DUMP" -out "$DUMP.plain"
+          createdb -h localhost -U caresetu caresetu_backup_restore
+          pg_restore -h localhost -U caresetu -d caresetu_backup_restore "$DUMP.plain"
+          COUNT="$(psql -h localhost -U caresetu -d caresetu_backup_restore -tAc \
+            'SELECT count(*) FROM smoke_test')"
+          test "$COUNT" = "1"
+        env:
+          BACKUP_DIR: ${{ runner.temp }}/backups
+
   # e2e (playwright) job lands in PHASE-1 alongside the first E2E spec and app
   # routes (roadmap §3.2). Until then there are no tests to run.
 
