@@ -1,0 +1,27 @@
+# CareSetu daily backup cron (PHASE-1 T8b, #32).
+#
+# Install on the staging VM:
+#   crontab deploy/cron/caresetu-backup.cron
+#
+# The crontab format does not interpolate variables into the command line, so
+# the checkout path is written literally below. The staging VM convention is a
+# checkout at /opt/caresetu (the Caddyfile edge is run from the same checkout);
+# adjust the path if it differs.
+#
+# The backup script refuses to run without credentials and a passphrase, so the
+# operator must add a connection env block above the schedule line (values
+# belong to the VM, never this repo - security-phii-standards.md §4). Example:
+#
+#   PGHOST=localhost
+#   PGPORT=5432
+#   PGDATABASE=caresetu
+#   PGUSER=caresetu
+#   PGPASSWORD=<from the secret manager>
+#   BACKUP_PASSPHRASE=<from the secret manager>
+#
+# Runs every day at 01:30 local time. Daily cadence keeps the recovery point
+# objective (RPO) <= 24 h - the NFR-004 durability floor. Dumps land encrypted
+# at rest in the script's BACKUP_DIR (default /var/backups/caresetu) and are
+# pruned after BACKUP_RETENTION_DAYS (default 14).
+
+30 1 * * * /opt/caresetu/deploy/cron/backup.sh >> /var/log/caresetu/backup.log 2>&1
