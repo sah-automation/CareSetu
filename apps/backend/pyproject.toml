@@ -41,7 +41,7 @@ target-version = "py311"
 line-length = 100
 
 [tool.ruff.lint.isort]
-known-first-party = ["bus"]
+known-first-party = ["app", "bus"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RUF"]
