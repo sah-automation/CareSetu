@@ -26,7 +26,8 @@
     "scan:backend": "bandit -c apps/backend/pyproject.toml -r apps/backend -q",
     "scan:audit": "pip-audit --path D:/Dev/venvs/backend-env",
     "scan:audit:npm": "npm audit --audit-level=high",
-    "migration-check": "node scripts/migration-check.cjs"
+    "migration-check": "node scripts/migration-check.cjs",
+    "check:boundaries": "node scripts/py.cjs apps/backend/scripts/check_module_boundaries.py"
   },
   "devDependencies": {
     "@playwright/test": "^1.49.0"

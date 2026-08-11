@@ -34,3 +34,13 @@ repos:
       - id: prettier
         files: \.(js|jsx|ts|tsx|json|css|md)$
         args: [--write]
+
+  - repo: local
+    hooks:
+      - id: check-module-boundaries
+        name: module boundary checker (ADR-0003)
+        entry: python apps/backend/scripts/check_module_boundaries.py
+        language: python
+        additional_dependencies: []
+        pass_filenames: false
+        always_run: true
