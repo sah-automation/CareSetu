@@ -1,0 +1,40 @@
+# CareSetu staging edge - TLS termination boundary (PHASE-1 T8a, #31).
+#
+# The edge is the deployment boundary at the VM perimeter: Caddy terminates
+# TLS here before any request reaches an app. It is distinct from the in-app
+# gateway (the FastAPI middleware stack that establishes caller identity) -
+# see the CONTEXT.md glossary and deploy/edge/README.md.
+#
+# STAGING_DOMAIN must be set on the staging VM (e.g.
+# STAGING_DOMAIN=staging.caresetu.in). Caddy then auto-provisions a
+# certificate for it via ACME. The default below uses the RFC-2606 reserved
+# .example TLD so the file validates locally without a real domain; it is
+# never a reachable host.
+
+{$STAGING_DOMAIN:staging.caresetu.example} {
+	# Compress responses before sending them over the wire.
+	encode zstd gzip
+
+	# Structured JSON access logs to stdout for the VM operator.
+	log {
+		output stdout
+		format json
+	}
+
+	# TLS-termination boundary headers.
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+
+	# FastAPI backend (apps/backend, uvicorn on 127.0.0.1:8000).
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	# Next.js frontend (apps/frontend, next start on 127.0.0.1:3000).
+	handle {
+		reverse_proxy 127.0.0.1:3000
+	}
+}

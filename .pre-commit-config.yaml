@@ -51,3 +51,10 @@ repos:
         additional_dependencies: []
         pass_filenames: false
         always_run: true
+      - id: check-edge-config
+        name: edge reverse-proxy config lint (PHASE-1 T8a #31)
+        entry: python apps/backend/scripts/check_edge_config.py
+        language: python
+        additional_dependencies: []
+        pass_filenames: false
+        always_run: true
