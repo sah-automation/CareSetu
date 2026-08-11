@@ -1,11 +1,13 @@
 """PHASE-1 T6a (#26): module boundary checker - fixture tests.
 
 Feeds throwaway module trees to ``scripts.check_module_boundaries`` and asserts
-the four acceptance criteria: forbidden cross-module imports (of ``domain``/
+the acceptance criteria: forbidden cross-module imports (of ``domain``/
 ``schema``/``adapters`` and any other non-``facade`` target) are rejected, legal
 facade-only imports pass, the transport carve-out (dispatcher) is whitelisted
-for outbox/schema plumbing, and the table namespace prefixes are asserted. The
-real 11-module tree must pass the same gate.
+for outbox/schema plumbing, the worker composition root (PHASE-1 T4, #30) is
+whitelisted for its ``register_handlers`` adapters seam and nothing else, and
+the table namespace prefixes are asserted. The real 11-module tree must pass the
+same gate.
 """
 
 from pathlib import Path
@@ -39,6 +41,7 @@ def _module(root: Path, name: str) -> None:
     _write(root, f"modules/{name}/schema/__init__.py", "")
     _write(root, f"modules/{name}/schema/models.py", "MODULE_METADATA = None\n")
     _write(root, f"modules/{name}/outbox.py", f'{name.upper()}_OUTBOX_TABLE = "{name}_outbox"\n')
+    _write(root, f"modules/{name}/adapters/__init__.py", "")
 
 
 def _messages(violations: tuple[BoundaryViolation, ...]) -> list[str]:
@@ -123,6 +126,61 @@ def test_transport_carve_out_still_rejects_domain(tmp_path: Path) -> None:
     assert any("consent.domain" in message for message in messages)
 
 
+def test_worker_carve_out_allows_register_handlers_seam(tmp_path: Path) -> None:
+    _module(tmp_path, "consent")
+    _write(
+        tmp_path,
+        "worker/main.py",
+        "from modules.consent.adapters import register_handlers\n",
+    )
+
+    assert check_module_boundaries(tmp_path / "modules", (tmp_path / "worker",)) == ()
+
+
+def test_worker_carve_out_still_rejects_domain(tmp_path: Path) -> None:
+    _module(tmp_path, "consent")
+    _write(
+        tmp_path,
+        "worker/main.py",
+        "from modules.consent.domain.exceptions import ConsentError\n",
+    )
+
+    messages = _messages(check_module_boundaries(tmp_path / "modules", (tmp_path / "worker",)))
+
+    assert any("consent.domain" in message for message in messages)
+
+
+@pytest.mark.parametrize(
+    "import_line,subpackage",
+    [
+        ("from modules.consent.schema.models import MODULE_METADATA", "schema"),
+        ("from modules.consent.outbox import CONSENT_OUTBOX_TABLE", "outbox"),
+    ],
+)
+def test_worker_carve_out_rejects_non_adapters_targets(
+    tmp_path: Path, import_line: str, subpackage: str
+) -> None:
+    _module(tmp_path, "consent")
+    _write(tmp_path, "worker/main.py", f"{import_line}\n")
+
+    messages = _messages(check_module_boundaries(tmp_path / "modules", (tmp_path / "worker",)))
+
+    assert any(f"consent.{subpackage}" in message for message in messages)
+
+
+def test_bus_carve_out_cannot_import_adapters(tmp_path: Path) -> None:
+    _module(tmp_path, "consent")
+    _write(
+        tmp_path,
+        "bus/dispatcher.py",
+        "from modules.consent.adapters import register_handlers\n",
+    )
+
+    messages = _messages(check_module_boundaries(tmp_path / "modules", (tmp_path / "bus",)))
+
+    assert any("consent.adapters" in message for message in messages)
+
+
 def test_namespace_prefixes_pass(tmp_path: Path) -> None:
     _module(tmp_path, "consent")
     _write(
@@ -202,7 +260,7 @@ def test_typed_outbox_constant_accepted(tmp_path: Path) -> None:
 def test_real_module_tree_passes() -> None:
     violations = check_module_boundaries(
         BACKEND_ROOT / "modules",
-        (BACKEND_ROOT / "bus", BACKEND_ROOT / "alembic"),
+        (BACKEND_ROOT / "bus", BACKEND_ROOT / "alembic", BACKEND_ROOT / "worker"),
     )
 
     assert violations == ()

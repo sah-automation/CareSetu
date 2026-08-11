@@ -62,6 +62,9 @@ def test_generator_emits_hexagonal_layout(tmp_path: Path) -> None:
     assert 'MODULE_METADATA = MetaData(schema="iam")' in models_text
     assert "iam_identities = Table(" in models_text
 
+    adapters_text = (out_dir / "iam" / "adapters" / "__init__.py").read_text(encoding="utf-8")
+    assert "def register_handlers(registry: HandlerRegistry) -> None:" in adapters_text
+
 
 def test_all_modules_scaffolded() -> None:
     for name in ALL_MODULES:

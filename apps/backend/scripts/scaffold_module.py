@@ -73,7 +73,22 @@ def _module_files(spec: ModuleSpec) -> list[tuple[str, str]]:
             f'    """Base error for the {schema_name} module."""\n'
         ),
         "domain/__init__.py": "",
-        "adapters/__init__.py": "",
+        "adapters/__init__.py": (
+            f'"""{spec.mod_id}: event handlers for the ``{spec.module}`` module '
+            "(coding-standards §2).\n"
+            "\n"
+            "``register_handlers`` is the composition-root seam (PHASE-1 T4, #30):\n"
+            "the worker entrypoint calls it to register this module's handlers on\n"
+            "the shared ``HandlerRegistry``. No business handlers exist in Phase 1.\n"
+            '"""\n'
+            "\n"
+            "from bus.registry import HandlerRegistry\n"
+            "\n"
+            "\n"
+            "def register_handlers(registry: HandlerRegistry) -> None:\n"
+            "    \"\"\"Register this module's event handlers on ``registry`` "
+            "(none yet in Phase 1).\"\"\"\n"
+        ),
         "schema/__init__.py": "",
         "schema/models.py": (
             f'"""{spec.mod_id}: SQLAlchemy models for the ``{schema_name}`` '
