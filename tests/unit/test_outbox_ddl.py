@@ -50,7 +50,7 @@ def test_outbox_table_contract() -> None:
     assert isinstance(table.c.payload.type, JSONB)
     assert table.c.status.server_default is not None
     assert table.c.attempts.server_default is not None
-    assert OUTBOX_STATUSES == ("pending", "inflight", "dispatched", "failed", "dead_letter")
+    assert OUTBOX_STATUSES == ("pending", "inflight", "dead_letter")
 
 
 def test_consumed_events_table_contract() -> None:

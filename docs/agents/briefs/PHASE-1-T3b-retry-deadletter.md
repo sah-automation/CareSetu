@@ -49,8 +49,8 @@ subscriber attempt.
 - **Retry state is `pending`, not `failed`.** T3a's claim-eligibility predicate
   is `status='pending' AND (next_attempt_at IS NULL OR next_attempt_at <=
 now())`. Backoff scheduling composes with it by returning a failed row to
-  `pending` with `next_attempt_at = now + backoff`. `OUTBOX_STATUS_FAILED`
-  exists in the DDL enum but is reserved, not used as the retry state.
+  `pending` with `next_attempt_at = now + backoff` - there is no `failed`
+  outbox status.
 - **Attempt counting:** `attempts` starts at 0 (writer). Each partial/failed
   fan-out increments it; the row dead-letters when the incremented count reaches
   `max_attempts` (5). A row survives 5 delivery attempts (initial + 4 retries).
