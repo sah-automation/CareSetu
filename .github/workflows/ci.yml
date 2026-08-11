@@ -60,6 +60,20 @@ jobs:
       - name: vitest
         run: npm run test:unit:frontend
 
+  page-budget:
+    name: page-budget (NFR-003, <= 1.5 MB per channel)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: install frontend
+        run: npm ci
+      - name: build, serve, and measure channel payloads
+        run: npm run check:pages
+
   migration-check:
     name: migration-check (alembic single head + no cross-schema FK)
     runs-on: ubuntu-latest
