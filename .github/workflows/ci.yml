@@ -176,8 +176,8 @@ jobs:
         env:
           BACKUP_DIR: ${{ runner.temp }}/backups
 
-  # e2e (playwright) job lands in PHASE-1 alongside the first E2E spec and app
-  # routes (roadmap §3.2). Until then there are no tests to run.
+  # e2e (playwright) job lands in PHASE-2 alongside the first E2E spec and
+  # patient auth routes (roadmap §3.2). Until then there are no tests to run.
 
   scan:
     name: security scan (gitleaks + bandit + pip-audit)
