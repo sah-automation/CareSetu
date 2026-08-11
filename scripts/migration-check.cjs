@@ -39,7 +39,7 @@ if (heads.length === 0) {
 }
 
 if (heads.length > 1) {
-  console.error(`migration-check: multiple heads (${heads.length}) — linear history required`);
+  console.error(`migration-check: multiple heads (${heads.length}) - linear history required`);
   process.exit(1);
 }
 

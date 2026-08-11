@@ -8,10 +8,12 @@ later module migrations (Phase 2+) materialize identical tables.
 
 Outbox row contract (issue #16): ``id`` (UUID PK), ``event_id``,
 ``event_type``, ``payload`` (JSONB), ``occurred_at``, ``status``, ``attempts``,
-``next_attempt_at``. The status machine is ``pending -> inflight ->
-dispatched`` with ``failed``/``dead_letter`` branches; only the dispatcher
-moves a row out of ``pending``. A row is deleted after full successful fan-out
-- the subscriber's ``consumed_events`` ledger is the delivery record.
+``next_attempt_at``. The status machine is ``pending -> inflight``; only the
+dispatcher moves a row out of ``pending``. A row whose fan-out fully succeeds is
+deleted - delete-on-success per ADR-0002, no tombstone, the subscriber's
+``consumed_events`` ledger is the delivery record. A partial fan-out returns the
+row to ``pending`` on an exponential-backoff schedule and, once ``attempts``
+reaches the cap, ``dead_letter`` is terminal.
 
 Ledger contract: ``event_id`` (UUID PK), ``event_type``, ``processed_at``,
 ``handler_result``. It lives with the subscriber in its own schema, never
@@ -37,15 +39,11 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 OUTBOX_STATUSES: tuple[str, ...] = (
     "pending",
     "inflight",
-    "dispatched",
-    "failed",
     "dead_letter",
 )
 
 OUTBOX_STATUS_PENDING = "pending"
 OUTBOX_STATUS_INFLIGHT = "inflight"
-OUTBOX_STATUS_DISPATCHED = "dispatched"
-OUTBOX_STATUS_FAILED = "failed"
 OUTBOX_STATUS_DEAD_LETTER = "dead_letter"
 
 _OUTBOX_STATUS_LIST = ", ".join(f"'{status}'" for status in OUTBOX_STATUSES)

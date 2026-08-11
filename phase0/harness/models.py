@@ -1,4 +1,4 @@
-"""Phase 0 harness — typed DTOs.
+"""Phase 0 harness - typed DTOs.
 
 Throwaway research code for the PHASE-0 Hindi voice feasibility spike
 (issues #2 / #4 / #5). The dataclasses here are the request/response envelope
@@ -43,7 +43,7 @@ class PreSummaryData(TypedDict, total=False):
 
     Keys are optional (``total=False``) because a provider may omit fields it
     found nothing for; scoring treats a missing key as empty. ``clinical_notes``
-    and ``extraction_notes`` are not part of this shape — they are reference
+    and ``extraction_notes`` are not part of this shape - they are reference
     metadata the provider is not asked to produce.
     """
 

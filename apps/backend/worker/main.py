@@ -64,6 +64,27 @@ _MODULE_REGISTERS: tuple[Callable[[HandlerRegistry], None], ...] = (
 )
 
 
+def _assert_registers_mirror_schemas(
+    registers: tuple[Callable[[HandlerRegistry], None], ...],
+    schemas: tuple[str, ...],
+) -> None:
+    """Composition-root guard: ``registers`` must mirror ``schemas`` in order.
+
+    Names are declared once in ``bus.bootstrap.MODULE_SCHEMAS`` (issue #47);
+    a new module must add its ``register_handlers`` here in that same order.
+    Runs at import so a drift between the two lists fails before the process
+    boots. Imports stay static - no dynamic ``importlib`` (PHASE-1 T4).
+    """
+    names = tuple(register.__module__.split(".")[1] for register in registers)
+    if names != schemas:
+        raise RuntimeError(
+            f"_MODULE_REGISTERS no longer mirrors MODULE_SCHEMAS: expected {schemas}, got {names}"
+        )
+
+
+_assert_registers_mirror_schemas(_MODULE_REGISTERS, MODULE_SCHEMAS)
+
+
 def build_registry() -> HandlerRegistry:
     """Wire every module's ``register_handlers`` into one ``HandlerRegistry``.
 

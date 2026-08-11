@@ -50,7 +50,7 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, cast
+from typing import cast
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -98,7 +98,7 @@ class OutboxRow:
     id: UUID
     event_id: UUID
     event_type: str
-    payload: dict[str, Any]
+    payload: dict[str, object]
     occurred_at: datetime
     next_attempt_at: datetime
     attempts: int
@@ -239,7 +239,7 @@ def _to_outbox_row(mapping: RowMapping) -> OutboxRow:
         id=cast(UUID, mapping["id"]),
         event_id=cast(UUID, mapping["event_id"]),
         event_type=cast(str, mapping["event_type"]),
-        payload=cast(dict[str, Any], mapping["payload"]),
+        payload=cast(dict[str, object], mapping["payload"]),
         occurred_at=cast(datetime, mapping["occurred_at"]),
         next_attempt_at=cast(datetime, mapping["next_attempt_at"]),
         attempts=cast(int, mapping["attempts"]),

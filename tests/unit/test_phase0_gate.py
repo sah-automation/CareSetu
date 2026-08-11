@@ -1,9 +1,9 @@
-"""Phase 0 harness — AMB-006 forced-review gate tests (issue #5).
+"""Phase 0 harness - AMB-006 forced-review gate tests (issue #5).
 
 Verifies the fallback semantics FEAT-007 / MOD-005 pin down: a
 ``low_confidence`` pre-summary is unusable as drafting or consult input until
 an explicit, timestamped, attributed doctor review clears it. Pure state
-machine — no providers, no network.
+machine - no providers, no network.
 """
 
 import pytest

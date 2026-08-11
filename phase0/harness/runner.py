@@ -1,4 +1,4 @@
-"""Phase 0 harness — run orchestration (issues #4 / #5).
+"""Phase 0 harness - run orchestration (issues #4 / #5).
 
 Drives a provider over the corpus, scores the transcription leg of the
 acceptance bar (WER/CER per clip → median/p90 per cohort and overall),
@@ -129,7 +129,7 @@ async def _structure_clip(
         result = await gateway.structure(transcript, clip.clip_id)
     except Exception as exc:  # a provider failure must not sink the whole run
         # A provider failure produces no output: nothing clinically-significant
-        # was *asserted*, so this is not a significant error — it is an error
+        # was *asserted*, so this is not a significant error - it is an error
         # row (excluded from calibration) and flagged as low-confidence.
         return PerClipStructuring(
             clip_id=clip.clip_id,
@@ -236,8 +236,8 @@ def run_corpus(
     ``concurrency`` caps the number of in-flight provider calls (default 1 to
     stay inside free-tier rate limits).
 
-    The structuring leg (issue #5) runs only on the well-formed subset — the
-    clips whose transcription WER cleared ``TRANSCRIPTION_FLOOR_WER`` — so
+    The structuring leg (issue #5) runs only on the well-formed subset - the
+    clips whose transcription WER cleared ``TRANSCRIPTION_FLOOR_WER`` - so
     extraction is scored without punishing it for ASR failures. Pass
     ``structure=False`` for a transcription-only run.
     """

@@ -1,4 +1,4 @@
-"""Phase 0 harness — Gemini provider (issue #4).
+"""Phase 0 harness - Gemini provider (issue #4).
 
 First candidate provider on the throwaway harness: the Gemini free/cheap tier,
 driven over the same REST endpoint the google-genai SDK wraps, using httpx so
@@ -53,7 +53,7 @@ _STRUCTURE_PROMPT = (
     "only what is actually spoken: unstated string fields are null, unstated "
     'list fields are []. Never invent facts. "structuring_confidence" is a '
     "number from 0 to 1 stating how confident you are that the extraction "
-    "captures everything stated in the transcript and nothing else — lower it "
+    "captures everything stated in the transcript and nothing else - lower it "
     "when fields are ambiguous, partially stated, or the transcript is noisy. "
     "It is the AMB-006 calibration signal, so do not game it."
 )
@@ -78,7 +78,7 @@ class GeminiPricing:
 
 
 # Gemini 2.5 Flash list prices (US cents per 1M tokens); audio input may be
-# billed higher than text input — this table uses the text rate and is
+# billed higher than text input - this table uses the text rate and is
 # configurable via GEMINI_PRICE_USD_PER_1M_IN / _OUT if the tier changes.
 DEFAULT_PRICING = GeminiPricing(
     tier="free",

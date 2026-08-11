@@ -1,4 +1,4 @@
-"""Phase 0 harness — OpenAI Whisper provider (issue #9).
+"""Phase 0 harness - OpenAI Whisper provider (issue #9).
 
 Second candidate provider on the throwaway harness: OpenAI Whisper
 (``whisper-1``) for the audio → transcript leg, driven over the REST API
@@ -54,7 +54,7 @@ _STRUCTURE_PROMPT = (
     "only what is actually spoken: unstated string fields are null, unstated "
     'list fields are []. Never invent facts. "structuring_confidence" is a '
     "number from 0 to 1 stating how confident you are that the extraction "
-    "captures everything stated in the transcript and nothing else — lower it "
+    "captures everything stated in the transcript and nothing else - lower it "
     "when fields are ambiguous, partially stated, or the transcript is noisy. "
     "It is the AMB-006 calibration signal, so do not game it."
 )

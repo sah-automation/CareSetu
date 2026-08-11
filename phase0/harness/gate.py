@@ -1,10 +1,10 @@
-"""Phase 0 harness — AMB-006 forced-review usage gate (issue #5).
+"""Phase 0 harness - AMB-006 forced-review usage gate (issue #5).
 
 The fallback semantics FEAT-007 / MOD-005 pin down: a ``low_confidence``
 pre-summary is unusable as drafting or consult input until an explicit,
 timestamped, attributed doctor review clears it. The lifecycle is
 ``[Draft] -> [Reviewed] -> [Final]`` with the flag as a quality gate, not a
-fourth state — it is cleared only by that recorded review.
+fourth state - it is cleared only by that recorded review.
 
 This module is the throwaway, pure-state version of the gate the spike must
 validate; the hard interlocks live at ``request_rx_draft`` and
@@ -64,7 +64,7 @@ def mark_reviewed(record: PreSummaryRecord, doctor: str, reviewed_at: str) -> Pr
     """Clear the low-confidence gate with a recorded, attributed doctor review.
 
     The flag itself is not reset (the extraction is still flagged "low
-    confidence — verify"); the recorded review is what unlocks it. A Final
+    confidence - verify"); the recorded review is what unlocks it. A Final
     pre-summary is terminal and cannot be re-reviewed.
     """
     if record.status == PreSummaryStatus.FINAL:

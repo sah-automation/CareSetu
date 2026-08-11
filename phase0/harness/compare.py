@@ -1,9 +1,9 @@
-"""Phase 0 harness — cross-provider comparison table (issue #11).
+"""Phase 0 harness - cross-provider comparison table (issue #11).
 
 Throws the recorded run reports (``phase0/runs/*.json``, written by
 ``phase0.harness.runner.report_to_json``) side by side so the spike verdict is
 apples-to-apples: same harness, same corpus, same five-number bar, per
-provider. Covers the four comparison areas — transcription quality
+provider. Covers the four comparison areas - transcription quality
 (median/p90 WER and CER), structuring accuracy (overall field F1), flag
 calibration (AMB-006 silent-error rate + flag precision/recall), and
 per-intake cost.
@@ -17,7 +17,7 @@ surfaced in the output.
 
 Per-intake cost is the mean, over billed clips, of the recorded per-clip cost
 summed across both legs (transcribe + structure); the calls-per-intake column
-restates the per-call ceiling the run itself records — Gemini's multimodal
+restates the per-call ceiling the run itself records - Gemini's multimodal
 single-call finding collapses to one call, the 2-leg pipelines (Whisper/NIM)
 to two.
 
@@ -43,7 +43,7 @@ class ComparisonRow:
     """One provider's apples-to-apples row; ``None`` means no recorded data.
 
     A missing metric (structuring on a transcription-only run, any metric for
-    a provider with no run at all) is ``None`` and renders as ``no data`` —
+    a provider with no run at all) is ``None`` and renders as ``no data`` -
     never a guess, never a fabricated zero.
     """
 
@@ -73,7 +73,7 @@ def compare_runs(runs_dir: Path) -> list[ComparisonRow]:
 
     Every provider in ``PROVIDER_ORDER`` gets a row, in that order; any
     provider present in the directory but not in that order is appended
-    alphabetically. A run file that is not valid JSON is a hard error — the
+    alphabetically. A run file that is not valid JSON is a hard error - the
     directory is meant to hold only recorded run reports, so a corrupt file is
     surfaced, not silently skipped.
     """

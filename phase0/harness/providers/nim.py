@@ -1,4 +1,4 @@
-"""Phase 0 harness — NVIDIA NIM provider (issue #10).
+"""Phase 0 harness - NVIDIA NIM provider (issue #10).
 
 Third candidate provider on the throwaway harness: NVIDIA NIM, driven over
 the hosted OpenAI-compatible endpoint (``https://integrate.api.nvidia.com/v1``)
@@ -11,7 +11,7 @@ prompt the other adapters use.
 
 Cost posture: the hosted NIM preview is free for prototyping, so the list
 price is zero and recorded INR is 0. Production use requires NVIDIA AI
-Enterprise licensing, which is not a per-token published rate — that caveat is
+Enterprise licensing, which is not a per-token published rate - that caveat is
 recorded in the run output (``LICENSING_CAVEAT``). The ASR endpoint does not
 report token counts, so transcription usage records 0 tokens (honest, not
 estimated); the chat leg reports real tokens. Not production code.
@@ -34,7 +34,7 @@ from phase0.harness.models import PreSummaryData, StructureResult, TranscribeRes
 
 _DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
 # The base URL already ends in /v1 (the OpenAI-compatible prefix), so the
-# endpoint paths below are relative to it — never prefix them with /v1 again.
+# endpoint paths below are relative to it - never prefix them with /v1 again.
 _ASR_ENDPOINT = "/audio/transcriptions"
 _CHAT_ENDPOINT = "/chat/completions"
 _TRANSIENT_STATUS_CODES = (500, 502, 503)
@@ -47,7 +47,7 @@ _DEFAULT_QUOTA_BACKOFF_SECONDS = 30.0
 _LANGUAGE = "hi-IN"
 
 LICENSING_CAVEAT = (
-    "prototyping only — the hosted NVIDIA NIM preview is free for development; "
+    "prototyping only - the hosted NVIDIA NIM preview is free for development; "
     "production use requires NVIDIA AI Enterprise licensing"
 )
 
@@ -63,7 +63,7 @@ _STRUCTURE_PROMPT = (
     "only what is actually spoken: unstated string fields are null, unstated "
     'list fields are []. Never invent facts. "structuring_confidence" is a '
     "number from 0 to 1 stating how confident you are that the extraction "
-    "captures everything stated in the transcript and nothing else — lower it "
+    "captures everything stated in the transcript and nothing else - lower it "
     "when fields are ambiguous, partially stated, or the transcript is noisy. "
     "It is the AMB-006 calibration signal, so do not game it."
 )

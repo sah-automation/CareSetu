@@ -1,9 +1,9 @@
-# Phase 0 Corpus — Ground-Truth Review Ledger
+# Phase 0 Corpus - Ground-Truth Review Ledger
 
 Two-person double-authoring record for the committed corpus ground truth.
 
-- **Author (primary):** John — authored the verbatim transcripts (normalization) and the reference structured pre-summaries.
-- **Reviewer (independent):** Sonu — independent second-pass review of every transcript and pre-summary against the source recording/transcript.
+- **Author (primary):** John - authored the verbatim transcripts (normalization) and the reference structured pre-summaries.
+- **Reviewer (independent):** Sonu - independent second-pass review of every transcript and pre-summary against the source recording/transcript.
 - Review pass: re-read each clip's transcript against its audio source intent, checked every pre-summary field against the transcript for over-extraction (never filling from outside knowledge) and missed content, and checked for PHI.
 
 Every clip below is **approved** by both John and Sonu. Status values: `approved` (both passes complete).

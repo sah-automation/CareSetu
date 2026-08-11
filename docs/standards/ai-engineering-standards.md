@@ -1,6 +1,6 @@
 # AI Engineering Standards
 
-**Scope:** Two audiences — (A) the **product's AI features** (LLM transcribe → structure → pre-summary, rx drafting) and (B) **agent-assisted development** of this codebase. Both optimized for scalability, production safety, cost (`NFR-001`), and context management.
+**Scope:** Two audiences - (A) the **product's AI features** (LLM transcribe → structure → pre-summary, rx drafting) and (B) **agent-assisted development** of this codebase. Both optimized for scalability, production safety, cost (`NFR-001`), and context management.
 **Upstream:** `MOD-005`, `FEAT-006/007/009`, `NFR-001`, `NFR-PERF-003`, `NFR-SEC-006`, `AMB-006`, `RISK-EVAL-006`.
 
 ---
@@ -14,34 +14,34 @@
 
 ### A2. Structured output (validate everything)
 
-- Every LLM response is parsed into a Pydantic v2 model and **validated** — malformed output is a failed job, never a silent pass-through.
+- Every LLM response is parsed into a Pydantic v2 model and **validated** - malformed output is a failed job, never a silent pass-through.
 - Prompt contract is versioned alongside the schema; prompt changes are reviewed like code.
 - Hindi + English are first-class; language selection is explicit in the request (`REQ-006`).
 
 ### A3. Confidence & the "never verified" rule
 
 - Extraction confidence is computed and recorded; below the `AMB-006` threshold → `pre_summary.low_confidence` → **forced doctor review**.
-- AI output is **never presented as verified**. The pre-summary is a draft for a licensed doctor; a prescription is never issued without doctor approval (`REQ-023`). This is the `CFL-002` baseline — a compliance decision, not a code shortcut.
+- AI output is **never presented as verified**. The pre-summary is a draft for a licensed doctor; a prescription is never issued without doctor approval (`REQ-023`). This is the `CFL-002` baseline - a compliance decision, not a code shortcut.
 
 ### A4. Cost & budget metering
 
 - Every AI call records provider, tokens, and ₹cost to `ai_jobs`; counters persist (`NFR-001`, `NFR-COST-001`).
-- Hard monthly budget: when exhausted, AI degrades to its fallback (doctor-review) path — no overspend.
+- Hard monthly budget: when exhausted, AI degrades to its fallback (doctor-review) path - no overspend.
 - Egress is **PHI-minimized and consent-gated** (`NFR-SEC-006`): only intake/prescription context leaves, never the full record; each egress is audited.
 
 ### A5. Degradation
 
 - Timeout / failure / low confidence → degrade to doctor review. An LLM outage must never block the care loop (`NFR-PERF-003`). Every degradation is logged + audited + metered.
 
-### A6. Advanced AI — gateway/router, fallback, caching, versioning
+### A6. Advanced AI - gateway/router, fallback, caching, versioning
 
 An abstract **AI gateway port** sits behind `MOD-005`. All LLM calls go through one typed interface; domain code never touches a concrete provider.
 
 - **Routing & per-task model selection:** each task (transcribe / structure / draft) declares a model _tier_ (e.g. cheap-capable vs. strong). The gateway picks the cheapest model meeting the task's quality bar. Selection is config-driven.
 - **Multi-provider fallback chains:** a task can list ordered fallback providers. On provider failure, budget cap, or timeout → try the next in the chain before degrading. Still bounded by the hard rule: never block the care loop (A5).
 - **Cost-aware routing:** the gateway consults the budget meter and routes to the cheapest eligible provider; at budget exhaustion it degrades, never overspends (`NFR-001`).
-- **Caching:** identical/near-identical prompts are served from cache (cache key = prompt version + normalized input). Invalidation on prompt or output-schema version change. Provider-level prompt caching may be used where supported — but never caches PHI outside consented, audited paths.
-- **Versioning:** prompt contract and output schema are versioned together (A2). A model upgrade is a reviewed change gated by an A/B check against the previous model — never a silent swap in production.
+- **Caching:** identical/near-identical prompts are served from cache (cache key = prompt version + normalized input). Invalidation on prompt or output-schema version change. Provider-level prompt caching may be used where supported - but never caches PHI outside consented, audited paths.
+- **Versioning:** prompt contract and output schema are versioned together (A2). A model upgrade is a reviewed change gated by an A/B check against the previous model - never a silent swap in production.
 
 ---
 
@@ -55,7 +55,7 @@ An abstract **AI gateway port** sits behind `MOD-005`. All LLM calls go through 
 ### B2. Context management
 
 - Read before writing: `CONTEXT.md` (when present), the target module's spec in `internal-modules.md`, the feature's PRD section, and `docs/standards/*` before editing that area.
-- Keep working sets small — match the roadmap's phase granularity; don't pull whole-file dumps when a section suffices.
+- Keep working sets small - match the roadmap's phase granularity; don't pull whole-file dumps when a section suffices.
 - Reuse existing domain vocabulary and event names (whitebox §4.2); do not invent synonyms or new events without registering them.
 
 ### B3. Production-safe code

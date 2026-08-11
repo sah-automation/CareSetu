@@ -65,3 +65,9 @@ repos:
         additional_dependencies: []
         pass_filenames: false
         always_run: true
+      - id: check-em-dashes
+        name: no-em-dash gate (Ticket #49)
+        entry: python apps/backend/scripts/check_em_dashes.py
+        language: python
+        additional_dependencies: []
+        pass_filenames: true

@@ -1,7 +1,7 @@
-# Brief — 30 PHASE-1 T4: Worker process + composition root
+# Brief - 30 PHASE-1 T4: Worker process + composition root
 
 **Ticket:** #30 · **Parent:** #16 · **Refreshed:** 2026-08-11
-**Reading surface:** ~6K tokens (budget 10K) — within budget
+**Reading surface:** ~6K tokens (budget 10K) - within budget
 
 ## Scope
 
@@ -18,20 +18,20 @@ Acceptance criteria (verbatim from #30):
 
 ## Read-list (in order)
 
-1. Issue #16 `Implementation Decisions` — the **Worker process** bullet: separate
+1. Issue #16 `Implementation Decisions` - the **Worker process** bullet: separate
    async process, dispatcher poll loop, graceful SIGTERM drain; and the composition-root
    rule (infra imports modules only at the composition root) (~2K, via `gh issue view 16`).
-2. `apps/backend/bus/dispatcher.py` — `run_poll_loop` (already honours `stop_event`
+2. `apps/backend/bus/dispatcher.py` - `run_poll_loop` (already honours `stop_event`
    between passes so the pass in flight drains; exceptions propagate), `discover_outbox_tables`
    (list-based discovery), `OutboxTable`, `DispatcherConfig`, `DEFAULT_DISPATCHER_CONFIG` (~1.5K).
-3. `apps/backend/bus/registry.py` — `HandlerRegistry` + the docstring's composition-root
+3. `apps/backend/bus/registry.py` - `HandlerRegistry` + the docstring's composition-root
    contract: "built ... from each module's `register_handlers` callbacks" (~0.5K).
-4. `apps/backend/app/config.py` — `Settings` / `get_settings` (env-driven `database_url`,
-   resolved once) and `apps/backend/bus/bootstrap.py` — `MODULE_SCHEMAS` (the 11 canonical names) (~0.3K).
-5. `apps/backend/scripts/check_module_boundaries.py` — `_iter_checked_files`,
+4. `apps/backend/app/config.py` - `Settings` / `get_settings` (env-driven `database_url`,
+   resolved once) and `apps/backend/bus/bootstrap.py` - `MODULE_SCHEMAS` (the 11 canonical names) (~0.3K).
+5. `apps/backend/scripts/check_module_boundaries.py` - `_iter_checked_files`,
    `_violation_message`, `DEFAULT_CARVE_OUT_RELATIVE_ROOTS`, `SCHEMA_PLUMBING_PACKAGES`:
    the worker's module-`adapters` imports must be carve-out-whitelisted or the CI gate fails (~1.5K).
-6. `apps/backend/scripts/scaffold_module.py` + `tests/unit/test_module_layout.py` —
+6. `apps/backend/scripts/scaffold_module.py` + `tests/unit/test_module_layout.py` -
    the `adapters/__init__.py` template the new `register_handlers` seam extends (~0.5K).
 7. Test patterns: `tests/unit/test_dispatcher.py` (stop-event unit pattern),
    `tests/integration/test_dispatcher.py::test_run_poll_loop_drains_discovered_outbox_tables`
@@ -61,17 +61,17 @@ Acceptance criteria (verbatim from #30):
 
 - Baseline verified green on 2026-08-11: 250 unit + 21 integration passed.
 - **Graceful drain already lives in the loop:** `run_poll_loop` honours `stop_event`
-  between passes — the current pass finishes so inflight claims drain before shutdown.
+  between passes - the current pass finishes so inflight claims drain before shutdown.
   The worker's job is SIGTERM → `stop_event.set()`; the loop does the rest. Do not
   reimplement drain in the worker.
 - **The `register_handlers` seam does not exist yet.** Each of the 11 modules' empty
   `adapters/__init__.py` gets `register_handlers(registry: HandlerRegistry) -> None`
-  (no-op in Phase 1 — no business handlers). Update the generator template in
+  (no-op in Phase 1 - no business handlers). Update the generator template in
   `scaffold_module.py` too and hand-write the 11 existing trees to match (the generator
   never rewrites an existing file).
 - **Composition root = static imports in the worker entrypoint.** Use
   `from modules.<name>.adapters import register_handlers` for all 11, in
-  `MODULE_SCHEMAS` order. Do not use dynamic `importlib` — static imports are
+  `MODULE_SCHEMAS` order. Do not use dynamic `importlib` - static imports are
   gate-visible and mypy-strict friendly.
 - **Boundary checker needs one additive change:** add `worker` to
   `DEFAULT_CARVE_OUT_RELATIVE_ROOTS` and allow the worker carve-out to import module

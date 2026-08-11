@@ -1,4 +1,4 @@
-# Phase 0 — Hindi Voice Reference Corpus & Ground Truth
+# Phase 0 - Hindi Voice Reference Corpus & Ground Truth
 
 Reference corpus for the Phase 0 Hindi Voice Feasibility Spike (issues #2 / #3): committed, reproducible fixtures used to measure ASR transcription quality and Hindi structuring accuracy before any production LLM spend.
 
@@ -6,13 +6,13 @@ Reference corpus for the Phase 0 Hindi Voice Feasibility Spike (issues #2 / #3):
 
 ```
 phase0/
-├── README.md                        # this file — format, schema, provenance
+├── README.md                        # this file - format, schema, provenance
 ├── REVIEW_LEDGER.md                 # John (author) / Sonu (reviewer) double-author record
 ├── PHI_SCAN.md                      # PHI scan method, results, exclusions
 ├── field_set/
 │   ├── field_set.json               # provisional Phase 7 pre-summary field set, v1.0.0
 │   └── field_set.md                 # human-readable field reference
-├── loader.py                        # load_corpus() — one-call fixture loader (stdlib only)
+├── loader.py                        # load_corpus() - one-call fixture loader (stdlib only)
 └── corpus/
     ├── manifest.json                # clip manifest (cohort, paths, duration, word count)
     ├── audio/                       # 43 .wav clips (16 kHz mono)
@@ -30,15 +30,15 @@ phase0/
 | Audio format | WAV, 16 kHz, 16-bit, mono                                            |
 | Transcripts  | Verbatim, UTF-8 Devanagari (roman/English words kept as spoken)      |
 | Field set    | `1.0.0` (provisional)                                                |
-| Ground truth | John (author) + Sonu (independent reviewer) — see `REVIEW_LEDGER.md` |
+| Ground truth | John (author) + Sonu (independent reviewer) - see `REVIEW_LEDGER.md` |
 
 ## Cohort definitions
 
 Cohort tags are assigned by a **deterministic transcript heuristic**, documented here for reproducibility:
 
-- **`urban_hindi`** — transcripts with heavy English code-mixing (≥ 20% Latin-script tokens). Typically educated city speech.
-- **`peri_urban`** — light code-mixing (5–19% Latin-script tokens). Town / semi-urban register.
-- **`heavy_local`** — near-pure Hindi (≤ 4% Latin-script tokens). Most colloquial register in the corpus.
+- **`urban_hindi`** - transcripts with heavy English code-mixing (≥ 20% Latin-script tokens). Typically educated city speech.
+- **`peri_urban`** - light code-mixing (5–19% Latin-script tokens). Town / semi-urban register.
+- **`heavy_local`** - near-pure Hindi (≤ 4% Latin-script tokens). Most colloquial register in the corpus.
 
 A Latin-script token is any space-separated word that is fully ASCII (e.g. `fever`, `Okay`, `OFC`). The ratio is `ASCII words / total words` per transcript. The tag for each clip is stored in `manifest.json`.
 
@@ -99,8 +99,8 @@ Reference structured pre-summary against the field set. **Only what is spoken in
 
 ## Provenance & caveats
 
-- **Source:** the raw audio dump in the repo's (gitignored) `audio/` directory is the **EKA Medical Dataset** — an external public corpus of Hindi doctor–patient medical dialogue (including drug-information readings). It is **not** audio recorded locally in/around Daltonganj.
-- **Selection:** 43 of ~310 clips were selected as genuine, PHI-free **consultations** (drug-description readings, demo outtakes, truncated clips, and clips containing personal names were excluded — see `PHI_SCAN.md`).
+- **Source:** the raw audio dump in the repo's (gitignored) `audio/` directory is the **EKA Medical Dataset** - an external public corpus of Hindi doctor–patient medical dialogue (including drug-information readings). It is **not** audio recorded locally in/around Daltonganj.
+- **Selection:** 43 of ~310 clips were selected as genuine, PHI-free **consultations** (drug-description readings, demo outtakes, truncated clips, and clips containing personal names were excluded - see `PHI_SCAN.md`).
 - **Ticket status:** Issue #3's corpus/ground-truth work is complete on this subset, but the "recorded in/around Daltonganj across three dialect cohorts" requirement is **only approximated** by transcript-based cohort proxies. A locally recorded Daltonganj cohort set should supplement/replace this proxy corpus before Phase 7 (per issue #2: vendor sample sets may supplement but must not substitute).
 - **PHI:** selected subset is PHI-free per automated + human review (`PHI_SCAN.md`). No identifier fields exist in the field set.
 
@@ -154,7 +154,7 @@ phase0/harness/
   subset. `clinical_notes`, `extraction_notes`, and metadata are not
   extractions and are excluded.
 - **`low_confidence` flag:** derived from the provider's structuring
-  confidence vs. the `AMB_006_THRESHOLD` (0.70) — strictly below is flagged;
+  confidence vs. the `AMB_006_THRESHOLD` (0.70) - strictly below is flagged;
   an unknown (missing) confidence is treated as flagged ("never present
   unverified output as final"). The provider self-reports the confidence as a
   `structuring_confidence` key alongside the field-set object; the flag is
@@ -165,7 +165,7 @@ phase0/harness/
   chief complaint, severity, medications, allergies, vitals, labs, diagnosis,
   advice, follow-up) on an **unflagged** pre-summary. The report states the
   silent-error rate on unflagged items (bound ≤ 2%), the flag precision/recall
-  vs. measured accuracy, and the verdict — the testable core of the
+  vs. measured accuracy, and the verdict - the testable core of the
   "never present as verified" rule. With **no unflagged pre-summaries** the
   bound has no evidence to certify, so the verdict is FAIL as _unproven_ (never
   a vacuous pass).
@@ -174,7 +174,7 @@ phase0/harness/
   `rx_draft` / `consult` input until `mark_reviewed` records a timestamped,
   attributed doctor review. Each run re-validates the semantics on the sample
   (`gate_validated` in the report); the recorded clear is attributed to the
-  synthetic `harness-reviewer` at the run timestamp — the harness proves the
+  synthetic `harness-reviewer` at the run timestamp - the harness proves the
   state machine, a production deployment records the actual doctor.
 
 ### Run
@@ -207,7 +207,7 @@ report to `phase0/runs/<timestamp>.json` (gitignored).
 ### Compare (issue #11)
 
 Once at least one provider has recorded runs, emit the apples-to-apples
-comparison table — transcription quality, structuring accuracy, flag
+comparison table - transcription quality, structuring accuracy, flag
 calibration, and per-intake cost, per provider:
 
 ```bash
@@ -221,7 +221,7 @@ transcripts. One row per provider (latest run by `generated_at`, run file
 named for provenance); a provider with no recorded run is an explicit
 `no data` row, not a guess. Per-intake cost is the mean recorded cost per
 billed clip across both legs; the `calls` column restates the per-call ceiling
-the run itself records — Gemini's multimodal single-call finding collapses to
+the run itself records - Gemini's multimodal single-call finding collapses to
 one call, Whisper/NIM's 2-leg pipeline to two. The NIM production-licensing
 caveat is surfaced in the output.
 
@@ -230,7 +230,7 @@ caveat is surfaced in the output.
 - **Free-tier quota:** a full 43-clip run in one burst trips the free-tier 429
   quota; the runner records per-clip failures and continues, but a complete
   verdict may need a small paid allowance (`NFR-001` headroom) or runs spread
-  across days — per the roadmap's Phase 0 risk plan.
+  across days - per the roadmap's Phase 0 risk plan.
 - **Multimodal single call:** Gemini accepts audio + a structuring prompt in one
   `generateContent` call (verified live, recorded in each report as
   `provider_findings`), so the per-intake cost ceiling restates as one call

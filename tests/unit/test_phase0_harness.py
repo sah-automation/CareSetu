@@ -1,11 +1,11 @@
-"""Phase 0 harness — gateway port + run orchestration tests (issues #4 / #5).
+"""Phase 0 harness - gateway port + run orchestration tests (issues #4 / #5).
 
 Verifies the provider-agnostic gateway interface (the seam that mirrors the
 future MOD-005 AI gateway port), and that the runner drives a corpus through
 a provider end-to-end, scores the transcription leg, runs the structuring leg
 on the well-formed subset (field F1, AMB-006 calibration, forced-review gate
 validation), records tokens + INR per call, and persists the run output.
-Providers are faked here — only the Gemini adapter's pure request/response
+Providers are faked here - only the Gemini adapter's pure request/response
 parsing is tested without network.
 """
 

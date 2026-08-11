@@ -55,7 +55,7 @@ def test_envelope_from_row_validates_payload_into_the_registered_model() -> None
     assert envelope.event_type == "phase1.round_trip"
     assert envelope.occurred_at == row.occurred_at
     assert isinstance(envelope.payload, RoundTripPayload)
-    assert envelope.payload.round_trip_id == UUID(row.payload["round_trip_id"])
+    assert envelope.payload.round_trip_id == UUID(str(row.payload["round_trip_id"]))
 
 
 def test_envelope_from_row_infers_producer_from_the_outbox_schema() -> None:

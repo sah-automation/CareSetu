@@ -1,7 +1,7 @@
 """Phase 0 NVIDIA NIM provider tests (issue #10).
 
 Tests the NIM adapter's pure request-building, response-parsing, and cost
-computation — deterministic, no network. The port methods are exercised
+computation - deterministic, no network. The port methods are exercised
 against a stubbed HTTP layer; the live end-to-end path is covered by the CLI
 run (gated on NVIDIA_API_KEY), not by CI.
 """

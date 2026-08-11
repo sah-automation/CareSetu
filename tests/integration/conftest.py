@@ -44,7 +44,7 @@ async def db_engine(database_url: str) -> AsyncEngine:
             await connection.execute(text("SELECT 1"))
     except Exception:
         await engine.dispose()
-        pytest.skip(f"PostgreSQL unreachable at {database_url} — install/start the native service")
+        pytest.skip(f"PostgreSQL unreachable at {database_url} - install/start the native service")
     yield engine
     await engine.dispose()
 

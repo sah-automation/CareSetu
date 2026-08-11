@@ -1,9 +1,9 @@
-"""Phase 0 harness — cross-provider comparison table tests (issue #11).
+"""Phase 0 harness - cross-provider comparison table tests (issue #11).
 
 Verifies the two seams of the comparison tool: ``compare_runs`` parses the
 recorded run JSONs (written by ``phase0.harness.runner.report_to_json``) into
-one apples-to-apples row per provider — transcription quality, structuring
-accuracy, flag calibration, and per-intake cost — and ``render_comparison``
+one apples-to-apples row per provider - transcription quality, structuring
+accuracy, flag calibration, and per-intake cost - and ``render_comparison``
 emits the comparison table. Feed is synthetic run JSONs written to a temp
 directory; the table is generated from recorded runs, never eyeballed, and a
 provider with no recorded run gets an explicit ``no data`` row, never a guess.
