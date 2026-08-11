@@ -61,7 +61,7 @@ jobs:
         run: npm run test:unit:frontend
 
   migration-check:
-    name: migration-check (alembic single head)
+    name: migration-check (alembic single head + no cross-schema FK)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -73,6 +73,8 @@ jobs:
         run: uv sync --project apps/backend --group dev
       - name: alembic heads
         run: uv run --project apps/backend alembic -c apps/backend/alembic.ini heads
+      - name: cross-schema FK scan
+        run: uv run --project apps/backend python apps/backend/scripts/check_migrations_fk.py
 
   integration:
     name: integration tests (pytest vs Postgres)

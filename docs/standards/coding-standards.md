@@ -65,7 +65,7 @@ Every module follows hexagonal layout — pure domain core + adapters:
 | E2E            | `Playwright` (`tests/e2e`, browsers shared from the global cache)           | `npm run test:e2e`                                                |
 | Lint           | `pre-commit` (ruff lint+format, prettier, whitespace)                       | `npm run lint` / `npm run lint:backend` / `npm run lint:frontend` |
 | Typecheck      | `mypy --strict` (backend), `tsc --noEmit` (frontend)                        | `npm run typecheck`                                               |
-| Migration gate | `alembic` single-head check                                                 | `npm run migration-check`                                         |
+| Migration gate | `alembic` single-head check + cross-schema-FK scan                          | `npm run migration-check`                                         |
 | Security scan  | `gitleaks` (secret), `bandit` (static), `pip-audit` (deps)                  | `npm run scan`                                                    |
 
 - **pre-commit is the gate on every commit** — gitleaks, ruff, bandit, prettier, whitespace run there; CI runs the same plus typecheck/unit/integration/migration-check/e2e (`.github/workflows/ci.yml`).

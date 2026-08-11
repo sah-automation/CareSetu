@@ -5,9 +5,15 @@ const fs = require('node:fs');
 const venvName = process.env.CARESETU_BACKEND_ENV || 'backend-env';
 const python = path.join('D:\\Dev', 'venvs', venvName, 'Scripts', 'python.exe');
 const alembicIni = path.join('apps', 'backend', 'alembic.ini');
+const fkChecker = path.join('apps', 'backend', 'scripts', 'check_migrations_fk.py');
 
 if (!fs.existsSync(alembicIni)) {
   console.error(`migration-check: missing ${alembicIni}`);
+  process.exit(1);
+}
+
+if (!fs.existsSync(fkChecker)) {
+  console.error(`migration-check: missing ${fkChecker}`);
   process.exit(1);
 }
 
@@ -38,4 +44,17 @@ if (heads.length > 1) {
 }
 
 console.log(`migration-check: single head ${heads[0].split(' ')[0]}. OK`);
+
+const fkResult = spawnSync(python, [fkChecker], {
+  encoding: 'utf-8',
+  cwd: process.cwd(),
+});
+
+if (fkResult.status !== 0) {
+  console.error('migration-check: cross-schema FK scan failed');
+  console.error(fkResult.stderr || fkResult.stdout);
+  process.exit(1);
+}
+
+console.log((fkResult.stdout || '').trim());
 process.exit(0);
