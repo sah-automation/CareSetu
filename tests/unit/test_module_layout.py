@@ -11,21 +11,17 @@ that the T6a boundary checker (#26) will enforce over the real module tree.
 import importlib
 from pathlib import Path
 
-from scripts.scaffold_module import MODULE_SPECS, MODULES_PACKAGE, scaffold_module
-
-ALL_MODULES = (
-    "iam",
-    "partner",
-    "health",
-    "consent",
-    "intake",
-    "care",
-    "diagnostics",
-    "fulfillment",
-    "settlement",
-    "notify",
-    "audit",
+import pytest
+from scripts.scaffold_module import (
+    _MODULE_SPEC_TUPLES,
+    MODULE_SPECS,
+    MODULES_PACKAGE,
+    _build_module_specs,
+    scaffold_module,
 )
+
+from bus.bootstrap import MODULE_SCHEMAS
+
 EXPECTED_DIRS = ("domain", "adapters", "schema")
 EXPECTED_FILES = (
     "facade.py",
@@ -35,6 +31,14 @@ EXPECTED_FILES = (
     "schema/__init__.py",
     "schema/models.py",
 )
+
+
+def test_spec_drift_from_bootstrap_raises() -> None:
+    """A name in MODULE_SCHEMAS but not the spec tuples fails loudly (issue #47)."""
+    drifted = (*MODULE_SCHEMAS, "future_module")
+
+    with pytest.raises(RuntimeError, match="MODULE_SCHEMAS"):
+        _build_module_specs(drifted, _MODULE_SPEC_TUPLES)
 
 
 def _assert_hexagonal_layout(root: Path) -> None:
@@ -67,13 +71,13 @@ def test_generator_emits_hexagonal_layout(tmp_path: Path) -> None:
 
 
 def test_all_modules_scaffolded() -> None:
-    for name in ALL_MODULES:
+    for name in MODULE_SCHEMAS:
         assert name in MODULE_SPECS, f"{name} missing from generator registry"
         _assert_hexagonal_layout(MODULES_PACKAGE / name)
 
 
 def test_table_namespace_prefixes() -> None:
-    for name in ALL_MODULES:
+    for name in MODULE_SCHEMAS:
         models = importlib.import_module(f"modules.{name}.schema.models")
         metadata = models.MODULE_METADATA
         assert metadata.tables, f"{name}: schema defines no tables"
@@ -83,14 +87,14 @@ def test_table_namespace_prefixes() -> None:
 
 
 def test_outbox_table_name_constant() -> None:
-    for name in ALL_MODULES:
+    for name in MODULE_SCHEMAS:
         outbox = importlib.import_module(f"modules.{name}.outbox")
         constant = getattr(outbox, f"{name.upper()}_OUTBOX_TABLE")
         assert constant == f"{name}_outbox"
 
 
 def test_domain_error_class_exists() -> None:
-    for name in ALL_MODULES:
+    for name in MODULE_SCHEMAS:
         exceptions = importlib.import_module(f"modules.{name}.domain.exceptions")
         error_class = getattr(exceptions, f"{name.title()}Error")
         assert issubclass(error_class, Exception)

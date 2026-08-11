@@ -22,6 +22,11 @@ down_revision: str | Sequence[str] | None = "3481d39c74cc"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+# Intentionally frozen by design (issue #47): a migration records the exact
+# database state applied at this revision, so it deliberately does not import
+# ``bus.bootstrap.MODULE_SCHEMAS`` - re-reading the current source would make
+# a historical migration change retroactively as later phases add modules.
+# Adding a module requires a NEW migration, never an edit to this tuple.
 FROZEN_MODULE_SCHEMAS: tuple[str, ...] = (
     "iam",
     "partner",

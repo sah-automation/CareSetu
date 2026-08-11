@@ -24,6 +24,7 @@ The `NFR-001` cost floor forbids separate database instances per bounded context
 
 ## Consequences
 
+- The bootstrap migration (`v0.0__bootstrap_schemas`) carries its own frozen copy of the module names (`FROZEN_MODULE_SCHEMAS`, issue #47) and never imports `bus.bootstrap.MODULE_SCHEMAS`. A migration is immutable: it records the exact database state applied at its revision, so modules added by later phases arrive as new migrations, never as edits to the frozen tuple.
 - The `audit` schema is append-only at the DB level (no UPDATE/DELETE grants) and written only by MOD-011.
 - The monolith can be re-cut into services later without redesign: each module's schema + facade + outbox is already a bounded deployment unit.
 - The boundary checker is itself under test (fixture violations must fail the gate) so the rule cannot silently weaken.

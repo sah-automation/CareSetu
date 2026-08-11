@@ -24,11 +24,45 @@ from bus.bootstrap import MODULE_SCHEMAS
 from bus.registry import HandlerRegistry
 
 
-def test_composition_root_covers_every_module_register_handlers() -> None:
-    module_names = {register.__module__.split(".")[1] for register in worker_main._MODULE_REGISTERS}
+def test_register_guard_mirrors_bootstrap_schemas() -> None:
+    """The composition-root guard accepts a matching register set (issue #47)."""
+    registers = tuple(_fake_register(name) for name in MODULE_SCHEMAS)
 
-    assert module_names == set(MODULE_SCHEMAS)
-    assert len(worker_main._MODULE_REGISTERS) == len(MODULE_SCHEMAS)
+    worker_main._assert_registers_mirror_schemas(registers, MODULE_SCHEMAS)
+
+
+def test_register_guard_rejects_drift_from_schemas() -> None:
+    """A name added to MODULE_SCHEMAS but missing from the register fails (issue #47)."""
+    registers = tuple(_fake_register(name) for name in MODULE_SCHEMAS)
+
+    with pytest.raises(RuntimeError, match="MODULE_SCHEMAS"):
+        worker_main._assert_registers_mirror_schemas(registers, (*MODULE_SCHEMAS, "future_module"))
+
+
+def test_register_guard_rejects_missing_register() -> None:
+    """A register dropped from the composition root fails the guard (issue #47)."""
+    registers = tuple(_fake_register(name) for name in MODULE_SCHEMAS[:-1])
+
+    with pytest.raises(RuntimeError, match="MODULE_SCHEMAS"):
+        worker_main._assert_registers_mirror_schemas(registers, MODULE_SCHEMAS)
+
+
+def test_register_guard_rejects_reordering() -> None:
+    """Registers out of MODULE_SCHEMAS order fail the guard (issue #47)."""
+    registers = tuple(_fake_register(name) for name in reversed(MODULE_SCHEMAS))
+
+    with pytest.raises(RuntimeError, match="MODULE_SCHEMAS"):
+        worker_main._assert_registers_mirror_schemas(registers, MODULE_SCHEMAS)
+
+
+def _fake_register(name: str) -> Callable[[HandlerRegistry], None]:
+    """A ``register_handlers``-shaped callable whose ``__module__`` looks real."""
+
+    def register(_registry: HandlerRegistry) -> None:
+        return None
+
+    register.__module__ = f"modules.{name}.adapters"
+    return register
 
 
 def test_build_registry_invokes_every_module_register_handlers_once(

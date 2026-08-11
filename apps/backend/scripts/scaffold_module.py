@@ -1,8 +1,9 @@
 """Emit Phase 1 module scaffolds for the CareSetu hexagonal layout.
 
-Covered by ticket #24 (T5a: module scaffolding). The registry below is the
-single source of truth for Phase 1 modules; later phases extend it in place
-with new ``ModuleSpec`` entries rather than touching this script's structure.
+Covered by ticket #24 (T5a: module scaffolding). Module names are NOT repeated
+here: they come from ``bus.bootstrap.MODULE_SCHEMAS``, the single source of
+truth (issue #47). This script keeps only the per-module ``title`` and
+``mod_id`` local, zipped onto ``MODULE_SCHEMAS`` in order.
 """
 
 from __future__ import annotations
@@ -10,6 +11,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
+from bus.bootstrap import MODULE_SCHEMAS
 
 MODULES_PACKAGE = Path(__file__).resolve().parent.parent / "modules"
 
@@ -23,24 +26,40 @@ class ModuleSpec:
     mod_id: str
 
 
-_MODULE_SPEC_TUPLES: Sequence[tuple[str, str, str]] = (
-    ("iam", "Identity and access management", "MOD-001"),
-    ("partner", "Partner network management", "MOD-002"),
-    ("health", "Health data", "MOD-003"),
-    ("consent", "Consent management", "MOD-004"),
-    ("intake", "Intake workflows", "MOD-005"),
-    ("care", "Care planning", "MOD-006"),
-    ("diagnostics", "Diagnostics and lab reports", "MOD-007"),
-    ("fulfillment", "Pharmacy fulfillment", "MOD-008"),
-    ("settlement", "Settlement and payments", "MOD-009"),
-    ("notify", "Notifications", "MOD-010"),
-    ("audit", "Audit", "MOD-011"),
+# ``title``/``mod_id`` per module, in MODULE_SCHEMAS order. Names live only in
+# ``bus.bootstrap.MODULE_SCHEMAS`` (issue #47).
+_MODULE_SPEC_TUPLES: Sequence[tuple[str, str]] = (
+    ("Identity and access management", "MOD-001"),
+    ("Partner network management", "MOD-002"),
+    ("Health data", "MOD-003"),
+    ("Consent management", "MOD-004"),
+    ("Intake workflows", "MOD-005"),
+    ("Care planning", "MOD-006"),
+    ("Diagnostics and lab reports", "MOD-007"),
+    ("Pharmacy fulfillment", "MOD-008"),
+    ("Settlement and payments", "MOD-009"),
+    ("Notifications", "MOD-010"),
+    ("Audit", "MOD-011"),
 )
 
-MODULE_SPECS: dict[str, ModuleSpec] = {
-    module: ModuleSpec(module=module, title=title, mod_id=mod_id)
-    for module, title, mod_id in _MODULE_SPEC_TUPLES
-}
+
+def _build_module_specs(
+    schemas: Sequence[str],
+    spec_tuples: Sequence[tuple[str, str]],
+) -> dict[str, ModuleSpec]:
+    """Zip ``schemas`` onto per-module ``(title, mod_id)``, failing loudly on drift."""
+    if len(spec_tuples) != len(schemas):
+        raise RuntimeError(
+            f"_MODULE_SPEC_TUPLES has {len(spec_tuples)} entries but "
+            f"MODULE_SCHEMAS has {len(schemas)}"
+        )
+    return {
+        module: ModuleSpec(module=module, title=title, mod_id=mod_id)
+        for module, (title, mod_id) in zip(schemas, spec_tuples, strict=True)
+    }
+
+
+MODULE_SPECS = _build_module_specs(MODULE_SCHEMAS, _MODULE_SPEC_TUPLES)
 
 
 def _ensure_package_init(pkg: Path) -> None:
