@@ -11,6 +11,15 @@ class IamError(Exception):
     """Base error for the iam module."""
 
 
+class InvalidPhoneError(IamError):
+    """A phone number failed +91 E.164 normalization (spec #51 §2.2).
+
+    Raised by ``register_patient`` when the caller's number cannot be
+    normalized server-side to the launch-scope Indian form; the message is a
+    clear, human-safe validation error for the gateway envelope.
+    """
+
+
 class SmsDeliveryError(IamError):
     """An EXT-001 SMS delivery failed after the retry budget was exhausted.
 

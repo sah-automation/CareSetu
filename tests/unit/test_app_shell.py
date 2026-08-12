@@ -1,7 +1,8 @@
 """PHASE-1 T7a: FastAPI app shell boots (ticket #28).
 
 Boot contract from the brief: the app builds from the shared env-driven
-``Settings``, serves ``/health`` with 200, and registers no business routes.
+``Settings``, serves ``/health`` with 200, and (from PHASE-2 T3, #54) mounts
+exactly one business route - the iam register endpoint.
 """
 
 import pytest
@@ -45,11 +46,7 @@ def test_health_returns_200() -> None:
     assert response.json() == {"status": "ok"}
 
 
-def test_no_business_routes() -> None:
+def test_register_route_is_the_only_business_route() -> None:
     app = create_app()
-    infra_paths = {"/health", "/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
 
-    paths = {route.path for route in app.routes}
-
-    assert "/health" in paths
-    assert paths <= infra_paths
+    assert set(app.openapi()["paths"]) == {"/health", "/v1/auth/register"}
