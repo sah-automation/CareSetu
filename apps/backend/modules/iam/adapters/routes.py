@@ -1,13 +1,13 @@
-"""MOD-001: HTTP adapters for the iam module (PHASE-2 T3, ticket #54).
+"""MOD-001: HTTP adapters for the iam module (PHASE-2 T3/T4, tickets #54, #55).
 
 Endpoints are thin adapters (api-standards §1): parse the typed request, call
 the module facade, return the typed result. Every expected failure answers the
 shared error envelope at the top level (api-standards §2): a stable
 ``SCREAMING_SNAKE`` code, a human-safe message, a trace id, and details.
 ``register_error_handlers`` maps iam domain errors to that envelope; the route
-itself carries no business logic. The register route sits behind the gateway
-middleware stack in ``app.main`` - the rate-limit policy for the OTP/auth
-surface is a Phase 2 gateway ticket.
+itself carries no business logic. The register/verify routes sit behind the
+gateway middleware stack in ``app.main`` - the rate-limit policy for the
+OTP/auth surface is a Phase 2 gateway ticket.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from modules.iam.domain.exceptions import IamError, InvalidPhoneError, SmsDeliveryError
-from modules.iam.facade import IamFacade, RegisterPatientResult
+from modules.iam.facade import IamFacade, RegisterPatientResult, VerifyOtpResult
 
 router = APIRouter(prefix="/v1/auth", tags=["iam"])
 
@@ -32,6 +32,18 @@ class RegisterPatientRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     phone: str = Field(min_length=1, description="10-digit Indian mobile number, or with 91 prefix")
+
+
+class VerifyOtpRequest(BaseModel):
+    """Body of ``POST /v1/auth/verify``: the phone and the submitted 6-digit code."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    phone: str = Field(min_length=1, description="10-digit Indian mobile number, or with 91 prefix")
+    otp: str = Field(
+        pattern=r"^[0-9]{6}$",
+        description="The 6-digit code the patient received; only well-formed guesses count",
+    )
 
 
 class ErrorEnvelope(BaseModel):
@@ -61,6 +73,25 @@ async def register_patient(
     """
     facade = cast(IamFacade, request.app.state.iam_facade)
     return await facade.register_patient(body.phone)
+
+
+@router.post(
+    "/verify",
+    response_model=VerifyOtpResult,
+    status_code=status.HTTP_200_OK,
+    summary="Verify a submitted OTP code",
+)
+async def verify_otp(
+    request: Request,
+    body: VerifyOtpRequest,
+) -> VerifyOtpResult:
+    """Submit the 6-digit code: consume the challenge and verify the patient.
+
+    Returns the outcome the PWA renders - ``verified``, ``wrong_code`` with
+    the remaining attempts, or ``expired``/``spent`` ("request a new code").
+    """
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    return await facade.verify_otp(body.phone, body.otp)
 
 
 def _error_response(status_code: int, code: str, message: str) -> JSONResponse:

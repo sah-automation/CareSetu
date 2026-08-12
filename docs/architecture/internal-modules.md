@@ -159,7 +159,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 
 - **Inbound Sync APIs:** `register_patient(phone)`, `verify_otp(phone, otp)`, `resend_otp(phone)`, `issue_session`, `refresh_session`, `validate_token(jwt) → scope`, `resolve_identity(phone)`, `resolve_actor(actor_id)`, `create_credential_account(partner_id, type)`, `set_actor_status(actor_id, active|suspended)`.
 - **Inbound Events Subscribed:** `partner.activated` (from `MOD-002` → activate partner role), `partner.rejected` (→ revoke/deny role).
-- **Outbound Events Published:** `patient.registered`, `patient.verified`, `patient_auth_failed`, `otp.sent`, `otp.failed`.
+- **Outbound Events Published:** `patient.registered`, `patient.verified`, `patient.auth_failed`, `otp.sent`, `otp.failed`.
 
 #### 3. Core Business Logic & State Machines
 
@@ -594,7 +594,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 | :--------------------------------------------- | :-------------------------- | :--------------------------------------------------------------------------- | :------------- | :------------------------- |
 | `patient.registered`                           | `MOD-001` (IAM)             | `MOD-003` (create record shell), `MOD-004` (init consent profile), `MOD-011` | JSON           | At-least-once (idempotent) |
 | `patient.verified`                             | `MOD-001` (IAM)             | `MOD-011`, `MOD-010` (in-app welcome)                                        | JSON           | At-least-once              |
-| `patient_auth_failed`                          | `MOD-001` (IAM)             | `MOD-011`                                                                    | JSON           | At-least-once              |
+| `patient.auth_failed`                          | `MOD-001` (IAM)             | `MOD-011`                                                                    | JSON           | At-least-once              |
 | `otp.sent`                                     | `MOD-001` (IAM)             | `MOD-011`                                                                    | JSON           | At-least-once              |
 | `consent.requested`                            | `MOD-004` (Consent)         | `MOD-003`, `MOD-011`                                                         | JSON           | At-least-once              |
 | `consent.granted`                              | `MOD-004` (Consent)         | `MOD-003` (update share scope), `MOD-011`                                    | JSON           | At-least-once              |
