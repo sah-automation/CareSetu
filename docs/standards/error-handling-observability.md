@@ -23,7 +23,7 @@ Classify every failure into exactly one bucket; handling differs per bucket:
 - JSON logs: `{ timestamp, level, logger, module, trace_id, actor_id?, event, message, ...context }`.
 - **No PHI, no OTPs, no tokens, no raw provider payloads in logs** - PHI redaction is a hard rule (`NFR-SEC`). Redact field values by schema, and scrub on write.
 - Log levels: `debug` local only; `info` for lifecycle/telemetry events; `warning` for degradations and retries; `error` for operational failures; `critical` for data-integrity/security.
-- Follow the PRD telemetry event names exactly (`patient_registered`, `pre_summary_low_confidence`, `report_rejected_mismatch`, …). New events are registered in the whitebox §4.2 registry, not invented ad hoc.
+- Event names follow the registry dot-notation in `internal-modules.md` §4.2 (e.g. `patient.auth_failed`, `pre_summary.low_confidence`, `report_rejected_mismatch`) - that registry is the single source of truth, not the PRD's legacy snake_case telemetry names. New events are registered in the whitebox §4.2 registry, not invented ad hoc.
 
 ## 3. Correlation & Tracing
 

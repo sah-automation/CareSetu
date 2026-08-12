@@ -159,7 +159,7 @@ PHASE-14 E2E + Observability + Release ◄─ all phases
 
 - **Phase ID:** `PHASE-2-IAM-AUTH`
 - **Phase Strategic Objective:** Deliver the patient identity core - phone-OTP registration with duplicate resolution, session JWT issuance/validation, RBAC scope enforcement at the edge - so every later phase has a trustworthy caller identity (`FEAT-001`).
-- **Release Readiness Criteria:** E2E: register → OTP (mocked SMS) → verify → authenticated session → access a protected route; duplicate phone re-registration resolves to the existing identity; OTP single-use, 5-min TTL, ≥ 60 s resend cooldown; `validate_token` p95 < 100 ms; `patient_auth_failed` and consent/access-denial attempts written to audit events.
+- **Release Readiness Criteria:** E2E: register → OTP (mocked SMS) → verify → authenticated session → access a protected route; duplicate phone re-registration resolves to the existing identity; OTP single-use, 5-min TTL, ≥ 60 s resend cooldown; `validate_token` p95 < 100 ms; `patient.auth_failed` and consent/access-denial attempts written to audit events.
 
 #### 1. In-Scope Modules & Features
 

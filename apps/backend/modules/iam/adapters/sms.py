@@ -12,7 +12,10 @@ server-side API key from settings only, and the OTP value never reaches a log
 line (error-handling-observability: no OTPs, no tokens, no raw provider
 payloads in logs). The circuit-breaker column of §1 is a later-phase concern,
 not part of this ticket - the adapter honours timeout/retry here and logs a
-``patient_auth_failed`` marker on persistent failure so operators can alert.
+``patient.auth_failed`` marker on persistent failure so operators can alert.
+The marker is the dot-notation event name (registry §4.2), not an event
+envelope itself; if an external alert rule greps logs on the legacy name,
+update it in the same change as renaming the marker.
 """
 
 from __future__ import annotations
@@ -143,7 +146,7 @@ class SmsProviderAdapter:
             except httpx.HTTPError as exc:
                 if attempt == self._max_retries:
                     logger.error(
-                        "patient_auth_failed: EXT-001 send failed after %d attempts "
+                        "patient.auth_failed: EXT-001 send failed after %d attempts "
                         "(network error) for phone %s",
                         self._max_retries + 1,
                         mask_phone(request.phone_e164),
@@ -165,7 +168,7 @@ class SmsProviderAdapter:
             )
             raise SmsDeliveryError(f"EXT-001 send rejected with HTTP {response.status_code}")
         logger.error(
-            "patient_auth_failed: EXT-001 send failed after %d attempts "
+            "patient.auth_failed: EXT-001 send failed after %d attempts "
             "(last HTTP %d) for phone %s",
             self._max_retries + 1,
             last_status,

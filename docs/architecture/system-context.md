@@ -106,7 +106,7 @@ _(All software systems, platforms, or APIs outside the blackbox perimeter)_
 - **Data Payload Schema:**
   - Request: `{ "phone_e164": "+91…", "template": "caresetu_otp", "params": { "otp": "123456", "ttl_min": 5 } }`
   - Response: `{ "request_id": "…", "status": "queued" }`
-- **Error & Retry Behavior:** On HTTP 5xx / rate-limit → exponential backoff, max 3 retries; persistent failure logged (`patient_auth_failed`); patient may re-request via an in-app resend gate (cooldown ≥ 60 s). OTP validity 5 minutes, single-use. OTP values are hashed at rest and never logged.
+- **Error & Retry Behavior:** On HTTP 5xx / rate-limit → exponential backoff, max 3 retries; persistent failure logged (`patient.auth_failed`); patient may re-request via an in-app resend gate (cooldown ≥ 60 s). OTP validity 5 minutes, single-use. OTP values are hashed at rest and never logged.
 - **Security & Verification:** Server-side API key from environment (never client-exposed); transport TLS; the only PII crossing is the phone number; OTP generation and verification stays server-side (`GAP-001` baseline = phone OTP).
 
 #### System Integration: `EXT-002` (LLM / AI Provider)

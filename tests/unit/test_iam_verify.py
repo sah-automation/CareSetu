@@ -6,7 +6,7 @@ challenge accepts exactly one correct guess (single-use), a wrong guess only
 decrements the 5-attempt budget, the budget exhausted spends the challenge,
 and a used/expired/spent challenge is rejected with the "request a new code"
 outcome. The outbox write on success (``patient.verified``) vs failure
-(``patient_auth_failed``) is the integration suite's job.
+(``patient.auth_failed``) is the integration suite's job.
 """
 
 from __future__ import annotations

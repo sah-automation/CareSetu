@@ -14,17 +14,13 @@ from uuid import uuid4
 from pydantic import BaseModel
 
 from bus.envelope import Envelope
+from bus.events import (
+    EVENT_OTP_SENT,
+    EVENT_PATIENT_AUTH_FAILED,
+    EVENT_PATIENT_REGISTERED,
+    EVENT_PATIENT_VERIFIED,
+)
 from modules.iam.domain.verify import FailureReason
-
-EVENT_PATIENT_REGISTERED = "patient.registered"
-EVENT_PATIENT_VERIFIED = "patient.verified"
-# The Envelope and HandlerRegistry (bus/envelope.py) enforce the ``domain.action``
-# event-type grammar (coding-standards §3), so ``patient_auth_failed`` - the PRD's
-# legacy snake_case telemetry name, still echoed in internal-modules.md §4.2 - can
-# never be emitted. Spec #51 §2.6 supersedes the legacy names: subscribers match
-# on ``patient.auth_failed``.
-EVENT_PATIENT_AUTH_FAILED = "patient.auth_failed"
-EVENT_OTP_SENT = "otp.sent"
 
 PRODUCER_MODULE = "iam"
 
@@ -116,7 +112,7 @@ def patient_auth_failed_envelope(
     reason: FailureReason,
     attempts_left: int | None = None,
 ) -> Envelope[PatientAuthFailedPayload]:
-    """Build the ``patient_auth_failed`` envelope for the iam outbox.
+    """Build the ``patient.auth_failed`` envelope for the iam outbox.
 
     Emitted for every rejected verification (wrong code, expired, spent,
     replayed, or missing challenge) in the same transaction as the attempt;

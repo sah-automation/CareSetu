@@ -318,7 +318,7 @@ async def test_provider_send_raises_after_exhausting_retries(
 
     assert "654321" not in caplog.text
     assert "+919876543210" not in caplog.text
-    assert "patient_auth_failed" in caplog.text
+    assert "patient.auth_failed" in caplog.text
 
 
 async def test_provider_send_raises_on_network_error() -> None:
