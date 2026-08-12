@@ -49,9 +49,13 @@ OUTBOX_STATUS_DEAD_LETTER = "dead_letter"
 _OUTBOX_STATUS_LIST = ", ".join(f"'{status}'" for status in OUTBOX_STATUSES)
 
 
-def outbox_table(table_name: str, schema: str) -> Table:
-    """Build the transactional-outbox ``Table`` for ``schema``."""
-    metadata = MetaData()
+def outbox_table(table_name: str, schema: str, metadata: MetaData | None = None) -> Table:
+    """Build the transactional-outbox ``Table`` for ``schema``.
+
+    ``metadata`` lets a module register its outbox on its own schema metadata
+    (so introspection sees it); a fresh one is used when omitted.
+    """
+    metadata = metadata if metadata is not None else MetaData()
     return Table(
         table_name,
         metadata,

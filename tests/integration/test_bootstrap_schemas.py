@@ -3,7 +3,8 @@
 Verifies the acceptance criteria that need a live database:
 
   1. ``alembic upgrade head`` creates all 11 private module schemas (ADR-0003
-     layout) and, per the ticket, no module outbox tables yet.
+     layout); the only tables they may hold are the five ``iam`` tables added
+     by ``v1.0__init_iam`` (PHASE-2 T1, #52).
   2. The outbox/``consumed_events`` DDL template materializes into a throwaway
      schema with the documented row contract (issue #16), so the round-trip
      harness (T2c) can build on it.
@@ -41,6 +42,14 @@ OUTBOX_COLUMNS = {
     "next_attempt_at",
 }
 LEDGER_COLUMNS = {"event_id", "event_type", "processed_at", "handler_result"}
+
+EXPECTED_IAM_TABLES = {
+    "iam.iam_identities",
+    "iam.iam_otp_challenges",
+    "iam.iam_sessions",
+    "iam.iam_role_grants",
+    "iam.iam_outbox",
+}
 
 
 def _alembic_config(database_url: str) -> Config:
@@ -123,9 +132,10 @@ def test_upgrade_head_creates_all_eleven_module_schemas(
         )
 
         tables = asyncio.run(_module_schema_table_names(database_url))
-        assert tables == [], (
-            "no module outbox/domain tables may exist after the bootstrap migration, "
-            f"found: {tables}"
+        assert set(tables) == EXPECTED_IAM_TABLES, (
+            "only the iam schema may hold tables after upgrade head (v1.0__init_iam), "
+            f"unexpected: {set(tables) - EXPECTED_IAM_TABLES}, "
+            f"missing: {EXPECTED_IAM_TABLES - set(tables)}"
         )
     finally:
         if upgraded:
