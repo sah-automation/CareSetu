@@ -118,9 +118,11 @@ _Traceability: `REQ-021`, `REQ-003`, `NFR-002`, `GAP-001`, `GAP-005`, `GAP-013`,
 
 **Telemetry & Event Tracking:**
 
-- `patient_registered`: `patient_id`, `phone_country`, `timestamp`
-- `patient_verified`: `patient_id`, `verify_method`, `timestamp`
-- `patient_auth_failed`: `patient_id`, `reason`, `timestamp`
+- `patient.registered`: `identity_id`, `phone_e164`, `timestamp`
+- `patient.verified`: `identity_id`, `phone_e164`, `timestamp`
+- `patient.auth_failed`: `identity_id`, `phone_e164`, `reason`, `timestamp`
+
+> Event names use the registry `domain.action` dot-notation. The event registry in `internal-modules.md` §4.2 is the single source of truth for event names and payloads; the PRD's earlier snake_case telemetry names are superseded by it.
 
 #### Feature 4.1.2: Longitudinal Health Record & Per-Action Consent
 

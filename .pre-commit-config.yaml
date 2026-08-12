@@ -71,3 +71,9 @@ repos:
         language: python
         additional_dependencies: []
         pass_filenames: true
+      - id: check-event-names
+        name: legacy snake_case event-name gate (tickets #54/#55)
+        entry: python apps/backend/scripts/check_event_names.py
+        language: python
+        additional_dependencies: []
+        pass_filenames: true
