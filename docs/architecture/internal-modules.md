@@ -151,7 +151,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 
 #### 1. Data Ownership & Storage Isolation
 
-- **Storage Type:** Relational - PostgreSQL schema `iam`: `identities` (phone_e164 unique, status), `otp_challenges` (OTP hashed, single-use, TTL 5 min, cooldown), `sessions` (jti, expiry, scope), `role_grants` (patient/partner/operator), `audit_outbox`.
+- **Storage Type:** Relational - PostgreSQL schema `iam`: `iam_identities` (phone_e164 unique, status, lockout_failed_attempts + lockout_until), `iam_otp_challenges` (OTP hashed, single-use, TTL 5 min, 5-attempt budget, cooldown), `iam_sessions` (jti, expiry, scope, refresh_token_hash + refresh_expires_at), `iam_role_grants` (patient/partner/operator), `iam_outbox`.
 - **Caching Strategy:** Session/scope claims cached in Redis (TTL); OTP resend cooldown & brute-force counters in Redis (fallback to SQL counters if Redis absent).
 - **Data Isolation Rule:** Private `iam` schema; no other module reads `iam` tables. Identity resolution, token validation, and role/scope checks are exported via the IAM facade only.
 
@@ -164,8 +164,10 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 #### 3. Core Business Logic & State Machines
 
 - **Identity state machine:** `[Unverified] → [Active] → [Suspended]`; re-registration with existing phone resolves to the existing identity (never a duplicate - `FEAT-001` Rule 1, baseline `GAP-001`).
-- **OTP challenge machine:** `[Pending] → [Verified] | [Expired] | [Failed]`; single-use, 5-minute TTL, latest-wins resend (invalidates the pending challenge), in-app resend cooldown ≥ 60 s per phone measured from the last issuance, values hashed at rest and never logged.
-- **Brute-force lockout (a counter, never identity state):** 10 consecutive verification failures across challenges → 15-minute temporary phone lockout, carried on `iam_identities` as `lockout_failed_attempts` + `lockout_until`, enforced on both `verify_otp` and `resend_otp`, reset only by a successful verification. Distinct from the `Suspended` identity status, which stays reachable only via `set_actor_status` (Phase 5).
+- **Phone normalization:** input is a 10-digit Indian mobile number, normalized server-side to E.164 `+91XXXXXXXXXX`; anything else is rejected with a clear validation error, the country code is derived server-side and never trusted from the client, and the canonical form is stored as `phone_e164` (unique).
+- **OTP challenge machine:** `[Pending] → [Verified] | [Expired] | [Failed]`; single-use, 5-minute TTL, 5-attempt budget per challenge (a wrong guess decrements the budget but does not kill the code; the challenge is spent at 0 with a "request a new code" response), latest-wins resend (invalidates the pending challenge), in-app resend cooldown ≥ 60 s per phone measured from the last issuance, values hashed at rest and never logged.
+- **Brute-force lockout (a counter, never identity state):** 10 consecutive verification failures across challenges → 15-minute temporary phone lockout, carried as the `lockout_failed_attempts` + `lockout_until` columns on `iam_identities` (never as the identity lifecycle status), enforced on both `verify_otp` and `resend_otp`, reset only by a successful verification. Distinct from the `Suspended` identity status, which stays reachable only via `set_actor_status` (Phase 5).
+- **Session machine:** after successful verification the module issues an access JWT with a ~15-minute TTL carrying `jti`, expiry, and the scope claim, plus an opaque refresh token stored server-side with a ~30-day sliding lifetime, rotated on every refresh; the refresh path is fully independent of SMS.
 
 #### 4. High-Level Tech Stack & Framework Constraints
 

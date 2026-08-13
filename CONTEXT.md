@@ -73,6 +73,28 @@ _Avoid_: good clips, qualifying set
 The ≤ 2% rate of clinically-significant field errors on unflagged pre-summaries, certified over the well-formed subset - the testable core of "never present unverified output as final".
 _Avoid_: error budget
 
+### Patient identity & access
+
+**identity**:
+The stable, per-phone record that first registration creates and every later login resolves to; one identity per normalized phone, carrying lifecycle status and the lockout counter. The `patient.*` events (`patient.registered`, `patient.verified`, `patient.auth_failed`) are its lifecycle signals.
+_Avoid_: account (for the patient's identity), legacy snake_case spellings of the `patient.*` event names (superseded by the dot-notation registry)
+
+**OTP challenge**:
+A single-use 6-digit code bound to one phone, hashed at rest and never logged, valid for 5 minutes with a 5-attempt budget; a resend invalidates the pending code (latest-wins).
+_Avoid_: verification code (when meaning the OTP itself), SMS code
+
+**phone lockout**:
+The temporary, automatic 15-minute block on a phone after 10 consecutive verification failures across challenges; a counter, never identity state, and distinct from the `Suspended` identity status.
+_Avoid_: suspension, account ban (lockout is automatic and time-boxed)
+
+**duplicate resolution**:
+The rule that re-registering an existing phone resolves to the existing identity instead of creating a second one; the unique index on the normalized phone is the sole arbiter under concurrency.
+_Avoid_: dedupe, merge (there is no merge - concurrent writers converge on the winning row)
+
+**E.164 phone**:
+The canonical stored form `+91XXXXXXXXXX`, normalized server-side from the 10-digit Indian mobile number; the country code is derived server-side and never trusted from the client.
+_Avoid_: mobile number (when meaning the stored canonical form), client-supplied country code
+
 ### Event bus & module seams
 
 **outbox**:
