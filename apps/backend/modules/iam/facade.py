@@ -4,12 +4,15 @@ The only legal cross-module import target for the ``iam`` module
 (coding-standards §2, ADR-0003). Phase 2 T3 (#54) implements the begin-or-
 resume entry point ``register_patient``; T4 (#55) adds the verification
 challenge machine ``verify_otp``; T5 (#56) adds ``resend_otp`` with the
-latest-wins resend, cooldown, and brute-force lockout. The remaining typed
-methods arrive with their Phase 2 tickets.
+latest-wins resend, cooldown, and brute-force lockout; T6 (#57) adds the
+session seam ``issue_session`` (access JWT mint) and the stateless
+``validate_token`` the gateway RBAC consumes. The remaining typed methods
+arrive with their Phase 2 tickets.
 """
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -21,7 +24,8 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from bus.outbox_writer import write_outbox
 from modules.iam.adapters.sms import SmsAdapter, SmsSendRequest, SmsTemplateParams
-from modules.iam.domain import events
+from modules.iam.domain import events, jwt
+from modules.iam.domain.exceptions import SessionIssuanceError
 from modules.iam.domain.lockout import evaluate_failure, lockout_remaining_seconds
 from modules.iam.domain.otp import (
     MAX_ATTEMPTS,
@@ -46,7 +50,12 @@ from modules.iam.domain.verify import (
     suspended_decision,
 )
 from modules.iam.outbox import IAM_OUTBOX_TABLE
-from modules.iam.schema.models import iam_identities, iam_otp_challenges, iam_role_grants
+from modules.iam.schema.models import (
+    iam_identities,
+    iam_otp_challenges,
+    iam_role_grants,
+    iam_sessions,
+)
 
 _IAM_SCHEMA = "iam"
 _PATIENT_ROLE = "patient"
@@ -107,22 +116,55 @@ class ResendOtpResult(BaseModel):
     attempts_left: int | None = None
 
 
+class IssueSessionResult(BaseModel):
+    """A freshly minted access session (spec #51 §2.5, ticket #57).
+
+    ``jwt`` is the HS256 access JWT the PWA stores; ``jti``/``expires_in_seconds``
+    mirror its claims so the client can show a session indicator, and ``scope``
+    is the resolved RBAC scope - always from the patient role grant, never from
+    client input.
+    """
+
+    jwt: str
+    jti: str
+    scope: str
+    identity_id: int
+    expires_in_seconds: int
+
+
+class ValidatedAccessToken(BaseModel):
+    """Claims of a verified access JWT, as the gateway attaches them (ticket #57, T8).
+
+    ``subject_id`` is the identity id the gateway scopes to the patient's own
+    record; ``scope`` is the RBAC scope resolved from the token claim.
+    """
+
+    subject_id: int
+    scope: str
+    jti: str
+
+
 def _default_clock() -> datetime:
     return datetime.now(UTC)
 
 
 class IamFacade:
-    """Typed public facade for iam (Phase 2: registration + OTP verify + resend)."""
+    """Typed public facade for iam (Phase 2: registration + OTP + sessions)."""
 
     def __init__(
         self,
         engine: AsyncEngine,
         sms_adapter: SmsAdapter,
         clock: Callable[[], datetime] = _default_clock,
+        *,
+        access_token_signing_key: str = "",
+        access_token_ttl_seconds: int = jwt.ACCESS_TOKEN_TTL_SECONDS,
     ) -> None:
         self._engine = engine
         self._sms = sms_adapter
         self._clock = clock
+        self._access_token_signing_key = access_token_signing_key
+        self._access_token_ttl_seconds = access_token_ttl_seconds
 
     async def register_patient(self, phone: str) -> RegisterPatientResult:
         """Begin-or-resume: create the identity on first use, else resolve it.
@@ -473,6 +515,86 @@ class IamFacade:
             attempts_left=MAX_ATTEMPTS,
         )
 
+    async def issue_session(self, phone: str) -> IssueSessionResult:
+        """Mint an access JWT for a verified patient (spec #51 §2.5, ticket #57).
+
+        The scope claim is always derived from the patient's active role grant,
+        never from the client (acceptance criterion #3): the identity must be
+        ``Active`` (OTP-verified) and hold an ``Active`` patient grant, else a
+        ``SessionIssuanceError`` names the missing precondition. A fresh ``jti``
+        is generated per token, ``exp`` is ~15 minutes out so a stolen token has
+        limited value, and the session row is recorded in the ``iam``
+        ``sessions`` table in the same transaction - the jti is the anchor the
+        refresh rotation (T7) and revocation check against. An empty signing key
+        fails closed rather than minting a token anyone could forge.
+        """
+        phone_e164 = normalize_phone(phone)
+        if not self._access_token_signing_key:
+            raise SessionIssuanceError(
+                "access-token signing key is not configured; refusing to issue a session"
+            )
+        now = self._clock()
+
+        async with self._engine.begin() as connection:
+            locked = await self._lock_identity(connection, phone_e164)
+            if locked is None:
+                raise SessionIssuanceError(
+                    f"no identity for {phone_e164}; register the phone before issuing a session"
+                )
+            identity_id, identity_status, _failed_attempts, _lockout_until = locked
+            if identity_status != IDENTITY_ACTIVE:
+                raise SessionIssuanceError(
+                    f"identity {identity_id} is {identity_status}, not Active; "
+                    "verify the OTP before issuing a session"
+                )
+            scope = await self._resolve_active_role(connection, identity_id, _PATIENT_ROLE)
+            if scope is None:
+                raise SessionIssuanceError(
+                    f"identity {identity_id} has no active patient role grant"
+                )
+
+            jti = uuid.uuid4().hex
+            token = jwt.issue_token(
+                jti=jti,
+                subject_id=identity_id,
+                scope=scope,
+                signing_key=self._access_token_signing_key,
+                now=now,
+                ttl_seconds=self._access_token_ttl_seconds,
+            )
+            await connection.execute(
+                iam_sessions.insert().values(
+                    jti=jti,
+                    identity_id=identity_id,
+                    scope=scope,
+                    issued_at=now,
+                    expires_at=now + timedelta(seconds=self._access_token_ttl_seconds),
+                )
+            )
+
+        return IssueSessionResult(
+            jwt=token,
+            jti=jti,
+            scope=scope,
+            identity_id=identity_id,
+            expires_in_seconds=self._access_token_ttl_seconds,
+        )
+
+    async def validate_token(self, token: str) -> ValidatedAccessToken:
+        """Resolve a valid access JWT to its scope for the gateway (ticket #57).
+
+        A pure signature + expiry check with no database round-trip (acceptance
+        criterion #4), so the edge hot path stays far under the 100 ms p95
+        (MOD-001 §3.1): the signing key and the clock are all it needs. Every
+        rejection raises the matching ``InvalidAccessTokenError`` subclass -
+        expired, malformed, or wrong signature - for the gateway to deny with a
+        single 401.
+        """
+        claims = jwt.verify_token(token, self._access_token_signing_key, now=self._clock())
+        return ValidatedAccessToken(
+            subject_id=claims.subject_id, scope=claims.scope, jti=claims.jti
+        )
+
     @staticmethod
     async def _latest_cooldown_until(
         connection: AsyncConnection, identity_id: int
@@ -488,6 +610,28 @@ class IamFacade:
                 select(iam_otp_challenges.c.cooldown_until)
                 .where(iam_otp_challenges.c.identity_id == identity_id)
                 .order_by(iam_otp_challenges.c.id.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+
+    @staticmethod
+    async def _resolve_active_role(
+        connection: AsyncConnection, identity_id: int, role: str
+    ) -> str | None:
+        """The role name if ``identity_id`` holds an Active grant for ``role``.
+
+        The source of the token's scope claim: session scope is always derived
+        from a live role grant in ``iam``, never from the client (spec #51
+        §2.5, ticket #57). ``None`` means no active grant - issuance refuses.
+        """
+        return (
+            await connection.execute(
+                select(iam_role_grants.c.role)
+                .where(
+                    iam_role_grants.c.identity_id == identity_id,
+                    iam_role_grants.c.role == role,
+                    iam_role_grants.c.status == "Active",
+                )
                 .limit(1)
             )
         ).scalar_one_or_none()

@@ -59,6 +59,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.iam_facade = IamFacade(
         engine=engine,
         sms_adapter=build_sms_adapter(resolved_settings),
+        access_token_signing_key=resolved_settings.gateway_jwt_signing_key,
+        access_token_ttl_seconds=resolved_settings.gateway_access_token_ttl_seconds,
     )
     app.include_router(iam_router)
     register_error_handlers(app)
