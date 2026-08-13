@@ -14,6 +14,9 @@ DEFAULT_APP_ENVIRONMENT = "production"
 DEFAULT_SMS_PROVIDER = "mock"
 DEFAULT_SMS_TIMEOUT_SECONDS = 10.0
 DEFAULT_SMS_MAX_RETRIES = 3
+# Mirrors ``modules.iam.domain.jwt.ACCESS_TOKEN_TTL_SECONDS``; config stays
+# import-free so it reads as one plain dataclass over the environment.
+DEFAULT_ACCESS_TOKEN_TTL_SECONDS = 900
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _DEV_TEST_ENVIRONMENTS = frozenset({"dev", "test"})
@@ -28,6 +31,8 @@ class Settings:
     gateway_jwt_verify_enabled: bool = False
     gateway_jwt_test_header: str = DEFAULT_TEST_PRINCIPAL_HEADER
     gateway_rate_limit_enabled: bool = False
+    gateway_jwt_signing_key: str = ""
+    gateway_access_token_ttl_seconds: int = DEFAULT_ACCESS_TOKEN_TTL_SECONDS
     sms_provider: str = DEFAULT_SMS_PROVIDER
     sms_api_key: str = ""
     sms_base_url: str = ""
@@ -69,6 +74,8 @@ class Settings:
                 "sms_timeout_seconds must be in (0, 10] to honour the EXT-001 "
                 "call discipline (third-party-integration-standards §1)"
             )
+        if self.gateway_access_token_ttl_seconds <= 0:
+            raise ValueError("gateway_access_token_ttl_seconds must be positive")
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -113,6 +120,10 @@ def get_settings() -> Settings:
             "GATEWAY_JWT_TEST_HEADER", DEFAULT_TEST_PRINCIPAL_HEADER
         ),
         gateway_rate_limit_enabled=_env_bool("GATEWAY_RATE_LIMIT_ENABLED", False),
+        gateway_jwt_signing_key=os.environ.get("GATEWAY_JWT_SIGNING_KEY", ""),
+        gateway_access_token_ttl_seconds=_env_int(
+            "GATEWAY_ACCESS_TOKEN_TTL_SECONDS", DEFAULT_ACCESS_TOKEN_TTL_SECONDS
+        ),
         sms_provider=os.environ.get("SMS_PROVIDER", DEFAULT_SMS_PROVIDER),
         sms_api_key=os.environ.get("SMS_API_KEY", ""),
         sms_base_url=os.environ.get("SMS_BASE_URL", ""),
