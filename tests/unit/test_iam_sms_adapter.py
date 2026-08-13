@@ -8,6 +8,7 @@ to staging/production; the OTP value never reaches a log line.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -26,6 +27,7 @@ from app.config import (
 )
 from modules.iam.adapters.sms import (
     MockSmsAdapter,
+    SmsDeliveryQueue,
     SmsProviderAdapter,
     SmsSendRequest,
     SmsSendResult,
@@ -385,3 +387,84 @@ def test_mask_phone_redacts_middle_digits() -> None:
     assert masked.endswith("10")
     assert _PHONE not in masked
     assert re.fullmatch(r"\+[0-9]{2}\.\.\.[0-9]{2}", masked)
+
+
+# --- background delivery queue (PHASE-2 REM T4, #86) ------------------------
+
+
+class _BlockingSmsAdapter:
+    """Adapter whose send blocks until released, to prove enqueue is non-blocking."""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.sent: list[SmsSendRequest] = []
+
+    async def send(self, request: SmsSendRequest) -> SmsSendResult:
+        self.sent.append(request)
+        self.started.set()
+        await self.release.wait()
+        return SmsSendResult(request_id=f"slow-{len(self.sent)}", status="queued")
+
+
+class _FailingSmsAdapter:
+    """Adapter whose send always fails, to prove failures never reach the caller."""
+
+    async def send(self, request: SmsSendRequest) -> SmsSendResult:
+        raise SmsDeliveryError("EXT-001 unavailable")
+
+
+async def test_delivery_queue_enqueue_returns_before_delivery_completes() -> None:
+    adapter = _BlockingSmsAdapter()
+    queue = SmsDeliveryQueue(adapter)
+
+    queue.enqueue(_request())
+    await adapter.started.wait()
+
+    assert adapter.sent == [_request()]
+    assert queue.pending_count == 1
+    adapter.release.set()
+    await queue.flush()
+    assert queue.pending_count == 0
+
+
+async def test_delivery_queue_flush_awaits_pending_deliveries() -> None:
+    adapter = MockSmsAdapter()
+    queue = SmsDeliveryQueue(adapter)
+
+    queue.enqueue(_request())
+    queue.enqueue(_request(phone="+919000000000", otp="999999"))
+    assert queue.pending_count == 2
+
+    await queue.flush()
+
+    assert queue.pending_count == 0
+    assert adapter.sent_count(_PHONE) == 1
+    assert adapter.last_sent_code("+919000000000") == "999999"
+
+
+async def test_delivery_queue_swallows_delivery_failure() -> None:
+    queue = SmsDeliveryQueue(_FailingSmsAdapter())
+
+    queue.enqueue(_request())
+
+    await queue.flush()
+
+    assert queue.pending_count == 0
+
+
+async def test_delivery_queue_persistent_failure_logs_the_marker_without_the_otp(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+
+    queue = SmsDeliveryQueue(_provider_adapter(handler))
+    caplog.set_level(logging.ERROR)
+
+    queue.enqueue(_request(otp="654321"))
+    await queue.flush()
+
+    assert "patient.auth_failed" in caplog.text
+    assert "654321" not in caplog.text
+    assert "+919876543210" not in caplog.text
