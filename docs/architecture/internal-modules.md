@@ -638,6 +638,8 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 | `audit.event` (generic)                        | All modules                 | `MOD-011` (append to hash chain)                                             | JSON           | At-least-once              |
 | `record.accessed`                              | `MOD-003` (LHR)             | `MOD-011`                                                                    | JSON           | At-least-once              |
 
+> `otp.failed` carries a `reason`: `lockout` when the brute-force lockout triggers (MOD-001, ADR-0004) or `delivery` when an SMS send has exhausted every retry and the code never reached the phone (MOD-001, PHASE-2 REM T5 #81).
+
 ---
 
 ## 5. System-Wide End-to-End Traceability Matrix

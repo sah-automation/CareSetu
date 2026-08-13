@@ -236,7 +236,9 @@ class IamFacade:
         refresh_token_ttl_seconds: int = refresh.REFRESH_TOKEN_TTL_SECONDS,
     ) -> None:
         self._engine = engine
-        self.delivery_queue = SmsDeliveryQueue(sms_adapter)
+        self.delivery_queue = SmsDeliveryQueue(
+            sms_adapter, on_delivery_failed=self._emit_delivery_failed
+        )
         self._clock = clock
         self._access_token_signing_key = access_token_signing_key
         self._access_token_ttl_seconds = access_token_ttl_seconds
@@ -696,6 +698,38 @@ class IamFacade:
             cooldown_remaining_seconds=RESEND_COOLDOWN_SECONDS,
             attempts_left=MAX_ATTEMPTS,
         )
+
+    async def _emit_delivery_failed(self, request: SmsSendRequest) -> None:
+        """Publish ``otp.failed`` (reason ``delivery``) for an undeliverable send.
+
+        PHASE-2 REM T5 (#81): when the background EXT-001 delivery has
+        exhausted every retry, audit needs to track phones that never received
+        their code - not just the lockout case already emitted. The identity
+        for the phone is resolved in a fresh transaction (the delivery runs
+        outside the issuing request's transaction) and the event lands in the
+        iam outbox on its own commit. A phone with no identity row (nothing to
+        name) is skipped silently - the queue has already logged the failure.
+        """
+        async with self._engine.begin() as connection:
+            identity_id = (
+                await connection.execute(
+                    select(iam_identities.c.id).where(
+                        iam_identities.c.phone_e164 == request.phone_e164
+                    )
+                )
+            ).scalar_one_or_none()
+            if identity_id is None:
+                return
+            await write_outbox(
+                connection,
+                _IAM_SCHEMA,
+                IAM_OUTBOX_TABLE,
+                events.otp_failed_envelope(
+                    identity_id=identity_id,
+                    phone_e164=request.phone_e164,
+                    reason="delivery",
+                ),
+            )
 
     async def issue_session(self, phone: str) -> IssueSessionResult:
         """Mint an access JWT for a verified patient (spec #51 §2.5, ticket #57).
