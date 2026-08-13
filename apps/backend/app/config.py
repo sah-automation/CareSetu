@@ -9,11 +9,16 @@ import os
 from dataclasses import dataclass
 
 DEFAULT_DATABASE_URL = "postgresql+asyncpg://caresetu:caresetu@localhost:5432/caresetu"
-DEFAULT_TEST_PRINCIPAL_HEADER = "X-CareSetu-Test-Principal"
 DEFAULT_APP_ENVIRONMENT = "production"
 DEFAULT_SMS_PROVIDER = "mock"
 DEFAULT_SMS_TIMEOUT_SECONDS = 10.0
 DEFAULT_SMS_MAX_RETRIES = 3
+# Auth-surface rate limit (``NFR-SEC-004``): the OTP/auth endpoints are the
+# abuse target, so the gateway caps them per caller. 10 requests / 60 s per
+# IP is a headroom-rich ceiling above the one-user flow (register + verify +
+# resend) while still stopping bursts.
+DEFAULT_AUTH_RATE_LIMIT_MAX_REQUESTS = 10
+DEFAULT_AUTH_RATE_LIMIT_WINDOW_SECONDS = 60
 # Mirrors ``modules.iam.domain.jwt.ACCESS_TOKEN_TTL_SECONDS``; config stays
 # import-free so it reads as one plain dataclass over the environment.
 DEFAULT_ACCESS_TOKEN_TTL_SECONDS = 900
@@ -31,11 +36,12 @@ class Settings:
     database_url: str = DEFAULT_DATABASE_URL
     app_environment: str = DEFAULT_APP_ENVIRONMENT
     gateway_jwt_verify_enabled: bool = False
-    gateway_jwt_test_header: str = DEFAULT_TEST_PRINCIPAL_HEADER
     gateway_rate_limit_enabled: bool = False
     gateway_jwt_signing_key: str = ""
     gateway_access_token_ttl_seconds: int = DEFAULT_ACCESS_TOKEN_TTL_SECONDS
     gateway_refresh_token_ttl_seconds: int = DEFAULT_REFRESH_TOKEN_TTL_SECONDS
+    gateway_rate_limit_auth_max_requests: int = DEFAULT_AUTH_RATE_LIMIT_MAX_REQUESTS
+    gateway_rate_limit_auth_window_seconds: int = DEFAULT_AUTH_RATE_LIMIT_WINDOW_SECONDS
     sms_provider: str = DEFAULT_SMS_PROVIDER
     sms_api_key: str = ""
     sms_base_url: str = ""
@@ -43,15 +49,15 @@ class Settings:
     sms_max_retries: int = DEFAULT_SMS_MAX_RETRIES
 
     def __post_init__(self) -> None:
-        if (
-            self.gateway_jwt_verify_enabled
-            and self.app_environment.strip().lower() not in _DEV_TEST_ENVIRONMENTS
-        ):
+        if self.gateway_jwt_verify_enabled and not self.gateway_jwt_signing_key:
             raise ValueError(
-                "gateway_jwt_verify_enabled=True requires a dev/test marker: set "
-                "APP_ENVIRONMENT to 'dev' or 'test'. Refusing to enable the "
-                "test-header auth backdoor outside a dev/test deployment."
+                "gateway_jwt_verify_enabled=True requires GATEWAY_JWT_SIGNING_KEY; "
+                "refusing to verify tokens with a blank key."
             )
+        if self.gateway_rate_limit_auth_max_requests <= 0:
+            raise ValueError("gateway_rate_limit_auth_max_requests must be positive")
+        if self.gateway_rate_limit_auth_window_seconds <= 0:
+            raise ValueError("gateway_rate_limit_auth_window_seconds must be positive")
         provider = self.sms_provider.strip().lower()
         if provider not in {"mock", "provider"}:
             raise ValueError(
@@ -112,18 +118,15 @@ def get_settings() -> Settings:
 
     ``create_app`` resolves this and stores it on ``app.state.settings`` once
     per process; the worker (#30) and gateway (#29) consume that resolved value
-    rather than re-reading the environment. Both gateway stubs default to
-    disabled (PHASE-1 T7b, #29). Enabling the ``jwt_verify`` test-header stub
-    additionally requires ``APP_ENVIRONMENT`` set to ``dev`` or ``test``
-    (ticket #48) - ``Settings`` refuses the flag otherwise.
+    rather than re-reading the environment. Both gateway middleware default to
+    disabled (PHASE-1 T7b, #29); the Phase 2 real ``jwt_verify`` (ticket #59)
+    additionally requires ``GATEWAY_JWT_SIGNING_KEY`` - ``Settings`` refuses
+    the flag otherwise (fail-closed boot, never a blank-key verify).
     """
     return Settings(
         database_url=os.environ.get("DATABASE_URL", DEFAULT_DATABASE_URL),
         app_environment=os.environ.get("APP_ENVIRONMENT", DEFAULT_APP_ENVIRONMENT),
         gateway_jwt_verify_enabled=_env_bool("GATEWAY_JWT_VERIFY_ENABLED", False),
-        gateway_jwt_test_header=os.environ.get(
-            "GATEWAY_JWT_TEST_HEADER", DEFAULT_TEST_PRINCIPAL_HEADER
-        ),
         gateway_rate_limit_enabled=_env_bool("GATEWAY_RATE_LIMIT_ENABLED", False),
         gateway_jwt_signing_key=os.environ.get("GATEWAY_JWT_SIGNING_KEY", ""),
         gateway_access_token_ttl_seconds=_env_int(
@@ -131,6 +134,12 @@ def get_settings() -> Settings:
         ),
         gateway_refresh_token_ttl_seconds=_env_int(
             "GATEWAY_REFRESH_TOKEN_TTL_SECONDS", DEFAULT_REFRESH_TOKEN_TTL_SECONDS
+        ),
+        gateway_rate_limit_auth_max_requests=_env_int(
+            "GATEWAY_RATE_LIMIT_AUTH_MAX_REQUESTS", DEFAULT_AUTH_RATE_LIMIT_MAX_REQUESTS
+        ),
+        gateway_rate_limit_auth_window_seconds=_env_int(
+            "GATEWAY_RATE_LIMIT_AUTH_WINDOW_SECONDS", DEFAULT_AUTH_RATE_LIMIT_WINDOW_SECONDS
         ),
         sms_provider=os.environ.get("SMS_PROVIDER", DEFAULT_SMS_PROVIDER),
         sms_api_key=os.environ.get("SMS_API_KEY", ""),
