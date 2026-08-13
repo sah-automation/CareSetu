@@ -176,8 +176,46 @@ jobs:
         env:
           BACKUP_DIR: ${{ runner.temp }}/backups
 
-  # e2e (playwright) job lands in PHASE-2 alongside the first E2E spec and
-  # patient auth routes (roadmap §3.2). Until then there are no tests to run.
+  e2e:
+    name: e2e tests (playwright vs Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: caresetu
+          POSTGRES_PASSWORD: caresetu
+          POSTGRES_DB: caresetu
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U caresetu -d caresetu"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+      - name: install backend
+        run: uv sync --project apps/backend --group dev
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: install frontend
+        run: npm ci
+      - name: install playwright chromium
+        run: npx playwright install --with-deps chromium
+      - name: run e2e
+        run: npm run test:e2e
+        env:
+          # Reaches the backend webServer via playwright.config.ts, which copies
+          # process.env into the backend command's env (scripts/e2e-backend.cjs
+          # then applies migrations against this database and serves :8000).
+          DATABASE_URL: postgresql+asyncpg://caresetu:caresetu@localhost:5432/caresetu
 
   scan:
     name: security scan (gitleaks + bandit + pip-audit)
