@@ -154,8 +154,7 @@ async def test_issue_session_records_the_session_anchor_row(
 
     rows = await _query(
         database_url,
-        "SELECT jti, identity_id, scope, issued_at, expires_at, revoked_at "
-        "FROM iam.iam_sessions",
+        "SELECT jti, identity_id, scope, issued_at, expires_at, revoked_at FROM iam.iam_sessions",
     )
     assert rows == [
         {
@@ -191,9 +190,7 @@ async def test_issue_session_refuses_a_suspended_identity(
     engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
     try:
         async with engine.begin() as connection:
-            await connection.execute(
-                text("UPDATE iam.iam_identities SET status = 'Suspended'")
-            )
+            await connection.execute(text("UPDATE iam.iam_identities SET status = 'Suspended'"))
     finally:
         await engine.dispose()
 
@@ -220,9 +217,7 @@ async def test_issue_session_refuses_without_an_active_role_grant(
     assert await _query(database_url, "SELECT id FROM iam.iam_sessions") == []
 
 
-async def test_issue_session_refuses_an_unknown_phone(
-    database_url: str, clean_iam: Any
-) -> None:
+async def test_issue_session_refuses_an_unknown_phone(database_url: str, clean_iam: Any) -> None:
     facade = _facade(database_url, MockSmsAdapter(), MutableClock(_T0))
 
     with pytest.raises(SessionIssuanceError, match="no identity"):
@@ -244,9 +239,7 @@ async def test_issue_session_mints_a_unique_jti_per_issue(
     assert {row["jti"] for row in rows} == {first.jti, second.jti}
 
 
-async def test_validate_token_resolves_an_issued_token(
-    database_url: str, clean_iam: Any
-) -> None:
+async def test_validate_token_resolves_an_issued_token(database_url: str, clean_iam: Any) -> None:
     clock = MutableClock(_T0)
     facade = await _verified_facade(database_url, clock)
     session = await facade.issue_session("9876543210")
