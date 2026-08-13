@@ -60,6 +60,7 @@ def test_verify_success_forwards_phone_and_code() -> None:
         "phone_e164": _PHONE,
         "identity_id": 7,
         "attempts_left": None,
+        "lockout_remaining_seconds": None,
     }
     assert facade.called_with == [("98765 43210", "654321")]
 
@@ -88,6 +89,19 @@ def test_expired_and_spent_return_request_new_code_outcome() -> None:
 
         assert response.status_code == 200
         assert response.json()["outcome"] == outcome
+
+
+def test_locked_outcome_renders_the_lockout_countdown() -> None:
+    facade = StubFacade()
+    facade.result = _result("locked", lockout_remaining_seconds=812)
+    client = _client_with(facade)
+
+    response = client.post("/v1/auth/verify", json={"phone": "9876543210", "otp": "654321"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["outcome"] == "locked"
+    assert body["lockout_remaining_seconds"] == 812
 
 
 def test_verify_route_sits_behind_the_gateway_stack() -> None:

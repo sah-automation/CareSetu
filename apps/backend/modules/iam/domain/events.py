@@ -1,4 +1,4 @@
-"""MOD-001: canonical auth event payloads (PHASE-2 T3/T4, tickets #54, #55).
+"""MOD-001: canonical auth event payloads (PHASE-2 T3/T4/T5, tickets #54, #55, #56).
 
 Event names follow the registry dot-notation in ``internal-modules.md`` §4.2
 (spec #51 §2.6); the legacy snake_case telemetry names are superseded. Payloads
@@ -9,6 +9,7 @@ the hash, or any other secret - they name the identity and the challenge only.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 from uuid import uuid4
 
 from pydantic import BaseModel
@@ -24,6 +25,8 @@ from modules.iam.domain.verify import FailureReason
 
 PRODUCER_MODULE = "iam"
 
+EVENT_OTP_FAILED = "otp.failed"
+
 
 class PatientRegisteredPayload(BaseModel):
     """Subject of ``patient.registered``: the identity just created."""
@@ -38,6 +41,22 @@ class OtpSentPayload(BaseModel):
     identity_id: int
     challenge_id: int
     expires_at: datetime
+
+
+class OtpFailedPayload(BaseModel):
+    """Subject of ``otp.failed``: the OTP flow failed for this phone.
+
+    Written when the brute-force lockout triggers (10 consecutive failures
+    across challenges, spec #51 §2.4) - the moment the phone becomes unusable
+    for OTP - alongside ``patient.auth_failed`` for the triggering attempt.
+    ``lockout_until`` names when the temporary lockout lifts. The payload never
+    carries the OTP value or its hash.
+    """
+
+    identity_id: int
+    phone_e164: str
+    reason: Literal["lockout"]
+    lockout_until: datetime
 
 
 class PatientVerifiedPayload(BaseModel):
@@ -85,6 +104,29 @@ def otp_sent_envelope(
         producer=PRODUCER_MODULE,
         payload=OtpSentPayload(
             identity_id=identity_id, challenge_id=challenge_id, expires_at=expires_at
+        ),
+    )
+
+
+def otp_failed_envelope(
+    identity_id: int,
+    phone_e164: str,
+    lockout_until: datetime,
+) -> Envelope[OtpFailedPayload]:
+    """Build the ``otp.failed`` envelope for the iam outbox.
+
+    Emitted exactly when the brute-force lockout triggers, in the same
+    transaction as the counter write-back that locks the phone.
+    """
+    return Envelope[OtpFailedPayload](
+        event_id=uuid4(),
+        event_type=EVENT_OTP_FAILED,
+        producer=PRODUCER_MODULE,
+        payload=OtpFailedPayload(
+            identity_id=identity_id,
+            phone_e164=phone_e164,
+            reason="lockout",
+            lockout_until=lockout_until,
         ),
     )
 

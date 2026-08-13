@@ -164,7 +164,8 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 #### 3. Core Business Logic & State Machines
 
 - **Identity state machine:** `[Unverified] → [Active] → [Suspended]`; re-registration with existing phone resolves to the existing identity (never a duplicate - `FEAT-001` Rule 1, baseline `GAP-001`).
-- **OTP challenge machine:** `[Pending] → [Verified] | [Expired] | [Failed]`; single-use, 5-minute TTL, in-app resend cooldown ≥ 60 s, values hashed at rest and never logged.
+- **OTP challenge machine:** `[Pending] → [Verified] | [Expired] | [Failed]`; single-use, 5-minute TTL, latest-wins resend (invalidates the pending challenge), in-app resend cooldown ≥ 60 s per phone measured from the last issuance, values hashed at rest and never logged.
+- **Brute-force lockout (a counter, never identity state):** 10 consecutive verification failures across challenges → 15-minute temporary phone lockout, carried on `iam_identities` as `lockout_failed_attempts` + `lockout_until`, enforced on both `verify_otp` and `resend_otp`, reset only by a successful verification. Distinct from the `Suspended` identity status, which stays reachable only via `set_actor_status` (Phase 5).
 
 #### 4. High-Level Tech Stack & Framework Constraints
 
@@ -596,6 +597,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 | `patient.verified`                             | `MOD-001` (IAM)             | `MOD-011`, `MOD-010` (in-app welcome)                                        | JSON           | At-least-once              |
 | `patient.auth_failed`                          | `MOD-001` (IAM)             | `MOD-011`                                                                    | JSON           | At-least-once              |
 | `otp.sent`                                     | `MOD-001` (IAM)             | `MOD-011`                                                                    | JSON           | At-least-once              |
+| `otp.failed`                                   | `MOD-001` (IAM)             | `MOD-011`                                                                    | JSON           | At-least-once              |
 | `consent.requested`                            | `MOD-004` (Consent)         | `MOD-003`, `MOD-011`                                                         | JSON           | At-least-once              |
 | `consent.granted`                              | `MOD-004` (Consent)         | `MOD-003` (update share scope), `MOD-011`                                    | JSON           | At-least-once              |
 | `consent.revoked`                              | `MOD-004` (Consent)         | `MOD-003` (stop sharing), `MOD-011`                                          | JSON           | At-least-once              |

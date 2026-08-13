@@ -20,9 +20,11 @@ from typing import Literal
 
 from modules.iam.domain.otp import MAX_ATTEMPTS, verify_otp
 
-Outcome = Literal["verified", "wrong_code", "expired", "spent"]
+Outcome = Literal["verified", "wrong_code", "expired", "spent", "locked"]
 
-FailureReason = Literal["wrong_code", "expired", "spent", "replay", "no_challenge", "suspended"]
+FailureReason = Literal[
+    "wrong_code", "expired", "spent", "replay", "no_challenge", "suspended", "locked"
+]
 
 CHALLENGE_PENDING = "Pending"
 CHALLENGE_VERIFIED = "Verified"
@@ -129,3 +131,14 @@ def suspended_decision() -> AttemptDecision:
     without touching the challenge.
     """
     return AttemptDecision(outcome="expired", reason="suspended")
+
+
+def locked_decision() -> AttemptDecision:
+    """Outcome when the phone is in the brute-force lockout: verification refused.
+
+    Distinct from ``Suspended`` (spec #51 §2.4): the lockout is a temporary
+    15-minute counter, never identity state, so the identity row's ``status``
+    is untouched and the lockout lifts on its own. The attempt is rejected
+    without touching the challenge or the counter.
+    """
+    return AttemptDecision(outcome="locked", reason="locked")
