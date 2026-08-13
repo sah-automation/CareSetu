@@ -7,19 +7,24 @@ shared error envelope at the top level (api-standards §2): a stable
 ``register_error_handlers`` maps iam domain errors to that envelope; the route
 itself carries no business logic. The register/verify routes sit behind the
 gateway middleware stack in ``app.main`` - the rate-limit policy for the
-OTP/auth surface is a Phase 2 gateway ticket.
+OTP/auth surface is a Phase 2 gateway ticket. The register/verify/resend
+mutations honour the edge's ``Idempotency-Key`` contract (api-standards §5,
+PHASE-2 REM T11, #80) via ``_run_idempotent``: a duplicate key replays the
+stored result instead of re-executing.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import cast
+from collections.abc import Awaitable, Callable
+from typing import TypeVar, cast
 
 from fastapi import APIRouter, FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.gateway.idempotency import IdempotencyStore
 from app.gateway.trace import resolve_trace_id
 from modules.iam.domain.exceptions import (
     IamError,
@@ -85,6 +90,38 @@ class ErrorEnvelope(BaseModel):
     details: dict[str, object]
 
 
+_T = TypeVar("_T")
+
+
+async def _run_idempotent(
+    request: Request,
+    call: Callable[[], Awaitable[_T]],
+) -> _T:
+    """Execute ``call`` once per ``Idempotency-Key`` (api-standards §5).
+
+    With the header present, the edge's in-process store (PHASE-2 REM T11, #80)
+    is checked first: a replayed key returns the stored result of the first
+    execution and the facade is not called again, so a client retry after a lost
+    response cannot double-issue an OTP or double-consume a challenge. Only a
+    completed call is stored - an expected failure (error envelope) or a 5xx is
+    never cached, so a retry re-executes. The key is namespaced by the request
+    path so one client key cannot collide across endpoints. A missing or blank
+    header passes straight through exactly as before - no store read or write.
+    """
+    raw_key = request.headers.get("Idempotency-Key")
+    if raw_key is None or not raw_key.strip():
+        return await call()
+    key = raw_key.strip()
+    store = cast(IdempotencyStore, request.app.state.idempotency_store)
+    cache_key = f"{request.url.path}:{key}"
+    cached = store.get(cache_key)
+    if cached is not None:
+        return cast(_T, cached)
+    result = await call()
+    store.put(cache_key, result)
+    return result
+
+
 @router.post(
     "/register",
     response_model=RegisterPatientResult,
@@ -105,7 +142,7 @@ async def register_patient(
     sent (spec #51 §2.4).
     """
     facade = cast(IamFacade, request.app.state.iam_facade)
-    return await facade.register_patient(body.phone)
+    return await _run_idempotent(request, lambda: facade.register_patient(body.phone))
 
 
 @router.post(
@@ -125,7 +162,7 @@ async def verify_otp(
     ``locked`` with the lockout countdown.
     """
     facade = cast(IamFacade, request.app.state.iam_facade)
-    return await facade.verify_otp(body.phone, body.otp)
+    return await _run_idempotent(request, lambda: facade.verify_otp(body.phone, body.otp))
 
 
 @router.post(
@@ -146,7 +183,7 @@ async def resend_otp(
     cooldown and the brute-force lockout.
     """
     facade = cast(IamFacade, request.app.state.iam_facade)
-    return await facade.resend_otp(body.phone)
+    return await _run_idempotent(request, lambda: facade.resend_otp(body.phone))
 
 
 @router.post(
