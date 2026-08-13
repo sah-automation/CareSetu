@@ -75,6 +75,41 @@ def error_response(
     return JSONResponse(status_code=status_code, content=envelope, headers=headers)
 
 
+async def _emit_access_denial(request: Request) -> None:
+    """Publish ``patient.auth_failed`` (reason ``access_denied``) for an authenticated 403.
+
+    PHASE-2 REM T7 (#87): an access denial on a protected route becomes
+    auditable. The gateway is a thin adapter (spec #51, Implementation Decision
+    6) - the iam facade owns the outbox write and resolves the identity's phone
+    in its own transaction; only the authenticated ``Principal`` the
+    ``jwt_verify`` middleware attached is passed over, never a token. Anonymous
+    401s carry no identity to attribute and never reach this call - they stay
+    log-only by boundary (``error_response``'s ``gateway_rejection`` line).
+    An outbox failure must not turn a denial into a 5xx, so the emission is
+    best-effort and the loss is logged (security-phii-standards KPI-006:
+    authz failures are 100% audited, so a missed write is an operator signal).
+    """
+    principal = getattr(request.state, "principal", None)
+    if principal is None or not principal.is_authenticated:
+        return
+    facade = getattr(request.app.state, "iam_facade", None)
+    if facade is None:
+        logger.error(
+            "access_denial_emit_failed trace_id=%s identity=%s: iam facade not attached to the app",
+            resolve_trace_id(request),
+            principal.subject_id,
+        )
+        return
+    try:
+        await facade.emit_access_denied(int(principal.subject_id))
+    except Exception:
+        logger.exception(
+            "access_denial_emit_failed trace_id=%s identity=%s",
+            resolve_trace_id(request),
+            principal.subject_id,
+        )
+
+
 def register_gateway_error_handlers(app: FastAPI) -> None:
     """Attach the gateway error envelope to the protected-route rejections."""
 
@@ -87,6 +122,7 @@ def register_gateway_error_handlers(app: FastAPI) -> None:
         )
 
     async def _insufficient_scope(request: Request, exc: Exception) -> JSONResponse:
+        await _emit_access_denial(request)
         return error_response(
             status.HTTP_403_FORBIDDEN,
             CODE_AUTH_INSUFFICIENT_SCOPE,

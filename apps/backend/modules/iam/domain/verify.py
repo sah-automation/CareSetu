@@ -23,7 +23,14 @@ from modules.iam.domain.otp import MAX_ATTEMPTS, verify_otp
 Outcome = Literal["verified", "wrong_code", "expired", "spent", "locked"]
 
 FailureReason = Literal[
-    "wrong_code", "expired", "spent", "replay", "no_challenge", "suspended", "locked"
+    "wrong_code",
+    "expired",
+    "spent",
+    "replay",
+    "no_challenge",
+    "suspended",
+    "locked",
+    "access_denied",
 ]
 
 CHALLENGE_PENDING = "Pending"
