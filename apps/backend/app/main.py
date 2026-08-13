@@ -97,20 +97,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ):
         app.state.mock_sms_adapter = cast(MockSmsAdapter, sms_adapter)
 
-    # Gateway middleware stack (PHASE-1 T7b, #29; PHASE-2 T8, #59; REM T6, #77).
-    # Caller identity is established (jwt_verify, outermost of the gateway)
-    # before per-identity rate limiting (rate_limit), so later limits can key
-    # off the Principal.
+    # Gateway middleware stack (PHASE-1 T7b, #29; PHASE-2 T8, #59; REM T6, #77;
+    # REM T8, #78). The auth surface is unauthenticated, so rate_limit is the
+    # outermost of the gateway pair: every /v1/auth/* request - valid, invalid,
+    # or missing token - is counted toward the per-client-IP cap before
+    # jwt_verify can short-circuit on a bad token. jwt_verify runs inside the
+    # limiter and attaches the settled Principal for the routes and the
+    # protected-route dependency.
+    app.add_middleware(
+        JWTVerifyMiddleware,
+        enabled=resolved_settings.gateway_jwt_verify_enabled,
+        validate_token=facade.validate_token,
+    )
     app.add_middleware(
         RateLimitMiddleware,
         enabled=resolved_settings.gateway_rate_limit_enabled,
         max_requests=resolved_settings.gateway_rate_limit_auth_max_requests,
         window_seconds=resolved_settings.gateway_rate_limit_auth_window_seconds,
-    )
-    app.add_middleware(
-        JWTVerifyMiddleware,
-        enabled=resolved_settings.gateway_jwt_verify_enabled,
-        validate_token=facade.validate_token,
     )
     # CORS for the local-dev PWA origin (added so the allow-origin header
     # reaches every response, including 401/403 from the gateway stack). No

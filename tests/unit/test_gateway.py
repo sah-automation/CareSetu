@@ -31,7 +31,7 @@ from app.gateway.rate_limit import _MAX_TRACKED_BUCKETS, RateLimitMiddleware
 from app.gateway.rbac import resolve_scope_roles
 from app.main import create_app
 from modules.iam.domain.jwt import issue_token
-from modules.iam.facade import RegisterPatientResult
+from modules.iam.facade import RegisterPatientResult, VerifyOtpResult
 
 _SIGNING_KEY = "unit-test-gateway-signing-key"
 
@@ -63,6 +63,9 @@ class StubFacade:
 
     async def register_patient(self, phone: str) -> RegisterPatientResult:
         return _RESULT
+
+    async def verify_otp(self, phone: str, otp: str) -> VerifyOtpResult:
+        return VerifyOtpResult(outcome="verified", phone_e164=_RESULT.phone_e164)
 
     async def emit_access_denied(self, identity_id: int) -> None:
         self.access_denials.append(identity_id)
@@ -484,31 +487,83 @@ def test_rate_limit_does_not_limit_health_endpoint() -> None:
         assert client.get("/health").status_code == 200
 
 
-def test_rate_limit_is_per_identity_when_authenticated() -> None:
+def test_garbage_token_spray_exhausts_ip_cap(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """AC 2/4: unusable tokens count toward the cap and the spray hits 429.
+
+    The limiter runs before ``jwt_verify`` (REM T8, #78), so a sprayed
+    malformed Bearer is counted toward the per-client-IP bucket and then
+    denied 401; once the cap is reached the next request answers 429 even
+    though verification never ran.
+    """
+    caplog.set_level(logging.WARNING)
     settings = Settings(
         gateway_jwt_verify_enabled=True,
         gateway_jwt_signing_key=_SIGNING_KEY,
         gateway_rate_limit_enabled=True,
-        gateway_rate_limit_auth_max_requests=1,
+        gateway_rate_limit_auth_max_requests=2,
         gateway_rate_limit_auth_window_seconds=60,
     )
-    client = _probe_client(settings)
+    app = create_app(settings=settings)
+    app.state.iam_facade = StubFacade()
+    client = TestClient(app)
 
-    # Identity 7 exhausts its own bucket on the first request.
+    for _ in range(2):
+        response = client.post(
+            "/v1/auth/register",
+            json={"phone": "9876543210"},
+            headers=_with_trace(_bearer("not-a-jws")),
+        )
+        assert response.status_code == 401
+        assert response.json()["code"] == "AUTH_UNAUTHENTICATED"
+
+    response = client.post(
+        "/v1/auth/register",
+        json={"phone": "9876543210"},
+        headers=_with_trace(_bearer("not-a-jws")),
+    )
+
+    assert response.status_code == 429
+    body = response.json()
+    assert body["code"] == "RATE_LIMIT_EXCEEDED"
+    assert body["trace_id"] == _TRACE_ID
+    assert body["details"] == {}
+    assert response.headers["Retry-After"] == "60"
+    _assert_gateway_rejection_logged(caplog, _TRACE_ID)
+
+
+def test_valid_auth_flows_pass_under_rate_cap() -> None:
+    """AC 4: anonymous auth flows and a valid Bearer on a protected route.
+
+    Under the flipped order the limiter keys per client IP on the
+    unauthenticated auth surface; a legit register/verify from a fresh caller
+    stays under the cap, and the protected route is outside the auth prefix so
+    a valid token is admitted without being counted.
+    """
+    settings = Settings(
+        gateway_jwt_verify_enabled=True,
+        gateway_jwt_signing_key=_SIGNING_KEY,
+        gateway_rate_limit_enabled=True,
+        gateway_rate_limit_auth_max_requests=10,
+        gateway_rate_limit_auth_window_seconds=60,
+    )
+    app = create_app(settings=settings)
+    app.state.iam_facade = StubFacade()
+    client = TestClient(app)
+
+    assert client.post("/v1/auth/register", json={"phone": "9876543210"}).status_code == 200
     assert (
-        client.get("/v1/auth/probe", headers=_bearer(_issue_access_token(subject_id=7))).status_code
+        client.post("/v1/auth/verify", json={"phone": "9876543210", "otp": "123456"}).status_code
         == 200
     )
-    # A different identity from the same client IP starts a fresh bucket...
     assert (
-        client.get("/v1/auth/probe", headers=_bearer(_issue_access_token(subject_id=8))).status_code
-        == 200
+        client.get("/v1/me", headers=_bearer(_issue_access_token(subject_id=7))).status_code == 200
     )
-    # ...while identity 7's exhausted bucket is now refused (api-standards §6).
-    assert (
-        client.get("/v1/auth/probe", headers=_bearer(_issue_access_token(subject_id=7))).status_code
-        == 429
-    )
+    assert client.get("/v1/me", headers=_bearer(_issue_access_token(subject_id=7))).json() == {
+        "subject_id": "7",
+        "roles": ["patient"],
+    }
 
 
 def test_rate_limit_prune_keeps_bucket_dict_bounded() -> None:

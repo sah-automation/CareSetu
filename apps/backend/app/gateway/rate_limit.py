@@ -1,12 +1,14 @@
-"""``rate_limit`` gateway middleware (PHASE-2 T8, ticket #59).
+"""``rate_limit`` gateway middleware (PHASE-2 T8, ticket #59; REM T8, #78).
 
 Enforces the strictest limit on the OTP/auth surface (``NFR-SEC-004``,
 api-standards §6): the auth endpoints are the abuse target, so only their path
 prefix is counted and capped. The limit is a fixed in-memory window keyed per
-identity when the gateway attached an authenticated ``Principal``, else per
-client IP; exceeding it answers 429 with ``Retry-After`` and the shared error
-envelope. In-memory per process by design - the DDoS layer is the edge (Caddy)
-and this middleware is the application's own per-caller abuse brake.
+client IP - the middleware runs outermost of the gateway pair (before
+``jwt_verify``) so every request counts toward the cap even when the presented
+token is unusable, and the auth surface is unauthenticated. Exceeding it
+answers 429 with ``Retry-After`` and the shared error envelope. In-memory per
+process by design - the DDoS layer is the edge (Caddy) and this middleware is
+the application's own per-caller abuse brake.
 """
 
 from __future__ import annotations
@@ -23,7 +25,6 @@ from app.gateway.errors import (
     MESSAGE_RATE_LIMIT_EXCEEDED,
     error_response,
 )
-from app.gateway.principal import Principal
 
 _DEFAULT_AUTH_PATH_PREFIX = "/v1/auth/"
 # Upper bound on tracked buckets: once exceeded, stale windows are pruned and,
@@ -80,10 +81,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
     def _key_for(self, request: Request) -> str:
-        """Per-identity when authenticated, else per client IP (api-standards §6)."""
-        principal: Principal | None = getattr(request.state, "principal", None)
-        if principal is not None and principal.is_authenticated:
-            return f"identity:{principal.subject_id}"
+        """Per client IP (api-standards §6).
+
+        The limiter runs outermost of the gateway pair (REM T8, #78), before
+        ``jwt_verify`` attaches a ``Principal``, so the unauthenticated auth
+        surface always keys by the caller's IP.
+        """
         client = request.client
         return f"ip:{client.host if client is not None else 'unknown'}"
 
