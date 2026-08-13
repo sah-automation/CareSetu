@@ -1,0 +1,239 @@
+.root {
+  min-height: 100dvh;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.7rem 1rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--hairline);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 700;
+  font-size: 0.95rem;
+  margin: 0;
+}
+
+.brandMark {
+  width: 0.8rem;
+  height: 0.8rem;
+  border-radius: 0.28rem;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+
+.steps {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 0;
+  list-style: none;
+  margin: 1.2rem 0 0;
+  padding: 0 1rem;
+}
+
+.step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  flex: 0 0 5.5rem;
+  position: relative;
+}
+
+.step::after {
+  content: "";
+  position: absolute;
+  top: 1rem;
+  left: calc(50% + 1.1rem);
+  width: calc(100% - 2.2rem);
+  height: 2px;
+  background: var(--hairline);
+}
+
+.step:last-child::after {
+  display: none;
+}
+
+.stepDone::after {
+  background: var(--accent);
+}
+
+.stepNum {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 9999px;
+  background: var(--hairline-soft);
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  font-weight: 700;
+  z-index: 1;
+}
+
+.stepCurrent .stepNum {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.stepDone .stepNum {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.stepLabel {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.stepCurrent .stepLabel {
+  color: var(--accent);
+}
+
+.main {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 1.2rem 1rem 2.5rem;
+}
+
+.card {
+  width: 100%;
+  max-width: 24rem;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  padding: 1.5rem 1.4rem;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.title {
+  font-size: 1.15rem;
+  margin: 0;
+  text-align: center;
+}
+
+.sub {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.sub strong {
+  color: var(--text);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.props {
+  list-style: none;
+  margin: 0;
+  padding: 0.2rem 0 0.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.props li {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  font-size: 0.85rem;
+  color: var(--text-sub);
+}
+
+.propIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.9rem;
+  height: 1.9rem;
+  border-radius: 0.6rem;
+  background: var(--accent-soft);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.center {
+  display: flex;
+  justify-content: center;
+}
+
+.ring {
+  position: relative;
+  width: 5rem;
+  height: 5rem;
+}
+
+.ringTime {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.ringTimeLow {
+  color: var(--danger);
+}
+
+.resendRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.editLink {
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  cursor: pointer;
+  padding: 0.35rem 0.5rem;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.attempts {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--warn-text);
+  background: var(--warn-soft);
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 0.65rem;
+  text-align: center;
+}
+
+.successIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 4.25rem;
+  height: 4.25rem;
+  border-radius: 9999px;
+  background: var(--success-soft);
+  color: var(--success);
+}

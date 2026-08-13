@@ -1,0 +1,241 @@
+/* Shared tokens + UI atoms for the patient auth wizard (MOD-001, T9 #60). */
+
+.otpProto {
+  --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --page-bg: #f8fafc;
+  --surface: #ffffff;
+  --hairline: #e2e8f0;
+  --hairline-soft: #eef2f7;
+  --text: #0f172a;
+  --text-sub: #334155;
+  --text-muted: #64748b;
+  --accent: #0e7490;
+  --accent-strong: #155e75;
+  --accent-soft: #ecfeff;
+  --accent-border: #bae6fd;
+  --success: #10b981;
+  --success-soft: #dcfce7;
+  --success-text: #166534;
+  --warn-soft: #fef3c7;
+  --warn-text: #92400e;
+  --danger: #b91c1c;
+  --danger-soft: #fef2f2;
+  --danger-border: #fecaca;
+  --on-accent: #ffffff;
+  --radius-sm: 0.5rem;
+  --radius: 0.75rem;
+  --radius-lg: 1rem;
+  --shadow-card: 0 1px 3px rgba(2, 6, 23, 0.08);
+  --shadow-pop: 0 12px 32px rgba(2, 6, 23, 0.18);
+
+  background: var(--page-bg);
+  color: var(--text);
+  font-family: var(--font);
+  min-height: 100dvh;
+}
+
+.otpProto button {
+  font-family: inherit;
+}
+
+.otpProto button:focus-visible,
+.otpProto input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.brandHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.7rem 1rem;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 700;
+  font-size: 0.95rem;
+  margin: 0;
+  color: var(--text);
+}
+
+.brandMark {
+  width: 0.8rem;
+  height: 0.8rem;
+  border-radius: 0.28rem;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+
+.langToggle {
+  display: flex;
+  gap: 0.25rem;
+  background: var(--hairline-soft);
+  border-radius: 9999px;
+  padding: 0.15rem;
+}
+
+.langBtn {
+  border: none;
+  background: transparent;
+  border-radius: 9999px;
+  padding: 0.25rem 0.65rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.langActive {
+  background: var(--surface);
+  color: var(--accent);
+  box-shadow: 0 1px 2px rgba(2, 6, 23, 0.12);
+}
+
+.label {
+  display: block;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-sub);
+  margin-bottom: 0.35rem;
+}
+
+.phoneWrap {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  padding: 0 0.75rem;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.phoneWrap:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.phonePrefix {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  border-right: 1px solid var(--hairline);
+  padding-right: 0.5rem;
+}
+
+.phoneInput {
+  flex: 1;
+  border: none;
+  background: transparent;
+  outline: none;
+  font-size: 1rem;
+  padding: 0.8rem 0;
+  color: var(--text);
+  min-width: 0;
+}
+
+.otpWrap {
+  display: flex;
+  gap: 0.45rem;
+  cursor: text;
+}
+
+.otpHiddenInput {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.otpBox {
+  flex: 1;
+  max-width: 3rem;
+  aspect-ratio: 1 / 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.35rem;
+  font-weight: 700;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.otpBoxActive {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.btnPrimary {
+  width: 100%;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 0.95rem;
+  font-weight: 600;
+  padding: 0.85rem 1rem;
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    transform 0.1s ease;
+}
+
+.btnPrimary:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+.btnPrimary:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.btnPrimary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btnGhost {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 0.35rem 0.5rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.btnGhost:disabled {
+  color: var(--text-muted);
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.error {
+  margin: 0.4rem 0 0;
+  font-size: 0.8rem;
+  color: var(--danger);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-sm);
+  padding: 0.5rem 0.65rem;
+}
+
+.notice {
+  margin: 0.4rem 0 0;
+  font-size: 0.8rem;
+  color: var(--success-text);
+  background: var(--success-soft);
+  border-radius: var(--radius-sm);
+  padding: 0.5rem 0.65rem;
+}

@@ -1,9 +1,9 @@
 """PHASE-1 T7a: FastAPI app shell boots (ticket #28).
 
 Boot contract from the brief: the app builds from the shared env-driven
-``Settings`` and serves ``/health`` with 200. From PHASE-2 T3/T4/T5 (#54, #55,
-#56) it mounts exactly the iam auth surface - the register, verify, and resend
-endpoints - and no other business routes.
+``Settings`` and serves ``/health`` with 200. From PHASE-2 T3/T4/T5/T9 (#54,
+#55, #56, #60) it mounts exactly the iam auth surface - the register, verify,
+resend, and session endpoints - and no other business routes.
 """
 
 import pytest
@@ -55,5 +55,6 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/auth/register",
         "/v1/auth/verify",
         "/v1/auth/resend",
+        "/v1/auth/session",
         "/v1/me",
     }

@@ -20,9 +20,15 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from modules.iam.domain.exceptions import IamError, InvalidPhoneError, SmsDeliveryError
+from modules.iam.domain.exceptions import (
+    IamError,
+    InvalidPhoneError,
+    SessionIssuanceError,
+    SmsDeliveryError,
+)
 from modules.iam.facade import (
     IamFacade,
+    IssueSessionResult,
     RegisterPatientResult,
     ResendOtpResult,
     VerifyOtpResult,
@@ -53,6 +59,14 @@ class VerifyOtpRequest(BaseModel):
 
 class ResendOtpRequest(BaseModel):
     """Body of ``POST /v1/auth/resend``: the phone needing a fresh code."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    phone: str = Field(min_length=1, description="10-digit Indian mobile number, or with 91 prefix")
+
+
+class IssueSessionRequest(BaseModel):
+    """Body of ``POST /v1/auth/session``: the verified phone to mint a session for."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -129,6 +143,29 @@ async def resend_otp(
     return await facade.resend_otp(body.phone)
 
 
+@router.post(
+    "/session",
+    response_model=IssueSessionResult,
+    status_code=status.HTTP_200_OK,
+    summary="Issue an authenticated session for a verified patient",
+)
+async def issue_session(
+    request: Request,
+    body: IssueSessionRequest,
+) -> IssueSessionResult:
+    """Mint an access JWT + refresh token for a verified patient's phone.
+
+    The PWA calls this only after a ``verified`` outcome: the facade requires
+    the identity to be Active with a patient role grant, so an unverified or
+    Suspended phone is refused with a ``409`` ``SESSION_REFUSED`` envelope the
+    client must resolve (verify the OTP, or await the role grant) before a
+    session can be minted. The returned session is what the PWA stores so it
+    can reach protected routes.
+    """
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    return await facade.issue_session(body.phone)
+
+
 def _error_response(status_code: int, code: str, message: str) -> JSONResponse:
     envelope = ErrorEnvelope(code=code, message=message, trace_id=uuid.uuid4().hex, details={})
     return JSONResponse(status_code=status_code, content=envelope.model_dump(mode="json"))
@@ -142,6 +179,13 @@ def register_error_handlers(app: FastAPI) -> None:
 
     async def _sms_failed(request: Request, exc: Exception) -> JSONResponse:
         return _error_response(status.HTTP_502_BAD_GATEWAY, "SMS_DELIVERY_FAILED", str(exc))
+
+    async def _session_refused(request: Request, exc: Exception) -> JSONResponse:
+        return _error_response(
+            status.HTTP_409_CONFLICT,
+            "SESSION_REFUSED",
+            str(exc),
+        )
 
     async def _iam_failed(request: Request, exc: Exception) -> JSONResponse:
         return _error_response(
@@ -174,5 +218,6 @@ def register_error_handlers(app: FastAPI) -> None:
 
     app.add_exception_handler(InvalidPhoneError, _invalid_phone)
     app.add_exception_handler(SmsDeliveryError, _sms_failed)
+    app.add_exception_handler(SessionIssuanceError, _session_refused)
     app.add_exception_handler(IamError, _iam_failed)
     app.add_exception_handler(RequestValidationError, _validation_failed)
