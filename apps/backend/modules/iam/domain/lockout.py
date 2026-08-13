@@ -5,9 +5,11 @@ failures across challenges trigger a 15-minute temporary phone lockout. The
 lockout is a counter, never identity state - ``Suspended`` stays an identity
 status reachable only via the operator status-change interface (Phase 5). The
 counter lives on the identity row so it survives challenge replacement
-(resend is latest-wins); only a successful verification resets it, so the
-failures stay "consecutive". Everything here is pure logic with no I/O so unit
-tests pin the threshold, the expiry, and the remaining-time boundary without a
+(resend is latest-wins); a successful verification resets it and so does the
+window lifting - once the 15 minutes have fully elapsed, the next failure
+starts a fresh streak, so a single mistake after the lockout lifts never
+re-locks the phone. Everything here is pure logic with no I/O so unit tests
+pin the threshold, the expiry, and the remaining-time boundary without a
 database.
 """
 
@@ -35,15 +37,22 @@ class LockoutDecision:
     lockout_until: datetime | None
 
 
-def evaluate_failure(consecutive_failures: int, now: datetime) -> LockoutDecision:
+def evaluate_failure(
+    consecutive_failures: int, now: datetime, lockout_until: datetime | None
+) -> LockoutDecision:
     """Decide whether the next failure triggers a lockout.
 
     ``consecutive_failures`` is the count persisted on the identity before this
-    attempt. The counter keeps growing past the threshold so that, once a
-    lockout expires, any further failure immediately re-locks (the prototype's
-    ``submitOtp`` contract, otpState.ts).
+    attempt and ``lockout_until`` is when the active window ends (``None`` when
+    the phone is not locked). Inside the window the counter keeps growing past
+    the threshold, matching the ``submitOtp`` contract (otpState.ts); once the
+    window has fully elapsed (``now >= lockout_until``) the streak resets to a
+    fresh count, so a single mistake after a lockout lifts never re-locks the
+    phone - the lockout is genuinely temporary (spec #51 §2.4). The boundary is
+    inclusive and matches ``lockout_remaining_seconds``: at ``now ==
+    lockout_until`` the lockout has ended and the failure starts a new streak.
     """
-    counter = consecutive_failures + 1
+    counter = 1 if lockout_until is not None and now >= lockout_until else consecutive_failures + 1
     if counter >= LOCKOUT_THRESHOLD:
         return LockoutDecision(
             locked=True,
