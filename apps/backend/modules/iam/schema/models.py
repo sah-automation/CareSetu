@@ -14,6 +14,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     MetaData,
     String,
@@ -87,7 +88,10 @@ iam_sessions = Table(
     Column("issued_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("expires_at", DateTime(timezone=True), nullable=False),
     Column("revoked_at", DateTime(timezone=True), nullable=True),
+    Column("refresh_token_hash", String(256), nullable=True),
+    Column("refresh_expires_at", DateTime(timezone=True), nullable=True),
     UniqueConstraint("jti", name="uq_iam_sessions_jti"),
+    Index("ux_iam_sessions_refresh_hash", "refresh_token_hash", unique=True),
 )
 
 iam_role_grants = Table(

@@ -6,8 +6,9 @@ resume entry point ``register_patient``; T4 (#55) adds the verification
 challenge machine ``verify_otp``; T5 (#56) adds ``resend_otp`` with the
 latest-wins resend, cooldown, and brute-force lockout; T6 (#57) adds the
 session seam ``issue_session`` (access JWT mint) and the stateless
-``validate_token`` the gateway RBAC consumes. The remaining typed methods
-arrive with their Phase 2 tickets.
+``validate_token`` the gateway RBAC consumes; T7 (#58) adds the SMS-independent
+``refresh_session`` that rotates an opaque refresh token. The remaining typed
+methods arrive with their Phase 2 tickets.
 """
 
 from __future__ import annotations
@@ -18,14 +19,20 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from bus.outbox_writer import write_outbox
 from modules.iam.adapters.sms import SmsAdapter, SmsSendRequest, SmsTemplateParams
-from modules.iam.domain import events, jwt
-from modules.iam.domain.exceptions import SessionIssuanceError
+from modules.iam.domain import events, jwt, refresh
+from modules.iam.domain.exceptions import (
+    RefreshTokenExpiredError,
+    RefreshTokenRevokedError,
+    RefreshTokenUnknownError,
+    SessionIssuanceError,
+)
 from modules.iam.domain.lockout import evaluate_failure, lockout_remaining_seconds
 from modules.iam.domain.otp import (
     MAX_ATTEMPTS,
@@ -122,7 +129,8 @@ class IssueSessionResult(BaseModel):
     ``jwt`` is the HS256 access JWT the PWA stores; ``jti``/``expires_in_seconds``
     mirror its claims so the client can show a session indicator, and ``scope``
     is the resolved RBAC scope - always from the patient role grant, never from
-    client input.
+    client input. ``refresh_token`` is the opaque, server-side-hashed refresh
+    token the PWA keeps for ``refresh_session`` (ticket #58).
     """
 
     jwt: str
@@ -130,6 +138,23 @@ class IssueSessionResult(BaseModel):
     scope: str
     identity_id: int
     expires_in_seconds: int
+    refresh_token: str
+
+
+class RefreshSessionResult(BaseModel):
+    """The output of one successful ``refresh_session`` rotation (ticket #58).
+
+    Mirrors ``IssueSessionResult`` - a fresh access JWT and a brand-new opaque
+    refresh token. The previous refresh token is already invalid by the time
+    this is returned (rotation is in the same transaction as the mint).
+    """
+
+    jwt: str
+    jti: str
+    scope: str
+    identity_id: int
+    expires_in_seconds: int
+    refresh_token: str
 
 
 class ValidatedAccessToken(BaseModel):
@@ -148,6 +173,42 @@ def _default_clock() -> datetime:
     return datetime.now(UTC)
 
 
+async def _lock_identity_row(
+    connection: AsyncConnection, predicate: ColumnElement[bool]
+) -> tuple[int, str, int, datetime | None] | None:
+    """Row-lock the identity matching ``predicate`` and return its guard state.
+
+    Returns ``(id, status, lockout_failed_attempts, lockout_until)``. The core
+    shared by ``_lock_identity`` (by phone) and ``_lock_identity_by_id`` (by
+    id); ``FOR UPDATE`` serializes concurrent writers so the failure counter
+    cannot race and the identity guards see stable values.
+    """
+    row = (
+        (
+            await connection.execute(
+                select(
+                    iam_identities.c.id,
+                    iam_identities.c.status,
+                    iam_identities.c.lockout_failed_attempts,
+                    iam_identities.c.lockout_until,
+                )
+                .where(predicate)
+                .with_for_update()
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        return None
+    return (
+        row["id"],
+        row["status"],
+        row["lockout_failed_attempts"],
+        row["lockout_until"],
+    )
+
+
 class IamFacade:
     """Typed public facade for iam (Phase 2: registration + OTP + sessions)."""
 
@@ -159,12 +220,14 @@ class IamFacade:
         *,
         access_token_signing_key: str = "",
         access_token_ttl_seconds: int = jwt.ACCESS_TOKEN_TTL_SECONDS,
+        refresh_token_ttl_seconds: int = refresh.REFRESH_TOKEN_TTL_SECONDS,
     ) -> None:
         self._engine = engine
         self._sms = sms_adapter
         self._clock = clock
         self._access_token_signing_key = access_token_signing_key
         self._access_token_ttl_seconds = access_token_ttl_seconds
+        self._refresh_token_ttl_seconds = refresh_token_ttl_seconds
 
     async def register_patient(self, phone: str) -> RegisterPatientResult:
         """Begin-or-resume: create the identity on first use, else resolve it.
@@ -397,37 +460,105 @@ class IamFacade:
     ) -> tuple[int, str, int, datetime | None] | None:
         """Row-lock the identity for ``phone_e164`` and return its guard state.
 
-        Returns ``(id, status, lockout_failed_attempts, lockout_until)``.
         ``FOR UPDATE`` serializes every verification and resend for one phone
         so the challenge can be consumed exactly once, the role grant stays
         unique, and the failure counter cannot race (spec #51 §2.4). The status
         and lockout columns are read under the same lock so the Suspended guard
         and the lockout check see stable values.
         """
-        row = (
+        return await _lock_identity_row(connection, iam_identities.c.phone_e164 == phone_e164)
+
+    @staticmethod
+    async def _lock_identity_by_id(
+        connection: AsyncConnection, identity_id: int
+    ) -> tuple[int, str, int, datetime | None] | None:
+        """Row-lock an identity by id and return its guard state (ticket #58).
+
+        The refresh path already holds the ``sessions`` row ``FOR UPDATE``, so
+        the identity lock here serializes a concurrent role/status change
+        against the rotation without creating a lock cycle - no other code ever
+        locks a session row.
+        """
+        return await _lock_identity_row(connection, iam_identities.c.id == identity_id)
+
+    @staticmethod
+    async def _session_for_refresh(
+        connection: AsyncConnection, token_hash: str
+    ) -> RowMapping | None:
+        """The session row for a refresh-token hash, locked to serialize rotation.
+
+        ``FOR UPDATE`` on the session row is the rotation guard: two concurrent
+        refreshes presenting the same token serialize, and the second re-reads
+        the row after the first commits, sees ``revoked_at`` set, and refuses
+        as a replay instead of double-rotating (ticket #58).
+        """
+        return (
             (
                 await connection.execute(
                     select(
-                        iam_identities.c.id,
-                        iam_identities.c.status,
-                        iam_identities.c.lockout_failed_attempts,
-                        iam_identities.c.lockout_until,
+                        iam_sessions.c.id,
+                        iam_sessions.c.identity_id,
+                        iam_sessions.c.revoked_at,
+                        iam_sessions.c.refresh_expires_at,
                     )
-                    .where(iam_identities.c.phone_e164 == phone_e164)
+                    .where(iam_sessions.c.refresh_token_hash == token_hash)
                     .with_for_update()
                 )
             )
             .mappings()
             .first()
         )
-        if row is None:
-            return None
+
+    @staticmethod
+    async def _identity_phone(connection: AsyncConnection, identity_id: int) -> str:
+        """The ``phone_e164`` for an identity, for the audit event on a replay.
+
+        A session row's FK guarantees the identity exists; the fallback keeps
+        the outbox write safe even if a row were ever orphaned.
+        """
         return (
-            row["id"],
-            row["status"],
-            row["lockout_failed_attempts"],
-            row["lockout_until"],
+            await connection.execute(
+                select(iam_identities.c.phone_e164).where(iam_identities.c.id == identity_id)
+            )
+        ).scalar_one_or_none() or ""
+
+    async def _mint_session_row(
+        self,
+        connection: AsyncConnection,
+        identity_id: int,
+        scope: str,
+        now: datetime,
+    ) -> tuple[str, str, str]:
+        """Mint a fresh access JWT + opaque refresh token and record the session row.
+
+        Shared by ``issue_session`` and ``refresh_session`` so both mint the
+        same row shape: a random ``jti``, a fresh opaque refresh token (stored
+        hashed, never in clear) with its ~30-day sliding ``refresh_expires_at``,
+        and an access JWT whose ``exp`` is the access-token TTL out. Returns
+        ``(jti, refresh_token, jwt)``.
+        """
+        jti = uuid.uuid4().hex
+        refresh_token = refresh.generate_refresh_token()
+        token = jwt.issue_token(
+            jti=jti,
+            subject_id=identity_id,
+            scope=scope,
+            signing_key=self._access_token_signing_key,
+            now=now,
+            ttl_seconds=self._access_token_ttl_seconds,
         )
+        await connection.execute(
+            iam_sessions.insert().values(
+                jti=jti,
+                identity_id=identity_id,
+                scope=scope,
+                issued_at=now,
+                expires_at=now + timedelta(seconds=self._access_token_ttl_seconds),
+                refresh_token_hash=refresh.hash_refresh_token(refresh_token),
+                refresh_expires_at=now + timedelta(seconds=self._refresh_token_ttl_seconds),
+            )
+        )
+        return jti, refresh_token, token
 
     async def resend_otp(self, phone: str) -> ResendOtpResult:
         """Request a fresh code: latest-wins over the pending challenge.
@@ -525,8 +656,10 @@ class IamFacade:
         is generated per token, ``exp`` is ~15 minutes out so a stolen token has
         limited value, and the session row is recorded in the ``iam``
         ``sessions`` table in the same transaction - the jti is the anchor the
-        refresh rotation (T7) and revocation check against. An empty signing key
-        fails closed rather than minting a token anyone could forge.
+        refresh rotation (T7) and revocation check against, and the row also
+        carries the SHA-256 of a fresh opaque refresh token (never the token
+        itself) with its ~30-day sliding ``refresh_expires_at``. An empty signing
+        key fails closed rather than minting a token anyone could forge.
         """
         phone_e164 = normalize_phone(phone)
         if not self._access_token_signing_key:
@@ -553,23 +686,8 @@ class IamFacade:
                     f"identity {identity_id} has no active patient role grant"
                 )
 
-            jti = uuid.uuid4().hex
-            token = jwt.issue_token(
-                jti=jti,
-                subject_id=identity_id,
-                scope=scope,
-                signing_key=self._access_token_signing_key,
-                now=now,
-                ttl_seconds=self._access_token_ttl_seconds,
-            )
-            await connection.execute(
-                iam_sessions.insert().values(
-                    jti=jti,
-                    identity_id=identity_id,
-                    scope=scope,
-                    issued_at=now,
-                    expires_at=now + timedelta(seconds=self._access_token_ttl_seconds),
-                )
+            jti, refresh_token, token = await self._mint_session_row(
+                connection, identity_id, scope, now
             )
 
         return IssueSessionResult(
@@ -578,6 +696,7 @@ class IamFacade:
             scope=scope,
             identity_id=identity_id,
             expires_in_seconds=self._access_token_ttl_seconds,
+            refresh_token=refresh_token,
         )
 
     async def validate_token(self, token: str) -> ValidatedAccessToken:
@@ -593,6 +712,106 @@ class IamFacade:
         claims = jwt.verify_token(token, self._access_token_signing_key, now=self._clock())
         return ValidatedAccessToken(
             subject_id=claims.subject_id, scope=claims.scope, jti=claims.jti
+        )
+
+    async def refresh_session(self, refresh_token: str) -> RefreshSessionResult:
+        """Rotate an opaque refresh token into a fresh session (ticket #58).
+
+        The refresh path is fully independent of SMS (NFR-004): it only reads
+        the ``sessions`` table and mints tokens, so an EXT-001 outage never
+        bricks an existing session. The token is looked up by its SHA-256
+        (opaque, never stored or logged in clear); an unknown token, a revoked
+        one, and an expired one are each refused with their own
+        ``InvalidRefreshTokenError`` subclass (acceptance criterion #3).
+
+        A valid token rotates in the same transaction as the mint: the old
+        session row is revoked (``revoked_at``) and a fresh row records the new
+        access ``jti`` with a brand-new refresh token whose lifetime slides to
+        ~30 days from ``now``. Presenting the already-rotated token afterwards
+        finds the revoked row - a replay signal - and is refused while
+        ``patient.auth_failed`` is committed to the outbox in the same
+        transaction (audit can tell a stolen-session replay from a garbage
+        token, which matches nothing). The scope of the fresh JWT is re-derived
+        from the identity's current active role grant, never from the old
+        token. The identity row is locked ``FOR UPDATE`` (after the session
+        row) so a concurrent role change cannot race the refresh, and the
+        session-row lock serializes two concurrent refreshes of the same token
+        so only one rotation wins. An empty signing key fails closed exactly
+        like ``issue_session``.
+        """
+        if not self._access_token_signing_key:
+            raise SessionIssuanceError(
+                "access-token signing key is not configured; refusing to refresh a session"
+            )
+        now = self._clock()
+        token_hash = refresh.hash_refresh_token(refresh_token)
+        replay_signal = False
+
+        async with self._engine.begin() as connection:
+            session_row = await self._session_for_refresh(connection, token_hash)
+            if session_row is None:
+                raise RefreshTokenUnknownError("no session matches this refresh token")
+
+            decision = refresh.evaluate_refresh(
+                revoked_at=session_row["revoked_at"],
+                refresh_expires_at=session_row["refresh_expires_at"],
+                now=now,
+            )
+
+            if decision.reason == "revoked":
+                phone = await self._identity_phone(connection, session_row["identity_id"])
+                await write_outbox(
+                    connection,
+                    _IAM_SCHEMA,
+                    IAM_OUTBOX_TABLE,
+                    events.patient_auth_failed_envelope(
+                        identity_id=session_row["identity_id"],
+                        phone_e164=phone,
+                        reason="replay",
+                    ),
+                )
+                replay_signal = True
+            elif decision.reason == "expired":
+                raise RefreshTokenExpiredError(
+                    "this refresh token has expired; re-authenticate to continue"
+                )
+            else:
+                identity = await self._lock_identity_by_id(connection, session_row["identity_id"])
+                if identity is None:
+                    raise RefreshTokenRevokedError("the session identity no longer exists")
+                identity_id, identity_status, _failed_attempts, _lockout_until = identity
+                if identity_status != IDENTITY_ACTIVE:
+                    raise RefreshTokenRevokedError(
+                        f"identity {identity_id} is {identity_status}; refusing to refresh"
+                    )
+                scope = await self._resolve_active_role(connection, identity_id, _PATIENT_ROLE)
+                if scope is None:
+                    raise RefreshTokenRevokedError(
+                        f"identity {identity_id} has no active patient role grant; "
+                        "refusing to refresh"
+                    )
+
+                new_jti, new_refresh_token, token = await self._mint_session_row(
+                    connection, identity_id, scope, now
+                )
+                await connection.execute(
+                    iam_sessions.update()
+                    .where(iam_sessions.c.id == session_row["id"])
+                    .values(revoked_at=now)
+                )
+
+        if replay_signal:
+            raise RefreshTokenRevokedError(
+                "this refresh token was already used or revoked; refusing to refresh"
+            )
+
+        return RefreshSessionResult(
+            jwt=token,
+            jti=new_jti,
+            scope=scope,
+            identity_id=identity_id,
+            expires_in_seconds=self._access_token_ttl_seconds,
+            refresh_token=new_refresh_token,
         )
 
     @staticmethod
