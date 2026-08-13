@@ -29,9 +29,9 @@ from modules.iam.domain.exceptions import (
 )
 from modules.iam.facade import (
     IamFacade,
-    IssueSessionResult,
     RegisterPatientResult,
     ResendOtpResult,
+    SessionResult,
     VerifyOtpResult,
 )
 
@@ -151,14 +151,14 @@ async def resend_otp(
 
 @router.post(
     "/session",
-    response_model=IssueSessionResult,
+    response_model=SessionResult,
     status_code=status.HTTP_200_OK,
     summary="Issue an authenticated session for a verified patient",
 )
 async def issue_session(
     request: Request,
     body: IssueSessionRequest,
-) -> IssueSessionResult:
+) -> SessionResult:
     """Mint an access JWT + refresh token for a verified patient's phone.
 
     The PWA calls this only after a ``verified`` outcome: the facade requires

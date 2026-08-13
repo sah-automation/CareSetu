@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
@@ -136,30 +137,18 @@ class ResendOtpResult(BaseModel):
     attempts_left: int | None = None
 
 
-class IssueSessionResult(BaseModel):
-    """A freshly minted access session (spec #51 §2.5, ticket #57).
+class SessionResult(BaseModel):
+    """A session, whether freshly issued or rotated (spec #51 §2.5, tickets #57, #58).
 
-    ``jwt`` is the HS256 access JWT the PWA stores; ``jti``/``expires_in_seconds``
-    mirror its claims so the client can show a session indicator, and ``scope``
-    is the resolved RBAC scope - always from the patient role grant, never from
-    client input. ``refresh_token`` is the opaque, server-side-hashed refresh
-    token the PWA keeps for ``refresh_session`` (ticket #58).
-    """
-
-    jwt: str
-    jti: str
-    scope: str
-    identity_id: int
-    expires_in_seconds: int
-    refresh_token: str
-
-
-class RefreshSessionResult(BaseModel):
-    """The output of one successful ``refresh_session`` rotation (ticket #58).
-
-    Mirrors ``IssueSessionResult`` - a fresh access JWT and a brand-new opaque
-    refresh token. The previous refresh token is already invalid by the time
-    this is returned (rotation is in the same transaction as the mint).
+    One model for both paths: ``issue_session`` mints the first session for a
+    verified patient, and ``refresh_session`` rotates an opaque refresh token
+    into the same shape. ``jwt`` is the HS256 access JWT the PWA stores;
+    ``jti``/``expires_in_seconds`` mirror its claims so the client can show a
+    session indicator, and ``scope`` is the resolved RBAC scope - always from
+    the patient role grant, never from client input. ``refresh_token`` is the
+    opaque, server-side-hashed refresh token the PWA keeps for the next
+    ``refresh_session``; on a rotation the previous refresh token is already
+    invalid by the time the result is returned.
     """
 
     jwt: str
@@ -186,14 +175,29 @@ def _default_clock() -> datetime:
     return datetime.now(UTC)
 
 
+@dataclass(frozen=True)
+class IdentityGuardState:
+    """The identity row's guard columns, read under the ``FOR UPDATE`` row lock.
+
+    ``status`` drives the Suspended/Active guards, ``lockout_until`` the
+    brute-force lockout check, and ``lockout_failed_attempts`` seeds the
+    streak evaluation for the next rejection. Every row-lock call site reads
+    these four columns through this one typed object.
+    """
+
+    identity_id: int
+    status: str
+    lockout_failed_attempts: int
+    lockout_until: datetime | None
+
+
 async def _lock_identity_row(
     connection: AsyncConnection, predicate: ColumnElement[bool]
-) -> tuple[int, str, int, datetime | None] | None:
+) -> IdentityGuardState | None:
     """Row-lock the identity matching ``predicate`` and return its guard state.
 
-    Returns ``(id, status, lockout_failed_attempts, lockout_until)``. The core
-    shared by ``_lock_identity`` (by phone) and ``_lock_identity_by_id`` (by
-    id); ``FOR UPDATE`` serializes concurrent writers so the failure counter
+    The core shared by ``_lock_identity`` (by phone) and ``_lock_identity_by_id``
+    (by id); ``FOR UPDATE`` serializes concurrent writers so the failure counter
     cannot race and the identity guards see stable values.
     """
     row = (
@@ -214,11 +218,11 @@ async def _lock_identity_row(
     )
     if row is None:
         return None
-    return (
-        row["id"],
-        row["status"],
-        row["lockout_failed_attempts"],
-        row["lockout_until"],
+    return IdentityGuardState(
+        identity_id=row["id"],
+        status=row["status"],
+        lockout_failed_attempts=row["lockout_failed_attempts"],
+        lockout_until=row["lockout_until"],
     )
 
 
@@ -297,7 +301,9 @@ class IamFacade:
                 locked = await self._lock_identity(connection, phone_e164)
                 if locked is None:
                     raise IamError("existing identity disappeared between the insert and the lock")
-                identity_id, identity_status, _failed_attempts, lockout_until = locked
+                identity_id = locked.identity_id
+                identity_status = locked.status
+                lockout_until = locked.lockout_until
                 latest_cooldown_until = await self._latest_cooldown_until(connection, identity_id)
                 decision = evaluate_resend(
                     identity_status=identity_status,
@@ -386,15 +392,24 @@ class IamFacade:
         async with self._engine.begin() as connection:
             locked = await self._lock_identity(connection, phone_e164)
             if locked is None:
-                return await self._reject_no_challenge(connection, phone_e164, identity_id=None)
-            identity_id, identity_status, lockout_failed_attempts, lockout_until = locked
+                return await self._reject(connection, phone_e164, None, no_challenge_decision())
+            identity_id = locked.identity_id
+            identity_status = locked.status
+            lockout_failed_attempts = locked.lockout_failed_attempts
+            lockout_until = locked.lockout_until
 
             if identity_status == IDENTITY_SUSPENDED:
-                return await self._reject_suspended(connection, phone_e164, identity_id)
+                return await self._reject(connection, phone_e164, identity_id, suspended_decision())
 
             lockout_left = lockout_remaining_seconds(lockout_until, now)
             if lockout_left is not None:
-                return await self._reject_locked(connection, phone_e164, identity_id, lockout_left)
+                return await self._reject(
+                    connection,
+                    phone_e164,
+                    identity_id,
+                    locked_decision(),
+                    lockout_remaining_seconds=lockout_left,
+                )
 
             challenge = (
                 (
@@ -416,7 +431,9 @@ class IamFacade:
             )
 
             if challenge is None:
-                return await self._reject_no_challenge(connection, phone_e164, identity_id)
+                return await self._reject(
+                    connection, phone_e164, identity_id, no_challenge_decision()
+                )
 
             decision = evaluate_attempt(
                 status=challenge["status"],
@@ -509,7 +526,7 @@ class IamFacade:
     @staticmethod
     async def _lock_identity(
         connection: AsyncConnection, phone_e164: str
-    ) -> tuple[int, str, int, datetime | None] | None:
+    ) -> IdentityGuardState | None:
         """Row-lock the identity for ``phone_e164`` and return its guard state.
 
         ``FOR UPDATE`` serializes every verification and resend for one phone
@@ -523,7 +540,7 @@ class IamFacade:
     @staticmethod
     async def _lock_identity_by_id(
         connection: AsyncConnection, identity_id: int
-    ) -> tuple[int, str, int, datetime | None] | None:
+    ) -> IdentityGuardState | None:
         """Row-lock an identity by id and return its guard state (ticket #58).
 
         The refresh path already holds the ``sessions`` row ``FOR UPDATE``, so
@@ -640,7 +657,9 @@ class IamFacade:
             locked = await self._lock_identity(connection, phone_e164)
             if locked is None:
                 return ResendOtpResult(outcome="no_identity", phone_e164=phone_e164)
-            identity_id, identity_status, _failed_attempts, lockout_until = locked
+            identity_id = locked.identity_id
+            identity_status = locked.status
+            lockout_until = locked.lockout_until
             cooldown_until = await self._latest_cooldown_until(connection, identity_id)
 
             decision = evaluate_resend(
@@ -759,7 +778,7 @@ class IamFacade:
                 ),
             )
 
-    async def issue_session(self, phone: str) -> IssueSessionResult:
+    async def issue_session(self, phone: str) -> SessionResult:
         """Mint an access JWT for a verified patient (spec #51 §2.5, ticket #57).
 
         The scope claim is always derived from the patient's active role grant,
@@ -787,7 +806,8 @@ class IamFacade:
                 raise SessionIssuanceError(
                     f"no identity for {phone_e164}; register the phone before issuing a session"
                 )
-            identity_id, identity_status, _failed_attempts, _lockout_until = locked
+            identity_id = locked.identity_id
+            identity_status = locked.status
             if identity_status != IDENTITY_ACTIVE:
                 raise SessionIssuanceError(
                     f"identity {identity_id} is {identity_status}, not Active; "
@@ -803,7 +823,7 @@ class IamFacade:
                 connection, identity_id, scope, now
             )
 
-        return IssueSessionResult(
+        return SessionResult(
             jwt=token,
             jti=jti,
             scope=scope,
@@ -827,7 +847,7 @@ class IamFacade:
             subject_id=claims.subject_id, scope=claims.scope, jti=claims.jti
         )
 
-    async def refresh_session(self, refresh_token: str) -> RefreshSessionResult:
+    async def refresh_session(self, refresh_token: str) -> SessionResult:
         """Rotate an opaque refresh token into a fresh session (ticket #58).
 
         The refresh path is fully independent of SMS (NFR-004): it only reads
@@ -836,6 +856,12 @@ class IamFacade:
         (opaque, never stored or logged in clear); an unknown token, a revoked
         one, and an expired one are each refused with their own
         ``InvalidRefreshTokenError`` subclass (acceptance criterion #3).
+
+        The seam is backend-only: an internal rotation path with no HTTP route,
+        no frontend consumer, and no lifecycle outbox event. Clients reach a
+        session only through ``issue_session`` and call ``refresh_session``
+        when the access JWT expires; its only outbox write is the
+        ``patient.auth_failed`` replay audit on a refused rotation.
 
         A valid token rotates in the same transaction as the mint: the old
         session row is revoked (``revoked_at``) and a fresh row records the new
@@ -892,7 +918,8 @@ class IamFacade:
                 identity = await self._lock_identity_by_id(connection, session_row["identity_id"])
                 if identity is None:
                     raise RefreshTokenRevokedError("the session identity no longer exists")
-                identity_id, identity_status, _failed_attempts, _lockout_until = identity
+                identity_id = identity.identity_id
+                identity_status = identity.status
                 if identity_status != IDENTITY_ACTIVE:
                     raise RefreshTokenRevokedError(
                         f"identity {identity_id} is {identity_status}; refusing to refresh"
@@ -918,7 +945,7 @@ class IamFacade:
                 "this refresh token was already used or revoked; refusing to refresh"
             )
 
-        return RefreshSessionResult(
+        return SessionResult(
             jwt=token,
             jti=new_jti,
             scope=scope,
@@ -988,78 +1015,25 @@ class IamFacade:
             )
 
     @staticmethod
-    async def _reject_no_challenge(
+    async def _reject(
         connection: AsyncConnection,
         phone_e164: str,
         identity_id: int | None,
+        decision: AttemptDecision,
+        *,
+        lockout_remaining_seconds: int | None = None,
     ) -> VerifyOtpResult:
-        """Reject a verification with no live challenge: "request a new code".
+        """Reject a verification: decision -> ``patient.auth_failed`` -> result.
 
-        Covers a phone never registered (``identity_id`` is ``None``) and an
-        identity with no challenge row yet. Writes ``patient.auth_failed`` in
-        the same transaction as the rejection.
+        Every rejected verification - no live challenge (``no_challenge_decision``),
+        a Suspended identity (``suspended_decision``), or an active brute-force
+        lockout (``locked_decision``) - refuses with the same chain: the challenge
+        machine's decision names the outcome and the failure reason,
+        ``patient.auth_failed`` lands in the outbox in the same transaction as
+        the rejection, and the returned ``VerifyOtpResult`` renders the outcome
+        for the PWA. Only the lockout rejection carries
+        ``lockout_remaining_seconds``, for its countdown.
         """
-        decision = no_challenge_decision()
-        await write_outbox(
-            connection,
-            _IAM_SCHEMA,
-            IAM_OUTBOX_TABLE,
-            events.patient_auth_failed_envelope(
-                identity_id=identity_id,
-                phone_e164=phone_e164,
-                reason=decision.reason or "expired",
-                attempts_left=decision.attempts_left,
-            ),
-        )
-        return VerifyOtpResult(
-            outcome=decision.outcome, phone_e164=phone_e164, identity_id=identity_id
-        )
-
-    @staticmethod
-    async def _reject_suspended(
-        connection: AsyncConnection,
-        phone_e164: str,
-        identity_id: int,
-    ) -> VerifyOtpResult:
-        """Reject verification for a Suspended identity without touching the challenge.
-
-        ``Suspended`` is reachable only via the operator status-change interface
-        (spec #51 §2.4), so no OTP can move the identity out of it; the attempt
-        is refused with a "request a new code" outcome and ``patient.auth_failed``
-        in the same transaction.
-        """
-        decision = suspended_decision()
-        await write_outbox(
-            connection,
-            _IAM_SCHEMA,
-            IAM_OUTBOX_TABLE,
-            events.patient_auth_failed_envelope(
-                identity_id=identity_id,
-                phone_e164=phone_e164,
-                reason=decision.reason or "expired",
-                attempts_left=decision.attempts_left,
-            ),
-        )
-        return VerifyOtpResult(
-            outcome=decision.outcome, phone_e164=phone_e164, identity_id=identity_id
-        )
-
-    @staticmethod
-    async def _reject_locked(
-        connection: AsyncConnection,
-        phone_e164: str,
-        identity_id: int,
-        lockout_remaining: int,
-    ) -> VerifyOtpResult:
-        """Reject verification while the phone is in the brute-force lockout.
-
-        The lockout is a temporary counter, never identity state (spec #51
-        §2.4), so the attempt is refused with the ``locked`` outcome - the PWA
-        shows the lockout countdown - without touching the challenge or the
-        counter. The refusal writes ``patient.auth_failed`` in the same
-        transaction.
-        """
-        decision = locked_decision()
         await write_outbox(
             connection,
             _IAM_SCHEMA,
@@ -1075,7 +1049,7 @@ class IamFacade:
             outcome=decision.outcome,
             phone_e164=phone_e164,
             identity_id=identity_id,
-            lockout_remaining_seconds=lockout_remaining,
+            lockout_remaining_seconds=lockout_remaining_seconds,
         )
 
     @staticmethod

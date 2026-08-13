@@ -19,11 +19,11 @@ from app.gateway.rate_limit import RateLimitMiddleware
 from app.gateway.trace import TraceMiddleware
 from app.main import create_app
 from modules.iam.domain.exceptions import IamError, SessionIssuanceError
-from modules.iam.facade import IssueSessionResult
+from modules.iam.facade import SessionResult
 
 _TRACE_ID = "unit-trace-1234abcd"
 
-_RESULT = IssueSessionResult(
+_RESULT = SessionResult(
     jwt="header.payload.signature",
     jti="abc123",
     scope="patient",
@@ -38,10 +38,10 @@ class StubFacade:
 
     def __init__(self) -> None:
         self.called_with: list[str] = []
-        self.result: IssueSessionResult | None = _RESULT
+        self.result: SessionResult | None = _RESULT
         self.error: IamError | None = None
 
-    async def issue_session(self, phone: str) -> IssueSessionResult:
+    async def issue_session(self, phone: str) -> SessionResult:
         self.called_with.append(phone)
         if self.error is not None:
             raise self.error
