@@ -33,6 +33,13 @@ iam_identities = Table(
     Column("id", BigInteger, primary_key=True),
     Column("phone_e164", String(32), nullable=False),
     Column("status", String(20), nullable=False, server_default=text("'Unverified'")),
+    Column(
+        "lockout_failed_attempts",
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+    ),
+    Column("lockout_until", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     UniqueConstraint("phone_e164", name="uq_iam_identities_phone_e164"),

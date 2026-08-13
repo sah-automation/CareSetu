@@ -1,4 +1,4 @@
-"""MOD-001: HTTP adapters for the iam module (PHASE-2 T3/T4, tickets #54, #55).
+"""MOD-001: HTTP adapters for the iam module (PHASE-2 T3/T4/T5, tickets #54, #55, #56).
 
 Endpoints are thin adapters (api-standards §1): parse the typed request, call
 the module facade, return the typed result. Every expected failure answers the
@@ -21,7 +21,12 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from modules.iam.domain.exceptions import IamError, InvalidPhoneError, SmsDeliveryError
-from modules.iam.facade import IamFacade, RegisterPatientResult, VerifyOtpResult
+from modules.iam.facade import (
+    IamFacade,
+    RegisterPatientResult,
+    ResendOtpResult,
+    VerifyOtpResult,
+)
 
 router = APIRouter(prefix="/v1/auth", tags=["iam"])
 
@@ -44,6 +49,14 @@ class VerifyOtpRequest(BaseModel):
         pattern=r"^[0-9]{6}$",
         description="The 6-digit code the patient received; only well-formed guesses count",
     )
+
+
+class ResendOtpRequest(BaseModel):
+    """Body of ``POST /v1/auth/resend``: the phone needing a fresh code."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    phone: str = Field(min_length=1, description="10-digit Indian mobile number, or with 91 prefix")
 
 
 class ErrorEnvelope(BaseModel):
@@ -88,10 +101,32 @@ async def verify_otp(
     """Submit the 6-digit code: consume the challenge and verify the patient.
 
     Returns the outcome the PWA renders - ``verified``, ``wrong_code`` with
-    the remaining attempts, or ``expired``/``spent`` ("request a new code").
+    the remaining attempts, ``expired``/``spent`` ("request a new code"), or
+    ``locked`` with the lockout countdown.
     """
     facade = cast(IamFacade, request.app.state.iam_facade)
     return await facade.verify_otp(body.phone, body.otp)
+
+
+@router.post(
+    "/resend",
+    response_model=ResendOtpResult,
+    status_code=status.HTTP_200_OK,
+    summary="Resend the OTP code (latest-wins)",
+)
+async def resend_otp(
+    request: Request,
+    body: ResendOtpRequest,
+) -> ResendOtpResult:
+    """Request a fresh code: invalidate the pending one and issue a new one.
+
+    Returns the outcome the PWA renders - ``sent`` with the fresh challenge
+    fields, or the refuse states ``cooldown``/``locked``/``suspended`` with the
+    countdown the disable state needs. The facade enforces the >= 60 s resend
+    cooldown and the brute-force lockout.
+    """
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    return await facade.resend_otp(body.phone)
 
 
 def _error_response(status_code: int, code: str, message: str) -> JSONResponse:
