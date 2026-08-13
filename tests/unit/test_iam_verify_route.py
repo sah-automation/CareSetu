@@ -14,6 +14,7 @@ import logging
 import pytest
 from fastapi.testclient import TestClient
 
+from app.gateway.idempotency import IdempotencyStore
 from app.gateway.jwt_verify import JWTVerifyMiddleware
 from app.gateway.rate_limit import RateLimitMiddleware
 from app.gateway.trace import TraceMiddleware
@@ -49,6 +50,13 @@ class StubFacade:
 def _client_with(facade: StubFacade) -> TestClient:
     app = create_app()
     app.state.iam_facade = facade
+    return TestClient(app)
+
+
+def _client_with_store(facade: StubFacade, store: IdempotencyStore) -> TestClient:
+    app = create_app()
+    app.state.iam_facade = facade
+    app.state.idempotency_store = store
     return TestClient(app)
 
 
@@ -195,3 +203,68 @@ def test_unknown_field_rejected_at_the_gateway() -> None:
 
     assert response.status_code == 422
     assert facade.called_with == []
+
+
+# ---------------------------------------------------------------------------
+# Idempotency-Key (api-standards §5, PHASE-2 REM T11 #80)
+# ---------------------------------------------------------------------------
+
+
+def test_verify_replays_same_key_without_reconsuming_the_challenge() -> None:
+    facade = StubFacade()
+    facade.result = _result("verified")
+    client = _client_with(facade)
+    headers = {"Idempotency-Key": "verify-retry-123"}
+
+    first = client.post(
+        "/v1/auth/verify", json={"phone": "9876543210", "otp": "654321"}, headers=headers
+    )
+    replay = client.post(
+        "/v1/auth/verify", json={"phone": "9876543210", "otp": "654321"}, headers=headers
+    )
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert replay.json() == first.json()
+    assert facade.called_with == [("9876543210", "654321")]
+
+
+def test_verify_different_keys_execute_each_mutation() -> None:
+    facade = StubFacade()
+    client = _client_with(facade)
+
+    client.post(
+        "/v1/auth/verify",
+        json={"phone": "9876543210", "otp": "654321"},
+        headers={"Idempotency-Key": "k-1"},
+    )
+    client.post(
+        "/v1/auth/verify",
+        json={"phone": "9876543210", "otp": "654321"},
+        headers={"Idempotency-Key": "k-2"},
+    )
+
+    assert facade.called_with == [("9876543210", "654321"), ("9876543210", "654321")]
+
+
+def test_verify_no_key_passes_through_without_store_interaction() -> None:
+    facade = StubFacade()
+    client = _client_with(facade)
+
+    client.post("/v1/auth/verify", json={"phone": "9876543210", "otp": "654321"})
+    client.post("/v1/auth/verify", json={"phone": "9876543210", "otp": "654321"})
+
+    assert facade.called_with == [("9876543210", "654321"), ("9876543210", "654321")]
+
+
+def test_verify_replayed_key_expired_by_ttl_reexecutes(fake_clock) -> None:
+    store = IdempotencyStore(ttl_seconds=300, clock=fake_clock)
+    facade = StubFacade()
+    client = _client_with_store(facade, store)
+    headers = {"Idempotency-Key": "verify-retry-123"}
+
+    client.post("/v1/auth/verify", json={"phone": "9876543210", "otp": "654321"}, headers=headers)
+    fake_clock.advance(301)
+    client.post("/v1/auth/verify", json={"phone": "9876543210", "otp": "654321"}, headers=headers)
+
+    assert facade.called_with == [("9876543210", "654321"), ("9876543210", "654321")]

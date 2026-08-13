@@ -20,6 +20,7 @@ from sqlalchemy.pool import NullPool
 
 from app.config import _DEV_TEST_ENVIRONMENTS, Settings, get_settings
 from app.gateway.errors import register_gateway_error_handlers
+from app.gateway.idempotency import IdempotencyStore
 from app.gateway.jwt_verify import JWTVerifyMiddleware
 from app.gateway.principal import Principal
 from app.gateway.rate_limit import RateLimitMiddleware
@@ -88,6 +89,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         refresh_token_ttl_seconds=resolved_settings.gateway_refresh_token_ttl_seconds,
     )
     app.state.iam_facade = facade
+    # The edge's in-process idempotency store (api-standards §5, PHASE-2 REM
+    # T11, #80): the auth mutation adapters read/write it per ``Idempotency-Key``
+    # so a retried register/verify/resend replays the stored result instead of
+    # re-executing. Resolved once like the facade; a restart loses the entries
+    # and degrades to at-most-once (documented trade-off in the store module).
+    app.state.idempotency_store = IdempotencyStore()
     # Only keep the plaintext OTP read surface when it can never be a real
     # provider: mock SMS + a dev/test environment. Production-default boots
     # leave app.state.mock_sms_adapter absent.
