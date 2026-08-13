@@ -102,11 +102,22 @@ def _facade(database_url: str, sms: SmsAdapter, clock: MutableClock) -> IamFacad
     return IamFacade(engine=engine, sms_adapter=sms, clock=clock)
 
 
+async def _flush(facade: IamFacade) -> None:
+    """Await the facade's background SMS deliveries (PHASE-2 REM T4, #86).
+
+    Delivery leaves the request path, so the mock adapter's read surface is
+    only populated once the background task runs; tests await the queue before
+    asserting on sent codes.
+    """
+    await facade.delivery_queue.flush()
+
+
 async def _register(
     database_url: str, sms: MockSmsAdapter, clock: MutableClock
 ) -> tuple[IamFacade, str]:
     facade = _facade(database_url, sms, clock)
     await facade.register_patient("9876543210")
+    await _flush(facade)
     sent = sms.last_sent_code(_PHONE)
     assert sent is not None and len(sent) == 6
     return facade, sent
@@ -309,6 +320,7 @@ async def test_login_verify_does_not_duplicate_the_role_grant(
     await facade.verify_otp("9876543210", sent)
     clock.set(_T0 + timedelta(seconds=61))
     second_flow = await facade.register_patient("9876543210")
+    await _flush(facade)
     second_code = sms.last_sent_code(_PHONE)
     assert second_code is not None and second_code != sent
     assert second_flow.flow == "login"

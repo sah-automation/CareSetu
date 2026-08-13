@@ -141,6 +141,7 @@ async def _exhaust_and_relock(facade: IamFacade, clock: MutableClock, sms: MockS
     clock.set(_T0 + timedelta(seconds=61))
     resend = await facade.resend_otp("9876543210")
     assert resend.outcome == "sent"
+    await _flush(facade)
     code = sms.last_sent_code(_PHONE)
     assert code is not None
     for _ in range(4):
@@ -166,6 +167,7 @@ async def test_resend_after_cooldown_issues_fresh_challenge_and_invalidates_pend
     assert resend.expires_in_seconds == OTP_TTL_SECONDS
     assert resend.cooldown_remaining_seconds == 60
     assert resend.attempts_left == 5
+    await _flush(facade)
     second_code = sms.last_sent_code(_PHONE)
     assert second_code is not None and second_code != first_code
 
@@ -202,6 +204,7 @@ async def test_resend_inside_cooldown_is_refused_and_allowed_at_the_boundary(
     allowed = await facade.resend_otp("9876543210")
 
     assert allowed.outcome == "sent"
+    await _flush(facade)
     assert sms.sent_count(_PHONE) == 2
 
 
@@ -276,6 +279,7 @@ async def test_lockout_expires_and_success_resets_the_counter(
     resend = await facade.resend_otp("9876543210")
 
     assert resend.outcome == "sent"
+    await _flush(facade)
     fresh_code = sms.last_sent_code(_PHONE)
     assert fresh_code is not None
     verified = await facade.verify_otp("9876543210", fresh_code)
@@ -307,6 +311,7 @@ async def test_lockout_expires_and_failure_starts_a_fresh_streak(
     resend = await facade.resend_otp("9876543210")
 
     assert resend.outcome == "sent"
+    await _flush(facade)
     fresh_code = sms.last_sent_code(_PHONE)
     assert fresh_code is not None
 
