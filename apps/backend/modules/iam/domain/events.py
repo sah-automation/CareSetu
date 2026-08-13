@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from bus.envelope import Envelope
 from bus.events import (
+    EVENT_OTP_FAILED,
     EVENT_OTP_SENT,
     EVENT_PATIENT_AUTH_FAILED,
     EVENT_PATIENT_REGISTERED,
@@ -24,8 +25,6 @@ from bus.events import (
 from modules.iam.domain.verify import FailureReason
 
 PRODUCER_MODULE = "iam"
-
-EVENT_OTP_FAILED = "otp.failed"
 
 
 class PatientRegisteredPayload(BaseModel):

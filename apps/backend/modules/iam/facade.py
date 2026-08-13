@@ -272,7 +272,7 @@ class IamFacade:
                     .values(
                         identity_id=identity_id,
                         otp_hash=hash_otp(otp),
-                        status="Pending",
+                        status=CHALLENGE_PENDING,
                         attempts=0,
                         expires_at=expires_at,
                         cooldown_until=cooldown_until,
@@ -618,7 +618,7 @@ class IamFacade:
                     .values(
                         identity_id=identity_id,
                         otp_hash=hash_otp(otp),
-                        status="Pending",
+                        status=CHALLENGE_PENDING,
                         attempts=0,
                         expires_at=expires_at,
                         cooldown_until=cooldown_until_new,
@@ -849,7 +849,7 @@ class IamFacade:
                 .where(
                     iam_role_grants.c.identity_id == identity_id,
                     iam_role_grants.c.role == role,
-                    iam_role_grants.c.status == "Active",
+                    iam_role_grants.c.status == IDENTITY_ACTIVE,
                 )
                 .limit(1)
             )
@@ -863,14 +863,14 @@ class IamFacade:
                 select(iam_role_grants.c.id).where(
                     iam_role_grants.c.identity_id == identity_id,
                     iam_role_grants.c.role == _PATIENT_ROLE,
-                    iam_role_grants.c.status == "Active",
+                    iam_role_grants.c.status == IDENTITY_ACTIVE,
                 )
             )
         ).first()
         if existing is None:
             await connection.execute(
                 iam_role_grants.insert().values(
-                    identity_id=identity_id, role=_PATIENT_ROLE, status="Active"
+                    identity_id=identity_id, role=_PATIENT_ROLE, status=IDENTITY_ACTIVE
                 )
             )
 

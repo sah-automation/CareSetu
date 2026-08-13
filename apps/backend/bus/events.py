@@ -13,6 +13,5 @@ EVENT_PATIENT_REGISTERED = "patient.registered"
 EVENT_PATIENT_VERIFIED = "patient.verified"
 EVENT_PATIENT_AUTH_FAILED = "patient.auth_failed"
 EVENT_OTP_SENT = "otp.sent"
-# Reserved: the registry lists otp.failed but no module emits it yet. Do not
-# use this constant before the producing phase lands.
+# Emitted by MOD-001 (iam) when the brute-force lockout triggers (spec #51 §2.4).
 EVENT_OTP_FAILED = "otp.failed"
