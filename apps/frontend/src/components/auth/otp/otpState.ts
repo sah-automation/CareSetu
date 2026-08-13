@@ -283,8 +283,11 @@ export function useOtpFlow(): OtpFlow {
         const cooldownRemaining = Math.max(0, s.cooldownRemaining - 1);
         const lockoutRemaining = Math.max(0, s.lockoutRemaining - 1);
         const expiresIn = Math.max(0, s.expiresIn - 1);
-        const challenge =
+        let challenge =
           s.challenge === "pending" && expiresIn <= 0 ? "spent" : s.challenge;
+        if (challenge === "locked" && lockoutRemaining <= 0) {
+          challenge = "idle";
+        }
         const next: OtpState = {
           ...s,
           cooldownRemaining,
@@ -321,15 +324,51 @@ export function useOtpFlow(): OtpFlow {
         setState((s) => ({ ...s, busy: true }));
         void registerPhone(phone)
           .then((result) => {
+            if (result.outcome === "cooldown") {
+              const cooldown = result.cooldown_remaining_seconds ?? 0;
+              setState((s) => ({
+                ...s,
+                phone,
+                cooldownRemaining: cooldown,
+                busy: false,
+                lastError: null,
+                lastNotice: null,
+              }));
+              return;
+            }
+            if (result.outcome === "locked") {
+              const lockoutSeconds = result.lockout_remaining_seconds ?? 0;
+              setState((s) => ({
+                ...s,
+                phone,
+                challenge: "locked",
+                lockoutRemaining: lockoutSeconds,
+                busy: false,
+                lastError: null,
+                lastNotice: null,
+              }));
+              return;
+            }
+            if (result.outcome === "suspended") {
+              setState((s) => ({
+                ...s,
+                phone,
+                busy: false,
+                lastError: t.suspendedNotice,
+                lastNotice: null,
+              }));
+              return;
+            }
             setState((s) => ({
               ...s,
               phone,
               stage: "otp",
               isExisting: result.is_existing,
               challenge: "pending",
-              attemptsLeft: result.attempts_left,
-              cooldownRemaining: result.cooldown_remaining_seconds,
-              expiresIn: result.expires_in_seconds,
+              attemptsLeft: result.attempts_left ?? MAX_ATTEMPTS,
+              cooldownRemaining:
+                result.cooldown_remaining_seconds ?? RESEND_COOLDOWN_SECONDS,
+              expiresIn: result.expires_in_seconds ?? OTP_TTL_SECONDS,
               otpDraft: "",
               busy: false,
               lastError: null,

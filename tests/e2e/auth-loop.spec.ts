@@ -53,7 +53,21 @@ async function startRegistration(page: Page, number: string): Promise<void> {
   });
   await page.getByPlaceholder("10-digit mobile number").fill(number);
   await page.getByRole("button", { name: "Get verification code" }).click();
-  await expect(page.getByRole("group", { name: "OTP" })).toBeVisible();
+  const otpGroup = page.getByRole("group", { name: "OTP" });
+  // Re-registering a phone inside its 60 s resend cooldown is refused on the
+  // phone step (register honours the resend cooldown - PHASE-2 REM T3): the
+  // PWA shows the countdown instead of a fresh code. Wait the window out and
+  // retry so the duplicate-login case still resolves to the same identity.
+  await otpGroup
+    .waitFor({ state: "visible", timeout: 15_000 })
+    .catch(async () => {
+      await expect(page.getByText("Resend in")).toBeVisible({
+        timeout: 15_000,
+      });
+      await page.waitForTimeout(62_000);
+      await page.getByRole("button", { name: "Get verification code" }).click();
+      await expect(otpGroup).toBeVisible({ timeout: 30_000 });
+    });
 }
 
 async function readMockOtp(

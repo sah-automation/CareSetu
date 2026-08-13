@@ -28,6 +28,7 @@ from bus.outbox_writer import write_outbox
 from modules.iam.adapters.sms import SmsAdapter, SmsSendRequest, SmsTemplateParams
 from modules.iam.domain import events, jwt, refresh
 from modules.iam.domain.exceptions import (
+    IamError,
     RefreshTokenExpiredError,
     RefreshTokenRevokedError,
     RefreshTokenUnknownError,
@@ -69,21 +70,28 @@ _PATIENT_ROLE = "patient"
 
 
 class RegisterPatientResult(BaseModel):
-    """Flow state the PWA drives after ``register_patient`` (spec #51 §1, #51 §2.1).
+    """Outcome of the begin-or-resume entry, as the PWA renders it (spec #51 §2.1/§2.4).
 
-    ``is_existing``/``flow`` tell the client which notice to show (the
-    duplicate notice vs first-time), and the challenge fields seed the
-    countdown ring, the resend cooldown, and the attempts-left strip.
+    ``sent``: a challenge was issued (first-time registration or an
+    out-of-cooldown login) and the challenge fields seed the countdown ring,
+    the resend cooldown, and the attempts-left strip; ``is_existing``/``flow``
+    tell the client which notice to show. ``cooldown``/``locked``/``suspended``:
+    the entry was refused exactly like a resend - no fresh challenge was issued
+    and no SMS was sent - and the PWA stays on the phone step with the matching
+    countdown or lockout state. ``no_identity`` is impossible on this path: the
+    single begin-or-resume entry always resolves to an identity.
     """
 
+    outcome: Literal["sent", "cooldown", "locked", "suspended"]
     phone_e164: str
     identity_id: int
-    challenge_id: int
+    challenge_id: int | None = None
     is_existing: bool
     flow: Literal["register", "login"]
-    expires_in_seconds: int
-    cooldown_remaining_seconds: int
-    attempts_left: int
+    expires_in_seconds: int | None = None
+    cooldown_remaining_seconds: int | None = None
+    attempts_left: int | None = None
+    lockout_remaining_seconds: int | None = None
 
 
 class VerifyOtpResult(BaseModel):
@@ -237,9 +245,20 @@ class IamFacade:
         ``phone_e164`` index: ``INSERT ... ON CONFLICT DO NOTHING`` then a
         re-read, never SELECT-then-INSERT (spec #51 §2.3). A new identity is
         created ``[Unverified]`` and emits ``patient.registered``; a repeat
-        phone resolves to the existing identity (no duplicate) and emits only
-        a login ``otp.sent``. The challenge is hashed at rest, and both events
-        land in the iam outbox in the same transaction as the change.
+        phone resolves to the existing identity (no duplicate).
+
+        The existing-phone login branch enforces the same anti-spam gate as a
+        resend (spec #51 §2.4, ADR-0004): while the phone is inside the >= 60 s
+        resend cooldown measured from the last issuance, in the brute-force
+        lockout, or ``Suspended``, the entry is refused - no fresh challenge is
+        issued, no ``otp.sent`` is written, and no SMS is sent - so an attacker
+        cannot defeat the cooldown by calling register repeatedly or poke a
+        locked phone back into the OTP flow. The identity row is locked
+        ``FOR UPDATE`` so the refusal reads stable guard state and concurrent
+        writers serialize. First-time registration and out-of-cooldown login
+        are unchanged: a hashed challenge is issued, ``otp.sent`` lands in the
+        iam outbox in the same transaction as the change, and the EXT-001
+        adapter delivers it afterwards.
         """
         phone_e164 = normalize_phone(phone)
         now = self._clock()
@@ -253,19 +272,41 @@ class IamFacade:
                 .values(phone_e164=phone_e164)
                 .on_conflict_do_nothing(index_elements=["phone_e164"])
             )
-            identity_id = (
-                await connection.execute(
-                    select(iam_identities.c.id).where(iam_identities.c.phone_e164 == phone_e164)
-                )
-            ).scalar_one()
             is_new = inserted.rowcount == 1
             if is_new:
+                identity_id = (
+                    await connection.execute(
+                        select(iam_identities.c.id).where(iam_identities.c.phone_e164 == phone_e164)
+                    )
+                ).scalar_one()
                 await write_outbox(
                     connection,
                     _IAM_SCHEMA,
                     IAM_OUTBOX_TABLE,
                     events.patient_registered_envelope(identity_id, phone_e164),
                 )
+            else:
+                locked = await self._lock_identity(connection, phone_e164)
+                if locked is None:
+                    raise IamError("existing identity disappeared between the insert and the lock")
+                identity_id, identity_status, _failed_attempts, lockout_until = locked
+                latest_cooldown_until = await self._latest_cooldown_until(connection, identity_id)
+                decision = evaluate_resend(
+                    identity_status=identity_status,
+                    lockout_until=lockout_until,
+                    cooldown_until=latest_cooldown_until,
+                    now=now,
+                )
+                if decision.outcome != "sent":
+                    return RegisterPatientResult(
+                        outcome=decision.outcome,
+                        phone_e164=phone_e164,
+                        identity_id=identity_id,
+                        is_existing=True,
+                        flow="login",
+                        cooldown_remaining_seconds=decision.cooldown_remaining_seconds,
+                        lockout_remaining_seconds=decision.lockout_remaining_seconds,
+                    )
             challenge_id = (
                 await connection.execute(
                     iam_otp_challenges.insert()
@@ -292,6 +333,7 @@ class IamFacade:
         )
 
         return RegisterPatientResult(
+            outcome="sent",
             phone_e164=phone_e164,
             identity_id=identity_id,
             challenge_id=challenge_id,

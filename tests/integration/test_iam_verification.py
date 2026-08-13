@@ -307,10 +307,12 @@ async def test_login_verify_does_not_duplicate_the_role_grant(
     facade, sent = await _register(database_url, sms, clock)
 
     await facade.verify_otp("9876543210", sent)
+    clock.set(_T0 + timedelta(seconds=61))
     second_flow = await facade.register_patient("9876543210")
     second_code = sms.last_sent_code(_PHONE)
     assert second_code is not None and second_code != sent
     assert second_flow.flow == "login"
+    assert second_flow.outcome == "sent"
     login = await facade.verify_otp("9876543210", second_code)
 
     assert login.outcome == "verified"

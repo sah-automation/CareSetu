@@ -3,14 +3,16 @@
 // shapes mirror the facade result models in modules/iam/facade.py exactly.
 
 export interface RegisterResult {
+  outcome: "sent" | "cooldown" | "locked" | "suspended";
   phone_e164: string;
   identity_id: number;
-  challenge_id: number;
+  challenge_id: number | null;
   is_existing: boolean;
   flow: "register" | "login";
-  expires_in_seconds: number;
-  cooldown_remaining_seconds: number;
-  attempts_left: number;
+  expires_in_seconds: number | null;
+  cooldown_remaining_seconds: number | null;
+  attempts_left: number | null;
+  lockout_remaining_seconds: number | null;
 }
 
 export interface VerifyResult {
