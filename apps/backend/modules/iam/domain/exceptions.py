@@ -58,3 +58,37 @@ class AccessTokenMalformedError(InvalidAccessTokenError):
 
 class AccessTokenSignatureError(InvalidAccessTokenError):
     """The token is signed with the wrong key or an unsupported algorithm."""
+
+
+class InvalidRefreshTokenError(IamError):
+    """Base for a refresh token the session service must reject (spec #51 §2.5).
+
+    One subclass per rejection reason - unknown, revoked (reuse), or expired -
+    so the caller can tell a compromised-session signal from the ordinary end
+    of the sliding window (ticket #58).
+    """
+
+
+class RefreshTokenUnknownError(InvalidRefreshTokenError):
+    """No stored session matches the presented opaque token.
+
+    Covers a never-issued token and a token that was never stored; the message
+    is human-safe and never echoes the token itself.
+    """
+
+
+class RefreshTokenRevokedError(InvalidRefreshTokenError):
+    """The token belongs to a dead session.
+
+    Two distinct paths raise it. A replay - the token was consumed by an
+    earlier refresh (rotation) - is a compromise signal: the session service
+    writes ``patient.auth_failed`` in the same transaction and surfaces this
+    error only after that audit row is committed. An identity that no longer
+    exists, is ``Suspended``, or holds no active patient grant raises the same
+    error without an audit row: nothing was attempted, the guard simply
+    refuses to rotate.
+    """
+
+
+class RefreshTokenExpiredError(InvalidRefreshTokenError):
+    """The ~30-day sliding refresh window has closed; the patient must re-auth."""
