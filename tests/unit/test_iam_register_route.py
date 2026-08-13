@@ -8,13 +8,19 @@ here - the DB-backed behavior is the integration suite's job.
 
 from __future__ import annotations
 
+import logging
+
+import pytest
 from fastapi.testclient import TestClient
 
 from app.gateway.jwt_verify import JWTVerifyMiddleware
 from app.gateway.rate_limit import RateLimitMiddleware
+from app.gateway.trace import TraceMiddleware
 from app.main import create_app
 from modules.iam.domain.exceptions import IamError, InvalidPhoneError, SmsDeliveryError
 from modules.iam.facade import RegisterPatientResult
+
+_TRACE_ID = "unit-trace-1234abcd"
 
 _RESULT = RegisterPatientResult(
     outcome="sent",
@@ -52,6 +58,14 @@ def _client_with(facade: StubFacade) -> TestClient:
     return TestClient(app)
 
 
+def _assert_iam_rejection_logged(caplog: pytest.LogCaptureFixture, trace_id: str) -> None:
+    """One ``iam_rejection`` line carries the same id as the envelope."""
+    assert any(
+        "iam_rejection" in record.getMessage() and f"trace_id={trace_id}" in record.getMessage()
+        for record in caplog.records
+    )
+
+
 def test_register_returns_flow_state_and_forwards_raw_phone() -> None:
     facade = StubFacade()
     client = _client_with(facade)
@@ -69,22 +83,29 @@ def test_register_route_sits_behind_the_gateway_stack() -> None:
     middlewares = {middleware.cls for middleware in app.user_middleware}
     assert JWTVerifyMiddleware in middlewares
     assert RateLimitMiddleware in middlewares
+    assert TraceMiddleware in middlewares
     assert "/v1/auth/register" in app.openapi()["paths"]
 
 
-def test_invalid_phone_answers_422_envelope() -> None:
+def test_invalid_phone_answers_422_envelope(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING)
     facade = StubFacade()
     facade.error = InvalidPhoneError("phone must be a valid 10-digit Indian mobile number")
     client = _client_with(facade)
 
-    response = client.post("/v1/auth/register", json={"phone": "14445556666"})
+    response = client.post(
+        "/v1/auth/register",
+        json={"phone": "14445556666"},
+        headers={"X-Request-Id": _TRACE_ID},
+    )
 
     assert response.status_code == 422
     body = response.json()
     assert body["code"] == "PHONE_INVALID"
     assert "10-digit Indian mobile number" in body["message"]
-    assert isinstance(body["trace_id"], str) and body["trace_id"]
+    assert body["trace_id"] == _TRACE_ID
     assert body["details"] == {}
+    _assert_iam_rejection_logged(caplog, _TRACE_ID)
 
 
 def test_sms_delivery_failure_answers_502_envelope() -> None:
@@ -114,18 +135,20 @@ def test_unexpected_iam_error_answers_500_envelope() -> None:
     assert "boom" not in body["message"]
 
 
-def test_missing_phone_rejected_at_the_gateway() -> None:
+def test_missing_phone_rejected_at_the_gateway(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING)
     facade = StubFacade()
     client = _client_with(facade)
 
-    response = client.post("/v1/auth/register", json={})
+    response = client.post("/v1/auth/register", json={}, headers={"X-Request-Id": _TRACE_ID})
 
     assert response.status_code == 422
     body = response.json()
     assert body["code"] == "VALIDATION_ERROR"
-    assert isinstance(body["trace_id"], str) and body["trace_id"]
+    assert body["trace_id"] == _TRACE_ID
     assert body["details"]["errors"][0]["path"] == "phone"
     assert facade.called_with == []
+    _assert_iam_rejection_logged(caplog, _TRACE_ID)
 
 
 def test_empty_phone_rejected_at_the_gateway() -> None:

@@ -10,7 +10,6 @@ protected route that proves the edge admit/deny.
 """
 
 from typing import Annotated, Literal, cast
-from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,6 +24,7 @@ from app.gateway.jwt_verify import JWTVerifyMiddleware
 from app.gateway.principal import Principal
 from app.gateway.rate_limit import RateLimitMiddleware
 from app.gateway.rbac import require_patient
+from app.gateway.trace import TraceMiddleware, resolve_trace_id
 from modules.iam.adapters.routes import ErrorEnvelope, register_error_handlers
 from modules.iam.adapters.routes import router as iam_router
 from modules.iam.adapters.sms import MockSmsAdapter, build_sms_adapter
@@ -97,9 +97,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ):
         app.state.mock_sms_adapter = cast(MockSmsAdapter, sms_adapter)
 
-    # Gateway middleware stack (PHASE-1 T7b, #29; PHASE-2 T8, #59). Caller
-    # identity is established (jwt_verify, outermost) before per-identity rate
-    # limiting (rate_limit), so later limits can key off the Principal.
+    # Gateway middleware stack (PHASE-1 T7b, #29; PHASE-2 T8, #59; REM T6, #77).
+    # Caller identity is established (jwt_verify, outermost of the gateway)
+    # before per-identity rate limiting (rate_limit), so later limits can key
+    # off the Principal.
     app.add_middleware(
         RateLimitMiddleware,
         enabled=resolved_settings.gateway_rate_limit_enabled,
@@ -111,16 +112,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         enabled=resolved_settings.gateway_jwt_verify_enabled,
         validate_token=facade.validate_token,
     )
-    # CORS for the local-dev PWA origin (added last so it is outermost and the
-    # allow-origin header reaches every response, including 401/403 from the
-    # gateway stack). No production origin is granted; the staging edge proxies
-    # the API same-origin.
+    # CORS for the local-dev PWA origin (added so the allow-origin header
+    # reaches every response, including 401/403 from the gateway stack). No
+    # production origin is granted; the staging edge proxies the API
+    # same-origin.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(_DEV_CORS_ORIGINS),
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # Trace established outermost of the whole stack (PHASE-2 REM T6, #77), so
+    # the one request-scoped trace id is settled before the gateway middleware
+    # and every route can answer - a 401/403/429/422/5xx envelope and the log
+    # line that records it carry the same id (error-handling-observability §3).
+    app.add_middleware(TraceMiddleware)
 
     app.include_router(iam_router)
     register_error_handlers(app)
@@ -163,7 +169,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         envelope = ErrorEnvelope(
             code="DEV_OTP_UNAVAILABLE",
             message="mock OTP read-back is only available in dev/test with the mock SMS adapter",
-            trace_id=uuid4().hex,
+            trace_id=resolve_trace_id(request),
             details={},
         )
         return JSONResponse(

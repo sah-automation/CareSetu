@@ -14,10 +14,11 @@ line and the envelope can never drift.
 from __future__ import annotations
 
 import logging
-import uuid
 
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
+
+from app.gateway.trace import resolve_trace_id
 
 CODE_AUTH_UNAUTHENTICATED = "AUTH_UNAUTHENTICATED"
 CODE_AUTH_INSUFFICIENT_SCOPE = "AUTH_INSUFFICIENT_SCOPE"
@@ -57,16 +58,18 @@ def error_response(
     code: str,
     message: str,
     *,
+    request: Request,
     headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     """One error envelope for every gateway rejection (api-standards §2).
 
-    Records the rejection as a structured log line keyed by the same trace id
-    the envelope carries, so a reported 401/403/429 is reproducible from logs
-    alone (error-handling-observability §3). Never logs the token or the
-    caller's raw input.
+    Records the rejection as a structured log line keyed by the request-scoped
+    trace id the envelope carries - the same id every log line for that request
+    uses - so a reported 401/403/429 is reproducible from logs alone
+    (error-handling-observability §3). Never logs the token or the caller's raw
+    input.
     """
-    trace_id = uuid.uuid4().hex
+    trace_id = resolve_trace_id(request)
     logger.warning("gateway_rejection code=%s status=%d trace_id=%s", code, status_code, trace_id)
     envelope = {"code": code, "message": message, "trace_id": trace_id, "details": {}}
     return JSONResponse(status_code=status_code, content=envelope, headers=headers)
@@ -80,6 +83,7 @@ def register_gateway_error_handlers(app: FastAPI) -> None:
             status.HTTP_401_UNAUTHORIZED,
             CODE_AUTH_UNAUTHENTICATED,
             MESSAGE_AUTH_UNAUTHENTICATED,
+            request=request,
         )
 
     async def _insufficient_scope(request: Request, exc: Exception) -> JSONResponse:
@@ -87,6 +91,7 @@ def register_gateway_error_handlers(app: FastAPI) -> None:
             status.HTTP_403_FORBIDDEN,
             CODE_AUTH_INSUFFICIENT_SCOPE,
             MESSAGE_AUTH_INSUFFICIENT_SCOPE,
+            request=request,
         )
 
     app.add_exception_handler(AuthenticationRequiredError, _authentication_required)
