@@ -136,17 +136,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return MeResponse(subject_id=principal.subject_id, roles=list(principal.roles))
 
     @app.get("/v1/auth/dev/otp", response_model=MockOtpResponse)
-    def dev_otp(request: Request, phone: str) -> MockOtpResponse | JSONResponse:
+    async def dev_otp(request: Request, phone: str) -> MockOtpResponse | JSONResponse:
         """Dev/test-only read-back of the most recent mock OTP sent to a phone.
 
         The mock SMS adapter keeps sent codes in memory inside the backend
         process (they are hashed in the database), so the browser E2E suite
-        needs a small HTTP read-back to drive register -> verify. Gated to the
-        mock provider in dev/test; never answers against the real provider or
-        in production.
+        needs a small HTTP read-back to drive register -> verify. Delivery is
+        asynchronous since PHASE-2 REM T4 (#86), so the route first awaits the
+        facade's delivery queue - the read-back is safe against the background
+        send racing the response - and only then reads the recorded code. Gated
+        to the mock provider in dev/test; never answers against the real
+        provider or in production.
         """
         settings = cast(Settings, request.app.state.settings)
         adapter = cast(MockSmsAdapter | None, getattr(request.app.state, "mock_sms_adapter", None))
+        facade = cast(IamFacade, request.app.state.iam_facade)
         # mypy narrows ``adapter is not None`` only inside an if-condition, so
         # gate the success path directly rather than asserting on a boolean.
         if (
@@ -154,6 +158,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             and settings.app_environment.strip().lower() in _DEV_TEST_ENVIRONMENTS
             and adapter is not None
         ):
+            await facade.delivery_queue.flush()
             return MockOtpResponse(code=adapter.last_sent_code(phone))
         envelope = ErrorEnvelope(
             code="DEV_OTP_UNAVAILABLE",

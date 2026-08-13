@@ -11,12 +11,14 @@ Playwright E2E suite uses to drive register -> verify in the browser.
 import asyncio
 from typing import cast
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from app.config import DEFAULT_DATABASE_URL, Settings
 from app.main import create_app
 from modules.iam.adapters.sms import MockSmsAdapter, SmsSendRequest, SmsTemplateParams
+from modules.iam.facade import IamFacade
 
 
 def test_app_boots_from_default_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -107,6 +109,35 @@ def test_dev_otp_gated_outside_dev_test_environment() -> None:
 
     assert response.status_code == 404
     assert response.json()["code"] == "DEV_OTP_UNAVAILABLE"
+
+
+async def test_dev_otp_awaits_background_delivery_before_read_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The read-back beats the async delivery race by flushing the queue first.
+
+    Delivery is background since PHASE-2 REM T4 (#86), so the dev/test read-back
+    must await the facade's delivery queue before reading the recorded code. The
+    enqueued send and the route run on the same event loop here (ASGITransport),
+    so the route's flush is what makes the code readable - without it the
+    background task would race the read.
+    """
+    monkeypatch.setenv("APP_ENVIRONMENT", "test")
+    app = create_app()
+    facade = cast(IamFacade, app.state.iam_facade)
+    facade.delivery_queue.enqueue(
+        SmsSendRequest(
+            phone_e164="+919000000000",
+            params=SmsTemplateParams(otp="123456"),
+        )
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/v1/auth/dev/otp", params={"phone": "+919000000000"})
+
+    assert response.status_code == 200
+    assert response.json() == {"code": "123456"}
 
 
 def test_app_answers_cors_headers_for_the_dev_pwa_origin() -> None:

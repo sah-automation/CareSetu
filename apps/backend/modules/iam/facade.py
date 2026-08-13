@@ -25,7 +25,12 @@ from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from bus.outbox_writer import write_outbox
-from modules.iam.adapters.sms import SmsAdapter, SmsSendRequest, SmsTemplateParams
+from modules.iam.adapters.sms import (
+    SmsAdapter,
+    SmsDeliveryQueue,
+    SmsSendRequest,
+    SmsTemplateParams,
+)
 from modules.iam.domain import events, jwt, refresh
 from modules.iam.domain.exceptions import (
     IamError,
@@ -231,7 +236,7 @@ class IamFacade:
         refresh_token_ttl_seconds: int = refresh.REFRESH_TOKEN_TTL_SECONDS,
     ) -> None:
         self._engine = engine
-        self._sms = sms_adapter
+        self.delivery_queue = SmsDeliveryQueue(sms_adapter)
         self._clock = clock
         self._access_token_signing_key = access_token_signing_key
         self._access_token_ttl_seconds = access_token_ttl_seconds
@@ -258,7 +263,8 @@ class IamFacade:
         writers serialize. First-time registration and out-of-cooldown login
         are unchanged: a hashed challenge is issued, ``otp.sent`` lands in the
         iam outbox in the same transaction as the change, and the EXT-001
-        adapter delivers it afterwards.
+        adapter delivers it as a background task afterwards - the request never
+        blocks on the provider (PHASE-2 REM T4, #86).
         """
         phone_e164 = normalize_phone(phone)
         now = self._clock()
@@ -328,7 +334,7 @@ class IamFacade:
                 events.otp_sent_envelope(identity_id, challenge_id, expires_at),
             )
 
-        await self._sms.send(
+        self.delivery_queue.enqueue(
             SmsSendRequest(phone_e164=phone_e164, params=SmsTemplateParams(otp=otp))
         )
 
@@ -614,8 +620,9 @@ class IamFacade:
         distinct, and neither is cleared by a resend. Otherwise it invalidates
         the pending challenge (latest-wins: the previous code can no longer
         verify) and issues a fresh hashed one, writing ``otp.sent`` to the
-        outbox in the same transaction and delivering it via the EXT-001
-        adapter afterwards.
+        outbox in the same transaction and dispatching the EXT-001 delivery as
+        a background task afterwards (PHASE-2 REM T4, #86) - the request never
+        blocks on the provider.
 
         The identity row is locked ``FOR UPDATE`` so concurrent resends for one
         phone serialize: only one winner issues a challenge and the invalidation
@@ -677,7 +684,7 @@ class IamFacade:
                 events.otp_sent_envelope(identity_id, challenge_id, expires_at),
             )
 
-        await self._sms.send(
+        self.delivery_queue.enqueue(
             SmsSendRequest(phone_e164=phone_e164, params=SmsTemplateParams(otp=otp))
         )
 

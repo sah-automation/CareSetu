@@ -112,6 +112,16 @@ def _facade(database_url: str, sms: SmsAdapter, clock: MutableClock) -> IamFacad
     return IamFacade(engine=engine, sms_adapter=sms, clock=clock)
 
 
+async def _flush(facade: IamFacade) -> None:
+    """Await the facade's background SMS deliveries (PHASE-2 REM T4, #86).
+
+    Delivery leaves the request path, so the mock adapter's read surface is
+    only populated once the background task runs; tests await the queue before
+    asserting on sent codes.
+    """
+    await facade.delivery_queue.flush()
+
+
 async def test_first_time_phone_creates_identity_issues_otp_and_writes_events(
     database_url: str, clean_iam: Any
 ) -> None:
@@ -119,6 +129,7 @@ async def test_first_time_phone_creates_identity_issues_otp_and_writes_events(
     facade = _facade(database_url, sms, MutableClock(_T0))
 
     result = await facade.register_patient("9876543210")
+    await _flush(facade)
 
     assert result.phone_e164 == _PHONE
     assert result.outcome == "sent"
@@ -170,6 +181,7 @@ async def test_existing_phone_resolves_identity_and_issues_login_otp(
     first = await facade.register_patient("9876543210")
     clock.set(_T0 + timedelta(seconds=61))
     second = await facade.register_patient("9876543210")
+    await _flush(facade)
 
     assert first.flow == "register"
     assert second.flow == "login"
@@ -218,6 +230,7 @@ async def test_concurrent_registrations_converge_to_one_identity(
         facade.register_patient("9876543210"),
         facade.register_patient("9876543210"),
     )
+    await _flush(facade)
 
     identity_ids = {result.identity_id for result in results}
     assert len(identity_ids) == 1
@@ -232,14 +245,16 @@ async def test_concurrent_registrations_converge_to_one_identity(
     assert sms.sent_count(_PHONE) == 1
 
 
-async def test_sms_failure_propagates_but_state_commits_atomically(
+async def test_sms_delivery_failure_never_blocks_register_but_state_commits_atomically(
     database_url: str, clean_iam: Any
 ) -> None:
     facade = _facade(database_url, FailingSmsAdapter(), MutableClock(_T0))
 
-    with pytest.raises(SmsDeliveryError):
-        await facade.register_patient("9876543210")
+    result = await facade.register_patient("9876543210")
+    await _flush(facade)
 
+    assert result.outcome == "sent"
+    assert result.flow == "register"
     identities = await _query(database_url, "SELECT id FROM iam.iam_identities")
     assert len(identities) == 1
     challenges = await _query(database_url, "SELECT id FROM iam.iam_otp_challenges")
@@ -287,6 +302,7 @@ async def test_existing_phone_inside_cooldown_is_refused_without_a_challenge_or_
     facade = _facade(database_url, sms, clock)
 
     await facade.register_patient("9876543210")
+    await _flush(facade)
     clock.set(_T0 + timedelta(seconds=30))
     refused = await facade.register_patient("9876543210")
 
@@ -317,6 +333,7 @@ async def test_existing_phone_is_allowed_at_the_exact_cooldown_boundary(
     await facade.register_patient("9876543210")
     clock.set(_T0 + timedelta(seconds=60))
     allowed = await facade.register_patient("9876543210")
+    await _flush(facade)
 
     assert allowed.outcome == "sent"
     assert allowed.flow == "login"
@@ -334,7 +351,9 @@ async def test_existing_phone_inside_lockout_is_refused_without_a_challenge_or_s
     facade = _facade(database_url, sms, clock)
 
     await facade.register_patient("9876543210")
+    await _flush(facade)
     await _trigger_lockout(facade, clock)
+    await _flush(facade)
 
     refused = await facade.register_patient("9876543210")
 
@@ -367,6 +386,7 @@ async def test_register_for_suspended_identity_is_refused_without_a_challenge_or
     facade = _facade(database_url, sms, clock)
 
     await facade.register_patient("9876543210")
+    await _flush(facade)
 
     engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
     try:

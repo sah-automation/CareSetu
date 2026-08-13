@@ -106,6 +106,70 @@ class MockSmsAdapter:
         return len(self._sent.get(phone_e164, []))
 
 
+class SmsDeliveryQueue:
+    """In-process background delivery: the EXT-001 send leaves the request path.
+
+    PHASE-2 REM T4 (ticket #86): MOD-001 issues the challenge and writes
+    ``otp.sent`` in one transaction, then ``enqueue``s the send here instead of
+    awaiting the provider, so a slow or retrying provider never holds the
+    patient's HTTP response (third-party-integration-standards §1: never in the
+    user-critical path). A background task delivers each enqueued request
+    through the ``SmsAdapter`` as soon as the request yields to the event loop.
+
+    Delivery is tracked in ``_pending`` until it finishes. ``flush`` awaits
+    every pending delivery - the deterministic hook the unit/integration suites
+    and the dev/test OTP read-back route use to beat the async delivery race.
+    A failed send is swallowed here: the provider adapter has already logged the
+    ``patient.auth_failed`` marker with the redacted phone, and the request has
+    already answered - a background failure must never surface to a caller that
+    received its flow state.
+    """
+
+    def __init__(self, adapter: SmsAdapter) -> None:
+        self._adapter = adapter
+        self._pending: set[asyncio.Task[None]] = set()
+
+    def enqueue(self, request: SmsSendRequest) -> None:
+        """Schedule ``request`` for background delivery and return immediately."""
+        task = asyncio.create_task(self._deliver(request))
+        self._pending.add(task)
+        task.add_done_callback(self._pending.discard)
+
+    @property
+    def pending_count(self) -> int:
+        """How many deliveries have been scheduled but not yet finished."""
+        return len(self._pending)
+
+    async def flush(self) -> None:
+        """Await every currently-pending delivery (a no-op when none are pending).
+
+        A delivery enqueued after the flush started is not awaited; callers
+        await the specific issuance (register/resend returned) before flushing,
+        so the flush covers the delivery that issuance scheduled.
+        """
+        pending = tuple(self._pending)
+        if pending:
+            await asyncio.gather(*pending)
+
+    async def _deliver(self, request: SmsSendRequest) -> None:
+        try:
+            await self._adapter.send(request)
+        except SmsDeliveryError:
+            # The provider adapter logged ``patient.auth_failed`` at error on
+            # persistent failure; the request has already answered, so swallow
+            # it here. Warn because the send degraded (observability §1:
+            # degradations at warning), even for adapters that log no marker.
+            logger.warning(
+                "background SMS delivery failed for phone %s",
+                mask_phone(request.phone_e164),
+            )
+        except Exception:
+            logger.exception(
+                "unexpected background SMS delivery failure for phone %s",
+                mask_phone(request.phone_e164),
+            )
+
+
 class SmsProviderAdapter:
     """Staging/production EXT-001 implementation (httpx, timeout + retries).
 
