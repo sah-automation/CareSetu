@@ -68,8 +68,11 @@ class PatientVerifiedPayload(BaseModel):
 
 
 class PatientAuthFailedPayload(BaseModel):
-    """Subject of ``patient.auth_failed``: a failed verification attempt.
+    """Subject of ``patient.auth_failed``: a refused auth attempt.
 
+    Emitted for every rejected OTP verification (wrong code, expired, spent,
+    replayed, or missing challenge) and for an authenticated access denial on a
+    protected route (reason ``access_denied``, PHASE-2 REM T7 #87).
     ``identity_id`` is ``None`` only when the phone was never registered, so
     there is no identity to name. ``attempts_left`` is the remaining budget
     after a wrong guess, 0 when the budget is exhausted (``spent``), and
@@ -163,8 +166,9 @@ def patient_auth_failed_envelope(
     """Build the ``patient.auth_failed`` envelope for the iam outbox.
 
     Emitted for every rejected verification (wrong code, expired, spent,
-    replayed, or missing challenge) in the same transaction as the attempt;
-    never emitted on success.
+    replayed, or missing challenge) in the same transaction as the attempt,
+    and by the gateway for an authenticated access denial (reason
+    ``access_denied``, PHASE-2 REM T7 #87); never emitted on success.
     """
     return Envelope[PatientAuthFailedPayload](
         event_id=uuid4(),

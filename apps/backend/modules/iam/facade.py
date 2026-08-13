@@ -563,10 +563,13 @@ class IamFacade:
 
     @staticmethod
     async def _identity_phone(connection: AsyncConnection, identity_id: int) -> str:
-        """The ``phone_e164`` for an identity, for the audit event on a replay.
+        """The ``phone_e164`` for an identity, for an audit event that names it.
 
-        A session row's FK guarantees the identity exists; the fallback keeps
-        the outbox write safe even if a row were ever orphaned.
+        Used by the refresh-replay path (``patient.auth_failed`` reason
+        ``replay``) and by the access-denial emitter (reason
+        ``access_denied``, PHASE-2 REM T7 #87). A session row's FK guarantees
+        the identity exists; the fallback keeps the outbox write safe even if a
+        row were ever orphaned.
         """
         return (
             await connection.execute(
@@ -698,6 +701,31 @@ class IamFacade:
             cooldown_remaining_seconds=RESEND_COOLDOWN_SECONDS,
             attempts_left=MAX_ATTEMPTS,
         )
+
+    async def emit_access_denied(self, identity_id: int) -> None:
+        """Publish ``patient.auth_failed`` (reason ``access_denied``) for an identity.
+
+        PHASE-2 REM T7 (#87): the gateway answers an authenticated 403 on a
+        protected route (insufficient scope / missing role) with this call so
+        the access-denial attempt reaches the audit event stream (spec #51 user
+        story 44, Implementation Decision 6). The event runs in its own
+        transaction - the gateway holds no open transaction - and names the
+        identity and its phone (resolved here, in the iam module; the gateway
+        stays a thin adapter and never touches the database). Anonymous 401s
+        carry no identity to attribute and never reach this call.
+        """
+        async with self._engine.begin() as connection:
+            phone = await self._identity_phone(connection, identity_id)
+            await write_outbox(
+                connection,
+                _IAM_SCHEMA,
+                IAM_OUTBOX_TABLE,
+                events.patient_auth_failed_envelope(
+                    identity_id=identity_id,
+                    phone_e164=phone,
+                    reason="access_denied",
+                ),
+            )
 
     async def _emit_delivery_failed(self, request: SmsSendRequest) -> None:
         """Publish ``otp.failed`` (reason ``delivery``) for an undeliverable send.

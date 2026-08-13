@@ -51,10 +51,28 @@ _RESULT = RegisterPatientResult(
 
 
 class StubFacade:
-    """Facade stand-in so auth routes answer without a database."""
+    """Facade stand-in so auth routes answer without a database.
+
+    ``access_denials`` records the identities whose 403 the gateway asked the
+    facade to audit (PHASE-2 REM T7, #87), so tests can pin the emission and
+    its absence.
+    """
+
+    def __init__(self) -> None:
+        self.access_denials: list[int] = []
 
     async def register_patient(self, phone: str) -> RegisterPatientResult:
         return _RESULT
+
+    async def emit_access_denied(self, identity_id: int) -> None:
+        self.access_denials.append(identity_id)
+
+
+class FailingEmitFacade(StubFacade):
+    """A facade whose access-denial emission fails, to prove the 403 survives."""
+
+    async def emit_access_denied(self, identity_id: int) -> None:
+        raise RuntimeError("outbox unavailable")
 
 
 def _issue_access_token(
@@ -122,11 +140,22 @@ def _probe_client(settings: Settings) -> TestClient:
     return TestClient(app)
 
 
-def _protected_client(settings: Settings | None = None) -> TestClient:
-    """The real app: the ``/v1/me`` protected route proves admit/deny."""
+def _protected_client(
+    settings: Settings | None = None, facade: StubFacade | None = None
+) -> TestClient:
+    """The real app: the ``/v1/me`` protected route proves admit/deny.
+
+    ``facade`` (when given) replaces ``app.state.iam_facade`` after the app is
+    built so the 403 path answers without a database; the middleware's
+    ``validate_token`` is stateless (signature + expiry only) and keeps working
+    off the real facade it was bound to at build time.
+    """
     if settings is None:
         settings = Settings(gateway_jwt_verify_enabled=True, gateway_jwt_signing_key=_SIGNING_KEY)
-    return TestClient(create_app(settings=settings))
+    app = create_app(settings=settings)
+    if facade is not None:
+        app.state.iam_facade = facade
+    return TestClient(app)
 
 
 def _bearer(token: str) -> dict[str, str]:
@@ -313,7 +342,8 @@ def test_authenticated_caller_without_patient_scope_denied_403(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.WARNING)
-    client = _protected_client()
+    facade = StubFacade()
+    client = _protected_client(facade=facade)
     token = _issue_access_token(scope="superadmin")
 
     response = client.get("/v1/me", headers=_with_trace(_bearer(token)))
@@ -324,6 +354,60 @@ def test_authenticated_caller_without_patient_scope_denied_403(
     assert body["trace_id"] == _TRACE_ID
     assert body["details"] == {}
     _assert_gateway_rejection_logged(caplog, _TRACE_ID)
+
+
+def test_authenticated_403_emits_access_denial_audit_for_the_named_identity() -> None:
+    facade = StubFacade()
+    client = _protected_client(facade=facade)
+
+    response = client.get("/v1/me", headers=_bearer(_issue_access_token(scope="superadmin")))
+
+    assert response.status_code == 403
+    # The gateway passes the authenticated principal's subject - the same
+    # identity the token names - to the iam facade, which resolves the phone.
+    assert facade.access_denials == [7]
+
+
+def test_anonymous_401_stays_log_only_no_access_denial_emission(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
+    facade = StubFacade()
+    client = _protected_client(facade=facade)
+
+    response = client.get("/v1/me", headers={"X-Request-Id": _TRACE_ID})
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "AUTH_UNAUTHENTICATED"
+    assert facade.access_denials == []
+    _assert_gateway_rejection_logged(caplog, _TRACE_ID)
+
+
+def test_presented_but_unusable_token_401_stays_log_only_no_access_denial_emission(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
+    facade = StubFacade()
+    client = _protected_client(facade=facade)
+
+    response = client.get("/v1/me", headers=_with_trace(_bearer("not-a-jws")))
+
+    assert response.status_code == 401
+    assert facade.access_denials == []
+    _assert_gateway_rejection_logged(caplog, _TRACE_ID)
+
+
+def test_403_survives_an_access_denial_emit_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR)
+    client = _protected_client(facade=FailingEmitFacade())
+
+    response = client.get("/v1/me", headers=_bearer(_issue_access_token(scope="superadmin")))
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "AUTH_INSUFFICIENT_SCOPE"
+    assert any("access_denial_emit_failed" in record.getMessage() for record in caplog.records)
 
 
 def test_resolve_scope_roles_maps_known_scopes_to_singleton_role() -> None:

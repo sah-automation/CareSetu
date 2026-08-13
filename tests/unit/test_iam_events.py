@@ -15,7 +15,7 @@ import pytest
 from pydantic import ValidationError
 
 from bus.envelope import Envelope
-from bus.events import EVENT_OTP_FAILED
+from bus.events import EVENT_OTP_FAILED, EVENT_PATIENT_AUTH_FAILED
 from modules.iam.domain import events
 
 _PHONE = "+919876543210"
@@ -81,4 +81,34 @@ def test_otp_failed_payload_serializes_with_both_reasons() -> None:
         "phone_e164": _PHONE,
         "reason": "delivery",
         "lockout_until": None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# patient.auth_failed: the access_denied reason (PHASE-2 REM T7, #87)
+# ---------------------------------------------------------------------------
+
+
+def test_patient_auth_failed_payload_accepts_the_access_denied_reason() -> None:
+    payload = events.PatientAuthFailedPayload(
+        identity_id=7, phone_e164=_PHONE, reason="access_denied"
+    )
+
+    assert payload.reason == "access_denied"
+    assert payload.attempts_left is None
+
+
+def test_patient_auth_failed_envelope_models_the_access_denial_emitter() -> None:
+    envelope = events.patient_auth_failed_envelope(
+        identity_id=7, phone_e164=_PHONE, reason="access_denied"
+    )
+
+    assert isinstance(envelope, Envelope)
+    assert envelope.event_type == EVENT_PATIENT_AUTH_FAILED
+    assert envelope.producer == "iam"
+    assert envelope.payload.model_dump(mode="json") == {
+        "identity_id": 7,
+        "phone_e164": _PHONE,
+        "reason": "access_denied",
+        "attempts_left": None,
     }
