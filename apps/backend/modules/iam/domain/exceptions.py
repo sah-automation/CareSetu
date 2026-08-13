@@ -25,7 +25,15 @@ class SmsDeliveryError(IamError):
 
     Raised by the provider adapter only; the mock never raises. The message is
     safe for logs - it never carries the OTP, the API key, or the raw payload.
+    ``retries_exhausted`` distinguishes the retry-exhaustion failure (True)
+    from a rejection or response-shape failure the provider gives up on without
+    retrying (False); the delivery-failure audit event (PHASE-2 REM T5, #81)
+    fires only for the former.
     """
+
+    def __init__(self, message: str, *, retries_exhausted: bool = True) -> None:
+        super().__init__(message)
+        self.retries_exhausted = retries_exhausted
 
 
 class SessionIssuanceError(IamError):

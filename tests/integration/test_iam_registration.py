@@ -259,9 +259,17 @@ async def test_sms_delivery_failure_never_blocks_register_but_state_commits_atom
     assert len(identities) == 1
     challenges = await _query(database_url, "SELECT id FROM iam.iam_otp_challenges")
     assert len(challenges) == 1
-    outbox = await _query(database_url, "SELECT event_type, status FROM iam.iam_outbox")
-    assert sorted(row["event_type"] for row in outbox) == ["otp.sent", "patient.registered"]
+    outbox = await _query(database_url, "SELECT event_type, payload, status FROM iam.iam_outbox")
+    assert sorted(row["event_type"] for row in outbox) == [
+        "otp.failed",
+        "otp.sent",
+        "patient.registered",
+    ]
     assert all(row["status"] == "pending" for row in outbox)
+    failed = next(row for row in outbox if row["event_type"] == "otp.failed")
+    assert failed["payload"]["reason"] == "delivery"
+    assert failed["payload"]["phone_e164"] == _PHONE
+    assert failed["payload"]["lockout_until"] is None
 
 
 async def test_invalid_phone_is_rejected_without_db_writes(

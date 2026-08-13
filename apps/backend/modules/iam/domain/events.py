@@ -45,17 +45,19 @@ class OtpSentPayload(BaseModel):
 class OtpFailedPayload(BaseModel):
     """Subject of ``otp.failed``: the OTP flow failed for this phone.
 
-    Written when the brute-force lockout triggers (10 consecutive failures
-    across challenges, spec #51 §2.4) - the moment the phone becomes unusable
-    for OTP - alongside ``patient.auth_failed`` for the triggering attempt.
-    ``lockout_until`` names when the temporary lockout lifts. The payload never
-    carries the OTP value or its hash.
+    Two emitters (registry §4.2). The brute-force lockout (10 consecutive
+    failures across challenges, spec #51 §2.4) - the moment the phone becomes
+    unusable for OTP, alongside ``patient.auth_failed`` for the triggering
+    attempt - names the lift in ``lockout_until``. The delivery path, when the
+    SMS send has exhausted every retry and the code never reached the phone
+    (PHASE-2 REM T5, #81), carries ``reason`` ``delivery`` and no
+    ``lockout_until``. The payload never carries the OTP value or its hash.
     """
 
     identity_id: int
     phone_e164: str
-    reason: Literal["lockout"]
-    lockout_until: datetime
+    reason: Literal["lockout", "delivery"]
+    lockout_until: datetime | None = None
 
 
 class PatientVerifiedPayload(BaseModel):
@@ -110,12 +112,17 @@ def otp_sent_envelope(
 def otp_failed_envelope(
     identity_id: int,
     phone_e164: str,
-    lockout_until: datetime,
+    reason: Literal["lockout", "delivery"] = "lockout",
+    lockout_until: datetime | None = None,
 ) -> Envelope[OtpFailedPayload]:
     """Build the ``otp.failed`` envelope for the iam outbox.
 
-    Emitted exactly when the brute-force lockout triggers, in the same
-    transaction as the counter write-back that locks the phone.
+    Two emitters (registry §4.2). The lockout emitter (default ``reason``)
+    fires exactly when the brute-force lockout triggers, in the same
+    transaction as the counter write-back that locks the phone, carrying the
+    ``lockout_until`` lift time. The delivery emitter (``reason="delivery"``)
+    fires when the EXT-001 send has exhausted every retry and the code never
+    reached the phone - ``lockout_until`` stays ``None``.
     """
     return Envelope[OtpFailedPayload](
         event_id=uuid4(),
@@ -124,7 +131,7 @@ def otp_failed_envelope(
         payload=OtpFailedPayload(
             identity_id=identity_id,
             phone_e164=phone_e164,
-            reason="lockout",
+            reason=reason,
             lockout_until=lockout_until,
         ),
     )

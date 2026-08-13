@@ -315,9 +315,10 @@ async def test_provider_send_raises_after_exhausting_retries(
     adapter = _provider_adapter(handler)
     caplog.set_level(logging.ERROR)
 
-    with pytest.raises(SmsDeliveryError, match="after 4 attempts"):
+    with pytest.raises(SmsDeliveryError, match="after 4 attempts") as exc_info:
         await adapter.send(_request(otp="654321"))
 
+    assert exc_info.value.retries_exhausted is True
     assert "654321" not in caplog.text
     assert "+919876543210" not in caplog.text
     assert "patient.auth_failed" in caplog.text
@@ -342,10 +343,11 @@ async def test_provider_send_rejects_non_retryable_4xx_immediately() -> None:
 
     adapter = _provider_adapter(handler)
 
-    with pytest.raises(SmsDeliveryError, match="HTTP 400"):
+    with pytest.raises(SmsDeliveryError, match="HTTP 400") as exc_info:
         await adapter.send(_request())
 
     assert calls == [1]
+    assert exc_info.value.retries_exhausted is False
 
 
 async def test_provider_send_raises_when_response_missing_request_id() -> None:
@@ -354,8 +356,10 @@ async def test_provider_send_raises_when_response_missing_request_id() -> None:
 
     adapter = _provider_adapter(handler)
 
-    with pytest.raises(SmsDeliveryError, match="invalid response payload"):
+    with pytest.raises(SmsDeliveryError, match="invalid response payload") as exc_info:
         await adapter.send(_request())
+
+    assert exc_info.value.retries_exhausted is False
 
 
 async def test_provider_send_raises_on_non_json_response() -> None:
@@ -364,8 +368,10 @@ async def test_provider_send_raises_on_non_json_response() -> None:
 
     adapter = _provider_adapter(handler)
 
-    with pytest.raises(SmsDeliveryError, match="non-JSON"):
+    with pytest.raises(SmsDeliveryError, match="non-JSON") as exc_info:
         await adapter.send(_request())
+
+    assert exc_info.value.retries_exhausted is False
 
 
 # --- backoff + redaction helpers -----------------------------------------
@@ -412,6 +418,30 @@ class _FailingSmsAdapter:
 
     async def send(self, request: SmsSendRequest) -> SmsSendResult:
         raise SmsDeliveryError("EXT-001 unavailable")
+
+
+class _UnexpectedFailureSmsAdapter:
+    """Adapter that fails with a non-delivery error (a provider-side bug)."""
+
+    async def send(self, request: SmsSendRequest) -> SmsSendResult:
+        raise RuntimeError("provider bug")
+
+
+class _RejectedSmsAdapter:
+    """Adapter that gives up immediately without retrying (a 4xx rejection)."""
+
+    async def send(self, request: SmsSendRequest) -> SmsSendResult:
+        raise SmsDeliveryError("EXT-001 send rejected with HTTP 400", retries_exhausted=False)
+
+
+class _RecordingCallback:
+    """Records the requests handed to an ``on_delivery_failed`` callback."""
+
+    def __init__(self) -> None:
+        self.calls: list[SmsSendRequest] = []
+
+    async def __call__(self, request: SmsSendRequest) -> None:
+        self.calls.append(request)
 
 
 async def test_delivery_queue_enqueue_returns_before_delivery_completes() -> None:
@@ -467,4 +497,68 @@ async def test_delivery_queue_persistent_failure_logs_the_marker_without_the_otp
 
     assert "patient.auth_failed" in caplog.text
     assert "654321" not in caplog.text
+    assert "+919876543210" not in caplog.text
+
+
+# --- delivery-failure emission (PHASE-2 REM T5, #81) --------------------------
+
+
+async def test_delivery_queue_notifies_on_delivery_failure() -> None:
+    callback = _RecordingCallback()
+    queue = SmsDeliveryQueue(_FailingSmsAdapter(), on_delivery_failed=callback)
+
+    queue.enqueue(_request())
+    await queue.flush()
+
+    assert callback.calls == [_request()]
+    assert queue.pending_count == 0
+
+
+async def test_delivery_queue_does_not_notify_on_success() -> None:
+    callback = _RecordingCallback()
+    queue = SmsDeliveryQueue(MockSmsAdapter(), on_delivery_failed=callback)
+
+    queue.enqueue(_request())
+    await queue.flush()
+
+    assert callback.calls == []
+    assert queue.pending_count == 0
+
+
+async def test_delivery_queue_does_not_notify_on_unexpected_failure() -> None:
+    callback = _RecordingCallback()
+    queue = SmsDeliveryQueue(_UnexpectedFailureSmsAdapter(), on_delivery_failed=callback)
+
+    queue.enqueue(_request())
+    await queue.flush()
+
+    assert callback.calls == []
+    assert queue.pending_count == 0
+
+
+async def test_delivery_queue_does_not_notify_on_non_retryable_rejection() -> None:
+    callback = _RecordingCallback()
+    queue = SmsDeliveryQueue(_RejectedSmsAdapter(), on_delivery_failed=callback)
+
+    queue.enqueue(_request())
+    await queue.flush()
+
+    assert callback.calls == []
+    assert queue.pending_count == 0
+
+
+async def test_delivery_queue_callback_failure_does_not_break_the_task(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def boom(request: SmsSendRequest) -> None:
+        raise RuntimeError("outbox write failed")
+
+    queue = SmsDeliveryQueue(_FailingSmsAdapter(), on_delivery_failed=boom)
+    caplog.set_level(logging.ERROR)
+
+    queue.enqueue(_request())
+    await queue.flush()
+
+    assert queue.pending_count == 0
+    assert "failed to record delivery failure" in caplog.text
     assert "+919876543210" not in caplog.text

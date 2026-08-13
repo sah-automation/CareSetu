@@ -122,11 +122,18 @@ class SmsDeliveryQueue:
     A failed send is swallowed here: the provider adapter has already logged the
     ``patient.auth_failed`` marker with the redacted phone, and the request has
     already answered - a background failure must never surface to a caller that
-    received its flow state.
+    received its flow state. ``on_delivery_failed`` (when given) is awaited once
+    a delivery has exhausted every retry, so the owning module can publish its
+    delivery-failure event (PHASE-2 REM T5, #81) outside the request path.
     """
 
-    def __init__(self, adapter: SmsAdapter) -> None:
+    def __init__(
+        self,
+        adapter: SmsAdapter,
+        on_delivery_failed: Callable[[SmsSendRequest], Awaitable[None]] | None = None,
+    ) -> None:
         self._adapter = adapter
+        self._on_delivery_failed = on_delivery_failed
         self._pending: set[asyncio.Task[None]] = set()
 
     def enqueue(self, request: SmsSendRequest) -> None:
@@ -154,7 +161,7 @@ class SmsDeliveryQueue:
     async def _deliver(self, request: SmsSendRequest) -> None:
         try:
             await self._adapter.send(request)
-        except SmsDeliveryError:
+        except SmsDeliveryError as exc:
             # The provider adapter logged ``patient.auth_failed`` at error on
             # persistent failure; the request has already answered, so swallow
             # it here. Warn because the send degraded (observability §1:
@@ -163,6 +170,17 @@ class SmsDeliveryQueue:
                 "background SMS delivery failed for phone %s",
                 mask_phone(request.phone_e164),
             )
+            if exc.retries_exhausted and self._on_delivery_failed is not None:
+                try:
+                    await self._on_delivery_failed(request)
+                except Exception:
+                    # The delivery-failure event must never crash the
+                    # background task the way the send never did; log the
+                    # emission failure so audit loss is visible to operators.
+                    logger.exception(
+                        "failed to record delivery failure for phone %s",
+                        mask_phone(request.phone_e164),
+                    )
         except Exception:
             logger.exception(
                 "unexpected background SMS delivery failure for phone %s",
@@ -230,7 +248,10 @@ class SmsProviderAdapter:
                 response.status_code,
                 mask_phone(request.phone_e164),
             )
-            raise SmsDeliveryError(f"EXT-001 send rejected with HTTP {response.status_code}")
+            raise SmsDeliveryError(
+                f"EXT-001 send rejected with HTTP {response.status_code}",
+                retries_exhausted=False,
+            )
         logger.error(
             "patient.auth_failed: EXT-001 send failed after %d attempts "
             "(last HTTP %d) for phone %s",
@@ -247,14 +268,20 @@ def _parse_response(response: httpx.Response) -> SmsSendResult:
     try:
         payload = response.json()
     except ValueError as exc:
-        raise SmsDeliveryError("EXT-001 returned a non-JSON response") from exc
+        raise SmsDeliveryError(
+            "EXT-001 returned a non-JSON response", retries_exhausted=False
+        ) from exc
     if not isinstance(payload, dict):
-        raise SmsDeliveryError("EXT-001 returned an unexpected response payload")
+        raise SmsDeliveryError(
+            "EXT-001 returned an unexpected response payload", retries_exhausted=False
+        )
     try:
         return SmsSendResult.model_validate(payload)
     except pydantic.ValidationError as exc:
         raise SmsDeliveryError(
-            "EXT-001 returned an invalid response payload (expected request_id and status='queued')"
+            "EXT-001 returned an invalid response payload "
+            "(expected request_id and status='queued')",
+            retries_exhausted=False,
         ) from exc
 
 
