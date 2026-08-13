@@ -12,7 +12,7 @@ OTP/auth surface is a Phase 2 gateway ticket.
 
 from __future__ import annotations
 
-import uuid
+import logging
 from typing import cast
 
 from fastapi import APIRouter, FastAPI, Request, status
@@ -20,6 +20,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.gateway.trace import resolve_trace_id
 from modules.iam.domain.exceptions import (
     IamError,
     InvalidPhoneError,
@@ -35,6 +36,8 @@ from modules.iam.facade import (
 )
 
 router = APIRouter(prefix="/v1/auth", tags=["iam"])
+
+logger = logging.getLogger(__name__)
 
 
 class RegisterPatientRequest(BaseModel):
@@ -169,8 +172,28 @@ async def issue_session(
     return await facade.issue_session(body.phone)
 
 
-def _error_response(status_code: int, code: str, message: str) -> JSONResponse:
-    envelope = ErrorEnvelope(code=code, message=message, trace_id=uuid.uuid4().hex, details={})
+def _error_response(
+    request: Request,
+    status_code: int,
+    code: str,
+    message: str,
+    *,
+    details: dict[str, object] | None = None,
+) -> JSONResponse:
+    """One error envelope for every expected iam failure (api-standards §2).
+
+    Records the failure as a structured log line keyed by the same request
+    scoped trace id the envelope carries, so a reported 409/422/502/5xx is
+    reproducible from logs alone (error-handling-observability §3).
+    """
+    trace_id = resolve_trace_id(request)
+    logger.warning("iam_rejection code=%s status=%d trace_id=%s", code, status_code, trace_id)
+    envelope = ErrorEnvelope(
+        code=code,
+        message=message,
+        trace_id=trace_id,
+        details=details if details is not None else {},
+    )
     return JSONResponse(status_code=status_code, content=envelope.model_dump(mode="json"))
 
 
@@ -178,13 +201,18 @@ def register_error_handlers(app: FastAPI) -> None:
     """Attach the MOD-001 error envelope to every expected iam failure."""
 
     async def _invalid_phone(request: Request, exc: Exception) -> JSONResponse:
-        return _error_response(status.HTTP_422_UNPROCESSABLE_CONTENT, "PHONE_INVALID", str(exc))
+        return _error_response(
+            request, status.HTTP_422_UNPROCESSABLE_CONTENT, "PHONE_INVALID", str(exc)
+        )
 
     async def _sms_failed(request: Request, exc: Exception) -> JSONResponse:
-        return _error_response(status.HTTP_502_BAD_GATEWAY, "SMS_DELIVERY_FAILED", str(exc))
+        return _error_response(
+            request, status.HTTP_502_BAD_GATEWAY, "SMS_DELIVERY_FAILED", str(exc)
+        )
 
     async def _session_refused(request: Request, exc: Exception) -> JSONResponse:
         return _error_response(
+            request,
             status.HTTP_409_CONFLICT,
             "SESSION_REFUSED",
             str(exc),
@@ -192,6 +220,7 @@ def register_error_handlers(app: FastAPI) -> None:
 
     async def _iam_failed(request: Request, exc: Exception) -> JSONResponse:
         return _error_response(
+            request,
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             "IAM_INTERNAL",
             "Internal identity error",
@@ -199,7 +228,7 @@ def register_error_handlers(app: FastAPI) -> None:
 
     async def _validation_failed(request: Request, exc: Exception) -> JSONResponse:
         validation_errors = cast(RequestValidationError, exc).errors()
-        details = {
+        details: dict[str, object] = {
             "errors": [
                 {
                     "path": ".".join(str(part) for part in error["loc"] if part != "body"),
@@ -208,15 +237,12 @@ def register_error_handlers(app: FastAPI) -> None:
                 for error in validation_errors
             ]
         }
-        envelope = ErrorEnvelope(
-            code="VALIDATION_ERROR",
-            message="Request validation failed",
-            trace_id=uuid.uuid4().hex,
+        return _error_response(
+            request,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "VALIDATION_ERROR",
+            "Request validation failed",
             details=details,
-        )
-        return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            content=envelope.model_dump(mode="json"),
         )
 
     app.add_exception_handler(InvalidPhoneError, _invalid_phone)

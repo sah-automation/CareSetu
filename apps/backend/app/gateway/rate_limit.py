@@ -67,6 +67,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 status_code=429,
                 code=CODE_RATE_LIMIT_EXCEEDED,
                 message=MESSAGE_RATE_LIMIT_EXCEEDED,
+                request=request,
                 headers={"Retry-After": str(self.window_seconds)},
             )
         else:

@@ -59,12 +59,12 @@ class JWTVerifyMiddleware(BaseHTTPMiddleware):
 
         token = _parse_bearer(header)
         if token is None:
-            return await _deny_unauthenticated()
+            return await _deny_unauthenticated(request)
 
         try:
             validated = await self.validate_token(token)
         except InvalidAccessTokenError:
-            return await _deny_unauthenticated()
+            return await _deny_unauthenticated(request)
 
         request.state.principal = Principal.for_subject(
             str(validated.subject_id), *resolve_scope_roles(validated.scope)
@@ -85,16 +85,17 @@ def _parse_bearer(header: str) -> str | None:
     return value.strip()
 
 
-async def _deny_unauthenticated() -> Response:
+async def _deny_unauthenticated(request: Request) -> Response:
     """One 401 envelope for every presented-but-unusable token.
 
     The rejected token's exact cause (expired vs malformed vs unsigned vs
     wrong signature) stays server-side per the security error taxonomy; the
     envelope message is fixed and human-safe, and the log line carries the
-    trace id (error-handling-observability §1).
+    request-scoped trace id (error-handling-observability §1).
     """
     return error_response(
         status_code=401,
         code=CODE_AUTH_UNAUTHENTICATED,
         message=MESSAGE_AUTH_UNAUTHENTICATED,
+        request=request,
     )

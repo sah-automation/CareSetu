@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -33,6 +34,8 @@ from modules.iam.domain.jwt import issue_token
 from modules.iam.facade import RegisterPatientResult
 
 _SIGNING_KEY = "unit-test-gateway-signing-key"
+
+_TRACE_ID = "unit-trace-1234abcd"
 
 _RESULT = RegisterPatientResult(
     outcome="sent",
@@ -130,6 +133,18 @@ def _bearer(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _with_trace(headers: dict[str, str] | None = None) -> dict[str, str]:
+    return {**(headers or {}), "X-Request-Id": _TRACE_ID}
+
+
+def _assert_gateway_rejection_logged(caplog: pytest.LogCaptureFixture, trace_id: str) -> None:
+    """One ``gateway_rejection`` line carries the same id as the envelope."""
+    assert any(
+        "gateway_rejection" in record.getMessage() and f"trace_id={trace_id}" in record.getMessage()
+        for record in caplog.records
+    )
+
+
 # ---------------------------------------------------------------------------
 # jwt_verify: real Bearer verification + Principal attachment
 # ---------------------------------------------------------------------------
@@ -171,16 +186,20 @@ def test_jwt_verify_attaches_scoped_principal_from_valid_bearer_token() -> None:
     assert body["principal_roles"] == ["patient"]
 
 
-def test_jwt_verify_denies_presented_malformed_token() -> None:
+def test_jwt_verify_denies_presented_malformed_token(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
     client = _protected_client()
 
-    response = client.get("/v1/me", headers=_bearer("not-a-jws"))
+    response = client.get("/v1/me", headers=_with_trace(_bearer("not-a-jws")))
 
     assert response.status_code == 401
     body = response.json()
     assert body["code"] == "AUTH_UNAUTHENTICATED"
-    assert isinstance(body["trace_id"], str) and body["trace_id"]
+    assert body["trace_id"] == _TRACE_ID
     assert body["details"] == {}
+    _assert_gateway_rejection_logged(caplog, _TRACE_ID)
 
 
 def test_jwt_verify_denies_expired_token() -> None:
@@ -221,16 +240,59 @@ def test_jwt_verify_denies_non_bearer_authorization_header() -> None:
     assert response.json()["code"] == "AUTH_UNAUTHENTICATED"
 
 
-def test_anonymous_denied_on_protected_route_with_401_envelope() -> None:
+def test_anonymous_denied_on_protected_route_with_401_envelope(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
     client = _protected_client()
 
-    response = client.get("/v1/me")
+    response = client.get("/v1/me", headers={"X-Request-Id": _TRACE_ID})
 
     assert response.status_code == 401
     body = response.json()
     assert body["code"] == "AUTH_UNAUTHENTICATED"
     assert body["message"]
     assert body["details"] == {}
+    assert body["trace_id"] == _TRACE_ID
+    _assert_gateway_rejection_logged(caplog, _TRACE_ID)
+
+
+def test_denial_without_client_request_id_mints_trace_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
+    client = _protected_client()
+
+    response = client.get("/v1/me", headers=_bearer("not-a-jws"))
+
+    assert response.status_code == 401
+    trace_id = response.json()["trace_id"]
+    assert trace_id
+    _assert_gateway_rejection_logged(caplog, trace_id)
+
+
+def test_blank_request_id_falls_back_to_minted_trace_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
+    client = _protected_client()
+
+    response = client.get("/v1/me", headers={**_bearer("not-a-jws"), "X-Request-Id": "   "})
+
+    assert response.status_code == 401
+    trace_id = response.json()["trace_id"]
+    assert trace_id
+    _assert_gateway_rejection_logged(caplog, trace_id)
+
+
+def test_request_id_guard_rejects_log_unsafe_tokens() -> None:
+    from app.gateway.trace import _is_safe_trace_id
+
+    assert _is_safe_trace_id("abc-123._:/~")
+    assert not _is_safe_trace_id("")
+    assert not _is_safe_trace_id("a b")
+    assert not _is_safe_trace_id("a\nb")
+    assert not _is_safe_trace_id("a" * 129)
 
 
 # ---------------------------------------------------------------------------
@@ -247,16 +309,21 @@ def test_valid_patient_token_admitted_to_protected_route() -> None:
     assert response.json() == {"subject_id": "7", "roles": ["patient"]}
 
 
-def test_authenticated_caller_without_patient_scope_denied_403() -> None:
+def test_authenticated_caller_without_patient_scope_denied_403(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
     client = _protected_client()
     token = _issue_access_token(scope="superadmin")
 
-    response = client.get("/v1/me", headers=_bearer(token))
+    response = client.get("/v1/me", headers=_with_trace(_bearer(token)))
 
     assert response.status_code == 403
     body = response.json()
     assert body["code"] == "AUTH_INSUFFICIENT_SCOPE"
+    assert body["trace_id"] == _TRACE_ID
     assert body["details"] == {}
+    _assert_gateway_rejection_logged(caplog, _TRACE_ID)
 
 
 def test_resolve_scope_roles_maps_known_scopes_to_singleton_role() -> None:
@@ -291,7 +358,10 @@ def test_rate_limit_enabled_counts_only_auth_paths() -> None:
     assert client.get("/probe").json()["rate_limit_checked"] is False
 
 
-def test_rate_limit_answers_429_with_retry_after_on_auth_route() -> None:
+def test_rate_limit_answers_429_with_retry_after_on_auth_route(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
     settings = Settings(
         gateway_rate_limit_enabled=True,
         gateway_rate_limit_auth_max_requests=2,
@@ -304,13 +374,19 @@ def test_rate_limit_answers_429_with_retry_after_on_auth_route() -> None:
     assert client.post("/v1/auth/register", json={"phone": "9876543210"}).status_code == 200
     assert client.post("/v1/auth/register", json={"phone": "9876543210"}).status_code == 200
 
-    response = client.post("/v1/auth/register", json={"phone": "9876543210"})
+    response = client.post(
+        "/v1/auth/register",
+        json={"phone": "9876543210"},
+        headers={"X-Request-Id": _TRACE_ID},
+    )
 
     assert response.status_code == 429
     body = response.json()
     assert body["code"] == "RATE_LIMIT_EXCEEDED"
+    assert body["trace_id"] == _TRACE_ID
     assert body["details"] == {}
     assert response.headers["Retry-After"] == "60"
+    _assert_gateway_rejection_logged(caplog, _TRACE_ID)
 
 
 def test_rate_limit_does_not_limit_health_endpoint() -> None:
