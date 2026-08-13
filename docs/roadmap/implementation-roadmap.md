@@ -159,7 +159,7 @@ PHASE-14 E2E + Observability + Release ◄─ all phases
 
 - **Phase ID:** `PHASE-2-IAM-AUTH`
 - **Phase Strategic Objective:** Deliver the patient identity core - phone-OTP registration with duplicate resolution, session JWT issuance/validation, RBAC scope enforcement at the edge - so every later phase has a trustworthy caller identity (`FEAT-001`).
-- **Release Readiness Criteria:** E2E: register → OTP (mocked SMS) → verify → authenticated session → access a protected route; duplicate phone re-registration resolves to the existing identity; OTP single-use, 5-min TTL, ≥ 60 s resend cooldown; `validate_token` p95 < 100 ms; `patient.auth_failed` and consent/access-denial attempts written to audit events.
+- **Release Readiness Criteria:** E2E: register → OTP (mocked SMS) → verify → authenticated session → access a protected route; duplicate phone re-registration resolves to the existing identity; OTP single-use, 5-min TTL, ≥ 60 s resend cooldown; `validate_token` p95 < 100 ms (measured - pinned by a benchmark unit test, PHASE-2 REM T9 #79); `patient.auth_failed` and consent/access-denial attempts written to audit events (authenticated denials only - anonymous 401s stay log-only, PHASE-2 REM T7 #87).
 
 #### 1. In-Scope Modules & Features
 
@@ -182,7 +182,7 @@ PHASE-14 E2E + Observability + Release ◄─ all phases
 #### 4. Infrastructure, DevOps & Environment Targets
 
 - **Hosting / Cloud Provisioning:** `EXT-001` SMS provider key in staging (mock in CI); rate-limit config on `/otp` + `/auth` endpoints (`NFR-SEC-004`); OTP hashed at rest, never logged.
-- **CI/CD Requirements:** Auth E2E suite runs against the mocked SMS adapter in CI; real-SMS smoke test gated to staging.
+- **CI/CD Requirements:** Auth E2E suite runs against the mocked SMS adapter in CI; real-SMS smoke test gated to staging. The dev/test OTP read-back route `GET /v1/auth/dev/otp` (gated to the mock SMS adapter and `dev`/`test` environments) is kept so the E2E auth loop stays deterministic once SMS delivery moved off the request path; it is the only plaintext-OTP surface and never ships outside dev/test (PHASE-2 REM T4 #86). A repo-wide `check_event_names` gate enforces internal-modules.md §4.2 as the single source of truth for event names, so a drifted name (e.g. a legacy snake_case telemetry name) fails CI instead of silently desyncing code from the docs (PHASE-2 REM T1 #84).
 
 #### 5. Phase Dependency & Risk Matrix
 
