@@ -134,9 +134,19 @@ function PhoneStep({ flow }: { flow: OtpFlow }) {
       </div>
       <NoticeMessage message={state.lastNotice} />
       <ErrorMessage message={state.lastError} />
+      {state.cooldownRemaining > 0 && state.challenge !== "locked" && (
+        <p className={stylesB.attempts}>
+          {t.resendIn(state.cooldownRemaining)}
+        </p>
+      )}
+      {state.challenge === "locked" && (
+        <p className={stylesB.attempts}>
+          {t.lockout(Math.ceil(state.lockoutRemaining / 60))}
+        </p>
+      )}
       <PrimaryButton
         onClick={() => flow.submitPhone(phoneDraft)}
-        disabled={state.busy}
+        disabled={state.busy || state.challenge === "locked"}
       >
         {t.getCode}
       </PrimaryButton>

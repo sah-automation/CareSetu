@@ -31,6 +31,7 @@ vi.mock("@/lib/auth/api", async (importOriginal) => {
 
 const PHONE = "+919876543210";
 const REGISTER_OK: RegisterResult = {
+  outcome: "sent",
   phone_e164: PHONE,
   identity_id: 1,
   challenge_id: 11,
@@ -39,6 +40,7 @@ const REGISTER_OK: RegisterResult = {
   expires_in_seconds: 300,
   cooldown_remaining_seconds: 60,
   attempts_left: 5,
+  lockout_remaining_seconds: null,
 };
 
 const REGISTER_DUPLICATE: RegisterResult = {
@@ -152,6 +154,97 @@ describe("PatientAuthWizard - phone step", () => {
         "This number is already registered - verifying logs you in.",
       ),
     ).toBeInTheDocument();
+  });
+});
+
+describe("PatientAuthWizard - register refusal states", () => {
+  it("cooldown outcome stays on the phone step with the live countdown", async () => {
+    vi.mocked(registerPhone).mockResolvedValue({
+      outcome: "cooldown",
+      phone_e164: PHONE,
+      identity_id: 1,
+      challenge_id: null,
+      is_existing: true,
+      flow: "login",
+      expires_in_seconds: null,
+      cooldown_remaining_seconds: 45,
+      attempts_left: null,
+      lockout_remaining_seconds: null,
+    });
+    render(<PatientAuthWizard />);
+    await enterPhone();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Get verification code" }),
+    );
+
+    expect(await screen.findByText(/Resend in \d+s/)).toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText("10-digit mobile number"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("group", { name: "OTP" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("locked outcome shows the lockout message and blocks the phone step", async () => {
+    vi.mocked(registerPhone).mockResolvedValue({
+      outcome: "locked",
+      phone_e164: PHONE,
+      identity_id: 1,
+      challenge_id: null,
+      is_existing: true,
+      flow: "login",
+      expires_in_seconds: null,
+      cooldown_remaining_seconds: null,
+      attempts_left: null,
+      lockout_remaining_seconds: 900,
+    });
+    render(<PatientAuthWizard />);
+    await enterPhone();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Get verification code" }),
+    );
+
+    expect(
+      await screen.findByText(
+        "Too many failed attempts. Verification locked for 15 min.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Get verification code" }),
+    ).toBeDisabled();
+    expect(
+      screen.queryByRole("group", { name: "OTP" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("suspended outcome shows the suspended notice on the phone step", async () => {
+    vi.mocked(registerPhone).mockResolvedValue({
+      outcome: "suspended",
+      phone_e164: PHONE,
+      identity_id: 1,
+      challenge_id: null,
+      is_existing: true,
+      flow: "login",
+      expires_in_seconds: null,
+      cooldown_remaining_seconds: null,
+      attempts_left: null,
+      lockout_remaining_seconds: null,
+    });
+    render(<PatientAuthWizard />);
+    await enterPhone();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Get verification code" }),
+    );
+
+    expect(
+      await screen.findByText(
+        "This number is suspended. Contact support for assistance.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("group", { name: "OTP" }),
+    ).not.toBeInTheDocument();
   });
 });
 

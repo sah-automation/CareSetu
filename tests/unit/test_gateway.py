@@ -35,6 +35,7 @@ from modules.iam.facade import RegisterPatientResult
 _SIGNING_KEY = "unit-test-gateway-signing-key"
 
 _RESULT = RegisterPatientResult(
+    outcome="sent",
     phone_e164="+919876543210",
     identity_id=7,
     challenge_id=42,

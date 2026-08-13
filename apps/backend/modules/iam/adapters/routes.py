@@ -94,9 +94,12 @@ async def register_patient(
 ) -> RegisterPatientResult:
     """Enter a mobile number: create the identity on first use, else resolve it.
 
-    Always issues a hashed OTP challenge, sends it via the EXT-001 adapter,
-    and returns the flow state the PWA drives (is-existing notice, countdown,
-    resend cooldown, attempts left).
+    First-time registration and out-of-cooldown login issue a hashed OTP
+    challenge, send it via the EXT-001 adapter, and return the flow state the
+    PWA drives (is-existing notice, countdown, resend cooldown, attempts
+    left). An existing phone inside the resend cooldown, the brute-force
+    lockout, or Suspended is refused with the matching outcome and no code is
+    sent (spec #51 §2.4).
     """
     facade = cast(IamFacade, request.app.state.iam_facade)
     return await facade.register_patient(body.phone)
