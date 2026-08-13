@@ -75,9 +75,7 @@ async def test_validate_token_resolves_scope_through_the_facade() -> None:
 
     validated = await _facade().validate_token(token)
 
-    assert validated == ValidatedAccessToken(
-        subject_id=7, scope="patient", jti="jti-unit-1"
-    )
+    assert validated == ValidatedAccessToken(subject_id=7, scope="patient", jti="jti-unit-1")
 
 
 async def test_validate_token_rejects_an_expired_token() -> None:
@@ -120,7 +118,5 @@ async def test_validate_token_fails_closed_without_a_configured_key() -> None:
     )
     token = _token()
 
-    with pytest.raises(
-        AccessTokenSignatureError, match="signing key is not configured"
-    ):
+    with pytest.raises(AccessTokenSignatureError, match="signing key is not configured"):
         await facade.validate_token(token)

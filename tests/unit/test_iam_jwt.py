@@ -64,9 +64,7 @@ def _jws(header: dict[str, object], payload: object, *, key: str = _KEY) -> str:
     signing_input = f"{enc(header)}.{enc(payload)}"
     signature = (
         base64.urlsafe_b64encode(
-            hmac.new(
-                key.encode("utf-8"), signing_input.encode("utf-8"), hashlib.sha256
-            ).digest()
+            hmac.new(key.encode("utf-8"), signing_input.encode("utf-8"), hashlib.sha256).digest()
         )
         .decode("ascii")
         .rstrip("=")
@@ -271,7 +269,5 @@ def test_empty_signing_key_fails_closed_at_issue() -> None:
 def test_empty_signing_key_fails_closed_at_verify() -> None:
     token = _token()
 
-    with pytest.raises(
-        AccessTokenSignatureError, match="signing key is not configured"
-    ):
+    with pytest.raises(AccessTokenSignatureError, match="signing key is not configured"):
         verify_token(token, "", _NOW)
