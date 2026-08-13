@@ -321,7 +321,9 @@ class IamFacade:
         identity's ``lockout_failed_attempts`` counter; the 10th consecutive
         failure across challenges sets ``lockout_until`` 15 minutes out, writes
         ``otp.failed`` alongside ``patient.auth_failed``, and answers ``locked``.
-        The lockout is a counter, never identity state - ``status`` stays
+        Once the window has fully elapsed the streak resets, so a failure after
+        the lockout lifts starts a fresh count instead of re-locking. The
+        lockout is a counter, never identity state - ``status`` stays
         Unverified/Active/Suspended and ``Suspended`` remains operator-only.
 
         The identity row is locked ``FOR UPDATE`` so concurrent verifications
@@ -409,7 +411,7 @@ class IamFacade:
                 attempts=challenge["attempts"],
                 decision=decision,
             )
-            lockout = evaluate_failure(lockout_failed_attempts, now)
+            lockout = evaluate_failure(lockout_failed_attempts, now, lockout_until)
             await connection.execute(
                 iam_identities.update()
                 .where(iam_identities.c.id == identity_id)

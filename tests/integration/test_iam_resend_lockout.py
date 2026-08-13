@@ -284,6 +284,40 @@ async def test_lockout_expires_and_success_resets_the_counter(
     ]
 
 
+async def test_lockout_expires_and_failure_starts_a_fresh_streak(
+    database_url: str, clean_iam: Any
+) -> None:
+    clock = MutableClock(_T0)
+    sms = MockSmsAdapter()
+    facade, _ = await _register(database_url, sms, clock)
+    await _exhaust_and_relock(facade, clock, sms)
+
+    clock.set(_T0 + timedelta(seconds=61 + LOCKOUT_SECONDS + 1))
+    resend = await facade.resend_otp("9876543210")
+
+    assert resend.outcome == "sent"
+    fresh_code = sms.last_sent_code(_PHONE)
+    assert fresh_code is not None
+
+    wrong = await facade.verify_otp("9876543210", _WRONG)
+
+    assert wrong.outcome == "wrong_code"
+
+    identities = await _query(
+        database_url,
+        "SELECT status, lockout_failed_attempts, lockout_until FROM iam.iam_identities",
+    )
+    assert identities == [
+        {
+            "status": "Unverified",
+            "lockout_failed_attempts": 1,
+            "lockout_until": None,
+        }
+    ]
+    outbox = await _query(database_url, "SELECT event_type FROM iam.iam_outbox")
+    assert sorted(row["event_type"] for row in outbox).count("otp.failed") == 1
+
+
 async def test_resend_for_suspended_identity_is_refused(database_url: str, clean_iam: Any) -> None:
     clock = MutableClock(_T0)
     sms = MockSmsAdapter()
