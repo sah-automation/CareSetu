@@ -5,12 +5,12 @@ the module facade, return the typed result. Every expected failure answers the
 shared error envelope at the top level (api-standards §2): a stable
 ``SCREAMING_SNAKE`` code, a human-safe message, a trace id, and details.
 ``register_error_handlers`` maps iam domain errors to that envelope; the route
-itself carries no business logic. The register/verify routes sit behind the
-gateway middleware stack in ``app.main`` - the rate-limit policy for the
-OTP/auth surface is a Phase 2 gateway ticket. The register/verify/resend
-mutations honour the edge's ``Idempotency-Key`` contract (api-standards §5,
-PHASE-2 REM T11, #80) via ``_run_idempotent``: a duplicate key replays the
-stored result instead of re-executing.
+itself carries no business logic. The auth routes sit behind the gateway
+middleware stack in ``app.main`` - the rate-limit policy for the OTP/auth
+surface is a Phase 2 gateway ticket. The register/verify/resend/session
+mutations honour the edge's ``Idempotency-Key`` contract
+(api-standards §5, PHASE-2 REM T11, #80) via ``_run_idempotent``: a duplicate
+key replays the stored result instead of re-executing.
 """
 
 from __future__ import annotations
@@ -206,7 +206,7 @@ async def issue_session(
     can reach protected routes.
     """
     facade = cast(IamFacade, request.app.state.iam_facade)
-    return await facade.issue_session(body.phone)
+    return await _run_idempotent(request, lambda: facade.issue_session(body.phone))
 
 
 def _error_response(
