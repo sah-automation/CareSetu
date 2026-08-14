@@ -76,4 +76,5 @@ repos:
         entry: python apps/backend/scripts/check_event_names.py
         language: python
         additional_dependencies: []
-        pass_filenames: true
+        pass_filenames: false
+        always_run: true

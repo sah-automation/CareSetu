@@ -18,7 +18,7 @@ Acceptance criteria:
 ## Read-list (in order)
 
 1. The EXT-001 SMS adapter contract - `SmsAdapter` protocol, `MockSmsAdapter` (`last_sent_code`, `sent_count`), `SmsProviderAdapter` (timeout ≤10 s, up to 3 retries with `backoff_delay` exponential+jitter, `patient.auth_failed` error-log marker on persistent failure), `build_sms_adapter` (mock/provider gating by `Settings`) in `apps/backend/modules/iam/adapters/sms.py` (~2.5K).
-2. The two OTP-issuing facade paths - `register_patient` and `resend_otp` in `apps/backend/modules/iam/facade.py`: challenge insert with `hash_otp`, `write_outbox` of `otp_sent` in the same transaction, then the post-commit inline `self._sms.send(...)` - the send currently in the request path (~2.5K).
+2. The two OTP-issuing facade paths - `register_patient` and `resend_otp` in `apps/backend/modules/iam/facade.py`: challenge insert with `hash_otp`, `write_outbox` of `otp.sent` in the same transaction, then the post-commit inline `self._sms.send(...)` - the send currently in the request path (~2.5K).
 3. The `otp.sent` event contract - `OtpSentPayload` + `otp_sent_envelope` in `apps/backend/modules/iam/domain/events.py` (payload names identity + challenge only, never the code) (~0.6K).
 4. The outbox writer + handler seam - `write_outbox` in `bus/outbox_writer.py`, `HandlerRegistry` in `bus/registry.py`, and the fan-out `dispatch` in `bus/dispatch.py` (the seam a background delivery handler registers on) (~1.0K).
 5. Dispatcher retry/dead-letter slice - `process_outbox_table` in `bus/dispatcher.py`: failed deliveries retry up to `max_attempts` then dead-letter; targeted slice only, not the poll-loop internals (~1.2K).

@@ -2,18 +2,18 @@
 
 The ``Envelope`` and ``HandlerRegistry`` enforce the ``domain.action``
 grammar, so the legacy snake_case telemetry spelling (the underscore form of a
-``patient.*`` event, e.g. ``patient.auth_failed``) can never be emitted at
-runtime. The failure mode is docs, tests, and log markers carrying the legacy
-spelling, which keeps re-briefing agents wrong. This gate scans the files
-pre-commit passes it and fails when one contains the legacy snake_case form of
-a canonical ``patient.*`` event.
+``patient.*`` or ``otp.*`` event, e.g. ``patient.auth_failed`` or ``otp.sent``)
+can never be emitted at runtime. The failure mode is docs, tests, and log
+markers carrying the legacy spelling, which keeps re-briefing agents wrong.
+This gate scans the whole tree when invoked with no files (``git ls-files -z``,
+as pre-commit does repo-wide) and fails when a file contains the legacy
+snake_case form of a canonical gated event.
 
 The forbidden spellings are derived from the canonical dot-notation names in
 ``bus.events`` (the single source of truth), never hardcoded here, so a new
 canonical event automatically gates its legacy form. Matching uses word
-boundaries, so the ``patient_registered_envelope`` builder function names
-(which merely prefix the token) are not flagged. ``otp.*`` events are not
-gated because ``otp_sent`` is a legitimate local-variable spelling in tests.
+boundaries, so the ``patient_registered_envelope`` and ``otp_sent_envelope``
+builder function names (which merely prefix the token) are not flagged.
 
 Stdlib-only by design: like the other check_*.py gates, this runs on a bare
 interpreter in pre-commit and CI without third-party dependencies.
@@ -23,11 +23,12 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess  # nosec B404 - git enumeration with a fixed argv list, no shell
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-_GATED_DOMAINS = ("patient",)
+_GATED_DOMAINS = ("patient", "otp")
 _BINARY_SNIFF_BYTES = 1024
 _BACKEND_PACKAGE = Path(__file__).resolve().parents[1]
 
@@ -92,14 +93,36 @@ def check_event_names(files: list[Path]) -> tuple[EventNameViolation, ...]:
     return tuple(sorted(violations, key=lambda v: (str(v.path), v.line, v.token)))
 
 
+def _tracked_repo_files(repo_root: Path) -> list[Path]:
+    """Every git-tracked, on-disk file under ``repo_root`` (``git ls-files -z``)."""
+    result = subprocess.run(  # nosec B603 B607 - hardcoded argv, no shell, no user input
+        ["git", "ls-files", "-z"],
+        cwd=repo_root,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise SystemExit(result.stderr.decode("utf-8", "replace"))
+    files: list[Path] = []
+    for raw in result.stdout.split(b"\x00"):
+        if raw:
+            path = repo_root / raw.decode("utf-8", "replace")
+            if path.is_file():
+                files.append(path)
+    return files
+
+
 def main(argv: list[str] | None = None) -> int:
-    """Scan the given files; exit 1 when a legacy event name is found."""
+    """Scan the given files (or the whole tree via ``git ls-files`` when none);
+    exit 1 when a legacy event name is found."""
     parser = argparse.ArgumentParser(
         description="Scan files for legacy snake_case event names (tickets #54/#55).",
     )
     parser.add_argument("files", nargs="*", type=Path, help="files to scan")
     args = parser.parse_args(argv)
     files = [path for path in args.files if path.is_file()]
+    if not args.files:
+        files = _tracked_repo_files(Path.cwd())
     violations = check_event_names(files)
     for violation in violations:
         print(
