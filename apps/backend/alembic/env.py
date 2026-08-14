@@ -6,6 +6,7 @@ section 5). The online path is async-only: the connectable is built from
 """
 
 import asyncio
+import os
 from logging.config import fileConfig
 
 from alembic import context
@@ -41,6 +42,9 @@ def do_run_migrations(connection: Connection) -> None:
 
 async def run_async_migrations() -> None:
     section = config.get_section(config.config_ini_section, {}) or {}
+    database_url = os.environ.get("DATABASE_URL")
+    if database_url:
+        section["sqlalchemy.url"] = database_url
     connectable = async_engine_from_config(
         section,
         prefix="sqlalchemy.",
