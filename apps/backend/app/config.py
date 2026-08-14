@@ -51,6 +51,14 @@ class Settings:
     sms_max_retries: int = DEFAULT_SMS_MAX_RETRIES
     sms_circuit_breaker_threshold: int = DEFAULT_SMS_CIRCUIT_BREAKER_THRESHOLD
     sms_circuit_breaker_cooldown_seconds: float = DEFAULT_SMS_CIRCUIT_BREAKER_COOLDOWN_SECONDS
+    # Extra browser origins allowed by the CORS middleware, e.g. the Vercel
+    # origin of the public demo (deployment plan 4.1). Empty by default, which
+    # preserves today's posture: only the localhost dev origin is allowed.
+    cors_allowed_origins: tuple[str, ...] = ()
+    # Explicit demo-flag: when set, the mock-OTP read-back route answers even
+    # in production so the deployed portfolio demo can drive register -> verify
+    # (deployment plan 4.3). Fail-closed: never valid with a real provider.
+    demo_mode: bool = False
 
     def __post_init__(self) -> None:
         if self.gateway_jwt_verify_enabled and not self.gateway_jwt_signing_key:
@@ -66,6 +74,11 @@ class Settings:
         if provider not in {"mock", "provider"}:
             raise ValueError(
                 f"unsupported sms_provider {self.sms_provider!r}; expected 'mock' or 'provider'"
+            )
+        if self.demo_mode and provider != "mock":
+            raise ValueError(
+                "demo_mode=True requires sms_provider='mock' (fail-closed): "
+                "the demo flag must never ride a real provider"
             )
         if provider == "provider":
             if self.app_environment.strip().lower() in _DEV_TEST_ENVIRONMENTS:
@@ -96,6 +109,19 @@ class Settings:
         if self.sms_circuit_breaker_cooldown_seconds <= 0:
             raise ValueError("sms_circuit_breaker_cooldown_seconds must be positive")
 
+    @property
+    def mock_otp_readback_enabled(self) -> bool:
+        """Whether the plaintext mock-OTP read-back surface may be exposed.
+
+        True only for the mock provider in a dev/test environment, or under the
+        explicit ``DEMO_MODE`` flag (deployment plan 4.3) - never for the real
+        provider. One settled policy behind both the adapter-storage gate and
+        the ``/v1/auth/dev/otp`` route gate in ``create_app``.
+        """
+        return self.sms_provider.strip().lower() == "mock" and (
+            self.app_environment.strip().lower() in _DEV_TEST_ENVIRONMENTS or self.demo_mode
+        )
+
 
 def _env_bool(name: str, default: bool) -> bool:
     """Parse a boolean environment variable, falling back to ``default``."""
@@ -119,6 +145,18 @@ def _env_int(name: str, default: int) -> int:
     if raw is None:
         return default
     return int(raw)
+
+
+def _env_csv(name: str) -> tuple[str, ...]:
+    """Parse a comma-separated environment variable into trimmed entries.
+
+    Splits on commas, strips whitespace, and drops empties; an unset or empty
+    value yields ``()`` so the caller's default posture is untouched.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return ()
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
 
 
 def get_settings() -> Settings:
@@ -161,4 +199,6 @@ def get_settings() -> Settings:
             "SMS_CIRCUIT_BREAKER_COOLDOWN_SECONDS",
             DEFAULT_SMS_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
         ),
+        cors_allowed_origins=_env_csv("CORS_ALLOWED_ORIGINS"),
+        demo_mode=_env_bool("DEMO_MODE", False),
     )
