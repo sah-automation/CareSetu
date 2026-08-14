@@ -13,12 +13,15 @@ import json
 import logging
 import re
 from collections.abc import Callable
+from typing import Literal
 
 import httpx
 import pydantic
 import pytest
 
 from app.config import (
+    DEFAULT_SMS_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+    DEFAULT_SMS_CIRCUIT_BREAKER_THRESHOLD,
     DEFAULT_SMS_MAX_RETRIES,
     DEFAULT_SMS_PROVIDER,
     DEFAULT_SMS_TIMEOUT_SECONDS,
@@ -26,6 +29,9 @@ from app.config import (
     get_settings,
 )
 from modules.iam.adapters.sms import (
+    CircuitBreaker,
+    CircuitBreakerSmsAdapter,
+    CircuitBreakerState,
     MockSmsAdapter,
     SmsDeliveryQueue,
     SmsProviderAdapter,
@@ -133,6 +139,10 @@ def test_settings_default_to_mock_provider() -> None:
     assert settings.sms_max_retries == DEFAULT_SMS_MAX_RETRIES
     assert settings.sms_api_key == ""
     assert settings.sms_base_url == ""
+    assert settings.sms_circuit_breaker_threshold == DEFAULT_SMS_CIRCUIT_BREAKER_THRESHOLD
+    assert settings.sms_circuit_breaker_cooldown_seconds == (
+        DEFAULT_SMS_CIRCUIT_BREAKER_COOLDOWN_SECONDS
+    )
 
 
 def test_settings_read_sms_values_from_environment(
@@ -144,6 +154,8 @@ def test_settings_read_sms_values_from_environment(
     monkeypatch.setenv("SMS_BASE_URL", "https://sms.example.com")
     monkeypatch.setenv("SMS_TIMEOUT_SECONDS", "5")
     monkeypatch.setenv("SMS_MAX_RETRIES", "2")
+    monkeypatch.setenv("SMS_CIRCUIT_BREAKER_THRESHOLD", "7")
+    monkeypatch.setenv("SMS_CIRCUIT_BREAKER_COOLDOWN_SECONDS", "45.5")
 
     settings = get_settings()
 
@@ -152,6 +164,8 @@ def test_settings_read_sms_values_from_environment(
     assert settings.sms_base_url == "https://sms.example.com"
     assert settings.sms_timeout_seconds == 5.0
     assert settings.sms_max_retries == 2
+    assert settings.sms_circuit_breaker_threshold == 7
+    assert settings.sms_circuit_breaker_cooldown_seconds == 45.5
 
 
 @pytest.mark.parametrize("environment", ["dev", "test"])
@@ -214,13 +228,25 @@ def test_settings_accept_timeout_boundary_of_ten_seconds() -> None:
     assert settings.sms_timeout_seconds == 10.0
 
 
+@pytest.mark.parametrize("threshold", [0, -1])
+def test_settings_refuse_non_positive_breaker_threshold(threshold: int) -> None:
+    with pytest.raises(ValueError, match="sms_circuit_breaker_threshold must be positive"):
+        Settings(sms_circuit_breaker_threshold=threshold)
+
+
+@pytest.mark.parametrize("cooldown_seconds", [0, -1, -30.0])
+def test_settings_refuse_non_positive_breaker_cooldown(cooldown_seconds: float) -> None:
+    with pytest.raises(ValueError, match="sms_circuit_breaker_cooldown_seconds must be positive"):
+        Settings(sms_circuit_breaker_cooldown_seconds=cooldown_seconds)
+
+
 def test_build_sms_adapter_defaults_to_mock() -> None:
     adapter = build_sms_adapter(Settings())
 
     assert isinstance(adapter, MockSmsAdapter)
 
 
-def test_build_sms_adapter_returns_provider_when_configured() -> None:
+def test_build_sms_adapter_wraps_provider_in_circuit_breaker() -> None:
     settings = Settings(
         app_environment="staging",
         sms_provider="provider",
@@ -230,7 +256,9 @@ def test_build_sms_adapter_returns_provider_when_configured() -> None:
 
     adapter = build_sms_adapter(settings)
 
-    assert isinstance(adapter, SmsProviderAdapter)
+    assert isinstance(adapter, CircuitBreakerSmsAdapter)
+    assert isinstance(adapter._adapter, SmsProviderAdapter)
+    assert isinstance(adapter._breaker, CircuitBreaker)
 
 
 # --- request/response typing ---------------------------------------------
@@ -562,3 +590,231 @@ async def test_delivery_queue_callback_failure_does_not_break_the_task(
     assert queue.pending_count == 0
     assert "failed to record delivery failure" in caplog.text
     assert "+919876543210" not in caplog.text
+
+
+# --- circuit breaker (PHASE-2 REM FIX 4, #104) --------------------------------
+
+
+class _SwitchableSmsAdapter:
+    """Adapter whose outcome flips at runtime, to prove the breaker gates it."""
+
+    def __init__(self, outcome: Literal["ok", "outage", "reject"] = "ok") -> None:
+        self.outcome = outcome
+        self.calls = 0
+
+    async def send(self, request: SmsSendRequest) -> SmsSendResult:
+        self.calls += 1
+        if self.outcome == "outage":
+            raise SmsDeliveryError("EXT-001 unavailable")
+        if self.outcome == "reject":
+            raise SmsDeliveryError("EXT-001 send rejected with HTTP 400", retries_exhausted=False)
+        return SmsSendResult(request_id="switch-1", status="queued")
+
+
+def test_breaker_starts_closed_and_allows_requests() -> None:
+    breaker = CircuitBreaker(threshold=3)
+
+    assert breaker.state is CircuitBreakerState.CLOSED
+    assert breaker.allow_request() is True
+
+
+def test_breaker_opens_after_threshold_consecutive_failures() -> None:
+    breaker = CircuitBreaker(threshold=3)
+
+    breaker.record_failure()
+    breaker.record_failure()
+    assert breaker.state is CircuitBreakerState.CLOSED
+    assert breaker.allow_request() is True
+
+    breaker.record_failure()
+
+    assert breaker.state is CircuitBreakerState.OPEN
+    assert breaker.allow_request() is False
+
+
+def test_breaker_success_resets_the_failure_count() -> None:
+    breaker = CircuitBreaker(threshold=3)
+
+    breaker.record_failure()
+    breaker.record_failure()
+    breaker.record_success()
+    breaker.record_failure()
+    breaker.record_failure()
+
+    assert breaker.state is CircuitBreakerState.CLOSED
+    assert breaker.allow_request() is True
+
+
+def test_breaker_probe_after_cooldown_reopens_on_failure(fake_clock) -> None:
+    breaker = CircuitBreaker(threshold=2, cooldown_seconds=30.0, clock=fake_clock)
+    breaker.record_failure()
+    breaker.record_failure()
+    assert breaker.state is CircuitBreakerState.OPEN
+
+    fake_clock.advance(29.0)
+    assert breaker.allow_request() is False
+
+    fake_clock.advance(1.0)
+    assert breaker.allow_request() is True
+    assert breaker.state is CircuitBreakerState.HALF_OPEN
+
+    breaker.record_failure()
+
+    assert breaker.state is CircuitBreakerState.OPEN
+    assert breaker.allow_request() is False
+
+
+def test_breaker_probe_success_closes_and_logs_recovery(
+    fake_clock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    breaker = CircuitBreaker(threshold=1, cooldown_seconds=30.0, clock=fake_clock)
+    breaker.record_failure()
+    assert breaker.state is CircuitBreakerState.OPEN
+
+    fake_clock.advance(30.0)
+    assert breaker.allow_request() is True
+    assert breaker.state is CircuitBreakerState.HALF_OPEN
+
+    breaker.record_success()
+
+    assert breaker.state is CircuitBreakerState.CLOSED
+    assert "recovered" in caplog.text
+
+
+async def test_breaker_adapter_refuses_without_calling_provider_when_open() -> None:
+    breaker = CircuitBreaker(threshold=1)
+    breaker.record_failure()
+    spy = _SwitchableSmsAdapter()
+    adapter = CircuitBreakerSmsAdapter(spy, breaker)
+    assert breaker.state is CircuitBreakerState.OPEN
+
+    with pytest.raises(SmsDeliveryError, match="circuit breaker is open") as exc_info:
+        await adapter.send(_request())
+
+    assert exc_info.value.retries_exhausted is True
+    assert spy.calls == 0
+
+
+async def test_breaker_adapter_only_outage_failures_trip_the_breaker() -> None:
+    breaker = CircuitBreaker(threshold=2)
+    spy = _SwitchableSmsAdapter("reject")
+    adapter = CircuitBreakerSmsAdapter(spy, breaker)
+
+    with pytest.raises(SmsDeliveryError, match="HTTP 400"):
+        await adapter.send(_request())
+
+    assert breaker.state is CircuitBreakerState.CLOSED
+    assert breaker.allow_request() is True
+
+
+async def test_breaker_adapter_outage_failures_trip_the_breaker() -> None:
+    breaker = CircuitBreaker(threshold=2)
+    spy = _SwitchableSmsAdapter("outage")
+    adapter = CircuitBreakerSmsAdapter(spy, breaker)
+
+    with pytest.raises(SmsDeliveryError):
+        await adapter.send(_request())
+    with pytest.raises(SmsDeliveryError):
+        await adapter.send(_request())
+
+    assert breaker.state is CircuitBreakerState.OPEN
+    assert spy.calls == 2
+
+
+async def test_breaker_adapter_success_resets_the_failure_count() -> None:
+    breaker = CircuitBreaker(threshold=2)
+    spy = _SwitchableSmsAdapter("outage")
+    adapter = CircuitBreakerSmsAdapter(spy, breaker)
+
+    with pytest.raises(SmsDeliveryError):
+        await adapter.send(_request())
+    spy.outcome = "ok"
+    await adapter.send(_request())
+    spy.outcome = "outage"
+    with pytest.raises(SmsDeliveryError):
+        await adapter.send(_request())
+
+    assert breaker.state is CircuitBreakerState.CLOSED
+    assert breaker.allow_request() is True
+
+
+async def test_breaker_adapter_probe_after_cooldown_recovers(fake_clock) -> None:
+    breaker = CircuitBreaker(threshold=1, cooldown_seconds=30.0, clock=fake_clock)
+    spy = _SwitchableSmsAdapter("outage")
+    adapter = CircuitBreakerSmsAdapter(spy, breaker)
+
+    with pytest.raises(SmsDeliveryError):
+        await adapter.send(_request())
+    assert breaker.state is CircuitBreakerState.OPEN
+
+    spy.outcome = "ok"
+    fake_clock.advance(30.0)
+    result = await adapter.send(_request())
+
+    assert result.status == "queued"
+    assert breaker.state is CircuitBreakerState.CLOSED
+
+
+async def test_breaker_adapter_probe_is_single_flight(fake_clock) -> None:
+    breaker = CircuitBreaker(threshold=1, cooldown_seconds=30.0, clock=fake_clock)
+    breaker.record_failure()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class _GatedProbeAdapter:
+        async def send(self, request: SmsSendRequest) -> SmsSendResult:
+            started.set()
+            await release.wait()
+            return SmsSendResult(request_id="probe-1", status="queued")
+
+    adapter = CircuitBreakerSmsAdapter(_GatedProbeAdapter(), breaker)
+    fake_clock.advance(30.0)
+    probe_task = asyncio.create_task(adapter.send(_request()))
+    await started.wait()
+
+    with pytest.raises(SmsDeliveryError, match="probe is already in flight"):
+        await adapter.send(_request())
+
+    release.set()
+    result = await probe_task
+
+    assert result.status == "queued"
+    assert breaker.state is CircuitBreakerState.CLOSED
+
+
+async def test_breaker_adapter_unexpected_probe_error_clears_the_probe(fake_clock) -> None:
+    breaker = CircuitBreaker(threshold=1, cooldown_seconds=30.0, clock=fake_clock)
+    breaker.record_failure()
+
+    class _BoomProbeAdapter:
+        async def send(self, request: SmsSendRequest) -> SmsSendResult:
+            raise RuntimeError("provider bug")
+
+    adapter = CircuitBreakerSmsAdapter(_BoomProbeAdapter(), breaker)
+    fake_clock.advance(30.0)
+
+    with pytest.raises(RuntimeError):
+        await adapter.send(_request())
+
+    assert adapter._probe_in_flight is False
+    assert breaker.state is CircuitBreakerState.HALF_OPEN
+
+
+async def test_open_breaker_failure_flows_through_queue_degradation_path() -> None:
+    breaker = CircuitBreaker(threshold=1)
+    breaker.record_failure()
+    spy = _SwitchableSmsAdapter()
+    callback = _RecordingCallback()
+    queue = SmsDeliveryQueue(
+        CircuitBreakerSmsAdapter(spy, breaker),
+        on_delivery_failed=callback,
+    )
+
+    queue.enqueue(_request())
+    await queue.flush()
+
+    assert spy.calls == 0
+    assert callback.calls == [_request()]
+    assert queue.pending_count == 0
