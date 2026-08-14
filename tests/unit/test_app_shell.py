@@ -13,6 +13,8 @@ from typing import cast
 
 import httpx
 import pytest
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.testclient import TestClient
 
 from app.config import DEFAULT_DATABASE_URL, Settings
@@ -146,3 +148,75 @@ def test_app_answers_cors_headers_for_the_dev_pwa_origin() -> None:
     response = client.get("/v1/me", headers={"Origin": "http://localhost:3000"})
 
     assert response.headers.get("access-control-allow-origin") == "http://localhost:3000"
+
+
+def _cors_allow_origins(app: FastAPI) -> tuple[str, ...]:
+    cors = next(
+        middleware for middleware in app.user_middleware if middleware.cls is CORSMiddleware
+    )
+    return cors.kwargs["allow_origins"]
+
+
+def test_create_app_cors_adds_nothing_when_config_empty() -> None:
+    app = create_app(settings=Settings())
+
+    assert _cors_allow_origins(app) == ("http://localhost:3000",)
+
+
+def test_create_app_cors_preserves_localhost_and_adds_configured_origins() -> None:
+    settings = Settings(cors_allowed_origins=("https://demo.example.com",))
+    app = create_app(settings=settings)
+
+    assert _cors_allow_origins(app) == ("http://localhost:3000", "https://demo.example.com")
+
+
+def test_create_app_cors_dedupes_localhost_repeated_in_config() -> None:
+    settings = Settings(cors_allowed_origins=("http://localhost:3000", "https://demo.example.com"))
+    app = create_app(settings=settings)
+
+    assert _cors_allow_origins(app) == ("http://localhost:3000", "https://demo.example.com")
+
+
+def test_app_answers_cors_headers_for_the_configured_demo_origin() -> None:
+    client = TestClient(
+        create_app(settings=Settings(cors_allowed_origins=("https://demo.example.com",)))
+    )
+
+    response = client.get("/v1/me", headers={"Origin": "https://demo.example.com"})
+
+    assert response.headers.get("access-control-allow-origin") == "https://demo.example.com"
+
+
+def test_mock_sms_adapter_stored_in_demo_mode_but_not_production_default() -> None:
+    demo_app = create_app(settings=Settings(demo_mode=True))
+    prod_app = create_app(settings=Settings())
+
+    assert hasattr(demo_app.state, "mock_sms_adapter")
+    assert not hasattr(prod_app.state, "mock_sms_adapter")
+
+
+def test_dev_otp_reads_back_the_mock_code_in_demo_mode() -> None:
+    app = create_app(settings=Settings(demo_mode=True))
+    adapter = cast(MockSmsAdapter, app.state.mock_sms_adapter)
+    asyncio.run(
+        adapter.send(
+            SmsSendRequest(
+                phone_e164="+919000000000",
+                params=SmsTemplateParams(otp="123456"),
+            )
+        )
+    )
+
+    response = TestClient(app).get("/v1/auth/dev/otp", params={"phone": "+919000000000"})
+
+    assert response.status_code == 200
+    assert response.json() == {"code": "123456"}
+
+
+def test_dev_otp_returns_null_in_demo_mode_when_nothing_sent() -> None:
+    app = create_app(settings=Settings(demo_mode=True))
+
+    response = TestClient(app).get("/v1/auth/dev/otp", params={"phone": "+919000000000"})
+
+    assert response.status_code == 200
+    assert response.json() == {"code": None}

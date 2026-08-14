@@ -240,6 +240,78 @@ def test_settings_refuse_non_positive_breaker_cooldown(cooldown_seconds: float) 
         Settings(sms_circuit_breaker_cooldown_seconds=cooldown_seconds)
 
 
+def test_settings_demo_flags_default_to_production_posture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CORS_ALLOWED_ORIGINS", raising=False)
+    monkeypatch.delenv("DEMO_MODE", raising=False)
+
+    settings = get_settings()
+
+    assert settings.cors_allowed_origins == ()
+    assert settings.demo_mode is False
+
+
+def test_settings_read_demo_flags_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "CORS_ALLOWED_ORIGINS",
+        " https://demo.example.com ,, http://other.example.com ",
+    )
+    monkeypatch.setenv("DEMO_MODE", "true")
+
+    settings = get_settings()
+
+    assert settings.cors_allowed_origins == (
+        "https://demo.example.com",
+        "http://other.example.com",
+    )
+    assert settings.demo_mode is True
+
+
+def test_settings_accept_demo_mode_with_mock_provider() -> None:
+    settings = Settings(demo_mode=True)
+
+    assert settings.demo_mode is True
+    assert settings.sms_provider == "mock"
+
+
+def test_settings_refuse_demo_mode_with_real_provider() -> None:
+    with pytest.raises(
+        ValueError,
+        match="demo_mode=True requires sms_provider='mock'",
+    ):
+        Settings(
+            app_environment="production",
+            demo_mode=True,
+            sms_provider="provider",
+            sms_api_key="k",
+            sms_base_url="https://sms.test",
+        )
+
+
+@pytest.mark.parametrize(
+    ("environment", "demo_mode", "expected"),
+    [
+        ("dev", False, True),
+        ("test", False, True),
+        ("production", False, False),
+        ("staging", False, False),
+        ("production", True, True),
+        ("staging", True, True),
+    ],
+)
+def test_mock_otp_readback_enabled_policy(
+    environment: str,
+    demo_mode: bool,
+    expected: bool,
+) -> None:
+    settings = Settings(app_environment=environment, demo_mode=demo_mode)
+
+    assert settings.mock_otp_readback_enabled is expected
+
+
 def test_build_sms_adapter_defaults_to_mock() -> None:
     adapter = build_sms_adapter(Settings())
 

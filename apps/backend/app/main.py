@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-from app.config import _DEV_TEST_ENVIRONMENTS, Settings, get_settings
+from app.config import Settings, get_settings
 from app.gateway.errors import register_gateway_error_handlers
 from app.gateway.idempotency import IdempotencyStore
 from app.gateway.jwt_verify import JWTVerifyMiddleware
@@ -38,7 +38,7 @@ _DEV_CORS_ORIGINS = ("http://localhost:3000",)
 
 
 class MockOtpResponse(BaseModel):
-    """Payload of the dev/test-only mock OTP read-back (api-standards §3)."""
+    """Payload of the dev/test/demo mock OTP read-back (api-standards §3)."""
 
     code: str | None
 
@@ -75,10 +75,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # gateway stack. The engine is lazy - no connection is opened at boot. It
     # is resolved before the middleware is registered so ``jwt_verify`` can
     # call the facade's ``validate_token`` on the settled instance. The mock
-    # SMS adapter is kept on app state as the read surface for the dev/test
-    # only OTP read-back route (the E2E suite) - the real provider is gated out
-    # of dev/test by Settings, so the adapter is a MockSmsAdapter whenever it
-    # is stored.
+    # SMS adapter is kept on app state as the read surface for the dev/test/demo
+    # OTP read-back route (the E2E suite and the deployed demo) - the real
+    # provider is gated out of dev/test by Settings, so the adapter is a
+    # MockSmsAdapter whenever it is stored.
     engine = create_async_engine(resolved_settings.database_url, poolclass=NullPool)
     sms_adapter = build_sms_adapter(resolved_settings)
     facade = IamFacade(
@@ -96,12 +96,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # and degrades to at-most-once (documented trade-off in the store module).
     app.state.idempotency_store = IdempotencyStore()
     # Only keep the plaintext OTP read surface when it can never be a real
-    # provider: mock SMS + a dev/test environment. Production-default boots
-    # leave app.state.mock_sms_adapter absent.
-    if (
-        resolved_settings.sms_provider.strip().lower() == "mock"
-        and resolved_settings.app_environment.strip().lower() in _DEV_TEST_ENVIRONMENTS
-    ):
+    # provider (mock SMS in dev/test, or the explicit demo flag - deployment
+    # plan 4.3). Production-default boots leave app.state.mock_sms_adapter
+    # absent. The policy lives on Settings.mock_otp_readback_enabled so the
+    # storage gate and the route gate below can never drift apart.
+    if resolved_settings.mock_otp_readback_enabled:
         app.state.mock_sms_adapter = cast(MockSmsAdapter, sms_adapter)
 
     # Gateway middleware stack (PHASE-1 T7b, #29; PHASE-2 T8, #59; REM T6, #77;
@@ -123,12 +122,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         window_seconds=resolved_settings.gateway_rate_limit_auth_window_seconds,
     )
     # CORS for the local-dev PWA origin (added so the allow-origin header
-    # reaches every response, including 401/403 from the gateway stack). No
-    # production origin is granted; the staging edge proxies the API
-    # same-origin.
+    # reaches every response, including 401/403 from the gateway stack). The
+    # deployment plan's public demo adds the env-configured Vercel origin on
+    # top, deduped against the dev origin; empty config grants nothing extra.
+    # The staging edge proxies the API same-origin and needs no CORS entry.
+    allow_origins = tuple(dict.fromkeys(_DEV_CORS_ORIGINS + resolved_settings.cors_allowed_origins))
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=list(_DEV_CORS_ORIGINS),
+        allow_origins=allow_origins,
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -153,27 +154,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/v1/auth/dev/otp", response_model=MockOtpResponse)
     async def dev_otp(request: Request, phone: str) -> MockOtpResponse | JSONResponse:
-        """Dev/test-only read-back of the most recent mock OTP sent to a phone.
+        """Dev/test/demo read-back of the most recent mock OTP sent to a phone.
 
         The mock SMS adapter keeps sent codes in memory inside the backend
-        process (they are hashed in the database), so the browser E2E suite
-        needs a small HTTP read-back to drive register -> verify. Delivery is
-        asynchronous since PHASE-2 REM T4 (#86), so the route first awaits the
-        facade's delivery queue - the read-back is safe against the background
-        send racing the response - and only then reads the recorded code. Gated
-        to the mock provider in dev/test; never answers against the real
-        provider or in production.
+        process (they are hashed in the database), so the browser E2E suite and
+        the deployed portfolio demo need a small HTTP read-back to drive
+        register -> verify. Delivery is asynchronous since PHASE-2 REM T4
+        (#86), so the route first awaits the facade's delivery queue - the
+        read-back is safe against the background send racing the response - and
+        only then reads the recorded code. Gated to the mock provider in
+        dev/test, or in any environment under the explicit DEMO_MODE flag
+        (deployment plan 4.3); never answers against the real provider.
         """
         settings = cast(Settings, request.app.state.settings)
         adapter = cast(MockSmsAdapter | None, getattr(request.app.state, "mock_sms_adapter", None))
         facade = cast(IamFacade, request.app.state.iam_facade)
         # mypy narrows ``adapter is not None`` only inside an if-condition, so
         # gate the success path directly rather than asserting on a boolean.
-        if (
-            settings.sms_provider.strip().lower() == "mock"
-            and settings.app_environment.strip().lower() in _DEV_TEST_ENVIRONMENTS
-            and adapter is not None
-        ):
+        if settings.mock_otp_readback_enabled and adapter is not None:
             await facade.delivery_queue.flush()
             return MockOtpResponse(code=adapter.last_sent_code(phone))
         envelope = ErrorEnvelope(
