@@ -177,7 +177,7 @@ PHASE-14 E2E + Observability + Release ◄─ all phases
 
 - **Databases Introduced/Updated:** PostgreSQL `iam` schema.
 - **Tables / Entities Created/Modified:** `identities` (phone_e164 unique, status Unverified/Active/Suspended), `otp_challenges` (hashed OTP, single-use, TTL 5 min, cooldown), `sessions` (jti, expiry, scope), `role_grants` (patient role), `iam_outbox`.
-- **Migration Scripts:** `v1.0__init_iam.sql`.
+- **Migration Scripts:** the shipped alembic series `v1.0__init_iam`, `v1.1__otp_lockout_counters`, `v1.2__session_refresh_tokens`.
 
 #### 4. Infrastructure, DevOps & Environment Targets
 

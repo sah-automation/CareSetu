@@ -169,10 +169,10 @@ async def test_first_time_phone_creates_identity_issues_otp_and_writes_events(
     assert all(row["status"] == "pending" for row in outbox)
     registered = next(row for row in outbox if row["event_type"] == "patient.registered")
     assert registered["payload"] == {"identity_id": identity["id"], "phone_e164": _PHONE}
-    otp_sent = next(row for row in outbox if row["event_type"] == "otp.sent")
-    assert otp_sent["payload"]["challenge_id"] == result.challenge_id
-    assert otp_sent["payload"]["identity_id"] == identity["id"]
-    assert sent not in str(otp_sent["payload"])
+    sent_row = next(row for row in outbox if row["event_type"] == "otp.sent")
+    assert sent_row["payload"]["challenge_id"] == result.challenge_id
+    assert sent_row["payload"]["identity_id"] == identity["id"]
+    assert sent not in str(sent_row["payload"])
 
 
 async def test_existing_phone_resolves_identity_and_issues_login_otp(

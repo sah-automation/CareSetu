@@ -13,9 +13,11 @@ repo-wide scan cannot trip on this file's own fixtures.
 import subprocess
 from pathlib import Path
 
+import pytest
 from scripts.check_event_names import (
     EventNameViolation,
     check_event_names,
+    main,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -75,3 +77,19 @@ def test_binary_file_is_skipped(tmp_path: Path) -> None:
 
 def test_repo_is_clean() -> None:
     assert check_event_names(_tracked_repo_files(REPO_ROOT)) == ()
+
+
+def test_main_with_no_files_falls_back_to_the_full_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    dirty = _write(repo, "dirty.md", f"Emit {_LEGACY} on rejection.\n")
+    subprocess.run(["git", "add", dirty.name], cwd=repo, check=True)
+    monkeypatch.chdir(repo)
+
+    assert main([]) == 1
+
+    subprocess.run(["git", "rm", "--cached", "-q", dirty.name], cwd=repo, check=True)
+    assert main([]) == 0
