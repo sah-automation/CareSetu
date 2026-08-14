@@ -7,11 +7,14 @@ and is gated to staging/production by ``Settings`` (``__post_init__``), keeping
 the real EXT-001 path out of dev/test.
 
 EXT-001 call discipline (third-party-integration-standards §1/§3): timeout
-<= 10 s, up to 3 retries (4 total attempts) with exponential + jitter,
+<= 10 s, up to 3 retries (4 total attempts) with exponential + jitter, an
+in-process circuit breaker (``CircuitBreaker``) that fast-fails every send
+while a provider outage persists and probes recovery after a cooldown,
 server-side API key from settings only, and the OTP value never reaches a log
 line (error-handling-observability: no OTPs, no tokens, no raw provider
-payloads in logs). The circuit-breaker column of §1 is a later-phase concern,
-not part of this ticket - the adapter honours timeout/retry here and logs a
+payloads in logs). Only genuine outage failures (network/timeout/5xx/429,
+``SmsDeliveryError(retries_exhausted=True)``) trip the breaker - a 4xx
+contract rejection never does. The provider adapter logs a
 ``patient.auth_failed`` marker on persistent failure so operators can alert.
 The marker is the dot-notation event name (registry §4.2), not an event
 envelope itself; if an external alert rule greps logs on the legacy name,
@@ -25,7 +28,9 @@ import logging
 import random
 import re
 import secrets
+import time
 from collections.abc import Awaitable, Callable
+from enum import StrEnum
 from typing import Literal, Protocol
 
 import httpx
@@ -33,6 +38,8 @@ import pydantic
 from pydantic import BaseModel, Field, field_validator
 
 from app.config import (
+    DEFAULT_SMS_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+    DEFAULT_SMS_CIRCUIT_BREAKER_THRESHOLD,
     DEFAULT_SMS_MAX_RETRIES,
     DEFAULT_SMS_TIMEOUT_SECONDS,
     Settings,
@@ -188,6 +195,134 @@ class SmsDeliveryQueue:
             )
 
 
+class CircuitBreakerState(StrEnum):
+    """The three circuit-breaker states (third-party-integration-standards §1)."""
+
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+
+
+class CircuitBreaker:
+    """In-process state machine gating EXT-001 sends during a provider outage.
+
+    Closed -> open after ``threshold`` consecutive outage failures; while open,
+    ``allow_request`` fast-fails every send until ``cooldown_seconds`` elapses,
+    then a half-open probe decides recovery: success closes the breaker, failure
+    opens it again. The state machine owns no IO - ``allow_request`` gates a
+    send and ``record_success``/``record_failure`` feed it outcomes. The clock
+    is injectable so tests can drive the cooldown without sleeping; breaker
+    state resets on process restart, the same in-process posture as the
+    idempotency store and rate limiter (handoff note, ticket #104). Only
+    genuine outages reach ``record_failure`` - the calling adapter gates on
+    ``SmsDeliveryError(retries_exhausted=True)``, so a 4xx contract rejection
+    is never counted here.
+    """
+
+    def __init__(
+        self,
+        *,
+        threshold: int = DEFAULT_SMS_CIRCUIT_BREAKER_THRESHOLD,
+        cooldown_seconds: float = DEFAULT_SMS_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._threshold = threshold
+        self._cooldown_seconds = cooldown_seconds
+        self._clock = clock
+        self._state = CircuitBreakerState.CLOSED
+        self._consecutive_failures = 0
+        self._opened_at: float | None = None
+
+    @property
+    def state(self) -> CircuitBreakerState:
+        """The current breaker state (closed/open/half_open)."""
+        return self._state
+
+    def allow_request(self) -> bool:
+        """Whether a send may proceed right now.
+
+        While open, the first call past the cooldown transitions to half-open
+        and lets the probe through; earlier calls are refused without touching
+        the wrapped adapter.
+        """
+        if self._state is CircuitBreakerState.OPEN:
+            if self._opened_at is not None and (
+                self._clock() - self._opened_at >= self._cooldown_seconds
+            ):
+                self._state = CircuitBreakerState.HALF_OPEN
+                return True
+            return False
+        return True
+
+    def record_success(self) -> None:
+        """Record a successful send; a half-open probe success closes the breaker."""
+        if self._state is CircuitBreakerState.HALF_OPEN:
+            logger.info("EXT-001 circuit breaker recovered; the provider accepts sends again")
+            self._state = CircuitBreakerState.CLOSED
+        self._consecutive_failures = 0
+
+    def record_failure(self) -> None:
+        """Record an outage failure; enough consecutive failures trip the breaker."""
+        if self._state is CircuitBreakerState.HALF_OPEN:
+            self._state = CircuitBreakerState.OPEN
+            self._opened_at = self._clock()
+            self._consecutive_failures = 1
+            logger.warning("EXT-001 circuit breaker re-opened after a half-open probe failed")
+            return
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self._threshold:
+            self._state = CircuitBreakerState.OPEN
+            self._opened_at = self._clock()
+            logger.warning(
+                "EXT-001 circuit breaker opened after %d consecutive outage failures",
+                self._consecutive_failures,
+            )
+
+
+class CircuitBreakerSmsAdapter:
+    """Wraps the provider adapter: gates each send through the circuit breaker.
+
+    The mock is never wrapped - this class exists only on the real EXT-001
+    path, where an outage must fast-fail every send instead of hammering the
+    provider with full retries (third-party-integration-standards §1). While
+    the breaker is open, ``send`` raises ``SmsDeliveryError`` immediately
+    without touching the wrapped adapter, and the failure flows through the
+    queue's degradation path (warn + ``on_delivery_failed`` audit event)
+    exactly like any retry-exhausted delivery. The half-open recovery probe is
+    single-flight: a send racing an in-flight probe is refused the same way,
+    so one slow probe cannot become a burst of concurrent provider calls.
+    """
+
+    def __init__(self, adapter: SmsAdapter, breaker: CircuitBreaker) -> None:
+        self._adapter = adapter
+        self._breaker = breaker
+        self._probe_in_flight = False
+
+    async def send(self, request: SmsSendRequest) -> SmsSendResult:
+        if not self._breaker.allow_request():
+            raise SmsDeliveryError(
+                "EXT-001 circuit breaker is open; send refused without calling the provider"
+            )
+        is_probe = self._breaker.state is CircuitBreakerState.HALF_OPEN
+        if is_probe:
+            if self._probe_in_flight:
+                raise SmsDeliveryError(
+                    "EXT-001 circuit breaker is half-open; a recovery probe is already in flight"
+                )
+            self._probe_in_flight = True
+        try:
+            result = await self._adapter.send(request)
+        except SmsDeliveryError as exc:
+            if exc.retries_exhausted:
+                self._breaker.record_failure()
+            raise
+        finally:
+            if is_probe:
+                self._probe_in_flight = False
+        self._breaker.record_success()
+        return result
+
+
 class SmsProviderAdapter:
     """Staging/production EXT-001 implementation (httpx, timeout + retries).
 
@@ -310,13 +445,23 @@ def mask_phone(phone_e164: str) -> str:
 
 
 def build_sms_adapter(settings: Settings) -> SmsAdapter:
-    """Resolve the EXT-001 adapter from config; mock is the CI/dev default."""
+    """Resolve the EXT-001 adapter from config; mock is the CI/dev default.
+
+    Only the provider branch is wrapped in the circuit breaker - the mock stays
+    unwrapped so dev/E2E sends are never fast-failed (acceptance, ticket #104).
+    """
     provider = settings.sms_provider.strip().lower()
     if provider == "mock":
         return MockSmsAdapter()
-    return SmsProviderAdapter(
-        api_key=settings.sms_api_key,
-        base_url=settings.sms_base_url,
-        timeout_seconds=settings.sms_timeout_seconds,
-        max_retries=settings.sms_max_retries,
+    return CircuitBreakerSmsAdapter(
+        SmsProviderAdapter(
+            api_key=settings.sms_api_key,
+            base_url=settings.sms_base_url,
+            timeout_seconds=settings.sms_timeout_seconds,
+            max_retries=settings.sms_max_retries,
+        ),
+        CircuitBreaker(
+            threshold=settings.sms_circuit_breaker_threshold,
+            cooldown_seconds=settings.sms_circuit_breaker_cooldown_seconds,
+        ),
     )

@@ -13,6 +13,8 @@ DEFAULT_APP_ENVIRONMENT = "production"
 DEFAULT_SMS_PROVIDER = "mock"
 DEFAULT_SMS_TIMEOUT_SECONDS = 10.0
 DEFAULT_SMS_MAX_RETRIES = 3
+DEFAULT_SMS_CIRCUIT_BREAKER_THRESHOLD = 5
+DEFAULT_SMS_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 30.0
 # Auth-surface rate limit (``NFR-SEC-004``): the OTP/auth endpoints are the
 # abuse target, so the gateway caps them per caller. 10 requests / 60 s per
 # IP is a headroom-rich ceiling above the one-user flow (register + verify +
@@ -47,6 +49,8 @@ class Settings:
     sms_base_url: str = ""
     sms_timeout_seconds: float = DEFAULT_SMS_TIMEOUT_SECONDS
     sms_max_retries: int = DEFAULT_SMS_MAX_RETRIES
+    sms_circuit_breaker_threshold: int = DEFAULT_SMS_CIRCUIT_BREAKER_THRESHOLD
+    sms_circuit_breaker_cooldown_seconds: float = DEFAULT_SMS_CIRCUIT_BREAKER_COOLDOWN_SECONDS
 
     def __post_init__(self) -> None:
         if self.gateway_jwt_verify_enabled and not self.gateway_jwt_signing_key:
@@ -87,6 +91,10 @@ class Settings:
             raise ValueError("gateway_access_token_ttl_seconds must be positive")
         if self.gateway_refresh_token_ttl_seconds <= 0:
             raise ValueError("gateway_refresh_token_ttl_seconds must be positive")
+        if self.sms_circuit_breaker_threshold <= 0:
+            raise ValueError("sms_circuit_breaker_threshold must be positive")
+        if self.sms_circuit_breaker_cooldown_seconds <= 0:
+            raise ValueError("sms_circuit_breaker_cooldown_seconds must be positive")
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -146,4 +154,11 @@ def get_settings() -> Settings:
         sms_base_url=os.environ.get("SMS_BASE_URL", ""),
         sms_timeout_seconds=_env_float("SMS_TIMEOUT_SECONDS", DEFAULT_SMS_TIMEOUT_SECONDS),
         sms_max_retries=_env_int("SMS_MAX_RETRIES", DEFAULT_SMS_MAX_RETRIES),
+        sms_circuit_breaker_threshold=_env_int(
+            "SMS_CIRCUIT_BREAKER_THRESHOLD", DEFAULT_SMS_CIRCUIT_BREAKER_THRESHOLD
+        ),
+        sms_circuit_breaker_cooldown_seconds=_env_float(
+            "SMS_CIRCUIT_BREAKER_COOLDOWN_SECONDS",
+            DEFAULT_SMS_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+        ),
     )
