@@ -371,6 +371,14 @@ class IamFacade:
         lockout is a counter, never identity state - ``status`` stays
         Unverified/Active/Suspended and ``Suspended`` remains operator-only.
 
+        The SMS-cost counting rule (ADR-0004 decision 4) is structural: every
+        wrong-guess failure flows through ``_record_failed_attempt``, so only
+        attempts against a challenge that was actually issued - ``wrong_code``,
+        ``spent``, ``expired``, ``replay`` - count toward the streak, because
+        only they incurred an SMS cost. ``no_challenge``, ``suspended``, and
+        ``locked`` rejections route through ``_reject`` and never touch the
+        counter.
+
         The identity row is locked ``FOR UPDATE`` so concurrent verifications
         for the same phone serialize: the challenge can be consumed exactly
         once, the role grant stays unique, and the failure counter cannot race.
@@ -460,56 +468,17 @@ class IamFacade:
                     outcome="verified", phone_e164=phone_e164, identity_id=identity_id
                 )
 
-            await self._record_failure(
+            return await self._record_failed_attempt(
                 connection,
+                identity_id=identity_id,
+                phone_e164=phone_e164,
                 challenge_id=challenge["id"],
                 status=challenge["status"],
                 attempts=challenge["attempts"],
                 decision=decision,
-            )
-            lockout = evaluate_failure(lockout_failed_attempts, now, lockout_until)
-            await connection.execute(
-                iam_identities.update()
-                .where(iam_identities.c.id == identity_id)
-                .values(
-                    lockout_failed_attempts=lockout.counter,
-                    lockout_until=lockout.lockout_until,
-                )
-            )
-            await write_outbox(
-                connection,
-                _IAM_SCHEMA,
-                IAM_OUTBOX_TABLE,
-                events.patient_auth_failed_envelope(
-                    identity_id=identity_id,
-                    phone_e164=phone_e164,
-                    reason=decision.reason or "expired",
-                    attempts_left=decision.attempts_left,
-                ),
-            )
-            if lockout.locked:
-                await write_outbox(
-                    connection,
-                    _IAM_SCHEMA,
-                    IAM_OUTBOX_TABLE,
-                    events.otp_failed_envelope(
-                        identity_id=identity_id,
-                        phone_e164=phone_e164,
-                        lockout_until=lockout.lockout_until or now,
-                    ),
-                )
-                return VerifyOtpResult(
-                    outcome="locked",
-                    phone_e164=phone_e164,
-                    identity_id=identity_id,
-                    attempts_left=decision.attempts_left,
-                    lockout_remaining_seconds=lockout_remaining_seconds(lockout.lockout_until, now),
-                )
-            return VerifyOtpResult(
-                outcome=decision.outcome,
-                phone_e164=phone_e164,
-                identity_id=identity_id,
-                attempts_left=decision.attempts_left,
+                lockout_failed_attempts=lockout_failed_attempts,
+                lockout_until=lockout_until,
+                now=now,
             )
 
     @staticmethod
@@ -1063,6 +1032,12 @@ class IamFacade:
         the rejection, and the returned ``VerifyOtpResult`` renders the outcome
         for the PWA. Only the lockout rejection carries
         ``lockout_remaining_seconds``, for its countdown.
+
+        These are the SMS-cost rule's no-counter rejections (ADR-0004 decision
+        4): none of them ever touched ``lockout_failed_attempts`` - a
+        ``no_challenge`` verify had no SMS sent for it, and the ``suspended``
+        and ``locked`` guards are not attempts - so this helper must not route
+        through ``_record_failed_attempt``.
         """
         await write_outbox(
             connection,
@@ -1104,3 +1079,81 @@ class IamFacade:
                 .where(iam_otp_challenges.c.id == challenge_id)
                 .values(**values)
             )
+
+    @staticmethod
+    async def _record_failed_attempt(
+        connection: AsyncConnection,
+        *,
+        identity_id: int,
+        phone_e164: str,
+        challenge_id: int,
+        status: str,
+        attempts: int,
+        decision: AttemptDecision,
+        lockout_failed_attempts: int,
+        lockout_until: datetime | None,
+        now: datetime,
+    ) -> VerifyOtpResult:
+        """Record a wrong-guess failure against a challenge that was actually issued.
+
+        This is the SMS-cost counting rule (ADR-0004 decision 4): only attempts
+        against a challenge an SMS was actually sent for - ``wrong_code``,
+        ``spent``, ``expired``, ``replay`` - reach this helper and count toward
+        the lockout streak, because only they incurred an SMS cost.
+        ``no_challenge``, ``suspended``, and ``locked`` rejections never call it
+        (they route through ``_reject``) and never touch the counter. The whole
+        chain lives here in one place: challenge write-back, ``evaluate_failure``,
+        the identity counter update, ``patient.auth_failed``, and ``otp.failed``
+        when this failure crosses the lockout threshold.
+        """
+        await IamFacade._record_failure(
+            connection,
+            challenge_id=challenge_id,
+            status=status,
+            attempts=attempts,
+            decision=decision,
+        )
+        lockout = evaluate_failure(lockout_failed_attempts, now, lockout_until)
+        await connection.execute(
+            iam_identities.update()
+            .where(iam_identities.c.id == identity_id)
+            .values(
+                lockout_failed_attempts=lockout.counter,
+                lockout_until=lockout.lockout_until,
+            )
+        )
+        await write_outbox(
+            connection,
+            _IAM_SCHEMA,
+            IAM_OUTBOX_TABLE,
+            events.patient_auth_failed_envelope(
+                identity_id=identity_id,
+                phone_e164=phone_e164,
+                reason=decision.reason or "expired",
+                attempts_left=decision.attempts_left,
+            ),
+        )
+        if lockout.locked:
+            await write_outbox(
+                connection,
+                _IAM_SCHEMA,
+                IAM_OUTBOX_TABLE,
+                events.otp_failed_envelope(
+                    identity_id=identity_id,
+                    phone_e164=phone_e164,
+                    lockout_until=lockout.lockout_until or now,
+                ),
+            )
+            return VerifyOtpResult(
+                outcome="locked",
+                phone_e164=phone_e164,
+                identity_id=identity_id,
+                attempts_left=decision.attempts_left,
+                lockout_remaining_seconds=lockout_remaining_seconds(lockout.lockout_until, now),
+            )
+        return VerifyOtpResult(
+            outcome=decision.outcome,
+            phone_e164=phone_e164,
+            identity_id=identity_id,
+            attempts_left=decision.attempts_left,
+        )

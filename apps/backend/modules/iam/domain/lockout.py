@@ -44,13 +44,19 @@ def evaluate_failure(
 
     ``consecutive_failures`` is the count persisted on the identity before this
     attempt and ``lockout_until`` is when the active window ends (``None`` when
-    the phone is not locked). Inside the window the counter keeps growing past
-    the threshold, matching the ``submitOtp`` contract (otpState.ts); once the
-    window has fully elapsed (``now >= lockout_until``) the streak resets to a
-    fresh count, so a single mistake after a lockout lifts never re-locks the
-    phone - the lockout is genuinely temporary (spec #51 §2.4). The boundary is
-    inclusive and matches ``lockout_remaining_seconds``: at ``now ==
-    lockout_until`` the lockout has ended and the failure starts a new streak.
+    the phone is not locked). The facade refuses a locked phone outright - under
+    its ``FOR UPDATE`` identity lock it consults ``lockout_remaining_seconds``
+    and rejects before ever calling this - so ``evaluate_failure`` is never
+    reached with an open window: the in-window growth line below is defensive.
+    It exists only so a caller
+    that did pass an open window grows the counter rather than corrupting it,
+    matching the ``submitOtp`` contract (otpState.ts); in-window attempts never
+    extend ``lockout_until``, so the lockout is genuinely temporary (ADR-0004
+    decision 4). Once the window has fully elapsed (``now >= lockout_until``)
+    the streak resets to a fresh count, so a single mistake after a lockout
+    lifts never re-locks the phone (spec #51 §2.4). The boundary is inclusive
+    and matches ``lockout_remaining_seconds``: at ``now == lockout_until`` the
+    lockout has ended and the failure starts a new streak.
     """
     counter = 1 if lockout_until is not None and now >= lockout_until else consecutive_failures + 1
     if counter >= LOCKOUT_THRESHOLD:
