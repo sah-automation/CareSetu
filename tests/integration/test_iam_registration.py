@@ -8,6 +8,10 @@ fails after the transaction. Also covers the PHASE-2 REM T3 anti-spam gate
 (ticket #76): an existing phone inside the resend cooldown or brute-force
 lockout, or Suspended, is refused on register with no challenge, no ``otp.sent``,
 and no SMS - first-time registration and out-of-cooldown login are unchanged.
+Re-entering an existing phone out of cooldown is latest-wins (PHASE-2 REM FIX 1,
+#101): the pending challenge is invalidated before the fresh one is issued, so
+the older code can no longer verify - the same invalidate-and-issue pair
+``resend_otp`` uses.
 Requires the native PostgreSQL; the suite skips cleanly when it is
 unreachable, and the ``iam`` schema is migrated up for the module and down
 again afterwards, leaving the database as it was found.
@@ -31,7 +35,7 @@ from sqlalchemy.pool import NullPool
 
 from modules.iam.adapters.sms import MockSmsAdapter, SmsAdapter, SmsSendRequest, SmsSendResult
 from modules.iam.domain.exceptions import InvalidPhoneError, SmsDeliveryError
-from modules.iam.domain.otp import verify_otp
+from modules.iam.domain.otp import OTP_TTL_SECONDS, verify_otp
 from modules.iam.facade import IamFacade
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -349,6 +353,48 @@ async def test_existing_phone_is_allowed_at_the_exact_cooldown_boundary(
     assert isinstance(allowed.challenge_id, int)
     assert allowed.cooldown_remaining_seconds == 60
     assert sms.sent_count(_PHONE) == 2
+
+
+async def test_re_entering_existing_phone_is_latest_wins_and_shadows_the_pending_code(
+    database_url: str, clean_iam: Any
+) -> None:
+    clock = MutableClock(_T0)
+    sms = MockSmsAdapter()
+    facade = _facade(database_url, sms, clock)
+
+    await facade.register_patient("9876543210")
+    await _flush(facade)
+    first_code = sms.last_sent_code(_PHONE)
+    assert first_code is not None and len(first_code) == 6
+
+    clock.set(_T0 + timedelta(seconds=61))
+    second = await facade.register_patient("9876543210")
+    await _flush(facade)
+    second_code = sms.last_sent_code(_PHONE)
+
+    assert second.outcome == "sent"
+    assert second.phone_e164 == _PHONE
+    assert second.flow == "login"
+    assert second.is_existing is True
+    assert isinstance(second.challenge_id, int)
+    assert second.expires_in_seconds == OTP_TTL_SECONDS
+    assert second.cooldown_remaining_seconds == 60
+    assert second.attempts_left == 5
+    assert second_code is not None and second_code != first_code
+
+    challenges = await _query(
+        database_url, "SELECT status, attempts FROM iam.iam_otp_challenges ORDER BY id"
+    )
+    assert [row["status"] for row in challenges] == ["Expired", "Pending"]
+    assert all(row["attempts"] == 0 for row in challenges)
+
+    stale = await facade.verify_otp("9876543210", first_code)
+    assert stale.outcome != "verified"
+    fresh = await facade.verify_otp("9876543210", second_code)
+    assert fresh.outcome == "verified"
+
+    outbox = await _query(database_url, "SELECT event_type FROM iam.iam_outbox")
+    assert sorted(row["event_type"] for row in outbox).count("otp.sent") == 2
 
 
 async def test_existing_phone_inside_lockout_is_refused_without_a_challenge_or_sms(

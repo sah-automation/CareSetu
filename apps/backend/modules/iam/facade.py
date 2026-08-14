@@ -4,8 +4,11 @@ The only legal cross-module import target for the ``iam`` module
 (coding-standards §2, ADR-0003). Phase 2 T3 (#54) implements the begin-or-
 resume entry point ``register_patient``; T4 (#55) adds the verification
 challenge machine ``verify_otp``; T5 (#56) adds ``resend_otp`` with the
-latest-wins resend, cooldown, and brute-force lockout; T6 (#57) adds the
-session seam ``issue_session`` (access JWT mint) and the stateless
+latest-wins resend, cooldown, and brute-force lockout. Both register's out-of-
+cooldown login and resend issue through the same latest-wins helpers
+(``_invalidate_pending_challenges`` + ``_issue_challenge``), so every re-entry
+for a phone shadows its pending code (PHASE-2 REM FIX 1, #101). T6 (#57) adds
+the session seam ``issue_session`` (access JWT mint) and the stateless
 ``validate_token`` the gateway RBAC consumes; T7 (#58) adds the SMS-independent
 ``refresh_session`` that rotates an opaque refresh token. The remaining typed
 methods arrive with their Phase 2 tickets.
@@ -17,7 +20,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Literal, cast
 
 from pydantic import BaseModel
 from sqlalchemy import ColumnElement, select
@@ -267,16 +270,15 @@ class IamFacade:
         locked phone back into the OTP flow. The identity row is locked
         ``FOR UPDATE`` so the refusal reads stable guard state and concurrent
         writers serialize. First-time registration and out-of-cooldown login
-        are unchanged: a hashed challenge is issued, ``otp.sent`` lands in the
-        iam outbox in the same transaction as the change, and the EXT-001
-        adapter delivers it as a background task afterwards - the request never
-        blocks on the provider (PHASE-2 REM T4, #86).
+        share the resend's latest-wins issuance: the pending challenge is
+        invalidated before a fresh hashed one is issued (the old code can no
+        longer verify), ``otp.sent`` lands in the iam outbox in the same
+        transaction as the change, and the EXT-001 adapter delivers it as a
+        background task afterwards - the request never blocks on the provider
+        (PHASE-2 REM T4, #86).
         """
         phone_e164 = normalize_phone(phone)
         now = self._clock()
-        otp = generate_otp()
-        expires_at = now + timedelta(seconds=OTP_TTL_SECONDS)
-        cooldown_until = now + timedelta(seconds=RESEND_COOLDOWN_SECONDS)
 
         async with self._engine.begin() as connection:
             inserted = await connection.execute(
@@ -321,25 +323,12 @@ class IamFacade:
                         cooldown_remaining_seconds=decision.cooldown_remaining_seconds,
                         lockout_remaining_seconds=decision.lockout_remaining_seconds,
                     )
-            challenge_id = (
-                await connection.execute(
-                    iam_otp_challenges.insert()
-                    .values(
-                        identity_id=identity_id,
-                        otp_hash=hash_otp(otp),
-                        status=CHALLENGE_PENDING,
-                        attempts=0,
-                        expires_at=expires_at,
-                        cooldown_until=cooldown_until,
-                    )
-                    .returning(iam_otp_challenges.c.id)
-                )
-            ).scalar_one()
-            await write_outbox(
+                await self._invalidate_pending_challenges(connection, identity_id)
+            challenge_id, otp = await self._issue_challenge(
                 connection,
-                _IAM_SCHEMA,
-                IAM_OUTBOX_TABLE,
-                events.otp_sent_envelope(identity_id, challenge_id, expires_at),
+                identity_id=identity_id,
+                phone_e164=phone_e164,
+                now=now,
             )
 
         self.delivery_queue.enqueue(
@@ -676,36 +665,12 @@ class IamFacade:
                     lockout_remaining_seconds=decision.lockout_remaining_seconds,
                 )
 
-            await connection.execute(
-                iam_otp_challenges.update()
-                .where(
-                    iam_otp_challenges.c.identity_id == identity_id,
-                    iam_otp_challenges.c.status == CHALLENGE_PENDING,
-                )
-                .values(status=CHALLENGE_EXPIRED)
-            )
-            otp = generate_otp()
-            expires_at = now + timedelta(seconds=OTP_TTL_SECONDS)
-            cooldown_until_new = now + timedelta(seconds=RESEND_COOLDOWN_SECONDS)
-            challenge_id = (
-                await connection.execute(
-                    iam_otp_challenges.insert()
-                    .values(
-                        identity_id=identity_id,
-                        otp_hash=hash_otp(otp),
-                        status=CHALLENGE_PENDING,
-                        attempts=0,
-                        expires_at=expires_at,
-                        cooldown_until=cooldown_until_new,
-                    )
-                    .returning(iam_otp_challenges.c.id)
-                )
-            ).scalar_one()
-            await write_outbox(
+            await self._invalidate_pending_challenges(connection, identity_id)
+            challenge_id, otp = await self._issue_challenge(
                 connection,
-                _IAM_SCHEMA,
-                IAM_OUTBOX_TABLE,
-                events.otp_sent_envelope(identity_id, challenge_id, expires_at),
+                identity_id=identity_id,
+                phone_e164=phone_e164,
+                now=now,
             )
 
         self.delivery_queue.enqueue(
@@ -972,6 +937,71 @@ class IamFacade:
                 .limit(1)
             )
         ).scalar_one_or_none()
+
+    @staticmethod
+    async def _invalidate_pending_challenges(connection: AsyncConnection, identity_id: int) -> None:
+        """Expire every Pending challenge for the identity (latest-wins).
+
+        Reissuing a code for a phone shadows the prior pending one (spec #51
+        §2.4): the expired challenge can no longer verify. Runs in the same
+        transaction as the fresh insert, so the invalidation and the issuance
+        commit as one change and a verification can never interleave between
+        them (the caller holds the identity row ``FOR UPDATE``).
+        """
+        await connection.execute(
+            iam_otp_challenges.update()
+            .where(
+                iam_otp_challenges.c.identity_id == identity_id,
+                iam_otp_challenges.c.status == CHALLENGE_PENDING,
+            )
+            .values(status=CHALLENGE_EXPIRED)
+        )
+
+    async def _issue_challenge(
+        self,
+        connection: AsyncConnection,
+        *,
+        identity_id: int,
+        phone_e164: str,
+        now: datetime,
+    ) -> tuple[int, str]:
+        """Issue a fresh Pending challenge and publish ``otp.sent``.
+
+        The single place a challenge is born, shared by ``register_patient``
+        and ``resend_otp``: inserts the hashed OTP row and lands ``otp.sent``
+        in the iam outbox in the same transaction as the invalidation. Returns
+        ``(challenge_id, otp)`` so the caller can schedule exactly one EXT-001
+        delivery after the transaction commits - one issuance, one SMS cost
+        (SMS-cost rule, FIX 2) - and never before commit, so a rollback can
+        never leave a sent code with no persisted challenge.
+        """
+        otp = generate_otp()
+        expires_at = now + timedelta(seconds=OTP_TTL_SECONDS)
+        cooldown_until = now + timedelta(seconds=RESEND_COOLDOWN_SECONDS)
+        challenge_id = cast(
+            int,
+            (
+                await connection.execute(
+                    iam_otp_challenges.insert()
+                    .values(
+                        identity_id=identity_id,
+                        otp_hash=hash_otp(otp),
+                        status=CHALLENGE_PENDING,
+                        attempts=0,
+                        expires_at=expires_at,
+                        cooldown_until=cooldown_until,
+                    )
+                    .returning(iam_otp_challenges.c.id)
+                )
+            ).scalar_one(),
+        )
+        await write_outbox(
+            connection,
+            _IAM_SCHEMA,
+            IAM_OUTBOX_TABLE,
+            events.otp_sent_envelope(identity_id, challenge_id, expires_at),
+        )
+        return challenge_id, otp
 
     @staticmethod
     async def _resolve_active_role(
