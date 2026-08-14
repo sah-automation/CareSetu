@@ -6,7 +6,11 @@ Exercises the facade through its typed seam with the EXT-001 adapter stubbed
 challenges with expiry, enforcement on both verify and resend, the lockout as
 a counter never identity state (``Suspended`` stays operator-only), and the
 same-transaction outbox rows (``otp.sent`` on resend, ``otp.failed`` on the
-lockout trigger). Requires the native PostgreSQL; the suite skips cleanly when
+lockout trigger), and the SMS-cost counting rule (PHASE-2 REM FIX 2, #102):
+only attempts against an actually-issued challenge - ``wrong_code``, ``spent``,
+``expired``, ``replay`` - increment ``lockout_failed_attempts``, while
+``no_challenge``, ``suspended``, and ``locked`` rejections leave it untouched.
+Requires the native PostgreSQL; the suite skips cleanly when
 it is unreachable, and the ``iam`` schema is migrated up for the module and
 down again afterwards, leaving the database as it was found.
 """
@@ -252,6 +256,11 @@ async def test_verify_and_resend_are_refused_while_locked(
     assert verify.outcome == "locked"
     assert verify.lockout_remaining_seconds is not None
 
+    identities = await _query(
+        database_url, "SELECT lockout_failed_attempts FROM iam.iam_identities"
+    )
+    assert identities == [{"lockout_failed_attempts": 10}]
+
     resend = await facade.resend_otp("9876543210")
 
     assert resend.outcome == "locked"
@@ -262,7 +271,12 @@ async def test_verify_and_resend_are_refused_while_locked(
         database_url,
         "SELECT lockout_failed_attempts, lockout_until FROM iam.iam_identities",
     )
-    assert identities[0]["lockout_failed_attempts"] == 10
+    assert identities == [
+        {
+            "lockout_failed_attempts": 10,
+            "lockout_until": _T0 + timedelta(seconds=61 + LOCKOUT_SECONDS),
+        }
+    ]
     outbox = await _query(database_url, "SELECT event_type FROM iam.iam_outbox")
     assert sorted(row["event_type"] for row in outbox).count("otp.failed") == 1
 
@@ -332,6 +346,89 @@ async def test_lockout_expires_and_failure_starts_a_fresh_streak(
     ]
     outbox = await _query(database_url, "SELECT event_type FROM iam.iam_outbox")
     assert sorted(row["event_type"] for row in outbox).count("otp.failed") == 1
+
+
+async def test_verify_with_no_challenge_leaves_the_counter_unchanged(
+    database_url: str, clean_iam: Any
+) -> None:
+    clock = MutableClock(_T0)
+    sms = MockSmsAdapter()
+    facade, _code = await _register(database_url, sms, clock)
+
+    engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(text("DELETE FROM iam.iam_otp_challenges"))
+    finally:
+        await engine.dispose()
+
+    result = await facade.verify_otp("9876543210", _WRONG)
+
+    assert result.outcome == "expired"
+
+    identities = await _query(
+        database_url, "SELECT lockout_failed_attempts, lockout_until FROM iam.iam_identities"
+    )
+    assert identities == [{"lockout_failed_attempts": 0, "lockout_until": None}]
+
+    outbox = await _query(database_url, "SELECT event_type, payload FROM iam.iam_outbox")
+    failed = next(row for row in outbox if row["event_type"] == "patient.auth_failed")
+    assert failed["payload"]["reason"] == "no_challenge"
+
+
+async def test_verify_against_expired_challenge_increments_the_streak(
+    database_url: str, clean_iam: Any
+) -> None:
+    clock = MutableClock(_T0)
+    sms = MockSmsAdapter()
+    facade, code = await _register(database_url, sms, clock)
+
+    clock.set(_T0 + timedelta(seconds=OTP_TTL_SECONDS + 1))
+    result = await facade.verify_otp("9876543210", code)
+
+    assert result.outcome == "expired"
+
+    identities = await _query(
+        database_url, "SELECT lockout_failed_attempts, lockout_until FROM iam.iam_identities"
+    )
+    assert identities == [{"lockout_failed_attempts": 1, "lockout_until": None}]
+
+
+async def test_verify_against_spent_challenge_increments_the_streak(
+    database_url: str, clean_iam: Any
+) -> None:
+    clock = MutableClock(_T0)
+    sms = MockSmsAdapter()
+    facade, _ = await _register(database_url, sms, clock)
+
+    await _spend_budget(facade)
+
+    identities = await _query(
+        database_url, "SELECT lockout_failed_attempts, lockout_until FROM iam.iam_identities"
+    )
+    assert identities == [{"lockout_failed_attempts": 5, "lockout_until": None}]
+
+
+async def test_verify_against_replayed_challenge_increments_the_streak(
+    database_url: str, clean_iam: Any
+) -> None:
+    clock = MutableClock(_T0)
+    sms = MockSmsAdapter()
+    facade, code = await _register(database_url, sms, clock)
+
+    assert (await facade.verify_otp("9876543210", code)).outcome == "verified"
+    replay = await facade.verify_otp("9876543210", code)
+
+    assert replay.outcome == "expired"
+
+    identities = await _query(
+        database_url, "SELECT lockout_failed_attempts, lockout_until FROM iam.iam_identities"
+    )
+    assert identities == [{"lockout_failed_attempts": 1, "lockout_until": None}]
+
+    outbox = await _query(database_url, "SELECT event_type, payload FROM iam.iam_outbox")
+    failed = next(row for row in outbox if row["event_type"] == "patient.auth_failed")
+    assert failed["payload"]["reason"] == "replay"
 
 
 async def test_resend_for_suspended_identity_is_refused(database_url: str, clean_iam: Any) -> None:
