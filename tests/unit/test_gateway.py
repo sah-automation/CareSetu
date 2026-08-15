@@ -24,6 +24,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from fastapi.testclient import TestClient
 from starlette.requests import Request
+from starlette.responses import Response
 
 from app.config import Settings, get_settings
 from app.gateway.principal import Principal
@@ -174,6 +175,29 @@ def _assert_gateway_rejection_logged(caplog: pytest.LogCaptureFixture, trace_id:
     assert any(
         "gateway_rejection" in record.getMessage() and f"trace_id={trace_id}" in record.getMessage()
         for record in caplog.records
+    )
+
+
+def _auth_request(client_ip: str) -> Request:
+    """A crafted ``/v1/auth`` scope presenting ``client_ip`` as the caller's host.
+
+    ``TestClient`` hardcodes a single client IP, so the per-IP isolation test
+    (B4) builds its own scopes and drives ``RateLimitMiddleware.dispatch``
+    directly instead of going through the app.
+    """
+    return Request(
+        scope={
+            "type": "http",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/v1/auth/register",
+            "raw_path": b"/v1/auth/register",
+            "query_string": b"",
+            "root_path": "",
+            "headers": [],
+            "client": (client_ip, 12345),
+            "server": ("testserver", 80),
+        }
     )
 
 
@@ -575,6 +599,34 @@ def test_rate_limit_prune_keeps_bucket_dict_bounded() -> None:
     middleware._prune(now)
 
     assert len(middleware._buckets) <= _MAX_TRACKED_BUCKETS
+
+
+async def test_rate_limit_keys_buckets_per_client_ip() -> None:
+    """B4: two source IPs exhaust their own caps; neither 429s the other.
+
+    ``TestClient`` always presents the single IP ``"testclient"``, so this
+    drives ``RateLimitMiddleware.dispatch`` directly with crafted ``Request``
+    scopes carrying different ``client.host`` values and a stub ``call_next``.
+    IP A exhausting its bucket does not 429 IP B, and vice versa - the
+    per-caller keying behind NFR-SEC-004 ingress abuse protection.
+    """
+    middleware = RateLimitMiddleware(app=None, enabled=True, max_requests=2, window_seconds=60)
+
+    async def stub_call_next(request: Request) -> Response:
+        return Response(status_code=200)
+
+    ip_a = _auth_request("1.2.3.4")
+    ip_b = _auth_request("5.6.7.8")
+
+    assert (await middleware.dispatch(ip_a, stub_call_next)).status_code == 200
+    assert (await middleware.dispatch(ip_a, stub_call_next)).status_code == 200
+    assert (await middleware.dispatch(ip_a, stub_call_next)).status_code == 429
+
+    assert (await middleware.dispatch(ip_b, stub_call_next)).status_code == 200
+    assert (await middleware.dispatch(ip_b, stub_call_next)).status_code == 200
+    assert (await middleware.dispatch(ip_b, stub_call_next)).status_code == 429
+
+    assert (await middleware.dispatch(ip_a, stub_call_next)).status_code == 429
 
 
 # ---------------------------------------------------------------------------
