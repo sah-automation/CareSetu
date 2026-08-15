@@ -1,0 +1,74 @@
+name: Deploy
+
+# Continuous deployment (DEPLOY-6, ticket #116). Runs on every push to main
+# and on manual dispatch. Vercel deploys the frontend from the same push by
+# itself, so this workflow only manages the parts that are not self-deploying:
+# the Supabase schema (migrate + seed) and the Render backend (deploy hook).
+#
+# Ordering tolerance: Vercel's frontend build may briefly race this workflow's
+# migration. The app tolerates it - registration against a not-yet-migrated
+# database returns a 500 envelope the UI shows as an error, and the user
+# retries once the migration lands (plan section 6.1).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # One in-flight deploy per branch; a newer run cancels an older one from
+  # the same branch (plan section 6.1).
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: CI gate (reusable ci.yml)
+    # CD only proceeds on green CI: ci.yml runs every job (lint, typecheck,
+    # unit, page-budget, migration-check, integration, backup-smoke, e2e, scan)
+    # as one reusable gate before migrate-and-seed starts. The called workflow
+    # is auto-granted secrets.GITHUB_TOKEN, so the scan job runs the same here
+    # as it does standalone.
+    uses: ./.github/workflows/ci.yml
+
+  migrate-and-seed:
+    name: migrate + seed (Supabase)
+    needs: gate
+    runs-on: ubuntu-latest
+    env:
+      # Both secrets are created during DEPLOY-7 provisioning. A missing secret
+      # fails the run loudly at the first assert step, before migrations or the
+      # seed touch the database - never a silent fallback to the localhost
+      # defaults in alembic.ini / app config.
+      DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
+      RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: install backend
+        run: uv sync --project apps/backend
+      - name: assert SUPABASE_DATABASE_URL is set
+        run: test -n "$DATABASE_URL"
+      - name: assert RENDER_DEPLOY_HOOK_URL is set
+        run: test -n "$RENDER_DEPLOY_HOOK_URL"
+      - name: alembic upgrade head
+        run: uv run --project apps/backend alembic -c apps/backend/alembic.ini upgrade head
+      - name: seed demo data
+        # The plan's repo-root spelling (`uv run --project apps/backend python
+        # -m scripts.seed_demo`) cannot import the `scripts` package; ticket
+        # #114 runs the seed from `apps/backend`, so this step uses that cwd
+        # and lets uv auto-detect the project there. Do not revert to root.
+        working-directory: apps/backend
+        run: uv run python -m scripts.seed_demo
+
+  deploy-render:
+    name: trigger Render deploy
+    needs: migrate-and-seed
+    runs-on: ubuntu-latest
+    env:
+      RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+    steps:
+      # --fail makes a non-2xx hook response fail the job instead of passing
+      # silently.
+      - name: fire Render deploy hook
+        run: curl --fail -X POST "$RENDER_DEPLOY_HOOK_URL"
