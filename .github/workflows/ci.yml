@@ -284,3 +284,38 @@ jobs:
         run: uvx pip-audit --path apps/backend/.venv
       - name: npm audit
         run: npm audit --audit-level=high
+
+  sbom:
+    name: sbom (cyclonedx backend + frontend artifacts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+      - name: install backend
+        run: uv sync --project apps/backend --group dev
+      - name: generate backend sbom
+        # The upstream generator (formerly `pip-cyclonedx`) now ships as
+        # `cyclonedx-bom` with the `cyclonedx-py` CLI; `uvx` keeps it out of the
+        # repo's dependency graph. `environment` scans the synced venv.
+        run: uvx --from cyclonedx-bom cyclonedx-py environment -o backend-sbom.json apps/backend/.venv
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: install frontend
+        run: npm ci
+      - name: generate frontend sbom
+        # Run from the workspace root: @cyclonedx/cyclonedx-npm needs the root
+        # package-lock.json and hoisted node_modules (npm workspaces leave no
+        # lockfile or node_modules under apps/frontend).
+        run: npx --yes @cyclonedx/cyclonedx-npm -o frontend-sbom.json
+      - name: upload sbom artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: |
+            backend-sbom.json
+            frontend-sbom.json
