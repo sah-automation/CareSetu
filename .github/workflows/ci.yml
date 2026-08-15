@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Reused by deploy.yml as its gate: CD runs only on green CI.
+  workflow_call:
 
 jobs:
   lint:
