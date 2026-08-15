@@ -76,6 +76,41 @@ jobs:
       - name: build, serve, and measure channel payloads
         run: npm run check:pages
 
+  lighthouse:
+    name: lighthouse gate (NFR-PERF-001, mobile + throttled 4G)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: install frontend
+        run: npm ci
+      - name: install playwright chromium
+        # Reuses the same Playwright Chromium the e2e job installs, so the
+        # Lighthouse run needs no second browser download (plan §3.C1).
+        run: npx playwright install --with-deps chromium
+      - name: install lighthouse cli
+        # Kept out of the dependency graph (like k6/ZAP) so npm audit and npm
+        # ci are untouched; pinned for reproducibility.
+        run: npm install --no-save lighthouse@13.4.1
+      - name: resolve playwright chromium path
+        id: chromium
+        run: echo "chrome_path=$(node -e "console.log(require('@playwright/test').chromium.executablePath())")" >> "$GITHUB_OUTPUT"
+      - name: build, serve, and run lighthouse
+        run: npm run check:lighthouse
+        env:
+          CHROME_PATH: ${{ steps.chromium.outputs.chrome_path }}
+      - name: upload lighthouse report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lighthouse-report
+          path: |
+            lighthouse-report.html
+            lighthouse-report.json
+
   migration-check:
     name: migration-check (alembic single head + no cross-schema FK)
     runs-on: ubuntu-latest

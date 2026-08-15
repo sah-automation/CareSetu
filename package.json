@@ -32,7 +32,8 @@
     "check:edge": "node scripts/py.cjs apps/backend/scripts/check_edge_config.py",
     "check:backup": "node scripts/py.cjs apps/backend/scripts/check_backup_config.py",
     "build": "npm run build -w @caresetu/frontend",
-    "check:pages": "node scripts/measure-pages.cjs"
+    "check:pages": "node scripts/measure-pages.cjs",
+    "check:lighthouse": "node scripts/lighthouse-gate.cjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.49.0"
