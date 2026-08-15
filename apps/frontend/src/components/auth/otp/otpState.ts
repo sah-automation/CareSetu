@@ -56,6 +56,7 @@ export interface OtpState {
   verifiedAt: string | null;
   busy: boolean;
   session: StoredSession | null;
+  otpSends: number;
   hydrated: boolean;
 }
 
@@ -76,6 +77,7 @@ export function initialState(): OtpState {
     verifiedAt: null,
     busy: false,
     session: null,
+    otpSends: 0,
     hydrated: false,
   };
 }
@@ -373,6 +375,7 @@ export function useOtpFlow(): OtpFlow {
               busy: false,
               lastError: null,
               lastNotice: result.is_existing ? t.duplicateNotice : null,
+              otpSends: s.otpSends + 1,
             }));
           })
           .catch((error: unknown) => {
@@ -501,6 +504,7 @@ export function useOtpFlow(): OtpFlow {
                 busy: false,
                 lastError: null,
                 lastNotice: t.latestWins,
+                otpSends: prev.otpSends + 1,
               }));
               return;
             }

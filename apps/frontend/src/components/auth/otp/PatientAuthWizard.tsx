@@ -6,9 +6,11 @@
 // countdown ring / resend cooldown / attempts-left / lockout states, and a
 // successful verify stores the session so the patient lands on the
 // authenticated home - the protected patient view. Prototype-only chrome
-// (mock OTP hint, state strip, demo toggles) is gone.
+// (mock OTP hint, state strip, demo toggles) is gone; the only demo surface
+// left is the build-flag-gated OTP read-back banner (DEPLOY-4, #118), which
+// is inert unless NEXT_PUBLIC_DEMO_MODE is inlined as "true" at build time.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import {
   IconCheck,
@@ -18,6 +20,7 @@ import {
   IconPhone,
   IconShield,
 } from "@/components/auth/icons";
+import { fetchDemoOtp } from "@/lib/auth/api";
 import type { OtpFlow } from "./otpState";
 import { formatCountdown, OTP_TTL_SECONDS, useOtpFlow } from "./otpState";
 import {
@@ -273,6 +276,24 @@ function AuthenticatedHome({ flow }: { flow: OtpFlow }) {
 
 export function PatientAuthWizard() {
   const flow = useOtpFlow();
+  const demoMode = process.env.NEXT_PUBLIC_DEMO_MODE === "true";
+  const [demoOtp, setDemoOtp] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!demoMode || flow.state.stage !== "otp" || flow.state.otpSends < 1) {
+      return;
+    }
+    setDemoOtp(null);
+    let cancelled = false;
+    void fetchDemoOtp(flow.state.phone).then((code) => {
+      if (!cancelled) {
+        setDemoOtp(code);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [demoMode, flow.state.stage, flow.state.otpSends, flow.state.phone]);
 
   if (!flow.state.hydrated) {
     return null;
@@ -291,6 +312,11 @@ export function PatientAuthWizard() {
       <StepDots flow={flow} />
       <main className={stylesB.main}>
         <div className={stylesB.card}>
+          {flow.state.stage === "otp" && demoMode && demoOtp !== null && (
+            <div className={stylesB.demoBanner} role="status">
+              Demo OTP: {demoOtp}
+            </div>
+          )}
           {flow.state.stage === "phone" && <PhoneStep flow={flow} />}
           {flow.state.stage === "otp" && <OtpStep flow={flow} />}
           {flow.state.stage === "done" && <DoneStep flow={flow} />}
