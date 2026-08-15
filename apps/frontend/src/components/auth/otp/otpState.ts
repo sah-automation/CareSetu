@@ -129,6 +129,7 @@ export interface I18n {
   stepPhone: string;
   stepVerify: string;
   stepDone: string;
+  stepProgress: string;
   valueProps: string[];
   networkError: string;
   smsFailed: string;
@@ -175,6 +176,7 @@ export const STRINGS: Record<Lang, I18n> = {
     stepPhone: "Phone",
     stepVerify: "Verify",
     stepDone: "Done",
+    stepProgress: "Sign in progress",
     valueProps: [
       "One stable identity - no duplicate accounts",
       "Your record stays yours, shared only with your consent",
@@ -221,6 +223,7 @@ export const STRINGS: Record<Lang, I18n> = {
     stepPhone: "फ़ोन",
     stepVerify: "सत्यापन",
     stepDone: "पूर्ण",
+    stepProgress: "साइन इन प्रगति",
     valueProps: [
       "एक स्थिर पहचान - कोई डुप्लीकेट खाता नहीं",
       "आपका रिकॉर्ड आपका है, केवल आपकी सहमति से साझा",

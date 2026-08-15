@@ -1,0 +1,58 @@
+# TEST-B1 (#135): OWASP ZAP API scan of the locally-booted backend's OpenAPI
+# spec (/openapi.json), driven headless by the ci.yml zap-dast job via
+# `zap.sh -cmd -autorun`.
+#
+# The openapi job imports every endpoint the spec declares, activeScan attacks
+# them with the default active-scan policy, the reports are written for the
+# artifact upload, and the exitStatus job maps the findings to ZAP's exit
+# code so the CI gate needs no report parsing:
+#   0 - no alert at or above warnLevel (Medium) (clean)
+#   2 - Medium alerts present, none High (warnings - job passes, artifacts reviewed)
+#   1 - at least one High alert, or a scan error (job fails)
+# (Low/Info alerts alone also exit 0, since warnLevel is Medium.)
+#
+# The run is bounded to stay inside the plan's CI runtime upper bound: the
+# active scan is capped at 10 minutes and the passive queue wait at 2 minutes.
+# The Automation Framework add-on bundled in ZAP 2.17.0 (v0.58.0) has no
+# whole-plan duration parameter, so those two caps bound the run.
+---
+env:
+  contexts:
+    - name: caresetu
+      urls:
+        - "http://127.0.0.1:8000"
+  parameters:
+    failOnError: true
+    failOnWarning: false
+    continueOnFailure: false
+    progressToStdout: true
+jobs:
+  - type: openapi
+    parameters:
+      apiUrl: "http://127.0.0.1:8000/openapi.json"
+      context: caresetu
+      targetUrl: "http://127.0.0.1:8000"
+  - type: activeScan
+    parameters:
+      context: caresetu
+      maxScanDurationInMins: 10
+  - type: passiveScan-wait
+    parameters:
+      maxDuration: 2
+  - type: report
+    parameters:
+      template: traditional-json
+      reportDir: .
+      reportFile: zap-report
+  - type: report
+    parameters:
+      template: traditional-html
+      reportDir: .
+      reportFile: zap-report
+  - type: exitStatus
+    parameters:
+      errorLevel: High
+      warnLevel: Medium
+      okExitValue: 0
+      errorExitValue: 1
+      warnExitValue: 2

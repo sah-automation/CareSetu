@@ -76,6 +76,41 @@ jobs:
       - name: build, serve, and measure channel payloads
         run: npm run check:pages
 
+  lighthouse:
+    name: lighthouse gate (NFR-PERF-001, mobile + throttled 4G)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: install frontend
+        run: npm ci
+      - name: install playwright chromium
+        # Reuses the same Playwright Chromium the e2e job installs, so the
+        # Lighthouse run needs no second browser download (plan §3.C1).
+        run: npx playwright install --with-deps chromium
+      - name: install lighthouse cli
+        # Kept out of the dependency graph (like k6/ZAP) so npm audit and npm
+        # ci are untouched; pinned for reproducibility.
+        run: npm install --no-save lighthouse@13.4.1
+      - name: resolve playwright chromium path
+        id: chromium
+        run: echo "chrome_path=$(node -e "console.log(require('@playwright/test').chromium.executablePath())")" >> "$GITHUB_OUTPUT"
+      - name: build, serve, and run lighthouse
+        run: npm run check:lighthouse
+        env:
+          CHROME_PATH: ${{ steps.chromium.outputs.chrome_path }}
+      - name: upload lighthouse report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lighthouse-report
+          path: |
+            lighthouse-report.html
+            lighthouse-report.json
+
   migration-check:
     name: migration-check (alembic single head + no cross-schema FK)
     runs-on: ubuntu-latest
@@ -91,6 +126,52 @@ jobs:
         run: uv run --project apps/backend alembic -c apps/backend/alembic.ini heads
       - name: cross-schema FK scan
         run: uv run --project apps/backend python apps/backend/scripts/check_migrations_fk.py
+
+  contract-check:
+    name: contract check (OpenAPI vs frontend auth client)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: caresetu
+          POSTGRES_PASSWORD: caresetu
+          POSTGRES_DB: caresetu
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U caresetu -d caresetu"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+      - name: install backend
+        run: uv sync --project apps/backend --group dev
+      - name: boot backend and wait for /openapi.json
+        # TEST-F: the checker needs the backend's real schema, so the job boots
+        # the app through the same shared harness as the e2e and load-test jobs
+        # (scripts/e2e-backend.cjs: migrations then uvicorn on :8000) and
+        # fetches /openapi.json from it rather than generating the document
+        # in-process.
+        run: |
+          node scripts/e2e-backend.cjs &
+          for i in $(seq 1 90); do
+            if curl -sf http://127.0.0.1:8000/openapi.json >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "backend did not serve /openapi.json on :8000" >&2
+          exit 1
+        env:
+          DATABASE_URL: postgresql+asyncpg://caresetu:caresetu@localhost:5432/caresetu
+      - name: run contract check against the booted app
+        run: uv run --project apps/backend python scripts/contract_check.py --openapi http://127.0.0.1:8000/openapi.json
 
   integration:
     name: integration tests (pytest vs Postgres)
@@ -219,6 +300,160 @@ jobs:
           # then applies migrations against this database and serves :8000).
           DATABASE_URL: postgresql+asyncpg://caresetu:caresetu@localhost:5432/caresetu
 
+  load-test:
+    name: load test (k6 patient flow, regression bounds)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: caresetu
+          POSTGRES_PASSWORD: caresetu
+          POSTGRES_DB: caresetu
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U caresetu -d caresetu"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+      - name: install backend
+        run: uv sync --project apps/backend --group dev
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: install k6 (explicit, like ZAP's JRE in TEST-B1)
+        run: |
+          curl --fail -sSL https://github.com/grafana/k6/releases/download/v2.2.0/k6-v2.2.0-linux-amd64.tar.gz -o k6.tar.gz
+          tar -xzf k6.tar.gz
+          sudo install -m 0755 k6-v2.2.0-linux-amd64/k6 /usr/local/bin/k6
+          k6 version
+      - name: run load test
+        run: npm run test:load
+        env:
+          # Reaches the backend booted by scripts/loadtest/run.cjs via
+          # scripts/e2e-backend.cjs (migrations then uvicorn on :8000) with the
+          # mock SMS adapter and the rate limiter disabled (TEST-A1 posture).
+          DATABASE_URL: postgresql+asyncpg://caresetu:caresetu@localhost:5432/caresetu
+
+  zap-dast:
+    name: zap dast (API scan of /openapi.json, HIGH/CRITICAL gate)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: caresetu
+          POSTGRES_PASSWORD: caresetu
+          POSTGRES_DB: caresetu
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U caresetu -d caresetu"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+      - name: install backend
+        run: uv sync --project apps/backend --group dev
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: install ZAP (explicit JRE + DAST tool, like k6 in TEST-A1)
+        # ZAP is not pre-installed on GitHub runners, so it is downloaded
+        # explicitly and pinned for reproducibility (same treatment as the k6
+        # step in the load-test job). The Linux tarball carries no JRE, hence
+        # the setup-java step above.
+        run: |
+          curl --fail -sSL https://github.com/zaproxy/zaproxy/releases/download/v2.17.0/ZAP_2.17.0_Linux.tar.gz -o zap.tar.gz
+          tar -xzf zap.tar.gz
+          ZAP_HOME="$(dirname "$(find . -maxdepth 2 -name zap.sh | head -n1)")"
+          echo "ZAP_HOME=$ZAP_HOME" >> "$GITHUB_ENV"
+          "$ZAP_HOME/zap.sh" -version
+      - name: boot backend and wait for /openapi.json
+        # TEST-B1: boots the same rate-limit-disabled local instance as the
+        # load-test job (scripts/e2e-backend.cjs: migrations then uvicorn on
+        # :8000), so ZAP's probes of the auth surface never 429 (TEST-A1
+        # posture, plan §3.B1).
+        run: |
+          node scripts/e2e-backend.cjs &
+          for i in $(seq 1 90); do
+            if curl -sf http://127.0.0.1:8000/openapi.json >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "backend did not serve /openapi.json on :8000" >&2
+          exit 1
+        env:
+          DATABASE_URL: postgresql+asyncpg://caresetu:caresetu@localhost:5432/caresetu
+          APP_ENVIRONMENT: test
+          SMS_PROVIDER: mock
+          GATEWAY_JWT_VERIFY_ENABLED: "true"
+          GATEWAY_JWT_SIGNING_KEY: e2e-dev-only-signing-key
+          GATEWAY_RATE_LIMIT_ENABLED: "false"
+      - name: run ZAP API scan
+        # Headless Automation Framework plan (scripts/zap/api-scan-plan.yaml):
+        # imports the OpenAPI spec, active-scans it, writes the HTML+JSON
+        # reports, then exitStatus maps findings to the exit code: 0 = no
+        # Medium+ alert, 2 = Medium only (pass + artifact), 1 = High alert or
+        # a scan error (fail). The reports are uploaded as artifacts for
+        # review. After the gate, the JSON report is checked to contain at
+        # least one scanned site so an empty scan (no endpoints imported)
+        # cannot silently pass.
+        run: |
+          set +e
+          # ZAP's launcher cd's into ZAP_HOME, so a relative plan path (and the
+          # plan's relative reportDir) resolve against ZAP_HOME, not the
+          # workspace - the plan is passed by absolute workspace path and the
+          # reports are copied back from ZAP_HOME to scripts/zap/ so the empty-
+          # scan guard and the artifact upload below see them.
+          "$ZAP_HOME/zap.sh" -cmd -autorun "$GITHUB_WORKSPACE/scripts/zap/api-scan-plan.yaml"
+          zap_exit=$?
+          set -e
+          cp "$ZAP_HOME/zap-report.json" scripts/zap/zap-report.json || true
+          cp "$ZAP_HOME/zap-report.html" scripts/zap/zap-report.html || true
+          echo "ZAP exit code: $zap_exit (0=clean, 2=Medium warnings, 1=High or plan error)"
+          if [ "$zap_exit" -eq 0 ] || [ "$zap_exit" -eq 2 ]; then
+            python3 - <<'PY'
+          import json, sys
+          try:
+              with open("scripts/zap/zap-report.json", encoding="utf-8") as f:
+                  report = json.load(f)
+          except OSError as e:
+              print("ZAP API scan FAILED: could not read scripts/zap/zap-report.json -", e)
+              sys.exit(1)
+          if not report.get("site"):
+              print("ZAP API scan FAILED: report contains no scanned sites - the auth surface was never probed")
+              sys.exit(1)
+          print(f"ZAP API scan passed: no High alerts; {len(report['site'])} site(s) scanned - report uploaded as artifact")
+          PY
+            exit 0
+          fi
+          echo "ZAP API scan FAILED: HIGH/CRITICAL alert or scan error - see the zap-report artifact"
+          exit 1
+      - name: upload ZAP scan report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-report
+          path: |
+            scripts/zap/zap-report.json
+            scripts/zap/zap-report.html
+
   scan:
     name: security scan (gitleaks + bandit + pip-audit)
     runs-on: ubuntu-latest
@@ -241,3 +476,38 @@ jobs:
         run: uvx pip-audit --path apps/backend/.venv
       - name: npm audit
         run: npm audit --audit-level=high
+
+  sbom:
+    name: sbom (cyclonedx backend + frontend artifacts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+      - name: install backend
+        run: uv sync --project apps/backend --group dev
+      - name: generate backend sbom
+        # The upstream generator (formerly `pip-cyclonedx`) now ships as
+        # `cyclonedx-bom` with the `cyclonedx-py` CLI; `uvx` keeps it out of the
+        # repo's dependency graph. `environment` scans the synced venv.
+        run: uvx --from cyclonedx-bom cyclonedx-py environment -o backend-sbom.json apps/backend/.venv
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: install frontend
+        run: npm ci
+      - name: generate frontend sbom
+        # Run from the workspace root: @cyclonedx/cyclonedx-npm needs the root
+        # package-lock.json and hoisted node_modules (npm workspaces leave no
+        # lockfile or node_modules under apps/frontend).
+        run: npx --yes @cyclonedx/cyclonedx-npm -o frontend-sbom.json
+      - name: upload sbom artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: |
+            backend-sbom.json
+            frontend-sbom.json

@@ -14,6 +14,7 @@
     "test:integration": "node scripts/py.cjs -m pytest -c apps/backend/pyproject.toml tests/integration -q",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
+    "test:load": "node scripts/loadtest/run.cjs",
     "lint": "pre-commit run --all-files",
     "lint:backend": "ruff check --config apps/backend/pyproject.toml apps/backend tests",
     "lint:frontend": "npm run lint -w @caresetu/frontend",
@@ -31,9 +32,12 @@
     "check:edge": "node scripts/py.cjs apps/backend/scripts/check_edge_config.py",
     "check:backup": "node scripts/py.cjs apps/backend/scripts/check_backup_config.py",
     "build": "npm run build -w @caresetu/frontend",
-    "check:pages": "node scripts/measure-pages.cjs"
+    "check:pages": "node scripts/measure-pages.cjs",
+    "check:lighthouse": "node scripts/lighthouse-gate.cjs",
+    "check:contract": "node scripts/py.cjs scripts/contract_check.py"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
     "@playwright/test": "^1.49.0"
   }
 }
