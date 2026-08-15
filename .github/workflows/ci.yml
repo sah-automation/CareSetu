@@ -416,9 +416,16 @@ jobs:
         # cannot silently pass.
         run: |
           set +e
-          "$ZAP_HOME/zap.sh" -cmd -autorun scripts/zap/api-scan-plan.yaml
+          # ZAP's launcher cd's into ZAP_HOME, so a relative plan path (and the
+          # plan's relative reportDir) resolve against ZAP_HOME, not the
+          # workspace - the plan is passed by absolute workspace path and the
+          # reports are copied back from ZAP_HOME to scripts/zap/ so the empty-
+          # scan guard and the artifact upload below see them.
+          "$ZAP_HOME/zap.sh" -cmd -autorun "$GITHUB_WORKSPACE/scripts/zap/api-scan-plan.yaml"
           zap_exit=$?
           set -e
+          cp "$ZAP_HOME/zap-report.json" scripts/zap/zap-report.json || true
+          cp "$ZAP_HOME/zap-report.html" scripts/zap/zap-report.html || true
           echo "ZAP exit code: $zap_exit (0=clean, 2=Medium warnings, 1=High or plan error)"
           if [ "$zap_exit" -eq 0 ] || [ "$zap_exit" -eq 2 ]; then
             python3 - <<'PY'
