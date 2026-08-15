@@ -1,3 +1,4 @@
+import AxeBuilder from "@axe-core/playwright";
 import {
   expect,
   test,
@@ -102,6 +103,21 @@ async function verifyOtp(
   ).toBeVisible();
 }
 
+// TEST-C2 (#131): accessibility regression guard. Axe scans run against the
+// already-booted local stack once each stage is on screen, so the assertion is
+// deterministic. The failure message lists the violating rule IDs (with impact
+// and help text) instead of dumping the whole nodes array.
+async function expectNoAxeViolations(page: Page, label: string): Promise<void> {
+  const results = await new AxeBuilder({ page }).analyze();
+  const failures = results.violations.map(
+    (v) => `${v.id} (${v.impact}): ${v.help}`,
+  );
+  expect(
+    failures,
+    `${label} should report zero accessibility violations`,
+  ).toEqual([]);
+}
+
 test("register a new number, read the mock OTP, verify, and reach the protected surface", async ({
   page,
   request,
@@ -178,4 +194,39 @@ test("an unauthenticated attempt at the protected surface is denied", async ({
   await expect(
     page.getByRole("heading", { name: "You're signed in" }),
   ).toHaveCount(0);
+});
+
+test("the auth wizard and the patient page pass the axe accessibility scan", async ({
+  page,
+  request,
+}) => {
+  // TEST-C2 (#131): assert zero axe violations on the patient auth wizard and
+  // the patient page. Scans each wizard stage and the signed-in surface.
+  const axePhone = randomPhone();
+
+  await page.goto("/patient");
+  await expect(
+    page.getByRole("heading", { name: "Verify & continue" }),
+  ).toBeVisible({
+    timeout: 60_000,
+  });
+  await expectNoAxeViolations(page, "auth wizard phone step");
+
+  await startRegistration(page, axePhone);
+  await expectNoAxeViolations(page, "auth wizard OTP step");
+
+  await verifyOtp(page, request, axePhone);
+  await expectNoAxeViolations(page, "auth wizard done step");
+
+  await page.getByRole("button", { name: "Go to CareSetu home" }).click();
+  await expect(
+    page.getByRole("heading", { name: "You're signed in" }),
+  ).toBeVisible();
+  await expectNoAxeViolations(page, "signed-in patient page");
+
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: "You're signed in" }),
+  ).toBeVisible();
+  await expectNoAxeViolations(page, "signed-in patient page after reload");
 });

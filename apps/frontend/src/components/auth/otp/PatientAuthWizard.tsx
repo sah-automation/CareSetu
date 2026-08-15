@@ -163,6 +163,7 @@ function OtpStep({ flow }: { flow: OtpFlow }) {
   const blocked = lockout || state.busy;
   return (
     <section className={stylesB.section}>
+      <h1 className={stylesB.title}>{t.verify}</h1>
       <div className={stylesB.center}>
         <div>
           <p className={stylesB.sub}>{t.codeExpires}</p>
@@ -309,7 +310,9 @@ export function PatientAuthWizard() {
   return (
     <div className={`${shared.otpProto} ${stylesB.root}`}>
       <BrandHeader t={flow.t} lang={flow.state.lang} onLang={flow.setLang} />
-      <StepDots flow={flow} />
+      <nav aria-label={flow.t.stepProgress}>
+        <StepDots flow={flow} />
+      </nav>
       <main className={stylesB.main}>
         <div className={stylesB.card}>
           {flow.state.stage === "otp" && demoMode && demoOtp !== null && (
