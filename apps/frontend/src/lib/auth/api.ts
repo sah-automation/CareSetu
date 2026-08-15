@@ -42,6 +42,10 @@ export interface SessionResult {
   refresh_token: string;
 }
 
+export interface DemoOtpResult {
+  code: string | null;
+}
+
 export interface ErrorEnvelope {
   code: string;
   message: string;
@@ -116,4 +120,19 @@ export function resendOtp(phone: string): Promise<ResendResult> {
 
 export function issueSession(phone: string): Promise<SessionResult> {
   return post<SessionResult>("/v1/auth/session", { phone });
+}
+
+export async function fetchDemoOtp(phone: string): Promise<string | null> {
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/v1/auth/dev/otp?phone=${encodeURIComponent(phone)}`,
+    );
+    if (!response.ok) {
+      return null;
+    }
+    const body = (await response.json()) as DemoOtpResult;
+    return typeof body.code === "string" ? body.code : null;
+  } catch {
+    return null;
+  }
 }

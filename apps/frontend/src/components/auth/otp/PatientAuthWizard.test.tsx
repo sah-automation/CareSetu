@@ -8,6 +8,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  fetchDemoOtp,
   issueSession,
   registerPhone,
   resendOtp,
@@ -26,6 +27,7 @@ vi.mock("@/lib/auth/api", async (importOriginal) => {
     verifyOtp: vi.fn(),
     resendOtp: vi.fn(),
     issueSession: vi.fn(),
+    fetchDemoOtp: vi.fn(),
   };
 });
 
@@ -99,6 +101,7 @@ function verifyButton() {
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllEnvs();
 });
 
 beforeEach(() => {
@@ -107,6 +110,7 @@ beforeEach(() => {
   vi.mocked(verifyOtp).mockReset();
   vi.mocked(resendOtp).mockReset();
   vi.mocked(issueSession).mockReset();
+  vi.mocked(fetchDemoOtp).mockReset();
 });
 
 describe("PatientAuthWizard - phone step", () => {
@@ -530,6 +534,57 @@ describe("PatientAuthWizard - success and session", () => {
       await screen.findByPlaceholderText("10-digit mobile number"),
     ).toBeInTheDocument();
     expect(localStorage.getItem("caresetu.session")).toBeNull();
+  });
+});
+
+describe("PatientAuthWizard - demo OTP banner", () => {
+  it("shows the banner with the fetched code after a successful register", async () => {
+    vi.stubEnv("NEXT_PUBLIC_DEMO_MODE", "true");
+    vi.mocked(fetchDemoOtp).mockResolvedValue("424242");
+
+    await startOtpFlow();
+
+    expect(await screen.findByText("Demo OTP: 424242")).toBeInTheDocument();
+    expect(fetchDemoOtp).toHaveBeenCalledWith(PHONE);
+  });
+
+  it("re-fetches and shows the new code after a successful resend", async () => {
+    vi.stubEnv("NEXT_PUBLIC_DEMO_MODE", "true");
+    vi.mocked(fetchDemoOtp).mockResolvedValue("424242");
+    await startOtpFlow({ ...REGISTER_OK, cooldown_remaining_seconds: 0 });
+    expect(await screen.findByText("Demo OTP: 424242")).toBeInTheDocument();
+
+    vi.mocked(fetchDemoOtp).mockResolvedValue("999999");
+    vi.mocked(resendOtp).mockResolvedValue({
+      outcome: "sent",
+      phone_e164: PHONE,
+      challenge_id: 12,
+      expires_in_seconds: 300,
+      cooldown_remaining_seconds: 60,
+      lockout_remaining_seconds: null,
+      attempts_left: 5,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Resend code" }));
+
+    expect(await screen.findByText("Demo OTP: 999999")).toBeInTheDocument();
+    expect(fetchDemoOtp).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows no banner when the read-back is unavailable", async () => {
+    vi.stubEnv("NEXT_PUBLIC_DEMO_MODE", "true");
+    vi.mocked(fetchDemoOtp).mockResolvedValue(null);
+
+    await startOtpFlow();
+
+    expect(fetchDemoOtp).toHaveBeenCalledWith(PHONE);
+    expect(screen.queryByText(/Demo OTP:/)).not.toBeInTheDocument();
+  });
+
+  it("without the flag there is no banner and no read-back call", async () => {
+    await startOtpFlow();
+
+    expect(fetchDemoOtp).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Demo OTP:/)).not.toBeInTheDocument();
   });
 });
 
