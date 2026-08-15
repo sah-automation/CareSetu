@@ -219,6 +219,49 @@ jobs:
           # then applies migrations against this database and serves :8000).
           DATABASE_URL: postgresql+asyncpg://caresetu:caresetu@localhost:5432/caresetu
 
+  load-test:
+    name: load test (k6 patient flow, regression bounds)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: caresetu
+          POSTGRES_PASSWORD: caresetu
+          POSTGRES_DB: caresetu
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U caresetu -d caresetu"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+      - name: install backend
+        run: uv sync --project apps/backend --group dev
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: install k6 (explicit, like ZAP's JRE in TEST-B1)
+        run: |
+          curl --fail -sSL https://github.com/grafana/k6/releases/download/v2.2.0/k6-v2.2.0-linux-amd64.tar.gz -o k6.tar.gz
+          tar -xzf k6.tar.gz
+          sudo install -m 0755 k6-v2.2.0-linux-amd64/k6 /usr/local/bin/k6
+          k6 version
+      - name: run load test
+        run: npm run test:load
+        env:
+          # Reaches the backend booted by scripts/loadtest/run.cjs via
+          # scripts/e2e-backend.cjs (migrations then uvicorn on :8000) with the
+          # mock SMS adapter and the rate limiter disabled (TEST-A1 posture).
+          DATABASE_URL: postgresql+asyncpg://caresetu:caresetu@localhost:5432/caresetu
+
   scan:
     name: security scan (gitleaks + bandit + pip-audit)
     runs-on: ubuntu-latest

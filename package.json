@@ -14,6 +14,7 @@
     "test:integration": "node scripts/py.cjs -m pytest -c apps/backend/pyproject.toml tests/integration -q",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
+    "test:load": "node scripts/loadtest/run.cjs",
     "lint": "pre-commit run --all-files",
     "lint:backend": "ruff check --config apps/backend/pyproject.toml apps/backend tests",
     "lint:frontend": "npm run lint -w @caresetu/frontend",
