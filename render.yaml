@@ -13,7 +13,10 @@ services:
     branch: main
     rootDir: apps/backend
     buildCommand: uv sync --frozen --no-dev
-    startCommand: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    # uv run self-discovers the .venv that the build created; Render's start
+    # shell does NOT put that venv's bin/ on PATH, so bare alembic/uvicorn
+    # would fail with "command not found" (seen live in DEPLOY-7).
+    startCommand: uv run alembic upgrade head && uv run uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
       # Render Python runtime selects the interpreter from PYTHON_VERSION.
       - key: PYTHON_VERSION
