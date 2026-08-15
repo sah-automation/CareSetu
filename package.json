@@ -33,7 +33,8 @@
     "check:backup": "node scripts/py.cjs apps/backend/scripts/check_backup_config.py",
     "build": "npm run build -w @caresetu/frontend",
     "check:pages": "node scripts/measure-pages.cjs",
-    "check:lighthouse": "node scripts/lighthouse-gate.cjs"
+    "check:lighthouse": "node scripts/lighthouse-gate.cjs",
+    "check:contract": "node scripts/py.cjs scripts/contract_check.py"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",
