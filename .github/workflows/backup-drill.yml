@@ -1,0 +1,153 @@
+name: Backup drill (monthly DR)
+
+# TEST-E (#133): monthly restore-validation drill operationalizing the NFR-004
+# durability floor (plan 3.E). The daily backup only proves a dump is written;
+# this drill proves a restore works. It dumps the LIVE Supabase database over
+# the session-pooler connection, encrypts it at rest (AES-256-CBC, PBKDF2 - the
+# same parameters as deploy/cron/backup.sh), uploads the encrypted dump as an
+# artifact, restores it into a throwaway Postgres service container, then
+# asserts the round-trip: the seeded demo identity `+919000000001` is present
+# and every app table's row count matches the live source.
+#
+# Hard-fail posture (plan 5): if Supabase has paused after 7 idle days, or a
+# secret is missing, the job fails loudly with a clear message - it never
+# passes silently. The backup passphrase is a repo secret
+# (BACKUP_DRILL_PASSPHRASE), never committed.
+
+on:
+  schedule:
+    # First day of the month, 02:00 UTC.
+    - cron: "0 2 1 * *"
+  workflow_dispatch:
+
+concurrency:
+  # One drill at a time; a manual dispatch replaces a queued run of the same
+  # drill so the free-tier database is never hit twice concurrently.
+  group: backup-drill
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  drill:
+    name: pg_dump -> encrypt -> restore -> round-trip assert
+    runs-on: ubuntu-latest
+    # A wedged free-tier pooler must not hold the monthly drill hostage for
+    # GitHub's default 6 h job timeout.
+    timeout-minutes: 30
+    env:
+      # SUPABASE_DATABASE_URL is the live Supabase session-pooler connection
+      # (same secret deploy.yml's migrate-and-seed job uses). BACKUP_DRILL_
+      # PASSPHRASE is the at-rest encryption passphrase - a repo secret, never
+      # committed. A missing secret becomes an empty string and is caught by
+      # the assert step below, never a silent pass.
+      DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
+      BACKUP_PASSPHRASE: ${{ secrets.BACKUP_DRILL_PASSPHRASE }}
+      PGPASSWORD: caresetu
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: caresetu
+          POSTGRES_PASSWORD: caresetu
+          POSTGRES_DB: caresetu
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U caresetu -d caresetu"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: install postgres client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: assert the secrets are set
+        run: |
+          test -n "$DATABASE_URL" || {
+            echo "backup drill FAILED: SUPABASE_DATABASE_URL secret is missing" >&2
+            exit 1
+          }
+          test -n "$BACKUP_PASSPHRASE" || {
+            echo "backup drill FAILED: BACKUP_DRILL_PASSPHRASE secret is missing" >&2
+            exit 1
+          }
+      - name: preflight - live Supabase reachable (fails loud if paused)
+        run: |
+          set -euo pipefail
+          PGDUMP_URL="$(printf '%s' "$DATABASE_URL" | sed 's/^postgresql+asyncpg:/postgresql:/')"
+          HOST_PORT="$(printf '%s' "$PGDUMP_URL" | sed -E 's#^[^/]+//[^@]*@##; s#[/?].*$##')"
+          if ! pg_isready -d "$PGDUMP_URL" -t 30; then
+            echo "backup drill FAILED: Supabase database unreachable at $HOST_PORT - paused after 7 idle days?" >&2
+            exit 1
+          fi
+          echo "preflight OK: Supabase database reachable at $HOST_PORT"
+      - name: live pg_dump + AES-256-encrypt at rest
+        run: |
+          set -euo pipefail
+          PGDUMP_URL="$(printf '%s' "$DATABASE_URL" | sed 's/^postgresql+asyncpg:/postgresql:/')"
+          if ! pg_dump -Fc "$PGDUMP_URL" \
+              | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
+                  -pass "env:BACKUP_PASSPHRASE" \
+                  -out "$RUNNER_TEMP/caresetu-drill.enc"; then
+            echo "backup drill FAILED: pg_dump of Supabase failed - database unreachable or credentials invalid (paused after 7 idle days?)" >&2
+            exit 1
+          fi
+          if [ ! -s "$RUNNER_TEMP/caresetu-drill.enc" ]; then
+            echo "backup drill FAILED: encrypted dump is empty - nothing to restore" >&2
+            exit 1
+          fi
+          echo "dump OK: $(wc -c < "$RUNNER_TEMP/caresetu-drill.enc") bytes encrypted at rest"
+      - name: upload encrypted dump artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: caresetu-supabase-backup-${{ github.run_id }}
+          path: ${{ runner.temp }}/caresetu-drill.enc
+          if-no-files-found: error
+      - name: decrypt + restore into the throwaway Postgres
+        run: |
+          set -euo pipefail
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
+            -pass "env:BACKUP_PASSPHRASE" \
+            -in "$RUNNER_TEMP/caresetu-drill.enc" \
+            -out "$RUNNER_TEMP/caresetu-drill.plain"
+          createdb -h localhost -U caresetu caresetu_drill_restore
+          # Supabase-internal objects (roles, auth extensions) warn on a stock
+          # image; --exit-on-error is deliberately NOT set - the round-trip
+          # asserts are the real gate.
+          pg_restore -h localhost -U caresetu -d caresetu_drill_restore \
+            "$RUNNER_TEMP/caresetu-drill.plain"
+      - name: round-trip assert - demo identity + row-count checksum
+        run: |
+          set -euo pipefail
+          PGDUMP_URL="$(printf '%s' "$DATABASE_URL" | sed 's/^postgresql+asyncpg:/postgresql:/')"
+          SCHEMAS="'iam','partner','health','consent','intake','care','diagnostics','fulfillment','settlement','notify','audit'"
+          TABLES_SQL="SELECT table_schema || '.' || table_name FROM information_schema.tables WHERE table_schema IN ($SCHEMAS) AND table_type = 'BASE TABLE' ORDER BY 1"
+          psql -h localhost -U caresetu -d caresetu_drill_restore -Atc "$TABLES_SQL" > "$RUNNER_TEMP/restored-tables.txt"
+          psql -Atc "$TABLES_SQL" "$PGDUMP_URL" > "$RUNNER_TEMP/source-tables.txt"
+          if ! diff -u "$RUNNER_TEMP/source-tables.txt" "$RUNNER_TEMP/restored-tables.txt"; then
+            echo "backup drill FAILED: restored table list differs from the live source" >&2
+            exit 1
+          fi
+          DEMO_COUNT="$(psql -h localhost -U caresetu -d caresetu_drill_restore -tAc \
+            "SELECT count(*) FROM iam.iam_identities WHERE phone_e164 = '+919000000001'")"
+          if [ "$DEMO_COUNT" != "1" ]; then
+            echo "backup drill FAILED: demo identity +919000000001 missing from the restored DB (count=$DEMO_COUNT)" >&2
+            exit 1
+          fi
+          echo "round-trip OK: demo identity +919000000001 present in the restored DB"
+          while IFS= read -r tbl; do
+            [ -n "$tbl" ] || continue
+            schema="${tbl%%.*}"
+            table="${tbl#*.}"
+            restored="$(psql -h localhost -U caresetu -d caresetu_drill_restore -tAc "SELECT count(*) FROM \"$schema\".\"$table\"")"
+            source="$(psql -tAc "SELECT count(*) FROM \"$schema\".\"$table\"" "$PGDUMP_URL")"
+            if [ "$source" != "$restored" ]; then
+              echo "backup drill FAILED: row-count mismatch on $tbl: source=$source restored=$restored" >&2
+              exit 1
+            fi
+            echo "checksum OK: $tbl = $restored rows"
+          done < "$RUNNER_TEMP/restored-tables.txt"
+          echo "backup drill OK: live dump -> AES-256 encrypt -> restore -> round-trip verified"
