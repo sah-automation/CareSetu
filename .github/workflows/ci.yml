@@ -343,6 +343,95 @@ jobs:
           # mock SMS adapter and the rate limiter disabled (TEST-A1 posture).
           DATABASE_URL: postgresql+asyncpg://caresetu:caresetu@localhost:5432/caresetu
 
+  zap-dast:
+    name: zap dast (API scan of /openapi.json, HIGH/CRITICAL gate)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: caresetu
+          POSTGRES_PASSWORD: caresetu
+          POSTGRES_DB: caresetu
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U caresetu -d caresetu"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+      - name: install backend
+        run: uv sync --project apps/backend --group dev
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: install ZAP (explicit JRE + DAST tool, like k6 in TEST-A1)
+        # ZAP is not pre-installed on GitHub runners, so it is downloaded
+        # explicitly and pinned for reproducibility (same treatment as the k6
+        # step in the load-test job). The Linux tarball carries no JRE, hence
+        # the setup-java step above.
+        run: |
+          curl --fail -sSL https://github.com/zaproxy/zaproxy/releases/download/v2.17.0/ZAP_2.17.0_Linux.tar.gz -o zap.tar.gz
+          tar -xzf zap.tar.gz
+          ZAP_HOME="$(dirname "$(find . -maxdepth 2 -name zap.sh | head -n1)")"
+          echo "ZAP_HOME=$ZAP_HOME" >> "$GITHUB_ENV"
+          "$ZAP_HOME/zap.sh" -version
+      - name: boot backend and wait for /openapi.json
+        # TEST-B1: boots the same rate-limit-disabled local instance as the
+        # load-test job (scripts/e2e-backend.cjs: migrations then uvicorn on
+        # :8000), so ZAP's probes of the auth surface never 429 (TEST-A1
+        # posture, plan §3.B1).
+        run: |
+          node scripts/e2e-backend.cjs &
+          for i in $(seq 1 90); do
+            if curl -sf http://127.0.0.1:8000/openapi.json >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "backend did not serve /openapi.json on :8000" >&2
+          exit 1
+        env:
+          DATABASE_URL: postgresql+asyncpg://caresetu:caresetu@localhost:5432/caresetu
+          APP_ENVIRONMENT: test
+          SMS_PROVIDER: mock
+          GATEWAY_JWT_VERIFY_ENABLED: "true"
+          GATEWAY_JWT_SIGNING_KEY: e2e-dev-only-signing-key
+          GATEWAY_RATE_LIMIT_ENABLED: "false"
+      - name: run ZAP API scan
+        # Headless Automation Framework plan (scripts/zap/api-scan-plan.yaml):
+        # imports the OpenAPI spec, active-scans it, writes the HTML+JSON
+        # reports, then exitStatus maps findings to the exit code: 0 = clean,
+        # 2 = MEDIUM/LOW only (pass + artifact), 1 = HIGH/CRITICAL or a scan
+        # error (fail). The reports are uploaded as artifacts for review.
+        run: |
+          set +e
+          "$ZAP_HOME/zap.sh" -cmd -autorun scripts/zap/api-scan-plan.yaml
+          zap_exit=$?
+          set -e
+          echo "ZAP exit code: $zap_exit (0=clean, 2=MEDIUM/LOW warnings, 1=HIGH/CRITICAL or error)"
+          if [ "$zap_exit" -eq 0 ] || [ "$zap_exit" -eq 2 ]; then
+            echo "ZAP API scan passed: no HIGH/CRITICAL alerts (report uploaded as artifact)"
+            exit 0
+          fi
+          echo "ZAP API scan FAILED: HIGH/CRITICAL alert or scan error - see the zap-report artifact"
+          exit 1
+      - name: upload ZAP scan report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-report
+          path: |
+            scripts/zap/zap-report.json
+            scripts/zap/zap-report.html
+
   scan:
     name: security scan (gitleaks + bandit + pip-audit)
     runs-on: ubuntu-latest
