@@ -6,12 +6,15 @@
 # them with the default active-scan policy, the reports are written for the
 # artifact upload, and the exitStatus job maps the findings to ZAP's exit
 # code so the CI gate needs no report parsing:
-#   0 - no alerts at or above warnLevel (clean)
-#   2 - MEDIUM/LOW/INFO only (warnings - job passes, artifacts reviewed)
-#   1 - at least one HIGH/CRITICAL alert, or a scan error (job fails)
+#   0 - no alert at or above warnLevel (Medium) (clean)
+#   2 - Medium alerts present, none High (warnings - job passes, artifacts reviewed)
+#   1 - at least one High alert, or a scan error (job fails)
+# (Low/Info alerts alone also exit 0, since warnLevel is Medium.)
 #
 # The run is bounded to stay inside the plan's CI runtime upper bound: the
-# active scan is capped at 10 minutes and the whole plan at 15 minutes.
+# active scan is capped at 10 minutes and the passive queue wait at 2 minutes.
+# The Automation Framework add-on bundled in ZAP 2.17.0 (v0.58.0) has no
+# whole-plan duration parameter, so those two caps bound the run.
 ---
 env:
   contexts:
@@ -23,7 +26,6 @@ env:
     failOnWarning: false
     continueOnFailure: false
     progressToStdout: true
-    maxDuration: 900
 jobs:
   - type: openapi
     parameters:

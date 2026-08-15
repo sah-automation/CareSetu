@@ -408,17 +408,32 @@ jobs:
       - name: run ZAP API scan
         # Headless Automation Framework plan (scripts/zap/api-scan-plan.yaml):
         # imports the OpenAPI spec, active-scans it, writes the HTML+JSON
-        # reports, then exitStatus maps findings to the exit code: 0 = clean,
-        # 2 = MEDIUM/LOW only (pass + artifact), 1 = HIGH/CRITICAL or a scan
-        # error (fail). The reports are uploaded as artifacts for review.
+        # reports, then exitStatus maps findings to the exit code: 0 = no
+        # Medium+ alert, 2 = Medium only (pass + artifact), 1 = High alert or
+        # a scan error (fail). The reports are uploaded as artifacts for
+        # review. After the gate, the JSON report is checked to contain at
+        # least one scanned site so an empty scan (no endpoints imported)
+        # cannot silently pass.
         run: |
           set +e
           "$ZAP_HOME/zap.sh" -cmd -autorun scripts/zap/api-scan-plan.yaml
           zap_exit=$?
           set -e
-          echo "ZAP exit code: $zap_exit (0=clean, 2=MEDIUM/LOW warnings, 1=HIGH/CRITICAL or error)"
+          echo "ZAP exit code: $zap_exit (0=clean, 2=Medium warnings, 1=High or plan error)"
           if [ "$zap_exit" -eq 0 ] || [ "$zap_exit" -eq 2 ]; then
-            echo "ZAP API scan passed: no HIGH/CRITICAL alerts (report uploaded as artifact)"
+            python3 - <<'PY'
+          import json, sys
+          try:
+              with open("scripts/zap/zap-report.json", encoding="utf-8") as f:
+                  report = json.load(f)
+          except OSError as e:
+              print("ZAP API scan FAILED: could not read scripts/zap/zap-report.json -", e)
+              sys.exit(1)
+          if not report.get("site"):
+              print("ZAP API scan FAILED: report contains no scanned sites - the auth surface was never probed")
+              sys.exit(1)
+          print(f"ZAP API scan passed: no High alerts; {len(report['site'])} site(s) scanned - report uploaded as artifact")
+          PY
             exit 0
           fi
           echo "ZAP API scan FAILED: HIGH/CRITICAL alert or scan error - see the zap-report artifact"
