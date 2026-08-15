@@ -1,0 +1,45 @@
+# CareSetu Render Blueprint (DEPLOY-5, ticket #115).
+#
+# One web service for the backend, reproduced from this repo instead of a
+# hand-built dashboard service. Source of truth for the commands and env vars
+# is plan section 5.2 (docs/plans/deployment-plan/portfolio-deployment-plan.md);
+# provisioning and live verification are DEPLOY-7 (ticket #117).
+
+services:
+  - type: web
+    name: caresetu-backend
+    runtime: python
+    plan: free
+    branch: main
+    rootDir: apps/backend
+    buildCommand: uv sync --frozen --no-dev
+    startCommand: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      # Render Python runtime selects the interpreter from PYTHON_VERSION.
+      - key: PYTHON_VERSION
+        value: "3.13"
+      # Supabase direct connection string; set in the Render Dashboard during
+      # blueprint creation (DEPLOY-7), never synced from the repo.
+      - key: DATABASE_URL
+        sync: false
+      - key: APP_ENVIRONMENT
+        value: production
+      # JWT verification and gateway rate limiting are on for the demo.
+      - key: GATEWAY_JWT_VERIFY_ENABLED
+        value: "true"
+      # Render generates a random 256-bit signing key at provisioning; the
+      # value is retained across blueprint syncs and never committed to the
+      # repo.
+      - key: GATEWAY_JWT_SIGNING_KEY
+        generateValue: true
+      - key: GATEWAY_RATE_LIMIT_ENABLED
+        value: "true"
+      # Demo mode reads the OTP back into the UI, so SMS stays mocked.
+      - key: SMS_PROVIDER
+        value: mock
+      - key: DEMO_MODE
+        value: "true"
+      # Vercel frontend origin; set in the Render Dashboard during blueprint
+      # creation (DEPLOY-7).
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
