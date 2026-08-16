@@ -15,7 +15,7 @@ The smoke performs, in order:
 4. Assert error envelopes carry `code` / `message` / `trace_id` (observability contract).
 5. Assert the Vercel `/patient` page returns 200 with title "CareSetu" and the served JS chunk inlines the backend base URL and the demo-banner strings (guards the trailing-slash and env-inlining bugs found during DEPLOY-7).
 
-Pacing note: the flow makes ~4 auth-surface calls from one runner IP per window - safely under the 10/60 s limiter (plan §3.D). Reads `LIVE_BACKEND_URL` / `LIVE_FRONTEND_URL` repo variables (created by TEST-A2). Runs on merge (+ nightly via TEST-NIGHTLY).
+Pacing note: the flow makes ~4 auth-surface calls from one runner IP per window - safely under the 10/60 s limiter (plan §3.D). Reads `LIVE_BACKEND_URL` / `LIVE_FRONTEND_URL` repo variables (created by TEST-A2). Runs on merge (+ nightly via TEST-NIGHTLY). Availability tolerance: a transient 5xx / connection failure in the demo flow (the Render build/instance swap from the deploy hook) is retried within a bounded window, paced under the limiter - a deploy in flight is not a regression (plan §3.D, §5); 4xx, wrong outcomes, and window exhaustion stay hard failures.
 
 Acceptance criteria (verbatim):
 

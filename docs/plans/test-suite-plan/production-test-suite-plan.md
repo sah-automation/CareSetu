@@ -73,6 +73,8 @@ Browser note: the runner already installs Playwright's Chromium for the e2e job;
 
    Cooldown note: register on the seeded phone goes through the existing-phone login branch, which honors the 60 s resend cooldown. If the smoke runs within 60 s of a prior OTP send to that phone (e.g. a deploy rerun right after a failed run), register answers `cooldown` - the smoke must wait out the window and retry rather than fail (mirrors the e2e's cooldown catch, `tests/e2e/auth-loop.spec.ts`).
 
+   Availability tolerance: a transient 5xx or connection-level failure in the demo flow (e.g. the Render build/instance swap from the deploy hook) is retried within a bounded window, paced under the limiter - a deploy in flight is not a regression, exactly like B2 (section 5). 4xx answers, wrong outcomes, and window exhaustion are hard failures.
+
 3. Assert `access-control-allow-origin` echoes the Vercel origin on every response (guards the CORS regression).
 4. Assert error envelopes carry `code` / `message` / `trace_id` (observability contract).
 5. Assert the Vercel `/patient` page returns 200 with title "CareSetu" and the served JS chunk inlines the backend base URL and the demo-banner strings (guards the trailing-slash and env-inlining bugs found during DEPLOY-7).
@@ -116,6 +118,7 @@ Operationalizes the boundary durability floor (`NFR-PERF-004`): restore validate
 - **Strict** (deterministic, local instances, no free-tier flakiness): A1, B1, B3, B4, C1, C2, F.
 - **Tolerant** (live free-tier jobs, fail only on clear regressions or availability): A2, B2.
 - **Hard fail everywhere** (this is the demo / durability floor): D, E.
+- D is hard-fail on genuine regressions (4xx, wrong outcomes, window exhaustion) but, like B2, absorbs availability: its bounded retry window re-runs the demo flow on a transient 5xx / connection failure from the Render build/instance swap, paced under the auth limiter (section 3.D).
 
 ## 6. Files (new and changed)
 

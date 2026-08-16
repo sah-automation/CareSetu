@@ -26,6 +26,12 @@ dev/otp, verify, session) - safely under the 10 req / 60 s limiter (plan
 section 2, section 3.D). A register cooldown retry only fires after waiting
 the window out, so a retry never pushes the window over the cap.
 
+Availability tolerance (plan section 3.D): a 5xx or connection-level failure
+in the demo flow (e.g. the Render build/instance swap from the deploy hook)
+is retried within a bounded window, paced under the limiter, exactly like the
+warm-up / settle / cooldown retries - a deploy in flight is not a regression.
+4xx answers, wrong outcomes, and window exhaustion are hard failures.
+
 Reads the `LIVE_BACKEND_URL` / `LIVE_FRONTEND_URL` repo variables (created by
 TEST-A2, #134); `--backend-url` / `--frontend-url` / `--origin` / `--phone`
 override for local runs. Stdlib-only like the other gate scripts. Any step
@@ -55,6 +61,11 @@ COOLDOWN_WAIT_BUFFER_SECONDS = 5
 MAX_REGISTER_ATTEMPTS = 5
 FRONTEND_SETTLE_WINDOW_SECONDS = 600
 FRONTEND_POLL_SECONDS = 10
+# The demo-flow step retries transient 5xx / connection failures (a deploy
+# swap) within this window; the poll is spaced so a retrying flow stays under
+# the per-IP /v1/auth/* limiter cap (10 req / 60 s) even at worst case.
+TRANSIENT_RETRY_WINDOW_SECONDS = 600
+TRANSIENT_RETRY_POLL_SECONDS = 30
 
 # The seeded demo phone (deploy plan / DEPLOY-7): registering it goes through
 # the existing-phone login branch, which is exactly the branch under test.
@@ -75,6 +86,11 @@ _SCRIPT_SRC = re.compile(r'<script[^>]*\bsrc=["\']([^"\']+)["\']', re.IGNORECASE
 
 class SmokeError(Exception):
     """A hard failure in the smoke runner itself (network/encoding)."""
+
+
+class TransientFailure(SmokeError):
+    """A retryable 5xx or connection failure - a deploy swap or cold start,
+    not a regression. The demo-flow step retries within a bounded window."""
 
 
 @dataclass(frozen=True)
@@ -174,6 +190,36 @@ def _request(
         return HttpResponse(status=exc.code, headers=dict(exc.headers.items()), body=exc.read())
 
 
+def _transient(response: HttpResponse) -> bool:
+    """Whether a response is a transient server error (>= 500) worth retrying.
+
+    The Render deploy hook builds and swaps the instance while the smoke runs;
+    a 502 bad-gateway during that swap is the deploy in flight, not a
+    regression. Lower statuses (4xx, wrong 2xx bodies) are hard results.
+    """
+    return response.status >= 500
+
+
+def _flow_request(
+    method: str,
+    url: str,
+    *,
+    origin: str,
+    payload: Mapping[str, object] | None = None,
+    bearer: str | None = None,
+) -> HttpResponse:
+    """One demo-flow request; a connection failure raises TransientFailure.
+
+    The demo flow runs inside the smoke's bounded transient-retry window, so a
+    connection-level failure mid-flow (the Render swap dropping the instance)
+    is retried like a 5xx instead of crashing the smoke.
+    """
+    try:
+        return _request(method, url, origin=origin, payload=payload, bearer=bearer)
+    except OSError as exc:
+        raise TransientFailure(f"connection failed: {exc}") from exc
+
+
 def check_health(
     backend: str,
     origin: str,
@@ -242,16 +288,20 @@ def _register(
     so the per-IP /v1/auth/* limiter cap (10 req / 60 s) is never approached.
     With ``expect_login`` (the default demo phone) a sent code must also have
     come from the existing-phone login branch - proving the seed is present and
-    the cooldown-capable branch is the one under test.
+    the cooldown-capable branch is the one under test. A transient 5xx or
+    connection failure raises ``TransientFailure`` for the step's retry window;
+    transient responses are never recorded for the step-3 CORS echo check.
     """
     label = f"register +91{phone}"
     for attempt in range(1, MAX_REGISTER_ATTEMPTS + 1):
-        response = _request(
+        response = _flow_request(
             "POST",
             f"{backend}/v1/auth/register",
             origin=origin,
             payload={"phone": phone},
         )
+        if _transient(response):
+            raise TransientFailure(f"register answered HTTP {response.status}")
         responses.append(response)
         body = response.json_body()
         if response.status != 200:
@@ -316,7 +366,9 @@ def check_demo_flow(
         return _flow_failures(results, "register did not send a code; verify/session/me skipped")
 
     otp_url = f"{backend}/v1/auth/dev/otp?{urllib.parse.urlencode({'phone': _phone_e164(phone)})}"
-    otp_response = _request("GET", otp_url, origin=origin)
+    otp_response = _flow_request("GET", otp_url, origin=origin)
+    if _transient(otp_response):
+        raise TransientFailure(f"GET /v1/auth/dev/otp answered HTTP {otp_response.status}")
     responses.append(otp_response)
     otp_body = otp_response.json_body()
     code = otp_body.get("code") if otp_response.status == 200 else None
@@ -330,12 +382,14 @@ def check_demo_flow(
         return _flow_failures(results, "OTP read-back failed; verify/session/me skipped")
     results.append(_pass("GET /v1/auth/dev/otp", "code read back"))
 
-    verify_response = _request(
+    verify_response = _flow_request(
         "POST",
         f"{backend}/v1/auth/verify",
         origin=origin,
         payload={"phone": phone, "otp": code},
     )
+    if _transient(verify_response):
+        raise TransientFailure(f"POST /v1/auth/verify answered HTTP {verify_response.status}")
     responses.append(verify_response)
     verify_body = verify_response.json_body()
     if verify_response.status != 200 or verify_body.get("outcome") != "verified":
@@ -349,12 +403,14 @@ def check_demo_flow(
         return _flow_failures(results, "verify did not land; session/me skipped")
     results.append(_pass("POST /v1/auth/verify", "outcome verified"))
 
-    session_response = _request(
+    session_response = _flow_request(
         "POST",
         f"{backend}/v1/auth/session",
         origin=origin,
         payload={"phone": phone},
     )
+    if _transient(session_response):
+        raise TransientFailure(f"POST /v1/auth/session answered HTTP {session_response.status}")
     responses.append(session_response)
     session_body = session_response.json_body()
     jwt = session_body.get("jwt")
@@ -368,7 +424,9 @@ def check_demo_flow(
         return _flow_failures(results, "session did not mint a JWT; /v1/me skipped")
     results.append(_pass("POST /v1/auth/session", "JWT minted"))
 
-    me_response = _request("GET", f"{backend}/v1/me", origin=origin, bearer=jwt)
+    me_response = _flow_request("GET", f"{backend}/v1/me", origin=origin, bearer=jwt)
+    if _transient(me_response):
+        raise TransientFailure(f"GET /v1/me answered HTTP {me_response.status}")
     responses.append(me_response)
     me_body = me_response.json_body()
     if me_response.status != 200:
@@ -621,7 +679,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--no-retry",
         action="store_true",
-        help="fail on the first attempt instead of waiting out cooldown/warm-up/settle windows",
+        help=(
+            "fail on the first attempt instead of waiting out "
+            "cooldown/warm-up/settle/transient windows"
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -633,9 +694,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     print("step 1/5: warm up + /health")
     results.extend(check_health(backend, origin, responses=responses, no_retry=args.no_retry))
     print("step 2/5: live demo flow (register -> dev/otp -> verify -> session -> /v1/me)")
-    results.extend(
-        check_demo_flow(backend, origin, phone, responses=responses, no_retry=args.no_retry)
-    )
+    flow_deadline = time.monotonic() + (0 if args.no_retry else TRANSIENT_RETRY_WINDOW_SECONDS)
+    while True:
+        try:
+            results.extend(
+                check_demo_flow(backend, origin, phone, responses=responses, no_retry=args.no_retry)
+            )
+            break
+        except TransientFailure as exc:
+            if args.no_retry or time.monotonic() >= flow_deadline:
+                results.append(
+                    _fail(
+                        "live demo flow",
+                        f"transient server failure persisted (last: {exc})",
+                    )
+                )
+                break
+            print(
+                f"live smoke: transient ({exc}); waiting {TRANSIENT_RETRY_POLL_SECONDS}s",
+                file=sys.stderr,
+            )
+            time.sleep(TRANSIENT_RETRY_POLL_SECONDS)
     print("step 3/5: CORS access-control-allow-origin echo")
     results.extend(check_cors(origin, responses=responses))
     print("step 4/5: error envelope code/message/trace_id")
