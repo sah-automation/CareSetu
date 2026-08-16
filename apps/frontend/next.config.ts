@@ -10,6 +10,18 @@ if (process.env.VERCEL && !process.env.NEXT_PUBLIC_API_BASE_URL) {
   );
 }
 
-const nextConfig: NextConfig = {};
+// NFR-SEC-001 (TEST-B2, #136): every external response must carry
+// X-Content-Type-Options: nosniff. Set here in Next headers (applies to all
+// routes including the root not-found page) in addition to vercel.json.
+const securityHeaders = [{ key: "X-Content-Type-Options", value: "nosniff" }];
+
+const nextConfig: NextConfig = {
+  headers: async () => [
+    {
+      source: "/(.*)",
+      headers: securityHeaders,
+    },
+  ],
+};
 
 export default nextConfig;

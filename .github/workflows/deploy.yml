@@ -165,7 +165,11 @@ jobs:
     # session -> /v1/me flow (cooldown-aware), the CORS origin echo, the error
     # envelope contract, and the Vercel /patient page + inlined-JS assertions.
     # The script's own settle poll absorbs the asynchronously-landing Vercel
-    # build, and any failing step exits 1 so this job hard-fails the deploy.
+    # build, its warm-up poll absorbs the Render cold start, and its bounded
+    # retry window absorbs a transient 5xx / connection failure from the
+    # Render build/instance swap - so a deploy in flight is not a regression.
+    # Any genuine failure (4xx, wrong outcome, window exhaustion) exits 1 so
+    # this job hard-fails the deploy (plan §3.D, §5).
     # Reuses the LIVE_BACKEND_URL / LIVE_FRONTEND_URL repo variables TEST-A2
     # owns (plan §3.D, §5).
     needs: deploy-render
