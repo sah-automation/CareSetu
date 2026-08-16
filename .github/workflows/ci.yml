@@ -6,7 +6,9 @@ on:
   # standalone push-to-main trigger on purpose - deploy.yml calls this same
   # workflow as its gate on every main push, so a standalone run would just
   # double every job on main. Main gets full CI via the deploy gate; PRs run
-  # this workflow directly.
+  # this workflow directly. `workflow_call` is what makes the reusable gate in
+  # deploy.yml valid - without it the deploy workflow fails at load time.
+  workflow_call:
 
 jobs:
   lint:
