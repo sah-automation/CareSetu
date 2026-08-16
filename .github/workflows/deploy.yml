@@ -156,3 +156,31 @@ jobs:
           python-version: "3.13"
       - name: run boundary security posture check
         run: python scripts/security_posture.py
+
+  live-smoke:
+    name: D live smoke (post-deploy, hard fail)
+    # TEST-D (#137): the crown-jewel gate - the demo itself must work on every
+    # merge. Runs the five-step post-deploy live smoke after the Render deploy
+    # hook: warm-up + /health, the full register -> dev/otp -> verify ->
+    # session -> /v1/me flow (cooldown-aware), the CORS origin echo, the error
+    # envelope contract, and the Vercel /patient page + inlined-JS assertions.
+    # The script's own settle poll absorbs the asynchronously-landing Vercel
+    # build, and any failing step exits 1 so this job hard-fails the deploy.
+    # Reuses the LIVE_BACKEND_URL / LIVE_FRONTEND_URL repo variables TEST-A2
+    # owns (plan §3.D, §5).
+    needs: deploy-render
+    runs-on: ubuntu-latest
+    env:
+      LIVE_BACKEND_URL: ${{ vars.LIVE_BACKEND_URL }}
+      LIVE_FRONTEND_URL: ${{ vars.LIVE_FRONTEND_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: assert LIVE_BACKEND_URL / LIVE_FRONTEND_URL are set
+        run: |
+          test -n "$LIVE_BACKEND_URL"
+          test -n "$LIVE_FRONTEND_URL"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: run post-deploy live smoke
+        run: python scripts/live_smoke.py
