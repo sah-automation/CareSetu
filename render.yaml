@@ -8,6 +8,10 @@
 services:
   - type: web
     name: caresetu-backend
+    # The deploy hook fired by deploy.yml is the sole automated deploy
+    # trigger, so this stays false: a git "On Commit" auto-deploy would boot
+    # before deploy.yml's migrate-and-seed and redeploy on docs-only pushes.
+    autoDeploy: false
     runtime: python
     plan: free
     branch: main
@@ -18,11 +22,12 @@ services:
     # would fail with "command not found" (seen live in DEPLOY-7).
     #
     # No boot-time `alembic upgrade head`: deploy.yml migrates the database
-    # and only then fires the deploy hook, and Render auto-deploy is OFF, so
-    # the hook (or a manual dashboard deploy) is the sole trigger. Running
-    # migrations here too would only add seconds to every cold start for zero
-    # benefit. A fresh-from-scratch blueprint provision relies on the next
-    # push to main to migrate before first boot.
+    # and only then fires the deploy hook, and Render auto-deploy is OFF
+    # (`autoDeploy: false`, dashboard confirmed 2026-08-16), so the hook (or a
+    # manual dashboard deploy) is the sole trigger. Running migrations here too
+    # would only add seconds to every cold start for zero benefit. A
+    # fresh-from-scratch blueprint provision relies on the next push to main to
+    # migrate before first boot.
     startCommand: uv run uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
       # Render Python runtime selects the interpreter from PYTHON_VERSION.
