@@ -72,3 +72,56 @@ jobs:
       # silently.
       - name: fire Render deploy hook
         run: curl --fail -X POST "$RENDER_DEPLOY_HOOK_URL"
+
+  live-load-sweep:
+    name: A2 live load sweep (k6, /health + /v1/me)
+    # TEST-A2 (#134): the first live job. Runs the tolerant production-stack
+    # health sweep right after the Render deploy hook is fired - the sweep's
+    # warm-up poll absorbs the hook-triggered build plus Render's cold start
+    # (plan §2, §3.A2). Reads the LIVE_BACKEND_URL / LIVE_FRONTEND_URL repo
+    # variables this job owns; TEST-B2 (#136) and TEST-D (#137) reuse them.
+    needs: deploy-render
+    runs-on: ubuntu-latest
+    env:
+      LIVE_BACKEND_URL: ${{ vars.LIVE_BACKEND_URL }}
+      LIVE_FRONTEND_URL: ${{ vars.LIVE_FRONTEND_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: assert LIVE_BACKEND_URL / LIVE_FRONTEND_URL are set
+        run: |
+          test -n "$LIVE_BACKEND_URL"
+          test -n "$LIVE_FRONTEND_URL"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: install k6 (explicit, like the ci.yml load-test job)
+        run: |
+          curl --fail -sSL https://github.com/grafana/k6/releases/download/v2.2.0/k6-v2.2.0-linux-amd64.tar.gz -o k6.tar.gz
+          tar -xzf k6.tar.gz
+          sudo install -m 0755 k6-v2.2.0-linux-amd64/k6 /usr/local/bin/k6
+          k6 version
+      - name: warm up + mint live session token
+        # Mint the shared session token from the live register -> dev/otp ->
+        # verify -> session flow on a dedicated test phone (never the seeded
+        # demo phone +91 9000000001, so this job never races TEST-D on the 60 s
+        # per-phone resend cooldown). The warm-up request in the script absorbs
+        # the Render cold start before any metric is recorded.
+        id: mint
+        run: echo "token=$(node scripts/loadtest/mint-live-token.cjs)" >> "$GITHUB_OUTPUT"
+        env:
+          LIVE_BACKEND_URL: ${{ vars.LIVE_BACKEND_URL }}
+          TEST_PHONE: "9000000002"
+      - name: run live load sweep
+        # 20 VUs for 90 s against /health + /v1/me only - the per-IP auth
+        # limiter makes the auth surface meaningless under load (plan §2).
+        # Thresholds are tolerant health-sweep bounds, not SLAs: error rate
+        # < 2%, p95 < 2.5 s (plan §3.A2).
+        run: k6 run --summary-export=k6-summary.json scripts/loadtest/live-sweep.js -e BASE_URL="$LIVE_BACKEND_URL" -e TOKEN="$LIVE_SWEEP_TOKEN"
+        env:
+          LIVE_SWEEP_TOKEN: ${{ steps.mint.outputs.token }}
+      - name: upload k6 report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-live-load-report
+          path: k6-summary.json
