@@ -2,8 +2,10 @@ name: Deploy
 
 # Continuous deployment (DEPLOY-6, ticket #116). Runs on every push to main
 # and on manual dispatch. Vercel deploys the frontend from the same push by
-# itself, so this workflow only manages the parts that are not self-deploying:
-# the Supabase schema (migrate + seed) and the Render backend (deploy hook).
+# itself (its Ignored Build Step skips the build when only non-frontend files
+# changed), and Render auto-deploy is OFF, so this workflow manages everything
+# else: the Supabase schema (migrate + seed) and the Render backend (deploy
+# hook - the sole automated deploy trigger now).
 #
 # Ordering tolerance: Vercel's frontend build may briefly race this workflow's
 # migration. The app tolerates it - registration against a not-yet-migrated
@@ -105,7 +107,10 @@ jobs:
         # verify -> session flow on a dedicated test phone (never the seeded
         # demo phone +91 9000000001, so this job never races TEST-D on the 60 s
         # per-phone resend cooldown). The warm-up request in the script absorbs
-        # the Render cold start before any metric is recorded.
+        # the Render cold start. A2 is a tolerant health sweep: if it runs right
+        # after the deploy hook, the old instance may still answer during the
+        # build, so the sweep can measure the previous release - accepted by
+        # design (plan §3.A2), not a claim that the new build is live.
         id: mint
         run: echo "token=$(node scripts/loadtest/mint-live-token.cjs)" >> "$GITHUB_OUTPUT"
         env:

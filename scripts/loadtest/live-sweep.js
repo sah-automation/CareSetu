@@ -54,11 +54,19 @@ export default function () {
   const me = http.get(`${BASE_URL}/v1/me`, {
     headers: { Authorization: `Bearer ${TOKEN}` },
   });
+  // Parse defensively: a 200 with a broken body must count as a failed sweep
+  // (non-JSON or a missing roles field), not escape every gate because the
+  // check callback throws before sweepFailures.add runs.
+  let meRoles = [];
+  try {
+    meRoles = me.json().roles ?? [];
+  } catch {
+    meRoles = [];
+  }
   ok =
     check(me, {
       "/v1/me answered 200": (r) => r.status === 200,
-      "/v1/me resolved the patient role": (r) =>
-        Array.isArray(r.json().roles) && r.json().roles.includes("patient"),
+      "/v1/me resolved the patient role": () => meRoles.includes("patient"),
     }) && ok;
 
   sweepFailures.add(!ok);

@@ -5,8 +5,11 @@
 // -> session flow on a DEDICATED test phone (TEST_PHONE, default +91
 // 9000000002) distinct from the seeded demo phone +91 9000000001, so this job
 // never races the live smoke (TEST-D) on the 60 s per-phone resend cooldown.
-// A warm-up /health poll runs first to absorb the Render free cold start and
-// the just-fired deploy build (plan §2, §3.A2).
+// A warm-up /health poll runs first to absorb the Render free cold start
+// (plan §2, §3.A2). The sweep is a tolerant health check: if this runs right
+// after a deploy hook, the old instance may still answer 200s during the
+// build, so the warm-up may settle on the previous release - accepted by
+// design (tolerant thresholds, no claim of verifying the new build).
 //
 // Prints ONLY the JWT on stdout; diagnostics go to stderr, so `$(node
 // scripts/loadtest/mint-live-token.cjs)` captures just the token.
@@ -26,6 +29,7 @@ const WARMUP_POLL_MS = 10 * 1000;
 const REQUEST_TIMEOUT_MS = 60 * 1000;
 const MAX_REGISTER_ATTEMPTS = 5;
 const MAX_MINT_ATTEMPTS = 3;
+const RETRY_PACING_SECONDS = 65;
 
 if (!BASE_URL) {
   console.error("mint-live-token: LIVE_BACKEND_URL env var is required");
@@ -48,7 +52,7 @@ async function requestJson(method, path, body) {
   }
   if (!res.ok) {
     const code = data && data.code ? data.code : `HTTP ${res.status}`;
-    const message = data && data.message ? data.message : `HTTP ${res.status}`;
+    const message = data && data.message ? data.message : code;
     throw new Error(`${method} ${path} -> ${res.status} ${code}: ${message}`);
   }
   return data;
@@ -147,8 +151,10 @@ async function main() {
         // 10 req / 60 s, and a re-register inside the 60 s cooldown returns
         // "cooldown" (register() waits it out). A full window between attempts
         // keeps every retry under the cap.
-        console.error("mint-live-token: waiting 65s before retrying");
-        await sleep(65 * 1000);
+        console.error(
+          `mint-live-token: waiting ${RETRY_PACING_SECONDS}s before retrying`,
+        );
+        await sleep(RETRY_PACING_SECONDS * 1000);
       }
     }
   }
