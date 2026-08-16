@@ -1,0 +1,133 @@
+name: Nightly
+
+# Nightly regression (TEST-NIGHTLY, #138): the last piece of the test suite -
+# catches drift between merges against the live stack. On a cron schedule (and
+# on manual dispatch) it runs the full suite: the deterministic set as a ci.yml
+# gate call, then the live jobs (A2 load sweep, B2 security posture, D live
+# smoke) against the already-deployed stack. Unlike deploy.yml it performs NO
+# deploy steps - the stack is assumed live; only its behavior is verified.
+#
+# Schedule + concurrency: the cron runs once a night in the quiet UTC window,
+# and the concurrency group guarantees only one nightly run is in flight at a
+# time (a manual dispatch supersedes an in-flight cron run), so the whole run
+# stays an upper-bound on minutes per plan section 2.
+
+on:
+  schedule:
+    # Nightly, 02:00 UTC.
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  # One nightly run at a time; a manual dispatch replaces a queued run so cron
+  # and manual runs never stack.
+  group: nightly
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: CI gate (reusable ci.yml)
+    # Same reusable gate deploy.yml uses: every deterministic check (lint,
+    # typecheck, unit, page-budget, migration-check, integration, backup-smoke,
+    # e2e, scan, A1 load, B1 ZAP, B4 rate-limit, C1 Lighthouse, C2 axe, F
+    # contract, B3 SBOM) must be green before the live stack is touched.
+    uses: ./.github/workflows/ci.yml
+
+  live-load-sweep:
+    name: A2 live load sweep (k6, /health + /v1/me)
+    # TEST-A2 (#134) against the already-live stack: the same job as deploy.yml's
+    # live-load-sweep minus the deploy-hook dependency - the script's warm-up
+    # poll still absorbs any Render cold start. Tolerant health sweep, not an
+    # SLA: error rate < 2%, p95 < 2.5 s (plan section 3.A2).
+    needs: gate
+    runs-on: ubuntu-latest
+    env:
+      LIVE_BACKEND_URL: ${{ vars.LIVE_BACKEND_URL }}
+      LIVE_FRONTEND_URL: ${{ vars.LIVE_FRONTEND_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: assert LIVE_BACKEND_URL / LIVE_FRONTEND_URL are set
+        run: |
+          test -n "$LIVE_BACKEND_URL"
+          test -n "$LIVE_FRONTEND_URL"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: install k6 (explicit, like the ci.yml load-test job)
+        run: |
+          curl --fail -sSL https://github.com/grafana/k6/releases/download/v2.2.0/k6-v2.2.0-linux-amd64.tar.gz -o k6.tar.gz
+          tar -xzf k6.tar.gz
+          sudo install -m 0755 k6-v2.2.0-linux-amd64/k6 /usr/local/bin/k6
+          k6 version
+      - name: warm up + mint live session token
+        # Mint the shared session token from the live register -> dev/otp ->
+        # verify -> session flow on a dedicated test phone (never the seeded
+        # demo phone +91 9000000001, so this job never races live-smoke on the
+        # 60 s per-phone resend cooldown). The warm-up request in the script
+        # absorbs the Render cold start.
+        id: mint
+        run: echo "token=$(node scripts/loadtest/mint-live-token.cjs)" >> "$GITHUB_OUTPUT"
+        env:
+          LIVE_BACKEND_URL: ${{ vars.LIVE_BACKEND_URL }}
+          TEST_PHONE: "9000000002"
+      - name: run live load sweep
+        # 20 VUs for 90 s against /health + /v1/me only - the per-IP auth
+        # limiter makes the auth surface meaningless under load (plan section 2).
+        run: k6 run --summary-export=k6-summary.json scripts/loadtest/live-sweep.js -e BASE_URL="$LIVE_BACKEND_URL" -e TOKEN="$LIVE_SWEEP_TOKEN"
+        env:
+          LIVE_SWEEP_TOKEN: ${{ steps.mint.outputs.token }}
+      - name: upload k6 report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-live-load-report
+          path: k6-summary.json
+
+  security-posture:
+    name: B2 boundary security posture (live)
+    # TEST-B2 (#136) against the live stack: asserts NFR-SEC-001 (HTTPS only,
+    # TLS 1.2+, HSTS, X-Content-Type-Options, no legacy ciphers) on the Render
+    # backend and Vercel frontend. Same job as deploy.yml's, minus the
+    # deploy-hook dependency - the script's own retry window absorbs any
+    # in-flight free-tier build (plan section 3.B2, 5).
+    needs: gate
+    runs-on: ubuntu-latest
+    env:
+      LIVE_BACKEND_URL: ${{ vars.LIVE_BACKEND_URL }}
+      LIVE_FRONTEND_URL: ${{ vars.LIVE_FRONTEND_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: assert LIVE_BACKEND_URL / LIVE_FRONTEND_URL are set
+        run: |
+          test -n "$LIVE_BACKEND_URL"
+          test -n "$LIVE_FRONTEND_URL"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: run boundary security posture check
+        run: python scripts/security_posture.py
+
+  live-smoke:
+    name: D live smoke (hard fail)
+    # TEST-D (#137) against the live stack: the demo itself must still work -
+    # warm-up + /health, the full register -> dev/otp -> verify -> session ->
+    # /v1/me flow (cooldown-aware), the CORS origin echo, the error envelope
+    # contract, and the Vercel /patient page + inlined-JS assertions. Hard
+    # fail: any failing step exits 1 so a regression fails the nightly
+    # (plan section 3.D, 5).
+    needs: gate
+    runs-on: ubuntu-latest
+    env:
+      LIVE_BACKEND_URL: ${{ vars.LIVE_BACKEND_URL }}
+      LIVE_FRONTEND_URL: ${{ vars.LIVE_FRONTEND_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: assert LIVE_BACKEND_URL / LIVE_FRONTEND_URL are set
+        run: |
+          test -n "$LIVE_BACKEND_URL"
+          test -n "$LIVE_FRONTEND_URL"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: run live smoke
+        run: python scripts/live_smoke.py
