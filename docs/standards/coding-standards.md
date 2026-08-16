@@ -33,7 +33,7 @@ Every module follows hexagonal layout - pure domain core + adapters:
 
 - **Type everything.** No `Any`, no untyped dicts crossing module boundaries; use Pydantic v2 schemas/DTOs.
 - Type hints on all function signatures; return annotations mandatory.
-- Naming: `snake_case` (python), `PascalCase` (classes/models), `CONSTANT_CASE` (env/config). Event names are `domain.action` (see event registry §4.2 of the whitebox doc).
+- Naming: `snake_case` (python), `PascalCase` (classes/models), `CONSTANT_CASE` (env/config). Event names are `domain.action` (see event registry §4.2 of the whitebox doc). Configuration & environment rules follow §9.
 - Exceptions named with a domain `Error` suffix, one per module.
 
 ## 4. State Machines
@@ -86,3 +86,35 @@ Code must be easy to understand, navigate, and debug **by a human**, without an 
 - **Name for the reader:** names carry intent; avoid abbreviations, magic numbers, and terse one-liners. Complex logic gets a short docstring explaining _why_, not just _what_.
 - **Debuggability:** a failure must be reproducible from `trace_id` + structured logs alone (see `error-handling-observability.md`). No silent swallowing of errors; expected outcomes are typed results, not bare `pass`/`except`.
 - **Local reasoning:** keep modules and files small enough that the whole flow fits one screen where possible; split large facades along their state machines.
+
+## 9. Configuration & Environment
+
+Everything that varies by environment, provider, service, deployment, or scale is **configuration, not code**. Swapping a provider, model, endpoint, or tuning a limit is an environment edit, never a code change. Apply the same rule in every project this codebase touches or informs.
+
+### 9.1 Always configuration - never hardcode
+
+- **Secrets & credentials:** API keys, tokens, passwords, database connection strings, JWT/HMAC signing keys, private URLs. Never in code, committed config, or logs (`security-phii-standards.md`); injected via environment or a secret manager.
+- **External service identity:** provider names, model/engine IDs, API base URLs and endpoints, regions, tenants, queue/storage/bucket names.
+- **Behavior & limits:** timeouts, retries, backoff and jitter, rate limits, quotas, TTLs, max batch/concurrency sizes, circuit-breaker thresholds, poll intervals.
+- **Business & price policy:** pricing tables, FX rates, currency, monthly budgets, per-unit ceilings, feature flags, license tier, demo/test identifiers.
+- **Deployment surface:** ports, hosts, domains, CORS origins, cookie/header settings, storage paths, machine/venv paths, environment names, log levels, tool versions.
+- **Content & locale:** language codes, region codes, timezones, locale strings, template ids, sandbox/base URLs used by tests.
+
+### 9.2 Hard rules
+
+- A literal value in code that a deployment, provider, scale, or locale change must touch is a defect - move it to configuration.
+- **No secrets in git:** never in source, committed `.env`, Dockerfiles, or CI logs. `.env` and `.env.*` are git-ignored; only `.env.example` with non-secret defaults is committed.
+- **No silent fallbacks in shipped code:** a missing required env var fails loudly at startup/boot - no hidden localhost or production default behind an unset variable.
+- **Single source of truth:** one env-driven settings object per service; never duplicate the same value across files, configs, or languages (frontend and backend must not each re-declare the same TTL).
+- **Validate at boot, fail closed:** settings are parsed and validated once at startup; invalid or unsafe combinations are refused (e.g. a demo flag never rides a real provider).
+- **Pinned constants are the exception:** a domain threshold stays a constant only when a decision record (ADR) pins it (e.g. `ADR-0001` AMB-006 threshold / WER floor). Everything else is configurable.
+- **Tests too:** tests must not silently bind to real network providers or production values; fixed literals are allowed only for deterministic assertions of that literal.
+
+### 9.3 How to apply it
+
+- **Central settings object:** the backend reads the environment through one typed settings dataclass with defaults + validation (pattern: `apps/backend/app/config.py`). Frontend uses `NEXT_PUBLIC_*` build-time variables.
+- **Document every variable:** each env var gets a non-secret default and a comment in `.env.example`; real values live in the local `.env` (git-ignored) or the secret manager.
+- **Ship config with the feature:** introducing a new endpoint/model/provider/limit adds its env var(s), default, and `.env.example` entry in the same change - not later.
+- **Naming:** `CONSTANT_CASE`, prefixed by component/scope (`SMS_`, `GEMINI_`, `NEXT_PUBLIC_`); sensitive names end in `_KEY`/`_SECRET` and carry no committed value.
+- **Defaults are dev/CI-friendly, never production:** safe local defaults are fine; production values come from the deployment environment.
+- **Precedence:** environment over code default; an explicit CLI flag may override for a one-off local run, but must never be the only way to reach a production path.

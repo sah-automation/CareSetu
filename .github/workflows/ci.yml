@@ -1,11 +1,12 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
-  # Reused by deploy.yml as its gate: CD runs only on green CI.
-  workflow_call:
+  # Reused by deploy.yml as its gate: CD runs only on green CI. There is no
+  # standalone push-to-main trigger on purpose - deploy.yml calls this same
+  # workflow as its gate on every main push, so a standalone run would just
+  # double every job on main. Main gets full CI via the deploy gate; PRs run
+  # this workflow directly.
 
 jobs:
   lint:
