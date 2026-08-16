@@ -130,3 +130,29 @@ jobs:
         with:
           name: k6-live-load-report
           path: k6-summary.json
+
+  security-posture:
+    name: B2 boundary security posture (live)
+    # TEST-B2 (#136): the live boundary security posture gate. Asserts
+    # NFR-SEC-001 (HTTPS only, TLS 1.2+, HSTS, X-Content-Type-Options, no
+    # legacy ciphers) against the Render backend and Vercel frontend after the
+    # deploy hook. Hard fail on merge: the script's own retry window absorbs
+    # the hook-triggered Render build plus cold start and a mid-deploy Vercel
+    # build, so a genuine regression (a missing header, a lowered TLS floor) is
+    # what fails the job - not a deploy in flight (plan §3.B2, §5).
+    needs: deploy-render
+    runs-on: ubuntu-latest
+    env:
+      LIVE_BACKEND_URL: ${{ vars.LIVE_BACKEND_URL }}
+      LIVE_FRONTEND_URL: ${{ vars.LIVE_FRONTEND_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: assert LIVE_BACKEND_URL / LIVE_FRONTEND_URL are set
+        run: |
+          test -n "$LIVE_BACKEND_URL"
+          test -n "$LIVE_FRONTEND_URL"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: run boundary security posture check
+        run: python scripts/security_posture.py

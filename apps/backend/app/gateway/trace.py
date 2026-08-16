@@ -50,9 +50,11 @@ class TraceMiddleware(BaseHTTPMiddleware):
     """Establish the one request-scoped trace id before any handler runs.
 
     The client's ``X-Request-Id`` is honoured when present, else a fresh id is
-    minted. Registered outermost in the app shell so a rejection from an inner
-    gateway middleware (``jwt_verify``, ``rate_limit``) or an iam error handler
-    carries the same id the app's logs record for that request.
+    minted. Registered inside the TEST-B2 security-posture headers middleware
+    (which wraps it), so a rejection from an inner gateway middleware
+    (``jwt_verify``, ``rate_limit``) or an iam error handler carries the same
+    id the app's logs record for that request - and the response still gets
+    the NFR-SEC-001 headers on the way back out.
     """
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
