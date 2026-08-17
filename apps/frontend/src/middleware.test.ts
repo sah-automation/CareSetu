@@ -2,10 +2,7 @@ import { describe, it, expect } from "vitest";
 import { NextRequest, NextResponse } from "next/server";
 import { middleware, config } from "./middleware";
 
-function makeRequest(
-  path: string,
-  cookie?: string,
-): NextRequest {
+function makeRequest(path: string, cookie?: string): NextRequest {
   const url = new URL(path, "http://localhost:3000");
   const headers = new Headers();
   if (cookie) {
