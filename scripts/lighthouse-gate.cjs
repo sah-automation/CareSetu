@@ -219,7 +219,9 @@ async function main() {
   server = startServer(port);
   try {
     await waitUntilReady(baseUrl, server);
-    const warm = await fetch(`${baseUrl}${TARGET_ROUTE}`);
+    const warm = await fetch(`${baseUrl}${TARGET_ROUTE}`, {
+      headers: { 'Cookie': 'caresetu_session=ci-dummy-token' },
+    });
     if (!warm.ok) {
       throw new Error(`GET ${TARGET_ROUTE} -> ${warm.status} ${warm.statusText}; not scanning`);
     }
