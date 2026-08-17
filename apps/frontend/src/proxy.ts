@@ -10,7 +10,7 @@ function isProtectedRoute(pathname: string): boolean {
   );
 }
 
-export function middleware(request: NextRequest) {
+export function proxy(request: NextRequest, _event?: never) {
   const { pathname } = request.nextUrl;
   const hasSession = request.cookies.get(COOKIE_NAME)?.value !== undefined;
 
