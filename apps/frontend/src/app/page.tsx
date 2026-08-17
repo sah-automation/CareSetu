@@ -1,4 +1,41 @@
+/**
+ * Marketing Homepage - FEAT-002, FEAT-020, FEAT-007
+ *
+ * Public landing page for CareSetu. Server-rendered for SEO and fast load.
+ * Replaces the previous root redirect to /patient.
+ *
+ * @see docs/agents/briefs/PHASE-2-5-T4-marketing-homepage.md
+ */
 import Link from "next/link";
+
+const ctaButtonStyle = {
+  display: "inline-block" as const,
+  padding: "0.75rem 2rem",
+  backgroundColor: "#2563eb",
+  color: "#ffffff",
+  borderRadius: "0.5rem",
+  textDecoration: "none",
+  fontWeight: "600" as const,
+  fontSize: "1.125rem",
+};
+
+const featureCardStyle = {
+  padding: "2rem",
+  border: "1px solid #e2e8f0",
+  borderRadius: "0.75rem",
+  backgroundColor: "#f8fafc",
+};
+
+const iconBaseStyle = {
+  width: "3rem",
+  height: "3rem",
+  borderRadius: "0.5rem",
+  display: "flex" as const,
+  alignItems: "center" as const,
+  justifyContent: "center" as const,
+  marginBottom: "1rem",
+  fontSize: "1.5rem",
+};
 
 export default function MarketingHomepage() {
   return (
@@ -76,19 +113,7 @@ export default function MarketingHomepage() {
             charge of your health data. Share records securely with doctors,
             labs, and pharmacies - only with your consent.
           </p>
-          <Link
-            href="/login"
-            style={{
-              display: "inline-block",
-              padding: "0.75rem 2rem",
-              backgroundColor: "#2563eb",
-              color: "#ffffff",
-              borderRadius: "0.5rem",
-              textDecoration: "none",
-              fontWeight: "600",
-              fontSize: "1.125rem",
-            }}
-          >
+          <Link href="/login" style={ctaButtonStyle}>
             Get Started
           </Link>
         </section>
@@ -109,28 +134,9 @@ export default function MarketingHomepage() {
               gap: "2rem",
             }}
           >
-            {/* Feature 1: Longitudinal Records */}
-            <div
-              style={{
-                padding: "2rem",
-                border: "1px solid #e2e8f0",
-                borderRadius: "0.75rem",
-                backgroundColor: "#f8fafc",
-              }}
-            >
-              <div
-                style={{
-                  width: "3rem",
-                  height: "3rem",
-                  backgroundColor: "#dbeafe",
-                  borderRadius: "0.5rem",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  marginBottom: "1rem",
-                  fontSize: "1.5rem",
-                }}
-              >
+            {/* Feature 1: Longitudinal Records (FEAT-002) */}
+            <div style={featureCardStyle}>
+              <div style={{ ...iconBaseStyle, backgroundColor: "#dbeafe" }}>
                 📋
               </div>
               <h3
@@ -150,28 +156,9 @@ export default function MarketingHomepage() {
               </p>
             </div>
 
-            {/* Feature 2: Consent-Gated Sharing */}
-            <div
-              style={{
-                padding: "2rem",
-                border: "1px solid #e2e8f0",
-                borderRadius: "0.75rem",
-                backgroundColor: "#f8fafc",
-              }}
-            >
-              <div
-                style={{
-                  width: "3rem",
-                  height: "3rem",
-                  backgroundColor: "#dcfce7",
-                  borderRadius: "0.5rem",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  marginBottom: "1rem",
-                  fontSize: "1.5rem",
-                }}
-              >
+            {/* Feature 2: Consent-Gated Sharing (FEAT-002/020) */}
+            <div style={featureCardStyle}>
+              <div style={{ ...iconBaseStyle, backgroundColor: "#dcfce7" }}>
                 🔒
               </div>
               <h3
@@ -190,28 +177,9 @@ export default function MarketingHomepage() {
               </p>
             </div>
 
-            {/* Feature 3: AI Pre-Summary */}
-            <div
-              style={{
-                padding: "2rem",
-                border: "1px solid #e2e8f0",
-                borderRadius: "0.75rem",
-                backgroundColor: "#f8fafc",
-              }}
-            >
-              <div
-                style={{
-                  width: "3rem",
-                  height: "3rem",
-                  backgroundColor: "#fef3c7",
-                  borderRadius: "0.5rem",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  marginBottom: "1rem",
-                  fontSize: "1.5rem",
-                }}
-              >
+            {/* Feature 3: AI Pre-Summary (FEAT-007) */}
+            <div style={featureCardStyle}>
+              <div style={{ ...iconBaseStyle, backgroundColor: "#fef3c7" }}>
                 🤖
               </div>
               <h3
@@ -263,19 +231,7 @@ export default function MarketingHomepage() {
             Join CareSetu today and experience secure, consent-based health
             record management.
           </p>
-          <Link
-            href="/login"
-            style={{
-              display: "inline-block",
-              padding: "0.75rem 2rem",
-              backgroundColor: "#2563eb",
-              color: "#ffffff",
-              borderRadius: "0.5rem",
-              textDecoration: "none",
-              fontWeight: "600",
-              fontSize: "1.125rem",
-            }}
-          >
+          <Link href="/login" style={ctaButtonStyle}>
             Get Started
           </Link>
         </section>
