@@ -83,6 +83,30 @@ def test_session_returns_minted_session_and_forwards_raw_phone() -> None:
     assert facade.called_with == ["98765 43210"]
 
 
+def test_session_sets_jwt_cookie() -> None:
+    facade = StubFacade()
+    client = _client_with(facade)
+
+    response = client.post("/v1/auth/session", json={"phone": "9876543210"})
+
+    set_cookie = response.headers.get("set-cookie", "")
+    assert "caresetu_session=" in set_cookie
+    assert "header.payload.signature" in set_cookie
+    assert "httponly" in set_cookie.lower()
+    assert "samesite=strict" in set_cookie.lower()
+    assert "path=/" in set_cookie.lower()
+
+
+def test_session_jwt_cookie_max_age_matches_token_ttl() -> None:
+    facade = StubFacade()
+    client = _client_with(facade)
+
+    response = client.post("/v1/auth/session", json={"phone": "9876543210"})
+
+    set_cookie = response.headers.get("set-cookie", "")
+    assert "max-age=900" in set_cookie.lower()
+
+
 def test_session_route_sits_behind_the_gateway_stack() -> None:
     app = create_app()
 

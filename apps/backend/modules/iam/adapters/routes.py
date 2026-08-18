@@ -21,14 +21,18 @@ from typing import TypeVar, cast
 
 from fastapi import APIRouter, FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.config import Settings
 from app.gateway.idempotency import IdempotencyStore
 from app.gateway.trace import resolve_trace_id
 from modules.iam.domain.exceptions import (
     IamError,
     InvalidPhoneError,
+    RefreshTokenExpiredError,
+    RefreshTokenRevokedError,
+    RefreshTokenUnknownError,
     SessionIssuanceError,
     SmsDeliveryError,
 )
@@ -79,6 +83,47 @@ class IssueSessionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     phone: str = Field(min_length=1, description="10-digit Indian mobile number, or with 91 prefix")
+
+
+class RefreshSessionRequest(BaseModel):
+    """Body of ``POST /v1/auth/refresh``: the refresh token to rotate."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    refresh_token: str = Field(
+        min_length=1, description="Opaque refresh token from a previous session"
+    )
+
+
+_DEV_TEST_ENVIRONMENTS = frozenset({"dev", "test"})
+_JWT_COOKIE_NAME = "caresetu_session"
+
+
+def _is_secure_cookie(request: Request) -> bool:
+    """True when the cookie ``secure`` flag should be set (non-dev/test)."""
+    settings = cast(Settings, request.app.state.settings)
+    return settings.app_environment.strip().lower() not in _DEV_TEST_ENVIRONMENTS
+
+
+def _set_jwt_cookie(response: Response, jwt_value: str, ttl_seconds: int, *, secure: bool) -> None:
+    """Attach the JWT as an httpOnly cookie on ``response``.
+
+    Cookie attributes match the acceptance criteria:
+    - ``httpOnly=true``: JS cannot read the cookie (XSS mitigation)
+    - ``secure=true`` when not in dev/test: cookie only sent over HTTPS
+    - ``sameSite=strict``: no cross-origin cookie submission
+    - ``path=/``: cookie sent on every request path
+    - ``maxAge`` matching JWT TTL so the browser drops it at expiry
+    """
+    response.set_cookie(
+        key=_JWT_COOKIE_NAME,
+        value=jwt_value,
+        max_age=ttl_seconds,
+        httponly=True,
+        secure=secure,
+        samesite="strict",
+        path="/",
+    )
 
 
 class ErrorEnvelope(BaseModel):
@@ -195,7 +240,7 @@ async def resend_otp(
 async def issue_session(
     request: Request,
     body: IssueSessionRequest,
-) -> SessionResult:
+) -> Response:
     """Mint an access JWT + refresh token for a verified patient's phone.
 
     The PWA calls this only after a ``verified`` outcome: the facade requires
@@ -203,10 +248,57 @@ async def issue_session(
     Suspended phone is refused with a ``409`` ``SESSION_REFUSED`` envelope the
     client must resolve (verify the OTP, or await the role grant) before a
     session can be minted. The returned session is what the PWA stores so it
-    can reach protected routes.
+    can reach protected routes. The JWT is also set as an httpOnly cookie for
+    Next.js middleware route protection.
     """
     facade = cast(IamFacade, request.app.state.iam_facade)
-    return await _run_idempotent(request, lambda: facade.issue_session(body.phone))
+    result = await _run_idempotent(request, lambda: facade.issue_session(body.phone))
+    response = Response(
+        content=result.model_dump_json(),
+        media_type="application/json",
+        status_code=status.HTTP_200_OK,
+    )
+    _set_jwt_cookie(
+        response,
+        result.jwt,
+        result.expires_in_seconds,
+        secure=_is_secure_cookie(request),
+    )
+    return response
+
+
+@router.post(
+    "/refresh",
+    response_model=SessionResult,
+    status_code=status.HTTP_200_OK,
+    summary="Rotate a refresh token into a fresh session",
+)
+async def refresh_session(
+    request: Request,
+    body: RefreshSessionRequest,
+) -> Response:
+    """Rotate an opaque refresh token into a fresh JWT + new refresh token.
+
+    The refresh path is independent of SMS (NFR-004): it only reads the
+    ``sessions`` table and mints tokens, so an EXT-001 outage never bricks an
+    existing session. A revoked or expired token is refused with the matching
+    error envelope. The rotated JWT is also set as an httpOnly cookie for
+    Next.js middleware route protection.
+    """
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    result = await facade.refresh_session(body.refresh_token)
+    response = Response(
+        content=result.model_dump_json(),
+        media_type="application/json",
+        status_code=status.HTTP_200_OK,
+    )
+    _set_jwt_cookie(
+        response,
+        result.jwt,
+        result.expires_in_seconds,
+        secure=_is_secure_cookie(request),
+    )
+    return response
 
 
 def _error_response(
@@ -255,6 +347,30 @@ def register_error_handlers(app: FastAPI) -> None:
             str(exc),
         )
 
+    async def _refresh_token_unknown(request: Request, exc: Exception) -> JSONResponse:
+        return _error_response(
+            request,
+            status.HTTP_401_UNAUTHORIZED,
+            "REFRESH_TOKEN_UNKNOWN",
+            str(exc),
+        )
+
+    async def _refresh_token_expired(request: Request, exc: Exception) -> JSONResponse:
+        return _error_response(
+            request,
+            status.HTTP_401_UNAUTHORIZED,
+            "REFRESH_TOKEN_EXPIRED",
+            str(exc),
+        )
+
+    async def _refresh_token_revoked(request: Request, exc: Exception) -> JSONResponse:
+        return _error_response(
+            request,
+            status.HTTP_401_UNAUTHORIZED,
+            "REFRESH_TOKEN_REVOKED",
+            str(exc),
+        )
+
     async def _iam_failed(request: Request, exc: Exception) -> JSONResponse:
         return _error_response(
             request,
@@ -285,5 +401,8 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(InvalidPhoneError, _invalid_phone)
     app.add_exception_handler(SmsDeliveryError, _sms_failed)
     app.add_exception_handler(SessionIssuanceError, _session_refused)
+    app.add_exception_handler(RefreshTokenUnknownError, _refresh_token_unknown)
+    app.add_exception_handler(RefreshTokenExpiredError, _refresh_token_expired)
+    app.add_exception_handler(RefreshTokenRevokedError, _refresh_token_revoked)
     app.add_exception_handler(IamError, _iam_failed)
     app.add_exception_handler(RequestValidationError, _validation_failed)

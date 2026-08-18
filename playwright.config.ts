@@ -30,10 +30,11 @@ export default defineConfig({
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: [
     {
-      // Probed on /patient, not /: there is no root page and Playwright's url
-      // probe only accepts non-404 status codes.
+      // Probed on / (public marketing homepage, no auth required).
+      // Previously probed /patient, but the proxy now redirects unauthenticated
+      // requests there to /login, which does not exist until T6 is merged.
       command: "npm run dev -w @caresetu/frontend",
-      url: "http://localhost:3000/patient",
+      url: "http://localhost:3000/",
       reuseExistingServer: !process.env.CI,
       timeout: 120_000,
     },
