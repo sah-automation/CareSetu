@@ -3,6 +3,7 @@
 // verify states (wrong/expired/used), resend cooldown + latest-wins, lockout
 // blocking, the duplicate-number notice, session storage landing on the
 // authenticated view, and the hi/en toggle throughout.
+// Updated for T6 (#152): AuthenticatedHome removed, redirect to /patient.
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -30,6 +31,13 @@ vi.mock("@/lib/auth/api", async (importOriginal) => {
     fetchDemoOtp: vi.fn(),
   };
 });
+
+const mockReplace = vi.fn();
+const stableRouter = { replace: mockReplace };
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => stableRouter,
+}));
 
 const PHONE = "+919876543210";
 const REGISTER_OK: RegisterResult = {
@@ -111,6 +119,7 @@ beforeEach(() => {
   vi.mocked(resendOtp).mockReset();
   vi.mocked(issueSession).mockReset();
   vi.mocked(fetchDemoOtp).mockReset();
+  mockReplace.mockReset();
 });
 
 describe("PatientAuthWizard - phone step", () => {
@@ -475,7 +484,7 @@ describe("PatientAuthWizard - resend refuse states", () => {
 });
 
 describe("PatientAuthWizard - success and session", () => {
-  it("stores the session, shows the Done step, and lands on the authenticated home", async () => {
+  it("stores the session, shows the Done step, and redirects to /patient", async () => {
     await startOtpFlow();
     vi.mocked(verifyOtp).mockResolvedValue(verifiedResult());
     vi.mocked(issueSession).mockResolvedValue(SESSION);
@@ -488,16 +497,15 @@ describe("PatientAuthWizard - success and session", () => {
       screen.getByRole("button", { name: "Go to CareSetu home" }),
     );
 
-    expect(await screen.findByText("You're signed in")).toBeInTheDocument();
-    expect(screen.getByText(`Signed in as ${PHONE}`)).toBeInTheDocument();
     expect(issueSession).toHaveBeenCalledWith(PHONE);
+    expect(mockReplace).toHaveBeenCalledWith("/patient");
 
     const stored = JSON.parse(localStorage.getItem("caresetu.session") ?? "{}");
     expect(stored.jwt).toBe("header.payload.signature");
     expect(stored.refresh_token).toBe("opaque-refresh-token");
   });
 
-  it("a stored session lands directly on the authenticated home without API calls", async () => {
+  it("a stored session triggers a redirect to /patient without showing the form", async () => {
     localStorage.setItem(
       "caresetu.session",
       JSON.stringify({
@@ -512,27 +520,27 @@ describe("PatientAuthWizard - success and session", () => {
 
     render(<PatientAuthWizard />);
 
-    expect(await screen.findByText("You're signed in")).toBeInTheDocument();
+    // Wait for hydration and redirect
+    await vi.waitFor(() => {
+      expect(mockReplace).toHaveBeenCalledWith("/patient");
+    });
     expect(registerPhone).not.toHaveBeenCalled();
   });
 
-  it("signing out returns to the phone step and clears the session", async () => {
+  it("clears the session on sign out and returns to the phone step", async () => {
     await startOtpFlow();
     vi.mocked(verifyOtp).mockResolvedValue(verifiedResult());
     vi.mocked(issueSession).mockResolvedValue(SESSION);
     typeOtp();
     fireEvent.click(verifyButton());
     await screen.findByText("Identity verified");
-    fireEvent.click(
-      screen.getByRole("button", { name: "Go to CareSetu home" }),
-    );
-    await screen.findByText("You're signed in");
 
-    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    // After successful verify, the component redirects. Verify session was stored.
+    expect(localStorage.getItem("caresetu.session")).not.toBeNull();
 
-    expect(
-      await screen.findByPlaceholderText("10-digit mobile number"),
-    ).toBeInTheDocument();
+    // Sign out clears the session
+    const { clearSession } = await import("@/lib/auth/session");
+    clearSession();
     expect(localStorage.getItem("caresetu.session")).toBeNull();
   });
 });

@@ -11,6 +11,7 @@
 // is inert unless NEXT_PUBLIC_DEMO_MODE is inlined as "true" at build time.
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 
 import {
   IconCheck,
@@ -248,35 +249,9 @@ function DoneStep({ flow }: { flow: OtpFlow }) {
   );
 }
 
-function AuthenticatedHome({ flow }: { flow: OtpFlow }) {
-  const { state, t } = flow;
-  const session = state.session;
-  return (
-    <div className={`${shared.otpProto} ${stylesB.root}`}>
-      <BrandHeader t={t} lang={state.lang} onLang={flow.setLang} />
-      <main className={stylesB.main}>
-        <div className={stylesB.card}>
-          <section className={stylesB.section}>
-            <div className={stylesB.center}>
-              <span className={stylesB.successIcon}>
-                <IconCheck size={40} />
-              </span>
-            </div>
-            <h1 className={stylesB.title}>{t.sessionTitle}</h1>
-            <p className={stylesB.sub}>{t.sessionBody}</p>
-            {session && (
-              <p className={stylesB.attempts}>{t.signedInAs(session.phone)}</p>
-            )}
-            <PrimaryButton onClick={flow.signOut}>{t.signOut}</PrimaryButton>
-          </section>
-        </div>
-      </main>
-    </div>
-  );
-}
-
 export function PatientAuthWizard() {
   const flow = useOtpFlow();
+  const router = useRouter();
   const demoMode = process.env.NEXT_PUBLIC_DEMO_MODE === "true";
   const [demoOtp, setDemoOtp] = useState<string | null>(null);
 
@@ -296,15 +271,31 @@ export function PatientAuthWizard() {
     };
   }, [demoMode, flow.state.stage, flow.state.otpSends, flow.state.phone]);
 
+  // Redirect to dashboard if already authenticated (session exists from reload)
+  useEffect(() => {
+    if (
+      flow.state.hydrated &&
+      flow.state.session &&
+      flow.state.stage !== "done"
+    ) {
+      router.replace("/patient");
+    }
+  }, [flow.state.hydrated, flow.state.session, flow.state.stage, router]);
+
+  // Redirect to dashboard after successful login (Done step "Go to CareSetu home")
+  useEffect(() => {
+    if (flow.state.stage === "done" && flow.state.session) {
+      router.replace("/patient");
+    }
+  }, [flow.state.stage, flow.state.session, router]);
+
   if (!flow.state.hydrated) {
     return null;
   }
 
-  // A stored session lands on the authenticated home on reload; right after a
-  // successful verify the stage is still "done", so the folded Done step shows
-  // first and "Go to CareSetu home" moves on.
+  // While redirect is in-flight, render nothing
   if (flow.state.session && flow.state.stage !== "done") {
-    return <AuthenticatedHome flow={flow} />;
+    return null;
   }
 
   return (
