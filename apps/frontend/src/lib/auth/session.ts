@@ -9,6 +9,7 @@ import type { SessionResult } from "./api";
 const JWT_KEY = "caresetu.access_jwt";
 const REFRESH_KEY = "caresetu.refresh_token";
 const SESSION_KEY = "caresetu.session";
+const SELECTED_ROLE_KEY = "caresetu.selected_role";
 
 export interface StoredSession {
   jwt: string;
@@ -47,4 +48,17 @@ export function clearSession(): void {
   localStorage.removeItem(JWT_KEY);
   localStorage.removeItem(REFRESH_KEY);
   localStorage.removeItem(SESSION_KEY);
+  localStorage.removeItem(SELECTED_ROLE_KEY);
+}
+
+export function readSelectedRole(): string | null {
+  return localStorage.getItem(SELECTED_ROLE_KEY);
+}
+
+export function saveSelectedRole(role: string): void {
+  localStorage.setItem(SELECTED_ROLE_KEY, role);
+}
+
+export function clearSelectedRole(): void {
+  localStorage.removeItem(SELECTED_ROLE_KEY);
 }
