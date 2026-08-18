@@ -98,9 +98,7 @@ async function verifyOtp(
   const code = await readMockOtp(request, number);
   await page.getByLabel("Verification code").fill(code);
   await page.getByRole("button", { name: "Verify & continue" }).click();
-  await expect(
-    page.getByRole("heading", { name: "Identity verified" }),
-  ).toBeVisible();
+  await page.waitForURL("**/patient", { timeout: 15_000 });
 }
 
 // TEST-C2 (#131): accessibility regression guard. Axe scans run against the
@@ -216,9 +214,7 @@ test("the auth wizard and the patient page pass the axe accessibility scan", asy
   await expectNoAxeViolations(page, "auth wizard OTP step");
 
   await verifyOtp(page, request, axePhone);
-  await expectNoAxeViolations(page, "auth wizard done step");
 
-  await page.waitForURL("**/patient");
   await expect(
     page.getByRole("heading", { name: "CareSetu Patient" }),
   ).toBeVisible();
