@@ -7,7 +7,14 @@
 
 import { createContext, useContext, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { readSession, clearSession, type StoredSession } from "./session";
+import {
+  readSession,
+  clearSession,
+  readSelectedRole,
+  saveSelectedRole,
+  clearSelectedRole,
+  type StoredSession,
+} from "./session";
 
 const API_BASE_URL: string =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
@@ -63,7 +70,9 @@ function applyMe(
     roles: me.roles,
   });
   if (me.roles.length > 0) {
-    setSelectedRole(me.roles[0]);
+    const saved = readSelectedRole();
+    const role = saved && me.roles.includes(saved) ? saved : me.roles[0];
+    setSelectedRole(role);
   }
 }
 
@@ -168,10 +177,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   function switchRole(role: string) {
     setSelectedRole(role);
+    saveSelectedRole(role);
   }
 
   function logout() {
     clearSession();
+    clearSelectedRole();
     clearCookie("caresetu.access_jwt");
     setUser(null);
     setSelectedRole(null);
