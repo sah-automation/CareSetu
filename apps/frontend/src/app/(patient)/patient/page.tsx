@@ -32,7 +32,7 @@ export default function PatientChannelPage() {
   }
 
   return (
-    <div
+    <main
       style={{
         minHeight: "100vh",
         display: "flex",
@@ -82,6 +82,6 @@ export default function PatientChannelPage() {
           Sign out
         </button>
       </div>
-    </div>
+    </main>
   );
 }
