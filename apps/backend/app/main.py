@@ -133,6 +133,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_origins=allow_origins,
         allow_methods=["*"],
         allow_headers=["*"],
+        allow_credentials=True,
     )
     # Trace established outermost of the whole stack (PHASE-2 REM T6, #77), so
     # the one request-scoped trace id is settled before the gateway middleware
