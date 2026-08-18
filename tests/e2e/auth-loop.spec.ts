@@ -124,7 +124,7 @@ test("register a new number, read the mock OTP, verify, and reach the protected 
   await verifyOtp(page, request, phone);
   await page.waitForURL("**/patient");
   await expect(
-    page.getByRole("heading", { name: "CareSetu Patient" }),
+    page.getByRole("heading", { name: "Welcome, Patient" }),
   ).toBeVisible();
 
   const accessJwt = await page.evaluate(() =>
@@ -145,7 +145,7 @@ test("register a new number, read the mock OTP, verify, and reach the protected 
 
   await page.reload();
   await expect(
-    page.getByRole("heading", { name: "CareSetu Patient" }),
+    page.getByRole("heading", { name: "Welcome, Patient" }),
   ).toBeVisible();
 });
 
@@ -162,7 +162,7 @@ test("re-registering the same number resolves to the existing identity and logs 
   await verifyOtp(page, request, phone);
   await page.waitForURL("**/patient");
   await expect(
-    page.getByRole("heading", { name: "CareSetu Patient" }),
+    page.getByRole("heading", { name: "Welcome, Patient" }),
   ).toBeVisible();
 
   const accessJwt = await page.evaluate(() =>
@@ -216,13 +216,13 @@ test("the auth wizard and the patient page pass the axe accessibility scan", asy
   await verifyOtp(page, request, axePhone);
 
   await expect(
-    page.getByRole("heading", { name: "CareSetu Patient" }),
+    page.getByRole("heading", { name: "Welcome, Patient" }),
   ).toBeVisible();
   await expectNoAxeViolations(page, "signed-in patient page");
 
   await page.reload();
   await expect(
-    page.getByRole("heading", { name: "CareSetu Patient" }),
+    page.getByRole("heading", { name: "Welcome, Patient" }),
   ).toBeVisible();
   await expectNoAxeViolations(page, "signed-in patient page after reload");
 });
