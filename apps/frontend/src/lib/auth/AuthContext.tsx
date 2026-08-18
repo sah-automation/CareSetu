@@ -91,6 +91,7 @@ async function fetchRefresh(refreshToken: string): Promise<RefreshResponse> {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ refresh_token: refreshToken }),
+    credentials: "include",
   });
   if (!res.ok) {
     throw new Error(`POST /v1/auth/refresh returned ${res.status}`);

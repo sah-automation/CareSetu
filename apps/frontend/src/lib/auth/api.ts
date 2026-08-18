@@ -78,6 +78,7 @@ async function post<T>(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      credentials: "include",
     });
   } catch {
     throw new AuthApiError({
