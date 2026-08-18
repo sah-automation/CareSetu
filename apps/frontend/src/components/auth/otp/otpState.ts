@@ -249,7 +249,6 @@ export interface OtpFlow {
   setOtpDraft: (digits: string) => void;
   setLang: (lang: Lang) => void;
   backToPhone: () => void;
-  goHome: () => void;
   signOut: () => void;
 }
 
@@ -576,7 +575,6 @@ export function useOtpFlow(): OtpFlow {
           isExisting: s.isExisting,
           hydrated: true,
         })),
-      goHome: () => setState((s) => ({ ...s, stage: "phone" })),
       signOut: () => {
         clearSession();
         setState((s) => ({ ...initialState(), lang: s.lang, hydrated: true }));
