@@ -1,16 +1,18 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import OperatorChannelPage from "@/app/(operator)/operator/page";
-import PartnerChannelPage from "@/app/(partner)/partner/page";
+import PatientDashboardPage from "@/app/(dashboard)/patient/page";
+import PartnerDashboardPage from "@/app/(dashboard)/partner/page";
+import OperatorDashboardPage from "@/app/(dashboard)/operator/page";
 
-describe("channel hello-world routes", () => {
+describe("dashboard scaffold pages", () => {
   it.each([
-    ["partner", PartnerChannelPage, "Partner channel - hello world"],
-    ["operator", OperatorChannelPage, "Operator channel - hello world"],
+    ["patient", PatientDashboardPage, "Welcome, Patient"],
+    ["partner", PartnerDashboardPage, "Welcome, Partner"],
+    ["operator", OperatorDashboardPage, "Welcome, Operator"],
   ] as const)(
-    "renders the %s channel hello-world page",
-    (_channel, Page, heading) => {
+    "renders the %s dashboard scaffold page",
+    (_role, Page, heading) => {
       render(<Page />);
       expect(
         screen.getByRole("heading", { name: heading, level: 1 }),
