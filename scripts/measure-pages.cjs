@@ -67,7 +67,12 @@ function killTree(child) {
 }
 
 async function fetchBuffer(url) {
-  const response = await fetch(url, { headers: { 'Accept-Encoding': 'identity' } });
+  const response = await fetch(url, {
+    headers: {
+      'Accept-Encoding': 'identity',
+      'Cookie': 'caresetu_session=ci-dummy-token',
+    },
+  });
   if (!response.ok) {
     throw new Error(`GET ${url} -> ${response.status} ${response.statusText}`);
   }

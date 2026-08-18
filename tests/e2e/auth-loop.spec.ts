@@ -42,7 +42,7 @@ const phone = randomPhone();
 let registeredSubjectId: string | null = null;
 
 async function startRegistration(page: Page, number: string): Promise<void> {
-  await page.goto("/patient");
+  await page.goto("/login");
   // The wizard renders null until hydration completes; wait for the phone step
   // to actually be on screen before touching the input so a slow first compile
   // cannot land us mid-hydration. Assertions do NOT inherit test.setTimeout -
@@ -189,7 +189,7 @@ test("an unauthenticated attempt at the protected surface is denied", async ({
   const me = await request.get(`${BACKEND}/v1/me`);
   expect(me.status()).toBe(401);
 
-  await page.goto("/patient");
+  await page.goto("/login");
   await expect(page.getByPlaceholder("10-digit mobile number")).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "You're signed in" }),
@@ -204,7 +204,7 @@ test("the auth wizard and the patient page pass the axe accessibility scan", asy
   // the patient page. Scans each wizard stage and the signed-in surface.
   const axePhone = randomPhone();
 
-  await page.goto("/patient");
+  await page.goto("/login");
   await expect(
     page.getByRole("heading", { name: "Verify & continue" }),
   ).toBeVisible({

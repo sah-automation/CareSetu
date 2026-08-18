@@ -66,6 +66,7 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/auth/verify",
         "/v1/auth/resend",
         "/v1/auth/session",
+        "/v1/auth/refresh",
         "/v1/auth/dev/otp",
         "/v1/me",
     }
