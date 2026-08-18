@@ -124,9 +124,9 @@ test("register a new number, read the mock OTP, verify, and reach the protected 
 }) => {
   await startRegistration(page, phone);
   await verifyOtp(page, request, phone);
-  await page.getByRole("button", { name: "Go to CareSetu home" }).click();
+  await page.waitForURL("**/patient");
   await expect(
-    page.getByRole("heading", { name: "You're signed in" }),
+    page.getByRole("heading", { name: "CareSetu Patient" }),
   ).toBeVisible();
 
   const accessJwt = await page.evaluate(() =>
@@ -147,7 +147,7 @@ test("register a new number, read the mock OTP, verify, and reach the protected 
 
   await page.reload();
   await expect(
-    page.getByRole("heading", { name: "You're signed in" }),
+    page.getByRole("heading", { name: "CareSetu Patient" }),
   ).toBeVisible();
 });
 
@@ -162,9 +162,9 @@ test("re-registering the same number resolves to the existing identity and logs 
     ),
   ).toBeVisible();
   await verifyOtp(page, request, phone);
-  await page.getByRole("button", { name: "Go to CareSetu home" }).click();
+  await page.waitForURL("**/patient");
   await expect(
-    page.getByRole("heading", { name: "You're signed in" }),
+    page.getByRole("heading", { name: "CareSetu Patient" }),
   ).toBeVisible();
 
   const accessJwt = await page.evaluate(() =>
@@ -218,15 +218,15 @@ test("the auth wizard and the patient page pass the axe accessibility scan", asy
   await verifyOtp(page, request, axePhone);
   await expectNoAxeViolations(page, "auth wizard done step");
 
-  await page.getByRole("button", { name: "Go to CareSetu home" }).click();
+  await page.waitForURL("**/patient");
   await expect(
-    page.getByRole("heading", { name: "You're signed in" }),
+    page.getByRole("heading", { name: "CareSetu Patient" }),
   ).toBeVisible();
   await expectNoAxeViolations(page, "signed-in patient page");
 
   await page.reload();
   await expect(
-    page.getByRole("heading", { name: "You're signed in" }),
+    page.getByRole("heading", { name: "CareSetu Patient" }),
   ).toBeVisible();
   await expectNoAxeViolations(page, "signed-in patient page after reload");
 });
