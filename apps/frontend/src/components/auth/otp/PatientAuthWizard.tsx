@@ -221,6 +221,7 @@ function OtpStep({ flow }: { flow: OtpFlow }) {
 
 function DoneStep({ flow }: { flow: OtpFlow }) {
   const { t } = flow;
+  const router = useRouter();
   return (
     <section className={stylesB.section}>
       <div className={stylesB.center}>
@@ -244,7 +245,9 @@ function DoneStep({ flow }: { flow: OtpFlow }) {
           {t.valueProps[2]}
         </li>
       </ul>
-      <PrimaryButton onClick={flow.goHome}>{t.goHome}</PrimaryButton>
+      <PrimaryButton onClick={() => router.replace("/patient")}>
+        {t.goHome}
+      </PrimaryButton>
     </section>
   );
 }
