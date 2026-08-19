@@ -33,7 +33,7 @@ from modules.iam.schema.models import (
 )
 
 if TYPE_CHECKING:
-    from modules.iam.facade import IdentityGuardState
+    from modules.iam.domain.shared import IdentityGuardState
 
 _IAM_SCHEMA = "iam"
 _PATIENT_ROLE = "patient"
@@ -325,7 +325,7 @@ async def _lock_identity_by_phone(
     connection: AsyncConnection, phone_e164: str
 ) -> IdentityGuardState | None:
     """Row-lock the identity for ``phone_e164`` and return its guard state."""
-    from modules.iam.facade import _lock_identity_row
+    from modules.iam.domain.shared import _lock_identity_row
 
     return await _lock_identity_row(connection, iam_identities.c.phone_e164 == phone_e164)
 
@@ -334,7 +334,7 @@ async def _lock_identity_by_id(
     connection: AsyncConnection, identity_id: int
 ) -> IdentityGuardState | None:
     """Row-lock an identity by id and return its guard state (ticket #58)."""
-    from modules.iam.facade import _lock_identity_row
+    from modules.iam.domain.shared import _lock_identity_row
 
     return await _lock_identity_row(connection, iam_identities.c.id == identity_id)
 
