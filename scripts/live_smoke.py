@@ -655,7 +655,7 @@ def check_frontend(frontend: str, backend: str, *, no_retry: bool) -> tuple[Chec
         frontend,
         "/login",
         no_retry=no_retry,
-        settle=False,
+        settle=True,
     )
     results.extend(login_results)
 
