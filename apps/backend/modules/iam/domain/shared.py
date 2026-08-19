@@ -3,9 +3,10 @@
 ``IdentityGuardState`` and ``_lock_identity_row`` are consumed by both
 the identity and OTP sub-facades.  ``_invalidate_pending_challenges`` and
 ``_issue_challenge`` are the latest-wins challenge lifecycle helpers shared
-by ``register_patient`` and ``resend_otp``.  ``OtpSender`` is the port that
-decouples sub-facades from the SMS adapter - the coordinator wires the
-``SmsDeliveryQueue`` behind it.
+by ``register_patient`` and ``resend_otp``.  ``_latest_cooldown_until`` is
+the shared cooldown query used by both ``register_patient`` and ``resend_otp``.
+``OtpSender`` is the port that decouples sub-facades from the SMS adapter -
+the coordinator wires the ``SmsDeliveryQueue`` behind it.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from modules.iam.outbox import IAM_OUTBOX_TABLE
 from modules.iam.schema.models import iam_identities, iam_otp_challenges
 
 _IAM_SCHEMA = "iam"
+_PATIENT_ROLE = "patient"
 
 OtpSender = Callable[[str, str], Awaitable[None]]
 """Port: ``(phone_e164, otp) -> None``.  The coordinator wires
@@ -147,3 +149,21 @@ async def _issue_challenge(
         events.otp_sent_envelope(identity_id, challenge_id, expires_at),
     )
     return challenge_id, otp
+
+
+async def _latest_cooldown_until(connection: AsyncConnection, identity_id: int) -> datetime | None:
+    """The latest challenge's ``cooldown_until`` for the identity, or None.
+
+    The resend cooldown is measured per phone from the last issuance (spec
+    #51 section 2.4), and challenges are issued per identity - so the newest
+    challenge row carries the cooldown boundary.  Shared by ``register_patient``
+    and ``resend_otp``.
+    """
+    return (
+        await connection.execute(
+            select(iam_otp_challenges.c.cooldown_until)
+            .where(iam_otp_challenges.c.identity_id == identity_id)
+            .order_by(iam_otp_challenges.c.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
