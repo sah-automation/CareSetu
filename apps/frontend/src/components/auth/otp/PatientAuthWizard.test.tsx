@@ -5,7 +5,13 @@
 // authenticated view, and the hi/en toggle throughout.
 // Updated for T6 (#152): AuthenticatedHome removed, redirect to /patient.
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -584,7 +590,9 @@ describe("PatientAuthWizard - demo OTP banner", () => {
 
     await startOtpFlow();
 
-    expect(fetchDemoOtp).toHaveBeenCalledWith(PHONE);
+    await waitFor(() => {
+      expect(fetchDemoOtp).toHaveBeenCalledWith(PHONE);
+    });
     expect(screen.queryByText(/Demo OTP:/)).not.toBeInTheDocument();
   });
 
