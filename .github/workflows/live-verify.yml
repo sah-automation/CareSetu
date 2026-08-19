@@ -1,0 +1,114 @@
+name: Live verify
+
+# Reusable workflow for post-deploy and nightly live verification. Extracts
+# the three live jobs (A2 load sweep, B2 security posture, D live smoke) that
+# both deploy.yml and nightly.yml ran identically. Single source of truth for
+# live verification steps, env vars, and artifact uploads.
+
+on:
+  workflow_call:
+    inputs:
+      live-load-sweep:
+        description: Run the A2 live load sweep job
+        type: boolean
+        default: true
+      security-posture:
+        description: Run the B2 boundary security posture job
+        type: boolean
+        default: true
+      live-smoke:
+        description: Run the D live smoke job
+        type: boolean
+        default: true
+
+jobs:
+  live-load-sweep:
+    if: ${{ inputs.live-load-sweep }}
+    name: A2 live load sweep (k6, /health + /v1/me)
+    # TEST-A2 (#134): the first live job. Runs the tolerant production-stack
+    # health sweep. The caller's dependency chain ensures this runs at the
+    # right time (after deploy-render in deploy.yml, after gate in nightly.yml).
+    # Reads the LIVE_BACKEND_URL / LIVE_FRONTEND_URL repo variables; TEST-B2
+    # (#136) and TEST-D (#137) reuse them.
+    runs-on: ubuntu-latest
+    env:
+      LIVE_BACKEND_URL: ${{ vars.LIVE_BACKEND_URL }}
+      LIVE_FRONTEND_URL: ${{ vars.LIVE_FRONTEND_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: assert LIVE_BACKEND_URL / LIVE_FRONTEND_URL are set
+        run: |
+          test -n "$LIVE_BACKEND_URL"
+          test -n "$LIVE_FRONTEND_URL"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: install k6 (explicit, like the ci.yml load-test job)
+        run: |
+          curl --fail -sSL https://github.com/grafana/k6/releases/download/v2.2.0/k6-v2.2.0-linux-amd64.tar.gz -o k6.tar.gz
+          tar -xzf k6.tar.gz
+          sudo install -m 0755 k6-v2.2.0-linux-amd64/k6 /usr/local/bin/k6
+          k6 version
+      - name: warm up + mint live session token
+        id: mint
+        run: echo "token=$(node scripts/loadtest/mint-live-token.cjs)" >> "$GITHUB_OUTPUT"
+        env:
+          LIVE_BACKEND_URL: ${{ vars.LIVE_BACKEND_URL }}
+          TEST_PHONE: "9000000002"
+      - name: run live load sweep
+        run: k6 run --summary-export=k6-summary.json scripts/loadtest/live-sweep.js -e BASE_URL="$LIVE_BACKEND_URL" -e TOKEN="$LIVE_SWEEP_TOKEN"
+        env:
+          LIVE_SWEEP_TOKEN: ${{ steps.mint.outputs.token }}
+      - name: upload k6 report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-live-load-report
+          path: k6-summary.json
+
+  security-posture:
+    if: ${{ inputs.security-posture }}
+    name: B2 boundary security posture (live)
+    # TEST-B2 (#136): the live boundary security posture gate. Asserts
+    # NFR-SEC-001 (HTTPS only, TLS 1.2+, HSTS, X-Content-Type-Options, no
+    # legacy ciphers) against the Render backend and Vercel frontend. The
+    # script's own retry window absorbs any in-flight free-tier build.
+    runs-on: ubuntu-latest
+    env:
+      LIVE_BACKEND_URL: ${{ vars.LIVE_BACKEND_URL }}
+      LIVE_FRONTEND_URL: ${{ vars.LIVE_FRONTEND_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: assert LIVE_BACKEND_URL / LIVE_FRONTEND_URL are set
+        run: |
+          test -n "$LIVE_BACKEND_URL"
+          test -n "$LIVE_FRONTEND_URL"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: run boundary security posture check
+        run: python scripts/security_posture.py
+
+  live-smoke:
+    if: ${{ inputs.live-smoke }}
+    name: D live smoke (hard fail)
+    # TEST-D (#137): the crown-jewel gate - the demo itself must work on every
+    # run. Warm-up + /health, the full register -> dev/otp -> verify -> session
+    # -> /v1/me flow (cooldown-aware), the CORS origin echo, the error envelope
+    # contract, and the Vercel /patient page + inlined-JS assertions. Any
+    # genuine failure exits 1 so the calling workflow hard-fails.
+    runs-on: ubuntu-latest
+    env:
+      LIVE_BACKEND_URL: ${{ vars.LIVE_BACKEND_URL }}
+      LIVE_FRONTEND_URL: ${{ vars.LIVE_FRONTEND_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: assert LIVE_BACKEND_URL / LIVE_FRONTEND_URL are set
+        run: |
+          test -n "$LIVE_BACKEND_URL"
+          test -n "$LIVE_FRONTEND_URL"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: run live smoke
+        run: python scripts/live_smoke.py

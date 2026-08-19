@@ -1,0 +1,18 @@
+name: Setup Backend (Python + uv)
+description: Set up Python 3.13, uv, and install backend dev dependencies
+inputs:
+  install:
+    description: Whether to run uv sync (set to "false" when venv is cached)
+    required: false
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.13"
+    - uses: astral-sh/setup-uv@v5
+    - name: install backend
+      if: inputs.install == 'true'
+      run: uv sync --project apps/backend --group dev
+      shell: bash
