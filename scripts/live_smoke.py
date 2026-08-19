@@ -18,8 +18,11 @@ settles (test-suite plan section 3.D). Five steps, in order:
    section 2), probed with an unauthenticated `GET /v1/me` - a deterministic
    401 outside the per-IP `/v1/auth/*` rate limiter.
 5. Assert the Vercel `/patient` page returns 200 with title "CareSetu" and the
-   served JS chunk inlines the backend base URL and the demo-banner strings
-   (guards the trailing-slash and env-inlining bugs found during DEPLOY-7).
+   served JS chunk inlines the backend base URL (guards a missing
+   NEXT_PUBLIC_API_BASE_URL falling back to localhost:8000). Also fetch
+   `/login` and assert the demo-banner string is present in the combined JS
+   chunks from both pages (the auth wizard moved to `/login` in Phase 2.5;
+   guards the env-inlining bugs found during DEPLOY-7).
 
 Pacing: the flow makes ~4 auth-surface calls per runner-IP window (register,
 dev/otp, verify, session) - safely under the 10 req / 60 s limiter (plan
@@ -543,23 +546,21 @@ def _script_srcs(html: str) -> list[str]:
     return _SCRIPT_SRC.findall(html)
 
 
-def check_frontend(frontend: str, backend: str, *, no_retry: bool) -> tuple[CheckResult, ...]:
-    """Step 5: /patient serves 200, titles CareSetu, and inlines the right JS.
+def _fetch_page_chunks(
+    frontend: str, path: str, *, no_retry: bool, settle: bool = False
+) -> tuple[HttpResponse | None, list[str], list[CheckResult]]:
+    """Fetch a page and return (response, js_chunk_texts, results).
 
-    Polls until the Vercel build settles (the frontend rebuild lands
-    asynchronously from `deploy-render`), then fetches every JS chunk the page
-    references and asserts the two DEPLOY-7 regressions cannot silently return:
-    the backend base URL is inlined (guards a missing NEXT_PUBLIC_API_BASE_URL
-    falling back to localhost:8000) and the demo-banner string is present
-    (guards the trailing-slash / env-inlining bugs). The base-URL comparison
-    strips trailing slashes so a URL written with or without one both match.
+    When *settle* is True the first fetch waits up to FRONTEND_SETTLE_WINDOW
+    for a 200 (used for /patient which may not be ready yet after a deploy).
+    Returns (None, [], [fail]) when the page never arrives.
     """
-    deadline = time.monotonic() + (0 if no_retry else FRONTEND_SETTLE_WINDOW_SECONDS)
+    deadline = time.monotonic() + (0 if no_retry or not settle else FRONTEND_SETTLE_WINDOW_SECONDS)
     page: HttpResponse | None = None
     last_observation = "no response yet"
     while page is None and time.monotonic() < deadline:
         try:
-            response = _request("GET", f"{frontend}/patient", origin=None)
+            response = _request("GET", f"{frontend}{path}", origin=None)
         except OSError as exc:
             last_observation = f"connection failed: {exc}"
         else:
@@ -571,25 +572,21 @@ def check_frontend(frontend: str, backend: str, *, no_retry: bool) -> tuple[Chec
             time.sleep(FRONTEND_POLL_SECONDS)
     if page is None:
         return (
-            _fail(
-                "Vercel /patient serves 200",
-                f"not served within the settle window (last: {last_observation})",
-            ),
+            None,
+            [],
+            [
+                _fail(
+                    f"Vercel {path} serves 200",
+                    f"not served within the settle window (last: {last_observation})",
+                ),
+            ],
         )
 
-    results: list[CheckResult] = [_pass("Vercel /patient serves 200", "200 answered")]
-    html = page.text
-    if "<title>CareSetu</title>" not in html:
-        results.append(
-            _fail("page title is CareSetu", "no <title>CareSetu</title> in the served HTML")
-        )
-    else:
-        results.append(_pass("page title is CareSetu", "<title>CareSetu</title>"))
-
-    scripts = _script_srcs(html)
+    results: list[CheckResult] = [_pass(f"Vercel {path} serves 200", "200 answered")]
+    scripts = _script_srcs(page.text)
     if not scripts:
-        results.append(_fail("served JS chunk", "no script src found in the /patient HTML"))
-        return tuple(results)
+        results.append(_fail(f"served JS chunk ({path})", "no script src found"))
+        return page, [], results
     chunks: list[str] = []
     for src in scripts:
         url = urllib.parse.urljoin(frontend, src)
@@ -602,12 +599,50 @@ def check_frontend(frontend: str, backend: str, *, no_retry: bool) -> tuple[Chec
             results.append(_fail(f"JS chunk {src}", f"HTTP {chunk.status}"))
             continue
         chunks.append(chunk.text)
-    if not chunks:
+    return page, chunks, results
+
+
+def check_frontend(frontend: str, backend: str, *, no_retry: bool) -> tuple[CheckResult, ...]:
+    """Step 5: /patient serves 200, titles CareSetu, and inlines the right JS.
+
+    Polls until the Vercel build settles (the frontend rebuild lands
+    asynchronously from `deploy-render`), then fetches every JS chunk the page
+    references and asserts the DEPLOY-7 regressions cannot silently return:
+
+    - The backend base URL is inlined on ``/patient`` (guards a missing
+      ``NEXT_PUBLIC_API_BASE_URL`` falling back to ``localhost:8000``).
+    - The demo-banner string ``"Demo OTP:"`` is present in the combined JS
+      chunks from ``/patient`` **and** ``/login`` (the auth wizard moved to
+      ``/login`` in Phase 2.5; guards the env-inlining bugs).
+
+    The base-URL comparison strips trailing slashes so a URL written with or
+    without one both match.
+    """
+    results: list[CheckResult] = []
+
+    patient_page, patient_chunks, patient_results = _fetch_page_chunks(
+        frontend,
+        "/patient",
+        no_retry=no_retry,
+        settle=True,
+    )
+    results.extend(patient_results)
+    if patient_page is None:
         return tuple(results)
 
-    joined = "\n".join(chunks)
+    if "<title>CareSetu</title>" not in patient_page.text:
+        results.append(
+            _fail("page title is CareSetu", "no <title>CareSetu</title> in the served HTML")
+        )
+    else:
+        results.append(_pass("page title is CareSetu", "<title>CareSetu</title>"))
+
+    if not patient_chunks:
+        return tuple(results)
+
+    patient_joined = "\n".join(patient_chunks)
     backend_normalized = backend.rstrip("/")
-    if backend_normalized not in joined:
+    if backend_normalized not in patient_joined:
         results.append(
             _fail(
                 "JS inlines the backend base URL", f"{backend_normalized!r} not found in any chunk"
@@ -615,6 +650,21 @@ def check_frontend(frontend: str, backend: str, *, no_retry: bool) -> tuple[Chec
         )
     else:
         results.append(_pass("JS inlines the backend base URL", f"found {backend_normalized!r}"))
+
+    _, login_chunks, login_results = _fetch_page_chunks(
+        frontend,
+        "/login",
+        no_retry=no_retry,
+        settle=False,
+    )
+    results.extend(login_results)
+
+    all_chunks = patient_chunks + login_chunks
+    if not all_chunks:
+        results.append(_fail("JS inlines the demo-banner string", "no JS chunks available to scan"))
+        return tuple(results)
+
+    joined = "\n".join(all_chunks)
     if "Demo OTP:" not in joined:
         results.append(
             _fail("JS inlines the demo-banner string", "'Demo OTP:' not found in any chunk")
@@ -719,7 +769,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     results.extend(check_cors(origin, responses=responses))
     print("step 4/5: error envelope code/message/trace_id")
     results.extend(check_error_envelope(backend, origin, responses=responses))
-    print("step 5/5: Vercel /patient page + inlined JS")
+    print("step 5/5: Vercel /patient + /login pages and inlined JS")
     results.extend(check_frontend(frontend, backend, no_retry=args.no_retry))
 
     _report(results)
