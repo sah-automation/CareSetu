@@ -18,7 +18,7 @@ on:
 
 concurrency:
   group: ci-${{ github.head_ref || github.run_id }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   changes:
@@ -131,8 +131,9 @@ jobs:
   lighthouse:
     name: lighthouse gate (NFR-PERF-001, mobile + throttled 4G)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    if: github.event_name != 'pull_request'
+    timeout-minutes: 15
+    needs: [changes]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -141,17 +142,7 @@ jobs:
           cache: npm
       - name: install frontend
         run: npm ci
-      - name: cache Playwright browsers
-        id: playwright-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
-      - name: install playwright chromium
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: npx playwright install chromium
-      - name: install playwright system deps
-        run: npx playwright install-deps chromium
+      - uses: ./.github/actions/setup-playwright
       - name: install lighthouse cli
         # Kept out of the dependency graph (like k6/ZAP) so npm audit and npm
         # ci are untouched; pinned for reproducibility.
@@ -345,7 +336,9 @@ jobs:
   e2e:
     name: e2e tests (playwright vs Postgres)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
+    needs: [changes]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true' || needs.changes.outputs.backend == 'true'
     services:
       postgres:
         image: postgres:16-alpine
@@ -378,17 +371,7 @@ jobs:
           cache: npm
       - name: install frontend
         run: npm ci
-      - name: cache Playwright browsers
-        id: playwright-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
-      - name: install playwright chromium
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: npx playwright install chromium
-      - name: install playwright system deps
-        run: npx playwright install-deps chromium
+      - uses: ./.github/actions/setup-playwright
       - name: run e2e
         run: npm run test:e2e
         env:

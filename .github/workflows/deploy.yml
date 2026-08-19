@@ -18,10 +18,10 @@ on:
   workflow_dispatch:
 
 concurrency:
-  # One in-flight deploy per branch; a newer run cancels an older one from
-  # the same branch (plan section 6.1).
+  # One in-flight deploy per branch; a newer run queues behind an older one
+  # instead of cancelling it (plan section 6.1).
   group: deploy-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
