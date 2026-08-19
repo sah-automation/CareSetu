@@ -2,6 +2,12 @@ name: CI
 
 on:
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - ".github/workflows/nightly.yml"
+      - ".github/workflows/backup-drill.yml"
+      - "deploy/**"
   # Reused by deploy.yml as its gate: CD runs only on green CI. There is no
   # standalone push-to-main trigger on purpose - deploy.yml calls this same
   # workflow as its gate on every main push, so a standalone run would just
@@ -10,10 +16,40 @@ on:
   # deploy.yml valid - without it the deploy workflow fails at load time.
   workflow_call:
 
+concurrency:
+  group: ci-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
+  changes:
+    name: detect changed paths
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      pull-requests: read
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'apps/backend/**'
+              - 'tests/**'
+              - 'pyproject.toml'
+              - 'alembic.ini'
+            frontend:
+              - 'apps/frontend/**'
+              - 'package.json'
+              - 'package-lock.json'
+
   lint:
     name: lint (pre-commit)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -24,6 +60,7 @@ jobs:
   typecheck:
     name: typecheck (mypy + tsc)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -46,6 +83,7 @@ jobs:
   unit:
     name: unit tests (pytest + vitest)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -68,6 +106,9 @@ jobs:
   page-budget:
     name: page-budget (NFR-003, <= 1.5 MB per channel)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [changes]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -82,6 +123,8 @@ jobs:
   lighthouse:
     name: lighthouse gate (NFR-PERF-001, mobile + throttled 4G)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -92,7 +135,7 @@ jobs:
         run: npm ci
       - name: install playwright chromium
         # Reuses the same Playwright Chromium the e2e job installs, so the
-        # Lighthouse run needs no second browser download (plan §3.C1).
+        # Lighthouse run needs no second browser download (plan section 3.C1).
         run: npx playwright install --with-deps chromium
       - name: install lighthouse cli
         # Kept out of the dependency graph (like k6/ZAP) so npm audit and npm
@@ -117,6 +160,7 @@ jobs:
   migration-check:
     name: migration-check (alembic single head + no cross-schema FK)
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -133,6 +177,9 @@ jobs:
   contract-check:
     name: contract check (OpenAPI vs frontend auth client)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [changes]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true'
     services:
       postgres:
         image: postgres:16-alpine
@@ -179,6 +226,9 @@ jobs:
   integration:
     name: integration tests (pytest vs Postgres)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [changes]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true'
     services:
       postgres:
         image: postgres:16-alpine
@@ -209,6 +259,9 @@ jobs:
   backup-smoke:
     name: backup smoke (pg_dump vs throwaway DB)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [changes]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true'
     env:
       PGPASSWORD: caresetu
       BACKUP_PASSPHRASE: backup-smoke-passphrase
@@ -265,6 +318,7 @@ jobs:
   e2e:
     name: e2e tests (playwright vs Postgres)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:16-alpine
@@ -306,6 +360,8 @@ jobs:
   load-test:
     name: load test (k6 patient flow, regression bounds)
     runs-on: ubuntu-latest
+    timeout-minutes: 25
+    if: github.event_name != 'pull_request'
     services:
       postgres:
         image: postgres:16-alpine
@@ -349,6 +405,8 @@ jobs:
   zap-dast:
     name: zap dast (API scan of /openapi.json, HIGH/CRITICAL gate)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name != 'pull_request'
     services:
       postgres:
         image: postgres:16-alpine
@@ -390,7 +448,7 @@ jobs:
         # TEST-B1: boots the same rate-limit-disabled local instance as the
         # load-test job (scripts/e2e-backend.cjs: migrations then uvicorn on
         # :8000), so ZAP's probes of the auth surface never 429 (TEST-A1
-        # posture, plan §3.B1).
+        # posture, plan section 3.B1).
         run: |
           node scripts/e2e-backend.cjs &
           for i in $(seq 1 90); do
@@ -460,6 +518,7 @@ jobs:
   scan:
     name: security scan (gitleaks + bandit + pip-audit)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -477,12 +536,20 @@ jobs:
         run: uvx bandit -c apps/backend/pyproject.toml -r apps/backend -q
       - name: pip-audit
         run: uvx pip-audit --path apps/backend/.venv
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: install frontend
+        run: npm ci
       - name: npm audit
         run: npm audit --audit-level=high
 
   sbom:
     name: sbom (cyclonedx backend + frontend artifacts)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
