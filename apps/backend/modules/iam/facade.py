@@ -25,6 +25,9 @@ from modules.iam.adapters.sms import (
     SmsTemplateParams,
 )
 from modules.iam.domain import events
+from modules.iam.domain.exceptions import (
+    InvalidAccessTokenError as InvalidAccessTokenError,
+)
 from modules.iam.domain.shared import (
     OtpSender as OtpSender,
 )
