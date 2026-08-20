@@ -5,8 +5,10 @@ the identity and OTP sub-facades.  ``_invalidate_pending_challenges`` and
 ``_issue_challenge`` are the latest-wins challenge lifecycle helpers shared
 by ``register_patient`` and ``resend_otp``.  ``_latest_cooldown_until`` is
 the shared cooldown query used by both ``register_patient`` and ``resend_otp``.
-``OtpSender`` is the port that decouples sub-facades from the SMS adapter -
-the coordinator wires the ``SmsDeliveryQueue`` behind it.
+``_identity_phone`` resolves a phone_e164 from an identity id, shared by the
+access-denial emitter and the refresh-replay path.  ``OtpSender`` is the port
+that decouples sub-facades from the SMS adapter - the coordinator wires the
+``SmsDeliveryQueue`` behind it.
 """
 
 from __future__ import annotations
@@ -167,3 +169,19 @@ async def _latest_cooldown_until(connection: AsyncConnection, identity_id: int) 
             .limit(1)
         )
     ).scalar_one_or_none()
+
+
+async def _identity_phone(connection: AsyncConnection, identity_id: int) -> str:
+    """The ``phone_e164`` for an identity, for an audit event that names it.
+
+    Used by the refresh-replay path (``patient.auth_failed`` reason
+    ``replay``) and by the access-denial emitter (reason
+    ``access_denied``, PHASE-2 REM T7 #87). A session row's FK guarantees
+    the identity exists; the fallback keeps the outbox write safe even if a
+    row were ever orphaned.
+    """
+    return (
+        await connection.execute(
+            select(iam_identities.c.phone_e164).where(iam_identities.c.id == identity_id)
+        )
+    ).scalar_one_or_none() or ""

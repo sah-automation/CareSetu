@@ -15,7 +15,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bus.outbox_writer import write_outbox
 from modules.iam.adapters.sms import (
@@ -30,6 +30,9 @@ from modules.iam.domain.exceptions import (
 )
 from modules.iam.domain.shared import (
     OtpSender as OtpSender,
+)
+from modules.iam.domain.shared import (
+    _identity_phone as _identity_phone,
 )
 from modules.iam.identity_facade import (
     IdentityFacade as IdentityFacade,
@@ -65,22 +68,6 @@ _IAM_SCHEMA = "iam"
 
 def _default_clock() -> datetime:
     return datetime.now(UTC)
-
-
-async def _identity_phone(connection: AsyncConnection, identity_id: int) -> str:
-    """The ``phone_e164`` for an identity, for an audit event that names it.
-
-    Used by the refresh-replay path (``patient.auth_failed`` reason
-    ``replay``) and by the access-denial emitter (reason
-    ``access_denied``, PHASE-2 REM T7 #87). A session row's FK guarantees
-    the identity exists; the fallback keeps the outbox write safe even if a
-    row were ever orphaned.
-    """
-    return (
-        await connection.execute(
-            select(iam_identities.c.phone_e164).where(iam_identities.c.id == identity_id)
-        )
-    ).scalar_one_or_none() or ""
 
 
 class IamFacade:

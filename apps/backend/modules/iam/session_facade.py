@@ -24,6 +24,7 @@ from modules.iam.domain.exceptions import (
     RefreshTokenUnknownError,
     SessionIssuanceError,
 )
+from modules.iam.domain.shared import _identity_phone
 from modules.iam.domain.verify import IDENTITY_ACTIVE
 from modules.iam.outbox import IAM_OUTBOX_TABLE
 from modules.iam.schema.models import (
@@ -217,8 +218,6 @@ class SessionFacade:
             )
 
             if decision.reason == "revoked":
-                from modules.iam.facade import _identity_phone
-
                 phone = await _identity_phone(connection, session_row["identity_id"])
                 await bus_outbox_write(
                     connection,
