@@ -28,8 +28,7 @@ from app.gateway.errors import (
 )
 from app.gateway.principal import Principal
 from app.gateway.rbac import resolve_scope_roles
-from modules.iam.domain.exceptions import InvalidAccessTokenError
-from modules.iam.facade import ValidatedAccessToken
+from modules.iam.facade import InvalidAccessTokenError, ValidatedAccessToken
 
 TokenValidator = Callable[[str], Awaitable[ValidatedAccessToken]]
 
