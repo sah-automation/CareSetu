@@ -25,7 +25,7 @@
 
 Standardize on **shadcn/ui** (Radix primitive base, Tailwind v3 registry pinned), adopting components lazily per feature. **React Aria Components** adopted selectively for Intl-sensitive inputs (Hindi date/number fields). Hand-rolled Tailwind remains the pattern for leaf presentational components only.
 
-Key evidence (from `docs/research/ui-component-library.md`, branch `research/component-library`):
+Key evidence (from `docs/research/ui-component-library.md`):
 
 - Bundle sizes measured Aug 2026: Radix dialog 12.6 KB gzip incl. deps; Headless UI whole package 63 KB gzip; react-aria-components whole package 271.5 KB gzip.
 - shadcn explicitly supports Tailwind v3 apps and React 19 / App Router first-class since Oct 2024.
@@ -625,6 +625,8 @@ Carried verbatim from the resolutions so downstream phase planning cannot lose t
 | G9  | Dispute-feature PRD gap: moderation needs a backing FEAT (dispute lifecycle model) before the Disputes area can ship.                                                                                                                                                                                                                                                                | #186       |
 | G10 | Verification detail depends on FEAT-014 credentials-upload artifacts being retrievable by operators - API-surface note for phase planning.                                                                                                                                                                                                                                           | #186       |
 | G11 | `<html lang>` hardcoded `"en"` in the current shell - flagged for PHASE-2.6 fix (§9.2).                                                                                                                                                                                                                                                                                              | #188       |
+
+Event-name spelling note: this blueprint carries event spellings verbatim from the resolution comments (`consult_marked_complete`, `prescription_approved`, `sample_collected`, `report_matched`, `consent_granted`, ...), which use snake_case. The canonical registry in `docs/architecture/internal-modules.md` §4.2 uses dot-notation; when these events are registered (G6/G7 and Phase 5 planning), reconcile to the registry spelling - the blueprint invents no new names and defers to §4.2 as the source of truth.
 
 ---
 
