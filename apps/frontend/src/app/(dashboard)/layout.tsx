@@ -1,61 +1,32 @@
 "use client";
 
+// PHASE-2.6 T06 (#197): the generic dashboard group renders through the
+// shared AppShell family, parameterized by the session's selected role. The
+// retired JS viewport-collapse mechanics are gone - viewport behavior lives
+// entirely in CSS inside the shells. Route-group split and guards are
+// ticket 07. Session state comes from the root-layout AuthProvider
+// (PHASE-2.6 T01, #192).
+
 import type { ReactNode } from "react";
-import { useState, useEffect } from "react";
+
+import { AppShell } from "@/components/dashboard/AppShell";
+import { resolveRole } from "@/components/dashboard/types";
 import { useAuth } from "@/lib/auth/AuthContext";
-import { Sidebar } from "@/components/dashboard/Sidebar";
-import { Topbar } from "@/components/dashboard/Topbar";
-import type { Role } from "@/components/dashboard/types";
-import {
-  SIDEBAR_MARGIN_COLLAPSED,
-  SIDEBAR_MARGIN_EXPANDED,
-} from "@/components/dashboard/types";
 
-function DashboardShell({ children }: { children: ReactNode }) {
+function DashboardChrome({ children }: { children: ReactNode }) {
   const { selectedRole, isLoading } = useAuth();
-  const [collapsed, setCollapsed] = useState(false);
-
-  useEffect(() => {
-    const mq = window.matchMedia("(max-width: 1023px)");
-    setCollapsed(mq.matches);
-    function handleChange(e: MediaQueryListEvent) {
-      setCollapsed(e.matches);
-    }
-    mq.addEventListener("change", handleChange);
-    return () => mq.removeEventListener("change", handleChange);
-  }, []);
 
   if (isLoading) {
     return (
-      <div className="flex h-screen items-center justify-center bg-page-bg">
+      <div className="flex h-dvh items-center justify-center bg-page-bg">
         <div className="text-sm text-txt-muted">Loading...</div>
       </div>
     );
   }
 
-  const role: Role = (selectedRole as Role) ?? "patient";
-
-  return (
-    <div className="min-h-screen bg-page-bg">
-      <Sidebar
-        role={role}
-        collapsed={collapsed}
-        onToggle={() => setCollapsed(!collapsed)}
-      />
-      <Topbar />
-      <main
-        className={`pt-14 transition-all duration-200 ${
-          collapsed ? SIDEBAR_MARGIN_COLLAPSED : SIDEBAR_MARGIN_EXPANDED
-        }`}
-      >
-        <div className="p-6">{children}</div>
-      </main>
-    </div>
-  );
+  return <AppShell role={resolveRole(selectedRole)}>{children}</AppShell>;
 }
 
-// Session state comes from the root-layout AuthProvider; this layout only
-// renders the dashboard chrome. (PHASE-2.6 T01, #192)
 export default function DashboardLayout({ children }: { children: ReactNode }) {
-  return <DashboardShell>{children}</DashboardShell>;
+  return <DashboardChrome>{children}</DashboardChrome>;
 }

@@ -68,6 +68,30 @@ const en = {
     signedInAs: (phone: string) => `Signed in as ${phone}`,
     signOut: "Sign out",
   },
+
+  // nav.* surface - the typed nav-config labels (PHASE-2.6 T06, #197).
+  // One entry per NavItemDef.labelKey across all four role configs; the
+  // bottom tabs / top-nav / sidebar all render through this section.
+  nav: {
+    home: "Home",
+    find: "Find Care",
+    start: "Start",
+    record: "My Record",
+    inbox: "Inbox",
+    bookings: "Bookings & Orders",
+    profileSettings: "Profile & Settings",
+    more: "More",
+    queue: "Queue",
+    cases: "Cases",
+    patients: "Patients",
+    orders: "Orders",
+    history: "History",
+    settlements: "Settlements",
+    profile: "Profile",
+    verifications: "Verifications",
+    disputes: "Disputes",
+    audit: "Audit",
+  },
 };
 
 export type Dictionary = typeof en;
@@ -121,6 +145,26 @@ export const STRINGS: Record<Lang, Dictionary> = {
       sessionBody: "आपकी पहचान सत्यापित है और स्वास्थ्य यात्रा तैयार है।",
       signedInAs: (phone) => `${phone} से साइन इन`,
       signOut: "साइन आउट",
+    },
+    nav: {
+      home: "होम",
+      find: "खोजें",
+      start: "शुरू करें",
+      record: "मेरा रिकॉर्ड",
+      inbox: "इनबॉक्स",
+      bookings: "बुकिंग और ऑर्डर",
+      profileSettings: "प्रोफ़ाइल और सेटिंग",
+      more: "और",
+      queue: "कतार",
+      cases: "केस",
+      patients: "मरीज़",
+      orders: "ऑर्डर",
+      history: "इतिहास",
+      settlements: "सेटलमेंट",
+      profile: "प्रोफ़ाइल",
+      verifications: "सत्यापन",
+      disputes: "विवाद",
+      audit: "ऑडिट",
     },
   },
 };
