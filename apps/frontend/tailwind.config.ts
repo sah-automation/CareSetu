@@ -1,4 +1,5 @@
 import type { Config } from "tailwindcss";
+import tailwindcssAnimate from "tailwindcss-animate";
 
 const config: Config = {
   content: ["./src/**/*.{ts,tsx}"],
@@ -46,6 +47,35 @@ const config: Config = {
           sub: "var(--txt-sub)",
           muted: "var(--txt-muted)",
         },
+        scrim: "var(--scrim)",
+        // shadcn/ui semantic slots (#195) - aliases over the #193 tokens.
+        // The ui-* slots store H S% L% triplets (see tokens.css) so Tailwind
+        // can inject alpha into the /opacity utilities the primitives use.
+        background: "var(--page-bg)",
+        foreground: "var(--txt)",
+        popover: {
+          DEFAULT: "var(--surface)",
+          foreground: "var(--txt)",
+        },
+        primary: {
+          DEFAULT: "hsl(var(--ui-primary))",
+          foreground: "hsl(var(--ui-primary-fg))",
+        },
+        secondary: {
+          DEFAULT: "hsl(var(--ui-secondary))",
+          foreground: "hsl(var(--ui-secondary-fg))",
+        },
+        muted: {
+          DEFAULT: "var(--hairline-soft)",
+          foreground: "var(--txt-muted)",
+        },
+        destructive: {
+          DEFAULT: "hsl(var(--ui-destructive))",
+          foreground: "hsl(var(--ui-destructive-fg))",
+        },
+        border: "var(--hairline)",
+        input: "var(--hairline)",
+        ring: "var(--accent-border)",
       },
       borderRadius: {
         sm: "var(--radius-sm)",
@@ -58,7 +88,7 @@ const config: Config = {
       },
     },
   },
-  plugins: [],
+  plugins: [tailwindcssAnimate],
 };
 
 export default config;

@@ -49,4 +49,23 @@
   /* Typography - Mukta loaded once in app/layout.tsx via next/font */
   --font-stack: var(--font-mukta), "Noto Sans Devanagari", "Nirmala UI",
     system-ui, sans-serif;
+
+  /* shadcn/ui slot bridge (#195). The Tailwind theme maps these onto the
+     shadcn semantic color names (primary/secondary/destructive/...) that the
+     copied primitives under src/components/ui consume; no palette lives in
+     the primitives themselves. Slots whose utilities use alpha modifiers
+     (hover:bg-primary/90, bg-primary/10, ...) are stored as H S% L%
+     channel triplets so Tailwind can inject alpha via hsl(var(--x)); each
+     triplet restates a resolved token above - update both lines together
+     when the palette moves. All other slots are direct aliases. Hexes are
+     deliberately not repeated in these comments; the #193 gate counts them. */
+  --ui-primary: 175.34 77.44% 26.08%; /* = --accent teal-700 */
+  --ui-primary-fg: 0 0% 100%; /* = --on-accent white */
+  --ui-secondary: 33.33 100% 96.47%; /* = --warm-soft orange-50 */
+  --ui-secondary-fg: 17.47 88.35% 40.39%; /* = --warm orange-700 */
+  --ui-destructive: 0 73.71% 41.76%; /* = --danger red-700 */
+  --ui-destructive-fg: 0 0% 100%; /* white on danger */
+
+  /* Scrim wash behind sheet/dialog overlays (same ink as --shadow-pop). */
+  --scrim: rgb(2 6 23 / 0.8);
 }

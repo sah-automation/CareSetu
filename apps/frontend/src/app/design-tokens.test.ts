@@ -93,7 +93,13 @@ describe("single palette source (#193)", () => {
     const leaves = colorLeaves(colors);
     expect(leaves.length).toBeGreaterThan(0);
     for (const value of leaves) {
-      expect(value.startsWith("var(--"), `non-var token: ${value}`).toBe(true);
+      // hsl(var(--x)) is the shadcn/ui slot form (#195): the var holds H S% L%
+      // channels so Tailwind can inject alpha (hover:bg-primary/90); still a
+      // tokens.css variable, so still single-source.
+      const isVar =
+        value.startsWith("var(--") ||
+        /^hsl\(var\(--[a-z0-9-]+\)\)$/.test(value);
+      expect(isVar, `non-var token: ${value}`).toBe(true);
     }
     expect(JSON.stringify(tailwindConfig.theme)).not.toMatch(HEX_COLOR);
   });
@@ -158,9 +164,67 @@ describe("reduced-motion kill switch (#193, story 33)", () => {
   });
 });
 
+describe("shadcn/ui slot bridge (#195)", () => {
+  // Each triplet restates a resolved hex token above (see the bridge block in
+  // tokens.css); this gate fails when one side moves without the other.
+  // One channel-step of slack absorbs the rounding used when writing HSL.
+  const BRIDGE_SLOTS: Record<string, { source: string; hex: string }> = {
+    "--ui-primary": { source: "--accent", hex: "#0f766e" },
+    "--ui-primary-fg": { source: "--on-accent", hex: "#ffffff" },
+    "--ui-secondary": { source: "--warm-soft", hex: "#fff7ed" },
+    "--ui-secondary-fg": { source: "--warm", hex: "#c2410c" },
+    "--ui-destructive": { source: "--danger", hex: "#b91c1c" },
+    "--ui-destructive-fg": { source: "--on-accent", hex: "#ffffff" },
+  };
+
+  it("keeps every alpha-capable triplet in sync with its source token", () => {
+    for (const [name, { source, hex }] of Object.entries(BRIDGE_SLOTS)) {
+      const m = tokensCss.match(
+        new RegExp(`${name}:\\s*([\\d.]+)\\s+([\\d.]+)%\\s+([\\d.]+)%`),
+      );
+      expect(m, `${name} missing from tokens.css bridge`).not.toBeNull();
+      const [h, s, l] = [
+        Number(m![1]),
+        Number(m![2]) / 100,
+        Number(m![3]) / 100,
+      ];
+
+      const expected = hexToRgb(hex);
+      const actual = hslToRgb(h, s, l);
+      for (const channel of ["r", "g", "b"] as const) {
+        expect(
+          Math.abs(actual[channel] - expected[channel]),
+          `${name} (${source}) drifted from ${hex}`,
+        ).toBeLessThanOrEqual(1);
+      }
+      // The source token itself must exist exactly where #193 says it does.
+      expect(tokensCss).toContain(`${source}: ${hex}`);
+    }
+  });
+});
+
 function colorLeaves(value: unknown): string[] {
   if (typeof value === "string") return [value];
   if (value && typeof value === "object")
     return Object.values(value).flatMap(colorLeaves);
   return [];
+}
+
+function hexToRgb(hex: string): { r: number; g: number; b: number } {
+  const v = parseInt(hex.slice(1), 16);
+  return { r: (v >> 16) & 255, g: (v >> 8) & 255, b: v & 255 };
+}
+
+function hslToRgb(
+  h: number,
+  s: number,
+  l: number,
+): { r: number; g: number; b: number } {
+  const k = (n: number) => (n + h / 30) % 12;
+  const a = s * Math.min(l, 1 - l);
+  const f = (n: number) => {
+    const c = l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+    return Math.round(255 * c);
+  };
+  return { r: f(0), g: f(8), b: f(4) };
 }
