@@ -45,7 +45,7 @@ _FIELD_RE = re.compile(r"^\s{2}(\w+):\s*(.+?);\s*$", re.M)
 _FUNCTION_START_RE = re.compile(r"^export (?:async )?function (\w+)", re.M)
 _POST_CALL_RE = re.compile(r"post<[^>]*>\s*\(([^)]*)\)")
 _OBJECT_LITERAL_RE = re.compile(r"\{([^}]*)\}")
-_PATH_RE = re.compile(r"(/v1/[^\"'?]+)")
+_PATH_RE = re.compile(r"(/v1/[^\"'`?$]+)")
 _QUERY_RE = re.compile(r"\?([^\"']+)")
 _QUERY_PARAM_RE = re.compile(r"(\w+)=")
 _PROMISE_RE = re.compile(r"Promise<([A-Za-z_]\w*)>")
@@ -59,6 +59,7 @@ _STRING_BASE = frozenset({"string"})
 _NUMBER_BASE = frozenset({"integer", "number"})
 _BOOLEAN_BASE = frozenset({"boolean"})
 _OBJECT_BASE = frozenset({"object"})
+_ARRAY_BASE = frozenset({"array"})
 
 
 class ContractParseError(Exception):
@@ -70,15 +71,18 @@ class TypeSpec:
     """A normalized request/response type, client- or OpenAPI-side.
 
     ``base`` is the set of compatible JSON base types (``string``, ``integer``,
-    ``number``, ``boolean``, ``object``); ``number`` and ``integer`` are treated
-    as interchangeable because FastAPI serializes integers as JSON numbers.
-    ``values`` carries the string-literal union members when the type is an
-    enum; ``nullable`` mirrors the ``| null`` / ``anyOf: null`` spelling.
+    ``number``, ``boolean``, ``object``, ``array``); ``number`` and ``integer``
+    are treated as interchangeable because FastAPI serializes integers as JSON
+    numbers. ``values`` carries the string-literal union members when the type
+    is an enum; ``nullable`` mirrors the ``| null`` / ``anyOf: null`` spelling.
+    Array types carry their element type in ``items`` (``string[]`` client-side,
+    ``{type: array, items: ...}`` schema-side) so element drift is caught too.
     """
 
     base: frozenset[str] = field(default_factory=frozenset)
     nullable: bool = False
     values: frozenset[str] | None = None
+    items: TypeSpec | None = None
 
 
 @dataclass(frozen=True)
@@ -99,6 +103,12 @@ def _client_type(expr: str) -> TypeSpec:
     if expr.endswith("| null"):
         nullable = True
         expr = expr[: -len("| null")].strip()
+    if expr.endswith("[]"):
+        return TypeSpec(
+            base=_ARRAY_BASE,
+            nullable=nullable,
+            items=_client_type(expr[: -len("[]")]),
+        )
     parts = [part.strip() for part in expr.split("|")]
     literals = [part for part in parts if part.startswith('"') and part.endswith('"')]
     if literals and len(literals) == len(parts):
@@ -226,9 +236,16 @@ def _openapi_type(spec: dict, schema: dict) -> TypeSpec:
     bases: set[str] = set()
     nullable = False
     enum_values: frozenset[str] | None = None
+    item_specs: list[TypeSpec] = []
     for leaf in _flatten_leaves(spec, schema):
         if leaf.get("type") == "null":
             nullable = True
+            continue
+        if leaf.get("type") == "array":
+            bases.add("array")
+            item_schema = leaf.get("items")
+            if isinstance(item_schema, dict):
+                item_specs.append(_openapi_type(spec, item_schema))
             continue
         if "enum" in leaf:
             enum_values = frozenset(str(value) for value in leaf["enum"])
@@ -245,7 +262,12 @@ def _openapi_type(spec: dict, schema: dict) -> TypeSpec:
             bases.add(type_value)
         else:
             bases.add("unknown")
-    return TypeSpec(base=frozenset(bases), nullable=nullable, values=enum_values)
+    return TypeSpec(
+        base=frozenset(bases),
+        nullable=nullable,
+        values=enum_values,
+        items=item_specs[0] if item_specs else None,
+    )
 
 
 def _describe(spec_type: TypeSpec) -> str:
@@ -255,6 +277,9 @@ def _describe(spec_type: TypeSpec) -> str:
         rendered = f"literal union [{joined}]"
     elif spec_type.base == _NUMBER_BASE:
         rendered = "number"
+    elif spec_type.base == _ARRAY_BASE:
+        inner = _describe(spec_type.items) if spec_type.items is not None else "unknown"
+        rendered = f"{inner}[]"
     elif len(spec_type.base) == 1:
         rendered = next(iter(spec_type.base))
     else:
@@ -298,6 +323,8 @@ def _type_mismatches(iface: str, field_name: str, client: TypeSpec, schema: Type
             f"{iface}.{field_name}: type mismatch: client declares {_describe(client)}, "
             f"OpenAPI declares {_describe(schema)}"
         ]
+    if client.items is not None and schema.items is not None:
+        return _type_mismatches(iface, f"{field_name}[]", client.items, schema.items)
     return []
 
 

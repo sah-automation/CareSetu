@@ -1,10 +1,12 @@
 // DEPLOY-4 (ticket #118): best-effort demo OTP read-back contract.
 // fetchDemoOtp must return the code on 200, null on 404/error, and never
 // reject into the auth flow.
+// PHASE-2.6 T05 (#196): fetchMe mirrors the protected GET /v1/me session
+// read - subject id, roles, and the additive E.164 phone.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { fetchDemoOtp } from "./api";
+import { fetchDemoOtp, fetchMe } from "./api";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -83,5 +85,36 @@ describe("fetchDemoOtp", () => {
 
     const [url] = fetchMock.mock.calls[0] as [string, RequestInit?];
     expect(url).toContain("/v1/auth/dev/otp?phone=%2B919876543210");
+  });
+});
+
+describe("fetchMe", () => {
+  it("resolves the session identity on a 200", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        subject_id: "7",
+        roles: ["patient"],
+        phone: "+919876543210",
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchMe("test-jwt")).resolves.toEqual({
+      subject_id: "7",
+      roles: ["patient"],
+      phone: "+919876543210",
+    });
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://localhost:8000/v1/me");
+    expect(init.headers).toEqual({ Authorization: "Bearer test-jwt" });
+  });
+
+  it("rejects on a non-ok response", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({}, 401)));
+
+    await expect(fetchMe("expired-jwt")).rejects.toThrow(
+      "GET /v1/me returned 401",
+    );
   });
 });
