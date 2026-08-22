@@ -339,19 +339,20 @@ describe("retired icon-rail / matchMedia mechanics", () => {
     for (const source of dashboardSources()) {
       expect(source).not.toMatch(/matchMedia/);
     }
-    const layout = readFileSync(
-      join(__dirname, "../../app/(dashboard)/layout.tsx"),
-      "utf8",
-    );
-    expect(layout).not.toMatch(/matchMedia/);
   });
 
-  it("the layout wires the generic dashboard group through AppShell", () => {
-    const layout = readFileSync(
-      join(__dirname, "../../app/(dashboard)/layout.tsx"),
-      "utf8",
-    );
-    expect(layout).toContain("<AppShell");
-    expect(layout).toContain("resolveRole");
+  // PHASE-2.6 T07 (#198): the generic dashboard group split into per-role
+  // route groups - each group layout pins one fixed role into the shared
+  // AppShell instead of resolving it from the session.
+  it("each per-role group layout wires its role through AppShell", () => {
+    const roles = ["patient", "doctor", "partner", "operator"] as const;
+    for (const role of roles) {
+      const layout = readFileSync(
+        join(__dirname, `../../app/(${role})/layout.tsx`),
+        "utf8",
+      );
+      expect(layout).toContain("<AppShell");
+      expect(layout).toContain(`role="${role}"`);
+    }
   });
 });

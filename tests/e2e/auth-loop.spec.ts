@@ -12,6 +12,13 @@ import {
 // SMS adapter, the gateway's JWT verify enabled, and the dev/test-only
 // mock-OTP read-back route (see apps/backend/app/main.py).
 //
+// PHASE-2.6 T07 (#198) extends the loop with the cookie-presence route guard:
+// a signed-out hit on a patient app route must land on the group-correct
+// entry (/login) carrying ?return=<original>, staff groups must target
+// /staff/login (404 until ticket 10), and completing sign-in must land back
+// on the original destination - proven end-to-end by a query marker that only
+// survives if the return-url drove the post-auth navigation.
+//
 // The three tests share one randomly-chosen phone so the duplicate re-register
 // case resolves against the SAME identity the first test registered. Serial
 // mode keeps them in one worker in order; each test gets its own browser
@@ -187,11 +194,48 @@ test("an unauthenticated attempt at the protected surface is denied", async ({
   const me = await request.get(`${BACKEND}/v1/me`);
   expect(me.status()).toBe(401);
 
-  await page.goto("/login");
-  await expect(page.getByPlaceholder("10-digit mobile number")).toBeVisible();
+  // Cookie-presence proxy (PHASE-2.6 T07 #198), staff group: a signed-out
+  // hit on /operator redirects to the staff entry point with the return-url
+  // preserved. /staff/login does not exist until ticket 10, so the redirect
+  // target answers 404 - the mapping, not the page, is what this asserts.
+  const staffResponse = await page.goto("/operator");
+  expect(page.url()).toBe(`${FRONTEND}/staff/login?return=%2Foperator`);
+  expect(staffResponse?.status()).toBe(404);
+
+  // Patient group: a signed-out deep link lands on /login with the original
+  // path+query preserved as ?return=... The src marker distinguishes the
+  // honored return target from the wizard's default /patient landing.
+  await page.goto("/patient?src=deep-link");
+  expect(page.url()).toBe(
+    `${FRONTEND}/login?return=${encodeURIComponent("/patient?src=deep-link")}`,
+  );
+  await expect(page.getByPlaceholder("10-digit mobile number")).toBeVisible({
+    timeout: 60_000,
+  });
   await expect(
     page.getByRole("heading", { name: "You're signed in" }),
   ).toHaveCount(0);
+
+  // Post-auth return completes: sign in through the wizard and land back on
+  // the exact deep-linked destination.
+  const returnPhone = randomPhone();
+  await page.getByPlaceholder("10-digit mobile number").fill(returnPhone);
+  await page.getByRole("button", { name: "Get verification code" }).click();
+  await expect(page.getByRole("group", { name: "OTP" })).toBeVisible({
+    timeout: 30_000,
+  });
+  const code = await readMockOtp(request, returnPhone);
+  await page.getByLabel("Verification code").fill(code);
+  await page.getByRole("button", { name: "Verify & continue" }).click();
+  await page.waitForURL(
+    (url) =>
+      url.pathname === "/patient" &&
+      url.searchParams.get("src") === "deep-link",
+    { timeout: 60_000 },
+  );
+  await expect(
+    page.getByRole("heading", { name: "Welcome, Patient" }),
+  ).toBeVisible();
 });
 
 test("the auth wizard and the patient page pass the axe accessibility scan", async ({
