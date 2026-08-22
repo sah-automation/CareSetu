@@ -22,6 +22,7 @@ import {
   IconShield,
 } from "@/components/auth/icons";
 import { fetchDemoOtp } from "@/lib/auth/api";
+import { useLang } from "@/lib/i18n/LangContext";
 import type { OtpFlow } from "./otpState";
 import { formatCountdown, OTP_TTL_SECONDS, useOtpFlow } from "./otpState";
 import {
@@ -254,6 +255,9 @@ function DoneStep({ flow }: { flow: OtpFlow }) {
 
 export function PatientAuthWizard() {
   const flow = useOtpFlow();
+  // Locale is app-wide state now (PHASE-2.6 T03, #194): the wizard reads and
+  // toggles it through LangContext instead of wizard-local state.
+  const { lang, setLang } = useLang();
   const router = useRouter();
   const demoMode = process.env.NEXT_PUBLIC_DEMO_MODE === "true";
   const [demoOtp, setDemoOtp] = useState<string | null>(null);
@@ -303,7 +307,7 @@ export function PatientAuthWizard() {
 
   return (
     <div className={`${shared.otpProto} ${stylesB.root}`}>
-      <BrandHeader t={flow.t} lang={flow.state.lang} onLang={flow.setLang} />
+      <BrandHeader t={flow.t} lang={lang} onLang={setLang} />
       <nav aria-label={flow.t.stepProgress}>
         <StepDots flow={flow} />
       </nav>
