@@ -16,6 +16,7 @@ import {
 } from "./nav-config";
 import type { NavItemDef } from "./nav-config";
 import type { Role } from "./types";
+import { ROLE_HOME } from "./types";
 
 const ROLES: Role[] = ["patient", "doctor", "partner", "operator"];
 
@@ -27,7 +28,9 @@ describe("NAV_CONFIG", () => {
 
   it.each(ROLES)("%s lands on a live home entry that is never Soon", (role) => {
     const home = NAV_CONFIG[role][0];
-    expect(home.href).toBe(`/${role}`);
+    // First destination must be the ROLE_HOME surface from types.ts - the
+    // single source public chrome also reads; the two may never drift.
+    expect(home.href).toBe(ROLE_HOME[role]);
     expect(home.soon).toBeUndefined();
   });
 

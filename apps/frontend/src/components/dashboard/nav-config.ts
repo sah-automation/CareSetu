@@ -32,6 +32,7 @@ import {
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 
 import type { Role } from "./types";
+import { ROLE_HOME } from "./types";
 
 export type NavIcon = ComponentType<{ size?: number; className?: string }>;
 
@@ -63,7 +64,7 @@ export interface NavItemDef {
 
 export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
   patient: [
-    { key: "home", labelKey: "home", href: "/patient", icon: Home },
+    { key: "home", labelKey: "home", href: ROLE_HOME.patient, icon: Home },
     { key: "find", labelKey: "find", href: "/patient/find", icon: Search },
     {
       key: "start",
@@ -122,7 +123,7 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
     {
       key: "orders",
       labelKey: "orders",
-      href: "/partner",
+      href: ROLE_HOME.partner,
       icon: Package,
       partnerTypes: ["lab", "chemist"],
     },
@@ -150,7 +151,7 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
     },
   ],
   operator: [
-    { key: "home", labelKey: "home", href: "/operator", icon: Home },
+    { key: "home", labelKey: "home", href: ROLE_HOME.operator, icon: Home },
     {
       key: "verifications",
       labelKey: "verifications",

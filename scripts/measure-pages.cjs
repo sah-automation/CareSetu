@@ -1,7 +1,9 @@
 const { spawnSync, spawn } = require('node:child_process');
 const net = require('node:net');
 
-const CHANNELS = ['/patient', '/partner', '/operator'];
+// PHASE-2.6 T09 (#200): the homepage joins the measured routes (spec #191
+// decision 15 extends this gate to the new public/per-role surfaces).
+const CHANNELS = ['/', '/patient', '/partner', '/operator'];
 const WORKSPACE = '@caresetu/frontend';
 const BUDGET_BYTES = 1.5 * 1024 * 1024;
 const BUDGET_LABEL = `1.5 MB (${BUDGET_BYTES} bytes)`;

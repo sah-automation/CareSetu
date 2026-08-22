@@ -27,3 +27,16 @@ export function isAppRole(value: string): value is Role {
 export function resolveRole(value: string | null | undefined): Role {
   return value && isAppRole(value) ? value : "patient";
 }
+
+// Single source for each role's home surface - the Dashboard target of the
+// §3.2 role-entry model and each NAV_CONFIG config's first destination.
+// Kept dependency-free so session-aware public chrome (PHASE-2.6 T09 #200)
+// can resolve dashboard targets without pulling the full nav graph (icons
+// et al) into every page bundle. nav-config derives its home entries from
+// this table, and a unit test pins the two together.
+export const ROLE_HOME: Record<Role, string> = {
+  patient: "/patient",
+  doctor: "/doctor",
+  partner: "/partner",
+  operator: "/operator",
+};
