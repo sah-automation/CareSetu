@@ -79,4 +79,36 @@ describe("Button", () => {
     );
     expect(buttonVariants()).toContain("bg-primary");
   });
+
+  // PHASE-2.6 T08 (#199): spinner-in-button pattern (blueprint §9.1) -
+  // in-place mutations disable the trigger while pending.
+  describe("loading", () => {
+    it("renders a spinner and marks the button busy while loading", () => {
+      render(<Button loading>Save</Button>);
+
+      const button = screen.getByRole("button", { name: "Save" });
+      expect(button).toHaveAttribute("aria-busy", "true");
+      expect(screen.getByTestId("button-spinner")).toBeInTheDocument();
+    });
+
+    it("disables the button and swallows clicks while loading", () => {
+      const onClick = vi.fn();
+      render(
+        <Button loading onClick={onClick}>
+          Save
+        </Button>,
+      );
+
+      expect(screen.getByRole("button")).toBeDisabled();
+      fireEvent.click(screen.getByRole("button"));
+      expect(onClick).not.toHaveBeenCalled();
+    });
+
+    it("renders no spinner and no busy state when not loading", () => {
+      render(<Button>Save</Button>);
+
+      expect(screen.getByRole("button")).not.toHaveAttribute("aria-busy");
+      expect(screen.queryByTestId("button-spinner")).toBeNull();
+    });
+  });
 });

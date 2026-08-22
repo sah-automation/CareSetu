@@ -17,6 +17,16 @@ import {
 
 import { isAppRole, resolveRole, roleLabel } from "./types";
 
+// Stale sessions can carry a user whose JSON predates the T05 additive
+// phone field (absent or empty at runtime despite the non-optional type);
+// the menu degrades to the subject id rather than crashing (#199 handoff).
+function identityLine(user: { phone?: string; id: number } | null): string {
+  if (!user) {
+    return "";
+  }
+  return user.phone || `Subject #${user.id}`;
+}
+
 export function AccountMenu() {
   const { user, selectedRole, switchRole, logout } = useAuth();
   const currentRole = resolveRole(selectedRole);
@@ -33,12 +43,12 @@ export function AccountMenu() {
           data-testid="account-menu"
           className="flex h-9 w-9 items-center justify-center rounded-full bg-accent-soft text-sm font-semibold text-accent-strong hover:bg-accent-border"
         >
-          {(user?.phone ?? "?").slice(-2)}
+          {(user?.phone || "?").slice(-2)}
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-52">
         <DropdownMenuLabel className="flex items-center justify-between gap-2 font-normal">
-          <span className="text-sm text-txt">{user?.phone}</span>
+          <span className="text-sm text-txt">{identityLine(user)}</span>
           <span
             className="rounded bg-accent-soft px-1.5 py-0.5 text-xs font-medium text-accent"
             data-testid="account-menu-role-badge"

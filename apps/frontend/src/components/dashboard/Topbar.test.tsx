@@ -272,4 +272,34 @@ describe("Topbar account cluster", () => {
       expect(mockReplace).toHaveBeenCalledWith("/");
     });
   });
+
+  it("PHASE-2.6 T08: the same account cluster serves the full-shell density", async () => {
+    const operatorSession = { ...VALID_SESSION, scope: "operator" };
+    setStoredSession(operatorSession);
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          identity_id: 42,
+          phone: "+911234567890",
+          roles: ["operator"],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    renderTopbar("full", "operator");
+    await waitFor(() =>
+      expect(screen.getByTestId("account-menu")).toBeInTheDocument(),
+    );
+
+    openAccountMenu();
+
+    expect(screen.getByText("+911234567890")).toBeInTheDocument();
+    expect(screen.getByTestId("account-menu-role-badge")).toHaveTextContent(
+      "Operator",
+    );
+    expect(
+      screen.getByRole("menuitem", { name: "Logout" }),
+    ).toBeInTheDocument();
+  });
 });
