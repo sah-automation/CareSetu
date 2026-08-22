@@ -1,9 +1,11 @@
 "use client";
 
 // AuthContext - session validation, role management, and logout for the
-// dashboard routes. Reads the stored session on mount, validates against
-// GET /v1/me, auto-refreshes expired JWTs, and redirects to /login when
-// the session is invalid. (PHASE-2.5 T3, #151)
+// whole app. Mounted once at the root layout so public and dashboard
+// surfaces share one session source: reads the stored session on mount,
+// validates against GET /v1/me, auto-refreshes expired JWTs, and redirects
+// to /login when the session is invalid. (PHASE-2.5 T3 #151; hoisted to
+// root in PHASE-2.6 T01, #192)
 
 import { createContext, useContext, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";

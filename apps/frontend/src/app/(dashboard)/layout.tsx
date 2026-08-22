@@ -2,7 +2,7 @@
 
 import type { ReactNode } from "react";
 import { useState, useEffect } from "react";
-import { AuthProvider, useAuth } from "@/lib/auth/AuthContext";
+import { useAuth } from "@/lib/auth/AuthContext";
 import { Sidebar } from "@/components/dashboard/Sidebar";
 import { Topbar } from "@/components/dashboard/Topbar";
 import type { Role } from "@/components/dashboard/types";
@@ -54,10 +54,8 @@ function DashboardShell({ children }: { children: ReactNode }) {
   );
 }
 
+// Session state comes from the root-layout AuthProvider; this layout only
+// renders the dashboard chrome. (PHASE-2.6 T01, #192)
 export default function DashboardLayout({ children }: { children: ReactNode }) {
-  return (
-    <AuthProvider>
-      <DashboardShell>{children}</DashboardShell>
-    </AuthProvider>
-  );
+  return <DashboardShell>{children}</DashboardShell>;
 }

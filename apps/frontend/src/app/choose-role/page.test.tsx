@@ -8,6 +8,7 @@ import {
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 import ChooseRolePage from "./page";
+import { AuthProvider } from "@/lib/auth/AuthContext";
 import type { StoredSession } from "@/lib/auth/session";
 
 // ---------------------------------------------------------------------------
@@ -42,6 +43,16 @@ function mockMeResponse(roles: string[]) {
   );
 }
 
+// The page reads session state through the shared AuthProvider (mounted at
+// the root layout in the app), so tests wrap it the same way.
+function renderPage() {
+  return render(
+    <AuthProvider>
+      <ChooseRolePage />
+    </AuthProvider>,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Mocks
 // ---------------------------------------------------------------------------
@@ -69,7 +80,7 @@ afterEach(() => {
 
 describe("ChooseRolePage", () => {
   it("redirects to /login when no session is stored", async () => {
-    render(<ChooseRolePage />);
+    renderPage();
 
     await waitFor(() => {
       expect(mockReplace).toHaveBeenCalledWith("/login");
@@ -82,7 +93,7 @@ describe("ChooseRolePage", () => {
       new Response("", { status: 401 }),
     );
 
-    render(<ChooseRolePage />);
+    renderPage();
 
     await waitFor(() => {
       expect(mockReplace).toHaveBeenCalledWith("/login");
@@ -95,7 +106,7 @@ describe("ChooseRolePage", () => {
       new TypeError("Failed to fetch"),
     );
 
-    render(<ChooseRolePage />);
+    renderPage();
 
     await waitFor(() => {
       expect(mockReplace).toHaveBeenCalledWith("/login");
@@ -106,7 +117,7 @@ describe("ChooseRolePage", () => {
     setStoredSession(VALID_SESSION);
     mockMeResponse(["patient"]);
 
-    render(<ChooseRolePage />);
+    renderPage();
 
     await waitFor(() => {
       expect(mockReplace).toHaveBeenCalledWith("/patient");
@@ -119,7 +130,7 @@ describe("ChooseRolePage", () => {
     localStorage.setItem("caresetu.selected_role", "partner");
     mockMeResponse(["patient", "partner"]);
 
-    render(<ChooseRolePage />);
+    renderPage();
 
     await waitFor(() => {
       expect(mockReplace).toHaveBeenCalledWith("/partner");
@@ -130,7 +141,7 @@ describe("ChooseRolePage", () => {
     setStoredSession(VALID_SESSION);
     mockMeResponse(["patient", "partner"]);
 
-    render(<ChooseRolePage />);
+    renderPage();
 
     await waitFor(() => {
       expect(screen.getByText("Choose your role")).toBeInTheDocument();
@@ -150,7 +161,7 @@ describe("ChooseRolePage", () => {
     setStoredSession(VALID_SESSION);
     mockMeResponse(["patient", "partner"]);
 
-    render(<ChooseRolePage />);
+    renderPage();
 
     await waitFor(() => {
       expect(screen.getByText("Patient")).toBeInTheDocument();
@@ -166,7 +177,7 @@ describe("ChooseRolePage", () => {
     setStoredSession(VALID_SESSION);
     mockMeResponse([]);
 
-    render(<ChooseRolePage />);
+    renderPage();
 
     await waitFor(() => {
       expect(mockReplace).toHaveBeenCalledWith("/login");
@@ -177,7 +188,7 @@ describe("ChooseRolePage", () => {
     setStoredSession(VALID_SESSION);
     mockMeResponse(["patient", "admin"]);
 
-    render(<ChooseRolePage />);
+    renderPage();
 
     await waitFor(() => {
       expect(screen.getByText("Patient")).toBeInTheDocument();
@@ -192,7 +203,7 @@ describe("ChooseRolePage", () => {
     localStorage.setItem("caresetu.selected_role", "nonexistent");
     mockMeResponse(["patient", "partner"]);
 
-    render(<ChooseRolePage />);
+    renderPage();
 
     await waitFor(() => {
       expect(screen.getByText("Choose your role")).toBeInTheDocument();
