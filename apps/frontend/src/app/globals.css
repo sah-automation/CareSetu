@@ -1,3 +1,35 @@
+@import "./tokens.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer base {
+  body {
+    font-family: var(--font-stack);
+    line-height: 1.625; /* >= 1.6 for Devanagari matras, both locales */
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    line-height: 1.25;
+  }
+
+  /* Reduced-motion floor (user story 33): kills skeleton pulse and every
+     animation/transition app-wide. Base-layer contract - future skeletons
+     inherit it automatically; !important inside base beats layered overrides. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
