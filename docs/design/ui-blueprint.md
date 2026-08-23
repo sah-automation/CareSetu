@@ -15,7 +15,7 @@
 | §9 Cross-cutting patterns      | #188 cross-cutting UX conventions           |
 | §10 Gaps and implications      | carried from all resolutions                |
 | §11 Conflicts flagged          | found during assembly (#189)                |
-| §12 PHASE-2.6 scope sketch     | proposed, not yet ticketed                  |
+| §12 PHASE-2.6 scope sketch     | ratified-with-D1-D4 (spec #191)             |
 
 ---
 
