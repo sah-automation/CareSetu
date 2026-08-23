@@ -46,3 +46,6 @@ Thumbs.db
 
 # Phase 0 harness run outputs (live evaluation reports)
 /phase0/runs/
+
+# Throwaway static UI prototype (never committed; delete after project completion)
+/prototype/
