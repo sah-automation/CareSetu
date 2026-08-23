@@ -419,6 +419,83 @@ const en = {
     },
   },
 
+  // profile.* surface - PHASE-2.6 T13 (#204): the first-login profile-
+  // completion wizard (blueprint §5.9, finalized PROTO-PHASE-2.6 view
+  // profile-completion.html is the binding copy spec). Step/copy keys carry
+  // the prototype's pc.* strings; nudge/gate/demo keys extend the §5.9 rules
+  // (browse never gated; intake/booking gated on basics; medicine-delivery
+  // checkout gated on area; skips resurface as gentle Home nudges - never
+  // modals).
+  profile: {
+    title: "Welcome! Set up your profile",
+    sub: "Three quick steps. You can skip the optional ones and finish later.",
+    pageTitle: "Complete your profile",
+    steps: ["Required", "Optional", "Optional"],
+    s1: "About you",
+    s2: "Health tracking (optional)",
+    s2sub:
+      "Turn on daily logging for blood pressure or sugar - we will remind you gently.",
+    s3: "Contact & photo (optional)",
+    name: "Full name",
+    namePlaceholder: "e.g. Asha Devi",
+    age: "Age",
+    agePlaceholder: "Years",
+    gender: "Gender",
+    genderPlaceholder: "Select",
+    genders: { female: "Female", male: "Male", other: "Other" },
+    langLabel: "Language preference",
+    bp: "Blood pressure",
+    sugar: "Blood sugar",
+    photo: "Profile photo",
+    photoPrompt: "Upload photo",
+    area: "Area / address",
+    areaPlaceholder: "Ward, mohalla, landmark",
+    ec: "Emergency contact",
+    ecPlaceholder: "+91",
+    skip: "Skip for now",
+    continueCta: "Continue",
+    finish: "Finish",
+    meterLabel: "Profile complete",
+    errors: {
+      nameRequired: "Enter your full name.",
+      ageRequired: "Enter your age.",
+      ageInvalid: "Enter age as a whole number between 1 and 120.",
+      genderRequired: "Select your gender.",
+    },
+    nudges: {
+      basicsTitle: "Add your name to start a visit",
+      basicsBody: "Care actions need a named record - it takes one minute.",
+      trackingTitle: "Turn on health tracking",
+      trackingBody:
+        "Daily BP or sugar logging switches on gentle due-card reminders.",
+      photoTitle: "Add a profile photo",
+      photoBody: "Helps providers confirm they are treating the right person.",
+      areaTitle: "Add your area for medicine delivery",
+      areaBody: "Delivery checkout needs an area or address to ship to.",
+      emergencyTitle: "Add an emergency contact",
+      emergencyBody:
+        "One phone number we can reach if something urgent happens.",
+      dismiss: "Dismiss",
+      completeCta: "Complete profile",
+    },
+    gate: {
+      basicsExplain:
+        "A named record (name, age, gender) is required for care actions - add it here to continue.",
+      areaExplain:
+        "Medicine delivery needs your area or address - add it here to continue.",
+    },
+    demo: {
+      badge: "Demo care actions",
+      title: "Care-action gating",
+      body: "Browsing Find Care and My Record is never gated. Care actions check your profile at the moment you act:",
+      intake: "Start visit (intake)",
+      booking: "Book appointment",
+      checkout: "Medicine delivery - go to checkout",
+      proceedNote:
+        "This action clears gating - the real intake/booking/checkout flows arrive in their build phases.",
+    },
+  },
+
   // nav.* surface - the typed nav-config labels (PHASE-2.6 T06, #197).
   // One entry per NavItemDef.labelKey across all four role configs; the
   // bottom tabs / top-nav / sidebar all render through this section.
@@ -447,6 +524,7 @@ const en = {
 export type Dictionary = typeof en;
 export type AuthStrings = Dictionary["auth"];
 export type StaffAuthStrings = Dictionary["staffAuth"];
+export type ProfileStrings = Dictionary["profile"];
 
 export const STRINGS: Record<Lang, Dictionary> = {
   en,
@@ -723,6 +801,78 @@ export const STRINGS: Record<Lang, Dictionary> = {
         standingDenial: "आपने पहले 'अभी नहीं' चुना था - कुछ भी साझा नहीं हुआ।",
       },
     },
+    profile: {
+      title: "स्वागत है! प्रोफ़ाइल पूरी करें",
+      sub: "तीन छोटे कदम। ज़रूरी नहीं वाले कदम छोड़ भी सकते हैं।",
+      pageTitle: "अपनी प्रोफ़ाइल पूरी करें",
+      steps: ["ज़रूरी", "वैकल्पिक", "वैकल्पिक"],
+      s1: "आपके बारे में",
+      s2: "हेल्थ ट्रैकिंग (ऐच्छिक)",
+      s2sub:
+        "ब्लड प्रेशर या शुगर की रोज़ एंट्री चालू करें - हम धीरे-धीरे याद दिलाएँगे।",
+      s3: "संपर्क और फ़ोटो (ऐच्छिक)",
+      name: "पूरा नाम",
+      namePlaceholder: "जैसे आशा देवी",
+      age: "उम्र",
+      agePlaceholder: "साल",
+      gender: "लिंग",
+      genderPlaceholder: "चुनें",
+      genders: { female: "महिला", male: "पुरुष", other: "अन्य" },
+      langLabel: "भाषा पसंद",
+      bp: "ब्लड प्रेशर",
+      sugar: "ब्लड शुगर",
+      photo: "प्रोफ़ाइल फ़ोटो",
+      photoPrompt: "फ़ोटो अपलोड करें",
+      area: "इलाक़ा / पता",
+      areaPlaceholder: "वार्ड, मोहल्ला, पहचान",
+      ec: "आपातकालीन संपर्क",
+      ecPlaceholder: "+91",
+      skip: "अभी नहीं",
+      continueCta: "आगे बढ़ें",
+      finish: "पूरा करें",
+      meterLabel: "प्रोफ़ाइल पूरी",
+      errors: {
+        nameRequired: "अपना पूरा नाम दर्ज करें।",
+        ageRequired: "अपनी उम्र दर्ज करें।",
+        ageInvalid: "पूरी संख्या में 1 से 120 के बीच उम्र दर्ज करें।",
+        genderRequired: "अपना लिंग चुनें।",
+      },
+      nudges: {
+        basicsTitle: "विज़िट शुरू करने के लिए नाम जोड़ें",
+        basicsBody:
+          "इलाज से जुड़े कामों के लिए नाम वाला रिकॉर्ड ज़रूरी है - एक मिनट लगेगा।",
+        trackingTitle: "हेल्थ ट्रैकिंग चालू करें",
+        trackingBody:
+          "ब्लड प्रेशर या शुगर की रोज़ एंट्री से धीमे-धीमे याद-दिलाने वाले कार्ड मिलेंगे।",
+        photoTitle: "प्रोफ़ाइल फ़ोटो जोड़ें",
+        photoBody:
+          "इससे प्रोवाइडर पक्का कर पाते हैं कि वे सही व्यक्ति का इलाज कर रहे हैं।",
+        areaTitle: "दवाई डिलीवरी के लिए अपना इलाक़ा जोड़ें",
+        areaBody: "डिलीवरी चेकआउट के लिए इलाक़ा या पता ज़रूरी है।",
+        emergencyTitle: "आपातकालीन संपर्क जोड़ें",
+        emergencyBody:
+          "एक फ़ोन नंबर जिससे हम किसी आपात स्थिति में संपर्क कर सकें।",
+        dismiss: "हटाएँ",
+        completeCta: "प्रोफ़ाइल पूरी करें",
+      },
+      gate: {
+        basicsExplain:
+          "इलाज से जुड़े कामों के लिए नाम वाला रिकॉर्ड (नाम, उम्र, लिंग) ज़रूरी है - जारी रखने के लिए यहाँ जोड़ें।",
+        areaExplain:
+          "दवाई डिलीवरी के लिए आपका इलाक़ा या पता ज़रूरी है - जारी रखने के लिए यहाँ जोड़ें।",
+      },
+      demo: {
+        badge: "डेमो केयर एक्शन",
+        title: "केयर-एक्शन गेटिंग",
+        body: "Find Care और My Record देखना कभी गेट नहीं होता। केयर एक्शन पर आपकी प्रोफ़ाइल उसी समय जाँची जाती है:",
+        intake: "विज़िट शुरू करें (इंटेक)",
+        booking: "अपॉइंटमेंट बुक करें",
+        checkout: "दवाई डिलीवरी - चेकआउट पर जाएँ",
+        proceedNote:
+          "यह एक्शन गेटिंग पार करता है - असली इंटेक/बुकिंग/चेकआउट फ़्लो अपने बिल्ड फ़ेज़ में आएँगे।",
+      },
+    },
+
     nav: {
       home: "होम",
       find: "खोजें",
