@@ -1,23 +1,22 @@
 // PHASE-2.6 T07 (#198): cookie-presence guard on app routes (ADR-0005).
 //
-// The proxy checks ONLY that the backend-issued httpOnly session cookie is
-// present and non-empty - it never decodes JWT claims. Unauthenticated hits
-// on an app route redirect to that group's entry point (blueprint §2.2):
-// patient deep links re-enter via the patient OTP wizard (/login), staff
-// groups via /staff/login (built in ticket 10; 404 until then). The original
-// path+query rides along as the `return` param so deep links never dead-end.
-// Wrong-role/unauthenticated enforcement beyond this is client-side UX;
-// real authorization stays at the API gateway RBAC.
+// The guard checks ONLY that a secret-free, client-written presence-hint
+// cookie (`caresetu_authed`, maintained by saveSession/clearSession in
+// lib/auth/session) is present and non-empty - it never decodes JWT claims.
+// The hint lives on THIS origin because the backend's own Set-Cookie lands
+// on the API origin and cannot reach the frontend on split deployments
+// (Vercel frontend -> Render backend); see the ADR-0005 amendment.
+// Unauthenticated hits on an app route redirect to that group's entry point
+// (blueprint §2.2): patient deep links re-enter via the patient OTP wizard
+// (/login), staff groups via /staff/login (built in ticket 10; 404 until
+// then). The original path+query rides along as the `return` param so deep
+// links never dead-end. Wrong-role/unauthenticated enforcement beyond this
+// is client-side UX; real authorization stays at the API gateway RBAC.
 
 import { NextRequest, NextResponse } from "next/server";
 
+import { HINT_COOKIE } from "@/lib/auth/session";
 import { RETURN_PARAM } from "@/lib/auth/return-url";
-
-// Single source of truth lives in the backend: modules/iam/adapters/routes.py
-// `_JWT_COOKIE_NAME`. The value cannot be shared across the Python/TS runtime
-// boundary without adding build-time config that would itself need syncing,
-// so the duplicate is deliberate - change both together (coding-standards §9).
-const SESSION_COOKIE = "caresetu_session";
 
 // Staff entry point, built in PHASE-2.6 T10 (#201). Pointed at now so the
 // redirect contract is stable; until then a signed-out staff-group hit 404s
@@ -51,7 +50,7 @@ function matchesAppGroup(pathname: string): AppGroup | null {
 }
 
 function hasSessionCookie(request: NextRequest): boolean {
-  const value = request.cookies.get(SESSION_COOKIE)?.value;
+  const value = request.cookies.get(HINT_COOKIE)?.value;
   return typeof value === "string" && value.length > 0;
 }
 
