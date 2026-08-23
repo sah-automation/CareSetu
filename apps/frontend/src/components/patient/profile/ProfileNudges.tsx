@@ -99,7 +99,9 @@ export function ProfileNudgeCards({
           >
             <div className="flex items-start justify-between gap-2">
               <div>
-                <h4 className="text-sm font-medium text-txt">{copy.title}</h4>
+                {/* T14 #205 axe gate: this follows the page h1 directly, so
+                    it must not skip to h4 (heading-order). */}
+                <h2 className="text-sm font-medium text-txt">{copy.title}</h2>
                 <p className="text-sm text-txt-sub">{copy.body}</p>
               </div>
               <button

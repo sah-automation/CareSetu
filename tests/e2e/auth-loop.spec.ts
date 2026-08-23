@@ -15,14 +15,23 @@ import {
 // PHASE-2.6 T07 (#198) extends the loop with the cookie-presence route guard:
 // a signed-out hit on a patient app route must land on the group-correct
 // entry (/login) carrying ?return=<original>, staff groups must target
-// /staff/login (404 until ticket 10), and completing sign-in must land back
-// on the original destination - proven end-to-end by a query marker that only
-// survives if the return-url drove the post-auth navigation.
+// /staff/login, and completing sign-in must land back on the original
+// destination - proven end-to-end by a query marker that only survives if the
+// return-url drove the post-auth navigation.
 //
-// The three tests share one randomly-chosen phone so the duplicate re-register
-// case resolves against the SAME identity the first test registered. Serial
-// mode keeps them in one worker in order; each test gets its own browser
-// context, so the sessions do not leak between tests.
+// PHASE-2.6 T14 (#205, spec #191 decisions 15/16) completes the guard story
+// for the resolved route structure: the staff entry now renders (ticket 10),
+// axe extends to the homepage and the open consent sheet, and a dedicated
+// stability test pins the deployed-smoke literals (the /login path and the
+// demo OTP banner copy) byte-stable in-suite. A staff POST-login landing is
+// not drivable end to end this phase - no staff session can be minted (staff
+// auth is Phase 5; registration grants only the patient role), so the staff
+// landing matrix stays covered at unit level (staff-routing.test.ts).
+//
+// The first three tests share one randomly-chosen phone so the duplicate
+// re-register case resolves against the SAME identity the first test
+// registered. Serial mode keeps them in one worker in order; each test gets
+// its own browser context, so the sessions do not leak between tests.
 
 test.describe.configure({ mode: "serial" });
 
@@ -196,11 +205,17 @@ test("an unauthenticated attempt at the protected surface is denied", async ({
 
   // Cookie-presence proxy (PHASE-2.6 T07 #198), staff group: a signed-out
   // hit on /operator redirects to the staff entry point with the return-url
-  // preserved. /staff/login does not exist until ticket 10, so the redirect
-  // target answers 404 - the mapping, not the page, is what this asserts.
+  // preserved. Since ticket 10 (#201) the entry surface exists, so the
+  // redirect must land on a RENDERED sign-in (PHASE-2.6 T14 #205) - the
+  // stale pre-T10 expectation of a post-redirect 404 would now fail. The
+  // return param is consumed only at post-login, which stays unit-level this
+  // phase (see the file header).
   const staffResponse = await page.goto("/operator");
   expect(page.url()).toBe(`${FRONTEND}/staff/login?return=%2Foperator`);
-  expect(staffResponse?.status()).toBe(404);
+  expect(staffResponse?.status()).toBe(200);
+  await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible({
+    timeout: 60_000,
+  });
 
   // Patient group: a signed-out deep link lands on /login with the original
   // path+query preserved as ?return=... The src marker distinguishes the
@@ -238,12 +253,21 @@ test("an unauthenticated attempt at the protected surface is denied", async ({
   ).toBeVisible();
 });
 
-test("the auth wizard and the patient page pass the axe accessibility scan", async ({
+test("the homepage, consent sheet, auth wizard and patient page pass the axe accessibility scan", async ({
   page,
   request,
 }) => {
-  // TEST-C2 (#131): assert zero axe violations on the patient auth wizard and
-  // the patient page. Scans each wizard stage and the signed-in surface.
+  // TEST-C2 (#131) + PHASE-2.6 T14 (#205, spec #191 decision 15): assert zero
+  // axe violations on the resolved homepage, each wizard stage, the open
+  // consent sheet, and the signed-in surface.
+  await page.goto("/");
+  await expect(
+    page.getByRole("heading", {
+      name: "Find trusted doctors, labs and chemists near you",
+    }),
+  ).toBeVisible({ timeout: 60_000 });
+  await expectNoAxeViolations(page, "public homepage");
+
   const axePhone = randomPhone();
 
   await page.goto("/login");
@@ -264,9 +288,38 @@ test("the auth wizard and the patient page pass the axe accessibility scan", asy
   ).toBeVisible();
   await expectNoAxeViolations(page, "signed-in patient page");
 
+  // The consent sheet (T12 #203) scans while OPEN - the Radix overlay traps
+  // focus and aria-hides the page behind it, so this is the state a
+  // screen-reader user actually experiences at a consent moment.
+  await page.getByTestId("consent-demo-trigger").click();
+  await expect(page.getByTestId("consent-title")).toBeVisible();
+  await expectNoAxeViolations(page, "open consent sheet");
+  await page.keyboard.press("Escape");
+
   await page.reload();
   await expect(
     page.getByRole("heading", { name: "Welcome, Patient" }),
   ).toBeVisible();
   await expectNoAxeViolations(page, "signed-in patient page after reload");
+});
+
+test("deployed-smoke stability: login route path and demo OTP banner copy are byte-stable", async ({
+  page,
+}) => {
+  // PHASE-2.6 T14 (#205, spec #191 decision 16): the deployed live smoke
+  // (scripts/live_smoke.py step 5) fetches /patient and /login and asserts
+  // the literal "Demo OTP:" string in their served JS chunks. Any drift in
+  // the login route path or the banner copy would surface only as a
+  // post-deploy smoke failure - so both literals are pinned here, in-suite,
+  // where they fail loudly before anything ships. The banner renders because
+  // playwright.config.ts sets NEXT_PUBLIC_DEMO_MODE for the e2e dev server;
+  // production deploys keep their own value.
+  const stabilityPhone = randomPhone();
+
+  await page.goto("/login");
+  await expect(page).toHaveURL(`${FRONTEND}/login`);
+  await startRegistration(page, stabilityPhone);
+  await expect(page.getByText(/^Demo OTP: \d{6}$/)).toBeVisible({
+    timeout: 15_000,
+  });
 });

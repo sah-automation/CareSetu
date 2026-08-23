@@ -25,7 +25,10 @@ export function FinalCtaBand() {
       <div className="mx-auto w-full max-w-6xl px-4 py-10">
         <div className="rounded-lg bg-accent px-6 py-10 text-center text-on-accent">
           <h2 className="text-2xl font-semibold">{t.finalCta.title}</h2>
-          <p className="mx-auto mt-2 max-w-md text-accent-border">
+          {/* T14 #205 axe gate: text-accent-border (#99f6e4) scores 4.34:1 on
+              bg-accent - under the 4.5:1 floor. accent-soft (#f0fdfa) keeps
+              the tinted hierarchy at 5.4:1. */}
+          <p className="mx-auto mt-2 max-w-md text-accent-soft">
             {t.finalCta.sub}
           </p>
           <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
