@@ -384,6 +384,41 @@ const en = {
     },
   },
 
+  // consent.* surface - PHASE-2.6 T12 (#203): the reusable consent-moment
+  // bottom sheet (blueprint §5.10, finalized PROTO-PHASE-2.6 view
+  // consent-sheet.html). Labels/buttons are component-owned; the per-request
+  // content (requester, scope, validity) is host-supplied - the demo keys
+  // under `demo` carry it for the patient-surface demo integration point.
+  // Copy rules baked in: scope is always specific, never blanket wording;
+  // denial explains plainly what stays blocked and never nags.
+  consent: {
+    title: "Sharing permission",
+    whoLabel: "Who is asking",
+    whatLabel: "What they will see",
+    howLongLabel: "For how long",
+    verifiedBadge: "Verified",
+    allow: "Allow",
+    deny: "Not now",
+    logLink: "See all permissions",
+    grantedNote: "Allowed - recorded in your consent log.",
+    deniedNote:
+      "No problem. Without permission the lab cannot attach your history to this booking - you can still book, just without record sharing.",
+    demo: {
+      badge: "Demo care action",
+      cardTitle: "Book a lab test",
+      cardBody:
+        "This booking wants to attach your recent history so the doctor has context. Nothing is shared unless you allow it.",
+      cta: "Continue booking",
+      requesterName: "Sahyog Path Lab",
+      requesterContext: "via your booking · Dr. A. Kumar reference",
+      scope: "Your prescriptions from the last 3 months",
+      validity:
+        "This one booking only. You can revoke anytime in My Record → Consent log.",
+      allowedProceed: "Your booking continues - your history is attached.",
+      standingDenial: "You chose Not now earlier - nothing has been shared.",
+    },
+  },
+
   // nav.* surface - the typed nav-config labels (PHASE-2.6 T06, #197).
   // One entry per NavItemDef.labelKey across all four role configs; the
   // bottom tabs / top-nav / sidebar all render through this section.
@@ -659,6 +694,33 @@ export const STRINGS: Record<Lang, Dictionary> = {
         },
         phase5Notice:
           "जमा करना अभी जुड़ा नहीं है: आवेदन Phase 5 में आएँगे। अभी कुछ भेजा या सहेजा नहीं गया।",
+      },
+    },
+    consent: {
+      title: "साझा करने की अनुमति",
+      whoLabel: "कौन पूछ रहा है",
+      whatLabel: "वे क्या देखेंगे",
+      howLongLabel: "कितने समय के लिए",
+      verifiedBadge: "सत्यापित",
+      allow: "अनुमति दें",
+      deny: "अभी नहीं",
+      logLink: "सभी अनुमतियाँ देखें",
+      grantedNote: "अनुमति मिल गई - आपके अनुमति लॉग में दर्ज हुई।",
+      deniedNote:
+        "कोई बात नहीं। अनुमति के बिना लैब आपका इतिहास इस बुकिंग से नहीं जोड़ पाएगा - बुकिंग फिर भी हो सकती है, बस रिकॉर्ड साझा नहीं होगा।",
+      demo: {
+        badge: "डेमो केयर एक्शन",
+        cardTitle: "लैब टेस्ट बुक करें",
+        cardBody:
+          "यह बुकिंग आपका हाल का रिकॉर्ड जोड़ना चाहती है ताकि डॉक्टर को संदर्भ मिले। आपकी अनुमति के बिना कुछ साझा नहीं होता।",
+        cta: "बुकिंग जारी रखें",
+        requesterName: "सहयोग पैथ लैब",
+        requesterContext: "आपकी बुकिंग के माध्यम से · डॉ. ए. कुमार का रेफ़रंस",
+        scope: "आपकी पिछले 3 महीने की प्रिस्क्रिप्शन",
+        validity:
+          "सिर्फ़ इसी बुकिंग के लिए। आप मेरा रिकॉर्ड → अनुमति लॉग से कभी भी वापस ले सकते हैं।",
+        allowedProceed: "आपकी बुकिंग जारी है - आपका रिकॉर्ड जुड़ गया।",
+        standingDenial: "आपने पहले 'अभी नहीं' चुना था - कुछ भी साझा नहीं हुआ।",
       },
     },
     nav: {
