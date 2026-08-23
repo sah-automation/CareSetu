@@ -145,6 +145,137 @@ const en = {
       partnerDesc: "Orders, history, settlements, profile",
       operatorDesc: "Verifications, disputes, audit",
     },
+
+    // register.* surface - PHASE-2.6 T11 (#202): the four-step provider
+    // application wizard (/staff/register, blueprint §4.3). Client-side
+    // validation mirrors the planned Phase 5 field schemas (prototype
+    // provider-register.html is the binding copy spec); error keys below are
+    // produced by providerRegisterState.ts and resolved with t.errors[key].
+    register: {
+      subtitle:
+        "Apply now - our team verifies every credential before you are listed.",
+      stepperLabel: "Registration steps",
+      steps: [
+        "Account basics",
+        "Identity",
+        "Credentials",
+        "Review & declarations",
+      ],
+      typeBadge: {
+        doctor: "Doctor application",
+        lab: "Lab application",
+        chemist: "Chemist application",
+      },
+      typeLabels: { doctor: "Doctor", lab: "Lab", chemist: "Chemist" },
+      back: "Back",
+      continueCta: "Continue",
+      submitApplication: "Submit application",
+      summaryTitle: (n: number) =>
+        `${n} ${
+          n === 1 ? "field needs" : "fields need"
+        } attention before you continue.`,
+      accountTitle: "Account basics",
+      identityTitleDoctor: "Professional identity",
+      identityTitlePartner: "Business identity",
+      credentialsTitle: "Credentials upload",
+      credentialsNote:
+        "Photos or PDFs. Files are checked by our team; nothing is listed publicly until activation.",
+      reviewTitle: "Review & declarations",
+      fields: {
+        fullName: "Full name",
+        fullNamePlaceholder: "e.g. Dr. Asha Kumar",
+        email: "Email",
+        emailPlaceholder: "you@example.com",
+        password: "Password",
+        passwordHelp:
+          "Strength: use 12+ characters with a number and a symbol.",
+        mobile: "Mobile for alerts",
+        mobilePlaceholder: "10-digit mobile number",
+        degreeName: "Name as per degree",
+        degreeNamePlaceholder: "Exactly as printed on your certificate",
+        council: "State medical council",
+        councilPlaceholder: "Select your council",
+        city: "City",
+        cityPlaceholder: "e.g. Daltonganj",
+        languages: "Languages spoken",
+        languagesPlaceholder: "e.g. Hindi, English",
+        businessName: "Business name",
+        address: "Address",
+        serviceArea: "Service area",
+        serviceAreaPlaceholder: "e.g. Daltonganj + 15 km",
+        ownerContact: "Owner contact",
+      },
+      optionalSuffix: "(optional)",
+      mobilePrefix: "+91",
+      councils: [
+        "Jharkhand State Medical Council",
+        "Bihar State Medical Council",
+        "Other",
+      ],
+      slots: {
+        councilCert: {
+          label: "State medical council registration certificate",
+          hint: "Upload photo/PDF",
+        },
+        degrees: {
+          label: "Degree certificates (MBBS / MD)",
+          hint: "Upload photo/PDF",
+        },
+        photoId: { label: "Government photo ID", hint: "Aadhaar / PAN / DL" },
+        businessReg: {
+          label: "Business registration",
+          hint: "GST / trade license",
+        },
+        accreditations: { label: "Accreditations", hint: "NABL / ISO if held" },
+        kyc: { label: "Owner KYC", hint: "Government photo ID" },
+        drugLicense: {
+          label: "Drug license (Form 20/21)",
+          hint: "Upload photo/PDF",
+        },
+        shopLicense: { label: "Shop license", hint: "Municipal trade license" },
+      },
+      uploadPrompt: "Upload photo/PDF",
+      removeFile: "Remove",
+      review: {
+        applicant: "Applicant",
+        email: "Email",
+        mobile: "Mobile for alerts",
+        notProvided: "Not provided",
+        type: "Type",
+        credentialsAttached: "Credentials attached",
+        fileCount: (n: number) => `${n} ${n === 1 ? "file" : "files"}`,
+        noFile: "Nothing attached yet",
+      },
+      declarations: {
+        truth: "I declare the information and documents provided are true.",
+        consent: "I consent to credential verification by CareSetu.",
+        terms: "I accept the Terms of Service.",
+      },
+      errors: {
+        fullNameRequired: "Enter your full name.",
+        emailInvalid: "Enter a valid email address.",
+        passwordWeak:
+          "Use at least 12 characters including a number and a symbol.",
+        mobileInvalid:
+          "Enter a valid 10-digit Indian mobile number, or leave this blank.",
+        degreeNameRequired: "Enter your name as per degree.",
+        councilRequired: "Select your state medical council.",
+        cityRequired: "Enter your city.",
+        languagesRequired: "Enter the languages you speak with patients.",
+        businessNameRequired: "Enter the business name.",
+        addressRequired: "Enter the business address.",
+        serviceAreaRequired: "Enter the area you serve.",
+        ownerContactInvalid:
+          "Enter the owner's valid 10-digit Indian mobile number.",
+        uploadRequired: "Attach this document to continue.",
+        uploadWrongType:
+          "Only photos (JPEG, PNG, WebP) or PDF files work here.",
+        uploadTooLarge: "Files must be 10 MB or smaller.",
+        declarationRequired: "Tick this declaration to continue.",
+      },
+      phase5Notice:
+        "Submission is not connected yet: applications arrive in Phase 5. Nothing was sent or saved just now.",
+    },
   },
 
   // home.* surface - the resolved public homepage's copy (PHASE-2.6 T09,
@@ -400,6 +531,134 @@ export const STRINGS: Record<Lang, Dictionary> = {
         doctorDesc: "कतार, केस, मरीज़, प्रोफ़ाइल",
         partnerDesc: "ऑर्डर, इतिहास, सेटलमेंट, प्रोफ़ाइल",
         operatorDesc: "सत्यापन, विवाद, ऑडिट",
+      },
+
+      register: {
+        subtitle:
+          "अभी आवेदन करें - लिस्ट होने से पहले हमारी टीम हर दस्तावेज़ जाँचती है।",
+        stepperLabel: "पंजीकरण चरण",
+        steps: [
+          "खाते की मूल जानकारी",
+          "पहचान",
+          "दस्तावेज़",
+          "समीक्षा और घोषणाएँ",
+        ],
+        typeBadge: {
+          doctor: "डॉक्टर आवेदन",
+          lab: "लैब आवेदन",
+          chemist: "केमिस्ट आवेदन",
+        },
+        typeLabels: { doctor: "डॉक्टर", lab: "लैब", chemist: "केमिस्ट" },
+        back: "वापस",
+        continueCta: "आगे बढ़ें",
+        submitApplication: "आवेदन जमा करें",
+        summaryTitle: (n) => `जारी रखने से पहले ${n} फ़ील्ड में ध्यान देना है।`,
+        accountTitle: "खाते की मूल जानकारी",
+        identityTitleDoctor: "प्रोफ़ेशनल पहचान",
+        identityTitlePartner: "व्यवसाय की पहचान",
+        credentialsTitle: "दस्तावेज़ अपलोड",
+        credentialsNote:
+          "फ़ोटो या PDF। फ़ाइलें हमारी टीम जाँचती है; सक्रिय होने तक कुछ भी सार्वजनिक रूप से नहीं दिखता।",
+        reviewTitle: "समीक्षा और घोषणाएँ",
+        fields: {
+          fullName: "पूरा नाम",
+          fullNamePlaceholder: "जैसे डॉ. आशा कुमार",
+          email: "ईमेल",
+          emailPlaceholder: "you@example.com",
+          password: "पासवर्ड",
+          passwordHelp:
+            "मज़बूती: 12+ अक्षरों में एक अंक और एक प्रतीक के साथ बनाएँ।",
+          mobile: "सूचनाओं के लिए मोबाइल",
+          mobilePlaceholder: "10 अंकों का मोबाइल नंबर",
+          degreeName: "डिग्री के अनुसार नाम",
+          degreeNamePlaceholder: "प्रमाणपत्र पर जैसा छपा है वैसा ही",
+          council: "राज्य मेडिकल काउंसिल",
+          councilPlaceholder: "अपनी काउंसिल चुनें",
+          city: "शहर",
+          cityPlaceholder: "जैसे डालटनगंज",
+          languages: "बोली जाने वाली भाषाएँ",
+          languagesPlaceholder: "जैसे हिंदी, English",
+          businessName: "व्यवसाय का नाम",
+          address: "पता",
+          serviceArea: "सेवा क्षेत्र",
+          serviceAreaPlaceholder: "जैसे डालटनगंज + 15 किमी",
+          ownerContact: "मालिक का संपर्क",
+        },
+        optionalSuffix: "(वैकल्पिक)",
+        mobilePrefix: "+91",
+        councils: [
+          "झारखंड राज्य मेडिकल काउंसिल",
+          "बिहार राज्य मेडिकल काउंसिल",
+          "अन्य",
+        ],
+        slots: {
+          councilCert: {
+            label: "राज्य मेडिकल काउंसिल पंजीकरण प्रमाणपत्र",
+            hint: "फ़ोटो/PDF अपलोड करें",
+          },
+          degrees: {
+            label: "डिग्री प्रमाणपत्र (MBBS / MD)",
+            hint: "फ़ोटो/PDF अपलोड करें",
+          },
+          photoId: { label: "सरकारी फ़ोटो ID", hint: "आधार / पैन / DL" },
+          businessReg: {
+            label: "व्यवसाय पंजीकरण",
+            hint: "GST / ट्रेड लाइसेंस",
+          },
+          accreditations: { label: "मान्यताएँ", hint: "NABL / ISO हो तो" },
+          kyc: { label: "मालिक का KYC", hint: "सरकारी फ़ोटो ID" },
+          drugLicense: {
+            label: "ड्रग लाइसेंस (फ़ॉर्म 20/21)",
+            hint: "फ़ोटो/PDF अपलोड करें",
+          },
+          shopLicense: {
+            label: "दुकान लाइसेंस",
+            hint: "नगर पालिका ट्रेड लाइसेंस",
+          },
+        },
+        uploadPrompt: "फ़ोटो/PDF अपलोड करें",
+        removeFile: "हटाएँ",
+        review: {
+          applicant: "आवेदक",
+          email: "ईमेल",
+          mobile: "सूचनाओं के लिए मोबाइल",
+          notProvided: "नहीं दिया गया",
+          type: "प्रकार",
+          credentialsAttached: "संलग्न दस्तावेज़",
+          fileCount: (n) => `${n} ${n === 1 ? "फ़ाइल" : "फ़ाइलें"}`,
+          noFile: "कुछ संलग्न नहीं",
+        },
+        declarations: {
+          truth:
+            "मैं घोषणा करता/करती हूँ कि दी गई जानकारी और दस्तावेज़ सही हैं।",
+          consent:
+            "मैं CareSetu द्वारा दस्तावेज़ सत्यापन की सहमति देता/देती हूँ।",
+          terms: "मैं सेवा की शर्तें स्वीकार करता/करती हूँ।",
+        },
+        errors: {
+          fullNameRequired: "अपना पूरा नाम दर्ज करें।",
+          emailInvalid: "एक सही ईमेल पता दर्ज करें।",
+          passwordWeak:
+            "कम से कम 12 अक्षर, जिसमें एक अंक और एक प्रतीक हो, इस्तेमाल करें।",
+          mobileInvalid:
+            "सही 10 अंकों का भारतीय मोबाइल नंबर दर्ज करें, या खाली छोड़ दें।",
+          degreeNameRequired: "डिग्री के अनुसार नाम दर्ज करें।",
+          councilRequired: "अपनी राज्य मेडिकल काउंसिल चुनें।",
+          cityRequired: "अपना शहर दर्ज करें।",
+          languagesRequired: "मरीज़ों से बोली जाने वाली भाषाएँ दर्ज करें।",
+          businessNameRequired: "व्यवसाय का नाम दर्ज करें।",
+          addressRequired: "व्यवसाय का पता दर्ज करें।",
+          serviceAreaRequired: "अपना सेवा क्षेत्र दर्ज करें।",
+          ownerContactInvalid:
+            "मालिक का सही 10 अंकों का भारतीय मोबाइल नंबर दर्ज करें।",
+          uploadRequired: "जारी रखने के लिए यह दस्तावेज़ संलग्न करें।",
+          uploadWrongType:
+            "यहाँ केवल फ़ोटो (JPEG, PNG, WebP) या PDF फ़ाइलें चलेंगी।",
+          uploadTooLarge: "फ़ाइलें 10 MB या उससे छोटी होनी चाहिए।",
+          declarationRequired: "आगे बढ़ने के लिए यह घोषणा टिक करें।",
+        },
+        phase5Notice:
+          "जमा करना अभी जुड़ा नहीं है: आवेदन Phase 5 में आएँगे। अभी कुछ भेजा या सहेजा नहीं गया।",
       },
     },
     nav: {
