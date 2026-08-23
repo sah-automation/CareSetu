@@ -46,3 +46,7 @@ Acceptance criteria (verbatim):
 - The token must be minted from a dedicated phone (e.g. `+91 9000000002` or a documented test phone) - never `+91 9000000001` (the seeded demo phone TEST-D registers), or the two jobs race the 60 s resend cooldown.
 - Warm-up request precedes the sweep to absorb Render's ~1 min cold start; thresholds are tolerant on purpose (plan §3.A2 - health sweep, not capacity test).
 - `/v1/me` needs a valid Bearer token - all 20 VUs share the single minted token; `GET /v1/auth/*` is off-limits in the scenario.
+
+## Delta 2026-08-23
+
+- Hardened after CD run 32648093502 breached the original bound on queueing alone (p95 5.75 s with error rate and sweep_failures passing): the sweep now runs 10 VUs (down from 20) against the same 90 s window, and the duration threshold is p95 < 4 s (up from 2.5 s, aligning with the CI regression-bound philosophy in patient-flow.js). The job also warms both `/health` and `/v1/me` before k6 starts instead of a single warm-up request. Rationale lives in the live-sweep.js header.

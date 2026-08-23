@@ -55,6 +55,26 @@ jobs:
         env:
           LIVE_BACKEND_URL: ${{ vars.LIVE_BACKEND_URL }}
           TEST_PHONE: "9000000002"
+      - name: warm up /health and /v1/me before the sweep
+        # The sweep measures steady-state latency, so first-hit costs (Render
+        # cold start, JIT, DB pool fill) must be paid here. Best-effort by
+        # design: if the surface never settles the step says so and exits 0,
+        # letting the k6 thresholds be the single judge of the gate.
+        run: |
+          for i in $(seq 1 12); do
+            HEALTH=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$LIVE_BACKEND_URL/health")
+            ME=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+              -H "Authorization: Bearer $LIVE_SWEEP_TOKEN" "$LIVE_BACKEND_URL/v1/me")
+            echo "warm-up attempt $i: /health=$HEALTH /v1/me=$ME"
+            if [ "$HEALTH" = "200" ] && [ "$ME" = "200" ]; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "warm-up: surface did not settle within 60 s - continuing; k6 thresholds will judge"
+        env:
+          LIVE_BACKEND_URL: ${{ vars.LIVE_BACKEND_URL }}
+          LIVE_SWEEP_TOKEN: ${{ steps.mint.outputs.token }}
       - name: run live load sweep
         run: k6 run --summary-export=k6-summary.json scripts/loadtest/live-sweep.js -e BASE_URL="$LIVE_BACKEND_URL" -e TOKEN="$LIVE_SWEEP_TOKEN"
         env:
