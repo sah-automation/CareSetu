@@ -644,7 +644,9 @@ No other cross-resolution conflicts were found: interim `/choose-role`, shell ve
 
 ## 12. Proposed PHASE-2.6 scope sketch
 
-Candidate next UI implementation phase. This sketch proposes scope only - actual phase ticketing is a separate effort (map out-of-scope). Candidate ID "PHASE-2.6" slots between the Phase 2.5 frontend foundation work and the roadmap's later phases; the roadmap owner should ratify the number when ticketing.
+> **Ratified-with-D1-D4** (2026-08-22): the candidate identifier below was ratified as `PHASE-2.6` when ticketed as spec [#191](https://github.com/sah-automation/CareSetu/issues/191). Planning decisions D1-D4 are recorded in #191 (Implementation Decisions 1) as amended by its prototype-reconciliation amendment comment; the ratification decision note on #191 is the authoritative record. Tracking is issue-side per the Phase 2.5 precedent ([#146](https://github.com/sah-automation/CareSetu/issues/146)) - the roadmap §1.2 inventory intentionally remains `PHASE-0..14`.
+
+Candidate next UI implementation phase. This sketch proposes scope only - actual phase ticketing is a separate effort (map out-of-scope). Candidate ID "PHASE-2.6" slots between the Phase 2.5 frontend foundation work and the roadmap's later phases; the number was ratified at ticketing time as noted above.
 
 ### 12.1 Candidate goal
 
