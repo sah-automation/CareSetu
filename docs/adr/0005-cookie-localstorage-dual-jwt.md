@@ -1,6 +1,6 @@
 # ADR-0005: Cookie + localStorage dual JWT storage
 
-**Status:** accepted
+**Status:** accepted (amended 2026-08-23 - see Amendment below)
 **Date:** 2026-08-17
 **Decides:** How the JWT is stored on the frontend to satisfy both Next.js middleware (server-side route protection) and the API client (client-side Authorization header).
 **Traceability:** `PHASE-2.5-APP-SHELL` (issue #146), `MOD-001`, `FEAT-001`.
@@ -36,3 +36,34 @@ The backend sets the cookie. The frontend writes localStorage. Both happen from 
 - The middleware only checks cookie presence, not JWT claims. Role-based routing logic lives in the AuthContext (client-side). This keeps the middleware simple and avoids JWT parsing on the edge.
 
 - Future risk: if the JWT TTL is changed, both the cookie `maxAge` and the JWT `exp` claim must stay in sync. This is already a single-source concern (the backend's JWT signing logic sets both).
+
+## Amendment (2026-08-23): client-written presence-hint cookie for the edge guard
+
+**Context of the change:** the live demo deploys the frontend and backend on
+separate sites (Vercel `<app>.vercel.app`, Render `<api>.onrender.com`). The
+backend's `SameSite=Strict` `Set-Cookie` is dropped outright by browsers on
+cross-site responses - and even if stored, it would be scoped to the API
+origin, invisible to the Next.js proxy running at the frontend origin. The
+PHASE-2.6 cookie-presence route guard therefore never saw a session on the
+live deployment: every navigation to `/patient` bounced to `/login` with a
+307 (first observed after PR #190). The same design works unchanged on
+same-site topologies (local dev `localhost:3000/8000`, staging Caddy edge),
+which is why all pre-deploy gates passed.
+
+**Amended decision:** `saveSession()` additionally writes a secret-free,
+first-party presence-hint cookie `caresetu_authed=1` (`Path=/`,
+`SameSite=Lax`, `Secure` on https) via `document.cookie`, and
+`clearSession()` expires it; `src/proxy.ts` checks that hint instead of the
+backend-issued cookie. Attributes of the amended hint:
+
+- **Value is `"1"`** - no token material, so nothing new to exfiltrate.
+- **Fixed long window (30 days), not the JWT TTL** - the refresh path
+  (`POST /v1/auth/refresh`) rotates tokens without a TTL payload, so a
+  TTL-bound hint would out-live its renewal signal. A lapsed or stale hint
+  costs at most one client-side redirect, because real authentication is
+  still enforced by gateway RBAC and AuthContext's `/v1/me` validation.
+
+**Unchanged:** localStorage remains the JWT source for the API client; the
+backend keeps setting its httpOnly cookie (harmless on split deployments,
+still useful if a same-site topology returns); the guard still never parses
+JWT claims at the edge.

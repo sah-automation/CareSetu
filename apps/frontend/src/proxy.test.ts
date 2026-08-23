@@ -1,15 +1,17 @@
 // PHASE-2.6 T07 (#198): unit coverage for the cookie-presence proxy.
-// ADR-0005: the guard checks session-cookie presence only - it never decodes
-// JWT claims. Covered here: pass-through with a cookie, group-correct
-// redirects without one, return-url preservation (path AND query), empty-
-// value cookies treated as absent, and the matcher table shape.
+// ADR-0005 (amended): the guard checks the client-written presence-hint
+// cookie's existence only - it never decodes JWT claims. Covered here:
+// pass-through with the hint cookie, group-correct redirects without one,
+// return-url preservation (path AND query), empty-value cookies treated as
+// absent, and the matcher table shape.
 
 import { describe, expect, it } from "vitest";
 import { NextRequest, NextResponse } from "next/server";
 
 import { config, proxy } from "./proxy";
+import { HINT_COOKIE } from "@/lib/auth/session";
 
-const COOKIE_NAME = "caresetu_session";
+const COOKIE_NAME = HINT_COOKIE;
 
 function makeRequest(path: string, cookie?: string): NextRequest {
   const url = new URL(path, "http://localhost:3000");
