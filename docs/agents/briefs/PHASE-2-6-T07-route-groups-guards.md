@@ -15,7 +15,7 @@ Acceptance criteria: see #198 body verbatim (groups under shared AppShell; redir
 
 1. ADR-0005 - why middleware stays cookie-presence-only (~0.5K tokens)
 2. UI blueprint §4.5 (post-login routing) + §3 guard patterns - entry-point mapping per role group (~1.5K)
-3. Existing Next.js route middleware from Phase 2.5 (see brief `PHASE-2-5-T5-route-middleware.md`) - what exists to extend (~1K)
+3. Existing Next.js route middleware from Phase 2.5 (see brief `PHASE-2-5-T5-middleware.md`) - what exists to extend (~1K)
 4. Current `(dashboard)` route-group layout + stub pages - what re-homes where (~1K)
 5. E2E auth-loop spec (`tests/e2e/auth-loop.spec.ts`) - every hardcoded URL/copy assertion needing update (~2K)
 

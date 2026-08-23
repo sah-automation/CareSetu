@@ -23,6 +23,7 @@
 - Operator accounts require MFA. Partner roles activate only after credential verification (`REQ-028`).
 - Credential expiry/revocation deactivates the partner and removes them from search immediately (`FEAT-005`).
 - Authn/authz failures and consent events are 100% audited (`KPI-006`).
+- Session transport across the split-origin (Vercel + Render) deployment follows the cookie/CORS invariants in api-standards §6.1 and `ADR-0007` - read those before touching auth, cookies, or CORS.
 
 ## 4. Secret Management
 

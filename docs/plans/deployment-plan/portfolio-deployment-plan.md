@@ -20,6 +20,8 @@ Stand up a public, live CareSetu demo at zero monthly cost so a recruiter or eva
 
 The plan is written to double as a migration reference: section 8 covers moving to the roadmap's single-VM launch environment.
 
+> **Session-transport note:** this plan's env-var values (CORS origins, `NEXT_PUBLIC_API_BASE_URL`, gateway flags) are half of the deployed-auth contract. The cookie/guard/CORS behavioral invariants that keep it working across the Vercel+Render split live in `docs/adr/0007-split-origin-deployment-session-invariants.md` (with `ADR-0005` for storage mechanics) - read ADR-0007 before any auth/session change.
+
 ---
 
 ## 2. Current state assessment (post-Phase-2)

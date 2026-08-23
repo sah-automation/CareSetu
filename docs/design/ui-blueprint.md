@@ -2,20 +2,20 @@
 
 **Status:** assembled 2026-08-21 from Wayfinder map [#178](https://github.com/sah-automation/CareSetu/issues/178), decisions [#179](https://github.com/sah-automation/CareSetu/issues/179)-[#188](https://github.com/sah-automation/CareSetu/issues/188) (ticket #189). This document synthesizes resolved decisions; it does not re-decide them. Where resolutions conflict, the conflict is flagged in §11 rather than silently resolved. The PRD (`docs/prd/project-prd.md`) and architecture docs remain authoritative for requirements; this blueprint governs UI design at wireframe-description fidelity.
 
-| Section                        | Source resolution                           |
-| :----------------------------- | :------------------------------------------ |
-| §1 Design system               | #179 component library, #187 brand identity |
-| §2 Navigation model and shells | #182 shell and navigation                   |
-| §3 Public site                 | #180 homepage composition                   |
-| §4 Auth surfaces               | #181 split auth and role entry              |
-| §5 Patient app                 | #183 patient IA                             |
-| §6 Doctor channel              | #184 doctor IA                              |
-| §7 Partner channels            | #185 partner IA                             |
-| §8 Operator console            | #186 operator IA                            |
-| §9 Cross-cutting patterns      | #188 cross-cutting UX conventions           |
-| §10 Gaps and implications      | carried from all resolutions                |
-| §11 Conflicts flagged          | found during assembly (#189)                |
-| §12 PHASE-2.6 scope sketch     | ratified-with-D1-D4 (spec #191)             |
+| Section                        | Source resolution                                     |
+| :----------------------------- | :---------------------------------------------------- |
+| §1 Design system               | #179 component library, #187 brand identity           |
+| §2 Navigation model and shells | #182 shell and navigation                             |
+| §3 Public site                 | #180 homepage composition                             |
+| §4 Auth surfaces               | #181 split auth and role entry                        |
+| §5 Patient app                 | #183 patient IA                                       |
+| §6 Doctor channel              | #184 doctor IA                                        |
+| §7 Partner channels            | #185 partner IA                                       |
+| §8 Operator console            | #186 operator IA                                      |
+| §9 Cross-cutting patterns      | #188 cross-cutting UX conventions                     |
+| §10 Gaps and implications      | carried from all resolutions                          |
+| §11 Conflicts flagged          | found during assembly (#189)                          |
+| §12 PHASE-2.6 scope sketch     | ratified-with-D1-D4 (spec #191); delivered 2026-08-23 |
 
 ---
 
@@ -642,13 +642,13 @@ No other cross-resolution conflicts were found: interim `/choose-role`, shell ve
 
 ---
 
-## 12. Proposed PHASE-2.6 scope sketch
+## 12. PHASE-2.6 scope sketch (delivered)
 
-> **Ratified-with-D1-D4** (2026-08-22): the candidate identifier below was ratified as `PHASE-2.6` when ticketed as spec [#191](https://github.com/sah-automation/CareSetu/issues/191). Planning decisions D1-D4 are recorded in #191 (Implementation Decisions 1) as amended by its prototype-reconciliation amendment comment; the ratification decision note on #191 is the authoritative record. Tracking is issue-side per the Phase 2.5 precedent ([#146](https://github.com/sah-automation/CareSetu/issues/146)) - the roadmap §1.2 inventory intentionally remains `PHASE-0..14`.
+> **Ratified-with-D1-D4** (2026-08-22): the candidate identifier below was ratified as `PHASE-2.6` when ticketed as spec [#191](https://github.com/sah-automation/CareSetu/issues/191). Planning decisions D1-D4 are recorded in #191 (Implementation Decisions 1) as amended by its prototype-reconciliation amendment comment; the ratification decision note on #191 is the authoritative record. Originally tracked issue-side per the Phase 2.5 precedent ([#146](https://github.com/sah-automation/CareSetu/issues/146)); now ratified in the roadmap as §2.2b (`PHASE-2.6-PUBLIC-FACE-CHASSIS`), superseding that decision. Delivered via tickets #192-#206, deployed 2026-08-23.
 
-Candidate next UI implementation phase. This sketch proposes scope only - actual phase ticketing is a separate effort (map out-of-scope). Candidate ID "PHASE-2.6" slots between the Phase 2.5 frontend foundation work and the roadmap's later phases; the number was ratified at ticketing time as noted above.
+This sketch scoped PHASE-2.6; implementation landed as tickets #192-#206 following PR #190's blueprint publication.
 
-### 12.1 Candidate goal
+### 12.1 Goal
 
 Turn the Phase 2.5 skeleton into the resolved public face and shared app chassis: ship the resolved homepage, rework the shell to the §2 model, stand up the split-auth page skeletons, and add the patient profile-completion skeleton - everything wired to what exists today, with clearly-marked integration points where backend legs land in later phases.
 

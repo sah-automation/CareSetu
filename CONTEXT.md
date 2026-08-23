@@ -4,18 +4,18 @@
 
 ## Doc inventory
 
-| File                                     | Purpose                                                                                                              | Read when                                                 | ~Tokens  |
-| :--------------------------------------- | :------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------- | :------- |
-| `CONTEXT.md` (this file)                 | Navigation guide - what to read/skip                                                                                 | Always (first)                                            | ~0.5K    |
-| `docs/prd/project-prd.md`                | WHAT we build: epics, features (`FEAT-xxx`), NFRs, risks                                                             | Every build; the §4.x section for the features in scope   | ~13K     |
-| `docs/architecture/system-context.md`    | External actors (`ACT-xxx`) + third-party integrations (`EXT-001..004`)                                              | When touching integrations, actors, or boundary rules     | ~6K      |
-| `docs/architecture/internal-modules.md`  | HOW modules work: per-module specs (`MOD-001..011`), sync matrix §4.1, event registry §4.2, traceability §5          | Every build; specs for the modules you touch              | ~14K     |
-| `docs/roadmap/implementation-roadmap.md` | IN WHAT ORDER we build: per-phase specs (`PHASE-0..14`), phased traceability §3                                      | Every build; the section for the current phase            | ~16K     |
-| `docs/adr/*`                             | Resolved decisions (ADR-0001: AMB-006 confidence split, 0.70 threshold, forced-review gate)                          | When a decision or `AMB`/`CFL`/`GAP` baseline is in scope | ~1K each |
-| `docs/design/ui-blueprint.md`            | Top-level UI design for all five surfaces: navigation model, design system, per-surface IA, cross-cutting patterns   | Any UI/frontend build; the surface sections you touch     | ~10K     |
-| `docs/research/ui-component-library.md`  | Component-library evidence and migration notes behind the blueprint's §1.1 recommendation                            | When adopting UI components or touching bundle budget     | ~2K      |
-| `docs/standards/*`                       | Top-level rules per area (coding, api, integrations, errors, security, AI)                                           | The relevant standard before working in its area          | ~2K each |
-| `docs/agents/briefs/*`                   | Per-ticket **context packs** (read-list, do-not-read, baseline/done-verify) - the contract for implementing a ticket | The ticket's own brief, before anything else              | ~2K each |
+| File                                     | Purpose                                                                                                                                               | Read when                                                                                                                   | ~Tokens  |
+| :--------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------- | :------- |
+| `CONTEXT.md` (this file)                 | Navigation guide - what to read/skip                                                                                                                  | Always (first)                                                                                                              | ~0.5K    |
+| `docs/prd/project-prd.md`                | WHAT we build: epics, features (`FEAT-xxx`), NFRs, risks                                                                                              | Every build; the §4.x section for the features in scope                                                                     | ~13K     |
+| `docs/architecture/system-context.md`    | External actors (`ACT-xxx`) + third-party integrations (`EXT-001..004`)                                                                               | When touching integrations, actors, or boundary rules                                                                       | ~6K      |
+| `docs/architecture/internal-modules.md`  | HOW modules work: per-module specs (`MOD-001..011`), sync matrix §4.1, event registry §4.2, traceability §5                                           | Every build; specs for the modules you touch                                                                                | ~14K     |
+| `docs/roadmap/implementation-roadmap.md` | IN WHAT ORDER we build: per-phase specs (`PHASE-0..14` plus delivered chassis inserts `PHASE-2.5`/`PHASE-2.6` in §2.2a/§2.2b), phased traceability §3 | Every build; the section for the current phase                                                                              | ~17K     |
+| `docs/adr/*`                             | Resolved decisions (ADR-0001: confidence split; ADR-0005: dual JWT storage; **ADR-0007: split-origin deploy + session-transport invariants**)         | When a decision or `AMB`/`CFL`/`GAP` baseline is in scope; ADR-0007 before ANY auth/session/CORS/middleware/deploy-env work | ~1K each |
+| `docs/design/ui-blueprint.md`            | Top-level UI design for all five surfaces: navigation model, design system, per-surface IA, cross-cutting patterns                                    | Any UI/frontend build; the surface sections you touch                                                                       | ~10K     |
+| `docs/research/ui-component-library.md`  | Component-library evidence and migration notes behind the blueprint's §1.1 recommendation                                                             | When adopting UI components or touching bundle budget                                                                       | ~2K      |
+| `docs/standards/*`                       | Top-level rules per area (coding, api, integrations, errors, security, AI)                                                                            | The relevant standard before working in its area                                                                            | ~2K each |
+| `docs/agents/briefs/*`                   | Per-ticket **context packs** (read-list, do-not-read, baseline/done-verify) - the contract for implementing a ticket                                  | The ticket's own brief, before anything else                                                                                | ~2K each |
 
 ## Build-session protocol
 
@@ -29,6 +29,8 @@ Follow this order and stop when you have what you need:
 6. **`docs/standards/*`** - the standard(s) relevant to the area you're editing.
 
 Read only the sections you need. If a task stays confined to one module or phase, do not pull in unrelated sections.
+
+**Hard gate:** if the task touches session/auth cookies, CORS, middleware or proxy route guards, `credentials` options, deploy env vars, or Vercel/Render config, read **`docs/adr/0007-split-origin-deployment-session-invariants.md`** before editing. Production is split-origin (Vercel frontend + Render backend) while localhost is same-origin, so designs that pass locally can still fail only when deployed - this has caused incidents #119/#159/#208.
 
 ## Cross-reference rule
 
@@ -124,7 +126,7 @@ No cross-schema imports, no cross-schema SQL, no cross-schema foreign keys; the 
 _Avoid_: bounded-context separation (when meaning this CI-enforced rule)
 
 **edge**:
-The deployment boundary - the reverse proxy (Caddy/nginx) that terminates TLS at the VM perimeter. Distinct from the in-app gateway.
+The deployment boundary - the reverse proxy (Caddy/nginx) that terminates TLS at the VM perimeter. Distinct from the in-app gateway. (The current Vercel+Render demo runs without this edge - see split-origin deployment; the edge arrives with the same-origin VM path.)
 _Avoid_: gateway
 
 **gateway**:
@@ -133,4 +135,14 @@ _Avoid_: API proxy
 
 **audit event**:
 `audit.event` - published by each owning module into its own outbox in the same transaction as the audited change, and consumed by MOD-011 which appends to the audit schema. Never synthesized by the dispatcher.
+
+### Split-origin deployment (ADR-0007)
+
+**split-origin deployment**:
+The production/demo topology: Vercel serves the frontend and Render serves the backend as two different sites, so browsers apply cross-site cookie rules between them; localhost dev is same-origin and masks every one of those rules. Session-transport changes are reasoned against this topology first (`ADR-0007`) and verified by live gates, never by local runs alone.
+_Avoid_: multi-domain setup, separated hosting (when meaning this specific Vercel+Render topology)
+
+**presence-hint cookie**:
+`caresetu_authed=1` - a secret-free, first-party cookie written/cleared by the frontend's `saveSession()`/`clearSession()` and the ONLY cookie the edge guard (`src/proxy.ts`) reads. Attributes are deliberate: `SameSite=Lax`, `Secure` on https, fixed 30-day window (not the JWT TTL). The backend's `caresetu_session` httpOnly cookie never reaches the frontend origin under split hosting.
+_Avoid_: session cookie (that name belongs to the backend's httpOnly JWT cookie), auth cookie, JWT cookie (when meaning the hint)
 _Avoid_: audit log entry
