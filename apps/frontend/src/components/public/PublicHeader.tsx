@@ -9,43 +9,13 @@
 
 import Link from "next/link";
 
+import { BrandMark } from "@/components/brand/BrandMark";
 import { LangToggle } from "@/components/dashboard/LangToggle";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useRoleHomeHref } from "@/lib/auth/useRoleHomeHref";
 import { useLang } from "@/lib/i18n/LangContext";
-
-function Wordmark() {
-  return (
-    <svg
-      width="26"
-      height="26"
-      viewBox="0 0 32 32"
-      fill="none"
-      aria-hidden="true"
-    >
-      <path
-        d="M8 24v-8M24 24v-8"
-        stroke="currentColor"
-        strokeWidth="2.5"
-        strokeLinecap="round"
-      />
-      <path
-        d="M8 16Q16 5 24 16"
-        stroke="currentColor"
-        strokeWidth="2.5"
-        strokeLinecap="round"
-      />
-      <path
-        d="M4 27h24"
-        stroke="currentColor"
-        strokeWidth="2.5"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
 
 export function PublicHeader() {
   const { lang } = useLang();
@@ -67,7 +37,7 @@ export function PublicHeader() {
           href="/"
           className="flex items-center gap-2 text-lg font-semibold text-accent"
         >
-          <Wordmark />
+          <BrandMark size={26} />
           CareSetu
         </Link>
         <nav

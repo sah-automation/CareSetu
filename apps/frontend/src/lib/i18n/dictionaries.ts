@@ -69,6 +69,84 @@ const en = {
     signOut: "Sign out",
   },
 
+  // staffAuth.* surface - PHASE-2.6 T10 (#201): the split-auth staff entry
+  // (/staff/login), partner status screens, and the scoped staff-role picker.
+  // Pages only this phase: submits name Phase 5 honestly, never fake success.
+  staffAuth: {
+    login: {
+      brand: "CareSetu",
+      subtitle: "Staff sign-in - doctor, lab, chemist and operator",
+      heading: "Sign in",
+      emailLabel: "Email",
+      emailPlaceholder: "you@example.com",
+      passwordLabel: "Password",
+      showPassword: "Show",
+      hidePassword: "Hide",
+      forgotPassword: "Forgot password?",
+      signIn: "Sign in",
+      mfaCodeLabel: "Authentication code (2FA)",
+      mfaHelp:
+        "From your authenticator app. MFA verification activates in Phase 5.",
+      newHereTitle: "New to CareSetu?",
+      newHereBody:
+        "Register your practice or business - our team verifies before you are listed.",
+      registerDoctor: "Doctor",
+      registerLab: "Lab",
+      registerChemist: "Chemist",
+      noRolePickerNote:
+        "No role picker here by design: at sign-in your role comes from your account, never chosen by hand. Patients use the phone OTP wizard instead.",
+      interimNote: "Interim staff entry stays until Phase 5:",
+      chooseRoleLink: "choose role",
+      emailInvalid: "Enter a valid email address.",
+      passwordRequired: "Enter your password.",
+      summaryTitle: (n: number) =>
+        `${n} ${
+          n === 1 ? "field needs" : "fields need"
+        } attention before you continue.`,
+      phase5Notice:
+        "Sign-in is not connected yet: staff authentication arrives in Phase 5. Nothing was sent or saved just now.",
+      invalidCredentials: "Incorrect email or password.",
+      accountLocked:
+        "This account is temporarily locked after repeated failures. Try again in about 15 minutes or reset your password.",
+      genericError: "Something went wrong on our side. Please retry.",
+    },
+    pending: {
+      badge: "Under Verification",
+      headerTitle: "Application status",
+      title: "Your application is being verified",
+      submittedLabel: "Submitted",
+      applicationLabel: "Application",
+      verifyingLabel: "Being verified",
+      windowLabel: "Expected review window",
+      detailPlaceholder: "Shown once staff accounts go live (Phase 5)",
+      windowValue: "Within 48 hours",
+      infoBanner:
+        "You are not listed publicly until activated. We will call or message you if anything more is needed.",
+      helpCta: "Help: contact the CareSetu team",
+    },
+    rejected: {
+      badge: "Rejected",
+      headerTitle: "Application status",
+      title: "We could not verify your application",
+      reasonHeading: "Reason:",
+      reasonPlaceholder:
+        "The specific reason appears here once operator review goes live (Phase 5).",
+      fixNote:
+        "Fix the issue and resubmit - your corrected upload goes straight back into verification; you do not start over.",
+      resubmitCta: "Re-upload and resubmit",
+      resubmitStubNotice:
+        "Resubmission opens with Phase 5 - nothing was resubmitted just now.",
+      helpCta: "Help: contact the CareSetu team",
+    },
+    picker: {
+      title: "Choose a role to continue",
+      sub: "This account holds more than one staff role. Pick which console to open - you can switch later from the top bar.",
+      doctorDesc: "Queue, cases, patients, profile",
+      partnerDesc: "Orders, history, settlements, profile",
+      operatorDesc: "Verifications, disputes, audit",
+    },
+  },
+
   // home.* surface - the resolved public homepage's copy (PHASE-2.6 T09,
   // #200), carried over verbatim from the finalized PROTO-PHASE-2.6 view
   // home-resolved.html; the specialty-chip labels the prototype left
@@ -202,6 +280,7 @@ const en = {
 
 export type Dictionary = typeof en;
 export type AuthStrings = Dictionary["auth"];
+export type StaffAuthStrings = Dictionary["staffAuth"];
 
 export const STRINGS: Record<Lang, Dictionary> = {
   en,
@@ -251,6 +330,77 @@ export const STRINGS: Record<Lang, Dictionary> = {
       sessionBody: "आपकी पहचान सत्यापित है और स्वास्थ्य यात्रा तैयार है।",
       signedInAs: (phone) => `${phone} से साइन इन`,
       signOut: "साइन आउट",
+    },
+    staffAuth: {
+      login: {
+        brand: "CareSetu",
+        subtitle: "स्टाफ साइन-इन - डॉक्टर, लैब, केमिस्ट और ऑपरेटर",
+        heading: "साइन इन करें",
+        emailLabel: "ईमेल",
+        emailPlaceholder: "you@example.com",
+        passwordLabel: "पासवर्ड",
+        showPassword: "दिखाएँ",
+        hidePassword: "छिपाएँ",
+        forgotPassword: "पासवर्ड भूल गए?",
+        signIn: "साइन इन करें",
+        mfaCodeLabel: "प्रमाणीकरण कोड (2FA)",
+        mfaHelp:
+          "अपने authenticator ऐप से। MFA सत्यापन Phase 5 में सक्रिय होगा।",
+        newHereTitle: "CareSetu पर नए हैं?",
+        newHereBody:
+          "अपनी प्रैक्टिस या व्यवसाय रजिस्टर करें - लिस्ट होने से पहले हमारी टीम जाँच करती है।",
+        registerDoctor: "डॉक्टर",
+        registerLab: "लैब",
+        registerChemist: "केमिस्ट",
+        noRolePickerNote:
+          "यहाँ जानबूझकर कोई रोल पिकर नहीं है: साइन इन पर आपका रोल आपके खाते से तय होता है, हाथ से नहीं चुना जाता। मरीज़ फ़ोन OTP विज़ार्ड से साइन इन करते हैं।",
+        interimNote: "Phase 5 तक अंतरिम स्टाफ प्रवेश उपलब्ध रहेगा:",
+        chooseRoleLink: "रोल चुनें",
+        emailInvalid: "एक सही ईमेल पता दर्ज करें।",
+        passwordRequired: "अपना पासवर्ड दर्ज करें।",
+        summaryTitle: (n) => `आगे बढ़ने से पहले ${n} फ़ील्ड में ध्यान देना है।`,
+        phase5Notice:
+          "साइन-इन अभी जुड़ा नहीं है: स्टाफ प्रमाणीकरण Phase 5 में आएगा। अभी कुछ भेजा या सहेजा नहीं गया।",
+        invalidCredentials: "ईमेल या पासवर्ड गलत है।",
+        accountLocked:
+          "बार-बार विफल प्रयासों के बाद यह खाता अस्थायी रूप से लॉक है। लगभग 15 मिनट बाद फिर कोशिश करें या पासवर्ड रीसेट करें।",
+        genericError: "हमारी तरफ़ से कुछ गड़बड़ हुई। कृपया फिर से कोशिश करें।",
+      },
+      pending: {
+        badge: "जाँच प्रक्रिया में",
+        headerTitle: "आवेदन की स्थिति",
+        title: "आपका आवेदन जाँचा जा रहा है",
+        submittedLabel: "जमा किया गया",
+        applicationLabel: "आवेदन",
+        verifyingLabel: "जिसकी जाँच हो रही है",
+        windowLabel: "समीक्षा अपेक्षित अवधि",
+        detailPlaceholder: "स्टाफ खाते लाइव होने पर दिखेगा (Phase 5)",
+        windowValue: "48 घंटे के भीतर",
+        infoBanner:
+          "सक्रिय होने तक आप सार्वजनिक रूप से सूचीबद्ध नहीं होंगे। यदि कुछ और चाहिए तो हम आपको कॉल या संदेश भेजेंगे।",
+        helpCta: "सहायता: CareSetu टीम से संपर्क करें",
+      },
+      rejected: {
+        badge: "अस्वीकृत",
+        headerTitle: "आवेदन की स्थिति",
+        title: "हम आपका आवेदन सत्यापित नहीं कर सके",
+        reasonHeading: "कारण:",
+        reasonPlaceholder:
+          "ऑपरेटर समीक्षा लाइव होने पर विशिष्ट कारण यहाँ दिखेगा (Phase 5)।",
+        fixNote:
+          "समस्या ठीक करें और फिर से जमा करें - आपका संशोधित अपलोड सीधे जाँच में वापस चला जाएगा; आप शुरुआत से नहीं करते।",
+        resubmitCta: "दोबारा अपलोड करें और जमा करें",
+        resubmitStubNotice:
+          "दोबारा जमा करना Phase 5 के साथ खुलेगा - अभी कुछ भी दोबारा जमा नहीं हुआ।",
+        helpCta: "सहायता: CareSetu टीम से संपर्क करें",
+      },
+      picker: {
+        title: "जारी रखने के लिए एक रोल चुनें",
+        sub: "इस खाते में एक से अधिक स्टाफ रोल हैं। कौन-सा कंसोल खोलना है चुनें - बाद में ऊपरी बार से बदल सकते हैं।",
+        doctorDesc: "कतार, केस, मरीज़, प्रोफ़ाइल",
+        partnerDesc: "ऑर्डर, इतिहास, सेटलमेंट, प्रोफ़ाइल",
+        operatorDesc: "सत्यापन, विवाद, ऑडिट",
+      },
     },
     nav: {
       home: "होम",
