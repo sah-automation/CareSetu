@@ -266,3 +266,76 @@ describe("AuthProvider", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Root-layout shared context (PHASE-2.6 T01, #192)
+//
+// The provider mounts once at the root layout, so sibling consumers - e.g. a
+// public page header and the dashboard shell - must share one session source
+// with a single /v1/me validation.
+// ---------------------------------------------------------------------------
+
+function SessionProbe({ id }: { id: string }) {
+  const auth = useAuth();
+  return (
+    <div>
+      <span data-testid={`${id}-loading`}>{String(auth.isLoading)}</span>
+      <span data-testid={`${id}-authenticated`}>
+        {String(auth.isAuthenticated)}
+      </span>
+      <span data-testid={`${id}-roles`}>
+        {auth.user?.roles?.join(",") ?? "none"}
+      </span>
+    </div>
+  );
+}
+
+describe("AuthProvider as app-wide root context", () => {
+  it("serves multiple consumers from one /v1/me validation", async () => {
+    setStoredSession(VALID_SESSION);
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(ME_RESPONSE), { status: 200 }),
+      );
+
+    renderWithAuth(
+      <>
+        <SessionProbe id="public" />
+        <SessionProbe id="dashboard" />
+      </>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("public-authenticated").textContent).toBe(
+        "true",
+      );
+    });
+
+    expect(screen.getByTestId("dashboard-authenticated").textContent).toBe(
+      "true",
+    );
+    expect(screen.getByTestId("public-roles").textContent).toBe(
+      "patient,partner",
+    );
+    expect(screen.getByTestId("dashboard-roles").textContent).toBe(
+      "patient,partner",
+    );
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves signed-out state for public consumers without any fetch", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+    renderWithAuth(<SessionProbe id="public" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("public-loading").textContent).toBe("false");
+    });
+
+    expect(screen.getByTestId("public-authenticated").textContent).toBe(
+      "false",
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});

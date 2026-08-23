@@ -12,6 +12,8 @@
 | `docs/architecture/internal-modules.md`  | HOW modules work: per-module specs (`MOD-001..011`), sync matrix §4.1, event registry §4.2, traceability §5          | Every build; specs for the modules you touch              | ~14K     |
 | `docs/roadmap/implementation-roadmap.md` | IN WHAT ORDER we build: per-phase specs (`PHASE-0..14`), phased traceability §3                                      | Every build; the section for the current phase            | ~16K     |
 | `docs/adr/*`                             | Resolved decisions (ADR-0001: AMB-006 confidence split, 0.70 threshold, forced-review gate)                          | When a decision or `AMB`/`CFL`/`GAP` baseline is in scope | ~1K each |
+| `docs/design/ui-blueprint.md`            | Top-level UI design for all five surfaces: navigation model, design system, per-surface IA, cross-cutting patterns   | Any UI/frontend build; the surface sections you touch     | ~10K     |
+| `docs/research/ui-component-library.md`  | Component-library evidence and migration notes behind the blueprint's §1.1 recommendation                            | When adopting UI components or touching bundle budget     | ~2K      |
 | `docs/standards/*`                       | Top-level rules per area (coding, api, integrations, errors, security, AI)                                           | The relevant standard before working in its area          | ~2K each |
 | `docs/agents/briefs/*`                   | Per-ticket **context packs** (read-list, do-not-read, baseline/done-verify) - the contract for implementing a ticket | The ticket's own brief, before anything else              | ~2K each |
 

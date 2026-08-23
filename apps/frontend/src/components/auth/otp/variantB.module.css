@@ -73,7 +73,7 @@
   height: 2rem;
   border-radius: 9999px;
   background: var(--hairline-soft);
-  color: var(--text-muted);
+  color: var(--txt-muted);
   font-size: 0.85rem;
   font-weight: 700;
   z-index: 1;
@@ -92,7 +92,7 @@
 .stepLabel {
   font-size: 0.7rem;
   font-weight: 600;
-  color: var(--text-muted);
+  color: var(--txt-muted);
 }
 
 .stepCurrent .stepLabel {
@@ -130,12 +130,12 @@
 .sub {
   margin: 0;
   font-size: 0.85rem;
-  color: var(--text-muted);
+  color: var(--txt-muted);
   text-align: center;
 }
 
 .sub strong {
-  color: var(--text);
+  color: var(--txt);
 }
 
 .field {
@@ -158,7 +158,7 @@
   align-items: center;
   gap: 0.7rem;
   font-size: 0.85rem;
-  color: var(--text-sub);
+  color: var(--txt-sub);
 }
 
 .propIcon {
@@ -209,7 +209,7 @@
 .editLink {
   border: none;
   background: none;
-  color: var(--text-muted);
+  color: var(--txt-muted);
   font-size: 0.8rem;
   cursor: pointer;
   padding: 0.35rem 0.5rem;

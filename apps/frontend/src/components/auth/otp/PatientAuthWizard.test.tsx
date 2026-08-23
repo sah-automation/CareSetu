@@ -533,6 +533,58 @@ describe("PatientAuthWizard - success and session", () => {
     expect(registerPhone).not.toHaveBeenCalled();
   });
 
+  // PHASE-2.6 T07 (#198): the proxy's return-url must survive the whole OTP
+  // wizard - a deep link bounced to /login?return=... lands back on the
+  // original destination after sign-in, never dead-ending on /patient.
+  describe("return-url redirect target", () => {
+    async function completeFlowWithReturnTo(returnTo: string) {
+      vi.mocked(registerPhone).mockResolvedValue(REGISTER_OK);
+      render(<PatientAuthWizard returnTo={returnTo} />);
+      await enterPhone();
+      fireEvent.click(
+        screen.getByRole("button", { name: "Get verification code" }),
+      );
+      await screen.findByText(/6-digit code sent by SMS to/);
+      vi.mocked(verifyOtp).mockResolvedValue(verifiedResult());
+      vi.mocked(issueSession).mockResolvedValue(SESSION);
+      typeOtp();
+      fireEvent.click(verifyButton());
+      expect(await screen.findByText("Identity verified")).toBeInTheDocument();
+      fireEvent.click(
+        screen.getByRole("button", { name: "Go to CareSetu home" }),
+      );
+      expect(mockReplace).toHaveBeenCalledWith(returnTo);
+    }
+
+    it("redirects to the returnTo prop after the Done step", async () => {
+      await completeFlowWithReturnTo("/patient/record");
+    });
+
+    it("falls back to /patient when no returnTo is given", async () => {
+      await completeFlowWithReturnTo("/patient");
+    });
+
+    it("routes an already-stored session to the returnTo prop", async () => {
+      localStorage.setItem(
+        "caresetu.session",
+        JSON.stringify({
+          jwt: "header.payload.signature",
+          refresh_token: "opaque-refresh-token",
+          jti: "jti-1",
+          scope: "patient",
+          identity_id: 1,
+          phone: PHONE,
+        }),
+      );
+
+      render(<PatientAuthWizard returnTo="/patient/bookings" />);
+
+      await vi.waitFor(() => {
+        expect(mockReplace).toHaveBeenCalledWith("/patient/bookings");
+      });
+    });
+  });
+
   it("clears the session on sign out and returns to the phone step", async () => {
     await startOtpFlow();
     vi.mocked(verifyOtp).mockResolvedValue(verifiedResult());

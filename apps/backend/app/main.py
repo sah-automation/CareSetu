@@ -55,11 +55,14 @@ class MeResponse(BaseModel):
 
     ``subject_id`` is the identity the token is scoped to - a patient sees
     their own record id and nothing else; ``roles`` is the resolved RBAC scope
-    from the token claim (api-standards §6).
+    from the token claim (api-standards §6). ``phone`` (PHASE-2.6 T05, #196,
+    decision D4) is the caller's E.164 number resolved from the identity
+    table, additive so older clients keep working.
     """
 
     subject_id: str
     roles: list[str]
+    phone: str
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -158,9 +161,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return HealthResponse(status="ok")
 
     @app.get("/v1/me", response_model=MeResponse)
-    def me(principal: Annotated[Principal, Depends(require_patient)]) -> MeResponse:
-        """Protected proof route: admit only a valid patient-scoped session."""
-        return MeResponse(subject_id=principal.subject_id, roles=list(principal.roles))
+    async def me(
+        request: Request, principal: Annotated[Principal, Depends(require_patient)]
+    ) -> MeResponse:
+        """Protected proof route: admit only a valid patient-scoped session.
+
+        The phone is resolved through the iam facade's one-column lookup by
+        the principal's subject id (PHASE-2.6 T05, #196) - the route never
+        touches the database itself.
+        """
+        facade = cast(IamFacade, request.app.state.iam_facade)
+        phone = await facade.identity_phone(int(principal.subject_id))
+        return MeResponse(
+            subject_id=principal.subject_id,
+            roles=list(principal.roles),
+            phone=phone,
+        )
 
     @app.get("/v1/auth/dev/otp", response_model=MockOtpResponse)
     async def dev_otp(request: Request, phone: str) -> MockOtpResponse | JSONResponse:

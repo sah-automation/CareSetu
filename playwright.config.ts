@@ -37,6 +37,14 @@ export default defineConfig({
       url: "http://localhost:3000/",
       reuseExistingServer: !process.env.CI,
       timeout: 120_000,
+      env: {
+        ...process.env,
+        // PHASE-2.6 T14 (#205, spec decision 16): render the demo OTP banner
+        // so its literal copy is pinned byte-stable in-suite against what the
+        // deployed live smoke asserts. Build-time-inlined var - this only
+        // affects the local/CI e2e dev server, never a production deploy.
+        NEXT_PUBLIC_DEMO_MODE: "true",
+      },
     },
     {
       command: "node scripts/e2e-backend.cjs",

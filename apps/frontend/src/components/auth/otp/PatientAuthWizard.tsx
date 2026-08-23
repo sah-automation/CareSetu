@@ -22,6 +22,7 @@ import {
   IconShield,
 } from "@/components/auth/icons";
 import { fetchDemoOtp } from "@/lib/auth/api";
+import { useLang } from "@/lib/i18n/LangContext";
 import type { OtpFlow } from "./otpState";
 import { formatCountdown, OTP_TTL_SECONDS, useOtpFlow } from "./otpState";
 import {
@@ -219,7 +220,7 @@ function OtpStep({ flow }: { flow: OtpFlow }) {
   );
 }
 
-function DoneStep({ flow }: { flow: OtpFlow }) {
+function DoneStep({ flow, returnTo }: { flow: OtpFlow; returnTo: string }) {
   const { t } = flow;
   const router = useRouter();
   return (
@@ -245,15 +246,24 @@ function DoneStep({ flow }: { flow: OtpFlow }) {
           {t.valueProps[2]}
         </li>
       </ul>
-      <PrimaryButton onClick={() => router.replace("/patient")}>
+      <PrimaryButton onClick={() => router.replace(returnTo)}>
         {t.goHome}
       </PrimaryButton>
     </section>
   );
 }
 
-export function PatientAuthWizard() {
+export function PatientAuthWizard({
+  returnTo = "/patient",
+}: {
+  // Post-auth destination (PHASE-2.6 T07 #198): the sanitized `return`
+  // target from the login surface; defaults to the patient app home.
+  returnTo?: string;
+}) {
   const flow = useOtpFlow();
+  // Locale is app-wide state now (PHASE-2.6 T03, #194): the wizard reads and
+  // toggles it through LangContext instead of wizard-local state.
+  const { lang, setLang } = useLang();
   const router = useRouter();
   const demoMode = process.env.NEXT_PUBLIC_DEMO_MODE === "true";
   const [demoOtp, setDemoOtp] = useState<string | null>(null);
@@ -274,23 +284,31 @@ export function PatientAuthWizard() {
     };
   }, [demoMode, flow.state.stage, flow.state.otpSends, flow.state.phone]);
 
-  // Redirect to dashboard if already authenticated (session exists from reload)
+  // Redirect to the return target if already authenticated (session exists
+  // from reload)
   useEffect(() => {
     if (
       flow.state.hydrated &&
       flow.state.session &&
       flow.state.stage !== "done"
     ) {
-      router.replace("/patient");
+      router.replace(returnTo);
     }
-  }, [flow.state.hydrated, flow.state.session, flow.state.stage, router]);
+  }, [
+    flow.state.hydrated,
+    flow.state.session,
+    flow.state.stage,
+    returnTo,
+    router,
+  ]);
 
-  // Redirect to dashboard after successful login (Done step "Go to CareSetu home")
+  // Redirect to the return target after successful login (Done step "Go to
+  // CareSetu home" also routes there directly)
   useEffect(() => {
     if (flow.state.stage === "done" && flow.state.session) {
-      router.replace("/patient");
+      router.replace(returnTo);
     }
-  }, [flow.state.stage, flow.state.session, router]);
+  }, [flow.state.stage, flow.state.session, returnTo, router]);
 
   if (!flow.state.hydrated) {
     return null;
@@ -303,7 +321,7 @@ export function PatientAuthWizard() {
 
   return (
     <div className={`${shared.otpProto} ${stylesB.root}`}>
-      <BrandHeader t={flow.t} lang={flow.state.lang} onLang={flow.setLang} />
+      <BrandHeader t={flow.t} lang={lang} onLang={setLang} />
       <nav aria-label={flow.t.stepProgress}>
         <StepDots flow={flow} />
       </nav>
@@ -316,7 +334,9 @@ export function PatientAuthWizard() {
           )}
           {flow.state.stage === "phone" && <PhoneStep flow={flow} />}
           {flow.state.stage === "otp" && <OtpStep flow={flow} />}
-          {flow.state.stage === "done" && <DoneStep flow={flow} />}
+          {flow.state.stage === "done" && (
+            <DoneStep flow={flow} returnTo={returnTo} />
+          )}
         </div>
       </main>
     </div>

@@ -499,5 +499,7 @@ def test_real_api_ts_passes_against_real_openapi() -> None:
     interfaces, endpoints = parse_api(API_FILE.read_text(encoding="utf-8"))
     spec = load_openapi(None)
 
-    assert len(endpoints) == 5
+    # Five auth endpoints plus the protected GET /v1/me session read
+    # mirrored by the contract gate since PHASE-2.6 T05 (#196).
+    assert len(endpoints) == 6
     assert check_contract(interfaces, endpoints, spec) == []

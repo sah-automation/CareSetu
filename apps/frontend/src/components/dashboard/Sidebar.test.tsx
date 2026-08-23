@@ -1,3 +1,6 @@
+// PHASE-2.6 T06 (#197): unit suite for the full-shell desktop sidebar -
+// CSS-driven responsiveness, collapsed icon-only columns, Soon semantics.
+
 import { render, screen, fireEvent, cleanup } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
@@ -46,80 +49,98 @@ afterEach(() => {
 });
 
 describe("Sidebar", () => {
-  it("renders patient nav items", () => {
-    render(<Sidebar role="patient" collapsed={false} onToggle={vi.fn()} />);
+  it("renders the patient nav-config entries", () => {
+    render(
+      <Sidebar role="patient" collapsed={false} onToggleCollapse={vi.fn()} />,
+    );
 
-    expect(screen.getByTestId("nav-home")).toBeInTheDocument();
-    expect(screen.getByTestId("nav-my-records")).toBeInTheDocument();
-    expect(screen.getByTestId("nav-appointments")).toBeInTheDocument();
-    expect(screen.getByTestId("nav-medicines")).toBeInTheDocument();
-    expect(screen.getByTestId("nav-consent")).toBeInTheDocument();
-    expect(screen.getByTestId("nav-notifications")).toBeInTheDocument();
+    ["nav-home", "nav-find", "nav-start", "nav-record", "nav-inbox"].forEach(
+      (id) => expect(screen.getByTestId(id)).toBeInTheDocument(),
+    );
   });
 
-  it("renders partner nav items", () => {
-    render(<Sidebar role="partner" collapsed={false} onToggle={vi.fn()} />);
+  it.each(["doctor", "partner", "operator"] as const)(
+    "renders the %s nav-config entries",
+    (role) => {
+      mockPathname.mockReturnValue(`/${role}`);
+      render(
+        <Sidebar role={role} collapsed={false} onToggleCollapse={vi.fn()} />,
+      );
 
-    expect(screen.getByTestId("nav-home")).toBeInTheDocument();
-    expect(screen.getByTestId("nav-active-cases")).toBeInTheDocument();
-    expect(screen.getByTestId("nav-my-profile")).toBeInTheDocument();
-    expect(screen.getByTestId("nav-settlements")).toBeInTheDocument();
+      const first = {
+        doctor: "nav-queue",
+        partner: "nav-orders",
+        operator: "nav-home",
+      }[role];
+      const last = {
+        doctor: "nav-profile",
+        partner: "nav-profile",
+        operator: "nav-audit",
+      }[role];
+      expect(screen.getByTestId(first)).toBeInTheDocument();
+      expect(screen.getByTestId(last)).toBeInTheDocument();
+    },
+  );
+
+  it("shows Soon badges only on unbuilt entries", () => {
+    render(
+      <Sidebar role="partner" collapsed={false} onToggleCollapse={vi.fn()} />,
+    );
+
+    // Orders is the live landing entry; the rest carry the Soon convention.
+    const soonBadges = screen.getAllByTestId("soon-badge");
+    expect(soonBadges).toHaveLength(3);
+    expect(screen.getByTestId("nav-orders").textContent).not.toContain("Soon");
   });
 
-  it("renders operator nav items", () => {
-    render(<Sidebar role="operator" collapsed={false} onToggle={vi.fn()} />);
+  it("hides labels and toggle text when collapsed", () => {
+    render(
+      <Sidebar role="patient" collapsed={true} onToggleCollapse={vi.fn()} />,
+    );
 
-    expect(screen.getByTestId("nav-home")).toBeInTheDocument();
-    expect(screen.getByTestId("nav-user-management")).toBeInTheDocument();
-    expect(screen.getByTestId("nav-moderation")).toBeInTheDocument();
-    expect(screen.getByTestId("nav-audit-trail")).toBeInTheDocument();
+    expect(screen.getByTestId("sidebar")).toHaveAttribute(
+      "data-collapsed",
+      "true",
+    );
+    expect(screen.queryByText("Home")).not.toBeInTheDocument();
+    expect(screen.getByTestId("sidebar-toggle")).toHaveAttribute(
+      "aria-label",
+      "Expand sidebar",
+    );
   });
 
-  it("shows Soon badges on non-Home items", () => {
-    render(<Sidebar role="patient" collapsed={false} onToggle={vi.fn()} />);
-
-    const soonBadges = screen.getAllByText("Soon");
-    expect(soonBadges.length).toBe(5);
-
-    const homeItem = screen.getByTestId("nav-home");
-    expect(homeItem.textContent).not.toContain("Soon");
-  });
-
-  it("hides nav labels when collapsed", () => {
-    render(<Sidebar role="patient" collapsed={true} onToggle={vi.fn()} />);
-
-    expect(screen.getByTestId("nav-home")).toBeInTheDocument();
-    expect(screen.queryByText("My Records")).not.toBeInTheDocument();
-  });
-
-  it("calls onToggle when toggle button is clicked", () => {
-    const onToggle = vi.fn();
-    render(<Sidebar role="patient" collapsed={false} onToggle={onToggle} />);
+  it("calls onToggleCollapse when the toggle button is clicked", () => {
+    const onToggleCollapse = vi.fn();
+    render(
+      <Sidebar
+        role="patient"
+        collapsed={false}
+        onToggleCollapse={onToggleCollapse}
+      />,
+    );
 
     fireEvent.click(screen.getByTestId("sidebar-toggle"));
-    expect(onToggle).toHaveBeenCalledTimes(1);
+    expect(onToggleCollapse).toHaveBeenCalledTimes(1);
   });
 
-  it("highlights active nav item based on pathname", () => {
+  it("highlights and links the live destination matching the pathname", () => {
     mockPathname.mockReturnValue("/patient");
-    render(<Sidebar role="patient" collapsed={false} onToggle={vi.fn()} />);
+    render(
+      <Sidebar role="patient" collapsed={false} onToggleCollapse={vi.fn()} />,
+    );
 
-    const homeLink = screen.getByTestId("nav-home");
-    expect(homeLink.className).toContain("bg-accent-soft");
+    const home = screen.getByTestId("nav-home");
+    expect(home).toHaveAttribute("aria-current", "page");
+    expect(home.getAttribute("href")).toBe("/patient");
   });
 
-  it("links non-Soon items to correct href", () => {
-    render(<Sidebar role="patient" collapsed={false} onToggle={vi.fn()} />);
+  it("renders Soon entries as non-interactive spans without hrefs", () => {
+    render(
+      <Sidebar role="operator" collapsed={false} onToggleCollapse={vi.fn()} />,
+    );
 
-    const homeLink = screen.getByTestId("nav-home");
-    expect(homeLink.getAttribute("href")).toBe("/patient");
-  });
-
-  it("links Soon items to # and disables them", () => {
-    render(<Sidebar role="patient" collapsed={false} onToggle={vi.fn()} />);
-
-    const recordsLink = screen.getByTestId("nav-my-records");
-    expect(recordsLink.getAttribute("href")).toBe("#");
-    expect(recordsLink.getAttribute("aria-disabled")).toBe("true");
+    const disputes = screen.getByTestId("nav-disputes");
+    expect(disputes.tagName).toBe("SPAN");
+    expect(disputes).toHaveAttribute("aria-disabled", "true");
   });
 });

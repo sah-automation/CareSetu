@@ -1,6 +1,7 @@
 // MOD-001 auth HTTP surface client for the patient PWA (PHASE-2 T9, #60).
-// Thin fetch wrapper over the backend's /v1/auth endpoints; the response
-// shapes mirror the facade result models in modules/iam/facade.py exactly.
+// Thin fetch wrapper over the backend's /v1/auth endpoints and the protected
+// GET /v1/me session read (PHASE-2.6 T05, #196); the response shapes mirror
+// the facade result models in modules/iam/facade.py and app/main.py exactly.
 
 export interface RegisterResult {
   outcome: "sent" | "cooldown" | "locked" | "suspended";
@@ -40,6 +41,12 @@ export interface SessionResult {
   identity_id: number;
   expires_in_seconds: number;
   refresh_token: string;
+}
+
+export interface MeResult {
+  subject_id: string;
+  roles: string[];
+  phone: string;
 }
 
 export interface DemoOtpResult {
@@ -121,6 +128,16 @@ export function resendOtp(phone: string): Promise<ResendResult> {
 
 export function issueSession(phone: string): Promise<SessionResult> {
   return post<SessionResult>("/v1/auth/session", { phone });
+}
+
+export async function fetchMe(jwt: string): Promise<MeResult> {
+  const response = await fetch(`${API_BASE_URL}/v1/me`, {
+    headers: { Authorization: `Bearer ${jwt}` },
+  });
+  if (!response.ok) {
+    throw new Error(`GET /v1/me returned ${response.status}`);
+  }
+  return (await response.json()) as MeResult;
 }
 
 export async function fetchDemoOtp(phone: string): Promise<string | null> {

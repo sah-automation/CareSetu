@@ -52,11 +52,13 @@ _RESULT = RegisterPatientResult(
 
 
 class StubFacade:
-    """Facade stand-in so auth routes answer without a database.
+    """Facade stand-in so auth routes and ``/v1/me`` answer without a database.
 
     ``access_denials`` records the identities whose 403 the gateway asked the
     facade to audit (PHASE-2 REM T7, #87), so tests can pin the emission and
-    its absence.
+    its absence. ``identity_phone`` answers the protected route's one-column
+    phone lookup with the registered fixture identity's number (PHASE-2.6
+    T05, #196).
     """
 
     def __init__(self) -> None:
@@ -70,6 +72,9 @@ class StubFacade:
 
     async def emit_access_denied(self, identity_id: int) -> None:
         self.access_denials.append(identity_id)
+
+    async def identity_phone(self, identity_id: int) -> str:
+        return _RESULT.phone_e164
 
 
 class FailingEmitFacade(StubFacade):
@@ -149,16 +154,18 @@ def _protected_client(
 ) -> TestClient:
     """The real app: the ``/v1/me`` protected route proves admit/deny.
 
-    ``facade`` (when given) replaces ``app.state.iam_facade`` after the app is
-    built so the 403 path answers without a database; the middleware's
-    ``validate_token`` is stateless (signature + expiry only) and keeps working
-    off the real facade it was bound to at build time.
+    ``app.state.iam_facade`` is replaced after the app is built - with
+    ``facade`` when given, else a fresh ``StubFacade`` - so every route answer
+    resolves without a database: the 403 path's access-denial emission
+    (PHASE-2 REM T7, #87) and the admitted ``/v1/me`` phone lookup (PHASE-2.6
+    T05, #196) both go through that seam. The middleware's ``validate_token``
+    is stateless (signature + expiry only) and keeps working off the real
+    facade it was bound to at build time.
     """
     if settings is None:
         settings = Settings(gateway_jwt_verify_enabled=True, gateway_jwt_signing_key=_SIGNING_KEY)
     app = create_app(settings=settings)
-    if facade is not None:
-        app.state.iam_facade = facade
+    app.state.iam_facade = facade if facade is not None else StubFacade()
     return TestClient(app)
 
 
@@ -362,7 +369,11 @@ def test_valid_patient_token_admitted_to_protected_route() -> None:
     response = client.get("/v1/me", headers=_bearer(_issue_access_token(subject_id=7)))
 
     assert response.status_code == 200
-    assert response.json() == {"subject_id": "7", "roles": ["patient"]}
+    assert response.json() == {
+        "subject_id": "7",
+        "roles": ["patient"],
+        "phone": "+919876543210",
+    }
 
 
 def test_authenticated_caller_without_patient_scope_denied_403(
@@ -587,6 +598,7 @@ def test_valid_auth_flows_pass_under_rate_cap() -> None:
     assert client.get("/v1/me", headers=_bearer(_issue_access_token(subject_id=7))).json() == {
         "subject_id": "7",
         "roles": ["patient"],
+        "phone": "+919876543210",
     }
 
 

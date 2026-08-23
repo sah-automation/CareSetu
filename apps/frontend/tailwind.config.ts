@@ -1,57 +1,94 @@
 import type { Config } from "tailwindcss";
+import tailwindcssAnimate from "tailwindcss-animate";
 
 const config: Config = {
   content: ["./src/**/*.{ts,tsx}"],
   theme: {
     extend: {
+      // Palette hexes live only in src/app/tokens.css (#193); this config
+      // consumes the CSS variables so there is a single token source.
       colors: {
         accent: {
-          DEFAULT: "#0e7490",
-          strong: "#155e75",
-          soft: "#ecfeff",
-          border: "#bae6fd",
+          DEFAULT: "var(--accent)",
+          strong: "var(--accent-strong)",
+          soft: "var(--accent-soft)",
+          border: "var(--accent-border)",
+        },
+        warm: {
+          DEFAULT: "var(--warm)",
+          mid: "var(--warm-mid)",
+          soft: "var(--warm-soft)",
         },
         success: {
-          DEFAULT: "#10b981",
-          soft: "#dcfce7",
-          text: "#166534",
+          DEFAULT: "var(--success)",
+          soft: "var(--success-soft)",
+          text: "var(--success-text)",
         },
         warn: {
-          soft: "#fef3c7",
-          text: "#92400e",
+          soft: "var(--warn-soft)",
+          text: "var(--warn-text)",
         },
         danger: {
-          DEFAULT: "#b91c1c",
-          soft: "#fef2f2",
-          border: "#fecaca",
+          DEFAULT: "var(--danger)",
+          soft: "var(--danger-soft)",
+          border: "var(--danger-border)",
         },
         page: {
-          bg: "#f8fafc",
+          bg: "var(--page-bg)",
         },
-        surface: "#ffffff",
+        surface: "var(--surface)",
         hairline: {
-          DEFAULT: "#e2e8f0",
-          soft: "#eef2f7",
+          DEFAULT: "var(--hairline)",
+          soft: "var(--hairline-soft)",
         },
-        "on-accent": "#ffffff",
+        "on-accent": "var(--on-accent)",
         txt: {
-          DEFAULT: "#0f172a",
-          sub: "#334155",
-          muted: "#64748b",
+          DEFAULT: "var(--txt)",
+          sub: "var(--txt-sub)",
+          muted: "var(--txt-muted)",
         },
+        scrim: "var(--scrim)",
+        // shadcn/ui semantic slots (#195) - aliases over the #193 tokens.
+        // The ui-* slots store H S% L% triplets (see tokens.css) so Tailwind
+        // can inject alpha into the /opacity utilities the primitives use.
+        background: "var(--page-bg)",
+        foreground: "var(--txt)",
+        popover: {
+          DEFAULT: "var(--surface)",
+          foreground: "var(--txt)",
+        },
+        primary: {
+          DEFAULT: "hsl(var(--ui-primary))",
+          foreground: "hsl(var(--ui-primary-fg))",
+        },
+        secondary: {
+          DEFAULT: "hsl(var(--ui-secondary))",
+          foreground: "hsl(var(--ui-secondary-fg))",
+        },
+        muted: {
+          DEFAULT: "var(--hairline-soft)",
+          foreground: "var(--txt-muted)",
+        },
+        destructive: {
+          DEFAULT: "hsl(var(--ui-destructive))",
+          foreground: "hsl(var(--ui-destructive-fg))",
+        },
+        border: "var(--hairline)",
+        input: "var(--hairline)",
+        ring: "var(--accent-border)",
       },
       borderRadius: {
-        sm: "0.5rem",
-        DEFAULT: "0.75rem",
-        lg: "1rem",
+        sm: "var(--radius-sm)",
+        DEFAULT: "var(--radius)",
+        lg: "var(--radius-lg)",
       },
       boxShadow: {
-        card: "0 1px 3px rgba(2, 6, 23, 0.08)",
-        pop: "0 12px 32px rgba(2, 6, 23, 0.18)",
+        card: "var(--shadow-card)",
+        pop: "var(--shadow-pop)",
       },
     },
   },
-  plugins: [],
+  plugins: [tailwindcssAnimate],
 };
 
 export default config;

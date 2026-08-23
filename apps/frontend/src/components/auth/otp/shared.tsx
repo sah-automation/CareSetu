@@ -7,8 +7,8 @@
 
 import { useRef } from "react";
 
+import type { AuthStrings, Lang } from "@/lib/i18n/dictionaries";
 import { IconRefresh } from "@/components/auth/icons";
-import type { I18n, Lang } from "./otpState";
 import styles from "./otpShared.module.css";
 
 export function BrandHeader({
@@ -16,7 +16,7 @@ export function BrandHeader({
   lang,
   onLang,
 }: {
-  t: I18n;
+  t: AuthStrings;
   lang: Lang;
   onLang: (l: Lang) => void;
 }) {

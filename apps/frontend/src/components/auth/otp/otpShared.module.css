@@ -1,36 +1,11 @@
-/* Shared tokens + UI atoms for the patient auth wizard (MOD-001, T9 #60). */
+/* Shared UI atoms for the patient auth wizard (MOD-001, T9 #60).
+   Palette/shape variables come from src/app/tokens.css (#193) via :root -
+   this module no longer redefines them. */
 
 .otpProto {
-  --font: system-ui, -apple-system, "Segoe UI", sans-serif;
-  --page-bg: #f8fafc;
-  --surface: #ffffff;
-  --hairline: #e2e8f0;
-  --hairline-soft: #eef2f7;
-  --text: #0f172a;
-  --text-sub: #334155;
-  --text-muted: #64748b;
-  --accent: #0e7490;
-  --accent-strong: #155e75;
-  --accent-soft: #ecfeff;
-  --accent-border: #bae6fd;
-  --success: #10b981;
-  --success-soft: #dcfce7;
-  --success-text: #166534;
-  --warn-soft: #fef3c7;
-  --warn-text: #92400e;
-  --danger: #b91c1c;
-  --danger-soft: #fef2f2;
-  --danger-border: #fecaca;
-  --on-accent: #ffffff;
-  --radius-sm: 0.5rem;
-  --radius: 0.75rem;
-  --radius-lg: 1rem;
-  --shadow-card: 0 1px 3px rgba(2, 6, 23, 0.08);
-  --shadow-pop: 0 12px 32px rgba(2, 6, 23, 0.18);
-
   background: var(--page-bg);
-  color: var(--text);
-  font-family: var(--font);
+  color: var(--txt);
+  font-family: var(--font-stack);
   min-height: 100dvh;
 }
 
@@ -58,7 +33,7 @@
   font-weight: 700;
   font-size: 0.95rem;
   margin: 0;
-  color: var(--text);
+  color: var(--txt);
 }
 
 .brandMark {
@@ -84,7 +59,7 @@
   padding: 0.25rem 0.65rem;
   font-size: 0.72rem;
   font-weight: 600;
-  color: var(--text-muted);
+  color: var(--txt-muted);
   cursor: pointer;
 }
 
@@ -98,7 +73,7 @@
   display: block;
   font-size: 0.78rem;
   font-weight: 600;
-  color: var(--text-sub);
+  color: var(--txt-sub);
   margin-bottom: 0.35rem;
 }
 
@@ -123,7 +98,7 @@
 .phonePrefix {
   font-size: 0.9rem;
   font-weight: 600;
-  color: var(--text-muted);
+  color: var(--txt-muted);
   border-right: 1px solid var(--hairline);
   padding-right: 0.5rem;
 }
@@ -135,7 +110,7 @@
   outline: none;
   font-size: 1rem;
   padding: 0.8rem 0;
-  color: var(--text);
+  color: var(--txt);
   min-width: 0;
 }
 
@@ -165,7 +140,7 @@
   border: 1px solid var(--hairline);
   border-radius: var(--radius-sm);
   background: var(--surface);
-  color: var(--text);
+  color: var(--txt);
 }
 
 .otpBoxActive {
@@ -216,7 +191,7 @@
 }
 
 .btnGhost:disabled {
-  color: var(--text-muted);
+  color: var(--txt-muted);
   opacity: 0.6;
   cursor: not-allowed;
 }

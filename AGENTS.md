@@ -16,6 +16,13 @@ Global dev tooling (gitleaks, pre-commit, ruff, mypy, bandit, pip-audit, uv, sha
 
 Start every session by reading `CONTEXT.md` - it maps the plan/architecture/standards docs and tells you what to read (and skip) for the work at hand. Follow its build-session protocol: current phase → in-scope modules → feature PRD sections → relevant standards. Never read `docs/archive/`; the PRD supersedes it. Cross-reference matrices live in `internal-modules.md` §4/§5 and `implementation-roadmap.md` §3 - read those whole when tracing edges.
 
+### Prototype folder
+
+`prototype/` (gitignored, disposable) holds throwaway static HTML+CSS+JS UI views built per-phase before implementing each roadmap phase. Read `prototype/README.md` and `prototype/PLAN.md` before any prototype work. Rules:
+
+- **Scope rule:** when the task is a `PROTO-PHASE-N` build/review/finalize, confine ALL edits to `prototype/` (including `PLAN.md` status updates) - no changes to app code, docs, or configs until the prototype is finalized and actual PHASE-N implementation begins.
+- **Commit rule:** never stage or commit anything under `prototype/`; it is gitignored by design and gets deleted after project completion.
+
 ### Issue tracker
 
 Issues and PRDs for this repo live as GitHub issues, driven via the `gh` CLI. See `docs/agents/issue-tracker.md`.

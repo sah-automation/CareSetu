@@ -4,24 +4,15 @@
 // Displays available roles as selectable cards. On selection, stores the
 // chosen role in localStorage and redirects to the role dashboard. If the
 // user has only one role, redirects directly without showing the picker.
+// Session state comes from the shared AuthProvider at the root layout;
+// this page performs no session storage reads or /v1/me calls of its own.
+// (PHASE-2.6 T01, #192)
 
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 
-import {
-  readSession,
-  saveSelectedRole,
-  readSelectedRole,
-} from "@/lib/auth/session";
-
-const API_BASE_URL: string =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
-
-interface MeResponse {
-  identity_id: number;
-  phone: string;
-  roles: string[];
-}
+import { useAuth } from "@/lib/auth/AuthContext";
+import { saveSelectedRole, readSelectedRole } from "@/lib/auth/session";
 
 const ROLE_META: Record<string, { label: string; description: string }> = {
   patient: {
@@ -49,75 +40,40 @@ function getRoleMeta(role: string) {
 
 export default function ChooseRolePage() {
   const router = useRouter();
-  const [roles, setRoles] = useState<string[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { user, isLoading, isAuthenticated } = useAuth();
+
+  // Stable reference from context state (undefined while signed out) so the
+  // redirect effect below does not churn on every render.
+  const roles = user?.roles;
 
   useEffect(() => {
-    let cancelled = false;
-
-    async function load() {
-      const session = readSession();
-      if (!session) {
-        router.replace("/login");
-        return;
-      }
-
-      try {
-        const res = await fetch(`${API_BASE_URL}/v1/me`, {
-          headers: { Authorization: `Bearer ${session.jwt}` },
-        });
-
-        if (!res.ok) {
-          router.replace("/login");
-          return;
-        }
-
-        const me: MeResponse = await res.json();
-
-        if (cancelled) return;
-
-        if (me.roles.length === 0) {
-          router.replace("/login");
-          return;
-        }
-
-        if (me.roles.length === 1) {
-          saveSelectedRole(me.roles[0]);
-          router.replace(`/${me.roles[0]}`);
-          return;
-        }
-
-        const saved = readSelectedRole();
-        if (saved && me.roles.includes(saved)) {
-          router.replace(`/${saved}`);
-          return;
-        }
-
-        setRoles(me.roles);
-      } catch {
-        if (!cancelled) {
-          router.replace("/login");
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      }
+    if (isLoading) {
+      return;
     }
 
-    load();
+    if (!isAuthenticated || !roles || roles.length === 0) {
+      router.replace("/login");
+      return;
+    }
 
-    return () => {
-      cancelled = true;
-    };
-  }, [router]);
+    if (roles.length === 1) {
+      saveSelectedRole(roles[0]);
+      router.replace(`/${roles[0]}`);
+      return;
+    }
+
+    const saved = readSelectedRole();
+    if (saved && roles.includes(saved)) {
+      router.replace(`/${saved}`);
+    }
+  }, [isLoading, isAuthenticated, router, roles]);
 
   function handleSelectRole(role: string) {
     saveSelectedRole(role);
     router.replace(`/${role}`);
   }
 
-  if (loading) {
+  if (isLoading) {
     return null;
   }
 
@@ -162,7 +118,7 @@ export default function ChooseRolePage() {
             gap: "1rem",
           }}
         >
-          {roles.map((role) => {
+          {(roles ?? []).map((role) => {
             const meta = getRoleMeta(role);
             return (
               <button

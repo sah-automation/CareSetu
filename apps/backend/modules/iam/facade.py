@@ -138,6 +138,21 @@ class IamFacade:
         """Rotate an opaque refresh token into a fresh session (delegated to ``SessionFacade``)."""
         return await self._sessions.refresh_session(refresh_token)
 
+    # -- Protected-route reads (PHASE-2.6 T05, #196) -----------------------
+
+    async def identity_phone(self, identity_id: int) -> str:
+        """The E.164 phone for an identity id (one-column lookup).
+
+        PHASE-2.6 T05 (#196, decision D4): the protected ``/v1/me`` route
+        resolves the caller's phone through this seam so its response can
+        name a truthful identity while the gateway-side principal stays free
+        of database reads. Read-only, in its own transaction - the route
+        holds no open transaction - and an id with no row (a stale token's
+        subject) degrades to ``""`` exactly like the audit emitter's lookup.
+        """
+        async with self._engine.begin() as connection:
+            return await _identity_phone(connection, identity_id)
+
     # -- Audit --------------------------------------------------------------
 
     async def emit_access_denied(self, identity_id: int) -> None:
