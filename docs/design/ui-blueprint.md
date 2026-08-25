@@ -275,12 +275,12 @@ Fixed inputs: §2 shell conventions and Persona-001 (moderate digital literacy, 
 
 ### 5.1 Bottom tabs
 
-`Home | Find Care | Start Visit | My Record | Inbox`
+`Home | Find Care | Start Visit | My Record | More` - ratified five-column mobile bar (PHASE-3 T1 #210): Inbox folds into the More sheet; the desktop top-nav keeps Inbox first-class.
 
 - **Start Visit** is the center tab: accent-colored circular button with a mic icon, label "Shuru karein / Start". The intake loop is the product core and gets a permanent big target.
 - **My Record** absorbs chronic metric tracking (FEAT-018's tracking view) - metrics are record entries by definition.
-- **Inbox** is first-class per FEAT-019 (WhatsApp stays notifications-only).
-- **Bookings & Orders** and **Profile & Settings** live outside the tab bar: reachable from Home cards, post-action confirmations, and the account menu.
+- **Inbox** is first-class on the desktop top-nav per FEAT-019 (WhatsApp stays notifications-only); on mobile it lives inside the More sheet.
+- **Bookings & Orders** and **Profile & Settings** live outside the tab bar in the More sheet: reachable from Home cards, post-action confirmations, and the account menu.
 
 ### 5.2 Home (`/patient`)
 

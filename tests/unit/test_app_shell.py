@@ -69,6 +69,22 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/auth/refresh",
         "/v1/auth/dev/otp",
         "/v1/me",
+        # PHASE-3 T2 (#211): the owner-only record surface.
+        "/v1/records",
+        "/v1/records/{record_id}",
+        # PHASE-3 T5 (#214): partner consent-gated record read.
+        "/v1/records/consented-read",
+        # PHASE-3 T3 (#212): the patient-driven consent lifecycle surface.
+        "/v1/consents",
+        "/v1/consents/requests",
+        "/v1/consents/{consent_id}/grant",
+        "/v1/consents/{consent_id}/revoke",
+        "/v1/consents/{consent_id}/decline",
+        # PHASE-3 T5 (#214): patient egress log.
+        "/v1/consents/egress-log",
+        # PHASE-3 T11 (#220): test-only data seeding endpoints.
+        "/v1/test/seed",
+        "/v1/test/seed-egress",
     }
 
 

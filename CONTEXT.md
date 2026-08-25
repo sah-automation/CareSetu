@@ -99,6 +99,36 @@ _Avoid_: dedupe, merge (there is no merge - concurrent writers converge on the w
 The canonical stored form `+91XXXXXXXXXX`, normalized server-side from the 10-digit Indian mobile number; the country code is derived server-side and never trusted from the client.
 _Avoid_: mobile number (when meaning the stored canonical form), client-supplied country code
 
+### Record & consent
+
+**record scope**:
+The closed enum of record areas a consent grant may name - `consultations | prescriptions | lab_results | metrics | full_record`; `check_consent` matches on (counterparty, scope). Never per-entry, never free-form.
+_Avoid_: data category (when meaning a grant's scope), permission level
+
+**standing grant**:
+One live consent authorization for one (patient, counterparty, record scope) triple, effective from grant until revoked or superseded by a re-grant. "Per-action" consent means this per-purpose targeting, never a one-shot token.
+_Avoid_: per-action token, one-shot consent
+
+**grant lineage**:
+The identity of a consent across re-grants - the (patient, counterparty, record scope) triple; referenced to patients as `C-YYYY-NNN`, with versions counting the re-grants inside it.
+_Avoid_: consent relationship
+
+**consent version**:
+The immutable state of a grant lineage after each grant or re-grant; egress receipts cite lineage id + version exactly as they authorized.
+_Avoid_: consent update, consent edit
+
+**revocation**:
+The terminal consent transition: stops all future access by the counterparty immediately, durably written before treated inactive, and recorded. Data already disclosed while the grant was live stays outside platform control - deletion requests are operator-mediated (`GAP-005` baseline).
+_Avoid_: recall, retroactive revoke (neither happens)
+
+**egress log**:
+The consent-schema ledger of successful, consent-authorized PHI disclosures - what left, when, to whom, under which consent id + version; the source of a record entry's "who has seen this" trail.
+_Avoid_: access log (that is the record access history), audit log (that is the Phase 4 engine)
+
+**record access history**:
+The health-schema ledger of every read attempt on a record - owner reads, partner reads, denied attempts; feeds the patient's trust view (`FEAT-003`, Phase 4).
+_Avoid_: audit trail
+
 ### Event bus & module seams
 
 **outbox**:

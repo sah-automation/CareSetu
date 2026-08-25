@@ -71,6 +71,9 @@ export function LabBookingConsentDemo() {
           requesterContext={t.demo.requesterContext}
           scope={t.demo.scope}
           validity={t.demo.validity}
+          counterpartyType="lab"
+          counterpartyId="demo-lab-booking"
+          recordScope="prescriptions"
           onDecision={handleDecision}
         >
           <Button size="lg" data-testid="consent-demo-trigger">

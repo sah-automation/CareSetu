@@ -6,7 +6,8 @@
 //
 // Visual/interaction spec: finalized PROTO-PHASE-2.6 views shell-light.html +
 // shell-full.html; density rules blueprint §2.3-§2.4; per-role IA from §5.1
-// (patient tabs), §6.1 (doctor), §7.2 (partner), §8.1 (operator).
+// (patient tabs, re-ratified five-column per the PROTO-PHASE-3 carry-over fix
+// #210), §6.1 (doctor), §7.2 (partner), §8.1 (operator).
 
 import type { ComponentType } from "react";
 import {
@@ -56,6 +57,11 @@ export interface NavItemDef {
   // Bottom-tab center accent slot (patient Start Visit, §5.1). Pinned to the
   // middle column of the tab bar; excluded from the desktop top-nav.
   center?: boolean;
+  // Always renders inside the mobile More sheet instead of as a tab column;
+  // desktop surfaces keep their own placement from this same config. The
+  // ratified patient bar (#210) pins every secondary destination this way -
+  // otherwise freed bar slots backfill from the remaining config order.
+  mobileOverflow?: boolean;
   // Reserved live-count slot: when a number is attached at render time the
   // item shows a count pill (prototype's count-pill convention).
   count?: number;
@@ -79,13 +85,20 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       href: "/patient/record",
       icon: FileText,
     },
-    { key: "inbox", labelKey: "inbox", href: "/patient/inbox", icon: Inbox },
+    {
+      key: "inbox",
+      labelKey: "inbox",
+      href: "/patient/inbox",
+      icon: Inbox,
+      mobileOverflow: true,
+    },
     {
       key: "bookings",
       labelKey: "bookings",
       href: "/patient/bookings",
       icon: CalendarDays,
       soon: true,
+      mobileOverflow: true,
     },
     {
       key: "profile-settings",
@@ -93,6 +106,7 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       href: "/patient/profile",
       icon: Settings,
       soon: true,
+      mobileOverflow: true,
     },
   ],
   doctor: [
@@ -204,17 +218,20 @@ function weaveCenter(
 
 export function splitMobileTabs(items: NavItemDef[]): MobileTabSplit {
   const center = items.find((item) => item.center);
-  const regular = items.filter((item) => !item.center);
+  const pinnedOverflow = items.filter(
+    (item) => item.mobileOverflow && !item.center,
+  );
+  const regular = items.filter((item) => !item.center && !item.mobileOverflow);
   const capacity = center
     ? TABBAR_MAX_DESTINATIONS - 1
     : TABBAR_MAX_DESTINATIONS;
 
-  if (regular.length <= capacity) {
+  if (pinnedOverflow.length === 0 && regular.length <= capacity) {
     return { tabs: weaveCenter(center, regular), overflow: [], hasMore: false };
   }
   return {
     tabs: weaveCenter(center, regular.slice(0, capacity)),
-    overflow: regular.slice(capacity),
+    overflow: [...pinnedOverflow, ...regular.slice(capacity)],
     hasMore: true,
   };
 }

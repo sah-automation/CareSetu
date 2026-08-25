@@ -49,3 +49,19 @@ async def require_patient(request: Request) -> Principal:
     if "patient" not in principal.roles:
         raise InsufficientScopeError("the patient role is required for this route")
     return principal
+
+
+async def require_partner(request: Request) -> Principal:
+    """FastAPI dependency: admit only an authenticated partner-scoped caller.
+
+    Reads the ``Principal`` the gateway's ``jwt_verify`` middleware attached to
+    the request state. Anonymous or missing principals are refused with 401;
+    an authenticated caller without the partner role is refused with 403
+    (api-standards §6: partner = scoped record access via consent).
+    """
+    principal: Principal | None = getattr(request.state, "principal", None)
+    if principal is None or not principal.is_authenticated:
+        raise AuthenticationRequiredError("no valid session on a protected route")
+    if "partner" not in principal.roles:
+        raise InsufficientScopeError("the partner role is required for this route")
+    return principal
