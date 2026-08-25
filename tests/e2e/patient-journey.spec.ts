@@ -86,10 +86,10 @@ async function verifyOtp(
   await page.waitForURL("**/patient", { timeout: 15_000 });
 }
 
-async function getSubjectId(
+async function getAuthInfo(
   request: APIRequestContext,
   page: Page,
-): Promise<string> {
+): Promise<{ subjectId: string; jwt: string }> {
   const accessJwt = await page.evaluate(() =>
     localStorage.getItem("caresetu.access_jwt"),
   );
@@ -102,17 +102,17 @@ async function getSubjectId(
   });
   expect(me.status(), "GET /v1/me should succeed after login").toBe(200);
   const body = (await me.json()) as { subject_id: string };
-  return body.subject_id;
+  return { subjectId: body.subject_id, jwt: accessJwt! };
 }
 
 // ---- Seed helpers ----
 
 async function seedRecordEntries(
   request: APIRequestContext,
-  subjectId: string,
+  jwt: string,
 ): Promise<{ entry_ids: number[]; entry_types: string[] }> {
   const response = await request.post(`${BACKEND}/v1/test/seed`, {
-    headers: { Authorization: `Bearer ${subjectId}` },
+    headers: { Authorization: `Bearer ${jwt}` },
   });
   expect(response.status(), "POST /v1/test/seed should succeed").toBe(200);
   return (await response.json()) as {
@@ -123,10 +123,10 @@ async function seedRecordEntries(
 
 async function seedEgressData(
   request: APIRequestContext,
-  subjectId: string,
+  jwt: string,
 ): Promise<{ egress_id: number }> {
   const response = await request.post(`${BACKEND}/v1/test/seed-egress`, {
-    headers: { Authorization: `Bearer ${subjectId}` },
+    headers: { Authorization: `Bearer ${jwt}` },
   });
   expect(response.status(), "POST /v1/test/seed-egress should succeed").toBe(
     200,
@@ -148,11 +148,11 @@ test("patient journey: record -> filter -> grant sheet -> receipt -> revoke -> r
     page.getByRole("heading", { name: "Welcome, Patient" }),
   ).toBeVisible();
 
-  // Capture the subject ID for API seeding calls.
-  const subjectId = await getSubjectId(request, page);
+  // Capture the subject ID and JWT for API seeding calls.
+  const { subjectId, jwt } = await getAuthInfo(request, page);
 
   // 2. Seed record entries via synthetic outbox rows through the real dispatcher
-  const seed = await seedRecordEntries(request, subjectId);
+  const seed = await seedRecordEntries(request, jwt);
   expect(
     seed.entry_ids.length,
     "seeding should create at least 2 entries",
@@ -226,7 +226,7 @@ test("patient journey: record -> filter -> grant sheet -> receipt -> revoke -> r
   await page.waitForTimeout(500);
 
   // 9. Seed egress data so the egress slice renders on the consent log
-  await seedEgressData(request, subjectId);
+  await seedEgressData(request, jwt);
 
   // 10. Navigate to consent log
   await page.goto("/patient/record/consent-log");
