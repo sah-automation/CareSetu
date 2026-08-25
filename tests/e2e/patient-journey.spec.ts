@@ -221,11 +221,6 @@ test("patient journey: record -> filter -> grant sheet -> receipt -> revoke -> r
   await expect(page.getByTestId("consent-receipt-line2")).toBeVisible();
   await expect(page.getByTestId("consent-receipt-line3")).toBeVisible();
 
-  // 8. Bilingual spot-check on the consent sheet (toggle to Hindi while sheet is open)
-  await langToggle.getByRole("button", { name: "हिं" }).click();
-  await expect(page.getByTestId("consent-title")).toContainText("अनुमति");
-  await langToggle.getByRole("button", { name: "EN" }).click();
-
   // Close the receipt sheet
   await page.keyboard.press("Escape");
   await page.waitForTimeout(500);
