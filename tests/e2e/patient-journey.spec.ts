@@ -189,16 +189,16 @@ test("patient journey: record -> filter -> grant sheet -> receipt -> revoke -> r
   await expect(visibleEntries).toHaveCount(seed.entry_ids.length);
 
   // 5. Bilingual EN/HI spot-check on the record screen
-  const langGroup = page.getByTestId("lang-toggle");
-  await expect(langGroup).toBeVisible({ timeout: 5_000 });
+  const langToggle = page.getByTestId("lang-toggle");
+  await expect(langToggle).toBeVisible({ timeout: 5_000 });
   // Click the Hindi button to switch locale
-  await langGroup.getByRole("button", { name: "हिं" }).click();
+  await langToggle.getByRole("button", { name: "हिं" }).click();
   // The record heading should switch to Hindi
   await expect(page.getByRole("heading", { name: "मेरा रिकॉर्ड" })).toBeVisible(
     { timeout: 5_000 },
   );
   // Toggle back to English
-  await langGroup.getByRole("button", { name: "EN" }).click();
+  await langToggle.getByRole("button", { name: "EN" }).click();
   await expect(page.getByRole("heading", { name: "My Record" })).toBeVisible({
     timeout: 5_000,
   });
@@ -222,9 +222,9 @@ test("patient journey: record -> filter -> grant sheet -> receipt -> revoke -> r
   await expect(page.getByTestId("consent-receipt-line3")).toBeVisible();
 
   // 8. Bilingual spot-check on the consent sheet (toggle to Hindi while sheet is open)
-  await langToggle.click();
+  await langToggle.getByRole("button", { name: "हिं" }).click();
   await expect(page.getByTestId("consent-title")).toContainText("अनुमति");
-  await langToggle.click();
+  await langToggle.getByRole("button", { name: "EN" }).click();
 
   // Close the receipt sheet
   await page.keyboard.press("Escape");
@@ -284,8 +284,12 @@ test("patient journey: record -> filter -> grant sheet -> receipt -> revoke -> r
   await expect(page.getByTestId("egress-table")).toBeVisible();
 
   // 18. Bilingual spot-check on consent log screen
-  await langToggle.click();
-  await expect(page.getByText("अनुमति लॉग")).toBeVisible({ timeout: 5_000 });
-  await langToggle.click();
-  await expect(page.getByText("Consent log")).toBeVisible({ timeout: 5_000 });
+  await langToggle.getByRole("button", { name: "हिं" }).click();
+  await expect(page.getByRole("heading", { name: "अनुमति लॉग" })).toBeVisible({
+    timeout: 5_000,
+  });
+  await langToggle.getByRole("button", { name: "EN" }).click();
+  await expect(page.getByRole("heading", { name: "Consent log" })).toBeVisible({
+    timeout: 5_000,
+  });
 });
