@@ -86,8 +86,20 @@ async function verifyOtp(
   await page.waitForURL("**/patient", { timeout: 15_000 });
 }
 
-async function getSubjectId(request: APIRequestContext): Promise<string> {
-  const me = await request.get(`${BACKEND}/v1/me`);
+async function getSubjectId(
+  request: APIRequestContext,
+  page: Page,
+): Promise<string> {
+  const accessJwt = await page.evaluate(() =>
+    localStorage.getItem("caresetu.access_jwt"),
+  );
+  expect(
+    accessJwt,
+    "JWT should exist in localStorage after login",
+  ).toBeTruthy();
+  const me = await request.get(`${BACKEND}/v1/me`, {
+    headers: { Authorization: `Bearer ${accessJwt}` },
+  });
   expect(me.status(), "GET /v1/me should succeed after login").toBe(200);
   const body = (await me.json()) as { subject_id: string };
   return body.subject_id;
@@ -137,7 +149,7 @@ test("patient journey: record -> filter -> grant sheet -> receipt -> revoke -> r
   ).toBeVisible();
 
   // Capture the subject ID for API seeding calls.
-  const subjectId = await getSubjectId(request);
+  const subjectId = await getSubjectId(request, page);
 
   // 2. Seed record entries via synthetic outbox rows through the real dispatcher
   const seed = await seedRecordEntries(request, subjectId);

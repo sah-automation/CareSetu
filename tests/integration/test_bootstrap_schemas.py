@@ -62,6 +62,7 @@ EXPECTED_HEALTH_TABLES = {
 
 EXPECTED_CONSENT_TABLES = {
     "consent.consent_consents",
+    "consent.consent_egress_log",
     "consent.consent_events",
     "consent.consent_outbox",
 }

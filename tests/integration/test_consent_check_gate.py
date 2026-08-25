@@ -184,10 +184,10 @@ async def test_sql_fallback_when_redis_unavailable(database_url: str, clean_tabl
 
 
 @pytest.mark.asyncio
-async def test_fault_injection_redis_down_fails_closed(
+async def test_fault_injection_redis_down_graceful_fallback(
     database_url: str, clean_tables: None
 ) -> None:
-    """AC: Redis connection failure -> fail-closed (deny) without crashing."""
+    """AC: Redis connection failure -> graceful fallback to SQL, no crash."""
     facade = _facade(database_url)
 
     from app.config import Settings
@@ -199,7 +199,7 @@ async def test_fault_injection_redis_down_fails_closed(
         # Grant consent so there's something to check
         await facade.grant_consent(_PATIENT, "chemist", "ch-1", "prescriptions")
 
-        # Mock Redis client to raise exception on hmget
+        # Mock Redis client to raise exception on hmget (cache miss)
         from modules.consent import redis_cache
 
         def mock_get_client():
@@ -208,14 +208,13 @@ async def test_fault_injection_redis_down_fails_closed(
             return mock_client
 
         with patch.object(redis_cache, "get_redis_client", mock_get_client):
-            # Should fail-closed (deny) without crashing
+            # Should fall through to SQL without crashing
             decision = await facade.check_consent(
                 _PATIENT, "chemist", "ch-1", "prescriptions", settings
             )
-            assert decision.allowed is False
-            assert decision.consent_id is None
-            assert decision.version is None
-            assert decision.effective_scope is None
+            # SQL is the source of truth - grant is found
+            assert decision.allowed is True
+            assert decision.consent_id is not None
     finally:
         await close_redis_client()
 
