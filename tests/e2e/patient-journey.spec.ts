@@ -189,13 +189,14 @@ test("patient journey: record -> filter -> grant sheet -> receipt -> revoke -> r
   await expect(visibleEntries).toHaveCount(seed.entry_ids.length);
 
   // 5. Bilingual EN/HI spot-check on the record screen
-  const langToggle = page.getByRole("button", { name: /HI|EN/ });
-  await expect(langToggle).toBeVisible({ timeout: 5_000 });
-  await langToggle.click();
+  const langGroup = page.getByTestId("lang-toggle");
+  await expect(langGroup).toBeVisible({ timeout: 5_000 });
+  // Click the Hindi button to switch locale
+  await langGroup.getByRole("button", { name: "हिं" }).click();
   // The record heading should switch to Hindi
   await expect(page.getByText("मेरा रिकॉर्ड")).toBeVisible({ timeout: 5_000 });
   // Toggle back to English
-  await langToggle.click();
+  await langGroup.getByRole("button", { name: "EN" }).click();
   await expect(page.getByText("My Record")).toBeVisible({ timeout: 5_000 });
 
   // 6. Open the grant sheet via the consent-demo-trigger on the patient page
