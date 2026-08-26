@@ -4,7 +4,8 @@ Verifies the acceptance criteria that need a live database:
 
   1. ``alembic upgrade head`` creates all 11 private module schemas (ADR-0003
      layout); the only tables they may hold are the five ``iam`` tables added
-     by ``v1.0__init_iam`` (PHASE-2 T1, #52).
+     by ``v1.0__init_iam`` (PHASE-2 T1, #52) plus the health record core added
+     by ``v2.0__init_health`` (PHASE-3 T2, #211).
   2. The outbox/``consumed_events`` DDL template materializes into a throwaway
      schema with the documented row contract (issue #16), so the round-trip
      harness (T2c) can build on it.
@@ -49,6 +50,21 @@ EXPECTED_IAM_TABLES = {
     "iam.iam_sessions",
     "iam.iam_role_grants",
     "iam.iam_outbox",
+}
+
+EXPECTED_HEALTH_TABLES = {
+    "health.health_patient_records",
+    "health.health_record_entries",
+    "health.health_record_access_history",
+    "health.health_outbox",
+    "health.consumed_events",
+}
+
+EXPECTED_CONSENT_TABLES = {
+    "consent.consent_consents",
+    "consent.consent_egress_log",
+    "consent.consent_events",
+    "consent.consent_outbox",
 }
 
 
@@ -132,10 +148,12 @@ def test_upgrade_head_creates_all_eleven_module_schemas(
         )
 
         tables = asyncio.run(_module_schema_table_names(database_url))
-        assert set(tables) == EXPECTED_IAM_TABLES, (
-            "only the iam schema may hold tables after upgrade head (v1.0__init_iam), "
-            f"unexpected: {set(tables) - EXPECTED_IAM_TABLES}, "
-            f"missing: {EXPECTED_IAM_TABLES - set(tables)}"
+        expected_tables = EXPECTED_IAM_TABLES | EXPECTED_HEALTH_TABLES | EXPECTED_CONSENT_TABLES
+        assert set(tables) == expected_tables, (
+            "only the iam + health + consent schemas may hold tables after upgrade head "
+            "(v1.0__init_iam, v2.0__init_health, v2.1__init_consent), "
+            f"unexpected: {set(tables) - expected_tables}, "
+            f"missing: {expected_tables - set(tables)}"
         )
     finally:
         if upgraded:

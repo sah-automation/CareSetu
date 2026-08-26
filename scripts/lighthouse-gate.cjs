@@ -220,7 +220,8 @@ async function main() {
   try {
     await waitUntilReady(baseUrl, server);
     const warm = await fetch(`${baseUrl}${TARGET_ROUTE}`, {
-      headers: { 'Cookie': 'caresetu_session=ci-dummy-token' },
+      // Route-guard bypass cookie - must track HINT_COOKIE in apps/frontend/src/lib/auth/session.ts (ADR-0007).
+      headers: { 'Cookie': 'caresetu_authed=1' },
     });
     if (!warm.ok) {
       throw new Error(`GET ${TARGET_ROUTE} -> ${warm.status} ${warm.statusText}; not scanning`);

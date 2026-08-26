@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import Settings
+from app.gateway.errors import ErrorEnvelope
 from app.gateway.idempotency import IdempotencyStore
 from app.gateway.trace import resolve_trace_id
 from modules.iam.domain.exceptions import (
@@ -124,15 +125,6 @@ def _set_jwt_cookie(response: Response, jwt_value: str, ttl_seconds: int, *, sec
         samesite="strict",
         path="/",
     )
-
-
-class ErrorEnvelope(BaseModel):
-    """The single error shape every CareSetu endpoint answers (api-standards §2)."""
-
-    code: str
-    message: str
-    trace_id: str
-    details: dict[str, object]
 
 
 _T = TypeVar("_T")

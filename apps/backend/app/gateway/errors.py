@@ -17,6 +17,7 @@ import logging
 
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from app.gateway.trace import resolve_trace_id
 
@@ -29,6 +30,15 @@ MESSAGE_AUTH_INSUFFICIENT_SCOPE = "Your session does not grant the scope this ro
 MESSAGE_RATE_LIMIT_EXCEEDED = "Too many requests; retry after the window"
 
 logger = logging.getLogger(__name__)
+
+
+class ErrorEnvelope(BaseModel):
+    """The single error shape every CareSetu endpoint answers (api-standards §2)."""
+
+    code: str
+    message: str
+    trace_id: str
+    details: dict[str, object]
 
 
 class GatewayError(Exception):

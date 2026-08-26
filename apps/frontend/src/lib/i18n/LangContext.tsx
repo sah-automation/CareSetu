@@ -120,4 +120,7 @@ export function useLang(): LangContextValue {
 // between tests alongside localStorage. Subscriptions stay untouched.
 export function __resetLangForTests(): void {
   currentLang = "en";
+  if (typeof window !== "undefined") {
+    window.localStorage.removeItem(LANG_KEY);
+  }
 }

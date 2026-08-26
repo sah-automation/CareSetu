@@ -80,24 +80,52 @@ describe("NAV_CONFIG", () => {
 });
 
 describe("splitMobileTabs", () => {
-  it("carries the five patient destinations with Start Visit as the center column", () => {
+  it("shapes the ratified five-column patient bar with Start Visit centered", () => {
     const { tabs, overflow, hasMore } = splitMobileTabs(NAV_CONFIG.patient);
 
+    // Ratified carry-over fix (#210): Home | Find | Start(center) | Record |
+    // More - four destination columns plus the More chrome trigger; Inbox
+    // folds into the More sheet instead of taking a sixth column.
     expect(tabs.map((item) => item.key)).toEqual([
       "home",
       "find",
       "start",
       "record",
-      "inbox",
     ]);
+    expect(tabs.length + (hasMore ? 1 : 0)).toBe(TABBAR_MAX_DESTINATIONS);
     expect(tabs[TABBAR_CENTER_COLUMN]?.key).toBe("start");
     expect(tabs.filter((item) => item.center)).toHaveLength(1);
-    // Bookings & Orders and Profile & Settings stay outside the bar.
-    expect(hasMore).toBe(true);
+    // Inbox stays reachable inside More, ahead of the Soon destinations.
     expect(overflow.map((item) => item.key)).toEqual([
+      "inbox",
       "bookings",
       "profile-settings",
     ]);
+    // PHASE-3 T7 (#216): the record screen un-sooned its nav slot - Record is
+    // now a live destination on every surface via this one config entry.
+    expect(
+      NAV_CONFIG.patient.find((item) => item.key === "record")?.soon,
+    ).toBeUndefined();
+  });
+
+  it("pins mobileOverflow destinations into More even when everything fits", () => {
+    const synthetic: NavItemDef[] = [
+      { key: "dest-0", labelKey: "home", href: "/x/0", icon: Home },
+      { key: "dest-1", labelKey: "home", href: "/x/1", icon: Home },
+      {
+        key: "pinned",
+        labelKey: "home",
+        href: "/x/pinned",
+        icon: Home,
+        mobileOverflow: true,
+      },
+    ];
+
+    const { tabs, overflow, hasMore } = splitMobileTabs(synthetic);
+
+    expect(tabs.map((item) => item.key)).toEqual(["dest-0", "dest-1"]);
+    expect(hasMore).toBe(true);
+    expect(overflow.map((item) => item.key)).toEqual(["pinned"]);
   });
 
   it.each(["doctor", "partner", "operator"] as const)(

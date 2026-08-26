@@ -9,6 +9,9 @@ adapter, clock - is resolved once from ``Settings`` and stored on
 protected route that proves the edge admit/deny.
 """
 
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated, Literal, cast
 
 from fastapi import Depends, FastAPI, Request, status
@@ -19,7 +22,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.config import Settings, get_settings
-from app.gateway.errors import register_gateway_error_handlers
+from app.gateway.errors import ErrorEnvelope, register_gateway_error_handlers
 from app.gateway.idempotency import IdempotencyStore
 from app.gateway.jwt_verify import JWTVerifyMiddleware
 from app.gateway.principal import Principal
@@ -27,10 +30,21 @@ from app.gateway.rate_limit import RateLimitMiddleware
 from app.gateway.rbac import require_patient
 from app.gateway.security_headers import SecurityHeadersMiddleware
 from app.gateway.trace import TraceMiddleware, resolve_trace_id
-from modules.iam.adapters.routes import ErrorEnvelope, register_error_handlers
+from modules.consent.adapters.routes import (
+    register_error_handlers as register_consent_error_handlers,
+)
+from modules.consent.adapters.routes import router as consent_router
+from modules.consent.facade import ConsentFacade
+from modules.consent.redis_cache import close_redis_client, init_redis_client
+from modules.health.adapters.routes import register_error_handlers as register_health_error_handlers
+from modules.health.adapters.routes import router as health_router
+from modules.health.facade import HealthFacade
+from modules.iam.adapters.routes import register_error_handlers
 from modules.iam.adapters.routes import router as iam_router
 from modules.iam.adapters.sms import MockSmsAdapter, build_sms_adapter
 from modules.iam.facade import IamFacade
+
+logger = logging.getLogger(__name__)
 
 # Browser dev/E2E origin the PWA calls the API from (:3000). The staging edge
 # reverse-proxies /api/* same-origin (deploy/edge/Caddyfile), so no CORS entry
@@ -42,6 +56,27 @@ class MockOtpResponse(BaseModel):
     """Payload of the dev/test/demo mock OTP read-back (api-standards §3)."""
 
     code: str | None
+
+
+class SeedResponse(BaseModel):
+    """Payload of the test-only /v1/test/seed endpoint.
+
+    Returns the record entries created via synthetic outbox rows processed
+    through the real dispatcher (PHASE-3 T11, #220).
+    """
+
+    entry_ids: list[int]
+    entry_types: list[str]
+
+
+class SeedEgressResponse(BaseModel):
+    """Payload of the test-only /v1/test/seed-egress endpoint.
+
+    Inserts a synthetic egress log row to prove the egress slice renders
+    in the consent log screen (PHASE-3 T11, #220).
+    """
+
+    egress_id: int
 
 
 class HealthResponse(BaseModel):
@@ -72,7 +107,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     worker (#30) can read the same resolved config from the app instance.
     """
     resolved_settings = settings if settings is not None else get_settings()
-    app = FastAPI(title="CareSetu API", version="0.1.0")
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # Initialize Redis client for consent cache
+        await init_redis_client(resolved_settings)
+        yield
+        # Close Redis client on shutdown
+        await close_redis_client()
+
+    app = FastAPI(title="CareSetu API", version="0.1.0", lifespan=lifespan)
     app.state.settings = resolved_settings
 
     # MOD-001 (PHASE-2 T3, #54): one resolved iam facade instance behind the
@@ -93,6 +137,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         refresh_token_ttl_seconds=resolved_settings.gateway_refresh_token_ttl_seconds,
     )
     app.state.iam_facade = facade
+    # MOD-004 (PHASE-3 T3, #212): the consent facade shares the same settled
+    # engine and app-state pattern - routes read one resolved object and unit
+    # tests stub it on state.
+    app.state.consent_facade = ConsentFacade(engine=engine)
+    # MOD-003 (PHASE-3 T2, #211): the record facade shares the one settled
+    # engine - no connection opens at boot - and is stored like the iam
+    # instance so routes read one resolved object and unit tests can stub it.
+    # Pass consent_facade for PHASE-3 T5 (#214) gated reads.
+    app.state.health_facade = HealthFacade(engine=engine, consent_facade=app.state.consent_facade)
     # The edge's in-process idempotency store (api-standards §5, PHASE-2 REM
     # T11, #80): the auth mutation adapters read/write it per ``Idempotency-Key``
     # so a retried register/verify/resend replays the stored result instead of
@@ -153,8 +206,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(SecurityHeadersMiddleware)
 
     app.include_router(iam_router)
+    app.include_router(health_router)
+    app.include_router(consent_router)
     register_error_handlers(app)
     register_gateway_error_handlers(app)
+    register_health_error_handlers(app)
+    register_consent_error_handlers(app)
+
+    # Catch-all for any unhandled exception that escapes the module-level
+    # handlers above (e.g. SQLAlchemy OperationalError from a DB connection
+    # failure).  Without this, Starlette's own ServerErrorMiddleware - which
+    # sits OUTSIDE all user middleware including CORSMiddleware - generates a
+    # raw 500 HTML page with no CORS headers, causing the browser to report a
+    # misleading CORS error instead of the real failure.
+    @app.exception_handler(Exception)
+    async def _unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
+        trace_id = resolve_trace_id(request)
+        logger.exception("unhandled_exception trace_id=%s path=%s", trace_id, request.url.path)
+        envelope = ErrorEnvelope(
+            code="INTERNAL_SERVER_ERROR",
+            message="An unexpected error occurred",
+            trace_id=trace_id,
+            details={},
+        )
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content=envelope.model_dump(mode="json"),
+        )
 
     @app.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
@@ -210,6 +288,133 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             status_code=status.HTTP_404_NOT_FOUND,
             content=envelope.model_dump(),
         )
+
+    @app.post("/v1/test/seed", response_model=SeedResponse)
+    async def test_seed(
+        request: Request, principal: Annotated[Principal, Depends(require_patient)]
+    ) -> SeedResponse | JSONResponse:
+        """Test-only data seeding via synthetic outbox rows (PHASE-3 T11, #220).
+
+        Creates a lab report and a prescription entry by publishing synthetic
+        outbox events through the real dispatcher. Gated to the same dev/test
+        surface as the mock OTP read-back (``mock_otp_readback_enabled``).
+
+        Timeline entries are seeded by emitting synthetic outbox rows fanned
+        out through the real dispatcher - no direct table inserts.
+        """
+        settings = cast(Settings, request.app.state.settings)
+        if not settings.mock_otp_readback_enabled:
+            envelope = ErrorEnvelope(
+                code="SEED_UNAVAILABLE",
+                message="test seeding is only available in dev/test mode",
+                trace_id=resolve_trace_id(request),
+                details={},
+            )
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content=envelope.model_dump(),
+            )
+
+        from datetime import UTC, datetime
+        from uuid import uuid4
+
+        from bus.dispatch import dispatch
+        from bus.envelope import Envelope
+        from bus.outbox_writer import write_outbox
+        from modules.health.domain.events import (
+            PrescriptionIssuedPayload,
+            ReportFiledPayload,
+        )
+        from modules.health.outbox import HEALTH_OUTBOX_TABLE
+        from worker.main import build_registry
+
+        patient_id = int(principal.subject_id)
+        now = datetime.now(UTC)
+        registry = build_registry()
+        entry_ids: list[int] = []
+        entry_types: list[str] = []
+
+        # Publish report.filed + prescription.issued through the outbox and
+        # dispatch synchronously so the handlers create record entries in the
+        # same request cycle.
+        report_envelope = Envelope[ReportFiledPayload](
+            event_id=uuid4(),
+            event_type="report.filed",
+            occurred_at=now,
+            producer="test.seed",
+            payload=ReportFiledPayload(
+                order_id=9001,
+                patient_id=patient_id,
+                filename="Blood_Panel_2026.pdf",
+                occurred_at=now.isoformat(),
+            ),
+        )
+        rx_envelope = Envelope[PrescriptionIssuedPayload](
+            event_id=uuid4(),
+            event_type="prescription.issued",
+            occurred_at=now,
+            producer="test.seed",
+            payload=PrescriptionIssuedPayload(
+                prescription_id=8001,
+                patient_id=patient_id,
+                occurred_at=now.isoformat(),
+            ),
+        )
+
+        engine = create_async_engine(settings.database_url, poolclass=NullPool)
+        try:
+            async with engine.begin() as connection:
+                await write_outbox(connection, "health", HEALTH_OUTBOX_TABLE, report_envelope)
+                await write_outbox(connection, "health", HEALTH_OUTBOX_TABLE, rx_envelope)
+            # Dispatch synchronously - handlers create record entries.
+            await dispatch(registry, report_envelope)
+            await dispatch(registry, rx_envelope)
+        finally:
+            await engine.dispose()
+
+        # Read back the created entries to return their IDs.
+        health_facade = cast(HealthFacade, request.app.state.health_facade)
+        entry_ids, entry_types = await health_facade.seed_record_entries(patient_id)
+
+        return SeedResponse(entry_ids=entry_ids, entry_types=entry_types)
+
+    @app.post("/v1/test/seed-egress", response_model=SeedEgressResponse)
+    async def test_seed_egress(
+        request: Request, principal: Annotated[Principal, Depends(require_patient)]
+    ) -> SeedEgressResponse | JSONResponse:
+        """Test-only egress data seeding (PHASE-3 T11, #220).
+
+        Inserts a synthetic row into ``consent.consent_egress_log`` so the
+        consent log screen's egress table renders with real data. Gated to
+        the same dev/test surface as mock OTP read-back.
+
+        The egress log normally records partner disclosures; since partners
+        do not exist yet, this endpoint creates the row directly.
+        """
+        settings = cast(Settings, request.app.state.settings)
+        if not settings.mock_otp_readback_enabled:
+            envelope = ErrorEnvelope(
+                code="SEED_UNAVAILABLE",
+                message="test seeding is only available in dev/test mode",
+                trace_id=resolve_trace_id(request),
+                details={},
+            )
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content=envelope.model_dump(),
+            )
+
+        patient_id = int(principal.subject_id)
+        consent_facade = cast(ConsentFacade, request.app.state.consent_facade)
+        egress_id = await consent_facade.seed_egress_log(
+            patient_id=patient_id,
+            counterparty_type="doctor",
+            counterparty_id="e2e-test-doctor",
+            record_scope="full_record",
+            disclosed_entry_ids=[],
+        )
+
+        return SeedEgressResponse(egress_id=egress_id)
 
     return app
 

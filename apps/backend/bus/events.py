@@ -15,3 +15,18 @@ EVENT_PATIENT_AUTH_FAILED = "patient.auth_failed"
 EVENT_OTP_SENT = "otp.sent"
 # Emitted by MOD-001 (iam) when the brute-force lockout triggers (spec #51 §2.4).
 EVENT_OTP_FAILED = "otp.failed"
+# MOD-004 (consent) lifecycle events - internal-modules.md §4.2 registry.
+EVENT_CONSENT_REQUESTED = "consent.requested"
+EVENT_CONSENT_GRANTED = "consent.granted"
+EVENT_CONSENT_REVOKED = "consent.revoked"
+# MOD-007 (diagnostics) - report filed into patient record.
+EVENT_REPORT_FILED = "report.filed"
+# MOD-006 (care) - prescription lifecycle.
+EVENT_PRESCRIPTION_ISSUED = "prescription.issued"
+EVENT_PRESCRIPTION_DELIVERED = "prescription.delivered"
+# MOD-009 (settlement) - settlement recorded.
+EVENT_SETTLEMENT_RECORDED = "settlement.recorded"
+# The generic audit carrier every module publishes into its OWN outbox in the
+# same transaction as the audited change; MOD-011 consumes and appends to the
+# audit schema (ADR-0002 §5) - the dispatcher never synthesizes it.
+EVENT_AUDIT_EVENT = "audit.event"

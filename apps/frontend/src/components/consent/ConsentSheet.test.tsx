@@ -11,13 +11,35 @@ import * as axe from "axe-core";
 import { ConsentSheet, type ConsentDecision } from "./ConsentSheet";
 import { __resetLangForTests } from "@/lib/i18n/LangContext";
 import { useLang } from "@/lib/i18n/LangContext";
+import * as consentApi from "@/lib/consent/api";
 
 beforeEach(() => {
   __resetLangForTests();
+  vi.spyOn(consentApi, "grantConsent").mockResolvedValue({
+    consent_id: 1,
+    lineage_ref: "C-2026-001",
+    patient_id: 1,
+    counterparty_type: "lab",
+    counterparty_id: "lab-123",
+    record_scope: "prescriptions",
+    status: "granted",
+    version: 1,
+    created_at: "2026-08-25T10:00:00Z",
+    updated_at: "2026-08-25T10:00:00Z",
+    events: [
+      {
+        kind: "granted",
+        version: 1,
+        actor_patient_id: 1,
+        occurred_at: "2026-08-25T10:00:00Z",
+      },
+    ],
+  });
 });
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
 });
 
 function LangFlip() {
@@ -42,6 +64,9 @@ function setup({ onDecision, withLangFlip }: SetupOptions = {}) {
         requesterContext="via your booking · Dr. A. Kumar reference"
         scope="Your prescriptions from the last 3 months"
         validity="This one booking only. You can revoke anytime."
+        counterpartyType="lab"
+        counterpartyId="lab-123"
+        recordScope="prescriptions"
         onDecision={onDecision}
       >
         <button type="button" data-testid="consent-trigger">
@@ -100,21 +125,48 @@ describe("ConsentSheet", () => {
     );
   });
 
-  it("Allow reports the allow decision and closes", async () => {
+  it("Allow calls grant API, shows receipt, then calls onDecision(allow)", async () => {
     const onDecision = vi.fn();
     setup({ onDecision });
 
     await openSheet();
     fireEvent.click(screen.getByTestId("consent-allow"));
 
+    // Loading state
+    await waitFor(() =>
+      expect(screen.getByText("Recording permission...")).toBeInTheDocument(),
+    );
+
+    // Receipt state
+    await waitFor(() =>
+      expect(screen.getByTestId("consent-receipt-title")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("consent-receipt-line1")).toHaveTextContent(
+      "You allowed Sahyog Path Lab to read your prescriptions from the last 3 months.",
+    );
+    expect(screen.getByTestId("consent-receipt-line2")).toHaveTextContent(
+      "It is valid this one booking only. you can revoke anytime.",
+    );
+    expect(screen.getByTestId("consent-receipt-line3")).toHaveTextContent(
+      "Receipt ref #C-2026-001 v1 · recorded just now",
+    );
+
+    // Click "Got it" to close
+    fireEvent.click(screen.getByText("Got it"));
+
     await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
     );
     expect(onDecision).toHaveBeenCalledTimes(1);
     expect(onDecision).toHaveBeenCalledWith("allow");
+    expect(consentApi.grantConsent).toHaveBeenCalledWith({
+      counterparty_type: "lab",
+      counterparty_id: "lab-123",
+      record_scope: "prescriptions",
+    });
   });
 
-  it("Not-now reports the deny decision and closes", async () => {
+  it("Not-now shows denied explanation and calls onDecision(deny) without API call", async () => {
     const onDecision = vi.fn();
     setup({ onDecision });
 
@@ -122,10 +174,41 @@ describe("ConsentSheet", () => {
     fireEvent.click(screen.getByTestId("consent-deny"));
 
     await waitFor(() =>
+      expect(screen.getByTestId("consent-denied-title")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("consent-denied-body")).toHaveTextContent(
+      "Without permission, Sahyog Path Lab cannot read your prescriptions from the last 3 months. The action still proceeds - it simply starts without your record context. Changed your mind? Allow it anytime from your Consent log.",
+    );
+
+    fireEvent.click(screen.getByText("Got it"));
+
+    await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
     );
     expect(onDecision).toHaveBeenCalledTimes(1);
     expect(onDecision).toHaveBeenCalledWith("deny");
+    expect(consentApi.grantConsent).not.toHaveBeenCalled();
+  });
+
+  it("shows error on grant API failure and stays in prompt", async () => {
+    const onDecision = vi.fn();
+    vi.spyOn(consentApi, "grantConsent").mockRejectedValueOnce(
+      new Error("Network error"),
+    );
+    setup({ onDecision });
+
+    await openSheet();
+    fireEvent.click(screen.getByTestId("consent-allow"));
+
+    // Error message appears
+    await waitFor(() =>
+      expect(screen.getByText("Network error")).toBeInTheDocument(),
+    );
+    // Back to prompt state
+    await waitFor(() =>
+      expect(screen.getByTestId("consent-allow")).toBeInTheDocument(),
+    );
+    expect(onDecision).not.toHaveBeenCalled();
   });
 
   it("moves focus into the sheet on open", async () => {
@@ -222,5 +305,57 @@ describe("ConsentSheet", () => {
     expect(screen.getByTestId("consent-log-link")).toHaveTextContent(
       "सभी अनुमतियाँ देखें",
     );
+  });
+
+  it("shows Hindi receipt copy after Allow in Hindi locale", async () => {
+    const onDecision = vi.fn();
+    setup({ withLangFlip: true, onDecision });
+
+    fireEvent.click(screen.getByText("flip-lang"));
+    await openSheet();
+    fireEvent.click(screen.getByTestId("consent-allow"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("consent-receipt-title")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("consent-receipt-line1")).toHaveTextContent(
+      "आपने Sahyog Path Lab को Your prescriptions from the last 3 months पढ़ने की अनुमति दी।",
+    );
+    expect(screen.getByTestId("consent-receipt-line2")).toHaveTextContent(
+      'यह "This one booking only. You can revoke anytime." तक मान्य है।',
+    );
+    expect(screen.getByTestId("consent-receipt-line3")).toHaveTextContent(
+      "रसीद संदर्भ #C-2026-001 v1 · अभी दर्ज हुई",
+    );
+
+    fireEvent.click(screen.getByText("समझा"));
+
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(onDecision).toHaveBeenCalledWith("allow");
+  });
+
+  it("shows Hindi denied copy after Not-now in Hindi locale", async () => {
+    const onDecision = vi.fn();
+    setup({ withLangFlip: true, onDecision });
+
+    fireEvent.click(screen.getByText("flip-lang"));
+    await openSheet();
+    fireEvent.click(screen.getByTestId("consent-deny"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("consent-denied-title")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("consent-denied-body")).toHaveTextContent(
+      "अनुमति के बिना Sahyog Path Lab your prescriptions from the last 3 months नहीं पढ़ पाएंगे। यह क्रिया फिर भी होगी - बस रिकॉर्ड संदर्भ के बिना। मन बदले, तो अनुमति लॉग से कभी भी दे सकते हैं।",
+    );
+
+    fireEvent.click(screen.getByText("समझा"));
+
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(onDecision).toHaveBeenCalledWith("deny");
   });
 });

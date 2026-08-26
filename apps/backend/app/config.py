@@ -15,6 +15,10 @@ DEFAULT_SMS_TIMEOUT_SECONDS = 10.0
 DEFAULT_SMS_MAX_RETRIES = 3
 DEFAULT_SMS_CIRCUIT_BREAKER_THRESHOLD = 5
 DEFAULT_SMS_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 30.0
+# Redis consent-status cache (PHASE-3 T4, #213): optional; SQL fallback when
+# absent or unhealthy. p95 < 50 ms SLA on the hot path.
+DEFAULT_REDIS_URL = ""
+DEFAULT_REDIS_CONSENT_TTL_SECONDS = 300
 # Auth-surface rate limit (``NFR-SEC-004``): the OTP/auth endpoints are the
 # abuse target, so the gateway caps them per caller. 10 requests / 60 s per
 # IP is a headroom-rich ceiling above the one-user flow (register + verify +
@@ -51,6 +55,8 @@ class Settings:
     sms_max_retries: int = DEFAULT_SMS_MAX_RETRIES
     sms_circuit_breaker_threshold: int = DEFAULT_SMS_CIRCUIT_BREAKER_THRESHOLD
     sms_circuit_breaker_cooldown_seconds: float = DEFAULT_SMS_CIRCUIT_BREAKER_COOLDOWN_SECONDS
+    redis_url: str = DEFAULT_REDIS_URL
+    redis_consent_ttl_seconds: int = DEFAULT_REDIS_CONSENT_TTL_SECONDS
     # Extra browser origins allowed by the CORS middleware, e.g. the Vercel
     # origin of the public demo (deployment plan 4.1). Empty by default, which
     # preserves today's posture: only the localhost dev origin is allowed.
@@ -100,6 +106,8 @@ class Settings:
                 "sms_timeout_seconds must be in (0, 10] to honour the EXT-001 "
                 "call discipline (third-party-integration-standards §1)"
             )
+        if self.redis_consent_ttl_seconds <= 0:
+            raise ValueError("redis_consent_ttl_seconds must be positive")
         if self.gateway_access_token_ttl_seconds <= 0:
             raise ValueError("gateway_access_token_ttl_seconds must be positive")
         if self.gateway_refresh_token_ttl_seconds <= 0:
@@ -198,6 +206,10 @@ def get_settings() -> Settings:
         sms_circuit_breaker_cooldown_seconds=_env_float(
             "SMS_CIRCUIT_BREAKER_COOLDOWN_SECONDS",
             DEFAULT_SMS_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+        ),
+        redis_url=os.environ.get("REDIS_URL", DEFAULT_REDIS_URL),
+        redis_consent_ttl_seconds=_env_int(
+            "REDIS_CONSENT_TTL_SECONDS", DEFAULT_REDIS_CONSENT_TTL_SECONDS
         ),
         cors_allowed_origins=_env_csv("CORS_ALLOWED_ORIGINS"),
         demo_mode=_env_bool("DEMO_MODE", False),

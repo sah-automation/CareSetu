@@ -519,6 +519,118 @@ const en = {
     disputes: "Disputes",
     audit: "Audit",
   },
+
+  // record.* surface - PHASE-3 T7 (#216): the My Record timeline screen
+  // (blueprint §5.5, binding prototype record.html). Filter naming follows
+  // the ratified review outcome: "Consultations" everywhere incl. Hindi
+  // परामर्श - consultation wording, never physical-visit.
+  record: {
+    title: "My Record",
+    description:
+      "Your health story in one place - consultations, prescriptions, lab results and daily metrics.",
+    filterGroupLabel: "Filter record entries",
+    moreMenuLabel: "More filters",
+    filter: {
+      all: "All",
+      consultation: "Consultations",
+      prescription: "Prescriptions",
+      labReport: "Lab results",
+      metric: "Metrics",
+      more: "More",
+    },
+    badge: {
+      consultation: "Consultation",
+      prescription: "Prescription",
+      labReport: "Lab result",
+      metric: "Metric",
+      settlement: "Settlement",
+      issued: "Issued",
+      delivered: "Delivered",
+    },
+    filedFromBooking: "filed from booking",
+    empty: {
+      title: "No entries yet",
+      body: "Your consultations, prescriptions, lab results and metrics appear here as your care happens.",
+    },
+    loadError: "Could not load your record.",
+    placeholder: {
+      accessTitle: "Who accessed my record",
+      accessBody: "Full access history arrives with Phase 4.",
+      healthTitle: "Health tracking",
+      healthBody: "BP/sugar trends and follow-up plans arrive with Phase 12.",
+    },
+    detail: {
+      loadError: "Could not load this entry.",
+      notFound: "Entry not found.",
+      filedOn: "Filed",
+      bookingRef: "booking",
+      sourceHeading: "Source",
+      verified: "Verified",
+      consentHeading: "Consent reference",
+      consentLine: (lineageRef: string, version: number, date: string) =>
+        `Shared to your record under consent #${lineageRef} v${version}, granted ${date}.`,
+      consentLink: "See this permission in your consent log",
+      resultsHeading: "Results",
+      resultsThTest: "Test",
+      resultsThValue: "Value",
+      resultsThRange: "Usual range",
+      resultsThStatus: "Status",
+      resultsNote:
+        "Values are shown exactly as the lab filed them. Your doctor reads them in full context - the app does not interpret results.",
+      resultsStatusInRange: "In range",
+      resultsStatusBelowRange: "Below range",
+      resultsStatusAboveRange: "Above range",
+      egressHeading: "Who has seen this entry",
+      shareEntry: "Share this entry",
+      downloadPdf: "Download PDF",
+    },
+  },
+  consentLog: {
+    title: "Consent log",
+    description:
+      "Every permission you have given or taken back - each with its own receipt.",
+    pendingHeading: "Needs your answer",
+    historyHeading: "Earlier permissions",
+    badge: {
+      requested: "Requested",
+      active: "Active",
+      revoked: "Revoked",
+    },
+    viewReceipt: "View receipt",
+    metaRequested: "requested",
+    metaGranted: "granted",
+    receiptRequested: "Requested on {date}.",
+    receiptGranted: "Granted on {date}.",
+    receiptRevoked: "Revoked on {date} - any further use stopped immediately.",
+    allow: "Allow",
+    decline: "Not now",
+    revoke: "Revoke",
+    stopForward:
+      "Revocation does not erase what was already seen. This partner retains any data they received under this permission.",
+    revokeConfirm: {
+      title: "Take back this permission?",
+      body: "Sharing stops immediately - the partner loses access going forward. What was already seen or sent stays with them as per their retention duty. You can always allow a similar permission again later (it becomes a new version).",
+      confirm: "Yes, take it back",
+      cancel: "Keep it",
+      done: "Permission taken back - future sharing stopped.",
+    },
+    egress: {
+      heading: "What has left your record",
+      description:
+        "Every time something from your record was read or sent, it is written here - who, when, under which permission.",
+      th: {
+        when: "When",
+        what: "What",
+        to: "To whom",
+        via: "Under which permission",
+      },
+    },
+    empty: {
+      title: "No consent history yet",
+      body: "Consent interactions will appear here as you share or restrict access to your record.",
+    },
+    loadError: "Could not load your consent log.",
+  },
 };
 
 export type Dictionary = typeof en;
@@ -991,6 +1103,114 @@ export const STRINGS: Record<Lang, Dictionary> = {
         meta: "\u00a9 CareSetu - डालटनगंज और आसपास के इलाक़ों में",
         operatorConsole: "ऑपरेटर कंसोल",
       },
+    },
+
+    record: {
+      title: "मेरा रिकॉर्ड",
+      description:
+        "आपकी सेहत की पूरी कहानी एक जगह - परामर्श, प्रिस्क्रिप्शन, लैब रिपोर्ट और रोज़ की मेट्रिक्स।",
+      filterGroupLabel: "रिकॉर्ड एंट्री फ़िल्टर करें",
+      moreMenuLabel: "और फ़िल्टर",
+      filter: {
+        all: "सभी",
+        consultation: "परामर्श",
+        prescription: "प्रिस्क्रिप्शन",
+        labReport: "लैब रिपोर्ट",
+        metric: "मेट्रिक्स",
+        more: "और",
+      },
+      badge: {
+        consultation: "परामर्श",
+        prescription: "प्रिस्क्रिप्शन",
+        labReport: "लैब रिपोर्ट",
+        metric: "मेट्रिक",
+        settlement: "सेटलमेंट",
+        issued: "जारी हुई",
+        delivered: "पहुँच गई",
+      },
+      filedFromBooking: "बुकिंग से दर्ज",
+      empty: {
+        title: "अभी कोई एंट्री नहीं",
+        body: "आपके परामर्श, प्रिस्क्रिप्शन, लैब रिपोर्ट और मेट्रिक्स यहाँ दिखेंगे जैसे-जैसे आपकी देखभाल होगी।",
+      },
+      loadError: "आपका रिकॉर्ड लोड नहीं हो सका।",
+      placeholder: {
+        accessTitle: "रिकॉर्ड किसने देखा",
+        accessBody: "पूरा एक्सेस इतिहास फेज़ 4 में आएगा।",
+        healthTitle: "हेल्थ ट्रैकिंग",
+        healthBody: "BP/शुगर ट्रेंड और फॉलो-अप प्लान फेज़ 12 में आएंगे।",
+      },
+      detail: {
+        loadError: "यह एंट्री लोड नहीं हो सकी।",
+        notFound: "एंट्री नहीं मिली।",
+        filedOn: "दर्ज हुई",
+        bookingRef: "बुकिंग",
+        sourceHeading: "स्रोत",
+        verified: "सत्यापित",
+        consentHeading: "अनुमति का हवाला",
+        consentLine: (lineageRef: string, version: number, date: string) =>
+          `यह रिपोर्ट अनुमति #${lineageRef} v${version} के तहत आपके रिकॉर्ड में आई, अनुमति मिली ${date}।`,
+        consentLink: "यह अनुमति अनुमति लॉग में देखें",
+        resultsHeading: "नतीजे",
+        resultsThTest: "जाँच",
+        resultsThValue: "मान",
+        resultsThRange: "आम रेंज",
+        resultsThStatus: "स्थिति",
+        resultsNote:
+          "मान वैसे ही दिखाए जाते हैं जैसे लैब ने दर्ज किए। आपका डॉक्टर पूरे संदर्भ में पढ़ता है - ऐप नतीजों की स्वयं व्याख्या नहीं करता।",
+        resultsStatusInRange: "रेंज में",
+        resultsStatusBelowRange: "रेंज से कम",
+        resultsStatusAboveRange: "रेंज से ज़्यादा",
+        egressHeading: "इस एंट्री को किसने देखा",
+        shareEntry: "यह एंट्री साझा करें",
+        downloadPdf: "PDF डाउनलोड करें",
+      },
+    },
+    consentLog: {
+      title: "अनुमति लॉग",
+      description: "आपने जो अनुमति दी या वापस ली - हर एक की अपनी रसीद।",
+      pendingHeading: "आपके जवाब की ज़रूरत",
+      historyHeading: "पहले की अनुमतियाँ",
+      badge: {
+        requested: "अनुरोध आया",
+        active: "सक्रिय",
+        revoked: "वापस ली",
+      },
+      viewReceipt: "रसीद देखें",
+      metaRequested: "अनुरोध",
+      metaGranted: "अनुमति मिली",
+      receiptRequested: "{date} पर अनुरोध किया गया।",
+      receiptGranted: "{date} पर अनुमति दी गई।",
+      receiptRevoked:
+        "{date} को वापस ले ली गई - आगे का कोई इस्तेमाल तुरंत रुक गया।",
+      allow: "अनुमति दें",
+      decline: "अभी नहीं",
+      revoke: "वापस लें",
+      stopForward:
+        "वापसी से पहले देखी गई जानकारी मिटती नहीं। इस अनुमति के तहत जो डेटा इस पार्टनर को मिला, वह उनके पास रहता है।",
+      revokeConfirm: {
+        title: "यह अनुमति वापस लेनी है?",
+        body: "साझा करना तुरंत रुक जाएगा - पार्टनर की आगे की पहुँच बंद। जो पहले देखा या भेजा जा चुका है, वह उनकी रिटेंशन ज़िम्मेदारी के तहत उनके पास रहेगा। आप बाद में ऐसी अनुमति फिर दे सकते हैं (वह नए वर्ज़न के रूप में दर्ज होगी)।",
+        confirm: "हाँ, वापस लें",
+        cancel: "रहने दें",
+        done: "अनुमति वापस ले ली गई - आगे की साझेदारी बंद।",
+      },
+      egress: {
+        heading: "आपके रिकॉर्ड से क्या निकला",
+        description:
+          "जब भी आपके रिकॉर्ड की कोई चीज़ पढ़ी या भेजी गई, यहाँ दर्ज है - कौन, कब, किस अनुमति में।",
+        th: {
+          when: "कब",
+          what: "क्या",
+          to: "किसे",
+          via: "किस अनुमति में",
+        },
+      },
+      empty: {
+        title: "अभी कोई अनुमति इतिहास नहीं",
+        body: "जैसे-जैसे आप अपने रिकॉर्ड की पहुँच साझा या प्रतिबंधित करेंगे, अनुमति इंटरैक्शन यहाँ दिखेंगे।",
+      },
+      loadError: "आपका अनुमति लॉग लोड नहीं हो सका।",
     },
   },
 };

@@ -1,20 +1,95 @@
 """MOD-003: SQLAlchemy models for the ``health`` schema only (ADR-0003).
 
-Table namespace rule (coding-standards §2, T6a checker #26):
-every table is prefixed with ``health_`` and lives in
-the ``health`` schema. Models are added incrementally
-as Phase 2 tickets land.
+Table namespace rule (coding-standards §2, T6a checker #26): every table is
+prefixed with ``health_`` and lives in the ``health`` schema. PHASE-3 T2
+(#211) lands the longitudinal-record core: one ``health_patient_records``
+shell per patient identity (created on ``patient.registered``), the clinical
+``health_record_entries`` attached to it by later phases' events, and the
+``health_record_access_history`` ledger that records EVERY read attempt -
+owner reads included - feeding FEAT-003's trust view. The transactional
+outbox mirrors the shared ``bus/outbox_ddl.py`` shape (single source of
+truth, ADR-0002); the ``consumed_events`` subscriber ledger lives in the
+same schema but is materialized only by the migration and addressed through
+``bus.outbox_ddl.consumed_events_table``, never this metadata (its name
+carries no module prefix by shared contract).
 """
 
 from __future__ import annotations
 
-from sqlalchemy import BigInteger, Column, MetaData, Table
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    Column,
+    DateTime,
+    ForeignKey,
+    Index,
+    MetaData,
+    String,
+    Table,
+    UniqueConstraint,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+
+from bus.outbox_ddl import outbox_table
 
 MODULE_METADATA = MetaData(schema="health")
 
 
-health_identities = Table(
-    "health_identities",
+health_patient_records = Table(
+    "health_patient_records",
     MODULE_METADATA,
     Column("id", BigInteger, primary_key=True),
+    Column("identity_id", BigInteger, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    # One shell per patient identity - the unique index is the concurrency
+    # arbiter that makes subscriber replay and lazy ensure idempotent.
+    UniqueConstraint("identity_id", name="uq_health_patient_records_identity"),
 )
+
+# Initial entry vocabulary; later filing phases extend it by additive migration
+# (roadmap PHASE-3 §2 deferred items: prescriptions/reports/metrics/settlements).
+health_record_entries = Table(
+    "health_record_entries",
+    MODULE_METADATA,
+    Column("id", BigInteger, primary_key=True),
+    Column(
+        "record_id",
+        BigInteger,
+        ForeignKey("health_patient_records.id", name="fk_health_record_entries_record"),
+        nullable=False,
+    ),
+    Column("entry_type", String(40), nullable=False),
+    Column("payload", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("occurred_at", DateTime(timezone=True), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    CheckConstraint(
+        "entry_type IN ('consultation', 'prescription', 'lab_report', 'metric', 'settlement')",
+        name="ck_health_record_entries_entry_type",
+    ),
+    Index("ix_health_record_entries_timeline", "record_id", text("occurred_at DESC")),
+)
+
+health_record_access_history = Table(
+    "health_record_access_history",
+    MODULE_METADATA,
+    Column("id", BigInteger, primary_key=True),
+    Column(
+        "record_id",
+        BigInteger,
+        ForeignKey("health_patient_records.id", name="fk_health_record_access_history_record"),
+        nullable=False,
+    ),
+    # The caller whose read attempt this row records; denials name who tried.
+    # Every read arrives behind the gateway, so the accessor is always known.
+    Column("accessor_identity_id", BigInteger, nullable=False),
+    Column("outcome", String(20), nullable=False),
+    Column("accessed_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    CheckConstraint(
+        "outcome IN ('allowed', 'denied')",
+        name="ck_health_record_access_history_outcome",
+    ),
+    Index("ix_health_record_access_history_record", "record_id", text("accessed_at DESC")),
+)
+
+health_outbox = outbox_table("health_outbox", "health", MODULE_METADATA)

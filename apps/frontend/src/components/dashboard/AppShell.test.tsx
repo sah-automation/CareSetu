@@ -108,6 +108,12 @@ describe("AppShell light density (patient)", () => {
     expect(topnav.textContent).toContain("Bookings & Orders");
     expect(topnav.textContent).toContain("Soon");
     expect(topnav.textContent).not.toContain("Profile & Settings");
+    // PHASE-3 T7 (#216) un-sooned My Record: it renders as a live link on
+    // every surface via the single source.
+    expect(screen.getByTestId("nav-record")).toHaveAttribute(
+      "href",
+      "/patient/record",
+    );
     // The finalized view also carries the language switch in this cluster.
     expect(screen.getByTestId("lang-toggle")).toBeInTheDocument();
   });
@@ -137,7 +143,7 @@ describe("AppShell light density (patient)", () => {
     );
   });
 
-  it("carries the five bottom tabs with Start Visit pinned as the center accent", () => {
+  it("carries the five-column bottom bar with Start Visit pinned as the center accent", () => {
     render(
       <AppShell role="patient">
         <h1>Patient home</h1>
@@ -147,23 +153,35 @@ describe("AppShell light density (patient)", () => {
     const bar = screen.getByTestId("bottom-tabs");
     expect(bar.className).toContain("lg:hidden");
 
-    const keys = ["home", "find", "start", "record", "inbox"];
+    const keys = ["home", "find", "start", "record"];
     keys.forEach((key) =>
       expect(screen.getByTestId(`tab-${key}`)).toBeInTheDocument(),
     );
+    // Ratified five columns (#210): Home | Find | Start(center) | Record |
+    // More - exactly five children, no sixth Inbox column.
+    expect(screen.queryByTestId("tab-inbox")).not.toBeInTheDocument();
+    expect(
+      Array.from(bar.children).map((child) =>
+        child.getAttribute("data-testid"),
+      ),
+    ).toEqual([
+      "tab-home",
+      "tab-find",
+      "tab-start",
+      "tab-record",
+      "more-trigger",
+    ]);
     // The center accent renders as a circular accent FAB inside its column.
     expect(
       screen
         .getByTestId("tab-start")
         .querySelector("span.rounded-full.bg-accent"),
     ).not.toBeNull();
-    // Column order puts the center accent third (between find and record).
-    const order = keys.map((key) =>
-      Array.from(bar.children).findIndex(
-        (child) => child.getAttribute("data-testid") === `tab-${key}`,
-      ),
+    // PHASE-3 T7 (#216) un-sooned My Record: the tab column is a live link.
+    expect(screen.getByTestId("tab-record")).toHaveAttribute(
+      "href",
+      "/patient/record",
     );
-    expect(order).toEqual([0, 1, 2, 3, 4]);
   });
 
   it("moves overflow destinations into the More sheet with Soon badges", () => {
@@ -177,8 +195,11 @@ describe("AppShell light density (patient)", () => {
     fireEvent.click(screen.getByTestId("more-trigger"));
 
     const sheet = screen.getByTestId("more-sheet");
+    // Inbox folds into More (#210) and stays a live link there.
+    expect(sheet).toHaveTextContent("Inbox");
     expect(sheet).toHaveTextContent("Bookings & Orders");
     expect(sheet).toHaveTextContent("Profile & Settings");
+    expect(screen.getByTestId("more-inbox").tagName).toBe("A");
     expect(screen.getByTestId("more-bookings")).toHaveAttribute(
       "aria-disabled",
       "true",

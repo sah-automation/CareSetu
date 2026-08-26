@@ -26,18 +26,20 @@
 - No free background worker on Render -> worker deferred.
 - Free SMS providers do not match the EXT-001 contract (`POST {base}/v1/send`, `{request_id,status}`); demo mode chosen instead of a provider adapter.
 
-## Required code changes (tracked in the plan)
+## Code changes (all delivered - DEPLOY-1..7, #112-#125)
 
-| Change                                        | File                                                          | Status  |
-| :-------------------------------------------- | :------------------------------------------------------------ | :------ |
-| `CORS_ALLOWED_ORIGINS` + `DEMO_MODE` settings | `apps/backend/app/config.py`                                  | planned |
-| Honour `DATABASE_URL` in migrations           | `apps/backend/alembic/env.py`                                 | planned |
-| CORS from settings + demo OTP gate            | `apps/backend/app/main.py`                                    | planned |
-| Idempotent demo identity seed                 | `apps/backend/scripts/seed_demo.py`                           | planned |
-| Demo OTP read-back client call                | `apps/frontend/src/lib/auth/api.ts`                           | planned |
-| Demo OTP banner                               | `apps/frontend/src/components/auth/otp/PatientAuthWizard.tsx` | planned |
-| Render blueprint                              | `render.yaml`                                                 | planned |
-| CD workflow                                   | `.github/workflows/deploy.yml`                                | planned |
+| Change                                        | File                                                          | Status            |
+| :-------------------------------------------- | :------------------------------------------------------------ | :---------------- |
+| `CORS_ALLOWED_ORIGINS` + `DEMO_MODE` settings | `apps/backend/app/config.py`                                  | done (DEPLOY-1)   |
+| Honour `DATABASE_URL` in migrations           | `apps/backend/alembic/env.py`                                 | done (DEPLOY-2)   |
+| CORS from settings + demo OTP gate            | `apps/backend/app/main.py`                                    | done (DEPLOY-1)   |
+| Idempotent demo identity seed                 | `apps/backend/scripts/seed_demo.py`                           | done (DEPLOY-3)   |
+| Demo OTP read-back client call                | `apps/frontend/src/lib/auth/api.ts`                           | done (DEPLOY-4)   |
+| Demo OTP banner                               | `apps/frontend/src/components/auth/otp/PatientAuthWizard.tsx` | done (DEPLOY-4)   |
+| Render blueprint                              | `render.yaml`                                                 | done (DEPLOY-5)   |
+| CD workflow                                   | `.github/workflows/deploy.yml`                                | done (DEPLOY-6/7) |
+
+> Deployed-auth behavior (cookies, guard, credentialed CORS) is governed by `docs/adr/0007-split-origin-deployment-session-invariants.md` - read it before touching session transport; localhost masks split-origin failures.
 
 ## Env var cheat sheet
 

@@ -15,6 +15,7 @@ import {
   markDenied,
 } from "@/lib/consent/consentGate";
 import { __resetLangForTests, useLang } from "@/lib/i18n/LangContext";
+import * as consentApi from "@/lib/consent/api";
 
 function LangFlip() {
   const { lang, setLang } = useLang();
@@ -28,10 +29,31 @@ function LangFlip() {
 beforeEach(() => {
   __resetLangForTests();
   __resetConsentGateForTests();
+  vi.spyOn(consentApi, "grantConsent").mockResolvedValue({
+    consent_id: 1,
+    lineage_ref: "C-2026-001",
+    patient_id: 1,
+    counterparty_type: "lab",
+    counterparty_id: "demo-lab-booking",
+    record_scope: "prescriptions",
+    status: "granted",
+    version: 1,
+    created_at: "2026-08-25T10:00:00Z",
+    updated_at: "2026-08-25T10:00:00Z",
+    events: [
+      {
+        kind: "granted",
+        version: 1,
+        actor_patient_id: 1,
+        occurred_at: "2026-08-25T10:00:00Z",
+      },
+    ],
+  });
 });
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
 });
 
 async function openSheet() {
@@ -63,6 +85,13 @@ describe("LabBookingConsentDemo", () => {
     await openSheet();
     fireEvent.click(screen.getByTestId("consent-allow"));
 
+    // Wait for receipt to appear
+    await waitFor(() =>
+      expect(screen.getByTestId("consent-receipt-title")).toBeInTheDocument(),
+    );
+    // Click "Got it" to close the sheet
+    fireEvent.click(screen.getByText("Got it"));
+
     await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
     );
@@ -81,6 +110,13 @@ describe("LabBookingConsentDemo", () => {
 
     await openSheet();
     fireEvent.click(screen.getByTestId("consent-deny"));
+
+    // Wait for denied explanation to appear
+    await waitFor(() =>
+      expect(screen.getByTestId("consent-denied-title")).toBeInTheDocument(),
+    );
+    // Click "Got it" to close the sheet
+    fireEvent.click(screen.getByText("Got it"));
 
     await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
@@ -104,6 +140,10 @@ describe("LabBookingConsentDemo", () => {
     await openSheet();
     fireEvent.click(screen.getByTestId("consent-deny"));
     await waitFor(() =>
+      expect(screen.getByTestId("consent-denied-title")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByText("Got it"));
+    await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
     );
 
@@ -113,6 +153,10 @@ describe("LabBookingConsentDemo", () => {
     // Second explicit pass behaves identically - same single explanation.
     await openSheet();
     fireEvent.click(screen.getByTestId("consent-deny"));
+    await waitFor(() =>
+      expect(screen.getByTestId("consent-denied-title")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByText("Got it"));
     await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
     );
@@ -127,6 +171,10 @@ describe("LabBookingConsentDemo", () => {
     const { unmount } = render(<LabBookingConsentDemo />);
     await openSheet();
     fireEvent.click(screen.getByTestId("consent-deny"));
+    await waitFor(() =>
+      expect(screen.getByTestId("consent-denied-title")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByText("Got it"));
     await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
     );
@@ -153,6 +201,12 @@ describe("LabBookingConsentDemo", () => {
     // The patient changes their mind: Allow.
     await openSheet();
     fireEvent.click(screen.getByTestId("consent-allow"));
+    // Wait for receipt and click "Got it"
+    await waitFor(() =>
+      expect(screen.getByTestId("consent-receipt-title")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByText("Got it"));
+
     await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
     );
@@ -195,6 +249,12 @@ describe("LabBookingConsentDemo", () => {
       screen.getByText("आपकी पिछले 3 महीने की प्रिस्क्रिप्शन"),
     ).toBeInTheDocument();
     fireEvent.click(screen.getByTestId("consent-allow"));
+
+    // Wait for receipt and click "समझा"
+    await waitFor(() =>
+      expect(screen.getByTestId("consent-receipt-title")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByText("समझा"));
 
     await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
