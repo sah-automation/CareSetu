@@ -9,6 +9,7 @@ uses to compute hashes and append to the ``audit_events`` ledger.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -18,6 +19,11 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from modules.audit.domain.chain import GENESIS_HASH, compute_audit_hash
 from modules.audit.domain.consumer import AuditEventPayload, AuditRow, build_audit_row
 from modules.audit.schema.models import audit_events
+
+if TYPE_CHECKING:
+    # Type-only import for the T7 delegation seam: AuditFacade calls through to
+    # MOD-003's facade rather than reading the health schema (module isolation).
+    from modules.health.facade import AccessHistoryView, HealthFacade
 
 AUDIT_SCHEMA = "audit"
 
@@ -194,8 +200,9 @@ class AuditFacade:
     and the DB read stays inside the module.
     """
 
-    def __init__(self, engine: AsyncEngine) -> None:
+    def __init__(self, engine: AsyncEngine, health_facade: HealthFacade | None = None) -> None:
         self._engine = engine
+        self._health_facade = health_facade
 
     async def query_audit(
         self,
@@ -222,3 +229,16 @@ class AuditFacade:
                 page=page,
                 page_size=page_size,
             )
+
+    async def get_access_history(self, patient_id: int) -> AccessHistoryView:
+        """Return a patient's record access history via the MOD-003 facade (T7).
+
+        MOD-003 owns the ``health.record_access_history`` ledger, so the
+        cross-module seam is its facade (module isolation rule) - never a
+        direct audit-schema read. Route-level RBAC (patient role + own record
+        only) gates who may call this; the facade trusts the caller's record
+        scope like ``get_own_record``.
+        """
+        if self._health_facade is None:
+            raise RuntimeError("HealthFacade not configured on AuditFacade")
+        return await self._health_facade.get_access_history(patient_id)

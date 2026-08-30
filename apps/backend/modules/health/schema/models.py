@@ -26,6 +26,7 @@ from sqlalchemy import (
     MetaData,
     String,
     Table,
+    Text,
     UniqueConstraint,
     text,
 )
@@ -85,9 +86,23 @@ health_record_access_history = Table(
     Column("accessor_identity_id", BigInteger, nullable=False),
     Column("outcome", String(20), nullable=False),
     Column("accessed_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    # PHASE-4 T7 (#241): actor_type / scope / denial_reason join the ledger so
+    # the patient access-history view answers FEAT-003's "who / how / why"
+    # from the fast health ledger alone. NULLABLE because rows written before
+    # the enrichment migration have no values; ``_log_access`` populates them
+    # on every fresh write (additive migration v3.1). actor_type is pinned to
+    # the counterparty vocabulary; scope deliberately is not - denied attempts
+    # record caller-supplied scopes the consent gate fails closed against.
+    Column("actor_type", String(20), nullable=True),
+    Column("scope", String(40), nullable=True),
+    Column("denial_reason", Text, nullable=True),
     CheckConstraint(
         "outcome IN ('allowed', 'denied')",
         name="ck_health_record_access_history_outcome",
+    ),
+    CheckConstraint(
+        "actor_type IN ('patient', 'doctor', 'lab', 'chemist')",
+        name="ck_health_record_access_history_actor_type",
     ),
     Index("ix_health_record_access_history_record", "record_id", text("accessed_at DESC")),
 )

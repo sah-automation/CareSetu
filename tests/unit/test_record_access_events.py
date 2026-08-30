@@ -130,3 +130,50 @@ async def test_log_access_denied_publishes_view_denied_event() -> None:
         "denied": True,
         "denial_reason": "consent check failed",
     }
+
+
+def _ledger_insert_sql(connection: AsyncMock) -> str:
+    (insert_stmt,) = connection.execute.await_args.args
+    return str(insert_stmt.compile(compile_kwargs={"literal_binds": True}))
+
+
+async def test_log_access_allowed_persists_actor_type_and_scope_next_to_the_row() -> None:
+    connection = AsyncMock()
+
+    with patch("modules.health.facade.write_outbox", new_callable=AsyncMock):
+        await _log_access(
+            connection,
+            record_id=42,
+            accessor_identity_id=7,
+            outcome="allowed",
+            actor_type="patient",
+            scope="full_record",
+        )
+
+    sql = _ledger_insert_sql(connection)
+    # The fast ledger names WHO read over WHICH scope (T7, #241) so the patient
+    # access-history view answers without joining the outbox payload.
+    assert "'patient'" in sql
+    assert "'full_record'" in sql
+    assert "'allowed'" in sql
+
+
+async def test_log_access_denied_persists_actor_type_scope_and_denial_reason() -> None:
+    connection = AsyncMock()
+
+    with patch("modules.health.facade.write_outbox", new_callable=AsyncMock):
+        await _log_access(
+            connection,
+            record_id=42,
+            accessor_identity_id=77,
+            outcome="denied",
+            actor_type="chemist",
+            scope="prescriptions",
+            denial_reason="consent check failed",
+        )
+
+    sql = _ledger_insert_sql(connection)
+    assert "'denied'" in sql
+    assert "'chemist'" in sql
+    assert "'prescriptions'" in sql
+    assert "'consent check failed'" in sql

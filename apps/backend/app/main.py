@@ -150,8 +150,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.health_facade = HealthFacade(engine=engine, consent_facade=app.state.consent_facade)
     # MOD-011 (PHASE-4 T6, #240): the audit facade shares the settled engine
     # for the operator query surface - stored on state so routes read one
-    # resolved object and unit tests stub it.
-    app.state.audit_facade = AuditFacade(engine=engine)
+    # resolved object and unit tests stub it. The health facade (MOD-003) is
+    # passed for T7's patient access-history delegation: the ledger lives in
+    # the health schema, so the audit facade calls through the facade seam
+    # instead of reading across schemas (module isolation rule).
+    app.state.audit_facade = AuditFacade(engine=engine, health_facade=app.state.health_facade)
     # The edge's in-process idempotency store (api-standards §5, PHASE-2 REM
     # T11, #80): the auth mutation adapters read/write it per ``Idempotency-Key``
     # so a retried register/verify/resend replays the stored result instead of
