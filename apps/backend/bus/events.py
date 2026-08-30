@@ -30,3 +30,45 @@ EVENT_SETTLEMENT_RECORDED = "settlement.recorded"
 # same transaction as the audited change; MOD-011 consumes and appends to the
 # audit schema (ADR-0002 §5) - the dispatcher never synthesizes it.
 EVENT_AUDIT_EVENT = "audit.event"
+
+# PHASE-4 T3 (#237): the canonical regulated-act whitelist. MOD-011 appends an
+# ``audit.event`` payload to the hash chain only when its ``event_type`` is
+# regulated; operational events (notifications, OTPs, metrics, order
+# lifecycle, intake pipeline, case consult) are skipped. Mirrors the
+# regulatory scope documented in implementation-roadmap PHASE-4 / NFR-D01.
+REGULATED_ACT_TYPES: frozenset[str] = frozenset(
+    {
+        EVENT_CONSENT_REQUESTED,
+        EVENT_CONSENT_GRANTED,
+        EVENT_CONSENT_REVOKED,
+        "record.accessed",
+        "record_view_denied",
+        "prescription.approved",
+        "prescription.rejected",
+        "prescription.routed",
+        EVENT_REPORT_FILED,
+        "report.rejected_mismatch",
+        "sample.collected",
+        EVENT_SETTLEMENT_RECORDED,
+        "platform_payment.initiated",
+        "payment.webhook_received",
+        "order.cancelled",
+        "refund.partner_direct",
+        "partner.registered",
+        "partner.activated",
+        "partner.rejected",
+        "credential.invalidated",
+        EVENT_PATIENT_REGISTERED,
+        EVENT_PATIENT_VERIFIED,
+        EVENT_PATIENT_AUTH_FAILED,
+    }
+)
+
+
+def is_regulated_act(event_type: str) -> bool:
+    """Return True when ``event_type`` is a regulated act for the audit chain.
+
+    Lookup is exact and conservative: an unknown (or future) event type is
+    False, so only an explicitly whitelisted act is appended to the hash chain.
+    """
+    return event_type in REGULATED_ACT_TYPES
