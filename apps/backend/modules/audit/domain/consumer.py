@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import NAMESPACE_DNS, uuid5
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from bus.events import is_regulated_act
 from modules.audit.domain.chain import compute_audit_hash
@@ -90,6 +90,91 @@ def _actor_uuid(patient_id: int) -> str:
 def _target_uuid(consent_id: int) -> str:
     """Deterministic, reproducible UUID for one consent lineage (int -> UUID)."""
     return str(uuid5(_AUDIT_NAMESPACE, f"consent:{consent_id}"))
+
+
+def _record_uuid(record_id: int) -> str:
+    """Deterministic, reproducible UUID for one health record (int -> UUID)."""
+    return str(uuid5(_AUDIT_NAMESPACE, f"record:{record_id}"))
+
+
+class RecordAccessAuditPayload(BaseModel):
+    """MOD-011's typed mirror of MOD-003's record-access payload.
+
+    The dispatcher reconstructs a claimed ``record.accessed`` / ``record.denied``
+    outbox row into this model - the registry's registered payload model - so
+    its field contract is a byte-for-byte mirror of what MOD-003 publishes
+    (its ``RecordAccessedPayload``). The mirror lives here so MOD-011 consumes
+    the events without importing another module's domain (ADR-0003).
+    """
+
+    record_id: int
+    actor_id: int
+    actor_type: str
+    scope: str
+    accessed_at: datetime
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+def build_record_access_row(
+    event_type: str,
+    payload: RecordAccessAuditPayload,
+    producer: str,
+    prev_hash: str,
+) -> AuditRow:
+    """Compute the ``audit_events`` columns for one record-access audit event.
+
+    The event type IS the regulated act (``record.accessed`` / ``record.denied``
+    - T3's predicate runs on it directly, no derivation). The accessor identity
+    maps to ``actor_id`` and the accessed record to ``target_id`` through the
+    deterministic uuid5 namespace; ``metadata`` re-hosts the no-PHI facts
+    (producer, ``actor_type``, optional ``denied`` / ``denial_reason``) the
+    health outbox carried, so the operator view answers the same who/how/why as
+    the patient view without reading across schemas. ``timestamp`` mirrors the
+    payload's ``accessed_at`` so the hash chain and the ``record_access_history``
+    ledger agree exactly on when the read happened.
+    """
+    actor_id = _actor_uuid(payload.actor_id)
+    target_id = _record_uuid(payload.record_id)
+    metadata: dict[str, Any] = {
+        "producer": producer,
+        "actor_type": payload.actor_type,
+        **payload.metadata,
+    }
+    digest = compute_audit_hash(
+        event_type,
+        actor_id,
+        target_id,
+        payload.scope,
+        metadata,
+        payload.accessed_at,
+        prev_hash,
+    )
+    return AuditRow(
+        event_type=event_type,
+        actor_id=actor_id,
+        target_id=target_id,
+        scope=payload.scope,
+        metadata=metadata,
+        timestamp=payload.accessed_at,
+        prev_hash=prev_hash,
+        hash=digest,
+    )
+
+
+class TamperDetectedPayload(BaseModel):
+    """MOD-011's payload model for the ``audit.tamper_detected`` outbox event.
+
+    The tamper guard trigger writes this into ``audit.audit_outbox`` when an
+    UPDATE/DELETE on ``audit.audit_events`` is attempted and blocked (PHASE-4
+    #234 user story 11). Telemetry only - deliberately never appended to the
+    hash chain; real-time alert delivery is deferred, so MOD-011's consumer
+    logs the attempt and does not touch ``audit_events``.
+    """
+
+    attempted_operation: str
+    target_event_id: str | None
+    details: dict[str, Any] = Field(default_factory=dict)
+    attempted_at: datetime
 
 
 @dataclass(frozen=True)

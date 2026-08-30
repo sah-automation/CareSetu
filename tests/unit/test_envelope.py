@@ -78,7 +78,7 @@ def test_event_type_accepts_registry_shapes() -> None:
         "pre_summary.low_confidence",
         "phase1.round_trip",
         "record.accessed",
-        "record_view_denied",
+        "record.denied",
     ):
         assert _envelope(event_type=valid).event_type == valid
 

@@ -240,7 +240,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 
 - **Inbound Sync APIs:** `create_record(patient_id)`, `get_own_record(patient_id)`, `get_access_history(patient_id)`, `log_metric(patient_id, type, value)`, `read_consented_history(patient_id, scope, counterparty, consent_token)`, `get_follow_up_plan(patient_id)`.
 - **Inbound Events Subscribed:** `patient.registered` (create shell), `consent.granted/revoked` (update effective sharing scope), `report.filed`, `prescription.issued`, `prescription.delivered`, `metric.logged` (self), `settlement.recorded` (attach to record).
-- **Outbound Events Published:** `record.accessed`, `metric.logged`, `metric_out_of_range`, `follow_up.due` (to scheduler / `MOD-010`).
+- **Outbound Events Published:** `record.accessed`, `record.denied`, `metric.logged`, `metric_out_of_range`, `follow_up.due` (to scheduler / `MOD-010`).
 
 #### 3. Core Business Logic & State Machines
 
@@ -639,6 +639,8 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 | `credential.invalidated`                       | `MOD-002` (Partner)         | `MOD-011`, (self: deindex directory)                                         | JSON           | At-least-once              |
 | `audit.event` (generic)                        | All modules                 | `MOD-011` (append to hash chain)                                             | JSON           | At-least-once              |
 | `record.accessed`                              | `MOD-003` (LHR)             | `MOD-011`                                                                    | JSON           | At-least-once              |
+| `record.denied`                                | `MOD-003` (LHR)             | `MOD-011`                                                                    | JSON           | At-least-once              |
+| `audit.tamper_detected`                        | `MOD-011` (trigger)         | (telemetry, alert delivery deferred)                                         | JSON           | At-least-once              |
 
 > `otp.failed` carries a `reason`: `lockout` when the brute-force lockout triggers (MOD-001, ADR-0004) or `delivery` when an SMS send has exhausted every retry and the code never reached the phone (MOD-001, PHASE-2 REM T5 #81).
 

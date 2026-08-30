@@ -37,7 +37,15 @@ EVENT_AUDIT_EVENT = "audit.event"
 EVENT_RECORD_ACCESSED = "record.accessed"
 # MOD-003 (health): emitted when a read attempt is denied (non-owner or a
 # failed consent check); carries denied=true + denial_reason in metadata.
-EVENT_RECORD_VIEW_DENIED = "record_view_denied"
+# Dot-notation per the registry grammar (CONTEXT.md glossary) - the PRD's
+# legacy snake_case spelling is superseded and rejected repo-wide.
+EVENT_RECORD_DENIED = "record.denied"
+# MOD-011 (audit): emitted into ``audit.audit_outbox`` by the tamper guard
+# trigger when an UPDATE/DELETE on ``audit.audit_events`` is attempted and
+# blocked (PHASE-4 #234 user story 11). Telemetry only - deliberately NOT in
+# ``REGULATED_ACT_TYPES``, so it never enters the hash chain; real-time
+# alert delivery is deferred, the outbox row is the publication.
+EVENT_AUDIT_TAMPER_DETECTED = "audit.tamper_detected"
 
 # PHASE-4 T3 (#237): the canonical regulated-act whitelist. MOD-011 appends an
 # ``audit.event`` payload to the hash chain only when its ``event_type`` is
@@ -50,7 +58,7 @@ REGULATED_ACT_TYPES: frozenset[str] = frozenset(
         EVENT_CONSENT_GRANTED,
         EVENT_CONSENT_REVOKED,
         EVENT_RECORD_ACCESSED,
-        EVENT_RECORD_VIEW_DENIED,
+        EVENT_RECORD_DENIED,
         "prescription.approved",
         "prescription.rejected",
         "prescription.routed",

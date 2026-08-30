@@ -33,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app.config import Settings
 from bus.outbox_writer import write_outbox
-from modules.health.domain.events import record_accessed_envelope, record_view_denied_envelope
+from modules.health.domain.events import record_accessed_envelope, record_denied_envelope
 from modules.health.domain.exceptions import (
     RecordAccessDeniedError,
     RecordNotFoundError,
@@ -147,7 +147,7 @@ async def _log_access(
 
     Dual write (FEAT-003, KPI-006) in the caller's transaction: the
     ``health_record_access_history`` row feeds the fast patient view, and the
-    ``record.accessed`` / ``record_view_denied`` event drives MOD-011's hash
+    ``record.accessed`` / ``record.denied`` event drives MOD-011's hash
     chain. The caller commits or rolls both back together.
     """
     accessed_at = datetime.now(UTC)
@@ -173,7 +173,7 @@ async def _log_access(
             accessed_at=accessed_at,
         )
     else:
-        envelope = record_view_denied_envelope(
+        envelope = record_denied_envelope(
             record_id=record_id,
             actor_id=accessor_identity_id,
             actor_type=actor_type,

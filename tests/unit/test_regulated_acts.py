@@ -23,7 +23,7 @@ _REGULATED: tuple[str, ...] = (
     "consent.revoked",
     # Record access
     "record.accessed",
-    "record_view_denied",
+    "record.denied",
     # Prescriptions
     "prescription.approved",
     "prescription.rejected",
@@ -86,6 +86,7 @@ def test_operational_event_types_return_false(event_type: str) -> None:
         "some.future_event",
         "unknown.type",
         "audit.event",
+        "audit.tamper_detected",
         "prescription.issued",
         "prescription.delivered",
         "diagnostic.order_booked",

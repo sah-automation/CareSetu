@@ -3,16 +3,21 @@
 ``register_handlers`` is the composition-root seam (PHASE-1 T4, #30):
 the worker entrypoint calls it to register this module's handlers on the
 shared ``HandlerRegistry``. PHASE-4 T4 (#239) registers the audit engine's
-first real subscriber: ``audit.event`` -> append one regulated act to the
-hash-chained ``audit_events`` ledger.
+consumers: ``audit.event`` (the generic consent carrier) and the
+``record.accessed`` / ``record.denied`` events MOD-003 publishes - each
+appends one regulated act to the hash-chained ``audit_events`` ledger. The
+``audit.tamper_detected`` telemetry event (written by the tamper guard
+trigger) is consumed with a logging handler only, never appended to the
+chain (#234 user story 11; real-time alert delivery deferred).
 
-The handler is idempotent (ADR-0002 §3): its ``consumed_events`` ledger row is
-written in the SAME transaction as the append, so replaying a delivered
+Every handler is idempotent (ADR-0002 §3): its ``consumed_events`` ledger row
+is written in the SAME transaction as the effect, so replaying a delivered
 ``event_id`` is a no-op and a crash rolls both back together.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
@@ -22,11 +27,26 @@ from sqlalchemy.pool import NullPool
 
 from app.config import get_settings
 from bus.envelope import Envelope
-from bus.events import EVENT_AUDIT_EVENT
+from bus.events import (
+    EVENT_AUDIT_EVENT,
+    EVENT_AUDIT_TAMPER_DETECTED,
+    EVENT_RECORD_ACCESSED,
+    EVENT_RECORD_DENIED,
+    is_regulated_act,
+)
 from bus.ledger import record_consumed_event
 from bus.registry import HandlerRegistry
-from modules.audit.domain.consumer import AuditEventPayload, is_appended_act
-from modules.audit.facade import AUDIT_SCHEMA, append_audit_event
+from modules.audit.domain.consumer import (
+    AuditEventPayload,
+    RecordAccessAuditPayload,
+    TamperDetectedPayload,
+    is_appended_act,
+)
+from modules.audit.facade import (
+    AUDIT_SCHEMA,
+    append_audit_event,
+    append_record_access_event,
+)
 
 _T = TypeVar("_T", bound=BaseModel)
 
@@ -106,3 +126,70 @@ def register_handlers(registry: HandlerRegistry) -> None:
         await _run_handler(envelope, AuditEventPayload, _impl, "append_audit_act")
 
     registry.register(EVENT_AUDIT_EVENT, append_audit_act)
+
+    # MOD-011 owns the payload mirror for the record-access events MOD-003
+    # publishes (the consumer owns the model, cf. ``audit.event``): the
+    # dispatcher reconstructs claimed ``record.accessed`` / ``record.denied``
+    # outbox rows with it before fan-out. Both events share one mirror shape.
+    for record_event_type in (EVENT_RECORD_ACCESSED, EVENT_RECORD_DENIED):
+        registry.register_payload_model(record_event_type, RecordAccessAuditPayload)
+
+    async def append_record_access_act(envelope: Envelope[BaseModel]) -> None:
+        """Consume ``record.accessed`` / ``record.denied``: append to the chain.
+
+        Ledger first, filter and append second, one transaction: a redelivered
+        ``event_id`` finds its ledger row and skips the append (at-least-once).
+        Both event types are regulated acts on their own - T3's predicate runs
+        on the event type directly, no derivation - so the read facts (who /
+        which record / scope, optional denial) are appended with the event type
+        as the act type.
+        """
+
+        async def _impl(connection: AsyncConnection, payload: RecordAccessAuditPayload) -> None:
+            if not is_regulated_act(envelope.event_type):
+                return
+            await append_record_access_event(
+                connection,
+                envelope.event_type,
+                payload,
+                envelope.producer,
+            )
+
+        await _run_handler(
+            envelope,
+            RecordAccessAuditPayload,
+            _impl,
+            "append_record_access_act",
+        )
+
+    registry.register(EVENT_RECORD_ACCESSED, append_record_access_act)
+    registry.register(EVENT_RECORD_DENIED, append_record_access_act)
+
+    # MOD-011 owns the model + a logging consumer for its own tamper telemetry
+    # event (written into ``audit.audit_outbox`` by the v3.2 trigger). Without
+    # a registered model and handler the dispatcher would error-loop the row on
+    # reclaim (its "no handlers registered" guard); the consumer keeps the
+    # outbox draining. Never appended to the hash chain (out of scope: real-time
+    # alert delivery).
+    registry.register_payload_model(EVENT_AUDIT_TAMPER_DETECTED, TamperDetectedPayload)
+
+    async def log_tamper_detected(envelope: Envelope[BaseModel]) -> None:
+        """Consume ``audit.tamper_detected``: log the blocked tamper attempt.
+
+        A telemetry/notification event, NOT a regulated act (PHASE-4 #234 user
+        story 11): the ledger row marks delivery, then the attempt facts ride a
+        structured log line until real-time alerting lands in a later phase.
+        """
+
+        async def _impl(connection: AsyncConnection, payload: TamperDetectedPayload) -> None:
+            del connection
+            logging.getLogger(__name__).warning(
+                "tamper attempt blocked and recorded: operation=%s target_event_id=%s details=%s",
+                payload.attempted_operation,
+                payload.target_event_id,
+                payload.details,
+            )
+
+        await _run_handler(envelope, TamperDetectedPayload, _impl, "log_tamper_detected")
+
+    registry.register(EVENT_AUDIT_TAMPER_DETECTED, log_tamper_detected)

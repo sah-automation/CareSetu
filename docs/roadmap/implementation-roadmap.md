@@ -392,7 +392,7 @@ Still no new PRD feature - resolved chassis anchored to `REQ-003` + `REQ-006`, g
 
 - **Target for grilling (`grill-with-docs`):** Tamper-detection guarantees, retention/expiry (open `GAP-011`), and what "regulated act" must include per `NFR-D01`.
 - **Target for `prototype`:** Operator audit-view screens (filter by actor/type/scope) and patient access-history view.
-- **Target for `to-spec` & `to-tickets`:** Scope boundary = audit append API + outbox consumer + hash chain, `query_audit`, `get_access_history`, `record_view_denied` handling, tamper detection. No partner/fulfillment audit wiring yet.
+- **Target for `to-spec` & `to-tickets`:** Scope boundary = audit append API + outbox consumer + hash chain, `query_audit`, `get_access_history`, `record.denied` handling, tamper detection. No partner/fulfillment audit wiring yet.
 
 ---
 

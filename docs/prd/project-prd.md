@@ -185,7 +185,7 @@ _Traceability: `REQ-021`, `REQ-003`, `NFR-002`, `GAP-001`, `GAP-005`, `GAP-013`,
 
 **Telemetry & Event Tracking:**
 
-- `record_view_denied`: `patient_id`, `actor_id`, `reason`, `timestamp`
+- `record.denied`: `patient_id`, `actor_id`, `reason`, `timestamp`
 
 ---
 

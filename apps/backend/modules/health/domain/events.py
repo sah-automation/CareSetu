@@ -20,7 +20,7 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from bus.envelope import Envelope
-from bus.events import EVENT_RECORD_ACCESSED, EVENT_RECORD_VIEW_DENIED
+from bus.events import EVENT_RECORD_ACCESSED, EVENT_RECORD_DENIED
 
 PRODUCER_MODULE = "health"
 
@@ -90,12 +90,12 @@ class SettlementRecordedPayload(BaseModel):
 
 
 class RecordAccessedPayload(BaseModel):
-    """Producer payload for ``record.accessed`` / ``record_view_denied``.
+    """Producer payload for ``record.accessed`` / ``record.denied``.
 
     The audit payload MOD-011 consumes (FEAT-003): names WHO read WHICH record
     and WHEN, plus the scope of the read. Carries no clinical content (no-PHI).
     ``metadata`` holds the optional ``denied`` / ``denial_reason`` for denied
-    attempts emitted as ``record_view_denied``.
+    attempts emitted as ``record.denied``.
     """
 
     record_id: int
@@ -129,7 +129,7 @@ def record_accessed_envelope(
     )
 
 
-def record_view_denied_envelope(
+def record_denied_envelope(
     record_id: int,
     actor_id: int,
     actor_type: str,
@@ -137,14 +137,14 @@ def record_view_denied_envelope(
     accessed_at: datetime,
     denial_reason: str,
 ) -> Envelope[RecordAccessedPayload]:
-    """Build the ``record_view_denied`` envelope for a refused read.
+    """Build the ``record.denied`` envelope for a refused read.
 
     The denial is auditable with the identity of who tried and why, separate
     from the allowed ``record.accessed`` event.
     """
     return Envelope[RecordAccessedPayload](
         event_id=uuid4(),
-        event_type=EVENT_RECORD_VIEW_DENIED,
+        event_type=EVENT_RECORD_DENIED,
         producer=PRODUCER_MODULE,
         payload=RecordAccessedPayload(
             record_id=record_id,

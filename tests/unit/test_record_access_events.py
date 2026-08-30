@@ -1,7 +1,7 @@
 """PHASE-4 T5: record.accessed event publishing (ticket #238, FEAT-003).
 
 Pins the producer contract of MOD-003's record-read audit path without a
-database: the ``record.accessed`` / ``record_view_denied`` envelope builders
+database: the ``record.accessed`` / ``record.denied`` envelope builders
 and payload shape, plus the dual-write behavior of ``_log_access`` - it
 appends the health_record_access_history row AND writes the outbox event in
 the same call (one transaction). Prior art: test_consent_events, the regulated-
@@ -15,12 +15,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from bus.events import EVENT_RECORD_ACCESSED, EVENT_RECORD_VIEW_DENIED
+from bus.events import EVENT_RECORD_ACCESSED, EVENT_RECORD_DENIED
 from modules.health.domain.events import (
     PRODUCER_MODULE,
     RecordAccessedPayload,
     record_accessed_envelope,
-    record_view_denied_envelope,
+    record_denied_envelope,
 )
 from modules.health.facade import _log_access
 
@@ -49,7 +49,7 @@ def test_accessed_envelope_names_the_read_with_no_phi() -> None:
 
 
 def test_denied_envelope_flags_the_denial_with_a_reason() -> None:
-    envelope = record_view_denied_envelope(
+    envelope = record_denied_envelope(
         record_id=42,
         actor_id=77,
         actor_type="doctor",
@@ -58,7 +58,7 @@ def test_denied_envelope_flags_the_denial_with_a_reason() -> None:
         denial_reason="consent check failed",
     )
 
-    assert envelope.event_type == EVENT_RECORD_VIEW_DENIED
+    assert envelope.event_type == EVENT_RECORD_DENIED
     assert envelope.producer == "health"
     metadata = envelope.payload.model_dump(mode="json")["metadata"]
     assert metadata == {"denied": True, "denial_reason": "consent check failed"}
@@ -76,7 +76,7 @@ def test_payload_rejects_absent_required_fields() -> None:
 
 def test_both_envelopes_carry_distinct_event_ids() -> None:
     accessed = record_accessed_envelope(1, 7, "patient", "full_record", _NOW)
-    denied = record_view_denied_envelope(1, 7, "patient", "full_record", _NOW, "no access")
+    denied = record_denied_envelope(1, 7, "patient", "full_record", _NOW, "no access")
     assert accessed.event_id != denied.event_id
 
 
@@ -109,7 +109,7 @@ async def test_log_access_dual_writes_history_row_and_outbox_event() -> None:
     assert envelope.payload.metadata == {}
 
 
-async def test_log_access_denied_publishes_view_denied_event() -> None:
+async def test_log_access_denied_publishes_record_denied_event() -> None:
     connection = AsyncMock()
 
     with patch("modules.health.facade.write_outbox", new_callable=AsyncMock) as write_outbox:
@@ -125,7 +125,7 @@ async def test_log_access_denied_publishes_view_denied_event() -> None:
 
     write_outbox.assert_awaited_once()
     envelope = write_outbox.await_args.args[3]
-    assert envelope.event_type == EVENT_RECORD_VIEW_DENIED
+    assert envelope.event_type == EVENT_RECORD_DENIED
     assert envelope.payload.metadata == {
         "denied": True,
         "denial_reason": "consent check failed",

@@ -15,9 +15,16 @@ from uuid import UUID
 from pydantic import BaseModel
 from sqlalchemy import func, insert, select
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.orm import aliased
 
 from modules.audit.domain.chain import GENESIS_HASH, compute_audit_hash
-from modules.audit.domain.consumer import AuditEventPayload, AuditRow, build_audit_row
+from modules.audit.domain.consumer import (
+    AuditEventPayload,
+    AuditRow,
+    RecordAccessAuditPayload,
+    build_audit_row,
+    build_record_access_row,
+)
 from modules.audit.schema.models import audit_events
 
 if TYPE_CHECKING:
@@ -56,15 +63,21 @@ def compute_event_hash(
 
 
 async def _latest_hash(connection: AsyncConnection) -> str:
-    """Return the most recent row's hash, or ``GENESIS_HASH`` for an empty chain.
+    """Return the chain tail's hash, or ``GENESIS_HASH`` for an empty ledger.
 
-    The chain head is the newest row by ``timestamp``; its digest becomes the
-    next row's ``prev_hash``. An empty ledger chains the first row to the
-    pinned genesis constant.
+    The tail is the row no other row references as its ``prev_hash`` - the
+    chain is defined by those links, never by ``timestamp``. A record-access
+    row carries the historical ``accessed_at`` (so the audit view matches the
+    access-history view); a newest-row-by-timestamp selection would make a
+    backdated row fork off an older head. The first row chains to the pinned
+    genesis constant. The ``references`` alias is explicit so the correlation
+    binds the inner ``prev_hash`` to each outer row, not to itself.
     """
-    hash_value = await connection.scalar(
-        select(audit_events.c.hash).order_by(audit_events.c.timestamp.desc()).limit(1)
+    references = aliased(audit_events)
+    referenced = (
+        select(references.c.prev_hash).where(references.c.prev_hash == audit_events.c.hash).exists()
     )
+    hash_value = await connection.scalar(select(audit_events.c.hash).where(~referenced).limit(1))
     return hash_value if hash_value is not None else GENESIS_HASH
 
 
@@ -76,7 +89,7 @@ async def append_audit_event(
 ) -> AuditRow:
     """Append one regulated act to the hash-chained ``audit_events`` ledger.
 
-    Reads the latest chain head (or genesis for the first row), computes the
+    Reads the chain tail (or genesis for the first row), computes the
     deterministic digest with ``build_audit_row``, and inserts the row with
     every required column populated. Designed to run inside the caller's
     transaction - the ``consumed_events`` ledger row - so a crash rolls both
@@ -84,6 +97,39 @@ async def append_audit_event(
     """
     prev_hash = await _latest_hash(connection)
     row = build_audit_row(payload, producer, occurred_at, prev_hash)
+    await connection.execute(
+        insert(audit_events).values(
+            event_type=row.event_type,
+            actor_id=row.actor_id,
+            target_id=row.target_id,
+            scope=row.scope,
+            metadata=row.metadata,
+            timestamp=row.timestamp,
+            prev_hash=row.prev_hash,
+            hash=row.hash,
+        )
+    )
+    return row
+
+
+async def append_record_access_event(
+    connection: AsyncConnection,
+    event_type: str,
+    payload: RecordAccessAuditPayload,
+    producer: str,
+) -> AuditRow:
+    """Append one record-access regulated act to the hash-chained ledger.
+
+    Mirrors ``append_audit_event`` for ``record.accessed`` / ``record.denied``:
+    reads the chain tail (or genesis), computes the deterministic digest
+    with ``build_record_access_row``, and inserts the row with every required
+    column populated. The event type is already the regulated act, so there is
+    no derived act type. Runs inside the caller's transaction (the
+    ``consumed_events`` ledger row), so a crash rolls both back together
+    (ADR-0002 §3).
+    """
+    prev_hash = await _latest_hash(connection)
+    row = build_record_access_row(event_type, payload, producer, prev_hash)
     await connection.execute(
         insert(audit_events).values(
             event_type=row.event_type,

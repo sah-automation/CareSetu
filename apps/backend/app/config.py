@@ -30,6 +30,11 @@ DEFAULT_AUTH_RATE_LIMIT_WINDOW_SECONDS = 60
 DEFAULT_ACCESS_TOKEN_TTL_SECONDS = 900
 # Mirrors ``modules.iam.domain.refresh.REFRESH_TOKEN_TTL_SECONDS`` (~30 days).
 DEFAULT_REFRESH_TOKEN_TTL_SECONDS = 2_592_000
+# Audit retention (PHASE-4, issue #234 storage item 21): 0 = no expiry, keep
+# every regulated act indefinitely. A future compliance decision may raise this
+# to 2555 (7 years) via AUDIT_RETENTION_DAYS without code changes; compaction/
+# archive logic stays deferred (GAP-011).
+DEFAULT_AUDIT_RETENTION_DAYS = 0
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _DEV_TEST_ENVIRONMENTS = frozenset({"dev", "test"})
@@ -57,6 +62,9 @@ class Settings:
     sms_circuit_breaker_cooldown_seconds: float = DEFAULT_SMS_CIRCUIT_BREAKER_COOLDOWN_SECONDS
     redis_url: str = DEFAULT_REDIS_URL
     redis_consent_ttl_seconds: int = DEFAULT_REDIS_CONSENT_TTL_SECONDS
+    # The stub flag for audit retention (GAP-011): 0 means no expiry today; the
+    # future 2555-day (7-year) policy is a one-line env change, never a code change.
+    audit_retention_days: int = DEFAULT_AUDIT_RETENTION_DAYS
     # Extra browser origins allowed by the CORS middleware, e.g. the Vercel
     # origin of the public demo (deployment plan 4.1). Empty by default, which
     # preserves today's posture: only the localhost dev origin is allowed.
@@ -108,6 +116,8 @@ class Settings:
             )
         if self.redis_consent_ttl_seconds <= 0:
             raise ValueError("redis_consent_ttl_seconds must be positive")
+        if self.audit_retention_days < 0:
+            raise ValueError("audit_retention_days must be zero or positive (0 = no expiry)")
         if self.gateway_access_token_ttl_seconds <= 0:
             raise ValueError("gateway_access_token_ttl_seconds must be positive")
         if self.gateway_refresh_token_ttl_seconds <= 0:
@@ -211,6 +221,7 @@ def get_settings() -> Settings:
         redis_consent_ttl_seconds=_env_int(
             "REDIS_CONSENT_TTL_SECONDS", DEFAULT_REDIS_CONSENT_TTL_SECONDS
         ),
+        audit_retention_days=_env_int("AUDIT_RETENTION_DAYS", DEFAULT_AUDIT_RETENTION_DAYS),
         cors_allowed_origins=_env_csv("CORS_ALLOWED_ORIGINS"),
         demo_mode=_env_bool("DEMO_MODE", False),
     )

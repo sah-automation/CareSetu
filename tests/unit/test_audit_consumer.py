@@ -10,6 +10,7 @@ connection handler tests (test_record_access_events).
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import NAMESPACE_DNS, uuid4, uuid5
@@ -18,17 +19,30 @@ import pytest
 from pydantic import BaseModel
 
 from bus.envelope import Envelope
-from bus.events import EVENT_AUDIT_EVENT
+from bus.events import (
+    EVENT_AUDIT_EVENT,
+    EVENT_AUDIT_TAMPER_DETECTED,
+    EVENT_RECORD_ACCESSED,
+    EVENT_RECORD_DENIED,
+)
 from bus.registry import HandlerRegistry
 from modules.audit.adapters import register_handlers
 from modules.audit.domain.chain import GENESIS_HASH, compute_audit_hash
 from modules.audit.domain.consumer import (
     AuditEventPayload,
+    RecordAccessAuditPayload,
+    TamperDetectedPayload,
     audit_act_type,
     build_audit_row,
+    build_record_access_row,
     is_appended_act,
 )
-from modules.audit.facade import AUDIT_SCHEMA, append_audit_event, compute_event_hash
+from modules.audit.facade import (
+    AUDIT_SCHEMA,
+    append_audit_event,
+    append_record_access_event,
+    compute_event_hash,
+)
 
 _NOW = datetime(2026, 8, 27, 10, 30, 0, tzinfo=UTC)
 _AUDIT_NS = uuid5(NAMESPACE_DNS, "caresetu.audit")
@@ -313,3 +327,241 @@ def test_compute_event_hash_helper_links_to_prev_hash() -> None:
         )
         == first
     )
+
+
+def _record_payload(denied: bool = False) -> RecordAccessAuditPayload:
+    """A MOD-003 record-access payload as MOD-011's mirror sees it."""
+    return RecordAccessAuditPayload(
+        record_id=42,
+        actor_id=7,
+        actor_type="patient",
+        scope="full_record",
+        accessed_at=_NOW,
+        metadata={"denied": True, "denial_reason": "consent check failed"} if denied else {},
+    )
+
+
+def _record_envelope(
+    event_type: str,
+    payload: RecordAccessAuditPayload,
+    producer: str = "health",
+    event_id=None,
+) -> Envelope[RecordAccessAuditPayload]:
+    return Envelope[RecordAccessAuditPayload](
+        event_id=event_id or uuid4(),
+        event_type=event_type,  # type: ignore[arg-type]
+        producer=producer,
+        payload=payload,
+    )
+
+
+def _registered_record_handler(event_type: str) -> tuple[HandlerRegistry, object]:
+    registry = HandlerRegistry()
+    register_handlers(registry)
+    # MOD-011 owns the payload mirror for the record-access events (consumer
+    # owns the model, cf. audit.event), and both event types share one handler.
+    assert registry.payload_model_for(event_type) is RecordAccessAuditPayload
+    handlers = registry.handlers_for(event_type)  # type: ignore[arg-type]
+    assert len(handlers) == 1
+    return registry, handlers[0]
+
+
+def test_build_record_access_row_populates_every_column() -> None:
+    row = build_record_access_row(EVENT_RECORD_ACCESSED, _record_payload(), "health", GENESIS_HASH)
+
+    assert row.event_type == "record.accessed"
+    assert row.actor_id == str(uuid5(_AUDIT_NS, "actor:7"))
+    assert row.target_id == str(uuid5(_AUDIT_NS, "record:42"))
+    assert row.scope == "full_record"
+    assert row.timestamp == _NOW
+    assert row.prev_hash == GENESIS_HASH
+    assert row.metadata == {"producer": "health", "actor_type": "patient"}
+    expected = compute_audit_hash(
+        row.event_type,
+        row.actor_id,
+        row.target_id,
+        row.scope,
+        row.metadata,
+        row.timestamp,
+        row.prev_hash,
+    )
+    assert row.hash == expected
+    assert len(row.hash) == 64
+
+
+def test_build_record_access_row_for_denied_keeps_the_reason() -> None:
+    row = build_record_access_row(
+        EVENT_RECORD_DENIED, _record_payload(denied=True), "health", GENESIS_HASH
+    )
+
+    assert row.event_type == "record.denied"
+    # The denial facts ride the chain metadata exactly as the outbox carried them.
+    assert row.metadata == {
+        "producer": "health",
+        "actor_type": "patient",
+        "denied": True,
+        "denial_reason": "consent check failed",
+    }
+
+
+def test_record_access_row_uses_payload_time_for_ledger_consistency() -> None:
+    """The chain timestamp mirrors health's accessed_at, so both views agree."""
+    row = build_record_access_row(EVENT_RECORD_ACCESSED, _record_payload(), "health", GENESIS_HASH)
+    assert row.timestamp == _NOW
+
+
+async def test_record_access_handler_records_ledger_then_appends() -> None:
+    _, handler = _registered_record_handler(EVENT_RECORD_ACCESSED)
+    envelope = _record_envelope(EVENT_RECORD_ACCESSED, _record_payload())
+    engine, connection = _fake_engine()
+
+    with (
+        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch(
+            "modules.audit.adapters.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as record_consumed,
+        patch(
+            "modules.audit.adapters.append_record_access_event",
+            new_callable=AsyncMock,
+        ) as append,
+    ):
+        await handler(envelope)
+
+    record_consumed.assert_awaited_once()
+    assert record_consumed.await_args.args[1] == AUDIT_SCHEMA
+    append.assert_awaited_once()
+    assert append.await_args.args[0] is connection
+    assert append.await_args.args[1] == EVENT_RECORD_ACCESSED
+    assert append.await_args.args[2].record_id == 42
+    assert append.await_args.args[3] == "health"
+
+
+async def test_record_access_handler_skips_when_ledger_already_has_event_id() -> None:
+    _, handler = _registered_record_handler(EVENT_RECORD_DENIED)
+    envelope = _record_envelope(EVENT_RECORD_DENIED, _record_payload(denied=True))
+    engine, _connection = _fake_engine()
+
+    with (
+        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch(
+            "modules.audit.adapters.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=False,
+        ) as record_consumed,
+        patch(
+            "modules.audit.adapters.append_record_access_event",
+            new_callable=AsyncMock,
+        ) as append,
+    ):
+        await handler(envelope)
+
+    # delivered=False -> the append never runs: one event_id = one audit row.
+    record_consumed.assert_awaited_once()
+    append.assert_not_awaited()
+
+
+async def test_append_record_access_event_reads_latest_hash_and_inserts_every_column() -> None:
+    connection = AsyncMock()
+    connection.scalar = AsyncMock(return_value=None)
+    payload = _record_payload()
+
+    row = await append_record_access_event(connection, EVENT_RECORD_ACCESSED, payload, "health")
+
+    connection.scalar.assert_awaited_once()
+    assert row.prev_hash == GENESIS_HASH
+    connection.execute.assert_awaited_once()
+    values = _insert_values(connection.execute.await_args.args[0])
+    assert values["event_type"] == "record.accessed"
+    assert values["actor_id"] == str(uuid5(_AUDIT_NS, "actor:7"))
+    assert values["target_id"] == str(uuid5(_AUDIT_NS, "record:42"))
+    assert values["scope"] == "full_record"
+    assert values["metadata"] == {"producer": "health", "actor_type": "patient"}
+    assert values["timestamp"] == _NOW
+    assert values["prev_hash"] == GENESIS_HASH
+    assert values["hash"] == row.hash
+
+
+def test_record_access_payload_is_a_pydantic_model() -> None:
+    assert issubclass(RecordAccessAuditPayload, BaseModel)
+    assert issubclass(TamperDetectedPayload, BaseModel)
+
+
+def test_tamper_event_registers_model_and_a_single_consumer() -> None:
+    registry = HandlerRegistry()
+    register_handlers(registry)
+    assert registry.payload_model_for(EVENT_AUDIT_TAMPER_DETECTED) is TamperDetectedPayload
+    handlers = registry.handlers_for(EVENT_AUDIT_TAMPER_DETECTED)
+    assert len(handlers) == 1
+
+
+async def test_tamper_handler_consumes_and_never_appends_to_chain() -> None:
+    """audit.tamper_detected is telemetry: consumed, logged, never chained."""
+    registry = HandlerRegistry()
+    register_handlers(registry)
+    handler = registry.handlers_for(EVENT_AUDIT_TAMPER_DETECTED)[0]
+    payload = TamperDetectedPayload(
+        attempted_operation="UPDATE",
+        target_event_id=str(uuid4()),
+        details={"old_data": {}, "user": "caresetu"},
+        attempted_at=_NOW,
+    )
+    envelope = Envelope[TamperDetectedPayload](
+        event_id=uuid4(),
+        event_type=EVENT_AUDIT_TAMPER_DETECTED,
+        producer="audit",
+        payload=payload,
+    )
+    engine, _connection = _fake_engine()
+
+    with (
+        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch(
+            "modules.audit.adapters.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("modules.audit.adapters.append_audit_event", new_callable=AsyncMock) as append_audit,
+        patch(
+            "modules.audit.adapters.append_record_access_event",
+            new_callable=AsyncMock,
+        ) as append_record,
+    ):
+        await handler(envelope)
+
+    append_audit.assert_not_awaited()
+    append_record.assert_not_awaited()
+
+
+async def test_tamper_handler_logs_the_attempt(caplog) -> None:
+    """The deferred-alert minimal delivery is a structured log line."""
+    registry = HandlerRegistry()
+    register_handlers(registry)
+    handler = registry.handlers_for(EVENT_AUDIT_TAMPER_DETECTED)[0]
+    payload = TamperDetectedPayload(
+        attempted_operation="DELETE",
+        target_event_id=str(uuid4()),
+        details={"user": "caresetu"},
+        attempted_at=_NOW,
+    )
+    envelope = Envelope[TamperDetectedPayload](
+        event_id=uuid4(),
+        event_type=EVENT_AUDIT_TAMPER_DETECTED,
+        producer="audit",
+        payload=payload,
+    )
+    engine, _connection = _fake_engine()
+
+    with (
+        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch(
+            "modules.audit.adapters.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        caplog.at_level(logging.WARNING, logger="modules.audit.adapters"),
+    ):
+        await handler(envelope)
+
+    assert any("tamper attempt blocked and recorded" in record.message for record in caplog.records)
