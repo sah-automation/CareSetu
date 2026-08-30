@@ -30,6 +30,14 @@ EVENT_SETTLEMENT_RECORDED = "settlement.recorded"
 # same transaction as the audited change; MOD-011 consumes and appends to the
 # audit schema (ADR-0002 §5) - the dispatcher never synthesizes it.
 EVENT_AUDIT_EVENT = "audit.event"
+# MOD-003 (health): emitted on every record read - owner or consented partner.
+# Dual-write with the health_record_access_history ledger (FEAT-003): the
+# event drives MOD-011's hash chain, the local ledger feeds the fast patient
+# view. internal-modules.md §4.2 registry.
+EVENT_RECORD_ACCESSED = "record.accessed"
+# MOD-003 (health): emitted when a read attempt is denied (non-owner or a
+# failed consent check); carries denied=true + denial_reason in metadata.
+EVENT_RECORD_VIEW_DENIED = "record_view_denied"
 
 # PHASE-4 T3 (#237): the canonical regulated-act whitelist. MOD-011 appends an
 # ``audit.event`` payload to the hash chain only when its ``event_type`` is
@@ -41,8 +49,8 @@ REGULATED_ACT_TYPES: frozenset[str] = frozenset(
         EVENT_CONSENT_REQUESTED,
         EVENT_CONSENT_GRANTED,
         EVENT_CONSENT_REVOKED,
-        "record.accessed",
-        "record_view_denied",
+        EVENT_RECORD_ACCESSED,
+        EVENT_RECORD_VIEW_DENIED,
         "prescription.approved",
         "prescription.rejected",
         "prescription.routed",

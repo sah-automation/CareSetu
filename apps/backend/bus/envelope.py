@@ -17,29 +17,34 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
-_EVENT_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")
+_EVENT_TYPE_PATTERN = re.compile(
+    r"^(?:[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*|[a-z][a-z0-9_]*_[a-z][a-z0-9_]+)$"
+)
 
 PayloadT = TypeVar("PayloadT", bound=BaseModel, covariant=True)
 
 
 def is_valid_event_type(value: str) -> bool:
-    """Return True when ``value`` matches the registry ``domain.action`` shape.
+    """Return True when ``value`` matches the event-type grammar.
 
-    Single source of truth for the event-type grammar so the ``Envelope``
-    validator (T2a) and the ``HandlerRegistry`` key guard (T2b) agree.
+    Accepts the registry ``domain.action`` dot-notation shape (``record.accessed``)
+    and the underscore ``domain_action`` shape (``record_view_denied``). Single
+    source of truth for the event-type grammar so the ``Envelope`` validator
+    (T2a) and the ``HandlerRegistry`` key guard (T2b) agree.
     """
     return _EVENT_TYPE_PATTERN.match(value) is not None
 
 
 def require_valid_event_type(value: str) -> None:
-    """Raise ``ValueError`` unless ``value`` matches the ``domain.action`` shape.
+    """Raise ``ValueError`` unless ``value`` matches the event-type grammar.
 
     The ``Envelope`` validator and ``HandlerRegistry`` share this so the
     grammar and its message live in exactly one place.
     """
     if not is_valid_event_type(value):
         raise ValueError(
-            f"event_type must match '<domain>.<action>' in lowercase snake_case, got {value!r}"
+            f"event_type must be '<domain>.<action>' or lowercase '<domain>_<action>', "
+            f"got {value!r}"
         )
 
 

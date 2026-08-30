@@ -21,7 +21,7 @@ append-only egress audit row (see inline ADR in ``read_consented_history``).
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 # Type-only import to avoid circular dependency at runtime
 from typing import TYPE_CHECKING
@@ -32,10 +32,13 @@ from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app.config import Settings
+from bus.outbox_writer import write_outbox
+from modules.health.domain.events import record_accessed_envelope, record_view_denied_envelope
 from modules.health.domain.exceptions import (
     RecordAccessDeniedError,
     RecordNotFoundError,
 )
+from modules.health.outbox import HEALTH_OUTBOX_TABLE
 from modules.health.schema.models import (
     health_patient_records,
     health_record_access_history,
@@ -46,6 +49,12 @@ if TYPE_CHECKING:
     from modules.consent.facade import ConsentFacade
 
 HEALTH_SCHEMA = "health"
+
+# The default scope for an owner's own read of their complete record; matches
+# the consent ``RecordScope`` vocabulary ("full_record").
+_OWNER_SCOPE = "full_record"
+
+_ACTOR_TYPE_PATIENT = "patient"
 
 
 class RecordEntryView(BaseModel):
@@ -96,9 +105,23 @@ async def _ensure_record_shell(connection: AsyncConnection, patient_id: int) -> 
 
 
 async def _log_access(
-    connection: AsyncConnection, record_id: int, accessor_identity_id: int, outcome: str
+    connection: AsyncConnection,
+    record_id: int,
+    accessor_identity_id: int,
+    outcome: str,
+    *,
+    actor_type: str,
+    scope: str,
+    denial_reason: str | None = None,
 ) -> None:
-    """Append one access-history row for this read attempt (KPI-006)."""
+    """Record one read attempt in BOTH the access-history ledger and the outbox.
+
+    Dual write (FEAT-003, KPI-006) in the caller's transaction: the
+    ``health_record_access_history`` row feeds the fast patient view, and the
+    ``record.accessed`` / ``record_view_denied`` event drives MOD-011's hash
+    chain. The caller commits or rolls both back together.
+    """
+    accessed_at = datetime.now(UTC)
     await connection.execute(
         health_record_access_history.insert().values(
             record_id=record_id,
@@ -106,6 +129,24 @@ async def _log_access(
             outcome=outcome,
         )
     )
+    if outcome == "allowed":
+        envelope = record_accessed_envelope(
+            record_id=record_id,
+            actor_id=accessor_identity_id,
+            actor_type=actor_type,
+            scope=scope,
+            accessed_at=accessed_at,
+        )
+    else:
+        envelope = record_view_denied_envelope(
+            record_id=record_id,
+            actor_id=accessor_identity_id,
+            actor_type=actor_type,
+            scope=scope,
+            accessed_at=accessed_at,
+            denial_reason=denial_reason or "access denied",
+        )
+    await write_outbox(connection, HEALTH_SCHEMA, HEALTH_OUTBOX_TABLE, envelope)
 
 
 async def _load_timeline(
@@ -176,7 +217,14 @@ class HealthFacade:
         """
         async with self._engine.begin() as connection:
             record_id = await _ensure_record_shell(connection, patient_id)
-            await _log_access(connection, record_id, patient_id, "allowed")
+            await _log_access(
+                connection,
+                record_id,
+                patient_id,
+                "allowed",
+                actor_type=_ACTOR_TYPE_PATIENT,
+                scope=_OWNER_SCOPE,
+            )
             return await _load_timeline(connection, record_id, patient_id)
 
     async def get_record_as_owner(self, patient_id: int, record_id: int) -> RecordTimeline:
@@ -202,10 +250,25 @@ class HealthFacade:
                 # No record to key a history row against: 404, nothing logged.
                 pass
             elif row.identity_id != patient_id:
-                await _log_access(connection, record_id, patient_id, "denied")
+                await _log_access(
+                    connection,
+                    record_id,
+                    patient_id,
+                    "denied",
+                    actor_type=_ACTOR_TYPE_PATIENT,
+                    scope=_OWNER_SCOPE,
+                    denial_reason="only the record owner may read this record",
+                )
                 denial_recorded = True
             else:
-                await _log_access(connection, record_id, patient_id, "allowed")
+                await _log_access(
+                    connection,
+                    record_id,
+                    patient_id,
+                    "allowed",
+                    actor_type=_ACTOR_TYPE_PATIENT,
+                    scope=_OWNER_SCOPE,
+                )
                 return await _load_timeline(connection, record_id, patient_id)
         if denial_recorded:
             raise RecordAccessDeniedError("only the record owner may read this record")
@@ -266,12 +329,27 @@ class HealthFacade:
             record_id = await _ensure_record_shell(connection, patient_id)
 
             if denied:
-                # Denied read: log in access history, then raise AFTER
-                # the transaction commits (cf. get_record_as_owner pattern).
-                await _log_access(connection, record_id, counterparty_id, "denied")
+                # Denied read: log access history + denied event, then raise
+                # AFTER the transaction commits (cf. get_record_as_owner pattern).
+                await _log_access(
+                    connection,
+                    record_id,
+                    counterparty_id,
+                    "denied",
+                    actor_type=counterparty_type,
+                    scope=scope,
+                    denial_reason="consent check failed",
+                )
             else:
-                # Allowed read: load entries and log in access history
-                await _log_access(connection, record_id, counterparty_id, "allowed")
+                # Allowed read: load entries and log access history + event
+                await _log_access(
+                    connection,
+                    record_id,
+                    counterparty_id,
+                    "allowed",
+                    actor_type=counterparty_type,
+                    scope=scope,
+                )
                 timeline = await _load_timeline(connection, record_id, patient_id)
 
         if denied:
