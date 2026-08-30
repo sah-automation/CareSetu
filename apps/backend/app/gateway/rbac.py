@@ -51,6 +51,22 @@ async def require_patient(request: Request) -> Principal:
     return principal
 
 
+async def require_operator(request: Request) -> Principal:
+    """FastAPI dependency: admit only an authenticated operator-scoped caller.
+
+    Reads the ``Principal`` the gateway's ``jwt_verify`` middleware attached to
+    the request state. Anonymous or missing principals are refused with 401;
+    an authenticated caller without the operator role is refused with 403
+    (api-standards A6, NFR-SEC-003: operator = all records).
+    """
+    principal: Principal | None = getattr(request.state, "principal", None)
+    if principal is None or not principal.is_authenticated:
+        raise AuthenticationRequiredError("no valid session on a protected route")
+    if "operator" not in principal.roles:
+        raise InsufficientScopeError("the operator role is required for this route")
+    return principal
+
+
 async def require_partner(request: Request) -> Principal:
     """FastAPI dependency: admit only an authenticated partner-scoped caller.
 

@@ -85,6 +85,8 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         # PHASE-3 T11 (#220): test-only data seeding endpoints.
         "/v1/test/seed",
         "/v1/test/seed-egress",
+        # PHASE-4 T6 (#240): operator-only audit query surface.
+        "/v1/audit/events",
     }
 
 
