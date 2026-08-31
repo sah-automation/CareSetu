@@ -25,7 +25,7 @@ from modules.iam.domain.exceptions import (
     SessionIssuanceError,
 )
 from modules.iam.domain.shared import _identity_phone
-from modules.iam.domain.verify import IDENTITY_ACTIVE
+from modules.iam.domain.verify import IDENTITY_ACTIVE, IDENTITY_SUSPENDED
 from modules.iam.outbox import IAM_OUTBOX_TABLE
 from modules.iam.schema.models import (
     iam_identities,
@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 
 _IAM_SCHEMA = "iam"
 _PATIENT_ROLE = "patient"
+_PARTNER_ROLE = "partner"
 
 
 class SessionResult(BaseModel):
@@ -369,6 +370,77 @@ async def _resolve_active_role(
                 iam_role_grants.c.identity_id == identity_id,
                 iam_role_grants.c.role == role,
                 iam_role_grants.c.status == IDENTITY_ACTIVE,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def grant_partner_role(connection: AsyncConnection, identity_id: int) -> None:
+    """Grant (or restore) the ``partner`` role on ``identity_id`` (T03, #248).
+
+    Idempotent: an existing ``Active`` partner grant is left untouched, a
+    missing one is inserted, and a ``Suspended`` one (a previously rejected
+    partner being re-approved) is flipped back to ``Active``. Runs on the
+    consumer's delivery connection inside the same transaction as the
+    ``consumed_events`` ledger row (ADR-0002 §3), so a redelivered
+    ``partner.activated`` is a no-op and a crash rolls both back.
+    """
+
+    await connection.execute(
+        iam_role_grants.update()
+        .where(
+            iam_role_grants.c.identity_id == identity_id,
+            iam_role_grants.c.role == _PARTNER_ROLE,
+            iam_role_grants.c.status == IDENTITY_SUSPENDED,
+        )
+        .values(status=IDENTITY_ACTIVE)
+    )
+    existing = (
+        await connection.execute(
+            select(iam_role_grants.c.id).where(
+                iam_role_grants.c.identity_id == identity_id,
+                iam_role_grants.c.role == _PARTNER_ROLE,
+                iam_role_grants.c.status == IDENTITY_ACTIVE,
+            )
+        )
+    ).first()
+    if existing is None:
+        await connection.execute(
+            iam_role_grants.insert().values(
+                identity_id=identity_id, role=_PARTNER_ROLE, status=IDENTITY_ACTIVE
+            )
+        )
+
+
+async def suspend_partner_role(connection: AsyncConnection, identity_id: int) -> None:
+    """Suspend the ``partner`` role on ``identity_id`` (T03, #248).
+
+    Flips an ``Active`` partner grant to ``Suspended``; a missing grant (never
+    activated) or one already suspended is left alone, so the deny is idempotent
+    even when no grant row exists. Runs on the consumer's delivery connection in
+    the same transaction as the ``consumed_events`` ledger row.
+    """
+
+    await connection.execute(
+        iam_role_grants.update()
+        .where(
+            iam_role_grants.c.identity_id == identity_id,
+            iam_role_grants.c.role == _PARTNER_ROLE,
+            iam_role_grants.c.status == IDENTITY_ACTIVE,
+        )
+        .values(status=IDENTITY_SUSPENDED)
+    )
+
+
+async def _partner_role_status(connection: AsyncConnection, identity_id: int) -> str | None:
+    """The ``partner`` role grant status for ``identity_id`` (None if none)."""
+    return (
+        await connection.execute(
+            select(iam_role_grants.c.status)
+            .where(
+                iam_role_grants.c.identity_id == identity_id,
+                iam_role_grants.c.role == _PARTNER_ROLE,
             )
             .limit(1)
         )

@@ -52,15 +52,18 @@ def test_verification_started_carries_the_round() -> None:
 
 
 def test_activated_carries_the_approving_operator() -> None:
-    envelope = partner_activated_envelope(partner_id=3, decision_by=77)
+    envelope = partner_activated_envelope(partner_id=3, identity_id=9, decision_by=77)
 
     assert envelope.event_type == EVENT_PARTNER_ACTIVATED
     assert envelope.payload.partner_id == 3
+    assert envelope.payload.identity_id == 9
     assert envelope.payload.decision_by == 77
 
 
 def test_rejected_carries_reason_and_round() -> None:
-    envelope = partner_rejected_envelope(partner_id=3, reason="doc unreadable", round=1)
+    envelope = partner_rejected_envelope(
+        partner_id=3, identity_id=9, reason="doc unreadable", round=1
+    )
 
     assert envelope.event_type == EVENT_PARTNER_REJECTED
     assert envelope.payload.reason == "doc unreadable"
@@ -70,7 +73,7 @@ def test_rejected_carries_reason_and_round() -> None:
 
 def test_rejected_operator_decision_carries_actor() -> None:
     envelope = partner_rejected_envelope(
-        partner_id=3, reason="fraud signal", round=2, decision_by=77
+        partner_id=3, identity_id=9, reason="fraud signal", round=2, decision_by=77
     )
 
     assert envelope.payload.decision_by == 77
@@ -85,10 +88,13 @@ def test_credential_reviewed_carries_actor_and_partner() -> None:
 
 
 def test_credential_invalidated_carries_reason() -> None:
-    envelope = credential_invalidated_envelope(partner_id=3, reason="grace lapsed", credential_id=5)
+    envelope = credential_invalidated_envelope(
+        partner_id=3, identity_id=9, reason="grace lapsed", credential_id=5
+    )
 
     assert envelope.event_type == EVENT_CREDENTIAL_INVALIDATED
     assert envelope.payload.partner_id == 3
+    assert envelope.payload.identity_id == 9
     assert envelope.payload.credential_id == 5
     assert envelope.payload.reason == "grace lapsed"
 
@@ -99,10 +105,10 @@ def test_no_payload_carries_credential_artifact_bytes() -> None:
     for envelope in (
         partner_registered_envelope(3, 9, "lab"),
         verification_started_envelope(3, 1),
-        partner_activated_envelope(3, 77),
-        partner_rejected_envelope(3, "reason", 1),
+        partner_activated_envelope(3, 9, 77),
+        partner_rejected_envelope(3, 9, "reason", 1),
         credential_reviewed_envelope(3, 77),
-        credential_invalidated_envelope(3, "reason", 5),
+        credential_invalidated_envelope(3, 9, "reason", 5),
     ):
         dumped = envelope.payload.model_dump(mode="json")
         assert "artifact" not in dumped
@@ -114,10 +120,10 @@ def test_every_builder_produces_distinct_event_ids() -> None:
     envelopes = [
         partner_registered_envelope(3, 9, "doctor"),
         verification_started_envelope(3, 1),
-        partner_activated_envelope(3, 77),
-        partner_rejected_envelope(3, "reason", 1),
+        partner_activated_envelope(3, 9, 77),
+        partner_rejected_envelope(3, 9, "reason", 1),
         credential_reviewed_envelope(3, 77),
-        credential_invalidated_envelope(3, "reason", 5),
+        credential_invalidated_envelope(3, 9, "reason", 5),
     ]
 
     ids = {envelope.event_id for envelope in envelopes}

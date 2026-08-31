@@ -62,9 +62,14 @@ class PartnerActivatedPayload(BaseModel):
 
     Reached ONLY by explicit operator decision - the no-auto-approve guarantee
     (ADR-0008 §2). ``decision_by`` is the approving operator identity.
+    ``identity_id`` is the iam identity the ``partner`` role is granted to
+    (MOD-001 consumes this event to flip the role on activation); it was fixed
+    at registration (ADR-0010) and rides the payload so the consuming iam
+    module never reads this schema (ADR-0003 isolation).
     """
 
     partner_id: int
+    identity_id: int
     decision_by: int
 
 
@@ -73,10 +78,14 @@ class PartnerRejectedPayload(BaseModel):
 
     Two emitters (ADR-0008). Step-1 auto-fail (reason ``step1_fail``, never
     queued) and operator rejection (reason the operator gave). ``round`` names
-    the verification round that was refused.
+    the verification round that was refused. ``identity_id`` is the iam
+    identity whose ``partner`` role is suspended (MOD-001 consumes this to deny
+    the role on rejection) - the isolation-safe identifier, never a cross-schema
+    read.
     """
 
     partner_id: int
+    identity_id: int
     reason: str
     round: int
     decision_by: int | None = None
@@ -101,10 +110,13 @@ class CredentialInvalidatedPayload(BaseModel):
     Fires on permanent rejection (document cleanup after 30 days) and when an
     Active partner's re-verification fails / the grace window lapses with the
     credential expired - deindexing the directory and revoking the IAM role
-    via MOD-001 (ADR-0008, spec phase-5 "Deactivation").
+    via MOD-001 (ADR-0008, spec phase-5 "Deactivation"). ``identity_id`` is
+    the iam identity whose ``partner`` role is suspended on deactivation
+    (MOD-001 consumes this event) - the isolation-safe identifier.
     """
 
     partner_id: int
+    identity_id: int
     credential_id: int | None = None
     reason: str
 
@@ -136,19 +148,22 @@ def verification_started_envelope(
 
 
 def partner_activated_envelope(
-    partner_id: int, decision_by: int
+    partner_id: int, identity_id: int, decision_by: int
 ) -> Envelope[PartnerActivatedPayload]:
     """Build the ``partner.activated`` envelope for the partner outbox."""
     return Envelope[PartnerActivatedPayload](
         event_id=uuid4(),
         event_type=EVENT_PARTNER_ACTIVATED,
         producer=PRODUCER_MODULE,
-        payload=PartnerActivatedPayload(partner_id=partner_id, decision_by=decision_by),
+        payload=PartnerActivatedPayload(
+            partner_id=partner_id, identity_id=identity_id, decision_by=decision_by
+        ),
     )
 
 
 def partner_rejected_envelope(
     partner_id: int,
+    identity_id: int,
     reason: str,
     round: int,
     decision_by: int | None = None,
@@ -160,6 +175,7 @@ def partner_rejected_envelope(
         producer=PRODUCER_MODULE,
         payload=PartnerRejectedPayload(
             partner_id=partner_id,
+            identity_id=identity_id,
             reason=reason,
             round=round,
             decision_by=decision_by,
@@ -181,6 +197,7 @@ def credential_reviewed_envelope(
 
 def credential_invalidated_envelope(
     partner_id: int,
+    identity_id: int,
     reason: str,
     credential_id: int | None = None,
 ) -> Envelope[CredentialInvalidatedPayload]:
@@ -191,6 +208,7 @@ def credential_invalidated_envelope(
         producer=PRODUCER_MODULE,
         payload=CredentialInvalidatedPayload(
             partner_id=partner_id,
+            identity_id=identity_id,
             credential_id=credential_id,
             reason=reason,
         ),

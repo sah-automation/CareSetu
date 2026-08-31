@@ -65,6 +65,9 @@ from modules.iam.session_facade import (
 from modules.iam.session_facade import (
     ValidatedAccessToken as ValidatedAccessToken,
 )
+from modules.iam.session_facade import (
+    _partner_role_status as _partner_role_status,
+)
 
 _IAM_SCHEMA = "iam"
 
@@ -162,6 +165,17 @@ class IamFacade:
         """
         async with self._engine.begin() as connection:
             return await _identity_phone(connection, identity_id)
+
+    async def partner_role_status(self, identity_id: int) -> str | None:
+        """The lifecycle status of the ``partner`` role grant for ``identity_id``.
+
+        T03 (#248) observability seam: ``None`` when the identity holds no
+        ``partner`` grant, otherwise the grant status (``Active`` or
+        ``Suspended``). Lets the event-chain tests and any consumer-facing
+        surface read the role outcome through the facade, never the internals.
+        """
+        async with self._engine.begin() as connection:
+            return await _partner_role_status(connection, identity_id)
 
     # -- Audit --------------------------------------------------------------
 

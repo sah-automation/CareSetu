@@ -222,6 +222,7 @@ class PartnerFacade:
                     PARTNER_OUTBOX_TABLE,
                     partner_rejected_envelope(
                         partner_id,
+                        identity_id=profile.identity_id,
                         reason=reason or _STEP1_REASON,
                         round=next_state.round,
                         decision_by=None,
@@ -256,7 +257,7 @@ class PartnerFacade:
                     connection,
                     PARTNER_SCHEMA,
                     PARTNER_OUTBOX_TABLE,
-                    partner_activated_envelope(partner_id, decision_by),
+                    partner_activated_envelope(partner_id, profile.identity_id, decision_by),
                 )
             else:
                 await write_outbox(
@@ -265,6 +266,7 @@ class PartnerFacade:
                     PARTNER_OUTBOX_TABLE,
                     partner_rejected_envelope(
                         partner_id,
+                        identity_id=profile.identity_id,
                         reason=reason or "rejected by operator",
                         round=next_state.round,
                         decision_by=decision_by,
