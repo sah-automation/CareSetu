@@ -1,13 +1,14 @@
-"""PHASE-2 T1: the five ``iam`` schema tables exist after upgrade (#52).
+"""PHASE-2 T1: the iam schema tables exist after upgrade (#52).
 
 ``alembic upgrade head`` applies ``v1.0__init_iam`` which creates the MOD-001
 data foundation - ``iam_identities``, ``iam_otp_challenges``, ``iam_sessions``,
 ``iam_role_grants`` and ``iam_outbox`` - inside the private ``iam`` schema
-(ADR-0003). The test asserts the five tables exist and that the duplicate
-arbiter ``phone_e164`` is unique with the FEAT-001 status check on top. Leaves
-the database at ``base`` so sibling tests run from a clean slate; skips cleanly
-when the native PostgreSQL is unreachable, like the rest of the integration
-suite.
+(ADR-0003), and ``v4.1__iam_roles_mfa`` (#244) which adds ``iam_operator_mfa``
+for operator MFA enrollment. The test asserts these tables exist and that the
+duplicate arbiter ``phone_e164`` is unique with the FEAT-001 status check on
+top. Leaves the database at ``base`` so sibling tests run from a clean slate;
+skips cleanly when the native PostgreSQL is unreachable, like the rest of the
+integration suite.
 """
 
 import asyncio
@@ -28,6 +29,7 @@ IAM_TABLES = {
     "iam_sessions",
     "iam_role_grants",
     "iam_outbox",
+    "iam_operator_mfa",
 }
 
 
@@ -70,7 +72,7 @@ async def _constraints(database_url: str, table: str) -> set[tuple[str, str]]:
         await engine.dispose()
 
 
-def test_upgrade_head_creates_the_five_iam_tables(database_url: str, reachable_db: None) -> None:
+def test_upgrade_head_creates_the_iam_tables(database_url: str, reachable_db: None) -> None:
     config = _alembic_config(database_url)
 
     upgraded = False
