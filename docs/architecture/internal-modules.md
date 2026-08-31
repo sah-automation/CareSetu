@@ -202,7 +202,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 
 - **Inbound Sync APIs:** `register_partner(profile, credentials)`, `submit_credentials`, `list_verification_queue(operator)`, `operator_decision(partner, approve|reject)`, `search_directory(query, filters, geo)`, `get_provider_profile(partner)`, `invalidate_credential(partner, reason)`.
 - **Inbound Events Subscribed:** (none external; driven by sync calls from operator/partner channels).
-- **Outbound Events Published:** `partner.registered`, `partner.verification_started`, `partner.activated`, `partner.rejected`, `credential.invalidated`, `directory_search` (analytics).
+- **Outbound Events Published:** `partner.registered`, `partner.verification_started`, `partner.credential_reviewed`, `partner.activated`, `partner.rejected`, `credential.invalidated`, `directory_search` (analytics).
 
 #### 3. Core Business Logic & State Machines
 
@@ -634,6 +634,8 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 | `follow_up.due`                                | `MOD-003` (LHR) / Scheduler | `MOD-010` (send re-test nudge), `MOD-011`                                    | JSON           | At-least-once              |
 | `notification.sent` / `.delivered` / `.failed` | `MOD-010` (Notify)          | `MOD-011`                                                                    | JSON           | At-least-once              |
 | `partner.registered`                           | `MOD-002` (Partner)         | `MOD-011`                                                                    | JSON           | At-least-once              |
+| `partner.verification_started`                 | `MOD-002` (Partner)         | `MOD-011`                                                                    | JSON           | At-least-once              |
+| `partner.credential_reviewed`                  | `MOD-002` (Partner)         | `MOD-011`                                                                    | JSON           | At-least-once              |
 | `partner.activated`                            | `MOD-002` (Partner)         | `MOD-001` (activate role), `MOD-010` (notify partner), `MOD-011`             | JSON           | At-least-once              |
 | `partner.rejected`                             | `MOD-002` (Partner)         | `MOD-001` (deny role), `MOD-010`, `MOD-011`                                  | JSON           | At-least-once              |
 | `credential.invalidated`                       | `MOD-002` (Partner)         | `MOD-011`, (self: deindex directory)                                         | JSON           | At-least-once              |

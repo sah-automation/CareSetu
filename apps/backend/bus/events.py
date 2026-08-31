@@ -49,6 +49,24 @@ EVENT_AUDIT_TAMPER_DETECTED = "audit.tamper_detected"
 # MOD-002 (partner): emitted when a partner credential account is created
 # synchronously by the iam facade (ADR-0010, ticket #245).
 EVENT_PARTNER_REGISTERED = "partner.registered"
+# MOD-002 (partner): emitted when a verification round (first-time or
+# re-verification) opens, carrying the round/version in the payload so the
+# audit trail distinguishes rounds (ADR-0008, ticket #247).
+EVENT_PARTNER_VERIFICATION_STARTED = "partner.verification_started"
+# MOD-002 (partner): emitted ONLY on explicit operator approval - no
+# auto-approve path ever reaches Active (ADR-0008 two-step gate, ticket #247).
+EVENT_PARTNER_ACTIVATED = "partner.activated"
+# MOD-002 (partner): emitted on operator rejection (carries the reason) or on
+# Step-1 auto-fail (never queued) (ADR-0008, ticket #247).
+EVENT_PARTNER_REJECTED = "partner.rejected"
+# MOD-002 (partner): emitted when an operator views a partner's credentials
+# during review, carrying actor + partner + timestamp (ADR-0008, ticket #247).
+# Layered on top of the terminal decision audit (partner.activated/rejected).
+EVENT_PARTNER_CREDENTIAL_REVIEWED = "partner.credential_reviewed"
+# MOD-002 (partner): emitted when a credential is invalidated - on permanent
+# rejection or when an active partner's re-verification window fails and the
+# credential expires (7-day grace window), deindexing the directory (ticket #247).
+EVENT_CREDENTIAL_INVALIDATED = "credential.invalidated"
 # MOD-010 (notify): emitted into ``notify.notify_outbox`` when a delivery
 # channel reports the message failed/undeliverable (ADR-0009). The EXT-003
 # delivery webhook's ``notification.failed`` drives the WhatsApp -> SMS
@@ -81,9 +99,9 @@ REGULATED_ACT_TYPES: frozenset[str] = frozenset(
         "order.cancelled",
         "refund.partner_direct",
         EVENT_PARTNER_REGISTERED,
-        "partner.activated",
-        "partner.rejected",
-        "credential.invalidated",
+        EVENT_PARTNER_ACTIVATED,
+        EVENT_PARTNER_REJECTED,
+        EVENT_CREDENTIAL_INVALIDATED,
         EVENT_PATIENT_REGISTERED,
         EVENT_PATIENT_VERIFIED,
         EVENT_PATIENT_AUTH_FAILED,

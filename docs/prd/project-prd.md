@@ -578,8 +578,8 @@ _Traceability: `REQ-011`, `REQ-028`, `REQ-005`, `GAP-002`, `AMB-003`, `NFR-001`_
 
 **Telemetry & Event Tracking:**
 
-- `partner_registered`: `partner_id`, `partner_type`, `timestamp`
-- `partner_verification_started` / `partner_activated` / `partner_rejected`: `partner_id`, `reason`, `timestamp`
+- `partner.registered`: `partner_id`, `partner_type`, `timestamp`
+- `partner.verification_started` / `partner.activated` / `partner.rejected`: `partner_id`, `reason`, `timestamp`
 
 #### Feature 4.7.2: Operator Console - Verification & Moderation
 
