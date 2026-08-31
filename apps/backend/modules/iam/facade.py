@@ -15,7 +15,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from bus.outbox_writer import write_outbox
 from modules.iam.adapters.sms import (
@@ -120,12 +120,17 @@ class IamFacade:
         """Begin-or-resume: create the identity on first use, else resolve it."""
         return await self._identity.register_patient(phone)
 
-    async def create_credential_account(self, phone: str) -> PartnerCredentialCreatedResult:
+    async def create_credential_account(
+        self, phone: str, connection: AsyncConnection | None = None
+    ) -> PartnerCredentialCreatedResult:
         """Create a login-capable identity for a newly registered partner (ADR-0010).
 
         Synchronous, in one transaction boundary, with no role grant - the
-        ``partner`` role is granted later at activation (T03, #246)."""
-        return await self._identity.create_credential_account(phone)
+        ``partner`` role is granted later at activation (T03, #246). ``connection``
+        lets the caller share an open transaction so the identity and the partner
+        profile commit atomically (ADR-0010); when omitted the seam opens its own.
+        """
+        return await self._identity.create_credential_account(phone, connection=connection)
 
     # -- OTP delegation (ADR-0006, ticket #168) ----------------------------
 

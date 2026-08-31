@@ -7,6 +7,10 @@ pure :mod:`modules.partner.domain.state_machine`; this layer only persists and
 writes the outbox.
 
 Methods:
+- ``register`` opens a ``[Registered]`` profile from an open self-service
+  registration (FEAT-014, T05): creates the iam credential account
+  synchronously (ADR-0010) and emits ``partner.registered``; a duplicate phone
+  resolves to the existing profile.
 - ``register_partner`` opens a profile in ``Registered``.
 - ``submit_credentials`` runs the Step-1 pre-filter and, on pass, opens a
   verification round (``verification_started`` - including re-verification of an
@@ -31,10 +35,12 @@ from typing import Any
 
 from pydantic import BaseModel
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from bus.outbox_writer import write_outbox
+from modules.iam.facade import IamFacade
 from modules.partner.domain.events import (
     PartnerType,
     partner_activated_envelope,
@@ -92,6 +98,26 @@ class PartnerView(BaseModel):
     round: int
 
 
+class RegisterPartnerResult(BaseModel):
+    """The outcome of open partner registration (FEAT-014, T05).
+
+    ``partner_id`` and ``status`` name the partner profile - a freshly opened
+    ``[Registered]`` profile on first registration, or the pre-existing
+    profile on a duplicate phone (accepted criterion 6: duplicate phone
+    resolves to the existing identity). ``identity_id`` is the iam gateway
+    principal the account was created/resolved for, and ``created`` tells the
+    caller whether this call introduced a new profile (``True``) or resolved
+    an existing one (``False``).
+    """
+
+    partner_id: int
+    identity_id: int
+    partner_type: str
+    status: str
+    round: int
+    created: bool
+
+
 def _to_profile(row: Row[Any], round: int) -> _Profile:
     return _Profile(
         partner_id=int(row.id),
@@ -122,6 +148,83 @@ async def _load_profile(connection: AsyncConnection, partner_id: int) -> _Profil
     return _to_profile(row, current_round)
 
 
+async def _load_profile_by_identity(
+    connection: AsyncConnection, identity_id: int
+) -> _Profile | None:
+    """The profile (with its round) for ``identity_id``, or ``None`` if absent.
+
+    Duplicate-phone resolution (accepted criterion 6): an existing partner
+    identity has at most one profile row (``uq_partner_profiles_identity``),
+    so this lookup decides between resolving the existing partner and opening
+    a new one. Round is computed the same way ``_load_profile`` does it so the
+    resolved view reports the partner's true verification round.
+    """
+    row = (
+        await connection.execute(
+            select(*_PROFILE_COLUMNS).where(partner_profiles.c.identity_id == identity_id)
+        )
+    ).first()
+    if row is None:
+        return None
+    current_round = int(
+        (
+            await connection.execute(
+                select(func.coalesce(func.max(partner_verifications.c.round), 0)).where(
+                    partner_verifications.c.profile_id == row.id
+                )
+            )
+        ).scalar_one()
+    )
+    return _to_profile(row, current_round)
+
+
+async def _insert_registered_profile(
+    connection: AsyncConnection,
+    *,
+    identity_id: int,
+    partner_type: PartnerType,
+    practice_address: str,
+    practice_latitude: float,
+    practice_longitude: float,
+    service_area_id: int | None,
+) -> int | None:
+    """Insert a ``[Registered]`` profile and emit ``partner.registered`` atomically.
+
+    Shared by ``register`` and ``register_partner`` (ADR-0002 §1: the outbox
+    row lands in the same transaction as the state change). Concurrency
+    converges on the ``uq_partner_profiles_identity`` unique constraint (the
+    single profile a partner identity may hold): ``INSERT ... ON CONFLICT DO
+    NOTHING`` - never SELECT-then-INSERT without a fallback, mirroring the iam
+    ``create_credential_account`` pattern. Returns the new profile id, or
+    ``None`` when a concurrent registration already opened a profile for the
+    same identity (the caller re-reads and returns that existing profile).
+    """
+    result = await connection.execute(
+        postgresql_insert(partner_profiles)
+        .values(
+            identity_id=identity_id,
+            partner_type=partner_type,
+            status=REGISTERED.status.value,
+            practice_address=practice_address,
+            practice_latitude=practice_latitude,
+            practice_longitude=practice_longitude,
+            service_area_id=service_area_id,
+        )
+        .on_conflict_do_nothing(index_elements=["identity_id"])
+        .returning(partner_profiles.c.id)
+    )
+    partner_id = result.scalar_one_or_none()
+    if partner_id is None:
+        return None
+    await write_outbox(
+        connection,
+        PARTNER_SCHEMA,
+        PARTNER_OUTBOX_TABLE,
+        partner_registered_envelope(int(partner_id), identity_id, partner_type),
+    )
+    return int(partner_id)
+
+
 async def _apply_transition(
     connection: AsyncConnection,
     profile: _Profile,
@@ -149,8 +252,82 @@ async def _apply_transition(
 class PartnerFacade:
     """Typed public facade for the partner lifecycle surface."""
 
-    def __init__(self, engine: AsyncEngine) -> None:
+    def __init__(self, engine: AsyncEngine, iam_facade: IamFacade) -> None:
         self._engine = engine
+        self._iam = iam_facade
+
+    async def register(
+        self,
+        phone: str,
+        partner_type: PartnerType,
+        practice_address: str,
+        practice_latitude: float,
+        practice_longitude: float,
+        service_area_id: int | None = None,
+    ) -> RegisterPartnerResult:
+        """Open partner registration (FEAT-014, ADR-0010): open + sync account.
+
+        A doctor/lab/chemist registers openly with their phone and basic
+        profile - no invite required. The iam credential account is created
+        synchronously first (ADR-0010) so a login-capable identity exists
+        before the partner can authenticate, then the ``[Registered]`` profile
+        row opens with ``partner.registered`` emitted. Both happen in the SAME
+        transaction (the iam seam runs on this method's connection) so the
+        identity and profile commit together as one atomic unit (ADR-0010,
+        ADR-0002 §1) - no orphan identity if the profile insert fails.
+
+        A phone that already resolves to a partner identity (duplicate
+        registration) returns the existing profile unchanged - never a second
+        row. Duplicate identities are resolved by the iam seam (``ON CONFLICT``
+        on ``phone_e164``) and duplicate profiles by ``on_conflict_do_nothing``
+        on ``uq_partner_profiles_identity``, so concurrent registrations of the
+        same phone converge instead of raising (accepted criterion 6).
+        """
+        async with self._engine.begin() as connection:
+            account = await self._iam.create_credential_account(phone, connection=connection)
+            identity_id = int(account.identity_id)
+
+            existing = await _load_profile_by_identity(connection, identity_id)
+            if existing is not None:
+                return RegisterPartnerResult(
+                    partner_id=existing.partner_id,
+                    identity_id=identity_id,
+                    partner_type=existing.partner_type,
+                    status=existing.status,
+                    round=existing.round,
+                    created=False,
+                )
+
+            partner_id = await _insert_registered_profile(
+                connection,
+                identity_id=identity_id,
+                partner_type=partner_type,
+                practice_address=practice_address,
+                practice_latitude=practice_latitude,
+                practice_longitude=practice_longitude,
+                service_area_id=service_area_id,
+            )
+            if partner_id is None:
+                # A concurrent registration opened the profile first - resolve it.
+                existing = await _load_profile_by_identity(connection, identity_id)
+                if existing is None:  # pragma: no cover - cannot lose a just-inserted row
+                    raise AssertionError("partner profile vanished between insert and conflict")
+                return RegisterPartnerResult(
+                    partner_id=existing.partner_id,
+                    identity_id=identity_id,
+                    partner_type=existing.partner_type,
+                    status=existing.status,
+                    round=existing.round,
+                    created=False,
+                )
+            return RegisterPartnerResult(
+                partner_id=partner_id,
+                identity_id=identity_id,
+                partner_type=partner_type,
+                status=REGISTERED.status.value,
+                round=0,
+                created=True,
+            )
 
     async def register_partner(
         self,
@@ -161,29 +338,38 @@ class PartnerFacade:
         practice_longitude: float,
         service_area_id: int | None = None,
     ) -> PartnerView:
-        """Open a new partner profile in ``Registered``."""
+        """Open a new partner profile in ``Registered`` (low-level seam).
+
+        Used by ``register`` and any caller that already holds an identity id;
+        inserts the profile row and emits ``partner.registered`` in the same
+        transaction (ADR-0002 §1). A profile that already exists for the
+        identity (the ``uq_partner_profiles_identity`` arbiter) is resolved and
+        returned unchanged - never a second row.
+        """
         async with self._engine.begin() as connection:
-            result = await connection.execute(
-                partner_profiles.insert()
-                .values(
-                    identity_id=identity_id,
-                    partner_type=partner_type,
-                    status=REGISTERED.status.value,
-                    practice_address=practice_address,
-                    practice_latitude=practice_latitude,
-                    practice_longitude=practice_longitude,
-                    service_area_id=service_area_id,
-                )
-                .returning(partner_profiles.c.id)
-            )
-            partner_id = int(result.scalar_one())
-            await write_outbox(
+            partner_id = await _insert_registered_profile(
                 connection,
-                PARTNER_SCHEMA,
-                PARTNER_OUTBOX_TABLE,
-                partner_registered_envelope(partner_id, identity_id, partner_type),
+                identity_id=identity_id,
+                partner_type=partner_type,
+                practice_address=practice_address,
+                practice_latitude=practice_latitude,
+                practice_longitude=practice_longitude,
+                service_area_id=service_area_id,
             )
-            return PartnerView(partner_id=partner_id, status=REGISTERED.status.value, round=0)
+            if partner_id is not None:
+                return PartnerView(
+                    partner_id=partner_id,
+                    status=REGISTERED.status.value,
+                    round=0,
+                )
+            existing = await _load_profile_by_identity(connection, identity_id)
+            if existing is None:  # pragma: no cover - cannot lose a just-inserted row
+                raise AssertionError("partner profile vanished between insert and conflict")
+            return PartnerView(
+                partner_id=existing.partner_id,
+                status=existing.status,
+                round=existing.round,
+            )
 
     async def submit_credentials(
         self,

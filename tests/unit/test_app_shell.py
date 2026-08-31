@@ -89,6 +89,8 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/audit/events",
         # PHASE-4 T7 (#241): patient-only own access-history surface.
         "/v1/audit/access-history",
+        # PHASE-5 T05 (#249): open partner self-service registration.
+        "/v1/partner/register",
     }
 
 

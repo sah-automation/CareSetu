@@ -16,7 +16,7 @@ from typing import Literal
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from bus.outbox_writer import write_outbox
 from modules.iam.domain import events
@@ -195,7 +195,9 @@ class IdentityFacade:
             attempts_left=MAX_ATTEMPTS,
         )
 
-    async def create_credential_account(self, phone: str) -> PartnerCredentialCreatedResult:
+    async def create_credential_account(
+        self, phone: str, connection: AsyncConnection | None = None
+    ) -> PartnerCredentialCreatedResult:
         """Create a login-capable identity for a newly registered partner (ADR-0010, #245).
 
         Called synchronously by the ``partner`` module inside the same
@@ -204,13 +206,23 @@ class IdentityFacade:
         NOT issue a challenge or grant a role: the identity is created
         ``[Unverified]`` with no ``partner`` role grant, so a later activation
         (T03, #246) is the gated step that grants the role and unlocks
-        patient-facing scope. The ``partner.registered`` event lands in the iam
-        outbox in the same transaction as the identity insert.
+        patient-facing scope.
+
+        ``connection`` lets the caller (the ``partner`` facade) share its own
+        open transaction so the identity insert and the ``partner.registered``
+        iam outbox event commit atomically with the partner profile (ADR-0010:
+        "in the same registration transaction boundary"). When omitted the
+        method opens its own transaction, preserving the standalone seam shape
+        the iam tests exercise. Concurrency converges via the unique
+        ``phone_e164`` index (``INSERT ... ON CONFLICT DO NOTHING`` then a
+        re-read, never SELECT-then-INSERT), and the outbox event is emitted
+        only for a genuinely new identity - a duplicate phone resolves to the
+        existing identity without re-publishing ``partner.registered``.
         """
         phone_e164 = normalize_phone(phone)
 
-        async with self._engine.begin() as connection:
-            await connection.execute(
+        async def _run(connection: AsyncConnection) -> int:
+            inserted = await connection.execute(
                 postgresql_insert(iam_identities)
                 .values(phone_e164=phone_e164)
                 .on_conflict_do_nothing(index_elements=["phone_e164"])
@@ -220,11 +232,19 @@ class IdentityFacade:
                     select(iam_identities.c.id).where(iam_identities.c.phone_e164 == phone_e164)
                 )
             ).scalar_one()
-            await write_outbox(
-                connection,
-                _IAM_SCHEMA,
-                IAM_OUTBOX_TABLE,
-                events.partner_registered_envelope(identity_id, phone_e164),
-            )
+            if inserted.rowcount == 1:
+                await write_outbox(
+                    connection,
+                    _IAM_SCHEMA,
+                    IAM_OUTBOX_TABLE,
+                    events.partner_registered_envelope(identity_id, phone_e164),
+                )
+            return int(identity_id)
+
+        if connection is not None:
+            identity_id = await _run(connection)
+        else:
+            async with self._engine.begin() as connection:
+                identity_id = await _run(connection)
 
         return PartnerCredentialCreatedResult(identity_id=identity_id, phone_e164=phone_e164)

@@ -45,6 +45,11 @@ from modules.iam.adapters.routes import register_error_handlers
 from modules.iam.adapters.routes import router as iam_router
 from modules.iam.adapters.sms import MockSmsAdapter, build_sms_adapter
 from modules.iam.facade import IamFacade
+from modules.partner.adapters.routes import (
+    register_error_handlers as register_partner_error_handlers,
+)
+from modules.partner.adapters.routes import router as partner_router
+from modules.partner.facade import PartnerFacade
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +160,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # the health schema, so the audit facade calls through the facade seam
     # instead of reading across schemas (module isolation rule).
     app.state.audit_facade = AuditFacade(engine=engine, health_facade=app.state.health_facade)
+    # MOD-002 (PHASE-5 T05, #249): the partner facade shares the settled engine
+    # and, for open registration (ADR-0010), the settled iam facade - the sync
+    # ``create_credential_account`` seam is called in-sequence at registration
+    # so a login-capable account exists before the partner can authenticate.
+    # Stored on state so the registration route reads one resolved instance and
+    # unit tests stub it.
+    app.state.partner_facade = PartnerFacade(engine=engine, iam_facade=facade)
     # The edge's in-process idempotency store (api-standards §5, PHASE-2 REM
     # T11, #80): the auth mutation adapters read/write it per ``Idempotency-Key``
     # so a retried register/verify/resend replays the stored result instead of
@@ -218,10 +230,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health_router)
     app.include_router(consent_router)
     app.include_router(audit_router)
+    app.include_router(partner_router)
     register_error_handlers(app)
     register_gateway_error_handlers(app)
     register_health_error_handlers(app)
     register_consent_error_handlers(app)
+    register_partner_error_handlers(app)
 
     # Catch-all for any unhandled exception that escapes the module-level
     # handlers above (e.g. SQLAlchemy OperationalError from a DB connection
