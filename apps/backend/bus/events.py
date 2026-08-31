@@ -46,6 +46,9 @@ EVENT_RECORD_DENIED = "record.denied"
 # ``REGULATED_ACT_TYPES``, so it never enters the hash chain; real-time
 # alert delivery is deferred, the outbox row is the publication.
 EVENT_AUDIT_TAMPER_DETECTED = "audit.tamper_detected"
+# MOD-002 (partner): emitted when a partner credential account is created
+# synchronously by the iam facade (ADR-0010, ticket #245).
+EVENT_PARTNER_REGISTERED = "partner.registered"
 
 # PHASE-4 T3 (#237): the canonical regulated-act whitelist. MOD-011 appends an
 # ``audit.event`` payload to the hash chain only when its ``event_type`` is
@@ -70,7 +73,7 @@ REGULATED_ACT_TYPES: frozenset[str] = frozenset(
         "payment.webhook_received",
         "order.cancelled",
         "refund.partner_direct",
-        "partner.registered",
+        EVENT_PARTNER_REGISTERED,
         "partner.activated",
         "partner.rejected",
         "credential.invalidated",

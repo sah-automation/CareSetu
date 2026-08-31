@@ -38,6 +38,9 @@ from modules.iam.identity_facade import (
     IdentityFacade as IdentityFacade,
 )
 from modules.iam.identity_facade import (
+    PartnerCredentialCreatedResult as PartnerCredentialCreatedResult,
+)
+from modules.iam.identity_facade import (
     RegisterPatientResult as RegisterPatientResult,
 )
 from modules.iam.otp_facade import (
@@ -113,6 +116,13 @@ class IamFacade:
     async def register_patient(self, phone: str) -> RegisterPatientResult:
         """Begin-or-resume: create the identity on first use, else resolve it."""
         return await self._identity.register_patient(phone)
+
+    async def create_credential_account(self, phone: str) -> PartnerCredentialCreatedResult:
+        """Create a login-capable identity for a newly registered partner (ADR-0010).
+
+        Synchronous, in one transaction boundary, with no role grant - the
+        ``partner`` role is granted later at activation (T03, #246)."""
+        return await self._identity.create_credential_account(phone)
 
     # -- OTP delegation (ADR-0006, ticket #168) ----------------------------
 

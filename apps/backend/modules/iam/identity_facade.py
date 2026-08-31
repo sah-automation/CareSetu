@@ -68,6 +68,20 @@ class RegisterPatientResult(BaseModel):
     lockout_remaining_seconds: int | None = None
 
 
+class PartnerCredentialCreatedResult(BaseModel):
+    """Outcome of creating a partner credential account (ADR-0010, ticket #245).
+
+    The identity is created ``[Unverified]`` with no role grant, so it is
+    login-capable via phone-OTP from the moment the partner registers but holds
+    no ``partner`` role scope until activation (the role grant is the
+    activation-gated step, T03 #246). ``identity_id`` and ``phone_e164`` let
+    the ``partner`` module persist its own row in the same transaction.
+    """
+
+    identity_id: int
+    phone_e164: str
+
+
 def _default_clock() -> datetime:
     return datetime.now(UTC)
 
@@ -180,3 +194,37 @@ class IdentityFacade:
             cooldown_remaining_seconds=RESEND_COOLDOWN_SECONDS,
             attempts_left=MAX_ATTEMPTS,
         )
+
+    async def create_credential_account(self, phone: str) -> PartnerCredentialCreatedResult:
+        """Create a login-capable identity for a newly registered partner (ADR-0010, #245).
+
+        Called synchronously by the ``partner`` module inside the same
+        transaction as partner registration, so a partner's phone-OTP login
+        works the moment they register. Unlike ``register_patient`` this does
+        NOT issue a challenge or grant a role: the identity is created
+        ``[Unverified]`` with no ``partner`` role grant, so a later activation
+        (T03, #246) is the gated step that grants the role and unlocks
+        patient-facing scope. The ``partner.registered`` event lands in the iam
+        outbox in the same transaction as the identity insert.
+        """
+        phone_e164 = normalize_phone(phone)
+
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                postgresql_insert(iam_identities)
+                .values(phone_e164=phone_e164)
+                .on_conflict_do_nothing(index_elements=["phone_e164"])
+            )
+            identity_id = (
+                await connection.execute(
+                    select(iam_identities.c.id).where(iam_identities.c.phone_e164 == phone_e164)
+                )
+            ).scalar_one()
+            await write_outbox(
+                connection,
+                _IAM_SCHEMA,
+                IAM_OUTBOX_TABLE,
+                events.partner_registered_envelope(identity_id, phone_e164),
+            )
+
+        return PartnerCredentialCreatedResult(identity_id=identity_id, phone_e164=phone_e164)
