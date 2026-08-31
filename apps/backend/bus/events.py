@@ -49,6 +49,13 @@ EVENT_AUDIT_TAMPER_DETECTED = "audit.tamper_detected"
 # MOD-002 (partner): emitted when a partner credential account is created
 # synchronously by the iam facade (ADR-0010, ticket #245).
 EVENT_PARTNER_REGISTERED = "partner.registered"
+# MOD-010 (notify): emitted into ``notify.notify_outbox`` when a delivery
+# channel reports the message failed/undeliverable (ADR-0009). The EXT-003
+# delivery webhook's ``notification.failed`` drives the WhatsApp -> SMS
+# fallback: this event is the signal the notify consumer re-routes a
+# terminal-status message to SMS on. Operational, deliberately NOT in
+# ``REGULATED_ACT_TYPES``. internal-modules.md §4.2 registry.
+EVENT_NOTIFICATION_FAILED = "notification.failed"
 
 # PHASE-4 T3 (#237): the canonical regulated-act whitelist. MOD-011 appends an
 # ``audit.event`` payload to the hash chain only when its ``event_type`` is

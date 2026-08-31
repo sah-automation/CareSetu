@@ -15,6 +15,11 @@ DEFAULT_SMS_TIMEOUT_SECONDS = 10.0
 DEFAULT_SMS_MAX_RETRIES = 3
 DEFAULT_SMS_CIRCUIT_BREAKER_THRESHOLD = 5
 DEFAULT_SMS_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 30.0
+DEFAULT_WHATSAPP_PROVIDER = "mock"
+DEFAULT_WHATSAPP_TIMEOUT_SECONDS = 10.0
+DEFAULT_WHATSAPP_MAX_RETRIES = 3
+DEFAULT_WHATSAPP_CIRCUIT_BREAKER_THRESHOLD = 5
+DEFAULT_WHATSAPP_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 30.0
 # Redis consent-status cache (PHASE-3 T4, #213): optional; SQL fallback when
 # absent or unhealthy. p95 < 50 ms SLA on the hot path.
 DEFAULT_REDIS_URL = ""
@@ -60,6 +65,15 @@ class Settings:
     sms_max_retries: int = DEFAULT_SMS_MAX_RETRIES
     sms_circuit_breaker_threshold: int = DEFAULT_SMS_CIRCUIT_BREAKER_THRESHOLD
     sms_circuit_breaker_cooldown_seconds: float = DEFAULT_SMS_CIRCUIT_BREAKER_COOLDOWN_SECONDS
+    whatsapp_provider: str = DEFAULT_WHATSAPP_PROVIDER
+    whatsapp_api_key: str = ""
+    whatsapp_base_url: str = ""
+    whatsapp_timeout_seconds: float = DEFAULT_WHATSAPP_TIMEOUT_SECONDS
+    whatsapp_max_retries: int = DEFAULT_WHATSAPP_MAX_RETRIES
+    whatsapp_circuit_breaker_threshold: int = DEFAULT_WHATSAPP_CIRCUIT_BREAKER_THRESHOLD
+    whatsapp_circuit_breaker_cooldown_seconds: float = (
+        DEFAULT_WHATSAPP_CIRCUIT_BREAKER_COOLDOWN_SECONDS
+    )
     redis_url: str = DEFAULT_REDIS_URL
     redis_consent_ttl_seconds: int = DEFAULT_REDIS_CONSENT_TTL_SECONDS
     # The stub flag for audit retention (GAP-011): 0 means no expiry today; the
@@ -114,6 +128,32 @@ class Settings:
                 "sms_timeout_seconds must be in (0, 10] to honour the EXT-001 "
                 "call discipline (third-party-integration-standards §1)"
             )
+        whatsapp_provider = self.whatsapp_provider.strip().lower()
+        if whatsapp_provider not in {"mock", "provider"}:
+            raise ValueError(
+                f"unsupported whatsapp_provider {self.whatsapp_provider!r}; "
+                "expected 'mock' or 'provider'"
+            )
+        if whatsapp_provider == "provider":
+            if self.app_environment.strip().lower() in _DEV_TEST_ENVIRONMENTS:
+                raise ValueError(
+                    "whatsapp_provider='provider' is gated to staging/production: set "
+                    "APP_ENVIRONMENT to 'staging' or 'production' before using the "
+                    "real EXT-003 path. Refusing it in dev/test."
+                )
+            if not self.whatsapp_api_key:
+                raise ValueError(
+                    "whatsapp_provider='provider' requires WHATSAPP_API_KEY from the environment"
+                )
+            if not self.whatsapp_base_url:
+                raise ValueError(
+                    "whatsapp_provider='provider' requires WHATSAPP_BASE_URL from the environment"
+                )
+        if not (0 < self.whatsapp_timeout_seconds <= 10):
+            raise ValueError(
+                "whatsapp_timeout_seconds must be in (0, 10] to honour the EXT-003 "
+                "call discipline (third-party-integration-standards §1)"
+            )
         if self.redis_consent_ttl_seconds <= 0:
             raise ValueError("redis_consent_ttl_seconds must be positive")
         if self.audit_retention_days < 0:
@@ -126,6 +166,10 @@ class Settings:
             raise ValueError("sms_circuit_breaker_threshold must be positive")
         if self.sms_circuit_breaker_cooldown_seconds <= 0:
             raise ValueError("sms_circuit_breaker_cooldown_seconds must be positive")
+        if self.whatsapp_circuit_breaker_threshold <= 0:
+            raise ValueError("whatsapp_circuit_breaker_threshold must be positive")
+        if self.whatsapp_circuit_breaker_cooldown_seconds <= 0:
+            raise ValueError("whatsapp_circuit_breaker_cooldown_seconds must be positive")
 
     @property
     def mock_otp_readback_enabled(self) -> bool:
@@ -216,6 +260,21 @@ def get_settings() -> Settings:
         sms_circuit_breaker_cooldown_seconds=_env_float(
             "SMS_CIRCUIT_BREAKER_COOLDOWN_SECONDS",
             DEFAULT_SMS_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+        ),
+        whatsapp_provider=os.environ.get("WHATSAPP_PROVIDER", DEFAULT_WHATSAPP_PROVIDER),
+        whatsapp_api_key=os.environ.get("WHATSAPP_API_KEY", ""),
+        whatsapp_base_url=os.environ.get("WHATSAPP_BASE_URL", ""),
+        whatsapp_timeout_seconds=_env_float(
+            "WHATSAPP_TIMEOUT_SECONDS", DEFAULT_WHATSAPP_TIMEOUT_SECONDS
+        ),
+        whatsapp_max_retries=_env_int("WHATSAPP_MAX_RETRIES", DEFAULT_WHATSAPP_MAX_RETRIES),
+        whatsapp_circuit_breaker_threshold=_env_int(
+            "WHATSAPP_CIRCUIT_BREAKER_THRESHOLD",
+            DEFAULT_WHATSAPP_CIRCUIT_BREAKER_THRESHOLD,
+        ),
+        whatsapp_circuit_breaker_cooldown_seconds=_env_float(
+            "WHATSAPP_CIRCUIT_BREAKER_COOLDOWN_SECONDS",
+            DEFAULT_WHATSAPP_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
         ),
         redis_url=os.environ.get("REDIS_URL", DEFAULT_REDIS_URL),
         redis_consent_ttl_seconds=_env_int(
