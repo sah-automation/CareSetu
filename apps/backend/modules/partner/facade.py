@@ -12,10 +12,12 @@ Methods:
   synchronously (ADR-0010) and emits ``partner.registered``; a duplicate phone
   resolves to the existing profile.
 - ``register_partner`` opens a profile in ``Registered``.
-- ``submit_credentials`` runs the Step-1 pre-filter and, on pass, opens a
-  verification round (``verification_started`` - including re-verification of an
-  ``Active`` partner, who stays ``Active`` through the 7-day grace window) or,
-  on fail, rejects never queued (``partner.rejected`` with reason ``step1_fail``).
+- ``submit_credentials`` runs the Step-1 credential pre-filter (ADR-0008) and,
+  on pass, encrypts the documents into ``partner/``, opens ``partner_credentials``
+  rows and a verification round (``verification_started`` - including
+  re-verification of an ``Active`` partner, who stays ``Active`` through the 7-day
+  grace window) or, on auto-fail, rejects never queued (``partner.rejected`` with
+  the specific pre-filter reason).
 - ``operator_decision`` is the Step-2 manual gate: explicit operator approval
   reaches ``Active`` (``partner.activated``); operator reject reaches
   ``Rejected`` (``partner.rejected`` with reason + actor). No auto-approve.
@@ -41,6 +43,8 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from bus.outbox_writer import write_outbox
 from modules.iam.facade import IamFacade
+from modules.partner.adapters.artifact_store import CredentialArtifactStore
+from modules.partner.domain.credentials import CredentialType
 from modules.partner.domain.events import (
     PartnerType,
     partner_activated_envelope,
@@ -51,6 +55,7 @@ from modules.partner.domain.events import (
 from modules.partner.domain.exceptions import (
     PartnerNotFoundError,
 )
+from modules.partner.domain.prefilter import evaluate_submission
 from modules.partner.domain.state_machine import (
     REGISTERED,
     PartnerAction,
@@ -59,12 +64,13 @@ from modules.partner.domain.state_machine import (
     transition,
 )
 from modules.partner.outbox import PARTNER_OUTBOX_TABLE
-from modules.partner.schema.models import partner_profiles, partner_verifications
+from modules.partner.schema.models import (
+    partner_credentials,
+    partner_profiles,
+    partner_verifications,
+)
 
 PARTNER_SCHEMA = "partner"
-
-#: Step-1 pre-filter outcome of a credentials submission.
-_STEP1_REASON = "step1_fail"
 
 
 @dataclass(frozen=True)
@@ -116,6 +122,35 @@ class RegisterPartnerResult(BaseModel):
     status: str
     round: int
     created: bool
+
+
+class CredentialSubmission(BaseModel):
+    """One credential a partner submits for Step-1 review (ADR-0008).
+
+    ``credential_type`` is the closed per-partner-type type (a doctor's medical
+    registration, a lab's lab license, a chemist's drug license, or a supporting
+    document). ``artifacts`` are the encrypted-document source bytes the facade
+    AES-encrypts into the ``partner/`` object-storage prefix; the refs, not the
+    bytes, are persisted in ``partner_credentials.artifact_refs``.
+    """
+
+    credential_type: CredentialType
+    artifacts: list[bytes] = []
+
+
+class CredentialSubmissionResult(BaseModel):
+    """The typed outcome of a credential submission.
+
+    ``status`` is ``Under Verification`` on a Step-1 pass (a round opened,
+    ``partner.verification_started``); ``Rejected`` on a Step-1 auto-fail with
+    ``reason`` naming the specific pre-filter failure (never queued - ADR-0008).
+    ``reason`` is present only on the auto-fail path.
+    """
+
+    partner_id: int
+    status: str
+    round: int
+    reason: str | None = None
 
 
 def _to_profile(row: Row[Any], round: int) -> _Profile:
@@ -249,12 +284,76 @@ async def _apply_transition(
     return next_state
 
 
+async def _load_live_credential_types(
+    connection: AsyncConnection, partner_id: int
+) -> frozenset[str]:
+    """The credential types already recorded for a partner (duplicate gate input).
+
+    The Step-1 duplicate check (ADR-0008) rejects a submission re-offering a
+    credential type the partner already holds in a live (non-rejected) state; a
+    ``Rejected`` partner re-submitting the same type is a new round, not a
+    duplicate, so the caller passes an empty set in that case.
+    """
+    rows = (
+        await connection.execute(
+            select(partner_credentials.c.credential_type).where(
+                partner_credentials.c.profile_id == partner_id
+            )
+        )
+    ).all()
+    return frozenset(str(row.credential_type) for row in rows)
+
+
+async def _ingest_credentials(
+    connection: AsyncConnection,
+    partner_id: int,
+    credentials: list[CredentialSubmission],
+    artifact_store: CredentialArtifactStore,
+) -> None:
+    """Encrypt documents into ``partner/`` and open ``partner_credentials`` rows.
+
+    Called only on a Step-1 pass with a configured store (the facade refuses to
+    run without one - see ``submit_credentials``), inside the submission
+    transaction (ADR-0002 §1). Each credential's artifact bytes are AES-encrypted
+    by the given store (refs persisted, never plaintext).
+    """
+    for submission in credentials:
+        refs: dict[str, object] = {}
+        for artifact_index, data in enumerate(submission.artifacts):
+            refs[f"{submission.credential_type.value}_{artifact_index}"] = (
+                artifact_store.save_artifact(
+                    partner_id,
+                    submission.credential_type.value,
+                    artifact_index,
+                    data,
+                )
+            )
+        await connection.execute(
+            partner_credentials.insert().values(
+                profile_id=partner_id,
+                credential_type=submission.credential_type.value,
+                verified=False,
+                artifact_refs=refs,
+            )
+        )
+
+
 class PartnerFacade:
     """Typed public facade for the partner lifecycle surface."""
 
-    def __init__(self, engine: AsyncEngine, iam_facade: IamFacade) -> None:
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        iam_facade: IamFacade,
+        artifact_store: CredentialArtifactStore | None = None,
+    ) -> None:
         self._engine = engine
         self._iam = iam_facade
+        # Credential documents are encrypted into the ``partner/`` object-storage
+        # prefix on a Step-1 pass (ADR-0008, T06). The store must be configured;
+        # ``submit_credentials`` refuses to run a passing submission without one
+        # rather than silently dropping the documents.
+        self._artifact_store = artifact_store
 
     async def register(
         self,
@@ -371,34 +470,69 @@ class PartnerFacade:
                 round=existing.round,
             )
 
+    async def resolve_partner(self, identity_id: int) -> PartnerView:
+        """Resolve the partner profile for an iam identity (credential route).
+
+        The self-service credential route is partner-scoped: the gateway hands
+        the authenticated partner principal carrying ``identity_id``, and this
+        seam resolves it to the partner profile id so the caller can only submit
+        against their own identity (no cross-partner submission/idor). Raises
+        :class:`PartnerNotFoundError` when the identity holds no profile.
+        """
+        async with self._engine.begin() as connection:
+            profile = await _load_profile_by_identity(connection, identity_id)
+            if profile is None:
+                raise PartnerNotFoundError(identity_id)
+            return PartnerView(
+                partner_id=profile.partner_id,
+                status=profile.status,
+                round=profile.round,
+            )
+
     async def submit_credentials(
         self,
         partner_id: int,
         *,
-        pass_step1: bool,
-        reason: str | None = None,
-    ) -> PartnerView:
-        """Run the Step-1 pre-filter then open a round or reject (never queued).
+        credentials: list[CredentialSubmission],
+    ) -> CredentialSubmissionResult:
+        """Submit professional credentials and run the Step-1 pre-filter (ADR-0008).
 
-        ``pass_step1`` is the format/duplicate validation outcome computed by
-        the caller (T08 wires it from the credentials submitted). On a pass the
-        partner enters ``Under Verification`` and a new round opens
-        (``partner.verification_started``); on a fail the partner is rejected
-        with reason ``step1_fail`` and never enters the operator queue.
+        The first half of the two-step gate, fully automatic and synchronous on
+        submission. The pre-filter (:func:`modules.partner.domain.prefilter`)
+        validates format (a known credential type appropriate for this partner
+        type, with documents uploaded) and duplicates (a like credential type is
+        not already live):
+
+        - On a **pass**: the documents are AES-encrypted into the ``partner/``
+          object-storage prefix (refs stored, never bytes), ``partner_credentials``
+          rows open, and the partner enters ``Under Verification`` with a new
+          round emitted as ``partner.verification_started``. This is NOT approval
+          - the submission then waits for the Step-2 operator gate.
+        - On an **auto-fail**: the partner returns to ``Rejected`` (never queued)
+          and ``partner.rejected`` fires with the specific pre-filter reason
+          (``invalid_credential_type`` / ``missing_artifacts`` / ``duplicate_credential``).
+
+        A previously-``Rejected`` partner re-submitting is a NEW round, not a
+        duplicate; an ``Under Verification``/``Active`` partner re-submitting
+        opens the next round (re-verification) with the round incremented.
         """
         async with self._engine.begin() as connection:
             profile = await _load_profile(connection, partner_id)
-            if pass_step1:
-                next_state = await _apply_transition(
-                    connection, profile, PartnerAction.START_VERIFICATION, verification=True
-                )
-                await write_outbox(
-                    connection,
-                    PARTNER_SCHEMA,
-                    PARTNER_OUTBOX_TABLE,
-                    verification_started_envelope(partner_id, next_state.round),
-                )
-            else:
+            existing_types = await _load_live_credential_types(connection, partner_id)
+            outcome = evaluate_submission(
+                partner_type=profile.partner_type,
+                credential_types=[c.credential_type for c in credentials],
+                has_artifacts=any(c.artifacts for c in credentials),
+                existing_active_credential_types=(
+                    frozenset()
+                    if profile.status == PartnerStatus.REJECTED.value
+                    else existing_types
+                ),
+            )
+
+            if not outcome.passed:
+                if outcome.reason is None:
+                    raise AssertionError("pre-filter failure did not carry a reason")
                 next_state = await _apply_transition(
                     connection, profile, PartnerAction.AUTO_FAIL, verification=False
                 )
@@ -409,12 +543,42 @@ class PartnerFacade:
                     partner_rejected_envelope(
                         partner_id,
                         identity_id=profile.identity_id,
-                        reason=reason or _STEP1_REASON,
+                        reason=outcome.reason.value,
                         round=next_state.round,
                         decision_by=None,
                     ),
                 )
-            return PartnerView(
+                return CredentialSubmissionResult(
+                    partner_id=partner_id,
+                    status=next_state.status.value,
+                    round=next_state.round,
+                    reason=outcome.reason.value,
+                )
+
+            if self._artifact_store is None:
+                # The Step-1 gate passed, so documents were submitted, yet no
+                # store is wired. Silently ingesting the credential with empty
+                # artifact references would queue the operator with nothing to
+                # review - fail loud rather than swallow the documents
+                # (coding-standards §8 "no silent swallowing").
+                raise RuntimeError("credential submission requires a configured artifact store")
+
+            await _ingest_credentials(
+                connection,
+                partner_id,
+                credentials,
+                self._artifact_store,
+            )
+            next_state = await _apply_transition(
+                connection, profile, PartnerAction.START_VERIFICATION, verification=True
+            )
+            await write_outbox(
+                connection,
+                PARTNER_SCHEMA,
+                PARTNER_OUTBOX_TABLE,
+                verification_started_envelope(partner_id, next_state.round),
+            )
+            return CredentialSubmissionResult(
                 partner_id=partner_id,
                 status=next_state.status.value,
                 round=next_state.round,

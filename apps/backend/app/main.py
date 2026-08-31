@@ -45,6 +45,7 @@ from modules.iam.adapters.routes import register_error_handlers
 from modules.iam.adapters.routes import router as iam_router
 from modules.iam.adapters.sms import MockSmsAdapter, build_sms_adapter
 from modules.iam.facade import IamFacade
+from modules.partner.adapters.artifact_store import build_artifact_store
 from modules.partner.adapters.routes import (
     register_error_handlers as register_partner_error_handlers,
 )
@@ -166,7 +167,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # so a login-capable account exists before the partner can authenticate.
     # Stored on state so the registration route reads one resolved instance and
     # unit tests stub it.
-    app.state.partner_facade = PartnerFacade(engine=engine, iam_facade=facade)
+    # MOD-002 (PHASE-5 T06, #251): credential documents are AES-encrypted into
+    # the ``partner/`` object-storage prefix before a Step-1 pass enters the
+    # queue. The store's key/root come from the environment (fail-closed when a
+    # key is supplied but malformed); dev/test without a key derives an ephemeral
+    # one so the encrypted write path still runs.
+    partner_artifact_store = build_artifact_store(
+        root=resolved_settings.partner_artifact_root,
+        b64_key=resolved_settings.partner_artifact_key,
+    )
+    app.state.partner_facade = PartnerFacade(
+        engine=engine,
+        iam_facade=facade,
+        artifact_store=partner_artifact_store,
+    )
     # The edge's in-process idempotency store (api-standards §5, PHASE-2 REM
     # T11, #80): the auth mutation adapters read/write it per ``Idempotency-Key``
     # so a retried register/verify/resend replays the stored result instead of

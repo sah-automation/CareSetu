@@ -91,6 +91,8 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/audit/access-history",
         # PHASE-5 T05 (#249): open partner self-service registration.
         "/v1/partner/register",
+        # PHASE-5 T06 (#251): partner credential submission (Step-1 pre-filter).
+        "/v1/partner/credentials",
     }
 
 

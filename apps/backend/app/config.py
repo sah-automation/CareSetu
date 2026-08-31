@@ -40,6 +40,11 @@ DEFAULT_REFRESH_TOKEN_TTL_SECONDS = 2_592_000
 # to 2555 (7 years) via AUDIT_RETENTION_DAYS without code changes; compaction/
 # archive logic stays deferred (GAP-011).
 DEFAULT_AUDIT_RETENTION_DAYS = 0
+# Partner credential artifacts (PHASE-5 T06, #251): encrypted local filesystem
+# store under the ``partner/`` object-storage prefix. ``PARTNER_ARTIFACT_KEY``
+# is a base64 32-byte AES-256 key from the environment (never committed); the
+# store refuses a blank/malformed key (fail-closed, security-phii-standards §4).
+DEFAULT_PARTNER_ARTIFACT_ROOT = "var/partner-artifacts"
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _DEV_TEST_ENVIRONMENTS = frozenset({"dev", "test"})
@@ -87,6 +92,12 @@ class Settings:
     # in production so the deployed portfolio demo can drive register -> verify
     # (deployment plan 4.3). Fail-closed: never valid with a real provider.
     demo_mode: bool = False
+    # Encrypted credential-document store (PHASE-5 T06, #251): local root and
+    # the base64 AES-256 key. Root defaults to a repo-local ``var/`` dir; the
+    # key is empty unless supplied by the environment (the store derives an
+    # ephemeral dev key, never committed).
+    partner_artifact_root: str = DEFAULT_PARTNER_ARTIFACT_ROOT
+    partner_artifact_key: str = ""
 
     def __post_init__(self) -> None:
         if self.gateway_jwt_verify_enabled and not self.gateway_jwt_signing_key:
@@ -283,4 +294,8 @@ def get_settings() -> Settings:
         audit_retention_days=_env_int("AUDIT_RETENTION_DAYS", DEFAULT_AUDIT_RETENTION_DAYS),
         cors_allowed_origins=_env_csv("CORS_ALLOWED_ORIGINS"),
         demo_mode=_env_bool("DEMO_MODE", False),
+        partner_artifact_root=os.environ.get(
+            "PARTNER_ARTIFACT_ROOT", DEFAULT_PARTNER_ARTIFACT_ROOT
+        ),
+        partner_artifact_key=os.environ.get("PARTNER_ARTIFACT_KEY", ""),
     )

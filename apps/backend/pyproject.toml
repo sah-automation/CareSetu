@@ -13,6 +13,10 @@ dependencies = [
     "alembic>=1.13",
     "httpx>=0.27",
     "redis>=5.0",
+    # At-rest encryption for partner credential documents (security-phii-standards
+    # §1/§5, ADR-0008): AES-GCM via the ``cryptography`` package whose key lives in
+    # the environment, never in code.
+    "cryptography>=42.0",
 ]
 
 [dependency-groups]

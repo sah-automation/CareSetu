@@ -18,18 +18,27 @@ no business logic - duplicate-phone resolution and the sync account creation
 
 from __future__ import annotations
 
+import base64
 import logging
-from typing import cast
+from typing import Annotated, cast
 
-from fastapi import APIRouter, FastAPI, Request, status
+from fastapi import APIRouter, Depends, FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.gateway.errors import ErrorEnvelope
+from app.gateway.principal import Principal
+from app.gateway.rbac import require_partner
 from app.gateway.trace import resolve_trace_id
+from modules.partner.domain.credentials import CredentialType
 from modules.partner.domain.events import PartnerType
 from modules.partner.domain.exceptions import PartnerError
-from modules.partner.facade import PartnerFacade, RegisterPartnerResult
+from modules.partner.facade import (
+    CredentialSubmission,
+    CredentialSubmissionResult,
+    PartnerFacade,
+    RegisterPartnerResult,
+)
 
 router = APIRouter(prefix="/v1/partner", tags=["partner"])
 
@@ -54,6 +63,35 @@ class RegisterPartnerRequest(BaseModel):
     practice_latitude: float = Field(ge=-90, le=90)
     practice_longitude: float = Field(ge=-180, le=180)
     service_area_id: int | None = None
+
+
+class CredentialDocumentRequest(BaseModel):
+    """One professional credential a partner submits (ADR-0008, T06).
+
+    ``credential_type`` is the closed per-partner-type type; ``artifacts`` are the
+    base64-encoded document bytes the route decodes and hands to the facade to
+    AES-encrypt into the ``partner/`` object-storage prefix. Refs, never bytes,
+    are what gets persisted; the pre-filter rejects a submission with no
+    artifacts (``missing_artifacts``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    credential_type: CredentialType
+    artifacts: list[str] = Field(
+        default_factory=list,
+        description="Base64-encoded document bytes to encrypt and file",
+    )
+
+
+class CredentialSubmissionRequest(BaseModel):
+    """Body of ``POST /v1/partner/credentials``: the Step-1 submission body."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    credentials: list[CredentialDocumentRequest] = Field(
+        min_length=1, description="At least one credential document to submit"
+    )
 
 
 @router.post(
@@ -83,6 +121,52 @@ async def open_partner_registration(
         practice_longitude=body.practice_longitude,
         service_area_id=body.service_area_id,
     )
+
+
+@router.post(
+    "/credentials",
+    response_model=CredentialSubmissionResult,
+    status_code=status.HTTP_200_OK,
+    summary="Submit professional credentials (Step-1 pre-filter run here)",
+)
+async def open_credential_submission(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+    body: CredentialSubmissionRequest,
+) -> CredentialSubmissionResult:
+    """Submit professional credentials and run the Step-1 automated pre-filter.
+
+    The automatic first half of the two-step gate (ADR-0008): the pre-filter
+    validates format (credential type appropriate for this partner type,
+    documents uploaded) and duplicates, then either opens a verification round
+    (``[Under Verification]``, ``partner.verification_started``) or auto-fails
+    straight to ``[Rejected]`` with a specific reason - never queued. The route
+    is a thin adapter: it decodes the base64 document bytes and hands the typed
+    submission to the facade, which encrypts them into ``partner/``. The partner
+    acts only on their own identity - the authenticated principal's ``subject_id``
+    is resolved to the partner profile, so no cross-partner submission.
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    partner = await facade.resolve_partner(int(account.subject_id))
+    credentials = [
+        CredentialSubmission(
+            credential_type=doc.credential_type,
+            artifacts=[_decode_artifact(b64) for b64 in doc.artifacts],
+        )
+        for doc in body.credentials
+    ]
+    return await facade.submit_credentials(
+        partner.partner_id,
+        credentials=credentials,
+    )
+
+
+def _decode_artifact(b64: str) -> bytes:
+    """Decode a base64 artifact, rejecting malformed input (never stored raw)."""
+    try:
+        return base64.b64decode(b64, validate=True)
+    except ValueError as exc:
+        raise ValueError("artifact is not valid base64") from exc
 
 
 def _error_response(
