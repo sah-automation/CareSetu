@@ -121,6 +121,48 @@ _Avoid_: consent update, consent edit
 The terminal consent transition: stops all future access by the counterparty immediately, durably written before treated inactive, and recorded. Data already disclosed while the grant was live stays outside platform control - deletion requests are operator-mediated (`GAP-005` baseline).
 _Avoid_: recall, retroactive revoke (neither happens)
 
+### Partner onboarding & gated activation (Phase 5)
+
+**partner identity**:
+The one stable entity per registration that carries the partner lifecycle status (`[Registered] → [Under Verification] → [Active] | [Rejected]`), separate from the display profile and credential metadata. Mirrors patient identity in `MOD-001`.
+_Avoid_: partner profile (that is credentials/metadata), partner account (that is the `iam` credential account)
+
+**partner type**:
+The closed enum from `doctor | lab | chemist` that fixes which credential types a partner must submit and how verification branches.
+_Avoid_: provider kind, role (that is an `iam` scope)
+
+**credential type**:
+The closed enum of professional documents a partner submits per partner type - e.g. `medical_registration | lab_license | drug_license` - giving deterministic verification routing, operator-facing labels, and a queryable `partner_credentials` key.
+_Avoid_: document type (when meaning the free-form upload), license category
+
+**two-step verification**:
+The `AMB-003` resolution: Step 1 is an automated pre-filter (format + duplicate) that auto-rejects obvious bad submissions without queueing; Step 2 is the manual activation gate where every Step-1-pass clears through the operator queue. There is no auto-approve path - no partner activates without human review.
+_Avoid_: automated verification, auto-approve (there is none)
+
+**verification round**:
+An individual pass through the verification process (first-time or re-verification), each emitting `partner.verification_started` with a round/version in the payload so the audit trail distinguishes rounds.
+_Avoid_: verification attempt (that is the Step 1 check), resubmission count
+
+**credential document**:
+A sensitive-class upload (a partner's professional identity artifact, e.g. license photo, registration cert) held in the `partner/` object-storage prefix, encrypted at rest, readable only by the owning partner and the operator during review, and logged on every operator view. Not PHI, but access and retention are restricted. Deleted 30 days after permanent rejection/closure.
+_Avoid_: credential (that is the structured record), registration proof, supporting file
+
+**grace window**:
+The fixed period (7 days, configurable) an `[Active]` partner keeps active while newly submitted credentials are reverified; on lapse without a decision the partner auto-drops to `[Under Verification]`; on verification failure they go `[Rejected]` with `credential.invalidated` firing.
+_Avoid_: suspension grace, review buffer
+
+**rejection appeal**:
+The rate-limited path for a `[Rejected]` partner: re-submit corrected credentials (a new verification round) or file a one-time appeal that re-enters the operator queue. Guarded to prevent queue spam (max 3 re-submissions before cooldown).
+_Avoid_: re-registration (that is a fresh partner identity), complaint
+
+**operator**:
+A member of the trusted closed group that runs the verification queue; bootstrapped at deploy and grown by operator-invites-operator, never self-registering, and MFA-bound at login.
+_Avoid_: admin, moderator (when meaning the operator console role)
+
+**operator decision**:
+An individual, attributed approve/reject action on a verification round; reason is required on reject, every view of a partner's credentials is itself audited (`partner.credential_reviewed`), and bulk actions are forbidden in Phase 5 so every decision maps to an actor.
+_Avoid_: moderation action, verdict
+
 **egress log**:
 The consent-schema ledger of successful, consent-authorized PHI disclosures - what left, when, to whom, under which consent id + version; the source of a record entry's "who has seen this" trail.
 _Avoid_: access log (that is the record access history), audit log (that is the Phase 4 engine)
