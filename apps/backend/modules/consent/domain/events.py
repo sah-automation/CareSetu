@@ -8,10 +8,10 @@ the facade writes into ``consent.consent_outbox`` in the SAME transaction
 as the state change (ADR-0002 §1).
 
 Alongside each lifecycle event the module publishes the generic
-``audit.event`` (KPI-006: 100% of consent actions audited). MOD-011's
-consumption engine arrives in Phase 4 - emission coverage is this ticket's
-contract; when that engine lands, the audit payload-model registration in
-``adapters/__init__.py`` moves to its owning module deliberately.
+``audit.event`` (KPI-006: 100% of consent actions audited), consumed by
+MOD-011 (PHASE-4 T4, #239). MOD-011 owns the ``audit.event`` payload-model
+registration; consent is emission-only and its envelope builders are the
+producer-side shape it mirrors.
 """
 
 from __future__ import annotations

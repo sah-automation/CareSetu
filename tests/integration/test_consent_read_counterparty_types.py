@@ -125,6 +125,53 @@ async def test_consented_read_denied_when_no_consent(
 
 
 @pytest.mark.asyncio
+async def test_consented_read_denied_records_out_of_vocabulary_scope(
+    database_url: str, clean_tables: None
+) -> None:
+    """A denied read with an unlisted scope is recorded, not rejected.
+
+    The access-history ledger is a happened-events record: the consent gate
+    (MOD-004 ``_scope_subsumes``) fails closed against unknown requested
+    scopes, and that denial must still be written with the caller's literal
+    scope (PHASE-4 T7, #241). Guards the ledger's ``scope`` column against a
+    CHECK constraint that would turn this clean domain denial into a 500.
+    """
+    health_facade, _consent_facade = _facades(database_url)
+
+    await health_facade.create_record(_PATIENT)
+
+    with pytest.raises(RecordAccessDeniedError):
+        await health_facade.read_consented_history(
+            patient_id=_PATIENT,
+            scope="everything",
+            counterparty_type="doctor",
+            counterparty_id=_COUNTERPARTY_ID,
+        )
+
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        async with engine.connect() as connection:
+            rows = (
+                await connection.execute(
+                    text(
+                        "SELECT rah.scope, rah.actor_type, rah.outcome, rah.denial_reason "
+                        "FROM health.health_record_access_history rah "
+                        "JOIN health.health_patient_records r ON r.id = rah.record_id "
+                        "WHERE r.identity_id = :patient"
+                    ),
+                    {"patient": _PATIENT},
+                )
+            ).all()
+    finally:
+        await engine.dispose()
+
+    assert len(rows) == 1
+    assert rows[0].scope == "everything"
+    assert rows[0].actor_type == "doctor"
+    assert rows[0].outcome == "denied"
+
+
+@pytest.mark.asyncio
 async def test_counterparty_types_are_isolated(database_url: str, clean_tables: None) -> None:
     """AC: consent for one type does not grant access to another type."""
     health_facade, consent_facade = _facades(database_url)

@@ -30,6 +30,8 @@ from app.gateway.rate_limit import RateLimitMiddleware
 from app.gateway.rbac import require_patient
 from app.gateway.security_headers import SecurityHeadersMiddleware
 from app.gateway.trace import TraceMiddleware, resolve_trace_id
+from modules.audit.adapters.routes import router as audit_router
+from modules.audit.facade import AuditFacade
 from modules.consent.adapters.routes import (
     register_error_handlers as register_consent_error_handlers,
 )
@@ -146,6 +148,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # instance so routes read one resolved object and unit tests can stub it.
     # Pass consent_facade for PHASE-3 T5 (#214) gated reads.
     app.state.health_facade = HealthFacade(engine=engine, consent_facade=app.state.consent_facade)
+    # MOD-011 (PHASE-4 T6, #240): the audit facade shares the settled engine
+    # for the operator query surface - stored on state so routes read one
+    # resolved object and unit tests stub it. The health facade (MOD-003) is
+    # passed for T7's patient access-history delegation: the ledger lives in
+    # the health schema, so the audit facade calls through the facade seam
+    # instead of reading across schemas (module isolation rule).
+    app.state.audit_facade = AuditFacade(engine=engine, health_facade=app.state.health_facade)
     # The edge's in-process idempotency store (api-standards §5, PHASE-2 REM
     # T11, #80): the auth mutation adapters read/write it per ``Idempotency-Key``
     # so a retried register/verify/resend replays the stored result instead of
@@ -208,6 +217,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(iam_router)
     app.include_router(health_router)
     app.include_router(consent_router)
+    app.include_router(audit_router)
     register_error_handlers(app)
     register_gateway_error_handlers(app)
     register_health_error_handlers(app)

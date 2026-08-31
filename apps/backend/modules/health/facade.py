@@ -21,7 +21,7 @@ append-only egress audit row (see inline ADR in ``read_consented_history``).
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 # Type-only import to avoid circular dependency at runtime
 from typing import TYPE_CHECKING
@@ -32,10 +32,13 @@ from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app.config import Settings
+from bus.outbox_writer import write_outbox
+from modules.health.domain.events import record_accessed_envelope, record_denied_envelope
 from modules.health.domain.exceptions import (
     RecordAccessDeniedError,
     RecordNotFoundError,
 )
+from modules.health.outbox import HEALTH_OUTBOX_TABLE
 from modules.health.schema.models import (
     health_patient_records,
     health_record_access_history,
@@ -46,6 +49,12 @@ if TYPE_CHECKING:
     from modules.consent.facade import ConsentFacade
 
 HEALTH_SCHEMA = "health"
+
+# The default scope for an owner's own read of their complete record; matches
+# the consent ``RecordScope`` vocabulary ("full_record").
+_OWNER_SCOPE = "full_record"
+
+_ACTOR_TYPE_PATIENT = "patient"
 
 
 class RecordEntryView(BaseModel):
@@ -69,6 +78,35 @@ class RecordTimeline(BaseModel):
     patient_id: int
     created_at: datetime
     entries: list[RecordEntryView]
+
+
+class AccessHistoryEntry(BaseModel):
+    """One read attempt on the patient's record as the trust view answers it.
+
+    Every row of ``health_record_access_history`` becomes one entry: who read
+    (``actor_id`` + ``actor_type``), over which scope, when, and whether the
+    attempt was refused - with the ``denial_reason`` when it was (FEAT-003
+    "who / how / why"). The health ledger is the fast patient-facing source;
+    the hash-chained copy of the same acts lives in MOD-011's ``audit_events``.
+    """
+
+    actor_id: int
+    actor_type: str | None
+    scope: str | None
+    accessed_at: datetime
+    denied: bool
+    denial_reason: str | None
+
+
+class AccessHistoryView(BaseModel):
+    """The typed contract of the patient access-history view (FEAT-003).
+
+    ``entries`` is reverse-chronological by ``accessed_at``. A record no one
+    has touched yet answers an empty list - never an error (zero-setup trust
+    view for a freshly registered patient).
+    """
+
+    entries: list[AccessHistoryEntry]
 
 
 async def _ensure_record_shell(connection: AsyncConnection, patient_id: int) -> int:
@@ -96,16 +134,54 @@ async def _ensure_record_shell(connection: AsyncConnection, patient_id: int) -> 
 
 
 async def _log_access(
-    connection: AsyncConnection, record_id: int, accessor_identity_id: int, outcome: str
+    connection: AsyncConnection,
+    record_id: int,
+    accessor_identity_id: int,
+    outcome: str,
+    *,
+    actor_type: str,
+    scope: str,
+    denial_reason: str | None = None,
 ) -> None:
-    """Append one access-history row for this read attempt (KPI-006)."""
+    """Record one read attempt in BOTH the access-history ledger and the outbox.
+
+    Dual write (FEAT-003, KPI-006) in the caller's transaction: the
+    ``health_record_access_history`` row feeds the fast patient view, and the
+    ``record.accessed`` / ``record.denied`` event drives MOD-011's hash
+    chain. The caller commits or rolls both back together.
+    """
+    accessed_at = datetime.now(UTC)
+    # actor_type / scope / denial_reason persist next to the ledger row too
+    # (PHASE-4 T7, #241) so the fast patient view answers who/how/why without
+    # joining the outbox payload; denial_reason stays NULL for allowed reads.
     await connection.execute(
         health_record_access_history.insert().values(
             record_id=record_id,
             accessor_identity_id=accessor_identity_id,
             outcome=outcome,
+            actor_type=actor_type,
+            scope=scope,
+            denial_reason=denial_reason,
         )
     )
+    if outcome == "allowed":
+        envelope = record_accessed_envelope(
+            record_id=record_id,
+            actor_id=accessor_identity_id,
+            actor_type=actor_type,
+            scope=scope,
+            accessed_at=accessed_at,
+        )
+    else:
+        envelope = record_denied_envelope(
+            record_id=record_id,
+            actor_id=accessor_identity_id,
+            actor_type=actor_type,
+            scope=scope,
+            accessed_at=accessed_at,
+            denial_reason=denial_reason or "access denied",
+        )
+    await write_outbox(connection, HEALTH_SCHEMA, HEALTH_OUTBOX_TABLE, envelope)
 
 
 async def _load_timeline(
@@ -149,6 +225,55 @@ async def _load_timeline(
     )
 
 
+async def query_access_history(connection: AsyncConnection, patient_id: int) -> AccessHistoryView:
+    """Read every access-history row for a patient's record, newest first.
+
+    Resolves the patient's single record shell via ``health_patient_records``
+    and selects every ``health_record_access_history`` row bound to it - owner
+    reads, partner reads, and denied attempts alike - concretizing the
+    ``denied`` flag from the ``outcome`` column. A patient whose record has
+    never been touched answers an empty list. Running inside the caller's
+    connection keeps the read single-transaction and testable without a
+    database (same seam shape as MOD-011's ``query_audit_events``).
+    """
+    rows = (
+        await connection.execute(
+            select(
+                health_record_access_history.c.accessor_identity_id,
+                health_record_access_history.c.actor_type,
+                health_record_access_history.c.scope,
+                health_record_access_history.c.accessed_at,
+                health_record_access_history.c.outcome,
+                health_record_access_history.c.denial_reason,
+            )
+            .select_from(
+                health_record_access_history.join(
+                    health_patient_records,
+                    health_record_access_history.c.record_id == health_patient_records.c.id,
+                )
+            )
+            .where(health_patient_records.c.identity_id == patient_id)
+            .order_by(
+                health_record_access_history.c.accessed_at.desc(),
+                health_record_access_history.c.id.desc(),
+            )
+        )
+    ).all()
+    return AccessHistoryView(
+        entries=[
+            AccessHistoryEntry(
+                actor_id=int(row.accessor_identity_id),
+                actor_type=row.actor_type,
+                scope=row.scope,
+                accessed_at=row.accessed_at,
+                denied=row.outcome == "denied",
+                denial_reason=row.denial_reason,
+            )
+            for row in rows
+        ]
+    )
+
+
 class HealthFacade:
     """Typed public facade for the health module's record surface."""
 
@@ -176,7 +301,14 @@ class HealthFacade:
         """
         async with self._engine.begin() as connection:
             record_id = await _ensure_record_shell(connection, patient_id)
-            await _log_access(connection, record_id, patient_id, "allowed")
+            await _log_access(
+                connection,
+                record_id,
+                patient_id,
+                "allowed",
+                actor_type=_ACTOR_TYPE_PATIENT,
+                scope=_OWNER_SCOPE,
+            )
             return await _load_timeline(connection, record_id, patient_id)
 
     async def get_record_as_owner(self, patient_id: int, record_id: int) -> RecordTimeline:
@@ -202,14 +334,41 @@ class HealthFacade:
                 # No record to key a history row against: 404, nothing logged.
                 pass
             elif row.identity_id != patient_id:
-                await _log_access(connection, record_id, patient_id, "denied")
+                await _log_access(
+                    connection,
+                    record_id,
+                    patient_id,
+                    "denied",
+                    actor_type=_ACTOR_TYPE_PATIENT,
+                    scope=_OWNER_SCOPE,
+                    denial_reason="only the record owner may read this record",
+                )
                 denial_recorded = True
             else:
-                await _log_access(connection, record_id, patient_id, "allowed")
+                await _log_access(
+                    connection,
+                    record_id,
+                    patient_id,
+                    "allowed",
+                    actor_type=_ACTOR_TYPE_PATIENT,
+                    scope=_OWNER_SCOPE,
+                )
                 return await _load_timeline(connection, record_id, patient_id)
         if denial_recorded:
             raise RecordAccessDeniedError("only the record owner may read this record")
         raise RecordNotFoundError(f"no record exists with id {record_id}")
+
+    async def get_access_history(self, patient_id: int) -> AccessHistoryView:
+        """Return the patient's record access history, newest first (FEAT-003).
+
+        A pure read of ``health_record_access_history`` for every row keyed to
+        the patient's record - owner reads, partner reads, and denied attempts
+        alike. A record no one has touched yet answers an empty list, not an
+        error. The ledger is a trust read, not a record access itself, so it
+        is not logged back into the ledger.
+        """
+        async with self._engine.begin() as connection:
+            return await query_access_history(connection, patient_id)
 
     async def seed_record_entries(self, patient_id: int) -> tuple[list[int], list[str]]:
         """Return entry IDs and types for a patient's record (test-only seed helper).
@@ -266,12 +425,27 @@ class HealthFacade:
             record_id = await _ensure_record_shell(connection, patient_id)
 
             if denied:
-                # Denied read: log in access history, then raise AFTER
-                # the transaction commits (cf. get_record_as_owner pattern).
-                await _log_access(connection, record_id, counterparty_id, "denied")
+                # Denied read: log access history + denied event, then raise
+                # AFTER the transaction commits (cf. get_record_as_owner pattern).
+                await _log_access(
+                    connection,
+                    record_id,
+                    counterparty_id,
+                    "denied",
+                    actor_type=counterparty_type,
+                    scope=scope,
+                    denial_reason="consent check failed",
+                )
             else:
-                # Allowed read: load entries and log in access history
-                await _log_access(connection, record_id, counterparty_id, "allowed")
+                # Allowed read: load entries and log access history + event
+                await _log_access(
+                    connection,
+                    record_id,
+                    counterparty_id,
+                    "allowed",
+                    actor_type=counterparty_type,
+                    scope=scope,
+                )
                 timeline = await _load_timeline(connection, record_id, patient_id)
 
         if denied:

@@ -4,8 +4,9 @@ Verifies the acceptance criteria that need a live database:
 
   1. ``alembic upgrade head`` creates all 11 private module schemas (ADR-0003
      layout); the only tables they may hold are the five ``iam`` tables added
-     by ``v1.0__init_iam`` (PHASE-2 T1, #52) plus the health record core added
-     by ``v2.0__init_health`` (PHASE-3 T2, #211).
+     by ``v1.0__init_iam`` (PHASE-2 T1, #52), the health record core added by
+     ``v2.0__init_health`` (PHASE-3 T2, #211) and the MOD-011 audit ledger
+     added by ``v3.0__init_audit`` (PHASE-4 T1, #235).
   2. The outbox/``consumed_events`` DDL template materializes into a throwaway
      schema with the documented row contract (issue #16), so the round-trip
      harness (T2c) can build on it.
@@ -65,6 +66,13 @@ EXPECTED_CONSENT_TABLES = {
     "consent.consent_egress_log",
     "consent.consent_events",
     "consent.consent_outbox",
+}
+
+EXPECTED_AUDIT_TABLES = {
+    "audit.audit_events",
+    "audit.audit_tamper_attempts",
+    "audit.audit_outbox",
+    "audit.consumed_events",
 }
 
 
@@ -148,10 +156,16 @@ def test_upgrade_head_creates_all_eleven_module_schemas(
         )
 
         tables = asyncio.run(_module_schema_table_names(database_url))
-        expected_tables = EXPECTED_IAM_TABLES | EXPECTED_HEALTH_TABLES | EXPECTED_CONSENT_TABLES
+        expected_tables = (
+            EXPECTED_IAM_TABLES
+            | EXPECTED_HEALTH_TABLES
+            | EXPECTED_CONSENT_TABLES
+            | EXPECTED_AUDIT_TABLES
+        )
         assert set(tables) == expected_tables, (
-            "only the iam + health + consent schemas may hold tables after upgrade head "
-            "(v1.0__init_iam, v2.0__init_health, v2.1__init_consent), "
+            "only the iam + health + consent + audit schemas may hold tables after "
+            "upgrade head (v1.0__init_iam, v2.0__init_health, v2.1__init_consent, "
+            "v3.0__init_audit), "
             f"unexpected: {set(tables) - expected_tables}, "
             f"missing: {expected_tables - set(tables)}"
         )
