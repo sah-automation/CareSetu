@@ -29,6 +29,7 @@ from modules.iam.domain.verify import IDENTITY_ACTIVE, IDENTITY_SUSPENDED
 from modules.iam.outbox import IAM_OUTBOX_TABLE
 from modules.iam.schema.models import (
     iam_identities,
+    iam_operator_mfa,
     iam_role_grants,
     iam_sessions,
 )
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
 _IAM_SCHEMA = "iam"
 _PATIENT_ROLE = "patient"
 _PARTNER_ROLE = "partner"
+_OPERATOR_ROLE = "operator"
 
 
 class SessionResult(BaseModel):
@@ -138,6 +140,67 @@ class SessionFacade:
             if scope is None:
                 raise SessionIssuanceError(
                     f"identity {identity_id} has no active patient role grant"
+                )
+
+            jti, refresh_token, token = await self._mint_session_row(
+                connection, identity_id, scope, now
+            )
+
+        return SessionResult(
+            jwt=token,
+            jti=jti,
+            scope=scope,
+            identity_id=identity_id,
+            expires_in_seconds=self._access_token_ttl_seconds,
+            refresh_token=refresh_token,
+        )
+
+    async def issue_operator_session(self, phone: str) -> SessionResult:
+        """Mint an operator-scoped access JWT (T07, ticket #250).
+
+        Operators are a trusted closed group that never self-registers; a
+        session is minted only after the MFA second factor has been completed
+        at login. Mirror of ``issue_session`` for the ``operator`` role with an
+        extra gate: the identity must be ``Active``, hold an ``Active``
+        ``operator`` role grant, AND have an enrolled, verified MFA factor
+        (``iam_operator_mfa.mfa_enabled`` with a recorded ``last_verified_at``).
+        If MFA is not enrolled or not yet verified, a ``SessionIssuanceError``
+        names the missing precondition - an operator can never land an
+        operator-scoped session on the phone-OTP factor alone. The minted
+        ``scope`` resolves to ``operator`` so the gateway's ``require_operator``
+        admits the caller.
+        """
+        from modules.iam.domain.phone import normalize_phone
+
+        phone_e164 = normalize_phone(phone)
+        if not self._access_token_signing_key:
+            raise SessionIssuanceError(
+                "access-token signing key is not configured; refusing to issue a session"
+            )
+        now = self._clock()
+
+        async with self._engine.begin() as connection:
+            locked = await _lock_identity_by_phone(connection, phone_e164)
+            if locked is None:
+                raise SessionIssuanceError(
+                    f"no identity for {phone_e164}; invite the operator before issuing a session"
+                )
+            identity_id = locked.identity_id
+            identity_status = locked.status
+            if identity_status != IDENTITY_ACTIVE:
+                raise SessionIssuanceError(
+                    f"identity {identity_id} is {identity_status}, not Active; "
+                    "verify the phone before issuing a session"
+                )
+            if not await _mfa_verified(connection, identity_id):
+                raise SessionIssuanceError(
+                    f"identity {identity_id} has not completed the MFA second factor; "
+                    "enroll and verify MFA before issuing an operator session"
+                )
+            scope = await _resolve_active_role(connection, identity_id, _OPERATOR_ROLE)
+            if scope is None:
+                raise SessionIssuanceError(
+                    f"identity {identity_id} has no active operator role grant"
                 )
 
             jti, refresh_token, token = await self._mint_session_row(
@@ -376,6 +439,35 @@ async def _resolve_active_role(
     ).scalar_one_or_none()
 
 
+async def _mfa_verified(connection: AsyncConnection, identity_id: int) -> bool:
+    """Whether ``identity_id`` has completed the MFA second factor (T07, #250).
+
+    The operator MFA gate reads the ``iam_operator_mfa`` row (seeded by T01,
+    #244): the factor must be enrolled (``mfa_enabled``) and a successful
+    verification must have been recorded (``last_verified_at`` set). Both are
+    required - an enrolled-but-never-verified factor, or a row with no
+    enrollment at all, refuses the operator session (fail-closed). The phone
+    OTP factor alone never admits an operator-scoped session.
+    """
+    row = (
+        (
+            await connection.execute(
+                select(
+                    iam_operator_mfa.c.mfa_enabled,
+                    iam_operator_mfa.c.last_verified_at,
+                )
+                .where(iam_operator_mfa.c.identity_id == identity_id)
+                .limit(1)
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        return False
+    return bool(row["mfa_enabled"]) and row["last_verified_at"] is not None
+
+
 async def grant_partner_role(connection: AsyncConnection, identity_id: int) -> None:
     """Grant (or restore) the ``partner`` role on ``identity_id`` (T03, #248).
 
@@ -431,6 +523,42 @@ async def suspend_partner_role(connection: AsyncConnection, identity_id: int) ->
         )
         .values(status=IDENTITY_SUSPENDED)
     )
+
+
+async def grant_operator_role(connection: AsyncConnection, identity_id: int) -> None:
+    """Grant (or restore) the ``operator`` role on ``identity_id`` (T07, #250).
+
+    Idempotent and symmetric with ``grant_partner_role``: an existing ``Active``
+    operator grant is left untouched, a missing one is inserted, and a
+    ``Suspended`` one is flipped back to ``Active``. Used by the operator
+    seed/invite flow to hand the caller the ``operator`` scope so the gateway's
+    ``require_operator`` admits them at login.
+    """
+
+    await connection.execute(
+        iam_role_grants.update()
+        .where(
+            iam_role_grants.c.identity_id == identity_id,
+            iam_role_grants.c.role == _OPERATOR_ROLE,
+            iam_role_grants.c.status == IDENTITY_SUSPENDED,
+        )
+        .values(status=IDENTITY_ACTIVE)
+    )
+    existing = (
+        await connection.execute(
+            select(iam_role_grants.c.id).where(
+                iam_role_grants.c.identity_id == identity_id,
+                iam_role_grants.c.role == _OPERATOR_ROLE,
+                iam_role_grants.c.status == IDENTITY_ACTIVE,
+            )
+        )
+    ).first()
+    if existing is None:
+        await connection.execute(
+            iam_role_grants.insert().values(
+                identity_id=identity_id, role=_OPERATOR_ROLE, status=IDENTITY_ACTIVE
+            )
+        )
 
 
 async def _partner_role_status(connection: AsyncConnection, identity_id: int) -> str | None:

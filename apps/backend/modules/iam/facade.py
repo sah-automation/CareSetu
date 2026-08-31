@@ -38,10 +38,19 @@ from modules.iam.identity_facade import (
     IdentityFacade as IdentityFacade,
 )
 from modules.iam.identity_facade import (
+    OperatorInvitedResult as OperatorInvitedResult,
+)
+from modules.iam.identity_facade import (
     PartnerCredentialCreatedResult as PartnerCredentialCreatedResult,
 )
 from modules.iam.identity_facade import (
     RegisterPatientResult as RegisterPatientResult,
+)
+from modules.iam.mfa_facade import (
+    MfaFacade as MfaFacade,
+)
+from modules.iam.mfa_facade import (
+    VerifyMfaResult as VerifyMfaResult,
 )
 from modules.iam.otp_facade import (
     OtpFacade as OtpFacade,
@@ -106,6 +115,7 @@ class IamFacade:
         self._clock = clock
         self._identity = IdentityFacade(engine, self._otp_sender, clock)
         self._otp = OtpFacade(engine, clock, self._otp_sender)
+        self._mfa = MfaFacade(engine, clock)
         self._sessions = SessionFacade(
             engine,
             clock=clock,
@@ -132,6 +142,22 @@ class IamFacade:
         """
         return await self._identity.create_credential_account(phone, connection=connection)
 
+    async def create_operator_account(
+        self,
+        phone: str,
+        invited_by_identity_id: int,
+        connection: AsyncConnection | None = None,
+    ) -> OperatorInvitedResult:
+        """Invite a new operator (T07, #250): credentialed, MFA-bound at first login.
+
+        Delegated to ``IdentityFacade``. The invited identity is created with an
+        ``Active`` ``operator`` role grant, so an operator-scoped session is
+        minted only after MFA completes.
+        """
+        return await self._identity.create_operator_account(
+            phone, invited_by_identity_id=invited_by_identity_id, connection=connection
+        )
+
     # -- OTP delegation (ADR-0006, ticket #168) ----------------------------
 
     async def verify_otp(self, phone: str, otp: str) -> VerifyOtpResult:
@@ -142,11 +168,31 @@ class IamFacade:
         """Request a fresh code: latest-wins over the pending challenge."""
         return await self._otp.resend_otp(phone)
 
+    # -- MFA delegation (ADR-0006, T07 ticket #250) ------------------------
+
+    async def record_mfa_verified(self, phone: str) -> VerifyMfaResult:
+        """Record a successful operator MFA second factor (T07, #250).
+
+        Delegated to ``MfaFacade``. After this call the operator satisfies
+        ``issue_operator_session``'s MFA gate (``iam_operator_mfa`` enrolled
+        with ``last_verified_at`` stamped); a session is minted only once MFA
+        has been completed.
+        """
+        return await self._mfa.record_mfa_verified(phone)
+
     # -- Session delegation (ADR-0006, ticket #166) ------------------------
 
     async def issue_session(self, phone: str) -> SessionResult:
         """Mint an access JWT for a verified patient (delegated to ``SessionFacade``)."""
         return await self._sessions.issue_session(phone)
+
+    async def issue_operator_session(self, phone: str) -> SessionResult:
+        """Mint an operator-scoped access JWT after MFA (T07, #250).
+
+        Delegated to ``SessionFacade``; the session's ``scope`` resolves to
+        ``operator`` so the gateway's ``require_operator`` admits the caller.
+        """
+        return await self._sessions.issue_operator_session(phone)
 
     async def validate_token(self, token: str) -> ValidatedAccessToken:
         """Resolve a valid access JWT to its scope (delegated to ``SessionFacade``)."""

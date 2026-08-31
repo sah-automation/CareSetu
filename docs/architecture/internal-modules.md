@@ -634,6 +634,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 | `follow_up.due`                                | `MOD-003` (LHR) / Scheduler | `MOD-010` (send re-test nudge), `MOD-011`                                    | JSON           | At-least-once              |
 | `notification.sent` / `.delivered` / `.failed` | `MOD-010` (Notify)          | `MOD-011`                                                                    | JSON           | At-least-once              |
 | `partner.registered`                           | `MOD-002` (Partner)         | `MOD-011`                                                                    | JSON           | At-least-once              |
+| `operator.invited`                             | `MOD-001` (IAM)             | `MOD-011`                                                                    | JSON           | At-least-once              |
 | `partner.verification_started`                 | `MOD-002` (Partner)         | `MOD-011`                                                                    | JSON           | At-least-once              |
 | `partner.credential_reviewed`                  | `MOD-002` (Partner)         | `MOD-011`                                                                    | JSON           | At-least-once              |
 | `partner.activated`                            | `MOD-002` (Partner)         | `MOD-001` (activate role), `MOD-010` (notify partner), `MOD-011`             | JSON           | At-least-once              |

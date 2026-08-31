@@ -39,6 +39,7 @@ from modules.iam.domain.shared import (
 )
 from modules.iam.outbox import IAM_OUTBOX_TABLE
 from modules.iam.schema.models import iam_identities
+from modules.iam.session_facade import grant_operator_role
 
 _IAM_SCHEMA = "iam"
 
@@ -76,6 +77,19 @@ class PartnerCredentialCreatedResult(BaseModel):
     no ``partner`` role scope until activation (the role grant is the
     activation-gated step, T03 #246). ``identity_id`` and ``phone_e164`` let
     the ``partner`` module persist its own row in the same transaction.
+    """
+
+    identity_id: int
+    phone_e164: str
+
+
+class OperatorInvitedResult(BaseModel):
+    """Outcome of inviting a new operator (T07, ticket #250).
+
+    The invited identity is created ``[Unverified]`` with an ``Active``
+    ``operator`` role grant, so the invited phone can complete MFA at first
+    login and then hold the ``operator`` scope - there is no self-registration
+    path, only this credentialed operator-invites-operator flow.
     """
 
     identity_id: int
@@ -248,3 +262,65 @@ class IdentityFacade:
                 identity_id = await _run(connection)
 
         return PartnerCredentialCreatedResult(identity_id=identity_id, phone_e164=phone_e164)
+
+    async def create_operator_account(
+        self,
+        phone: str,
+        invited_by_identity_id: int,
+        connection: AsyncConnection | None = None,
+    ) -> OperatorInvitedResult:
+        """Invite a new operator: create a credentialed, MFA-bound account (T07, #250).
+
+        Operators are a trusted closed group that never self-registers - the
+        only way to grow the queue-running group is an existing operator
+        inviting a new phone. The invited identity is created ``[Unverified]``
+        and immediately granted an ``Active`` ``operator`` role, so a session
+        can be issued only after the invited phone completes MFA at first
+        login (the second factor precedes session minting in ``issue_operator_session``).
+
+        Unlike ``create_credential_account`` (a partner is login-capable with
+        no role until activation), the operator role grant is handed over at
+        invite time - MFA, not a separate activation step, is the gate that
+        binds the account. ``invited_by_identity_id`` names the inviting
+        operator for the ``operator.invited`` audit event, emitted in the same
+        transaction as the identity insert. ``connection`` lets the caller
+        share an open transaction; when omitted the method opens its own,
+        preserving the standalone seam shape the iam tests exercise. Concurrency
+        converges via the unique ``phone_e164`` index (``INSERT ... ON CONFLICT
+        DO NOTHING`` then a re-read); a duplicate phone resolves to the existing
+        identity with the role grant still ensured and no duplicate event.
+        """
+        phone_e164 = normalize_phone(phone)
+
+        async def _run(connection: AsyncConnection) -> int:
+            inserted = await connection.execute(
+                postgresql_insert(iam_identities)
+                .values(phone_e164=phone_e164)
+                .on_conflict_do_nothing(index_elements=["phone_e164"])
+            )
+            identity_id = (
+                await connection.execute(
+                    select(iam_identities.c.id).where(iam_identities.c.phone_e164 == phone_e164)
+                )
+            ).scalar_one()
+            await grant_operator_role(connection, identity_id)
+            if inserted.rowcount == 1:
+                await write_outbox(
+                    connection,
+                    _IAM_SCHEMA,
+                    IAM_OUTBOX_TABLE,
+                    events.operator_invited_envelope(
+                        identity_id=identity_id,
+                        phone_e164=phone_e164,
+                        invited_by_identity_id=invited_by_identity_id,
+                    ),
+                )
+            return int(identity_id)
+
+        if connection is not None:
+            identity_id = await _run(connection)
+        else:
+            async with self._engine.begin() as connection:
+                identity_id = await _run(connection)
+
+        return OperatorInvitedResult(identity_id=identity_id, phone_e164=phone_e164)

@@ -38,6 +38,7 @@ def test_otp_surface_disabled_for_real_provider() -> None:
 
 
 def test_summary_prints_phone_and_surface() -> None:
-    summary = format_summary("+919000000001", "mock OTP read-back enabled")
+    summary = format_summary("+919000000001", "mock OTP read-back enabled", "+919000000002")
     assert "demo phone: +919000000001" in summary
+    assert "bootstrap operator phone: +919000000002" in summary
     assert "otp surface: mock OTP read-back enabled" in summary
