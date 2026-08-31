@@ -263,4 +263,6 @@ async def test_rejected_partner_resubmits_same_type_as_new_round(
     rounds = await _query(
         database_url, "SELECT round, status FROM partner.partner_verifications ORDER BY round"
     )
-    assert rounds == [{"round": 1, "status": "queued"}, {"round": 2, "status": "queued"}]
+    # Round 1 was rejected at Step-2 (the operator's decision is recorded on it),
+    # the re-submission opens round 2 back in the queue.
+    assert rounds == [{"round": 1, "status": "rejected"}, {"round": 2, "status": "queued"}]

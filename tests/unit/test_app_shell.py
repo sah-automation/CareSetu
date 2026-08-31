@@ -93,6 +93,11 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/partner/register",
         # PHASE-5 T06 (#251): partner credential submission (Step-1 pre-filter).
         "/v1/partner/credentials",
+        # PHASE-5 T08 (#252): the operator verification console (FEAT-015) -
+        # age-sortable queue, per-partner detail, approve/reject gate.
+        "/v1/partner/verification-queue",
+        "/v1/partner/verification/{partner_id}",
+        "/v1/partner/verification/{partner_id}/decision",
     }
 
 

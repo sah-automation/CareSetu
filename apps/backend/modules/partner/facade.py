@@ -33,6 +33,7 @@ the state transitions and event constants/builders they need already live in
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel
@@ -47,13 +48,16 @@ from modules.partner.adapters.artifact_store import CredentialArtifactStore
 from modules.partner.domain.credentials import CredentialType
 from modules.partner.domain.events import (
     PartnerType,
+    credential_reviewed_envelope,
     partner_activated_envelope,
     partner_registered_envelope,
     partner_rejected_envelope,
     verification_started_envelope,
 )
 from modules.partner.domain.exceptions import (
+    InvalidQueueSortError,
     PartnerNotFoundError,
+    RejectionReasonRequiredError,
 )
 from modules.partner.domain.prefilter import evaluate_submission
 from modules.partner.domain.state_machine import (
@@ -151,6 +155,85 @@ class CredentialSubmissionResult(BaseModel):
     status: str
     round: int
     reason: str | None = None
+
+
+class PartnerQueueItem(BaseModel):
+    """One partner on the operator verification queue (FEAT-015, T08).
+
+    ``created_at`` is the registration time the age-prioritized default sort
+    orders by (KPI-004: oldest registrations first so the activation-cycle
+    median stays within 48 h). ``round`` is the partner's latest verification
+    round (0 = never entered a round).
+    """
+
+    partner_id: int
+    identity_id: int
+    partner_type: str
+    status: str
+    practice_name: str | None
+    practice_address: str
+    created_at: datetime
+    round: int
+
+
+class PartnerQueue(BaseModel):
+    """The operator's verification queue view."""
+
+    items: list[PartnerQueueItem]
+
+
+class CredentialDetail(BaseModel):
+    """One submitted credential in the operator's per-partner detail view."""
+
+    credential_id: int
+    credential_type: str
+    verified: bool
+    expires_at: datetime | None
+    artifact_refs: dict[str, str]
+
+
+class VerificationRound(BaseModel):
+    """One verification round in the operator's history view."""
+
+    round: int
+    status: str
+    decision: str | None
+    decision_reason: str | None
+    decision_by: int | None
+    decided_at: datetime | None
+    created_at: datetime
+
+
+class PartnerVerificationDetail(BaseModel):
+    """The full per-partner review: profile + credentials + verification history.
+
+    What the operator sees when they open a queue item (FEAT-015 user story 17)
+    to make a defensible approve/reject decision. ``credentials`` are the
+    submitted documents (artifact refs, never bytes); ``verification_history``
+    is the per-round queue/decision trail.
+    """
+
+    partner_id: int
+    identity_id: int
+    partner_type: str
+    status: str
+    practice_name: str | None
+    practice_address: str
+    service_area_id: int | None
+    created_at: datetime
+    credentials: list[CredentialDetail]
+    verification_history: list[VerificationRound]
+
+
+_QUEUE_SORTS: dict[str, Any] = {
+    "registration_age": partner_profiles.c.created_at,
+    "partner_type": partner_profiles.c.partner_type,
+    "status": partner_profiles.c.status,
+}
+
+
+def _row_str(row: Any, name: str) -> str:
+    return str(getattr(row, name))
 
 
 def _to_profile(row: Row[Any], round: int) -> _Profile:
@@ -595,13 +678,37 @@ class PartnerFacade:
         """Step-2 manual gate: explicit operator approval or rejection.
 
         Approval is the ONLY path to ``Active`` (no auto-approve). Rejection
-        requires no reason at this layer but the route surface (T08) enforces a
-        required reason; it is carried into the ``partner.rejected`` payload.
+        REQUIRES a reason (raises :class:`RejectionReasonRequiredError` when
+        blank); it is carried into the ``partner.rejected`` payload. The
+        decision is recorded on the current round's ``partner_verifications``
+        row - status/decision flipped to ``approved`` or ``rejected`` with the
+        actor and ``decided_at`` - so the per-partner detail's verification
+        history and the rejection reason are queryable, then the terminal event
+        is emitted in the same transaction (ADR-0002 §1). Every decision is a
+        single, individually attributed action - there is no bulk path.
         """
+        if not approve and (reason is None or not reason.strip()):
+            raise RejectionReasonRequiredError()
         async with self._engine.begin() as connection:
             profile = await _load_profile(connection, partner_id)
             action = PartnerAction.OPERATOR_APPROVE if approve else PartnerAction.OPERATOR_REJECT
             next_state = await _apply_transition(connection, profile, action, verification=False)
+            decision = "approved" if approve else "rejected"
+            resolved_reason = None if approve else (reason or "rejected by operator")
+            await connection.execute(
+                partner_verifications.update()
+                .where(
+                    partner_verifications.c.profile_id == partner_id,
+                    partner_verifications.c.round == next_state.round,
+                )
+                .values(
+                    status=decision,
+                    decision=decision,
+                    decision_reason=resolved_reason,
+                    decision_by=decision_by,
+                    decided_at=func.now(),
+                )
+            )
             if approve:
                 await write_outbox(
                     connection,
@@ -617,7 +724,7 @@ class PartnerFacade:
                     partner_rejected_envelope(
                         partner_id,
                         identity_id=profile.identity_id,
-                        reason=reason or "rejected by operator",
+                        reason=resolved_reason or "rejected by operator",
                         round=next_state.round,
                         decision_by=decision_by,
                     ),
@@ -627,3 +734,171 @@ class PartnerFacade:
                 status=next_state.status.value,
                 round=next_state.round,
             )
+
+    async def list_verification_queue(
+        self,
+        *,
+        partner_type: str | None = None,
+        status: str | None = "Under Verification",
+        sort_by: str = "registration_age",
+    ) -> PartnerQueue:
+        """The operator verification queue (FEAT-015, user story 16).
+
+        Lists partner profiles with their latest verification round, defaulting
+        to the ``[Under Verification]`` queue the operator gates (Step 2,
+        ADR-0008). ``status`` filters on the profile lifecycle status - the
+        default ``Under Verification`` shows the active queue; a broader value
+        (``Active``/``Rejected``) drives the activation-cycle KPI view. Sortable
+        by registration age (default, ``created_at`` ascending so the oldest /
+        longest-waiting registrations surface first for the <= 48 h median,
+        KPI-004), partner type, or status. An unknown ``sort_by`` raises
+        :class:`InvalidQueueSortError`.
+        """
+        sort_column = _QUEUE_SORTS.get(sort_by)
+        if sort_column is None:
+            raise InvalidQueueSortError(sort_by)
+        order: Any = sort_column.asc()
+
+        async with self._engine.begin() as connection:
+            stmt = (
+                select(
+                    partner_profiles.c.id,
+                    partner_profiles.c.identity_id,
+                    partner_profiles.c.partner_type,
+                    partner_profiles.c.status,
+                    partner_profiles.c.practice_name,
+                    partner_profiles.c.practice_address,
+                    partner_profiles.c.created_at,
+                    func.coalesce(func.max(partner_verifications.c.round), 0).label("round"),
+                )
+                .outerjoin(
+                    partner_verifications,
+                    partner_verifications.c.profile_id == partner_profiles.c.id,
+                )
+                .group_by(partner_profiles.c.id)
+                .order_by(order)
+            )
+            if status is not None:
+                stmt = stmt.where(partner_profiles.c.status == status)
+            if partner_type is not None:
+                stmt = stmt.where(partner_profiles.c.partner_type == partner_type)
+            rows = (await connection.execute(stmt)).all()
+
+            return PartnerQueue(
+                items=[
+                    PartnerQueueItem(
+                        partner_id=int(row.id),
+                        identity_id=int(row.identity_id),
+                        partner_type=_row_str(row, "partner_type"),
+                        status=_row_str(row, "status"),
+                        practice_name=(
+                            str(row.practice_name) if row.practice_name is not None else None
+                        ),
+                        practice_address=str(row.practice_address),
+                        created_at=row.created_at,
+                        round=int(row.round),
+                    )
+                    for row in rows
+                ]
+            )
+
+    async def get_verification_detail(
+        self, partner_id: int, actor_id: int
+    ) -> PartnerVerificationDetail:
+        """Open a queue item: the full per-partner review (FEAT-015, story 17).
+
+        Returns the profile, all submitted credentials, and the verification
+        history so the operator can make a defensible decision. Emits
+        ``partner.credential_reviewed`` (with ``actor_id``) for this view - the
+        "who saw this document" trail (spec: operator audit depth) - written to
+        the outbox in its own transaction after the read. Consumed by the audit
+        module in a later ticket (T13); the event is emitted here.
+        """
+        async with self._engine.begin() as connection:
+            row = (
+                await connection.execute(
+                    select(
+                        partner_profiles.c.id,
+                        partner_profiles.c.identity_id,
+                        partner_profiles.c.partner_type,
+                        partner_profiles.c.status,
+                        partner_profiles.c.practice_name,
+                        partner_profiles.c.practice_address,
+                        partner_profiles.c.service_area_id,
+                        partner_profiles.c.created_at,
+                    ).where(partner_profiles.c.id == partner_id)
+                )
+            ).first()
+            if row is None:
+                raise PartnerNotFoundError(partner_id)
+
+            credential_rows = (
+                await connection.execute(
+                    select(
+                        partner_credentials.c.id,
+                        partner_credentials.c.credential_type,
+                        partner_credentials.c.verified,
+                        partner_credentials.c.expires_at,
+                        partner_credentials.c.artifact_refs,
+                    ).where(partner_credentials.c.profile_id == partner_id)
+                )
+            ).all()
+
+            history_rows = (
+                await connection.execute(
+                    select(
+                        partner_verifications.c.round,
+                        partner_verifications.c.status,
+                        partner_verifications.c.decision,
+                        partner_verifications.c.decision_reason,
+                        partner_verifications.c.decision_by,
+                        partner_verifications.c.decided_at,
+                        partner_verifications.c.created_at,
+                    )
+                    .where(partner_verifications.c.profile_id == partner_id)
+                    .order_by(partner_verifications.c.round)
+                )
+            ).all()
+
+        async with self._engine.begin() as connection:
+            await write_outbox(
+                connection,
+                PARTNER_SCHEMA,
+                PARTNER_OUTBOX_TABLE,
+                credential_reviewed_envelope(partner_id, actor_id),
+            )
+
+        return PartnerVerificationDetail(
+            partner_id=int(row.id),
+            identity_id=int(row.identity_id),
+            partner_type=_row_str(row, "partner_type"),
+            status=_row_str(row, "status"),
+            practice_name=str(row.practice_name) if row.practice_name is not None else None,
+            practice_address=str(row.practice_address),
+            service_area_id=int(row.service_area_id) if row.service_area_id is not None else None,
+            created_at=row.created_at,
+            credentials=[
+                CredentialDetail(
+                    credential_id=int(c.id),
+                    credential_type=str(c.credential_type),
+                    verified=bool(c.verified),
+                    expires_at=c.expires_at,
+                    artifact_refs=dict(c.artifact_refs or {}),
+                )
+                for c in credential_rows
+            ],
+            verification_history=[
+                VerificationRound(
+                    round=int(h.round),
+                    status=str(h.status),
+                    decision=str(h.decision) if h.decision is not None else None,
+                    decision_reason=(
+                        str(h.decision_reason) if h.decision_reason is not None else None
+                    ),
+                    decision_by=int(h.decision_by) if h.decision_by is not None else None,
+                    decided_at=h.decided_at,
+                    created_at=h.created_at,
+                )
+                for h in history_rows
+            ],
+        )

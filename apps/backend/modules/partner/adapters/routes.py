@@ -22,21 +22,28 @@ import base64
 import logging
 from typing import Annotated, cast
 
-from fastapi import APIRouter, Depends, FastAPI, Request, status
+from fastapi import APIRouter, Depends, FastAPI, Query, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.gateway.errors import ErrorEnvelope
 from app.gateway.principal import Principal
-from app.gateway.rbac import require_partner
+from app.gateway.rbac import require_operator, require_partner
 from app.gateway.trace import resolve_trace_id
 from modules.partner.domain.credentials import CredentialType
 from modules.partner.domain.events import PartnerType
-from modules.partner.domain.exceptions import PartnerError
+from modules.partner.domain.exceptions import (
+    InvalidQueueSortError,
+    PartnerError,
+    RejectionReasonRequiredError,
+)
 from modules.partner.facade import (
     CredentialSubmission,
     CredentialSubmissionResult,
     PartnerFacade,
+    PartnerQueue,
+    PartnerVerificationDetail,
+    PartnerView,
     RegisterPartnerResult,
 )
 
@@ -161,6 +168,108 @@ async def open_credential_submission(
     )
 
 
+@router.get(
+    "/verification-queue",
+    response_model=PartnerQueue,
+    status_code=status.HTTP_200_OK,
+    summary="List the operator verification queue (operator only)",
+)
+async def list_verification_queue(
+    request: Request,
+    operator: Annotated[Principal, Depends(require_operator)],
+    partner_type: Annotated[PartnerType | None, Query()] = None,
+    status: Annotated[str | None, Query()] = "Under Verification",
+    sort_by: Annotated[str, Query()] = "registration_age",
+) -> PartnerQueue:
+    """List the engagement queue an operator gates (FEAT-015, user story 16).
+
+    Operator-scoped (MFA attested - ``require_operator``): a partner/patient/
+    anonymous caller is refused 403/401 at the edge. Defaults to the
+    ``[Under Verification]`` queue, filterable by ``partner_type`` and
+    ``status`` (the status filter also opens the ``[Active]``/``[Rejected]``
+    activation-cycle KPI view), and sortable by ``registration_age`` (default,
+    oldest first for the <= 48 h KPI-004 median), ``partner_type`` or
+    ``status``. No bulk actions - the queue only lists; decisions go through the
+    per-partner decision route.
+    """
+    del operator
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    return await facade.list_verification_queue(
+        partner_type=partner_type,
+        status=status,
+        sort_by=sort_by,
+    )
+
+
+@router.get(
+    "/verification/{partner_id}",
+    response_model=PartnerVerificationDetail,
+    status_code=status.HTTP_200_OK,
+    summary="Open a queue item: profile + credentials + verification history (operator only)",
+)
+async def verification_detail(
+    request: Request,
+    operator: Annotated[Principal, Depends(require_operator)],
+    partner_id: int,
+) -> PartnerVerificationDetail:
+    """Open a partner's queue item for review (FEAT-015, user story 17).
+
+    Returns the profile, all submitted credentials, and the per-round
+    verification history. Every view of the credentials emits
+    ``partner.credential_reviewed`` (actor + partner) - the "who saw this
+    document" trail (operator audit depth); audit consumption is a later ticket.
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    return await facade.get_verification_detail(int(partner_id), actor_id=int(operator.subject_id))
+
+
+@router.post(
+    "/verification/{partner_id}/decision",
+    response_model=PartnerView,
+    status_code=status.HTTP_200_OK,
+    summary="Approve or reject a partner queue item (operator only, reason required on reject)",
+)
+async def operator_decision(
+    request: Request,
+    operator: Annotated[Principal, Depends(require_operator)],
+    partner_id: int,
+    body: OperatorDecisionRequest,
+) -> PartnerView:
+    """The Step-2 manual activation gate (FEAT-015, user stories 18-19).
+
+    Approve -> the partner becomes ``[Active]`` and ``partner.activated`` fires
+    (the iam consumer grants the ``partner`` role, T03 chain). Reject -> a
+    reason is REQUIRED (facade raises 422 when absent) and the partner becomes
+    ``[Rejected]`` with ``partner.rejected`` carrying the reason (role denied).
+    Individually attributed to the operator principal - there is no bulk path.
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    return await facade.operator_decision(
+        int(partner_id),
+        decision_by=int(operator.subject_id),
+        approve=body.approve,
+        reason=body.reason,
+    )
+
+
+class OperatorDecisionRequest(BaseModel):
+    """Body of ``POST /v1/partner/verification/{id}/decision`` (FEAT-015).
+
+    ``approve`` is a single, individually-attributed action - no bulk path.
+    ``reason`` is REQUIRED on reject (422 when missing/blank) and optional on
+    approve; it is recorded on the verification round and carried into the
+    ``partner.rejected`` payload so the partner learns the specific failure.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    approve: bool
+    reason: str | None = Field(
+        default=None,
+        description="Required on reject; the specific failure surfaced to the partner",
+    )
+
+
 def _decode_artifact(b64: str) -> bytes:
     """Decode a base64 artifact, rejecting malformed input (never stored raw)."""
     try:
@@ -213,4 +322,24 @@ def register_error_handlers(app: FastAPI) -> None:
             "Internal partner error",
         )
 
+    async def _rejection_reason_required(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        return _error_response(
+            request,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "REJECTION_REASON_REQUIRED",
+            "a reason is required when rejecting a partner",
+        )
+
+    async def _invalid_queue_sort(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        return _error_response(
+            request,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "INVALID_QUEUE_SORT",
+            "unknown verification queue sort key",
+        )
+
+    app.add_exception_handler(RejectionReasonRequiredError, _rejection_reason_required)
+    app.add_exception_handler(InvalidQueueSortError, _invalid_queue_sort)
     app.add_exception_handler(PartnerError, _partner_failed)
