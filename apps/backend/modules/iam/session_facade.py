@@ -468,22 +468,21 @@ async def _mfa_verified(connection: AsyncConnection, identity_id: int) -> bool:
     return bool(row["mfa_enabled"]) and row["last_verified_at"] is not None
 
 
-async def grant_partner_role(connection: AsyncConnection, identity_id: int) -> None:
-    """Grant (or restore) the ``partner`` role on ``identity_id`` (T03, #248).
+async def _grant_or_reactivate_role(
+    connection: AsyncConnection, identity_id: int, role: str
+) -> None:
+    """Grant (or restore) a role on ``identity_id`` (T03 #248, T07 #250).
 
-    Idempotent: an existing ``Active`` partner grant is left untouched, a
-    missing one is inserted, and a ``Suspended`` one (a previously rejected
-    partner being re-approved) is flipped back to ``Active``. Runs on the
-    consumer's delivery connection inside the same transaction as the
-    ``consumed_events`` ledger row (ADR-0002 §3), so a redelivered
-    ``partner.activated`` is a no-op and a crash rolls both back.
+    Idempotent: an existing ``Active`` grant is left untouched, a missing one is
+    inserted, and a ``Suspended`` one is flipped back to ``Active``.  Runs on
+    the consumer's delivery connection inside the same transaction as the
+    ``consumed_events`` ledger row (ADR-0002 §3).
     """
-
     await connection.execute(
         iam_role_grants.update()
         .where(
             iam_role_grants.c.identity_id == identity_id,
-            iam_role_grants.c.role == _PARTNER_ROLE,
+            iam_role_grants.c.role == role,
             iam_role_grants.c.status == IDENTITY_SUSPENDED,
         )
         .values(status=IDENTITY_ACTIVE)
@@ -492,7 +491,7 @@ async def grant_partner_role(connection: AsyncConnection, identity_id: int) -> N
         await connection.execute(
             select(iam_role_grants.c.id).where(
                 iam_role_grants.c.identity_id == identity_id,
-                iam_role_grants.c.role == _PARTNER_ROLE,
+                iam_role_grants.c.role == role,
                 iam_role_grants.c.status == IDENTITY_ACTIVE,
             )
         )
@@ -500,9 +499,14 @@ async def grant_partner_role(connection: AsyncConnection, identity_id: int) -> N
     if existing is None:
         await connection.execute(
             iam_role_grants.insert().values(
-                identity_id=identity_id, role=_PARTNER_ROLE, status=IDENTITY_ACTIVE
+                identity_id=identity_id, role=role, status=IDENTITY_ACTIVE
             )
         )
+
+
+async def grant_partner_role(connection: AsyncConnection, identity_id: int) -> None:
+    """Grant (or restore) the ``partner`` role on ``identity_id`` (T03, #248)."""
+    await _grant_or_reactivate_role(connection, identity_id, _PARTNER_ROLE)
 
 
 async def suspend_partner_role(connection: AsyncConnection, identity_id: int) -> None:
@@ -526,39 +530,8 @@ async def suspend_partner_role(connection: AsyncConnection, identity_id: int) ->
 
 
 async def grant_operator_role(connection: AsyncConnection, identity_id: int) -> None:
-    """Grant (or restore) the ``operator`` role on ``identity_id`` (T07, #250).
-
-    Idempotent and symmetric with ``grant_partner_role``: an existing ``Active``
-    operator grant is left untouched, a missing one is inserted, and a
-    ``Suspended`` one is flipped back to ``Active``. Used by the operator
-    seed/invite flow to hand the caller the ``operator`` scope so the gateway's
-    ``require_operator`` admits them at login.
-    """
-
-    await connection.execute(
-        iam_role_grants.update()
-        .where(
-            iam_role_grants.c.identity_id == identity_id,
-            iam_role_grants.c.role == _OPERATOR_ROLE,
-            iam_role_grants.c.status == IDENTITY_SUSPENDED,
-        )
-        .values(status=IDENTITY_ACTIVE)
-    )
-    existing = (
-        await connection.execute(
-            select(iam_role_grants.c.id).where(
-                iam_role_grants.c.identity_id == identity_id,
-                iam_role_grants.c.role == _OPERATOR_ROLE,
-                iam_role_grants.c.status == IDENTITY_ACTIVE,
-            )
-        )
-    ).first()
-    if existing is None:
-        await connection.execute(
-            iam_role_grants.insert().values(
-                identity_id=identity_id, role=_OPERATOR_ROLE, status=IDENTITY_ACTIVE
-            )
-        )
+    """Grant (or restore) the ``operator`` role on ``identity_id`` (T07, #250)."""
+    await _grant_or_reactivate_role(connection, identity_id, _OPERATOR_ROLE)
 
 
 async def _partner_role_status(connection: AsyncConnection, identity_id: int) -> str | None:
