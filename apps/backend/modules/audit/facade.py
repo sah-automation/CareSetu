@@ -21,8 +21,12 @@ from modules.audit.domain.chain import GENESIS_HASH, compute_audit_hash
 from modules.audit.domain.consumer import (
     AuditEventPayload,
     AuditRow,
+    CredentialReviewedPayload,
+    PartnerDecisionPayload,
     RecordAccessAuditPayload,
     build_audit_row,
+    build_credential_reviewed_row,
+    build_partner_decision_row,
     build_record_access_row,
 )
 from modules.audit.schema.models import audit_events
@@ -130,6 +134,73 @@ async def append_record_access_event(
     """
     prev_hash = await _latest_hash(connection)
     row = build_record_access_row(event_type, payload, producer, prev_hash)
+    await connection.execute(
+        insert(audit_events).values(
+            event_type=row.event_type,
+            actor_id=row.actor_id,
+            target_id=row.target_id,
+            scope=row.scope,
+            metadata=row.metadata,
+            timestamp=row.timestamp,
+            prev_hash=row.prev_hash,
+            hash=row.hash,
+        )
+    )
+    return row
+
+
+async def append_partner_decision_event(
+    connection: AsyncConnection,
+    event_type: str,
+    payload: PartnerDecisionPayload,
+    producer: str,
+    occurred_at: datetime,
+) -> AuditRow:
+    """Append one partner terminal decision to the hash-chained ledger.
+
+    Mirrors ``append_record_access_event`` for ``partner.activated`` /
+    ``partner.rejected``: reads the chain tail (or genesis), computes the
+    deterministic digest with ``build_partner_decision_row``, and inserts the
+    row with every required column populated. The event type is already the
+    regulated act, so there is no derived act type. Runs inside the caller's
+    transaction (the ``consumed_events`` ledger row), so a crash rolls both
+    back together (ADR-0002 §3).
+    """
+    prev_hash = await _latest_hash(connection)
+    row = build_partner_decision_row(event_type, payload, producer, occurred_at, prev_hash)
+    await connection.execute(
+        insert(audit_events).values(
+            event_type=row.event_type,
+            actor_id=row.actor_id,
+            target_id=row.target_id,
+            scope=row.scope,
+            metadata=row.metadata,
+            timestamp=row.timestamp,
+            prev_hash=row.prev_hash,
+            hash=row.hash,
+        )
+    )
+    return row
+
+
+async def append_credential_reviewed_event(
+    connection: AsyncConnection,
+    payload: CredentialReviewedPayload,
+    producer: str,
+    occurred_at: datetime,
+) -> AuditRow:
+    """Append one ``partner.credential_reviewed`` view to the hash-chained ledger.
+
+    Mirrors ``append_partner_decision_event`` for the credential-view act:
+    reads the chain tail (or genesis), computes the deterministic digest with
+    ``build_credential_reviewed_row``, and inserts the row with every required
+    column populated. One append per credential view - every view is
+    traceable, not just a summary. Runs inside the caller's transaction (the
+    ``consumed_events`` ledger row), so a crash rolls both back together
+    (ADR-0002 §3).
+    """
+    prev_hash = await _latest_hash(connection)
+    row = build_credential_reviewed_row(payload, producer, occurred_at, prev_hash)
     await connection.execute(
         insert(audit_events).values(
             event_type=row.event_type,

@@ -30,6 +30,9 @@ from bus.envelope import Envelope
 from bus.events import (
     EVENT_AUDIT_EVENT,
     EVENT_AUDIT_TAMPER_DETECTED,
+    EVENT_PARTNER_ACTIVATED,
+    EVENT_PARTNER_CREDENTIAL_REVIEWED,
+    EVENT_PARTNER_REJECTED,
     EVENT_RECORD_ACCESSED,
     EVENT_RECORD_DENIED,
     is_regulated_act,
@@ -38,6 +41,8 @@ from bus.ledger import record_consumed_event
 from bus.registry import HandlerRegistry
 from modules.audit.domain.consumer import (
     AuditEventPayload,
+    CredentialReviewedPayload,
+    PartnerDecisionPayload,
     RecordAccessAuditPayload,
     TamperDetectedPayload,
     is_appended_act,
@@ -45,6 +50,8 @@ from modules.audit.domain.consumer import (
 from modules.audit.facade import (
     AUDIT_SCHEMA,
     append_audit_event,
+    append_credential_reviewed_event,
+    append_partner_decision_event,
     append_record_access_event,
 )
 
@@ -164,6 +171,79 @@ def register_handlers(registry: HandlerRegistry) -> None:
 
     registry.register(EVENT_RECORD_ACCESSED, append_record_access_act)
     registry.register(EVENT_RECORD_DENIED, append_record_access_act)
+
+    # PHASE-5 T13 (#256): the partner gate's regulated acts. MOD-011 consumes
+    # the terminal-decision events with its own payload mirror - MOD-001 owns
+    # the registry payload model for ``partner.activated`` / ``partner.rejected``
+    # (its role-grant/suspend consumers), so MOD-011 registers no duplicate
+    # model here; ``_run_handler`` re-validates the dispatched payload into
+    # ``PartnerDecisionPayload``. The dispatcher must only know this
+    # event has consumers, never claim a model for it.
+    async def append_partner_decision(envelope: Envelope[BaseModel]) -> None:
+        """Consume ``partner.activated`` / ``partner.rejected``: append to chain.
+
+        Ledger first, filter and append second, one transaction: a redelivered
+        ``event_id`` finds its ledger row and skips the append (at-least-once).
+        Both event types are regulated acts on their own - T3's predicate runs
+        on the event type directly, no derivation - so the terminal operator
+        decision (who decided, which partner, why) is appended with the event
+        type as the act type.
+        """
+
+        async def _impl(connection: AsyncConnection, payload: PartnerDecisionPayload) -> None:
+            if not is_regulated_act(envelope.event_type):
+                return
+            await append_partner_decision_event(
+                connection,
+                envelope.event_type,
+                payload,
+                envelope.producer,
+                envelope.occurred_at,
+            )
+
+        await _run_handler(
+            envelope,
+            PartnerDecisionPayload,
+            _impl,
+            "append_partner_decision",
+        )
+
+    registry.register(EVENT_PARTNER_ACTIVATED, append_partner_decision)
+    registry.register(EVENT_PARTNER_REJECTED, append_partner_decision)
+
+    # MOD-011 owns the payload mirror for ``partner.credential_reviewed`` (the
+    # "who saw this document" trail, ADR-0008): one append per credential view,
+    # attributed with actor + partner + timestamp.
+    registry.register_payload_model(EVENT_PARTNER_CREDENTIAL_REVIEWED, CredentialReviewedPayload)
+
+    async def append_credential_reviewed(envelope: Envelope[BaseModel]) -> None:
+        """Consume ``partner.credential_reviewed``: append one view to the chain.
+
+        Ledger first, filter and append second, one transaction: a redelivered
+        ``event_id`` finds its ledger row and skips the append (at-least-once).
+        The event type is a regulated act on its own (T13 added it to T3's
+        whitelist) - every view yields one chained append so "who looked at the
+        documents" is fully attributed.
+        """
+
+        async def _impl(connection: AsyncConnection, payload: CredentialReviewedPayload) -> None:
+            if not is_regulated_act(envelope.event_type):
+                return
+            await append_credential_reviewed_event(
+                connection,
+                payload,
+                envelope.producer,
+                envelope.occurred_at,
+            )
+
+        await _run_handler(
+            envelope,
+            CredentialReviewedPayload,
+            _impl,
+            "append_credential_reviewed",
+        )
+
+    registry.register(EVENT_PARTNER_CREDENTIAL_REVIEWED, append_credential_reviewed)
 
     # MOD-011 owns the model + a logging consumer for its own tamper telemetry
     # event (written into ``audit.audit_outbox`` by the v3.2 trigger). Without

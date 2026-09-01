@@ -22,6 +22,9 @@ from bus.envelope import Envelope
 from bus.events import (
     EVENT_AUDIT_EVENT,
     EVENT_AUDIT_TAMPER_DETECTED,
+    EVENT_PARTNER_ACTIVATED,
+    EVENT_PARTNER_CREDENTIAL_REVIEWED,
+    EVENT_PARTNER_REJECTED,
     EVENT_RECORD_ACCESSED,
     EVENT_RECORD_DENIED,
 )
@@ -30,16 +33,22 @@ from modules.audit.adapters import register_handlers
 from modules.audit.domain.chain import GENESIS_HASH, compute_audit_hash
 from modules.audit.domain.consumer import (
     AuditEventPayload,
+    CredentialReviewedPayload,
+    PartnerDecisionPayload,
     RecordAccessAuditPayload,
     TamperDetectedPayload,
     audit_act_type,
     build_audit_row,
+    build_credential_reviewed_row,
+    build_partner_decision_row,
     build_record_access_row,
     is_appended_act,
 )
 from modules.audit.facade import (
     AUDIT_SCHEMA,
     append_audit_event,
+    append_credential_reviewed_event,
+    append_partner_decision_event,
     append_record_access_event,
     compute_event_hash,
 )
@@ -486,6 +495,367 @@ async def test_append_record_access_event_reads_latest_hash_and_inserts_every_co
 def test_record_access_payload_is_a_pydantic_model() -> None:
     assert issubclass(RecordAccessAuditPayload, BaseModel)
     assert issubclass(TamperDetectedPayload, BaseModel)
+
+
+def _partner_decision_payload(
+    event_type: str,
+    *,
+    partner_id: int = 5,
+    identity_id: int = 11,
+    decision_by: int | None = 3,
+    reason: str | None = None,
+    round_number: int | None = None,
+) -> PartnerDecisionPayload:
+    return PartnerDecisionPayload(
+        partner_id=partner_id,
+        identity_id=identity_id,
+        decision_by=decision_by,
+        reason=reason,
+        round=round_number,
+    )
+
+
+def _credential_reviewed_payload(
+    partner_id: int = 5, actor_id: int = 3
+) -> CredentialReviewedPayload:
+    return CredentialReviewedPayload(partner_id=partner_id, actor_id=actor_id)
+
+
+def _partner_envelope(
+    event_type: str,
+    payload: PartnerDecisionPayload | CredentialReviewedPayload,
+    producer: str = "partner",
+    event_id=None,
+) -> Envelope:
+    return Envelope(
+        event_id=event_id or uuid4(),
+        event_type=event_type,  # type: ignore[arg-type]
+        producer=producer,
+        payload=payload,
+    )
+
+
+def _registered_partner_handler(event_type: str) -> tuple[HandlerRegistry, object]:
+    registry = HandlerRegistry()
+    register_handlers(registry)
+    # MOD-011 owns the payload mirrors for the partner events.
+    handlers = registry.handlers_for(event_type)  # type: ignore[arg-type]
+    assert len(handlers) == 1
+    return registry, handlers[0]
+
+
+def test_build_partner_decision_row_populates_every_column_activated() -> None:
+    payload = _partner_decision_payload(EVENT_PARTNER_ACTIVATED)
+    row = build_partner_decision_row(
+        EVENT_PARTNER_ACTIVATED, payload, "partner", _NOW, GENESIS_HASH
+    )
+
+    assert row.event_type == EVENT_PARTNER_ACTIVATED
+    assert row.actor_id == str(uuid5(_AUDIT_NS, "actor:3"))
+    assert row.target_id == str(uuid5(_AUDIT_NS, "partner:5"))
+    assert row.scope == "partner_decision"
+    assert row.timestamp == _NOW
+    assert row.prev_hash == GENESIS_HASH
+    assert row.metadata == {
+        "producer": "partner",
+        "identity_id": 11,
+    }
+    expected = compute_audit_hash(
+        row.event_type,
+        row.actor_id,
+        row.target_id,
+        row.scope,
+        row.metadata,
+        row.timestamp,
+        row.prev_hash,
+    )
+    assert row.hash == expected
+    assert len(row.hash) == 64
+
+
+def test_build_partner_decision_row_for_rejected_keeps_reason_and_round() -> None:
+    payload = _partner_decision_payload(
+        EVENT_PARTNER_REJECTED,
+        reason="documents did not match the recorded identity",
+        round_number=2,
+    )
+    row = build_partner_decision_row(EVENT_PARTNER_REJECTED, payload, "partner", _NOW, GENESIS_HASH)
+
+    assert row.event_type == EVENT_PARTNER_REJECTED
+    assert row.actor_id == str(uuid5(_AUDIT_NS, "actor:3"))
+    assert row.target_id == str(uuid5(_AUDIT_NS, "partner:5"))
+    assert row.metadata == {
+        "producer": "partner",
+        "identity_id": 11,
+        "reason": "documents did not match the recorded identity",
+        "round": 2,
+    }
+
+
+def test_build_partner_decision_row_without_operator_dropped_actor_scope() -> None:
+    # A Step-1 auto-fail (never queued) has no deciding operator; the actor is
+    # None but the decision still enters the chain attributed to the partner.
+    payload = _partner_decision_payload(
+        EVENT_PARTNER_REJECTED, decision_by=None, reason="step1_fail", round_number=1
+    )
+    row = build_partner_decision_row(EVENT_PARTNER_REJECTED, payload, "partner", _NOW, GENESIS_HASH)
+
+    assert row.actor_id is None
+    assert row.target_id == str(uuid5(_AUDIT_NS, "partner:5"))
+    assert row.metadata == {
+        "producer": "partner",
+        "identity_id": 11,
+        "reason": "step1_fail",
+        "round": 1,
+    }
+    assert row.scope == "partner_decision"
+
+
+def test_build_credential_reviewed_row_attributed_with_actor_partner_timestamp() -> None:
+    payload = _credential_reviewed_payload(partner_id=5, actor_id=3)
+    row = build_credential_reviewed_row(payload, "partner", _NOW, GENESIS_HASH)
+
+    assert row.event_type == EVENT_PARTNER_CREDENTIAL_REVIEWED
+    assert row.actor_id == str(uuid5(_AUDIT_NS, "actor:3"))
+    assert row.target_id == str(uuid5(_AUDIT_NS, "partner:5"))
+    assert row.scope == "partner_credentials"
+    assert row.timestamp == _NOW
+    assert row.prev_hash == GENESIS_HASH
+    assert row.metadata == {"producer": "partner"}
+    expected = compute_audit_hash(
+        row.event_type,
+        row.actor_id,
+        row.target_id,
+        row.scope,
+        row.metadata,
+        row.timestamp,
+        row.prev_hash,
+    )
+    assert row.hash == expected
+    assert len(row.hash) == 64
+
+
+def test_build_credential_reviewed_row_maps_ids_deterministically() -> None:
+    first = build_credential_reviewed_row(
+        _credential_reviewed_payload(partner_id=5, actor_id=3), "partner", _NOW, GENESIS_HASH
+    )
+    second = build_credential_reviewed_row(
+        _credential_reviewed_payload(partner_id=5, actor_id=3), "partner", _NOW, GENESIS_HASH
+    )
+
+    assert first.actor_id == second.actor_id
+    assert first.target_id == second.target_id
+
+
+async def test_partner_decision_handler_records_ledger_then_appends() -> None:
+    _, handler = _registered_partner_handler(EVENT_PARTNER_ACTIVATED)
+    envelope = _partner_envelope(
+        EVENT_PARTNER_ACTIVATED, _partner_decision_payload(EVENT_PARTNER_ACTIVATED)
+    )
+    engine, connection = _fake_engine()
+
+    with (
+        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch(
+            "modules.audit.adapters.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as record_consumed,
+        patch(
+            "modules.audit.adapters.append_partner_decision_event",
+            new_callable=AsyncMock,
+        ) as append,
+    ):
+        await handler(envelope)
+
+    record_consumed.assert_awaited_once()
+    assert record_consumed.await_args.args[1] == AUDIT_SCHEMA
+    append.assert_awaited_once()
+    assert append.await_args.args[0] is connection
+    assert append.await_args.args[1] == EVENT_PARTNER_ACTIVATED
+    assert append.await_args.args[2].partner_id == 5
+    assert append.await_args.args[2].decision_by == 3
+    assert append.await_args.args[3] == "partner"
+    assert append.await_args.args[4] == envelope.occurred_at
+
+
+async def test_partner_rejected_handler_records_ledger_then_appends() -> None:
+    _, handler = _registered_partner_handler(EVENT_PARTNER_REJECTED)
+    envelope = _partner_envelope(
+        EVENT_PARTNER_REJECTED,
+        _partner_decision_payload(
+            EVENT_PARTNER_REJECTED, reason="identity mismatch", round_number=1
+        ),
+    )
+    engine, _connection = _fake_engine()
+
+    with (
+        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch(
+            "modules.audit.adapters.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as record_consumed,
+        patch(
+            "modules.audit.adapters.append_partner_decision_event",
+            new_callable=AsyncMock,
+        ) as append,
+    ):
+        await handler(envelope)
+
+    record_consumed.assert_awaited_once()
+    append.assert_awaited_once()
+    assert append.await_args.args[1] == EVENT_PARTNER_REJECTED
+    assert append.await_args.args[2].reason == "identity mismatch"
+
+
+async def test_partner_decision_handler_skips_replay_when_already_delivered() -> None:
+    _, handler = _registered_partner_handler(EVENT_PARTNER_ACTIVATED)
+    envelope = _partner_envelope(
+        EVENT_PARTNER_ACTIVATED, _partner_decision_payload(EVENT_PARTNER_ACTIVATED)
+    )
+    engine, _connection = _fake_engine()
+
+    with (
+        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch(
+            "modules.audit.adapters.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=False,
+        ) as record_consumed,
+        patch(
+            "modules.audit.adapters.append_partner_decision_event",
+            new_callable=AsyncMock,
+        ) as append,
+    ):
+        await handler(envelope)
+
+    record_consumed.assert_awaited_once()
+    append.assert_not_awaited()
+
+
+async def test_credential_reviewed_handler_records_ledger_then_appends() -> None:
+    _, handler = _registered_partner_handler(EVENT_PARTNER_CREDENTIAL_REVIEWED)
+    envelope = _partner_envelope(
+        EVENT_PARTNER_CREDENTIAL_REVIEWED, _credential_reviewed_payload(partner_id=5, actor_id=3)
+    )
+    engine, connection = _fake_engine()
+
+    with (
+        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch(
+            "modules.audit.adapters.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as record_consumed,
+        patch(
+            "modules.audit.adapters.append_credential_reviewed_event",
+            new_callable=AsyncMock,
+        ) as append,
+    ):
+        await handler(envelope)
+
+    record_consumed.assert_awaited_once()
+    assert record_consumed.await_args.args[1] == AUDIT_SCHEMA
+    append.assert_awaited_once()
+    assert append.await_args.args[0] is connection
+    assert append.await_args.args[1].actor_id == 3
+    assert append.await_args.args[1].partner_id == 5
+    assert append.await_args.args[2] == "partner"
+    assert append.await_args.args[3] == envelope.occurred_at
+
+
+async def test_credential_reviewed_handler_skips_replay_when_already_delivered() -> None:
+    _, handler = _registered_partner_handler(EVENT_PARTNER_CREDENTIAL_REVIEWED)
+    envelope = _partner_envelope(
+        EVENT_PARTNER_CREDENTIAL_REVIEWED, _credential_reviewed_payload(partner_id=5, actor_id=3)
+    )
+    engine, _connection = _fake_engine()
+
+    with (
+        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch(
+            "modules.audit.adapters.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=False,
+        ) as record_consumed,
+        patch(
+            "modules.audit.adapters.append_credential_reviewed_event",
+            new_callable=AsyncMock,
+        ) as append,
+    ):
+        await handler(envelope)
+
+    record_consumed.assert_awaited_once()
+    append.assert_not_awaited()
+
+
+async def test_append_partner_decision_event_reads_latest_hash_and_inserts_every_column() -> None:
+    connection = AsyncMock()
+    connection.scalar = AsyncMock(return_value=None)
+    payload = _partner_decision_payload(EVENT_PARTNER_ACTIVATED)
+
+    row = await append_partner_decision_event(
+        connection, EVENT_PARTNER_ACTIVATED, payload, "partner", _NOW
+    )
+
+    connection.scalar.assert_awaited_once()
+    assert row.prev_hash == GENESIS_HASH
+    connection.execute.assert_awaited_once()
+    values = _insert_values(connection.execute.await_args.args[0])
+    assert values["event_type"] == EVENT_PARTNER_ACTIVATED
+    assert values["actor_id"] == str(uuid5(_AUDIT_NS, "actor:3"))
+    assert values["target_id"] == str(uuid5(_AUDIT_NS, "partner:5"))
+    assert values["scope"] == "partner_decision"
+    assert values["metadata"] == row.metadata
+    assert values["timestamp"] == _NOW
+    assert values["prev_hash"] == GENESIS_HASH
+    assert values["hash"] == row.hash
+
+
+async def test_append_partner_decision_event_chains_from_nonempty_ledger_head() -> None:
+    connection = AsyncMock()
+    head_hash = "b" * 64
+    connection.scalar = AsyncMock(return_value=head_hash)
+
+    await append_partner_decision_event(
+        connection,
+        EVENT_PARTNER_REJECTED,
+        _partner_decision_payload(EVENT_PARTNER_REJECTED),
+        "partner",
+        _NOW,
+    )
+
+    values = _insert_values(connection.execute.await_args.args[0])
+    assert values["prev_hash"] == head_hash
+
+
+async def test_append_credential_reviewed_event_reads_latest_hash_and_inserts_every_column() -> (
+    None
+):
+    connection = AsyncMock()
+    connection.scalar = AsyncMock(return_value=None)
+    payload = _credential_reviewed_payload(partner_id=5, actor_id=3)
+
+    row = await append_credential_reviewed_event(connection, payload, "partner", _NOW)
+
+    connection.scalar.assert_awaited_once()
+    assert row.prev_hash == GENESIS_HASH
+    connection.execute.assert_awaited_once()
+    values = _insert_values(connection.execute.await_args.args[0])
+    assert values["event_type"] == EVENT_PARTNER_CREDENTIAL_REVIEWED
+    assert values["actor_id"] == str(uuid5(_AUDIT_NS, "actor:3"))
+    assert values["target_id"] == str(uuid5(_AUDIT_NS, "partner:5"))
+    assert values["scope"] == "partner_credentials"
+    assert values["metadata"] == row.metadata
+    assert values["timestamp"] == _NOW
+    assert values["prev_hash"] == GENESIS_HASH
+    assert values["hash"] == row.hash
+
+
+def test_partner_payloads_are_pydantic_models() -> None:
+    assert issubclass(PartnerDecisionPayload, BaseModel)
+    assert issubclass(CredentialReviewedPayload, BaseModel)
 
 
 def test_tamper_event_registers_model_and_a_single_consumer() -> None:
