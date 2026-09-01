@@ -34,6 +34,7 @@ from modules.partner.domain.credentials import CredentialType
 from modules.partner.domain.events import PartnerType
 from modules.partner.domain.exceptions import (
     AppealAlreadyUsedError,
+    IllegalPartnerTransitionError,
     InvalidQueueSortError,
     PartnerError,
     PartnerNotRejectedError,
@@ -319,6 +320,37 @@ class OperatorDecisionRequest(BaseModel):
     )
 
 
+@router.post(
+    "/verification/{partner_id}/grace-lapse",
+    response_model=PartnerView,
+    status_code=status.HTTP_200_OK,
+    summary="Drop an Active partner to Under Verification on grace-window lapse (operator only)",
+)
+async def grace_window_lapse(
+    request: Request,
+    operator: Annotated[Principal, Depends(require_operator)],
+    partner_id: int,
+) -> PartnerView:
+    """Apply the 7-day grace-window lapse (ticket #254, event-driven reverify path).
+
+    An ``[Active]`` partner who re-submitted credentials (a re-verification
+    round opened) stays ``[Active]`` through the 7-day grace window. When that
+    deadline runs out without an operator decision, THIS endpoint drops them to
+    ``[Under Verification]`` so they re-enter the operator gate - WITHOUT
+    deactivating them (no ``credential.invalidated`` fires for a mere lapse, as
+    opposed to an operator reject of the re-verification). It is not a
+    scheduled scanner (that is Phase 6); it is the explicit, event-driven
+    reverify-deadline path. Operator-scoped so only a verified operator can
+    trigger it (the timeline seam for the Phase-6 deadline flow). A
+    non-``[Active]`` partner - or an ``[Active]`` partner without an open,
+    undecided reverification round - is refused with an
+    ``ILLEGAL_PARTNER_TRANSITION`` 422.
+    """
+    del operator
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    return await facade.grace_lapse(int(partner_id))
+
+
 def _decode_artifact(b64: str) -> bytes:
     """Decode a base64 artifact, rejecting malformed input (never stored raw)."""
     try:
@@ -426,9 +458,19 @@ def register_error_handlers(app: FastAPI) -> None:
             response.headers["Retry-After"] = throttled.retry_at
         return response
 
+    async def _illegal_transition(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        return _error_response(
+            request,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "ILLEGAL_PARTNER_TRANSITION",
+            "the requested lifecycle action is illegal in the partner's current state",
+        )
+
     app.add_exception_handler(RejectionReasonRequiredError, _rejection_reason_required)
     app.add_exception_handler(InvalidQueueSortError, _invalid_queue_sort)
     app.add_exception_handler(PartnerNotRejectedError, _not_rejected)
     app.add_exception_handler(AppealAlreadyUsedError, _appeal_already_used)
     app.add_exception_handler(ReSubmissionThrottledError, _re_submission_throttled)
+    app.add_exception_handler(IllegalPartnerTransitionError, _illegal_transition)
     app.add_exception_handler(PartnerError, _partner_failed)

@@ -21,6 +21,10 @@ Methods:
 - ``operator_decision`` is the Step-2 manual gate: explicit operator approval
   reaches ``Active`` (``partner.activated``); operator reject reaches
   ``Rejected`` (``partner.rejected`` with reason + actor). No auto-approve.
+- ``grace_lapse`` (T10) applies the event-driven 7-day grace-window lapse that
+  drops an ``[Active]`` re-verifying partner to ``[Under Verification]``; the
+  opposite (deactivation) is ``operator_decision`` rejecting an ``[Active]``
+  partner, which emits ``credential.invalidated`` alongside ``partner.rejected``.
 
 Each mutating method writes its envelope into ``partner.partner_outbox`` in the
 SAME transaction as the state change (ADR-0002 §1). The operator review /
@@ -48,6 +52,7 @@ from modules.partner.adapters.artifact_store import CredentialArtifactStore
 from modules.partner.domain.credentials import CredentialType
 from modules.partner.domain.events import (
     PartnerType,
+    credential_invalidated_envelope,
     credential_reviewed_envelope,
     partner_activated_envelope,
     partner_registered_envelope,
@@ -56,6 +61,7 @@ from modules.partner.domain.events import (
 )
 from modules.partner.domain.exceptions import (
     AppealAlreadyUsedError,
+    IllegalPartnerTransitionError,
     InvalidQueueSortError,
     PartnerNotFoundError,
     PartnerNotRejectedError,
@@ -415,7 +421,9 @@ async def _load_live_credential_types(
     The Step-1 duplicate check (ADR-0008) rejects a submission re-offering a
     credential type the partner already holds in a live (non-rejected) state; a
     ``Rejected`` partner re-submitting the same type is a new round, not a
-    duplicate, so the caller passes an empty set in that case.
+    duplicate, and an ``Active`` partner re-submitting the same type is a
+    renewal/re-verification (PHASE-5 T10), so the caller passes an empty set
+    in those two cases.
     """
     rows = (
         await connection.execute(
@@ -699,7 +707,7 @@ class PartnerFacade:
                 has_artifacts=any(c.artifacts for c in credentials),
                 existing_active_credential_types=(
                     frozenset()
-                    if profile.status == PartnerStatus.REJECTED.value
+                    if profile.status in (PartnerStatus.REJECTED.value, PartnerStatus.ACTIVE.value)
                     else existing_types
                 ),
             )
@@ -917,6 +925,78 @@ class PartnerFacade:
                         decision_by=decision_by,
                     ),
                 )
+                # A re-verification failure on an ACTIVE partner is a clean
+                # deactivation (spec phase-5 "Deactivation on failed
+                # re-verification", ticket #254): besides ``partner.rejected``
+                # (role deny via the T03 chain) the credential is invalidated so
+                # the partner is deindexed from any directory AND the iam role
+                # denied again through ``credential.invalidated`` (MOD-001
+                # consumer suspends the grant). The mere grace-window lapse to
+                # ``[Under Verification]`` is NOT a deactivation and emits this
+                # only via the operator reject on an Active partner.
+                if profile.status == PartnerStatus.ACTIVE.value:
+                    await write_outbox(
+                        connection,
+                        PARTNER_SCHEMA,
+                        PARTNER_OUTBOX_TABLE,
+                        credential_invalidated_envelope(
+                            partner_id,
+                            identity_id=profile.identity_id,
+                            reason=resolved_reason or "reverification_failed",
+                        ),
+                    )
+            return PartnerView(
+                partner_id=partner_id,
+                status=next_state.status.value,
+                round=next_state.round,
+            )
+
+    async def grace_lapse(self, partner_id: int) -> PartnerView:
+        """Auto-drop an ``[Active]`` partner to ``[Under Verification]`` on grace-window lapse.
+
+        PHASE-5 T10 (ticket #254), the event-driven reverify-grace path: an
+        ``[Active]`` partner who re-submitted credentials (a re-verification
+        round opened, ``partner.verification_started``) stays ``[Active]``
+        through the 7-day grace window. When that deadline lapses without an
+        operator decision, THIS seam applies the ``GRACE_LAPSE`` transition -
+        the partner drops to ``[Under Verification]`` (round unchanged) and is
+        queued for the operator gate again, but is NOT deactivated: no
+        ``credential.invalidated`` fires, because the mere lapse is not a
+        rejection (brief handoff #254). A deactivation only happens on an
+        explicit operator reject of the re-verification (see
+        ``operator_decision``), which emits ``credential.invalidated``.
+
+        There is deliberately NO background scanner here - the caller (the
+        reverify flow's deadline check, Phase 6) invokes this when the window is
+        known to have lapsed; automated expiry-scanning is out of Phase-5 scope.
+
+        Two preconditions gate the lapse (both raise
+        :class:`IllegalPartnerTransitionError`, mapped to a 422): the partner
+        must be ``[Active]`` (the state machine edge) AND the current round must
+        be an open, undecided reverification round - that is the ``[Active]``
+        partner has re-submitted (``partner.verification_started`` queued them)
+        and the operator has not yet decided. A freshly-approved round-1
+        ``[Active]`` partner has an already-decided round and is NOT lapse-able:
+        AC2 ("window lapses without a decision") only covers a round that is
+        still undecided.
+        """
+        async with self._engine.begin() as connection:
+            profile = await _load_profile(connection, partner_id)
+            latest = (
+                await connection.execute(
+                    select(partner_verifications.c.status).where(
+                        partner_verifications.c.profile_id == partner_id,
+                        partner_verifications.c.round == profile.round,
+                    )
+                )
+            ).first()
+            if latest is None or str(latest.status) != "queued":
+                raise IllegalPartnerTransitionError(
+                    "grace_lapse requires an open, undecided reverification round"
+                )
+            next_state = await _apply_transition(
+                connection, profile, PartnerAction.GRACE_LAPSE, verification=False
+            )
             return PartnerView(
                 partner_id=partner_id,
                 status=next_state.status.value,

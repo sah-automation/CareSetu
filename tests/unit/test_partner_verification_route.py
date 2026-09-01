@@ -136,6 +136,10 @@ class StubPartnerFacade:
         )
         return self.decision
 
+    async def grace_lapse(self, partner_id: int) -> PartnerView:
+        self.calls.append({"method": "grace_lapse", "partner_id": partner_id})
+        return PartnerView(partner_id=partner_id, status="Under Verification", round=1)
+
 
 def _token(*, scope: str = "operator", subject_id: int = _OPERATOR_ID) -> str:
     return issue_token(
@@ -309,6 +313,22 @@ def test_unknown_field_rejected_at_the_gateway() -> None:
     assert response.json()["code"] == "VALIDATION_ERROR"
 
 
+# -- Grace-window lapse (PHASE-5 T10) --------------------------------------------
+
+
+def test_grace_lapse_forwards_to_facade() -> None:
+    facade = StubPartnerFacade()
+    client = _client(facade)
+
+    response = client.post("/v1/partner/verification/3/grace-lapse", headers=_bearer(_token()))
+
+    assert response.status_code == 200
+    assert response.json() == PartnerView(
+        partner_id=3, status="Under Verification", round=1
+    ).model_dump(mode="json")
+    assert facade.calls == [{"method": "grace_lapse", "partner_id": 3}]
+
+
 # -- RBAC guard -----------------------------------------------------------------
 
 
@@ -321,6 +341,7 @@ def test_anonymous_queue_denied_with_401() -> None:
         client.post("/v1/partner/verification/3/decision", json={"approve": True}).status_code
         == 401
     )
+    assert client.post("/v1/partner/verification/3/grace-lapse").status_code == 401
 
 
 def test_patient_scope_denied_with_403() -> None:
@@ -335,6 +356,7 @@ def test_patient_scope_denied_with_403() -> None:
         ).status_code
         == 403
     )
+    assert client.post("/v1/partner/verification/3/grace-lapse", headers=headers).status_code == 403
 
 
 def test_partner_scope_denied_with_403() -> None:
@@ -348,6 +370,7 @@ def test_partner_scope_denied_with_403() -> None:
         ).status_code
         == 403
     )
+    assert client.post("/v1/partner/verification/3/grace-lapse", headers=headers).status_code == 403
 
 
 def test_console_routes_sit_behind_the_gateway_stack() -> None:
@@ -359,3 +382,4 @@ def test_console_routes_sit_behind_the_gateway_stack() -> None:
     assert "/v1/partner/verification-queue" in paths
     assert "/v1/partner/verification/{partner_id}" in paths
     assert "/v1/partner/verification/{partner_id}/decision" in paths
+    assert "/v1/partner/verification/{partner_id}/grace-lapse" in paths

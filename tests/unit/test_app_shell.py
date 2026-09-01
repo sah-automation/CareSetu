@@ -103,6 +103,8 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/partner/verification-queue",
         "/v1/partner/verification/{partner_id}",
         "/v1/partner/verification/{partner_id}/decision",
+        # PHASE-5 T10 (#254): grace-window lapse auto-drop (event-driven reverify path).
+        "/v1/partner/verification/{partner_id}/grace-lapse",
     }
 
 

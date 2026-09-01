@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.sql.dml import Insert, Update
 
 from modules.partner.domain.exceptions import (
+    IllegalPartnerTransitionError,
     InvalidQueueSortError,
     PartnerNotFoundError,
     RejectionReasonRequiredError,
@@ -190,6 +191,129 @@ async def test_operator_reject_records_reason_and_emits_rejected() -> None:
 
     outbox = _outbox_inserts(connection)
     assert len(outbox) == 1
+
+
+@pytest.mark.asyncio
+async def test_operator_reject_of_an_active_partner_emits_invalidated() -> None:
+    """PHASE-5 T10 AC3: re-verification failure emits credential.invalidated.
+
+    Rejecting an ``[Active]`` partner (a failed re-verification) is a clean
+    deactivation: besides ``partner.rejected`` (role deny via T03) the
+    ``credential.invalidated`` envelope must be written in the SAME transaction
+    so the partner is deindexed and the iam role suspended via MOD-001.
+    """
+    connection = _connection(
+        [
+            _FakeResult(first=_profile_row(status="Active")),  # load profile
+            _FakeResult(scalar=1),  # max(round) = 1
+            _FakeResult(),  # profile update
+            _FakeResult(),  # verification update
+            _FakeResult(),  # partner.rejected outbox insert
+            _FakeResult(),  # credential.invalidated outbox insert
+        ]
+    )
+    facade = PartnerFacade(engine=_engine(connection), iam_facade=MagicMock())
+
+    result = await facade.operator_decision(
+        3, decision_by=77, approve=False, reason="credential expired"
+    )
+
+    assert result.status == "Rejected"
+    outbox = _outbox_inserts(connection)
+    event_types = sorted(_bound_value(insert._values["event_type"]) for insert in outbox)
+    assert event_types == ["credential.invalidated", "partner.rejected"]
+
+
+@pytest.mark.asyncio
+async def test_operator_reject_of_an_under_verification_partner_emits_no_invalidated() -> None:
+    """A first-time rejection is NOT a deactivation: no credential.invalidated.
+
+    The brief (ticket #254) explicitly says only an Active partner's failed
+    re-verification emits ``credential.invalidated`` - a mere lapse or first-time
+    rejection never fires it.
+    """
+    connection = _connection(
+        [
+            _FakeResult(first=_profile_row(status="Under Verification")),  # load profile
+            _FakeResult(scalar=1),  # max(round) = 1
+            _FakeResult(),  # profile update
+            _FakeResult(),  # verification update
+            _FakeResult(),  # partner.rejected outbox insert
+        ]
+    )
+    facade = PartnerFacade(engine=_engine(connection), iam_facade=MagicMock())
+
+    result = await facade.operator_decision(
+        3, decision_by=77, approve=False, reason="documents unreadable"
+    )
+
+    assert result.status == "Rejected"
+    outbox = _outbox_inserts(connection)
+    assert len(outbox) == 1
+    assert _bound_value(outbox[0]._values["event_type"]) == "partner.rejected"
+
+
+@pytest.mark.asyncio
+async def test_grace_lapse_drops_active_to_under_verification_with_no_event() -> None:
+    """PHASE-5 T10 AC2: grace-window lapse auto-drops Active -> Under Verification.
+
+    The lapse is event-driven (no background scanner - Phase 6) and is NOT a
+    deactivation, so it flips the profile status only - no outbox event, in
+    particular no ``credential.invalidated`` fires. It also requires an open,
+    undecided reverification round (the current round is still queued).
+    """
+    connection = _connection(
+        [
+            _FakeResult(first=_profile_row(status="Active")),  # load profile
+            _FakeResult(scalar=1),  # max(round) = 1
+            _FakeResult(first=_history_row()),  # current round is open/queued
+            _FakeResult(),  # profile update (GRACE_LAPSE)
+        ]
+    )
+    facade = PartnerFacade(engine=_engine(connection), iam_facade=MagicMock())
+
+    result = await facade.grace_lapse(3)
+
+    assert result.status == "Under Verification"
+    assert result.round == 1
+    assert _outbox_inserts(connection) == []
+
+
+@pytest.mark.asyncio
+async def test_grace_lapse_with_no_open_round_raises_illegal_transition() -> None:
+    """AC2's "window lapses without a decision" precondition: a lapse is only
+    legal over an open, undecided reverification round. A freshly-approved
+    ``[Active]`` partner (round already decided) cannot be lapsed over an
+    already-decided round."""
+    connection = _connection(
+        [
+            _FakeResult(first=_profile_row(status="Active")),  # load profile
+            _FakeResult(scalar=1),  # max(round) = 1
+            _FakeResult(first=SimpleNamespace(status="approved")),  # round already decided
+        ]
+    )
+    facade = PartnerFacade(engine=_engine(connection), iam_facade=MagicMock())
+
+    with pytest.raises(IllegalPartnerTransitionError):
+        await facade.grace_lapse(3)
+
+
+@pytest.mark.asyncio
+async def test_grace_lapse_on_non_active_raises_illegal_transition() -> None:
+    """A lapse can only target an Active partner; anything else is illegal
+    (the state machine edge refuses it even with an open round)."""
+    for status in ("Registered", "Under Verification", "Rejected"):
+        connection = _connection(
+            [
+                _FakeResult(first=_profile_row(status=status)),  # load profile
+                _FakeResult(scalar=1),  # max(round) = 1
+                _FakeResult(first=_history_row()),  # open round (still refused)
+            ]
+        )
+        facade = PartnerFacade(engine=_engine(connection), iam_facade=MagicMock())
+
+        with pytest.raises(IllegalPartnerTransitionError):
+            await facade.grace_lapse(3)
 
 
 @pytest.mark.asyncio
