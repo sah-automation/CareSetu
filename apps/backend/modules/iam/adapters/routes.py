@@ -17,9 +17,9 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import TypeVar, cast
+from typing import Annotated, TypeVar, cast
 
-from fastapi import APIRouter, FastAPI, Request, status
+from fastapi import APIRouter, Depends, FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -27,10 +27,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.config import Settings
 from app.gateway.errors import ErrorEnvelope
 from app.gateway.idempotency import IdempotencyStore
+from app.gateway.principal import Principal
+from app.gateway.rbac import require_operator
 from app.gateway.trace import resolve_trace_id
 from modules.iam.domain.exceptions import (
     IamError,
     InvalidPhoneError,
+    OperatorMfaError,
     RefreshTokenExpiredError,
     RefreshTokenRevokedError,
     RefreshTokenUnknownError,
@@ -39,6 +42,7 @@ from modules.iam.domain.exceptions import (
 )
 from modules.iam.facade import (
     IamFacade,
+    OperatorInvitedResult,
     RegisterPatientResult,
     ResendOtpResult,
     SessionResult,
@@ -93,6 +97,26 @@ class RefreshSessionRequest(BaseModel):
 
     refresh_token: str = Field(
         min_length=1, description="Opaque refresh token from a previous session"
+    )
+
+
+class OperatorInviteRequest(BaseModel):
+    """Body of ``POST /v1/auth/operator/invite`` (S9, #262)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    phone: str = Field(min_length=1, description="10-digit Indian mobile number, or with 91 prefix")
+
+
+class OperatorLoginRequest(BaseModel):
+    """Body of ``POST /v1/auth/operator/login`` (S9, #262)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    phone: str = Field(min_length=1, description="10-digit Indian mobile number, or with 91 prefix")
+    code: str = Field(
+        pattern=r"^[0-9]{6}$",
+        description="The 6-digit RFC-6238 TOTP code from the enrolled MFA factor",
     )
 
 
@@ -293,6 +317,69 @@ async def refresh_session(
     return response
 
 
+@router.post(
+    "/operator/invite",
+    response_model=OperatorInvitedResult,
+    status_code=status.HTTP_201_CREATED,
+    summary="Invite a new operator (operator only)",
+)
+async def invite_operator(
+    request: Request,
+    operator: Annotated[Principal, Depends(require_operator)],
+    body: OperatorInviteRequest,
+) -> OperatorInvitedResult:
+    """Grow the trusted queue-running group (US-22).
+
+    Operator-scoped (``require_operator``): only an attested operator can
+    invite another phone. The invited identity is created ``[Unverified]``
+    with an ``Active`` ``operator`` role grant, so the invited phone completes
+    MFA at first login. The requesting operator is recorded as the inviter on
+    the ``operator.invited`` audit event. Duplicate phones resolve to the
+    existing identity (idempotent by phone, plus the edge ``Idempotency-Key``).
+    """
+    invited_by = int(operator.subject_id)
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    return await _run_idempotent(
+        request,
+        lambda: facade.create_operator_account(body.phone, invited_by_identity_id=invited_by),
+    )
+
+
+@router.post(
+    "/operator/login",
+    response_model=SessionResult,
+    status_code=status.HTTP_200_OK,
+    summary="MFA-gated operator login",
+)
+async def operator_login(
+    request: Request,
+    body: OperatorLoginRequest,
+) -> Response:
+    """Log an operator in with the MFA second factor (US-15, S8).
+
+    Accepts the phone and an RFC-6238 TOTP code. A wrong or absent second
+    factor is refused with a 401 ``SESSION_MFA_REQUIRED`` envelope - an
+    operator can never land an operator-scoped session on the phone alone.
+    Identity-state refusals (unknown/not-Active phone, no operator role) stay
+    409 ``SESSION_REFUSED``. On success the operator-scoped JWT is returned and
+    set as the httpOnly session cookie.
+    """
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    result = await facade.issue_operator_session(body.phone, body.code)
+    response = Response(
+        content=result.model_dump_json(),
+        media_type="application/json",
+        status_code=status.HTTP_200_OK,
+    )
+    _set_jwt_cookie(
+        response,
+        result.jwt,
+        result.expires_in_seconds,
+        secure=_is_secure_cookie(request),
+    )
+    return response
+
+
 def _error_response(
     request: Request,
     status_code: int,
@@ -336,6 +423,14 @@ def register_error_handlers(app: FastAPI) -> None:
             request,
             status.HTTP_409_CONFLICT,
             "SESSION_REFUSED",
+            str(exc),
+        )
+
+    async def _operator_mfa_failed(request: Request, exc: Exception) -> JSONResponse:
+        return _error_response(
+            request,
+            status.HTTP_401_UNAUTHORIZED,
+            "SESSION_MFA_REQUIRED",
             str(exc),
         )
 
@@ -393,6 +488,7 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(InvalidPhoneError, _invalid_phone)
     app.add_exception_handler(SmsDeliveryError, _sms_failed)
     app.add_exception_handler(SessionIssuanceError, _session_refused)
+    app.add_exception_handler(OperatorMfaError, _operator_mfa_failed)
     app.add_exception_handler(RefreshTokenUnknownError, _refresh_token_unknown)
     app.add_exception_handler(RefreshTokenExpiredError, _refresh_token_expired)
     app.add_exception_handler(RefreshTokenRevokedError, _refresh_token_revoked)

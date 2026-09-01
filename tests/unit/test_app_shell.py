@@ -105,6 +105,9 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/partner/verification/{partner_id}/decision",
         # PHASE-5 T10 (#254): grace-window lapse auto-drop (event-driven reverify path).
         "/v1/partner/verification/{partner_id}/grace-lapse",
+        # PHASE-5 S9 (#262): operator invite + MFA-gated operator login.
+        "/v1/auth/operator/invite",
+        "/v1/auth/operator/login",
     }
 
 

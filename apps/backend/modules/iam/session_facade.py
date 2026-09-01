@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from modules.iam.domain import events, jwt, refresh
 from modules.iam.domain.exceptions import (
+    OperatorMfaError,
     RefreshTokenExpiredError,
     RefreshTokenRevokedError,
     RefreshTokenUnknownError,
@@ -166,7 +167,7 @@ class SessionFacade:
         extra gate: the identity must be ``Active``, hold an ``Active``
         ``operator`` role grant, AND have an enrolled, verified MFA factor
         (``iam_operator_mfa.mfa_enabled`` with a recorded ``last_verified_at``).
-        If MFA is not enrolled or not yet verified, a ``SessionIssuanceError``
+        If MFA is not enrolled or not yet verified, an ``OperatorMfaError``
         names the missing precondition - an operator can never land an
         operator-scoped session on the phone-OTP factor alone. The minted
         ``scope`` resolves to ``operator`` so the gateway's ``require_operator``
@@ -176,7 +177,8 @@ class SessionFacade:
         operator's enrolled MFA secret.  It is verified against the decrypted
         ``iam_operator_mfa.secret`` at the current clock time with a small drift
         window (S8, #261).  A wrong or expired code is rejected with
-        ``SessionIssuanceError``.
+        ``OperatorMfaError`` (a ``SessionIssuanceError`` subclass the edge
+        answers 401, ticket #262).
         """
         from modules.iam.domain.phone import normalize_phone
         from modules.iam.domain.secret_encryption import decrypt_secret
@@ -207,7 +209,7 @@ class SessionFacade:
                     "verify the phone before issuing a session"
                 )
             if not await _mfa_verified(connection, identity_id):
-                raise SessionIssuanceError(
+                raise OperatorMfaError(
                     f"identity {identity_id} has not completed the MFA second factor; "
                     "enroll and verify MFA before issuing an operator session"
                 )
@@ -228,7 +230,7 @@ class SessionFacade:
                 )
             ).scalar_one_or_none()
             if not secret_ciphertext:
-                raise SessionIssuanceError(
+                raise OperatorMfaError(
                     f"identity {identity_id} has no enrolled TOTP secret; "
                     "complete MFA enrollment before issuing an operator session"
                 )
@@ -236,7 +238,7 @@ class SessionFacade:
                 decrypted_secret = decrypt_secret(secret_ciphertext, self._mfa_secret_key)
                 verify_totp(decrypted_secret, code, clock=self._clock)
             except (TotpSecretEmptyError, TotpVerificationError, ValueError) as exc:
-                raise SessionIssuanceError(
+                raise OperatorMfaError(
                     f"TOTP verification failed for identity {identity_id}: {exc}"
                 ) from exc
 
