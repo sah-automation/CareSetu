@@ -35,12 +35,12 @@ from modules.notify.adapters.transport import (
     DeliveryRequest,
     DeliveryResult,
     NotificationDeliveryQueue,
+    mock_backoff_delay,
 )
 from modules.notify.adapters.whatsapp import (
     MockWhatsAppChannel,
     WhatsAppProviderChannel,
     build_whatsapp_channel,
-    mock_backoff_delay,
 )
 from modules.notify.domain.events import NotificationFailedPayload
 from modules.notify.domain.exceptions import NotificationDeliveryError

@@ -23,11 +23,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import secrets
 import time
 from collections.abc import Awaitable, Callable
 from enum import StrEnum
 from typing import Literal, Protocol
 
+import httpx
+import pydantic
 from pydantic import BaseModel
 
 from modules.notify.domain.exceptions import NotificationDeliveryError
@@ -60,6 +63,152 @@ class ChannelAdapter(Protocol):
     """Port every notify channel implementation satisfies - one typed send."""
 
     async def send(self, request: DeliveryRequest) -> DeliveryResult: ...
+
+
+class MockChannel:
+    """CI/dev implementation: records sent messages for tests, never logs them.
+
+    Shared by every channel adapter's mock variant.  ``request_id_prefix``
+    is the only channel-specific bit (e.g. ``"mock-wa-"`` vs ``"mock-sms-"``).
+    """
+
+    def __init__(self, request_id_prefix: str = "mock-") -> None:
+        self._request_id_prefix = request_id_prefix
+        self._sent: dict[str, list[DeliveryRequest]] = {}
+
+    async def send(self, request: DeliveryRequest) -> DeliveryResult:
+        self._sent.setdefault(request.recipient_phone_e164, []).append(request)
+        return DeliveryResult(
+            request_id=f"{self._request_id_prefix}{secrets.token_hex(8)}",
+            status="queued",
+        )
+
+    def sent_count(self, phone_e164: str) -> int:
+        """How many sends have been recorded for ``phone_e164``."""
+        return len(self._sent.get(phone_e164, []))
+
+    def last_message(self, phone_e164: str) -> str | None:
+        """The body of the most recent send to ``phone_e164``, or None."""
+        sent = self._sent.get(phone_e164)
+        if sent is None:
+            return None
+        return sent[-1].message
+
+
+def _parse_provider_response(response: httpx.Response, *, integration_label: str) -> DeliveryResult:
+    """Parse a generic ``{ request_id, status }`` provider acknowledgement.
+
+    Shared by every HTTP provider channel; ``integration_label`` is the only
+    channel-specific bit (e.g. ``"EXT-003 WhatsApp"`` vs ``"EXT-001 SMS"``)
+    used in error messages.
+    """
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise NotificationDeliveryError(
+            f"{integration_label} returned a non-JSON response",
+            retries_exhausted=False,
+        ) from exc
+    if not isinstance(payload, dict):
+        raise NotificationDeliveryError(
+            f"{integration_label} returned an unexpected response payload",
+            retries_exhausted=False,
+        )
+    try:
+        return DeliveryResult.model_validate(payload)
+    except pydantic.ValidationError as exc:
+        raise NotificationDeliveryError(
+            f"{integration_label} returned an invalid response payload "
+            "(expected request_id and status='queued')",
+            retries_exhausted=False,
+        ) from exc
+
+
+class HttpProviderChannel:
+    """Shared HTTP provider implementation with retry and backoff.
+
+    ``integration_label`` (e.g. ``"EXT-003 WhatsApp"``) is used in all log
+    and error messages; the remaining constructor args are pure config.
+    ``sleep`` is injectable so tests can exercise the retry loop without real
+    waits.  The API key is passed by the caller from ``Settings`` - never read
+    from code or logs.
+    """
+
+    def __init__(
+        self,
+        *,
+        integration_label: str,
+        send_path: str,
+        api_key: str,
+        base_url: str,
+        timeout_seconds: float,
+        max_retries: int,
+        client: httpx.AsyncClient | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        self._integration_label = integration_label
+        self._send_path = send_path
+        self._api_key = api_key
+        self._base_url = base_url.rstrip("/")
+        self._max_retries = max_retries
+        self._sleep = sleep
+        self._client = client or httpx.AsyncClient(timeout=timeout_seconds)
+
+    async def send(self, request: DeliveryRequest) -> DeliveryResult:
+        payload = {
+            "recipient_phone_e164": request.recipient_phone_e164,
+            "message": request.message,
+        }
+        headers = {"Authorization": f"Bearer {self._api_key}"}
+        last_status = 0
+        for attempt in range(self._max_retries + 1):
+            if attempt > 0:
+                await self._sleep(mock_backoff_delay(attempt))
+            try:
+                response = await self._client.post(
+                    f"{self._base_url}{self._send_path}",
+                    json=payload,
+                    headers=headers,
+                )
+            except httpx.HTTPError as exc:
+                if attempt == self._max_retries:
+                    logger.error(
+                        "%s send failed after %d attempts (network error) for phone %s",
+                        self._integration_label,
+                        self._max_retries + 1,
+                        mask_phone(request.recipient_phone_e164),
+                    )
+                    raise NotificationDeliveryError(
+                        f"{self._integration_label} send failed after "
+                        f"{self._max_retries + 1} attempts (network error)"
+                    ) from exc
+                continue
+            if response.status_code == 429 or response.status_code >= 500:
+                last_status = response.status_code
+                continue
+            if response.is_success:
+                return _parse_provider_response(response, integration_label=self._integration_label)
+            logger.warning(
+                "%s send rejected with HTTP %d for phone %s",
+                self._integration_label,
+                response.status_code,
+                mask_phone(request.recipient_phone_e164),
+            )
+            raise NotificationDeliveryError(
+                f"{self._integration_label} send rejected with HTTP {response.status_code}",
+                retries_exhausted=False,
+            )
+        logger.error(
+            "%s send failed after %d attempts (last HTTP %d) for phone %s",
+            self._integration_label,
+            self._max_retries + 1,
+            last_status,
+            mask_phone(request.recipient_phone_e164),
+        )
+        raise NotificationDeliveryError(
+            f"{self._integration_label} send failed after "
+            f"{self._max_retries + 1} attempts (last HTTP {last_status})"
+        )
 
 
 class CircuitBreakerState(StrEnum):
