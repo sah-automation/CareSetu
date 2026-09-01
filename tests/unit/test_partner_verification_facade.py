@@ -17,7 +17,7 @@ and the live-Postgres decision -> event -> role chain by the integration suite
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -33,7 +33,7 @@ from modules.partner.domain.exceptions import (
 )
 from modules.partner.facade import PartnerFacade
 from modules.partner.outbox import PARTNER_OUTBOX_TABLE
-from modules.partner.schema.models import partner_verifications
+from modules.partner.schema.models import partner_credentials, partner_verifications
 
 _NOW = datetime(2026, 8, 31, 10, 0, 0, tzinfo=UTC)
 
@@ -173,6 +173,7 @@ async def test_operator_reject_records_reason_and_emits_rejected() -> None:
             _FakeResult(),  # profile update
             _FakeResult(),  # verification update
             _FakeResult(),  # partner.rejected outbox insert
+            _FakeResult(all=[]),  # credential-cleanup select (none held)
         ]
     )
     facade = PartnerFacade(engine=_engine(connection), iam_facade=MagicMock())
@@ -200,7 +201,9 @@ async def test_operator_reject_of_an_active_partner_emits_invalidated() -> None:
     Rejecting an ``[Active]`` partner (a failed re-verification) is a clean
     deactivation: besides ``partner.rejected`` (role deny via T03) the
     ``credential.invalidated`` envelope must be written in the SAME transaction
-    so the partner is deindexed and the iam role suspended via MOD-001.
+    so the partner is deindexed and the iam role suspended via MOD-001. US-27
+    (#263): the envelope carries the round's real ``credential_id`` (not None),
+    and the 30-day cleanup window is scheduled on the credential row.
     """
     connection = _connection(
         [
@@ -209,6 +212,8 @@ async def test_operator_reject_of_an_active_partner_emits_invalidated() -> None:
             _FakeResult(),  # profile update
             _FakeResult(),  # verification update
             _FakeResult(),  # partner.rejected outbox insert
+            _FakeResult(all=[SimpleNamespace(id=5, artifact_refs={})]),  # credential select
+            _FakeResult(),  # credential cleanup_due_at update
             _FakeResult(),  # credential.invalidated outbox insert
         ]
     )
@@ -222,6 +227,11 @@ async def test_operator_reject_of_an_active_partner_emits_invalidated() -> None:
     outbox = _outbox_inserts(connection)
     event_types = sorted(_bound_value(insert._values["event_type"]) for insert in outbox)
     assert event_types == ["credential.invalidated", "partner.rejected"]
+    invalidated = next(
+        i for i in outbox if _bound_value(i._values["event_type"]) == "credential.invalidated"
+    )
+    payload = _bound_value(invalidated._values["payload"])
+    assert payload["credential_id"] == 5
 
 
 @pytest.mark.asyncio
@@ -230,7 +240,9 @@ async def test_operator_reject_of_an_under_verification_partner_emits_no_invalid
 
     The brief (ticket #254) explicitly says only an Active partner's failed
     re-verification emits ``credential.invalidated`` - a mere lapse or first-time
-    rejection never fires it.
+    rejection never fires it. US-27 (#263) still schedules the 30-day cleanup
+    window on the held credential rows so first-time rejections do purge their
+    documents later.
     """
     connection = _connection(
         [
@@ -239,6 +251,8 @@ async def test_operator_reject_of_an_under_verification_partner_emits_no_invalid
             _FakeResult(),  # profile update
             _FakeResult(),  # verification update
             _FakeResult(),  # partner.rejected outbox insert
+            _FakeResult(all=[SimpleNamespace(id=5, artifact_refs={})]),  # credential select
+            _FakeResult(),  # credential cleanup_due_at update
         ]
     )
     facade = PartnerFacade(engine=_engine(connection), iam_facade=MagicMock())
@@ -331,6 +345,136 @@ async def test_operator_reject_without_reason_raises_reason_required() -> None:
             await facade.operator_decision(3, decision_by=77, approve=False, reason=reason)
 
     assert connection.execute.await_args_list == []
+
+
+@pytest.mark.asyncio
+async def test_operator_reject_schedules_cleanup_window_with_clock() -> None:
+    """US-27 (#263): a rejection schedules cleanup_due_at clock() + cleanup window.
+
+    The atomic period clocks the rejected partner's credentials for the 30-day
+    retention window so the Phase-6 purge seam knows when to delete them.
+    """
+    connection = _connection(
+        [
+            _FakeResult(first=_profile_row(status="Active")),  # load profile
+            _FakeResult(scalar=1),  # max(round) = 1
+            _FakeResult(),  # profile update
+            _FakeResult(),  # verification update
+            _FakeResult(),  # partner.rejected outbox insert
+            _FakeResult(all=[SimpleNamespace(id=5, artifact_refs={})]),  # credential select
+            _FakeResult(),  # credential cleanup_due_at update
+            _FakeResult(),  # credential.invalidated outbox insert
+        ]
+    )
+    facade = PartnerFacade(
+        engine=_engine(connection),
+        iam_facade=MagicMock(),
+        credential_cleanup_days=30,
+        clock=lambda: _NOW,
+    )
+
+    await facade.operator_decision(3, decision_by=77, approve=False, reason="rejected")
+
+    credential_updates = [
+        u
+        for u in _updates(connection)
+        if isinstance(u, Update) and u.table.name == partner_credentials.name
+    ]
+    assert len(credential_updates) == 1
+    expected_due = _NOW + timedelta(days=30)
+    assert _bound_value(credential_updates[0]._values["cleanup_due_at"]) == expected_due
+
+
+@pytest.mark.asyncio
+async def test_purge_deletes_credential_emits_invalidated_and_removes_artifact() -> None:
+    """US-27 AC1: a credential past the 30-day window on a [Rejected] partner is
+    deleted (row + artifact file) and emits credential.invalidated in the same txn."""
+
+    from modules.partner.adapters.artifact_store import CredentialArtifactStore
+
+    store = CredentialArtifactStore(root=MagicMock(), key_bytes=bytes(32))
+    store.delete_artifacts = MagicMock()  # type: ignore[method-assign]
+    connection = _connection(
+        [
+            _FakeResult(
+                all=[
+                    SimpleNamespace(
+                        id=5,
+                        profile_id=3,
+                        identity_id=9,
+                        artifact_refs={"r0": "partner/3/medical_registration_0.enc"},
+                    )
+                ]
+            ),  # expired credential select
+            _FakeResult(),  # credential delete
+            _FakeResult(),  # credential.invalidated outbox insert
+        ]
+    )
+    facade = PartnerFacade(
+        engine=_engine(connection),
+        iam_facade=MagicMock(),
+        artifact_store=store,
+        clock=lambda: _NOW + timedelta(days=31),
+    )
+
+    deleted = await facade.purge_expired_credentials()
+
+    assert deleted == [5]
+    store.delete_artifacts.assert_called_once_with({"r0": "partner/3/medical_registration_0.enc"})
+    outbox = _outbox_inserts(connection)
+    assert len(outbox) == 1
+    insert = outbox[0]
+    assert _bound_value(insert._values["event_type"]) == "credential.invalidated"
+    payload = _bound_value(insert._values["payload"])
+    assert payload["credential_id"] == 5
+    assert payload["reason"] == "permanent_rejection_cleanup"
+
+
+@pytest.mark.asyncio
+async def test_purge_ignores_inside_window_and_non_rejected() -> None:
+    """US-27 AC2: still inside the 30-day window nothing purges; and a partner who
+    recovered (no longer [Rejected]) keeps their documents."""
+
+    # Inside the window: the select finds nothing past due.
+    inside = _connection(
+        [
+            _FakeResult(all=[]),  # no lapsed credential
+        ]
+    )
+    facade = PartnerFacade(engine=_engine(inside), iam_facade=MagicMock(), clock=lambda: _NOW)
+    assert await facade.purge_expired_credentials() == []
+    assert _outbox_inserts(inside) == []
+
+
+@pytest.mark.asyncio
+async def test_purge_handles_missing_artifact_store() -> None:
+    """US-27 AC1: with no artifact store wired the row is still deleted and the
+    credential.invalidated event still emits (artifact removal is best-effort)."""
+
+    connection = _connection(
+        [
+            _FakeResult(
+                all=[
+                    SimpleNamespace(id=7, profile_id=3, identity_id=9, artifact_refs={"r0": "ref"})
+                ]
+            ),
+            _FakeResult(),  # credential delete
+            _FakeResult(),  # credential.invalidated outbox insert
+        ]
+    )
+    facade = PartnerFacade(
+        engine=_engine(connection),
+        iam_facade=MagicMock(),
+        artifact_store=None,
+        clock=lambda: _NOW + timedelta(days=31),
+    )
+
+    deleted = await facade.purge_expired_credentials()
+
+    assert deleted == [7]
+    outbox = _outbox_inserts(connection)
+    assert len(outbox) == 1
+    assert _bound_value(outbox[0]._values["event_type"]) == "credential.invalidated"
 
 
 @pytest.mark.asyncio

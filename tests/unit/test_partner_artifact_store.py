@@ -99,3 +99,17 @@ def test_build_artifact_store_without_key_derives_ephemeral(tmp_path: Path) -> N
 
     ref = store.save_artifact(3, "drug_license", 0, _PLAINTEXT)
     assert ref == "partner/3/drug_license_0.enc"
+
+
+def test_delete_artifacts_removes_files_and_ignores_unknown_refs(tmp_path: Path) -> None:
+    """US-27 (#263): deleting a credential row also removes its encrypted files."""
+    store = CredentialArtifactStore(root=tmp_path, key_bytes=bytes(32))
+    ref0 = store.save_artifact(42, "medical_registration", 0, b"doc0")
+    ref1 = store.save_artifact(42, "qualification_certificate", 0, b"doc1")
+
+    store.delete_artifacts({"r0": ref0, "r1": ref1, "gone": "partner/42/missing.enc"})
+
+    assert not (tmp_path / ref0.replace("/", os.sep)).exists()
+    assert not (tmp_path / ref1.replace("/", os.sep)).exists()
+    # A missing ref is ignored (best-effort, idempotent).
+    assert not (tmp_path / "partner" / "42" / "missing.enc").exists()

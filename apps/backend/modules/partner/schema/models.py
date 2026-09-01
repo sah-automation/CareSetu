@@ -120,6 +120,13 @@ partner_credentials = Table(
     # References into encrypted object storage under the ``partner/`` prefix
     # (security-phii-standards). Never the document bytes themselves.
     Column("artifact_refs", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    # US-27 credential-document cleanup (ticket #263): the moment a permanent
+    # rejection schedules document removal is ``now() + cleanup window``. NULL
+    # means no cleanup is scheduled (credential still live / under review). The
+    # ``purge_expired_credentials`` facade seam deletes the row (and its
+    # artifact files) once ``cleanup_due_at <= now`` and the profile is still
+    # ``[Rejected]``.
+    Column("cleanup_due_at", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     CheckConstraint(
@@ -131,6 +138,12 @@ partner_credentials = Table(
         name="ck_partner_credentials_credential_type",
     ),
     Index("ix_partner_credentials_profile", "profile_id"),
+    # Partial so the 30-day purge scan touches only scheduled rows.
+    Index(
+        "ix_partner_credentials_cleanup_due",
+        "cleanup_due_at",
+        postgresql_where=text("cleanup_due_at IS NOT NULL"),
+    ),
 )
 
 

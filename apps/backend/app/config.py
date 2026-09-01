@@ -52,6 +52,11 @@ DEFAULT_PARTNER_ARTIFACT_ROOT = "var/partner-artifacts"
 # pins no numbers, so the default stands as a config fallback, overridable by env.
 DEFAULT_PARTNER_RE_SUBMISSION_MAX = 3
 DEFAULT_PARTNER_RE_SUBMISSION_COOLDOWN_DAYS = 30
+# Credential-document cleanup after permanent rejection (US-27, ticket #263):
+# the rejection path schedules ``partner_credentials.cleanup_due_at`` this many
+# days out; the purge seam then deletes the documents so identity files are not
+# hoarded (spec phase-5 "Credential document storage"). Spec-pinned at 30 days.
+DEFAULT_PARTNER_CREDENTIAL_CLEANUP_DAYS = 30
 # Operator MFA TOTP secret encryption (PHASE-5 S8, #261): the AES-256-GCM key
 # for encrypting/decrypting the TOTP secret stored in ``iam_operator_mfa.secret``
 # comes from the ``IAM_MFA_SECRET_KEY`` environment variable (never committed).
@@ -115,6 +120,9 @@ class Settings:
     # re-submission budget before cooldown; ``cooldown_days`` the cooldown length.
     partner_re_submission_max: int = DEFAULT_PARTNER_RE_SUBMISSION_MAX
     partner_re_submission_cooldown_days: int = DEFAULT_PARTNER_RE_SUBMISSION_COOLDOWN_DAYS
+    # Credential-document cleanup window after permanent rejection (US-27) - a
+    # retention policy, env-driven like the other phase-5 knobs.
+    partner_credential_cleanup_days: int = DEFAULT_PARTNER_CREDENTIAL_CLEANUP_DAYS
     # Encrypted TOTP secret for operator MFA (PHASE-5 S8, #261): AES-256-GCM key
     # from the ``IAM_MFA_SECRET_KEY`` environment; ``issue_operator_session``
     # refuses to verify without it.
@@ -206,6 +214,8 @@ class Settings:
             raise ValueError("partner_re_submission_max must be positive")
         if self.partner_re_submission_cooldown_days <= 0:
             raise ValueError("partner_re_submission_cooldown_days must be positive")
+        if self.partner_credential_cleanup_days <= 0:
+            raise ValueError("partner_credential_cleanup_days must be positive")
 
     @property
     def mock_otp_readback_enabled(self) -> bool:
@@ -329,6 +339,10 @@ def get_settings() -> Settings:
         partner_re_submission_cooldown_days=_env_int(
             "PARTNER_RE_SUBMISSION_COOLDOWN_DAYS",
             DEFAULT_PARTNER_RE_SUBMISSION_COOLDOWN_DAYS,
+        ),
+        partner_credential_cleanup_days=_env_int(
+            "PARTNER_CREDENTIAL_CLEANUP_DAYS",
+            DEFAULT_PARTNER_CREDENTIAL_CLEANUP_DAYS,
         ),
         iam_mfa_secret_key=os.environ.get("IAM_MFA_SECRET_KEY", ""),
     )

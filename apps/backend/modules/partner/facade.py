@@ -25,6 +25,11 @@ Methods:
   drops an ``[Active]`` re-verifying partner to ``[Under Verification]``; the
   opposite (deactivation) is ``operator_decision`` rejecting an ``[Active]``
   partner, which emits ``credential.invalidated`` alongside ``partner.rejected``.
+- ``purge_expired_credentials`` (US-27, #263) is the deterministic credential-
+  cleanup trigger: it deletes credential rows whose permanent-rejection 30-day
+  cleanup window has lapsed (still ``[Rejected]``), removes their artifacts, and
+  emits ``credential.invalidated`` per credential - one transaction. It is
+  invoked by the Phase-6 periodic job; no background scanner lives here.
 
 Each mutating method writes its envelope into ``partner.partner_outbox`` in the
 SAME transaction as the state change (ADR-0002 §1). The operator review /
@@ -36,6 +41,7 @@ the state transitions and event constants/builders they need already live in
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -301,6 +307,15 @@ def _row_str(row: Any, name: str) -> str:
     return str(getattr(row, name))
 
 
+def _default_clock() -> datetime:
+    """The wall-clock the lifecycle uses for scheduling windows (US-27, #263).
+
+    A plain UTC now, overridable for tests (the ``MutableClock`` pattern the
+    integration suite uses to walk the 30-day cleanup window).
+    """
+    return datetime.now(UTC)
+
+
 def _to_profile(row: Row[Any], round: int) -> _Profile:
     appeal_used = getattr(row, "appeal_used", False)
     blocked_until = getattr(row, "re_submission_blocked_until", None)
@@ -493,6 +508,52 @@ async def _ingest_credentials(
         )
 
 
+async def _schedule_credential_cleanup(
+    connection: AsyncConnection,
+    artifact_store: CredentialArtifactStore | None,
+    partner_id: int,
+    *,
+    due_at: datetime,
+) -> list[int]:
+    """Schedule a permanently-rejected partner's credential rows for cleanup (US-27).
+
+    Sets ``cleanup_due_at`` on every credential the partner submitted this
+    round - so the 30-day retention window starts at rejection - and answers
+    their ids in ``created_at`` order (the current round's credential on an
+    ``[Active]`` deactivation is the first). Runs in the caller's transaction so
+    the schedule commits with the state change (ADR-0002 §1). A partner with no
+    credential rows (e.g. a Step-1 auto-fail or a rejection before submitting)
+    schedules nothing.
+    """
+    rows = (
+        await connection.execute(
+            select(
+                partner_credentials.c.id,
+                partner_credentials.c.artifact_refs,
+            )
+            .where(
+                partner_credentials.c.profile_id == partner_id,
+                partner_credentials.c.cleanup_due_at.is_(None),
+            )
+            .order_by(partner_credentials.c.created_at)
+        )
+    ).all()
+    if not rows:
+        return []
+    await connection.execute(
+        partner_credentials.update()
+        .where(
+            partner_credentials.c.profile_id == partner_id,
+            partner_credentials.c.cleanup_due_at.is_(None),
+        )
+        .values(
+            cleanup_due_at=due_at,
+            updated_at=func.now(),
+        )
+    )
+    return [int(row.id) for row in rows]
+
+
 class PartnerFacade:
     """Typed public facade for the partner lifecycle surface."""
 
@@ -505,6 +566,8 @@ class PartnerFacade:
         *,
         re_submission_max: int = 3,
         re_submission_cooldown_days: int = 30,
+        credential_cleanup_days: int = 30,
+        clock: Callable[[], datetime] = _default_clock,
     ) -> None:
         self._engine = engine
         self._iam = iam_facade
@@ -524,6 +587,15 @@ class PartnerFacade:
         # hardcoded in the domain core.
         self._re_submission_max = re_submission_max
         self._re_submission_cooldown_days = re_submission_cooldown_days
+        # Credential-document cleanup window after permanent rejection (US-27,
+        # ticket #263): the rejection path schedules ``cleanup_due_at`` this many
+        # days out, and ``purge_expired_credentials`` deletes the documents after
+        # it lapses. Config-injected like the throttle above (spec-pinned at 30).
+        self._credential_cleanup_days = credential_cleanup_days
+        # The injectable clock that schedules the 30-day window (overridden by
+        # ``MutableClock`` in tests to walk the boundary). Mirrors the iam
+        # facades' ``clock`` convention.
+        self._clock = clock
 
     async def register(
         self,
@@ -966,6 +1038,22 @@ class PartnerFacade:
                         decision_by=decision_by,
                     ),
                 )
+                # Permanent-rejection cleanup (US-27, ticket #263): rejecting a
+                # partner that held credentials schedules their documents for
+                # deletion after the 30-day retention window. ``cleanup_due_at``
+                # is written on the credential rows now (same transaction), and a
+                # Phase-6 ``purge_expired_credentials`` seam deletes them once the
+                # deadline lapses - no background scanner lives here (the
+                # "deliberately no scanner" doctrine). The window still runs when
+                # the partner had been ``[Active]`` (a deactivation) or was merely
+                # ``[Under Verification]`` (a first-time rejection); a partner
+                # rejected before submitting holds no rows to schedule.
+                credential_ids = await _schedule_credential_cleanup(
+                    connection,
+                    self._artifact_store,
+                    partner_id,
+                    due_at=self._clock() + timedelta(days=self._credential_cleanup_days),
+                )
                 # A re-verification failure on an ACTIVE partner is a clean
                 # deactivation (spec phase-5 "Deactivation on failed
                 # re-verification", ticket #254): besides ``partner.rejected``
@@ -974,8 +1062,13 @@ class PartnerFacade:
                 # denied again through ``credential.invalidated`` (MOD-001
                 # consumer suspends the grant). The mere grace-window lapse to
                 # ``[Under Verification]`` is NOT a deactivation and emits this
-                # only via the operator reject on an Active partner.
+                # only via the operator reject on an Active partner. The envelope
+                # carries the round's real ``credential_id`` (not ``None``) so the
+                # audit/iam consumers can act on the specific credential - the
+                # ``Active`` rejection always has the live credentials of the
+                # current round.
                 if profile.status == PartnerStatus.ACTIVE.value:
+                    first_credential_id = credential_ids[0] if credential_ids else None
                     await write_outbox(
                         connection,
                         PARTNER_SCHEMA,
@@ -983,6 +1076,7 @@ class PartnerFacade:
                         credential_invalidated_envelope(
                             partner_id,
                             identity_id=profile.identity_id,
+                            credential_id=first_credential_id,
                             reason=resolved_reason or "reverification_failed",
                         ),
                     )
@@ -1240,3 +1334,74 @@ class PartnerFacade:
                 for e in (audit_page.events if audit_page is not None else [])
             ],
         )
+
+    async def purge_expired_credentials(self) -> list[int]:
+        """Delete credentials past the 30-day cleanup window of a permanent rejection (US-27).
+
+        The event-driven cleanup seam (ticket #263): finds every
+        ``partner_credentials`` row whose ``cleanup_due_at`` has lapsed and whose
+        partner profile is still ``[Rejected]`` - i.e. the permanent-rejection
+        retention window has passed and the partner has not recovered to a live
+        status. For each it deletes the row, removes the underlying encrypted
+        artifact files via the artifact store, and emits ``credential.invalidated``
+        (with the real ``credential_id``) - ALL in one DB transaction (ADR-0002 §1),
+        so a crash cannot leave an event without its row deletion or vice versa.
+
+        A partner who was rejected but later recovered (re-submit / appeal, so the
+        profile is no longer ``[Rejected]``) is NOT purged: their documents stay
+        until that recovery round's own terminal decision. Inside the 30-day
+        window nothing is scheduled-eligible yet, so it is a no-op.
+
+        There is deliberately NO background scanner built here - this seam is
+        invoked by the periodic job the roadmap schedules in Phase 6 (the
+        "deliberately no scanner" doctrine from ``grace_lapse``); this ticket only
+        provides the deterministic, transactional trigger.
+
+        Returns the ids of the credentials deleted.
+        """
+        now = self._clock()
+        async with self._engine.begin() as connection:
+            rows = (
+                await connection.execute(
+                    select(
+                        partner_credentials.c.id,
+                        partner_credentials.c.profile_id,
+                        partner_profiles.c.identity_id,
+                        partner_credentials.c.artifact_refs,
+                    )
+                    .join(
+                        partner_profiles,
+                        partner_profiles.c.id == partner_credentials.c.profile_id,
+                    )
+                    .where(
+                        partner_credentials.c.cleanup_due_at.is_not(None),
+                        partner_credentials.c.cleanup_due_at <= now,
+                        partner_profiles.c.status == PartnerStatus.REJECTED.value,
+                    )
+                    .order_by(partner_credentials.c.id)
+                )
+            ).all()
+            deleted: list[int] = []
+            for row in rows:
+                credential_id = int(row.id)
+                partner_id = int(row.profile_id)
+                identity_id = int(row.identity_id)
+                refs = dict(row.artifact_refs or {})
+                await connection.execute(
+                    partner_credentials.delete().where(partner_credentials.c.id == credential_id)
+                )
+                if self._artifact_store is not None:
+                    self._artifact_store.delete_artifacts(refs)
+                await write_outbox(
+                    connection,
+                    PARTNER_SCHEMA,
+                    PARTNER_OUTBOX_TABLE,
+                    credential_invalidated_envelope(
+                        partner_id,
+                        identity_id=identity_id,
+                        credential_id=credential_id,
+                        reason="permanent_rejection_cleanup",
+                    ),
+                )
+                deleted.append(credential_id)
+            return deleted

@@ -78,6 +78,24 @@ class CredentialArtifactStore:
         path.write_bytes(payload)
         return f"{PREFIX}/{partner_id}/{filename}"
 
+    def delete_artifacts(self, refs: dict[str, str]) -> None:
+        """Delete the encrypted artifact files a credential's refs point at.
+
+        US-27 (ticket #263): when the 30-day cleanup deletes a credential row,
+        the operator also removes the underlying encrypted document files so no
+        plaintext/encrypted bytes linger on disk. Each ref is a
+        ``partner/<id>/<file>.enc`` path under the store root; refs that do not
+        resolve (already gone, or malformed) are ignored so the purge is
+        best-effort and idempotent.
+        """
+        for ref in refs.values():
+            if not isinstance(ref, str) or not ref:
+                continue
+            relative = ref if ref.startswith(f"{PREFIX}/") else f"{PREFIX}/{ref}"
+            path = (self._root / relative).resolve()
+            if path.is_file():
+                path.unlink(missing_ok=True)
+
 
 def decode_key(b64_key: str) -> bytes:
     """Decode a base64 AES-256 key, raising a clear error on malformed input."""
