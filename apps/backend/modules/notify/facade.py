@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.config import get_settings
@@ -35,6 +35,7 @@ from modules.notify.domain.events import (
     notification_failed_envelope,
 )
 from modules.notify.outbox import NOTIFY_OUTBOX_TABLE
+from modules.notify.schema.models import notify_notifications
 
 NOTIFY_SCHEMA = "notify"
 
@@ -112,6 +113,30 @@ class NotifyFacade:
         """Await every pending delivery on both channels (deterministic test hook)."""
         await self._whatsapp_queue.flush()
         await self._sms_queue.flush()
+
+
+async def insert_notification(
+    connection: AsyncConnection, recipient_phone_e164: str, message: str
+) -> int:
+    """Persist a terminal-status notification row; return its id.
+
+    T12 (ticket #255): called by the ``partner.activated`` / ``partner.rejected``
+    consumers inside their ledger transaction. The row records the WhatsApp-first
+    attempt (ADR-0009) as ``channel='wa'``, ``status='pending'``; its id becomes
+    ``DeliveryRequest.notification_id`` so a ``notification.failed`` on the
+    WhatsApp leg can re-route the same message to SMS.
+    """
+    result = await connection.execute(
+        notify_notifications.insert()
+        .values(
+            recipient_phone_e164=recipient_phone_e164,
+            message=message,
+            channel="wa",
+            status="pending",
+        )
+        .returning(notify_notifications.c.id)
+    )
+    return int(result.scalar_one())
 
 
 def _emit_notification_failed_to_outbox(payload: NotificationFailedPayload) -> Awaitable[None]:

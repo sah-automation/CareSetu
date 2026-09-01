@@ -24,6 +24,9 @@ from modules.iam.adapters.sms import (
     SmsSendRequest,
     SmsTemplateParams,
 )
+from modules.iam.adapters.sms import (
+    build_sms_adapter as build_sms_adapter,
+)
 from modules.iam.domain import events
 from modules.iam.domain.exceptions import (
     InvalidAccessTokenError as InvalidAccessTokenError,
