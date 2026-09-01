@@ -203,9 +203,9 @@ async def test_handler_records_ledger_then_appends_regulated_act() -> None:
     engine, connection = _fake_engine()
 
     with (
-        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
         patch(
-            "modules.audit.adapters.record_consumed_event",
+            "bus.handler_harness.record_consumed_event",
             new_callable=AsyncMock,
             return_value=True,
         ) as record_consumed,
@@ -234,9 +234,9 @@ async def test_handler_skips_replay_when_ledger_already_has_event_id() -> None:
     engine, _connection = _fake_engine()
 
     with (
-        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
         patch(
-            "modules.audit.adapters.record_consumed_event",
+            "bus.handler_harness.record_consumed_event",
             new_callable=AsyncMock,
             return_value=False,
         ) as record_consumed,
@@ -258,9 +258,9 @@ async def test_handler_skips_operational_act_without_appending() -> None:
     engine, _connection = _fake_engine()
 
     with (
-        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
         patch(
-            "modules.audit.adapters.record_consumed_event",
+            "bus.handler_harness.record_consumed_event",
             new_callable=AsyncMock,
             return_value=True,
         ),
@@ -433,9 +433,9 @@ async def test_record_access_handler_records_ledger_then_appends() -> None:
     engine, connection = _fake_engine()
 
     with (
-        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
         patch(
-            "modules.audit.adapters.record_consumed_event",
+            "bus.handler_harness.record_consumed_event",
             new_callable=AsyncMock,
             return_value=True,
         ) as record_consumed,
@@ -461,9 +461,9 @@ async def test_record_access_handler_skips_when_ledger_already_has_event_id() ->
     engine, _connection = _fake_engine()
 
     with (
-        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
         patch(
-            "modules.audit.adapters.record_consumed_event",
+            "bus.handler_harness.record_consumed_event",
             new_callable=AsyncMock,
             return_value=False,
         ) as record_consumed,
@@ -690,9 +690,9 @@ async def test_partner_decision_handler_records_ledger_then_appends() -> None:
     engine, connection = _fake_engine()
 
     with (
-        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
         patch(
-            "modules.audit.adapters.record_consumed_event",
+            "bus.handler_harness.record_consumed_event",
             new_callable=AsyncMock,
             return_value=True,
         ) as record_consumed,
@@ -725,9 +725,9 @@ async def test_partner_rejected_handler_records_ledger_then_appends() -> None:
     engine, _connection = _fake_engine()
 
     with (
-        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
         patch(
-            "modules.audit.adapters.record_consumed_event",
+            "bus.handler_harness.record_consumed_event",
             new_callable=AsyncMock,
             return_value=True,
         ) as record_consumed,
@@ -752,9 +752,9 @@ async def test_partner_decision_handler_skips_replay_when_already_delivered() ->
     engine, _connection = _fake_engine()
 
     with (
-        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
         patch(
-            "modules.audit.adapters.record_consumed_event",
+            "bus.handler_harness.record_consumed_event",
             new_callable=AsyncMock,
             return_value=False,
         ) as record_consumed,
@@ -777,9 +777,9 @@ async def test_credential_reviewed_handler_records_ledger_then_appends() -> None
     engine, connection = _fake_engine()
 
     with (
-        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
         patch(
-            "modules.audit.adapters.record_consumed_event",
+            "bus.handler_harness.record_consumed_event",
             new_callable=AsyncMock,
             return_value=True,
         ) as record_consumed,
@@ -808,9 +808,9 @@ async def test_credential_reviewed_handler_skips_replay_when_already_delivered()
     engine, _connection = _fake_engine()
 
     with (
-        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
         patch(
-            "modules.audit.adapters.record_consumed_event",
+            "bus.handler_harness.record_consumed_event",
             new_callable=AsyncMock,
             return_value=False,
         ) as record_consumed,
@@ -969,9 +969,9 @@ async def test_tamper_handler_consumes_and_never_appends_to_chain() -> None:
     engine, _connection = _fake_engine()
 
     with (
-        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
         patch(
-            "modules.audit.adapters.record_consumed_event",
+            "bus.handler_harness.record_consumed_event",
             new_callable=AsyncMock,
             return_value=True,
         ),
@@ -1007,9 +1007,9 @@ async def test_tamper_handler_logs_the_attempt(caplog) -> None:
     engine, _connection = _fake_engine()
 
     with (
-        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
         patch(
-            "modules.audit.adapters.record_consumed_event",
+            "bus.handler_harness.record_consumed_event",
             new_callable=AsyncMock,
             return_value=True,
         ),
@@ -1098,9 +1098,9 @@ async def test_partner_registered_handler_records_ledger_then_appends() -> None:
     engine, connection = _fake_engine()
 
     with (
-        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
         patch(
-            "modules.audit.adapters.record_consumed_event",
+            "bus.handler_harness.record_consumed_event",
             new_callable=AsyncMock,
             return_value=True,
         ) as record_consumed,
@@ -1129,9 +1129,9 @@ async def test_partner_registered_handler_skips_replay_when_already_delivered() 
     engine, _connection = _fake_engine()
 
     with (
-        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
         patch(
-            "modules.audit.adapters.record_consumed_event",
+            "bus.handler_harness.record_consumed_event",
             new_callable=AsyncMock,
             return_value=False,
         ) as record_consumed,
@@ -1157,9 +1157,9 @@ async def test_credential_invalidated_handler_records_ledger_then_appends() -> N
     engine, connection = _fake_engine()
 
     with (
-        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
         patch(
-            "modules.audit.adapters.record_consumed_event",
+            "bus.handler_harness.record_consumed_event",
             new_callable=AsyncMock,
             return_value=True,
         ) as record_consumed,
@@ -1191,9 +1191,9 @@ async def test_credential_invalidated_handler_skips_replay_when_already_delivere
     engine, _connection = _fake_engine()
 
     with (
-        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
         patch(
-            "modules.audit.adapters.record_consumed_event",
+            "bus.handler_harness.record_consumed_event",
             new_callable=AsyncMock,
             return_value=False,
         ) as record_consumed,

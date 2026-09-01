@@ -107,9 +107,9 @@ async def test_activated_handler_records_ledger_then_grants_role() -> None:
     engine, connection = _fake_engine()
 
     with (
-        patch("modules.iam.adapters._delivery_engine", return_value=engine),
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
         patch(
-            "modules.iam.adapters.record_consumed_event",
+            "bus.handler_harness.record_consumed_event",
             new_callable=AsyncMock,
             return_value=True,
         ) as record_consumed,
@@ -134,9 +134,9 @@ async def test_activated_handler_skips_replay_when_ledger_already_has_event_id()
     engine, _connection = _fake_engine()
 
     with (
-        patch("modules.iam.adapters._delivery_engine", return_value=engine),
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
         patch(
-            "modules.iam.adapters.record_consumed_event",
+            "bus.handler_harness.record_consumed_event",
             new_callable=AsyncMock,
             return_value=False,
         ) as record_consumed,
@@ -171,9 +171,9 @@ async def test_rejection_and_invalidated_handlers_suspend_the_role(
     engine, connection = _fake_engine()
 
     with (
-        patch("modules.iam.adapters._delivery_engine", return_value=engine),
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
         patch(
-            "modules.iam.adapters.record_consumed_event",
+            "bus.handler_harness.record_consumed_event",
             new_callable=AsyncMock,
             return_value=True,
         ) as record_consumed,
@@ -209,9 +209,9 @@ async def test_suspend_handlers_skip_replay(event_type: str, payload_factory, fn
     engine, _connection = _fake_engine()
 
     with (
-        patch("modules.iam.adapters._delivery_engine", return_value=engine),
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
         patch(
-            "modules.iam.adapters.record_consumed_event",
+            "bus.handler_harness.record_consumed_event",
             new_callable=AsyncMock,
             return_value=False,
         ),

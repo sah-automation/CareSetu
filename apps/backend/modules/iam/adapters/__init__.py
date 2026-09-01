@@ -18,21 +18,16 @@ together.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
-from typing import TypeVar
-
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
-from sqlalchemy.pool import NullPool
+from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.config import get_settings
 from bus.envelope import Envelope
 from bus.events import (
     EVENT_CREDENTIAL_INVALIDATED,
     EVENT_PARTNER_ACTIVATED,
     EVENT_PARTNER_REJECTED,
 )
-from bus.ledger import record_consumed_event
+from bus.handler_harness import run_handler
 from bus.registry import HandlerRegistry
 from modules.iam.domain.consumer import (
     CredentialInvalidatedPayload,
@@ -44,53 +39,7 @@ from modules.iam.session_facade import (
     suspend_partner_role,
 )
 
-_T = TypeVar("_T", bound=BaseModel)
-
 _IAM_SCHEMA = "iam"
-
-
-def _delivery_engine() -> AsyncEngine:
-    """A short-lived engine for one delivery (the round-trip harness pattern).
-
-    The composition root passes only the registry to ``register_handlers``,
-    so the handler resolves the shared settings lazily at delivery time -
-    registration stays connection-free for unit tests and the worker boot.
-    ``NullPool`` matches every other short-lived engine in the repo.
-    """
-    return create_async_engine(get_settings().database_url, poolclass=NullPool)
-
-
-async def _run_handler(
-    envelope: Envelope[BaseModel],
-    payload_class: type[_T],
-    handler_fn: Callable[[AsyncConnection, _T], Awaitable[None]],
-    handler_name: str,
-) -> None:
-    """Run an event handler with the standard engine-lifecycle boilerplate.
-
-    Handles payload extraction, engine creation, ``record_consumed_event``,
-    delivery check, and engine disposal. The callback does the unique work.
-    """
-    raw_payload = envelope.payload
-    payload = (
-        raw_payload
-        if isinstance(raw_payload, payload_class)
-        else payload_class.model_validate(raw_payload.model_dump())
-    )
-    engine = _delivery_engine()
-    try:
-        async with engine.begin() as connection:
-            delivered = await record_consumed_event(
-                connection,
-                _IAM_SCHEMA,
-                envelope,
-                handler_result={"handler": handler_name},
-            )
-            if not delivered:
-                return
-            await handler_fn(connection, payload)
-    finally:
-        await engine.dispose()
 
 
 def register_handlers(registry: HandlerRegistry) -> None:
@@ -118,11 +67,12 @@ def register_handlers(registry: HandlerRegistry) -> None:
         async def _impl(connection: AsyncConnection, payload: PartnerActivatedPayload) -> None:
             await grant_partner_role(connection, payload.identity_id)
 
-        await _run_handler(
+        await run_handler(
             envelope,
             PartnerActivatedPayload,
             _impl,
             "grant_partner_role",
+            _IAM_SCHEMA,
         )
 
     async def suspend_partner_role_on_rejection(envelope: Envelope[BaseModel]) -> None:
@@ -136,11 +86,12 @@ def register_handlers(registry: HandlerRegistry) -> None:
         async def _impl(connection: AsyncConnection, payload: PartnerRejectedPayload) -> None:
             await suspend_partner_role(connection, payload.identity_id)
 
-        await _run_handler(
+        await run_handler(
             envelope,
             PartnerRejectedPayload,
             _impl,
             "suspend_partner_role",
+            _IAM_SCHEMA,
         )
 
     async def suspend_partner_role_on_invalidated(envelope: Envelope[BaseModel]) -> None:
@@ -154,11 +105,12 @@ def register_handlers(registry: HandlerRegistry) -> None:
         async def _impl(connection: AsyncConnection, payload: CredentialInvalidatedPayload) -> None:
             await suspend_partner_role(connection, payload.identity_id)
 
-        await _run_handler(
+        await run_handler(
             envelope,
             CredentialInvalidatedPayload,
             _impl,
             "suspend_partner_role",
+            _IAM_SCHEMA,
         )
 
     registry.register(EVENT_PARTNER_ACTIVATED, grant_or_restore_partner_role)

@@ -181,7 +181,7 @@ class CredentialInvalidatedPayload(BaseModel):
 
     The dispatcher reconstructs a claimed ``credential.invalidated`` outbox row
     and MOD-001's registered model owns the registry slot, so this mirror is
-    used ONLY by ``_run_handler`` to re-validate the dispatched payload for the
+    used ONLY by ``run_handler`` to re-validate the dispatched payload for the
     chain append - MOD-011 registers no duplicate model with the registry. Its
     field contract mirrors what MOD-002 publishes (its
     ``CredentialInvalidatedPayload``): the partner, its iam identity, the

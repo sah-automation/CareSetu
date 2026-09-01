@@ -109,9 +109,9 @@ async def test_activated_handler_records_ledger_then_sends_whatsapp_first() -> N
     recorder = _RecordingFacade()
 
     with (
-        patch("modules.notify.adapters._delivery_engine", return_value=engine),
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
         patch(
-            "modules.notify.adapters.record_consumed_event",
+            "bus.handler_harness.record_consumed_event",
             new_callable=AsyncMock,
             return_value=True,
         ) as record_consumed,
@@ -153,9 +153,9 @@ async def test_rejected_handler_carries_the_specific_reason_into_the_body() -> N
     recorder = _RecordingFacade()
 
     with (
-        patch("modules.notify.adapters._delivery_engine", return_value=engine),
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
         patch(
-            "modules.notify.adapters.record_consumed_event",
+            "bus.handler_harness.record_consumed_event",
             new_callable=AsyncMock,
             return_value=True,
         ),
@@ -190,9 +190,9 @@ async def test_terminal_handlers_skip_replay_when_ledger_already_has_event_id() 
     engine, _connection = _fake_engine()
 
     with (
-        patch("modules.notify.adapters._delivery_engine", return_value=engine),
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
         patch(
-            "modules.notify.adapters.record_consumed_event",
+            "bus.handler_harness.record_consumed_event",
             new_callable=AsyncMock,
             return_value=False,
         ) as record_consumed,
@@ -221,9 +221,9 @@ async def test_terminal_handler_skips_send_when_identity_has_no_resolvable_phone
     engine, _connection = _fake_engine()
 
     with (
-        patch("modules.notify.adapters._delivery_engine", return_value=engine),
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
         patch(
-            "modules.notify.adapters.record_consumed_event",
+            "bus.handler_harness.record_consumed_event",
             new_callable=AsyncMock,
             return_value=True,
         ) as record_consumed,
@@ -271,9 +271,9 @@ async def test_handler_revalidates_a_registry_carried_partner_model() -> None:
     recorder = _RecordingFacade()
 
     with (
-        patch("modules.notify.adapters._delivery_engine", return_value=engine),
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
         patch(
-            "modules.notify.adapters.record_consumed_event",
+            "bus.handler_harness.record_consumed_event",
             new_callable=AsyncMock,
             return_value=True,
         ),

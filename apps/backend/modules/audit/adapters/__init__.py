@@ -22,14 +22,10 @@ is written in the SAME transaction as the effect, so replaying a delivered
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
-from typing import TypeVar
 
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
-from sqlalchemy.pool import NullPool
+from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.config import get_settings
 from bus.envelope import Envelope
 from bus.events import (
     EVENT_AUDIT_EVENT,
@@ -43,7 +39,7 @@ from bus.events import (
     EVENT_RECORD_DENIED,
     is_regulated_act,
 )
-from bus.ledger import record_consumed_event
+from bus.handler_harness import run_handler
 from bus.registry import HandlerRegistry
 from modules.audit.domain.consumer import (
     AuditEventPayload,
@@ -64,52 +60,6 @@ from modules.audit.facade import (
     append_partner_registered_event,
     append_record_access_event,
 )
-
-_T = TypeVar("_T", bound=BaseModel)
-
-
-def _delivery_engine() -> AsyncEngine:
-    """A short-lived engine for one delivery (the round-trip harness pattern).
-
-    The composition root passes only the registry to ``register_handlers``,
-    so the handler resolves the shared settings lazily at delivery time -
-    registration stays connection-free for unit tests and the worker boot.
-    ``NullPool`` matches every other short-lived engine in the repo.
-    """
-    return create_async_engine(get_settings().database_url, poolclass=NullPool)
-
-
-async def _run_handler(
-    envelope: Envelope[BaseModel],
-    payload_class: type[_T],
-    handler_fn: Callable[[AsyncConnection, _T], Awaitable[None]],
-    handler_name: str,
-) -> None:
-    """Run an event handler with the standard engine-lifecycle boilerplate.
-
-    Handles payload extraction, engine creation, ``record_consumed_event``,
-    delivery check, and engine disposal. The callback does the unique work.
-    """
-    raw_payload = envelope.payload
-    payload = (
-        raw_payload
-        if isinstance(raw_payload, payload_class)
-        else payload_class.model_validate(raw_payload.model_dump())
-    )
-    engine = _delivery_engine()
-    try:
-        async with engine.begin() as connection:
-            delivered = await record_consumed_event(
-                connection,
-                AUDIT_SCHEMA,
-                envelope,
-                handler_result={"handler": handler_name},
-            )
-            if not delivered:
-                return
-            await handler_fn(connection, payload)
-    finally:
-        await engine.dispose()
 
 
 def register_handlers(registry: HandlerRegistry) -> None:
@@ -140,7 +90,7 @@ def register_handlers(registry: HandlerRegistry) -> None:
                 envelope.occurred_at,
             )
 
-        await _run_handler(envelope, AuditEventPayload, _impl, "append_audit_act")
+        await run_handler(envelope, AuditEventPayload, _impl, "append_audit_act", AUDIT_SCHEMA)
 
     registry.register(EVENT_AUDIT_EVENT, append_audit_act)
 
@@ -172,11 +122,12 @@ def register_handlers(registry: HandlerRegistry) -> None:
                 envelope.producer,
             )
 
-        await _run_handler(
+        await run_handler(
             envelope,
             RecordAccessAuditPayload,
             _impl,
             "append_record_access_act",
+            AUDIT_SCHEMA,
         )
 
     registry.register(EVENT_RECORD_ACCESSED, append_record_access_act)
@@ -186,7 +137,7 @@ def register_handlers(registry: HandlerRegistry) -> None:
     # the terminal-decision events with its own payload mirror - MOD-001 owns
     # the registry payload model for ``partner.activated`` / ``partner.rejected``
     # (its role-grant/suspend consumers), so MOD-011 registers no duplicate
-    # model here; ``_run_handler`` re-validates the dispatched payload into
+    # model here; ``run_handler`` re-validates the dispatched payload into
     # ``PartnerDecisionPayload``. The dispatcher must only know this
     # event has consumers, never claim a model for it.
     async def append_partner_decision(envelope: Envelope[BaseModel]) -> None:
@@ -211,11 +162,12 @@ def register_handlers(registry: HandlerRegistry) -> None:
                 envelope.occurred_at,
             )
 
-        await _run_handler(
+        await run_handler(
             envelope,
             PartnerDecisionPayload,
             _impl,
             "append_partner_decision",
+            AUDIT_SCHEMA,
         )
 
     registry.register(EVENT_PARTNER_ACTIVATED, append_partner_decision)
@@ -246,11 +198,12 @@ def register_handlers(registry: HandlerRegistry) -> None:
                 envelope.occurred_at,
             )
 
-        await _run_handler(
+        await run_handler(
             envelope,
             CredentialReviewedPayload,
             _impl,
             "append_credential_reviewed",
+            AUDIT_SCHEMA,
         )
 
     registry.register(EVENT_PARTNER_CREDENTIAL_REVIEWED, append_credential_reviewed)
@@ -281,18 +234,19 @@ def register_handlers(registry: HandlerRegistry) -> None:
                 envelope.occurred_at,
             )
 
-        await _run_handler(
+        await run_handler(
             envelope,
             PartnerRegisteredPayload,
             _impl,
             "append_partner_registered",
+            AUDIT_SCHEMA,
         )
 
     registry.register(EVENT_PARTNER_REGISTERED, append_partner_registered)
 
     # ``credential.invalidated`` is a regulated act (T13, #256) with MOD-001
     # already owning the registry payload model (its role-suspension
-    # consumer). MOD-011 registers no duplicate model here; ``_run_handler``
+    # consumer). MOD-011 registers no duplicate model here; ``run_handler``
     # re-validates the dispatched payload into the local mirror, matching the
     # ``partner.activated`` / ``partner.rejected`` consumer shape.
     async def append_credential_invalidated(envelope: Envelope[BaseModel]) -> None:
@@ -314,11 +268,12 @@ def register_handlers(registry: HandlerRegistry) -> None:
                 envelope.occurred_at,
             )
 
-        await _run_handler(
+        await run_handler(
             envelope,
             CredentialInvalidatedPayload,
             _impl,
             "append_credential_invalidated",
+            AUDIT_SCHEMA,
         )
 
     registry.register(EVENT_CREDENTIAL_INVALIDATED, append_credential_invalidated)
@@ -348,6 +303,8 @@ def register_handlers(registry: HandlerRegistry) -> None:
                 payload.details,
             )
 
-        await _run_handler(envelope, TamperDetectedPayload, _impl, "log_tamper_detected")
+        await run_handler(
+            envelope, TamperDetectedPayload, _impl, "log_tamper_detected", AUDIT_SCHEMA
+        )
 
     registry.register(EVENT_AUDIT_TAMPER_DETECTED, log_tamper_detected)

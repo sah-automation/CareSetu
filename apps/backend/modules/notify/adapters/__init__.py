@@ -16,11 +16,9 @@ written in the same transaction as the effect, so replaying a delivered
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
-from typing import TypeVar
 
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.config import get_settings
@@ -30,7 +28,7 @@ from bus.events import (
     EVENT_PARTNER_ACTIVATED,
     EVENT_PARTNER_REJECTED,
 )
-from bus.ledger import record_consumed_event
+from bus.handler_harness import run_handler
 from bus.registry import HandlerRegistry
 from modules.iam.facade import IamFacade, build_sms_adapter
 from modules.notify.adapters.transport import DeliveryRequest
@@ -48,52 +46,6 @@ from modules.notify.facade import (
 )
 
 logger = logging.getLogger(__name__)
-
-_T = TypeVar("_T", bound=BaseModel)
-
-
-def _delivery_engine() -> AsyncEngine:
-    """A short-lived engine for one delivery (the round-trip harness pattern).
-
-    The composition root passes only the registry to ``register_handlers``,
-    so handlers resolve the shared settings lazily at delivery time -
-    registration stays connection-free for unit tests and the worker boot.
-    ``NullPool`` matches every other short-lived engine in the repo.
-    """
-    return create_async_engine(get_settings().database_url, poolclass=NullPool)
-
-
-async def _run_handler(
-    envelope: Envelope[BaseModel],
-    payload_class: type[_T],
-    handler_fn: Callable[[AsyncConnection, _T], Awaitable[None]],
-    handler_name: str,
-) -> None:
-    """Run an event handler with the standard engine-lifecycle boilerplate.
-
-    Handles payload extraction, engine creation, ``record_consumed_event``,
-    delivery check, and engine disposal. The callback does the unique work.
-    """
-    raw_payload = envelope.payload
-    payload = (
-        raw_payload
-        if isinstance(raw_payload, payload_class)
-        else payload_class.model_validate(raw_payload.model_dump())
-    )
-    engine = _delivery_engine()
-    try:
-        async with engine.begin() as connection:
-            delivered = await record_consumed_event(
-                connection,
-                NOTIFY_SCHEMA,
-                envelope,
-                handler_result={"handler": handler_name},
-            )
-            if not delivered:
-                return
-            await handler_fn(connection, payload)
-    finally:
-        await engine.dispose()
 
 
 async def _resolve_recipient_phone(identity_id: int) -> str:
@@ -161,7 +113,7 @@ def register_handlers(registry: HandlerRegistry) -> None:
     fan-out. For the partner terminal events it registers handlers ONLY - the
     payload model is owned once by MOD-001's iam adapter (``register_payload_model``
     raises on a duplicate), and each handler revalidates the registry-carried
-    model into its own mirror inside ``_run_handler``.
+    model into its own mirror inside ``run_handler``.
     """
     registry.register_payload_model(EVENT_NOTIFICATION_FAILED, NotificationFailedPayload)
     registry.register(EVENT_NOTIFICATION_FAILED, _on_notification_failed)
@@ -180,11 +132,12 @@ async def _on_partner_activated(envelope: Envelope[BaseModel]) -> None:
     async def _impl(connection: AsyncConnection, payload: PartnerActivatedPayload) -> None:
         await _deliver_terminal_status(connection, payload.identity_id, PARTNER_ACTIVATED_MESSAGE)
 
-    await _run_handler(
+    await run_handler(
         envelope,
         PartnerActivatedPayload,
         _impl,
         "send_partner_activated_notification",
+        NOTIFY_SCHEMA,
     )
 
 
@@ -198,11 +151,12 @@ async def _on_partner_rejected(envelope: Envelope[BaseModel]) -> None:
             build_partner_rejected_message(payload.reason),
         )
 
-    await _run_handler(
+    await run_handler(
         envelope,
         PartnerRejectedPayload,
         _impl,
         "send_partner_rejected_notification",
+        NOTIFY_SCHEMA,
     )
 
 
@@ -214,31 +168,27 @@ async def _on_notification_failed(envelope: Envelope[BaseModel]) -> None:
     Only a WhatsApp-leg failure re-routes to SMS (ADR-0009); an SMS-leg failure
     is terminal - the fallback chain never loops. The SMS re-route is a
     background enqueue, so the facade is resolved from settings at delivery time
-    (mock channels in CI/local, configured providers in staging/prod).
+    (mock channels in CI/local, configured providers in staging/prod). The
+    facade is closed over by the handler callback, so ``run_handler`` can carry
+    the resolved facade without touching the ledger engine lifecycle.
     """
-    payload = envelope.payload
-    if not isinstance(payload, NotificationFailedPayload):
-        payload = NotificationFailedPayload.model_validate(payload.model_dump())
-
     facade = build_notify_facade()
-    engine = _delivery_engine()
-    try:
-        async with engine.begin() as connection:
-            delivered = await record_consumed_event(
-                connection,
-                NOTIFY_SCHEMA,
-                envelope,
-                handler_result={"handler": "on_notification_failed"},
-            )
-            if not delivered:
-                return
-            if payload.channel == "wa":
-                await facade.enqueue_sms_fallback(
-                    DeliveryRequest(
-                        notification_id=payload.notification_id,
-                        recipient_phone_e164=payload.recipient_phone_e164,
-                        message=payload.message,
-                    )
+
+    async def _impl(connection: AsyncConnection, payload: NotificationFailedPayload) -> None:
+        del connection
+        if payload.channel == "wa":
+            await facade.enqueue_sms_fallback(
+                DeliveryRequest(
+                    notification_id=payload.notification_id,
+                    recipient_phone_e164=payload.recipient_phone_e164,
+                    message=payload.message,
                 )
-    finally:
-        await engine.dispose()
+            )
+
+    await run_handler(
+        envelope,
+        NotificationFailedPayload,
+        _impl,
+        "on_notification_failed",
+        NOTIFY_SCHEMA,
+    )
