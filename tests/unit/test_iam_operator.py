@@ -17,6 +17,8 @@ are the integration suite's job.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -33,6 +35,7 @@ from modules.iam.adapters.sms import MockSmsAdapter
 from modules.iam.domain.exceptions import (
     AccessTokenMalformedError,
     AccessTokenSignatureError,
+    SessionIssuanceError,
 )
 from modules.iam.domain.jwt import issue_token
 from modules.iam.facade import IamFacade, ValidatedAccessToken
@@ -170,3 +173,37 @@ def test_operator_bearer_token_mints_the_operator_scope() -> None:
 
     claims = json.loads(base64.urlsafe_b64decode(payload + "=="))
     assert claims["scope"] == "operator"
+
+
+async def test_issue_operator_session_fails_closed_without_mfa_secret_key() -> None:
+    """S8: an MFA-enabled operator cannot log in when IAM_MFA_SECRET_KEY is unset.
+
+    The empty-key guard must reject with ``SessionIssuanceError`` before the
+    encrypted-secret select so the failure surfaces as a typed domain error,
+    never a raw ``ValueError`` leaking from ``decrypt_secret``.
+    """
+    from modules.iam.session_facade import SessionFacade
+
+    connection = AsyncMock()
+    connection.execute = AsyncMock()
+    engine = MagicMock()
+    engine.begin.return_value.__aenter__ = AsyncMock(return_value=connection)
+    engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+    facade = SessionFacade(
+        engine=engine,
+        clock=MutableClock(_NOW),
+        access_token_signing_key=_KEY,
+        mfa_secret_key="",
+    )
+
+    with (
+        patch("modules.iam.session_facade._lock_identity_by_phone", new_callable=AsyncMock) as lock,
+        patch("modules.iam.session_facade._mfa_verified", new_callable=AsyncMock) as mfa_verified,
+    ):
+        lock.return_value = SimpleNamespace(identity_id=11, status="Active")
+        mfa_verified.return_value = True
+
+        with pytest.raises(SessionIssuanceError, match="IAM_MFA_SECRET_KEY"):
+            await facade.issue_operator_session("+917000000011", "123456")
+
+    connection.execute.assert_not_called()

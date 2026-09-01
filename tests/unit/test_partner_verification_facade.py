@@ -408,3 +408,67 @@ async def test_detail_missing_partner_raises_not_found_without_event() -> None:
     with pytest.raises(PartnerNotFoundError):
         await facade.get_verification_detail(404, actor_id=77)
     assert _outbox_inserts(connection) == []
+
+
+@pytest.mark.asyncio
+async def test_detail_includes_partner_audit_chain_when_audit_facade_present() -> None:
+    from uuid import uuid4
+
+    from modules.audit.facade import AuditEventView, AuditPage
+
+    event = AuditEventView(
+        id=uuid4(),
+        event_type="partner.registered",
+        actor_id=None,
+        target_id=uuid4(),
+        scope="partner_registration",
+        metadata={"partner_type": "doctor"},
+        timestamp=_NOW,
+        prev_hash="0" * 64,
+        hash="1" * 64,
+    )
+
+    class StubAuditFacade:
+        def __init__(self) -> None:
+            self.partner_id: int | None = None
+
+        async def query_partner_audit(self, partner_id: int, *, page_size: int = 50) -> AuditPage:
+            self.partner_id = partner_id
+            return AuditPage(events=[event], total_count=1)
+
+    audit = StubAuditFacade()
+    connection = _connection(
+        [
+            _FakeResult(first=_profile_row()),  # profile (txn 1)
+            _FakeResult(all=[_credential_row()]),  # credentials
+            _FakeResult(all=[_history_row()]),  # history
+            _FakeResult(),  # partner.credential_reviewed outbox insert (txn 2)
+        ]
+    )
+    facade = PartnerFacade(
+        engine=_engine(connection, transactions=2),
+        iam_facade=MagicMock(),
+        audit_facade=audit,  # type: ignore[arg-type]
+    )
+
+    detail = await facade.get_verification_detail(3, actor_id=77)
+
+    assert audit.partner_id == 3
+    assert len(detail.audit_events) == 1
+    assert detail.audit_events[0].event_type == "partner.registered"
+    assert detail.audit_events[0].hash == event.hash
+
+    async def _no_audit_detail() -> None:
+        connection2 = _connection(
+            [
+                _FakeResult(first=_profile_row()),
+                _FakeResult(all=[_credential_row()]),
+                _FakeResult(all=[_history_row()]),
+                _FakeResult(),
+            ]
+        )
+        plain = PartnerFacade(engine=_engine(connection2, transactions=2), iam_facade=MagicMock())
+        d2 = await plain.get_verification_detail(3, actor_id=77)
+        assert d2.audit_events == []
+
+    await _no_audit_detail()

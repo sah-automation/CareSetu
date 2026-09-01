@@ -26,6 +26,7 @@ from modules.audit.domain.consumer import (
     PartnerDecisionPayload,
     PartnerRegisteredPayload,
     RecordAccessAuditPayload,
+    _partner_uuid,
     build_audit_row,
     build_credential_invalidated_row,
     build_credential_reviewed_row,
@@ -412,6 +413,29 @@ class AuditFacade:
                 from_ts=from_ts,
                 to_ts=to_ts,
                 page=page,
+                page_size=page_size,
+            )
+
+    async def query_partner_audit(self, partner_id: int, *, page_size: int = 50) -> AuditPage:
+        """Return the audit chain for one partner (S7 detail-view augmentation).
+
+        A partner's ledger rows are keyed by ``target_id = uuid5("caresetu.audit",
+        "partner:{partner_id}")`` (the deterministic ``_partner_uuid`` mapping the
+        partner consumers use when appending). This is the read-side reuse of that
+        seam - the partner module asks the audit facade for the ledger rows instead
+        of duplicating the int->UUID derivation.
+        """
+        target_id = UUID(_partner_uuid(partner_id))
+        async with self._engine.begin() as connection:
+            return await query_audit_events(
+                connection,
+                actor_id=None,
+                event_type=None,
+                target_id=target_id,
+                scope=None,
+                from_ts=None,
+                to_ts=None,
+                page=1,
                 page_size=page_size,
             )
 

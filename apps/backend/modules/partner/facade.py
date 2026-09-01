@@ -39,14 +39,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from bus.outbox_writer import write_outbox
+from modules.audit.facade import AuditFacade
 from modules.iam.facade import IamFacade
 from modules.partner.adapters.artifact_store import CredentialArtifactStore
 from modules.partner.domain.credentials import CredentialType
@@ -245,13 +247,34 @@ class VerificationRound(BaseModel):
     created_at: datetime
 
 
+class AuditEventDetail(BaseModel):
+    """One ``audit_events`` row in the partner's verification detail view (S7).
+
+    A typed, read-only projection of a ledger row surfaced alongside the
+    profile/credentials/history so the operator can see the partner's full
+    audit chain (who-what-when + hash links) while making a decision. This is
+    the primary-schema read of the existing audit seam - no new write path.
+    """
+
+    id: UUID
+    event_type: str
+    actor_id: UUID | None
+    target_id: UUID | None
+    scope: str | None
+    metadata: dict[str, object]
+    timestamp: datetime
+    prev_hash: str
+    hash: str
+
+
 class PartnerVerificationDetail(BaseModel):
     """The full per-partner review: profile + credentials + verification history.
 
     What the operator sees when they open a queue item (FEAT-015 user story 17)
     to make a defensible approve/reject decision. ``credentials`` are the
     submitted documents (artifact refs, never bytes); ``verification_history``
-    is the per-round queue/decision trail.
+    is the per-round queue/decision trail; ``audit_events`` is the partner's
+    ledger chain (S7 read-only augmentation).
     """
 
     partner_id: int
@@ -264,6 +287,7 @@ class PartnerVerificationDetail(BaseModel):
     created_at: datetime
     credentials: list[CredentialDetail]
     verification_history: list[VerificationRound]
+    audit_events: list[AuditEventDetail] = Field(default_factory=list)
 
 
 _QUEUE_SORTS: dict[str, Any] = {
@@ -477,6 +501,7 @@ class PartnerFacade:
         engine: AsyncEngine,
         iam_facade: IamFacade,
         artifact_store: CredentialArtifactStore | None = None,
+        audit_facade: AuditFacade | None = None,
         *,
         re_submission_max: int = 3,
         re_submission_cooldown_days: int = 30,
@@ -488,6 +513,11 @@ class PartnerFacade:
         # ``submit_credentials`` refuses to run a passing submission without one
         # rather than silently dropping the documents.
         self._artifact_store = artifact_store
+        # The audit ledger read seam (S7): the detail view surfaces the partner's
+        # audit chain by asking MOD-011's facade for the rows, not by duplicating
+        # its int->UUID derivation. Optional for testability - detail views without
+        # an audit facade default to an empty ``audit_events`` list.
+        self._audit_facade = audit_facade
         # Rejected-partner re-submission throttle (PHASE-5 T09, #253): the queue-
         # protection budget and cooldown come from configuration (coding-standards
         # §9), injected here from the resolved Settings (see app/main.py), never
@@ -1158,6 +1188,10 @@ class PartnerFacade:
                 credential_reviewed_envelope(partner_id, actor_id),
             )
 
+        audit_page = None
+        if self._audit_facade is not None:
+            audit_page = await self._audit_facade.query_partner_audit(partner_id)
+
         return PartnerVerificationDetail(
             partner_id=int(row.id),
             identity_id=int(row.identity_id),
@@ -1190,5 +1224,19 @@ class PartnerFacade:
                     created_at=h.created_at,
                 )
                 for h in history_rows
+            ],
+            audit_events=[
+                AuditEventDetail(
+                    id=e.id,
+                    event_type=e.event_type,
+                    actor_id=e.actor_id,
+                    target_id=e.target_id,
+                    scope=e.scope,
+                    metadata=e.metadata,
+                    timestamp=e.timestamp,
+                    prev_hash=e.prev_hash,
+                    hash=e.hash,
+                )
+                for e in (audit_page.events if audit_page is not None else [])
             ],
         )

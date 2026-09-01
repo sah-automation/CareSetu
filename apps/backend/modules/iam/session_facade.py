@@ -92,12 +92,14 @@ class SessionFacade:
         access_token_signing_key: str = "",
         access_token_ttl_seconds: int = jwt.ACCESS_TOKEN_TTL_SECONDS,
         refresh_token_ttl_seconds: int = refresh.REFRESH_TOKEN_TTL_SECONDS,
+        mfa_secret_key: str = "",
     ) -> None:
         self._engine = engine
         self._clock = clock
         self._access_token_signing_key = access_token_signing_key
         self._access_token_ttl_seconds = access_token_ttl_seconds
         self._refresh_token_ttl_seconds = refresh_token_ttl_seconds
+        self._mfa_secret_key = mfa_secret_key
 
     async def issue_session(self, phone: str) -> SessionResult:
         """Mint an access JWT for a verified patient (spec #51 section 2.5, ticket #57).
@@ -155,8 +157,8 @@ class SessionFacade:
             refresh_token=refresh_token,
         )
 
-    async def issue_operator_session(self, phone: str) -> SessionResult:
-        """Mint an operator-scoped access JWT (T07, ticket #250).
+    async def issue_operator_session(self, phone: str, code: str) -> SessionResult:
+        """Mint an operator-scoped access JWT (T07, ticket #250; S8, #261).
 
         Operators are a trusted closed group that never self-registers; a
         session is minted only after the MFA second factor has been completed
@@ -169,8 +171,20 @@ class SessionFacade:
         operator-scoped session on the phone-OTP factor alone. The minted
         ``scope`` resolves to ``operator`` so the gateway's ``require_operator``
         admits the caller.
+
+        The ``code`` parameter is an RFC-6238 TOTP code derived from the
+        operator's enrolled MFA secret.  It is verified against the decrypted
+        ``iam_operator_mfa.secret`` at the current clock time with a small drift
+        window (S8, #261).  A wrong or expired code is rejected with
+        ``SessionIssuanceError``.
         """
         from modules.iam.domain.phone import normalize_phone
+        from modules.iam.domain.secret_encryption import decrypt_secret
+        from modules.iam.domain.totp import (
+            TotpSecretEmptyError,
+            TotpVerificationError,
+            verify_totp,
+        )
 
         phone_e164 = normalize_phone(phone)
         if not self._access_token_signing_key:
@@ -197,6 +211,35 @@ class SessionFacade:
                     f"identity {identity_id} has not completed the MFA second factor; "
                     "enroll and verify MFA before issuing an operator session"
                 )
+
+            # S8: genuine TOTP verification - decrypt the stored secret and
+            # verify the presented code at the current clock time.  The MFA
+            # row is guaranteed non-None by the ``_mfa_verified`` gate above.
+            if not self._mfa_secret_key:
+                raise SessionIssuanceError(
+                    f"identity {identity_id} cannot complete MFA: encryption key "
+                    "is not configured (set IAM_MFA_SECRET_KEY)"
+                )
+            secret_ciphertext = (
+                await connection.execute(
+                    select(iam_operator_mfa.c.secret).where(
+                        iam_operator_mfa.c.identity_id == identity_id
+                    )
+                )
+            ).scalar_one_or_none()
+            if not secret_ciphertext:
+                raise SessionIssuanceError(
+                    f"identity {identity_id} has no enrolled TOTP secret; "
+                    "complete MFA enrollment before issuing an operator session"
+                )
+            try:
+                decrypted_secret = decrypt_secret(secret_ciphertext, self._mfa_secret_key)
+                verify_totp(decrypted_secret, code, clock=self._clock)
+            except (TotpSecretEmptyError, TotpVerificationError, ValueError) as exc:
+                raise SessionIssuanceError(
+                    f"TOTP verification failed for identity {identity_id}: {exc}"
+                ) from exc
+
             scope = await _resolve_active_role(connection, identity_id, _OPERATOR_ROLE)
             if scope is None:
                 raise SessionIssuanceError(

@@ -100,6 +100,7 @@ class IamFacade:
         access_token_signing_key: str = "",
         access_token_ttl_seconds: int = 900,
         refresh_token_ttl_seconds: int = 2_592_000,
+        mfa_secret_key: str = "",
     ) -> None:
         self._engine = engine
         self.delivery_queue = SmsDeliveryQueue(
@@ -125,6 +126,7 @@ class IamFacade:
             access_token_signing_key=access_token_signing_key,
             access_token_ttl_seconds=access_token_ttl_seconds,
             refresh_token_ttl_seconds=refresh_token_ttl_seconds,
+            mfa_secret_key=mfa_secret_key,
         )
 
     # -- Identity delegation (ADR-0006, ticket #169) -----------------------
@@ -189,13 +191,15 @@ class IamFacade:
         """Mint an access JWT for a verified patient (delegated to ``SessionFacade``)."""
         return await self._sessions.issue_session(phone)
 
-    async def issue_operator_session(self, phone: str) -> SessionResult:
-        """Mint an operator-scoped access JWT after MFA (T07, #250).
+    async def issue_operator_session(self, phone: str, code: str) -> SessionResult:
+        """Mint an operator-scoped access JWT after MFA (T07, #250; S8, #261).
 
         Delegated to ``SessionFacade``; the session's ``scope`` resolves to
         ``operator`` so the gateway's ``require_operator`` admits the caller.
+        The ``code`` is an RFC-6238 TOTP code verified against the operator's
+        enrolled MFA secret (S8).
         """
-        return await self._sessions.issue_operator_session(phone)
+        return await self._sessions.issue_operator_session(phone, code)
 
     async def validate_token(self, token: str) -> ValidatedAccessToken:
         """Resolve a valid access JWT to its scope (delegated to ``SessionFacade``)."""

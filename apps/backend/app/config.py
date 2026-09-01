@@ -52,6 +52,11 @@ DEFAULT_PARTNER_ARTIFACT_ROOT = "var/partner-artifacts"
 # pins no numbers, so the default stands as a config fallback, overridable by env.
 DEFAULT_PARTNER_RE_SUBMISSION_MAX = 3
 DEFAULT_PARTNER_RE_SUBMISSION_COOLDOWN_DAYS = 30
+# Operator MFA TOTP secret encryption (PHASE-5 S8, #261): the AES-256-GCM key
+# for encrypting/decrypting the TOTP secret stored in ``iam_operator_mfa.secret``
+# comes from the ``IAM_MFA_SECRET_KEY`` environment variable (never committed).
+# Fail-closed: ``issue_operator_session`` refuses to verify without it.
+
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _DEV_TEST_ENVIRONMENTS = frozenset({"dev", "test"})
@@ -110,6 +115,10 @@ class Settings:
     # re-submission budget before cooldown; ``cooldown_days`` the cooldown length.
     partner_re_submission_max: int = DEFAULT_PARTNER_RE_SUBMISSION_MAX
     partner_re_submission_cooldown_days: int = DEFAULT_PARTNER_RE_SUBMISSION_COOLDOWN_DAYS
+    # Encrypted TOTP secret for operator MFA (PHASE-5 S8, #261): AES-256-GCM key
+    # from the ``IAM_MFA_SECRET_KEY`` environment; ``issue_operator_session``
+    # refuses to verify without it.
+    iam_mfa_secret_key: str = ""
 
     def __post_init__(self) -> None:
         if self.gateway_jwt_verify_enabled and not self.gateway_jwt_signing_key:
@@ -321,4 +330,5 @@ def get_settings() -> Settings:
             "PARTNER_RE_SUBMISSION_COOLDOWN_DAYS",
             DEFAULT_PARTNER_RE_SUBMISSION_COOLDOWN_DAYS,
         ),
+        iam_mfa_secret_key=os.environ.get("IAM_MFA_SECRET_KEY", ""),
     )

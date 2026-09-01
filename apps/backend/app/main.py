@@ -143,6 +143,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         access_token_signing_key=resolved_settings.gateway_jwt_signing_key,
         access_token_ttl_seconds=resolved_settings.gateway_access_token_ttl_seconds,
         refresh_token_ttl_seconds=resolved_settings.gateway_refresh_token_ttl_seconds,
+        mfa_secret_key=resolved_settings.iam_mfa_secret_key,
     )
     app.state.iam_facade = facade
     # MOD-004 (PHASE-3 T3, #212): the consent facade shares the same settled
@@ -180,6 +181,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         engine=engine,
         iam_facade=facade,
         artifact_store=partner_artifact_store,
+        audit_facade=app.state.audit_facade,
         re_submission_max=resolved_settings.partner_re_submission_max,
         re_submission_cooldown_days=resolved_settings.partner_re_submission_cooldown_days,
     )
