@@ -37,7 +37,7 @@ the state transitions and event constants/builders they need already live in
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pydantic import BaseModel
@@ -477,6 +477,9 @@ class PartnerFacade:
         engine: AsyncEngine,
         iam_facade: IamFacade,
         artifact_store: CredentialArtifactStore | None = None,
+        *,
+        re_submission_max: int = 3,
+        re_submission_cooldown_days: int = 30,
     ) -> None:
         self._engine = engine
         self._iam = iam_facade
@@ -485,6 +488,12 @@ class PartnerFacade:
         # ``submit_credentials`` refuses to run a passing submission without one
         # rather than silently dropping the documents.
         self._artifact_store = artifact_store
+        # Rejected-partner re-submission throttle (PHASE-5 T09, #253): the queue-
+        # protection budget and cooldown come from configuration (coding-standards
+        # §9), injected here from the resolved Settings (see app/main.py), never
+        # hardcoded in the domain core.
+        self._re_submission_max = re_submission_max
+        self._re_submission_cooldown_days = re_submission_cooldown_days
 
     async def register(
         self,
@@ -639,6 +648,8 @@ class PartnerFacade:
                 re_submission_count=profile.re_submission_count,
                 re_submission_blocked_until=profile.re_submission_blocked_until,
                 now=datetime.now(UTC),
+                max_re_submissions=self._re_submission_max,
+                cooldown=timedelta(days=self._re_submission_cooldown_days),
             )
             if policy.allowed:
                 return None
@@ -996,6 +1007,17 @@ class PartnerFacade:
                 )
             next_state = await _apply_transition(
                 connection, profile, PartnerAction.GRACE_LAPSE, verification=False
+            )
+            # The lapse drops ``[Active]`` back to ``[Under Verification]`` and
+            # re-queues the still-open round for the operator gate, so the same
+            # state change writes its event to the outbox in the same transaction
+            # as every other transition (coding-standards §4). ``partner.verification_started``
+            # (round unchanged) is what re-queues downstream consumers.
+            await write_outbox(
+                connection,
+                PARTNER_SCHEMA,
+                PARTNER_OUTBOX_TABLE,
+                verification_started_envelope(partner_id, next_state.round),
             )
             return PartnerView(
                 partner_id=partner_id,

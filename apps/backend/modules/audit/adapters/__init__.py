@@ -5,7 +5,11 @@ the worker entrypoint calls it to register this module's handlers on the
 shared ``HandlerRegistry``. PHASE-4 T4 (#239) registers the audit engine's
 consumers: ``audit.event`` (the generic consent carrier) and the
 ``record.accessed`` / ``record.denied`` events MOD-003 publishes - each
-appends one regulated act to the hash-chained ``audit_events`` ledger. The
+appends one regulated act to the hash-chained ``audit_events`` ledger.
+PHASE-5 T04/T13 (#247/#256) adds consumers for the partner gate's regulated
+acts - ``partner.registered``, ``partner.activated`` / ``partner.rejected``,
+``partner.credential_reviewed``, and ``credential.invalidated`` - so every
+regulated act the bus carries lands in the chain exactly once. The
 ``audit.tamper_detected`` telemetry event (written by the tamper guard
 trigger) is consumed with a logging handler only, never appended to the
 chain (#234 user story 11; real-time alert delivery deferred).
@@ -30,8 +34,10 @@ from bus.envelope import Envelope
 from bus.events import (
     EVENT_AUDIT_EVENT,
     EVENT_AUDIT_TAMPER_DETECTED,
+    EVENT_CREDENTIAL_INVALIDATED,
     EVENT_PARTNER_ACTIVATED,
     EVENT_PARTNER_CREDENTIAL_REVIEWED,
+    EVENT_PARTNER_REGISTERED,
     EVENT_PARTNER_REJECTED,
     EVENT_RECORD_ACCESSED,
     EVENT_RECORD_DENIED,
@@ -41,8 +47,10 @@ from bus.ledger import record_consumed_event
 from bus.registry import HandlerRegistry
 from modules.audit.domain.consumer import (
     AuditEventPayload,
+    CredentialInvalidatedPayload,
     CredentialReviewedPayload,
     PartnerDecisionPayload,
+    PartnerRegisteredPayload,
     RecordAccessAuditPayload,
     TamperDetectedPayload,
     is_appended_act,
@@ -50,8 +58,10 @@ from modules.audit.domain.consumer import (
 from modules.audit.facade import (
     AUDIT_SCHEMA,
     append_audit_event,
+    append_credential_invalidated_event,
     append_credential_reviewed_event,
     append_partner_decision_event,
+    append_partner_registered_event,
     append_record_access_event,
 )
 
@@ -244,6 +254,74 @@ def register_handlers(registry: HandlerRegistry) -> None:
         )
 
     registry.register(EVENT_PARTNER_CREDENTIAL_REVIEWED, append_credential_reviewed)
+
+    # PHASE-5 T04 (#247) / T13 (#256): ``partner.registered`` is a regulated
+    # act on its own, and MOD-011 is its sole consumer (MOD-002 is the sole
+    # producer in the registry - the iam-side same-key emission was removed,
+    # see internal-modules §4.2). MOD-011 owns the payload model and appends
+    # one registration row to the chain.
+    registry.register_payload_model(EVENT_PARTNER_REGISTERED, PartnerRegisteredPayload)
+
+    async def append_partner_registered(envelope: Envelope[BaseModel]) -> None:
+        """Consume ``partner.registered``: append one registration row.
+
+        Ledger first, filter and append second, one transaction: a redelivered
+        ``event_id`` finds its ledger row and skips the append (at-least-once).
+        The event type is a regulated act on its own (T04) - every partner
+        registration yields one chained append.
+        """
+
+        async def _impl(connection: AsyncConnection, payload: PartnerRegisteredPayload) -> None:
+            if not is_regulated_act(envelope.event_type):
+                return
+            await append_partner_registered_event(
+                connection,
+                payload,
+                envelope.producer,
+                envelope.occurred_at,
+            )
+
+        await _run_handler(
+            envelope,
+            PartnerRegisteredPayload,
+            _impl,
+            "append_partner_registered",
+        )
+
+    registry.register(EVENT_PARTNER_REGISTERED, append_partner_registered)
+
+    # ``credential.invalidated`` is a regulated act (T13, #256) with MOD-001
+    # already owning the registry payload model (its role-suspension
+    # consumer). MOD-011 registers no duplicate model here; ``_run_handler``
+    # re-validates the dispatched payload into the local mirror, matching the
+    # ``partner.activated`` / ``partner.rejected`` consumer shape.
+    async def append_credential_invalidated(envelope: Envelope[BaseModel]) -> None:
+        """Consume ``credential.invalidated``: append one invalidation row.
+
+        Ledger first, filter and append second, one transaction: a redelivered
+        ``event_id`` finds its ledger row and skips the append (at-least-once).
+        The event type is a regulated act on its own (T13) - every credential
+        losing validity yields one chained append.
+        """
+
+        async def _impl(connection: AsyncConnection, payload: CredentialInvalidatedPayload) -> None:
+            if not is_regulated_act(envelope.event_type):
+                return
+            await append_credential_invalidated_event(
+                connection,
+                payload,
+                envelope.producer,
+                envelope.occurred_at,
+            )
+
+        await _run_handler(
+            envelope,
+            CredentialInvalidatedPayload,
+            _impl,
+            "append_credential_invalidated",
+        )
+
+    registry.register(EVENT_CREDENTIAL_INVALIDATED, append_credential_invalidated)
 
     # MOD-011 owns the model + a logging consumer for its own tamper telemetry
     # event (written into ``audit.audit_outbox`` by the v3.2 trigger). Without

@@ -45,6 +45,13 @@ DEFAULT_AUDIT_RETENTION_DAYS = 0
 # is a base64 32-byte AES-256 key from the environment (never committed); the
 # store refuses a blank/malformed key (fail-closed, security-phii-standards §4).
 DEFAULT_PARTNER_ARTIFACT_ROOT = "var/partner-artifacts"
+# Rejected-partner re-submission throttle (PHASE-5 T09, #253): the max
+# re-submission rounds a rejected partner may open before the operator queue is
+# protected, and the cooldown (days) after which the budget refreshes. Queue
+# protection is behavior/limits config, not code (coding-standards §9). ADR-0008
+# pins no numbers, so the default stands as a config fallback, overridable by env.
+DEFAULT_PARTNER_RE_SUBMISSION_MAX = 3
+DEFAULT_PARTNER_RE_SUBMISSION_COOLDOWN_DAYS = 30
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _DEV_TEST_ENVIRONMENTS = frozenset({"dev", "test"})
@@ -98,6 +105,11 @@ class Settings:
     # ephemeral dev key, never committed).
     partner_artifact_root: str = DEFAULT_PARTNER_ARTIFACT_ROOT
     partner_artifact_key: str = ""
+    # Rejected-partner re-submission throttle (PHASE-5 T09, #253): environment
+    # driven like the SMS/WhatsApp knobs (coding-standards §9.1). ``max`` is the
+    # re-submission budget before cooldown; ``cooldown_days`` the cooldown length.
+    partner_re_submission_max: int = DEFAULT_PARTNER_RE_SUBMISSION_MAX
+    partner_re_submission_cooldown_days: int = DEFAULT_PARTNER_RE_SUBMISSION_COOLDOWN_DAYS
 
     def __post_init__(self) -> None:
         if self.gateway_jwt_verify_enabled and not self.gateway_jwt_signing_key:
@@ -181,6 +193,10 @@ class Settings:
             raise ValueError("whatsapp_circuit_breaker_threshold must be positive")
         if self.whatsapp_circuit_breaker_cooldown_seconds <= 0:
             raise ValueError("whatsapp_circuit_breaker_cooldown_seconds must be positive")
+        if self.partner_re_submission_max <= 0:
+            raise ValueError("partner_re_submission_max must be positive")
+        if self.partner_re_submission_cooldown_days <= 0:
+            raise ValueError("partner_re_submission_cooldown_days must be positive")
 
     @property
     def mock_otp_readback_enabled(self) -> bool:
@@ -298,4 +314,11 @@ def get_settings() -> Settings:
             "PARTNER_ARTIFACT_ROOT", DEFAULT_PARTNER_ARTIFACT_ROOT
         ),
         partner_artifact_key=os.environ.get("PARTNER_ARTIFACT_KEY", ""),
+        partner_re_submission_max=_env_int(
+            "PARTNER_RE_SUBMISSION_MAX", DEFAULT_PARTNER_RE_SUBMISSION_MAX
+        ),
+        partner_re_submission_cooldown_days=_env_int(
+            "PARTNER_RE_SUBMISSION_COOLDOWN_DAYS",
+            DEFAULT_PARTNER_RE_SUBMISSION_COOLDOWN_DAYS,
+        ),
     )

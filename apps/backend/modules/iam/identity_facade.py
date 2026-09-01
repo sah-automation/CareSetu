@@ -223,20 +223,21 @@ class IdentityFacade:
         patient-facing scope.
 
         ``connection`` lets the caller (the ``partner`` facade) share its own
-        open transaction so the identity insert and the ``partner.registered``
-        iam outbox event commit atomically with the partner profile (ADR-0010:
-        "in the same registration transaction boundary"). When omitted the
+        open transaction so the identity insert commits atomically with the
+        partner profile and the partner module's ``partner.registered``
+        (ADR-0010: "in the same registration transaction boundary"). The
+        ``partner.registered`` event is MOD-002's, so the iam seam emits no
+        same-key event here - the registry's one-shape-per-name contract holds
+        (internal-modules §4.2, producer MOD-002). When omitted the
         method opens its own transaction, preserving the standalone seam shape
         the iam tests exercise. Concurrency converges via the unique
         ``phone_e164`` index (``INSERT ... ON CONFLICT DO NOTHING`` then a
-        re-read, never SELECT-then-INSERT), and the outbox event is emitted
-        only for a genuinely new identity - a duplicate phone resolves to the
-        existing identity without re-publishing ``partner.registered``.
+        re-read, never SELECT-then-INSERT).
         """
         phone_e164 = normalize_phone(phone)
 
         async def _run(connection: AsyncConnection) -> int:
-            inserted = await connection.execute(
+            await connection.execute(
                 postgresql_insert(iam_identities)
                 .values(phone_e164=phone_e164)
                 .on_conflict_do_nothing(index_elements=["phone_e164"])
@@ -246,13 +247,6 @@ class IdentityFacade:
                     select(iam_identities.c.id).where(iam_identities.c.phone_e164 == phone_e164)
                 )
             ).scalar_one()
-            if inserted.rowcount == 1:
-                await write_outbox(
-                    connection,
-                    _IAM_SCHEMA,
-                    IAM_OUTBOX_TABLE,
-                    events.partner_registered_envelope(identity_id, phone_e164),
-                )
             return int(identity_id)
 
         if connection is not None:

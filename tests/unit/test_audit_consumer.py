@@ -22,8 +22,10 @@ from bus.envelope import Envelope
 from bus.events import (
     EVENT_AUDIT_EVENT,
     EVENT_AUDIT_TAMPER_DETECTED,
+    EVENT_CREDENTIAL_INVALIDATED,
     EVENT_PARTNER_ACTIVATED,
     EVENT_PARTNER_CREDENTIAL_REVIEWED,
+    EVENT_PARTNER_REGISTERED,
     EVENT_PARTNER_REJECTED,
     EVENT_RECORD_ACCESSED,
     EVENT_RECORD_DENIED,
@@ -33,22 +35,28 @@ from modules.audit.adapters import register_handlers
 from modules.audit.domain.chain import GENESIS_HASH, compute_audit_hash
 from modules.audit.domain.consumer import (
     AuditEventPayload,
+    CredentialInvalidatedPayload,
     CredentialReviewedPayload,
     PartnerDecisionPayload,
+    PartnerRegisteredPayload,
     RecordAccessAuditPayload,
     TamperDetectedPayload,
     audit_act_type,
     build_audit_row,
+    build_credential_invalidated_row,
     build_credential_reviewed_row,
     build_partner_decision_row,
+    build_partner_registered_row,
     build_record_access_row,
     is_appended_act,
 )
 from modules.audit.facade import (
     AUDIT_SCHEMA,
     append_audit_event,
+    append_credential_invalidated_event,
     append_credential_reviewed_event,
     append_partner_decision_event,
+    append_partner_registered_event,
     append_record_access_event,
     compute_event_hash,
 )
@@ -521,9 +529,36 @@ def _credential_reviewed_payload(
     return CredentialReviewedPayload(partner_id=partner_id, actor_id=actor_id)
 
 
+def _partner_registered_payload(
+    partner_id: int = 5, identity_id: int = 11, partner_type: str = "lab"
+) -> PartnerRegisteredPayload:
+    return PartnerRegisteredPayload(
+        partner_id=partner_id, identity_id=identity_id, partner_type=partner_type
+    )
+
+
+def _credential_invalidated_payload(
+    partner_id: int = 5,
+    identity_id: int = 11,
+    credential_id: int | None = None,
+    reason: str = "grace_lapse",
+) -> CredentialInvalidatedPayload:
+    return CredentialInvalidatedPayload(
+        partner_id=partner_id,
+        identity_id=identity_id,
+        credential_id=credential_id,
+        reason=reason,
+    )
+
+
 def _partner_envelope(
     event_type: str,
-    payload: PartnerDecisionPayload | CredentialReviewedPayload,
+    payload: (
+        PartnerDecisionPayload
+        | CredentialReviewedPayload
+        | PartnerRegisteredPayload
+        | CredentialInvalidatedPayload
+    ),
     producer: str = "partner",
     event_id=None,
 ) -> Envelope:
@@ -853,9 +888,57 @@ async def test_append_credential_reviewed_event_reads_latest_hash_and_inserts_ev
     assert values["hash"] == row.hash
 
 
+async def test_append_partner_registered_event_reads_latest_hash_and_inserts_every_column() -> None:
+    connection = AsyncMock()
+    connection.scalar = AsyncMock(return_value=None)
+    payload = _partner_registered_payload(partner_id=5, identity_id=11, partner_type="lab")
+
+    row = await append_partner_registered_event(connection, payload, "partner", _NOW)
+
+    connection.scalar.assert_awaited_once()
+    assert row.prev_hash == GENESIS_HASH
+    connection.execute.assert_awaited_once()
+    values = _insert_values(connection.execute.await_args.args[0])
+    assert values["event_type"] == EVENT_PARTNER_REGISTERED
+    assert values["actor_id"] is None
+    assert values["target_id"] == str(uuid5(_AUDIT_NS, "partner:5"))
+    assert values["scope"] == "partner_registration"
+    assert values["metadata"] == row.metadata
+    assert values["timestamp"] == _NOW
+    assert values["prev_hash"] == GENESIS_HASH
+    assert values["hash"] == row.hash
+
+
+async def test_append_credential_invalidated_event_reads_latest_hash_and_inserts_every_column() -> (
+    None
+):
+    connection = AsyncMock()
+    connection.scalar = AsyncMock(return_value=None)
+    payload = _credential_invalidated_payload(
+        partner_id=5, identity_id=11, credential_id=7, reason="grace_lapse"
+    )
+
+    row = await append_credential_invalidated_event(connection, payload, "partner", _NOW)
+
+    connection.scalar.assert_awaited_once()
+    assert row.prev_hash == GENESIS_HASH
+    connection.execute.assert_awaited_once()
+    values = _insert_values(connection.execute.await_args.args[0])
+    assert values["event_type"] == EVENT_CREDENTIAL_INVALIDATED
+    assert values["actor_id"] is None
+    assert values["target_id"] == str(uuid5(_AUDIT_NS, "partner:5"))
+    assert values["scope"] == "partner_credentials"
+    assert values["metadata"] == row.metadata
+    assert values["timestamp"] == _NOW
+    assert values["prev_hash"] == GENESIS_HASH
+    assert values["hash"] == row.hash
+
+
 def test_partner_payloads_are_pydantic_models() -> None:
     assert issubclass(PartnerDecisionPayload, BaseModel)
     assert issubclass(CredentialReviewedPayload, BaseModel)
+    assert issubclass(PartnerRegisteredPayload, BaseModel)
+    assert issubclass(CredentialInvalidatedPayload, BaseModel)
 
 
 def test_tamper_event_registers_model_and_a_single_consumer() -> None:
@@ -935,3 +1018,205 @@ async def test_tamper_handler_logs_the_attempt(caplog) -> None:
         await handler(envelope)
 
     assert any("tamper attempt blocked and recorded" in record.message for record in caplog.records)
+
+
+def test_build_partner_registered_row_populates_every_column() -> None:
+    payload = _partner_registered_payload(partner_id=5, identity_id=11, partner_type="lab")
+    row = build_partner_registered_row(payload, "partner", _NOW, GENESIS_HASH)
+
+    assert row.event_type == EVENT_PARTNER_REGISTERED
+    assert row.actor_id is None
+    assert row.target_id == str(uuid5(_AUDIT_NS, "partner:5"))
+    assert row.scope == "partner_registration"
+    assert row.timestamp == _NOW
+    assert row.prev_hash == GENESIS_HASH
+    assert row.metadata == {
+        "producer": "partner",
+        "identity_id": 11,
+        "partner_type": "lab",
+    }
+    expected = compute_audit_hash(
+        row.event_type,
+        row.actor_id,
+        row.target_id,
+        row.scope,
+        row.metadata,
+        row.timestamp,
+        row.prev_hash,
+    )
+    assert row.hash == expected
+    assert len(row.hash) == 64
+
+
+def test_build_credential_invalidated_row_populates_every_column() -> None:
+    payload = _credential_invalidated_payload(
+        partner_id=5, identity_id=11, credential_id=7, reason="re_verification_failed"
+    )
+    row = build_credential_invalidated_row(payload, "partner", _NOW, GENESIS_HASH)
+
+    assert row.event_type == EVENT_CREDENTIAL_INVALIDATED
+    assert row.actor_id is None
+    assert row.target_id == str(uuid5(_AUDIT_NS, "partner:5"))
+    assert row.scope == "partner_credentials"
+    assert row.timestamp == _NOW
+    assert row.prev_hash == GENESIS_HASH
+    assert row.metadata == {
+        "producer": "partner",
+        "identity_id": 11,
+        "credential_id": 7,
+        "reason": "re_verification_failed",
+    }
+    expected = compute_audit_hash(
+        row.event_type,
+        row.actor_id,
+        row.target_id,
+        row.scope,
+        row.metadata,
+        row.timestamp,
+        row.prev_hash,
+    )
+    assert row.hash == expected
+    assert len(row.hash) == 64
+
+
+def test_build_credential_invalidated_row_without_credential_id_drops_key() -> None:
+    payload = _credential_invalidated_payload(partner_id=5, identity_id=11, reason="grace_lapse")
+    row = build_credential_invalidated_row(payload, "partner", _NOW, GENESIS_HASH)
+
+    assert row.metadata == {
+        "producer": "partner",
+        "identity_id": 11,
+        "reason": "grace_lapse",
+    }
+
+
+async def test_partner_registered_handler_records_ledger_then_appends() -> None:
+    _, handler = _registered_partner_handler(EVENT_PARTNER_REGISTERED)
+    envelope = _partner_envelope(
+        EVENT_PARTNER_REGISTERED, _partner_registered_payload(partner_id=5, identity_id=11)
+    )
+    engine, connection = _fake_engine()
+
+    with (
+        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch(
+            "modules.audit.adapters.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as record_consumed,
+        patch(
+            "modules.audit.adapters.append_partner_registered_event",
+            new_callable=AsyncMock,
+        ) as append,
+    ):
+        await handler(envelope)
+
+    record_consumed.assert_awaited_once()
+    assert record_consumed.await_args.args[1] == AUDIT_SCHEMA
+    append.assert_awaited_once()
+    assert append.await_args.args[0] is connection
+    assert append.await_args.args[1].partner_id == 5
+    assert append.await_args.args[1].identity_id == 11
+    assert append.await_args.args[2] == "partner"
+    assert append.await_args.args[3] == envelope.occurred_at
+
+
+async def test_partner_registered_handler_skips_replay_when_already_delivered() -> None:
+    _, handler = _registered_partner_handler(EVENT_PARTNER_REGISTERED)
+    envelope = _partner_envelope(
+        EVENT_PARTNER_REGISTERED, _partner_registered_payload(partner_id=5, identity_id=11)
+    )
+    engine, _connection = _fake_engine()
+
+    with (
+        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch(
+            "modules.audit.adapters.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=False,
+        ) as record_consumed,
+        patch(
+            "modules.audit.adapters.append_partner_registered_event",
+            new_callable=AsyncMock,
+        ) as append,
+    ):
+        await handler(envelope)
+
+    record_consumed.assert_awaited_once()
+    append.assert_not_awaited()
+
+
+async def test_credential_invalidated_handler_records_ledger_then_appends() -> None:
+    registry = HandlerRegistry()
+    register_handlers(registry)
+    handler = registry.handlers_for(EVENT_CREDENTIAL_INVALIDATED)[0]
+    envelope = _partner_envelope(
+        EVENT_CREDENTIAL_INVALIDATED,
+        _credential_invalidated_payload(partner_id=5, identity_id=11),
+    )
+    engine, connection = _fake_engine()
+
+    with (
+        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch(
+            "modules.audit.adapters.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as record_consumed,
+        patch(
+            "modules.audit.adapters.append_credential_invalidated_event",
+            new_callable=AsyncMock,
+        ) as append,
+    ):
+        await handler(envelope)
+
+    record_consumed.assert_awaited_once()
+    assert record_consumed.await_args.args[1] == AUDIT_SCHEMA
+    append.assert_awaited_once()
+    assert append.await_args.args[0] is connection
+    assert append.await_args.args[1].partner_id == 5
+    assert append.await_args.args[1].identity_id == 11
+    assert append.await_args.args[2] == "partner"
+    assert append.await_args.args[3] == envelope.occurred_at
+
+
+async def test_credential_invalidated_handler_skips_replay_when_already_delivered() -> None:
+    registry = HandlerRegistry()
+    register_handlers(registry)
+    handler = registry.handlers_for(EVENT_CREDENTIAL_INVALIDATED)[0]
+    envelope = _partner_envelope(
+        EVENT_CREDENTIAL_INVALIDATED,
+        _credential_invalidated_payload(partner_id=5, identity_id=11),
+    )
+    engine, _connection = _fake_engine()
+
+    with (
+        patch("modules.audit.adapters._delivery_engine", return_value=engine),
+        patch(
+            "modules.audit.adapters.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=False,
+        ) as record_consumed,
+        patch(
+            "modules.audit.adapters.append_credential_invalidated_event",
+            new_callable=AsyncMock,
+        ) as append,
+    ):
+        await handler(envelope)
+
+    record_consumed.assert_awaited_once()
+    append.assert_not_awaited()
+
+
+def test_registered_and_invalidated_payload_models_are_registered_correctly() -> None:
+    registry = HandlerRegistry()
+    register_handlers(registry)
+    # MOD-011 owns the model for partner.registered (sole consumer, MOD-002 sole producer).
+    assert registry.payload_model_for(EVENT_PARTNER_REGISTERED) is PartnerRegisteredPayload
+    # MOD-001 already owns the registry model for credential.invalidated, so MOD-011
+    # must NOT register a duplicate - the handler re-validates via its local mirror.
+    assert registry.payload_model_for(EVENT_CREDENTIAL_INVALIDATED) is not (
+        CredentialInvalidatedPayload
+    ), "MOD-011 must not register a duplicate model"
+    assert len(registry.handlers_for(EVENT_PARTNER_REGISTERED)) == 1
+    assert len(registry.handlers_for(EVENT_CREDENTIAL_INVALIDATED)) == 1

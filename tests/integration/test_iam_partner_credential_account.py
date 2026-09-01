@@ -1,12 +1,16 @@
 """PHASE-5 T02: create_credential_account against a real PostgreSQL (ticket #245).
 
 Exercises the ADR-0010 sync seam the ``partner`` module will call during
-registration: the identity is created in one transaction with the
-``partner.registered`` outbox event, holds no ``partner``/``patient`` role
-grant yet, and the resulting identity can begin a phone-OTP login via
-``resend_otp`` (the begin-or-resume path resolves the existing identity and
-issues a fresh challenge). The role grant is deliberately out of scope - that
-is the activation-gated step T03 (#246).
+registration: the identity is created in one transaction, holds no
+``partner``/``patient`` role grant yet, and the resulting identity can begin
+a phone-OTP login via ``resend_otp`` (the begin-or-resume path resolves the
+existing identity and issues a fresh challenge). The role grant is
+deliberately out of scope - that is the activation-gated step T03 (#246).
+
+The ``partner.registered`` event is MOD-002's (internal-modules §4.2, producer
+MOD-002) and is emitted by the partner module's registration transaction;
+this seam deliberately emits no ``partner.registered`` itself, so the iam
+outbox stays quiet here and the registry's one-shape-per-name contract holds.
 
 Requires the native PostgreSQL; the suite skips cleanly when it is
 unreachable, and the ``iam`` schema is migrated up for the module and down
@@ -126,8 +130,7 @@ async def test_partner_credential_created_in_one_tx_with_no_role_grant(
     assert grants == []
 
     outbox = await _query(database_url, "SELECT event_type, payload FROM iam.iam_outbox")
-    assert [row["event_type"] for row in outbox] == ["partner.registered"]
-    assert outbox[0]["payload"] == {"identity_id": result.identity_id, "phone_e164": _PHONE}
+    assert outbox == []
 
 
 async def test_partner_credential_account_can_begin_otp_login(

@@ -145,7 +145,7 @@ async def test_open_registration_creates_account_and_registered_profile(
     ]
 
     iam_outbox = await _query(database_url, "SELECT event_type FROM iam.iam_outbox")
-    assert [row["event_type"] for row in iam_outbox] == ["partner.registered"]
+    assert iam_outbox == []
 
 
 async def test_duplicate_phone_resolves_to_existing_identity_and_profile(
@@ -182,9 +182,10 @@ async def test_duplicate_phone_resolves_to_existing_identity_and_profile(
     partner_outbox = await _query(database_url, "SELECT event_type FROM partner.partner_outbox")
     assert [row["event_type"] for row in partner_outbox] == ["partner.registered"]
     # The duplicate resolves to the existing identity without re-publishing
-    # partner.registered - neither outbox gains a second event.
+    # partner.registered - the iam seam emits no same-key event (MOD-002 is
+    # the sole producer), so only the partner outbox gains the event.
     iam_outbox = await _query(database_url, "SELECT event_type FROM iam.iam_outbox")
-    assert [row["event_type"] for row in iam_outbox] == ["partner.registered"]
+    assert iam_outbox == []
 
 
 async def test_each_partner_type_registers(database_url: str, clean_partner: Any) -> None:

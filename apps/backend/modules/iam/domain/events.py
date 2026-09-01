@@ -19,7 +19,6 @@ from bus.events import (
     EVENT_OPERATOR_INVITED,
     EVENT_OTP_FAILED,
     EVENT_OTP_SENT,
-    EVENT_PARTNER_REGISTERED,
     EVENT_PATIENT_AUTH_FAILED,
     EVENT_PATIENT_REGISTERED,
     EVENT_PATIENT_VERIFIED,
@@ -156,31 +155,6 @@ def patient_verified_envelope(
         event_type=EVENT_PATIENT_VERIFIED,
         producer=PRODUCER_MODULE,
         payload=PatientVerifiedPayload(identity_id=identity_id, phone_e164=phone_e164),
-    )
-
-
-class PartnerRegisteredPayload(BaseModel):
-    """Subject of ``partner.registered``: the identity just created for a partner.
-
-    Emitted synchronously when the iam facade creates a credential account for
-    a newly registered partner (ADR-0010, ticket #245). The identity is
-    login-capable via phone-OTP but holds no ``partner`` role grant yet - the
-    grant is the activation-gated step (T03, #246).
-    """
-
-    identity_id: int
-    phone_e164: str
-
-
-def partner_registered_envelope(
-    identity_id: int, phone_e164: str
-) -> Envelope[PartnerRegisteredPayload]:
-    """Build the ``partner.registered`` envelope for the iam outbox."""
-    return Envelope[PartnerRegisteredPayload](
-        event_id=uuid4(),
-        event_type=EVENT_PARTNER_REGISTERED,
-        producer=PRODUCER_MODULE,
-        payload=PartnerRegisteredPayload(identity_id=identity_id, phone_e164=phone_e164),
     )
 
 

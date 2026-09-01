@@ -254,13 +254,15 @@ async def test_operator_reject_of_an_under_verification_partner_emits_no_invalid
 
 
 @pytest.mark.asyncio
-async def test_grace_lapse_drops_active_to_under_verification_with_no_event() -> None:
+async def test_grace_lapse_drops_active_to_under_verification_and_requeues() -> None:
     """PHASE-5 T10 AC2: grace-window lapse auto-drops Active -> Under Verification.
 
     The lapse is event-driven (no background scanner - Phase 6) and is NOT a
-    deactivation, so it flips the profile status only - no outbox event, in
-    particular no ``credential.invalidated`` fires. It also requires an open,
-    undecided reverification round (the current round is still queued).
+    deactivation, so no ``credential.invalidated`` fires. The state change
+    still writes its own outbox event in the same transaction (coding-standards
+    §4): ``partner.verification_started`` (round unchanged) re-queues the
+    still-open round for the operator gate. It requires an open, undecided
+    reverification round (the current round is still queued).
     """
     connection = _connection(
         [
@@ -268,6 +270,7 @@ async def test_grace_lapse_drops_active_to_under_verification_with_no_event() ->
             _FakeResult(scalar=1),  # max(round) = 1
             _FakeResult(first=_history_row()),  # current round is open/queued
             _FakeResult(),  # profile update (GRACE_LAPSE)
+            _FakeResult(),  # partner.verification_started outbox insert
         ]
     )
     facade = PartnerFacade(engine=_engine(connection), iam_facade=MagicMock())
@@ -276,7 +279,9 @@ async def test_grace_lapse_drops_active_to_under_verification_with_no_event() ->
 
     assert result.status == "Under Verification"
     assert result.round == 1
-    assert _outbox_inserts(connection) == []
+    outbox = _outbox_inserts(connection)
+    assert len(outbox) == 1
+    assert _bound_value(outbox[0]._values["event_type"]) == "partner.verification_started"
 
 
 @pytest.mark.asyncio

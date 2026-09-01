@@ -17,7 +17,12 @@ from uuid import NAMESPACE_DNS, uuid5
 
 from pydantic import BaseModel, Field
 
-from bus.events import EVENT_PARTNER_CREDENTIAL_REVIEWED, is_regulated_act
+from bus.events import (
+    EVENT_CREDENTIAL_INVALIDATED,
+    EVENT_PARTNER_CREDENTIAL_REVIEWED,
+    EVENT_PARTNER_REGISTERED,
+    is_regulated_act,
+)
 from modules.audit.domain.chain import compute_audit_hash
 
 #: Canonical ``audit.event`` payload actions from the consent producer
@@ -152,6 +157,129 @@ class CredentialReviewedPayload(BaseModel):
 
     partner_id: int
     actor_id: int
+
+
+class PartnerRegisteredPayload(BaseModel):
+    """MOD-011's typed mirror of MOD-002's ``partner.registered`` payload.
+
+    The dispatcher reconstructs a claimed ``partner.registered`` outbox row
+    into this model - the registry's registered payload model. Its field
+    contract mirrors what MOD-002 publishes (its ``PartnerRegisteredPayload``):
+    the partner, its iam identity, and the credential type submitted.
+    ``partner_type`` is the only MOD-002-specific vocabulary the mirror needs;
+    it is isolated here so MOD-011 consumes the event without importing
+    another module's domain (ADR-0003).
+    """
+
+    partner_id: int
+    identity_id: int
+    partner_type: str
+
+
+class CredentialInvalidatedPayload(BaseModel):
+    """MOD-011's typed mirror of MOD-002's ``credential.invalidated`` payload.
+
+    The dispatcher reconstructs a claimed ``credential.invalidated`` outbox row
+    and MOD-001's registered model owns the registry slot, so this mirror is
+    used ONLY by ``_run_handler`` to re-validate the dispatched payload for the
+    chain append - MOD-011 registers no duplicate model with the registry. Its
+    field contract mirrors what MOD-002 publishes (its
+    ``CredentialInvalidatedPayload``): the partner, its iam identity, the
+    optional credential that lost validity, and why.
+    """
+
+    partner_id: int
+    identity_id: int
+    credential_id: int | None = None
+    reason: str
+
+
+def build_partner_registered_row(
+    payload: PartnerRegisteredPayload,
+    producer: str,
+    occurred_at: datetime,
+    prev_hash: str,
+) -> AuditRow:
+    """Compute the ``audit_events`` columns for one ``partner.registered`` act.
+
+    The event type IS the regulated act (``partner.registered`` - T3's
+    predicate runs on it directly, no derivation). Registration is a system
+    action (the aspiring partner opens the profile, no operator is involved),
+    so ``actor_id`` is None and the partner maps to ``target_id`` through the
+    deterministic uuid5 namespace. ``metadata`` re-hosts the no-PHI facts
+    (producer, ``identity_id``, ``partner_type``) the partner outbox carried,
+    so the chain records who registered as which credential type.
+    """
+    target_id = _partner_uuid(payload.partner_id)
+    metadata: dict[str, Any] = {
+        "producer": producer,
+        "identity_id": payload.identity_id,
+        "partner_type": payload.partner_type,
+    }
+    digest = compute_audit_hash(
+        EVENT_PARTNER_REGISTERED,
+        None,
+        target_id,
+        "partner_registration",
+        metadata,
+        occurred_at,
+        prev_hash,
+    )
+    return AuditRow(
+        event_type=EVENT_PARTNER_REGISTERED,
+        actor_id=None,
+        target_id=target_id,
+        scope="partner_registration",
+        metadata=metadata,
+        timestamp=occurred_at,
+        prev_hash=prev_hash,
+        hash=digest,
+    )
+
+
+def build_credential_invalidated_row(
+    payload: CredentialInvalidatedPayload,
+    producer: str,
+    occurred_at: datetime,
+    prev_hash: str,
+) -> AuditRow:
+    """Compute the ``audit_events`` columns for one ``credential.invalidated`` act.
+
+    The event type IS the regulated act (``credential.invalidated`` - T3's
+    predicate runs on it directly, no derivation). A credential losing validity
+    is a system action (grace lapse, failed re-verification, the 30-day
+    cleanup), so ``actor_id`` is None and the partner maps to ``target_id``
+    through the deterministic uuid5 namespace. ``metadata`` re-hosts the
+    no-PHI facts (producer, ``identity_id``, optional ``credential_id``,
+    ``reason``) the partner outbox carried.
+    """
+    target_id = _partner_uuid(payload.partner_id)
+    metadata: dict[str, Any] = {
+        "producer": producer,
+        "identity_id": payload.identity_id,
+        "reason": payload.reason,
+    }
+    if payload.credential_id is not None:
+        metadata["credential_id"] = payload.credential_id
+    digest = compute_audit_hash(
+        EVENT_CREDENTIAL_INVALIDATED,
+        None,
+        target_id,
+        "partner_credentials",
+        metadata,
+        occurred_at,
+        prev_hash,
+    )
+    return AuditRow(
+        event_type=EVENT_CREDENTIAL_INVALIDATED,
+        actor_id=None,
+        target_id=target_id,
+        scope="partner_credentials",
+        metadata=metadata,
+        timestamp=occurred_at,
+        prev_hash=prev_hash,
+        hash=digest,
+    )
 
 
 def build_partner_decision_row(

@@ -7,10 +7,12 @@ patient registration it does NOT grant a role: the identity is created
 ``[Unverified]`` with no ``partner``/``patient`` role grant, so activation
 (T03, #246) is the gated step that unlocks patient-facing scope.
 
-The integration suite proves the DB rows land in one transaction with the
-``partner.registered`` outbox event. This unit test pins the seam shape: the
-facade creates the identity and writes the outbox event into one transaction,
-and never inserts a role grant.
+The ``partner.registered`` event is MOD-002's (internal-modules §4.2): the
+partner module emits it from its own outbox inside the same registration
+transaction, so this seam deliberately writes no outbox event itself. The
+integration suite proves the DB rows land in one transaction. This unit test
+pins the seam shape: the facade creates the identity only - one insert, no
+outbox write, never a role grant.
 """
 
 from __future__ import annotations
@@ -26,10 +28,10 @@ from modules.iam.schema.models import iam_role_grants
 
 
 class _FakeResult:
-    """Mimics the ``rowcount`` of ``INSERT ... ON CONFLICT DO NOTHING``."""
+    """Mimics the result of an executed statement."""
 
-    def __init__(self, rowcount: int) -> None:
-        self.rowcount = rowcount
+    def __init__(self) -> None:
+        self.rowcount = 1
 
 
 class _FakeScalar:
@@ -45,18 +47,16 @@ class _FakeScalar:
 def _facade() -> tuple[IdentityFacade, AsyncMock]:
     """An ``IdentityFacade`` whose engine records every executed statement.
 
-    The identity ``INSERT ... ON CONFLICT`` answers ``rowcount==1`` (a fresh
-    identity), the identity-id re-read answers ``7``, and the outbox insert
-    completes. No role grant insert is expected on the happy path.
+    The identity ``INSERT ... ON CONFLICT`` completes and the identity-id
+    re-read answers ``7``. No outbox insert is expected on the happy path.
     """
     from sqlalchemy.ext.asyncio import AsyncEngine
 
     connection = AsyncMock()
     connection.execute = AsyncMock(
         side_effect=[
-            _FakeResult(rowcount=1),
-            _FakeScalar(7),
-            _FakeResult(rowcount=1),
+            _FakeResult(),  # identity INSERT ... ON CONFLICT DO NOTHING
+            _FakeScalar(7),  # identity-id re-read
         ]
     )
     engine = MagicMock(spec=AsyncEngine)
@@ -77,7 +77,7 @@ def _inserts(connection: AsyncMock) -> list[Insert]:
 
 
 @pytest.mark.asyncio
-async def test_creates_identity_and_outbox_in_one_transaction() -> None:
+async def test_creates_identity_only_in_one_transaction() -> None:
     facade, connection = _facade()
 
     result = await facade.create_credential_account("9876543210")
@@ -86,18 +86,17 @@ async def test_creates_identity_and_outbox_in_one_transaction() -> None:
     assert result.phone_e164 == "+919876543210"
 
     tables = [stmt.table.name for stmt in _inserts(connection)]
-    assert tables == ["iam_identities", IAM_OUTBOX_TABLE]
+    assert tables == ["iam_identities"]
 
 
 @pytest.mark.asyncio
-async def test_writes_partner_registered_event() -> None:
+async def test_writes_no_outbox_event() -> None:
     facade, connection = _facade()
 
     await facade.create_credential_account("9876543210")
 
-    inserts = _inserts(connection)
-    outbox_stmt = next(stmt for stmt in inserts if stmt.table.name == IAM_OUTBOX_TABLE)
-    assert outbox_stmt._values["event_type"].value == "partner.registered"
+    tables = [stmt.table.name for stmt in _inserts(connection)]
+    assert IAM_OUTBOX_TABLE not in tables
 
 
 @pytest.mark.asyncio

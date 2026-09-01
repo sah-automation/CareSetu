@@ -180,6 +180,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         engine=engine,
         iam_facade=facade,
         artifact_store=partner_artifact_store,
+        re_submission_max=resolved_settings.partner_re_submission_max,
+        re_submission_cooldown_days=resolved_settings.partner_re_submission_cooldown_days,
     )
     # The edge's in-process idempotency store (api-standards §5, PHASE-2 REM
     # T11, #80): the auth mutation adapters read/write it per ``Idempotency-Key``
