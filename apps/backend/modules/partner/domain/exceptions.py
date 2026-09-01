@@ -43,3 +43,45 @@ class RejectionReasonRequiredError(PartnerError):
     adapter or future caller can reject without explaining why (coding-standards
     §4: pre-conditions live in the domain core, never in the router).
     """
+
+
+class PartnerNotRejectedError(PartnerError):
+    """The recovery action requires the partner to be in the ``[Rejected]`` state.
+
+    A rejection-reason view or a one-time appeal only makes sense for a rejected
+    partner (ADR-0008 recovery; PHASE-5 T09). Raising from the domain core keeps
+    the precondition in the facade, never just the router.
+    """
+
+    def __init__(self, partner_id: int, status: str) -> None:
+        super().__init__(
+            f"partner {partner_id} is {status}; rejection recovery requires 'Rejected'"
+        )
+        self.partner_id = partner_id
+        self.status = status
+
+
+class AppealAlreadyUsedError(PartnerError):
+    """The partner's one-time appeal has already been consumed (PHASE-5 T09).
+
+    A rejection appeal may be filed exactly once; a second attempt is rejected
+    (the ``appeal_used`` flag is consumed on first use and never re-armed).
+    """
+
+
+class ReSubmissionThrottledError(PartnerError):
+    """A rejected partner has exhausted the re-submission budget (PHASE-5 T09).
+
+    The verification queue is protected by a business-rule throttle - a rejected
+    partner may re-submit corrected credentials up to a maximum number of rounds
+    before a cooldown (NFR-001 headcount, ADR-0008). Raised when the boundary is
+    crossed so the queue cannot be spammed.
+    """
+
+    def __init__(self, partner_id: int, retry_at: str | None = None) -> None:
+        message = f"partner {partner_id} has exceeded the re-submission limit"
+        if retry_at is not None:
+            message += f"; retry after {retry_at}"
+        super().__init__(message)
+        self.partner_id = partner_id
+        self.retry_at = retry_at

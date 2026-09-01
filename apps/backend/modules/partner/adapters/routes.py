@@ -33,9 +33,12 @@ from app.gateway.trace import resolve_trace_id
 from modules.partner.domain.credentials import CredentialType
 from modules.partner.domain.events import PartnerType
 from modules.partner.domain.exceptions import (
+    AppealAlreadyUsedError,
     InvalidQueueSortError,
     PartnerError,
+    PartnerNotRejectedError,
     RejectionReasonRequiredError,
+    ReSubmissionThrottledError,
 )
 from modules.partner.facade import (
     CredentialSubmission,
@@ -45,6 +48,7 @@ from modules.partner.facade import (
     PartnerVerificationDetail,
     PartnerView,
     RegisterPartnerResult,
+    RejectionReasonView,
 )
 
 router = APIRouter(prefix="/v1/partner", tags=["partner"])
@@ -166,6 +170,51 @@ async def open_credential_submission(
         partner.partner_id,
         credentials=credentials,
     )
+
+
+@router.get(
+    "/rejection-reason",
+    response_model=RejectionReasonView,
+    status_code=status.HTTP_200_OK,
+    summary="View the specific rejection reason (partner only, rejected only)",
+)
+async def rejection_reason(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+) -> RejectionReasonView:
+    """A ``[Rejected]`` partner reads the reason their application failed.
+
+    A thin partner-scoped adapter (PHASE-5 T09): resolves the authenticated
+    partner principal to their profile and reads back the latest rejection
+    reason so they can re-apply with corrected credentials. The facade raises
+    :class:`PartnerNotRejectedError` for any non-``[Rejected]`` partner, which
+    the module error handler maps to a 422.
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    partner = await facade.resolve_partner(int(account.subject_id))
+    return await facade.get_rejection_reason(partner.partner_id)
+
+
+@router.post(
+    "/appeal",
+    response_model=PartnerView,
+    status_code=status.HTTP_200_OK,
+    summary="File a one-time appeal that re-enters the operator queue (partner only)",
+)
+async def partner_appeal(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+) -> PartnerView:
+    """A ``[Rejected]`` partner contests a decision once via a one-time appeal.
+
+    A thin partner-scoped adapter (PHASE-5 T09): resolves the partner principal
+    and files the appeal, which re-enters the operator queue (Step 2) and emits
+    ``partner.verification_started``. The ``appeal_used`` flag is consumed on
+    first use; a second appeal maps to an ``APPEAL_ALREADY_USED`` 422.
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    partner = await facade.resolve_partner(int(account.subject_id))
+    return await facade.appeal(partner.partner_id)
 
 
 @router.get(
@@ -340,6 +389,46 @@ def register_error_handlers(app: FastAPI) -> None:
             "unknown verification queue sort key",
         )
 
+    async def _not_rejected(request: Request, exc: Exception) -> JSONResponse:
+        partner_not_rejected = cast(PartnerNotRejectedError, exc)
+        return _error_response(
+            request,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "PARTNER_NOT_REJECTED",
+            "partner must be Rejected for this recovery action",
+            details={
+                "partner_id": partner_not_rejected.partner_id,
+                "current_status": partner_not_rejected.status,
+            },
+        )
+
+    async def _appeal_already_used(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        return _error_response(
+            request,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "APPEAL_ALREADY_USED",
+            "the one-time appeal has already been consumed",
+        )
+
+    async def _re_submission_throttled(request: Request, exc: Exception) -> JSONResponse:
+        throttled = cast(ReSubmissionThrottledError, exc)
+        response = _error_response(
+            request,
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "RE_SUBMISSION_THROTTLED",
+            "re-submission limit reached; try again after the cooldown",
+            details={"retry_at": throttled.retry_at} if throttled.retry_at else {},
+        )
+        # api-standards §6: a 429 carries Retry-After so the client knows the
+        # cooldown deadline without re-calling.
+        if throttled.retry_at:
+            response.headers["Retry-After"] = throttled.retry_at
+        return response
+
     app.add_exception_handler(RejectionReasonRequiredError, _rejection_reason_required)
     app.add_exception_handler(InvalidQueueSortError, _invalid_queue_sort)
+    app.add_exception_handler(PartnerNotRejectedError, _not_rejected)
+    app.add_exception_handler(AppealAlreadyUsedError, _appeal_already_used)
+    app.add_exception_handler(ReSubmissionThrottledError, _re_submission_throttled)
     app.add_exception_handler(PartnerError, _partner_failed)

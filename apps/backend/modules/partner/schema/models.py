@@ -71,6 +71,14 @@ partner_profiles = Table(
     # Optional service area, defaulting to Daltonganj (launch scope) when the
     # partner does not declare one; decided at the application layer.
     Column("service_area_id", BigInteger, nullable=True),
+    # Rejected-partner recovery (PHASE-5 T09, #253): a one-time appeal flag
+    # consumed on first use, and the re-submission throttle counters a rejected
+    # partner exercises when re-applying. All three live on the profile (the
+    # partner-wide verification lifecycle), never in iam/Redis - the throttle is
+    # a domain/business rule protecting the operator queue (NFR-001, ADR-0008).
+    Column("appeal_used", Boolean, nullable=False, server_default=text("false")),
+    Column("re_submission_count", BigInteger, nullable=False, server_default=text("0")),
+    Column("re_submission_blocked_until", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     UniqueConstraint("identity_id", name="uq_partner_profiles_identity"),

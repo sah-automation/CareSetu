@@ -33,7 +33,7 @@ the state transitions and event constants/builders they need already live in
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import BaseModel
@@ -55,11 +55,17 @@ from modules.partner.domain.events import (
     verification_started_envelope,
 )
 from modules.partner.domain.exceptions import (
+    AppealAlreadyUsedError,
     InvalidQueueSortError,
     PartnerNotFoundError,
+    PartnerNotRejectedError,
     RejectionReasonRequiredError,
+    ReSubmissionThrottledError,
 )
 from modules.partner.domain.prefilter import evaluate_submission
+from modules.partner.domain.rejection import (
+    evaluate_re_submission,
+)
 from modules.partner.domain.state_machine import (
     REGISTERED,
     PartnerAction,
@@ -76,6 +82,12 @@ from modules.partner.schema.models import (
 
 PARTNER_SCHEMA = "partner"
 
+# The re-submission throttle policy lives in the domain core
+# (:mod:`modules.partner.domain.rejection`): a rejected partner may open at most
+# ``MAX_RE_SUBMISSIONS`` re-submission rounds before a cooldown protects the
+# operator queue (NFR-001 headcount, ADR-0008, PHASE-5 T09). Business rule -
+# never enforced via an iam/Redis limiter, which is not this module's seam.
+
 
 @dataclass(frozen=True)
 class _Profile:
@@ -86,6 +98,11 @@ class _Profile:
     partner_type: str
     status: str
     round: int
+    # Rejected-partner recovery state (PHASE-5 T09, #253): the one-time appeal
+    # flag and the re-submission throttle budget carried by the profile.
+    appeal_used: bool = False
+    re_submission_count: int = 0
+    re_submission_blocked_until: datetime | None = None
 
     @property
     def state(self) -> PartnerState:
@@ -97,6 +114,9 @@ _PROFILE_COLUMNS = (
     partner_profiles.c.identity_id,
     partner_profiles.c.partner_type,
     partner_profiles.c.status,
+    partner_profiles.c.appeal_used,
+    partner_profiles.c.re_submission_count,
+    partner_profiles.c.re_submission_blocked_until,
 )
 
 
@@ -155,6 +175,21 @@ class CredentialSubmissionResult(BaseModel):
     status: str
     round: int
     reason: str | None = None
+
+
+class RejectionReasonView(BaseModel):
+    """The specific failure reason surfaced to a rejected partner (PHASE-5 T09).
+
+    Read back from the latest ``[Rejected]`` round's ``decision_reason`` (the
+    operator's reason or the Step-1 pre-filter auto-fail reason recorded by
+    T08/T06). Meaningful only for a ``[Rejected]`` partner - the facade raises
+    :class:`PartnerNotRejectedError` otherwise so the partner is never asked to
+    re-apply against a status they are not in.
+    """
+
+    partner_id: int
+    rejection_reason: str
+    round: int
 
 
 class PartnerQueueItem(BaseModel):
@@ -237,12 +272,17 @@ def _row_str(row: Any, name: str) -> str:
 
 
 def _to_profile(row: Row[Any], round: int) -> _Profile:
+    appeal_used = getattr(row, "appeal_used", False)
+    blocked_until = getattr(row, "re_submission_blocked_until", None)
     return _Profile(
         partner_id=int(row.id),
         identity_id=int(row.identity_id),
         partner_type=str(row.partner_type),
         status=str(row.status),
         round=round,
+        appeal_used=bool(appeal_used),
+        re_submission_count=int(getattr(row, "re_submission_count", 0)),
+        re_submission_blocked_until=blocked_until,
     )
 
 
@@ -572,6 +612,42 @@ class PartnerFacade:
                 round=profile.round,
             )
 
+    async def _persist_re_submission_throttle(
+        self, partner_id: int
+    ) -> ReSubmissionThrottledError | None:
+        """Persist the cooldown deadline for an exhausted re-submission budget.
+
+        A ``[Rejected]`` partner at the re-submission budget boundary is throttled
+        (PHASE-5 T09, ADR-0008): the cooldown deadline is written to the profile in
+        its OWN committed transaction so it is durable - the caller then raises the
+        returned error. This must not share the caller's (soon-aborting) transaction,
+        otherwise the deadline write would roll back with the error.
+        """
+        async with self._engine.begin() as connection:
+            profile = await _load_profile(connection, partner_id)
+            if profile.status != PartnerStatus.REJECTED.value:
+                return None
+            policy = evaluate_re_submission(
+                re_submission_count=profile.re_submission_count,
+                re_submission_blocked_until=profile.re_submission_blocked_until,
+                now=datetime.now(UTC),
+            )
+            if policy.allowed:
+                return None
+            if policy.blocked_until is None:
+                raise AssertionError(
+                    "blocked re-submission policy did not carry a cooldown deadline"
+                )
+            await connection.execute(
+                partner_profiles.update()
+                .where(partner_profiles.c.id == partner_id)
+                .values(
+                    re_submission_blocked_until=policy.blocked_until,
+                    updated_at=func.now(),
+                )
+            )
+            return ReSubmissionThrottledError(partner_id, retry_at=policy.blocked_until.isoformat())
+
     async def submit_credentials(
         self,
         partner_id: int,
@@ -598,9 +674,24 @@ class PartnerFacade:
         A previously-``Rejected`` partner re-submitting is a NEW round, not a
         duplicate; an ``Under Verification``/``Active`` partner re-submitting
         opens the next round (re-verification) with the round incremented.
+
+        A ``[Rejected]`` partner's re-submission is throttled (PHASE-5 T09,
+        ADR-0008): they may open at most ``MAX_RE_SUBMISSIONS`` re-submission
+        rounds before a cooldown, protecting the operator queue (NFR-001). Once
+        the budget is exhausted the next re-submission raises
+        :class:`ReSubmissionThrottledError` (with the cooldown's ``retry_at``).
+        The first submission from a fresh ``[Registered]`` profile is not a
+        re-submission and does not count against the budget.
         """
+        throttle_error = await self._persist_re_submission_throttle(partner_id)
+        if throttle_error is not None:
+            raise throttle_error
+
         async with self._engine.begin() as connection:
             profile = await _load_profile(connection, partner_id)
+
+            is_re_submission = profile.status == PartnerStatus.REJECTED.value
+
             existing_types = await _load_live_credential_types(connection, partner_id)
             outcome = evaluate_submission(
                 partner_type=profile.partner_type,
@@ -655,6 +746,26 @@ class PartnerFacade:
             next_state = await _apply_transition(
                 connection, profile, PartnerAction.START_VERIFICATION, verification=True
             )
+            if is_re_submission:
+                # A rejected partner's accepted re-submission opens a fresh round
+                # and advances the throttle budget. A lapsed cooldown (a
+                # previously-persisted ``blocked_until`` that has now passed)
+                # refreshes the budget, so the new window starts at 1; otherwise
+                # the counter simply advances.
+                new_count = (
+                    1
+                    if profile.re_submission_blocked_until is not None
+                    else profile.re_submission_count + 1
+                )
+                await connection.execute(
+                    partner_profiles.update()
+                    .where(partner_profiles.c.id == partner_id)
+                    .values(
+                        re_submission_count=new_count,
+                        re_submission_blocked_until=None,
+                        updated_at=func.now(),
+                    )
+                )
             await write_outbox(
                 connection,
                 PARTNER_SCHEMA,
@@ -662,6 +773,83 @@ class PartnerFacade:
                 verification_started_envelope(partner_id, next_state.round),
             )
             return CredentialSubmissionResult(
+                partner_id=partner_id,
+                status=next_state.status.value,
+                round=next_state.round,
+            )
+
+    async def get_rejection_reason(self, partner_id: int) -> RejectionReasonView:
+        """Read the specific failure reason back to a ``[Rejected]`` partner (PHASE-5 T09).
+
+        The partner learns WHY their application failed so they can re-apply with
+        corrected credentials (ADR-0008 recovery). The reason is the latest
+        ``[Rejected]`` round's ``decision_reason`` - the operator's reason or the
+        Step-1 pre-filter auto-fail reason recorded by T08/T06. Raises
+        :class:`PartnerNotRejectedError` when the partner is not currently
+        ``[Rejected]``: the reason is only meaningful (and only revealed) for a
+        rejected partner.
+        """
+        async with self._engine.begin() as connection:
+            profile = await _load_profile(connection, partner_id)
+            if profile.status != PartnerStatus.REJECTED.value:
+                raise PartnerNotRejectedError(partner_id, profile.status)
+            row = (
+                await connection.execute(
+                    select(
+                        partner_verifications.c.round,
+                        partner_verifications.c.decision_reason,
+                    )
+                    .where(
+                        partner_verifications.c.profile_id == partner_id,
+                        partner_verifications.c.decision == "rejected",
+                    )
+                    .order_by(partner_verifications.c.round.desc())
+                    .limit(1)
+                )
+            ).first()
+            reason = str(row.decision_reason) if row is not None and row.decision_reason else None
+            rejected_round = int(row.round) if row is not None else 0
+            if reason is None:
+                raise PartnerNotRejectedError(partner_id, profile.status)
+            return RejectionReasonView(
+                partner_id=partner_id,
+                rejection_reason=reason,
+                round=rejected_round,
+            )
+
+    async def appeal(self, partner_id: int) -> PartnerView:
+        """File the one-time rejection appeal, re-entering the operator queue (PHASE-5 T09).
+
+        A ``[Rejected]`` partner may contest an operator decision once: the appeal
+        re-enters Step 2 (opens a fresh verification round and emits
+        ``partner.verification_started``) and consumes the one-time ``appeal_used``
+        flag - a second appeal is rejected with :class:`AppealAlreadyUsedError`.
+        The appeal DOES NOT advance the re-submission throttle budget; it is a
+        distinct recovery path from re-submitting corrected credentials. Raising
+        :class:`PartnerNotRejectedError` keeps the action legal only for a
+        ``[Rejected]`` partner.
+        """
+        async with self._engine.begin() as connection:
+            profile = await _load_profile(connection, partner_id)
+            if profile.status != PartnerStatus.REJECTED.value:
+                raise PartnerNotRejectedError(partner_id, profile.status)
+            if profile.appeal_used:
+                raise AppealAlreadyUsedError()
+            next_state = await _apply_transition(
+                connection, profile, PartnerAction.START_VERIFICATION, verification=True
+            )
+            await connection.execute(
+                partner_profiles.update()
+                .where(partner_profiles.c.id == partner_id)
+                .values(appeal_used=True, updated_at=func.now())
+            )
+            await write_outbox(
+                connection,
+                PARTNER_SCHEMA,
+                PARTNER_OUTBOX_TABLE,
+                verification_started_envelope(partner_id, next_state.round),
+            )
+            return PartnerView(
                 partner_id=partner_id,
                 status=next_state.status.value,
                 round=next_state.round,
