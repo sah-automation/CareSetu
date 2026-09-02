@@ -98,6 +98,10 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         # re-enters the operator queue.
         "/v1/partner/rejection-reason",
         "/v1/partner/appeal",
+        # PHASE-5 review fix P2/P3 (#271): partner self-service onboarding
+        # status (US-6) and current-round credential review status (US-7).
+        "/v1/partner/me",
+        "/v1/partner/me/verification",
         # PHASE-5 T08 (#252): the operator verification console (FEAT-015) -
         # age-sortable queue, per-partner detail, approve/reject gate.
         "/v1/partner/verification-queue",

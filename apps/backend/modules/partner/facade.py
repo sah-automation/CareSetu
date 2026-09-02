@@ -126,6 +126,9 @@ class _Profile:
     appeal_used: bool = False
     re_submission_count: int = 0
     re_submission_blocked_until: datetime | None = None
+    # Registration time (P2/P3 #271): surfaced on the partner self-service
+    # status view (US-6), read from the profile row's ``created_at``.
+    created_at: datetime | None = None
 
     @property
     def state(self) -> PartnerState:
@@ -140,6 +143,7 @@ _PROFILE_COLUMNS = (
     partner_profiles.c.appeal_used,
     partner_profiles.c.re_submission_count,
     partner_profiles.c.re_submission_blocked_until,
+    partner_profiles.c.created_at,
 )
 
 
@@ -307,6 +311,42 @@ class PartnerVerificationDetail(BaseModel):
     audit_link: str | None = None
 
 
+class PartnerMeView(BaseModel):
+    """The partner's own self-service onboarding status (US-6, P2 #271).
+
+    A thin, partner-scoped read-only projection: ``status`` is the current
+    lifecycle state ([Registered]/[Under Verification]/[Active]/[Rejected]),
+    ``partner_type`` the registered type, ``round`` the latest verification
+    round (0 = never entered a round), and ``created_at`` the registration
+    time. None of the operator-scoped queue/credential detail is exposed -
+    the restricted pre-activation scope (spec) shows status only.
+    """
+
+    partner_id: int
+    status: str
+    partner_type: str
+    round: int
+    created_at: datetime | None
+
+
+class PartnerVerificationStatusView(BaseModel):
+    """The partner's own credential review status for the current round (US-7, P3 #271).
+
+    Surfaces whether the partner's credentials are under review, and on a
+    decided round the outcome (``decision``/``decision_reason``/``decided_at``),
+    without exposing the operator's artifact refs or audit chain. For a
+    ``[Registered]`` partner who has not entered a round ``round`` is 0 and the
+    round fields are ``None`` - a meaningful "no submission yet" response.
+    """
+
+    partner_id: int
+    round: int
+    status: str | None
+    decision: str | None
+    decision_reason: str | None
+    decided_at: datetime | None
+
+
 _QUEUE_SORTS: dict[str, Any] = {
     "registration_age": partner_profiles.c.created_at,
     "partner_type": partner_profiles.c.partner_type,
@@ -343,6 +383,7 @@ def _to_profile(row: Row[Any], round: int) -> _Profile:
         appeal_used=bool(appeal_used),
         re_submission_count=int(getattr(row, "re_submission_count", 0)),
         re_submission_blocked_until=blocked_until,
+        created_at=getattr(row, "created_at", None),
     )
 
 
@@ -787,6 +828,77 @@ class PartnerFacade:
                 partner_id=profile.partner_id,
                 status=profile.status,
                 round=profile.round,
+            )
+
+    async def get_my_status(self, identity_id: int) -> PartnerMeView:
+        """Read the authenticated partner's own onboarding status (US-6, P2 #271).
+
+        A partner-scoped read-only projection resolving the caller's identity to
+        their partner profile and returning status/type/round/registration time.
+        Reuses the identity lookup ``_load_profile_by_identity``; raises
+        :class:`PartnerNotFoundError` when the identity holds no profile. Unlike
+        the operator ``get_verification_detail`` it emits no audit event and
+        exposes no credentials - the restricted pre-activation scope (spec).
+        """
+        async with self._engine.begin() as connection:
+            profile = await _load_profile_by_identity(connection, identity_id)
+            if profile is None:
+                raise PartnerNotFoundError(identity_id)
+            return PartnerMeView(
+                partner_id=profile.partner_id,
+                status=profile.status,
+                partner_type=profile.partner_type,
+                round=profile.round,
+                created_at=profile.created_at,
+            )
+
+    async def get_my_verification(self, identity_id: int) -> PartnerVerificationStatusView:
+        """Read the partner's own credential review status (US-7, P3 #271).
+
+        Resolves the caller's identity to their profile, then projects the
+        current verification round's review state (``queued``/``in_review`` or,
+        once decided, ``approved``/``rejected`` with reason + timestamp). A
+        ``[Registered]`` partner with no round answers ``round`` 0 and ``None``
+        review fields - a meaningful "not submitted yet" without exposing the
+        operator's detail surface. Raises :class:`PartnerNotFoundError` when the
+        identity holds no profile.
+        """
+        async with self._engine.begin() as connection:
+            profile = await _load_profile_by_identity(connection, identity_id)
+            if profile is None:
+                raise PartnerNotFoundError(identity_id)
+            if profile.round == 0:
+                return PartnerVerificationStatusView(
+                    partner_id=profile.partner_id,
+                    round=0,
+                    status=None,
+                    decision=None,
+                    decision_reason=None,
+                    decided_at=None,
+                )
+            row = (
+                await connection.execute(
+                    select(
+                        partner_verifications.c.status,
+                        partner_verifications.c.decision,
+                        partner_verifications.c.decision_reason,
+                        partner_verifications.c.decided_at,
+                    )
+                    .where(partner_verifications.c.profile_id == profile.partner_id)
+                    .where(partner_verifications.c.round == profile.round)
+                )
+            ).first()
+            if row is None:  # pragma: no cover - a round implies a verification row
+                raise AssertionError("current round has no verification row")
+            return PartnerVerificationStatusView(
+                partner_id=profile.partner_id,
+                round=profile.round,
+                status=str(row.status),
+                decision=str(row.decision) if row.decision is not None else None,
+                decision_reason=str(row.decision_reason)
+                if row.decision_reason is not None
+                else None,
+                decided_at=row.decided_at,
             )
 
     async def _persist_re_submission_throttle(

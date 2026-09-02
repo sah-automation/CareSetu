@@ -49,8 +49,10 @@ from modules.partner.facade import (
     CredentialSubmission,
     CredentialSubmissionResult,
     PartnerFacade,
+    PartnerMeView,
     PartnerQueue,
     PartnerVerificationDetail,
+    PartnerVerificationStatusView,
     PartnerView,
     RegisterPartnerResult,
     RejectionReasonView,
@@ -236,6 +238,49 @@ async def rejection_reason(
     facade = cast(PartnerFacade, request.app.state.partner_facade)
     partner = await facade.resolve_partner(int(account.subject_id))
     return await facade.get_rejection_reason(partner.partner_id)
+
+
+@router.get(
+    "/me",
+    response_model=PartnerMeView,
+    status_code=status.HTTP_200_OK,
+    summary="Read the partner's own onboarding status (partner only, US-6)",
+)
+async def partner_me(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+) -> PartnerMeView:
+    """A partner reads their own onboarding status (US-6, P2 #271).
+
+    A thin partner-scoped adapter: resolves the authenticated partner principal
+    to their profile and returns status/type/round/registration time so they can
+    check where they stand pre-activation. Only the caller's own record is
+    returned - no cross-partner or patient-facing data (restricted scope).
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    return await facade.get_my_status(int(account.subject_id))
+
+
+@router.get(
+    "/me/verification",
+    response_model=PartnerVerificationStatusView,
+    status_code=status.HTTP_200_OK,
+    summary="Read the partner's own credential review status (partner only, US-7)",
+)
+async def partner_me_verification(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+) -> PartnerVerificationStatusView:
+    """A partner reads their current credential review status (US-7, P3 #271).
+
+    A thin partner-scoped adapter resolving the authenticated partner principal
+    to their profile and returning the current verification round's review
+    state (under review, or approved/rejected with the decision). Only the
+    caller's own record is returned - the operator's artifact refs and audit
+    chain stay out of the partner scope (restricted scope).
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    return await facade.get_my_verification(int(account.subject_id))
 
 
 @router.post(
