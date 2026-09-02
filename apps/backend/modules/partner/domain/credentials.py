@@ -26,18 +26,11 @@ class CredentialType(StrEnum):
     PHARMACIST_REGISTRATION = "pharmacist_registration"
 
 
-#: The credential types a partner of each type may submit. The flagship required
-#: type is first; the second is an optional supporting document (ADR-0008,
-#: FEAT-014: a doctor registers with a medical registration plus qualification
-#: documents, a lab with a lab license/accreditation, a chemist with a drug
-#: license / pharmacist registration). Mismatched types are rejected by the
-#: Step-1 pre-filter.
-REQUIRED_CREDENTIAL_TYPES_BY_PARTNER: dict[PartnerType, CredentialType] = {
-    "doctor": CredentialType.MEDICAL_REGISTRATION,
-    "lab": CredentialType.LAB_LICENSE,
-    "chemist": CredentialType.DRUG_LICENSE,
-}
-
+#: The credential types a partner of each type may submit (ADR-0008, FEAT-014):
+#: a doctor registers with a medical registration plus qualification documents,
+#: a lab with a lab license/accreditation, a chemist with a drug license /
+#: pharmacist registration). Mismatched types are rejected by the Step-1
+#: pre-filter.
 ALLOWED_CREDENTIAL_TYPES_BY_PARTNER: dict[PartnerType, frozenset[CredentialType]] = {
     "doctor": frozenset(
         {CredentialType.MEDICAL_REGISTRATION, CredentialType.QUALIFICATION_CERTIFICATE}
