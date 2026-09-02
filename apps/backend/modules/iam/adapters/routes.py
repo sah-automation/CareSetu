@@ -41,6 +41,7 @@ from modules.iam.domain.exceptions import (
     SmsDeliveryError,
 )
 from modules.iam.facade import (
+    EnrollMfaResult,
     IamFacade,
     OperatorInvitedResult,
     RegisterPatientResult,
@@ -378,6 +379,28 @@ async def operator_login(
         secure=_is_secure_cookie(request),
     )
     return response
+
+
+@router.post(
+    "/operator/mfa/enroll",
+    response_model=EnrollMfaResult,
+    status_code=status.HTTP_200_OK,
+    summary="Enroll an operator's TOTP MFA factor",
+)
+async def enroll_operator_mfa(
+    request: Request,
+    operator: Annotated[Principal, Depends(require_operator)],
+) -> EnrollMfaResult:
+    """Enroll the authenticated operator's TOTP MFA factor (US-15, P1 #272).
+
+    Operator-scoped (``require_operator``): only an authenticated operator can
+    enroll their own factor. Generates a fresh base32 secret, encrypts it at
+    rest, and returns the plaintext secret + provisioning URI exactly once so
+    the operator can add the factor to an authenticator app. The operator can
+    then complete login with a TOTP code from that factor.
+    """
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    return await _run_idempotent(request, lambda: facade.enroll_mfa(int(operator.subject_id)))
 
 
 def _error_response(

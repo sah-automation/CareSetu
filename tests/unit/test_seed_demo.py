@@ -37,8 +37,14 @@ def test_otp_surface_disabled_for_real_provider() -> None:
     assert "disabled" in describe_otp_surface(settings)
 
 
-def test_summary_prints_phone_and_surface() -> None:
-    summary = format_summary("+919000000001", "mock OTP read-back enabled", "+919000000002")
+def test_summary_prints_phone_surface_and_provisioning_uri() -> None:
+    summary = format_summary(
+        "+919000000001",
+        "mock OTP read-back enabled",
+        "+919000000002",
+        "otpauth://totp/CareSetu:%2B919000000002",
+    )
     assert "demo phone: +919000000001" in summary
     assert "bootstrap operator phone: +919000000002" in summary
+    assert "bootstrap operator provisioning uri: otpauth://totp/" in summary
     assert "otp surface: mock OTP read-back enabled" in summary

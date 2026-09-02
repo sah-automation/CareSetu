@@ -50,6 +50,9 @@ from modules.iam.identity_facade import (
     RegisterPatientResult as RegisterPatientResult,
 )
 from modules.iam.mfa_facade import (
+    EnrollMfaResult as EnrollMfaResult,
+)
+from modules.iam.mfa_facade import (
     MfaFacade as MfaFacade,
 )
 from modules.iam.mfa_facade import (
@@ -119,7 +122,7 @@ class IamFacade:
         self._clock = clock
         self._identity = IdentityFacade(engine, self._otp_sender, clock)
         self._otp = OtpFacade(engine, clock, self._otp_sender)
-        self._mfa = MfaFacade(engine, clock)
+        self._mfa = MfaFacade(engine, clock, mfa_secret_key=mfa_secret_key)
         self._sessions = SessionFacade(
             engine,
             clock=clock,
@@ -174,6 +177,18 @@ class IamFacade:
         return await self._otp.resend_otp(phone)
 
     # -- MFA delegation (ADR-0006, T07 ticket #250) ------------------------
+
+    async def enroll_mfa(self, identity_id: int) -> EnrollMfaResult:
+        """Enroll an operator's TOTP MFA factor (P1, #272).
+
+        Delegated to ``MfaFacade``. Generates a fresh secret, encrypts it at
+        rest, and stores the ciphertext in ``iam_operator_mfa.secret``; the
+        returned plaintext secret + provisioning URI are shown to the operator
+        exactly once to add the factor to their authenticator. After this call
+        the operator satisfies ``issue_operator_session``'s MFA gate and can
+        complete their first login.
+        """
+        return await self._mfa.enroll_mfa(identity_id)
 
     async def record_mfa_verified(self, phone: str) -> VerifyMfaResult:
         """Record a successful operator MFA second factor (T07, #250).

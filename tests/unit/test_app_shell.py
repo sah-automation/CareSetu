@@ -112,6 +112,8 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         # PHASE-5 S9 (#262): operator invite + MFA-gated operator login.
         "/v1/auth/operator/invite",
         "/v1/auth/operator/login",
+        # PHASE-5 review fix P1 (#272): operator MFA TOTP enrollment.
+        "/v1/auth/operator/mfa/enroll",
     }
 
 
