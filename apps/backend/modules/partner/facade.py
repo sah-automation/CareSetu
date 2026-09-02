@@ -1414,8 +1414,8 @@ class PartnerFacade:
         history so the operator can make a defensible decision. Emits
         ``partner.credential_reviewed`` (with ``actor_id``) for this view - the
         "who saw this document" trail (spec: operator audit depth) - written to
-        the outbox in its own transaction after the read. Consumed by the audit
-        module in a later ticket (T13); the event is emitted here.
+        the outbox in the same transaction as the read (ADR-0002 atomic
+        outbox). Consumed by the audit module in a later ticket (T13).
         """
         async with self._engine.begin() as connection:
             row = (
@@ -1463,7 +1463,6 @@ class PartnerFacade:
                 )
             ).all()
 
-        async with self._engine.begin() as connection:
             await write_outbox(
                 connection,
                 PARTNER_SCHEMA,
