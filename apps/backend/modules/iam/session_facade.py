@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from modules.iam.adapters.sms import mask_phone
 from modules.iam.domain import events, jwt, refresh
 from modules.iam.domain.exceptions import (
     OperatorMfaError,
@@ -130,7 +131,8 @@ class SessionFacade:
             locked = await _lock_identity_by_phone(connection, phone_e164)
             if locked is None:
                 raise SessionIssuanceError(
-                    f"no identity for {phone_e164}; register the phone before issuing a session"
+                    f"no identity for {mask_phone(phone_e164)}; "
+                    "register the phone before issuing a session"
                 )
             identity_id = locked.identity_id
             identity_status = locked.status
@@ -199,7 +201,8 @@ class SessionFacade:
             locked = await _lock_identity_by_phone(connection, phone_e164)
             if locked is None:
                 raise SessionIssuanceError(
-                    f"no identity for {phone_e164}; invite the operator before issuing a session"
+                    f"no identity for {mask_phone(phone_e164)}; "
+                    "invite the operator before issuing a session"
                 )
             identity_id = locked.identity_id
             identity_status = locked.status

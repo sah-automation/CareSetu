@@ -15,6 +15,7 @@ key replays the stored result instead of re-executing.
 
 from __future__ import annotations
 
+import re
 from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, FastAPI, Request, status
@@ -27,6 +28,7 @@ from app.gateway.errors import error_response
 from app.gateway.idempotency import run_idempotent
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_operator
+from modules.iam.adapters.sms import mask_phone
 from modules.iam.domain.exceptions import (
     IamError,
     InvalidPhoneError,
@@ -366,6 +368,23 @@ async def enroll_operator_mfa(
     return await run_idempotent(request, lambda: facade.enroll_mfa(int(operator.subject_id)))
 
 
+_E164_IN_MESSAGE = re.compile(r"\+[0-9]{6,15}")
+
+
+def _redact_phone(message: str) -> str:
+    """Mask any full E.164 phone embedded in a message (security-phii: no PII).
+
+    Belt-and-suspenders defense on the error envelope: the facades already
+    mask phones in their messages (S1, #275), but a message from any other
+    raise site must never surface a complete number to the client. Only the
+    ``+<cc>`` and the last two digits survive.
+    """
+    return _E164_IN_MESSAGE.sub(
+        lambda m: mask_phone(m.group(0)),
+        message,
+    )
+
+
 def register_error_handlers(app: FastAPI) -> None:
     """Attach the MOD-001 error envelope to every expected iam failure."""
 
@@ -373,7 +392,7 @@ def register_error_handlers(app: FastAPI) -> None:
         return error_response(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "PHONE_INVALID",
-            str(exc),
+            _redact_phone(str(exc)),
             log_tag="iam_rejection",
             request=request,
         )
@@ -382,7 +401,7 @@ def register_error_handlers(app: FastAPI) -> None:
         return error_response(
             status.HTTP_502_BAD_GATEWAY,
             "SMS_DELIVERY_FAILED",
-            str(exc),
+            _redact_phone(str(exc)),
             log_tag="iam_rejection",
             request=request,
         )
@@ -391,7 +410,7 @@ def register_error_handlers(app: FastAPI) -> None:
         return error_response(
             status.HTTP_409_CONFLICT,
             "SESSION_REFUSED",
-            str(exc),
+            _redact_phone(str(exc)),
             log_tag="iam_rejection",
             request=request,
         )

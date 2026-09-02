@@ -140,3 +140,16 @@ async def test_record_mfa_verified_refuses_a_phone_without_enrollment() -> None:
 
     with pytest.raises(SessionIssuanceError, match="no enrolled MFA"):
         await facade.record_mfa_verified("+919111111111")
+
+
+@pytest.mark.asyncio
+async def test_record_mfa_verified_masks_an_unknown_phone_in_the_message() -> None:
+    connection = _connection(
+        [
+            _FakeResult(scalar=None),  # identity lookup by phone: no such identity
+        ]
+    )
+    facade = _facade(connection)
+
+    with pytest.raises(SessionIssuanceError, match="no identity for \\+91\\.\\.\\.11"):
+        await facade.record_mfa_verified("+919111111111")

@@ -34,6 +34,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from modules.iam.adapters.sms import mask_phone
 from modules.iam.domain.exceptions import SessionIssuanceError
 from modules.iam.domain.phone import normalize_phone
 from modules.iam.domain.secret_encryption import encrypt_secret
@@ -169,7 +170,7 @@ class MfaFacade:
             ).scalar_one_or_none()
             if identity_id is None:
                 raise SessionIssuanceError(
-                    f"no identity for {phone_e164}; invite the operator before MFA"
+                    f"no identity for {mask_phone(phone_e164)}; invite the operator before MFA"
                 )
             enrolled = (
                 await connection.execute(

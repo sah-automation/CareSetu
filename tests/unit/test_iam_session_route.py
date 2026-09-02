@@ -141,6 +141,31 @@ def test_unverified_identity_refused_with_409_envelope(
     _assert_iam_rejection_logged(caplog, _TRACE_ID)
 
 
+def test_session_refused_masks_a_phone_in_the_envelope_message(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
+    facade = StubFacade()
+    facade.error = SessionIssuanceError(
+        "no identity for +919876543210; register the phone before issuing a session"
+    )
+    client = _client_with(facade)
+
+    response = client.post(
+        "/v1/auth/session",
+        json={"phone": "9876543210"},
+        headers={"X-Request-Id": _TRACE_ID},
+    )
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["code"] == "SESSION_REFUSED"
+    assert "+919876543210" not in body["message"]
+    assert "+91...10" in body["message"]
+    assert body["trace_id"] == _TRACE_ID
+    _assert_iam_rejection_logged(caplog, _TRACE_ID)
+
+
 def test_missing_phone_rejected_at_the_gateway(caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.WARNING)
     facade = StubFacade()

@@ -129,6 +129,8 @@ def test_operator_login_unknown_phone_stays_409_refused() -> None:
 
     assert response.status_code == 409
     assert response.json()["code"] == "SESSION_REFUSED"
+    assert "+919876543210" not in response.json()["message"]
+    assert "+91...10" in response.json()["message"]
 
 
 def test_operator_login_route_sits_behind_the_gateway_stack() -> None:
