@@ -270,6 +270,40 @@ async def test_rejected_partner_resubmits_same_type_as_new_round(
     assert rounds == [{"round": 1, "status": "rejected"}, {"round": 2, "status": "queued"}]
 
 
+async def test_rejected_credential_cleanup_due_at_excludes_from_duplicate_gate(
+    database_url: str, clean_partner: Any, tmp_path: Path
+) -> None:
+    """S14: a credential with ``cleanup_due_at`` set must not trip the duplicate gate.
+
+    After a permanent rejection schedules ``cleanup_due_at`` on the old credential,
+    a fresh submission of the same type must pass Step-1 (not rejected as duplicate).
+    Only credentials with ``cleanup_due_at IS NULL`` count toward the gate (#267).
+    """
+    _, partner = _facade(database_url, tmp_path)
+    partner_id = await _register_doctor(partner)
+
+    # Round 1: submit, then operator rejects - schedules cleanup on the credential.
+    first = await partner.submit_credentials(partner_id, credentials=_medical_submission())
+    assert first.status == "Under Verification"
+    await partner.operator_decision(
+        partner_id, decision_by=99, approve=False, reason="docs unclear"
+    )
+
+    # Verify cleanup_due_at was set on the old credential after rejection.
+    old_cred = await _query(
+        database_url,
+        "SELECT cleanup_due_at FROM partner.partner_credentials WHERE round = 1",
+    )
+    assert len(old_cred) == 1
+    assert old_cred[0]["cleanup_due_at"] is not None
+
+    # Round 2: re-submit the SAME type - must NOT be rejected as duplicate.
+    result = await partner.submit_credentials(partner_id, credentials=_medical_submission())
+    assert result.status == "Under Verification"
+    assert result.round == 2
+    assert result.reason is None
+
+
 async def test_under_verification_can_reoffer_old_rejected_round_type(
     database_url: str, clean_partner: Any, tmp_path: Path
 ) -> None:

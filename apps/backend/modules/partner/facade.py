@@ -498,11 +498,12 @@ async def _load_live_credential_types(
 ) -> frozenset[str]:
     """Credential types submitted in the current round (duplicate gate input).
 
-    Only credential types from the *current* verification round count as live
-    for the duplicate gate (S13, #266).  Credentials carry their submission round
-    (``partner_credentials.round``), so credentials from earlier rounds
-    (including rejected rounds) are excluded and a partner who was rejected for
-    type X can re-offer type X in a fresh round without tripping the gate.
+    Only credential types from the *current* verification round that are still
+    live count as active for the duplicate gate (S13, #266; S14, #267).
+    "Live" means ``cleanup_due_at IS NULL`` (not yet purged/rejected).
+    Credentials from earlier rounds (including rejected rounds) are excluded
+    and a partner who was rejected for type X can re-offer type X in a fresh
+    round without tripping the gate.
 
     The caller still passes ``frozenset()`` for ``Rejected`` / ``Active``
     statuses (renewal / new-round bypass), so this loader is only reached for
@@ -513,6 +514,7 @@ async def _load_live_credential_types(
             select(partner_credentials.c.credential_type).where(
                 partner_credentials.c.profile_id == partner_id,
                 partner_credentials.c.round == current_round,
+                partner_credentials.c.cleanup_due_at.is_(None),
             )
         )
     ).all()

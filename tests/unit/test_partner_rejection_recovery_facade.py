@@ -372,3 +372,25 @@ async def test_live_credential_types_empty_when_current_round_has_none() -> None
     live = await _load_live_credential_types(connection, partner_id=3, current_round=2)
 
     assert live == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_live_credential_types_excludes_cleaned_up_credentials() -> None:
+    """S14: credentials with ``cleanup_due_at`` set (rejected/cleaned) are excluded.
+
+    The duplicate gate must only count live credentials (``cleanup_due_at IS NULL``).
+    A credential whose cleanup has been scheduled - e.g. after a permanent rejection
+    - must not false-trip the duplicate gate on a fresh submission (S14, #267).
+    """
+    from modules.partner.facade import _load_live_credential_types
+
+    connection = _connection([_FakeResult(all=[])])
+
+    await _load_live_credential_types(connection, partner_id=3, current_round=2)
+
+    # The executed WHERE clause must filter out rows whose cleanup has been
+    # scheduled, so only live credentials count toward the duplicate gate.
+    executed_query = connection.execute.call_args[0][0]
+    where_clause = str(executed_query.whereclause)
+    assert "cleanup_due_at" in where_clause
+    assert "IS NULL" in where_clause
