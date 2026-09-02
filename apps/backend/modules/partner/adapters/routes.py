@@ -40,6 +40,7 @@ from modules.partner.domain.exceptions import (
     PartnerNotRejectedError,
     RejectionReasonRequiredError,
     ReSubmissionThrottledError,
+    ServiceAreaNotFoundError,
 )
 from modules.partner.facade import (
     CredentialSubmission,
@@ -63,8 +64,9 @@ class RegisterPartnerRequest(BaseModel):
     ``phone`` is the same 10-digit Indian mobile (or +91-prefixed) form the iam
     auth surface accepts - normalized server-side to +91 E.164, never trusted
     from the client. Practice location/geo is mandatory for every partner type;
-    ``service_area_id`` is optional (defaulting to Daltonganj at launch is a
-    Phase-6 application-layer concern, not validated here).
+    ``service_area_id`` is optional, defaulting to Daltonganj (the Phase-5
+    launch geography, REQ-008) at the application layer. An unknown id is
+    rejected (the facade maps ``SERVICE_AREA_NOT_FOUND`` to a 422).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -421,6 +423,16 @@ def register_error_handlers(app: FastAPI) -> None:
             "unknown verification queue sort key",
         )
 
+    async def _service_area_not_found(request: Request, exc: Exception) -> JSONResponse:
+        service_area_not_found = cast(ServiceAreaNotFoundError, exc)
+        return _error_response(
+            request,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "SERVICE_AREA_NOT_FOUND",
+            "no service area exists with the declared id",
+            details={"service_area_id": service_area_not_found.service_area_id},
+        )
+
     async def _not_rejected(request: Request, exc: Exception) -> JSONResponse:
         partner_not_rejected = cast(PartnerNotRejectedError, exc)
         return _error_response(
@@ -469,6 +481,7 @@ def register_error_handlers(app: FastAPI) -> None:
 
     app.add_exception_handler(RejectionReasonRequiredError, _rejection_reason_required)
     app.add_exception_handler(InvalidQueueSortError, _invalid_queue_sort)
+    app.add_exception_handler(ServiceAreaNotFoundError, _service_area_not_found)
     app.add_exception_handler(PartnerNotRejectedError, _not_rejected)
     app.add_exception_handler(AppealAlreadyUsedError, _appeal_already_used)
     app.add_exception_handler(ReSubmissionThrottledError, _re_submission_throttled)

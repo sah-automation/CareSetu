@@ -22,7 +22,7 @@ from app.gateway.rate_limit import RateLimitMiddleware
 from app.gateway.trace import TraceMiddleware
 from app.main import create_app
 from modules.iam.domain.exceptions import InvalidPhoneError
-from modules.partner.domain.exceptions import PartnerError
+from modules.partner.domain.exceptions import PartnerError, ServiceAreaNotFoundError
 from modules.partner.facade import RegisterPartnerResult
 
 _TRACE_ID = "unit-trace-partner-9000"
@@ -171,6 +171,22 @@ def test_unexpected_partner_error_answers_500_envelope(caplog: pytest.LogCapture
     assert "boom" not in body["message"]
     assert body["trace_id"] == _TRACE_ID
     _assert_partner_rejection_logged(caplog, _TRACE_ID)
+
+
+def test_unknown_service_area_id_answers_422_envelope() -> None:
+    facade = StubPartnerFacade()
+    facade.error = ServiceAreaNotFoundError(999)
+    client = _client_with(facade)
+    body = {**_BODY, "service_area_id": 999}
+
+    response = client.post("/v1/partner/register", json=body, headers={"X-Request-Id": _TRACE_ID})
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["code"] == "SERVICE_AREA_NOT_FOUND"
+    assert "no service area exists" in body["message"]
+    assert body["trace_id"] == _TRACE_ID
+    assert body["details"] == {"service_area_id": 999}
 
 
 def test_missing_required_field_rejected_at_the_gateway() -> None:

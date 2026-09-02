@@ -69,6 +69,19 @@ class AppealAlreadyUsedError(PartnerError):
     """
 
 
+class ServiceAreaNotFoundError(PartnerError):
+    """The ``service_area_id`` a registration declared does not exist (PHASE-5 #265).
+
+    A partner can never be attached to a nonexistent service area: an unknown
+    ``service_area_id`` is rejected (mapped to a 422) instead of silently
+    persisting a dangling reference.
+    """
+
+    def __init__(self, service_area_id: int) -> None:
+        super().__init__(f"no service area exists with id {service_area_id}")
+        self.service_area_id = service_area_id
+
+
 class ReSubmissionThrottledError(PartnerError):
     """A rejected partner has exhausted the re-submission budget (PHASE-5 T09).
 

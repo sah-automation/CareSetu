@@ -18,8 +18,25 @@ from collections.abc import Iterator
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
+
+
+async def seed_daltonganj_service_area(connection: AsyncConnection) -> None:
+    """Insert the Phase-5 launch default service area into an empty vocabulary.
+
+    The partner registration flow (PHASE-5 #265) defaults a partner with no
+    declared ``service_area_id`` to Daltonganj (REQ-008). The seed migration
+    v5.4 inserts it on upgrade; integration fixtures that truncate
+    ``partner_service_areas`` re-insert it here so the registration under test
+    reflects a launched database. Idempotent on the unique ``name``.
+    """
+    await connection.execute(
+        text(
+            "INSERT INTO partner.partner_service_areas (id, name) "
+            "VALUES (1, 'Daltonganj') ON CONFLICT (name) DO NOTHING"
+        )
+    )
 
 
 def _database_url() -> str:

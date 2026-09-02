@@ -26,6 +26,7 @@ from sqlalchemy.sql.dml import Insert
 
 from modules.iam.facade import IamFacade
 from modules.iam.identity_facade import PartnerCredentialCreatedResult
+from modules.partner.domain.exceptions import ServiceAreaNotFoundError
 from modules.partner.facade import PartnerFacade
 from modules.partner.schema.models import partner_profiles
 
@@ -114,6 +115,7 @@ async def test_register_passes_its_connection_into_the_iam_seam() -> None:
     connection = _connection(
         [
             _FakeResult(row=None),  # profile SELECT: absent
+            _FakeResult(scalar=5),  # service-area default resolution (Daltonganj)
             _FakeResult(rowcount=1, scalar=9),  # profile INSERT ... RETURNING id
             _FakeResult(rowcount=1),  # partner outbox INSERT
         ]
@@ -162,6 +164,7 @@ async def test_register_concurrent_race_re_reads_winning_profile() -> None:
     connection = _connection(
         [
             _FakeResult(row=None),  # profile SELECT: absent
+            _FakeResult(scalar=5),  # service-area default resolution (Daltonganj)
             _FakeResult(rowcount=0, scalar=None),  # profile INSERT lost the arbiter
             _FakeResult(row=_profile_row(partner_id=42)),  # re-read: winner + round query
             _FakeResult(scalar=0),  # max(round) for the resolved view
@@ -184,6 +187,7 @@ async def test_register_profile_insert_uses_on_conflict_do_nothing() -> None:
     connection = _connection(
         [
             _FakeResult(row=None),
+            _FakeResult(scalar=5),  # service-area default resolution (Daltonganj)
             _FakeResult(rowcount=1, scalar=9),
             _FakeResult(rowcount=1),  # partner outbox INSERT
         ]
@@ -199,3 +203,77 @@ async def test_register_profile_insert_uses_on_conflict_do_nothing() -> None:
     profile_insert = next(s for s in inserts if s.table.name == partner_profiles.name)
     # A postgresql ON CONFLICT insert carries a post-VALUES clause (DO NOTHING here).
     assert profile_insert._post_values_clause is not None
+
+
+def _profile_insert_params(inserts: list[Insert]) -> dict[str, object]:
+    profile_insert = next(s for s in inserts if s.table.name == partner_profiles.name)
+    return dict(profile_insert.compile().params)
+
+
+@pytest.mark.asyncio
+async def test_register_without_area_persists_the_daltonganj_default() -> None:
+    """A partner declaring no area is associated with the resolved default (REQ-008)."""
+    connection = _connection(
+        [
+            _FakeResult(row=None),  # profile SELECT: absent
+            _FakeResult(scalar=5),  # service-area default resolution (Daltonganj)
+            _FakeResult(rowcount=1, scalar=9),  # profile INSERT ... RETURNING id
+            _FakeResult(rowcount=1),  # partner outbox INSERT
+        ]
+    )
+    facade = PartnerFacade(
+        engine=_engine(connection),
+        iam_facade=_iam_facade([]),  # type: ignore[arg-type]
+    )
+
+    await facade.register(**_register_kwargs("doctor"))
+
+    assert _profile_insert_params(_inserts(connection))["service_area_id"] == 5
+
+
+@pytest.mark.asyncio
+async def test_register_persists_an_explicit_service_area_id() -> None:
+    connection = _connection(
+        [
+            _FakeResult(row=None),  # profile SELECT: absent
+            _FakeResult(scalar=3),  # service-area id lookup: exists
+            _FakeResult(rowcount=1, scalar=9),  # profile INSERT ... RETURNING id
+            _FakeResult(rowcount=1),  # partner outbox INSERT
+        ]
+    )
+    facade = PartnerFacade(
+        engine=_engine(connection),
+        iam_facade=_iam_facade([]),  # type: ignore[arg-type]
+    )
+
+    await facade.register(
+        **_register_kwargs("doctor"),
+        service_area_id=3,
+    )
+
+    assert _profile_insert_params(_inserts(connection))["service_area_id"] == 3
+
+
+@pytest.mark.asyncio
+async def test_register_rejects_an_unknown_service_area_id() -> None:
+    """An unknown ``service_area_id`` is rejected - never a dangling reference."""
+    connection = _connection(
+        [
+            _FakeResult(row=None),  # profile SELECT: absent
+            _FakeResult(scalar=None),  # service-area id lookup: not found
+        ]
+    )
+    facade = PartnerFacade(
+        engine=_engine(connection),
+        iam_facade=_iam_facade([]),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(ServiceAreaNotFoundError) as excinfo:
+        await facade.register(
+            **_register_kwargs("doctor"),
+            service_area_id=999,
+        )
+
+    assert excinfo.value.service_area_id == 999
+    # No profile insert or outbox write happened.
+    assert _inserts(connection) == []

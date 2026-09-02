@@ -26,6 +26,7 @@ import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
+from conftest import seed_daltonganj_service_area
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -77,6 +78,7 @@ async def clean_partner(database_url: str, migration: None) -> AsyncIterator[Non
                     "iam.iam_identities CASCADE"
                 )
             )
+            await seed_daltonganj_service_area(connection)
     finally:
         await engine.dispose()
     yield

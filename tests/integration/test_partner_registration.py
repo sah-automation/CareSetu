@@ -21,6 +21,7 @@ import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
+from conftest import seed_daltonganj_service_area
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -55,7 +56,12 @@ def migration(database_url: str) -> Iterator[None]:
 
 @pytest_asyncio.fixture
 async def clean_partner(database_url: str, migration: None) -> AsyncIterator[None]:
-    """Empty the iam + partner tables before every test for a clean slate."""
+    """Empty the iam + partner tables before every test for a clean slate.
+
+    The Daltonganj default service area (the seeded Phase-5 launch geography,
+    REQ-008) is re-inserted after the truncate so the registration under test
+    reflects a launched database, mirroring migration v5.4.
+    """
     engine = create_async_engine(database_url, poolclass=NullPool)
     try:
         async with engine.begin() as connection:
@@ -69,6 +75,7 @@ async def clean_partner(database_url: str, migration: None) -> AsyncIterator[Non
                     "iam.iam_identities CASCADE"
                 )
             )
+            await seed_daltonganj_service_area(connection)
     finally:
         await engine.dispose()
     yield
@@ -116,6 +123,11 @@ async def test_open_registration_creates_account_and_registered_profile(
     assert identities[0]["phone_e164"] == _PHONE
     assert identities[0]["status"] == "Unverified"
 
+    # A partner declaring no area is associated with the seeded Daltonganj default.
+    areas = await _query(database_url, "SELECT id FROM partner.partner_service_areas")
+    assert [row["id"] for row in areas] == [1]
+    daltonganj_id = areas[0]["id"]
+
     profiles = await _query(
         database_url,
         "SELECT id, identity_id, partner_type, status, "
@@ -127,7 +139,7 @@ async def test_open_registration_creates_account_and_registered_profile(
     assert profile["partner_type"] == "doctor"
     assert profile["status"] == "Registered"
     assert profile["practice_address"] == "Station Road, Daltonganj"
-    assert profile["service_area_id"] is None
+    assert profile["service_area_id"] == daltonganj_id
 
     partner_outbox = await _query(
         database_url, "SELECT event_type, payload, status FROM partner.partner_outbox"
@@ -216,3 +228,56 @@ async def test_each_partner_type_registers(database_url: str, clean_partner: Any
         ("doctor", "Registered"),
         ("lab", "Registered"),
     ]
+
+
+async def test_explicit_service_area_id_is_persisted(database_url: str, clean_partner: Any) -> None:
+    """A partner that declares a known area is associated with exactly that one."""
+    _, partner = _facade(database_url)
+    areas = await _query(database_url, "SELECT id, name FROM partner.partner_service_areas")
+    assert areas == [{"id": 1, "name": "Daltonganj"}]
+
+    result = await partner.register(
+        phone="9876543215",
+        partner_type="doctor",
+        practice_address="Main Road, Daltonganj",
+        practice_latitude=24.04,
+        practice_longitude=84.07,
+        service_area_id=1,
+    )
+
+    assert result.created is True
+    profiles = await _query(database_url, "SELECT service_area_id FROM partner.partner_profiles")
+    assert profiles == [{"service_area_id": 1}]
+    outbox = await _query(
+        database_url,
+        "SELECT event_type, status FROM partner.partner_outbox",
+    )
+    assert [row["event_type"] for row in outbox] == ["partner.registered"]
+    assert all(row["status"] == "pending" for row in outbox)
+
+
+async def test_unknown_service_area_id_rejected(database_url: str, clean_partner: Any) -> None:
+    """An unknown ``service_area_id`` raises and writes no profile or event."""
+    _, partner = _facade(database_url)
+
+    from modules.partner.domain.exceptions import ServiceAreaNotFoundError
+
+    with pytest.raises(ServiceAreaNotFoundError) as excinfo:
+        await partner.register(
+            phone="9876543216",
+            partner_type="doctor",
+            practice_address="Main Road, Daltonganj",
+            practice_latitude=24.04,
+            practice_longitude=84.07,
+            service_area_id=999,
+        )
+    assert excinfo.value.service_area_id == 999
+
+    identities = await _query(database_url, "SELECT id FROM iam.iam_identities")
+    # The iam account creation is atomic with the profile insert; the rollback
+    # leaves no orphan identity behind (ADR-0010).
+    assert identities == []
+    profiles = await _query(database_url, "SELECT id FROM partner.partner_profiles")
+    assert profiles == []
+    outbox = await _query(database_url, "SELECT event_type FROM partner.partner_outbox")
+    assert outbox == []

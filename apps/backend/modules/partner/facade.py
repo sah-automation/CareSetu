@@ -75,6 +75,7 @@ from modules.partner.domain.exceptions import (
     PartnerNotRejectedError,
     RejectionReasonRequiredError,
     ReSubmissionThrottledError,
+    ServiceAreaNotFoundError,
 )
 from modules.partner.domain.prefilter import evaluate_submission
 from modules.partner.domain.rejection import (
@@ -91,10 +92,17 @@ from modules.partner.outbox import PARTNER_OUTBOX_TABLE
 from modules.partner.schema.models import (
     partner_credentials,
     partner_profiles,
+    partner_service_areas,
     partner_verifications,
 )
 
 PARTNER_SCHEMA = "partner"
+
+# The Phase-5 launch service area (REQ-008): a partner that does not declare a
+# ``service_area_id`` defaults to this vocabulary row (seeded by migration
+# v5.4). An unknown explicitly-declared ``service_area_id`` is rejected at the
+# facade (mapped to a 422) so a partner is never attached to a nonexistent area.
+DEFAULT_SERVICE_AREA_NAME = "Daltonganj"
 
 # The re-submission throttle policy lives in the domain core
 # (:mod:`modules.partner.domain.rejection`): a rejected partner may open at most
@@ -383,6 +391,37 @@ async def _load_profile_by_identity(
     return _to_profile(row, current_round)
 
 
+async def _resolve_service_area(connection: AsyncConnection, service_area_id: int | None) -> int:
+    """Resolve the ``service_area_id`` a registration persists (PHASE-5 #265).
+
+    When the partner declares no area, the row resolves to the Daltonganj
+    default (the seeded Phase-5 launch geography, REQ-008). When an id is
+    declared, it is validated against ``partner_service_areas`` first - an
+    unknown id raises :class:`ServiceAreaNotFoundError` (mapped to a 422) so a
+    partner can never be attached to a nonexistent area. The resolved id is
+    what ``_insert_registered_profile`` persists.
+    """
+    if service_area_id is not None:
+        found = (
+            await connection.execute(
+                select(partner_service_areas.c.id).where(
+                    partner_service_areas.c.id == service_area_id
+                )
+            )
+        ).scalar_one_or_none()
+        if found is None:
+            raise ServiceAreaNotFoundError(service_area_id)
+        return int(found)
+    resolved = await connection.execute(
+        select(partner_service_areas.c.id).where(
+            partner_service_areas.c.name == DEFAULT_SERVICE_AREA_NAME
+        )
+    )
+    # The Daltonganj default is guaranteed by migration v5.4; a missing row is
+    # a deployment error we want to surface, not an ``int(None)``.
+    return int(resolved.scalar_one())
+
+
 async def _insert_registered_profile(
     connection: AsyncConnection,
     *,
@@ -641,6 +680,7 @@ class PartnerFacade:
                     created=False,
                 )
 
+            resolved_area_id = await _resolve_service_area(connection, service_area_id)
             partner_id = await _insert_registered_profile(
                 connection,
                 identity_id=identity_id,
@@ -648,7 +688,7 @@ class PartnerFacade:
                 practice_address=practice_address,
                 practice_latitude=practice_latitude,
                 practice_longitude=practice_longitude,
-                service_area_id=service_area_id,
+                service_area_id=resolved_area_id,
             )
             if partner_id is None:
                 # A concurrent registration opened the profile first - resolve it.
@@ -690,6 +730,7 @@ class PartnerFacade:
         returned unchanged - never a second row.
         """
         async with self._engine.begin() as connection:
+            resolved_area_id = await _resolve_service_area(connection, service_area_id)
             partner_id = await _insert_registered_profile(
                 connection,
                 identity_id=identity_id,
@@ -697,7 +738,7 @@ class PartnerFacade:
                 practice_address=practice_address,
                 practice_latitude=practice_latitude,
                 practice_longitude=practice_longitude,
-                service_area_id=service_area_id,
+                service_area_id=resolved_area_id,
             )
             if partner_id is not None:
                 return PartnerView(
