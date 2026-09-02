@@ -35,7 +35,7 @@ from modules.notify.adapters.transport import (
     DeliveryRequest,
     DeliveryResult,
     NotificationDeliveryQueue,
-    mock_backoff_delay,
+    backoff_delay,
 )
 from modules.notify.adapters.whatsapp import (
     MockWhatsAppChannel,
@@ -406,10 +406,10 @@ async def test_sms_provider_send_post_and_parse() -> None:
 
 
 def test_backoff_delay_grows_exponentially() -> None:
-    assert mock_backoff_delay(0) == 0.0
-    assert mock_backoff_delay(1) >= 1.0
-    assert mock_backoff_delay(2) >= 2.0
-    assert mock_backoff_delay(3) >= 4.0
+    assert backoff_delay(0) == 0.0
+    assert backoff_delay(1) >= 1.0
+    assert backoff_delay(2) >= 2.0
+    assert backoff_delay(3) >= 4.0
 
 
 # --- circuit breaker ----------------------------------------------------------

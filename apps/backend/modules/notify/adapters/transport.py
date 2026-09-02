@@ -163,7 +163,7 @@ class HttpProviderChannel:
         last_status = 0
         for attempt in range(self._max_retries + 1):
             if attempt > 0:
-                await self._sleep(mock_backoff_delay(attempt))
+                await self._sleep(backoff_delay(attempt))
             try:
                 response = await self._client.post(
                     f"{self._base_url}{self._send_path}",
@@ -255,6 +255,11 @@ class CircuitBreaker:
         """The current breaker state (closed/open/half_open)."""
         return self._state
 
+    @property
+    def integration_name(self) -> str:
+        """The integration label this breaker gates (e.g. ``EXT-003 WhatsApp``)."""
+        return self._integration
+
     def allow_request(self) -> bool:
         """Whether a send may proceed right now.
 
@@ -326,14 +331,14 @@ class CircuitBreakerChannel:
     async def send(self, request: DeliveryRequest) -> DeliveryResult:
         if not self._breaker.allow_request():
             raise NotificationDeliveryError(
-                f"{self._breaker._integration} circuit breaker is open; "
+                f"{self._breaker.integration_name} circuit breaker is open; "
                 "send refused without calling the provider"
             )
         is_probe = self._breaker.state is CircuitBreakerState.HALF_OPEN
         if is_probe:
             if self._probe_in_flight:
                 raise NotificationDeliveryError(
-                    f"{self._breaker._integration} circuit breaker is half-open; "
+                    f"{self._breaker.integration_name} circuit breaker is half-open; "
                     "a recovery probe is already in flight"
                 )
             self._probe_in_flight = True
@@ -424,7 +429,7 @@ def mask_phone(phone_e164: str) -> str:
     return f"{phone_e164[:3]}...{phone_e164[-2:]}"
 
 
-def mock_backoff_delay(
+def backoff_delay(
     attempt: int,
     base_seconds: float = 1.0,
     jitter_fraction: float = 0.25,
