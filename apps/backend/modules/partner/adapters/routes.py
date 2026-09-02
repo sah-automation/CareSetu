@@ -36,6 +36,7 @@ from modules.partner.domain.exceptions import (
     AppealAlreadyUsedError,
     IllegalPartnerTransitionError,
     InvalidQueueSortError,
+    InvalidQueueStatusError,
     PartnerError,
     PartnerNotRejectedError,
     RejectionReasonRequiredError,
@@ -239,7 +240,8 @@ async def list_verification_queue(
     anonymous caller is refused 403/401 at the edge. Defaults to the
     ``[Under Verification]`` queue, filterable by ``partner_type`` and
     ``status`` (the status filter also opens the ``[Active]``/``[Rejected]``
-    activation-cycle KPI view), and sortable by ``registration_age`` (default,
+    activation-cycle KPI view; an unknown value raises a 422, not an empty
+    queue), and sortable by ``registration_age`` (default,
     oldest first for the <= 48 h KPI-004 median), ``partner_type`` or
     ``status``. No bulk actions - the queue only lists; decisions go through the
     per-partner decision route.
@@ -423,6 +425,15 @@ def register_error_handlers(app: FastAPI) -> None:
             "unknown verification queue sort key",
         )
 
+    async def _invalid_queue_status(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        return _error_response(
+            request,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "INVALID_QUEUE_STATUS",
+            "unknown verification queue status",
+        )
+
     async def _service_area_not_found(request: Request, exc: Exception) -> JSONResponse:
         service_area_not_found = cast(ServiceAreaNotFoundError, exc)
         return _error_response(
@@ -481,6 +492,7 @@ def register_error_handlers(app: FastAPI) -> None:
 
     app.add_exception_handler(RejectionReasonRequiredError, _rejection_reason_required)
     app.add_exception_handler(InvalidQueueSortError, _invalid_queue_sort)
+    app.add_exception_handler(InvalidQueueStatusError, _invalid_queue_status)
     app.add_exception_handler(ServiceAreaNotFoundError, _service_area_not_found)
     app.add_exception_handler(PartnerNotRejectedError, _not_rejected)
     app.add_exception_handler(AppealAlreadyUsedError, _appeal_already_used)

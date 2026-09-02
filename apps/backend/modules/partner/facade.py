@@ -71,6 +71,7 @@ from modules.partner.domain.exceptions import (
     AppealAlreadyUsedError,
     IllegalPartnerTransitionError,
     InvalidQueueSortError,
+    InvalidQueueStatusError,
     PartnerNotFoundError,
     PartnerNotRejectedError,
     RejectionReasonRequiredError,
@@ -311,6 +312,10 @@ _QUEUE_SORTS: dict[str, Any] = {
     "partner_type": partner_profiles.c.partner_type,
     "status": partner_profiles.c.status,
 }
+
+# The statuses the operator queue may be filtered by (api-standards §4): any
+# other value is an explicit error, never a silent empty queue (S15, #268).
+_QUEUE_STATUSES: frozenset[str] = frozenset(ps.value for ps in PartnerStatus)
 
 
 def _row_str(row: Any, name: str) -> str:
@@ -1227,12 +1232,16 @@ class PartnerFacade:
         by registration age (default, ``created_at`` ascending so the oldest /
         longest-waiting registrations surface first for the <= 48 h median,
         KPI-004), partner type, or status. An unknown ``sort_by`` raises
-        :class:`InvalidQueueSortError`.
+        :class:`InvalidQueueSortError` and an unknown ``status`` raises
+        :class:`InvalidQueueStatusError`.
         """
         sort_column = _QUEUE_SORTS.get(sort_by)
         if sort_column is None:
             raise InvalidQueueSortError(sort_by)
         order: Any = sort_column.asc()
+
+        if status is not None and status not in _QUEUE_STATUSES:
+            raise InvalidQueueStatusError(status)
 
         async with self._engine.begin() as connection:
             stmt = (

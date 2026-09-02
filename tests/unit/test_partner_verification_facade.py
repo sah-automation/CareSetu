@@ -28,6 +28,7 @@ from sqlalchemy.sql.dml import Insert, Update
 from modules.partner.domain.exceptions import (
     IllegalPartnerTransitionError,
     InvalidQueueSortError,
+    InvalidQueueStatusError,
     PartnerNotFoundError,
     RejectionReasonRequiredError,
 )
@@ -554,6 +555,43 @@ async def test_queue_unknown_sort_raises_invalid_queue_sort() -> None:
 
     with pytest.raises(InvalidQueueSortError):
         await facade.list_verification_queue(sort_by="bogus")
+
+
+@pytest.mark.asyncio
+async def test_queue_unknown_status_raises_invalid_queue_status() -> None:
+    facade = PartnerFacade(engine=_engine(_connection([_FakeResult()])), iam_facade=MagicMock())
+
+    with pytest.raises(InvalidQueueStatusError):
+        await facade.list_verification_queue(status="bogus")
+
+
+@pytest.mark.asyncio
+async def test_queue_unknown_status_raises_before_any_query() -> None:
+    """S15 (#268): an unknown status is an explicit 422-able error, never a
+    silent empty queue - the validation must fire before the query runs."""
+    connection = _connection([_FakeResult()])
+    facade = PartnerFacade(engine=_engine(connection), iam_facade=MagicMock())
+
+    with pytest.raises(InvalidQueueStatusError):
+        await facade.list_verification_queue(status="Nonsense")
+    assert connection.execute.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_queue_filters_by_valid_status() -> None:
+    row = MagicMock()
+    row.id, row.identity_id = 3, 9
+    row.partner_type, row.status = "doctor", "Rejected"
+    row.practice_name, row.practice_address = None, "Station Road"
+    row.created_at, row.round = _NOW, 1
+    connection = _connection([_FakeResult(all=[row])])
+    facade = PartnerFacade(engine=_engine(connection), iam_facade=MagicMock())
+
+    queue = await facade.list_verification_queue(status="Rejected")
+
+    stmt = connection.execute.await_args_list[0].args[0]
+    assert stmt.compile().params["status_1"] == "Rejected"
+    assert queue.items[0].status == "Rejected"
 
 
 @pytest.mark.asyncio

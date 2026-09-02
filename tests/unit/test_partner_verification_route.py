@@ -26,6 +26,7 @@ from app.main import create_app
 from modules.iam.domain.jwt import issue_token
 from modules.partner.domain.exceptions import (
     InvalidQueueSortError,
+    InvalidQueueStatusError,
     RejectionReasonRequiredError,
 )
 from modules.partner.facade import (
@@ -104,6 +105,8 @@ class StubPartnerFacade:
     async def list_verification_queue(self, **kwargs: object) -> PartnerQueue:
         if kwargs.get("sort_by") == "bogus":
             raise InvalidQueueSortError("bogus")
+        if kwargs.get("status") == "bogus":
+            raise InvalidQueueStatusError("bogus")
         self.calls.append({"method": "list_verification_queue", **kwargs})
         return self.queue
 
@@ -215,6 +218,32 @@ def test_unknown_queue_sort_answers_422_invalid_sort() -> None:
 
     assert response.status_code == 422
     assert response.json()["code"] == "INVALID_QUEUE_SORT"
+
+
+def test_unknown_queue_status_answers_422_invalid_status() -> None:
+    client = _client()
+
+    response = client.get(
+        "/v1/partner/verification-queue",
+        params={"status": "bogus"},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "INVALID_QUEUE_STATUS"
+
+
+def test_valid_queue_statuses_still_forward() -> None:
+    facade = StubPartnerFacade()
+    client = _client(facade)
+
+    for status in ("Registered", "Under Verification", "Active", "Rejected"):
+        response = client.get(
+            "/v1/partner/verification-queue",
+            params={"status": status},
+            headers=_bearer(_token()),
+        )
+        assert response.status_code == 200
 
 
 # -- Detail view ---------------------------------------------------------------

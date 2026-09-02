@@ -36,6 +36,20 @@ class InvalidQueueSortError(PartnerError):
         self.sort_by = sort_by
 
 
+class InvalidQueueStatusError(PartnerError):
+    """The operator filtered the verification queue by an unknown status.
+
+    Mirrors ``InvalidQueueSortError``: the ``status`` filter is validated
+    against the lifecycle statuses whitelist before the WHERE clause runs, so
+    an unknown value is an explicit error (422) rather than a silent empty
+    queue.
+    """
+
+    def __init__(self, status: str) -> None:
+        super().__init__(f"unknown verification queue status: {status}")
+        self.status = status
+
+
 class RejectionReasonRequiredError(PartnerError):
     """An operator rejection must carry a reason (two-step gate, ADR-0008).
 
