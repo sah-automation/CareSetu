@@ -497,6 +497,39 @@ async def test_queue_defaults_to_under_verification_registration_age_order() -> 
     assert queue_item.partner_id == 3
     assert queue_item.status == "Under Verification"
     assert queue_item.round == 1
+    assert queue_item.audit_link is None
+
+
+@pytest.mark.asyncio
+async def test_queue_populates_audit_link_per_partner_when_audit_facade_present() -> None:
+    """US-29 (S11): each queue item carries the partner's audit link when the audit
+    facade is wired - batch-resolved (one call) from MOD-011, not a cross-schema read."""
+    row = MagicMock()
+    row.id, row.identity_id = 3, 9
+    row.partner_type, row.status = "doctor", "Under Verification"
+    row.practice_name, row.practice_address = None, "Station Road, Daltonganj"
+    row.created_at, row.round = _NOW, 1
+
+    class StubAuditFacade:
+        def __init__(self) -> None:
+            self.requested: list[int] = []
+
+        def get_partner_audit_links(self, partner_ids: list[int]) -> dict[int, str]:
+            self.requested = list(partner_ids)
+            return {pid: f"audit-link-{pid}" for pid in partner_ids}
+
+    audit = StubAuditFacade()
+    connection = _connection([_FakeResult(all=[row])])
+    facade = PartnerFacade(
+        engine=_engine(connection),
+        iam_facade=MagicMock(),
+        audit_facade=audit,  # type: ignore[arg-type]
+    )
+
+    queue = await facade.list_verification_queue()
+
+    assert audit.requested == [3]
+    assert queue.items[0].audit_link == "audit-link-3"
 
 
 @pytest.mark.asyncio
@@ -580,6 +613,9 @@ async def test_detail_includes_partner_audit_chain_when_audit_facade_present() -
             self.partner_id = partner_id
             return AuditPage(events=[event], total_count=1)
 
+        def get_partner_audit_link(self, partner_id: int) -> str:
+            return f"audit-link-{partner_id}"
+
     audit = StubAuditFacade()
     connection = _connection(
         [
@@ -601,6 +637,7 @@ async def test_detail_includes_partner_audit_chain_when_audit_facade_present() -
     assert len(detail.audit_events) == 1
     assert detail.audit_events[0].event_type == "partner.registered"
     assert detail.audit_events[0].hash == event.hash
+    assert detail.audit_link == "audit-link-3"
 
     async def _no_audit_detail() -> None:
         connection2 = _connection(

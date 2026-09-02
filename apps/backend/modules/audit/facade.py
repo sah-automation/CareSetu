@@ -439,6 +439,25 @@ class AuditFacade:
                 page_size=page_size,
             )
 
+    def get_partner_audit_link(self, partner_id: int) -> str:
+        """Return the deterministic audit-link identifier for one partner.
+
+        A partner's ledger rows are keyed by ``target_id = _partner_uuid(partner_id)``
+        (the deterministic int->UUID mapping). This method exposes that reference as a
+        stable, opaque string so the partner module can surface it on queue/detail views
+        without importing the domain helper (module isolation, ADR-0003).
+        """
+        return _partner_uuid(partner_id)
+
+    def get_partner_audit_links(self, partner_ids: list[int]) -> dict[int, str]:
+        """Batch-resolve audit-link identifiers for multiple partners.
+
+        Returns a ``{partner_id: audit_link}`` mapping. Every id in the input list
+        is present in the output (deterministic derivation, no DB round-trip), so the
+        caller can batch-populate queue items without N+1 facade calls.
+        """
+        return {pid: _partner_uuid(pid) for pid in partner_ids}
+
     async def get_access_history(self, patient_id: int) -> AccessHistoryView:
         """Return a patient's record access history via the MOD-003 facade (T7).
 

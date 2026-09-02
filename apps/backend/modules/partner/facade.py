@@ -223,6 +223,7 @@ class PartnerQueueItem(BaseModel):
     practice_address: str
     created_at: datetime
     round: int
+    audit_link: str | None = None
 
 
 class PartnerQueue(BaseModel):
@@ -294,6 +295,7 @@ class PartnerVerificationDetail(BaseModel):
     credentials: list[CredentialDetail]
     verification_history: list[VerificationRound]
     audit_events: list[AuditEventDetail] = Field(default_factory=list)
+    audit_link: str | None = None
 
 
 _QUEUE_SORTS: dict[str, Any] = {
@@ -1198,6 +1200,12 @@ class PartnerFacade:
                 stmt = stmt.where(partner_profiles.c.partner_type == partner_type)
             rows = (await connection.execute(stmt)).all()
 
+            audit_links: dict[int, str] = {}
+            if self._audit_facade is not None and rows:
+                audit_links = self._audit_facade.get_partner_audit_links(
+                    [int(row.id) for row in rows]
+                )
+
             return PartnerQueue(
                 items=[
                     PartnerQueueItem(
@@ -1211,6 +1219,7 @@ class PartnerFacade:
                         practice_address=str(row.practice_address),
                         created_at=row.created_at,
                         round=int(row.round),
+                        audit_link=audit_links.get(int(row.id)),
                     )
                     for row in rows
                 ]
@@ -1283,8 +1292,10 @@ class PartnerFacade:
             )
 
         audit_page = None
+        audit_link: str | None = None
         if self._audit_facade is not None:
             audit_page = await self._audit_facade.query_partner_audit(partner_id)
+            audit_link = self._audit_facade.get_partner_audit_link(partner_id)
 
         return PartnerVerificationDetail(
             partner_id=int(row.id),
@@ -1333,6 +1344,7 @@ class PartnerFacade:
                 )
                 for e in (audit_page.events if audit_page is not None else [])
             ],
+            audit_link=audit_link,
         )
 
     async def purge_expired_credentials(self) -> list[int]:
