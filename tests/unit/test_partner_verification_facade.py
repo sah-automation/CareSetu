@@ -481,11 +481,11 @@ async def test_purge_handles_missing_artifact_store() -> None:
 @pytest.mark.asyncio
 async def test_queue_defaults_to_under_verification_registration_age_order() -> None:
     profile = _profile_row()
-    profile.practice_name = None
+    profile.practice_name = "Dr. Arora Clinic"
     row = MagicMock()
     row.id, row.identity_id = 3, 9
     row.partner_type, row.status = "doctor", "Under Verification"
-    row.practice_name, row.practice_address = None, "Station Road, Daltonganj"
+    row.practice_name, row.practice_address = "Dr. Arora Clinic", "Station Road, Daltonganj"
     row.created_at, row.round = _NOW, 1
     connection = _connection([_FakeResult(all=[row])])
     facade = PartnerFacade(engine=_engine(connection), iam_facade=MagicMock())
@@ -499,6 +499,7 @@ async def test_queue_defaults_to_under_verification_registration_age_order() -> 
     assert queue_item.status == "Under Verification"
     assert queue_item.round == 1
     assert queue_item.audit_link is None
+    assert queue_item.practice_name == "Dr. Arora Clinic"
 
 
 @pytest.mark.asyncio
@@ -609,6 +610,7 @@ async def test_detail_returns_profile_credentials_history_and_emits_reviewed() -
     detail = await facade.get_verification_detail(3, actor_id=77)
 
     assert detail.partner_id == 3
+    assert detail.practice_name == "Dr. Arora Clinic"
     assert detail.credentials[0].credential_type == "medical_registration"
     assert detail.verification_history[0].round == 1
     outbox = _outbox_inserts(connection)

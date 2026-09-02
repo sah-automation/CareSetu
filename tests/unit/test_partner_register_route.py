@@ -96,6 +96,7 @@ def test_register_returns_opened_profile_and_forwards_typed_fields() -> None:
         {
             "phone": "9876543210",
             "partner_type": "doctor",
+            "practice_name": None,
             "practice_address": "Station Road, Daltonganj",
             "practice_latitude": 24.04,
             "practice_longitude": 84.07,
@@ -128,6 +129,42 @@ def test_register_forwards_optional_service_area_id() -> None:
     assert response.status_code == 200
     assert facade.called_with[0]["service_area_id"] == 1
     assert facade.called_with[0]["partner_type"] == "chemist"
+
+
+def test_register_forwards_optional_practice_name() -> None:
+    """A provided practice_name is forwarded to the facade (P6, #276)."""
+    facade = StubPartnerFacade()
+    client = _client_with(facade)
+    body = {**_BODY, "practice_name": "Shanti Clinic"}
+
+    response = client.post("/v1/partner/register", json=body)
+
+    assert response.status_code == 200
+    assert facade.called_with[0]["practice_name"] == "Shanti Clinic"
+
+
+def test_register_omitted_practice_name_defaults_to_none() -> None:
+    """An omitted practice_name defaults to None - existing registrations work (P6, #276)."""
+    facade = StubPartnerFacade()
+    client = _client_with(facade)
+
+    response = client.post("/v1/partner/register", json=_BODY)
+
+    assert response.status_code == 200
+    assert facade.called_with[0]["practice_name"] is None
+
+
+def test_register_practice_name_longer_than_120_rejected_at_the_gateway() -> None:
+    """An over-long practice_name is rejected at the gateway, not run to the DB (P6, #276)."""
+    facade = StubPartnerFacade()
+    client = _client_with(facade)
+    body = {**_BODY, "practice_name": "x" * 121}
+
+    response = client.post("/v1/partner/register", json=body, headers={"X-Request-Id": _TRACE_ID})
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "VALIDATION_ERROR"
+    assert facade.called_with == []
 
 
 def test_register_route_sits_behind_the_gateway_stack() -> None:

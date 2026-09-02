@@ -255,6 +255,51 @@ async def test_register_persists_an_explicit_service_area_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_register_persists_a_provided_practice_name() -> None:
+    """A provided practice_name is written to the profile INSERT (P6, #276)."""
+    connection = _connection(
+        [
+            _FakeResult(row=None),  # profile SELECT: absent
+            _FakeResult(scalar=5),  # service-area default resolution (Daltonganj)
+            _FakeResult(rowcount=1, scalar=9),  # profile INSERT ... RETURNING id
+            _FakeResult(rowcount=1),  # partner outbox INSERT
+        ]
+    )
+    facade = PartnerFacade(
+        engine=_engine(connection),
+        iam_facade=_iam_facade([]),  # type: ignore[arg-type]
+    )
+
+    await facade.register(
+        **_register_kwargs("doctor"),
+        practice_name="Shanti Clinic",
+    )
+
+    assert _profile_insert_params(_inserts(connection))["practice_name"] == "Shanti Clinic"
+
+
+@pytest.mark.asyncio
+async def test_register_without_practice_name_inserts_null() -> None:
+    """An omitted practice_name persists NULL - existing registrations keep working (P6, #276)."""
+    connection = _connection(
+        [
+            _FakeResult(row=None),  # profile SELECT: absent
+            _FakeResult(scalar=5),  # service-area default resolution (Daltonganj)
+            _FakeResult(rowcount=1, scalar=9),  # profile INSERT ... RETURNING id
+            _FakeResult(rowcount=1),  # partner outbox INSERT
+        ]
+    )
+    facade = PartnerFacade(
+        engine=_engine(connection),
+        iam_facade=_iam_facade([]),  # type: ignore[arg-type]
+    )
+
+    await facade.register(**_register_kwargs("doctor"))
+
+    assert _profile_insert_params(_inserts(connection))["practice_name"] is None
+
+
+@pytest.mark.asyncio
 async def test_register_rejects_an_unknown_service_area_id() -> None:
     """An unknown ``service_area_id`` is rejected - never a dangling reference."""
     connection = _connection(

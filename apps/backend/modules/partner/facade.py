@@ -473,6 +473,7 @@ async def _insert_registered_profile(
     *,
     identity_id: int,
     partner_type: PartnerType,
+    practice_name: str | None = None,
     practice_address: str,
     practice_latitude: float,
     practice_longitude: float,
@@ -495,6 +496,7 @@ async def _insert_registered_profile(
             identity_id=identity_id,
             partner_type=partner_type,
             status=REGISTERED.status.value,
+            practice_name=practice_name,
             practice_address=practice_address,
             practice_latitude=practice_latitude,
             practice_longitude=practice_longitude,
@@ -702,6 +704,7 @@ class PartnerFacade:
         practice_latitude: float,
         practice_longitude: float,
         service_area_id: int | None = None,
+        practice_name: str | None = None,
     ) -> RegisterPartnerResult:
         """Open partner registration (FEAT-014, ADR-0010): open + sync account.
 
@@ -741,6 +744,7 @@ class PartnerFacade:
                 connection,
                 identity_id=identity_id,
                 partner_type=partner_type,
+                practice_name=practice_name,
                 practice_address=practice_address,
                 practice_latitude=practice_latitude,
                 practice_longitude=practice_longitude,

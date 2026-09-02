@@ -73,6 +73,11 @@ class RegisterPartnerRequest(BaseModel):
 
     phone: str = Field(min_length=1, description="10-digit Indian mobile number, or with 91 prefix")
     partner_type: PartnerType
+    practice_name: str | None = Field(
+        default=None,
+        max_length=120,
+        description="Optional public-facing practice name (max 120 chars)",
+    )
     practice_address: str = Field(min_length=1, description="Practice location address (mandatory)")
     practice_latitude: float = Field(ge=-90, le=90)
     practice_longitude: float = Field(ge=-180, le=180)
@@ -130,6 +135,7 @@ async def open_partner_registration(
     return await facade.register(
         phone=body.phone,
         partner_type=body.partner_type,
+        practice_name=body.practice_name,
         practice_address=body.practice_address,
         practice_latitude=body.practice_latitude,
         practice_longitude=body.practice_longitude,
