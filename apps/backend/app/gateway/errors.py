@@ -70,18 +70,22 @@ def error_response(
     *,
     request: Request,
     headers: dict[str, str] | None = None,
+    details: dict[str, object] | None = None,
+    log_tag: str = "gateway_rejection",
 ) -> JSONResponse:
     """One error envelope for every gateway rejection (api-standards §2).
 
     Records the rejection as a structured log line keyed by the request-scoped
     trace id the envelope carries - the same id every log line for that request
     uses - so a reported 401/403/429 is reproducible from logs alone
-    (error-handling-observability §3). Never logs the token or the caller's raw
-    input.
+    (error-handling-observability §3). ``log_tag`` lets a module adapter keep
+    its own rejection label in the log line (``iam_rejection`` etc.) so an
+    operator can tell which surface rejected a call. Never logs the token or
+    the caller's raw input.
     """
     trace_id = resolve_trace_id(request)
-    logger.warning("gateway_rejection code=%s status=%d trace_id=%s", code, status_code, trace_id)
-    envelope = {"code": code, "message": message, "trace_id": trace_id, "details": {}}
+    logger.warning("%s code=%s status=%d trace_id=%s", log_tag, code, status_code, trace_id)
+    envelope = {"code": code, "message": message, "trace_id": trace_id, "details": details or {}}
     return JSONResponse(status_code=status_code, content=envelope, headers=headers)
 
 

@@ -13,17 +13,15 @@ the shared error envelope at the top level (api-standards §2).
 
 from __future__ import annotations
 
-import logging
 from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.gateway.errors import ErrorEnvelope
+from app.gateway.errors import error_response
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_patient
-from app.gateway.trace import resolve_trace_id
 from modules.consent.domain.events import CounterpartyType, RecordScope
 from modules.consent.domain.exceptions import (
     ConsentAccessDeniedError,
@@ -34,8 +32,6 @@ from modules.consent.domain.exceptions import (
 from modules.consent.facade import ConsentFacade, ConsentLog, ConsentView, EgressLog
 
 router = APIRouter(tags=["consent"])
-
-logger = logging.getLogger(__name__)
 
 
 class ConsentTargetRequest(BaseModel):
@@ -177,60 +173,46 @@ async def decline_consent(
     return await facade.decline_consent(int(principal.subject_id), consent_id)
 
 
-def _error_response(
-    request: Request,
-    status_code: int,
-    code: str,
-    message: str,
-) -> JSONResponse:
-    """One error envelope for every expected consent failure (api-standards §2).
-
-    Records the failure as a structured log line keyed by the request-scoped
-    trace id the envelope carries (error-handling-observability §3); never
-    logs lineage content or counterparty detail.
-    """
-    trace_id = resolve_trace_id(request)
-    logger.warning("consent_rejection code=%s status=%d trace_id=%s", code, status_code, trace_id)
-    envelope = ErrorEnvelope(code=code, message=message, trace_id=trace_id, details={})
-    return JSONResponse(status_code=status_code, content=envelope.model_dump(mode="json"))
-
-
 def register_error_handlers(app: FastAPI) -> None:
     """Attach the MOD-004 error envelope to every expected consent failure."""
 
     async def _not_found(request: Request, exc: Exception) -> JSONResponse:
         del exc
-        return _error_response(
-            request,
+        return error_response(
             status.HTTP_404_NOT_FOUND,
             "CONSENT_NOT_FOUND",
             "no such consent for this patient",
+            log_tag="consent_rejection",
+            request=request,
         )
 
     async def _access_denied(request: Request, exc: Exception) -> JSONResponse:
         del exc
-        return _error_response(
-            request,
+        return error_response(
             status.HTTP_403_FORBIDDEN,
             "CONSENT_ACCESS_DENIED",
             "only the owning patient may act on this consent",
+            log_tag="consent_rejection",
+            request=request,
         )
 
     async def _illegal_transition(request: Request, exc: Exception) -> JSONResponse:
-        return _error_response(
-            request,
+        return error_response(
             status.HTTP_409_CONFLICT,
             "CONSENT_INVALID_TRANSITION",
             str(exc),
+            log_tag="consent_rejection",
+            request=request,
         )
 
     async def _consent_failed(request: Request, exc: Exception) -> JSONResponse:
         del exc
-        return _error_response(
-            request,
+        return error_response(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             "CONSENT_INTERNAL",
             "Internal consent error",
+            log_tag="consent_rejection",
+            request=request,
         )
 
     app.add_exception_handler(ConsentNotFoundError, _not_found)

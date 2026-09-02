@@ -9,15 +9,13 @@ itself carries no business logic. The auth routes sit behind the gateway
 middleware stack in ``app.main`` - the rate-limit policy for the OTP/auth
 surface is a Phase 2 gateway ticket. The register/verify/resend/session
 mutations honour the edge's ``Idempotency-Key`` contract
-(api-standards §5, PHASE-2 REM T11, #80) via ``_run_idempotent``: a duplicate
+(api-standards §5, PHASE-2 REM T11, #80) via ``run_idempotent``: a duplicate
 key replays the stored result instead of re-executing.
 """
 
 from __future__ import annotations
 
-import logging
-from collections.abc import Awaitable, Callable
-from typing import Annotated, TypeVar, cast
+from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -25,11 +23,10 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import Settings
-from app.gateway.errors import ErrorEnvelope
-from app.gateway.idempotency import IdempotencyStore
+from app.gateway.errors import error_response
+from app.gateway.idempotency import run_idempotent
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_operator
-from app.gateway.trace import resolve_trace_id
 from modules.iam.domain.exceptions import (
     IamError,
     InvalidPhoneError,
@@ -51,8 +48,6 @@ from modules.iam.facade import (
 )
 
 router = APIRouter(prefix="/v1/auth", tags=["iam"])
-
-logger = logging.getLogger(__name__)
 
 
 class RegisterPatientRequest(BaseModel):
@@ -152,38 +147,6 @@ def _set_jwt_cookie(response: Response, jwt_value: str, ttl_seconds: int, *, sec
     )
 
 
-_T = TypeVar("_T")
-
-
-async def _run_idempotent(
-    request: Request,
-    call: Callable[[], Awaitable[_T]],
-) -> _T:
-    """Execute ``call`` once per ``Idempotency-Key`` (api-standards §5).
-
-    With the header present, the edge's in-process store (PHASE-2 REM T11, #80)
-    is checked first: a replayed key returns the stored result of the first
-    execution and the facade is not called again, so a client retry after a lost
-    response cannot double-issue an OTP or double-consume a challenge. Only a
-    completed call is stored - an expected failure (error envelope) or a 5xx is
-    never cached, so a retry re-executes. The key is namespaced by the request
-    path so one client key cannot collide across endpoints. A missing or blank
-    header passes straight through exactly as before - no store read or write.
-    """
-    raw_key = request.headers.get("Idempotency-Key")
-    if raw_key is None or not raw_key.strip():
-        return await call()
-    key = raw_key.strip()
-    store = cast(IdempotencyStore, request.app.state.idempotency_store)
-    cache_key = f"{request.url.path}:{key}"
-    cached = store.get(cache_key)
-    if cached is not None:
-        return cast(_T, cached)
-    result = await call()
-    store.put(cache_key, result)
-    return result
-
-
 @router.post(
     "/register",
     response_model=RegisterPatientResult,
@@ -204,7 +167,7 @@ async def register_patient(
     sent (spec #51 §2.4).
     """
     facade = cast(IamFacade, request.app.state.iam_facade)
-    return await _run_idempotent(request, lambda: facade.register_patient(body.phone))
+    return await run_idempotent(request, lambda: facade.register_patient(body.phone))
 
 
 @router.post(
@@ -224,7 +187,7 @@ async def verify_otp(
     ``locked`` with the lockout countdown.
     """
     facade = cast(IamFacade, request.app.state.iam_facade)
-    return await _run_idempotent(request, lambda: facade.verify_otp(body.phone, body.otp))
+    return await run_idempotent(request, lambda: facade.verify_otp(body.phone, body.otp))
 
 
 @router.post(
@@ -245,7 +208,7 @@ async def resend_otp(
     cooldown and the brute-force lockout.
     """
     facade = cast(IamFacade, request.app.state.iam_facade)
-    return await _run_idempotent(request, lambda: facade.resend_otp(body.phone))
+    return await run_idempotent(request, lambda: facade.resend_otp(body.phone))
 
 
 @router.post(
@@ -269,7 +232,7 @@ async def issue_session(
     Next.js middleware route protection.
     """
     facade = cast(IamFacade, request.app.state.iam_facade)
-    result = await _run_idempotent(request, lambda: facade.issue_session(body.phone))
+    result = await run_idempotent(request, lambda: facade.issue_session(body.phone))
     response = Response(
         content=result.model_dump_json(),
         media_type="application/json",
@@ -340,7 +303,7 @@ async def invite_operator(
     """
     invited_by = int(operator.subject_id)
     facade = cast(IamFacade, request.app.state.iam_facade)
-    return await _run_idempotent(
+    return await run_idempotent(
         request,
         lambda: facade.create_operator_account(body.phone, invited_by_identity_id=invited_by),
     )
@@ -400,93 +363,82 @@ async def enroll_operator_mfa(
     then complete login with a TOTP code from that factor.
     """
     facade = cast(IamFacade, request.app.state.iam_facade)
-    return await _run_idempotent(request, lambda: facade.enroll_mfa(int(operator.subject_id)))
-
-
-def _error_response(
-    request: Request,
-    status_code: int,
-    code: str,
-    message: str,
-    *,
-    details: dict[str, object] | None = None,
-) -> JSONResponse:
-    """One error envelope for every expected iam failure (api-standards §2).
-
-    Records the failure as a structured log line keyed by the same request
-    scoped trace id the envelope carries, so a reported 409/422/502/5xx is
-    reproducible from logs alone (error-handling-observability §3).
-    """
-    trace_id = resolve_trace_id(request)
-    logger.warning("iam_rejection code=%s status=%d trace_id=%s", code, status_code, trace_id)
-    envelope = ErrorEnvelope(
-        code=code,
-        message=message,
-        trace_id=trace_id,
-        details=details if details is not None else {},
-    )
-    return JSONResponse(status_code=status_code, content=envelope.model_dump(mode="json"))
+    return await run_idempotent(request, lambda: facade.enroll_mfa(int(operator.subject_id)))
 
 
 def register_error_handlers(app: FastAPI) -> None:
     """Attach the MOD-001 error envelope to every expected iam failure."""
 
     async def _invalid_phone(request: Request, exc: Exception) -> JSONResponse:
-        return _error_response(
-            request, status.HTTP_422_UNPROCESSABLE_CONTENT, "PHONE_INVALID", str(exc)
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "PHONE_INVALID",
+            str(exc),
+            log_tag="iam_rejection",
+            request=request,
         )
 
     async def _sms_failed(request: Request, exc: Exception) -> JSONResponse:
-        return _error_response(
-            request, status.HTTP_502_BAD_GATEWAY, "SMS_DELIVERY_FAILED", str(exc)
+        return error_response(
+            status.HTTP_502_BAD_GATEWAY,
+            "SMS_DELIVERY_FAILED",
+            str(exc),
+            log_tag="iam_rejection",
+            request=request,
         )
 
     async def _session_refused(request: Request, exc: Exception) -> JSONResponse:
-        return _error_response(
-            request,
+        return error_response(
             status.HTTP_409_CONFLICT,
             "SESSION_REFUSED",
             str(exc),
+            log_tag="iam_rejection",
+            request=request,
         )
 
     async def _operator_mfa_failed(request: Request, exc: Exception) -> JSONResponse:
-        return _error_response(
-            request,
+        return error_response(
             status.HTTP_401_UNAUTHORIZED,
             "SESSION_MFA_REQUIRED",
             str(exc),
+            log_tag="iam_rejection",
+            request=request,
         )
 
     async def _refresh_token_unknown(request: Request, exc: Exception) -> JSONResponse:
-        return _error_response(
-            request,
+        return error_response(
             status.HTTP_401_UNAUTHORIZED,
             "REFRESH_TOKEN_UNKNOWN",
             str(exc),
+            log_tag="iam_rejection",
+            request=request,
         )
 
     async def _refresh_token_expired(request: Request, exc: Exception) -> JSONResponse:
-        return _error_response(
-            request,
+        return error_response(
             status.HTTP_401_UNAUTHORIZED,
             "REFRESH_TOKEN_EXPIRED",
             str(exc),
+            log_tag="iam_rejection",
+            request=request,
         )
 
     async def _refresh_token_revoked(request: Request, exc: Exception) -> JSONResponse:
-        return _error_response(
-            request,
+        return error_response(
             status.HTTP_401_UNAUTHORIZED,
             "REFRESH_TOKEN_REVOKED",
             str(exc),
+            log_tag="iam_rejection",
+            request=request,
         )
 
     async def _iam_failed(request: Request, exc: Exception) -> JSONResponse:
-        return _error_response(
-            request,
+        return error_response(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             "IAM_INTERNAL",
             "Internal identity error",
+            log_tag="iam_rejection",
+            request=request,
         )
 
     async def _validation_failed(request: Request, exc: Exception) -> JSONResponse:
@@ -500,11 +452,12 @@ def register_error_handlers(app: FastAPI) -> None:
                 for error in validation_errors
             ]
         }
-        return _error_response(
-            request,
+        return error_response(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "VALIDATION_ERROR",
             "Request validation failed",
+            log_tag="iam_rejection",
+            request=request,
             details=details,
         )
 
