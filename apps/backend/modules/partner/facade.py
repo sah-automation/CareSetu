@@ -494,21 +494,25 @@ async def _apply_transition(
 
 
 async def _load_live_credential_types(
-    connection: AsyncConnection, partner_id: int
+    connection: AsyncConnection, partner_id: int, current_round: int
 ) -> frozenset[str]:
-    """The credential types already recorded for a partner (duplicate gate input).
+    """Credential types submitted in the current round (duplicate gate input).
 
-    The Step-1 duplicate check (ADR-0008) rejects a submission re-offering a
-    credential type the partner already holds in a live (non-rejected) state; a
-    ``Rejected`` partner re-submitting the same type is a new round, not a
-    duplicate, and an ``Active`` partner re-submitting the same type is a
-    renewal/re-verification (PHASE-5 T10), so the caller passes an empty set
-    in those two cases.
+    Only credential types from the *current* verification round count as live
+    for the duplicate gate (S13, #266).  Credentials carry their submission round
+    (``partner_credentials.round``), so credentials from earlier rounds
+    (including rejected rounds) are excluded and a partner who was rejected for
+    type X can re-offer type X in a fresh round without tripping the gate.
+
+    The caller still passes ``frozenset()`` for ``Rejected`` / ``Active``
+    statuses (renewal / new-round bypass), so this loader is only reached for
+    ``Registered`` / ``Under Verification`` profiles.
     """
     rows = (
         await connection.execute(
             select(partner_credentials.c.credential_type).where(
-                partner_credentials.c.profile_id == partner_id
+                partner_credentials.c.profile_id == partner_id,
+                partner_credentials.c.round == current_round,
             )
         )
     ).all()
@@ -520,13 +524,16 @@ async def _ingest_credentials(
     partner_id: int,
     credentials: list[CredentialSubmission],
     artifact_store: CredentialArtifactStore,
+    round_value: int,
 ) -> None:
     """Encrypt documents into ``partner/`` and open ``partner_credentials`` rows.
 
     Called only on a Step-1 pass with a configured store (the facade refuses to
     run without one - see ``submit_credentials``), inside the submission
     transaction (ADR-0002 §1). Each credential's artifact bytes are AES-encrypted
-    by the given store (refs persisted, never plaintext).
+    by the given store (refs persisted, never plaintext). ``round_value`` is the
+    verification round the submission opens - stamped on every credential so the
+    duplicate gate can scope to the current round (S13, #266).
     """
     for submission in credentials:
         refs: dict[str, object] = {}
@@ -543,6 +550,7 @@ async def _ingest_credentials(
             partner_credentials.insert().values(
                 profile_id=partner_id,
                 credential_type=submission.credential_type.value,
+                round=round_value,
                 verified=False,
                 artifact_refs=refs,
             )
@@ -856,7 +864,9 @@ class PartnerFacade:
 
             is_re_submission = profile.status == PartnerStatus.REJECTED.value
 
-            existing_types = await _load_live_credential_types(connection, partner_id)
+            existing_types = await _load_live_credential_types(
+                connection, partner_id, profile.round
+            )
             outcome = evaluate_submission(
                 partner_type=profile.partner_type,
                 credential_types=[c.credential_type for c in credentials],
@@ -901,11 +911,17 @@ class PartnerFacade:
                 # (coding-standards §8 "no silent swallowing").
                 raise RuntimeError("credential submission requires a configured artifact store")
 
+            # The round this submission opens (every START_VERIFICATION edge
+            # increments by one - state_machine). Stamped on the credentials so
+            # the duplicate gate can scope to the current round (S13, #266).
+            next_round = transition(profile.state, PartnerAction.START_VERIFICATION).round
+
             await _ingest_credentials(
                 connection,
                 partner_id,
                 credentials,
                 self._artifact_store,
+                round_value=next_round,
             )
             next_state = await _apply_transition(
                 connection, profile, PartnerAction.START_VERIFICATION, verification=True

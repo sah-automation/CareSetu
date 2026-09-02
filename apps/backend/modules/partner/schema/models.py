@@ -115,6 +115,11 @@ partner_credentials = Table(
     # registration + qualification docs, labs with a lab license/accreditation,
     # chemists with a drug license / pharmacist registration.
     Column("credential_type", String(40), nullable=False),
+    # The verification round this credential was submitted in
+    # (S13, #266). Round-gates the duplicate gate: only the CURRENT round's
+    # credential types are live for a re-offer, so a previously-rejected type
+    # can be re-offered in a fresh round without tripping the duplicate check.
+    Column("round", BigInteger, nullable=False, server_default=text("1")),
     Column("verified", Boolean, nullable=False, server_default=text("false")),
     Column("expires_at", DateTime(timezone=True), nullable=True),
     # References into encrypted object storage under the ``partner/`` prefix

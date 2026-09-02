@@ -334,3 +334,41 @@ async def test_submit_credentials_throttles_while_cooldown_in_flight() -> None:
             3,
             credentials=[],
         )
+
+
+# -- duplicate gate round scoping (S13, #266) ---------------------------------
+
+
+@pytest.mark.asyncio
+async def test_live_credential_types_scoped_to_current_round() -> None:
+    """The duplicate gate fights only the current round's credential types.
+
+    A partner previously rejected for type X who is now re-offering X in a fresh
+    round must not trip the gate on the old rejected round's types. The loader
+    filters ``partner_credentials`` by their submitted round, so only the current
+    round's types are reported as live (S13, #266).
+    """
+    from modules.partner.facade import _load_live_credential_types
+
+    connection = _connection(
+        [
+            # The current round's (round 2) submitted credential types.
+            _FakeResult(all=[SimpleNamespace(credential_type="qualification_certificate")]),
+        ]
+    )
+
+    live = await _load_live_credential_types(connection, partner_id=3, current_round=2)
+
+    assert live == frozenset({"qualification_certificate"})
+
+
+@pytest.mark.asyncio
+async def test_live_credential_types_empty_when_current_round_has_none() -> None:
+    """A round with no submitted credentials reports no live types."""
+    from modules.partner.facade import _load_live_credential_types
+
+    connection = _connection([_FakeResult(all=[])])
+
+    live = await _load_live_credential_types(connection, partner_id=3, current_round=2)
+
+    assert live == frozenset()

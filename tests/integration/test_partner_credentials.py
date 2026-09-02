@@ -268,3 +268,71 @@ async def test_rejected_partner_resubmits_same_type_as_new_round(
     # Round 1 was rejected at Step-2 (the operator's decision is recorded on it),
     # the re-submission opens round 2 back in the queue.
     assert rounds == [{"round": 1, "status": "rejected"}, {"round": 2, "status": "queued"}]
+
+
+async def test_under_verification_can_reoffer_old_rejected_round_type(
+    database_url: str, clean_partner: Any, tmp_path: Path
+) -> None:
+    """S13: the duplicate gate scopes to the current round, not all history.
+
+    A partner whose round-1 type X was rejected, then re-submits a DIFFERENT type Y
+    (round 2, now ``[Under Verification]``), can re-offer the old rejected type X
+    in round 2 without tripping the duplicate gate. Only the current round's types
+    (Y) are live for the gate - the rejected round-1 type X is a new round, not a
+    duplicate (ADR-0008 recovery).
+    """
+    _, partner = _facade(database_url, tmp_path)
+    partner_id = await _register_doctor(partner)
+
+    # Round 1: submit qualification_certificate, then the operator rejects it.
+    first = await partner.submit_credentials(
+        partner_id,
+        credentials=_medical_submission(credential_type=CredentialType.QUALIFICATION_CERTIFICATE),
+    )
+    assert first.status == "Under Verification"
+    assert first.round == 1
+    await partner.operator_decision(
+        partner_id, decision_by=99, approve=False, reason="docs unclear"
+    )
+
+    # Round 2: re-submit a DIFFERENT type (medical_registration) - becomes round 2.
+    second = await partner.submit_credentials(partner_id, credentials=_medical_submission())
+    assert second.status == "Under Verification"
+    assert second.round == 2
+
+    # Now while [Under Verification] round 2, re-offer the OLD rejected round-1
+    # type: this is a fresh offer of a previously-rejected type, not a duplicate.
+    # Opening it starts the next verification round (round 3) - the key assertion
+    # is that the gate does NOT reject it as a duplicate of the round-1 offer.
+    third = await partner.submit_credentials(
+        partner_id,
+        credentials=[
+            CredentialSubmission(
+                credential_type=CredentialType.QUALIFICATION_CERTIFICATE,
+                artifacts=[_DOC_BYTES],
+            )
+        ],
+    )
+    assert third.status == "Under Verification"
+    assert third.round == 3
+    assert third.reason is None
+
+    rounds = await _query(
+        database_url, "SELECT round, status FROM partner.partner_verifications ORDER BY round"
+    )
+    # Round 1 rejected; round 2 (medical_registration) queued; round 3 re-offers the
+    # rejected round-1 type - all in the queue, never duplicate-rejected.
+    assert rounds == [
+        {"round": 1, "status": "rejected"},
+        {"round": 2, "status": "queued"},
+        {"round": 3, "status": "queued"},
+    ]
+
+    credentials_rows = await _query(
+        database_url,
+        "SELECT credential_type FROM partner.partner_credentials ORDER BY credential_type",
+    )
+    assert {r["credential_type"] for r in credentials_rows} == {
+        "medical_registration",
+        "qualification_certificate",
+    }
