@@ -412,3 +412,62 @@ def test_console_routes_sit_behind_the_gateway_stack() -> None:
     assert "/v1/partner/verification/{partner_id}" in paths
     assert "/v1/partner/verification/{partner_id}/decision" in paths
     assert "/v1/partner/verification/{partner_id}/grace-lapse" in paths
+
+
+# -- Idempotency (api-standards 5) ----------------------------------------------
+
+
+def test_decision_idempotent_same_key_replays_result() -> None:
+    facade = StubPartnerFacade()
+    client = _client(facade)
+    key = "decision-key-1"
+
+    resp1 = client.post(
+        "/v1/partner/verification/3/decision",
+        json={"approve": True},
+        headers={**_bearer(_token()), "Idempotency-Key": key},
+    )
+    resp2 = client.post(
+        "/v1/partner/verification/3/decision",
+        json={"approve": True},
+        headers={**_bearer(_token()), "Idempotency-Key": key},
+    )
+
+    assert resp1.status_code == 200
+    assert resp2.status_code == 200
+    assert resp1.json() == resp2.json()
+    assert len(facade.calls) == 1
+
+
+def test_decision_distinct_keys_both_apply() -> None:
+    facade = StubPartnerFacade()
+    client = _client(facade)
+
+    resp1 = client.post(
+        "/v1/partner/verification/3/decision",
+        json={"approve": True},
+        headers={**_bearer(_token()), "Idempotency-Key": "key-1"},
+    )
+    resp2 = client.post(
+        "/v1/partner/verification/3/decision",
+        json={"approve": True},
+        headers={**_bearer(_token()), "Idempotency-Key": "key-2"},
+    )
+
+    assert resp1.status_code == 200
+    assert resp2.status_code == 200
+    assert len(facade.calls) == 2
+
+
+def test_decision_missing_key_still_allows_mutation() -> None:
+    facade = StubPartnerFacade()
+    client = _client(facade)
+
+    resp = client.post(
+        "/v1/partner/verification/3/decision",
+        json={"approve": True},
+        headers=_bearer(_token()),
+    )
+
+    assert resp.status_code == 200
+    assert len(facade.calls) == 1

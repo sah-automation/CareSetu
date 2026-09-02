@@ -161,3 +161,57 @@ def test_recovery_routes_sit_behind_the_gateway_stack() -> None:
     paths = app.openapi()["paths"]
     assert "/v1/partner/rejection-reason" in paths
     assert "/v1/partner/appeal" in paths
+
+
+# -- Idempotency (api-standards 5) ----------------------------------------------
+
+
+def test_appeal_idempotent_same_key_replays_result() -> None:
+    facade = StubPartnerFacade()
+    client = _client(facade)
+    key = "appeal-key-1"
+
+    resp1 = client.post(
+        "/v1/partner/appeal",
+        headers={**_bearer(_token()), "Idempotency-Key": key},
+    )
+    resp2 = client.post(
+        "/v1/partner/appeal",
+        headers={**_bearer(_token()), "Idempotency-Key": key},
+    )
+
+    assert resp1.status_code == 200
+    assert resp2.status_code == 200
+    assert resp1.json() == resp2.json()
+    assert len(facade.calls) == 2  # resolve_partner + appeal called once each
+
+
+def test_appeal_distinct_keys_both_apply() -> None:
+    facade = StubPartnerFacade()
+    client = _client(facade)
+
+    resp1 = client.post(
+        "/v1/partner/appeal",
+        headers={**_bearer(_token()), "Idempotency-Key": "key-1"},
+    )
+    resp2 = client.post(
+        "/v1/partner/appeal",
+        headers={**_bearer(_token()), "Idempotency-Key": "key-2"},
+    )
+
+    assert resp1.status_code == 200
+    assert resp2.status_code == 200
+    assert len(facade.calls) == 4  # resolve_partner + appeal called twice each
+
+
+def test_appeal_missing_key_still_allows_mutation() -> None:
+    facade = StubPartnerFacade()
+    client = _client(facade)
+
+    resp = client.post(
+        "/v1/partner/appeal",
+        headers=_bearer(_token()),
+    )
+
+    assert resp.status_code == 200
+    assert len(facade.calls) == 2  # resolve_partner + appeal

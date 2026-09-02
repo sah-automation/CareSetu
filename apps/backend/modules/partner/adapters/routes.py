@@ -20,13 +20,15 @@ from __future__ import annotations
 
 import base64
 import logging
-from typing import Annotated, cast
+from collections.abc import Awaitable, Callable
+from typing import Annotated, TypeVar, cast
 
 from fastapi import APIRouter, Depends, FastAPI, Query, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.gateway.errors import ErrorEnvelope
+from app.gateway.idempotency import IdempotencyStore
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_operator, require_partner
 from app.gateway.trace import resolve_trace_id
@@ -57,6 +59,37 @@ from modules.partner.facade import (
 router = APIRouter(prefix="/v1/partner", tags=["partner"])
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
+
+
+async def _run_idempotent(
+    request: Request,
+    call: Callable[[], Awaitable[_T]],
+) -> _T:
+    """Execute ``call`` once per ``Idempotency-Key`` (api-standards 5).
+
+    With the header present, the edge's in-process store (PHASE-2 REM T11, #80)
+    is checked first: a replayed key returns the stored result of the first
+    execution and the facade is not called again, so a client retry after a lost
+    response cannot double-submit credentials or double-file an appeal. Only a
+    completed call is stored - an expected failure (error envelope) or a 5xx is
+    never cached, so a retry re-executes. The key is namespaced by the request
+    path so one client key cannot collide across endpoints. A missing or blank
+    header passes straight through exactly as before - no store read or write.
+    """
+    raw_key = request.headers.get("Idempotency-Key")
+    if raw_key is None or not raw_key.strip():
+        return await call()
+    key = raw_key.strip()
+    store = cast(IdempotencyStore, request.app.state.idempotency_store)
+    cache_key = f"{request.url.path}:{key}"
+    cached = store.get(cache_key)
+    if cached is not None:
+        return cast(_T, cached)
+    result = await call()
+    store.put(cache_key, result)
+    return result
 
 
 class RegisterPartnerRequest(BaseModel):
@@ -160,20 +193,26 @@ async def open_credential_submission(
     submission to the facade, which encrypts them into ``partner/``. The partner
     acts only on their own identity - the authenticated principal's ``subject_id``
     is resolved to the partner profile, so no cross-partner submission.
+    Idempotent (api-standards 5): a duplicate ``Idempotency-Key`` replays the
+    stored result without re-executing the facade call.
     """
     facade = cast(PartnerFacade, request.app.state.partner_facade)
-    partner = await facade.resolve_partner(int(account.subject_id))
-    credentials = [
-        CredentialSubmission(
-            credential_type=doc.credential_type,
-            artifacts=[_decode_artifact(b64) for b64 in doc.artifacts],
+
+    async def _call() -> CredentialSubmissionResult:
+        partner = await facade.resolve_partner(int(account.subject_id))
+        credentials = [
+            CredentialSubmission(
+                credential_type=doc.credential_type,
+                artifacts=[_decode_artifact(b64) for b64 in doc.artifacts],
+            )
+            for doc in body.credentials
+        ]
+        return await facade.submit_credentials(
+            partner.partner_id,
+            credentials=credentials,
         )
-        for doc in body.credentials
-    ]
-    return await facade.submit_credentials(
-        partner.partner_id,
-        credentials=credentials,
-    )
+
+    return await _run_idempotent(request, _call)
 
 
 @router.get(
@@ -215,10 +254,16 @@ async def partner_appeal(
     and files the appeal, which re-enters the operator queue (Step 2) and emits
     ``partner.verification_started``. The ``appeal_used`` flag is consumed on
     first use; a second appeal maps to an ``APPEAL_ALREADY_USED`` 422.
+    Idempotent (api-standards 5): a duplicate ``Idempotency-Key`` replays the
+    stored result without re-executing the facade call.
     """
     facade = cast(PartnerFacade, request.app.state.partner_facade)
-    partner = await facade.resolve_partner(int(account.subject_id))
-    return await facade.appeal(partner.partner_id)
+
+    async def _call() -> PartnerView:
+        partner = await facade.resolve_partner(int(account.subject_id))
+        return await facade.appeal(partner.partner_id)
+
+    return await _run_idempotent(request, _call)
 
 
 @router.get(
@@ -296,14 +341,20 @@ async def operator_decision(
     reason is REQUIRED (facade raises 422 when absent) and the partner becomes
     ``[Rejected]`` with ``partner.rejected`` carrying the reason (role denied).
     Individually attributed to the operator principal - there is no bulk path.
+    Idempotent (api-standards 5): a duplicate ``Idempotency-Key`` replays the
+    stored result without re-executing the facade call.
     """
     facade = cast(PartnerFacade, request.app.state.partner_facade)
-    return await facade.operator_decision(
-        int(partner_id),
-        decision_by=int(operator.subject_id),
-        approve=body.approve,
-        reason=body.reason,
-    )
+
+    async def _call() -> PartnerView:
+        return await facade.operator_decision(
+            int(partner_id),
+            decision_by=int(operator.subject_id),
+            approve=body.approve,
+            reason=body.reason,
+        )
+
+    return await _run_idempotent(request, _call)
 
 
 class OperatorDecisionRequest(BaseModel):
