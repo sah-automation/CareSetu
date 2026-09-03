@@ -36,15 +36,6 @@ interface Notice {
   traceId?: string;
 }
 
-export interface StaffLoginFormProps {
-  /**
-   * Local stand-in for the Phase 5 session flag ("account has MFA enrolled").
-   * Nothing sets it this phase; it exists so the slot's rendering rule and
-   * its inertness are provable in isolation.
-   */
-  mfaEnrolled?: boolean;
-}
-
 function maskPhone(phone: string): string {
   if (phone.length <= 4) return phone;
   const visible = phone.slice(-4);
@@ -63,7 +54,7 @@ async function completeStaffLogin(
   return { roles: me.roles, phone: me.phone };
 }
 
-export function StaffLoginForm({ mfaEnrolled = false }: StaffLoginFormProps) {
+export function StaffLoginForm() {
   const { lang } = useLang();
   const t = STRINGS[lang].staffAuth.login;
   const router = useRouter();
@@ -448,30 +439,6 @@ export function StaffLoginForm({ mfaEnrolled = false }: StaffLoginFormProps) {
                   {t.forgotPassword}
                 </a>
               </div>
-
-              {mfaEnrolled ? (
-                <div
-                  aria-disabled="true"
-                  data-testid="mfa-slot"
-                  className="mb-4 opacity-60"
-                >
-                  <label
-                    htmlFor="staff-mfa-slot"
-                    className="mb-1 block text-sm font-medium"
-                  >
-                    {t.mfaCodeLabel}
-                  </label>
-                  <input
-                    id="staff-mfa-slot"
-                    inputMode="numeric"
-                    maxLength={6}
-                    disabled
-                    className="w-full rounded-md border border-hairline bg-surface px-3 py-2"
-                    data-testid="mfa-slot-input"
-                  />
-                  <p className="mt-1 text-xs opacity-80">{t.mfaHelp}</p>
-                </div>
-              ) : null}
             </>
           )}
         </>

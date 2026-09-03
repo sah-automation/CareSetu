@@ -1,5 +1,5 @@
 // PHASE-2.6 T10 (#201): staff login card behavior - phone/email dual-mode
-// form, MFA step, and honest submit feedback (done-verify suite).
+// form and honest submit feedback (done-verify suite).
 //
 // PHASE-5 T4 (#282): operator login flow tests - phone+password triggers
 // operatorLogin, SESSION_MFA_REQUIRED surfaces TOTP step, successful MFA
@@ -94,20 +94,6 @@ describe("StaffLoginForm", () => {
     render(<StaffLoginForm />);
     const link = screen.getByTestId("forgot-password");
     expect(link).toHaveTextContent(t.forgotPassword);
-  });
-
-  it("does not render the MFA slot at all when nothing flags enrollment", () => {
-    render(<StaffLoginForm />);
-    expect(screen.queryByTestId("mfa-slot")).not.toBeInTheDocument();
-  });
-
-  it("renders the slot only-inert when enrollment is locally indicated", () => {
-    render(<StaffLoginForm mfaEnrolled />);
-    const slot = screen.getByTestId("mfa-slot");
-    expect(slot).toHaveAttribute("aria-disabled", "true");
-    const input = screen.getByTestId("mfa-slot-input");
-    expect(input).toBeDisabled();
-    expect(slot).toHaveTextContent(/authenticator/i);
   });
 
   it("toggles password visibility through the labeled control in partner mode", () => {
