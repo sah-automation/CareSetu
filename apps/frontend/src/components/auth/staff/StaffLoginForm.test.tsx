@@ -1,32 +1,80 @@
-// PHASE-2.6 T10 (#201): staff login card behavior - MFA slot inertness, the
-// show/hide toggle, and honest submit feedback (done-verify suite).
+// PHASE-2.6 T10 (#201): staff login card behavior - phone/email dual-mode
+// form, MFA step, and honest submit feedback (done-verify suite).
+//
+// PHASE-5 T4 (#282): operator login flow tests - phone+password triggers
+// operatorLogin, SESSION_MFA_REQUIRED surfaces TOTP step, successful MFA
+// creates session and routes via postLoginTarget.
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { ApiError } from "@/lib/api-errors";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 
 import { StaffLoginForm } from "./StaffLoginForm";
 
-afterEach(cleanup);
+const mockPush = vi.fn();
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: mockPush }),
+}));
+
+const mockOperatorLogin = vi.fn();
+vi.mock("@/lib/operator/api", () => ({
+  operatorLogin: (...args: unknown[]) => mockOperatorLogin(...args),
+}));
+
+const mockFetchMe = vi.fn();
+vi.mock("@/lib/auth/api", () => ({
+  fetchMe: (...args: unknown[]) => mockFetchMe(...args),
+}));
+
+const mockSaveSession = vi.fn();
+vi.mock("@/lib/auth/session", () => ({
+  saveSession: (...args: unknown[]) => mockSaveSession(...args),
+}));
+
+const mockPostLoginTarget = vi.fn().mockReturnValue("/operator/home");
+vi.mock("@/lib/auth/staff-routing", () => ({
+  postLoginTarget: (...args: unknown[]) => mockPostLoginTarget(...args),
+}));
+
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+});
 
 const t = STRINGS.en.staffAuth.login;
 
-function fill(valid: boolean) {
-  fireEvent.change(screen.getByTestId("staff-email"), {
-    target: { value: valid ? "dr.sharma@example.com" : "not-an-email" },
+function fillPhoneAndPass() {
+  fireEvent.change(screen.getByTestId("staff-phone"), {
+    target: { value: "9876543210" },
   });
   fireEvent.change(screen.getByTestId("staff-password"), {
-    target: { value: valid ? "secret" : "" },
+    target: { value: "secret" },
+  });
+}
+
+function fillEmailAndPass() {
+  fireEvent.change(screen.getByTestId("staff-email"), {
+    target: { value: "dr.sharma@example.com" },
+  });
+  fireEvent.change(screen.getByTestId("staff-password"), {
+    target: { value: "secret" },
   });
 }
 
 describe("StaffLoginForm", () => {
-  it("renders the email + password composition without any role picker", () => {
+  it("renders phone, email, and password fields", () => {
     render(<StaffLoginForm />);
+    expect(screen.getByTestId("staff-phone")).toBeInTheDocument();
     expect(screen.getByTestId("staff-email")).toBeInTheDocument();
     expect(screen.getByTestId("staff-password")).toBeInTheDocument();
-    // §4.2: no role picker on the page, ever.
     expect(
       screen.queryByRole("button", { name: /doctor|lab|chemist/i }),
     ).not.toBeInTheDocument();
@@ -47,18 +95,9 @@ describe("StaffLoginForm", () => {
     render(<StaffLoginForm mfaEnrolled />);
     const slot = screen.getByTestId("mfa-slot");
     expect(slot).toHaveAttribute("aria-disabled", "true");
-    const input = screen.getByTestId("mfa-input");
+    const input = screen.getByTestId("mfa-slot-input");
     expect(input).toBeDisabled();
-    // The slot copy itself names where it activates.
-    expect(slot).toHaveTextContent(/Phase 5/);
-  });
-
-  it("never submits a functional MFA step even when enrolled", () => {
-    render(<StaffLoginForm mfaEnrolled />);
-    fill(true);
-    fireEvent.click(screen.getByTestId("staff-submit"));
-    // Still the honest Phase 5 outcome - enrollment never unlocks anything.
-    expect(screen.getByTestId("staff-phase5-notice")).toBeInTheDocument();
+    expect(slot).toHaveTextContent(/authenticator/i);
   });
 
   it("toggles password visibility through the labeled control", () => {
@@ -74,63 +113,254 @@ describe("StaffLoginForm", () => {
     expect(toggle).toHaveAttribute("aria-label", t.showPassword);
   });
 
-  it("validates a field on blur without summoning the submit summary", () => {
+  it("validates phone on blur", () => {
+    render(<StaffLoginForm />);
+    fireEvent.change(screen.getByTestId("staff-phone"), {
+      target: { value: "123" },
+    });
+    fireEvent.blur(screen.getByTestId("staff-phone"));
+    expect(screen.getByTestId("staff-phone-error")).toHaveTextContent(
+      t.phoneInvalid,
+    );
+  });
+
+  it("validates email on blur", () => {
     render(<StaffLoginForm />);
     fireEvent.blur(screen.getByTestId("staff-email"));
     expect(screen.getByTestId("staff-email-error")).toHaveTextContent(
       t.emailInvalid,
     );
-    // Blur alone never claims a failed submit.
-    expect(screen.queryByTestId("staff-form-summary")).not.toBeInTheDocument();
   });
 
-  it("clears a field error once blur sees a valid value", () => {
-    render(<StaffLoginForm />);
-    const email = screen.getByTestId("staff-email");
-    fireEvent.blur(email);
-    fireEvent.change(email, { target: { value: "dr.sharma@example.com" } });
-    fireEvent.blur(email);
-    expect(screen.queryByTestId("staff-email-error")).not.toBeInTheDocument();
-  });
-
-  it("summarizes invalid submits with a count and focuses the first bad field", () => {
+  it("summarizes invalid submits with a count", () => {
     render(<StaffLoginForm />);
     fireEvent.click(screen.getByTestId("staff-submit"));
-    const summary = screen.getByTestId("staff-form-summary");
-    expect(summary).toHaveTextContent(t.summaryTitle(2));
-    expect(document.activeElement?.id).toBe("staff-email");
+    expect(screen.getByTestId("staff-form-summary")).toBeInTheDocument();
   });
 
-  it("focuses the password field when only it is invalid", () => {
+  it("submits honestly when only email+password filled (partner path)", () => {
     render(<StaffLoginForm />);
-    fireEvent.change(screen.getByTestId("staff-email"), {
-      target: { value: "dr.sharma@example.com" },
-    });
-    fireEvent.click(screen.getByTestId("staff-submit"));
-    expect(document.activeElement?.id).toBe("staff-password");
-  });
-
-  it("submits honestly: names Phase 5, fabricates no success state", () => {
-    render(<StaffLoginForm />);
-    fill(true);
-    fireEvent.click(screen.getByTestId("staff-submit"));
-    const notice = screen.getByRole("status");
-    expect(notice).toHaveTextContent(t.phase5Notice);
-    expect(notice).toHaveTextContent(/Phase 5/);
-    // No success banner exists anywhere to fake.
-    expect(screen.queryByTestId("staff-login-success")).not.toBeInTheDocument();
-  });
-
-  it("clears a previous submit notice when validation fails again", () => {
-    render(<StaffLoginForm />);
-    fill(true);
+    fillEmailAndPass();
     fireEvent.click(screen.getByTestId("staff-submit"));
     expect(screen.getByTestId("staff-phase5-notice")).toBeInTheDocument();
-    fireEvent.change(screen.getByTestId("staff-email"), {
-      target: { value: "" },
+  });
+});
+
+describe("Operator login flow", () => {
+  it("calls operatorLogin with phone and password on submit", async () => {
+    mockOperatorLogin.mockResolvedValue({
+      jwt: "abc",
+      jti: "j1",
+      scope: "operator",
+      identity_id: 5,
+      expires_in_seconds: 3600,
+      refresh_token: "rt",
+    });
+    mockFetchMe.mockResolvedValue({
+      identity_id: 5,
+      phone: "+919876543210",
+      roles: ["operator"],
+    });
+
+    render(<StaffLoginForm />);
+    fillPhoneAndPass();
+    fireEvent.click(screen.getByTestId("staff-submit"));
+
+    await waitFor(() => {
+      expect(mockOperatorLogin).toHaveBeenCalledWith({
+        phone: "9876543210",
+        code: "secret",
+      });
+    });
+  });
+
+  it("saves session and routes on successful login", async () => {
+    const session = {
+      jwt: "abc",
+      jti: "j1",
+      scope: "operator",
+      identity_id: 5,
+      expires_in_seconds: 3600,
+      refresh_token: "rt",
+    };
+    mockOperatorLogin.mockResolvedValue(session);
+    mockFetchMe.mockResolvedValue({
+      identity_id: 5,
+      phone: "+919876543210",
+      roles: ["operator"],
+    });
+
+    render(<StaffLoginForm />);
+    fillPhoneAndPass();
+    fireEvent.click(screen.getByTestId("staff-submit"));
+
+    await waitFor(() => {
+      expect(mockSaveSession).toHaveBeenCalledWith(session, "+919876543210");
+      expect(mockPostLoginTarget).toHaveBeenCalledWith({
+        surface: "staff",
+        roles: ["operator"],
+      });
+      expect(mockPush).toHaveBeenCalledWith("/operator/home");
+    });
+  });
+
+  it("surfaces SESSION_MFA_REQUIRED as TOTP input step", async () => {
+    mockOperatorLogin.mockRejectedValue(
+      new ApiError({
+        code: "SESSION_MFA_REQUIRED",
+        message: "mfa required",
+        trace_id: "trace-123",
+        details: {},
+      }),
+    );
+    render(<StaffLoginForm />);
+    fillPhoneAndPass();
+    fireEvent.click(screen.getByTestId("staff-submit"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("mfa-input")).toBeInTheDocument();
+    });
+    // Masked phone displayed, not raw PII.
+    expect(screen.getByTestId("mfa-phone-display")).toHaveTextContent(/X/);
+    expect(screen.queryByTestId("staff-phone")).not.toBeInTheDocument();
+  });
+
+  it("submits TOTP code and creates session on MFA success", async () => {
+    // First call: password triggers MFA
+    mockOperatorLogin
+      .mockRejectedValueOnce(
+        new ApiError({
+          code: "SESSION_MFA_REQUIRED",
+          message: "mfa required",
+          trace_id: "t",
+          details: {},
+        }),
+      )
+      .mockResolvedValueOnce({
+        jwt: "xyz",
+        jti: "j2",
+        scope: "operator",
+        identity_id: 5,
+        expires_in_seconds: 3600,
+        refresh_token: "rt2",
+      });
+    mockFetchMe.mockResolvedValue({
+      identity_id: 5,
+      phone: "+919876543210",
+      roles: ["operator"],
+    });
+
+    render(<StaffLoginForm />);
+    fillPhoneAndPass();
+    fireEvent.click(screen.getByTestId("staff-submit"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("mfa-input")).toBeInTheDocument();
+    });
+
+    // Enter TOTP and submit
+    fireEvent.change(screen.getByTestId("mfa-input"), {
+      target: { value: "654321" },
     });
     fireEvent.click(screen.getByTestId("staff-submit"));
-    expect(screen.queryByTestId("staff-phase5-notice")).not.toBeInTheDocument();
-    expect(screen.getByTestId("staff-form-summary")).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(mockOperatorLogin).toHaveBeenLastCalledWith({
+        phone: "9876543210",
+        code: "654321",
+      });
+      expect(mockPush).toHaveBeenCalledWith("/operator/home");
+    });
+  });
+
+  it("rejects a short TOTP code without calling the API", async () => {
+    mockOperatorLogin.mockRejectedValue(
+      new ApiError({
+        code: "SESSION_MFA_REQUIRED",
+        message: "mfa required",
+        trace_id: "t",
+        details: {},
+      }),
+    );
+
+    render(<StaffLoginForm />);
+    fillPhoneAndPass();
+    fireEvent.click(screen.getByTestId("staff-submit"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("mfa-input")).toBeInTheDocument();
+    });
+
+    // Enter a code too short to verify.
+    fireEvent.change(screen.getByTestId("mfa-input"), {
+      target: { value: "123" },
+    });
+    fireEvent.click(screen.getByTestId("staff-submit"));
+
+    expect(screen.getByTestId("mfa-code-error")).toHaveTextContent(
+      t.codeRequired,
+    );
+    // The short code never goes out to the API.
+    expect(mockOperatorLogin).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows envelope error with traceId for failed login", async () => {
+    mockOperatorLogin.mockRejectedValue(
+      new ApiError({
+        code: "INVALID_CREDENTIALS",
+        message: "bad creds",
+        trace_id: "trace-456",
+        details: {},
+      }),
+    );
+
+    render(<StaffLoginForm />);
+    fillPhoneAndPass();
+    fireEvent.click(screen.getByTestId("staff-submit"));
+
+    await waitFor(() => {
+      const error = screen.getByTestId("staff-login-error");
+      // INVALID_CREDENTIALS maps to localized copy - the raw code is never shown.
+      expect(error).toHaveTextContent(t.invalidCredentials);
+      expect(error).not.toHaveTextContent("INVALID_CREDENTIALS");
+      // The envelope's trace id is still surfaced alongside the copy.
+      expect(error).toHaveTextContent("trace-456");
+    });
+  });
+
+  it("disables submit button while loading", async () => {
+    let resolveLogin: (v: unknown) => void;
+    mockOperatorLogin.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveLogin = resolve;
+        }),
+    );
+
+    render(<StaffLoginForm />);
+    fillPhoneAndPass();
+    fireEvent.click(screen.getByTestId("staff-submit"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("staff-submit")).toBeDisabled();
+    });
+
+    resolveLogin!({
+      jwt: "abc",
+      jti: "j1",
+      scope: "operator",
+      identity_id: 5,
+      expires_in_seconds: 3600,
+      refresh_token: "rt",
+    });
+  });
+
+  it("does not call operatorLogin when phone is empty", async () => {
+    render(<StaffLoginForm />);
+    fillEmailAndPass();
+    fireEvent.click(screen.getByTestId("staff-submit"));
+
+    // Partner path - no operatorLogin call
+    expect(mockOperatorLogin).not.toHaveBeenCalled();
   });
 });

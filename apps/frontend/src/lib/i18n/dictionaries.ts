@@ -84,9 +84,13 @@ const en = {
       hidePassword: "Hide",
       forgotPassword: "Forgot password?",
       signIn: "Sign in",
+      phoneLabel: "Phone number",
+      phonePlaceholder: "10-digit mobile number",
+      phoneInvalid: "Enter a valid phone number.",
       mfaCodeLabel: "Authentication code (2FA)",
-      mfaHelp:
-        "From your authenticator app. MFA verification activates in Phase 5.",
+      mfaHelp: "Enter the 6-digit code from your authenticator app.",
+      mfaSubmit: "Verify code",
+      codeRequired: "Enter the 6-digit code.",
       newHereTitle: "New to CareSetu?",
       newHereBody:
         "Register your practice or business - our team verifies before you are listed.",
@@ -706,9 +710,13 @@ export const STRINGS: Record<Lang, Dictionary> = {
         hidePassword: "छिपाएँ",
         forgotPassword: "पासवर्ड भूल गए?",
         signIn: "साइन इन करें",
+        phoneLabel: "फ़ोन नंबर",
+        phonePlaceholder: "10 अंकों का मोबाइल नंबर",
+        phoneInvalid: "एक सही फ़ोन नंबर दर्ज करें।",
         mfaCodeLabel: "प्रमाणीकरण कोड (2FA)",
-        mfaHelp:
-          "अपने authenticator ऐप से। MFA सत्यापन Phase 5 में सक्रिय होगा।",
+        mfaHelp: "अपने authenticator ऐप से 6 अंकों का कोड दर्ज करें।",
+        mfaSubmit: "कोड सत्यापित करें",
+        codeRequired: "6 अंकों का कोड दर्ज करें।",
         newHereTitle: "CareSetu पर नए हैं?",
         newHereBody:
           "अपनी प्रैक्टिस या व्यवसाय रजिस्टर करें - लिस्ट होने से पहले हमारी टीम जाँच करती है।",

@@ -4,17 +4,26 @@
 
 import { describe, expect, it } from "vitest";
 
+import { ApiError } from "@/lib/api-errors";
 import { AuthApiError } from "@/lib/auth/api";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 
-import { staffLoginErrorCopy, validateStaffLogin } from "./staffLoginState";
+import {
+  staffLoginErrorCopy,
+  staffOperatorErrorCopy,
+  validateStaffLogin,
+} from "./staffLoginState";
 
 const t = STRINGS.en.staffAuth.login;
 
 describe("validateStaffLogin", () => {
   it("accepts a well-formed email with any non-empty password", () => {
     expect(
-      validateStaffLogin({ email: "dr.sharma@example.com", password: "x" }),
+      validateStaffLogin({
+        phone: "",
+        email: "dr.sharma@example.com",
+        password: "x",
+      }),
     ).toEqual({});
   });
 
@@ -24,18 +33,41 @@ describe("validateStaffLogin", () => {
     ["whitespace-only", "   "],
     ["empty", ""],
   ])("rejects %s as an email", (_label, email) => {
-    const errors = validateStaffLogin({ email, password: "secret" });
+    const errors = validateStaffLogin({ phone: "", email, password: "secret" });
     expect(errors.email).toBe("emailInvalid");
   });
 
   it("requires a non-empty password", () => {
-    const errors = validateStaffLogin({ email: "a@b.co", password: "" });
+    const errors = validateStaffLogin({
+      phone: "",
+      email: "a@b.co",
+      password: "",
+    });
     expect(errors.password).toBe("passwordRequired");
   });
 
   it("reports both fields at once so the summary can count them", () => {
-    const errors = validateStaffLogin({ email: "", password: "" });
+    const errors = validateStaffLogin({ phone: "", email: "", password: "" });
     expect(Object.keys(errors)).toHaveLength(2);
+  });
+
+  it("accepts a well-formed phone number with any non-empty password", () => {
+    expect(
+      validateStaffLogin({
+        phone: "9876543210",
+        email: "",
+        password: "x",
+      }),
+    ).toEqual({});
+  });
+
+  it.each([
+    ["too short", "123"],
+    ["letters", "abcdefghij"],
+    ["with spaces", "987 654 3210"],
+  ])("rejects %s as a phone number", (_label, phone) => {
+    const errors = validateStaffLogin({ phone, email: "", password: "secret" });
+    expect(errors.phone).toBe("phoneInvalid");
   });
 });
 
@@ -78,5 +110,42 @@ describe("staffLoginErrorCopy", () => {
   it("treats non-envelope throws as operational errors", () => {
     expect(staffLoginErrorCopy(new Error("boom"), t)).toBe(t.genericError);
     expect(staffLoginErrorCopy(undefined, t)).toBe(t.genericError);
+  });
+});
+
+function operatorError(code: string): ApiError {
+  return new ApiError({
+    code,
+    message: "envelope message",
+    trace_id: "trace-1",
+    details: {},
+  });
+}
+
+describe("staffOperatorErrorCopy", () => {
+  it("keys INVALID_CREDENTIALS onto the calm invalid-credentials copy", () => {
+    expect(
+      staffOperatorErrorCopy(operatorError("INVALID_CREDENTIALS"), t),
+    ).toBe(t.invalidCredentials);
+  });
+
+  it("keys ACCOUNT_LOCKED onto the lockout copy", () => {
+    expect(staffOperatorErrorCopy(operatorError("ACCOUNT_LOCKED"), t)).toBe(
+      t.accountLocked,
+    );
+  });
+
+  it("never leaks a raw operator code to users - falls back to generic copy", () => {
+    const copy = staffOperatorErrorCopy(
+      operatorError("IAM_OPERATOR_UNKNOWN_CODE"),
+      t,
+    );
+    expect(copy).toBe(t.genericError);
+    expect(copy).not.toMatch(/IAM_OPERATOR_UNKNOWN_CODE/);
+  });
+
+  it("treats non-envelope throws as operational errors", () => {
+    expect(staffOperatorErrorCopy(new Error("boom"), t)).toBe(t.genericError);
+    expect(staffOperatorErrorCopy(undefined, t)).toBe(t.genericError);
   });
 });
