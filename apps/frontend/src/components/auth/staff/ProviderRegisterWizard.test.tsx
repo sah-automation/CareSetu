@@ -66,6 +66,21 @@ const mockIssueSession = vi.mocked(issueSession);
 const mockSaveSession = vi.mocked(saveSession);
 const mockPostLoginTarget = vi.mocked(postLoginTarget);
 
+function mockGeolocation(
+  handler: (
+    success: (position: {
+      coords: { latitude: number; longitude: number };
+    }) => void,
+    error: (err: { code: number; message: string }) => void,
+  ) => void,
+) {
+  vi.stubGlobal("navigator", {
+    geolocation: {
+      getCurrentPosition: vi.fn().mockImplementation(handler),
+    },
+  });
+}
+
 beforeEach(() => {
   vi.stubGlobal(
     "FileReader",
@@ -78,6 +93,17 @@ beforeEach(() => {
       }
     },
   );
+
+  // Mock navigator.geolocation for wizard submit tests - default resolves
+  // with a fixed position distinct from (0,0).
+  mockGeolocation((success) => {
+    success({
+      coords: {
+        latitude: 23.99,
+        longitude: 83.99,
+      },
+    });
+  });
 });
 
 afterEach(() => {
@@ -445,6 +471,8 @@ describe("review & declarations with submission", () => {
       expect.objectContaining({
         phone: "+919876543210",
         partner_type: "doctor",
+        practice_latitude: 23.99,
+        practice_longitude: 83.99,
       }),
     );
     expect(mockSubmitCredentials).toHaveBeenCalledOnce();
@@ -459,5 +487,61 @@ describe("review & declarations with submission", () => {
       roles: ["partner"],
       partnerState: "pending",
     });
+  });
+
+  it("passes through a 12-digit international-format phone unchanged", async () => {
+    render(<ProviderRegisterWizard presetType="doctor" />);
+    type("pr-fullname", "Dr. Asha Kumar");
+    type("pr-email", "asha@example.com");
+    type("pr-password", STRONG);
+    // 12-digit 91-prefixed form - the wizard must not double-prefix it.
+    type("pr-mobile", "919876543210");
+    fireEvent.click(screen.getByTestId("pr-next"));
+    fillDoctorStep2();
+    fireEvent.click(screen.getByTestId("pr-next"));
+    attachDoctorFiles();
+    fireEvent.click(screen.getByTestId("pr-next"));
+
+    fireEvent.click(screen.getByTestId("decl-truth"));
+    fireEvent.click(screen.getByTestId("decl-consent"));
+    fireEvent.click(screen.getByTestId("decl-terms"));
+    fireEvent.click(screen.getByTestId("pr-submit"));
+
+    await vi.waitFor(
+      () => {
+        expect(mockIssueSession).toHaveBeenCalledOnce();
+      },
+      { timeout: 5000 },
+    );
+
+    expect(mockRegisterPartner).toHaveBeenCalledWith(
+      expect.objectContaining({ phone: "+919876543210" }),
+    );
+  });
+
+  it("falls back to env-configured coordinates when geolocation is denied", async () => {
+    // Override geolocation to deny BEFORE the wizard mounts so its mount-time
+    // useEffect resolves to the env-configured fallback (Daltonganj).
+    mockGeolocation((_success, error) => error({ code: 1, message: "denied" }));
+
+    walkToStep(4, "doctor");
+    fireEvent.click(screen.getByTestId("decl-truth"));
+    fireEvent.click(screen.getByTestId("decl-consent"));
+    fireEvent.click(screen.getByTestId("decl-terms"));
+    fireEvent.click(screen.getByTestId("pr-submit"));
+
+    await vi.waitFor(
+      () => {
+        expect(mockIssueSession).toHaveBeenCalledOnce();
+      },
+      { timeout: 5000 },
+    );
+
+    expect(mockRegisterPartner).toHaveBeenCalledWith(
+      expect.objectContaining({
+        practice_latitude: 24.04,
+        practice_longitude: 84.07,
+      }),
+    );
   });
 });

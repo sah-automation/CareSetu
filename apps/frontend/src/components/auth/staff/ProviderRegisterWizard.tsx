@@ -119,11 +119,15 @@ function fileToBase64(file: File): Promise<string> {
 }
 
 function normalizePhone(mobile: string): string {
+  const countryCode = process.env.NEXT_PUBLIC_DEFAULT_COUNTRY_CODE ?? "91";
   const digits = mobile.replace(/\D/g, "");
-  if (digits.length === 12 && digits.startsWith("91")) {
+  if (
+    digits.length === countryCode.length + 10 &&
+    digits.startsWith(countryCode)
+  ) {
     return `+${digits}`;
   }
-  return `+91${digits}`;
+  return `+${countryCode}${digits}`;
 }
 
 interface WizardActions {
@@ -717,6 +721,10 @@ export function ProviderRegisterWizard({
     traceId: string;
   } | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [geoCoords, setGeoCoords] = useState<{
+    lat: number;
+    lng: number;
+  } | null>(null);
   const fileRefs = useRef(new Map<UploadSlotId, File>());
 
   // Re-normalize when the CTA preset changes (e.g. hopping between the
@@ -739,6 +747,36 @@ export function ProviderRegisterWizard({
     setErrors(EMPTY_ERRORS);
     fileRefs.current.clear();
   }, [presetType]);
+
+  // Collect real geolocation on mount; fall back to env-configured defaults
+  // (Daltonganj coordinates for dev/CI) when the browser API is unavailable
+  // or permission is denied.
+  useEffect(() => {
+    const fallbackLat = parseFloat(
+      process.env.NEXT_PUBLIC_DEFAULT_LATITUDE ?? "24.04",
+    );
+    const fallbackLng = parseFloat(
+      process.env.NEXT_PUBLIC_DEFAULT_LONGITUDE ?? "84.07",
+    );
+
+    if (!navigator.geolocation) {
+      setGeoCoords({ lat: fallbackLat, lng: fallbackLng });
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setGeoCoords({
+          lat: position.coords.latitude,
+          lng: position.coords.longitude,
+        });
+      },
+      () => {
+        setGeoCoords({ lat: fallbackLat, lng: fallbackLng });
+      },
+      { timeout: 5000, maximumAge: 60000 },
+    );
+  }, []);
 
   const fieldRefs = useRef(new Map<string, HTMLElement>());
   function registerRef(key: string) {
@@ -882,6 +920,15 @@ export function ProviderRegisterWizard({
       return;
     }
 
+    if (!geoCoords) {
+      setServerError({
+        message:
+          "Unable to determine your location. Please allow location access and try again.",
+        traceId: "",
+      });
+      return;
+    }
+
     setSubmitting(true);
     try {
       const phoneE164 = normalizePhone(phone);
@@ -892,8 +939,8 @@ export function ProviderRegisterWizard({
         practice_name:
           type === "doctor" ? values.fullName : values.businessName || null,
         practice_address: type === "doctor" ? values.city : values.address,
-        practice_latitude: 0,
-        practice_longitude: 0,
+        practice_latitude: geoCoords.lat,
+        practice_longitude: geoCoords.lng,
         service_area_id: null,
       });
 
