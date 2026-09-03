@@ -287,7 +287,33 @@ const en = {
       },
       phase5Notice:
         "Submission is not connected yet: applications arrive in Phase 5. Nothing was sent or saved just now.",
+      submitting: "Submitting...",
+      traceWithId: (traceId: string) => `Trace: ${traceId}`,
+      errorsSubmitPhoneRequired: "Phone number is required",
+      errorsSubmitLocationRequired:
+        "Unable to determine your location. Please allow location access and try again.",
+      errorsSubmitUnexpected: "An unexpected error occurred. Please try again.",
     },
+  },
+
+  // doctor.* surface - PROGRAM landing inside the doctor console (Phase 5,
+  // doctor landing page, P5 FE #291). String keys come from the binding
+  // doctor-resolved view; bilingual parity is compile-time enforced via
+  // Dictionary = typeof en.
+  doctor: {
+    welcome: (displayName: string) => `Welcome, ${displayName}`,
+    doctorLabel: "Doctor",
+    doctorWithPhone: (phone: string) => `Doctor (${phone})`,
+    workspaceActive: "Your doctor workspace is active.",
+    statusHeading: "Status",
+    profileActive:
+      "Your profile is active and verified. You can begin accepting consultations.",
+    nextStepsHeading: "Next Steps",
+    nextSteps: [
+      "- Complete your professional profile (coming soon)",
+      "- Browse the patient directory (Phase 6)",
+      "- Start a consultation from a patient record",
+    ],
   },
 
   // home.* surface - the resolved public homepage's copy (PHASE-2.6 T09,
@@ -657,6 +683,7 @@ export type Dictionary = typeof en;
 export type AuthStrings = Dictionary["auth"];
 export type StaffAuthStrings = Dictionary["staffAuth"];
 export type ProfileStrings = Dictionary["profile"];
+export type DoctorStrings = Dictionary["doctor"];
 
 export const STRINGS: Record<Lang, Dictionary> = {
   en,
@@ -915,7 +942,29 @@ export const STRINGS: Record<Lang, Dictionary> = {
         },
         phase5Notice:
           "जमा करना अभी जुड़ा नहीं है: आवेदन Phase 5 में आएँगे। अभी कुछ भेजा या सहेजा नहीं गया।",
+        submitting: "जमा हो रहा है...",
+        traceWithId: (traceId) => `ट्रेस: ${traceId}`,
+        errorsSubmitPhoneRequired: "फ़ोन नंबर आवश्यक है",
+        errorsSubmitLocationRequired:
+          "आपका स्थान निर्धारित नहीं हो सका। कृपया स्थान की अनुमति दें और फिर से प्रयास करें।",
+        errorsSubmitUnexpected:
+          "अप्रत्याशित त्रुटि हुई। कृपया फिर से प्रयास करें।",
       },
+    },
+    doctor: {
+      welcome: (displayName) => `स्वागत है, ${displayName}`,
+      doctorLabel: "डॉक्टर",
+      doctorWithPhone: (phone) => `डॉक्टर (${phone})`,
+      workspaceActive: "आपका डॉक्टर वर्कस्पेस सक्रिय है।",
+      statusHeading: "स्थिति",
+      profileActive:
+        "आपकी प्रोफ़ाइल सक्रिय और सत्यापित है। आप परामर्श स्वीकार करना शुरू कर सकते हैं।",
+      nextStepsHeading: "अगले कदम",
+      nextSteps: [
+        "- अपनी पेशेवर प्रोफ़ाइल पूरी करें (जल्द आ रही है)",
+        "- मरीज़ निर्देशिका ब्राउज़ करें (Phase 6)",
+        "- किसी मरीज़ के रिकॉर्ड से परामर्श शुरू करें",
+      ],
     },
     consent: {
       title: "साझा करने की अनुमति",

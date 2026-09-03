@@ -914,7 +914,7 @@ export function ProviderRegisterWizard({
     const phone = values.mobile.trim();
     if (!phone) {
       setServerError({
-        message: "Phone number is required",
+        message: t.errorsSubmitPhoneRequired,
         traceId: "",
       });
       return;
@@ -922,8 +922,7 @@ export function ProviderRegisterWizard({
 
     if (!geoCoords) {
       setServerError({
-        message:
-          "Unable to determine your location. Please allow location access and try again.",
+        message: t.errorsSubmitLocationRequired,
         traceId: "",
       });
       return;
@@ -984,7 +983,7 @@ export function ProviderRegisterWizard({
       } else {
         console.error("[provider-register] unexpected submit error", err);
         setServerError({
-          message: "An unexpected error occurred. Please try again.",
+          message: t.errorsSubmitUnexpected,
           traceId: "",
         });
       }
@@ -1070,7 +1069,7 @@ export function ProviderRegisterWizard({
             <p>{serverError.message}</p>
             {serverError.traceId ? (
               <p className="mt-1 text-xs text-txt-muted">
-                Trace: {serverError.traceId}
+                {t.traceWithId(serverError.traceId)}
               </p>
             ) : null}
           </div>
@@ -1112,7 +1111,7 @@ export function ProviderRegisterWizard({
             className="rounded-md bg-primary px-4 py-2 text-sm font-semibold text-on-accent disabled:opacity-50"
           >
             {submitting
-              ? "Submitting..."
+              ? t.submitting
               : step === STEP_LAST
                 ? t.submitApplication
                 : t.continueCta}
