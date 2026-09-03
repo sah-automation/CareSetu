@@ -142,10 +142,44 @@ describe("PartnerStatusPendingPage (inside the full shell)", () => {
     expect(screen.getByTestId("partner-pending-note")).toHaveTextContent(
       STRINGS.en.staffAuth.pending.infoBanner,
     );
-    // Verification scope from API
+    // No stale decision_reason from prior round shown
     expect(
-      screen.getByText("Drug license, shop license, owner KYC"),
-    ).toBeInTheDocument();
+      screen.queryByText("Drug license, shop license, owner KYC"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(STRINGS.en.staffAuth.pending.verifyingLabel),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not render a stale 'Verifying scope' row from a prior round", async () => {
+    const { fetchPartnerMe, fetchPartnerVerification } = await import(
+      "@/lib/partner/api"
+    );
+    vi.mocked(fetchPartnerMe).mockResolvedValue({
+      partner_id: 1,
+      status: "Under Verification",
+      partner_type: "chemist",
+      round: 2,
+      created_at: "2026-09-01T08:00:00Z",
+    });
+    vi.mocked(fetchPartnerVerification).mockResolvedValue({
+      partner_id: 1,
+      round: 2,
+      decision: "Rejected",
+      decision_reason: "Expired shop license",
+      decided_at: "2026-08-25T12:00:00Z",
+    });
+
+    render(<PartnerStatusPendingPage />);
+    await waitFor(() => {
+      expect(screen.getByTestId("partner-pending-card")).toBeInTheDocument();
+    });
+    // The stale decision_reason from round 1 must not appear
+    expect(screen.queryByText("Expired shop license")).not.toBeInTheDocument();
+    // The verifying label row itself must be absent
+    expect(
+      screen.queryByText(STRINGS.en.staffAuth.pending.verifyingLabel),
+    ).not.toBeInTheDocument();
   });
 
   it("shows error banner when fetch fails and recovers on retry", async () => {

@@ -156,12 +156,6 @@ export default function PartnerStatusPendingPage() {
                 </dd>
               </div>
               <div className="flex justify-between gap-4">
-                <dt className="text-txt-muted">{t.verifyingLabel}</dt>
-                <dd className="text-right font-medium">
-                  {verification?.decision_reason || t.detailPlaceholder}
-                </dd>
-              </div>
-              <div className="flex justify-between gap-4">
                 <dt className="text-txt-muted">{t.windowLabel}</dt>
                 <dd className="text-right font-medium">{t.windowValue}</dd>
               </div>
