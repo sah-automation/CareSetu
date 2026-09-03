@@ -18,6 +18,8 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { EmptyState } from "@/components/layout/EmptyState";
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
 import { SoonBadge } from "@/components/dashboard/NavItemLink";
+import { ApiError } from "@/lib/api-errors";
+import { fetchAccessHistory, type AccessHistoryEntry } from "@/lib/audit/api";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -39,6 +41,7 @@ import {
   RECORD_FILTERS,
   applyRecordFilter,
   describeEntry,
+  formatOccurredAt,
   sortTimelineDesc,
   type BadgeTone,
   type RecordFilter,
@@ -106,6 +109,44 @@ export default function RecordPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Access history is a secondary section that needs the record's patient id,
+  // so it fetches only once the timeline has resolved (own uses record.patient_id).
+  const [accessHistory, setAccessHistory] = useState<
+    AccessHistoryEntry[] | null
+  >(null);
+  const [accessStatus, setAccessStatus] = useState<LoadStatus>("loading");
+  const [accessTraceId, setAccessTraceId] = useState<string | undefined>(
+    undefined,
+  );
+  const [accessBannerOpen, setAccessBannerOpen] = useState(false);
+
+  const loadAccessHistory = useCallback((patientId: number) => {
+    setAccessStatus("loading");
+    fetchAccessHistory(patientId)
+      .then((data) => {
+        // Newest-first by accessed_at for a stable reading order.
+        const sorted = [...data.entries].sort(
+          (a, b) =>
+            new Date(b.accessed_at).getTime() -
+            new Date(a.accessed_at).getTime(),
+        );
+        setAccessHistory(sorted);
+        setAccessStatus("ready");
+        setAccessBannerOpen(false);
+      })
+      .catch((error: unknown) => {
+        setAccessTraceId(error instanceof ApiError ? error.traceId : undefined);
+        setAccessStatus("error");
+        setAccessBannerOpen(true);
+      });
+  }, []);
+
+  useEffect(() => {
+    if (status === "ready" && timeline?.patient_id) {
+      loadAccessHistory(timeline.patient_id);
+    }
+  }, [status, timeline, loadAccessHistory]);
 
   const visibleEntries: RecordEntryView[] = useMemo(() => {
     if (!timeline) return [];
@@ -241,18 +282,80 @@ export default function RecordPage() {
         </ul>
       )}
 
-      {/* Forward-scope placeholders per §2.7 Soon convention (Phases 4/12) */}
-      <section
-        aria-disabled="true"
-        data-testid="placeholder-access"
-        className="mt-6 space-y-1 rounded-lg border border-dashed border-hairline bg-hairline-soft/40 p-4 opacity-70"
-      >
-        <span className="flex items-center gap-2">
-          <strong>{t.placeholder.accessTitle}</strong>
-          <SoonBadge />
-        </span>
-        <p className="text-sm text-txt-muted">{t.placeholder.accessBody}</p>
-      </section>
+      {/* Access history (Phase 4, #283): rendered only once the timeline is
+          ready because it needs the record's patient id. Its own loading,
+          error, empty and data states follow the record page's patterns. */}
+      {status === "ready" && (
+        <section className="mt-6" data-testid="access-history">
+          <h2 className="mb-3 text-lg font-semibold text-txt">
+            {t.accessHistory.heading}
+          </h2>
+          {accessBannerOpen && (
+            <ErrorBanner
+              message={t.accessHistory.loadError}
+              traceId={accessTraceId}
+              onRetry={() => loadAccessHistory(timeline!.patient_id)}
+              onDismiss={() => setAccessBannerOpen(false)}
+            />
+          )}
+          {accessStatus === "loading" ? (
+            <ul className="space-y-2" data-testid="access-loading">
+              {[0, 1, 2].map((row) => (
+                <li
+                  key={row}
+                  className="h-16 animate-pulse rounded-lg border border-hairline bg-hairline-soft/60"
+                />
+              ))}
+            </ul>
+          ) : accessStatus === "error" ||
+            accessHistory === null ? null : accessHistory.length === 0 ? (
+            <EmptyState
+              title={t.accessHistory.emptyTitle}
+              body={t.accessHistory.emptyBody}
+            />
+          ) : (
+            <ul className="space-y-2" data-testid="access-history-list">
+              {accessHistory.map((entry, index) => {
+                const identity = entry.actor_type || `ID ${entry.actor_id}`;
+                const scope = entry.scope
+                  ? `, ${t.accessHistory.scopePrefix}${entry.scope}`
+                  : "";
+                return (
+                  <li
+                    key={`${entry.actor_id}-${entry.accessed_at}-${index}`}
+                    data-testid={`access-entry-${index}`}
+                  >
+                    <div className="rounded-lg border border-hairline bg-surface p-4 shadow-card">
+                      <div className="flex items-start gap-2">
+                        <strong className="min-w-0 flex-1 text-base">
+                          {identity}
+                        </strong>
+                        {entry.denied && (
+                          <span className="ml-auto shrink-0 rounded-full px-2 py-0.5 text-xs font-medium bg-danger-soft text-danger">
+                            {t.accessHistory.deniedLabel}
+                          </span>
+                        )}
+                      </div>
+                      <p className="mt-1 text-sm text-txt-muted">
+                        {formatOccurredAt(entry.accessed_at, lang)}
+                        {scope}
+                      </p>
+                      {entry.denied && entry.denial_reason ? (
+                        <p className="mt-1 text-xs text-txt-muted">
+                          {t.accessHistory.deniedReasonPrefix}
+                          {entry.denial_reason}
+                        </p>
+                      ) : null}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
+      )}
+
+      {/* Forward-scope placeholder per §2.7 Soon convention (Phase 12) */}
       <section
         aria-disabled="true"
         data-testid="placeholder-health"

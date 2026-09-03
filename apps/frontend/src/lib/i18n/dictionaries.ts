@@ -564,9 +564,17 @@ const en = {
       body: "Your consultations, prescriptions, lab results and metrics appear here as your care happens.",
     },
     loadError: "Could not load your record.",
+    accessHistory: {
+      heading: "Who accessed my record",
+      loadError: "Could not load access history.",
+      emptyTitle: "No access yet",
+      emptyBody:
+        "When a doctor, lab or chemist views your record, it appears here.",
+      scopePrefix: "Consent scope: ",
+      deniedLabel: "Denied",
+      deniedReasonPrefix: "Reason: ",
+    },
     placeholder: {
-      accessTitle: "Who accessed my record",
-      accessBody: "Full access history arrives with Phase 4.",
       healthTitle: "Health tracking",
       healthBody: "BP/sugar trends and follow-up plans arrive with Phase 12.",
     },
@@ -1155,9 +1163,17 @@ export const STRINGS: Record<Lang, Dictionary> = {
         body: "आपके परामर्श, प्रिस्क्रिप्शन, लैब रिपोर्ट और मेट्रिक्स यहाँ दिखेंगे जैसे-जैसे आपकी देखभाल होगी।",
       },
       loadError: "आपका रिकॉर्ड लोड नहीं हो सका।",
+      accessHistory: {
+        heading: "रिकॉर्ड किसने देखा",
+        loadError: "एक्सेस इतिहास लोड नहीं हो सका।",
+        emptyTitle: "अभी कोई एक्सेस नहीं",
+        emptyBody:
+          "जब कोई डॉक्टर, लैब या केमिस्ट आपका रिकॉर्ड देखता है, तो वह यहाँ दिखेगा।",
+        scopePrefix: "अनुमति का दायरा: ",
+        deniedLabel: "अस्वीकृत",
+        deniedReasonPrefix: "कारण: ",
+      },
       placeholder: {
-        accessTitle: "रिकॉर्ड किसने देखा",
-        accessBody: "पूरा एक्सेस इतिहास फेज़ 4 में आएगा।",
         healthTitle: "हेल्थ ट्रैकिंग",
         healthBody: "BP/शुगर ट्रेंड और फॉलो-अप प्लान फेज़ 12 में आएंगे।",
       },
