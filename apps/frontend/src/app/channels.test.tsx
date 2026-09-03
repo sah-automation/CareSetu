@@ -14,7 +14,7 @@ describe("per-role route-group scaffold pages", () => {
     ["patient", PatientDashboardPage, "Welcome, Patient"],
     ["doctor", DoctorDashboardPage, "Welcome, Doctor"],
     ["partner", PartnerDashboardPage, "Welcome, Partner"],
-    ["operator", OperatorDashboardPage, "Welcome, Operator"],
+    ["operator", OperatorDashboardPage, "Verification queue"],
   ] as const)(
     "renders the %s dashboard scaffold page",
     (_role, Page, heading) => {
