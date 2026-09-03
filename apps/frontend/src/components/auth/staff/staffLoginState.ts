@@ -20,7 +20,8 @@ export type StaffLoginFieldError =
   | "phoneInvalid"
   | "emailInvalid"
   | "passwordRequired"
-  | "codeRequired";
+  | "codeRequired"
+  | "codeInvalid";
 
 export interface StaffLoginFieldErrors {
   phone?: StaffLoginFieldError;
@@ -32,13 +33,15 @@ export interface StaffLoginFieldErrors {
 const EMAIL_PATTERN = /^\S+@\S+\.\S+$/;
 const PHONE_PATTERN = /^\d{10,15}$/;
 
+const TOTP_PATTERN = /^\d{6}$/;
+
 // Client-side validation first: mirror the Phase 5 server schema's observable
-// minimums (well-formed phone or email, non-empty password) - nothing stricter,
-// so the server stays the authority once it exists.
+// minimums (well-formed phone or email, non-empty password/TOTP) - nothing
+// stricter, so the server stays the authority once it exists.
 //
 // Mode detection: when the phone field is non-empty the user is on the operator
-// path and email is not required; when phone is empty the form defaults to the
-// partner staff path and email IS required.
+// path and a 6-digit TOTP code is required; when phone is empty the form
+// defaults to the partner staff path and email IS required.
 export function validateStaffLogin(
   values: StaffLoginValues,
 ): StaffLoginFieldErrors {
@@ -50,6 +53,13 @@ export function validateStaffLogin(
     if (!PHONE_PATTERN.test(values.phone.trim())) {
       errors.phone = "phoneInvalid";
     }
+    // Operator path: TOTP code must be exactly 6 digits.
+    const code = values.code ?? "";
+    if (code.length === 0) {
+      errors.code = "codeRequired";
+    } else if (!TOTP_PATTERN.test(code)) {
+      errors.code = "codeInvalid";
+    }
   } else {
     // Partner staff path: email is required and must be well-formed.
     if (!EMAIL_PATTERN.test(values.email.trim())) {
@@ -57,7 +67,7 @@ export function validateStaffLogin(
     }
   }
 
-  if (values.password.length === 0) {
+  if (!isOperatorMode && values.password.length === 0) {
     errors.password = "passwordRequired";
   }
   return errors;

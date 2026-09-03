@@ -51,12 +51,12 @@ afterEach(() => {
 
 const t = STRINGS.en.staffAuth.login;
 
-function fillPhoneAndPass() {
+function fillPhoneAndTotp() {
   fireEvent.change(screen.getByTestId("staff-phone"), {
     target: { value: "9876543210" },
   });
-  fireEvent.change(screen.getByTestId("staff-password"), {
-    target: { value: "secret" },
+  fireEvent.change(screen.getByTestId("staff-totp"), {
+    target: { value: "123456" },
   });
 }
 
@@ -70,7 +70,7 @@ function fillEmailAndPass() {
 }
 
 describe("StaffLoginForm", () => {
-  it("renders phone, email, and password fields", () => {
+  it("renders phone field, and email+password when phone is empty", () => {
     render(<StaffLoginForm />);
     expect(screen.getByTestId("staff-phone")).toBeInTheDocument();
     expect(screen.getByTestId("staff-email")).toBeInTheDocument();
@@ -78,6 +78,16 @@ describe("StaffLoginForm", () => {
     expect(
       screen.queryByRole("button", { name: /doctor|lab|chemist/i }),
     ).not.toBeInTheDocument();
+  });
+
+  it("renders TOTP input instead of email+password when phone is filled", () => {
+    render(<StaffLoginForm />);
+    fireEvent.change(screen.getByTestId("staff-phone"), {
+      target: { value: "9876543210" },
+    });
+    expect(screen.getByTestId("staff-totp")).toBeInTheDocument();
+    expect(screen.queryByTestId("staff-email")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("staff-password")).not.toBeInTheDocument();
   });
 
   it("keeps the forgot-password link as a placeholder", () => {
@@ -100,8 +110,9 @@ describe("StaffLoginForm", () => {
     expect(slot).toHaveTextContent(/authenticator/i);
   });
 
-  it("toggles password visibility through the labeled control", () => {
+  it("toggles password visibility through the labeled control in partner mode", () => {
     render(<StaffLoginForm />);
+    // Password toggle is only visible when phone is empty (partner mode).
     const input = screen.getByTestId("staff-password");
     const toggle = screen.getByTestId("password-toggle");
     expect(input).toHaveAttribute("type", "password");
@@ -121,6 +132,20 @@ describe("StaffLoginForm", () => {
     fireEvent.blur(screen.getByTestId("staff-phone"));
     expect(screen.getByTestId("staff-phone-error")).toHaveTextContent(
       t.phoneInvalid,
+    );
+  });
+
+  it("validates TOTP code on blur in operator mode", () => {
+    render(<StaffLoginForm />);
+    fireEvent.change(screen.getByTestId("staff-phone"), {
+      target: { value: "9876543210" },
+    });
+    fireEvent.change(screen.getByTestId("staff-totp"), {
+      target: { value: "123" },
+    });
+    fireEvent.blur(screen.getByTestId("staff-totp"));
+    expect(screen.getByTestId("staff-totp-error")).toHaveTextContent(
+      t.codeInvalid,
     );
   });
 
@@ -147,7 +172,7 @@ describe("StaffLoginForm", () => {
 });
 
 describe("Operator login flow", () => {
-  it("calls operatorLogin with phone and password on submit", async () => {
+  it("calls operatorLogin with phone and 6-digit TOTP code on submit", async () => {
     mockOperatorLogin.mockResolvedValue({
       jwt: "abc",
       jti: "j1",
@@ -163,13 +188,13 @@ describe("Operator login flow", () => {
     });
 
     render(<StaffLoginForm />);
-    fillPhoneAndPass();
+    fillPhoneAndTotp();
     fireEvent.click(screen.getByTestId("staff-submit"));
 
     await waitFor(() => {
       expect(mockOperatorLogin).toHaveBeenCalledWith({
         phone: "9876543210",
-        code: "secret",
+        code: "123456",
       });
     });
   });
@@ -191,7 +216,7 @@ describe("Operator login flow", () => {
     });
 
     render(<StaffLoginForm />);
-    fillPhoneAndPass();
+    fillPhoneAndTotp();
     fireEvent.click(screen.getByTestId("staff-submit"));
 
     await waitFor(() => {
@@ -204,7 +229,39 @@ describe("Operator login flow", () => {
     });
   });
 
-  it("surfaces SESSION_MFA_REQUIRED as TOTP input step", async () => {
+  it("rejects a non-6-digit TOTP code without calling the API", async () => {
+    render(<StaffLoginForm />);
+    fireEvent.change(screen.getByTestId("staff-phone"), {
+      target: { value: "9876543210" },
+    });
+    fireEvent.change(screen.getByTestId("staff-totp"), {
+      target: { value: "123" },
+    });
+    fireEvent.click(screen.getByTestId("staff-submit"));
+
+    expect(screen.getByTestId("staff-totp-error")).toHaveTextContent(
+      t.codeInvalid,
+    );
+    expect(mockOperatorLogin).not.toHaveBeenCalled();
+  });
+
+  it("rejects a TOTP code with letters without calling the API", async () => {
+    render(<StaffLoginForm />);
+    fireEvent.change(screen.getByTestId("staff-phone"), {
+      target: { value: "9876543210" },
+    });
+    fireEvent.change(screen.getByTestId("staff-totp"), {
+      target: { value: "abcdef" },
+    });
+    fireEvent.click(screen.getByTestId("staff-submit"));
+
+    expect(screen.getByTestId("staff-totp-error")).toHaveTextContent(
+      t.codeInvalid,
+    );
+    expect(mockOperatorLogin).not.toHaveBeenCalled();
+  });
+
+  it("surfaces SESSION_MFA_REQUIRED as TOTP re-verification step", async () => {
     mockOperatorLogin.mockRejectedValue(
       new ApiError({
         code: "SESSION_MFA_REQUIRED",
@@ -214,7 +271,7 @@ describe("Operator login flow", () => {
       }),
     );
     render(<StaffLoginForm />);
-    fillPhoneAndPass();
+    fillPhoneAndTotp();
     fireEvent.click(screen.getByTestId("staff-submit"));
 
     await waitFor(() => {
@@ -226,7 +283,7 @@ describe("Operator login flow", () => {
   });
 
   it("submits TOTP code and creates session on MFA success", async () => {
-    // First call: password triggers MFA
+    // First call: TOTP triggers MFA (SESSION_MFA_REQUIRED)
     mockOperatorLogin
       .mockRejectedValueOnce(
         new ApiError({
@@ -251,7 +308,7 @@ describe("Operator login flow", () => {
     });
 
     render(<StaffLoginForm />);
-    fillPhoneAndPass();
+    fillPhoneAndTotp();
     fireEvent.click(screen.getByTestId("staff-submit"));
 
     await waitFor(() => {
@@ -273,7 +330,7 @@ describe("Operator login flow", () => {
     });
   });
 
-  it("rejects a short TOTP code without calling the API", async () => {
+  it("rejects a short TOTP code in MFA re-verification without calling the API", async () => {
     mockOperatorLogin.mockRejectedValue(
       new ApiError({
         code: "SESSION_MFA_REQUIRED",
@@ -284,7 +341,7 @@ describe("Operator login flow", () => {
     );
 
     render(<StaffLoginForm />);
-    fillPhoneAndPass();
+    fillPhoneAndTotp();
     fireEvent.click(screen.getByTestId("staff-submit"));
 
     await waitFor(() => {
@@ -298,7 +355,7 @@ describe("Operator login flow", () => {
     fireEvent.click(screen.getByTestId("staff-submit"));
 
     expect(screen.getByTestId("mfa-code-error")).toHaveTextContent(
-      t.codeRequired,
+      t.codeInvalid,
     );
     // The short code never goes out to the API.
     expect(mockOperatorLogin).toHaveBeenCalledTimes(1);
@@ -315,7 +372,7 @@ describe("Operator login flow", () => {
     );
 
     render(<StaffLoginForm />);
-    fillPhoneAndPass();
+    fillPhoneAndTotp();
     fireEvent.click(screen.getByTestId("staff-submit"));
 
     await waitFor(() => {
@@ -338,7 +395,7 @@ describe("Operator login flow", () => {
     );
 
     render(<StaffLoginForm />);
-    fillPhoneAndPass();
+    fillPhoneAndTotp();
     fireEvent.click(screen.getByTestId("staff-submit"));
 
     await waitFor(() => {

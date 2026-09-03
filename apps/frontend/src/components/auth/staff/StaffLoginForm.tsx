@@ -99,7 +99,14 @@ export function StaffLoginForm({ mfaEnrolled = false }: StaffLoginFormProps) {
 
   // section 9.5: validate on blur AND on submit; a blur re-checks just that field.
   function handleBlur(field: FieldName) {
-    applyFieldResult(field, validateStaffLogin({ phone, email, password }));
+    if (field === "code") {
+      applyFieldResult(
+        field,
+        validateStaffLogin({ phone, email, password, code: totpCode }),
+      );
+    } else {
+      applyFieldResult(field, validateStaffLogin({ phone, email, password }));
+    }
   }
 
   // Landing after a successful login: persist the session and route through
@@ -125,14 +132,21 @@ export function StaffLoginForm({ mfaEnrolled = false }: StaffLoginFormProps) {
     setAttemptedSubmit(true);
     setNotice(null);
 
-    // TOTP step: phone + password already submitted, now verify the code.
+    // TOTP re-verification step (SESSION_MFA_REQUIRED fallback): phone already
+    // submitted, now verify the TOTP code.
     if (mfaContext !== null) {
-      const trimmedCode = totpCode.trim();
-      if (trimmedCode.length < 6) {
-        setFieldErrors({ code: "codeRequired" });
+      const errors = validateStaffLogin({
+        phone,
+        email,
+        password,
+        code: totpCode,
+      });
+      if (errors.code) {
+        setFieldErrors({ code: errors.code });
         totpRef.current?.focus();
         return;
       }
+      const trimmedCode = totpCode.trim();
       setLoading(true);
       operatorLogin({ phone: mfaContext.raw, code: trimmedCode })
         .then((session) => landAfterLogin(session))
@@ -141,21 +155,26 @@ export function StaffLoginForm({ mfaEnrolled = false }: StaffLoginFormProps) {
       return;
     }
 
-    // Operator path: phone filled - validate phone + password.
+    // Operator path: phone filled - validate phone + 6-digit TOTP code.
     const rawPhone = phone.trim();
     if (rawPhone.length > 0) {
-      const errors = validateStaffLogin({ phone, email, password });
+      const errors = validateStaffLogin({
+        phone,
+        email,
+        password,
+        code: totpCode,
+      });
       setFieldErrors(errors);
-      if (errors.phone || errors.password) {
+      if (errors.phone || errors.code) {
         if (errors.phone) {
           phoneRef.current?.focus();
         } else {
-          passwordRef.current?.focus();
+          totpRef.current?.focus();
         }
         return;
       }
       setLoading(true);
-      operatorLogin({ phone: rawPhone, code: password })
+      operatorLogin({ phone: rawPhone, code: totpCode.trim() })
         .then((session) => landAfterLogin(session))
         .catch((error: unknown) => {
           if (
@@ -197,6 +216,7 @@ export function StaffLoginForm({ mfaEnrolled = false }: StaffLoginFormProps) {
   const passwordError = errorFor("password");
   const codeError = errorFor("code");
   const isMfaStep = mfaContext !== null;
+  const isOperatorMode = phone.trim().length > 0 && !isMfaStep;
 
   return (
     <form onSubmit={handleSubmit} noValidate data-testid="staff-login-form">
@@ -309,117 +329,151 @@ export function StaffLoginForm({ mfaEnrolled = false }: StaffLoginFormProps) {
             ) : null}
           </div>
 
-          <div className="mb-4">
-            <label
-              htmlFor="staff-email"
-              className="mb-1 block text-sm font-medium"
-            >
-              {t.emailLabel}
-            </label>
-            <input
-              ref={emailRef}
-              id="staff-email"
-              type="email"
-              autoComplete="username"
-              placeholder={t.emailPlaceholder}
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              onBlur={() => handleBlur("email")}
-              aria-invalid={errorFor("email") ? true : undefined}
-              aria-describedby={
-                errorFor("email") ? "staff-email-error" : undefined
-              }
-              className="w-full rounded-md border border-hairline bg-surface px-3 py-2"
-              data-testid="staff-email"
-            />
-            {emailError ? (
-              <p
-                id="staff-email-error"
-                data-testid="staff-email-error"
-                className="mt-1 text-sm text-danger"
-              >
-                {t[emailError]}
-              </p>
-            ) : null}
-          </div>
-
-          <div className="mb-4">
-            <label
-              htmlFor="staff-password"
-              className="mb-1 block text-sm font-medium"
-            >
-              {t.passwordLabel}
-            </label>
-            <div className="flex items-center gap-2">
-              <input
-                ref={passwordRef}
-                id="staff-password"
-                type={showPassword ? "text" : "password"}
-                autoComplete="current-password"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                onBlur={() => handleBlur("password")}
-                aria-invalid={errorFor("password") ? true : undefined}
-                aria-describedby={
-                  errorFor("password") ? "staff-password-error" : undefined
-                }
-                className="min-w-0 flex-1 rounded-md border border-hairline bg-surface px-3 py-2"
-                data-testid="staff-password"
-              />
-              <button
-                type="button"
-                onClick={() => setShowPassword((value) => !value)}
-                aria-label={showPassword ? t.hidePassword : t.showPassword}
-                data-testid="password-toggle"
-                className="rounded-md border border-hairline px-2 py-1 text-sm"
-              >
-                {showPassword ? t.hidePassword : t.showPassword}
-              </button>
-            </div>
-            {passwordError ? (
-              <p
-                id="staff-password-error"
-                data-testid="staff-password-error"
-                className="mt-1 text-sm text-danger"
-              >
-                {t[passwordError]}
-              </p>
-            ) : null}
-            <a
-              href="#"
-              className="mt-1 inline-block text-sm underline"
-              data-testid="forgot-password"
-            >
-              {t.forgotPassword}
-            </a>
-          </div>
-
-          {/* Conditional post-password MFA step: renders ONLY while the account
-              is flagged enrolled (nothing sets that until Phase 5), and its input
-              stays disabled - the step is a slot, never functional this phase. */}
-          {mfaEnrolled ? (
-            <div
-              aria-disabled="true"
-              data-testid="mfa-slot"
-              className="mb-4 opacity-60"
-            >
+          {isOperatorMode ? (
+            <div className="mb-4">
               <label
-                htmlFor="staff-mfa-slot"
+                htmlFor="staff-totp"
                 className="mb-1 block text-sm font-medium"
               >
                 {t.mfaCodeLabel}
               </label>
               <input
-                id="staff-mfa-slot"
+                ref={totpRef}
+                id="staff-totp"
                 inputMode="numeric"
                 maxLength={6}
-                disabled
+                placeholder="000000"
+                value={totpCode}
+                onChange={(event) => setTotpCode(event.target.value)}
+                onBlur={() => handleBlur("code")}
+                aria-invalid={codeError ? true : undefined}
+                aria-describedby={codeError ? "staff-totp-error" : undefined}
                 className="w-full rounded-md border border-hairline bg-surface px-3 py-2"
-                data-testid="mfa-slot-input"
+                data-testid="staff-totp"
               />
+              {codeError ? (
+                <p
+                  id="staff-totp-error"
+                  data-testid="staff-totp-error"
+                  className="mt-1 text-sm text-danger"
+                >
+                  {t[codeError]}
+                </p>
+              ) : null}
               <p className="mt-1 text-xs opacity-80">{t.mfaHelp}</p>
             </div>
-          ) : null}
+          ) : (
+            <>
+              <div className="mb-4">
+                <label
+                  htmlFor="staff-email"
+                  className="mb-1 block text-sm font-medium"
+                >
+                  {t.emailLabel}
+                </label>
+                <input
+                  ref={emailRef}
+                  id="staff-email"
+                  type="email"
+                  autoComplete="username"
+                  placeholder={t.emailPlaceholder}
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                  onBlur={() => handleBlur("email")}
+                  aria-invalid={errorFor("email") ? true : undefined}
+                  aria-describedby={
+                    errorFor("email") ? "staff-email-error" : undefined
+                  }
+                  className="w-full rounded-md border border-hairline bg-surface px-3 py-2"
+                  data-testid="staff-email"
+                />
+                {emailError ? (
+                  <p
+                    id="staff-email-error"
+                    data-testid="staff-email-error"
+                    className="mt-1 text-sm text-danger"
+                  >
+                    {t[emailError]}
+                  </p>
+                ) : null}
+              </div>
+
+              <div className="mb-4">
+                <label
+                  htmlFor="staff-password"
+                  className="mb-1 block text-sm font-medium"
+                >
+                  {t.passwordLabel}
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    ref={passwordRef}
+                    id="staff-password"
+                    type={showPassword ? "text" : "password"}
+                    autoComplete="current-password"
+                    value={password}
+                    onChange={(event) => setPassword(event.target.value)}
+                    onBlur={() => handleBlur("password")}
+                    aria-invalid={errorFor("password") ? true : undefined}
+                    aria-describedby={
+                      errorFor("password") ? "staff-password-error" : undefined
+                    }
+                    className="min-w-0 flex-1 rounded-md border border-hairline bg-surface px-3 py-2"
+                    data-testid="staff-password"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword((value) => !value)}
+                    aria-label={showPassword ? t.hidePassword : t.showPassword}
+                    data-testid="password-toggle"
+                    className="rounded-md border border-hairline px-2 py-1 text-sm"
+                  >
+                    {showPassword ? t.hidePassword : t.showPassword}
+                  </button>
+                </div>
+                {passwordError ? (
+                  <p
+                    id="staff-password-error"
+                    data-testid="staff-password-error"
+                    className="mt-1 text-sm text-danger"
+                  >
+                    {t[passwordError]}
+                  </p>
+                ) : null}
+                <a
+                  href="#"
+                  className="mt-1 inline-block text-sm underline"
+                  data-testid="forgot-password"
+                >
+                  {t.forgotPassword}
+                </a>
+              </div>
+
+              {mfaEnrolled ? (
+                <div
+                  aria-disabled="true"
+                  data-testid="mfa-slot"
+                  className="mb-4 opacity-60"
+                >
+                  <label
+                    htmlFor="staff-mfa-slot"
+                    className="mb-1 block text-sm font-medium"
+                  >
+                    {t.mfaCodeLabel}
+                  </label>
+                  <input
+                    id="staff-mfa-slot"
+                    inputMode="numeric"
+                    maxLength={6}
+                    disabled
+                    className="w-full rounded-md border border-hairline bg-surface px-3 py-2"
+                    data-testid="mfa-slot-input"
+                  />
+                  <p className="mt-1 text-xs opacity-80">{t.mfaHelp}</p>
+                </div>
+              ) : null}
+            </>
+          )}
         </>
       )}
 

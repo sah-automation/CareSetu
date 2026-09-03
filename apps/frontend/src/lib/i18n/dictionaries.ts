@@ -91,6 +91,7 @@ const en = {
       mfaHelp: "Enter the 6-digit code from your authenticator app.",
       mfaSubmit: "Verify code",
       codeRequired: "Enter the 6-digit code.",
+      codeInvalid: "The code must be exactly 6 digits.",
       newHereTitle: "New to CareSetu?",
       newHereBody:
         "Register your practice or business - our team verifies before you are listed.",
@@ -725,6 +726,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
         mfaHelp: "अपने authenticator ऐप से 6 अंकों का कोड दर्ज करें।",
         mfaSubmit: "कोड सत्यापित करें",
         codeRequired: "6 अंकों का कोड दर्ज करें।",
+        codeInvalid: "कोड ठीक 6 अंकों का होना चाहिए।",
         newHereTitle: "CareSetu पर नए हैं?",
         newHereBody:
           "अपनी प्रैक्टिस या व्यवसाय रजिस्टर करें - लिस्ट होने से पहले हमारी टीम जाँच करती है।",
