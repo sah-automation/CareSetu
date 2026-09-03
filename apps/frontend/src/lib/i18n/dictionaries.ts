@@ -123,6 +123,8 @@ const en = {
       infoBanner:
         "You are not listed publicly until activated. We will call or message you if anything more is needed.",
       helpCta: "Help: contact the CareSetu team",
+      loadError:
+        "Could not load your application status. Please check your connection and try again.",
     },
     rejected: {
       badge: "Rejected",
@@ -137,6 +139,11 @@ const en = {
       resubmitStubNotice:
         "Resubmission opens with Phase 5 - nothing was resubmitted just now.",
       helpCta: "Help: contact the CareSetu team",
+      loadError:
+        "Could not load your rejection details. Please check your connection and try again.",
+      appealProcessing: "Submitting your appeal...",
+      appealSuccess:
+        "Appeal submitted. You are back in the verification queue.",
     },
     picker: {
       title: "Choose a role to continue",
@@ -735,6 +742,8 @@ export const STRINGS: Record<Lang, Dictionary> = {
         infoBanner:
           "सक्रिय होने तक आप सार्वजनिक रूप से सूचीबद्ध नहीं होंगे। यदि कुछ और चाहिए तो हम आपको कॉल या संदेश भेजेंगे।",
         helpCta: "सहायता: CareSetu टीम से संपर्क करें",
+        loadError:
+          "आपकी आवेदन स्थिति लोड नहीं हो सकी। कृपया अपना कनेक्शन जाँचें और फिर से प्रयास करें।",
       },
       rejected: {
         badge: "अस्वीकृत",
@@ -749,6 +758,10 @@ export const STRINGS: Record<Lang, Dictionary> = {
         resubmitStubNotice:
           "दोबारा जमा करना Phase 5 के साथ खुलेगा - अभी कुछ भी दोबारा जमा नहीं हुआ।",
         helpCta: "सहायता: CareSetu टीम से संपर्क करें",
+        loadError:
+          "आपकी अस्वीकृति विवरण लोड नहीं हो सका। कृपया अपना कनेक्शन जाँचें और फिर से प्रयास करें।",
+        appealProcessing: "आपकी अपील जमा हो रही है...",
+        appealSuccess: "अपील जमा हो गई। आप फिर से सत्यापन कतार में हैं।",
       },
       picker: {
         title: "जारी रखने के लिए एक रोल चुनें",
