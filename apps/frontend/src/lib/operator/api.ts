@@ -6,9 +6,9 @@
 // (EnrollMfaResult), and modules/partner/facade.py (PartnerQueue /
 // PartnerVerificationDetail / PartnerView).
 
-import { API_BASE_URL, authedFetch } from "@/lib/api-base";
-import { ApiError, parseErrorEnvelope } from "@/lib/api-errors";
+import { guardShape, request } from "@/lib/request";
 import type { SessionResult } from "@/lib/auth/api";
+import { isPartnerView } from "@/lib/partner/api";
 import type { PartnerView } from "@/lib/partner/api";
 
 export type { SessionResult } from "@/lib/auth/api";
@@ -150,71 +150,30 @@ function isPartnerVerificationDetail(
   );
 }
 
-function isPartnerView(value: unknown): value is PartnerView {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "partner_id" in value &&
-    "status" in value &&
-    "round" in value
+export async function operatorLogin(
+  req: OperatorLoginRequest,
+): Promise<SessionResult> {
+  const data = await request<unknown>("/v1/auth/operator/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  return guardShape(
+    data,
+    isSessionResult,
+    "The API returned an unexpected login session shape",
   );
 }
 
-async function operatorFetch<T>(
-  path: string,
-  options?: RequestInit,
-): Promise<T> {
-  let response: Response;
-  try {
-    response = await authedFetch(`${API_BASE_URL}${path}`, options);
-  } catch {
-    throw new ApiError({
-      code: "NETWORK_ERROR",
-      message: "Could not reach the CareSetu API",
-      trace_id: "",
-      details: {},
-    });
-  }
-
-  if (!response.ok) {
-    throw new ApiError(await parseErrorEnvelope(response));
-  }
-
-  return (await response.json()) as T;
-}
-
-export async function operatorLogin(
-  request: OperatorLoginRequest,
-): Promise<SessionResult> {
-  const data = await operatorFetch<unknown>("/v1/auth/operator/login", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
-  });
-  if (!isSessionResult(data)) {
-    throw new ApiError({
-      code: "UNEXPECTED_ERROR",
-      message: "The API returned an unexpected login session shape",
-      trace_id: "",
-      details: {},
-    });
-  }
-  return data;
-}
-
 export async function enrollOperatorMfa(): Promise<EnrollMfaResult> {
-  const data = await operatorFetch<unknown>("/v1/auth/operator/mfa/enroll", {
+  const data = await request<unknown>("/v1/auth/operator/mfa/enroll", {
     method: "POST",
   });
-  if (!isEnrollMfaResult(data)) {
-    throw new ApiError({
-      code: "UNEXPECTED_ERROR",
-      message: "The API returned an unexpected MFA enrollment shape",
-      trace_id: "",
-      details: {},
-    });
-  }
-  return data;
+  return guardShape(
+    data,
+    isEnrollMfaResult,
+    "The API returned an unexpected MFA enrollment shape",
+  );
 }
 
 export interface VerificationQueueParams {
@@ -231,56 +190,42 @@ export async function fetchVerificationQueue(
   if (params.status) search.set("status", params.status);
   if (params.sort_by) search.set("sort_by", params.sort_by);
   const query = search.toString();
-  const data = await operatorFetch<unknown>(
+  const data = await request<unknown>(
     `/v1/partner/verification-queue${query ? `?${query}` : ""}`,
   );
-  if (!isPartnerQueue(data)) {
-    throw new ApiError({
-      code: "UNEXPECTED_ERROR",
-      message: "The API returned an unexpected verification queue shape",
-      trace_id: "",
-      details: {},
-    });
-  }
-  return data;
+  return guardShape(
+    data,
+    isPartnerQueue,
+    "The API returned an unexpected verification queue shape",
+  );
 }
 
 export async function fetchVerificationDetail(
   partnerId: number,
 ): Promise<PartnerVerificationDetail> {
-  const data = await operatorFetch<unknown>(
-    `/v1/partner/verification/${partnerId}`,
+  const data = await request<unknown>(`/v1/partner/verification/${partnerId}`);
+  return guardShape(
+    data,
+    isPartnerVerificationDetail,
+    "The API returned an unexpected verification detail shape",
   );
-  if (!isPartnerVerificationDetail(data)) {
-    throw new ApiError({
-      code: "UNEXPECTED_ERROR",
-      message: "The API returned an unexpected verification detail shape",
-      trace_id: "",
-      details: {},
-    });
-  }
-  return data;
 }
 
 export async function submitOperatorDecision(
   partnerId: number,
-  request: OperatorDecisionRequest,
+  req: OperatorDecisionRequest,
 ): Promise<PartnerView> {
-  const data = await operatorFetch<unknown>(
+  const data = await request<unknown>(
     `/v1/partner/verification/${partnerId}/decision`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(request),
+      body: JSON.stringify(req),
     },
   );
-  if (!isPartnerView(data)) {
-    throw new ApiError({
-      code: "UNEXPECTED_ERROR",
-      message: "The API returned an unexpected decision result shape",
-      trace_id: "",
-      details: {},
-    });
-  }
-  return data;
+  return guardShape(
+    data,
+    isPartnerView,
+    "The API returned an unexpected decision result shape",
+  );
 }

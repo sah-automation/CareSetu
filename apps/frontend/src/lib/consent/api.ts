@@ -4,8 +4,7 @@
 // response shapes mirror modules/consent/facade.py's Pydantic models exactly.
 // Session cookie auth follows the same pattern as record/api.ts (ADR-0005).
 
-import { API_BASE_URL, authedFetch } from "@/lib/api-base";
-import { ApiError, parseErrorEnvelope } from "@/lib/api-errors";
+import { guardShape, request } from "@/lib/request";
 
 export interface ConsentEventView {
   kind: string;
@@ -101,55 +100,24 @@ function isEgressLog(value: unknown): value is EgressLog {
   );
 }
 
-async function consentFetch<T>(
-  path: string,
-  options?: RequestInit,
-): Promise<T> {
-  let response: Response;
-  try {
-    response = await authedFetch(`${API_BASE_URL}${path}`, options);
-  } catch {
-    throw new ApiError({
-      code: "NETWORK_ERROR",
-      message: "Could not reach the CareSetu API",
-      trace_id: "",
-      details: {},
-    });
-  }
-
-  if (!response.ok) {
-    throw new ApiError(await parseErrorEnvelope(response));
-  }
-
-  return (await response.json()) as T;
-}
-
 export async function fetchConsentLog(): Promise<ConsentLog> {
-  const data = await consentFetch<unknown>("/v1/consents");
-  if (!isConsentLog(data)) {
-    throw new ApiError({
-      code: "UNEXPECTED_ERROR",
-      message: "The API returned an unexpected consent log shape",
-      trace_id: "",
-      details: {},
-    });
-  }
-  return data;
+  const data = await request<unknown>("/v1/consents");
+  return guardShape(
+    data,
+    isConsentLog,
+    "The API returned an unexpected consent log shape",
+  );
 }
 
 export async function revokeConsent(consentId: number): Promise<ConsentView> {
-  const data = await consentFetch<unknown>(`/v1/consents/${consentId}/revoke`, {
+  const data = await request<unknown>(`/v1/consents/${consentId}/revoke`, {
     method: "POST",
   });
-  if (!isConsentView(data)) {
-    throw new ApiError({
-      code: "UNEXPECTED_ERROR",
-      message: "The API returned an unexpected consent view shape",
-      trace_id: "",
-      details: {},
-    });
-  }
-  return data;
+  return guardShape(
+    data,
+    isConsentView,
+    "The API returned an unexpected consent view shape",
+  );
 }
 
 export interface GrantConsentRequest {
@@ -164,33 +132,25 @@ export interface GrantConsentRequest {
 }
 
 export async function grantConsent(
-  request: GrantConsentRequest,
+  req: GrantConsentRequest,
 ): Promise<ConsentView> {
-  const data = await consentFetch<unknown>("/v1/consents", {
+  const data = await request<unknown>("/v1/consents", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
+    body: JSON.stringify(req),
   });
-  if (!isConsentView(data)) {
-    throw new ApiError({
-      code: "UNEXPECTED_ERROR",
-      message: "The API returned an unexpected consent view shape",
-      trace_id: "",
-      details: {},
-    });
-  }
-  return data;
+  return guardShape(
+    data,
+    isConsentView,
+    "The API returned an unexpected consent view shape",
+  );
 }
 
 export async function fetchEgressLog(): Promise<EgressLog> {
-  const data = await consentFetch<unknown>("/v1/consents/egress-log");
-  if (!isEgressLog(data)) {
-    throw new ApiError({
-      code: "UNEXPECTED_ERROR",
-      message: "The API returned an unexpected egress log shape",
-      trace_id: "",
-      details: {},
-    });
-  }
-  return data;
+  const data = await request<unknown>("/v1/consents/egress-log");
+  return guardShape(
+    data,
+    isEgressLog,
+    "The API returned an unexpected egress log shape",
+  );
 }

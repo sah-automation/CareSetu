@@ -3,8 +3,7 @@
 // the response shape mirrors modules/health/facade.py's AccessHistoryView.
 // Session cookie auth follows the same pattern as record/api.ts (ADR-0005).
 
-import { API_BASE_URL, authedFetch } from "@/lib/api-base";
-import { ApiError, parseErrorEnvelope } from "@/lib/api-errors";
+import { guardShape, request } from "@/lib/request";
 
 export interface AccessHistoryEntry {
   actor_id: number;
@@ -44,32 +43,10 @@ export async function fetchAccessHistory(
 ): Promise<AccessHistoryView> {
   const search = new URLSearchParams();
   search.set("patient_id", String(patientId));
-  let response: Response;
-  try {
-    response = await authedFetch(
-      `${API_BASE_URL}/v1/audit/access-history?${search}`,
-    );
-  } catch {
-    throw new ApiError({
-      code: "NETWORK_ERROR",
-      message: "Could not reach the CareSetu API",
-      trace_id: "",
-      details: {},
-    });
-  }
-
-  if (!response.ok) {
-    throw new ApiError(await parseErrorEnvelope(response));
-  }
-
-  const data: unknown = await response.json();
-  if (!isAccessHistoryView(data)) {
-    throw new ApiError({
-      code: "UNEXPECTED_ERROR",
-      message: "The API returned an unexpected access history shape",
-      trace_id: "",
-      details: {},
-    });
-  }
-  return data;
+  const data = await request<unknown>(`/v1/audit/access-history?${search}`);
+  return guardShape(
+    data,
+    isAccessHistoryView,
+    "The API returned an unexpected access history shape",
+  );
 }

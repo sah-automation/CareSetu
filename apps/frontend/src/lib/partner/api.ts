@@ -4,8 +4,7 @@
 // Session cookie auth follows the same pattern as record/api.ts and
 // consent/api.ts (ADR-0005).
 
-import { API_BASE_URL, authedFetch } from "@/lib/api-base";
-import { ApiError, parseErrorEnvelope } from "@/lib/api-errors";
+import { guardShape, request } from "@/lib/request";
 
 export type PartnerType = "doctor" | "lab" | "chemist";
 
@@ -145,7 +144,7 @@ function isRejectionReasonView(value: unknown): value is RejectionReasonView {
   );
 }
 
-function isPartnerView(value: unknown): value is PartnerView {
+export function isPartnerView(value: unknown): value is PartnerView {
   return (
     typeof value === "object" &&
     value !== null &&
@@ -155,117 +154,70 @@ function isPartnerView(value: unknown): value is PartnerView {
   );
 }
 
-async function partnerFetch<T>(
-  path: string,
-  options?: RequestInit,
-): Promise<T> {
-  let response: Response;
-  try {
-    response = await authedFetch(`${API_BASE_URL}${path}`, options);
-  } catch {
-    throw new ApiError({
-      code: "NETWORK_ERROR",
-      message: "Could not reach the CareSetu API",
-      trace_id: "",
-      details: {},
-    });
-  }
-
-  if (!response.ok) {
-    throw new ApiError(await parseErrorEnvelope(response));
-  }
-
-  return (await response.json()) as T;
-}
-
 export async function registerPartner(
-  request: RegisterPartnerRequest,
+  req: RegisterPartnerRequest,
 ): Promise<RegisterPartnerResult> {
-  const data = await partnerFetch<unknown>("/v1/partner/register", {
+  const data = await request<unknown>("/v1/partner/register", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
+    body: JSON.stringify(req),
   });
-  if (!isRegisterPartnerResult(data)) {
-    throw new ApiError({
-      code: "UNEXPECTED_ERROR",
-      message: "The API returned an unexpected registration result shape",
-      trace_id: "",
-      details: {},
-    });
-  }
-  return data;
+  return guardShape(
+    data,
+    isRegisterPartnerResult,
+    "The API returned an unexpected registration result shape",
+  );
 }
 
 export async function submitCredentials(
-  request: CredentialSubmissionRequest,
+  req: CredentialSubmissionRequest,
 ): Promise<CredentialSubmissionResult> {
-  const data = await partnerFetch<unknown>("/v1/partner/credentials", {
+  const data = await request<unknown>("/v1/partner/credentials", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
+    body: JSON.stringify(req),
   });
-  if (!isCredentialSubmissionResult(data)) {
-    throw new ApiError({
-      code: "UNEXPECTED_ERROR",
-      message: "The API returned an unexpected credential submission shape",
-      trace_id: "",
-      details: {},
-    });
-  }
-  return data;
+  return guardShape(
+    data,
+    isCredentialSubmissionResult,
+    "The API returned an unexpected credential submission shape",
+  );
 }
 
 export async function fetchPartnerMe(): Promise<PartnerMeView> {
-  const data = await partnerFetch<unknown>("/v1/partner/me");
-  if (!isPartnerMeView(data)) {
-    throw new ApiError({
-      code: "UNEXPECTED_ERROR",
-      message: "The API returned an unexpected partner status shape",
-      trace_id: "",
-      details: {},
-    });
-  }
-  return data;
+  const data = await request<unknown>("/v1/partner/me");
+  return guardShape(
+    data,
+    isPartnerMeView,
+    "The API returned an unexpected partner status shape",
+  );
 }
 
 export async function fetchPartnerVerification(): Promise<PartnerVerificationStatusView> {
-  const data = await partnerFetch<unknown>("/v1/partner/me/verification");
-  if (!isPartnerVerificationStatusView(data)) {
-    throw new ApiError({
-      code: "UNEXPECTED_ERROR",
-      message: "The API returned an unexpected verification status shape",
-      trace_id: "",
-      details: {},
-    });
-  }
-  return data;
+  const data = await request<unknown>("/v1/partner/me/verification");
+  return guardShape(
+    data,
+    isPartnerVerificationStatusView,
+    "The API returned an unexpected verification status shape",
+  );
 }
 
 export async function fetchRejectionReason(): Promise<RejectionReasonView> {
-  const data = await partnerFetch<unknown>("/v1/partner/rejection-reason");
-  if (!isRejectionReasonView(data)) {
-    throw new ApiError({
-      code: "UNEXPECTED_ERROR",
-      message: "The API returned an unexpected rejection reason shape",
-      trace_id: "",
-      details: {},
-    });
-  }
-  return data;
+  const data = await request<unknown>("/v1/partner/rejection-reason");
+  return guardShape(
+    data,
+    isRejectionReasonView,
+    "The API returned an unexpected rejection reason shape",
+  );
 }
 
 export async function appealRejection(): Promise<PartnerView> {
-  const data = await partnerFetch<unknown>("/v1/partner/appeal", {
+  const data = await request<unknown>("/v1/partner/appeal", {
     method: "POST",
   });
-  if (!isPartnerView(data)) {
-    throw new ApiError({
-      code: "UNEXPECTED_ERROR",
-      message: "The API returned an unexpected appeal result shape",
-      trace_id: "",
-      details: {},
-    });
-  }
-  return data;
+  return guardShape(
+    data,
+    isPartnerView,
+    "The API returned an unexpected appeal result shape",
+  );
 }
