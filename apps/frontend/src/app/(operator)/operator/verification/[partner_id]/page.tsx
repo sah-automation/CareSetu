@@ -30,20 +30,9 @@ import {
   type VerificationRound,
   type AuditEventDetail,
 } from "@/lib/operator/api";
+import { STATUS_BADGE, TYPE_BADGE, statusKey } from "@/lib/operator/badges";
 
 type LoadStatus = "loading" | "ready" | "error";
-
-const TYPE_BADGE: Record<string, string> = {
-  doctor: "bg-accent-soft text-accent-strong",
-  lab: "bg-success-soft text-success-text",
-  chemist: "bg-warm-soft text-txt-sub",
-};
-
-const STATUS_BADGE: Record<string, string> = {
-  "Under Verification": "bg-warn-soft text-warn-text",
-  verified: "bg-success-soft text-success-text",
-  rejected: "bg-danger-soft text-danger",
-};
 
 const CREDENTIAL_STATUS: Record<string, { label: string; cls: string }> = {
   verified: { label: "Verified", cls: "bg-success-soft text-success-text" },
@@ -213,7 +202,7 @@ function VerificationHistoryTable({ rounds }: { rounds: VerificationRound[] }) {
                   <span
                     className={cn(
                       "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
-                      STATUS_BADGE[round.status] ??
+                      STATUS_BADGE[statusKey(round.status)] ??
                         "bg-hairline-soft text-txt-muted",
                     )}
                   >

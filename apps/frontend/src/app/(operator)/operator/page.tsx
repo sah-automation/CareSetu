@@ -22,6 +22,7 @@ import {
   type PartnerQueueItem,
   type PartnerQueue,
 } from "@/lib/operator/api";
+import { STATUS_BADGE, TYPE_BADGE, statusKey } from "@/lib/operator/badges";
 
 type LoadStatus = "loading" | "ready" | "error";
 
@@ -37,18 +38,6 @@ const SORT_OPTIONS: SortConfig[] = [
   { field: "partner_type", label: "Type" },
   { field: "status", label: "Status" },
 ];
-
-const TYPE_BADGE: Record<string, string> = {
-  doctor: "bg-accent-soft text-accent-strong",
-  lab: "bg-success-soft text-success-text",
-  chemist: "bg-warm-soft text-txt-sub",
-};
-
-const STATUS_BADGE: Record<string, string> = {
-  "Under Verification": "bg-warn-soft text-warn-text",
-  verified: "bg-success-soft text-success-text",
-  rejected: "bg-danger-soft text-danger",
-};
 
 function registrationAge(createdAt: string): string {
   const ms = Date.now() - new Date(createdAt).getTime();
@@ -230,7 +219,7 @@ export default function OperatorDashboardPage() {
                       <span
                         className={cn(
                           "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
-                          STATUS_BADGE[item.status] ??
+                          STATUS_BADGE[statusKey(item.status)] ??
                             "bg-hairline-soft text-txt-muted",
                         )}
                       >
