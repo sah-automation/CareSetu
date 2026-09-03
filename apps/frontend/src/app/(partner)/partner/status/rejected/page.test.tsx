@@ -284,6 +284,36 @@ describe("PartnerStatusRejectedPage (inside the full shell)", () => {
     });
   });
 
+  it("reads STATUS_POLL_INTERVAL_MS from the shared config module", async () => {
+    vi.mock("@/lib/config", () => ({
+      STATUS_POLL_INTERVAL_MS: 42_000,
+    }));
+
+    const { fetchPartnerMe, fetchRejectionReason } = await import(
+      "@/lib/partner/api"
+    );
+
+    vi.mocked(fetchPartnerMe).mockResolvedValue({
+      partner_id: 1,
+      status: "Rejected",
+      partner_type: "chemist",
+      round: 1,
+    });
+    vi.mocked(fetchRejectionReason).mockResolvedValue({
+      partner_id: 1,
+      rejection_reason: "reason",
+      round: 1,
+    });
+
+    render(<PartnerStatusRejectedPage />);
+    await waitFor(() => {
+      expect(screen.getByTestId("partner-rejected-card")).toBeInTheDocument();
+    });
+
+    const { STATUS_POLL_INTERVAL_MS } = await import("@/lib/config");
+    expect(STATUS_POLL_INTERVAL_MS).toBe(42_000);
+  });
+
   it("redirects to pending when the application moves back under verification", async () => {
     const { fetchPartnerMe, fetchRejectionReason } = await import(
       "@/lib/partner/api"

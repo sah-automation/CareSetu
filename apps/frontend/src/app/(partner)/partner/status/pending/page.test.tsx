@@ -207,4 +207,34 @@ describe("PartnerStatusPendingPage (inside the full shell)", () => {
       );
     });
   });
+
+  it("reads STATUS_POLL_INTERVAL_MS from the shared config module", async () => {
+    vi.mock("@/lib/config", () => ({
+      STATUS_POLL_INTERVAL_MS: 42_000,
+    }));
+
+    const { fetchPartnerMe, fetchPartnerVerification } = await import(
+      "@/lib/partner/api"
+    );
+
+    vi.mocked(fetchPartnerMe).mockResolvedValue({
+      partner_id: 1,
+      status: "Under Verification",
+      partner_type: "chemist",
+      round: 1,
+      created_at: "2026-08-21T10:42:00Z",
+    });
+    vi.mocked(fetchPartnerVerification).mockResolvedValue({
+      partner_id: 1,
+      round: 1,
+    });
+
+    render(<PartnerStatusPendingPage />);
+    await waitFor(() => {
+      expect(screen.getByTestId("partner-pending-card")).toBeInTheDocument();
+    });
+
+    const { STATUS_POLL_INTERVAL_MS } = await import("@/lib/config");
+    expect(STATUS_POLL_INTERVAL_MS).toBe(42_000);
+  });
 });

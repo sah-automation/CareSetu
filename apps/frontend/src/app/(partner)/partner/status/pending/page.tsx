@@ -25,8 +25,7 @@ import {
   type PartnerVerificationStatusView,
 } from "@/lib/partner/api";
 import { ApiError } from "@/lib/api-errors";
-
-const POLL_INTERVAL_MS = 10_000;
+import { STATUS_POLL_INTERVAL_MS } from "@/lib/config";
 
 type LoadStatus = "loading" | "ready" | "error";
 
@@ -91,7 +90,7 @@ export default function PartnerStatusPendingPage() {
   // Poll while status is "Under Verification"
   useEffect(() => {
     if (partner?.status === "Under Verification") {
-      pollRef.current = setInterval(load, POLL_INTERVAL_MS);
+      pollRef.current = setInterval(load, STATUS_POLL_INTERVAL_MS);
     }
     return () => {
       if (pollRef.current) {

@@ -25,10 +25,9 @@ import {
   type RejectionReasonView,
 } from "@/lib/partner/api";
 import { ApiError } from "@/lib/api-errors";
+import { STATUS_POLL_INTERVAL_MS } from "@/lib/config";
 
 type LoadStatus = "loading" | "ready" | "error";
-
-const POLL_INTERVAL_MS = 10_000;
 
 export default function PartnerStatusRejectedPage() {
   const { lang } = useLang();
@@ -78,7 +77,7 @@ export default function PartnerStatusRejectedPage() {
   // move it back into the verification queue).
   useEffect(() => {
     if (partner?.status === "Rejected") {
-      pollRef.current = setInterval(load, POLL_INTERVAL_MS);
+      pollRef.current = setInterval(load, STATUS_POLL_INTERVAL_MS);
     }
     return () => {
       if (pollRef.current) {
