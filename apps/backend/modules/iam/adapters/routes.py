@@ -31,6 +31,7 @@ from app.gateway.rbac import require_operator
 from modules.iam.adapters.sms import mask_phone
 from modules.iam.domain.exceptions import (
     IamError,
+    InvalidOperatorCodeError,
     InvalidPhoneError,
     OperatorMfaError,
     RefreshTokenExpiredError,
@@ -424,6 +425,15 @@ def register_error_handlers(app: FastAPI) -> None:
             request=request,
         )
 
+    async def _invalid_operator_code(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_401_UNAUTHORIZED,
+            "INVALID_OPERATOR_CODE",
+            str(exc),
+            log_tag="iam_rejection",
+            request=request,
+        )
+
     async def _refresh_token_unknown(request: Request, exc: Exception) -> JSONResponse:
         return error_response(
             status.HTTP_401_UNAUTHORIZED,
@@ -484,6 +494,7 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(SmsDeliveryError, _sms_failed)
     app.add_exception_handler(SessionIssuanceError, _session_refused)
     app.add_exception_handler(OperatorMfaError, _operator_mfa_failed)
+    app.add_exception_handler(InvalidOperatorCodeError, _invalid_operator_code)
     app.add_exception_handler(RefreshTokenUnknownError, _refresh_token_unknown)
     app.add_exception_handler(RefreshTokenExpiredError, _refresh_token_expired)
     app.add_exception_handler(RefreshTokenRevokedError, _refresh_token_revoked)

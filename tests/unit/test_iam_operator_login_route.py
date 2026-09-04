@@ -19,7 +19,12 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
-from modules.iam.domain.exceptions import IamError, OperatorMfaError, SessionIssuanceError
+from modules.iam.domain.exceptions import (
+    IamError,
+    InvalidOperatorCodeError,
+    OperatorMfaError,
+    SessionIssuanceError,
+)
 from modules.iam.facade import SessionResult
 
 _SIGNING_KEY = "unit-test-operator-login-key"
@@ -107,7 +112,7 @@ def test_operator_login_refuses_without_a_verified_second_factor() -> None:
 
 def test_operator_login_wrong_code_is_refused_with_401() -> None:
     facade = StubIamFacade()
-    facade.error = OperatorMfaError("TOTP verification failed for identity 11: bad code")
+    facade.error = InvalidOperatorCodeError("TOTP verification failed for identity 11: bad code")
     client = _client(facade)
 
     response = client.post(
@@ -115,7 +120,7 @@ def test_operator_login_wrong_code_is_refused_with_401() -> None:
     )
 
     assert response.status_code == 401
-    assert response.json()["code"] == "SESSION_MFA_REQUIRED"
+    assert response.json()["code"] == "INVALID_OPERATOR_CODE"
 
 
 def test_operator_login_unknown_phone_stays_409_refused() -> None:

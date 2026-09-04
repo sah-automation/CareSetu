@@ -60,6 +60,17 @@ class OperatorMfaError(SessionIssuanceError):
     """
 
 
+class InvalidOperatorCodeError(SessionIssuanceError):
+    """The presented TOTP code failed verification (#295).
+
+    Raised when the operator submits a wrong RFC-6238 code. Distinct from
+    ``OperatorMfaError`` (MFA enrollment or secret missing) so the gateway
+    answers it with ``INVALID_OPERATOR_CODE`` rather than
+    ``SESSION_MFA_REQUIRED``. Subclasses ``SessionIssuanceError`` so
+    existing broad catches still work.
+    """
+
+
 class InvalidAccessTokenError(IamError):
     """Base for an access token the gateway must reject (spec #51 §2.5).
 

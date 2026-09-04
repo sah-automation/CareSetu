@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from modules.iam.adapters.sms import mask_phone
 from modules.iam.domain import events, jwt, refresh
 from modules.iam.domain.exceptions import (
+    InvalidOperatorCodeError,
     OperatorMfaError,
     RefreshTokenExpiredError,
     RefreshTokenRevokedError,
@@ -241,7 +242,7 @@ class SessionFacade:
                 decrypted_secret = decrypt_secret(secret_ciphertext, self._mfa_secret_key)
                 verify_totp(decrypted_secret, code, clock=self._clock)
             except (TotpSecretEmptyError, TotpVerificationError, ValueError) as exc:
-                raise OperatorMfaError(
+                raise InvalidOperatorCodeError(
                     f"TOTP verification failed for identity {identity_id}: {exc}"
                 ) from exc
 
