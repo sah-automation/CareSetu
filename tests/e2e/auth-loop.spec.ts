@@ -211,7 +211,9 @@ test("an unauthenticated attempt at the protected surface is denied", async ({
   // return param is consumed only at post-login, which stays unit-level this
   // phase (see the file header).
   const staffResponse = await page.goto("/operator");
-  expect(page.url()).toBe(`${FRONTEND}/staff/login?return=%2Foperator`);
+  expect(page.url()).toBe(
+    `${FRONTEND}/staff/login?role=operator&return=%2Foperator`,
+  );
   expect(staffResponse?.status()).toBe(200);
   await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible({
     timeout: 60_000,

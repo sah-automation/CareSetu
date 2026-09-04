@@ -30,6 +30,7 @@ IAM_TABLES = {
     "iam_role_grants",
     "iam_outbox",
     "iam_operator_mfa",
+    "consumed_events",
 }
 
 

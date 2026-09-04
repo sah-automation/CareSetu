@@ -199,7 +199,9 @@ test("patient journey: record -> filter -> grant sheet -> receipt -> revoke -> r
   );
   // Toggle back to English
   await langToggle.getByRole("button", { name: "EN" }).click();
-  await expect(page.getByRole("heading", { name: "My Record" })).toBeVisible({
+  await expect(
+    page.getByRole("heading", { name: "My Record", exact: true }),
+  ).toBeVisible({
     timeout: 5_000,
   });
 

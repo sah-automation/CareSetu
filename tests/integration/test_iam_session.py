@@ -489,7 +489,7 @@ async def test_operator_session_rotates_to_operator_scope(
             await connection.execute(
                 text(
                     "INSERT INTO iam.iam_role_grants (identity_id, role, status) "
-                    "VALUES (:identity_id, 'operator', 'active')"
+                    "VALUES (:identity_id, 'operator', 'Active')"
                 ),
                 {"identity_id": identity_id},
             )
