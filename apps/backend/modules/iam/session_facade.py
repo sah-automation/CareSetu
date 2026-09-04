@@ -8,7 +8,7 @@ and tests see the same public surface as before (ADR-0006 decision 2).
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -96,6 +96,7 @@ class SessionFacade:
         access_token_ttl_seconds: int = jwt.ACCESS_TOKEN_TTL_SECONDS,
         refresh_token_ttl_seconds: int = refresh.REFRESH_TOKEN_TTL_SECONDS,
         mfa_secret_key: str = "",
+        resolve_partner_by_identity: Callable[[int], Awaitable[int | None]] | None = None,
     ) -> None:
         self._engine = engine
         self._clock = clock
@@ -103,6 +104,18 @@ class SessionFacade:
         self._access_token_ttl_seconds = access_token_ttl_seconds
         self._refresh_token_ttl_seconds = refresh_token_ttl_seconds
         self._mfa_secret_key = mfa_secret_key
+        self._resolve_partner_by_identity = resolve_partner_by_identity
+
+    def set_partner_resolver(self, resolver: Callable[[int], Awaitable[int | None]]) -> None:
+        """Wire the partner-profile identity seam (T05, #298).
+
+        Called by the composition root after both ``IamFacade`` and
+        ``PartnerFacade`` have been constructed - the circular dependency
+        (``PartnerFacade`` needs ``IamFacade``; the session facade needs a
+        partner resolver) makes constructor injection impossible, so the
+        resolver is set post-construction.
+        """
+        self._resolve_partner_by_identity = resolver
 
     async def issue_session(self, phone: str) -> SessionResult:
         """Mint an access JWT for a verified patient (spec #51 section 2.5, ticket #57).
@@ -260,6 +273,63 @@ class SessionFacade:
             jwt=token,
             jti=jti,
             scope=scope,
+            identity_id=identity_id,
+            expires_in_seconds=self._access_token_ttl_seconds,
+            refresh_token=refresh_token,
+        )
+
+    async def issue_partner_session(self, phone: str) -> SessionResult:
+        """Mint a partner-scoped access JWT for a registered (pre-activation) partner (T05, #298).
+
+        Unlike ``issue_session`` this does NOT require identity ``Active`` or
+        an active patient role grant - a fresh registrant is ``[Unverified]``
+        with no role grant (ADR-0010). The gate is partner-profile existence:
+        the ``_resolve_partner_by_identity`` seam (wired by the composition
+        root through dependency inversion, no cross-schema import) checks
+        whether a partner profile exists for the identity. A patient-only phone
+        (identity exists but no partner profile) is refused with
+        ``SessionIssuanceError`` mapped to 409 ``SESSION_REFUSED``.
+
+        The minted ``scope`` resolves to ``partner`` so the gateway's
+        ``require_partner`` admits the caller for the self-service surface
+        (submit credentials, read own status, appeal).
+        """
+        from modules.iam.domain.phone import normalize_phone
+
+        phone_e164 = normalize_phone(phone)
+        if not self._access_token_signing_key:
+            raise SessionIssuanceError(
+                "access-token signing key is not configured; refusing to issue a session"
+            )
+        if self._resolve_partner_by_identity is None:
+            raise SessionIssuanceError(
+                "partner identity resolver is not configured; cannot issue a partner session"
+            )
+        now = self._clock()
+
+        async with self._engine.begin() as connection:
+            locked = await _lock_identity_by_phone(connection, phone_e164)
+            if locked is None:
+                raise SessionIssuanceError(
+                    f"no identity for {mask_phone(phone_e164)}; "
+                    "register the phone before issuing a session"
+                )
+            identity_id = locked.identity_id
+
+            partner_id = await self._resolve_partner_by_identity(identity_id)
+            if partner_id is None:
+                raise SessionIssuanceError(
+                    f"identity {identity_id} has no partner profile; this is a patient-only phone"
+                )
+
+            jti, refresh_token, token = await self._mint_session_row(
+                connection, identity_id, _PARTNER_ROLE, now
+            )
+
+        return SessionResult(
+            jwt=token,
+            jti=jti,
+            scope=_PARTNER_ROLE,
             identity_id=identity_id,
             expires_in_seconds=self._access_token_ttl_seconds,
             refresh_token=refresh_token,

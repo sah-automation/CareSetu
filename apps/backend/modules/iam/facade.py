@@ -11,7 +11,7 @@ here for backward compatibility.  ``emit_access_denied`` and
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -215,6 +215,27 @@ class IamFacade:
         enrolled MFA secret (S8).
         """
         return await self._sessions.issue_operator_session(phone, code)
+
+    def set_partner_resolver(self, resolver: Callable[[int], Awaitable[int | None]]) -> None:
+        """Wire the partner-profile identity seam for partner session issuance (T05, #298).
+
+        Called by the composition root after both ``IamFacade`` and
+        ``PartnerFacade`` have been constructed.
+        """
+        self._sessions.set_partner_resolver(resolver)
+
+    async def issue_partner_session(self, phone: str) -> SessionResult:
+        """Mint a partner-scoped access JWT for a registered partner (T05, #298).
+
+        Delegated to ``SessionFacade``; the session's ``scope`` resolves to
+        ``partner`` so the gateway's ``require_partner`` admits the caller for
+        self-service (submit credentials, read own status, appeal). Unlike
+        ``issue_session`` this does NOT require identity ``Active`` or a role
+        grant - a fresh registrant is ``[Unverified]`` with no grant (ADR-0010);
+        the gate is instead that a partner profile exists for the phone, keeping
+        patients from minting a ``partner``-scoped JWT.
+        """
+        return await self._sessions.issue_partner_session(phone)
 
     async def validate_token(self, token: str) -> ValidatedAccessToken:
         """Resolve a valid access JWT to its scope (delegated to ``SessionFacade``)."""

@@ -186,6 +186,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         re_submission_cooldown_days=resolved_settings.partner_re_submission_cooldown_days,
         credential_cleanup_days=resolved_settings.partner_credential_cleanup_days,
     )
+
+    # MOD-002/MOD-001 seam (T05, #298): wire the partner-profile identity
+    # resolver into the session facade so ``issue_partner_session`` can gate on
+    # partner-profile existence.  Must run after both facades are constructed
+    # (circular dependency: PartnerFacade needs IamFacade; the session facade
+    # needs the partner resolver).  No cross-schema imports at runtime - the
+    # closure routes through the two facades' own seams.
+    async def _resolve_partner_by_identity(identity_id: int) -> int | None:
+        partner = cast(PartnerFacade, app.state.partner_facade)
+        return await partner.resolve_partner_id_by_identity(identity_id)
+
+    facade.set_partner_resolver(_resolve_partner_by_identity)
     # The edge's in-process idempotency store (api-standards §5, PHASE-2 REM
     # T11, #80): the auth mutation adapters read/write it per ``Idempotency-Key``
     # so a retried register/verify/resend replays the stored result instead of

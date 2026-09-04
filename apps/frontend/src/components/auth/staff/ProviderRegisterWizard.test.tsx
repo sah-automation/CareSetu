@@ -18,7 +18,7 @@ import { STRINGS } from "@/lib/i18n/dictionaries";
 import { __resetLangForTests } from "@/lib/i18n/LangContext";
 
 import { registerPartner, submitCredentials } from "@/lib/partner/api";
-import { issueSession } from "@/lib/auth/api";
+import { issuePartnerSession } from "@/lib/auth/api";
 import { saveSession } from "@/lib/auth/session";
 import { postLoginTarget } from "@/lib/auth/staff-routing";
 
@@ -39,14 +39,31 @@ vi.mock("@/lib/partner/api", () => ({
 }));
 
 vi.mock("@/lib/auth/api", () => ({
-  issueSession: vi.fn().mockResolvedValue({
+  issuePartnerSession: vi.fn().mockResolvedValue({
     jwt: "test-jwt",
     jti: "test-jti",
-    scope: "staff",
+    scope: "partner",
     identity_id: 1,
     expires_in_seconds: 3600,
     refresh_token: "test-refresh",
   }),
+  AuthApiError: class MockAuthApiError extends Error {
+    readonly code: string;
+    readonly details: Record<string, unknown>;
+    readonly traceId: string;
+    constructor(envelope: {
+      code: string;
+      message: string;
+      trace_id: string;
+      details: Record<string, unknown>;
+    }) {
+      super(envelope.message);
+      this.name = "AuthApiError";
+      this.code = envelope.code;
+      this.details = envelope.details;
+      this.traceId = envelope.trace_id;
+    }
+  },
 }));
 
 vi.mock("@/lib/auth/session", () => ({
@@ -62,7 +79,7 @@ const STRONG = "correct-horse-battery1!";
 
 const mockRegisterPartner = vi.mocked(registerPartner);
 const mockSubmitCredentials = vi.mocked(submitCredentials);
-const mockIssueSession = vi.mocked(issueSession);
+const mockIssuePartnerSession = vi.mocked(issuePartnerSession);
 const mockSaveSession = vi.mocked(saveSession);
 const mockPostLoginTarget = vi.mocked(postLoginTarget);
 
@@ -455,7 +472,31 @@ describe("review & declarations with submission", () => {
     expect(error).toHaveTextContent("Trace: abc123");
   });
 
-  it("calls registerPartner then issueSession then saveSession on successful submit", async () => {
+  it("surfaces an AuthApiError's real backend message and trace id on failure", async () => {
+    const { AuthApiError: MockAuthApiError } = await import("@/lib/auth/api");
+    mockIssuePartnerSession.mockRejectedValueOnce(
+      new MockAuthApiError({
+        code: "SESSION_REFUSED",
+        message: "identity 1 is Unverified, not Active; verify the OTP first",
+        trace_id: "trace-session-refused",
+        details: {},
+      }),
+    );
+
+    walkToStep(4, "doctor");
+    fireEvent.click(screen.getByTestId("decl-truth"));
+    fireEvent.click(screen.getByTestId("decl-consent"));
+    fireEvent.click(screen.getByTestId("decl-terms"));
+    fireEvent.click(screen.getByTestId("pr-submit"));
+
+    const error = await screen.findByTestId("pr-server-error");
+    expect(error).toHaveTextContent(
+      "identity 1 is Unverified, not Active; verify the OTP first",
+    );
+    expect(error).toHaveTextContent("Trace: trace-session-refused");
+  });
+
+  it("calls registerPartner then issuePartnerSession then saveSession on successful submit", async () => {
     walkToStep(4, "doctor");
     fireEvent.click(screen.getByTestId("decl-truth"));
     fireEvent.click(screen.getByTestId("decl-consent"));
@@ -464,7 +505,7 @@ describe("review & declarations with submission", () => {
 
     await vi.waitFor(
       () => {
-        expect(mockIssueSession).toHaveBeenCalledOnce();
+        expect(mockIssuePartnerSession).toHaveBeenCalledOnce();
       },
       { timeout: 5000 },
     );
@@ -479,7 +520,7 @@ describe("review & declarations with submission", () => {
       }),
     );
     expect(mockSubmitCredentials).toHaveBeenCalledOnce();
-    expect(mockIssueSession).toHaveBeenCalledWith("+919876543210");
+    expect(mockIssuePartnerSession).toHaveBeenCalledWith("+919876543210");
     expect(mockSaveSession).toHaveBeenCalledOnce();
     expect(mockSaveSession).toHaveBeenCalledWith(
       expect.objectContaining({ jwt: "test-jwt" }),
@@ -512,7 +553,7 @@ describe("review & declarations with submission", () => {
 
     await vi.waitFor(
       () => {
-        expect(mockIssueSession).toHaveBeenCalledOnce();
+        expect(mockIssuePartnerSession).toHaveBeenCalledOnce();
       },
       { timeout: 5000 },
     );
@@ -535,7 +576,7 @@ describe("review & declarations with submission", () => {
 
     await vi.waitFor(
       () => {
-        expect(mockIssueSession).toHaveBeenCalledOnce();
+        expect(mockIssuePartnerSession).toHaveBeenCalledOnce();
       },
       { timeout: 5000 },
     );

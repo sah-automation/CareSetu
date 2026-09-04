@@ -251,6 +251,43 @@ async def issue_session(
 
 
 @router.post(
+    "/partner/session",
+    response_model=SessionResult,
+    status_code=status.HTTP_200_OK,
+    summary="Issue a partner-scoped session for a registered partner",
+)
+async def issue_partner_session(
+    request: Request,
+    body: IssueSessionRequest,
+) -> Response:
+    """Mint a partner-scoped access JWT for a registered (pre-activation) partner.
+
+    The gap-plan loop needs the partner to submit credentials and read their
+    own pending status immediately after registration. The partner identity is
+    ``[Unverified]`` with no role grant (ADR-0010), so the standard
+    ``POST /v1/auth/session`` (patient-only) always refuses 409
+    ``SESSION_REFUSED``. This endpoint instead gates on the existence of a
+    partner profile for the phone and mints a ``partner``-scoped JWT
+    (self-service surface only). Identity-state refusals (unknown phone, no
+    partner profile) stay 409 ``SESSION_REFUSED``.
+    """
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    result = await run_idempotent(request, lambda: facade.issue_partner_session(body.phone))
+    response = Response(
+        content=result.model_dump_json(),
+        media_type="application/json",
+        status_code=status.HTTP_200_OK,
+    )
+    _set_jwt_cookie(
+        response,
+        result.jwt,
+        result.expires_in_seconds,
+        secure=_is_secure_cookie(request),
+    )
+    return response
+
+
+@router.post(
     "/refresh",
     response_model=SessionResult,
     status_code=status.HTTP_200_OK,

@@ -114,6 +114,8 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/auth/operator/login",
         # PHASE-5 review fix P1 (#272): operator MFA TOTP enrollment.
         "/v1/auth/operator/mfa/enroll",
+        # T05 (#298): partner-scoped session issuance for registered partners.
+        "/v1/auth/partner/session",
     }
 
 

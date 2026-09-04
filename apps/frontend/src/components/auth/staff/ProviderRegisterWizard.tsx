@@ -20,7 +20,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { ProviderType } from "@/lib/directory/links";
 import { ApiError } from "@/lib/api-errors";
-import { issueSession } from "@/lib/auth/api";
+import { AuthApiError, issuePartnerSession } from "@/lib/auth/api";
 import { postLoginTarget } from "@/lib/auth/staff-routing";
 import { saveSession } from "@/lib/auth/session";
 import { STRINGS } from "@/lib/i18n/dictionaries";
@@ -960,7 +960,7 @@ export function ProviderRegisterWizard({
         });
       }
 
-      const session = await issueSession(phoneE164);
+      const session = await issuePartnerSession(phoneE164);
       saveSession(session, phoneE164);
 
       window.location.href = postLoginTarget({
@@ -970,6 +970,8 @@ export function ProviderRegisterWizard({
       });
     } catch (err) {
       if (err instanceof ApiError) {
+        setServerError({ message: err.message, traceId: err.traceId });
+      } else if (err instanceof AuthApiError) {
         setServerError({ message: err.message, traceId: err.traceId });
       } else {
         console.error("[provider-register] unexpected submit error", err);

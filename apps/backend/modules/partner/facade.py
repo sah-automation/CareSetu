@@ -834,6 +834,21 @@ class PartnerFacade:
                 round=profile.round,
             )
 
+    async def resolve_partner_id_by_identity(self, identity_id: int) -> int | None:
+        """The partner profile id for an iam identity, or None if absent (T05, #298).
+
+        Non-throwing companion to ``resolve_partner``: returns the partner
+        profile id when one exists, or ``None`` when the identity holds no
+        partner profile (a patient-only phone). Used by the session facade's
+        partner-session gate to distinguish a registered partner from a patient
+        without crossing the module isolation boundary.
+        """
+        async with self._engine.begin() as connection:
+            profile = await _load_profile_by_identity(connection, identity_id)
+            if profile is None:
+                return None
+            return profile.partner_id
+
     async def get_my_status(self, identity_id: int) -> PartnerMeView:
         """Read the authenticated partner's own onboarding status (US-6, P2 #271).
 
