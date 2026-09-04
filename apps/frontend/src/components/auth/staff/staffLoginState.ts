@@ -16,6 +16,11 @@ export interface StaffLoginValues {
   code?: string;
 }
 
+// The staff surface is split by role (#302): partners sign in with
+// email + password, operators with phone + TOTP. The role is fixed by the
+// URL (?role=operator) - never derived from what the user types.
+export type StaffLoginRole = "partner" | "operator";
+
 export type StaffLoginFieldError =
   | "phoneInvalid"
   | "emailInvalid"
@@ -39,14 +44,15 @@ const TOTP_PATTERN = /^\d{6}$/;
 // minimums (well-formed phone or email, non-empty password/TOTP) - nothing
 // stricter, so the server stays the authority once it exists.
 //
-// Mode detection: when the phone field is non-empty the user is on the operator
-// path and a 6-digit TOTP code is required; when phone is empty the form
-// defaults to the partner staff path and email IS required.
+// Mode follows the role passed by the caller (default partner): operator mode
+// requires a phone + 6-digit TOTP code, partner mode requires email +
+// password. Never derived from field contents - the URL pins the mode.
 export function validateStaffLogin(
   values: StaffLoginValues,
+  role: StaffLoginRole = "partner",
 ): StaffLoginFieldErrors {
   const errors: StaffLoginFieldErrors = {};
-  const isOperatorMode = values.phone.trim().length > 0;
+  const isOperatorMode = role === "operator";
 
   if (isOperatorMode) {
     // Operator path: phone is required and must be well-formed.

@@ -73,22 +73,45 @@ function fillEmailAndPass() {
 }
 
 describe("StaffLoginForm", () => {
-  it("renders phone field, and email+password when phone is empty", () => {
+  it("renders email and password fields in partner mode - no phone or TOTP", () => {
     render(<StaffLoginForm />);
-    expect(screen.getByTestId("staff-phone")).toBeInTheDocument();
     expect(screen.getByTestId("staff-email")).toBeInTheDocument();
     expect(screen.getByTestId("staff-password")).toBeInTheDocument();
+    expect(screen.queryByTestId("staff-phone")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("staff-totp")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /doctor|lab|chemist/i }),
     ).not.toBeInTheDocument();
   });
 
-  it("renders TOTP input instead of email+password when phone is filled", () => {
+  it("renders phone and TOTP fields in operator mode - no email or password", () => {
+    render(<StaffLoginForm role="operator" />);
+    expect(screen.getByTestId("staff-phone")).toBeInTheDocument();
+    expect(screen.getByTestId("staff-totp")).toBeInTheDocument();
+    expect(screen.queryByTestId("staff-email")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("staff-password")).not.toBeInTheDocument();
+  });
+
+  it("never swaps fields while typing in partner mode", () => {
     render(<StaffLoginForm />);
+    fireEvent.change(screen.getByTestId("staff-email"), {
+      target: { value: "dr.sharma@example.com" },
+    });
+    fireEvent.change(screen.getByTestId("staff-password"), {
+      target: { value: "secret" },
+    });
+    expect(screen.queryByTestId("staff-phone")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("staff-totp")).not.toBeInTheDocument();
+  });
+
+  it("never swaps fields while typing in operator mode", () => {
+    render(<StaffLoginForm role="operator" />);
     fireEvent.change(screen.getByTestId("staff-phone"), {
       target: { value: "9876543210" },
     });
-    expect(screen.getByTestId("staff-totp")).toBeInTheDocument();
+    fireEvent.change(screen.getByTestId("staff-totp"), {
+      target: { value: "123" },
+    });
     expect(screen.queryByTestId("staff-email")).not.toBeInTheDocument();
     expect(screen.queryByTestId("staff-password")).not.toBeInTheDocument();
   });
@@ -113,8 +136,8 @@ describe("StaffLoginForm", () => {
     expect(toggle).toHaveAttribute("aria-label", t.showPassword);
   });
 
-  it("validates phone on blur", () => {
-    render(<StaffLoginForm />);
+  it("validates phone on blur in operator mode", () => {
+    render(<StaffLoginForm role="operator" />);
     fireEvent.change(screen.getByTestId("staff-phone"), {
       target: { value: "123" },
     });
@@ -125,7 +148,7 @@ describe("StaffLoginForm", () => {
   });
 
   it("validates TOTP code on blur in operator mode", () => {
-    render(<StaffLoginForm />);
+    render(<StaffLoginForm role="operator" />);
     fireEvent.change(screen.getByTestId("staff-phone"), {
       target: { value: "9876543210" },
     });
@@ -176,7 +199,7 @@ describe("Operator login flow", () => {
       roles: ["operator"],
     });
 
-    render(<StaffLoginForm />);
+    render(<StaffLoginForm role="operator" />);
     fillPhoneAndTotp();
     fireEvent.click(screen.getByTestId("staff-submit"));
 
@@ -204,7 +227,7 @@ describe("Operator login flow", () => {
       roles: ["operator"],
     });
 
-    render(<StaffLoginForm />);
+    render(<StaffLoginForm role="operator" />);
     fillPhoneAndTotp();
     fireEvent.click(screen.getByTestId("staff-submit"));
 
@@ -219,7 +242,7 @@ describe("Operator login flow", () => {
   });
 
   it("rejects a non-6-digit TOTP code without calling the API", async () => {
-    render(<StaffLoginForm />);
+    render(<StaffLoginForm role="operator" />);
     fireEvent.change(screen.getByTestId("staff-phone"), {
       target: { value: "9876543210" },
     });
@@ -235,7 +258,7 @@ describe("Operator login flow", () => {
   });
 
   it("rejects a TOTP code with letters without calling the API", async () => {
-    render(<StaffLoginForm />);
+    render(<StaffLoginForm role="operator" />);
     fireEvent.change(screen.getByTestId("staff-phone"), {
       target: { value: "9876543210" },
     });
@@ -259,7 +282,7 @@ describe("Operator login flow", () => {
         details: {},
       }),
     );
-    render(<StaffLoginForm />);
+    render(<StaffLoginForm role="operator" />);
     fillPhoneAndTotp();
     fireEvent.click(screen.getByTestId("staff-submit"));
 
@@ -296,7 +319,7 @@ describe("Operator login flow", () => {
       roles: ["operator"],
     });
 
-    render(<StaffLoginForm />);
+    render(<StaffLoginForm role="operator" />);
     fillPhoneAndTotp();
     fireEvent.click(screen.getByTestId("staff-submit"));
 
@@ -329,7 +352,7 @@ describe("Operator login flow", () => {
       }),
     );
 
-    render(<StaffLoginForm />);
+    render(<StaffLoginForm role="operator" />);
     fillPhoneAndTotp();
     fireEvent.click(screen.getByTestId("staff-submit"));
 
@@ -360,7 +383,7 @@ describe("Operator login flow", () => {
       }),
     );
 
-    render(<StaffLoginForm />);
+    render(<StaffLoginForm role="operator" />);
     fillPhoneAndTotp();
     fireEvent.click(screen.getByTestId("staff-submit"));
 
@@ -384,7 +407,7 @@ describe("Operator login flow", () => {
       }),
     );
 
-    render(<StaffLoginForm />);
+    render(<StaffLoginForm role="operator" />);
     fillPhoneAndTotp();
     fireEvent.click(screen.getByTestId("staff-submit"));
 
@@ -416,7 +439,7 @@ describe("Operator login flow", () => {
         }),
       );
 
-    render(<StaffLoginForm />);
+    render(<StaffLoginForm role="operator" />);
     fillPhoneAndTotp();
     fireEvent.click(screen.getByTestId("staff-submit"));
 
@@ -444,7 +467,7 @@ describe("Operator login flow", () => {
         }),
     );
 
-    render(<StaffLoginForm />);
+    render(<StaffLoginForm role="operator" />);
     fillPhoneAndTotp();
     fireEvent.click(screen.getByTestId("staff-submit"));
 
@@ -462,7 +485,7 @@ describe("Operator login flow", () => {
     });
   });
 
-  it("does not call operatorLogin when phone is empty", async () => {
+  it("does not call operatorLogin in partner mode", async () => {
     render(<StaffLoginForm />);
     fillEmailAndPass();
     fireEvent.click(screen.getByTestId("staff-submit"));

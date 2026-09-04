@@ -17,98 +17,119 @@ import {
 const t = STRINGS.en.staffAuth.login;
 
 describe("validateStaffLogin", () => {
-  it("accepts a well-formed email with any non-empty password", () => {
-    expect(
-      validateStaffLogin({
-        phone: "",
-        email: "dr.sharma@example.com",
-        password: "x",
-      }),
-    ).toEqual({});
+  describe("partner mode", () => {
+    it("accepts a well-formed email with any non-empty password", () => {
+      expect(
+        validateStaffLogin(
+          { phone: "", email: "dr.sharma@example.com", password: "x" },
+          "partner",
+        ),
+      ).toEqual({});
+    });
+
+    it.each([
+      ["missing @", "not-an-email"],
+      ["missing domain", "user@"],
+      ["whitespace-only", "   "],
+      ["empty", ""],
+    ])("rejects %s as an email", (_label, email) => {
+      const errors = validateStaffLogin(
+        { phone: "", email, password: "secret" },
+        "partner",
+      );
+      expect(errors.email).toBe("emailInvalid");
+    });
+
+    it("requires a non-empty password", () => {
+      const errors = validateStaffLogin(
+        { phone: "", email: "a@b.co", password: "" },
+        "partner",
+      );
+      expect(errors.password).toBe("passwordRequired");
+    });
+
+    it("reports both fields at once so the summary can count them", () => {
+      const errors = validateStaffLogin(
+        { phone: "", email: "", password: "" },
+        "partner",
+      );
+      expect(Object.keys(errors)).toHaveLength(2);
+    });
+
+    it("ignores a filled phone - the mode is pinned, never typed", () => {
+      const errors = validateStaffLogin(
+        { phone: "9876543210", email: "", password: "" },
+        "partner",
+      );
+      expect(errors.email).toBe("emailInvalid");
+      expect(errors.password).toBe("passwordRequired");
+      expect(errors.phone).toBeUndefined();
+      expect(errors.code).toBeUndefined();
+    });
   });
 
-  it.each([
-    ["missing @", "not-an-email"],
-    ["missing domain", "user@"],
-    ["whitespace-only", "   "],
-    ["empty", ""],
-  ])("rejects %s as an email", (_label, email) => {
-    const errors = validateStaffLogin({ phone: "", email, password: "secret" });
+  describe("operator mode", () => {
+    it("accepts a well-formed phone number with a 6-digit TOTP code", () => {
+      expect(
+        validateStaffLogin(
+          { phone: "9876543210", email: "", password: "", code: "123456" },
+          "operator",
+        ),
+      ).toEqual({});
+    });
+
+    it.each([
+      ["too short", "123"],
+      ["letters", "abcdefghij"],
+      ["with spaces", "987 654 3210"],
+    ])("rejects %s as a phone number", (_label, phone) => {
+      const errors = validateStaffLogin(
+        { phone, email: "", password: "secret", code: "123456" },
+        "operator",
+      );
+      expect(errors.phone).toBe("phoneInvalid");
+    });
+
+    it("requires a 6-digit TOTP code", () => {
+      const errors = validateStaffLogin(
+        { phone: "9876543210", email: "", password: "", code: "" },
+        "operator",
+      );
+      expect(errors.code).toBe("codeRequired");
+    });
+
+    it.each([
+      ["too short", "123"],
+      ["too long", "1234567"],
+      ["letters", "abcdef"],
+      ["with spaces", "123 456"],
+    ])("rejects %s as a TOTP code", (_label, code) => {
+      const errors = validateStaffLogin(
+        { phone: "9876543210", email: "", password: "", code },
+        "operator",
+      );
+      expect(errors.code).toBe("codeInvalid");
+    });
+
+    it("does not require email or password", () => {
+      const errors = validateStaffLogin(
+        { phone: "9876543210", email: "", password: "", code: "123456" },
+        "operator",
+      );
+      expect(errors.password).toBeUndefined();
+      expect(errors.email).toBeUndefined();
+    });
+  });
+
+  it("defaults to partner mode when no role is passed", () => {
+    const errors = validateStaffLogin({
+      phone: "9876543210",
+      email: "",
+      password: "",
+      code: "123456",
+    });
     expect(errors.email).toBe("emailInvalid");
-  });
-
-  it("requires a non-empty password", () => {
-    const errors = validateStaffLogin({
-      phone: "",
-      email: "a@b.co",
-      password: "",
-    });
-    expect(errors.password).toBe("passwordRequired");
-  });
-
-  it("reports both fields at once so the summary can count them", () => {
-    const errors = validateStaffLogin({ phone: "", email: "", password: "" });
-    expect(Object.keys(errors)).toHaveLength(2);
-  });
-
-  it("accepts a well-formed phone number with a 6-digit TOTP code", () => {
-    expect(
-      validateStaffLogin({
-        phone: "9876543210",
-        email: "",
-        password: "",
-        code: "123456",
-      }),
-    ).toEqual({});
-  });
-
-  it.each([
-    ["too short", "123"],
-    ["letters", "abcdefghij"],
-    ["with spaces", "987 654 3210"],
-  ])("rejects %s as a phone number", (_label, phone) => {
-    const errors = validateStaffLogin({
-      phone,
-      email: "",
-      password: "secret",
-      code: "123456",
-    });
-    expect(errors.phone).toBe("phoneInvalid");
-  });
-
-  it("requires a 6-digit TOTP code in operator mode", () => {
-    const errors = validateStaffLogin({
-      phone: "9876543210",
-      email: "",
-      password: "",
-      code: "",
-    });
-    expect(errors.code).toBe("codeRequired");
-  });
-
-  it.each([
-    ["too short", "123"],
-    ["too long", "1234567"],
-    ["letters", "abcdef"],
-    ["with spaces", "123 456"],
-  ])("rejects %s as a TOTP code", (_label, code) => {
-    const errors = validateStaffLogin({
-      phone: "9876543210",
-      email: "",
-      password: "",
-      code,
-    });
-    expect(errors.code).toBe("codeInvalid");
-  });
-
-  it("does not require password in operator mode", () => {
-    const errors = validateStaffLogin({
-      phone: "9876543210",
-      email: "",
-      password: "",
-      code: "123456",
-    });
-    expect(errors.password).toBeUndefined();
+    expect(errors.phone).toBeUndefined();
   });
 });
 

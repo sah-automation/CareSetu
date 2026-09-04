@@ -75,7 +75,7 @@ const en = {
   staffAuth: {
     login: {
       brand: "CareSetu",
-      subtitle: "Staff sign-in - doctor, lab, chemist and operator",
+      subtitle: "Staff sign-in - doctor, lab, chemist",
       heading: "Sign in",
       emailLabel: "Email",
       emailPlaceholder: "you@example.com",
@@ -738,7 +738,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
     staffAuth: {
       login: {
         brand: "CareSetu",
-        subtitle: "स्टाफ साइन-इन - डॉक्टर, लैब, केमिस्ट और ऑपरेटर",
+        subtitle: "स्टाफ साइन-इन - डॉक्टर, लैब, केमिस्ट",
         heading: "साइन इन करें",
         emailLabel: "ईमेल",
         emailPlaceholder: "you@example.com",

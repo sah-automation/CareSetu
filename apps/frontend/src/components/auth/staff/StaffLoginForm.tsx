@@ -8,6 +8,9 @@
 // surfaces the TOTP input step. On successful auth: create session via
 // saveSession, route via postLoginTarget. Phone display stays masked per IAM
 // convention. Email + password fields remain for the partner staff login path.
+//
+// #302: the mode is fixed by the caller's role prop (default "partner",
+// "operator" via ?role=operator) - fields never swap while the user types.
 
 import { useRef, useState } from "react";
 
@@ -23,6 +26,7 @@ import {
   staffOperatorErrorCopy,
   validateStaffLogin,
   type StaffLoginFieldError,
+  type StaffLoginRole,
 } from "./staffLoginState";
 
 type FieldErrors = ReturnType<typeof validateStaffLogin>;
@@ -53,9 +57,15 @@ async function completeStaffLogin(
   return { roles: me.roles, phone: me.phone };
 }
 
-export function StaffLoginForm() {
+export function StaffLoginForm({
+  role = "partner",
+}: {
+  role?: StaffLoginRole;
+}) {
   const { lang } = useLang();
   const t = STRINGS[lang].staffAuth.login;
+
+  const isOperatorMode = role === "operator";
 
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
@@ -91,10 +101,13 @@ export function StaffLoginForm() {
     if (field === "code") {
       applyFieldResult(
         field,
-        validateStaffLogin({ phone, email, password, code: totpCode }),
+        validateStaffLogin({ phone, email, password, code: totpCode }, role),
       );
     } else {
-      applyFieldResult(field, validateStaffLogin({ phone, email, password }));
+      applyFieldResult(
+        field,
+        validateStaffLogin({ phone, email, password }, role),
+      );
     }
   }
 
@@ -126,12 +139,10 @@ export function StaffLoginForm() {
     // TOTP re-verification step (SESSION_MFA_REQUIRED fallback): phone already
     // submitted, now verify the TOTP code.
     if (mfaContext !== null) {
-      const errors = validateStaffLogin({
-        phone,
-        email,
-        password,
-        code: totpCode,
-      });
+      const errors = validateStaffLogin(
+        { phone, email, password, code: totpCode },
+        role,
+      );
       if (errors.code) {
         setFieldErrors({ code: errors.code });
         totpRef.current?.focus();
@@ -146,15 +157,13 @@ export function StaffLoginForm() {
       return;
     }
 
-    // Operator path: phone filled - validate phone + 6-digit TOTP code.
-    const rawPhone = phone.trim();
-    if (rawPhone.length > 0) {
-      const errors = validateStaffLogin({
-        phone,
-        email,
-        password,
-        code: totpCode,
-      });
+    // Operator path: role pinned by the caller (URL ?role=operator), not by
+    // what the user typed. Validate phone + 6-digit TOTP code.
+    if (isOperatorMode) {
+      const errors = validateStaffLogin(
+        { phone, email, password, code: totpCode },
+        role,
+      );
       setFieldErrors(errors);
       if (errors.phone || errors.code) {
         if (errors.phone) {
@@ -165,6 +174,7 @@ export function StaffLoginForm() {
         return;
       }
       setLoading(true);
+      const rawPhone = phone.trim();
       operatorLogin({ phone: rawPhone, code: totpCode.trim() })
         .then((session) => landAfterLogin(session))
         .catch((error: unknown) => {
@@ -186,7 +196,7 @@ export function StaffLoginForm() {
     }
 
     // Partner staff path: email + password.
-    const errors = validateStaffLogin({ phone, email, password });
+    const errors = validateStaffLogin({ phone, email, password }, role);
     setFieldErrors(errors);
     if (Object.keys(errors).length > 0) {
       if (errors.email) {
@@ -207,7 +217,6 @@ export function StaffLoginForm() {
   const passwordError = errorFor("password");
   const codeError = errorFor("code");
   const isMfaStep = mfaContext !== null;
-  const isOperatorMode = phone.trim().length > 0 && !isMfaStep;
 
   return (
     <form onSubmit={handleSubmit} noValidate data-testid="staff-login-form">
@@ -284,7 +293,7 @@ export function StaffLoginForm() {
             <p className="mt-1 text-xs opacity-80">{t.mfaHelp}</p>
           </div>
         </>
-      ) : (
+      ) : isOperatorMode ? (
         <>
           <div className="mb-4">
             <label
@@ -320,127 +329,125 @@ export function StaffLoginForm() {
             ) : null}
           </div>
 
-          {isOperatorMode ? (
-            <div className="mb-4">
-              <label
-                htmlFor="staff-totp"
-                className="mb-1 block text-sm font-medium"
+          <div className="mb-4">
+            <label
+              htmlFor="staff-totp"
+              className="mb-1 block text-sm font-medium"
+            >
+              {t.mfaCodeLabel}
+            </label>
+            <input
+              ref={totpRef}
+              id="staff-totp"
+              inputMode="numeric"
+              maxLength={6}
+              placeholder="000000"
+              value={totpCode}
+              onChange={(event) => setTotpCode(event.target.value)}
+              onBlur={() => handleBlur("code")}
+              aria-invalid={codeError ? true : undefined}
+              aria-describedby={codeError ? "staff-totp-error" : undefined}
+              className="w-full rounded-md border border-hairline bg-surface px-3 py-2"
+              data-testid="staff-totp"
+            />
+            {codeError ? (
+              <p
+                id="staff-totp-error"
+                data-testid="staff-totp-error"
+                className="mt-1 text-sm text-danger"
               >
-                {t.mfaCodeLabel}
-              </label>
-              <input
-                ref={totpRef}
-                id="staff-totp"
-                inputMode="numeric"
-                maxLength={6}
-                placeholder="000000"
-                value={totpCode}
-                onChange={(event) => setTotpCode(event.target.value)}
-                onBlur={() => handleBlur("code")}
-                aria-invalid={codeError ? true : undefined}
-                aria-describedby={codeError ? "staff-totp-error" : undefined}
-                className="w-full rounded-md border border-hairline bg-surface px-3 py-2"
-                data-testid="staff-totp"
-              />
-              {codeError ? (
-                <p
-                  id="staff-totp-error"
-                  data-testid="staff-totp-error"
-                  className="mt-1 text-sm text-danger"
-                >
-                  {t[codeError]}
-                </p>
-              ) : null}
-              <p className="mt-1 text-xs opacity-80">{t.mfaHelp}</p>
-            </div>
-          ) : (
-            <>
-              <div className="mb-4">
-                <label
-                  htmlFor="staff-email"
-                  className="mb-1 block text-sm font-medium"
-                >
-                  {t.emailLabel}
-                </label>
-                <input
-                  ref={emailRef}
-                  id="staff-email"
-                  type="email"
-                  autoComplete="username"
-                  placeholder={t.emailPlaceholder}
-                  value={email}
-                  onChange={(event) => setEmail(event.target.value)}
-                  onBlur={() => handleBlur("email")}
-                  aria-invalid={errorFor("email") ? true : undefined}
-                  aria-describedby={
-                    errorFor("email") ? "staff-email-error" : undefined
-                  }
-                  className="w-full rounded-md border border-hairline bg-surface px-3 py-2"
-                  data-testid="staff-email"
-                />
-                {emailError ? (
-                  <p
-                    id="staff-email-error"
-                    data-testid="staff-email-error"
-                    className="mt-1 text-sm text-danger"
-                  >
-                    {t[emailError]}
-                  </p>
-                ) : null}
-              </div>
+                {t[codeError]}
+              </p>
+            ) : null}
+            <p className="mt-1 text-xs opacity-80">{t.mfaHelp}</p>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="mb-4">
+            <label
+              htmlFor="staff-email"
+              className="mb-1 block text-sm font-medium"
+            >
+              {t.emailLabel}
+            </label>
+            <input
+              ref={emailRef}
+              id="staff-email"
+              type="email"
+              autoComplete="username"
+              placeholder={t.emailPlaceholder}
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              onBlur={() => handleBlur("email")}
+              aria-invalid={errorFor("email") ? true : undefined}
+              aria-describedby={
+                errorFor("email") ? "staff-email-error" : undefined
+              }
+              className="w-full rounded-md border border-hairline bg-surface px-3 py-2"
+              data-testid="staff-email"
+            />
+            {emailError ? (
+              <p
+                id="staff-email-error"
+                data-testid="staff-email-error"
+                className="mt-1 text-sm text-danger"
+              >
+                {t[emailError]}
+              </p>
+            ) : null}
+          </div>
 
-              <div className="mb-4">
-                <label
-                  htmlFor="staff-password"
-                  className="mb-1 block text-sm font-medium"
-                >
-                  {t.passwordLabel}
-                </label>
-                <div className="flex items-center gap-2">
-                  <input
-                    ref={passwordRef}
-                    id="staff-password"
-                    type={showPassword ? "text" : "password"}
-                    autoComplete="current-password"
-                    value={password}
-                    onChange={(event) => setPassword(event.target.value)}
-                    onBlur={() => handleBlur("password")}
-                    aria-invalid={errorFor("password") ? true : undefined}
-                    aria-describedby={
-                      errorFor("password") ? "staff-password-error" : undefined
-                    }
-                    className="min-w-0 flex-1 rounded-md border border-hairline bg-surface px-3 py-2"
-                    data-testid="staff-password"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword((value) => !value)}
-                    aria-label={showPassword ? t.hidePassword : t.showPassword}
-                    data-testid="password-toggle"
-                    className="rounded-md border border-hairline px-2 py-1 text-sm"
-                  >
-                    {showPassword ? t.hidePassword : t.showPassword}
-                  </button>
-                </div>
-                {passwordError ? (
-                  <p
-                    id="staff-password-error"
-                    data-testid="staff-password-error"
-                    className="mt-1 text-sm text-danger"
-                  >
-                    {t[passwordError]}
-                  </p>
-                ) : null}
-                <a
-                  href="#"
-                  className="mt-1 inline-block text-sm underline"
-                  data-testid="forgot-password"
-                >
-                  {t.forgotPassword}
-                </a>
-              </div>
-            </>
-          )}
+          <div className="mb-4">
+            <label
+              htmlFor="staff-password"
+              className="mb-1 block text-sm font-medium"
+            >
+              {t.passwordLabel}
+            </label>
+            <div className="flex items-center gap-2">
+              <input
+                ref={passwordRef}
+                id="staff-password"
+                type={showPassword ? "text" : "password"}
+                autoComplete="current-password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                onBlur={() => handleBlur("password")}
+                aria-invalid={errorFor("password") ? true : undefined}
+                aria-describedby={
+                  errorFor("password") ? "staff-password-error" : undefined
+                }
+                className="min-w-0 flex-1 rounded-md border border-hairline bg-surface px-3 py-2"
+                data-testid="staff-password"
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((value) => !value)}
+                aria-label={showPassword ? t.hidePassword : t.showPassword}
+                data-testid="password-toggle"
+                className="rounded-md border border-hairline px-2 py-1 text-sm"
+              >
+                {showPassword ? t.hidePassword : t.showPassword}
+              </button>
+            </div>
+            {passwordError ? (
+              <p
+                id="staff-password-error"
+                data-testid="staff-password-error"
+                className="mt-1 text-sm text-danger"
+              >
+                {t[passwordError]}
+              </p>
+            ) : null}
+            <a
+              href="#"
+              className="mt-1 inline-block text-sm underline"
+              data-testid="forgot-password"
+            >
+              {t.forgotPassword}
+            </a>
+          </div>
         </>
       )}
 

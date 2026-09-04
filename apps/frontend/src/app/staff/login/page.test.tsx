@@ -52,6 +52,30 @@ describe("StaffLoginPage", () => {
     expect(mockReplace).not.toHaveBeenCalled();
   });
 
+  it("renders the partner form by default - no phone or TOTP fields", () => {
+    render(<StaffLoginPage />);
+    expect(screen.getByTestId("staff-email")).toBeInTheDocument();
+    expect(screen.getByTestId("staff-password")).toBeInTheDocument();
+    expect(screen.queryByTestId("staff-phone")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("staff-totp")).not.toBeInTheDocument();
+  });
+
+  it("renders the operator form when role=operator is passed", () => {
+    searchParamsValue = new URLSearchParams({ role: "operator" });
+    render(<StaffLoginPage />);
+    expect(screen.getByTestId("staff-phone")).toBeInTheDocument();
+    expect(screen.getByTestId("staff-totp")).toBeInTheDocument();
+    expect(screen.queryByTestId("staff-email")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("staff-password")).not.toBeInTheDocument();
+  });
+
+  it("falls back to partner mode for an unknown role param", () => {
+    searchParamsValue = new URLSearchParams({ role: "doctor" });
+    render(<StaffLoginPage />);
+    expect(screen.getByTestId("staff-email")).toBeInTheDocument();
+    expect(screen.queryByTestId("staff-phone")).not.toBeInTheDocument();
+  });
+
   it("links the type-preset registration CTAs to the wizard route", () => {
     render(<StaffLoginPage />);
     expect(screen.getByTestId("register-doctor")).toHaveAttribute(
