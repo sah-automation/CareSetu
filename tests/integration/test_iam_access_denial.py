@@ -16,22 +16,28 @@ import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
+from fastapi import Depends
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.config import Settings
+from app.gateway.principal import Principal
+from app.gateway.rbac import require_patient
 from app.main import create_app
 from modules.iam.adapters.sms import MockSmsAdapter
 from modules.iam.domain.jwt import issue_token
 from modules.iam.facade import IamFacade
+
+if TYPE_CHECKING:
+    from starlette.requests import Request
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_INI = REPO_ROOT / "apps" / "backend" / "alembic.ini"
@@ -137,6 +143,13 @@ def _app_client(database_url: str) -> TestClient:
             gateway_jwt_signing_key=_KEY,
         )
     )
+
+    @app.get("/v1/probe/patient")
+    async def patient_probe(
+        request: Request, principal: Annotated[Principal, Depends(require_patient)]
+    ) -> dict[str, str]:
+        return {"subject_id": principal.subject_id}
+
     return TestClient(app)
 
 
@@ -148,7 +161,7 @@ async def test_authenticated_403_writes_access_denied_to_the_outbox(
     client = _app_client(database_url)
 
     response = client.get(
-        "/v1/me",
+        "/v1/probe/patient",
         headers={"Authorization": f"Bearer {_token_for(session.identity_id, 'superadmin')}"},
     )
 

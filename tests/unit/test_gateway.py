@@ -20,8 +20,10 @@ import logging
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Annotated
 
 import pytest
+from fastapi import Depends
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 from starlette.responses import Response
@@ -29,7 +31,7 @@ from starlette.responses import Response
 from app.config import Settings, get_settings
 from app.gateway.principal import Principal
 from app.gateway.rate_limit import _MAX_TRACKED_BUCKETS, RateLimitMiddleware
-from app.gateway.rbac import resolve_scope_roles
+from app.gateway.rbac import require_patient, resolve_scope_roles
 from app.main import create_app
 from modules.iam.domain.jwt import issue_token
 from modules.iam.facade import RegisterPatientResult, VerifyOtpResult
@@ -166,6 +168,29 @@ def _protected_client(
         settings = Settings(gateway_jwt_verify_enabled=True, gateway_jwt_signing_key=_SIGNING_KEY)
     app = create_app(settings=settings)
     app.state.iam_facade = facade if facade is not None else StubFacade()
+    return TestClient(app)
+
+
+def _patient_only_client(
+    settings: Settings | None = None, facade: StubFacade | None = None
+) -> TestClient:
+    """App with a patient-only probe route for 403 access-denial testing.
+
+    ``/v1/me`` now admits any authenticated principal, so the 403 audit-emit
+    coverage moves here - a patient-only route that still raises
+    ``InsufficientScopeError`` for a ``superadmin`` token.
+    """
+    if settings is None:
+        settings = Settings(gateway_jwt_verify_enabled=True, gateway_jwt_signing_key=_SIGNING_KEY)
+    app = create_app(settings=settings)
+    app.state.iam_facade = facade if facade is not None else StubFacade()
+
+    @app.get("/v1/probe/patient")
+    async def patient_probe(
+        request: Request, principal: Annotated[Principal, Depends(require_patient)]
+    ) -> dict[str, str]:
+        return {"subject_id": principal.subject_id}
+
     return TestClient(app)
 
 
@@ -376,15 +401,45 @@ def test_valid_patient_token_admitted_to_protected_route() -> None:
     }
 
 
+def test_valid_operator_token_admitted_to_v1_me() -> None:
+    client = _protected_client()
+
+    response = client.get(
+        "/v1/me", headers=_bearer(_issue_access_token(subject_id=12, scope="operator"))
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "subject_id": "12",
+        "roles": ["operator"],
+        "phone": "+919876543210",
+    }
+
+
+def test_valid_partner_token_admitted_to_v1_me() -> None:
+    client = _protected_client()
+
+    response = client.get(
+        "/v1/me", headers=_bearer(_issue_access_token(subject_id=9, scope="partner"))
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "subject_id": "9",
+        "roles": ["partner"],
+        "phone": "+919876543210",
+    }
+
+
 def test_authenticated_caller_without_patient_scope_denied_403(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.WARNING)
     facade = StubFacade()
-    client = _protected_client(facade=facade)
+    client = _patient_only_client(facade=facade)
     token = _issue_access_token(scope="superadmin")
 
-    response = client.get("/v1/me", headers=_with_trace(_bearer(token)))
+    response = client.get("/v1/probe/patient", headers=_with_trace(_bearer(token)))
 
     assert response.status_code == 403
     body = response.json()
@@ -396,9 +451,11 @@ def test_authenticated_caller_without_patient_scope_denied_403(
 
 def test_authenticated_403_emits_access_denial_audit_for_the_named_identity() -> None:
     facade = StubFacade()
-    client = _protected_client(facade=facade)
+    client = _patient_only_client(facade=facade)
 
-    response = client.get("/v1/me", headers=_bearer(_issue_access_token(scope="superadmin")))
+    response = client.get(
+        "/v1/probe/patient", headers=_bearer(_issue_access_token(scope="superadmin"))
+    )
 
     assert response.status_code == 403
     # The gateway passes the authenticated principal's subject - the same
@@ -439,9 +496,11 @@ def test_403_survives_an_access_denial_emit_failure(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.ERROR)
-    client = _protected_client(facade=FailingEmitFacade())
+    client = _patient_only_client(facade=FailingEmitFacade())
 
-    response = client.get("/v1/me", headers=_bearer(_issue_access_token(scope="superadmin")))
+    response = client.get(
+        "/v1/probe/patient", headers=_bearer(_issue_access_token(scope="superadmin"))
+    )
 
     assert response.status_code == 403
     assert response.json()["code"] == "AUTH_INSUFFICIENT_SCOPE"

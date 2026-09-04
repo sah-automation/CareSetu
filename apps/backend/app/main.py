@@ -27,7 +27,7 @@ from app.gateway.idempotency import IdempotencyStore
 from app.gateway.jwt_verify import JWTVerifyMiddleware
 from app.gateway.principal import Principal
 from app.gateway.rate_limit import RateLimitMiddleware
-from app.gateway.rbac import require_patient
+from app.gateway.rbac import require_authenticated, require_patient
 from app.gateway.security_headers import SecurityHeadersMiddleware
 from app.gateway.trace import TraceMiddleware, resolve_trace_id
 from modules.audit.adapters.routes import router as audit_router
@@ -283,9 +283,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/v1/me", response_model=MeResponse)
     async def me(
-        request: Request, principal: Annotated[Principal, Depends(require_patient)]
+        request: Request, principal: Annotated[Principal, Depends(require_authenticated)]
     ) -> MeResponse:
-        """Protected proof route: admit only a valid patient-scoped session.
+        """Protected proof route: admit any authenticated principal.
 
         The phone is resolved through the iam facade's one-column lookup by
         the principal's subject id (PHASE-2.6 T05, #196) - the route never

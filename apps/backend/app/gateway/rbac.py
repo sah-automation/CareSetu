@@ -35,6 +35,22 @@ def resolve_scope_roles(scope: str) -> tuple[str, ...]:
     return ()
 
 
+async def require_authenticated(request: Request) -> Principal:
+    """FastAPI dependency: admit any authenticated principal.
+
+    Reads the ``Principal`` the gateway's ``jwt_verify`` middleware attached to
+    the request state. Anonymous or missing principals are refused with 401;
+    any authenticated caller (patient, operator, partner, or unknown scope) is
+    admitted with 200 and its resolved roles.  Role-specific guards
+    (``require_patient`` / ``require_operator`` / ``require_partner``) stay on
+    their own routes and continue to enforce scope.
+    """
+    principal: Principal | None = getattr(request.state, "principal", None)
+    if principal is None or not principal.is_authenticated:
+        raise AuthenticationRequiredError("no valid session on a protected route")
+    return principal
+
+
 async def require_patient(request: Request) -> Principal:
     """FastAPI dependency: admit only an authenticated patient-scoped caller.
 

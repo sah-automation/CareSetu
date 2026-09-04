@@ -356,10 +356,11 @@ class SessionFacade:
                     raise RefreshTokenRevokedError(
                         f"identity {identity_id} is {identity_status}; refusing to refresh"
                     )
-                scope = await _resolve_active_role(connection, identity_id, _PATIENT_ROLE)
+                scope_name = session_row["scope"]
+                scope = await _resolve_active_role(connection, identity_id, scope_name)
                 if scope is None:
                     raise RefreshTokenRevokedError(
-                        f"identity {identity_id} has no active patient role grant; "
+                        f"identity {identity_id} has no active {scope_name} role grant; "
                         "refusing to refresh"
                     )
 
@@ -458,6 +459,7 @@ async def _session_for_refresh(connection: AsyncConnection, token_hash: str) -> 
                 select(
                     iam_sessions.c.id,
                     iam_sessions.c.identity_id,
+                    iam_sessions.c.scope,
                     iam_sessions.c.revoked_at,
                     iam_sessions.c.refresh_expires_at,
                 )

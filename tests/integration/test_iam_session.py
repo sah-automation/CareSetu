@@ -465,3 +465,58 @@ async def test_refresh_derives_scope_from_the_current_role_grant(
 
     with pytest.raises(RefreshTokenRevokedError, match="role grant"):
         await facade.refresh_session(session.refresh_token)
+
+
+async def test_operator_session_rotates_to_operator_scope(
+    database_url: str, clean_iam: Any
+) -> None:
+    """An operator-issued session rotates to an operator-scoped JWT.
+
+    Sets up an identity with both patient and operator role grants, then
+    directly inserts an operator-scoped session row.  The refresh path must
+    re-derive the scope from the session row's recorded scope
+    (``operator``), resolve the identity's active operator grant, and mint
+    a fresh operator-scoped JWT.
+    """
+    clock = MutableClock(_T0)
+    facade = await _verified_facade(database_url, clock)
+    patient_session = await facade.issue_session("9876543210")
+    identity_id = patient_session.identity_id
+
+    engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO iam.iam_role_grants (identity_id, role, status) "
+                    "VALUES (:identity_id, 'operator', 'active')"
+                ),
+                {"identity_id": identity_id},
+            )
+            refresh_token = "operator-test-refresh-token"
+            token_hash = hash_refresh_token(refresh_token)
+            await connection.execute(
+                text(
+                    "INSERT INTO iam.iam_sessions "
+                    "(jti, identity_id, scope, expires_at, "
+                    "refresh_token_hash, refresh_expires_at) "
+                    "VALUES ('op-jti', :identity_id, 'operator', "
+                    ":expires_at, :token_hash, :refresh_expires_at)"
+                ),
+                {
+                    "identity_id": identity_id,
+                    "expires_at": _T0 + timedelta(minutes=15),
+                    "token_hash": token_hash,
+                    "refresh_expires_at": _T0 + timedelta(days=30),
+                },
+            )
+    finally:
+        await engine.dispose()
+
+    clock.set(_T0 + timedelta(minutes=10))
+    refreshed = await facade.refresh_session(refresh_token)
+
+    assert refreshed.scope == "operator"
+    assert refreshed.identity_id == identity_id
+    claims = verify_token(refreshed.jwt, _KEY, _T0 + timedelta(minutes=10))
+    assert claims.scope == "operator"
