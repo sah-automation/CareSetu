@@ -134,23 +134,31 @@ describe("staffLoginErrorCopy", () => {
     expect(copy).toMatch(/15 minutes/);
   });
 
+  it("keys SESSION_REFUSED onto the invalid-credentials copy", () => {
+    expect(staffLoginErrorCopy(envelopeError("SESSION_REFUSED"), t)).toBe(
+      t.invalidCredentials,
+    );
+  });
+
   it("maps VALIDATION_ERROR to calm operational copy, never the envelope message", () => {
     // Whole-envelope validation failures cannot be attributed to one field
-    // until Phase 5 ships details[] mapping, so they get generic copy.
+    // until Phase 5 ships details[] mapping, so they get credential-focused copy.
     const copy = staffLoginErrorCopy(envelopeError("VALIDATION_ERROR"), t);
-    expect(copy).toBe(t.genericError);
+    expect(copy).toBe(t.invalidCredentials);
     expect(copy).not.toBe(t.emailInvalid);
   });
 
-  it("falls back to generic operational copy for unknown codes without leaking the raw code", () => {
+  it("falls back to credential-focused copy for unknown codes without leaking the raw code", () => {
     const copy = staffLoginErrorCopy(envelopeError("IAM_SOMETHING_NEW"), t);
-    expect(copy).toBe(t.genericError);
+    expect(copy).toBe(t.invalidCredentials);
     expect(copy).not.toMatch(/IAM_SOMETHING_NEW/);
   });
 
-  it("treats non-envelope throws as operational errors", () => {
-    expect(staffLoginErrorCopy(new Error("boom"), t)).toBe(t.genericError);
-    expect(staffLoginErrorCopy(undefined, t)).toBe(t.genericError);
+  it("treats non-envelope throws as credential-focused operational errors", () => {
+    expect(staffLoginErrorCopy(new Error("boom"), t)).toBe(
+      t.invalidCredentials,
+    );
+    expect(staffLoginErrorCopy(undefined, t)).toBe(t.invalidCredentials);
   });
 });
 
@@ -176,17 +184,28 @@ describe("staffOperatorErrorCopy", () => {
     );
   });
 
-  it("never leaks a raw operator code to users - falls back to generic copy", () => {
+  it("keys SESSION_REFUSED onto the invalid-credentials copy", () => {
+    // SESSION_REFUSED (409) is emitted when the phone is unknown or the
+    // identity is not Active - the user should be guided to check their input,
+    // not told the system failed.
+    expect(staffOperatorErrorCopy(operatorError("SESSION_REFUSED"), t)).toBe(
+      t.invalidCredentials,
+    );
+  });
+
+  it("never leaks a raw operator code to users - falls back to credential-focused copy", () => {
     const copy = staffOperatorErrorCopy(
       operatorError("IAM_OPERATOR_UNKNOWN_CODE"),
       t,
     );
-    expect(copy).toBe(t.genericError);
+    expect(copy).toBe(t.invalidCredentials);
     expect(copy).not.toMatch(/IAM_OPERATOR_UNKNOWN_CODE/);
   });
 
-  it("treats non-envelope throws as operational errors", () => {
-    expect(staffOperatorErrorCopy(new Error("boom"), t)).toBe(t.genericError);
-    expect(staffOperatorErrorCopy(undefined, t)).toBe(t.genericError);
+  it("treats non-envelope throws as credential-focused operational errors", () => {
+    expect(staffOperatorErrorCopy(new Error("boom"), t)).toBe(
+      t.invalidCredentials,
+    );
+    expect(staffOperatorErrorCopy(undefined, t)).toBe(t.invalidCredentials);
   });
 });

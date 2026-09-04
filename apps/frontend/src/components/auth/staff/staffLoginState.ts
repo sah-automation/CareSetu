@@ -83,27 +83,27 @@ export function staffLoginErrorCopy(error: unknown, t: LoginStrings): string {
   if (error instanceof AuthApiError) {
     switch (error.code) {
       case "INVALID_CREDENTIALS":
+      case "SESSION_REFUSED":
         return t.invalidCredentials;
       case "ACCOUNT_LOCKED":
         return t.accountLocked;
       default:
         // Includes VALIDATION_ERROR: until Phase 5 ships field-level
         // details[] mapping (ui-blueprint §9.5), a whole-envelope validation
-        // failure gets calm operational copy rather than wrongly blaming one
-        // specific field.
-        return t.genericError;
+        // failure gets credential-focused copy rather than blaming the system.
+        return t.invalidCredentials;
     }
   }
-  return t.genericError;
+  return t.invalidCredentials;
 }
 
 /**
  * Maps the operator-login HTTP client's ApiError (api-errors.ts, distinct from
  * AuthApiError) onto the same dictionary copy used by the staff login card.
  * SESSION_MFA_REQUIRED is handled by the caller as a state transition, never
- * rendered as free copy here. All other codes fall back to calm operational
- * copy - the raw SCREAMING_SNAKE code is never shown to users (api-standards
- * section 2).
+ * rendered as free copy here. All other codes - and non-envelope throws - fall
+ * back to the credential-focused copy; the raw SCREAMING_SNAKE code is never
+ * shown to users (api-standards section 2).
  */
 export function staffOperatorErrorCopy(
   error: unknown,
@@ -112,14 +112,15 @@ export function staffOperatorErrorCopy(
   if (error instanceof ApiError) {
     switch (error.code) {
       case "INVALID_CREDENTIALS":
+      case "SESSION_REFUSED":
         return t.invalidCredentials;
       case "ACCOUNT_LOCKED":
         return t.accountLocked;
       case "INVALID_OPERATOR_CODE":
         return t.invalidOperatorCode;
       default:
-        return t.genericError;
+        return t.invalidCredentials;
     }
   }
-  return t.genericError;
+  return t.invalidCredentials;
 }

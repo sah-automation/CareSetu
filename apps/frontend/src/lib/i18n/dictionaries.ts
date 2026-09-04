@@ -113,7 +113,8 @@ const en = {
       invalidCredentials: "Incorrect email or password.",
       accountLocked:
         "This account is temporarily locked after repeated failures. Try again in about 15 minutes or reset your password.",
-      genericError: "Something went wrong on our side. Please retry.",
+      genericError:
+        "Something went wrong, please check your credentials and try again.",
       invalidOperatorCode: "Invalid authentication code. Please try again.",
     },
     pending: {
@@ -772,7 +773,8 @@ export const STRINGS: Record<Lang, Dictionary> = {
         invalidCredentials: "ईमेल या पासवर्ड गलत है।",
         accountLocked:
           "बार-बार विफल प्रयासों के बाद यह खाता अस्थायी रूप से लॉक है। लगभग 15 मिनट बाद फिर कोशिश करें या पासवर्ड रीसेट करें।",
-        genericError: "हमारी तरफ़ से कुछ गड़बड़ हुई। कृपया फिर से कोशिश करें।",
+        genericError:
+          "कुछ गड़बड़ हुई, कृपया अपनी साख़ीयाँ जाँचें और फिर से कोशिश करें।",
         invalidOperatorCode: "अमान्य प्रमाणीकरण कोड। कृपया फिर से कोशिश करें।",
       },
       pending: {
