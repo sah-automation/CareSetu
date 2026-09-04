@@ -26,6 +26,10 @@ const STAFF_LOGIN = "/staff/login";
 interface AppGroup {
   prefix: string;
   entry: string;
+  // Optional extra query params applied to the entry URL on redirect so a
+  // signed-out hit lands on the correct form variant (e.g. /operator ->
+  // /staff/login?role=operator for the operator phone+TOTP form).
+  entryParams?: Record<string, string>;
 }
 
 // App-route prefix -> group-correct entry point (blueprint §2.1/§4.5).
@@ -37,7 +41,11 @@ const APP_GROUPS: readonly AppGroup[] = [
   { prefix: "/patient", entry: "/login" },
   { prefix: "/doctor", entry: STAFF_LOGIN },
   { prefix: "/partner", entry: STAFF_LOGIN },
-  { prefix: "/operator", entry: STAFF_LOGIN },
+  {
+    prefix: "/operator",
+    entry: STAFF_LOGIN,
+    entryParams: { role: "operator" },
+  },
 ];
 
 function matchesAppGroup(pathname: string): AppGroup | null {
@@ -71,6 +79,11 @@ export function proxy(request: NextRequest): NextResponse {
   // on read: the shared helper rejects off-site targets, so `return` can
   // never open-redirect.
   entry.search = "";
+  if (group.entryParams) {
+    for (const [key, value] of Object.entries(group.entryParams)) {
+      entry.searchParams.set(key, value);
+    }
+  }
   entry.searchParams.set(
     RETURN_PARAM,
     `${request.nextUrl.pathname}${request.nextUrl.search}`,
