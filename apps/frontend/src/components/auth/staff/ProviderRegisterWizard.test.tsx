@@ -526,6 +526,12 @@ describe("review & declarations with submission", () => {
       expect.objectContaining({ jwt: "test-jwt" }),
       "+919876543210",
     );
+
+    const sessionOrder = mockIssuePartnerSession.mock.invocationCallOrder[0];
+    const saveOrder = mockSaveSession.mock.invocationCallOrder[0];
+    const submitOrder = mockSubmitCredentials.mock.invocationCallOrder[0];
+    expect(sessionOrder).toBeLessThan(submitOrder);
+    expect(saveOrder).toBeLessThan(submitOrder);
     expect(mockPostLoginTarget).toHaveBeenCalledWith({
       surface: "staff",
       roles: ["partner"],

@@ -934,6 +934,9 @@ export function ProviderRegisterWizard({
         service_area_id: null,
       });
 
+      const session = await issuePartnerSession(phoneE164);
+      saveSession(session, phoneE164);
+
       const slots = UPLOAD_SLOTS[type];
       const credentialMap = new Map<CredentialType, string[]>();
       for (const slotId of slots) {
@@ -959,9 +962,6 @@ export function ProviderRegisterWizard({
           ),
         });
       }
-
-      const session = await issuePartnerSession(phoneE164);
-      saveSession(session, phoneE164);
 
       window.location.href = postLoginTarget({
         surface: "staff",
