@@ -42,12 +42,18 @@ jobs:
     needs: gate
     runs-on: ubuntu-latest
     env:
-      # Both secrets are created during DEPLOY-7 provisioning. A missing secret
+      # These secrets are created during DEPLOY-7 provisioning. A missing secret
       # fails the run loudly at the first assert step, before migrations or the
       # seed touch the database - never a silent fallback to the localhost
       # defaults in alembic.ini / app config.
       DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
       RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+      # Operator MFA TOTP secret encryption (PHASE-5 S8, #261): the seed's
+      # bootstrap-operator MFA enrollment (scripts/seed_demo.py) needs the AES
+      # key the MFA module reads as IAM_MFA_SECRET_KEY. Must match the Render
+      # service env var of the same name so the encrypted TOTP secret seeded
+      # here can be decrypted at runtime (security-phii-standards section 4).
+      IAM_MFA_SECRET_KEY: ${{ secrets.IAM_MFA_SECRET_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -57,6 +63,8 @@ jobs:
         run: test -n "$DATABASE_URL"
       - name: assert RENDER_DEPLOY_HOOK_URL is set
         run: test -n "$RENDER_DEPLOY_HOOK_URL"
+      - name: assert IAM_MFA_SECRET_KEY is set
+        run: test -n "$IAM_MFA_SECRET_KEY"
       - name: alembic upgrade head
         run: uv run --project apps/backend alembic -c apps/backend/alembic.ini upgrade head
       - name: seed demo data
