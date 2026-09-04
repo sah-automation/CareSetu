@@ -87,7 +87,7 @@ export interface WizardValues {
   fullName: string;
   email: string;
   password: string;
-  /** Optional alerts channel; empty means not provided. */
+  /** Required contact channel for partner registration. */
   mobile: string;
   // Step 2 - professional identity (doctor).
   degreeName: string;
@@ -150,6 +150,7 @@ export type TextFieldError =
   | "emailInvalid"
   | "passwordWeak"
   | "mobileInvalid"
+  | "mobileRequired"
   | "degreeNameRequired"
   | "councilRequired"
   | "cityRequired"
@@ -265,7 +266,9 @@ function validateStep1(values: WizardValues): StepErrors["fields"] {
   if (!isValidPassword(values.password)) {
     errors.password = "passwordWeak";
   }
-  if (values.mobile.trim().length > 0 && !isValidMobile(values.mobile)) {
+  if (values.mobile.trim().length === 0) {
+    errors.mobile = "mobileRequired";
+  } else if (!isValidMobile(values.mobile)) {
     errors.mobile = "mobileInvalid";
   }
   return errors;

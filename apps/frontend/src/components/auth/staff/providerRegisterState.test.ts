@@ -65,8 +65,8 @@ describe("step 1 - account basics validation matrix", () => {
     expect(errors.fields.fullName).toBe("fullNameRequired");
     expect(errors.fields.email).toBe("emailInvalid");
     expect(errors.fields.password).toBe("passwordWeak");
-    // Mobile for alerts is optional - absent stays clean.
-    expect(errors.fields.mobile).toBeUndefined();
+    // Mobile is required for partner registration.
+    expect(errors.fields.mobile).toBe("mobileRequired");
   });
 
   it("passes a complete account basics step", () => {
@@ -77,6 +77,7 @@ describe("step 1 - account basics validation matrix", () => {
         fullName: "Dr. Asha Kumar",
         email: "asha@example.com",
         password: STRONG_PASSWORD,
+        mobile: "9876543210",
       }),
     );
     expect(hasStepErrors(errors)).toBe(false);

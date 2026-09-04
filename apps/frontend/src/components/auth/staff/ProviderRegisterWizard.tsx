@@ -303,8 +303,7 @@ function StepAccountBasics({ values, errors, actions, t }: StepSectionProps) {
           htmlFor={FIELD_ID.mobile}
           className="mb-1 block text-sm font-medium"
         >
-          {t.fields.mobile}{" "}
-          <span className="font-normal text-txt-muted">{t.optionalSuffix}</span>
+          {t.fields.mobile}
         </label>
         <div className="flex items-center gap-2">
           <span className="text-sm text-txt-muted" aria-hidden="true">
@@ -912,14 +911,6 @@ export function ProviderRegisterWizard({
     if (submitting) return;
 
     const phone = values.mobile.trim();
-    if (!phone) {
-      setServerError({
-        message: t.errorsSubmitPhoneRequired,
-        traceId: "",
-      });
-      return;
-    }
-
     if (!geoCoords) {
       setServerError({
         message: t.errorsSubmitLocationRequired,

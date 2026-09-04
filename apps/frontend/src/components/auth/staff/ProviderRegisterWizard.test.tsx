@@ -279,8 +279,11 @@ describe("validation blocks progression with per-field messages", () => {
     expect(screen.getByTestId("pr-password-error")).toHaveTextContent(
       t.errors.passwordWeak,
     );
+    expect(screen.getByTestId("pr-mobile-error")).toHaveTextContent(
+      t.errors.mobileRequired,
+    );
     expect(screen.getByTestId("pr-form-summary")).toHaveTextContent(
-      t.summaryTitle(3),
+      t.summaryTitle(4),
     );
   });
 
