@@ -63,12 +63,14 @@ export interface ErrorEnvelope {
 export class AuthApiError extends Error {
   readonly code: string;
   readonly details: Record<string, unknown>;
+  readonly traceId: string;
 
   constructor(envelope: ErrorEnvelope) {
     super(envelope.message);
     this.name = "AuthApiError";
     this.code = envelope.code;
     this.details = envelope.details;
+    this.traceId = envelope.trace_id;
   }
 }
 
@@ -128,6 +130,10 @@ export function resendOtp(phone: string): Promise<ResendResult> {
 
 export function issueSession(phone: string): Promise<SessionResult> {
   return post<SessionResult>("/v1/auth/session", { phone });
+}
+
+export function issuePartnerSession(phone: string): Promise<SessionResult> {
+  return post<SessionResult>("/v1/auth/partner/session", { phone });
 }
 
 export async function fetchMe(jwt: string): Promise<MeResult> {

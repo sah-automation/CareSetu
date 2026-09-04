@@ -13,6 +13,14 @@ dependencies = [
     "alembic>=1.13",
     "httpx>=0.27",
     "redis>=5.0",
+    # At-rest encryption for partner credential documents (security-phii-standards
+    # A1/A5, ADR-0008): AES-GCM via the ``cryptography`` package whose key lives in
+    # the environment, never in code.
+    "cryptography>=42.0",
+    # RFC-6238 TOTP for the operator MFA second factor (PHASE-5 S8, #261): a
+    # time-based one-time password checked against the stored ``iam_operator_mfa``
+    # secret at operator login.
+    "pyotp>=2.9",
 ]
 
 [dependency-groups]

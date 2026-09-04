@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     Column,
     DateTime,
@@ -48,6 +49,25 @@ iam_identities = Table(
         "status IN ('Unverified', 'Active', 'Suspended')",
         name="ck_iam_identities_status",
     ),
+)
+
+iam_operator_mfa = Table(
+    "iam_operator_mfa",
+    MODULE_METADATA,
+    Column("id", BigInteger, primary_key=True),
+    Column(
+        "identity_id",
+        BigInteger,
+        ForeignKey("iam_identities.id", name="fk_iam_operator_mfa_identity"),
+        nullable=False,
+    ),
+    # Encrypted TOTP secret (never plaintext); only operators enroll.
+    Column("secret", String(256), nullable=False),
+    Column("mfa_enabled", Boolean, nullable=False, server_default=text("false")),
+    Column("enrolled_at", DateTime(timezone=True), nullable=True),
+    Column("last_verified_at", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    UniqueConstraint("identity_id", name="uq_iam_operator_mfa_identity"),
 )
 
 iam_otp_challenges = Table(

@@ -61,13 +61,29 @@ describe("proxy - patient group redirects to the patient wizard", () => {
   });
 });
 
-describe("proxy - staff groups redirect to /staff/login", () => {
+describe("proxy - staff partner groups redirect to /staff/login", () => {
   it.each([
     ["/doctor", "/staff/login?return=%2Fdoctor"],
     ["/partner", "/staff/login?return=%2Fpartner"],
     ["/partner/orders/42", "/staff/login?return=%2Fpartner%2Forders%2F42"],
-    ["/operator", "/staff/login?return=%2Foperator"],
-    ["/operator/audit", "/staff/login?return=%2Foperator%2Faudit"],
+  ])("redirects %s to %s", (path, expected) => {
+    const response = proxy(makeRequest(path));
+    expect(response.status).toBe(307);
+    expect(redirectLocation(response)).toBe(expected);
+  });
+});
+
+describe("proxy - operator group redirects to /staff/login?role=operator", () => {
+  it.each([
+    ["/operator", "/staff/login?role=operator&return=%2Foperator"],
+    [
+      "/operator/audit",
+      "/staff/login?role=operator&return=%2Foperator%2Faudit",
+    ],
+    [
+      "/operator/audit?tab=consent",
+      "/staff/login?role=operator&return=%2Foperator%2Faudit%3Ftab%3Dconsent",
+    ],
   ])("redirects %s to %s", (path, expected) => {
     const response = proxy(makeRequest(path));
     expect(response.status).toBe(307);

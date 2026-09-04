@@ -27,7 +27,7 @@ from app.gateway.idempotency import IdempotencyStore
 from app.gateway.jwt_verify import JWTVerifyMiddleware
 from app.gateway.principal import Principal
 from app.gateway.rate_limit import RateLimitMiddleware
-from app.gateway.rbac import require_patient
+from app.gateway.rbac import require_authenticated, require_patient
 from app.gateway.security_headers import SecurityHeadersMiddleware
 from app.gateway.trace import TraceMiddleware, resolve_trace_id
 from modules.audit.adapters.routes import router as audit_router
@@ -45,6 +45,12 @@ from modules.iam.adapters.routes import register_error_handlers
 from modules.iam.adapters.routes import router as iam_router
 from modules.iam.adapters.sms import MockSmsAdapter, build_sms_adapter
 from modules.iam.facade import IamFacade
+from modules.partner.adapters.artifact_store import build_artifact_store
+from modules.partner.adapters.routes import (
+    register_error_handlers as register_partner_error_handlers,
+)
+from modules.partner.adapters.routes import router as partner_router
+from modules.partner.facade import PartnerFacade
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +143,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         access_token_signing_key=resolved_settings.gateway_jwt_signing_key,
         access_token_ttl_seconds=resolved_settings.gateway_access_token_ttl_seconds,
         refresh_token_ttl_seconds=resolved_settings.gateway_refresh_token_ttl_seconds,
+        mfa_secret_key=resolved_settings.iam_mfa_secret_key,
     )
     app.state.iam_facade = facade
     # MOD-004 (PHASE-3 T3, #212): the consent facade shares the same settled
@@ -155,6 +162,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # the health schema, so the audit facade calls through the facade seam
     # instead of reading across schemas (module isolation rule).
     app.state.audit_facade = AuditFacade(engine=engine, health_facade=app.state.health_facade)
+    # MOD-002 (PHASE-5 T05, #249): the partner facade shares the settled engine
+    # and, for open registration (ADR-0010), the settled iam facade - the sync
+    # ``create_credential_account`` seam is called in-sequence at registration
+    # so a login-capable account exists before the partner can authenticate.
+    # Stored on state so the registration route reads one resolved instance and
+    # unit tests stub it.
+    # MOD-002 (PHASE-5 T06, #251): credential documents are AES-encrypted into
+    # the ``partner/`` object-storage prefix before a Step-1 pass enters the
+    # queue. The store's key/root come from the environment (fail-closed when a
+    # key is supplied but malformed); dev/test without a key derives an ephemeral
+    # one so the encrypted write path still runs.
+    partner_artifact_store = build_artifact_store(
+        root=resolved_settings.partner_artifact_root,
+        b64_key=resolved_settings.partner_artifact_key,
+    )
+    app.state.partner_facade = PartnerFacade(
+        engine=engine,
+        iam_facade=facade,
+        artifact_store=partner_artifact_store,
+        audit_facade=app.state.audit_facade,
+        re_submission_max=resolved_settings.partner_re_submission_max,
+        re_submission_cooldown_days=resolved_settings.partner_re_submission_cooldown_days,
+        credential_cleanup_days=resolved_settings.partner_credential_cleanup_days,
+    )
+
+    # MOD-002/MOD-001 seam (T05, #298): wire the partner-profile identity
+    # resolver into the session facade so ``issue_partner_session`` can gate on
+    # partner-profile existence.  Must run after both facades are constructed
+    # (circular dependency: PartnerFacade needs IamFacade; the session facade
+    # needs the partner resolver).  No cross-schema imports at runtime - the
+    # closure routes through the two facades' own seams.
+    async def _resolve_partner_by_identity(identity_id: int) -> int | None:
+        partner = cast(PartnerFacade, app.state.partner_facade)
+        return await partner.resolve_partner_id_by_identity(identity_id)
+
+    facade.set_partner_resolver(_resolve_partner_by_identity)
     # The edge's in-process idempotency store (api-standards §5, PHASE-2 REM
     # T11, #80): the auth mutation adapters read/write it per ``Idempotency-Key``
     # so a retried register/verify/resend replays the stored result instead of
@@ -218,10 +261,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health_router)
     app.include_router(consent_router)
     app.include_router(audit_router)
+    app.include_router(partner_router)
     register_error_handlers(app)
     register_gateway_error_handlers(app)
     register_health_error_handlers(app)
     register_consent_error_handlers(app)
+    register_partner_error_handlers(app)
 
     # Catch-all for any unhandled exception that escapes the module-level
     # handlers above (e.g. SQLAlchemy OperationalError from a DB connection
@@ -250,9 +295,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/v1/me", response_model=MeResponse)
     async def me(
-        request: Request, principal: Annotated[Principal, Depends(require_patient)]
+        request: Request, principal: Annotated[Principal, Depends(require_authenticated)]
     ) -> MeResponse:
-        """Protected proof route: admit only a valid patient-scoped session.
+        """Protected proof route: admit any authenticated principal.
 
         The phone is resolved through the iam facade's one-column lookup by
         the principal's subject id (PHASE-2.6 T05, #196) - the route never

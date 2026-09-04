@@ -15,6 +15,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 
 import { BrandMark } from "@/components/brand/BrandMark";
 import { StaffLoginForm } from "@/components/auth/staff/StaffLoginForm";
+import type { StaffLoginRole } from "@/components/auth/staff/staffLoginState";
 import { useAuth } from "@/lib/auth/AuthContext";
 import {
   CHOOSE_ROLE_ROUTE,
@@ -43,6 +44,13 @@ function StaffLoginView() {
   const { user, isLoading, isAuthenticated } = useAuth();
 
   const returnTarget = searchParams.get("return");
+
+  // #302: the surface is split by role - partners (default) get email +
+  // password, operators (?role=operator) get phone + TOTP. The param is
+  // supplied by the operator console redirect (#303); anything that is not
+  // exactly "operator" falls back to the partner flow.
+  const role: StaffLoginRole =
+    searchParams.get("role") === "operator" ? "operator" : "partner";
 
   // A visitor who already holds a staff session lands by the same §4.5
   // routing matrix the sign-in itself will use - never on this form.
@@ -76,7 +84,7 @@ function StaffLoginView() {
 
       <div className="mt-6 rounded-lg border border-hairline bg-surface p-6 shadow-card">
         <h1 className="mb-4 text-xl font-bold">{t.heading}</h1>
-        <StaffLoginForm />
+        <StaffLoginForm role={role} />
       </div>
 
       <hr className="my-6 border-hairline-soft" />

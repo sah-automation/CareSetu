@@ -17,7 +17,12 @@ from uuid import NAMESPACE_DNS, uuid5
 
 from pydantic import BaseModel, Field
 
-from bus.events import is_regulated_act
+from bus.events import (
+    EVENT_CREDENTIAL_INVALIDATED,
+    EVENT_PARTNER_CREDENTIAL_REVIEWED,
+    EVENT_PARTNER_REGISTERED,
+    is_regulated_act,
+)
 from modules.audit.domain.chain import compute_audit_hash
 
 #: Canonical ``audit.event`` payload actions from the consent producer
@@ -115,6 +120,255 @@ class RecordAccessAuditPayload(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+def _partner_uuid(partner_id: int) -> str:
+    """Deterministic, reproducible UUID for one partner (int -> UUID)."""
+    return str(uuid5(_AUDIT_NAMESPACE, f"partner:{partner_id}"))
+
+
+class PartnerDecisionPayload(BaseModel):
+    """MOD-011's typed mirrors of the partner terminal-decision payloads.
+
+    The dispatcher reconstructs a claimed ``partner.activated`` /
+    ``partner.rejected`` outbox row into this model - the registry's registered
+    payload model - so its field contract mirrors what MOD-002 publishes (its
+    ``PartnerActivatedPayload`` / ``PartnerRejectedPayload``). The mirror lives
+    here so MOD-011 consumes the events without importing another module's
+    domain (ADR-0003). ``identity_id`` names the iam identity whose ``partner``
+    role is granted/suspended - an isolation-safe identifier.
+    """
+
+    partner_id: int
+    identity_id: int
+    reason: str | None = None
+    round: int | None = None
+    decision_by: int | None = None
+
+
+class CredentialReviewedPayload(BaseModel):
+    """MOD-011's typed mirror of MOD-002's ``partner.credential_reviewed``.
+
+    The dispatcher reconstructs a claimed ``partner.credential_reviewed``
+    outbox row into this model - the registry's registered payload model. Its
+    field contract mirrors what MOD-002 publishes (its
+    ``CredentialReviewedPayload``): the operator who viewed the credentials
+    (``actor_id``) and the partner whose documents were seen (``partner_id``).
+    One row per credential view - every view is traceable, not just a summary.
+    """
+
+    partner_id: int
+    actor_id: int
+
+
+class PartnerRegisteredPayload(BaseModel):
+    """MOD-011's typed mirror of MOD-002's ``partner.registered`` payload.
+
+    The dispatcher reconstructs a claimed ``partner.registered`` outbox row
+    into this model - the registry's registered payload model. Its field
+    contract mirrors what MOD-002 publishes (its ``PartnerRegisteredPayload``):
+    the partner, its iam identity, and the credential type submitted.
+    ``partner_type`` is the only MOD-002-specific vocabulary the mirror needs;
+    it is isolated here so MOD-011 consumes the event without importing
+    another module's domain (ADR-0003).
+    """
+
+    partner_id: int
+    identity_id: int
+    partner_type: str
+
+
+class CredentialInvalidatedPayload(BaseModel):
+    """MOD-011's typed mirror of MOD-002's ``credential.invalidated`` payload.
+
+    The dispatcher reconstructs a claimed ``credential.invalidated`` outbox row
+    and MOD-001's registered model owns the registry slot, so this mirror is
+    used ONLY by ``run_handler`` to re-validate the dispatched payload for the
+    chain append - MOD-011 registers no duplicate model with the registry. Its
+    field contract mirrors what MOD-002 publishes (its
+    ``CredentialInvalidatedPayload``): the partner, its iam identity, the
+    optional credential that lost validity, and why.
+    """
+
+    partner_id: int
+    identity_id: int
+    credential_id: int | None = None
+    reason: str
+
+
+def build_partner_registered_row(
+    payload: PartnerRegisteredPayload,
+    producer: str,
+    occurred_at: datetime,
+    prev_hash: str,
+) -> AuditRow:
+    """Compute the ``audit_events`` columns for one ``partner.registered`` act.
+
+    The event type IS the regulated act (``partner.registered`` - T3's
+    predicate runs on it directly, no derivation). Registration is a system
+    action (the aspiring partner opens the profile, no operator is involved),
+    so ``actor_id`` is None and the partner maps to ``target_id`` through the
+    deterministic uuid5 namespace. ``metadata`` re-hosts the no-PHI facts
+    (producer, ``identity_id``, ``partner_type``) the partner outbox carried,
+    so the chain records who registered as which credential type.
+    """
+    target_id = _partner_uuid(payload.partner_id)
+    metadata: dict[str, Any] = {
+        "producer": producer,
+        "identity_id": payload.identity_id,
+        "partner_type": payload.partner_type,
+    }
+    digest = compute_audit_hash(
+        EVENT_PARTNER_REGISTERED,
+        None,
+        target_id,
+        "partner_registration",
+        metadata,
+        occurred_at,
+        prev_hash,
+    )
+    return AuditRow(
+        event_type=EVENT_PARTNER_REGISTERED,
+        actor_id=None,
+        target_id=target_id,
+        scope="partner_registration",
+        metadata=metadata,
+        timestamp=occurred_at,
+        prev_hash=prev_hash,
+        hash=digest,
+    )
+
+
+def build_credential_invalidated_row(
+    payload: CredentialInvalidatedPayload,
+    producer: str,
+    occurred_at: datetime,
+    prev_hash: str,
+) -> AuditRow:
+    """Compute the ``audit_events`` columns for one ``credential.invalidated`` act.
+
+    The event type IS the regulated act (``credential.invalidated`` - T3's
+    predicate runs on it directly, no derivation). A credential losing validity
+    is a system action (grace lapse, failed re-verification, the 30-day
+    cleanup), so ``actor_id`` is None and the partner maps to ``target_id``
+    through the deterministic uuid5 namespace. ``metadata`` re-hosts the
+    no-PHI facts (producer, ``identity_id``, optional ``credential_id``,
+    ``reason``) the partner outbox carried.
+    """
+    target_id = _partner_uuid(payload.partner_id)
+    metadata: dict[str, Any] = {
+        "producer": producer,
+        "identity_id": payload.identity_id,
+        "reason": payload.reason,
+    }
+    if payload.credential_id is not None:
+        metadata["credential_id"] = payload.credential_id
+    digest = compute_audit_hash(
+        EVENT_CREDENTIAL_INVALIDATED,
+        None,
+        target_id,
+        "partner_credentials",
+        metadata,
+        occurred_at,
+        prev_hash,
+    )
+    return AuditRow(
+        event_type=EVENT_CREDENTIAL_INVALIDATED,
+        actor_id=None,
+        target_id=target_id,
+        scope="partner_credentials",
+        metadata=metadata,
+        timestamp=occurred_at,
+        prev_hash=prev_hash,
+        hash=digest,
+    )
+
+
+def build_partner_decision_row(
+    event_type: str,
+    payload: PartnerDecisionPayload,
+    producer: str,
+    occurred_at: datetime,
+    prev_hash: str,
+) -> AuditRow:
+    """Compute the ``audit_events`` columns for one partner terminal decision.
+
+    The event type IS the regulated act (``partner.activated`` /
+    ``partner.rejected`` - T3's predicate runs on it directly, no derivation).
+    The deciding operator maps to ``actor_id`` and the partner to ``target_id``
+    through the deterministic uuid5 namespace; ``metadata`` re-hosts the
+    no-PHI facts (producer, ``identity_id``, optional ``reason`` / ``round``)
+    the partner outbox carried, so the operator view answers who decided and
+    why without reading across schemas.
+    """
+    actor_id = _actor_uuid(payload.decision_by) if payload.decision_by is not None else None
+    target_id = _partner_uuid(payload.partner_id)
+    metadata: dict[str, Any] = {
+        "producer": producer,
+        "identity_id": payload.identity_id,
+    }
+    if payload.reason is not None:
+        metadata["reason"] = payload.reason
+    if payload.round is not None:
+        metadata["round"] = payload.round
+    digest = compute_audit_hash(
+        event_type,
+        actor_id,
+        target_id,
+        "partner_decision",
+        metadata,
+        occurred_at,
+        prev_hash,
+    )
+    return AuditRow(
+        event_type=event_type,
+        actor_id=actor_id,
+        target_id=target_id,
+        scope="partner_decision",
+        metadata=metadata,
+        timestamp=occurred_at,
+        prev_hash=prev_hash,
+        hash=digest,
+    )
+
+
+def build_credential_reviewed_row(
+    payload: CredentialReviewedPayload,
+    producer: str,
+    occurred_at: datetime,
+    prev_hash: str,
+) -> AuditRow:
+    """Compute the ``audit_events`` columns for one credential view.
+
+    The event type IS the regulated act (``partner.credential_reviewed`` - T3's
+    predicate runs on it directly). The operator who looked maps to ``actor_id``
+    and the partner whose documents were seen to ``target_id`` through the
+    deterministic uuid5 namespace. ``timestamp`` mirrors the event's
+    ``occurred_at`` so the "who saw this document" trail is exact.
+    """
+    actor_id = _actor_uuid(payload.actor_id)
+    target_id = _partner_uuid(payload.partner_id)
+    scope = "partner_credentials"
+    metadata: dict[str, Any] = {"producer": producer}
+    digest = compute_audit_hash(
+        EVENT_PARTNER_CREDENTIAL_REVIEWED,
+        actor_id,
+        target_id,
+        scope,
+        metadata,
+        occurred_at,
+        prev_hash,
+    )
+    return AuditRow(
+        event_type=EVENT_PARTNER_CREDENTIAL_REVIEWED,
+        actor_id=actor_id,
+        target_id=target_id,
+        scope=scope,
+        metadata=metadata,
+        timestamp=occurred_at,
+        prev_hash=prev_hash,
+        hash=digest,
+    )
+
+
 def build_record_access_row(
     event_type: str,
     payload: RecordAccessAuditPayload,
@@ -182,8 +436,8 @@ class AuditRow:
     """The pure decision + column values the consumer appends (DB-free)."""
 
     event_type: str
-    actor_id: str
-    target_id: str
+    actor_id: str | None
+    target_id: str | None
     scope: str
     metadata: dict[str, Any]
     timestamp: datetime

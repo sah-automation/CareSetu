@@ -36,6 +36,11 @@ from modules.iam.adapters.sms import MockSmsAdapter
 from modules.iam.facade import IamFacade
 
 DEMO_PHONE_E164 = "+919000000001"
+BOOTSTRAP_OPERATOR_PHONE_E164 = "+919000000002"
+# The bootstrap operator is seeded by the deploy pipeline, not invited by an
+# existing operator, so there is no inviting identity to attribute the
+# ``operator.invited`` audit event to - the seed names the seeded identity.
+BOOTSTRAP_OPERATOR_INVITED_BY_ID = 0
 
 
 def describe_otp_surface(settings: Settings) -> str:
@@ -56,24 +61,53 @@ def describe_otp_surface(settings: Settings) -> str:
     )
 
 
-def format_summary(phone_e164: str, otp_surface: str) -> str:
+def format_summary(
+    phone_e164: str,
+    otp_surface: str,
+    operator_phone_e164: str,
+    operator_provisioning_uri: str,
+) -> str:
     """The seed's stdout, one field per line, ready to print."""
-    return f"demo phone: {phone_e164}\notp surface: {otp_surface}"
+    return (
+        f"demo phone: {phone_e164}\n"
+        f"bootstrap operator phone: {operator_phone_e164}\n"
+        f"bootstrap operator provisioning uri: {operator_provisioning_uri}\n"
+        f"otp surface: {otp_surface}"
+    )
 
 
-async def _seed(settings: Settings) -> tuple[str, str]:
-    """Ensure the demo identity exists and report the OTP surface.
+async def _seed(settings: Settings) -> tuple[str, str, str, str]:
+    """Ensure the demo identity and bootstrap operator exist, report the OTP surface.
 
-    Returns ``(phone_e164, otp_surface)``: the normalized demo phone as stored
-    and the description of which OTP surface is enabled. The engine is always
-    disposed, mirroring the worker composition root's lifecycle (worker/main.py).
+    Returns ``(phone_e164, operator_phone_e164, operator_provisioning_uri,
+    otp_surface)``: the normalized demo phone and bootstrap operator phone as
+    stored, the TOTP provisioning URI the developer scans into an authenticator
+    to complete the bootstrap operator's first login, and the description of
+    which OTP surface is enabled. The engine is always disposed, mirroring the
+    worker composition root's lifecycle (worker/main.py).
     """
     engine = create_async_engine(settings.database_url, poolclass=NullPool)
     try:
-        facade = IamFacade(engine=engine, sms_adapter=MockSmsAdapter())
+        facade = IamFacade(
+            engine=engine,
+            sms_adapter=MockSmsAdapter(),
+            mfa_secret_key=settings.iam_mfa_secret_key,
+        )
         result = await facade.register_patient(DEMO_PHONE_E164)
+        operator = await facade.create_operator_account(
+            BOOTSTRAP_OPERATOR_PHONE_E164,
+            invited_by_identity_id=BOOTSTRAP_OPERATOR_INVITED_BY_ID,
+        )
+        # Persist a real encrypted TOTP secret for the bootstrap operator (P1, #272),
+        # so they can actually complete MFA login - never the empty placeholder.
+        enroll = await facade.enroll_mfa(operator.identity_id)
         await facade.delivery_queue.flush()
-        return result.phone_e164, describe_otp_surface(settings)
+        return (
+            result.phone_e164,
+            operator.phone_e164,
+            enroll.provisioning_uri,
+            describe_otp_surface(settings),
+        )
     finally:
         await engine.dispose()
 
@@ -88,11 +122,13 @@ def main() -> int:
     """
     try:
         settings = get_settings()
-        phone_e164, otp_surface = asyncio.run(_seed(settings))
+        phone_e164, operator_phone_e164, provisioning_uri, otp_surface = asyncio.run(
+            _seed(settings)
+        )
     except Exception as exc:
         print(f"demo seed failed: {exc}", file=sys.stderr)
         return 1
-    print(format_summary(phone_e164, otp_surface))
+    print(format_summary(phone_e164, otp_surface, operator_phone_e164, provisioning_uri))
     return 0
 
 

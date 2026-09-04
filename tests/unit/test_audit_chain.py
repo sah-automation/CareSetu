@@ -161,3 +161,75 @@ def test_verify_chain_rejects_tampered_field_at_that_row(
     tampered = [row if i != 1 else mutate(row) for i, row in enumerate(rows)]
 
     assert not verify_chain(tampered)
+
+
+def test_partner_terminal_decisions_and_credential_views_coexist_in_one_chain() -> None:
+    """PHASE-5 T13 (#256): the terminal-decision and credential-view appends
+    share the same hash chain - both event families chain through one ledger."""
+    decision = compute_audit_hash(
+        "partner.activated",
+        _ACTOR,
+        _TARGET,
+        "partner_decision",
+        {"producer": "partner", "identity_id": 11},
+        _BASE,
+        GENESIS_HASH,
+    )
+    view = compute_audit_hash(
+        "partner.credential_reviewed",
+        _ACTOR,
+        _TARGET,
+        "partner_credentials",
+        {"producer": "partner"},
+        _BASE + timedelta(seconds=1),
+        decision,
+    )
+    rejected = compute_audit_hash(
+        "partner.rejected",
+        _ACTOR,
+        _TARGET,
+        "partner_decision",
+        {"producer": "partner", "identity_id": 11, "reason": "identity mismatch", "round": 1},
+        _BASE + timedelta(seconds=2),
+        view,
+    )
+
+    rows = [
+        AuditEventRow(
+            event_type="partner.activated",
+            actor_id=_ACTOR,
+            target_id=_TARGET,
+            scope="partner_decision",
+            metadata={"producer": "partner", "identity_id": 11},
+            timestamp=_BASE,
+            prev_hash=GENESIS_HASH,
+            hash=decision,
+        ),
+        AuditEventRow(
+            event_type="partner.credential_reviewed",
+            actor_id=_ACTOR,
+            target_id=_TARGET,
+            scope="partner_credentials",
+            metadata={"producer": "partner"},
+            timestamp=_BASE + timedelta(seconds=1),
+            prev_hash=decision,
+            hash=view,
+        ),
+        AuditEventRow(
+            event_type="partner.rejected",
+            actor_id=_ACTOR,
+            target_id=_TARGET,
+            scope="partner_decision",
+            metadata={
+                "producer": "partner",
+                "identity_id": 11,
+                "reason": "identity mismatch",
+                "round": 1,
+            },
+            timestamp=_BASE + timedelta(seconds=2),
+            prev_hash=view,
+            hash=rejected,
+        ),
+    ]
+
+    assert verify_chain(rows)

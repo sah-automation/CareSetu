@@ -75,7 +75,7 @@ const en = {
   staffAuth: {
     login: {
       brand: "CareSetu",
-      subtitle: "Staff sign-in - doctor, lab, chemist and operator",
+      subtitle: "Staff sign-in - doctor, lab, chemist",
       heading: "Sign in",
       emailLabel: "Email",
       emailPlaceholder: "you@example.com",
@@ -84,9 +84,14 @@ const en = {
       hidePassword: "Hide",
       forgotPassword: "Forgot password?",
       signIn: "Sign in",
+      phoneLabel: "Phone number",
+      phonePlaceholder: "10-digit mobile number",
+      phoneInvalid: "Enter a valid phone number.",
       mfaCodeLabel: "Authentication code (2FA)",
-      mfaHelp:
-        "From your authenticator app. MFA verification activates in Phase 5.",
+      mfaHelp: "Enter the 6-digit code from your authenticator app.",
+      mfaSubmit: "Verify code",
+      codeRequired: "Enter the 6-digit code.",
+      codeInvalid: "The code must be exactly 6 digits.",
       newHereTitle: "New to CareSetu?",
       newHereBody:
         "Register your practice or business - our team verifies before you are listed.",
@@ -108,7 +113,9 @@ const en = {
       invalidCredentials: "Incorrect email or password.",
       accountLocked:
         "This account is temporarily locked after repeated failures. Try again in about 15 minutes or reset your password.",
-      genericError: "Something went wrong on our side. Please retry.",
+      genericError:
+        "Something went wrong, please check your credentials and try again.",
+      invalidOperatorCode: "Invalid authentication code. Please try again.",
     },
     pending: {
       badge: "Under Verification",
@@ -123,6 +130,8 @@ const en = {
       infoBanner:
         "You are not listed publicly until activated. We will call or message you if anything more is needed.",
       helpCta: "Help: contact the CareSetu team",
+      loadError:
+        "Could not load your application status. Please check your connection and try again.",
     },
     rejected: {
       badge: "Rejected",
@@ -137,6 +146,11 @@ const en = {
       resubmitStubNotice:
         "Resubmission opens with Phase 5 - nothing was resubmitted just now.",
       helpCta: "Help: contact the CareSetu team",
+      loadError:
+        "Could not load your rejection details. Please check your connection and try again.",
+      appealProcessing: "Submitting your appeal...",
+      appealSuccess:
+        "Appeal submitted. You are back in the verification queue.",
     },
     picker: {
       title: "Choose a role to continue",
@@ -256,8 +270,8 @@ const en = {
         emailInvalid: "Enter a valid email address.",
         passwordWeak:
           "Use at least 12 characters including a number and a symbol.",
-        mobileInvalid:
-          "Enter a valid 10-digit Indian mobile number, or leave this blank.",
+        mobileRequired: "Enter your mobile number.",
+        mobileInvalid: "Enter a valid 10-digit Indian mobile number.",
         degreeNameRequired: "Enter your name as per degree.",
         councilRequired: "Select your state medical council.",
         cityRequired: "Enter your city.",
@@ -275,7 +289,32 @@ const en = {
       },
       phase5Notice:
         "Submission is not connected yet: applications arrive in Phase 5. Nothing was sent or saved just now.",
+      submitting: "Submitting...",
+      traceWithId: (traceId: string) => `Trace: ${traceId}`,
+      errorsSubmitLocationRequired:
+        "Unable to determine your location. Please allow location access and try again.",
+      errorsSubmitUnexpected: "An unexpected error occurred. Please try again.",
     },
+  },
+
+  // doctor.* surface - PROGRAM landing inside the doctor console (Phase 5,
+  // doctor landing page, P5 FE #291). String keys come from the binding
+  // doctor-resolved view; bilingual parity is compile-time enforced via
+  // Dictionary = typeof en.
+  doctor: {
+    welcome: (displayName: string) => `Welcome, ${displayName}`,
+    doctorLabel: "Doctor",
+    doctorWithPhone: (phone: string) => `Doctor (${phone})`,
+    workspaceActive: "Your doctor workspace is active.",
+    statusHeading: "Status",
+    profileActive:
+      "Your profile is active and verified. You can begin accepting consultations.",
+    nextStepsHeading: "Next Steps",
+    nextSteps: [
+      "- Complete your professional profile (coming soon)",
+      "- Browse the patient directory (Phase 6)",
+      "- Start a consultation from a patient record",
+    ],
   },
 
   // home.* surface - the resolved public homepage's copy (PHASE-2.6 T09,
@@ -553,9 +592,17 @@ const en = {
       body: "Your consultations, prescriptions, lab results and metrics appear here as your care happens.",
     },
     loadError: "Could not load your record.",
+    accessHistory: {
+      heading: "Who accessed my record",
+      loadError: "Could not load access history.",
+      emptyTitle: "No access yet",
+      emptyBody:
+        "When a doctor, lab or chemist views your record, it appears here.",
+      scopePrefix: "Consent scope: ",
+      deniedLabel: "Denied",
+      deniedReasonPrefix: "Reason: ",
+    },
     placeholder: {
-      accessTitle: "Who accessed my record",
-      accessBody: "Full access history arrives with Phase 4.",
       healthTitle: "Health tracking",
       healthBody: "BP/sugar trends and follow-up plans arrive with Phase 12.",
     },
@@ -637,6 +684,7 @@ export type Dictionary = typeof en;
 export type AuthStrings = Dictionary["auth"];
 export type StaffAuthStrings = Dictionary["staffAuth"];
 export type ProfileStrings = Dictionary["profile"];
+export type DoctorStrings = Dictionary["doctor"];
 
 export const STRINGS: Record<Lang, Dictionary> = {
   en,
@@ -690,7 +738,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
     staffAuth: {
       login: {
         brand: "CareSetu",
-        subtitle: "स्टाफ साइन-इन - डॉक्टर, लैब, केमिस्ट और ऑपरेटर",
+        subtitle: "स्टाफ साइन-इन - डॉक्टर, लैब, केमिस्ट",
         heading: "साइन इन करें",
         emailLabel: "ईमेल",
         emailPlaceholder: "you@example.com",
@@ -699,9 +747,14 @@ export const STRINGS: Record<Lang, Dictionary> = {
         hidePassword: "छिपाएँ",
         forgotPassword: "पासवर्ड भूल गए?",
         signIn: "साइन इन करें",
+        phoneLabel: "फ़ोन नंबर",
+        phonePlaceholder: "10 अंकों का मोबाइल नंबर",
+        phoneInvalid: "एक सही फ़ोन नंबर दर्ज करें।",
         mfaCodeLabel: "प्रमाणीकरण कोड (2FA)",
-        mfaHelp:
-          "अपने authenticator ऐप से। MFA सत्यापन Phase 5 में सक्रिय होगा।",
+        mfaHelp: "अपने authenticator ऐप से 6 अंकों का कोड दर्ज करें।",
+        mfaSubmit: "कोड सत्यापित करें",
+        codeRequired: "6 अंकों का कोड दर्ज करें।",
+        codeInvalid: "कोड ठीक 6 अंकों का होना चाहिए।",
         newHereTitle: "CareSetu पर नए हैं?",
         newHereBody:
           "अपनी प्रैक्टिस या व्यवसाय रजिस्टर करें - लिस्ट होने से पहले हमारी टीम जाँच करती है।",
@@ -720,7 +773,9 @@ export const STRINGS: Record<Lang, Dictionary> = {
         invalidCredentials: "ईमेल या पासवर्ड गलत है।",
         accountLocked:
           "बार-बार विफल प्रयासों के बाद यह खाता अस्थायी रूप से लॉक है। लगभग 15 मिनट बाद फिर कोशिश करें या पासवर्ड रीसेट करें।",
-        genericError: "हमारी तरफ़ से कुछ गड़बड़ हुई। कृपया फिर से कोशिश करें।",
+        genericError:
+          "कुछ गड़बड़ हुई, कृपया अपनी साख़ीयाँ जाँचें और फिर से कोशिश करें।",
+        invalidOperatorCode: "अमान्य प्रमाणीकरण कोड। कृपया फिर से कोशिश करें।",
       },
       pending: {
         badge: "जाँच प्रक्रिया में",
@@ -735,6 +790,8 @@ export const STRINGS: Record<Lang, Dictionary> = {
         infoBanner:
           "सक्रिय होने तक आप सार्वजनिक रूप से सूचीबद्ध नहीं होंगे। यदि कुछ और चाहिए तो हम आपको कॉल या संदेश भेजेंगे।",
         helpCta: "सहायता: CareSetu टीम से संपर्क करें",
+        loadError:
+          "आपकी आवेदन स्थिति लोड नहीं हो सकी। कृपया अपना कनेक्शन जाँचें और फिर से प्रयास करें।",
       },
       rejected: {
         badge: "अस्वीकृत",
@@ -749,6 +806,10 @@ export const STRINGS: Record<Lang, Dictionary> = {
         resubmitStubNotice:
           "दोबारा जमा करना Phase 5 के साथ खुलेगा - अभी कुछ भी दोबारा जमा नहीं हुआ।",
         helpCta: "सहायता: CareSetu टीम से संपर्क करें",
+        loadError:
+          "आपकी अस्वीकृति विवरण लोड नहीं हो सका। कृपया अपना कनेक्शन जाँचें और फिर से प्रयास करें।",
+        appealProcessing: "आपकी अपील जमा हो रही है...",
+        appealSuccess: "अपील जमा हो गई। आप फिर से सत्यापन कतार में हैं।",
       },
       picker: {
         title: "जारी रखने के लिए एक रोल चुनें",
@@ -865,8 +926,8 @@ export const STRINGS: Record<Lang, Dictionary> = {
           emailInvalid: "एक सही ईमेल पता दर्ज करें।",
           passwordWeak:
             "कम से कम 12 अक्षर, जिसमें एक अंक और एक प्रतीक हो, इस्तेमाल करें।",
-          mobileInvalid:
-            "सही 10 अंकों का भारतीय मोबाइल नंबर दर्ज करें, या खाली छोड़ दें।",
+          mobileRequired: "अपना मोबाइल नंबर दर्ज करें।",
+          mobileInvalid: "सही 10 अंकों का भारतीय मोबाइल नंबर दर्ज करें।",
           degreeNameRequired: "डिग्री के अनुसार नाम दर्ज करें।",
           councilRequired: "अपनी राज्य मेडिकल काउंसिल चुनें।",
           cityRequired: "अपना शहर दर्ज करें।",
@@ -884,7 +945,28 @@ export const STRINGS: Record<Lang, Dictionary> = {
         },
         phase5Notice:
           "जमा करना अभी जुड़ा नहीं है: आवेदन Phase 5 में आएँगे। अभी कुछ भेजा या सहेजा नहीं गया।",
+        submitting: "जमा हो रहा है...",
+        traceWithId: (traceId) => `ट्रेस: ${traceId}`,
+        errorsSubmitLocationRequired:
+          "आपका स्थान निर्धारित नहीं हो सका। कृपया स्थान की अनुमति दें और फिर से प्रयास करें।",
+        errorsSubmitUnexpected:
+          "अप्रत्याशित त्रुटि हुई। कृपया फिर से प्रयास करें।",
       },
+    },
+    doctor: {
+      welcome: (displayName) => `स्वागत है, ${displayName}`,
+      doctorLabel: "डॉक्टर",
+      doctorWithPhone: (phone) => `डॉक्टर (${phone})`,
+      workspaceActive: "आपका डॉक्टर वर्कस्पेस सक्रिय है।",
+      statusHeading: "स्थिति",
+      profileActive:
+        "आपकी प्रोफ़ाइल सक्रिय और सत्यापित है। आप परामर्श स्वीकार करना शुरू कर सकते हैं।",
+      nextStepsHeading: "अगले कदम",
+      nextSteps: [
+        "- अपनी पेशेवर प्रोफ़ाइल पूरी करें (जल्द आ रही है)",
+        "- मरीज़ निर्देशिका ब्राउज़ करें (Phase 6)",
+        "- किसी मरीज़ के रिकॉर्ड से परामर्श शुरू करें",
+      ],
     },
     consent: {
       title: "साझा करने की अनुमति",
@@ -1134,9 +1216,17 @@ export const STRINGS: Record<Lang, Dictionary> = {
         body: "आपके परामर्श, प्रिस्क्रिप्शन, लैब रिपोर्ट और मेट्रिक्स यहाँ दिखेंगे जैसे-जैसे आपकी देखभाल होगी।",
       },
       loadError: "आपका रिकॉर्ड लोड नहीं हो सका।",
+      accessHistory: {
+        heading: "रिकॉर्ड किसने देखा",
+        loadError: "एक्सेस इतिहास लोड नहीं हो सका।",
+        emptyTitle: "अभी कोई एक्सेस नहीं",
+        emptyBody:
+          "जब कोई डॉक्टर, लैब या केमिस्ट आपका रिकॉर्ड देखता है, तो वह यहाँ दिखेगा।",
+        scopePrefix: "अनुमति का दायरा: ",
+        deniedLabel: "अस्वीकृत",
+        deniedReasonPrefix: "कारण: ",
+      },
       placeholder: {
-        accessTitle: "रिकॉर्ड किसने देखा",
-        accessBody: "पूरा एक्सेस इतिहास फेज़ 4 में आएगा।",
         healthTitle: "हेल्थ ट्रैकिंग",
         healthBody: "BP/शुगर ट्रेंड और फॉलो-अप प्लान फेज़ 12 में आएंगे।",
       },

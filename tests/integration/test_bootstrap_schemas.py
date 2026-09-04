@@ -3,10 +3,15 @@
 Verifies the acceptance criteria that need a live database:
 
   1. ``alembic upgrade head`` creates all 11 private module schemas (ADR-0003
-     layout); the only tables they may hold are the five ``iam`` tables added
-     by ``v1.0__init_iam`` (PHASE-2 T1, #52), the health record core added by
-     ``v2.0__init_health`` (PHASE-3 T2, #211) and the MOD-011 audit ledger
-     added by ``v3.0__init_audit`` (PHASE-4 T1, #235).
+layout); the only tables they may hold are the five ``iam`` tables added
+      by ``v1.0__init_iam`` (PHASE-2 T1, #52) plus the operator-MFA table from
+      ``v4.1__iam_roles_mfa`` (PHASE-5 T1, #244), the health record core added
+      by ``v2.0__init_health`` (PHASE-3 T2, #211), the MOD-011 audit ledger
+      added by ``v3.0__init_audit`` (PHASE-4 T1, #235) and the MOD-002 partner
+      storage foundation added by ``v4.0__init_partner`` (PHASE-5 T1, #244).
+      Phase 5 also adds the ``iam`` idempotent-subscriber ledger
+      (``v5.1__iam_consumed_events``, #248) and the MOD-010 notify schema
+      foundation (``v5.0__init_notify``, #246).
   2. The outbox/``consumed_events`` DDL template materializes into a throwaway
      schema with the documented row contract (issue #16), so the round-trip
      harness (T2c) can build on it.
@@ -51,6 +56,8 @@ EXPECTED_IAM_TABLES = {
     "iam.iam_sessions",
     "iam.iam_role_grants",
     "iam.iam_outbox",
+    "iam.iam_operator_mfa",
+    "iam.consumed_events",
 }
 
 EXPECTED_HEALTH_TABLES = {
@@ -73,6 +80,21 @@ EXPECTED_AUDIT_TABLES = {
     "audit.audit_tamper_attempts",
     "audit.audit_outbox",
     "audit.consumed_events",
+}
+
+EXPECTED_PARTNER_TABLES = {
+    "partner.partner_profiles",
+    "partner.partner_credentials",
+    "partner.partner_verifications",
+    "partner.partner_service_areas",
+    "partner.partner_outbox",
+    "partner.consumed_events",
+}
+
+EXPECTED_NOTIFY_TABLES = {
+    "notify.notify_notifications",
+    "notify.notify_outbox",
+    "notify.consumed_events",
 }
 
 
@@ -161,11 +183,14 @@ def test_upgrade_head_creates_all_eleven_module_schemas(
             | EXPECTED_HEALTH_TABLES
             | EXPECTED_CONSENT_TABLES
             | EXPECTED_AUDIT_TABLES
+            | EXPECTED_PARTNER_TABLES
+            | EXPECTED_NOTIFY_TABLES
         )
         assert set(tables) == expected_tables, (
-            "only the iam + health + consent + audit schemas may hold tables after "
-            "upgrade head (v1.0__init_iam, v2.0__init_health, v2.1__init_consent, "
-            "v3.0__init_audit), "
+            "only the iam + health + consent + audit + partner + notify schemas "
+            "may hold tables after upgrade head (v1.0__init_iam, v2.0__init_health, "
+            "v2.1__init_consent, v3.0__init_audit, v4.0__init_partner, "
+            "v5.0__init_notify), "
             f"unexpected: {set(tables) - expected_tables}, "
             f"missing: {expected_tables - set(tables)}"
         )

@@ -15,6 +15,11 @@ DEFAULT_SMS_TIMEOUT_SECONDS = 10.0
 DEFAULT_SMS_MAX_RETRIES = 3
 DEFAULT_SMS_CIRCUIT_BREAKER_THRESHOLD = 5
 DEFAULT_SMS_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 30.0
+DEFAULT_WHATSAPP_PROVIDER = "mock"
+DEFAULT_WHATSAPP_TIMEOUT_SECONDS = 10.0
+DEFAULT_WHATSAPP_MAX_RETRIES = 3
+DEFAULT_WHATSAPP_CIRCUIT_BREAKER_THRESHOLD = 5
+DEFAULT_WHATSAPP_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 30.0
 # Redis consent-status cache (PHASE-3 T4, #213): optional; SQL fallback when
 # absent or unhealthy. p95 < 50 ms SLA on the hot path.
 DEFAULT_REDIS_URL = ""
@@ -35,6 +40,28 @@ DEFAULT_REFRESH_TOKEN_TTL_SECONDS = 2_592_000
 # to 2555 (7 years) via AUDIT_RETENTION_DAYS without code changes; compaction/
 # archive logic stays deferred (GAP-011).
 DEFAULT_AUDIT_RETENTION_DAYS = 0
+# Partner credential artifacts (PHASE-5 T06, #251): encrypted local filesystem
+# store under the ``partner/`` object-storage prefix. ``PARTNER_ARTIFACT_KEY``
+# is a base64 32-byte AES-256 key from the environment (never committed); the
+# store refuses a blank/malformed key (fail-closed, security-phii-standards §4).
+DEFAULT_PARTNER_ARTIFACT_ROOT = "var/partner-artifacts"
+# Rejected-partner re-submission throttle (PHASE-5 T09, #253): the max
+# re-submission rounds a rejected partner may open before the operator queue is
+# protected, and the cooldown (days) after which the budget refreshes. Queue
+# protection is behavior/limits config, not code (coding-standards §9). ADR-0008
+# pins no numbers, so the default stands as a config fallback, overridable by env.
+DEFAULT_PARTNER_RE_SUBMISSION_MAX = 3
+DEFAULT_PARTNER_RE_SUBMISSION_COOLDOWN_DAYS = 30
+# Credential-document cleanup after permanent rejection (US-27, ticket #263):
+# the rejection path schedules ``partner_credentials.cleanup_due_at`` this many
+# days out; the purge seam then deletes the documents so identity files are not
+# hoarded (spec phase-5 "Credential document storage"). Spec-pinned at 30 days.
+DEFAULT_PARTNER_CREDENTIAL_CLEANUP_DAYS = 30
+# Operator MFA TOTP secret encryption (PHASE-5 S8, #261): the AES-256-GCM key
+# for encrypting/decrypting the TOTP secret stored in ``iam_operator_mfa.secret``
+# comes from the ``IAM_MFA_SECRET_KEY`` environment variable (never committed).
+# Fail-closed: ``issue_operator_session`` refuses to verify without it.
+
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _DEV_TEST_ENVIRONMENTS = frozenset({"dev", "test"})
@@ -60,6 +87,15 @@ class Settings:
     sms_max_retries: int = DEFAULT_SMS_MAX_RETRIES
     sms_circuit_breaker_threshold: int = DEFAULT_SMS_CIRCUIT_BREAKER_THRESHOLD
     sms_circuit_breaker_cooldown_seconds: float = DEFAULT_SMS_CIRCUIT_BREAKER_COOLDOWN_SECONDS
+    whatsapp_provider: str = DEFAULT_WHATSAPP_PROVIDER
+    whatsapp_api_key: str = ""
+    whatsapp_base_url: str = ""
+    whatsapp_timeout_seconds: float = DEFAULT_WHATSAPP_TIMEOUT_SECONDS
+    whatsapp_max_retries: int = DEFAULT_WHATSAPP_MAX_RETRIES
+    whatsapp_circuit_breaker_threshold: int = DEFAULT_WHATSAPP_CIRCUIT_BREAKER_THRESHOLD
+    whatsapp_circuit_breaker_cooldown_seconds: float = (
+        DEFAULT_WHATSAPP_CIRCUIT_BREAKER_COOLDOWN_SECONDS
+    )
     redis_url: str = DEFAULT_REDIS_URL
     redis_consent_ttl_seconds: int = DEFAULT_REDIS_CONSENT_TTL_SECONDS
     # The stub flag for audit retention (GAP-011): 0 means no expiry today; the
@@ -73,6 +109,24 @@ class Settings:
     # in production so the deployed portfolio demo can drive register -> verify
     # (deployment plan 4.3). Fail-closed: never valid with a real provider.
     demo_mode: bool = False
+    # Encrypted credential-document store (PHASE-5 T06, #251): local root and
+    # the base64 AES-256 key. Root defaults to a repo-local ``var/`` dir; the
+    # key is empty unless supplied by the environment (the store derives an
+    # ephemeral dev key, never committed).
+    partner_artifact_root: str = DEFAULT_PARTNER_ARTIFACT_ROOT
+    partner_artifact_key: str = ""
+    # Rejected-partner re-submission throttle (PHASE-5 T09, #253): environment
+    # driven like the SMS/WhatsApp knobs (coding-standards §9.1). ``max`` is the
+    # re-submission budget before cooldown; ``cooldown_days`` the cooldown length.
+    partner_re_submission_max: int = DEFAULT_PARTNER_RE_SUBMISSION_MAX
+    partner_re_submission_cooldown_days: int = DEFAULT_PARTNER_RE_SUBMISSION_COOLDOWN_DAYS
+    # Credential-document cleanup window after permanent rejection (US-27) - a
+    # retention policy, env-driven like the other phase-5 knobs.
+    partner_credential_cleanup_days: int = DEFAULT_PARTNER_CREDENTIAL_CLEANUP_DAYS
+    # Encrypted TOTP secret for operator MFA (PHASE-5 S8, #261): AES-256-GCM key
+    # from the ``IAM_MFA_SECRET_KEY`` environment; ``issue_operator_session``
+    # refuses to verify without it.
+    iam_mfa_secret_key: str = ""
 
     def __post_init__(self) -> None:
         if self.gateway_jwt_verify_enabled and not self.gateway_jwt_signing_key:
@@ -114,6 +168,32 @@ class Settings:
                 "sms_timeout_seconds must be in (0, 10] to honour the EXT-001 "
                 "call discipline (third-party-integration-standards §1)"
             )
+        whatsapp_provider = self.whatsapp_provider.strip().lower()
+        if whatsapp_provider not in {"mock", "provider"}:
+            raise ValueError(
+                f"unsupported whatsapp_provider {self.whatsapp_provider!r}; "
+                "expected 'mock' or 'provider'"
+            )
+        if whatsapp_provider == "provider":
+            if self.app_environment.strip().lower() in _DEV_TEST_ENVIRONMENTS:
+                raise ValueError(
+                    "whatsapp_provider='provider' is gated to staging/production: set "
+                    "APP_ENVIRONMENT to 'staging' or 'production' before using the "
+                    "real EXT-003 path. Refusing it in dev/test."
+                )
+            if not self.whatsapp_api_key:
+                raise ValueError(
+                    "whatsapp_provider='provider' requires WHATSAPP_API_KEY from the environment"
+                )
+            if not self.whatsapp_base_url:
+                raise ValueError(
+                    "whatsapp_provider='provider' requires WHATSAPP_BASE_URL from the environment"
+                )
+        if not (0 < self.whatsapp_timeout_seconds <= 10):
+            raise ValueError(
+                "whatsapp_timeout_seconds must be in (0, 10] to honour the EXT-003 "
+                "call discipline (third-party-integration-standards §1)"
+            )
         if self.redis_consent_ttl_seconds <= 0:
             raise ValueError("redis_consent_ttl_seconds must be positive")
         if self.audit_retention_days < 0:
@@ -126,6 +206,16 @@ class Settings:
             raise ValueError("sms_circuit_breaker_threshold must be positive")
         if self.sms_circuit_breaker_cooldown_seconds <= 0:
             raise ValueError("sms_circuit_breaker_cooldown_seconds must be positive")
+        if self.whatsapp_circuit_breaker_threshold <= 0:
+            raise ValueError("whatsapp_circuit_breaker_threshold must be positive")
+        if self.whatsapp_circuit_breaker_cooldown_seconds <= 0:
+            raise ValueError("whatsapp_circuit_breaker_cooldown_seconds must be positive")
+        if self.partner_re_submission_max <= 0:
+            raise ValueError("partner_re_submission_max must be positive")
+        if self.partner_re_submission_cooldown_days <= 0:
+            raise ValueError("partner_re_submission_cooldown_days must be positive")
+        if self.partner_credential_cleanup_days <= 0:
+            raise ValueError("partner_credential_cleanup_days must be positive")
 
     @property
     def mock_otp_readback_enabled(self) -> bool:
@@ -217,6 +307,21 @@ def get_settings() -> Settings:
             "SMS_CIRCUIT_BREAKER_COOLDOWN_SECONDS",
             DEFAULT_SMS_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
         ),
+        whatsapp_provider=os.environ.get("WHATSAPP_PROVIDER", DEFAULT_WHATSAPP_PROVIDER),
+        whatsapp_api_key=os.environ.get("WHATSAPP_API_KEY", ""),
+        whatsapp_base_url=os.environ.get("WHATSAPP_BASE_URL", ""),
+        whatsapp_timeout_seconds=_env_float(
+            "WHATSAPP_TIMEOUT_SECONDS", DEFAULT_WHATSAPP_TIMEOUT_SECONDS
+        ),
+        whatsapp_max_retries=_env_int("WHATSAPP_MAX_RETRIES", DEFAULT_WHATSAPP_MAX_RETRIES),
+        whatsapp_circuit_breaker_threshold=_env_int(
+            "WHATSAPP_CIRCUIT_BREAKER_THRESHOLD",
+            DEFAULT_WHATSAPP_CIRCUIT_BREAKER_THRESHOLD,
+        ),
+        whatsapp_circuit_breaker_cooldown_seconds=_env_float(
+            "WHATSAPP_CIRCUIT_BREAKER_COOLDOWN_SECONDS",
+            DEFAULT_WHATSAPP_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+        ),
         redis_url=os.environ.get("REDIS_URL", DEFAULT_REDIS_URL),
         redis_consent_ttl_seconds=_env_int(
             "REDIS_CONSENT_TTL_SECONDS", DEFAULT_REDIS_CONSENT_TTL_SECONDS
@@ -224,4 +329,20 @@ def get_settings() -> Settings:
         audit_retention_days=_env_int("AUDIT_RETENTION_DAYS", DEFAULT_AUDIT_RETENTION_DAYS),
         cors_allowed_origins=_env_csv("CORS_ALLOWED_ORIGINS"),
         demo_mode=_env_bool("DEMO_MODE", False),
+        partner_artifact_root=os.environ.get(
+            "PARTNER_ARTIFACT_ROOT", DEFAULT_PARTNER_ARTIFACT_ROOT
+        ),
+        partner_artifact_key=os.environ.get("PARTNER_ARTIFACT_KEY", ""),
+        partner_re_submission_max=_env_int(
+            "PARTNER_RE_SUBMISSION_MAX", DEFAULT_PARTNER_RE_SUBMISSION_MAX
+        ),
+        partner_re_submission_cooldown_days=_env_int(
+            "PARTNER_RE_SUBMISSION_COOLDOWN_DAYS",
+            DEFAULT_PARTNER_RE_SUBMISSION_COOLDOWN_DAYS,
+        ),
+        partner_credential_cleanup_days=_env_int(
+            "PARTNER_CREDENTIAL_CLEANUP_DAYS",
+            DEFAULT_PARTNER_CREDENTIAL_CLEANUP_DAYS,
+        ),
+        iam_mfa_secret_key=os.environ.get("IAM_MFA_SECRET_KEY", ""),
     )

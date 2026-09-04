@@ -47,6 +47,30 @@ class SessionIssuanceError(IamError):
     """
 
 
+class OperatorMfaError(SessionIssuanceError):
+    """``issue_operator_session`` refused on the MFA second factor (S9, #262).
+
+    Raised when the operator-scoped session cannot be minted because the
+    second factor is absent (MFA not yet verified, no enrolled TOTP secret) or
+    bad (the presented RFC-6238 code failed verification). This is an
+    authentication failure - distinct from the identity-state refusals a
+    ``SessionIssuanceError`` describes - so the edge answers it 401 rather
+    than 409. It subclasses ``SessionIssuanceError`` so existing caller code
+    that catches the wide type still works.
+    """
+
+
+class InvalidOperatorCodeError(SessionIssuanceError):
+    """The presented TOTP code failed verification (#295).
+
+    Raised when the operator submits a wrong RFC-6238 code. Distinct from
+    ``OperatorMfaError`` (MFA enrollment or secret missing) so the gateway
+    answers it with ``INVALID_OPERATOR_CODE`` rather than
+    ``SESSION_MFA_REQUIRED``. Subclasses ``SessionIssuanceError`` so
+    existing broad catches still work.
+    """
+
+
 class InvalidAccessTokenError(IamError):
     """Base for an access token the gateway must reject (spec #51 §2.5).
 

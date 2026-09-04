@@ -29,10 +29,16 @@ import {
   type RecordEntryView,
   type RecordTimeline,
 } from "@/lib/record/api";
+import { fetchAccessHistory, type AccessHistoryEntry } from "@/lib/audit/api";
 
 vi.mock("@/lib/record/api", async (importOriginal) => {
   const mod = await importOriginal<typeof import("@/lib/record/api")>();
   return { ...mod, fetchOwnRecord: vi.fn() };
+});
+
+vi.mock("@/lib/audit/api", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("@/lib/audit/api")>();
+  return { ...mod, fetchAccessHistory: vi.fn() };
 });
 
 vi.mock("next/navigation", () => ({
@@ -52,6 +58,7 @@ vi.mock("@/lib/auth/AuthContext", () => ({
 }));
 
 const mockFetchOwnRecord = vi.mocked(fetchOwnRecord);
+const mockFetchAccessHistory = vi.mocked(fetchAccessHistory);
 
 // Radix popper relies on ResizeObserver and opens menus on real pointer
 // events, neither of which jsdom implements fully (same stubs as the
@@ -146,9 +153,46 @@ function resolveWith(timeline: RecordTimeline | null) {
   );
 }
 
+function accessEntry(
+  overrides: Partial<AccessHistoryEntry>,
+): AccessHistoryEntry {
+  return {
+    actor_id: 3,
+    accessed_at: "2026-08-15T11:00:00Z",
+    denied: false,
+    ...overrides,
+  };
+}
+
+const ACCESS_HISTORY: AccessHistoryEntry[] = [
+  // Deliberately out of order (lab first, doctor second) - the screen must
+  // still render newest-first by accessed_at.
+  accessEntry({
+    actor_id: 4,
+    actor_type: "lab",
+    scope: "lab_results",
+    accessed_at: "2026-08-18T07:45:00Z",
+  }),
+  accessEntry({
+    actor_id: 3,
+    actor_type: "doctor",
+    scope: "consultations",
+    accessed_at: "2026-08-19T09:00:00Z",
+  }),
+];
+
+function resolveAccessWith(entries: AccessHistoryEntry[] | null) {
+  mockFetchAccessHistory.mockImplementation(() =>
+    entries === null
+      ? Promise.reject(new Error("network down"))
+      : Promise.resolve({ entries }),
+  );
+}
+
 beforeEach(() => {
   __resetLangForTests();
   resolveWith(TIMELINE);
+  resolveAccessWith(ACCESS_HISTORY);
 });
 
 afterEach(() => {
@@ -161,7 +205,7 @@ async function waitForTimeline() {
 }
 
 describe("RecordPage (inside the patient light shell)", () => {
-  it("mounts within the patient AppShell with header, filters and placeholders", async () => {
+  it("mounts within the patient AppShell with header and filters", async () => {
     render(
       <PatientGroupLayout>
         <LangFlipHost />
@@ -175,12 +219,12 @@ describe("RecordPage (inside the patient light shell)", () => {
     expect(
       screen.getByRole("group", { name: "Filter record entries" }),
     ).toBeInTheDocument();
-    // Forward-scope placeholders stay Soon (Phases 4/12).
-    for (const id of ["placeholder-access", "placeholder-health"]) {
-      const card = screen.getByTestId(id);
-      expect(card).toHaveAttribute("aria-disabled", "true");
-      expect(card.querySelector('[data-testid="soon-badge"]')).not.toBeNull();
-    }
+    // The health-tracking placeholder stays Soon (Phase 12).
+    const health = screen.getByTestId("placeholder-health");
+    expect(health).toHaveAttribute("aria-disabled", "true");
+    expect(health.querySelector('[data-testid="soon-badge"]')).not.toBeNull();
+    // The access-history Soon placeholder was replaced by real data (#283).
+    expect(screen.queryByTestId("placeholder-access")).not.toBeInTheDocument();
   });
 
   it("renders API entries newest-first regardless of payload order", async () => {
@@ -341,9 +385,86 @@ describe("RecordPage bilingual EN/HI (REQ-006)", () => {
       .toBeInTheDocument();
     expect(screen.getByTestId("filter-chip-consultation")) //
       .toHaveTextContent(STRINGS.hi.record.filter.consultation);
-    expect(screen.getByTestId("placeholder-access")) //
-      .toHaveTextContent(STRINGS.hi.record.placeholder.accessTitle);
+    expect(
+      screen.getByRole("heading", {
+        name: STRINGS.hi.record.accessHistory.heading,
+      }),
+    ).toBeInTheDocument();
     expect(screen.getByTestId("entry-24")) //
       .toHaveTextContent(STRINGS.hi.record.badge.delivered);
+  });
+});
+
+describe("RecordPage access history", () => {
+  it("renders real entries with identity, scope and timestamp", async () => {
+    render(<RecordPage />);
+    await screen.findByTestId("access-history-list");
+
+    expect(mockFetchAccessHistory).toHaveBeenCalledWith(7);
+    expect(screen.getByTestId("access-entry-0")).toHaveTextContent("doctor");
+    expect(screen.getByTestId("access-entry-0")) //
+      .toHaveTextContent("consultations");
+    expect(screen.getByTestId("access-entry-1")) //
+      .toHaveTextContent("lab_results");
+  });
+
+  it("sorts entries newest-first by accessed_at", async () => {
+    render(<RecordPage />);
+    await screen.findByTestId("access-history-list");
+
+    const first = screen.getByTestId("access-entry-0").textContent ?? "";
+    const second = screen.getByTestId("access-entry-1").textContent ?? "";
+    // Payload ships lab-before-doctor; the screen reorders newest-first.
+    expect(first).toContain("doctor");
+    expect(second).toContain("lab");
+  });
+
+  it("flags denied attempts with the denied label and reason", async () => {
+    resolveAccessWith([
+      accessEntry({
+        actor_id: 9,
+        accessed_at: "2026-08-12T02:33:00Z",
+        denied: true,
+        denial_reason: "no consent",
+      }),
+    ]);
+    render(<RecordPage />);
+    await screen.findByTestId("access-entry-0");
+
+    expect(screen.getByTestId("access-entry-0")) //
+      .toHaveTextContent(STRINGS.en.record.accessHistory.deniedLabel);
+    expect(screen.getByTestId("access-entry-0")) //
+      .toHaveTextContent("no consent");
+  });
+
+  it("shows an empty state when there is no access history", async () => {
+    resolveAccessWith([]);
+    render(<RecordPage />);
+
+    expect(await screen.findByTestId("empty-state")).toHaveTextContent(
+      STRINGS.en.record.accessHistory.emptyTitle,
+    );
+    expect(screen.queryByTestId("access-history-list")).not.toBeInTheDocument();
+  });
+
+  it("shows a loading skeleton before the entries resolve", async () => {
+    mockFetchAccessHistory.mockReturnValue(new Promise(() => {}));
+    render(<RecordPage />);
+
+    expect(await screen.findByTestId("access-loading")).toBeInTheDocument();
+    expect(screen.queryByTestId("access-history-list")).not.toBeInTheDocument();
+  });
+
+  it("shows an error banner when access history fails and recovers on Retry", async () => {
+    resolveAccessWith(null);
+    render(<RecordPage />);
+    await screen.findByTestId("error-banner");
+    expect(mockFetchAccessHistory).toHaveBeenCalledTimes(1);
+
+    resolveAccessWith(ACCESS_HISTORY);
+    fireEvent.click(screen.getByTestId("error-banner-retry"));
+    await screen.findByTestId("access-history-list");
+    expect(mockFetchAccessHistory).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("error-banner")).not.toBeInTheDocument();
   });
 });

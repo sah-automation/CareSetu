@@ -16,11 +16,20 @@
 // Layout: one small component per step (coding standards §8), all fed by the
 // shared WizardActions seam; the root component owns state + gating only.
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { ProviderType } from "@/lib/directory/links";
+import { ApiError } from "@/lib/api-errors";
+import { AuthApiError, issuePartnerSession } from "@/lib/auth/api";
+import { postLoginTarget } from "@/lib/auth/staff-routing";
+import { saveSession } from "@/lib/auth/session";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
+import {
+  registerPartner,
+  submitCredentials,
+  type CredentialType,
+} from "@/lib/partner/api";
 
 import {
   ACCEPT_ATTRIBUTE,
@@ -71,6 +80,55 @@ const FIELD_ID: Record<TextFieldKey, string> = {
 };
 
 const EMPTY_ERRORS: StepErrors = { fields: {}, uploads: {}, declarations: {} };
+
+function slotToCredentialType(
+  slotId: UploadSlotId,
+  partnerType: ProviderType,
+): CredentialType {
+  switch (slotId) {
+    case "councilCert":
+      return "medical_registration";
+    case "degrees":
+      return "qualification_certificate";
+    case "photoId":
+      return "medical_registration";
+    case "businessReg":
+      return "lab_license";
+    case "accreditations":
+      return "accreditation";
+    case "kyc":
+      return partnerType === "lab" ? "lab_license" : "drug_license";
+    case "drugLicense":
+      return "drug_license";
+    case "shopLicense":
+      return "drug_license";
+  }
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      const base64 = result.split(",")[1] ?? "";
+      resolve(base64);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function normalizePhone(mobile: string): string {
+  const countryCode = process.env.NEXT_PUBLIC_DEFAULT_COUNTRY_CODE ?? "91";
+  const digits = mobile.replace(/\D/g, "");
+  if (
+    digits.length === countryCode.length + 10 &&
+    digits.startsWith(countryCode)
+  ) {
+    return `+${digits}`;
+  }
+  return `+${countryCode}${digits}`;
+}
 
 interface WizardActions {
   setValue: <K extends keyof WizardValues>(
@@ -245,8 +303,7 @@ function StepAccountBasics({ values, errors, actions, t }: StepSectionProps) {
           htmlFor={FIELD_ID.mobile}
           className="mb-1 block text-sm font-medium"
         >
-          {t.fields.mobile}{" "}
-          <span className="font-normal text-txt-muted">{t.optionalSuffix}</span>
+          {t.fields.mobile}
         </label>
         <div className="flex items-center gap-2">
           <span className="text-sm text-txt-muted" aria-hidden="true">
@@ -658,6 +715,16 @@ export function ProviderRegisterWizard({
   const [errors, setErrors] = useState<StepErrors>(EMPTY_ERRORS);
   const [attempted, setAttempted] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [serverError, setServerError] = useState<{
+    message: string;
+    traceId: string;
+  } | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [geoCoords, setGeoCoords] = useState<{
+    lat: number;
+    lng: number;
+  } | null>(null);
+  const fileRefs = useRef(new Map<UploadSlotId, File>());
 
   // Re-normalize when the CTA preset changes (e.g. hopping between the
   // Register-as-doctor/lab/chemist links). Identity + credential slices are
@@ -677,7 +744,38 @@ export function ProviderRegisterWizard({
       uploads: {},
     }));
     setErrors(EMPTY_ERRORS);
+    fileRefs.current.clear();
   }, [presetType]);
+
+  // Collect real geolocation on mount; fall back to env-configured defaults
+  // (Daltonganj coordinates for dev/CI) when the browser API is unavailable
+  // or permission is denied.
+  useEffect(() => {
+    const fallbackLat = parseFloat(
+      process.env.NEXT_PUBLIC_DEFAULT_LATITUDE ?? "24.04",
+    );
+    const fallbackLng = parseFloat(
+      process.env.NEXT_PUBLIC_DEFAULT_LONGITUDE ?? "84.07",
+    );
+
+    if (!navigator.geolocation) {
+      setGeoCoords({ lat: fallbackLat, lng: fallbackLng });
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setGeoCoords({
+          lat: position.coords.latitude,
+          lng: position.coords.longitude,
+        });
+      },
+      () => {
+        setGeoCoords({ lat: fallbackLat, lng: fallbackLng });
+      },
+      { timeout: 5000, maximumAge: 60000 },
+    );
+  }, []);
 
   const fieldRefs = useRef(new Map<string, HTMLElement>());
   function registerRef(key: string) {
@@ -710,6 +808,7 @@ export function ProviderRegisterWizard({
         ...prev,
         uploads: { ...prev.uploads, [slotId]: fileOrError },
       }));
+      fileRefs.current.delete(slotId);
       return;
     }
     setValues((prev) => ({
@@ -727,6 +826,7 @@ export function ProviderRegisterWizard({
       delete uploads[slotId];
       return { ...prev, uploads };
     });
+    fileRefs.current.set(slotId, fileOrError);
   }
 
   function removeUpload(slotId: UploadSlotId) {
@@ -740,6 +840,7 @@ export function ProviderRegisterWizard({
       delete uploads[slotId];
       return { ...prev, uploads };
     });
+    fileRefs.current.delete(slotId);
   }
 
   function toggleDeclaration(key: DeclarationKey, checked: boolean) {
@@ -785,6 +886,7 @@ export function ProviderRegisterWizard({
   function handlePrimary(event: React.FormEvent) {
     event.preventDefault();
     setNotice(null);
+    setServerError(null);
     setAttempted(true);
 
     const fresh = validateStep(step, type, values);
@@ -802,9 +904,85 @@ export function ProviderRegisterWizard({
       return;
     }
 
-    // Honest submit: applications arrive in Phase 5. No request, no fake
-    // success - the status banner says exactly that, nothing persists.
-    setNotice(t.phase5Notice);
+    void handleSubmitPartner();
+  }
+
+  async function handleSubmitPartner() {
+    if (submitting) return;
+
+    const phone = values.mobile.trim();
+    if (!geoCoords) {
+      setServerError({
+        message: t.errorsSubmitLocationRequired,
+        traceId: "",
+      });
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const phoneE164 = normalizePhone(phone);
+
+      await registerPartner({
+        phone: phoneE164,
+        partner_type: type,
+        practice_name:
+          type === "doctor" ? values.fullName : values.businessName || null,
+        practice_address: type === "doctor" ? values.city : values.address,
+        practice_latitude: geoCoords.lat,
+        practice_longitude: geoCoords.lng,
+        service_area_id: null,
+      });
+
+      const session = await issuePartnerSession(phoneE164);
+      saveSession(session, phoneE164);
+
+      const slots = UPLOAD_SLOTS[type];
+      const credentialMap = new Map<CredentialType, string[]>();
+      for (const slotId of slots) {
+        const file = fileRefs.current.get(slotId);
+        if (!file) continue;
+        const credType = slotToCredentialType(slotId, type);
+        const base64 = await fileToBase64(file);
+        const existing = credentialMap.get(credType);
+        if (existing) {
+          existing.push(base64);
+        } else {
+          credentialMap.set(credType, [base64]);
+        }
+      }
+
+      if (credentialMap.size > 0) {
+        await submitCredentials({
+          credentials: Array.from(credentialMap.entries()).map(
+            ([credential_type, artifacts]) => ({
+              credential_type,
+              artifacts,
+            }),
+          ),
+        });
+      }
+
+      window.location.href = postLoginTarget({
+        surface: "staff",
+        roles: ["partner"],
+        partnerState: "pending",
+      });
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setServerError({ message: err.message, traceId: err.traceId });
+      } else if (err instanceof AuthApiError) {
+        setServerError({ message: err.message, traceId: err.traceId });
+      } else {
+        console.error("[provider-register] unexpected submit error", err);
+        setServerError({
+          message: t.errorsSubmitUnexpected,
+          traceId: "",
+        });
+      }
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   function goBack() {
@@ -875,6 +1053,21 @@ export function ProviderRegisterWizard({
           </div>
         ) : null}
 
+        {serverError ? (
+          <div
+            role="alert"
+            data-testid="pr-server-error"
+            className="mb-4 rounded-md border border-danger bg-surface px-3 py-2 text-sm text-danger"
+          >
+            <p>{serverError.message}</p>
+            {serverError.traceId ? (
+              <p className="mt-1 text-xs text-txt-muted">
+                {t.traceWithId(serverError.traceId)}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+
         {attempted && total > 0 ? (
           <div
             role="alert"
@@ -906,10 +1099,15 @@ export function ProviderRegisterWizard({
           </button>
           <button
             type="submit"
-            data-testid="pr-next"
-            className="rounded-md bg-primary px-4 py-2 text-sm font-semibold text-on-accent"
+            data-testid={step === STEP_LAST ? "pr-submit" : "pr-next"}
+            disabled={submitting}
+            className="rounded-md bg-primary px-4 py-2 text-sm font-semibold text-on-accent disabled:opacity-50"
           >
-            {step === STEP_LAST ? t.submitApplication : t.continueCta}
+            {submitting
+              ? t.submitting
+              : step === STEP_LAST
+                ? t.submitApplication
+                : t.continueCta}
           </button>
         </div>
       </form>

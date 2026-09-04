@@ -15,16 +15,12 @@ and ``consent.granted/revoked`` to keep the effective sharing view current.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import TypeVar
 
 from pydantic import BaseModel
 from sqlalchemy import insert
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
-from sqlalchemy.pool import NullPool
+from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.config import get_settings
 from bus.envelope import Envelope
 from bus.events import (
     EVENT_CONSENT_GRANTED,
@@ -35,7 +31,7 @@ from bus.events import (
     EVENT_REPORT_FILED,
     EVENT_SETTLEMENT_RECORDED,
 )
-from bus.ledger import record_consumed_event
+from bus.handler_harness import run_handler
 from bus.registry import HandlerRegistry
 from modules.health.domain.events import (
     PatientRegisteredPayload,
@@ -46,52 +42,6 @@ from modules.health.domain.events import (
 )
 from modules.health.facade import HEALTH_SCHEMA, _ensure_record_shell
 from modules.health.schema.models import health_record_entries
-
-_T = TypeVar("_T", bound=BaseModel)
-
-
-def _delivery_engine() -> AsyncEngine:
-    """A short-lived engine for one delivery (the round-trip harness pattern).
-
-    The composition root passes only the registry to ``register_handlers``,
-    so the handler resolves the shared settings lazily at delivery time -
-    registration stays connection-free for unit tests and the worker boot.
-    ``NullPool`` matches every other short-lived engine in the repo.
-    """
-    return create_async_engine(get_settings().database_url, poolclass=NullPool)
-
-
-async def _run_handler(
-    envelope: Envelope[BaseModel],
-    payload_class: type[_T],
-    handler_fn: Callable[[AsyncConnection, _T], Awaitable[None]],
-    handler_name: str,
-) -> None:
-    """Run an event handler with the standard engine-lifecycle boilerplate.
-
-    Handles payload extraction, engine creation, ``record_consumed_event``,
-    delivery check, and engine disposal. The callback does the unique work.
-    """
-    raw_payload = envelope.payload
-    payload = (
-        raw_payload
-        if isinstance(raw_payload, payload_class)
-        else payload_class.model_validate(raw_payload.model_dump())
-    )
-    engine = _delivery_engine()
-    try:
-        async with engine.begin() as connection:
-            delivered = await record_consumed_event(
-                connection,
-                HEALTH_SCHEMA,
-                envelope,
-                handler_result={"handler": handler_name},
-            )
-            if not delivered:
-                return
-            await handler_fn(connection, payload)
-    finally:
-        await engine.dispose()
 
 
 def register_handlers(registry: HandlerRegistry) -> None:
@@ -117,7 +67,9 @@ def register_handlers(registry: HandlerRegistry) -> None:
         async def _impl(connection: AsyncConnection, payload: PatientRegisteredPayload) -> None:
             await _ensure_record_shell(connection, payload.identity_id)
 
-        await _run_handler(envelope, PatientRegisteredPayload, _impl, "create_record_shell")
+        await run_handler(
+            envelope, PatientRegisteredPayload, _impl, "create_record_shell", HEALTH_SCHEMA
+        )
 
     registry.register(EVENT_PATIENT_REGISTERED, create_record_shell)
 
@@ -138,7 +90,7 @@ def register_handlers(registry: HandlerRegistry) -> None:
                 )
             )
 
-        await _run_handler(envelope, ReportFiledPayload, _impl, "handle_report_filed")
+        await run_handler(envelope, ReportFiledPayload, _impl, "handle_report_filed", HEALTH_SCHEMA)
 
     registry.register(EVENT_REPORT_FILED, handle_report_filed)
 
@@ -159,7 +111,9 @@ def register_handlers(registry: HandlerRegistry) -> None:
                 )
             )
 
-        await _run_handler(envelope, PrescriptionIssuedPayload, _impl, "handle_prescription_issued")
+        await run_handler(
+            envelope, PrescriptionIssuedPayload, _impl, "handle_prescription_issued", HEALTH_SCHEMA
+        )
 
     registry.register(EVENT_PRESCRIPTION_ISSUED, handle_prescription_issued)
 
@@ -181,11 +135,12 @@ def register_handlers(registry: HandlerRegistry) -> None:
                 )
             )
 
-        await _run_handler(
+        await run_handler(
             envelope,
             PrescriptionDeliveredPayload,
             _impl,
             "handle_prescription_delivered",
+            HEALTH_SCHEMA,
         )
 
     registry.register(EVENT_PRESCRIPTION_DELIVERED, handle_prescription_delivered)
@@ -208,7 +163,9 @@ def register_handlers(registry: HandlerRegistry) -> None:
                 )
             )
 
-        await _run_handler(envelope, SettlementRecordedPayload, _impl, "handle_settlement_recorded")
+        await run_handler(
+            envelope, SettlementRecordedPayload, _impl, "handle_settlement_recorded", HEALTH_SCHEMA
+        )
 
     registry.register(EVENT_SETTLEMENT_RECORDED, handle_settlement_recorded)
 
@@ -224,7 +181,7 @@ def register_handlers(registry: HandlerRegistry) -> None:
         async def _impl(connection: AsyncConnection, payload: BaseModel) -> None:
             pass  # Effective sharing view update happens here in later phases
 
-        await _run_handler(envelope, BaseModel, _impl, "handle_consent_granted")
+        await run_handler(envelope, BaseModel, _impl, "handle_consent_granted", HEALTH_SCHEMA)
 
     registry.register(EVENT_CONSENT_GRANTED, handle_consent_granted)
 
@@ -239,6 +196,6 @@ def register_handlers(registry: HandlerRegistry) -> None:
         async def _impl(connection: AsyncConnection, payload: BaseModel) -> None:
             pass  # Effective sharing view update happens here in later phases
 
-        await _run_handler(envelope, BaseModel, _impl, "handle_consent_revoked")
+        await run_handler(envelope, BaseModel, _impl, "handle_consent_revoked", HEALTH_SCHEMA)
 
     registry.register(EVENT_CONSENT_REVOKED, handle_consent_revoked)

@@ -16,7 +16,7 @@ from typing import Literal
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from bus.outbox_writer import write_outbox
 from modules.iam.domain import events
@@ -39,6 +39,7 @@ from modules.iam.domain.shared import (
 )
 from modules.iam.outbox import IAM_OUTBOX_TABLE
 from modules.iam.schema.models import iam_identities
+from modules.iam.session_facade import grant_operator_role
 
 _IAM_SCHEMA = "iam"
 
@@ -66,6 +67,33 @@ class RegisterPatientResult(BaseModel):
     cooldown_remaining_seconds: int | None = None
     attempts_left: int | None = None
     lockout_remaining_seconds: int | None = None
+
+
+class PartnerCredentialCreatedResult(BaseModel):
+    """Outcome of creating a partner credential account (ADR-0010, ticket #245).
+
+    The identity is created ``[Unverified]`` with no role grant, so it is
+    login-capable via phone-OTP from the moment the partner registers but holds
+    no ``partner`` role scope until activation (the role grant is the
+    activation-gated step, T03 #246). ``identity_id`` and ``phone_e164`` let
+    the ``partner`` module persist its own row in the same transaction.
+    """
+
+    identity_id: int
+    phone_e164: str
+
+
+class OperatorInvitedResult(BaseModel):
+    """Outcome of inviting a new operator (T07, ticket #250).
+
+    The invited identity is created ``[Unverified]`` with an ``Active``
+    ``operator`` role grant, so the invited phone can complete MFA at first
+    login and then hold the ``operator`` scope - there is no self-registration
+    path, only this credentialed operator-invites-operator flow.
+    """
+
+    identity_id: int
+    phone_e164: str
 
 
 def _default_clock() -> datetime:
@@ -180,3 +208,113 @@ class IdentityFacade:
             cooldown_remaining_seconds=RESEND_COOLDOWN_SECONDS,
             attempts_left=MAX_ATTEMPTS,
         )
+
+    async def create_credential_account(
+        self, phone: str, connection: AsyncConnection | None = None
+    ) -> PartnerCredentialCreatedResult:
+        """Create a login-capable identity for a newly registered partner (ADR-0010, #245).
+
+        Called synchronously by the ``partner`` module inside the same
+        transaction as partner registration, so a partner's phone-OTP login
+        works the moment they register. Unlike ``register_patient`` this does
+        NOT issue a challenge or grant a role: the identity is created
+        ``[Unverified]`` with no ``partner`` role grant, so a later activation
+        (T03, #246) is the gated step that grants the role and unlocks
+        patient-facing scope.
+
+        ``connection`` lets the caller (the ``partner`` facade) share its own
+        open transaction so the identity insert commits atomically with the
+        partner profile and the partner module's ``partner.registered``
+        (ADR-0010: "in the same registration transaction boundary"). The
+        ``partner.registered`` event is MOD-002's, so the iam seam emits no
+        same-key event here - the registry's one-shape-per-name contract holds
+        (internal-modules §4.2, producer MOD-002). When omitted the
+        method opens its own transaction, preserving the standalone seam shape
+        the iam tests exercise. Concurrency converges via the unique
+        ``phone_e164`` index (``INSERT ... ON CONFLICT DO NOTHING`` then a
+        re-read, never SELECT-then-INSERT).
+        """
+        phone_e164 = normalize_phone(phone)
+
+        async def _run(connection: AsyncConnection) -> int:
+            await connection.execute(
+                postgresql_insert(iam_identities)
+                .values(phone_e164=phone_e164)
+                .on_conflict_do_nothing(index_elements=["phone_e164"])
+            )
+            identity_id = (
+                await connection.execute(
+                    select(iam_identities.c.id).where(iam_identities.c.phone_e164 == phone_e164)
+                )
+            ).scalar_one()
+            return int(identity_id)
+
+        if connection is not None:
+            identity_id = await _run(connection)
+        else:
+            async with self._engine.begin() as connection:
+                identity_id = await _run(connection)
+
+        return PartnerCredentialCreatedResult(identity_id=identity_id, phone_e164=phone_e164)
+
+    async def create_operator_account(
+        self,
+        phone: str,
+        invited_by_identity_id: int,
+        connection: AsyncConnection | None = None,
+    ) -> OperatorInvitedResult:
+        """Invite a new operator: create a credentialed, MFA-bound account (T07, #250).
+
+        Operators are a trusted closed group that never self-registers - the
+        only way to grow the queue-running group is an existing operator
+        inviting a new phone. The invited identity is created ``[Unverified]``
+        and immediately granted an ``Active`` ``operator`` role, so a session
+        can be issued only after the invited phone completes MFA at first
+        login (the second factor precedes session minting in ``issue_operator_session``).
+
+        Unlike ``create_credential_account`` (a partner is login-capable with
+        no role until activation), the operator role grant is handed over at
+        invite time - MFA, not a separate activation step, is the gate that
+        binds the account. ``invited_by_identity_id`` names the inviting
+        operator for the ``operator.invited`` audit event, emitted in the same
+        transaction as the identity insert. ``connection`` lets the caller
+        share an open transaction; when omitted the method opens its own,
+        preserving the standalone seam shape the iam tests exercise. Concurrency
+        converges via the unique ``phone_e164`` index (``INSERT ... ON CONFLICT
+        DO NOTHING`` then a re-read); a duplicate phone resolves to the existing
+        identity with the role grant still ensured and no duplicate event.
+        """
+        phone_e164 = normalize_phone(phone)
+
+        async def _run(connection: AsyncConnection) -> int:
+            inserted = await connection.execute(
+                postgresql_insert(iam_identities)
+                .values(phone_e164=phone_e164)
+                .on_conflict_do_nothing(index_elements=["phone_e164"])
+            )
+            identity_id = (
+                await connection.execute(
+                    select(iam_identities.c.id).where(iam_identities.c.phone_e164 == phone_e164)
+                )
+            ).scalar_one()
+            await grant_operator_role(connection, identity_id)
+            if inserted.rowcount == 1:
+                await write_outbox(
+                    connection,
+                    _IAM_SCHEMA,
+                    IAM_OUTBOX_TABLE,
+                    events.operator_invited_envelope(
+                        identity_id=identity_id,
+                        phone_e164=phone_e164,
+                        invited_by_identity_id=invited_by_identity_id,
+                    ),
+                )
+            return int(identity_id)
+
+        if connection is not None:
+            identity_id = await _run(connection)
+        else:
+            async with self._engine.begin() as connection:
+                identity_id = await _run(connection)
+
+        return OperatorInvitedResult(identity_id=identity_id, phone_e164=phone_e164)

@@ -42,6 +42,7 @@ _REGULATED: tuple[str, ...] = (
     "partner.registered",
     "partner.activated",
     "partner.rejected",
+    "partner.credential_reviewed",
     "credential.invalidated",
     # Patient lifecycle
     "patient.registered",
@@ -56,6 +57,7 @@ _OPERATIONAL: tuple[str, ...] = (
     "notification.failed",
     "otp.sent",
     "otp.failed",
+    "partner.verification_started",
     "metric.logged",
     "metric_out_of_range",
     "follow_up.due",
@@ -108,3 +110,21 @@ def test_whitelist_is_a_frozenset() -> None:
 
 def test_whitelist_contains_exactly_the_regulated_acts() -> None:
     assert set(_REGULATED) == REGULATED_ACT_TYPES
+
+
+def test_partner_regulated_events_referenced_by_constant() -> None:
+    # PHASE-5 T04 (#247): the four regulated partner events must be referenced
+    # in the whitelist by their canonical constants, never a bare string, so
+    # the code-side mirror cannot drift from bus.events. T13 (#256) promoted
+    # ``partner.credential_reviewed`` to a fifth regulated partner event.
+    from bus import events as bus_events
+
+    partner_regulated = (
+        "EVENT_PARTNER_REGISTERED",
+        "EVENT_PARTNER_ACTIVATED",
+        "EVENT_PARTNER_REJECTED",
+        "EVENT_PARTNER_CREDENTIAL_REVIEWED",
+        "EVENT_CREDENTIAL_INVALIDATED",
+    )
+    for name in partner_regulated:
+        assert getattr(bus_events, name) in REGULATED_ACT_TYPES

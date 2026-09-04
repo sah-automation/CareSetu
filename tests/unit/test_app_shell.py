@@ -89,6 +89,33 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/audit/events",
         # PHASE-4 T7 (#241): patient-only own access-history surface.
         "/v1/audit/access-history",
+        # PHASE-5 T05 (#249): open partner self-service registration.
+        "/v1/partner/register",
+        # PHASE-5 T06 (#251): partner credential submission (Step-1 pre-filter).
+        "/v1/partner/credentials",
+        # PHASE-5 T09 (#253): rejected-partner recovery - the partner view of
+        # their specific rejection reason and the one-time appeal that
+        # re-enters the operator queue.
+        "/v1/partner/rejection-reason",
+        "/v1/partner/appeal",
+        # PHASE-5 review fix P2/P3 (#271): partner self-service onboarding
+        # status (US-6) and current-round credential review status (US-7).
+        "/v1/partner/me",
+        "/v1/partner/me/verification",
+        # PHASE-5 T08 (#252): the operator verification console (FEAT-015) -
+        # age-sortable queue, per-partner detail, approve/reject gate.
+        "/v1/partner/verification-queue",
+        "/v1/partner/verification/{partner_id}",
+        "/v1/partner/verification/{partner_id}/decision",
+        # PHASE-5 T10 (#254): grace-window lapse auto-drop (event-driven reverify path).
+        "/v1/partner/verification/{partner_id}/grace-lapse",
+        # PHASE-5 S9 (#262): operator invite + MFA-gated operator login.
+        "/v1/auth/operator/invite",
+        "/v1/auth/operator/login",
+        # PHASE-5 review fix P1 (#272): operator MFA TOTP enrollment.
+        "/v1/auth/operator/mfa/enroll",
+        # T05 (#298): partner-scoped session issuance for registered partners.
+        "/v1/auth/partner/session",
     }
 
 

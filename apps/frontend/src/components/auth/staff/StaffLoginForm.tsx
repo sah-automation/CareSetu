@@ -1,26 +1,32 @@
 "use client";
 
-// PHASE-2.6 T10 (#201): the split-auth staff login card (blueprint §4.2),
-// visually and functionally distinct from the patient OTP wizard - email +
-// password here, no phone step, and deliberately NO role picker (the role
-// derives server-side from the account at sign-in, never chosen by hand).
+// PHASE-2.6 T10 (#201): the split-auth staff login card (blueprint section 4.2),
+// visually and functionally distinct from the patient OTP wizard.
 //
-// Pages only this phase: submitting never fakes success - it names Phase 5
-// honestly and nothing leaves the browser. `staffLoginErrorCopy` (pure,
-// suite-tested on stable codes) is the seam Phase 5's real envelopes plug
-// into; when that happens an envelope notice renders its short trace_id per
-// ui-blueprint §9.5. The MFA step renders only while enrollment is indicated
-// by local state - which nothing sets until Phase 5 wires TOTP - and its
-// input stays disabled even then.
+// PHASE-5 T4 (#282): wired to real operator login flow. Submit calls
+// POST /v1/auth/operator/login (phone + TOTP). SESSION_MFA_REQUIRED (401)
+// surfaces the TOTP input step. On successful auth: create session via
+// saveSession, route via postLoginTarget. Phone display stays masked per IAM
+// convention. Email + password fields remain for the partner staff login path.
+//
+// #302: the mode is fixed by the caller's role prop (default "partner",
+// "operator" via ?role=operator) - fields never swap while the user types.
 
 import { useRef, useState } from "react";
 
+import { ApiError } from "@/lib/api-errors";
+import { fetchMe, type SessionResult } from "@/lib/auth/api";
+import { postLoginTarget } from "@/lib/auth/staff-routing";
+import { saveSession } from "@/lib/auth/session";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
+import { operatorLogin } from "@/lib/operator/api";
 
 import {
+  staffOperatorErrorCopy,
   validateStaffLogin,
   type StaffLoginFieldError,
+  type StaffLoginRole,
 } from "./staffLoginState";
 
 type FieldErrors = ReturnType<typeof validateStaffLogin>;
@@ -29,34 +35,58 @@ type FieldName = keyof FieldErrors;
 interface Notice {
   kind: "phase5" | "envelope";
   message: string;
-  /** Short trace rendered alongside envelope errors only (§9.5). */
+  /** Short trace rendered alongside envelope errors only (section 9.5). */
   traceId?: string;
 }
 
-export interface StaffLoginFormProps {
-  /**
-   * Local stand-in for the Phase 5 session flag ("account has MFA enrolled").
-   * Nothing sets it this phase; it exists so the slot's rendering rule and
-   * its inertness are provable in isolation.
-   */
-  mfaEnrolled?: boolean;
+function maskPhone(phone: string): string {
+  if (phone.length <= 4) return phone;
+  const visible = phone.slice(-4);
+  const masked = "X".repeat(phone.length - 4);
+  return masked + visible;
 }
 
-export function StaffLoginForm({ mfaEnrolled = false }: StaffLoginFormProps) {
+// Shared post-auth landing: fetch the /v1/me profile, persist the session,
+// then route through postLoginTarget. Used by both the password step and the
+// TOTP step so a session/route change stays in one place.
+async function completeStaffLogin(
+  session: SessionResult,
+): Promise<{ roles: string[]; phone: string }> {
+  const me = await fetchMe(session.jwt);
+  saveSession(session, me.phone);
+  return { roles: me.roles, phone: me.phone };
+}
+
+export function StaffLoginForm({
+  role = "partner",
+}: {
+  role?: StaffLoginRole;
+}) {
   const { lang } = useLang();
   const t = STRINGS[lang].staffAuth.login;
 
+  const isOperatorMode = role === "operator";
+
+  const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  // Per-field errors accumulate from blur checks; the summary block above the
-  // form appears only once a submit has been attempted (§9.5).
+  const [totpCode, setTotpCode] = useState("");
+  // Set once SESSION_MFA_REQUIRED is seen: masked display number (never raw
+  // PII) plus the raw number retained only for the TOTP verification request.
+  const [mfaContext, setMfaContext] = useState<{
+    masked: string;
+    raw: string;
+  } | null>(null);
+  const [loading, setLoading] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [attemptedSubmit, setAttemptedSubmit] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
 
+  const phoneRef = useRef<HTMLInputElement>(null);
   const emailRef = useRef<HTMLInputElement>(null);
   const passwordRef = useRef<HTMLInputElement>(null);
+  const totpRef = useRef<HTMLInputElement>(null);
 
   function errorFor(field: FieldName): StaffLoginFieldError | undefined {
     return fieldErrors[field];
@@ -66,9 +96,39 @@ export function StaffLoginForm({ mfaEnrolled = false }: StaffLoginFormProps) {
     setFieldErrors((prev) => ({ ...prev, [field]: errors[field] }));
   }
 
-  // §9.5: validate on blur AND on submit; a blur re-checks just that field.
+  // section 9.5: validate on blur AND on submit; a blur re-checks just that field.
   function handleBlur(field: FieldName) {
-    applyFieldResult(field, validateStaffLogin({ email, password }));
+    if (field === "code") {
+      applyFieldResult(
+        field,
+        validateStaffLogin({ phone, email, password, code: totpCode }, role),
+      );
+    } else {
+      applyFieldResult(
+        field,
+        validateStaffLogin({ phone, email, password }, role),
+      );
+    }
+  }
+
+  // Landing after a successful login: persist the session and route through
+  // postLoginTarget. Duplicated nowhere because both the password step and the
+  // TOTP step funnel through completeStaffLogin, then this full-page redirect.
+  async function landAfterLogin(session: SessionResult) {
+    const me = await completeStaffLogin(session);
+    window.location.replace(
+      postLoginTarget({ surface: "staff", roles: me.roles }),
+    );
+  }
+
+  // Map any thrown value onto calm dictionary copy, reusing the operator
+  // envelope mapper. The envelope retains its own trace id for the notice.
+  function envelopeNotice(error: unknown): Notice {
+    return {
+      kind: "envelope",
+      message: staffOperatorErrorCopy(error, t),
+      traceId: error instanceof ApiError ? error.traceId : undefined,
+    };
   }
 
   function handleSubmit(event: React.FormEvent) {
@@ -76,11 +136,69 @@ export function StaffLoginForm({ mfaEnrolled = false }: StaffLoginFormProps) {
     setAttemptedSubmit(true);
     setNotice(null);
 
-    const errors = validateStaffLogin({ email, password });
+    // TOTP re-verification step (SESSION_MFA_REQUIRED fallback): phone already
+    // submitted, now verify the TOTP code.
+    if (mfaContext !== null) {
+      const errors = validateStaffLogin(
+        { phone, email, password, code: totpCode },
+        role,
+      );
+      if (errors.code) {
+        setFieldErrors({ code: errors.code });
+        totpRef.current?.focus();
+        return;
+      }
+      const trimmedCode = totpCode.trim();
+      setLoading(true);
+      operatorLogin({ phone: mfaContext.raw, code: trimmedCode })
+        .then((session) => landAfterLogin(session))
+        .catch((error: unknown) => setNotice(envelopeNotice(error)))
+        .finally(() => setLoading(false));
+      return;
+    }
+
+    // Operator path: role pinned by the caller (URL ?role=operator), not by
+    // what the user typed. Validate phone + 6-digit TOTP code.
+    if (isOperatorMode) {
+      const errors = validateStaffLogin(
+        { phone, email, password, code: totpCode },
+        role,
+      );
+      setFieldErrors(errors);
+      if (errors.phone || errors.code) {
+        if (errors.phone) {
+          phoneRef.current?.focus();
+        } else {
+          totpRef.current?.focus();
+        }
+        return;
+      }
+      setLoading(true);
+      const rawPhone = phone.trim();
+      operatorLogin({ phone: rawPhone, code: totpCode.trim() })
+        .then((session) => landAfterLogin(session))
+        .catch((error: unknown) => {
+          if (
+            error instanceof ApiError &&
+            error.code === "SESSION_MFA_REQUIRED"
+          ) {
+            setMfaContext({ masked: maskPhone(rawPhone), raw: rawPhone });
+            setTotpCode("");
+            setFieldErrors({});
+            setNotice(null);
+            setTimeout(() => totpRef.current?.focus(), 0);
+          } else {
+            setNotice(envelopeNotice(error));
+          }
+        })
+        .finally(() => setLoading(false));
+      return;
+    }
+
+    // Partner staff path: email + password.
+    const errors = validateStaffLogin({ phone, email, password }, role);
     setFieldErrors(errors);
     if (Object.keys(errors).length > 0) {
-      // Failed submit announces the count via the summary block and moves
-      // focus to the first invalid field.
       if (errors.email) {
         emailRef.current?.focus();
       } else {
@@ -89,14 +207,16 @@ export function StaffLoginForm({ mfaEnrolled = false }: StaffLoginFormProps) {
       return;
     }
 
-    // Honest submit: staff auth lands in Phase 5. No request, no fake
-    // success state - the banner says exactly that.
+    // Partner staff login not yet wired - honest placeholder.
     setNotice({ kind: "phase5", message: t.phase5Notice });
   }
 
   const errorCount = Object.values(fieldErrors).filter(Boolean).length;
+  const phoneError = errorFor("phone");
   const emailError = errorFor("email");
   const passwordError = errorFor("password");
+  const codeError = errorFor("code");
+  const isMfaStep = mfaContext !== null;
 
   return (
     <form onSubmit={handleSubmit} noValidate data-testid="staff-login-form">
@@ -133,116 +253,211 @@ export function StaffLoginForm({ mfaEnrolled = false }: StaffLoginFormProps) {
         </div>
       ) : null}
 
-      <div className="mb-4">
-        <label htmlFor="staff-email" className="mb-1 block text-sm font-medium">
-          {t.emailLabel}
-        </label>
-        <input
-          ref={emailRef}
-          id="staff-email"
-          type="email"
-          autoComplete="username"
-          placeholder={t.emailPlaceholder}
-          value={email}
-          onChange={(event) => setEmail(event.target.value)}
-          onBlur={() => handleBlur("email")}
-          aria-invalid={errorFor("email") ? true : undefined}
-          aria-describedby={errorFor("email") ? "staff-email-error" : undefined}
-          className="w-full rounded-md border border-hairline bg-surface px-3 py-2"
-          data-testid="staff-email"
-        />
-        {emailError ? (
+      {isMfaStep ? (
+        <>
           <p
-            id="staff-email-error"
-            data-testid="staff-email-error"
-            className="mt-1 text-sm text-danger"
+            data-testid="mfa-phone-display"
+            className="mb-4 text-sm text-on-surface"
           >
-            {t[emailError]}
+            {mfaContext.masked}
           </p>
-        ) : null}
-      </div>
 
-      <div className="mb-4">
-        <label
-          htmlFor="staff-password"
-          className="mb-1 block text-sm font-medium"
-        >
-          {t.passwordLabel}
-        </label>
-        <div className="flex items-center gap-2">
-          <input
-            ref={passwordRef}
-            id="staff-password"
-            type={showPassword ? "text" : "password"}
-            autoComplete="current-password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            onBlur={() => handleBlur("password")}
-            aria-invalid={errorFor("password") ? true : undefined}
-            aria-describedby={
-              errorFor("password") ? "staff-password-error" : undefined
-            }
-            className="min-w-0 flex-1 rounded-md border border-hairline bg-surface px-3 py-2"
-            data-testid="staff-password"
-          />
-          <button
-            type="button"
-            onClick={() => setShowPassword((value) => !value)}
-            aria-label={showPassword ? t.hidePassword : t.showPassword}
-            data-testid="password-toggle"
-            className="rounded-md border border-hairline px-2 py-1 text-sm"
-          >
-            {showPassword ? t.hidePassword : t.showPassword}
-          </button>
-        </div>
-        {passwordError ? (
-          <p
-            id="staff-password-error"
-            data-testid="staff-password-error"
-            className="mt-1 text-sm text-danger"
-          >
-            {t[passwordError]}
-          </p>
-        ) : null}
-        <a
-          href="#"
-          className="mt-1 inline-block text-sm underline"
-          data-testid="forgot-password"
-        >
-          {t.forgotPassword}
-        </a>
-      </div>
+          <div className="mb-4">
+            <label
+              htmlFor="staff-mfa"
+              className="mb-1 block text-sm font-medium"
+            >
+              {t.mfaCodeLabel}
+            </label>
+            <input
+              ref={totpRef}
+              id="staff-mfa"
+              inputMode="numeric"
+              maxLength={6}
+              value={totpCode}
+              onChange={(event) => setTotpCode(event.target.value)}
+              aria-invalid={codeError ? true : undefined}
+              aria-describedby={codeError ? "staff-mfa-error" : undefined}
+              className="w-full rounded-md border border-hairline bg-surface px-3 py-2"
+              data-testid="mfa-input"
+            />
+            {codeError ? (
+              <p
+                id="staff-mfa-error"
+                data-testid="mfa-code-error"
+                className="mt-1 text-sm text-danger"
+              >
+                {t[codeError]}
+              </p>
+            ) : null}
+            <p className="mt-1 text-xs opacity-80">{t.mfaHelp}</p>
+          </div>
+        </>
+      ) : isOperatorMode ? (
+        <>
+          <div className="mb-4">
+            <label
+              htmlFor="staff-phone"
+              className="mb-1 block text-sm font-medium"
+            >
+              {t.phoneLabel}
+            </label>
+            <input
+              ref={phoneRef}
+              id="staff-phone"
+              type="tel"
+              autoComplete="tel"
+              placeholder={t.phonePlaceholder}
+              value={phone}
+              onChange={(event) => setPhone(event.target.value)}
+              onBlur={() => handleBlur("phone")}
+              aria-invalid={errorFor("phone") ? true : undefined}
+              aria-describedby={
+                errorFor("phone") ? "staff-phone-error" : undefined
+              }
+              className="w-full rounded-md border border-hairline bg-surface px-3 py-2"
+              data-testid="staff-phone"
+            />
+            {phoneError ? (
+              <p
+                id="staff-phone-error"
+                data-testid="staff-phone-error"
+                className="mt-1 text-sm text-danger"
+              >
+                {t[phoneError]}
+              </p>
+            ) : null}
+          </div>
 
-      {/* Conditional post-password MFA step: renders ONLY while the account
-          is flagged enrolled (nothing sets that until Phase 5), and its input
-          stays disabled - the step is a slot, never functional this phase. */}
-      {mfaEnrolled ? (
-        <div
-          aria-disabled="true"
-          data-testid="mfa-slot"
-          className="mb-4 opacity-60"
-        >
-          <label htmlFor="staff-mfa" className="mb-1 block text-sm font-medium">
-            {t.mfaCodeLabel}
-          </label>
-          <input
-            id="staff-mfa"
-            inputMode="numeric"
-            maxLength={6}
-            disabled
-            className="w-full rounded-md border border-hairline bg-surface px-3 py-2"
-            data-testid="mfa-input"
-          />
-          <p className="mt-1 text-xs opacity-80">{t.mfaHelp}</p>
-        </div>
-      ) : null}
+          <div className="mb-4">
+            <label
+              htmlFor="staff-totp"
+              className="mb-1 block text-sm font-medium"
+            >
+              {t.mfaCodeLabel}
+            </label>
+            <input
+              ref={totpRef}
+              id="staff-totp"
+              inputMode="numeric"
+              maxLength={6}
+              placeholder="000000"
+              value={totpCode}
+              onChange={(event) => setTotpCode(event.target.value)}
+              onBlur={() => handleBlur("code")}
+              aria-invalid={codeError ? true : undefined}
+              aria-describedby={codeError ? "staff-totp-error" : undefined}
+              className="w-full rounded-md border border-hairline bg-surface px-3 py-2"
+              data-testid="staff-totp"
+            />
+            {codeError ? (
+              <p
+                id="staff-totp-error"
+                data-testid="staff-totp-error"
+                className="mt-1 text-sm text-danger"
+              >
+                {t[codeError]}
+              </p>
+            ) : null}
+            <p className="mt-1 text-xs opacity-80">{t.mfaHelp}</p>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="mb-4">
+            <label
+              htmlFor="staff-email"
+              className="mb-1 block text-sm font-medium"
+            >
+              {t.emailLabel}
+            </label>
+            <input
+              ref={emailRef}
+              id="staff-email"
+              type="email"
+              autoComplete="username"
+              placeholder={t.emailPlaceholder}
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              onBlur={() => handleBlur("email")}
+              aria-invalid={errorFor("email") ? true : undefined}
+              aria-describedby={
+                errorFor("email") ? "staff-email-error" : undefined
+              }
+              className="w-full rounded-md border border-hairline bg-surface px-3 py-2"
+              data-testid="staff-email"
+            />
+            {emailError ? (
+              <p
+                id="staff-email-error"
+                data-testid="staff-email-error"
+                className="mt-1 text-sm text-danger"
+              >
+                {t[emailError]}
+              </p>
+            ) : null}
+          </div>
+
+          <div className="mb-4">
+            <label
+              htmlFor="staff-password"
+              className="mb-1 block text-sm font-medium"
+            >
+              {t.passwordLabel}
+            </label>
+            <div className="flex items-center gap-2">
+              <input
+                ref={passwordRef}
+                id="staff-password"
+                type={showPassword ? "text" : "password"}
+                autoComplete="current-password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                onBlur={() => handleBlur("password")}
+                aria-invalid={errorFor("password") ? true : undefined}
+                aria-describedby={
+                  errorFor("password") ? "staff-password-error" : undefined
+                }
+                className="min-w-0 flex-1 rounded-md border border-hairline bg-surface px-3 py-2"
+                data-testid="staff-password"
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((value) => !value)}
+                aria-label={showPassword ? t.hidePassword : t.showPassword}
+                data-testid="password-toggle"
+                className="rounded-md border border-hairline px-2 py-1 text-sm"
+              >
+                {showPassword ? t.hidePassword : t.showPassword}
+              </button>
+            </div>
+            {passwordError ? (
+              <p
+                id="staff-password-error"
+                data-testid="staff-password-error"
+                className="mt-1 text-sm text-danger"
+              >
+                {t[passwordError]}
+              </p>
+            ) : null}
+            <a
+              href="#"
+              className="mt-1 inline-block text-sm underline"
+              data-testid="forgot-password"
+            >
+              {t.forgotPassword}
+            </a>
+          </div>
+        </>
+      )}
 
       <button
         type="submit"
         data-testid="staff-submit"
-        className="mt-1 w-full rounded-md bg-primary px-4 py-2 font-semibold text-on-accent"
+        disabled={loading}
+        className="mt-1 w-full rounded-md bg-primary px-4 py-2 font-semibold text-on-accent disabled:opacity-50"
       >
-        {t.signIn}
+        {isMfaStep ? t.mfaSubmit : t.signIn}
       </button>
     </form>
   );

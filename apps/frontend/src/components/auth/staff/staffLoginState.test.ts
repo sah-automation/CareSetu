@@ -4,38 +4,132 @@
 
 import { describe, expect, it } from "vitest";
 
+import { ApiError } from "@/lib/api-errors";
 import { AuthApiError } from "@/lib/auth/api";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 
-import { staffLoginErrorCopy, validateStaffLogin } from "./staffLoginState";
+import {
+  staffLoginErrorCopy,
+  staffOperatorErrorCopy,
+  validateStaffLogin,
+} from "./staffLoginState";
 
 const t = STRINGS.en.staffAuth.login;
 
 describe("validateStaffLogin", () => {
-  it("accepts a well-formed email with any non-empty password", () => {
-    expect(
-      validateStaffLogin({ email: "dr.sharma@example.com", password: "x" }),
-    ).toEqual({});
+  describe("partner mode", () => {
+    it("accepts a well-formed email with any non-empty password", () => {
+      expect(
+        validateStaffLogin(
+          { phone: "", email: "dr.sharma@example.com", password: "x" },
+          "partner",
+        ),
+      ).toEqual({});
+    });
+
+    it.each([
+      ["missing @", "not-an-email"],
+      ["missing domain", "user@"],
+      ["whitespace-only", "   "],
+      ["empty", ""],
+    ])("rejects %s as an email", (_label, email) => {
+      const errors = validateStaffLogin(
+        { phone: "", email, password: "secret" },
+        "partner",
+      );
+      expect(errors.email).toBe("emailInvalid");
+    });
+
+    it("requires a non-empty password", () => {
+      const errors = validateStaffLogin(
+        { phone: "", email: "a@b.co", password: "" },
+        "partner",
+      );
+      expect(errors.password).toBe("passwordRequired");
+    });
+
+    it("reports both fields at once so the summary can count them", () => {
+      const errors = validateStaffLogin(
+        { phone: "", email: "", password: "" },
+        "partner",
+      );
+      expect(Object.keys(errors)).toHaveLength(2);
+    });
+
+    it("ignores a filled phone - the mode is pinned, never typed", () => {
+      const errors = validateStaffLogin(
+        { phone: "9876543210", email: "", password: "" },
+        "partner",
+      );
+      expect(errors.email).toBe("emailInvalid");
+      expect(errors.password).toBe("passwordRequired");
+      expect(errors.phone).toBeUndefined();
+      expect(errors.code).toBeUndefined();
+    });
   });
 
-  it.each([
-    ["missing @", "not-an-email"],
-    ["missing domain", "user@"],
-    ["whitespace-only", "   "],
-    ["empty", ""],
-  ])("rejects %s as an email", (_label, email) => {
-    const errors = validateStaffLogin({ email, password: "secret" });
+  describe("operator mode", () => {
+    it("accepts a well-formed phone number with a 6-digit TOTP code", () => {
+      expect(
+        validateStaffLogin(
+          { phone: "9876543210", email: "", password: "", code: "123456" },
+          "operator",
+        ),
+      ).toEqual({});
+    });
+
+    it.each([
+      ["too short", "123"],
+      ["letters", "abcdefghij"],
+      ["with spaces", "987 654 3210"],
+    ])("rejects %s as a phone number", (_label, phone) => {
+      const errors = validateStaffLogin(
+        { phone, email: "", password: "secret", code: "123456" },
+        "operator",
+      );
+      expect(errors.phone).toBe("phoneInvalid");
+    });
+
+    it("requires a 6-digit TOTP code", () => {
+      const errors = validateStaffLogin(
+        { phone: "9876543210", email: "", password: "", code: "" },
+        "operator",
+      );
+      expect(errors.code).toBe("codeRequired");
+    });
+
+    it.each([
+      ["too short", "123"],
+      ["too long", "1234567"],
+      ["letters", "abcdef"],
+      ["with spaces", "123 456"],
+    ])("rejects %s as a TOTP code", (_label, code) => {
+      const errors = validateStaffLogin(
+        { phone: "9876543210", email: "", password: "", code },
+        "operator",
+      );
+      expect(errors.code).toBe("codeInvalid");
+    });
+
+    it("does not require email or password", () => {
+      const errors = validateStaffLogin(
+        { phone: "9876543210", email: "", password: "", code: "123456" },
+        "operator",
+      );
+      expect(errors.password).toBeUndefined();
+      expect(errors.email).toBeUndefined();
+    });
+  });
+
+  it("defaults to partner mode when no role is passed", () => {
+    const errors = validateStaffLogin({
+      phone: "9876543210",
+      email: "",
+      password: "",
+      code: "123456",
+    });
     expect(errors.email).toBe("emailInvalid");
-  });
-
-  it("requires a non-empty password", () => {
-    const errors = validateStaffLogin({ email: "a@b.co", password: "" });
-    expect(errors.password).toBe("passwordRequired");
-  });
-
-  it("reports both fields at once so the summary can count them", () => {
-    const errors = validateStaffLogin({ email: "", password: "" });
-    expect(Object.keys(errors)).toHaveLength(2);
+    expect(errors.phone).toBeUndefined();
   });
 });
 
@@ -61,22 +155,78 @@ describe("staffLoginErrorCopy", () => {
     expect(copy).toMatch(/15 minutes/);
   });
 
+  it("keys SESSION_REFUSED onto the invalid-credentials copy", () => {
+    expect(staffLoginErrorCopy(envelopeError("SESSION_REFUSED"), t)).toBe(
+      t.invalidCredentials,
+    );
+  });
+
   it("maps VALIDATION_ERROR to calm operational copy, never the envelope message", () => {
     // Whole-envelope validation failures cannot be attributed to one field
-    // until Phase 5 ships details[] mapping, so they get generic copy.
+    // until Phase 5 ships details[] mapping, so they get credential-focused copy.
     const copy = staffLoginErrorCopy(envelopeError("VALIDATION_ERROR"), t);
-    expect(copy).toBe(t.genericError);
+    expect(copy).toBe(t.invalidCredentials);
     expect(copy).not.toBe(t.emailInvalid);
   });
 
-  it("falls back to generic operational copy for unknown codes without leaking the raw code", () => {
+  it("falls back to credential-focused copy for unknown codes without leaking the raw code", () => {
     const copy = staffLoginErrorCopy(envelopeError("IAM_SOMETHING_NEW"), t);
-    expect(copy).toBe(t.genericError);
+    expect(copy).toBe(t.invalidCredentials);
     expect(copy).not.toMatch(/IAM_SOMETHING_NEW/);
   });
 
-  it("treats non-envelope throws as operational errors", () => {
-    expect(staffLoginErrorCopy(new Error("boom"), t)).toBe(t.genericError);
-    expect(staffLoginErrorCopy(undefined, t)).toBe(t.genericError);
+  it("treats non-envelope throws as credential-focused operational errors", () => {
+    expect(staffLoginErrorCopy(new Error("boom"), t)).toBe(
+      t.invalidCredentials,
+    );
+    expect(staffLoginErrorCopy(undefined, t)).toBe(t.invalidCredentials);
+  });
+});
+
+function operatorError(code: string): ApiError {
+  return new ApiError({
+    code,
+    message: "envelope message",
+    trace_id: "trace-1",
+    details: {},
+  });
+}
+
+describe("staffOperatorErrorCopy", () => {
+  it("keys INVALID_CREDENTIALS onto the calm invalid-credentials copy", () => {
+    expect(
+      staffOperatorErrorCopy(operatorError("INVALID_CREDENTIALS"), t),
+    ).toBe(t.invalidCredentials);
+  });
+
+  it("keys ACCOUNT_LOCKED onto the lockout copy", () => {
+    expect(staffOperatorErrorCopy(operatorError("ACCOUNT_LOCKED"), t)).toBe(
+      t.accountLocked,
+    );
+  });
+
+  it("keys SESSION_REFUSED onto the invalid-credentials copy", () => {
+    // SESSION_REFUSED (409) is emitted when the phone is unknown or the
+    // identity is not Active - the user should be guided to check their input,
+    // not told the system failed.
+    expect(staffOperatorErrorCopy(operatorError("SESSION_REFUSED"), t)).toBe(
+      t.invalidCredentials,
+    );
+  });
+
+  it("never leaks a raw operator code to users - falls back to credential-focused copy", () => {
+    const copy = staffOperatorErrorCopy(
+      operatorError("IAM_OPERATOR_UNKNOWN_CODE"),
+      t,
+    );
+    expect(copy).toBe(t.invalidCredentials);
+    expect(copy).not.toMatch(/IAM_OPERATOR_UNKNOWN_CODE/);
+  });
+
+  it("treats non-envelope throws as credential-focused operational errors", () => {
+    expect(staffOperatorErrorCopy(new Error("boom"), t)).toBe(
+      t.invalidCredentials,
+    );
+    expect(staffOperatorErrorCopy(undefined, t)).toBe(t.invalidCredentials);
   });
 });

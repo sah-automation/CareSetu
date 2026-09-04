@@ -1,7 +1,7 @@
 // PHASE-2.6 T11 (#202): component suite for the four-step provider
 // registration wizard. Covers the ticket's acceptance criteria: four steps
 // in order, the ?type= CTA preset flow, per-field validation blocking
-// progression, upload-discipline checks, and honest Phase-5-only submission.
+// progression, upload-discipline checks, and real submission to the backend.
 
 import {
   cleanup,
@@ -10,20 +10,125 @@ import {
   screen,
   within,
 } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ProviderRegisterWizard } from "./ProviderRegisterWizard";
 import { COUNCIL_OPTION_IDS } from "./providerRegisterState";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { __resetLangForTests } from "@/lib/i18n/LangContext";
 
+import { registerPartner, submitCredentials } from "@/lib/partner/api";
+import { issuePartnerSession } from "@/lib/auth/api";
+import { saveSession } from "@/lib/auth/session";
+import { postLoginTarget } from "@/lib/auth/staff-routing";
+
+vi.mock("@/lib/partner/api", () => ({
+  registerPartner: vi.fn().mockResolvedValue({
+    partner_id: 1,
+    identity_id: 1,
+    partner_type: "doctor",
+    status: "Registered",
+    round: 1,
+    created: true,
+  }),
+  submitCredentials: vi.fn().mockResolvedValue({
+    partner_id: 1,
+    status: "Registered",
+    round: 1,
+  }),
+}));
+
+vi.mock("@/lib/auth/api", () => ({
+  issuePartnerSession: vi.fn().mockResolvedValue({
+    jwt: "test-jwt",
+    jti: "test-jti",
+    scope: "partner",
+    identity_id: 1,
+    expires_in_seconds: 3600,
+    refresh_token: "test-refresh",
+  }),
+  AuthApiError: class MockAuthApiError extends Error {
+    readonly code: string;
+    readonly details: Record<string, unknown>;
+    readonly traceId: string;
+    constructor(envelope: {
+      code: string;
+      message: string;
+      trace_id: string;
+      details: Record<string, unknown>;
+    }) {
+      super(envelope.message);
+      this.name = "AuthApiError";
+      this.code = envelope.code;
+      this.details = envelope.details;
+      this.traceId = envelope.trace_id;
+    }
+  },
+}));
+
+vi.mock("@/lib/auth/session", () => ({
+  saveSession: vi.fn(),
+}));
+
+vi.mock("@/lib/auth/staff-routing", () => ({
+  postLoginTarget: vi.fn().mockReturnValue("/partner/status/pending"),
+}));
+
 const t = STRINGS.en.staffAuth.register;
 const STRONG = "correct-horse-battery1!";
 
+const mockRegisterPartner = vi.mocked(registerPartner);
+const mockSubmitCredentials = vi.mocked(submitCredentials);
+const mockIssuePartnerSession = vi.mocked(issuePartnerSession);
+const mockSaveSession = vi.mocked(saveSession);
+const mockPostLoginTarget = vi.mocked(postLoginTarget);
+
+function mockGeolocation(
+  handler: (
+    success: (position: {
+      coords: { latitude: number; longitude: number };
+    }) => void,
+    error: (err: { code: number; message: string }) => void,
+  ) => void,
+) {
+  vi.stubGlobal("navigator", {
+    geolocation: {
+      getCurrentPosition: vi.fn().mockImplementation(handler),
+    },
+  });
+}
+
+beforeEach(() => {
+  vi.stubGlobal(
+    "FileReader",
+    class {
+      result: string | null = null;
+      onload: (() => void) | null = null;
+      readAsDataURL(_blob: Blob) {
+        this.result = "data:application/octet-stream;base64,dGVzdA==";
+        if (this.onload) this.onload();
+      }
+    },
+  );
+
+  // Mock navigator.geolocation for wizard submit tests - default resolves
+  // with a fixed position distinct from (0,0).
+  mockGeolocation((success) => {
+    success({
+      coords: {
+        latitude: 23.99,
+        longitude: 83.99,
+      },
+    });
+  });
+});
+
 afterEach(() => {
   cleanup();
-  vi.restoreAllMocks();
+  vi.clearAllMocks();
+  vi.unstubAllGlobals();
   __resetLangForTests();
+  mockPostLoginTarget.mockClear();
 });
 
 function type(testId: string, value: string) {
@@ -42,6 +147,7 @@ function fillStep1() {
   type("pr-fullname", "Dr. Asha Kumar");
   type("pr-email", "asha@example.com");
   type("pr-password", STRONG);
+  type("pr-mobile", "9876543210");
 }
 
 function fillDoctorStep2() {
@@ -124,7 +230,7 @@ describe("four-step skeleton (blueprint §4.3)", () => {
   it("advances Continue through every step to Submit application", () => {
     walkToStep(4, "doctor");
     expect(screen.getByTestId("pr-step-4")).toBeInTheDocument();
-    expect(screen.getByTestId("pr-next")).toHaveTextContent(
+    expect(screen.getByTestId("pr-submit")).toHaveTextContent(
       t.submitApplication,
     );
   });
@@ -190,8 +296,11 @@ describe("validation blocks progression with per-field messages", () => {
     expect(screen.getByTestId("pr-password-error")).toHaveTextContent(
       t.errors.passwordWeak,
     );
+    expect(screen.getByTestId("pr-mobile-error")).toHaveTextContent(
+      t.errors.mobileRequired,
+    );
     expect(screen.getByTestId("pr-form-summary")).toHaveTextContent(
-      t.summaryTitle(3),
+      t.summaryTitle(4),
     );
   });
 
@@ -311,13 +420,13 @@ describe("credentials upload discipline", () => {
   });
 });
 
-describe("review & declarations with honest submission", () => {
+describe("review & declarations with submission", () => {
   it("summarizes the entered data faithfully before declarations", () => {
     walkToStep(4, "doctor");
     const review = screen.getByTestId("pr-step-4");
     expect(review).toHaveTextContent("Dr. Asha Kumar");
     expect(review).toHaveTextContent("asha@example.com");
-    expect(review).toHaveTextContent(t.review.notProvided);
+    expect(review).toHaveTextContent("9876543210");
     expect(review).toHaveTextContent(t.typeLabels.doctor);
     expect(review).toHaveTextContent("Jharkhand State Medical Council");
     expect(review).toHaveTextContent("council-cert.pdf");
@@ -328,29 +437,161 @@ describe("review & declarations with honest submission", () => {
 
   it("blocks submit until all three declarations are ticked", () => {
     walkToStep(4, "doctor");
-    fireEvent.click(screen.getByTestId("pr-next"));
+    fireEvent.click(screen.getByTestId("pr-submit"));
     expect(screen.getByTestId("decl-error-truth")).toHaveTextContent(
       t.errors.declarationRequired,
     );
-    expect(screen.queryByTestId("pr-phase5-notice")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("pr-server-error")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByTestId("decl-truth"));
     fireEvent.click(screen.getByTestId("decl-consent"));
     fireEvent.click(screen.getByTestId("decl-terms"));
-    fireEvent.click(screen.getByTestId("pr-next"));
+    fireEvent.click(screen.getByTestId("pr-submit"));
 
-    const notice = screen.getByTestId("pr-phase5-notice");
-    expect(notice).toHaveAttribute("role", "status");
-    expect(notice).toHaveTextContent(/Phase 5/);
+    expect(screen.getByTestId("pr-submit")).toBeDisabled();
   });
 
-  it("never sends anything anywhere on submit", () => {
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockName("fetch");
+  it("shows server error with trace id on API failure", async () => {
+    mockRegisterPartner.mockRejectedValueOnce(
+      new (await import("@/lib/api-errors")).ApiError({
+        code: "VALIDATION_ERROR",
+        message: "Phone number already registered",
+        trace_id: "abc123",
+        details: {},
+      }),
+    );
+
     walkToStep(4, "doctor");
     fireEvent.click(screen.getByTestId("decl-truth"));
     fireEvent.click(screen.getByTestId("decl-consent"));
     fireEvent.click(screen.getByTestId("decl-terms"));
+    fireEvent.click(screen.getByTestId("pr-submit"));
+
+    const error = await screen.findByTestId("pr-server-error");
+    expect(error).toHaveTextContent("Phone number already registered");
+    expect(error).toHaveTextContent("Trace: abc123");
+  });
+
+  it("surfaces an AuthApiError's real backend message and trace id on failure", async () => {
+    const { AuthApiError: MockAuthApiError } = await import("@/lib/auth/api");
+    mockIssuePartnerSession.mockRejectedValueOnce(
+      new MockAuthApiError({
+        code: "SESSION_REFUSED",
+        message: "identity 1 is Unverified, not Active; verify the OTP first",
+        trace_id: "trace-session-refused",
+        details: {},
+      }),
+    );
+
+    walkToStep(4, "doctor");
+    fireEvent.click(screen.getByTestId("decl-truth"));
+    fireEvent.click(screen.getByTestId("decl-consent"));
+    fireEvent.click(screen.getByTestId("decl-terms"));
+    fireEvent.click(screen.getByTestId("pr-submit"));
+
+    const error = await screen.findByTestId("pr-server-error");
+    expect(error).toHaveTextContent(
+      "identity 1 is Unverified, not Active; verify the OTP first",
+    );
+    expect(error).toHaveTextContent("Trace: trace-session-refused");
+  });
+
+  it("calls registerPartner then issuePartnerSession then saveSession on successful submit", async () => {
+    walkToStep(4, "doctor");
+    fireEvent.click(screen.getByTestId("decl-truth"));
+    fireEvent.click(screen.getByTestId("decl-consent"));
+    fireEvent.click(screen.getByTestId("decl-terms"));
+    fireEvent.click(screen.getByTestId("pr-submit"));
+
+    await vi.waitFor(
+      () => {
+        expect(mockIssuePartnerSession).toHaveBeenCalledOnce();
+      },
+      { timeout: 5000 },
+    );
+
+    expect(mockRegisterPartner).toHaveBeenCalledOnce();
+    expect(mockRegisterPartner).toHaveBeenCalledWith(
+      expect.objectContaining({
+        phone: "+919876543210",
+        partner_type: "doctor",
+        practice_latitude: 23.99,
+        practice_longitude: 83.99,
+      }),
+    );
+    expect(mockSubmitCredentials).toHaveBeenCalledOnce();
+    expect(mockIssuePartnerSession).toHaveBeenCalledWith("+919876543210");
+    expect(mockSaveSession).toHaveBeenCalledOnce();
+    expect(mockSaveSession).toHaveBeenCalledWith(
+      expect.objectContaining({ jwt: "test-jwt" }),
+      "+919876543210",
+    );
+
+    const sessionOrder = mockIssuePartnerSession.mock.invocationCallOrder[0];
+    const saveOrder = mockSaveSession.mock.invocationCallOrder[0];
+    const submitOrder = mockSubmitCredentials.mock.invocationCallOrder[0];
+    expect(sessionOrder).toBeLessThan(submitOrder);
+    expect(saveOrder).toBeLessThan(submitOrder);
+    expect(mockPostLoginTarget).toHaveBeenCalledWith({
+      surface: "staff",
+      roles: ["partner"],
+      partnerState: "pending",
+    });
+  });
+
+  it("passes through a 12-digit international-format phone unchanged", async () => {
+    render(<ProviderRegisterWizard presetType="doctor" />);
+    type("pr-fullname", "Dr. Asha Kumar");
+    type("pr-email", "asha@example.com");
+    type("pr-password", STRONG);
+    // 12-digit 91-prefixed form - the wizard must not double-prefix it.
+    type("pr-mobile", "919876543210");
     fireEvent.click(screen.getByTestId("pr-next"));
-    expect(fetchSpy).not.toHaveBeenCalled();
+    fillDoctorStep2();
+    fireEvent.click(screen.getByTestId("pr-next"));
+    attachDoctorFiles();
+    fireEvent.click(screen.getByTestId("pr-next"));
+
+    fireEvent.click(screen.getByTestId("decl-truth"));
+    fireEvent.click(screen.getByTestId("decl-consent"));
+    fireEvent.click(screen.getByTestId("decl-terms"));
+    fireEvent.click(screen.getByTestId("pr-submit"));
+
+    await vi.waitFor(
+      () => {
+        expect(mockIssuePartnerSession).toHaveBeenCalledOnce();
+      },
+      { timeout: 5000 },
+    );
+
+    expect(mockRegisterPartner).toHaveBeenCalledWith(
+      expect.objectContaining({ phone: "+919876543210" }),
+    );
+  });
+
+  it("falls back to env-configured coordinates when geolocation is denied", async () => {
+    // Override geolocation to deny BEFORE the wizard mounts so its mount-time
+    // useEffect resolves to the env-configured fallback (Daltonganj).
+    mockGeolocation((_success, error) => error({ code: 1, message: "denied" }));
+
+    walkToStep(4, "doctor");
+    fireEvent.click(screen.getByTestId("decl-truth"));
+    fireEvent.click(screen.getByTestId("decl-consent"));
+    fireEvent.click(screen.getByTestId("decl-terms"));
+    fireEvent.click(screen.getByTestId("pr-submit"));
+
+    await vi.waitFor(
+      () => {
+        expect(mockIssuePartnerSession).toHaveBeenCalledOnce();
+      },
+      { timeout: 5000 },
+    );
+
+    expect(mockRegisterPartner).toHaveBeenCalledWith(
+      expect.objectContaining({
+        practice_latitude: 24.04,
+        practice_longitude: 84.07,
+      }),
+    );
   });
 });

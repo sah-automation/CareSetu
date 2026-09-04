@@ -141,6 +141,31 @@ def test_unverified_identity_refused_with_409_envelope(
     _assert_iam_rejection_logged(caplog, _TRACE_ID)
 
 
+def test_session_refused_masks_a_phone_in_the_envelope_message(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
+    facade = StubFacade()
+    facade.error = SessionIssuanceError(
+        "no identity for +919876543210; register the phone before issuing a session"
+    )
+    client = _client_with(facade)
+
+    response = client.post(
+        "/v1/auth/session",
+        json={"phone": "9876543210"},
+        headers={"X-Request-Id": _TRACE_ID},
+    )
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["code"] == "SESSION_REFUSED"
+    assert "+919876543210" not in body["message"]
+    assert "+91...10" in body["message"]
+    assert body["trace_id"] == _TRACE_ID
+    _assert_iam_rejection_logged(caplog, _TRACE_ID)
+
+
 def test_missing_phone_rejected_at_the_gateway(caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.WARNING)
     facade = StubFacade()
@@ -266,3 +291,109 @@ def test_session_failed_mutation_is_not_cached_for_replay() -> None:
 
     assert retried.status_code == 200
     assert facade.called_with == ["9876543210", "9876543210"]
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/auth/partner/session (T05, #298)
+# ---------------------------------------------------------------------------
+
+_PARTNER_RESULT = SessionResult(
+    jwt="partner.jwt.signature",
+    jti="partner-jti-001",
+    scope="partner",
+    identity_id=42,
+    expires_in_seconds=900,
+    refresh_token="partner-refresh-token",
+)
+
+
+class PartnerStubFacade:
+    """Minimal facade stand-in for partner session routes."""
+
+    def __init__(self) -> None:
+        self.called_with: list[str] = []
+        self.result: SessionResult | None = _PARTNER_RESULT
+        self.error: IamError | None = None
+
+    async def issue_partner_session(self, phone: str) -> SessionResult:
+        self.called_with.append(phone)
+        if self.error is not None:
+            raise self.error
+        if self.result is None:
+            raise AssertionError("stub facade needs a result before the call")
+        return self.result
+
+
+def _partner_client_with(facade: PartnerStubFacade) -> TestClient:
+    app = create_app()
+    app.state.iam_facade = facade
+    return TestClient(app)
+
+
+def test_partner_session_returns_minted_session_and_sets_cookie() -> None:
+    facade = PartnerStubFacade()
+    client = _partner_client_with(facade)
+
+    response = client.post("/v1/auth/partner/session", json={"phone": "9876543210"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["scope"] == "partner"
+    assert body["identity_id"] == 42
+    assert facade.called_with == ["9876543210"]
+    set_cookie = response.headers.get("set-cookie", "")
+    assert "caresetu_session=" in set_cookie
+    assert "partner.jwt.signature" in set_cookie
+    assert "httponly" in set_cookie.lower()
+    assert "samesite=strict" in set_cookie.lower()
+
+
+def test_partner_session_refused_with_409_for_unknown_phone(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
+    facade = PartnerStubFacade()
+    facade.error = SessionIssuanceError(
+        "no identity for +919876543210; register the phone before issuing a session"
+    )
+    client = _partner_client_with(facade)
+
+    response = client.post(
+        "/v1/auth/partner/session",
+        json={"phone": "9876543210"},
+        headers={"X-Request-Id": _TRACE_ID},
+    )
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["code"] == "SESSION_REFUSED"
+    assert "+919876543210" not in body["message"]
+    assert body["trace_id"] == _TRACE_ID
+
+
+def test_partner_session_refused_with_409_for_patient_only_phone(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
+    facade = PartnerStubFacade()
+    facade.error = SessionIssuanceError(
+        "identity 7 has no partner profile; this is a patient-only phone"
+    )
+    client = _partner_client_with(facade)
+
+    response = client.post(
+        "/v1/auth/partner/session",
+        json={"phone": "9876543210"},
+        headers={"X-Request-Id": _TRACE_ID},
+    )
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["code"] == "SESSION_REFUSED"
+    assert "no partner profile" in body["message"]
+    assert body["trace_id"] == _TRACE_ID
+
+
+def test_partner_session_route_registered_in_openapi() -> None:
+    app = create_app()
+    assert "/v1/auth/partner/session" in app.openapi()["paths"]

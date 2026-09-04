@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from bus.envelope import Envelope
 from bus.events import (
+    EVENT_OPERATOR_INVITED,
     EVENT_OTP_FAILED,
     EVENT_OTP_SENT,
     EVENT_PATIENT_AUTH_FAILED,
@@ -179,5 +180,37 @@ def patient_auth_failed_envelope(
             phone_e164=phone_e164,
             reason=reason,
             attempts_left=attempts_left,
+        ),
+    )
+
+
+class OperatorInvitedPayload(BaseModel):
+    """Subject of ``operator.invited``: a new operator identity was created.
+
+    Emitted synchronously when an existing operator invites a new phone
+    to join the operator group. The invited identity is created
+    ``[Unverified]`` with an ``operator`` role grant, MFA-bound at first
+    login - no session is minted until MFA enrollment completes.
+    """
+
+    identity_id: int
+    phone_e164: str
+    invited_by_identity_id: int
+
+
+def operator_invited_envelope(
+    identity_id: int,
+    phone_e164: str,
+    invited_by_identity_id: int,
+) -> Envelope[OperatorInvitedPayload]:
+    """Build the ``operator.invited`` envelope for the iam outbox."""
+    return Envelope[OperatorInvitedPayload](
+        event_id=uuid4(),
+        event_type=EVENT_OPERATOR_INVITED,
+        producer=PRODUCER_MODULE,
+        payload=OperatorInvitedPayload(
+            identity_id=identity_id,
+            phone_e164=phone_e164,
+            invited_by_identity_id=invited_by_identity_id,
         ),
     )

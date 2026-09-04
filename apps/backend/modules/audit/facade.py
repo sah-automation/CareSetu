@@ -21,8 +21,17 @@ from modules.audit.domain.chain import GENESIS_HASH, compute_audit_hash
 from modules.audit.domain.consumer import (
     AuditEventPayload,
     AuditRow,
+    CredentialInvalidatedPayload,
+    CredentialReviewedPayload,
+    PartnerDecisionPayload,
+    PartnerRegisteredPayload,
     RecordAccessAuditPayload,
+    _partner_uuid,
     build_audit_row,
+    build_credential_invalidated_row,
+    build_credential_reviewed_row,
+    build_partner_decision_row,
+    build_partner_registered_row,
     build_record_access_row,
 )
 from modules.audit.schema.models import audit_events
@@ -130,6 +139,137 @@ async def append_record_access_event(
     """
     prev_hash = await _latest_hash(connection)
     row = build_record_access_row(event_type, payload, producer, prev_hash)
+    await connection.execute(
+        insert(audit_events).values(
+            event_type=row.event_type,
+            actor_id=row.actor_id,
+            target_id=row.target_id,
+            scope=row.scope,
+            metadata=row.metadata,
+            timestamp=row.timestamp,
+            prev_hash=row.prev_hash,
+            hash=row.hash,
+        )
+    )
+    return row
+
+
+async def append_partner_decision_event(
+    connection: AsyncConnection,
+    event_type: str,
+    payload: PartnerDecisionPayload,
+    producer: str,
+    occurred_at: datetime,
+) -> AuditRow:
+    """Append one partner terminal decision to the hash-chained ledger.
+
+    Mirrors ``append_record_access_event`` for ``partner.activated`` /
+    ``partner.rejected``: reads the chain tail (or genesis), computes the
+    deterministic digest with ``build_partner_decision_row``, and inserts the
+    row with every required column populated. The event type is already the
+    regulated act, so there is no derived act type. Runs inside the caller's
+    transaction (the ``consumed_events`` ledger row), so a crash rolls both
+    back together (ADR-0002 §3).
+    """
+    prev_hash = await _latest_hash(connection)
+    row = build_partner_decision_row(event_type, payload, producer, occurred_at, prev_hash)
+    await connection.execute(
+        insert(audit_events).values(
+            event_type=row.event_type,
+            actor_id=row.actor_id,
+            target_id=row.target_id,
+            scope=row.scope,
+            metadata=row.metadata,
+            timestamp=row.timestamp,
+            prev_hash=row.prev_hash,
+            hash=row.hash,
+        )
+    )
+    return row
+
+
+async def append_credential_reviewed_event(
+    connection: AsyncConnection,
+    payload: CredentialReviewedPayload,
+    producer: str,
+    occurred_at: datetime,
+) -> AuditRow:
+    """Append one ``partner.credential_reviewed`` view to the hash-chained ledger.
+
+    Mirrors ``append_partner_decision_event`` for the credential-view act:
+    reads the chain tail (or genesis), computes the deterministic digest with
+    ``build_credential_reviewed_row``, and inserts the row with every required
+    column populated. One append per credential view - every view is
+    traceable, not just a summary. Runs inside the caller's transaction (the
+    ``consumed_events`` ledger row), so a crash rolls both back together
+    (ADR-0002 §3).
+    """
+    prev_hash = await _latest_hash(connection)
+    row = build_credential_reviewed_row(payload, producer, occurred_at, prev_hash)
+    await connection.execute(
+        insert(audit_events).values(
+            event_type=row.event_type,
+            actor_id=row.actor_id,
+            target_id=row.target_id,
+            scope=row.scope,
+            metadata=row.metadata,
+            timestamp=row.timestamp,
+            prev_hash=row.prev_hash,
+            hash=row.hash,
+        )
+    )
+    return row
+
+
+async def append_partner_registered_event(
+    connection: AsyncConnection,
+    payload: PartnerRegisteredPayload,
+    producer: str,
+    occurred_at: datetime,
+) -> AuditRow:
+    """Append one ``partner.registered`` act to the hash-chained ledger.
+
+    Mirrors ``append_partner_decision_event`` for the registration act: reads
+    the chain tail (or genesis), computes the deterministic digest with
+    ``build_partner_registered_row``, and inserts the row with every required
+    column populated. Runs inside the caller's transaction (the
+    ``consumed_events`` ledger row), so a crash rolls both back together
+    (ADR-0002 §3).
+    """
+    prev_hash = await _latest_hash(connection)
+    row = build_partner_registered_row(payload, producer, occurred_at, prev_hash)
+    await connection.execute(
+        insert(audit_events).values(
+            event_type=row.event_type,
+            actor_id=row.actor_id,
+            target_id=row.target_id,
+            scope=row.scope,
+            metadata=row.metadata,
+            timestamp=row.timestamp,
+            prev_hash=row.prev_hash,
+            hash=row.hash,
+        )
+    )
+    return row
+
+
+async def append_credential_invalidated_event(
+    connection: AsyncConnection,
+    payload: CredentialInvalidatedPayload,
+    producer: str,
+    occurred_at: datetime,
+) -> AuditRow:
+    """Append one ``credential.invalidated`` act to the hash-chained ledger.
+
+    Mirrors ``append_credential_reviewed_event`` for the invalidation act:
+    reads the chain tail (or genesis), computes the deterministic digest with
+    ``build_credential_invalidated_row``, and inserts the row with every
+    required column populated. Runs inside the caller's transaction (the
+    ``consumed_events`` ledger row), so a crash rolls both back together
+    (ADR-0002 §3).
+    """
+    prev_hash = await _latest_hash(connection)
+    row = build_credential_invalidated_row(payload, producer, occurred_at, prev_hash)
     await connection.execute(
         insert(audit_events).values(
             event_type=row.event_type,
@@ -275,6 +415,48 @@ class AuditFacade:
                 page=page,
                 page_size=page_size,
             )
+
+    async def query_partner_audit(self, partner_id: int, *, page_size: int = 50) -> AuditPage:
+        """Return the audit chain for one partner (S7 detail-view augmentation).
+
+        A partner's ledger rows are keyed by ``target_id = uuid5("caresetu.audit",
+        "partner:{partner_id}")`` (the deterministic ``_partner_uuid`` mapping the
+        partner consumers use when appending). This is the read-side reuse of that
+        seam - the partner module asks the audit facade for the ledger rows instead
+        of duplicating the int->UUID derivation.
+        """
+        target_id = UUID(_partner_uuid(partner_id))
+        async with self._engine.begin() as connection:
+            return await query_audit_events(
+                connection,
+                actor_id=None,
+                event_type=None,
+                target_id=target_id,
+                scope=None,
+                from_ts=None,
+                to_ts=None,
+                page=1,
+                page_size=page_size,
+            )
+
+    def get_partner_audit_link(self, partner_id: int) -> str:
+        """Return the deterministic audit-link identifier for one partner.
+
+        A partner's ledger rows are keyed by ``target_id = _partner_uuid(partner_id)``
+        (the deterministic int->UUID mapping). This method exposes that reference as a
+        stable, opaque string so the partner module can surface it on queue/detail views
+        without importing the domain helper (module isolation, ADR-0003).
+        """
+        return _partner_uuid(partner_id)
+
+    def get_partner_audit_links(self, partner_ids: list[int]) -> dict[int, str]:
+        """Batch-resolve audit-link identifiers for multiple partners.
+
+        Returns a ``{partner_id: audit_link}`` mapping. Every id in the input list
+        is present in the output (deterministic derivation, no DB round-trip), so the
+        caller can batch-populate queue items without N+1 facade calls.
+        """
+        return {pid: _partner_uuid(pid) for pid in partner_ids}
 
     async def get_access_history(self, patient_id: int) -> AccessHistoryView:
         """Return a patient's record access history via the MOD-003 facade (T7).

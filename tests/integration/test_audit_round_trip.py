@@ -44,7 +44,14 @@ from bus.dispatcher import (
     process_outbox_table,
 )
 from bus.envelope import Envelope
-from bus.events import EVENT_AUDIT_EVENT, EVENT_RECORD_ACCESSED, EVENT_RECORD_DENIED
+from bus.events import (
+    EVENT_AUDIT_EVENT,
+    EVENT_PARTNER_ACTIVATED,
+    EVENT_PARTNER_CREDENTIAL_REVIEWED,
+    EVENT_PARTNER_REJECTED,
+    EVENT_RECORD_ACCESSED,
+    EVENT_RECORD_DENIED,
+)
 from bus.outbox_ddl import OUTBOX_STATUS_PENDING
 from bus.outbox_writer import write_outbox
 from bus.registry import HandlerRegistry
@@ -55,6 +62,13 @@ from modules.audit.outbox import AUDIT_OUTBOX_TABLE
 from modules.consent.outbox import CONSENT_OUTBOX_TABLE
 from modules.health.domain.events import record_accessed_envelope, record_denied_envelope
 from modules.health.outbox import HEALTH_OUTBOX_TABLE
+from modules.iam.adapters import register_handlers as register_iam_handlers
+from modules.partner.domain.events import (
+    credential_reviewed_envelope,
+    partner_activated_envelope,
+    partner_rejected_envelope,
+)
+from modules.partner.outbox import PARTNER_OUTBOX_TABLE
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_INI = REPO_ROOT / "apps" / "backend" / "alembic.ini"
@@ -82,7 +96,11 @@ def migrated_schema(database_url: str) -> Iterator[None]:
 
 @pytest_asyncio.fixture
 async def clean_tables(database_url: str, migrated_schema: None) -> Iterator[None]:
-    """Empty the audit ledger + bus ledgers and the publishing outboxes."""
+    """Empty the audit ledger + bus ledgers and the publishing outboxes.
+
+    Partner + iam tables included so the partner round trip (which imports the
+    iam handlers for their registered payload models) starts from a clean slate.
+    """
     engine = create_async_engine(database_url, poolclass=NullPool)
     try:
         async with engine.begin() as connection:
@@ -90,7 +108,9 @@ async def clean_tables(database_url: str, migrated_schema: None) -> Iterator[Non
                 text(
                     "TRUNCATE TABLE audit.audit_events, audit.consumed_events, "
                     "audit.audit_outbox, audit.audit_tamper_attempts, "
-                    "consent.consent_outbox, health.health_outbox CASCADE"
+                    "consent.consent_outbox, health.health_outbox, "
+                    "partner.partner_outbox, iam.iam_identities, iam.iam_role_grants, "
+                    "iam.consumed_events CASCADE"
                 )
             )
     finally:
@@ -100,6 +120,19 @@ async def clean_tables(database_url: str, migrated_schema: None) -> Iterator[Non
 
 def _registry() -> HandlerRegistry:
     registry = HandlerRegistry()
+    register_audit_handlers(registry)
+    return registry
+
+
+def _full_registry() -> HandlerRegistry:
+    """The composition-root registry for the partner gate: iam + audit.
+
+    MOD-001 owns the registered payload models for ``partner.activated`` /
+    ``partner.rejected``, so both must be registered for the dispatcher to
+    reconstruct the decision envelopes - mirroring the worker's build.
+    """
+    registry = HandlerRegistry()
+    register_iam_handlers(registry)
     register_audit_handlers(registry)
     return registry
 
@@ -147,9 +180,9 @@ def _verify_chain(rows: list[dict[str, object]]) -> None:
         visited.add(current_hash)
         expected = compute_audit_hash(
             str(current["event_type"]),
-            str(current["actor_id"]),
-            str(current["target_id"]),
-            str(current["scope"]),
+            None if current["actor_id"] is None else str(current["actor_id"]),
+            None if current["target_id"] is None else str(current["target_id"]),
+            None if current["scope"] is None else str(current["scope"]),
             current["metadata"],
             current["timestamp"],
             str(current["prev_hash"]),
@@ -364,5 +397,85 @@ async def test_append_only_guard_and_tamper_telemetry_delivery(
             assert delivered == 1
             rows = await _audit_rows(connection)
         assert len(rows) == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_partner_gate_events_round_trip_into_the_audit_chain(
+    database_url: str, clean_tables: None
+) -> None:
+    """AC (#256): partner.activated / partner.rejected / partner.credential_reviewed
+    each yield a MOD-011 audit-chain append, terminal decisions and credential
+    views coexist in one chain, and replaying the same event_id adds no row."""
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        activated_envelope = partner_activated_envelope(partner_id=5, identity_id=11, decision_by=3)
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO iam.iam_identities (id, phone_e164) VALUES "
+                    "(11, '+919876543210'), (12, '+919876543211')"
+                )
+            )
+            # MOD-002-style envelopes exactly as the partner facade publishes.
+            await write_outbox(connection, "partner", PARTNER_OUTBOX_TABLE, activated_envelope)
+            await write_outbox(
+                connection,
+                "partner",
+                PARTNER_OUTBOX_TABLE,
+                partner_rejected_envelope(
+                    partner_id=5,
+                    identity_id=12,
+                    reason="documents did not match the recorded identity",
+                    round=1,
+                ),
+            )
+            await write_outbox(
+                connection,
+                "partner",
+                PARTNER_OUTBOX_TABLE,
+                credential_reviewed_envelope(partner_id=5, actor_id=3),
+            )
+
+        registry = _full_registry()
+        async with engine.connect() as connection:
+            tables = await discover_outbox_tables(connection, ("partner",))
+        assert {table.table_name for table in tables} == {PARTNER_OUTBOX_TABLE}
+
+        for table in tables:
+            await process_outbox_table(engine, table, registry, DEFAULT_DISPATCHER_CONFIG)
+
+        async with engine.connect() as connection:
+            rows = await _audit_rows(connection)
+            assert len(rows) == 3
+            event_types = {str(row["event_type"]) for row in rows}
+            assert event_types == {
+                EVENT_PARTNER_ACTIVATED,
+                EVENT_PARTNER_REJECTED,
+                EVENT_PARTNER_CREDENTIAL_REVIEWED,
+            }
+            _verify_chain(rows)
+
+            # Every decision/view is attributed: the operator who acted and the
+            # partner acted upon ride the row's actor/target UUIDs.
+            activated = next(
+                row for row in rows if str(row["event_type"]) == EVENT_PARTNER_ACTIVATED
+            )
+            reviewed = next(
+                row for row in rows if str(row["event_type"]) == EVENT_PARTNER_CREDENTIAL_REVIEWED
+            )
+        assert activated["actor_id"] is not None
+        assert activated["target_id"] is not None
+        assert reviewed["actor_id"] is not None
+        assert reviewed["target_id"] is not None
+
+        # Replay the activated event_id: the idempotent consumer records the
+        # ledger conflict and appends nothing - still exactly three rows.
+        await dispatch(registry, activated_envelope)
+        async with engine.connect() as connection:
+            rows = await _audit_rows(connection)
+        assert len(rows) == 3
+        _verify_chain(rows)
     finally:
         await engine.dispose()

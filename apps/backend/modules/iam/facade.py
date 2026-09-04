@@ -11,11 +11,11 @@ here for backward compatibility.  ``emit_access_denied`` and
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from bus.outbox_writer import write_outbox
 from modules.iam.adapters.sms import (
@@ -23,6 +23,9 @@ from modules.iam.adapters.sms import (
     SmsDeliveryQueue,
     SmsSendRequest,
     SmsTemplateParams,
+)
+from modules.iam.adapters.sms import (
+    build_sms_adapter as build_sms_adapter,
 )
 from modules.iam.domain import events
 from modules.iam.domain.exceptions import (
@@ -38,7 +41,22 @@ from modules.iam.identity_facade import (
     IdentityFacade as IdentityFacade,
 )
 from modules.iam.identity_facade import (
+    OperatorInvitedResult as OperatorInvitedResult,
+)
+from modules.iam.identity_facade import (
+    PartnerCredentialCreatedResult as PartnerCredentialCreatedResult,
+)
+from modules.iam.identity_facade import (
     RegisterPatientResult as RegisterPatientResult,
+)
+from modules.iam.mfa_facade import (
+    EnrollMfaResult as EnrollMfaResult,
+)
+from modules.iam.mfa_facade import (
+    MfaFacade as MfaFacade,
+)
+from modules.iam.mfa_facade import (
+    VerifyMfaResult as VerifyMfaResult,
 )
 from modules.iam.otp_facade import (
     OtpFacade as OtpFacade,
@@ -62,6 +80,9 @@ from modules.iam.session_facade import (
 from modules.iam.session_facade import (
     ValidatedAccessToken as ValidatedAccessToken,
 )
+from modules.iam.session_facade import (
+    _partner_role_status as _partner_role_status,
+)
 
 _IAM_SCHEMA = "iam"
 
@@ -82,6 +103,7 @@ class IamFacade:
         access_token_signing_key: str = "",
         access_token_ttl_seconds: int = 900,
         refresh_token_ttl_seconds: int = 2_592_000,
+        mfa_secret_key: str = "",
     ) -> None:
         self._engine = engine
         self.delivery_queue = SmsDeliveryQueue(
@@ -100,12 +122,14 @@ class IamFacade:
         self._clock = clock
         self._identity = IdentityFacade(engine, self._otp_sender, clock)
         self._otp = OtpFacade(engine, clock, self._otp_sender)
+        self._mfa = MfaFacade(engine, clock, mfa_secret_key=mfa_secret_key)
         self._sessions = SessionFacade(
             engine,
             clock=clock,
             access_token_signing_key=access_token_signing_key,
             access_token_ttl_seconds=access_token_ttl_seconds,
             refresh_token_ttl_seconds=refresh_token_ttl_seconds,
+            mfa_secret_key=mfa_secret_key,
         )
 
     # -- Identity delegation (ADR-0006, ticket #169) -----------------------
@@ -113,6 +137,34 @@ class IamFacade:
     async def register_patient(self, phone: str) -> RegisterPatientResult:
         """Begin-or-resume: create the identity on first use, else resolve it."""
         return await self._identity.register_patient(phone)
+
+    async def create_credential_account(
+        self, phone: str, connection: AsyncConnection | None = None
+    ) -> PartnerCredentialCreatedResult:
+        """Create a login-capable identity for a newly registered partner (ADR-0010).
+
+        Synchronous, in one transaction boundary, with no role grant - the
+        ``partner`` role is granted later at activation (T03, #246). ``connection``
+        lets the caller share an open transaction so the identity and the partner
+        profile commit atomically (ADR-0010); when omitted the seam opens its own.
+        """
+        return await self._identity.create_credential_account(phone, connection=connection)
+
+    async def create_operator_account(
+        self,
+        phone: str,
+        invited_by_identity_id: int,
+        connection: AsyncConnection | None = None,
+    ) -> OperatorInvitedResult:
+        """Invite a new operator (T07, #250): credentialed, MFA-bound at first login.
+
+        Delegated to ``IdentityFacade``. The invited identity is created with an
+        ``Active`` ``operator`` role grant, so an operator-scoped session is
+        minted only after MFA completes.
+        """
+        return await self._identity.create_operator_account(
+            phone, invited_by_identity_id=invited_by_identity_id, connection=connection
+        )
 
     # -- OTP delegation (ADR-0006, ticket #168) ----------------------------
 
@@ -124,11 +176,66 @@ class IamFacade:
         """Request a fresh code: latest-wins over the pending challenge."""
         return await self._otp.resend_otp(phone)
 
+    # -- MFA delegation (ADR-0006, T07 ticket #250) ------------------------
+
+    async def enroll_mfa(self, identity_id: int) -> EnrollMfaResult:
+        """Enroll an operator's TOTP MFA factor (P1, #272).
+
+        Delegated to ``MfaFacade``. Generates a fresh secret, encrypts it at
+        rest, and stores the ciphertext in ``iam_operator_mfa.secret``; the
+        returned plaintext secret + provisioning URI are shown to the operator
+        exactly once to add the factor to their authenticator. After this call
+        the operator satisfies ``issue_operator_session``'s MFA gate and can
+        complete their first login.
+        """
+        return await self._mfa.enroll_mfa(identity_id)
+
+    async def record_mfa_verified(self, phone: str) -> VerifyMfaResult:
+        """Record a successful operator MFA second factor (T07, #250).
+
+        Delegated to ``MfaFacade``. After this call the operator satisfies
+        ``issue_operator_session``'s MFA gate (``iam_operator_mfa`` enrolled
+        with ``last_verified_at`` stamped); a session is minted only once MFA
+        has been completed.
+        """
+        return await self._mfa.record_mfa_verified(phone)
+
     # -- Session delegation (ADR-0006, ticket #166) ------------------------
 
     async def issue_session(self, phone: str) -> SessionResult:
         """Mint an access JWT for a verified patient (delegated to ``SessionFacade``)."""
         return await self._sessions.issue_session(phone)
+
+    async def issue_operator_session(self, phone: str, code: str) -> SessionResult:
+        """Mint an operator-scoped access JWT after MFA (T07, #250; S8, #261).
+
+        Delegated to ``SessionFacade``; the session's ``scope`` resolves to
+        ``operator`` so the gateway's ``require_operator`` admits the caller.
+        The ``code`` is an RFC-6238 TOTP code verified against the operator's
+        enrolled MFA secret (S8).
+        """
+        return await self._sessions.issue_operator_session(phone, code)
+
+    def set_partner_resolver(self, resolver: Callable[[int], Awaitable[int | None]]) -> None:
+        """Wire the partner-profile identity seam for partner session issuance (T05, #298).
+
+        Called by the composition root after both ``IamFacade`` and
+        ``PartnerFacade`` have been constructed.
+        """
+        self._sessions.set_partner_resolver(resolver)
+
+    async def issue_partner_session(self, phone: str) -> SessionResult:
+        """Mint a partner-scoped access JWT for a registered partner (T05, #298).
+
+        Delegated to ``SessionFacade``; the session's ``scope`` resolves to
+        ``partner`` so the gateway's ``require_partner`` admits the caller for
+        self-service (submit credentials, read own status, appeal). Unlike
+        ``issue_session`` this does NOT require identity ``Active`` or a role
+        grant - a fresh registrant is ``[Unverified]`` with no grant (ADR-0010);
+        the gate is instead that a partner profile exists for the phone, keeping
+        patients from minting a ``partner``-scoped JWT.
+        """
+        return await self._sessions.issue_partner_session(phone)
 
     async def validate_token(self, token: str) -> ValidatedAccessToken:
         """Resolve a valid access JWT to its scope (delegated to ``SessionFacade``)."""
@@ -152,6 +259,17 @@ class IamFacade:
         """
         async with self._engine.begin() as connection:
             return await _identity_phone(connection, identity_id)
+
+    async def partner_role_status(self, identity_id: int) -> str | None:
+        """The lifecycle status of the ``partner`` role grant for ``identity_id``.
+
+        T03 (#248) observability seam: ``None`` when the identity holds no
+        ``partner`` grant, otherwise the grant status (``Active`` or
+        ``Suspended``). Lets the event-chain tests and any consumer-facing
+        surface read the role outcome through the facade, never the internals.
+        """
+        async with self._engine.begin() as connection:
+            return await _partner_role_status(connection, identity_id)
 
     # -- Audit --------------------------------------------------------------
 

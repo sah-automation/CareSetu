@@ -173,3 +173,28 @@ async def test_facade_query_audit_delegates_through_its_engine() -> None:
 
     assert page.total_count == 0
     assert page.events == []
+
+
+async def test_facade_query_partner_audit_filters_by_deterministic_target_id() -> None:
+    from modules.audit.domain.consumer import _partner_uuid
+
+    partner_id = 42
+    expected_target = _partner_uuid(partner_id)
+
+    connection = AsyncMock()
+    connection.scalar = AsyncMock(return_value=1)
+    connection.execute = AsyncMock(return_value=_FakeResult([_ROW]))
+    engine = MagicMock()
+    engine.begin.return_value.__aenter__ = AsyncMock(return_value=connection)
+    engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    facade = AuditFacade(engine)
+    page = await facade.query_partner_audit(partner_id)
+
+    assert page.total_count == 1
+    assert len(page.events) == 1
+    (select_stmt,) = connection.execute.await_args.args
+    sql = str(select_stmt.compile(compile_kwargs={"literal_binds": True}))
+    compact = expected_target.replace("-", "").lower()
+    assert f"'{compact}'" in sql.lower()
+    assert "audit_events.target_id" in sql
