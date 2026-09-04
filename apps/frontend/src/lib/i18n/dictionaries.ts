@@ -114,6 +114,7 @@ const en = {
       accountLocked:
         "This account is temporarily locked after repeated failures. Try again in about 15 minutes or reset your password.",
       genericError: "Something went wrong on our side. Please retry.",
+      invalidOperatorCode: "Invalid authentication code. Please try again.",
     },
     pending: {
       badge: "Under Verification",
@@ -268,8 +269,8 @@ const en = {
         emailInvalid: "Enter a valid email address.",
         passwordWeak:
           "Use at least 12 characters including a number and a symbol.",
-        mobileInvalid:
-          "Enter a valid 10-digit Indian mobile number, or leave this blank.",
+        mobileRequired: "Enter your mobile number.",
+        mobileInvalid: "Enter a valid 10-digit Indian mobile number.",
         degreeNameRequired: "Enter your name as per degree.",
         councilRequired: "Select your state medical council.",
         cityRequired: "Enter your city.",
@@ -289,7 +290,6 @@ const en = {
         "Submission is not connected yet: applications arrive in Phase 5. Nothing was sent or saved just now.",
       submitting: "Submitting...",
       traceWithId: (traceId: string) => `Trace: ${traceId}`,
-      errorsSubmitPhoneRequired: "Phone number is required",
       errorsSubmitLocationRequired:
         "Unable to determine your location. Please allow location access and try again.",
       errorsSubmitUnexpected: "An unexpected error occurred. Please try again.",
@@ -773,6 +773,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
         accountLocked:
           "बार-बार विफल प्रयासों के बाद यह खाता अस्थायी रूप से लॉक है। लगभग 15 मिनट बाद फिर कोशिश करें या पासवर्ड रीसेट करें।",
         genericError: "हमारी तरफ़ से कुछ गड़बड़ हुई। कृपया फिर से कोशिश करें।",
+        invalidOperatorCode: "अमान्य प्रमाणीकरण कोड। कृपया फिर से कोशिश करें।",
       },
       pending: {
         badge: "जाँच प्रक्रिया में",
@@ -923,8 +924,8 @@ export const STRINGS: Record<Lang, Dictionary> = {
           emailInvalid: "एक सही ईमेल पता दर्ज करें।",
           passwordWeak:
             "कम से कम 12 अक्षर, जिसमें एक अंक और एक प्रतीक हो, इस्तेमाल करें।",
-          mobileInvalid:
-            "सही 10 अंकों का भारतीय मोबाइल नंबर दर्ज करें, या खाली छोड़ दें।",
+          mobileRequired: "अपना मोबाइल नंबर दर्ज करें।",
+          mobileInvalid: "सही 10 अंकों का भारतीय मोबाइल नंबर दर्ज करें।",
           degreeNameRequired: "डिग्री के अनुसार नाम दर्ज करें।",
           councilRequired: "अपनी राज्य मेडिकल काउंसिल चुनें।",
           cityRequired: "अपना शहर दर्ज करें।",
@@ -944,7 +945,6 @@ export const STRINGS: Record<Lang, Dictionary> = {
           "जमा करना अभी जुड़ा नहीं है: आवेदन Phase 5 में आएँगे। अभी कुछ भेजा या सहेजा नहीं गया।",
         submitting: "जमा हो रहा है...",
         traceWithId: (traceId) => `ट्रेस: ${traceId}`,
-        errorsSubmitPhoneRequired: "फ़ोन नंबर आवश्यक है",
         errorsSubmitLocationRequired:
           "आपका स्थान निर्धारित नहीं हो सका। कृपया स्थान की अनुमति दें और फिर से प्रयास करें।",
         errorsSubmitUnexpected:

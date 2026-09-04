@@ -19,10 +19,12 @@ import { STRINGS } from "@/lib/i18n/dictionaries";
 
 import { StaffLoginForm } from "./StaffLoginForm";
 
-const mockPush = vi.fn();
-vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: mockPush }),
-}));
+const mockLocationReplace = vi.fn();
+Object.defineProperty(window, "location", {
+  value: { ...window.location, replace: mockLocationReplace },
+  writable: true,
+  configurable: true,
+});
 
 const mockOperatorLogin = vi.fn();
 vi.mock("@/lib/operator/api", () => ({
@@ -47,6 +49,7 @@ vi.mock("@/lib/auth/staff-routing", () => ({
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  mockLocationReplace.mockClear();
 });
 
 const t = STRINGS.en.staffAuth.login;
@@ -211,7 +214,7 @@ describe("Operator login flow", () => {
         surface: "staff",
         roles: ["operator"],
       });
-      expect(mockPush).toHaveBeenCalledWith("/operator/home");
+      expect(mockLocationReplace).toHaveBeenCalledWith("/operator/home");
     });
   });
 
@@ -312,7 +315,7 @@ describe("Operator login flow", () => {
         phone: "9876543210",
         code: "654321",
       });
-      expect(mockPush).toHaveBeenCalledWith("/operator/home");
+      expect(mockLocationReplace).toHaveBeenCalledWith("/operator/home");
     });
   });
 
@@ -368,6 +371,67 @@ describe("Operator login flow", () => {
       expect(error).not.toHaveTextContent("INVALID_CREDENTIALS");
       // The envelope's trace id is still surfaced alongside the copy.
       expect(error).toHaveTextContent("trace-456");
+    });
+  });
+
+  it("shows INVALID_OPERATOR_CODE error on first submission without transitioning to MFA", async () => {
+    mockOperatorLogin.mockRejectedValue(
+      new ApiError({
+        code: "INVALID_OPERATOR_CODE",
+        message: "invalid code",
+        trace_id: "trace-totp",
+        details: {},
+      }),
+    );
+
+    render(<StaffLoginForm />);
+    fillPhoneAndTotp();
+    fireEvent.click(screen.getByTestId("staff-submit"));
+
+    await waitFor(() => {
+      const error = screen.getByTestId("staff-login-error");
+      expect(error).toHaveTextContent(t.invalidOperatorCode);
+    });
+    // Should stay on phone+code step, not transition to MFA.
+    expect(screen.getByTestId("staff-phone")).toBeInTheDocument();
+    expect(screen.queryByTestId("mfa-input")).not.toBeInTheDocument();
+  });
+
+  it("shows INVALID_OPERATOR_CODE error on MFA re-entry", async () => {
+    mockOperatorLogin
+      .mockRejectedValueOnce(
+        new ApiError({
+          code: "SESSION_MFA_REQUIRED",
+          message: "mfa required",
+          trace_id: "t",
+          details: {},
+        }),
+      )
+      .mockRejectedValueOnce(
+        new ApiError({
+          code: "INVALID_OPERATOR_CODE",
+          message: "invalid code",
+          trace_id: "trace-mfa",
+          details: {},
+        }),
+      );
+
+    render(<StaffLoginForm />);
+    fillPhoneAndTotp();
+    fireEvent.click(screen.getByTestId("staff-submit"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("mfa-input")).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByTestId("mfa-input"), {
+      target: { value: "000000" },
+    });
+    fireEvent.click(screen.getByTestId("staff-submit"));
+
+    await waitFor(() => {
+      const error = screen.getByTestId("staff-login-error");
+      expect(error).toHaveTextContent(t.invalidOperatorCode);
     });
   });
 

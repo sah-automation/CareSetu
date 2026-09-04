@@ -18,7 +18,6 @@ import { saveSession } from "@/lib/auth/session";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { operatorLogin } from "@/lib/operator/api";
-import { useRouter } from "next/navigation";
 
 import {
   staffOperatorErrorCopy,
@@ -57,7 +56,6 @@ async function completeStaffLogin(
 export function StaffLoginForm() {
   const { lang } = useLang();
   const t = STRINGS[lang].staffAuth.login;
-  const router = useRouter();
 
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
@@ -102,10 +100,12 @@ export function StaffLoginForm() {
 
   // Landing after a successful login: persist the session and route through
   // postLoginTarget. Duplicated nowhere because both the password step and the
-  // TOTP step funnel through completeStaffLogin, then this single router.push.
+  // TOTP step funnel through completeStaffLogin, then this full-page redirect.
   async function landAfterLogin(session: SessionResult) {
     const me = await completeStaffLogin(session);
-    router.push(postLoginTarget({ surface: "staff", roles: me.roles }));
+    window.location.replace(
+      postLoginTarget({ surface: "staff", roles: me.roles }),
+    );
   }
 
   // Map any thrown value onto calm dictionary copy, reusing the operator

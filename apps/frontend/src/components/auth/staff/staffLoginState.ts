@@ -115,6 +115,8 @@ export function staffOperatorErrorCopy(
         return t.invalidCredentials;
       case "ACCOUNT_LOCKED":
         return t.accountLocked;
+      case "INVALID_OPERATOR_CODE":
+        return t.invalidOperatorCode;
       default:
         return t.genericError;
     }
