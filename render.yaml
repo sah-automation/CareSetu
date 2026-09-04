@@ -58,3 +58,10 @@ services:
       # creation (DEPLOY-7).
       - key: CORS_ALLOWED_ORIGINS
         sync: false
+      # Operator MFA TOTP secret encryption (PHASE-5 S8, #261): the AES key the
+      # seed's bootstrap-operator MFA enrollment writes into Supabase. MUST equal
+      # the GitHub Actions secret IAM_MFA_SECRET_KEY used by the migrate-and-seed
+      # job so the runtime can decrypt that TOTP secret. Set in the Render
+      # Dashboard during blueprint creation (DEPLOY-7), never synced from the repo.
+      - key: IAM_MFA_SECRET_KEY
+        sync: false
