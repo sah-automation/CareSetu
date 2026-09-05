@@ -38,3 +38,27 @@ ALLOWED_CREDENTIAL_TYPES_BY_PARTNER: dict[PartnerType, frozenset[CredentialType]
     "lab": frozenset({CredentialType.LAB_LICENSE, CredentialType.ACCREDITATION}),
     "chemist": frozenset({CredentialType.DRUG_LICENSE, CredentialType.PHARMACIST_REGISTRATION}),
 }
+
+
+#: The closed set of reasons a credential stops being valid (PHASE-6 T01, #307;
+#: ADR-0011). Mirrors ``ck_partner_credentials_invalidation_reason`` so the
+#: domain never names a close-out the schema cannot hold. ``expired`` is the
+#: date-passed-without-renewal trigger (daily sweep); ``revoked`` is the
+#: taken-away-by-authority/operator trigger (immediate, ``invalidate_credential``);
+#: ``reverification_failed`` is the existing Phase 5 active-partner failure path
+#: (re-verification reject / grace lapse).
+class CredentialInvalidatedReason(StrEnum):
+    EXPIRED = "expired"
+    REVOKED = "revoked"
+    REVERIFICATION_FAILED = "reverification_failed"
+
+
+#: The closed pick-list of the kind of care an [Active] doctor offers
+#: (FEAT-004, glossary). Doctors only - labs and chemists carry no specialty,
+#: the field is never free-form. Mirrors the ``directory_index.specialty``
+#: CHECK constraint and pre-seeds the homepage/directory search filter chips.
+class Specialty(StrEnum):
+    GENERAL_PHYSICIAN = "General Physician"
+    PEDIATRICIAN = "Pediatrician"
+    GYNECOLOGIST = "Gynecologist"
+    DENTIST = "Dentist"

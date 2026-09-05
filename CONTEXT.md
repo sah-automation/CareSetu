@@ -171,6 +171,36 @@ _Avoid_: access log (that is the record access history), audit log (that is the 
 The health-schema ledger of every read attempt on a record - owner reads, partner reads, denied attempts; feeds the patient's trust view (`FEAT-003`, Phase 4).
 _Avoid_: audit trail
 
+### Provider directory & credential validity (Phase 6)
+
+**provider**:
+Not a domain term. The patient-facing display word for an `[Active]` partner - legal in UI copy and the public profile route, never in schema, events, model, or lifecycle language. A provider stops existing the moment its partner leaves `[Active]`.
+_Avoid_: using "provider" where the entity/status/lifecycle is meant - say partner
+
+**directory entry**:
+The single read-side row per `[Active]` partner that makes them discoverable in search: one entry per partner identity, one geo point (the practice location), the partner type, specialty (doctors only), and the verified indicator. One partner = one entry; multiple practice locations are a future extension, never a Phase 6 shape.
+_Avoid_: provider record, listing
+
+**specialty**:
+The label from a closed pick-list (doctors only) of the kind of care an `[Active]` doctor offers - e.g. `General Physician | Pediatrician | Gynecologist | Dentist`. Labs and chemists carry no specialty; the field is never free-form. Homepage chips pre-seed the search filter over it.
+_Avoid_: consultation type (that PRD phrase was dropped - it is not a field), expertise
+
+**verified**:
+The derived indicator on a directory entry: true iff the partner is `[Active]` AND every required credential is unexpired and unrevoked. Never stored - computed from activation state + credential dates, always agreeing with search visibility: if the tick is gone, the card is gone.
+_Avoid_: verification badge (when meaning a stored flag), approved
+
+**credential expiry**:
+One of the two `credential.invalidated` triggers: the credential's recorded date passes without renewal. Detection is lazy-on-read (an expired partner never appears, even mid-day) plus a daily sweep that records the official close-out; deliberately no background scanner.
+_Avoid_: license expiry in model language (fine in UI copy), auto-deactivation (that implies a scanner)
+
+**credential revocation**:
+The other `credential.invalidated` trigger: the credential is taken away by authority or operator decision. Same directory effect as expiry (hidden instantly, tick removed) but the reason is recorded on the event, and the partner keeps the renewal path - no dead-end state is invented.
+_Avoid_: suspension
+
+**wider-area fallback**:
+The `FEAT-004` no-results shape: when no directory entry matches the patient's filters within the Daltonganj peri-urban scope, relax only the location constraint (keep type and specialty filters), show nearest-first, and label the results "outside your area". The patient is never silently served results that dropped a filter.
+_Avoid_: fuzzy match, relaxed filters
+
 ### Event bus & module seams
 
 **outbox**:

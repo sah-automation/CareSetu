@@ -33,7 +33,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from bus.outbox_ddl import outbox_table
 
@@ -122,6 +122,18 @@ partner_credentials = Table(
     Column("round", BigInteger, nullable=False, server_default=text("1")),
     Column("verified", Boolean, nullable=False, server_default=text("false")),
     Column("expires_at", DateTime(timezone=True), nullable=True),
+    # Close-out bookkeeping for a credential that is no longer valid (PHASE-6
+    # T01, #307; ADR-0011). ``expires_at`` is the recorded renewal date; the
+    # three columns below record WHY/HOW a credential stopped being valid:
+    # ``revoked_at`` is the instant the close-out was recorded (expiry sweep or
+    # operator revocation), ``revoked_by`` the acting authority/operator
+    # (a UUID principal), and ``invalidation_reason`` the closed reason
+    # (expired | revoked | reverification_failed). NULL means the credential is
+    # still live (nothing has closed it out). These serve the lazy read-hide +
+    # daily-sweep derivation - never a background scanner.
+    Column("revoked_at", DateTime(timezone=True), nullable=True),
+    Column("revoked_by", UUID, nullable=True),
+    Column("invalidation_reason", String(40), nullable=True),
     # References into encrypted object storage under the ``partner/`` prefix
     # (security-phii-standards). Never the document bytes themselves.
     Column("artifact_refs", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
@@ -141,6 +153,15 @@ partner_credentials = Table(
         "'drug_license', 'pharmacist_registration'"
         ")",
         name="ck_partner_credentials_credential_type",
+    ),
+    # Lockstep with the CredentialInvalidatedReason vocabulary (domain
+    # credentials.py): a close-out reason is one of expired | revoked |
+    # reverification_failed. NULL means the credential is still live (no
+    # close-out recorded) - never a reason value.
+    CheckConstraint(
+        "invalidation_reason IS NULL OR invalidation_reason IN "
+        "('expired', 'revoked', 'reverification_failed')",
+        name="ck_partner_credentials_invalidation_reason",
     ),
     Index("ix_partner_credentials_profile", "profile_id"),
     # Partial so the 30-day purge scan touches only scheduled rows.
@@ -188,6 +209,63 @@ partner_verifications = Table(
     ),
     Index("ix_partner_verifications_queue", "status", "created_at"),
     Index("ix_partner_verifications_profile", "profile_id", "round"),
+)
+
+
+partner_directory_index = Table(
+    "partner_directory_index",
+    MODULE_METADATA,
+    # One row per [Active] partner (ADR-0012): the partner id is the PK and
+    # FK back to its profile. No cross-schema FK - the directory entry is a
+    # read-side cache of the partner's own profile, so it may carry the
+    # directly-forked profile fields without an iam read (ADR-0003 isolation).
+    Column(
+        "partner_id",
+        BigInteger,
+        ForeignKey("partner_profiles.id", name="fk_partner_directory_index_partner"),
+        primary_key=True,
+    ),
+    # Forked from partner_profiles at index time (practice location is already
+    # NOT NULL there, PHASE-5 T01). Mirroring them here keeps the directory a
+    # self-contained read-side cache for distance sort (FEAT-004) without a
+    # join back to the profile on every search (MOD-002 NFR: search p95 < 250 ms
+    # cached).
+    Column("practice_latitude", Numeric(9, 6), nullable=False),
+    Column("practice_longitude", Numeric(9, 6), nullable=False),
+    Column("partner_type", String(20), nullable=False),
+    # Closed pick-list, doctors only (ADR-0012, glossary). Labs and chemists
+    # carry NULL - the field is never free-form. Kept in lockstep with the
+    # Specialty vocabulary (domain credentials.py).
+    Column("specialty", String(40), nullable=True),
+    # Read-side active flag derived from partner status (de-index on activation
+    # loss / credential invalidation). True when the partner is [Active].
+    Column("is_active", Boolean, nullable=False, server_default=text("true")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    CheckConstraint(
+        "partner_type IN ('doctor', 'lab', 'chemist')",
+        name="ck_partner_directory_index_partner_type",
+    ),
+    # Specialty only from the closed list, and only for doctors (ADR-0012,
+    # glossary). Labs and chemists must always carry NULL - the field is never
+    # free-form. Kept in lockstep with the Specialty vocabulary (domain
+    # credentials.py).
+    CheckConstraint(
+        "specialty IS NULL OR (partner_type = 'doctor' AND specialty IN "
+        "('General Physician', 'Pediatrician', 'Gynecologist', 'Dentist'))",
+        name="ck_partner_directory_index_specialty",
+    ),
+    CheckConstraint(
+        "practice_longitude BETWEEN -180 AND 180",
+        name="ck_partner_directory_index_longitude",
+    ),
+    CheckConstraint(
+        "practice_latitude BETWEEN -90 AND 90",
+        name="ck_partner_directory_index_latitude",
+    ),
+    # Search filters by partner type, then geo distance; avoid paying an extra
+    # seq scan when filtering by a type. Active-only reads are the common case.
+    Index("ix_partner_directory_index_type_active", "partner_type", "is_active"),
 )
 
 
