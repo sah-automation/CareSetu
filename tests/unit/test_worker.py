@@ -172,6 +172,7 @@ def test_build_scheduler_registers_the_sweep_on_the_configured_cron() -> None:
     assert job.max_instances == 1
     assert job.coalesce
     assert isinstance(job.trigger, CronTrigger)
+    assert job.func is worker_main._run_credential_sweep
 
     # "30 1 * * *" -> 01:30 UTC daily.
     next_fire = job.trigger.get_next_fire_time(None, datetime(2026, 9, 5, 12, 0, tzinfo=UTC))
@@ -188,9 +189,52 @@ def test_build_scheduler_honours_a_configured_cadence() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sweep_callback_is_an_awaitable_stub_without_side_effects() -> None:
-    """#315: the sweep seam is a no-op callable leaving #316 to fill the logic."""
-    assert await worker_main._run_credential_sweep() is None
+async def test_sweep_callback_runs_the_partner_expiry_close_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#316: the daily sweep callback runs the T04b close-out through the facade."""
+
+    class _FakeFacade:
+        def __init__(self) -> None:
+            self.swept = False
+
+        async def close_out_expired_credentials(self) -> list[int]:
+            self.swept = True
+            return [1, 2]
+
+    engine = _FakeEngine()
+    facade = _FakeFacade()
+    monkeypatch.setattr(worker_main, "create_async_engine", lambda url: engine)
+    monkeypatch.setattr(worker_main, "_build_sweep_facade", lambda settings, eng: facade)
+
+    await worker_main._run_credential_sweep()
+
+    assert facade.swept
+    assert engine.disposed
+
+
+@pytest.mark.asyncio
+async def test_sweep_callback_disposes_the_engine_when_the_pass_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#316: a failing close-out still disposes the sweep's dedicated engine."""
+
+    class _FailingFacade:
+        async def close_out_expired_credentials(self) -> list[int]:
+            raise RuntimeError("db unreachable")
+
+    engine = _FakeEngine()
+    monkeypatch.setattr(worker_main, "create_async_engine", lambda url: engine)
+    monkeypatch.setattr(
+        worker_main,
+        "_build_sweep_facade",
+        lambda settings, eng: _FailingFacade(),
+    )
+
+    with pytest.raises(RuntimeError, match="db unreachable"):
+        await worker_main._run_credential_sweep()
+
+    assert engine.disposed
 
 
 class _FakeScheduler:

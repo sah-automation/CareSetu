@@ -36,6 +36,15 @@ Methods:
   (``is_active = False``), and emits ``credential.invalidated`` - one
   transaction, mirroring ``purge_expired_credentials`` (ADR-0011). No new
   lifecycle state: the partner recovers through a fresh verification round.
+- ``close_out_expired_credentials`` (PHASE-6 T04b, #316) is the daily expiry
+  close-out pass (ADR-0011's second, non-scanner mechanism): it finds an
+  ``[Active]`` partner's verified credentials whose recorded ``expires_at`` has
+  passed but have no close-out yet, stamps ``invalidation_reason = 'expired'``
+  (the idempotency marker a replay skips), deindexes the directory entry, and
+  emits ``credential.invalidated`` (reason ``expired``) once per credential -
+  one transaction. Lazy read-hide (``_has_invalid_credential``) is already
+  correct without it; this pass only performs the official event/audit
+  close-out.
 
 Each mutating method writes its envelope into ``partner.partner_outbox`` in the
 SAME transaction as the state change (ADR-0002 §1). The operator review /
@@ -1620,6 +1629,105 @@ class PartnerFacade:
                 status=profile.status,
                 round=profile.round,
             )
+
+    async def close_out_expired_credentials(self) -> list[int]:
+        """The daily credential-expiry close-out pass (ADR-0011, PHASE-6 T04b, #316).
+
+        The daily sweep is ADR-0011's second, non-scanner mechanism: lazy read-
+        hide already suppresses an expired partner on every directory read (via
+        ``_has_invalid_credential`` against the recorded ``expires_at``), so this
+        pass performs ONLY the official close-out - the recorded event/audit that
+        the event-triggered chain (role denial, partner notification, audit
+        ledger) fires exactly once on. It is invoked by the worker's daily
+        APScheduler job (``worker.main`` ``_run_credential_sweep``), never by a
+        read.
+
+        It finds every ``partner_credentials`` row whose recorded ``expires_at``
+        has passed since the last pass and records the close-out - ``revoked_at``
+        (the close-out instant) + ``invalidation_reason = 'expired'`` (the
+        marker; ``revoked_by`` stays NULL - the sweep is a system actor), sets the
+        ``partner_directory_index`` entry ``is_active = False`` once per affected
+        partner, and writes exactly one ``credential.invalidated`` (reason
+        ``expired``) per credential - ALL in one DB transaction (ADR-0002 §1), so
+        a crash cannot leave an event without its close-out or vice versa.
+
+        The close-out marker is the idempotency key: candidates are only rows with
+        ``invalidation_reason IS NULL``, so replaying the pass (a re-run of the
+        daily job, at-least-once) selects nothing and emits nothing. A row closed
+        by the immediate revocation reach (``invalidate_credential``) or the
+        permanent-rejection cleanup path is never revisited - the sweep does not
+        disturb either seam.
+
+        Only an ``[Active]`` partner's *verified* credential is a candidate: an
+        unverified submission is an undecided operator-gate round (its expiry is
+        that gate's decision, not the sweep's) and a ``[Rejected]`` partner was
+        already closed out by ``operator_decision`` / will be purged by
+        ``purge_expired_credentials`` - sweeping them would double-fire the
+        event.
+
+        Returns the ids of the credentials closed out.
+        """
+        now = self._clock()
+        async with self._engine.begin() as connection:
+            rows = (
+                await connection.execute(
+                    select(
+                        partner_credentials.c.id,
+                        partner_credentials.c.profile_id,
+                        partner_profiles.c.identity_id,
+                    )
+                    .join(
+                        partner_profiles,
+                        partner_profiles.c.id == partner_credentials.c.profile_id,
+                    )
+                    .where(
+                        partner_credentials.c.expires_at.is_not(None),
+                        partner_credentials.c.expires_at <= now,
+                        partner_credentials.c.invalidation_reason.is_(None),
+                        partner_credentials.c.verified.is_(True),
+                        partner_profiles.c.status == PartnerStatus.ACTIVE.value,
+                    )
+                    .order_by(partner_credentials.c.id)
+                )
+            ).all()
+            if not rows:
+                return []
+            closed_status = CredentialInvalidatedReason.EXPIRED.value
+            await connection.execute(
+                partner_credentials.update()
+                .where(partner_credentials.c.id.in_([int(row.id) for row in rows]))
+                .values(
+                    revoked_at=now,
+                    invalidation_reason=closed_status,
+                    updated_at=func.now(),
+                )
+            )
+            affected_partners = {int(row.profile_id) for row in rows}
+            await connection.execute(
+                partner_directory_index.update()
+                .where(partner_directory_index.c.partner_id.in_(affected_partners))
+                .values(is_active=False, updated_at=func.now())
+            )
+            closed: list[int] = []
+            for row in rows:
+                credential_id = int(row.id)
+                await write_outbox(
+                    connection,
+                    PARTNER_SCHEMA,
+                    PARTNER_OUTBOX_TABLE,
+                    credential_invalidated_envelope(
+                        int(row.profile_id),
+                        identity_id=int(row.identity_id),
+                        credential_id=credential_id,
+                        reason=closed_status,
+                    ),
+                )
+                closed.append(credential_id)
+            # PHASE-6 T02b (#314): the expiry close-out deindexes every affected
+            # partner, making each cached search result potentially stale. Flush
+            # the namespace once per pass (best-effort, silent on failure).
+            await invalidate_directory_cache()
+            return closed
 
     async def list_verification_queue(
         self,

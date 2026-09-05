@@ -13,24 +13,26 @@ flight finishes - inflight claims already under delivery drain - before the loop
 returns and the process exits. The dispatcher is pure transport (ADR-0002 §2):
 the worker authors no events and its SQL touches outbox plumbing only.
 
-Periodic jobs (PHASE-6 T04a, #315): the worker also hosts an APScheduler
-``AsyncIOScheduler`` on the same event loop for the scheduled jobs ADR-0011's
-daily-sweep mechanism runs on. Today that is exactly one job - the daily
-credential-expiry sweep, registered against the configurable cron in
-:func:`build_scheduler`. The sweep callback is a deliberately empty stub hook
-(#316 fills it with the T04b close-out pass); only the scheduler seam ships in
-this ticket. Job work stays in-process - no new dependency beyond APScheduler.
+Periodic jobs (PHASE-6 T04a/T04b, #315/#316): the worker also hosts an
+APScheduler ``AsyncIOScheduler`` on the same event loop for the scheduled jobs
+ADR-0011's daily-sweep mechanism runs on. Today that is exactly one job - the
+daily credential-expiry sweep, registered against the configurable cron in
+:func:`build_scheduler`. The sweep callback composes the minimal partner stack
+and runs the ``close_out_expired_credentials`` close-out pass (PHASE-6 T04b,
+#316); only the scheduler seam shipped in T04a. Job work stays in-process - no
+new dependency beyond APScheduler.
 """
 
 import asyncio
 import contextlib
+import logging
 import signal
 from collections.abc import Awaitable, Callable
 
 # apscheduler ships no py.typed marker; strict mypy skips it (import-untyped).
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
 from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from app.config import Settings, get_settings
 from bus.bootstrap import MODULE_SCHEMAS
@@ -49,10 +51,15 @@ from modules.diagnostics.adapters import register_handlers as diagnostics_regist
 from modules.fulfillment.adapters import register_handlers as fulfillment_register_handlers
 from modules.health.adapters import register_handlers as health_register_handlers
 from modules.iam.adapters import register_handlers as iam_register_handlers
+from modules.iam.adapters.sms import build_sms_adapter
+from modules.iam.facade import IamFacade
 from modules.intake.adapters import register_handlers as intake_register_handlers
 from modules.notify.adapters import register_handlers as notify_register_handlers
 from modules.partner.adapters import register_handlers as partner_register_handlers
+from modules.partner.facade import PartnerFacade
 from modules.settlement.adapters import register_handlers as settlement_register_handlers
+
+logger = logging.getLogger(__name__)
 
 # Every module's register_handlers, in MODULE_SCHEMAS order. This is the one
 # place infra imports module adapters (coding-standards §2, ADR-0003); a new
@@ -106,17 +113,53 @@ def build_registry() -> HandlerRegistry:
     return registry
 
 
-async def _run_credential_sweep() -> None:
-    """The daily credential-expiry sweep hook - deliberately a stub (#315 → #316).
+def _build_sweep_facade(settings: Settings, engine: AsyncEngine) -> PartnerFacade:
+    """Compose the minimal partner stack the daily expiry sweep needs.
 
-    ADR-0011's daily close-out job is scheduled by :func:`build_scheduler`; the
-    close-out pass itself (find credentials that expired since the last pass,
-    record ``credential.invalidated`` reason ``expired``, deindex, audit) is
-    explicitly NOT this ticket - PHASE-6 T04b (#316) fills this function. The
-    empty coroutine ships here so the scheduler seam is wired and testable end
-    to end before any business logic lands.
+    The sweep close-out only touches ``partner_credentials`` /
+    ``partner_directory_index`` and writes to the partner outbox, so the facade
+    is built from the shared engine + iam facade (mandatory constructor
+    dependency) - no artifact store, audit or notify facade is required on this
+    path, and the SMS adapter is never called (a sweep emits no OTP). Composed
+    here rather than in the API ``create_app`` so the two processes stay
+    independent composition roots (coding-standards §2).
     """
-    return None
+    iam_facade = IamFacade(
+        engine=engine,
+        sms_adapter=build_sms_adapter(settings),
+        mfa_secret_key=settings.iam_mfa_secret_key,
+    )
+    return PartnerFacade(engine=engine, iam_facade=iam_facade)
+
+
+async def _run_credential_sweep() -> None:
+    """Run the daily credential-expiry close-out pass (PHASE-6 T04b, #316).
+
+    ADR-0011's daily close-out job is scheduled by :func:`build_scheduler` on
+    ``settings.partner_credential_sweep_cron``; this callback is what the job
+    fires (T04a shipped the seam as a stub). It resolves the env-driven
+    ``Settings`` once, composes the sweep facade on a dedicated engine, runs the
+    ``close_out_expired_credentials`` pass, and disposes the engine - a
+    self-contained per-fire composition so daily cadence stays cheap and the
+    dispatcher's own engine is never shared into the timer. The pass result is
+    logged (info for the lifecycle close-out, exception for operational
+    failures - error-handling-observability §2; no PHI, ids only); failures
+    then bubble into APScheduler's job error path, and the lazy read-hide keeps
+    directory correctness regardless (ADR-0011).
+    """
+    settings = get_settings()
+    engine = create_async_engine(settings.database_url)
+    try:
+        facade = _build_sweep_facade(settings, engine)
+        closed = await facade.close_out_expired_credentials()
+    except Exception:
+        logger.exception(
+            "credential-expiry sweep pass failed; lazy read-hide keeps directory correctness"
+        )
+        raise
+    finally:
+        await engine.dispose()
+    logger.info("credential-expiry sweep pass closed out %d credential(s)", len(closed))
 
 
 def build_scheduler(
@@ -130,9 +173,10 @@ def build_scheduler(
     exactly one periodic job: the daily credential-expiry sweep, scheduled on
     ``settings.partner_credential_sweep_cron`` (defaults to the daily 01:30
     cadence of the backup cron, ``deploy/cron``). The callback is the injectable
-    ``sweep_callback`` so the scheduler wiring is unit-testable and #316 can
-    swap the real sweep in at the composition root. ``coalesce`` + a fixed job id
-    keep late/missed firings from stacking duplicate sweeps across a sleep.
+    ``sweep_callback`` (defaulting to :func:`_run_credential_sweep`, the T04b
+    close-out pass) so the scheduler wiring stays unit-testable.
+    ``coalesce`` + a fixed job id keep late/missed firings from stacking
+    duplicate sweeps across a sleep.
     """
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
