@@ -38,6 +38,7 @@ from modules.partner.domain.exceptions import (
     InvalidQueueStatusError,
     PartnerError,
     PartnerNotRejectedError,
+    ProviderProfileNotFoundError,
     RejectionReasonRequiredError,
     ReSubmissionThrottledError,
     ServiceAreaNotFoundError,
@@ -52,6 +53,7 @@ from modules.partner.facade import (
     PartnerVerificationDetail,
     PartnerVerificationStatusView,
     PartnerView,
+    ProviderProfileView,
     RegisterPartnerResult,
     RejectionReasonView,
 )
@@ -101,6 +103,31 @@ async def public_directory_search(
         latitude=lat,
         longitude=lng,
     )
+
+
+@directory_router.get(
+    "/providers/{partner_id}",
+    response_model=ProviderProfileView,
+    status_code=status.HTTP_200_OK,
+    summary="Public provider profile (open, no login required)",
+)
+async def public_provider_profile(
+    request: Request,
+    partner_id: int,
+) -> ProviderProfileView:
+    """Public provider profile (FEAT-005, PHASE-6 T03 #309).
+
+    Thin unauthenticated adapter over the ``MOD-002`` profile facade:
+    patients view a provider's verified credentials (type + status labels,
+    expiry date), service area and a truthful ``verified`` indicator.
+    ``partner_id`` is the path parameter. The facade owns the visibility gate:
+    not ``[Active]``, no index row, no credentials or any invalid credential
+    raises :class:`ProviderProfileNotFoundError` mapped to the 404 envelope.
+    The route carries no business logic - visibility derivation, credential
+    display, and the service-area default live in the facade.
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    return await facade.get_provider_profile(partner_id)
 
 
 class RegisterPartnerRequest(BaseModel):
@@ -586,6 +613,16 @@ def register_error_handlers(app: FastAPI) -> None:
             request=request,
         )
 
+    async def _provider_profile_not_found(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        return error_response(
+            status.HTTP_404_NOT_FOUND,
+            "PROVIDER_PROFILE_NOT_FOUND",
+            "no public provider profile exists for this id",
+            log_tag="partner_profile",
+            request=request,
+        )
+
     app.add_exception_handler(RejectionReasonRequiredError, _rejection_reason_required)
     app.add_exception_handler(InvalidQueueSortError, _invalid_queue_sort)
     app.add_exception_handler(InvalidQueueStatusError, _invalid_queue_status)
@@ -594,4 +631,5 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(AppealAlreadyUsedError, _appeal_already_used)
     app.add_exception_handler(ReSubmissionThrottledError, _re_submission_throttled)
     app.add_exception_handler(IllegalPartnerTransitionError, _illegal_transition)
+    app.add_exception_handler(ProviderProfileNotFoundError, _provider_profile_not_found)
     app.add_exception_handler(PartnerError, _partner_failed)

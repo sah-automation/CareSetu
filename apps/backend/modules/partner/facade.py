@@ -80,6 +80,7 @@ from modules.partner.domain.exceptions import (
     InvalidQueueStatusError,
     PartnerNotFoundError,
     PartnerNotRejectedError,
+    ProviderProfileNotFoundError,
     RejectionReasonRequiredError,
     ReSubmissionThrottledError,
     ServiceAreaNotFoundError,
@@ -405,6 +406,45 @@ class DirectorySearchView(BaseModel):
     fell_back: bool
 
 
+class ProviderCredential(BaseModel):
+    """One credential on the public provider profile (FEAT-005, PHASE-6 T03).
+
+    Verified-safe projection: only the closed ``credential_type``, the derived
+    ``status`` label and the recorded ``expires_at`` - never the artifact refs,
+    never the document bytes (they stay in encrypted object storage). Every
+    credential on a returned profile is labelled ``verified`` because the
+    profile gate matches search visibility (ADR-0011): an unverified, expired
+    or revoked credential makes the whole profile unreachable, so no invalid
+    label can ever surface here.
+    """
+
+    credential_type: str
+    status: str
+    expires_at: datetime | None
+
+
+class ProviderProfileView(BaseModel):
+    """The public provider profile (MOD-002, FEAT-005, PHASE-6 T03 #309).
+
+    A verified-safe projection of an ``[Active]`` partner that has a
+    ``directory_index`` entry and valid (verified, unexpired, unrevoked)
+    credentials: display name (``practice_name``), partner type, specialty
+    (doctors only), the partner's service area, the derived ``verified``
+    indicator and per-credential type + status labels. ``verified`` is always
+    True for a reachable profile because reachability uses the same derivation
+    as search visibility - it can never drift from the card tick (ADR-0011
+    "tick gone = card gone"). Never exposed: artifact refs, emails, phones, PHI.
+    """
+
+    partner_id: int
+    practice_name: str | None
+    partner_type: str
+    specialty: str | None
+    area: str | None
+    verified: bool
+    credentials: list[ProviderCredential]
+
+
 _QUEUE_SORTS: dict[str, Any] = {
     "registration_age": partner_profiles.c.created_at,
     "partner_type": partner_profiles.c.partner_type,
@@ -478,6 +518,26 @@ def _has_invalid_credential(column: Any) -> Any:
             ),
         )
         .exists()
+    )
+
+
+def _provider_visible(column: Any) -> Any:
+    """The single provider-visibility predicate (REQ-028 + ADR-0011).
+
+    ``True`` iff the partner is ``[Active]``, has a ``directory_index`` entry,
+    holds at least one submitted credential AND every credential is verified,
+    unexpired and unrevoked. Both ``search_directory`` (which card shows) and
+    ``get_provider_profile`` (which profile resolves, and whose ``verified``
+    indicator reads True) use this SAME predicate, so the indicator can never
+    claim a partner the search hides - one source of truth for "tick gone =
+    card gone". Always derived on read from the recorded dates, never a cached
+    ``is_active``-only trust (ADR-0011).
+    """
+    return and_(
+        partner_directory_index.c.is_active.is_(True),
+        partner_profiles.c.status == "Active",
+        _has_any_credential(column),
+        ~_has_invalid_credential(column),
     )
 
 
@@ -1617,12 +1677,7 @@ class PartnerFacade:
         distance_km = _haversine_km(latitude, longitude)
 
         def _conditions(peri_urban_only: bool) -> list[Any]:
-            conditions: list[Any] = [
-                partner_directory_index.c.is_active.is_(True),
-                partner_profiles.c.status == "Active",
-                _has_any_credential(partner_directory_index.c.partner_id),
-                ~_has_invalid_credential(partner_directory_index.c.partner_id),
-            ]
+            conditions: list[Any] = [_provider_visible(partner_directory_index.c.partner_id)]
             if partner_type is not None:
                 conditions.append(partner_directory_index.c.partner_type == partner_type)
             if specialty is not None:
@@ -1702,6 +1757,81 @@ class PartnerFacade:
                 ttl_seconds=self._directory_ttl_seconds,
             )
         return view
+
+    async def get_provider_profile(self, partner_id: int) -> ProviderProfileView:
+        """Public provider profile (MOD-002, FEAT-005, PHASE-6 T03 #309).
+
+        Returns the verified-safe profile of an ``[Active]`` partner that has a
+        ``directory_index`` entry and valid (verified, unexpired, unrevoked)
+        credentials. The four-condition visibility gate matches search exactly
+        (ADR-0011 "tick gone = card gone"): not ``[Active]``, no index row, no
+        credentials, or any invalid credential raises
+        :class:`ProviderProfileNotFoundError` (mapped to a 404) - the profile
+        is hidden exactly when search hides the card, so the indicator can
+        never drift.
+
+        Payload carries only verified-safe fields: display name
+        (``practice_name``), partner type, specialty (doctors only), service
+        area, the ``verified`` indicator (always True for a reachable profile)
+        and per-credential type + status label + expiry date. Never exposed:
+        artifact refs, emails, phones, PHI.
+        """
+        async with self._engine.begin() as connection:
+            row = (
+                await connection.execute(
+                    select(
+                        partner_directory_index.c.partner_id,
+                        partner_directory_index.c.partner_type,
+                        partner_directory_index.c.specialty,
+                        partner_profiles.c.practice_name,
+                        partner_service_areas.c.name.label("area_name"),
+                    )
+                    .join(
+                        partner_profiles,
+                        partner_profiles.c.id == partner_directory_index.c.partner_id,
+                    )
+                    .outerjoin(
+                        partner_service_areas,
+                        partner_service_areas.c.id == partner_profiles.c.service_area_id,
+                    )
+                    .where(
+                        partner_directory_index.c.partner_id == partner_id,
+                        _provider_visible(partner_directory_index.c.partner_id),
+                    )
+                )
+            ).first()
+            if row is None:
+                raise ProviderProfileNotFoundError(partner_id)
+
+            credential_rows = (
+                await connection.execute(
+                    select(
+                        partner_credentials.c.credential_type,
+                        partner_credentials.c.expires_at,
+                    )
+                    .where(
+                        partner_credentials.c.profile_id == partner_id,
+                    )
+                    .order_by(partner_credentials.c.credential_type)
+                )
+            ).all()
+
+        return ProviderProfileView(
+            partner_id=int(row.partner_id),
+            practice_name=(str(row.practice_name) if row.practice_name is not None else None),
+            partner_type=str(row.partner_type),
+            specialty=(str(row.specialty) if row.specialty is not None else None),
+            area=(str(row.area_name) if row.area_name is not None else DEFAULT_SERVICE_AREA_NAME),
+            verified=True,
+            credentials=[
+                ProviderCredential(
+                    credential_type=str(c.credential_type),
+                    status="verified",
+                    expires_at=c.expires_at,
+                )
+                for c in credential_rows
+            ],
+        )
 
     async def _cached_search_view(
         self,
@@ -1801,10 +1931,7 @@ class PartnerFacade:
                     )
                     .where(
                         partner_directory_index.c.partner_id.in_(partner_ids),
-                        partner_directory_index.c.is_active.is_(True),
-                        partner_profiles.c.status == "Active",
-                        _has_any_credential(partner_directory_index.c.partner_id),
-                        ~_has_invalid_credential(partner_directory_index.c.partner_id),
+                        _provider_visible(partner_directory_index.c.partner_id),
                     )
                 )
             ).scalar_one()

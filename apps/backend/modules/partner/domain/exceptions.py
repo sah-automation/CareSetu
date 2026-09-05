@@ -28,6 +28,22 @@ class PartnerNotFoundError(PartnerError):
         self.partner_id = partner_id
 
 
+class ProviderProfileNotFoundError(PartnerError):
+    """No public provider profile exists under the addressed id (PHASE-6 T03).
+
+    Raised by ``get_provider_profile`` when the partner is not ``[Active]``,
+    has no ``directory_index`` row, or carries any credential that is
+    unverified, expired or revoked. The public profile is hidden exactly when
+    search hides the card (ADR-0011 "tick gone = card gone"), so the route
+    maps this to a 404 - never a "hidden" 200 that leaks a partner identity
+    patients should not see.
+    """
+
+    def __init__(self, partner_id: int) -> None:
+        super().__init__(f"no public provider profile exists for partner {partner_id}")
+        self.partner_id = partner_id
+
+
 class InvalidQueueSortError(PartnerError):
     """The operator asked to sort the verification queue by an unknown key."""
 

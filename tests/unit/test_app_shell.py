@@ -119,6 +119,9 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         # PHASE-6 T02a (#313): the public provider directory search (FEAT-004) -
         # open surface, patients browse without logging in.
         "/v1/directory/search",
+        # PHASE-6 T03 (#309): the public provider profile (FEAT-005) - open
+        # surface, patients view a provider's verified-safe profile.
+        "/v1/directory/providers/{partner_id}",
     }
 
 
