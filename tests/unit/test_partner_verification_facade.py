@@ -20,6 +20,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -34,7 +35,11 @@ from modules.partner.domain.exceptions import (
 )
 from modules.partner.facade import PartnerFacade
 from modules.partner.outbox import PARTNER_OUTBOX_TABLE
-from modules.partner.schema.models import partner_credentials, partner_verifications
+from modules.partner.schema.models import (
+    partner_credentials,
+    partner_directory_index,
+    partner_verifications,
+)
 
 _NOW = datetime(2026, 8, 31, 10, 0, 0, tzinfo=UTC)
 
@@ -693,3 +698,104 @@ async def test_detail_includes_partner_audit_chain_when_audit_facade_present() -
         assert d2.audit_events == []
 
     await _no_audit_detail()
+
+
+@pytest.mark.asyncio
+async def test_invalidate_credential_revokes_deindexes_and_emits_one_event() -> None:
+    """PHASE-6 T04a (#315) AC: revocation stamps the close-out, deindexes, one event.
+
+    ``invalidate_credential`` marks every live credential row ``revoked_at`` +
+    ``invalidation_reason`` (actor ``revoked_by`` when named), flips the
+    ``partner_directory_index`` entry to ``is_active = False``, and writes exactly
+    one ``credential.invalidated`` envelope (reason carried, the real first
+    credential id) in the SAME transaction - all in one engine.begin(). The
+    profile is untouched: no lifecycle state change (partner stays ``[Active]``).
+    """
+    actor = uuid4()
+    connection = _connection(
+        [
+            _FakeResult(first=_profile_row(status="Active")),  # load profile
+            _FakeResult(scalar=1),  # max(round) = 1
+            _FakeResult(all=[SimpleNamespace(id=5)]),  # credential close-out (returning id)
+            _FakeResult(),  # directory_index deindex
+            _FakeResult(),  # credential.invalidated outbox insert
+        ]
+    )
+    facade = PartnerFacade(
+        engine=_engine(connection),
+        iam_facade=MagicMock(),
+        clock=lambda: _NOW,
+    )
+
+    result = await facade.invalidate_credential(3, revoked_by=actor)
+
+    assert result.partner_id == 3
+    assert result.status == "Active"  # no lifecycle change - recoverable re-verification
+    assert result.round == 1
+
+    updates = _updates(connection)
+    credential_update = next(u for u in updates if u.table.name == partner_credentials.name)
+    cred_values = credential_update._values
+    assert _bound_value(cred_values["revoked_at"]) == _NOW
+    assert _bound_value(cred_values["revoked_by"]) == actor
+    assert _bound_value(cred_values["invalidation_reason"]) == "revoked"
+
+    directory_update = next(u for u in updates if u.table.name == partner_directory_index.name)
+    assert _bound_value(directory_update._values["is_active"]) is False
+
+    outbox = _outbox_inserts(connection)
+    assert len(outbox) == 1  # exactly one credential.invalidated, same txn
+    insert = outbox[0]
+    assert _bound_value(insert._values["event_type"]) == "credential.invalidated"
+    payload = _bound_value(insert._values["payload"])
+    assert payload["credential_id"] == 5
+    assert payload["reason"] == "revoked"
+
+
+@pytest.mark.asyncio
+async def test_invalidate_credential_with_no_live_rows_still_deindexes_and_emits() -> None:
+    """#315: a partner with no live credentials still deindexes + exactly one event.
+
+    The credential close-out targets only ``revoked_at IS NULL`` rows - a partner
+    with none closes zero rows, but the directory index entry is still flipped to
+    ``is_active`` False and the single ``credential.invalidated`` envelope still
+    goes out (``credential_id`` null when nothing was closed, mirrors
+    ``purge_expired_credentials``).
+    """
+    connection = _connection(
+        [
+            _FakeResult(first=_profile_row(status="Active")),  # load profile
+            _FakeResult(scalar=1),  # max(round) = 1
+            _FakeResult(all=[]),  # no live credential rows
+            _FakeResult(),  # directory_index deindex
+            _FakeResult(),  # credential.invalidated outbox insert
+        ]
+    )
+    facade = PartnerFacade(engine=_engine(connection), iam_facade=MagicMock())
+
+    result = await facade.invalidate_credential(3)
+
+    assert result.status == "Active"
+    updates = _updates(connection)
+    credential_update = next(u for u in updates if u.table.name == partner_credentials.name)
+    assert _bound_value(credential_update._values["invalidation_reason"]) == "revoked"
+    directory_update = next(u for u in updates if u.table.name == partner_directory_index.name)
+    assert _bound_value(directory_update._values["is_active"]) is False
+
+    outbox = _outbox_inserts(connection)
+    assert len(outbox) == 1
+    payload = _bound_value(outbox[0]._values["payload"])
+    assert payload["credential_id"] is None
+    assert payload["reason"] == "revoked"
+
+
+@pytest.mark.asyncio
+async def test_invalidate_credential_unknown_partner_raises_without_writes() -> None:
+    """#315: an unknown partner raises and performs NO writes (profile gate first)."""
+    connection = _connection([_FakeResult(first=None)])  # load profile: not found
+    facade = PartnerFacade(engine=_engine(connection), iam_facade=MagicMock())
+
+    with pytest.raises(PartnerNotFoundError):
+        await facade.invalidate_credential(999)
+
+    assert _updates(connection) == []

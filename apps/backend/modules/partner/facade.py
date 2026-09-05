@@ -30,6 +30,12 @@ Methods:
   cleanup window has lapsed (still ``[Rejected]``), removes their artifacts, and
   emits ``credential.invalidated`` per credential - one transaction. It is
   invoked by the Phase-6 periodic job; no background scanner lives here.
+- ``invalidate_credential`` (PHASE-6 T04a, #315) is the immediate revocation
+  reach: it records the close-out on the partner's live credential rows
+  (``revoked_at``/``invalidation_reason``), deindexes the directory entry
+  (``is_active = False``), and emits ``credential.invalidated`` - one
+  transaction, mirroring ``purge_expired_credentials`` (ADR-0011). No new
+  lifecycle state: the partner recovers through a fresh verification round.
 
 Each mutating method writes its envelope into ``partner.partner_outbox`` in the
 SAME transaction as the state change (ADR-0002 §1). The operator review /
@@ -62,7 +68,7 @@ from modules.partner.directory_cache import (
     invalidate_directory_cache,
     set_cached_search,
 )
-from modules.partner.domain.credentials import CredentialType
+from modules.partner.domain.credentials import CredentialInvalidatedReason, CredentialType
 from modules.partner.domain.events import (
     PartnerType,
     credential_invalidated_envelope,
@@ -1538,6 +1544,81 @@ class PartnerFacade:
                 partner_id=partner_id,
                 status=next_state.status.value,
                 round=next_state.round,
+            )
+
+    async def invalidate_credential(
+        self,
+        partner_id: int,
+        reason: CredentialInvalidatedReason = CredentialInvalidatedReason.REVOKED,
+        *,
+        revoked_by: UUID | None = None,
+    ) -> PartnerView:
+        """Immediately revoke a partner's credentials (PHASE-6 T04a, #315; ADR-0011).
+
+        The immediate close-out leg of ADR-0011: a credential taken away by
+        authority or operator decision is revoked NOW - never left for the daily
+        expiry sweep. Every live (``revoked_at IS NULL``) credential row of the
+        partner is stamped ``revoked_at`` + ``invalidation_reason`` (``revoked``
+        by default, ``revoked_by`` the acting principal when named), the
+        ``partner_directory_index`` entry is deindexed (``is_active = False`` -
+        ADR-0012 one-entry-per-partner read-side cache), and ``credential.invalidated``
+        (with the reason carried onto the envelope) is written to the outbox in
+        the SAME transaction as those writes - mirroring
+        ``purge_expired_credentials`` (ADR-0002 §1, coding-standards §4). The
+        directory-search cache is flushed after the commit (best-effort, silent
+        on failure; the lazy read-hide is correct regardless).
+
+        Identity, profile row and verification history are untouched - there is
+        deliberately NO new lifecycle state (ADR-0008, brief handoff #315): the
+        partner stays ``[Active]`` and recovers by submitting a fresh
+        verification round through the Phase-5 flow, never by re-registering.
+        ``_has_invalid_credential`` derives the lazy read-hide against the
+        recorded ``revoked_at`` on every search/profile read, so the revoked
+        partner disappears from directory reads instantly.
+        """
+        async with self._engine.begin() as connection:
+            profile = await _load_profile(connection, partner_id)
+            closed = (
+                await connection.execute(
+                    partner_credentials.update()
+                    .where(
+                        partner_credentials.c.profile_id == partner_id,
+                        partner_credentials.c.revoked_at.is_(None),
+                    )
+                    .values(
+                        revoked_at=self._clock(),
+                        revoked_by=revoked_by,
+                        invalidation_reason=reason,
+                        updated_at=func.now(),
+                    )
+                    .returning(partner_credentials.c.id)
+                )
+            ).all()
+            await connection.execute(
+                partner_directory_index.update()
+                .where(partner_directory_index.c.partner_id == partner_id)
+                .values(is_active=False, updated_at=func.now())
+            )
+            first_credential_id = int(closed[0].id) if closed else None
+            await write_outbox(
+                connection,
+                PARTNER_SCHEMA,
+                PARTNER_OUTBOX_TABLE,
+                credential_invalidated_envelope(
+                    partner_id,
+                    identity_id=profile.identity_id,
+                    credential_id=first_credential_id,
+                    reason=reason,
+                ),
+            )
+            # PHASE-6 T02b (#314): the credential invalidation deindexes this
+            # partner, making every cached search result potentially stale. Flush
+            # the namespace (best-effort, silent on failure).
+            await invalidate_directory_cache()
+            return PartnerView(
+                partner_id=partner_id,
+                status=profile.status,
+                round=profile.round,
             )
 
     async def list_verification_queue(

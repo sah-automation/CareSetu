@@ -8,6 +8,9 @@ composition (every module's ``register_handlers`` is invoked exactly once) and
 the drain/shutdown path (a set ``stop_event`` makes the worker exit after handing
 the event through to ``run_poll_loop``; the loop-level drain itself is proven
 against the native PostgreSQL in ``tests/integration/test_dispatcher.py``).
+PHASE-6 T04a (#315) also pins the periodic-job scheduler seam: exactly one
+``credential-expiry-sweep`` job on the configured cron (UTC), and the start /
+stop discipline around the poll loop.
 """
 
 from __future__ import annotations
@@ -15,8 +18,10 @@ from __future__ import annotations
 import asyncio
 import signal
 from collections.abc import Callable
+from datetime import UTC, datetime
 
 import pytest
+from apscheduler.triggers.cron import CronTrigger
 
 import worker.main as worker_main
 from app.config import Settings
@@ -154,3 +159,114 @@ async def test_install_signal_handlers_wires_sigterm_and_sigint() -> None:
     assert not stop_event.is_set()
     handlers[signal.SIGTERM]()
     assert stop_event.is_set()
+
+
+def test_build_scheduler_registers_the_sweep_on_the_configured_cron() -> None:
+    """#315: the scheduler ships exactly one sweep job on the configured cadence."""
+    scheduler = worker_main.build_scheduler(Settings())
+
+    jobs = scheduler.get_jobs()
+    assert len(jobs) == 1
+    job = jobs[0]
+    assert job.id == "credential-expiry-sweep"
+    assert job.max_instances == 1
+    assert job.coalesce
+    assert isinstance(job.trigger, CronTrigger)
+
+    # "30 1 * * *" -> 01:30 UTC daily.
+    next_fire = job.trigger.get_next_fire_time(None, datetime(2026, 9, 5, 12, 0, tzinfo=UTC))
+    assert next_fire == datetime(2026, 9, 6, 1, 30, tzinfo=UTC)
+
+
+def test_build_scheduler_honours_a_configured_cadence() -> None:
+    """#315: an env-driven cron overrides the default sweep time."""
+    scheduler = worker_main.build_scheduler(Settings(partner_credential_sweep_cron="0 3 * * *"))
+
+    job = scheduler.get_jobs()[0]
+    next_fire = job.trigger.get_next_fire_time(None, datetime(2026, 9, 5, 12, 0, tzinfo=UTC))
+    assert next_fire == datetime(2026, 9, 6, 3, 0, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_sweep_callback_is_an_awaitable_stub_without_side_effects() -> None:
+    """#315: the sweep seam is a no-op callable leaving #316 to fill the logic."""
+    assert await worker_main._run_credential_sweep() is None
+
+
+class _FakeScheduler:
+    """A DB-free scheduler stand-in that records start/shutdown only."""
+
+    def __init__(self) -> None:
+        self.started = False
+        self.shutdown_calls = 0
+
+    def start(self) -> None:
+        self.started = True
+
+    def shutdown(self, wait: bool = False) -> None:
+        self.shutdown_calls += 1
+
+
+async def test_run_worker_until_stopped_starts_and_stops_the_scheduler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stop_event = asyncio.Event()
+    stop_event.set()
+    engine = _FakeEngine()
+    scheduler = _FakeScheduler()
+
+    async def fake_discover(connection: object, schemas: object) -> tuple[object, ...]:
+        return ()
+
+    async def fake_poll(
+        engine: object,
+        tables: object,
+        registry: object,
+        config: object,
+        stop_event: asyncio.Event | None = None,
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(worker_main, "create_async_engine", lambda url: engine)
+    monkeypatch.setattr(worker_main, "discover_outbox_tables", fake_discover)
+    monkeypatch.setattr(worker_main, "run_poll_loop", fake_poll)
+    monkeypatch.setattr(worker_main, "build_scheduler", lambda settings: scheduler)
+
+    await worker_main.run_worker_until_stopped(stop_event, settings=Settings())
+
+    assert scheduler.started
+    assert scheduler.shutdown_calls == 1
+    assert engine.disposed
+
+
+async def test_run_worker_until_stopped_stops_scheduler_when_poll_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crashing poll loop must not leave the scheduler running (crash-loud path)."""
+    stop_event = asyncio.Event()
+    engine = _FakeEngine()
+    scheduler = _FakeScheduler()
+
+    async def fake_discover(connection: object, schemas: object) -> tuple[object, ...]:
+        return ()
+
+    async def fake_poll(
+        engine: object,
+        tables: object,
+        registry: object,
+        config: object,
+        stop_event: asyncio.Event | None = None,
+    ) -> None:
+        raise RuntimeError("db unreachable")
+
+    monkeypatch.setattr(worker_main, "create_async_engine", lambda url: engine)
+    monkeypatch.setattr(worker_main, "discover_outbox_tables", fake_discover)
+    monkeypatch.setattr(worker_main, "run_poll_loop", fake_poll)
+    monkeypatch.setattr(worker_main, "build_scheduler", lambda settings: scheduler)
+
+    with pytest.raises(RuntimeError, match="db unreachable"):
+        await worker_main.run_worker_until_stopped(stop_event, settings=Settings())
+
+    assert scheduler.started
+    assert scheduler.shutdown_calls == 1
+    assert engine.disposed

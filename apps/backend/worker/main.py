@@ -13,15 +13,23 @@ flight finishes - inflight claims already under delivery drain - before the loop
 returns and the process exits. The dispatcher is pure transport (ADR-0002 §2):
 the worker authors no events and its SQL touches outbox plumbing only.
 
-No scheduler yet: the APScheduler scaffold from issue #16 lands with the first
-scheduled job (roadmap Phase 12/13) and is deliberately absent here.
+Periodic jobs (PHASE-6 T04a, #315): the worker also hosts an APScheduler
+``AsyncIOScheduler`` on the same event loop for the scheduled jobs ADR-0011's
+daily-sweep mechanism runs on. Today that is exactly one job - the daily
+credential-expiry sweep, registered against the configurable cron in
+:func:`build_scheduler`. The sweep callback is a deliberately empty stub hook
+(#316 fills it with the T04b close-out pass); only the scheduler seam ships in
+this ticket. Job work stays in-process - no new dependency beyond APScheduler.
 """
 
 import asyncio
 import contextlib
 import signal
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
+# apscheduler ships no py.typed marker; strict mypy skips it (import-untyped).
+from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
+from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import Settings, get_settings
@@ -98,6 +106,46 @@ def build_registry() -> HandlerRegistry:
     return registry
 
 
+async def _run_credential_sweep() -> None:
+    """The daily credential-expiry sweep hook - deliberately a stub (#315 → #316).
+
+    ADR-0011's daily close-out job is scheduled by :func:`build_scheduler`; the
+    close-out pass itself (find credentials that expired since the last pass,
+    record ``credential.invalidated`` reason ``expired``, deindex, audit) is
+    explicitly NOT this ticket - PHASE-6 T04b (#316) fills this function. The
+    empty coroutine ships here so the scheduler seam is wired and testable end
+    to end before any business logic lands.
+    """
+    return None
+
+
+def build_scheduler(
+    settings: Settings,
+    *,
+    sweep_callback: Callable[[], Awaitable[None]] = _run_credential_sweep,
+) -> AsyncIOScheduler:
+    """Build the worker's periodic-job scheduler (PHASE-6 T04a, #315).
+
+    An ``AsyncIOScheduler`` running on the worker's event loop, registered with
+    exactly one periodic job: the daily credential-expiry sweep, scheduled on
+    ``settings.partner_credential_sweep_cron`` (defaults to the daily 01:30
+    cadence of the backup cron, ``deploy/cron``). The callback is the injectable
+    ``sweep_callback`` so the scheduler wiring is unit-testable and #316 can
+    swap the real sweep in at the composition root. ``coalesce`` + a fixed job id
+    keep late/missed firings from stacking duplicate sweeps across a sleep.
+    """
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(
+        sweep_callback,
+        CronTrigger.from_crontab(settings.partner_credential_sweep_cron, timezone="UTC"),
+        id="credential-expiry-sweep",
+        name="daily-credential-expiry-sweep",
+        coalesce=True,
+        max_instances=1,
+    )
+    return scheduler
+
+
 async def run_worker_until_stopped(
     stop_event: asyncio.Event,
     settings: Settings | None = None,
@@ -108,19 +156,31 @@ async def run_worker_until_stopped(
     Resolves the shared env-driven ``Settings`` once, builds the ``HandlerRegistry``
     at the composition root, creates the engine, discovers the module outboxes
     (list-based over ``MODULE_SCHEMAS``, issue #16), and drives ``run_poll_loop``.
-    The loop honours ``stop_event`` between passes, so the pass in flight finishes
-    and inflight claims already under delivery drain before this coroutine returns
-    (ADR-0002 §2, issue #16 user story 19). The engine is always disposed.
+    The periodic-job ``AsyncIOScheduler`` (PHASE-6 T04a, #315) starts on the same
+    event loop and the sweep job is stopped before the engine is disposed. The
+    loop honours ``stop_event`` between passes, so the pass in flight finishes and
+    inflight claims already under delivery drain before this coroutine returns
+    (ADR-0002 §2, issue #16 user story 19). Exceptions from ``run_poll_loop``
+    propagate - a worker failing to reach its database crashes loudly. The engine
+    and scheduler are always disposed.
     """
     resolved_settings = settings if settings is not None else get_settings()
     registry = build_registry()
     engine = create_async_engine(resolved_settings.database_url)
+    scheduler = build_scheduler(resolved_settings)
     try:
         async with engine.connect() as connection:
             tables: tuple[OutboxTable, ...] = await discover_outbox_tables(
                 connection, MODULE_SCHEMAS
             )
-        await run_poll_loop(engine, tables, registry, config, stop_event=stop_event)
+        scheduler.start()
+        try:
+            await run_poll_loop(engine, tables, registry, config, stop_event=stop_event)
+        finally:
+            # The poll loop returned (stop_event set) or raised; stop the
+            # scheduler before the engine/loop tear down so no timer wakes after
+            # return (wait=False: never block the drain on a mid-fire job).
+            scheduler.shutdown(wait=False)
     finally:
         await engine.dispose()
 
