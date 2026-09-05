@@ -46,6 +46,7 @@ from modules.iam.adapters.routes import router as iam_router
 from modules.iam.adapters.sms import MockSmsAdapter, build_sms_adapter
 from modules.iam.facade import IamFacade
 from modules.partner.adapters.artifact_store import build_artifact_store
+from modules.partner.adapters.routes import directory_router
 from modules.partner.adapters.routes import (
     register_error_handlers as register_partner_error_handlers,
 )
@@ -262,6 +263,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(consent_router)
     app.include_router(audit_router)
     app.include_router(partner_router)
+    app.include_router(directory_router)
     register_error_handlers(app)
     register_gateway_error_handlers(app)
     register_health_error_handlers(app)

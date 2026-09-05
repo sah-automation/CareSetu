@@ -37,6 +37,7 @@ def test_partner_events_are_registered_in_the_catalog() -> None:
         "EVENT_PARTNER_REJECTED": "partner.rejected",
         "EVENT_PARTNER_CREDENTIAL_REVIEWED": "partner.credential_reviewed",
         "EVENT_CREDENTIAL_INVALIDATED": "credential.invalidated",
+        "EVENT_DIRECTORY_SEARCH": "directory.search",
     }
     for name, value in partner_events.items():
         assert getattr(events, name) == value

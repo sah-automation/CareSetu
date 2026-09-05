@@ -75,6 +75,14 @@ EVENT_CREDENTIAL_INVALIDATED = "credential.invalidated"
 # terminal-status message to SMS on. Operational, deliberately NOT in
 # ``REGULATED_ACT_TYPES``. internal-modules.md §4.2 registry.
 EVENT_NOTIFICATION_FAILED = "notification.failed"
+# MOD-002 (partner): emitted once per public directory search (FEAT-004,
+# PHASE-6 T02a #313) for analytics - records the filters/query, the result
+# count, and whether the wider-area fallback fired. Dot-notation ``directory
+# .search`` per the registry grammar (the PRD's legacy ``directory_search``
+# spelling is the display label; the ``Envelope`` validator enforces
+# ``domain.action``). Deliberately NOT in ``REGULATED_ACT_TYPES`` - this is
+# anonymous product analytics, not a regulated act, and carries no PHI.
+EVENT_DIRECTORY_SEARCH = "directory.search"
 
 # PHASE-4 T3 (#237): the canonical regulated-act whitelist. MOD-011 appends an
 # ``audit.event`` payload to the hash chain only when its ``event_type`` is

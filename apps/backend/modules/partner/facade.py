@@ -48,7 +48,7 @@ from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -62,6 +62,7 @@ from modules.partner.domain.events import (
     PartnerType,
     credential_invalidated_envelope,
     credential_reviewed_envelope,
+    directory_search_envelope,
     partner_activated_envelope,
     partner_registered_envelope,
     partner_rejected_envelope,
@@ -92,6 +93,7 @@ from modules.partner.domain.state_machine import (
 from modules.partner.outbox import PARTNER_OUTBOX_TABLE
 from modules.partner.schema.models import (
     partner_credentials,
+    partner_directory_index,
     partner_profiles,
     partner_service_areas,
     partner_verifications,
@@ -104,6 +106,21 @@ PARTNER_SCHEMA = "partner"
 # v5.4). An unknown explicitly-declared ``service_area_id`` is rejected at the
 # facade (mapped to a 422) so a partner is never attached to a nonexistent area.
 DEFAULT_SERVICE_AREA_NAME = "Daltonganj"
+
+# The peri-urban scope of the Phase-6 launch directory (FEAT-004, REQ-008):
+# Daltonganj plus its surrounding peri-urban belt. Search clamps results to this
+# many km from the patient's geo point; when nothing matches inside it, the
+# wider-area fallback relaxes only the location constraint (filters kept) and
+# labels the results "outside your area". A single km constant - no PostGIS -
+# is the cost-floor SQL range (MOD-002 §4).
+PERI_URBAN_RADIUS_KM = 25.0
+
+# The launch directory's default origin (parent #306, FEAT-004): when the
+# anonymous patient does not supply a geo point, distance sort anchors on the
+# Daltonganj centre (the beachhead city, REQ-008). Matches the coordinates the
+# partner integration suite uses for the city.
+DALTONGANJ_LATITUDE = 24.04
+DALTONGANJ_LONGITUDE = 84.07
 
 # The re-submission throttle policy lives in the domain core
 # (:mod:`modules.partner.domain.rejection`): a rejected partner may open at most
@@ -347,6 +364,42 @@ class PartnerVerificationStatusView(BaseModel):
     decided_at: datetime | None
 
 
+class DirectoryEntry(BaseModel):
+    """One public directory search result (FEAT-004, user story 7).
+
+    A verified-safe projection of an ``[Active]`` partner with valid
+    credentials: display name (``practice_name``), partner type, specialty
+    (doctors only) and the derived ``verified`` indicator plus its great-circle
+    ``distance_km`` from the caller's geo point. The tick is always True for a
+    returned row - search visibility and the tick share one derivation, so a
+    separate visibility flag could never drift (ADR-0011 "tick gone = card
+    gone"). Named ``practice_name`` to stay on the partner schema vocabulary;
+    patient-facing clients may render it as the provider's name.
+    """
+
+    partner_id: int
+    practice_name: str | None
+    partner_type: str
+    specialty: str | None
+    distance_km: float
+    verified: bool
+
+
+class DirectorySearchView(BaseModel):
+    """The public directory search response (MOD-002, FEAT-004).
+
+    ``items`` are active-only, distance-sorted entries after the caller's
+    filters (partner type, specialty for doctors, free-text over name);
+    ``fell_back`` marks the wider-area fallback: nothing matched within the
+    peri-urban scope, so the location constraint was relaxed (filters kept) and
+    the results must be labeled "outside your area" (glossary). The patient is
+    never silently served results that dropped a filter.
+    """
+
+    items: list[DirectoryEntry]
+    fell_back: bool
+
+
 _QUEUE_SORTS: dict[str, Any] = {
     "registration_age": partner_profiles.c.created_at,
     "partner_type": partner_profiles.c.partner_type,
@@ -360,6 +413,67 @@ _QUEUE_STATUSES: frozenset[str] = frozenset(ps.value for ps in PartnerStatus)
 
 def _row_str(row: Any, name: str) -> str:
     return str(getattr(row, name))
+
+
+def _haversine_km(latitude: float, longitude: float) -> Any:
+    """Haversine great-circle distance in km from the caller point to a row.
+
+    Computed in SQL over ``practice_latitude``/``practice_longitude`` so the
+    peri-urban range clamp and the nearest-first sort both stay in the
+    database (FEAT-004 geo via SQL range; PostGIS optional at the cost floor,
+    MOD-002 §4). Returns the SQL expression - 6371 km mean Earth radius.
+    """
+    rad_lat_me = func.radians(latitude)
+    rad_lng_me = func.radians(longitude)
+    rad_lat_row = func.radians(partner_directory_index.c.practice_latitude)
+    rad_lng_row = func.radians(partner_directory_index.c.practice_longitude)
+    dlat = rad_lat_row - rad_lat_me
+    dlon = rad_lng_row - rad_lng_me
+    a = func.power(func.sin(dlat / 2), 2) + func.cos(rad_lat_me) * func.cos(
+        rad_lat_row
+    ) * func.power(func.sin(dlon / 2), 2)
+    return 6371.0 * 2.0 * func.asin(func.sqrt(a))
+
+
+def _has_any_credential(column: Any) -> Any:
+    """Exists-subquery: the partner has at least one submitted credential.
+
+    Mirrors the directory backfill's ``EXISTS (SELECT 1 FROM credentials)``
+    guard so search and the index agree on the "verified on record" baseline.
+    """
+    return (
+        select(1)
+        .select_from(partner_credentials)
+        .where(partner_credentials.c.profile_id == column)
+        .exists()
+    )
+
+
+def _has_invalid_credential(column: Any) -> Any:
+    """Exists-subquery: the partner has any credential that is not valid.
+
+    The lazy read-hide (ADR-0011): a credential is invalid when it was never
+    verified, its recorded expiry date has passed, or it was revoked. Search
+    derives visibility from these recorded dates on every read - it never
+    trusts a cached ``is_active`` flag for the validity decision (T02b wraps
+    the cache later; correctness stays here).
+    """
+    return (
+        select(1)
+        .select_from(partner_credentials)
+        .where(
+            partner_credentials.c.profile_id == column,
+            or_(
+                partner_credentials.c.verified.is_(False),
+                and_(
+                    partner_credentials.c.expires_at.is_not(None),
+                    partner_credentials.c.expires_at <= func.now(),
+                ),
+                partner_credentials.c.revoked_at.is_not(None),
+            ),
+        )
+        .exists()
+    )
 
 
 def _default_clock() -> datetime:
@@ -1423,6 +1537,115 @@ class PartnerFacade:
                     for row in rows
                 ]
             )
+
+    async def search_directory(
+        self,
+        *,
+        query: str | None = None,
+        partner_type: str | None = None,
+        specialty: str | None = None,
+        latitude: float = DALTONGANJ_LATITUDE,
+        longitude: float = DALTONGANJ_LONGITUDE,
+        patient_id: int | None = None,
+    ) -> DirectorySearchView:
+        """Public directory search (MOD-002, FEAT-004, PHASE-6 T02a #313).
+
+        Returns only ``[Active]`` partners whose credentials are all verified,
+        unexpired and unrevoked (the "provider" visibility rule - REQ-028 +
+        ADR-0011, both derived on read, never cached), nearest-first by
+        great-circle distance from the caller's geo point. ``partner_type``
+        filters on the closed doctor/lab/chemist enum; ``specialty`` applies the
+        closed pick-list and is doctors-only (a non-doctor type with a specialty
+        matches nothing); ``query`` is free-text over the practice name.
+
+        The wider-area fallback (glossary): when no entry matches within the
+        peri-urban scope, the location constraint alone is relaxed (type,
+        specialty and name filters are kept), the run is re-executed
+        nearest-first, and the view is flagged ``fell_back`` so the client
+        labels the results honestly as "outside your area". ``fell_back`` is
+        never silently served - the patient's other filters hold.
+
+        Emits the ``directory.search`` analytics event (one per search) into
+        the partner outbox in the SAME transaction as the read, carrying the
+        filters/query, the result count and the fallback flag (telemetry, not a
+        regulated act; anonymous patients have a ``None`` actor). Lab/chemist
+        entries always return ``specialty=None``.
+        """
+        distance_km = _haversine_km(latitude, longitude)
+
+        def _conditions(peri_urban_only: bool) -> list[Any]:
+            conditions: list[Any] = [
+                partner_directory_index.c.is_active.is_(True),
+                partner_profiles.c.status == "Active",
+                _has_any_credential(partner_directory_index.c.partner_id),
+                ~_has_invalid_credential(partner_directory_index.c.partner_id),
+            ]
+            if partner_type is not None:
+                conditions.append(partner_directory_index.c.partner_type == partner_type)
+            if specialty is not None:
+                # Specialty is doctors-only (closed pick-list, glossary); a
+                # lab/chemist row never carries one, so pin the type too.
+                conditions.append(partner_directory_index.c.partner_type == "doctor")
+                conditions.append(partner_directory_index.c.specialty == specialty)
+            if query and query.strip():
+                conditions.append(partner_profiles.c.practice_name.ilike(f"%{query.strip()}%"))
+            if peri_urban_only:
+                conditions.append(distance_km <= PERI_URBAN_RADIUS_KM)
+            return conditions
+
+        async with self._engine.begin() as connection:
+            base = select(
+                partner_directory_index.c.partner_id,
+                partner_directory_index.c.partner_type,
+                partner_directory_index.c.specialty,
+                partner_profiles.c.practice_name,
+                distance_km.label("distance_km"),
+            ).join(
+                partner_profiles,
+                partner_profiles.c.id == partner_directory_index.c.partner_id,
+            )
+
+            async def _rows(peri_urban_only: bool) -> list[Any]:
+                stmt = base.where(*_conditions(peri_urban_only=peri_urban_only)).order_by(
+                    distance_km.asc()
+                )
+                return list((await connection.execute(stmt)).all())
+
+            rows = await _rows(peri_urban_only=True)
+            fell_back = len(rows) == 0
+            if fell_back:
+                rows = await _rows(peri_urban_only=False)
+
+            await write_outbox(
+                connection,
+                PARTNER_SCHEMA,
+                PARTNER_OUTBOX_TABLE,
+                directory_search_envelope(
+                    patient_id=patient_id,
+                    query=query,
+                    partner_type=partner_type,
+                    specialty=specialty,
+                    result_count=len(rows),
+                    fell_back=fell_back,
+                ),
+            )
+
+        return DirectorySearchView(
+            fell_back=fell_back,
+            items=[
+                DirectoryEntry(
+                    partner_id=int(row.partner_id),
+                    practice_name=(
+                        str(row.practice_name) if row.practice_name is not None else None
+                    ),
+                    partner_type=str(row.partner_type),
+                    specialty=str(row.specialty) if row.specialty is not None else None,
+                    distance_km=float(row.distance_km),
+                    verified=True,
+                )
+                for row in rows
+            ],
+        )
 
     async def get_verification_detail(
         self, partner_id: int, actor_id: int

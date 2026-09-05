@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from bus.events import (
     EVENT_CREDENTIAL_INVALIDATED,
+    EVENT_DIRECTORY_SEARCH,
     EVENT_PARTNER_ACTIVATED,
     EVENT_PARTNER_CREDENTIAL_REVIEWED,
     EVENT_PARTNER_REGISTERED,
@@ -22,6 +23,7 @@ from modules.partner.domain.events import (
     PRODUCER_MODULE,
     credential_invalidated_envelope,
     credential_reviewed_envelope,
+    directory_search_envelope,
     partner_activated_envelope,
     partner_registered_envelope,
     partner_rejected_envelope,
@@ -99,6 +101,50 @@ def test_credential_invalidated_carries_reason() -> None:
     assert envelope.payload.reason == "grace lapsed"
 
 
+def test_directory_search_carries_only_search_facts() -> None:
+    """The analytics payload (FEAT-004) names the search, never the results.
+
+    Filters, result count and the fallback flag travel on the bus; partner ids
+    and distances (and anything PHI-ish) do not - the analytics consumer only
+    needs the shape of the demand, not its content (error-handling-observability
+    no-PHI; privacy by design, only the facts required.)
+    """
+    envelope = directory_search_envelope(
+        patient_id=3,
+        query="Sharma",
+        partner_type="doctor",
+        specialty="General Physician",
+        result_count=2,
+        fell_back=False,
+    )
+
+    assert envelope.event_type == EVENT_DIRECTORY_SEARCH
+    assert envelope.producer == PRODUCER_MODULE
+    assert envelope.payload.patient_id == 3
+    assert envelope.payload.query == "Sharma"
+    assert envelope.payload.partner_type == "doctor"
+    assert envelope.payload.specialty == "General Physician"
+    assert envelope.payload.result_count == 2
+    assert envelope.payload.fell_back is False
+
+
+def test_directory_search_allows_anonymous_fallbacks() -> None:
+    """Anonymous patients and empty-wider-fallback outcomes are legal payloads."""
+    envelope = directory_search_envelope(
+        patient_id=None,
+        query="No Such Clinic",
+        partner_type=None,
+        specialty=None,
+        result_count=0,
+        fell_back=True,
+    )
+
+    assert envelope.payload.patient_id is None
+    assert envelope.payload.query == "No Such Clinic"
+    assert envelope.payload.result_count == 0
+    assert envelope.payload.fell_back is True
+
+
 def test_no_payload_carries_credential_artifact_bytes() -> None:
     # security-phii-standards: credential documents are never in a payload -
     # only the profile identity, actor, round and reason travel on the bus.
@@ -109,6 +155,14 @@ def test_no_payload_carries_credential_artifact_bytes() -> None:
         partner_rejected_envelope(3, 9, "reason", 1),
         credential_reviewed_envelope(3, 77),
         credential_invalidated_envelope(3, 9, "reason", 5),
+        directory_search_envelope(
+            patient_id=None,
+            query="query",
+            partner_type=None,
+            specialty=None,
+            result_count=0,
+            fell_back=True,
+        ),
     ):
         dumped = envelope.payload.model_dump(mode="json")
         assert "artifact" not in dumped
@@ -124,6 +178,14 @@ def test_every_builder_produces_distinct_event_ids() -> None:
         partner_rejected_envelope(3, 9, "reason", 1),
         credential_reviewed_envelope(3, 77),
         credential_invalidated_envelope(3, 9, "reason", 5),
+        directory_search_envelope(
+            patient_id=None,
+            query="query",
+            partner_type="doctor",
+            specialty="General Physician",
+            result_count=2,
+            fell_back=False,
+        ),
     ]
 
     ids = {envelope.event_id for envelope in envelopes}

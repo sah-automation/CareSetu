@@ -29,7 +29,7 @@ from app.gateway.errors import error_response
 from app.gateway.idempotency import run_idempotent
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_operator, require_partner
-from modules.partner.domain.credentials import CredentialType
+from modules.partner.domain.credentials import CredentialType, Specialty
 from modules.partner.domain.events import PartnerType
 from modules.partner.domain.exceptions import (
     AppealAlreadyUsedError,
@@ -43,8 +43,11 @@ from modules.partner.domain.exceptions import (
     ServiceAreaNotFoundError,
 )
 from modules.partner.facade import (
+    DALTONGANJ_LATITUDE,
+    DALTONGANJ_LONGITUDE,
     CredentialSubmission,
     CredentialSubmissionResult,
+    DirectorySearchView,
     PartnerFacade,
     PartnerMeView,
     PartnerQueue,
@@ -56,6 +59,49 @@ from modules.partner.facade import (
 )
 
 router = APIRouter(prefix="/v1/partner", tags=["partner"])
+
+# The public directory search surface (PHASE-6 T02a #313): a NEW unauthenticated
+# router under ``/v1/directory`` - patients browse the directory without logging
+# in (FEAT-004), so no auth dependency rides these routes. The gateway still
+# rate-limits them at the edge like the other public surfaces (api-standards).
+directory_router = APIRouter(prefix="/v1/directory", tags=["directory"])
+
+
+@directory_router.get(
+    "/search",
+    response_model=DirectorySearchView,
+    status_code=status.HTTP_200_OK,
+    summary="Search the public provider directory (open, no login required)",
+)
+async def public_directory_search(
+    request: Request,
+    q: Annotated[str | None, Query(max_length=120)] = None,
+    partner_type: Annotated[PartnerType | None, Query()] = None,
+    specialty: Annotated[Specialty | None, Query()] = None,
+    lat: Annotated[float | None, Query(ge=-90, le=90)] = None,
+    lng: Annotated[float | None, Query(ge=-180, le=180)] = None,
+) -> DirectorySearchView:
+    """Public provider directory search (FEAT-004, PHASE-6 T02a #313).
+
+    Thin unauthenticated adapter over the ``MOD-002`` search facade: patients
+    search ``[Active]`` partners with valid credentials, nearest-first from
+    their geo point. ``q`` is free-text over the practice name; ``partner_type``
+    and ``specialty`` (doctors only, closed pick-list) filter results; ``lat``/
+    ``lng`` anchor the distance sort and default to the Daltonganj centre. When
+    nothing matches within the peri-urban scope the facade relaxes only the
+    location constraint and flags the view with ``fell_back`` so the client
+    labels the results "outside your area". No business logic here - filters,
+    ordering, the wider-area fallback, and the ``directory.search`` analytics
+    event all live in the facade.
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    return await facade.search_directory(
+        query=q,
+        partner_type=partner_type,
+        specialty=specialty.value if specialty is not None else None,
+        latitude=lat if lat is not None else DALTONGANJ_LATITUDE,
+        longitude=lng if lng is not None else DALTONGANJ_LONGITUDE,
+    )
 
 
 class RegisterPartnerRequest(BaseModel):
