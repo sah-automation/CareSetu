@@ -194,6 +194,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         re_submission_cooldown_days=resolved_settings.partner_re_submission_cooldown_days,
         credential_cleanup_days=resolved_settings.partner_credential_cleanup_days,
         directory_ttl_seconds=resolved_settings.redis_directory_ttl_seconds,
+        directory_max_results=resolved_settings.directory_max_results,
     )
 
     # MOD-002/MOD-001 seam (T05, #298): wire the partner-profile identity

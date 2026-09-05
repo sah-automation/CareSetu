@@ -862,6 +862,7 @@ class PartnerFacade:
         re_submission_cooldown_days: int = 30,
         credential_cleanup_days: int = 30,
         directory_ttl_seconds: int = 0,
+        directory_max_results: int = 50,
         clock: Callable[[], datetime] = _default_clock,
     ) -> None:
         self._engine = engine
@@ -892,6 +893,11 @@ class PartnerFacade:
         # Settings-level TTL is injected) disables caching entirely so the unit
         # tier and callers that never set it stay SQL-only.
         self._directory_ttl_seconds = directory_ttl_seconds
+        # Directory result cap (PHASE-6 T2, #324): the top-N bound applied after
+        # distance ordering so a search never returns an unbounded nearest-first
+        # list. Config-injected from the resolved Settings (app/main.py), the
+        # same discipline as the throttle and TTL knobs above (coding-standards §9).
+        self._directory_max_results = directory_max_results
         # The injectable clock that schedules the 30-day window (overridden by
         # ``MutableClock`` in tests to walk the boundary). Mirrors the iam
         # facades' ``clock`` convention.
@@ -1894,8 +1900,14 @@ class PartnerFacade:
             )
 
             async def _rows(peri_urban_only: bool) -> list[Any]:
-                stmt = base.where(*_conditions(peri_urban_only=peri_urban_only)).order_by(
-                    distance_km.asc()
+                stmt = (
+                    base.where(*_conditions(peri_urban_only=peri_urban_only))
+                    .order_by(distance_km.asc())
+                    # PHASE-6 T2 (#324): the result list is bounded at the
+                    # configuration-driven top-N after distance ordering, on
+                    # both the in-scope and wider-area fallback paths. A cap,
+                    # not a filter/ordering/fallback change (MOD-002).
+                    .limit(self._directory_max_results)
                 )
                 return list((await connection.execute(stmt)).all())
 

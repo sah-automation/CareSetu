@@ -379,3 +379,54 @@ async def test_search_emits_directory_search_event_once_per_search(
     assert by_flag[False]["result_count"] == 1
     assert by_flag[True]["query"] == "no such clinic"
     assert by_flag[True]["result_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_search_caps_in_scope_results_at_directory_max_results(
+    database_url: str, clean_partner: None, tmp_path: Path
+) -> None:
+    """#324: a >50-match in-scope search returns at most top-50, still nearest-first."""
+    _, partner = _facade(database_url, tmp_path)
+    # 12 distinct longitude offsets * 6 partners each = 72 partners, all within
+    # the peri-urban scope (longitude offset <= ~18 km < PERI_URBAN_RADIUS_KM).
+    offsets = [0.001 + 0.015 * i for i in range(12)]
+    expected_count = 50
+    for index, offset in enumerate(offsets):
+        for _ in range(6):
+            await _seed_partner(
+                database_url,
+                practice_name=f"Dr. Offset {offset:.3f} #{index}",
+                longitude=DALTONGANJ_LONGITUDE + offset,
+            )
+
+    view = await partner.search_directory()
+
+    assert view.fell_back is False
+    assert len(view.items) == expected_count
+    distances = [entry.distance_km for entry in view.items]
+    assert distances == sorted(distances)
+    # The nearest 50 of 72 are returned; the furthest are excluded.
+    assert all(entry.distance_km <= distances[expected_count - 1] for entry in view.items)
+
+
+@pytest.mark.asyncio
+async def test_search_caps_fallback_results_at_directory_max_results(
+    database_url: str, clean_partner: None, tmp_path: Path
+) -> None:
+    """#324: the wider-area fallback path is also bounded at the top-N."""
+    _, partner = _facade(database_url, tmp_path)
+    # All partners sit beyond the peri-urban scope (~50 km east) so every search
+    # falls back; the relaxed run must still cap at the top-50 nearest.
+    for index in range(72):
+        await _seed_partner(
+            database_url,
+            practice_name=f"Dr. Far #{index}",
+            longitude=DALTONGANJ_LONGITUDE + 0.50 + 0.005 * index,
+        )
+
+    view = await partner.search_directory()
+
+    assert view.fell_back is True
+    assert len(view.items) == 50
+    distances = [entry.distance_km for entry in view.items]
+    assert distances == sorted(distances)

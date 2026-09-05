@@ -27,6 +27,12 @@ DEFAULT_REDIS_CONSENT_TTL_SECONDS = 300
 # Redis directory-search result cache (PHASE-6 T02b, #314): optional, same SQL
 # fallback + accelerator-only discipline (ADR-0011). p95 < 250 ms cached target.
 DEFAULT_REDIS_DIRECTORY_TTL_SECONDS = 300
+# Boundary directory result cap (PHASE-6 T2, #324): directory search never
+# returns an unbounded nearest-first list - the facade caps the returned items
+# at this top-N after distance ordering, on both the in-scope and the wider-area
+# fallback paths. A limit, not a correctness rule: filtering, distance ordering
+# and fallback semantics are unchanged (MOD-002).
+DEFAULT_DIRECTORY_MAX_RESULTS = 50
 # Auth-surface rate limit (``NFR-SEC-004``): the OTP/auth endpoints are the
 # abuse target, so the gateway caps them per caller. 10 requests / 60 s per
 # IP is a headroom-rich ceiling above the one-user flow (register + verify +
@@ -108,6 +114,10 @@ class Settings:
     redis_url: str = DEFAULT_REDIS_URL
     redis_consent_ttl_seconds: int = DEFAULT_REDIS_CONSENT_TTL_SECONDS
     redis_directory_ttl_seconds: int = DEFAULT_REDIS_DIRECTORY_TTL_SECONDS
+    # Directory result cap (PHASE-6 T2, #324): the top-N bound applied after
+    # distance ordering in ``search_directory`` (both the in-scope and fallback
+    # paths), so a patient's list tops out at the meaningful nearest matches.
+    directory_max_results: int = DEFAULT_DIRECTORY_MAX_RESULTS
     # The stub flag for audit retention (GAP-011): 0 means no expiry today; the
     # future 2555-day (7-year) policy is a one-line env change, never a code change.
     audit_retention_days: int = DEFAULT_AUDIT_RETENTION_DAYS
@@ -211,6 +221,8 @@ class Settings:
             raise ValueError("redis_consent_ttl_seconds must be positive")
         if self.redis_directory_ttl_seconds <= 0:
             raise ValueError("redis_directory_ttl_seconds must be positive")
+        if self.directory_max_results <= 0:
+            raise ValueError("directory_max_results must be positive")
         if self.audit_retention_days < 0:
             raise ValueError("audit_retention_days must be zero or positive (0 = no expiry)")
         if self.gateway_access_token_ttl_seconds <= 0:
@@ -344,6 +356,7 @@ def get_settings() -> Settings:
         redis_directory_ttl_seconds=_env_int(
             "REDIS_DIRECTORY_TTL_SECONDS", DEFAULT_REDIS_DIRECTORY_TTL_SECONDS
         ),
+        directory_max_results=_env_int("DIRECTORY_MAX_RESULTS", DEFAULT_DIRECTORY_MAX_RESULTS),
         audit_retention_days=_env_int("AUDIT_RETENTION_DAYS", DEFAULT_AUDIT_RETENTION_DAYS),
         cors_allowed_origins=_env_csv("CORS_ALLOWED_ORIGINS"),
         demo_mode=_env_bool("DEMO_MODE", False),
