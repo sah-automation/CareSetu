@@ -138,8 +138,9 @@ PERI_URBAN_RADIUS_KM = 25.0
 
 # The launch directory's default origin (parent #306, FEAT-004): when the
 # anonymous patient does not supply a geo point, distance sort anchors on the
-# Daltonganj centre (the beachhead city, REQ-008). Matches the coordinates the
-# partner integration suite uses for the city.
+# Daltonganj centre (the beachhead city, REQ-008). Single test-visible source
+# for the centre coordinates - the directory test suites import these rather
+# than duplicating the literals.
 DALTONGANJ_LATITUDE = 24.04
 DALTONGANJ_LONGITUDE = 84.07
 

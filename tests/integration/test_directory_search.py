@@ -46,9 +46,10 @@ from modules.partner.facade import DALTONGANJ_LATITUDE, DALTONGANJ_LONGITUDE, Pa
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_INI = REPO_ROOT / "apps" / "backend" / "alembic.ini"
 
-# An active partner a little outside the peri-urban scope (~95 km east).
+# An active partner a little outside the peri-urban scope (~95 km north on the
+# Daltonganj meridian - distance from the centre exceeds PERI_URBAN_RADIUS_KM).
 _FAR_LATITUDE = 24.90
-_FAR_LONGITUDE = 84.07
+_FAR_LONGITUDE = DALTONGANJ_LONGITUDE
 
 _identity_ids = count(1001)
 

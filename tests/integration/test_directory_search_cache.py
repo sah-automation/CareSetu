@@ -39,7 +39,7 @@ import modules.partner.directory_cache as directory_cache
 from modules.iam.adapters.sms import MockSmsAdapter
 from modules.iam.facade import IamFacade
 from modules.partner.adapters.artifact_store import CredentialArtifactStore
-from modules.partner.facade import PartnerFacade
+from modules.partner.facade import DALTONGANJ_LATITUDE, DALTONGANJ_LONGITUDE, PartnerFacade
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_INI = REPO_ROOT / "apps" / "backend" / "alembic.ini"
@@ -298,8 +298,9 @@ async def test_credential_purge_flushes_cache(
                             "(identity_id, partner_type, status, practice_name, practice_address, "
                             " practice_latitude, practice_longitude) "
                             "VALUES (9001, 'doctor', 'Rejected', 'Dr. Purged', "
-                            " 'integration test address', 24.04, 84.07) RETURNING id"
-                        )
+                            " 'integration test address', :latitude, :longitude) RETURNING id"
+                        ),
+                        {"latitude": DALTONGANJ_LATITUDE, "longitude": DALTONGANJ_LONGITUDE},
                     )
                 ).scalar_one()
             )

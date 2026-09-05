@@ -17,6 +17,8 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from modules.partner.facade import (
+    DALTONGANJ_LATITUDE,
+    DALTONGANJ_LONGITUDE,
     DirectoryEntry,
     DirectorySearchView,
 )
@@ -70,8 +72,8 @@ def test_search_forwards_typed_filters_and_geo() -> None:
             "q": "Sharma",
             "partner_type": "doctor",
             "specialty": "General Physician",
-            "lat": 24.04,
-            "lng": 84.07,
+            "lat": DALTONGANJ_LATITUDE,
+            "lng": DALTONGANJ_LONGITUDE,
         },
     )
 
@@ -81,8 +83,8 @@ def test_search_forwards_typed_filters_and_geo() -> None:
             "query": "Sharma",
             "partner_type": "doctor",
             "specialty": "General Physician",
-            "latitude": 24.04,
-            "longitude": 84.07,
+            "latitude": DALTONGANJ_LATITUDE,
+            "longitude": DALTONGANJ_LONGITUDE,
         }
     ]
 

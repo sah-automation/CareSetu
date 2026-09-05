@@ -29,6 +29,7 @@ from modules.partner.directory_cache import (
     invalidate_directory_cache,
     set_cached_search,
 )
+from modules.partner.facade import DALTONGANJ_LATITUDE, DALTONGANJ_LONGITUDE
 
 
 class _FakeRedis:
@@ -78,8 +79,8 @@ def test_cache_key_covers_query_filters_geo_and_expanded_flag() -> None:
         query="sharma",
         partner_type="doctor",
         specialty="General Physician",
-        latitude=24.04,
-        longitude=84.07,
+        latitude=DALTONGANJ_LATITUDE,
+        longitude=DALTONGANJ_LONGITUDE,
         expanded=False,
     )
     assert base.startswith("directory:")
@@ -87,24 +88,24 @@ def test_cache_key_covers_query_filters_geo_and_expanded_flag() -> None:
         query="mehta",
         partner_type="doctor",
         specialty="General Physician",
-        latitude=24.04,
-        longitude=84.07,
+        latitude=DALTONGANJ_LATITUDE,
+        longitude=DALTONGANJ_LONGITUDE,
         expanded=False,
     )
     assert base != _cache_key(
         query="sharma",
         partner_type="lab",
         specialty=None,
-        latitude=24.04,
-        longitude=84.07,
+        latitude=DALTONGANJ_LATITUDE,
+        longitude=DALTONGANJ_LONGITUDE,
         expanded=False,
     )
     assert base != _cache_key(
         query="sharma",
         partner_type="doctor",
         specialty="General Physician",
-        latitude=24.10,
-        longitude=84.07,
+        latitude=DALTONGANJ_LATITUDE + 0.06,
+        longitude=DALTONGANJ_LONGITUDE,
         expanded=False,
     )
     # The peri-urban and wider-area variants of the identical query/filters/geo
@@ -113,8 +114,8 @@ def test_cache_key_covers_query_filters_geo_and_expanded_flag() -> None:
         query="sharma",
         partner_type="doctor",
         specialty="General Physician",
-        latitude=24.04,
-        longitude=84.07,
+        latitude=DALTONGANJ_LATITUDE,
+        longitude=DALTONGANJ_LONGITUDE,
         expanded=True,
     )
 
@@ -126,8 +127,8 @@ async def test_get_returns_none_when_client_missing() -> None:
             query=None,
             partner_type=None,
             specialty=None,
-            latitude=24.04,
-            longitude=84.07,
+            latitude=DALTONGANJ_LATITUDE,
+            longitude=DALTONGANJ_LONGITUDE,
             expanded=False,
         )
         is None
@@ -141,8 +142,8 @@ async def test_set_is_noop_when_client_missing() -> None:
         query="sharma",
         partner_type=None,
         specialty=None,
-        latitude=24.04,
-        longitude=84.07,
+        latitude=DALTONGANJ_LATITUDE,
+        longitude=DALTONGANJ_LONGITUDE,
         expanded=False,
         raw_items=[],
         fell_back=False,
@@ -168,8 +169,8 @@ async def test_set_then_get_round_trips_view_with_ttl() -> None:
         query="sharma",
         partner_type="doctor",
         specialty="General Physician",
-        latitude=24.04,
-        longitude=84.07,
+        latitude=DALTONGANJ_LATITUDE,
+        longitude=DALTONGANJ_LONGITUDE,
         expanded=False,
         raw_items=raw_items,
         fell_back=False,
@@ -184,8 +185,8 @@ async def test_set_then_get_round_trips_view_with_ttl() -> None:
         query="sharma",
         partner_type="doctor",
         specialty="General Physician",
-        latitude=24.04,
-        longitude=84.07,
+        latitude=DALTONGANJ_LATITUDE,
+        longitude=DALTONGANJ_LONGITUDE,
         expanded=False,
     )
     assert cached is not None
@@ -201,8 +202,8 @@ async def test_restored_view_matches_only_the_exact_key() -> None:
         query="sharma",
         partner_type="doctor",
         specialty=None,
-        latitude=24.04,
-        longitude=84.07,
+        latitude=DALTONGANJ_LATITUDE,
+        longitude=DALTONGANJ_LONGITUDE,
         expanded=False,
         raw_items=[],
         fell_back=False,
@@ -214,8 +215,8 @@ async def test_restored_view_matches_only_the_exact_key() -> None:
             query="mehta",
             partner_type="doctor",
             specialty=None,
-            latitude=24.04,
-            longitude=84.07,
+            latitude=DALTONGANJ_LATITUDE,
+            longitude=DALTONGANJ_LONGITUDE,
             expanded=False,
         )
         is None
@@ -224,8 +225,12 @@ async def test_restored_view_matches_only_the_exact_key() -> None:
 
 async def test_invalidation_flushes_directory_namespace_only() -> None:
     store: dict[str, str] = {
-        "directory:sharma:doctor:::24.040000:84.070000:0": '{"items": []}',
-        "directory:sharma:doctor:::24.040000:84.070000:1": '{"items": []}',
+        f"directory:sharma:doctor:::{DALTONGANJ_LATITUDE:.6f}:{DALTONGANJ_LONGITUDE:.6f}:0": (
+            '{"items": []}'
+        ),
+        f"directory:sharma:doctor:::{DALTONGANJ_LATITUDE:.6f}:{DALTONGANJ_LONGITUDE:.6f}:1": (
+            '{"items": []}'
+        ),
         "consent:33:prescriptions:doctor:ch-1": "1",
     }
     _install(_FakeRedis(store))
@@ -256,8 +261,8 @@ async def test_read_failure_degrades_to_miss() -> None:
             query="sharma",
             partner_type=None,
             specialty=None,
-            latitude=24.04,
-            longitude=84.07,
+            latitude=DALTONGANJ_LATITUDE,
+            longitude=DALTONGANJ_LONGITUDE,
             expanded=False,
         )
         is None
@@ -274,8 +279,8 @@ async def test_write_failure_is_silent() -> None:
         query="sharma",
         partner_type=None,
         specialty=None,
-        latitude=24.04,
-        longitude=84.07,
+        latitude=DALTONGANJ_LATITUDE,
+        longitude=DALTONGANJ_LONGITUDE,
         expanded=False,
         raw_items=[],
         fell_back=False,
