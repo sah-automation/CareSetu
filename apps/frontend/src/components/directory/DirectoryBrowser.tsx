@@ -6,7 +6,7 @@
 // partner type and doctor specialty, result cards with the truthful verified
 // tick, and the wider-area fallback labelled honestly "outside your area"
 // with every other filter preserved (glossary). Type-preset variants and
-// homepage wiring are out of scope (#318).
+// homepage wiring are #318 (T05b) - see the `presetType` prop below.
 //
 // The URL is the single committed source of truth for filters (?type=&q=&
 // specialty=): chips and the search submit replace the query params, and the
@@ -14,6 +14,11 @@
 // navigable. The only state the URL does not hold is the typed-but-unsubmitted
 // query in the input, which is intentionally uncontrolled (keyed by the
 // committed query, so external changes remount it fresh without an effect).
+//
+// `presetType` (T05b): a type-preset variant route (/doctors, /labs,
+// /chemists) pins the partner type - the URL's `type` param is ignored, the
+// type-filter chip row is suppressed (the route *is* the type filter), and
+// commits stay on the variant route instead of /directory.
 
 import { useEffect, useState, type FormEvent } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -28,6 +33,7 @@ import {
   type Specialty,
 } from "@/lib/directory/search";
 import { DIRECTORY_ROUTE, type ProviderType } from "@/lib/directory/links";
+import { DIRECTORY_VARIANT_ROUTES } from "@/lib/directory/links";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 
@@ -80,13 +86,20 @@ const chipClass = (active: boolean) =>
       : "border-hairline bg-surface text-txt-sub"
   }`;
 
-export function DirectoryBrowser() {
+export function DirectoryBrowser({
+  presetType,
+}: {
+  /** T05b: pin the partner type on a variant route (/doctors, /labs,
+   * /chemists). The URL's `type` param is ignored while set. */
+  presetType?: ProviderType;
+}) {
   const { lang } = useLang();
   const t = STRINGS[lang].directory;
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  const committedType = parseProviderType(searchParams.get("type"));
+  const committedType =
+    presetType ?? parseProviderType(searchParams.get("type"));
   const committedSpecialty = parseSpecialty(searchParams.get("specialty"));
   const committedQuery = searchParams.get("q") ?? "";
 
@@ -123,7 +136,9 @@ export function DirectoryBrowser() {
   }, [committedQuery, committedType, committedSpecialty, retryNonce]);
 
   /** Replace the committed filter params on the URL (history replace - chip
-   * toggling must not spam the history stack). */
+   * toggling must not spam the history stack). On a type-preset variant the
+   * commits stay on the variant route, dropping the pinned `type` from the
+   * URL. */
   function commitFilters(next: {
     type?: ProviderType | null;
     specialty?: Specialty | null;
@@ -135,14 +150,19 @@ export function DirectoryBrowser() {
       if (value === null || value === "") params.delete(key);
       else params.set(key, value);
     };
-    apply("type", next.type === undefined ? undefined : next.type);
+    // On a type-preset variant the type is fixed by the route itself - any
+    // stale `type` param is scrubbed from the URL on commit.
+    apply("type", presetType ? null : next.type);
     apply(
       "specialty",
       next.specialty === undefined ? undefined : next.specialty,
     );
     apply("q", next.q === undefined ? undefined : next.q);
     const qs = params.toString();
-    router.replace(qs ? `${DIRECTORY_ROUTE}?${qs}` : DIRECTORY_ROUTE);
+    const base = presetType
+      ? DIRECTORY_VARIANT_ROUTES[presetType]
+      : DIRECTORY_ROUTE;
+    router.replace(qs ? `${base}?${qs}` : base);
   }
 
   function selectType(type: ProviderType | null) {
@@ -218,32 +238,38 @@ export function DirectoryBrowser() {
         role="group"
         aria-label={t.filtersLabel}
       >
-        <button
-          type="button"
-          data-testid="type-chip"
-          data-active={typeKey === "$all"}
-          aria-pressed={typeKey === "$all"}
-          onClick={() => selectType(null)}
-          className={chipClass(typeKey === "$all")}
-        >
-          {t.typeAll}
-        </button>
-        {PROVIDER_TYPES.map((type) => {
-          const active = typeKey === type;
-          return (
+        {/* Type chips are a /directory (all-types) concern: on a type-preset
+            variant route the route itself is the type filter. */}
+        {!presetType && (
+          <>
             <button
-              key={type}
               type="button"
               data-testid="type-chip"
-              data-active={active}
-              aria-pressed={active}
-              onClick={() => selectType(active ? null : type)}
-              className={chipClass(active)}
+              data-active={typeKey === "$all"}
+              aria-pressed={typeKey === "$all"}
+              onClick={() => selectType(null)}
+              className={chipClass(typeKey === "$all")}
             >
-              {t[TYPE_LABEL_KEY[type]]}
+              {t.typeAll}
             </button>
-          );
-        })}
+            {PROVIDER_TYPES.map((type) => {
+              const active = typeKey === type;
+              return (
+                <button
+                  key={type}
+                  type="button"
+                  data-testid="type-chip"
+                  data-active={active}
+                  aria-pressed={active}
+                  onClick={() => selectType(active ? null : type)}
+                  className={chipClass(active)}
+                >
+                  {t[TYPE_LABEL_KEY[type]]}
+                </button>
+              );
+            })}
+          </>
+        )}
 
         {showSpecialtyChips && (
           <>

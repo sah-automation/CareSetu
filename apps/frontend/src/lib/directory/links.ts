@@ -12,6 +12,16 @@ export const PATIENT_LOGIN_ROUTE = "/login";
 // directory filters, chips/tiles presets, and registration presets.
 export type ProviderType = "doctor" | "lab" | "chemist";
 
+// PHASE-6 T05b (#318): canonical URL for each type-preset directory variant
+// (blueprint §2.1 public URL group). The /directory route stays the
+// type-mutable "all" browse surface; these routes pin the type for SEO and
+// per-type deep links.
+export const DIRECTORY_VARIANT_ROUTES: Record<ProviderType, string> = {
+  doctor: "/doctors",
+  lab: "/labs",
+  chemist: "/chemists",
+};
+
 // Directory links pre-seed filters (blueprint §3.1): tiles/chips carry the
 // provider type plus, for chips, the specialty as the free-text query.
 export function directoryHref(

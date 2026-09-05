@@ -4,7 +4,13 @@
 // the honest wider-area fallback that keeps all other filters (glossary), and
 // loading/empty/error states.
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { useSyncExternalStore } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -275,6 +281,89 @@ describe("DirectoryBrowser filters as URL source of truth", () => {
     expect(screen.getByTestId("directory-heading")).toHaveTextContent(
       "Find chemists near you",
     );
+  });
+});
+
+describe("DirectoryBrowser type-preset variants (T05b)", () => {
+  it("pins the partner type from the preset and searches with it", async () => {
+    searchDirectory.mockResolvedValueOnce(view([doctor(1, "Dr. A. Kumar")]));
+
+    render(<DirectoryBrowser presetType="doctor" />);
+
+    await screen.findByTestId("directory-cards");
+    expect(searchDirectory).toHaveBeenCalledWith({
+      q: "",
+      partnerType: "doctor",
+      specialty: null,
+    });
+    // The route is the type filter: heading types the preset and the type
+    // chip row is suppressed.
+    expect(screen.getByTestId("directory-heading")).toHaveTextContent(
+      "Find doctors near you",
+    );
+    expect(screen.queryAllByTestId("type-chip")).toHaveLength(0);
+    // Doctor presets keep the specialty chips for narrowing.
+    expect(screen.getAllByTestId("specialty-chip").length).toBeGreaterThan(0);
+  });
+
+  it("keeps search and specialty commits on the variant route", async () => {
+    searchDirectory.mockResolvedValue(view([doctor(1, "Dr. Smile")]));
+
+    render(<DirectoryBrowser presetType="doctor" />);
+    await screen.findByTestId("directory-cards");
+
+    fireEvent.change(screen.getByRole("searchbox"), {
+      target: { value: "  heart  " },
+    });
+    fireEvent.submit(screen.getByRole("search"));
+
+    expect(mockReplace).toHaveBeenCalledWith("/doctors?q=heart");
+    expect(searchDirectory).toHaveBeenLastCalledWith({
+      q: "heart",
+      partnerType: "doctor",
+      specialty: null,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Dentist" }));
+
+    // The specialty commit preserves the already-committed query - the URL
+    // stays the single source of truth for every filter.
+    expect(mockReplace).toHaveBeenCalledWith(
+      "/doctors?q=heart&specialty=Dentist",
+    );
+    expect(searchDirectory).toHaveBeenLastCalledWith({
+      q: "heart",
+      partnerType: "doctor",
+      specialty: "Dentist",
+    });
+  });
+
+  it("suppresses specialty chips on a non-doctor preset", () => {
+    searchDirectory.mockResolvedValue(view([]));
+
+    render(<DirectoryBrowser presetType="chemist" />);
+
+    expect(screen.getByTestId("directory-heading")).toHaveTextContent(
+      "Find chemists near you",
+    );
+    expect(screen.queryAllByTestId("type-chip")).toHaveLength(0);
+    expect(screen.queryAllByTestId("specialty-chip")).toHaveLength(0);
+  });
+
+  it("ignores a URL type param while a preset pins the type", async () => {
+    navigation.setParams(new URLSearchParams("type=lab"));
+    searchDirectory.mockResolvedValueOnce(view([]));
+
+    render(<DirectoryBrowser presetType="doctor" />);
+
+    await waitFor(() =>
+      expect(searchDirectory).toHaveBeenCalledWith({
+        q: "",
+        partnerType: "doctor",
+        specialty: null,
+      }),
+    );
+    expect(screen.queryAllByTestId("type-chip")).toHaveLength(0);
   });
 });
 
