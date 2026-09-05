@@ -24,6 +24,9 @@ DEFAULT_WHATSAPP_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 30.0
 # absent or unhealthy. p95 < 50 ms SLA on the hot path.
 DEFAULT_REDIS_URL = ""
 DEFAULT_REDIS_CONSENT_TTL_SECONDS = 300
+# Redis directory-search result cache (PHASE-6 T02b, #314): optional, same SQL
+# fallback + accelerator-only discipline (ADR-0011). p95 < 250 ms cached target.
+DEFAULT_REDIS_DIRECTORY_TTL_SECONDS = 300
 # Auth-surface rate limit (``NFR-SEC-004``): the OTP/auth endpoints are the
 # abuse target, so the gateway caps them per caller. 10 requests / 60 s per
 # IP is a headroom-rich ceiling above the one-user flow (register + verify +
@@ -98,6 +101,7 @@ class Settings:
     )
     redis_url: str = DEFAULT_REDIS_URL
     redis_consent_ttl_seconds: int = DEFAULT_REDIS_CONSENT_TTL_SECONDS
+    redis_directory_ttl_seconds: int = DEFAULT_REDIS_DIRECTORY_TTL_SECONDS
     # The stub flag for audit retention (GAP-011): 0 means no expiry today; the
     # future 2555-day (7-year) policy is a one-line env change, never a code change.
     audit_retention_days: int = DEFAULT_AUDIT_RETENTION_DAYS
@@ -196,6 +200,8 @@ class Settings:
             )
         if self.redis_consent_ttl_seconds <= 0:
             raise ValueError("redis_consent_ttl_seconds must be positive")
+        if self.redis_directory_ttl_seconds <= 0:
+            raise ValueError("redis_directory_ttl_seconds must be positive")
         if self.audit_retention_days < 0:
             raise ValueError("audit_retention_days must be zero or positive (0 = no expiry)")
         if self.gateway_access_token_ttl_seconds <= 0:
@@ -325,6 +331,9 @@ def get_settings() -> Settings:
         redis_url=os.environ.get("REDIS_URL", DEFAULT_REDIS_URL),
         redis_consent_ttl_seconds=_env_int(
             "REDIS_CONSENT_TTL_SECONDS", DEFAULT_REDIS_CONSENT_TTL_SECONDS
+        ),
+        redis_directory_ttl_seconds=_env_int(
+            "REDIS_DIRECTORY_TTL_SECONDS", DEFAULT_REDIS_DIRECTORY_TTL_SECONDS
         ),
         audit_retention_days=_env_int("AUDIT_RETENTION_DAYS", DEFAULT_AUDIT_RETENTION_DAYS),
         cors_allowed_origins=_env_csv("CORS_ALLOWED_ORIGINS"),

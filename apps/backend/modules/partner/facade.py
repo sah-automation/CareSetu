@@ -57,6 +57,11 @@ from bus.outbox_writer import write_outbox
 from modules.audit.facade import AuditFacade
 from modules.iam.facade import IamFacade
 from modules.partner.adapters.artifact_store import CredentialArtifactStore
+from modules.partner.directory_cache import (
+    get_cached_search,
+    invalidate_directory_cache,
+    set_cached_search,
+)
 from modules.partner.domain.credentials import CredentialType
 from modules.partner.domain.events import (
     PartnerType,
@@ -780,6 +785,7 @@ class PartnerFacade:
         re_submission_max: int = 3,
         re_submission_cooldown_days: int = 30,
         credential_cleanup_days: int = 30,
+        directory_ttl_seconds: int = 0,
         clock: Callable[[], datetime] = _default_clock,
     ) -> None:
         self._engine = engine
@@ -805,6 +811,11 @@ class PartnerFacade:
         # days out, and ``purge_expired_credentials`` deletes the documents after
         # it lapses. Config-injected like the throttle above (spec-pinned at 30).
         self._credential_cleanup_days = credential_cleanup_days
+        # Directory-search result cache TTL (PHASE-6 T02b, #314): the accelerator
+        # only gates on Redis being available; ``0`` (the boot default when no
+        # Settings-level TTL is injected) disables caching entirely so the unit
+        # tier and callers that never set it stay SQL-only.
+        self._directory_ttl_seconds = directory_ttl_seconds
         # The injectable clock that schedules the 30-day window (overridden by
         # ``MutableClock`` in tests to walk the boundary). Mirrors the iam
         # facades' ``clock`` convention.
@@ -1336,6 +1347,11 @@ class PartnerFacade:
                     PARTNER_OUTBOX_TABLE,
                     partner_activated_envelope(partner_id, profile.identity_id, decision_by),
                 )
+                # PHASE-6 T02b (#314): activation changes which partners a
+                # directory search can return, so every cached search result is
+                # now potentially stale. Flush the namespace (best-effort Redis
+                # op - failure silently degrades to the lazy-correct read path).
+                await invalidate_directory_cache()
             else:
                 await write_outbox(
                     connection,
@@ -1391,6 +1407,10 @@ class PartnerFacade:
                             reason=resolved_reason or "reverification_failed",
                         ),
                     )
+                    # PHASE-6 T02b (#314): the credential invalidation deindexes
+                    # this partner, making every cached search result potentially
+                    # stale. Flush the namespace (best-effort, silent on failure).
+                    await invalidate_directory_cache()
             return PartnerView(
                 partner_id=partner_id,
                 status=next_state.status.value,
@@ -1576,6 +1596,24 @@ class PartnerFacade:
         """
         latitude = DALTONGANJ_LATITUDE if latitude is None else latitude
         longitude = DALTONGANJ_LONGITUDE if longitude is None else longitude
+
+        # PHASE-6 T02b (#314): the Redis accelerator, layered on top of the
+        # working SQL core. Redis is never a correctness surface (ADR-0011 lazy
+        # correctness) - on a cache hit we re-derive validity of the cached
+        # partner ids against the recorded dates; any invalidation/expiry drops
+        # the hit and recomputes SQL, so a stale row for a deactivated or
+        # expired partner never surfaces.
+        cached = await self._cached_search_view(
+            query=query,
+            partner_type=partner_type,
+            specialty=specialty,
+            latitude=latitude,
+            longitude=longitude,
+            patient_id=patient_id,
+        )
+        if cached is not None:
+            return cached
+
         distance_km = _haversine_km(latitude, longitude)
 
         def _conditions(peri_urban_only: bool) -> list[Any]:
@@ -1635,7 +1673,7 @@ class PartnerFacade:
                 ),
             )
 
-        return DirectorySearchView(
+        view = DirectorySearchView(
             fell_back=fell_back,
             items=[
                 DirectoryEntry(
@@ -1651,6 +1689,127 @@ class PartnerFacade:
                 for row in rows
             ],
         )
+        if self._directory_ttl_seconds > 0:
+            await set_cached_search(
+                query=query,
+                partner_type=partner_type,
+                specialty=specialty,
+                latitude=latitude,
+                longitude=longitude,
+                expanded=fell_back,
+                raw_items=[entry.model_dump() for entry in view.items],
+                fell_back=fell_back,
+                ttl_seconds=self._directory_ttl_seconds,
+            )
+        return view
+
+    async def _cached_search_view(
+        self,
+        *,
+        query: str | None,
+        partner_type: str | None,
+        specialty: str | None,
+        latitude: float,
+        longitude: float,
+        patient_id: int | None,
+    ) -> DirectorySearchView | None:
+        """Try the Redis accelerator for one search, re-deriving validity first.
+
+        PHASE-6 T02b (#314): the cache is an accelerator ONLY, never a
+        correctness surface (ADR-0011 lazy correctness). On a hit we re-derive
+        the visibility tick for the cached partner ids from the recorded dates
+        (``is_active``, ``Active`` status, verified/unexpired/unrevoked
+        credentials); if ANY cached partner no longer passes - deactivated,
+        revoked, expired, or unverified since the row was written - the hit is
+        rejected and the caller recomputes fresh SQL, so a stale row for a
+        deactivated/expired partner never surfaces. On a clean hit the cached
+        items are served as-is (their geo/distance already match the cached
+        key) and the ``directory.search`` analytics event still fires (one per
+        search - a cached search is still a real search).
+
+        Returns ``None`` when caching is disabled, the cache missed for both
+        expanded variants, or the cached ids no longer all pass validity.
+        """
+        if self._directory_ttl_seconds <= 0:
+            return None
+        cached = await get_cached_search(
+            query=query,
+            partner_type=partner_type,
+            specialty=specialty,
+            latitude=latitude,
+            longitude=longitude,
+            expanded=False,
+        )
+        raw_items: list[dict[str, Any]]
+        fell_back: bool
+        if cached is not None:
+            raw_items, fell_back = cached
+        else:
+            cached = await get_cached_search(
+                query=query,
+                partner_type=partner_type,
+                specialty=specialty,
+                latitude=latitude,
+                longitude=longitude,
+                expanded=True,
+            )
+            if cached is None:
+                return None
+            raw_items, fell_back = cached
+
+        partner_ids = sorted({int(item["partner_id"]) for item in raw_items})
+        async with self._engine.begin() as connection:
+            if not await self._cached_ids_still_valid(connection, partner_ids):
+                return None
+            await write_outbox(
+                connection,
+                PARTNER_SCHEMA,
+                PARTNER_OUTBOX_TABLE,
+                directory_search_envelope(
+                    patient_id=patient_id,
+                    query=query,
+                    partner_type=partner_type,
+                    specialty=specialty,
+                    result_count=len(raw_items),
+                    fell_back=fell_back,
+                ),
+            )
+        return DirectorySearchView(
+            fell_back=fell_back,
+            items=[DirectoryEntry(**item) for item in raw_items],
+        )
+
+    async def _cached_ids_still_valid(
+        self, connection: AsyncConnection, partner_ids: list[int]
+    ) -> bool:
+        """Whether every cached partner id still passes the visibility tick.
+
+        The one re-derivation the cache hit is allowed to skip is the distance
+        scan - the validity of each id is ALWAYS re-checked against the recorded
+        dates (ADR-0011), so a cached row can never surface a deactivated or
+        expired partner.
+        """
+        if not partner_ids:
+            return True
+        valid_count = int(
+            (
+                await connection.execute(
+                    select(func.count(partner_directory_index.c.partner_id))
+                    .join(
+                        partner_profiles,
+                        partner_profiles.c.id == partner_directory_index.c.partner_id,
+                    )
+                    .where(
+                        partner_directory_index.c.partner_id.in_(partner_ids),
+                        partner_directory_index.c.is_active.is_(True),
+                        partner_profiles.c.status == "Active",
+                        _has_any_credential(partner_directory_index.c.partner_id),
+                        ~_has_invalid_credential(partner_directory_index.c.partner_id),
+                    )
+                )
+            ).scalar_one()
+        )
+        return valid_count == len(partner_ids)
 
     async def get_verification_detail(
         self, partner_id: int, actor_id: int
@@ -1842,4 +2001,9 @@ class PartnerFacade:
                     ),
                 )
                 deleted.append(credential_id)
+            if deleted:
+                # PHASE-6 T02b (#314): credential close-out makes every cached
+                # directory search result potentially stale. The namespace flush
+                # fires once per purge run (best-effort, silent on failure).
+                await invalidate_directory_cache()
             return deleted
