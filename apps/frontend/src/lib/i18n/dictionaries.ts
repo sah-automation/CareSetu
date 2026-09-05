@@ -423,6 +423,53 @@ const en = {
     },
   },
 
+  // directory.* surface - PHASE-6 T05a (#317), the public /directory browse
+  // page (blueprint §3.1 row 2 look, PROTO-PHASE-6 finalized views are the
+  // visual binding). Copy rules baked in: the location indicator is the fixed
+  // launch beachhead (REQ-008) - never promise multi-city search; filters are
+  // provider type + doctor specialty (closed pick-list), never disease
+  // browsing (G1); the wider-area fallback labels results honestly "outside
+  // your area" with every other filter preserved (glossary).
+  directory: {
+    heading: {
+      all: "Find verified care near you",
+      doctor: "Find doctors near you",
+      lab: "Find labs near you",
+      chemist: "Find chemists near you",
+    },
+    subtitle:
+      "Only activated providers with valid credentials are listed, sorted by distance.",
+    searchLabel: "Search providers",
+    searchPlaceholder: "Search by name or specialty",
+    searchCta: "Search",
+    filtersLabel: "Filter by provider type and specialty",
+    typeAll: "All",
+    typeDoctor: "Doctors",
+    typeLab: "Labs",
+    typeChemist: "Chemists",
+    specialties: {
+      generalPhysician: "General Physician",
+      pediatrician: "Pediatrician",
+      gynecologist: "Gynecologist",
+      dentist: "Dentist",
+    },
+    verified: "Verified",
+    locationDaltonganj: "Daltonganj",
+    distanceKm: (km: string) => `${km} km`,
+    resultsCount: (n: number) =>
+      `${n} ${n === 1 ? "provider" : "providers"} found`,
+    loading: "Searching providers...",
+    emptyTitle: "No providers found for this search",
+    emptyBody: "Try broadening your search or check nearby areas.",
+    clearSearch: "Clear search",
+    outsideAreaLabel: "Showing providers outside your area",
+    outsideAreaBody:
+      "Nothing matched within your area with the filters you chose, so here are the nearest available providers. Your filters are kept.",
+    errorTitle: "We could not load the directory",
+    errorBody: "Check your connection and try again.",
+    retry: "Try again",
+  },
+
   // consent.* surface - PHASE-2.6 T12 (#203): the reusable consent-moment
   // bottom sheet (blueprint §5.10, finalized PROTO-PHASE-2.6 view
   // consent-sheet.html). Labels/buttons are component-owned; the per-request
@@ -1185,6 +1232,45 @@ export const STRINGS: Record<Lang, Dictionary> = {
         meta: "\u00a9 CareSetu - डालटनगंज और आसपास के इलाक़ों में",
         operatorConsole: "ऑपरेटर कंसोल",
       },
+    },
+
+    directory: {
+      heading: {
+        all: "अपने आसपास जाँची-परखी देखभाल खोजें",
+        doctor: "अपने आसपास डॉक्टर खोजें",
+        lab: "अपने आसपास लैब खोजें",
+        chemist: "अपने आसपास केमिस्ट खोजें",
+      },
+      subtitle:
+        "केवल सक्रिय और वैध प्रमाण वाले प्रोवाइडर ही सूचीबद्ध होते हैं, दूरी के हिसाब से।",
+      searchLabel: "प्रोवाइडर खोजें",
+      searchPlaceholder: "नाम या विशेषज्ञता से खोजें",
+      searchCta: "खोजें",
+      filtersLabel: "प्रोवाइडर प्रकार और विशेषज्ञता से छाँटें",
+      typeAll: "सभी",
+      typeDoctor: "डॉक्टर",
+      typeLab: "लैब",
+      typeChemist: "केमिस्ट",
+      specialties: {
+        generalPhysician: "जनरल फ़िज़िशियन",
+        pediatrician: "बाल रोग विशेषज्ञ",
+        gynecologist: "स्त्री रोग विशेषज्ञ",
+        dentist: "दंत चिकित्सक",
+      },
+      verified: "सत्यापित",
+      locationDaltonganj: "डालटनगंज",
+      distanceKm: (km: string) => `${km} किमी`,
+      resultsCount: (n: number) => `${n} प्रोवाइडर मिले`,
+      loading: "प्रोवाइडर खोजे जा रहे हैं...",
+      emptyTitle: "इस खोज के लिए कोई प्रोवाइडर नहीं मिला",
+      emptyBody: "अपनी खोज को और व्यापक बनाएँ या आस-पास के इलाक़े देखें।",
+      clearSearch: "खोज साफ़ करें",
+      outsideAreaLabel: "आपके इलाक़े के बाहर के प्रोवाइडर दिखाए जा रहे हैं",
+      outsideAreaBody:
+        "आपके चुने गए फ़िल्टर से आपके इलाक़े में कुछ नहीं मिला, इसलिए नज़दीकी उपलब्ध प्रोवाइडर दिखाए गए हैं। आपके फ़िल्टर वही रखे गए हैं।",
+      errorTitle: "डायरेक्टरी लोड नहीं हो सकी",
+      errorBody: "अपना कनेक्शन जाँचें और फिर कोशिश करें।",
+      retry: "फिर कोशिश करें",
     },
 
     record: {
