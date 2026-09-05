@@ -204,3 +204,16 @@ async def invalidate_directory_cache() -> None:
                 await client.delete(*keys)
             if cursor == 0:
                 break
+
+
+async def directory_visibility_changed() -> None:
+    """Flush the directory cache after any mutation that changes directory visibility.
+
+    The single flush point every directory-visibility mutation (partner
+    activation, credential invalidation on re-verification failure, immediate
+    revocation, the daily expiry close-out pass, and the permanent-rejection
+    purge) funnels through - a visibility change can never be forgotten at one
+    spot. Wraps :func:`invalidate_directory_cache` unchanged: best-effort
+    namespace flush, silent on Redis absence or failure.
+    """
+    await invalidate_directory_cache()

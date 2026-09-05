@@ -73,8 +73,8 @@ from modules.audit.facade import AuditFacade
 from modules.iam.facade import IamFacade
 from modules.partner.adapters.artifact_store import CredentialArtifactStore
 from modules.partner.directory_cache import (
+    directory_visibility_changed,
     get_cached_search,
-    invalidate_directory_cache,
     set_cached_search,
 )
 from modules.partner.domain.credentials import CredentialInvalidatedReason, CredentialType
@@ -1426,7 +1426,7 @@ class PartnerFacade:
                 # directory search can return, so every cached search result is
                 # now potentially stale. Flush the namespace (best-effort Redis
                 # op - failure silently degrades to the lazy-correct read path).
-                await invalidate_directory_cache()
+                await directory_visibility_changed()
             else:
                 await write_outbox(
                     connection,
@@ -1485,7 +1485,7 @@ class PartnerFacade:
                     # PHASE-6 T02b (#314): the credential invalidation deindexes
                     # this partner, making every cached search result potentially
                     # stale. Flush the namespace (best-effort, silent on failure).
-                    await invalidate_directory_cache()
+                    await directory_visibility_changed()
             return PartnerView(
                 partner_id=partner_id,
                 status=next_state.status.value,
@@ -1623,7 +1623,7 @@ class PartnerFacade:
             # PHASE-6 T02b (#314): the credential invalidation deindexes this
             # partner, making every cached search result potentially stale. Flush
             # the namespace (best-effort, silent on failure).
-            await invalidate_directory_cache()
+            await directory_visibility_changed()
             return PartnerView(
                 partner_id=partner_id,
                 status=profile.status,
@@ -1726,7 +1726,7 @@ class PartnerFacade:
             # PHASE-6 T02b (#314): the expiry close-out deindexes every affected
             # partner, making each cached search result potentially stale. Flush
             # the namespace once per pass (best-effort, silent on failure).
-            await invalidate_directory_cache()
+            await directory_visibility_changed()
             return closed
 
     async def list_verification_queue(
@@ -2321,5 +2321,5 @@ class PartnerFacade:
                 # PHASE-6 T02b (#314): credential close-out makes every cached
                 # directory search result potentially stale. The namespace flush
                 # fires once per purge run (best-effort, silent on failure).
-                await invalidate_directory_cache()
+                await directory_visibility_changed()
             return deleted
