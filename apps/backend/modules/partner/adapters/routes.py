@@ -43,8 +43,6 @@ from modules.partner.domain.exceptions import (
     ServiceAreaNotFoundError,
 )
 from modules.partner.facade import (
-    DALTONGANJ_LATITUDE,
-    DALTONGANJ_LONGITUDE,
     CredentialSubmission,
     CredentialSubmissionResult,
     DirectorySearchView,
@@ -87,9 +85,10 @@ async def public_directory_search(
     search ``[Active]`` partners with valid credentials, nearest-first from
     their geo point. ``q`` is free-text over the practice name; ``partner_type``
     and ``specialty`` (doctors only, closed pick-list) filter results; ``lat``/
-    ``lng`` anchor the distance sort and default to the Daltonganj centre. When
-    nothing matches within the peri-urban scope the facade relaxes only the
-    location constraint and flags the view with ``fell_back`` so the client
+    ``lng`` anchor the distance sort. The facade owns the missing-geo default
+    (the Daltonganj centre, REQ-008) - the adapter stays geography-agnostic.
+    When nothing matches within the peri-urban scope the facade relaxes only
+    the location constraint and flags the view with ``fell_back`` so the client
     labels the results "outside your area". No business logic here - filters,
     ordering, the wider-area fallback, and the ``directory.search`` analytics
     event all live in the facade.
@@ -99,8 +98,8 @@ async def public_directory_search(
         query=q,
         partner_type=partner_type,
         specialty=specialty.value if specialty is not None else None,
-        latitude=lat if lat is not None else DALTONGANJ_LATITUDE,
-        longitude=lng if lng is not None else DALTONGANJ_LONGITUDE,
+        latitude=lat,
+        longitude=lng,
     )
 
 

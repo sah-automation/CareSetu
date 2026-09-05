@@ -1544,8 +1544,8 @@ class PartnerFacade:
         query: str | None = None,
         partner_type: str | None = None,
         specialty: str | None = None,
-        latitude: float = DALTONGANJ_LATITUDE,
-        longitude: float = DALTONGANJ_LONGITUDE,
+        latitude: float | None = None,
+        longitude: float | None = None,
         patient_id: int | None = None,
     ) -> DirectorySearchView:
         """Public directory search (MOD-002, FEAT-004, PHASE-6 T02a #313).
@@ -1556,7 +1556,10 @@ class PartnerFacade:
         great-circle distance from the caller's geo point. ``partner_type``
         filters on the closed doctor/lab/chemist enum; ``specialty`` applies the
         closed pick-list and is doctors-only (a non-doctor type with a specialty
-        matches nothing); ``query`` is free-text over the practice name.
+        matches nothing); ``query`` is free-text over the practice name. A
+        missing geo point anchors the sort on the Daltonganj centre - the
+        launch-geography default the callers rely on (REQ-008 decision record;
+        the adapters stay geography-agnostic and let the domain own its default).
 
         The wider-area fallback (glossary): when no entry matches within the
         peri-urban scope, the location constraint alone is relaxed (type,
@@ -1571,6 +1574,8 @@ class PartnerFacade:
         regulated act; anonymous patients have a ``None`` actor). Lab/chemist
         entries always return ``specialty=None``.
         """
+        latitude = DALTONGANJ_LATITUDE if latitude is None else latitude
+        longitude = DALTONGANJ_LONGITUDE if longitude is None else longitude
         distance_km = _haversine_km(latitude, longitude)
 
         def _conditions(peri_urban_only: bool) -> list[Any]:

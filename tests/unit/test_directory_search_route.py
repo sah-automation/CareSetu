@@ -17,8 +17,6 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from modules.partner.facade import (
-    DALTONGANJ_LATITUDE,
-    DALTONGANJ_LONGITUDE,
     DirectoryEntry,
     DirectorySearchView,
 )
@@ -42,8 +40,8 @@ def _client_with(facade: StubDirectoryFacade) -> TestClient:
     return TestClient(app)
 
 
-def test_search_answers_200_without_login_and_defaults_geo() -> None:
-    """Open route: no Authorization header, geo anchored on Daltonganj centre."""
+def test_search_answers_200_without_login_and_passes_geo_through() -> None:
+    """Open route: no Authorization header, no geo - the facade owns the default."""
     facade = StubDirectoryFacade()
     client = _client_with(facade)
 
@@ -56,8 +54,8 @@ def test_search_answers_200_without_login_and_defaults_geo() -> None:
             "query": None,
             "partner_type": None,
             "specialty": None,
-            "latitude": DALTONGANJ_LATITUDE,
-            "longitude": DALTONGANJ_LONGITUDE,
+            "latitude": None,
+            "longitude": None,
         }
     ]
 
