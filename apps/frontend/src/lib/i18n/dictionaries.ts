@@ -470,6 +470,48 @@ const en = {
     retry: "Try again",
   },
 
+  // providerProfile.* surface - PHASE-6 T06 (#312): the public provider
+  // profile at /providers/:id (blueprint §3.1 row 5, PROTO-PHASE-6
+  // doctor-profile.html / partner-profile.html as the visual binding). Shows
+  // only the verified-safe fields the profile API returns - name, partner
+  // type, doctor specialty, service area, the verified indicator and the
+  // verified credential type + expiry labels. `provider` is the display word
+  // legal in this route's copy; `partner` stays the domain word in data.
+  providerProfile: {
+    verifiedByCareSetu: "Verified by CareSetu",
+    verified: "Verified",
+    active: "Active",
+    credentialsHeading: "Credentials",
+    credentialsAndLicensesHeading: "Credentials & licenses",
+    practiceDetailsHeading: "Practice details",
+    detailsHeading: "Details",
+    typeLabel: "Type",
+    specialtyLabel: "Specialty",
+    areaLabel: "Service area",
+    expiresOn: (date: string) => `Expires ${date}`,
+    credentialTypes: {
+      medical_registration: "Medical registration",
+      qualification_certificate: "Qualification certificate",
+      lab_license: "Lab license",
+      accreditation: "Accreditation",
+      drug_license: "Drug license",
+      pharmacist_registration: "Pharmacist registration",
+    },
+    typeDoctor: "Doctor",
+    typeLab: "Laboratory",
+    typeChemist: "Chemist",
+    breadcrumbDirectory: "Directory",
+    loadingProfile: "Loading profile",
+    comingSoon: "Coming soon",
+    comingSoonBody: "Booking and ordering will be available in a future phase.",
+    notFoundTitle: "Provider not found",
+    notFoundBody:
+      "This provider is either not listed in the directory or is no longer active. Only activated and verified providers appear here.",
+    notFoundCta: "Browse the directory",
+    loadError: "We could not load this provider profile.",
+    retry: "Try again",
+  },
+
   // consent.* surface - PHASE-2.6 T12 (#203): the reusable consent-moment
   // bottom sheet (blueprint §5.10, finalized PROTO-PHASE-2.6 view
   // consent-sheet.html). Labels/buttons are component-owned; the per-request
@@ -1270,6 +1312,41 @@ export const STRINGS: Record<Lang, Dictionary> = {
         "आपके चुने गए फ़िल्टर से आपके इलाक़े में कुछ नहीं मिला, इसलिए नज़दीकी उपलब्ध प्रोवाइडर दिखाए गए हैं। आपके फ़िल्टर वही रखे गए हैं।",
       errorTitle: "डायरेक्टरी लोड नहीं हो सकी",
       errorBody: "अपना कनेक्शन जाँचें और फिर कोशिश करें।",
+      retry: "फिर कोशिश करें",
+    },
+
+    providerProfile: {
+      verifiedByCareSetu: "CareSetu द्वारा सत्यापित",
+      verified: "सत्यापित",
+      active: "सक्रिय",
+      credentialsHeading: "प्रमाण",
+      credentialsAndLicensesHeading: "प्रमाण और लाइसेंस",
+      practiceDetailsHeading: "अभ्यास विवरण",
+      detailsHeading: "विवरण",
+      typeLabel: "प्रकार",
+      specialtyLabel: "विशेषज्ञता",
+      areaLabel: "सेवा क्षेत्र",
+      expiresOn: (date: string) => `${date} तक वैध`,
+      credentialTypes: {
+        medical_registration: "मेडिकल पंजीकरण",
+        qualification_certificate: "योग्यता प्रमाणपत्र",
+        lab_license: "लैब लाइसेंस",
+        accreditation: "मान्यता",
+        drug_license: "दवा लाइसेंस",
+        pharmacist_registration: "फार्मासिस्ट पंजीकरण",
+      },
+      typeDoctor: "डॉक्टर",
+      typeLab: "प्रयोगशाला",
+      typeChemist: "केमिस्ट",
+      breadcrumbDirectory: "डायरेक्टरी",
+      loadingProfile: "प्रोफ़ाइल लोड हो रही है",
+      comingSoon: "जल्द आ रहा है",
+      comingSoonBody: "बुकिंग और ऑर्डर एक भविष्य के चरण में उपलब्ध होंगे।",
+      notFoundTitle: "प्रोवाइडर नहीं मिला",
+      notFoundBody:
+        "यह प्रोवाइडर डायरेक्टरी में सूचीबद्ध नहीं है या अब सक्रिय नहीं है। केवल सक्रिय और सत्यापित प्रोवाइडर ही यहाँ दिखाए जाते हैं।",
+      notFoundCta: "डायरेक्टरी देखें",
+      loadError: "यह प्रोवाइडर प्रोफ़ाइल लोड नहीं हो सकी।",
       retry: "फिर कोशिश करें",
     },
 

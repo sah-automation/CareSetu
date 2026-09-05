@@ -13,6 +13,7 @@
 
 import Link from "next/link";
 
+import { providerProfileHref } from "@/lib/directory/links";
 import type { DirectoryEntry } from "@/lib/directory/search";
 
 export function formatDistanceKm(
@@ -51,7 +52,7 @@ export function DirectoryCard({
 
   return (
     <Link
-      href={`/providers/${entry.partner_id}`}
+      href={providerProfileHref(entry.partner_id)}
       data-testid="directory-card"
       className="flex flex-col items-start gap-1 rounded-lg border border-hairline bg-surface p-4 shadow-card transition-shadow hover:shadow-pop"
     >

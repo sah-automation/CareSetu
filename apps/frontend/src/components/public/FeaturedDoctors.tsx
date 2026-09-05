@@ -16,7 +16,7 @@ import {
   fetchFeaturedDoctors,
   type FeaturedDoctor,
 } from "@/lib/directory/featured";
-import { directoryHref } from "@/lib/directory/links";
+import { directoryHref, providerProfileHref } from "@/lib/directory/links";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 
@@ -35,7 +35,7 @@ function DoctorCard({
   const meta = [doctor.specialty, doctor.area].filter(Boolean).join(" \u00b7 ");
   return (
     <Link
-      href={`/providers/${doctor.id}`}
+      href={providerProfileHref(doctor.id)}
       className="flex flex-col items-start gap-1 rounded-lg border border-hairline bg-surface p-4 shadow-card transition-shadow hover:shadow-pop"
     >
       <span className="rounded-full bg-success-soft px-2 py-0.5 text-xs font-medium text-success-text">

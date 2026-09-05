@@ -5,8 +5,16 @@
 // targets are stable when those surfaces ship (brief handoff notes).
 
 export const DIRECTORY_ROUTE = "/directory";
+export const PROVIDER_PROFILE_ROUTE = "/providers";
 export const PROVIDER_REGISTER_ROUTE = "/staff/register";
 export const PATIENT_LOGIN_ROUTE = "/login";
+
+// Builds the public provider-profile href for a partner id (blueprint §3.1
+// row 5, `/providers/:id`). `provider` is the display word legal in this
+// route's copy; `partner` stays the domain word everywhere in data (glossary).
+export function providerProfileHref(partnerId: number): string {
+  return `${PROVIDER_PROFILE_ROUTE}/${partnerId}`;
+}
 
 // The three supply-side provider classes across the whole public chrome -
 // directory filters, chips/tiles presets, and registration presets.
