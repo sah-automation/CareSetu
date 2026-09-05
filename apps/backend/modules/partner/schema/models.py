@@ -170,6 +170,17 @@ partner_credentials = Table(
         "cleanup_due_at",
         postgresql_where=text("cleanup_due_at IS NOT NULL"),
     ),
+    # Partial so the daily expiry close-out sweep (PHASE-6 T04b #316, remediation
+    # #323) touches only live verified candidates instead of scanning the whole
+    # credential table. The close-out marker (``invalidation_reason IS NULL``) is
+    # the sweep's idempotency key, so replayed passes find nothing to scan.
+    Index(
+        "ix_partner_credentials_expiry_due",
+        "expires_at",
+        postgresql_where=text(
+            "expires_at IS NOT NULL AND invalidation_reason IS NULL AND verified"
+        ),
+    ),
 )
 
 
