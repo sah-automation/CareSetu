@@ -46,10 +46,15 @@ from modules.iam.adapters.routes import router as iam_router
 from modules.iam.adapters.sms import MockSmsAdapter, build_sms_adapter
 from modules.iam.facade import IamFacade
 from modules.partner.adapters.artifact_store import build_artifact_store
+from modules.partner.adapters.routes import directory_router
 from modules.partner.adapters.routes import (
     register_error_handlers as register_partner_error_handlers,
 )
 from modules.partner.adapters.routes import router as partner_router
+from modules.partner.directory_cache import (
+    close_directory_redis_client,
+    init_directory_redis_client,
+)
 from modules.partner.facade import PartnerFacade
 
 logger = logging.getLogger(__name__)
@@ -118,10 +123,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        # Initialize Redis client for consent cache
+        # Initialize Redis clients for the consent-status and directory-search
+        # caches (both degrade to SQL when absent/unhealthy)
         await init_redis_client(resolved_settings)
+        await init_directory_redis_client(resolved_settings)
         yield
-        # Close Redis client on shutdown
+        # Close Redis clients on shutdown
+        await close_directory_redis_client()
         await close_redis_client()
 
     app = FastAPI(title="CareSetu API", version="0.1.0", lifespan=lifespan)
@@ -185,6 +193,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         re_submission_max=resolved_settings.partner_re_submission_max,
         re_submission_cooldown_days=resolved_settings.partner_re_submission_cooldown_days,
         credential_cleanup_days=resolved_settings.partner_credential_cleanup_days,
+        directory_ttl_seconds=resolved_settings.redis_directory_ttl_seconds,
+        directory_max_results=resolved_settings.directory_max_results,
     )
 
     # MOD-002/MOD-001 seam (T05, #298): wire the partner-profile identity
@@ -262,6 +272,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(consent_router)
     app.include_router(audit_router)
     app.include_router(partner_router)
+    app.include_router(directory_router)
     register_error_handlers(app)
     register_gateway_error_handlers(app)
     register_health_error_handlers(app)

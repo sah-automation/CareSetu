@@ -25,15 +25,13 @@ const CARDS: FeaturedDoctor[] = [
     id: 1,
     name: "Dr. A. Kumar",
     specialty: "General Physician",
-    consultType: "In-clinic",
     area: "Medininagar Rd",
   },
   {
     id: 2,
     name: "Dr. S. Devi",
     specialty: "Gynecologist",
-    consultType: "Video + clinic",
-    area: "Court Rd",
+    area: null,
   },
 ];
 
@@ -68,13 +66,14 @@ describe("FeaturedDoctors (gap G2)", () => {
     expect(screen.getByText("Dr. A. Kumar")).toBeInTheDocument();
     expect(screen.getByText("Dr. S. Devi")).toBeInTheDocument();
     // Only activated providers are ever returned, so every card shows the
-    // truthful verified indicator (FEAT-004 Rule 1 / FEAT-005).
+    // truthful verified indicator (FEAT-004 Rule 1 / FEAT-005). Meta joins
+    // non-null parts only - the dropped `consultType` never renders, and a
+    // card without an area shows just its specialty.
     expect(screen.getAllByText("Verified")).toHaveLength(2);
     expect(
-      screen.getByText(
-        /General Physician \u00b7 In-clinic \u00b7 Medininagar Rd/,
-      ),
+      screen.getByText(/General Physician \u00b7 Medininagar Rd/),
     ).toBeInTheDocument();
+    expect(screen.getByText("Gynecologist")).toBeInTheDocument();
     // No fake cards means no empty state either.
     expect(screen.queryByTestId("empty-state")).not.toBeInTheDocument();
     // Cards target provider profiles; view-all pre-seeds the directory.

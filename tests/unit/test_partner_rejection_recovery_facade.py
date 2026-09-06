@@ -317,7 +317,7 @@ async def test_submit_credentials_persists_cooldown_deadline_when_throttled() ->
 async def test_submit_credentials_throttles_while_cooldown_in_flight() -> None:
     from modules.partner.domain.exceptions import ReSubmissionThrottledError
 
-    future = _NOW + timedelta(days=5)
+    future = datetime.now(UTC) + timedelta(days=5)
     connection = _connection(
         [
             _FakeResult(

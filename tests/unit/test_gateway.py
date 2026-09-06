@@ -20,6 +20,7 @@ import logging
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Annotated
 
 import pytest
@@ -766,6 +767,63 @@ def test_settings_guard_refuses_non_positive_rate_limit_settings() -> None:
         Settings(gateway_rate_limit_auth_max_requests=0)
     with pytest.raises(ValueError, match="gateway_rate_limit_auth_window_seconds must be positive"):
         Settings(gateway_rate_limit_auth_window_seconds=0)
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 directory config knobs (#324): DIRECTORY_MAX_RESULTS is new and
+# operator-discoverable at boot; REDIS_DIRECTORY_TTL_SECONDS is documented.
+# ---------------------------------------------------------------------------
+
+_ENV_EXAMPLE = Path(__file__).resolve().parents[2] / ".env.example"
+
+
+def test_settings_directory_max_results_defaults_to_50() -> None:
+    assert Settings().directory_max_results == 50
+
+
+def test_settings_directory_max_results_parses_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DIRECTORY_MAX_RESULTS", "100")
+
+    settings = get_settings()
+
+    assert settings.directory_max_results == 100
+
+
+def test_settings_directory_max_results_refuses_non_positive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DIRECTORY_MAX_RESULTS", "0")
+
+    with pytest.raises(ValueError, match="directory_max_results must be positive"):
+        get_settings()
+
+
+def test_settings_directory_max_results_refuses_invalid_int(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DIRECTORY_MAX_RESULTS", "not-a-number")
+
+    with pytest.raises(ValueError):
+        get_settings()
+
+
+def _env_example_text() -> str:
+    return _ENV_EXAMPLE.read_text(encoding="utf-8")
+
+
+def test_env_example_documents_every_phase6_directory_variable() -> None:
+    text = _env_example_text()
+    # Every Phase 6 settings variable must be discoverable at boot: the two
+    # directory knobs (#324) and the credential-expiry sweep cadence (#315).
+    assert "DIRECTORY_MAX_RESULTS=50" in text
+    assert "REDIS_DIRECTORY_TTL_SECONDS=300" in text
+    assert "PARTNER_CREDENTIAL_SWEEP_CRON=" in text
+
+
+def test_env_example_redis_directory_ttl_comments_the_default() -> None:
+    text = _env_example_text()
+    # The 300 default must be called out in a comment so the knob is discoverable.
+    assert "default 300" in text
 
 
 # ---------------------------------------------------------------------------

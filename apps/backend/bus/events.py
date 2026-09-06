@@ -75,6 +75,24 @@ EVENT_CREDENTIAL_INVALIDATED = "credential.invalidated"
 # terminal-status message to SMS on. Operational, deliberately NOT in
 # ``REGULATED_ACT_TYPES``. internal-modules.md §4.2 registry.
 EVENT_NOTIFICATION_FAILED = "notification.failed"
+# MOD-002 (partner): emitted once per public directory search (FEAT-004,
+# PHASE-6 T02a #313) for analytics - records the filters/query, the result
+# count, and whether the wider-area fallback fired. Dot-notation ``directory
+# .search`` per the registry grammar (the PRD's legacy ``directory_search``
+# spelling is the display label; the ``Envelope`` validator enforces
+# ``domain.action``). Deliberately NOT in ``REGULATED_ACT_TYPES`` - this is
+# anonymous product analytics, not a regulated act, and carries no PHI.
+EVENT_DIRECTORY_SEARCH = "directory.search"
+# MOD-002 (partner): emitted once per directory pick - a patient selects a
+# provider from the search results or a profile (FEAT-004 telemetry, PHASE-6 T4
+# #326). Client-initiated product analytics, not a regulated act: carries only
+# the pick facts (picked partner id + partner type, source surface), no actor
+# (the public ingest route is anonymous) and no PHI. Dot-notation
+# ``partner.selected`` per the registry grammar, superseding the PRD's legacy
+# ``provider_selected`` spelling; the ``Envelope`` validator rejects the
+# snake_case form and ``check_event_names.py`` gates it repo-wide. Deliberately
+# NOT in ``REGULATED_ACT_TYPES``.
+EVENT_PARTNER_SELECTED = "partner.selected"
 
 # PHASE-4 T3 (#237): the canonical regulated-act whitelist. MOD-011 appends an
 # ``audit.event`` payload to the hash chain only when its ``event_type`` is

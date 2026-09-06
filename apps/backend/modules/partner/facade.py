@@ -30,6 +30,21 @@ Methods:
   cleanup window has lapsed (still ``[Rejected]``), removes their artifacts, and
   emits ``credential.invalidated`` per credential - one transaction. It is
   invoked by the Phase-6 periodic job; no background scanner lives here.
+- ``invalidate_credential`` (PHASE-6 T04a, #315) is the immediate revocation
+  reach: it records the close-out on the partner's live credential rows
+  (``revoked_at``/``invalidation_reason``), deindexes the directory entry
+  (``is_active = False``), and emits ``credential.invalidated`` - one
+  transaction, mirroring ``purge_expired_credentials`` (ADR-0011). No new
+  lifecycle state: the partner recovers through a fresh verification round.
+- ``close_out_expired_credentials`` (PHASE-6 T04b, #316) is the daily expiry
+  close-out pass (ADR-0011's second, non-scanner mechanism): it finds an
+  ``[Active]`` partner's verified credentials whose recorded ``expires_at`` has
+  passed but have no close-out yet, stamps ``invalidation_reason = 'expired'``
+  (the idempotency marker a replay skips), deindexes the directory entry, and
+  emits ``credential.invalidated`` (reason ``expired``) once per credential -
+  one transaction. Lazy read-hide (``_has_invalid_credential``) is already
+  correct without it; this pass only performs the official event/audit
+  close-out.
 
 Each mutating method writes its envelope into ``partner.partner_outbox`` in the
 SAME transaction as the state change (ADR-0002 §1). The operator review /
@@ -48,7 +63,7 @@ from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -57,14 +72,21 @@ from bus.outbox_writer import write_outbox
 from modules.audit.facade import AuditFacade
 from modules.iam.facade import IamFacade
 from modules.partner.adapters.artifact_store import CredentialArtifactStore
-from modules.partner.domain.credentials import CredentialType
+from modules.partner.directory_cache import (
+    directory_visibility_changed,
+    get_cached_search,
+    set_cached_search,
+)
+from modules.partner.domain.credentials import CredentialInvalidatedReason, CredentialType
 from modules.partner.domain.events import (
     PartnerType,
     credential_invalidated_envelope,
     credential_reviewed_envelope,
+    directory_search_envelope,
     partner_activated_envelope,
     partner_registered_envelope,
     partner_rejected_envelope,
+    partner_selected_envelope,
     verification_started_envelope,
 )
 from modules.partner.domain.exceptions import (
@@ -74,6 +96,7 @@ from modules.partner.domain.exceptions import (
     InvalidQueueStatusError,
     PartnerNotFoundError,
     PartnerNotRejectedError,
+    ProviderProfileNotFoundError,
     RejectionReasonRequiredError,
     ReSubmissionThrottledError,
     ServiceAreaNotFoundError,
@@ -92,6 +115,7 @@ from modules.partner.domain.state_machine import (
 from modules.partner.outbox import PARTNER_OUTBOX_TABLE
 from modules.partner.schema.models import (
     partner_credentials,
+    partner_directory_index,
     partner_profiles,
     partner_service_areas,
     partner_verifications,
@@ -104,6 +128,22 @@ PARTNER_SCHEMA = "partner"
 # v5.4). An unknown explicitly-declared ``service_area_id`` is rejected at the
 # facade (mapped to a 422) so a partner is never attached to a nonexistent area.
 DEFAULT_SERVICE_AREA_NAME = "Daltonganj"
+
+# The peri-urban scope of the Phase-6 launch directory (FEAT-004, REQ-008):
+# Daltonganj plus its surrounding peri-urban belt. Search clamps results to this
+# many km from the patient's geo point; when nothing matches inside it, the
+# wider-area fallback relaxes only the location constraint (filters kept) and
+# labels the results "outside your area". A single km constant - no PostGIS -
+# is the cost-floor SQL range (MOD-002 §4).
+PERI_URBAN_RADIUS_KM = 25.0
+
+# The launch directory's default origin (parent #306, FEAT-004): when the
+# anonymous patient does not supply a geo point, distance sort anchors on the
+# Daltonganj centre (the beachhead city, REQ-008). Single test-visible source
+# for the centre coordinates - the directory test suites import these rather
+# than duplicating the literals.
+DALTONGANJ_LATITUDE = 24.04
+DALTONGANJ_LONGITUDE = 84.07
 
 # The re-submission throttle policy lives in the domain core
 # (:mod:`modules.partner.domain.rejection`): a rejected partner may open at most
@@ -347,6 +387,85 @@ class PartnerVerificationStatusView(BaseModel):
     decided_at: datetime | None
 
 
+class DirectoryEntry(BaseModel):
+    """One public directory search result (FEAT-004, user story 7).
+
+    A verified-safe projection of an ``[Active]`` partner with valid
+    credentials: display name (``practice_name``), partner type, specialty
+    (doctors only), the partner's ``area`` (its recorded service area, with the
+    Daltonganj fallback when none is recorded - the same optionality and
+    derivation the provider profile uses), and the derived ``verified``
+    indicator plus its great-circle ``distance_km`` from the caller's geo
+    point. The tick is always True for a returned row - search visibility and
+    the tick share one derivation, so a separate visibility flag could never
+    drift (ADR-0011 "tick gone = card gone"). Named ``practice_name`` to stay
+    on the partner schema vocabulary; patient-facing clients may render it as
+    the provider's name.
+    """
+
+    partner_id: int
+    practice_name: str | None
+    partner_type: str
+    specialty: str | None
+    area: str | None
+    distance_km: float
+    verified: bool
+
+
+class DirectorySearchView(BaseModel):
+    """The public directory search response (MOD-002, FEAT-004).
+
+    ``items`` are active-only, distance-sorted entries after the caller's
+    filters (partner type, specialty for doctors, free-text over name);
+    ``fell_back`` marks the wider-area fallback: nothing matched within the
+    peri-urban scope, so the location constraint was relaxed (filters kept) and
+    the results must be labeled "outside your area" (glossary). The patient is
+    never silently served results that dropped a filter.
+    """
+
+    items: list[DirectoryEntry]
+    fell_back: bool
+
+
+class ProviderCredential(BaseModel):
+    """One credential on the public provider profile (FEAT-005, PHASE-6 T03).
+
+    Verified-safe projection: only the closed ``credential_type``, the derived
+    ``status`` label and the recorded ``expires_at`` - never the artifact refs,
+    never the document bytes (they stay in encrypted object storage). Every
+    credential on a returned profile is labelled ``verified`` because the
+    profile gate matches search visibility (ADR-0011): an unverified, expired
+    or revoked credential makes the whole profile unreachable, so no invalid
+    label can ever surface here.
+    """
+
+    credential_type: str
+    status: str
+    expires_at: datetime | None
+
+
+class ProviderProfileView(BaseModel):
+    """The public provider profile (MOD-002, FEAT-005, PHASE-6 T03 #309).
+
+    A verified-safe projection of an ``[Active]`` partner that has a
+    ``directory_index`` entry and valid (verified, unexpired, unrevoked)
+    credentials: display name (``practice_name``), partner type, specialty
+    (doctors only), the partner's service area, the derived ``verified``
+    indicator and per-credential type + status labels. ``verified`` is always
+    True for a reachable profile because reachability uses the same derivation
+    as search visibility - it can never drift from the card tick (ADR-0011
+    "tick gone = card gone"). Never exposed: artifact refs, emails, phones, PHI.
+    """
+
+    partner_id: int
+    practice_name: str | None
+    partner_type: str
+    specialty: str | None
+    area: str | None
+    verified: bool
+    credentials: list[ProviderCredential]
+
+
 _QUEUE_SORTS: dict[str, Any] = {
     "registration_age": partner_profiles.c.created_at,
     "partner_type": partner_profiles.c.partner_type,
@@ -360,6 +479,87 @@ _QUEUE_STATUSES: frozenset[str] = frozenset(ps.value for ps in PartnerStatus)
 
 def _row_str(row: Any, name: str) -> str:
     return str(getattr(row, name))
+
+
+def _haversine_km(latitude: float, longitude: float) -> Any:
+    """Haversine great-circle distance in km from the caller point to a row.
+
+    Computed in SQL over ``practice_latitude``/``practice_longitude`` so the
+    peri-urban range clamp and the nearest-first sort both stay in the
+    database (FEAT-004 geo via SQL range; PostGIS optional at the cost floor,
+    MOD-002 §4). Returns the SQL expression - 6371 km mean Earth radius.
+    """
+    rad_lat_me = func.radians(latitude)
+    rad_lng_me = func.radians(longitude)
+    rad_lat_row = func.radians(partner_directory_index.c.practice_latitude)
+    rad_lng_row = func.radians(partner_directory_index.c.practice_longitude)
+    dlat = rad_lat_row - rad_lat_me
+    dlon = rad_lng_row - rad_lng_me
+    a = func.power(func.sin(dlat / 2), 2) + func.cos(rad_lat_me) * func.cos(
+        rad_lat_row
+    ) * func.power(func.sin(dlon / 2), 2)
+    return 6371.0 * 2.0 * func.asin(func.sqrt(a))
+
+
+def _has_any_credential(column: Any) -> Any:
+    """Exists-subquery: the partner has at least one submitted credential.
+
+    Mirrors the directory backfill's ``EXISTS (SELECT 1 FROM credentials)``
+    guard so search and the index agree on the "verified on record" baseline.
+    """
+    return (
+        select(1)
+        .select_from(partner_credentials)
+        .where(partner_credentials.c.profile_id == column)
+        .exists()
+    )
+
+
+def _has_invalid_credential(column: Any) -> Any:
+    """Exists-subquery: the partner has any credential that is not valid.
+
+    The lazy read-hide (ADR-0011): a credential is invalid when it was never
+    verified, its recorded expiry date has passed, or it was revoked. Search
+    derives visibility from these recorded dates on every read - it never
+    trusts a cached ``is_active`` flag for the validity decision (T02b wraps
+    the cache later; correctness stays here).
+    """
+    return (
+        select(1)
+        .select_from(partner_credentials)
+        .where(
+            partner_credentials.c.profile_id == column,
+            or_(
+                partner_credentials.c.verified.is_(False),
+                and_(
+                    partner_credentials.c.expires_at.is_not(None),
+                    partner_credentials.c.expires_at <= func.now(),
+                ),
+                partner_credentials.c.revoked_at.is_not(None),
+            ),
+        )
+        .exists()
+    )
+
+
+def _provider_visible(column: Any) -> Any:
+    """The single provider-visibility predicate (REQ-028 + ADR-0011).
+
+    ``True`` iff the partner is ``[Active]``, has a ``directory_index`` entry,
+    holds at least one submitted credential AND every credential is verified,
+    unexpired and unrevoked. Both ``search_directory`` (which card shows) and
+    ``get_provider_profile`` (which profile resolves, and whose ``verified``
+    indicator reads True) use this SAME predicate, so the indicator can never
+    claim a partner the search hides - one source of truth for "tick gone =
+    card gone". Always derived on read from the recorded dates, never a cached
+    ``is_active``-only trust (ADR-0011).
+    """
+    return and_(
+        partner_directory_index.c.is_active.is_(True),
+        partner_profiles.c.status == "Active",
+        _has_any_credential(column),
+        ~_has_invalid_credential(column),
+    )
 
 
 def _default_clock() -> datetime:
@@ -666,6 +866,8 @@ class PartnerFacade:
         re_submission_max: int = 3,
         re_submission_cooldown_days: int = 30,
         credential_cleanup_days: int = 30,
+        directory_ttl_seconds: int = 0,
+        directory_max_results: int = 50,
         clock: Callable[[], datetime] = _default_clock,
     ) -> None:
         self._engine = engine
@@ -691,6 +893,16 @@ class PartnerFacade:
         # days out, and ``purge_expired_credentials`` deletes the documents after
         # it lapses. Config-injected like the throttle above (spec-pinned at 30).
         self._credential_cleanup_days = credential_cleanup_days
+        # Directory-search result cache TTL (PHASE-6 T02b, #314): the accelerator
+        # only gates on Redis being available; ``0`` (the boot default when no
+        # Settings-level TTL is injected) disables caching entirely so the unit
+        # tier and callers that never set it stay SQL-only.
+        self._directory_ttl_seconds = directory_ttl_seconds
+        # Directory result cap (PHASE-6 T2, #324): the top-N bound applied after
+        # distance ordering so a search never returns an unbounded nearest-first
+        # list. Config-injected from the resolved Settings (app/main.py), the
+        # same discipline as the throttle and TTL knobs above (coding-standards §9).
+        self._directory_max_results = directory_max_results
         # The injectable clock that schedules the 30-day window (overridden by
         # ``MutableClock`` in tests to walk the boundary). Mirrors the iam
         # facades' ``clock`` convention.
@@ -1222,6 +1434,11 @@ class PartnerFacade:
                     PARTNER_OUTBOX_TABLE,
                     partner_activated_envelope(partner_id, profile.identity_id, decision_by),
                 )
+                # PHASE-6 T02b (#314): activation changes which partners a
+                # directory search can return, so every cached search result is
+                # now potentially stale. Flush the namespace (best-effort Redis
+                # op - failure silently degrades to the lazy-correct read path).
+                await directory_visibility_changed()
             else:
                 await write_outbox(
                     connection,
@@ -1277,6 +1494,10 @@ class PartnerFacade:
                             reason=resolved_reason or "reverification_failed",
                         ),
                     )
+                    # PHASE-6 T02b (#314): the credential invalidation deindexes
+                    # this partner, making every cached search result potentially
+                    # stale. Flush the namespace (best-effort, silent on failure).
+                    await directory_visibility_changed()
             return PartnerView(
                 partner_id=partner_id,
                 status=next_state.status.value,
@@ -1345,6 +1566,180 @@ class PartnerFacade:
                 status=next_state.status.value,
                 round=next_state.round,
             )
+
+    async def invalidate_credential(
+        self,
+        partner_id: int,
+        reason: CredentialInvalidatedReason = CredentialInvalidatedReason.REVOKED,
+        *,
+        revoked_by: UUID | None = None,
+    ) -> PartnerView:
+        """Immediately revoke a partner's credentials (PHASE-6 T04a, #315; ADR-0011).
+
+        The immediate close-out leg of ADR-0011: a credential taken away by
+        authority or operator decision is revoked NOW - never left for the daily
+        expiry sweep. Every live (``revoked_at IS NULL``) credential row of the
+        partner is stamped ``revoked_at`` + ``invalidation_reason`` (``revoked``
+        by default, ``revoked_by`` the acting principal when named), the
+        ``partner_directory_index`` entry is deindexed (``is_active = False`` -
+        ADR-0012 one-entry-per-partner read-side cache), and ``credential.invalidated``
+        (with the reason carried onto the envelope) is written to the outbox in
+        the SAME transaction as those writes - mirroring
+        ``purge_expired_credentials`` (ADR-0002 §1, coding-standards §4). The
+        directory-search cache is flushed after the commit (best-effort, silent
+        on failure; the lazy read-hide is correct regardless).
+
+        Identity, profile row and verification history are untouched - there is
+        deliberately NO new lifecycle state (ADR-0008, brief handoff #315): the
+        partner stays ``[Active]`` and recovers by submitting a fresh
+        verification round through the Phase-5 flow, never by re-registering.
+        ``_has_invalid_credential`` derives the lazy read-hide against the
+        recorded ``revoked_at`` on every search/profile read, so the revoked
+        partner disappears from directory reads instantly.
+        """
+        async with self._engine.begin() as connection:
+            profile = await _load_profile(connection, partner_id)
+            closed = (
+                await connection.execute(
+                    partner_credentials.update()
+                    .where(
+                        partner_credentials.c.profile_id == partner_id,
+                        partner_credentials.c.revoked_at.is_(None),
+                    )
+                    .values(
+                        revoked_at=self._clock(),
+                        revoked_by=revoked_by,
+                        invalidation_reason=reason,
+                        updated_at=func.now(),
+                    )
+                    .returning(partner_credentials.c.id)
+                )
+            ).all()
+            await connection.execute(
+                partner_directory_index.update()
+                .where(partner_directory_index.c.partner_id == partner_id)
+                .values(is_active=False, updated_at=func.now())
+            )
+            first_credential_id = int(closed[0].id) if closed else None
+            await write_outbox(
+                connection,
+                PARTNER_SCHEMA,
+                PARTNER_OUTBOX_TABLE,
+                credential_invalidated_envelope(
+                    partner_id,
+                    identity_id=profile.identity_id,
+                    credential_id=first_credential_id,
+                    reason=reason,
+                ),
+            )
+            # PHASE-6 T02b (#314): the credential invalidation deindexes this
+            # partner, making every cached search result potentially stale. Flush
+            # the namespace (best-effort, silent on failure).
+            await directory_visibility_changed()
+            return PartnerView(
+                partner_id=partner_id,
+                status=profile.status,
+                round=profile.round,
+            )
+
+    async def close_out_expired_credentials(self) -> list[int]:
+        """The daily credential-expiry close-out pass (ADR-0011, PHASE-6 T04b, #316).
+
+        The daily sweep is ADR-0011's second, non-scanner mechanism: lazy read-
+        hide already suppresses an expired partner on every directory read (via
+        ``_has_invalid_credential`` against the recorded ``expires_at``), so this
+        pass performs ONLY the official close-out - the recorded event/audit that
+        the event-triggered chain (role denial, partner notification, audit
+        ledger) fires exactly once on. It is invoked by the worker's daily
+        APScheduler job (``worker.main`` ``_run_credential_sweep``), never by a
+        read.
+
+        It finds every ``partner_credentials`` row whose recorded ``expires_at``
+        has passed since the last pass and records the close-out - ``revoked_at``
+        (the close-out instant) + ``invalidation_reason = 'expired'`` (the
+        marker; ``revoked_by`` stays NULL - the sweep is a system actor), sets the
+        ``partner_directory_index`` entry ``is_active = False`` once per affected
+        partner, and writes exactly one ``credential.invalidated`` (reason
+        ``expired``) per credential - ALL in one DB transaction (ADR-0002 §1), so
+        a crash cannot leave an event without its close-out or vice versa.
+
+        The close-out marker is the idempotency key: candidates are only rows with
+        ``invalidation_reason IS NULL``, so replaying the pass (a re-run of the
+        daily job, at-least-once) selects nothing and emits nothing. A row closed
+        by the immediate revocation reach (``invalidate_credential``) or the
+        permanent-rejection cleanup path is never revisited - the sweep does not
+        disturb either seam.
+
+        Only an ``[Active]`` partner's *verified* credential is a candidate: an
+        unverified submission is an undecided operator-gate round (its expiry is
+        that gate's decision, not the sweep's) and a ``[Rejected]`` partner was
+        already closed out by ``operator_decision`` / will be purged by
+        ``purge_expired_credentials`` - sweeping them would double-fire the
+        event.
+
+        Returns the ids of the credentials closed out.
+        """
+        now = self._clock()
+        async with self._engine.begin() as connection:
+            rows = (
+                await connection.execute(
+                    select(
+                        partner_credentials.c.id,
+                        partner_credentials.c.profile_id,
+                        partner_profiles.c.identity_id,
+                    )
+                    .join(
+                        partner_profiles,
+                        partner_profiles.c.id == partner_credentials.c.profile_id,
+                    )
+                    .where(
+                        partner_credentials.c.expires_at.is_not(None),
+                        partner_credentials.c.expires_at <= now,
+                        partner_credentials.c.invalidation_reason.is_(None),
+                        partner_credentials.c.verified.is_(True),
+                        partner_profiles.c.status == PartnerStatus.ACTIVE.value,
+                    )
+                    .order_by(partner_credentials.c.id)
+                )
+            ).all()
+            if not rows:
+                return []
+            closed_status = CredentialInvalidatedReason.EXPIRED.value
+            await connection.execute(
+                partner_credentials.update()
+                .where(partner_credentials.c.id.in_([int(row.id) for row in rows]))
+                .values(
+                    revoked_at=now,
+                    invalidation_reason=closed_status,
+                    updated_at=func.now(),
+                )
+            )
+            affected_partners = {int(row.profile_id) for row in rows}
+            await connection.execute(
+                partner_directory_index.update()
+                .where(partner_directory_index.c.partner_id.in_(affected_partners))
+                .values(is_active=False, updated_at=func.now())
+            )
+            closed: list[int] = []
+            for row in rows:
+                credential_id = int(row.id)
+                await write_outbox(
+                    connection,
+                    PARTNER_SCHEMA,
+                    PARTNER_OUTBOX_TABLE,
+                    credential_invalidated_envelope(
+                        int(row.profile_id),
+                        identity_id=int(row.identity_id),
+                        credential_id=credential_id,
+                        reason=closed_status,
+                    ),
+                )
+                closed.append(credential_id)
+            # PHASE-6 T02b (#314): the expiry close-out deindexes every affected
+            # partner, making each cached search result potentially stale. Flush
+            # the namespace once per pass (best-effort, silent on failure).
+            await directory_visibility_changed()
+            return closed
 
     async def list_verification_queue(
         self,
@@ -1423,6 +1818,377 @@ class PartnerFacade:
                     for row in rows
                 ]
             )
+
+    async def search_directory(
+        self,
+        *,
+        query: str | None = None,
+        partner_type: str | None = None,
+        specialty: str | None = None,
+        latitude: float | None = None,
+        longitude: float | None = None,
+        patient_id: int | None = None,
+    ) -> DirectorySearchView:
+        """Public directory search (MOD-002, FEAT-004, PHASE-6 T02a #313).
+
+        Returns only ``[Active]`` partners whose credentials are all verified,
+        unexpired and unrevoked (the "provider" visibility rule - REQ-028 +
+        ADR-0011, both derived on read, never cached), nearest-first by
+        great-circle distance from the caller's geo point. ``partner_type``
+        filters on the closed doctor/lab/chemist enum; ``specialty`` applies the
+        closed pick-list and is doctors-only (a non-doctor type with a specialty
+        matches nothing); ``query`` is free-text over the practice name. A
+        missing geo point anchors the sort on the Daltonganj centre - the
+        launch-geography default the callers rely on (REQ-008 decision record;
+        the adapters stay geography-agnostic and let the domain own its default).
+
+        The wider-area fallback (glossary): when no entry matches within the
+        peri-urban scope, the location constraint alone is relaxed (type,
+        specialty and name filters are kept), the run is re-executed
+        nearest-first, and the view is flagged ``fell_back`` so the client
+        labels the results honestly as "outside your area". ``fell_back`` is
+        never silently served - the patient's other filters hold.
+
+        Emits the ``directory.search`` analytics event (one per search) into
+        the partner outbox in the SAME transaction as the read, carrying the
+        filters/query, the result count and the fallback flag (telemetry, not a
+        regulated act; anonymous patients have a ``None`` actor). Lab/chemist
+        entries always return ``specialty=None``.
+        """
+        latitude = DALTONGANJ_LATITUDE if latitude is None else latitude
+        longitude = DALTONGANJ_LONGITUDE if longitude is None else longitude
+
+        # PHASE-6 T02b (#314): the Redis accelerator, layered on top of the
+        # working SQL core. Redis is never a correctness surface (ADR-0011 lazy
+        # correctness) - on a cache hit we re-derive validity of the cached
+        # partner ids against the recorded dates; any invalidation/expiry drops
+        # the hit and recomputes SQL, so a stale row for a deactivated or
+        # expired partner never surfaces.
+        cached = await self._cached_search_view(
+            query=query,
+            partner_type=partner_type,
+            specialty=specialty,
+            latitude=latitude,
+            longitude=longitude,
+            patient_id=patient_id,
+        )
+        if cached is not None:
+            return cached
+
+        distance_km = _haversine_km(latitude, longitude)
+
+        def _conditions(peri_urban_only: bool) -> list[Any]:
+            conditions: list[Any] = [_provider_visible(partner_directory_index.c.partner_id)]
+            if partner_type is not None:
+                conditions.append(partner_directory_index.c.partner_type == partner_type)
+            if specialty is not None:
+                # Specialty is doctors-only (closed pick-list, glossary); a
+                # lab/chemist row never carries one, so pin the type too.
+                conditions.append(partner_directory_index.c.partner_type == "doctor")
+                conditions.append(partner_directory_index.c.specialty == specialty)
+            if query and query.strip():
+                conditions.append(partner_profiles.c.practice_name.ilike(f"%{query.strip()}%"))
+            if peri_urban_only:
+                conditions.append(distance_km <= PERI_URBAN_RADIUS_KM)
+            return conditions
+
+        async with self._engine.begin() as connection:
+            base = (
+                select(
+                    partner_directory_index.c.partner_id,
+                    partner_directory_index.c.partner_type,
+                    partner_directory_index.c.specialty,
+                    partner_profiles.c.practice_name,
+                    partner_service_areas.c.name.label("area_name"),
+                    distance_km.label("distance_km"),
+                )
+                .join(
+                    partner_profiles,
+                    partner_profiles.c.id == partner_directory_index.c.partner_id,
+                )
+                .outerjoin(
+                    partner_service_areas,
+                    partner_service_areas.c.id == partner_profiles.c.service_area_id,
+                )
+            )
+
+            async def _rows(peri_urban_only: bool) -> list[Any]:
+                stmt = (
+                    base.where(*_conditions(peri_urban_only=peri_urban_only))
+                    .order_by(distance_km.asc())
+                    # PHASE-6 T2 (#324): the result list is bounded at the
+                    # configuration-driven top-N after distance ordering, on
+                    # both the in-scope and wider-area fallback paths. A cap,
+                    # not a filter/ordering/fallback change (MOD-002).
+                    .limit(self._directory_max_results)
+                )
+                return list((await connection.execute(stmt)).all())
+
+            rows = await _rows(peri_urban_only=True)
+            fell_back = len(rows) == 0
+            if fell_back:
+                rows = await _rows(peri_urban_only=False)
+
+            await write_outbox(
+                connection,
+                PARTNER_SCHEMA,
+                PARTNER_OUTBOX_TABLE,
+                directory_search_envelope(
+                    patient_id=patient_id,
+                    query=query,
+                    partner_type=partner_type,
+                    specialty=specialty,
+                    result_count=len(rows),
+                    fell_back=fell_back,
+                ),
+            )
+
+        view = DirectorySearchView(
+            fell_back=fell_back,
+            items=[
+                DirectoryEntry(
+                    partner_id=int(row.partner_id),
+                    practice_name=(
+                        str(row.practice_name) if row.practice_name is not None else None
+                    ),
+                    partner_type=str(row.partner_type),
+                    specialty=str(row.specialty) if row.specialty is not None else None,
+                    area=(
+                        str(row.area_name)
+                        if row.area_name is not None
+                        else DEFAULT_SERVICE_AREA_NAME
+                    ),
+                    distance_km=float(row.distance_km),
+                    verified=True,
+                )
+                for row in rows
+            ],
+        )
+        if self._directory_ttl_seconds > 0:
+            await set_cached_search(
+                query=query,
+                partner_type=partner_type,
+                specialty=specialty,
+                latitude=latitude,
+                longitude=longitude,
+                expanded=fell_back,
+                raw_items=[entry.model_dump() for entry in view.items],
+                fell_back=fell_back,
+                ttl_seconds=self._directory_ttl_seconds,
+            )
+        return view
+
+    async def record_partner_selected(
+        self,
+        *,
+        partner_id: int,
+        partner_type: str | None = None,
+        source: str | None = None,
+    ) -> None:
+        """Record one ``partner.selected`` analytics pick into the partner outbox.
+
+        Client-initiated product analytics (FEAT-004 telemetry, PHASE-6 T4
+        #326): ``POST /v1/directory/select`` reports that a patient picked a
+        provider from the directory, and this facade writes one
+        ``partner.selected`` outbox row in its own transaction. The payload
+        carries only the pick facts - the picked partner id + partner type and
+        the source surface - never a patient identity (the public route is
+        anonymous), never PHI or credential data. Deliberately NOT a regulated
+        act: the event stays out of ``REGULATED_ACT_TYPES``, mirroring the
+        ``directory.search`` analytics seam. The adapter calls only this
+        method; there is no business logic in the route.
+        """
+        async with self._engine.begin() as connection:
+            await write_outbox(
+                connection,
+                PARTNER_SCHEMA,
+                PARTNER_OUTBOX_TABLE,
+                partner_selected_envelope(
+                    partner_id=partner_id,
+                    partner_type=partner_type,
+                    source=source,
+                ),
+            )
+
+    async def get_provider_profile(self, partner_id: int) -> ProviderProfileView:
+        """Public provider profile (MOD-002, FEAT-005, PHASE-6 T03 #309).
+
+        Returns the verified-safe profile of an ``[Active]`` partner that has a
+        ``directory_index`` entry and valid (verified, unexpired, unrevoked)
+        credentials. The four-condition visibility gate matches search exactly
+        (ADR-0011 "tick gone = card gone"): not ``[Active]``, no index row, no
+        credentials, or any invalid credential raises
+        :class:`ProviderProfileNotFoundError` (mapped to a 404) - the profile
+        is hidden exactly when search hides the card, so the indicator can
+        never drift.
+
+        Payload carries only verified-safe fields: display name
+        (``practice_name``), partner type, specialty (doctors only), service
+        area, the ``verified`` indicator (always True for a reachable profile)
+        and per-credential type + status label + expiry date. Never exposed:
+        artifact refs, emails, phones, PHI.
+        """
+        async with self._engine.begin() as connection:
+            row = (
+                await connection.execute(
+                    select(
+                        partner_directory_index.c.partner_id,
+                        partner_directory_index.c.partner_type,
+                        partner_directory_index.c.specialty,
+                        partner_profiles.c.practice_name,
+                        partner_service_areas.c.name.label("area_name"),
+                    )
+                    .join(
+                        partner_profiles,
+                        partner_profiles.c.id == partner_directory_index.c.partner_id,
+                    )
+                    .outerjoin(
+                        partner_service_areas,
+                        partner_service_areas.c.id == partner_profiles.c.service_area_id,
+                    )
+                    .where(
+                        partner_directory_index.c.partner_id == partner_id,
+                        _provider_visible(partner_directory_index.c.partner_id),
+                    )
+                )
+            ).first()
+            if row is None:
+                raise ProviderProfileNotFoundError(partner_id)
+
+            credential_rows = (
+                await connection.execute(
+                    select(
+                        partner_credentials.c.credential_type,
+                        partner_credentials.c.expires_at,
+                    )
+                    .where(
+                        partner_credentials.c.profile_id == partner_id,
+                    )
+                    .order_by(partner_credentials.c.credential_type)
+                )
+            ).all()
+
+        return ProviderProfileView(
+            partner_id=int(row.partner_id),
+            practice_name=(str(row.practice_name) if row.practice_name is not None else None),
+            partner_type=str(row.partner_type),
+            specialty=(str(row.specialty) if row.specialty is not None else None),
+            area=(str(row.area_name) if row.area_name is not None else DEFAULT_SERVICE_AREA_NAME),
+            verified=True,
+            credentials=[
+                ProviderCredential(
+                    credential_type=str(c.credential_type),
+                    status="verified",
+                    expires_at=c.expires_at,
+                )
+                for c in credential_rows
+            ],
+        )
+
+    async def _cached_search_view(
+        self,
+        *,
+        query: str | None,
+        partner_type: str | None,
+        specialty: str | None,
+        latitude: float,
+        longitude: float,
+        patient_id: int | None,
+    ) -> DirectorySearchView | None:
+        """Try the Redis accelerator for one search, re-deriving validity first.
+
+        PHASE-6 T02b (#314): the cache is an accelerator ONLY, never a
+        correctness surface (ADR-0011 lazy correctness). On a hit we re-derive
+        the visibility tick for the cached partner ids from the recorded dates
+        (``is_active``, ``Active`` status, verified/unexpired/unrevoked
+        credentials); if ANY cached partner no longer passes - deactivated,
+        revoked, expired, or unverified since the row was written - the hit is
+        rejected and the caller recomputes fresh SQL, so a stale row for a
+        deactivated/expired partner never surfaces. On a clean hit the cached
+        items are served as-is (their geo/distance already match the cached
+        key) and the ``directory.search`` analytics event still fires (one per
+        search - a cached search is still a real search).
+
+        Returns ``None`` when caching is disabled, the cache missed for both
+        expanded variants, or the cached ids no longer all pass validity.
+        """
+        if self._directory_ttl_seconds <= 0:
+            return None
+        cached = await get_cached_search(
+            query=query,
+            partner_type=partner_type,
+            specialty=specialty,
+            latitude=latitude,
+            longitude=longitude,
+            expanded=False,
+        )
+        raw_items: list[dict[str, Any]]
+        fell_back: bool
+        if cached is not None:
+            raw_items, fell_back = cached
+        else:
+            cached = await get_cached_search(
+                query=query,
+                partner_type=partner_type,
+                specialty=specialty,
+                latitude=latitude,
+                longitude=longitude,
+                expanded=True,
+            )
+            if cached is None:
+                return None
+            raw_items, fell_back = cached
+
+        partner_ids = sorted({int(item["partner_id"]) for item in raw_items})
+        async with self._engine.begin() as connection:
+            if not await self._cached_ids_still_valid(connection, partner_ids):
+                return None
+            await write_outbox(
+                connection,
+                PARTNER_SCHEMA,
+                PARTNER_OUTBOX_TABLE,
+                directory_search_envelope(
+                    patient_id=patient_id,
+                    query=query,
+                    partner_type=partner_type,
+                    specialty=specialty,
+                    result_count=len(raw_items),
+                    fell_back=fell_back,
+                ),
+            )
+        return DirectorySearchView(
+            fell_back=fell_back,
+            items=[DirectoryEntry(**item) for item in raw_items],
+        )
+
+    async def _cached_ids_still_valid(
+        self, connection: AsyncConnection, partner_ids: list[int]
+    ) -> bool:
+        """Whether every cached partner id still passes the visibility tick.
+
+        The one re-derivation the cache hit is allowed to skip is the distance
+        scan - the validity of each id is ALWAYS re-checked against the recorded
+        dates (ADR-0011), so a cached row can never surface a deactivated or
+        expired partner.
+        """
+        if not partner_ids:
+            return True
+        valid_count = int(
+            (
+                await connection.execute(
+                    select(func.count(partner_directory_index.c.partner_id))
+                    .join(
+                        partner_profiles,
+                        partner_profiles.c.id == partner_directory_index.c.partner_id,
+                    )
+                    .where(
+                        partner_directory_index.c.partner_id.in_(partner_ids),
+                        _provider_visible(partner_directory_index.c.partner_id),
+                    )
+                )
+            ).scalar_one()
+        )
+        return valid_count == len(partner_ids)
 
     async def get_verification_detail(
         self, partner_id: int, actor_id: int
@@ -1614,4 +2380,9 @@ class PartnerFacade:
                     ),
                 )
                 deleted.append(credential_id)
+            if deleted:
+                # PHASE-6 T02b (#314): credential close-out makes every cached
+                # directory search result potentially stale. The namespace flush
+                # fires once per purge run (best-effort, silent on failure).
+                await directory_visibility_changed()
             return deleted

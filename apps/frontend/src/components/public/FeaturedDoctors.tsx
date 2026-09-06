@@ -2,9 +2,11 @@
 
 // PHASE-2.6 T09 (#200): homepage section 5 - featured doctor cards
 // (blueprint §3.1 row 5). Live proof of supply: cards render from the
-// public-directory integration point (lib/directory/featured - gap G2);
-// before supply exists the section shows the graceful "Directory launching
-// soon in Daltonganj" empty state. No fake/static provider cards, ever.
+// public-directory integration point (lib/directory/featured - gap G2),
+// which since PHASE-6 T05b (#318) resolves through the real search API; when
+// no activated supply exists the section shows the graceful "Directory
+// launching soon in Daltonganj" empty state. No fake/static provider cards,
+// ever.
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
@@ -14,7 +16,7 @@ import {
   fetchFeaturedDoctors,
   type FeaturedDoctor,
 } from "@/lib/directory/featured";
-import { directoryHref } from "@/lib/directory/links";
+import { directoryHref, providerProfileHref } from "@/lib/directory/links";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 
@@ -25,22 +27,22 @@ function DoctorCard({
   doctor: FeaturedDoctor;
   verifiedLabel: string;
 }) {
-  // Cards deep-link to the provider profile surface that ships with the
-  // Phase 3 directory (same ticket family as the featured endpoint); until
-  // then this branch is unreachable because fetchFeaturedDoctors resolves
-  // to an empty list.
+  // Cards deep-link to the provider profile surface that ships with
+  // PHASE-6 T06. Every card is active-and-verified by construction (the
+  // featured endpoint only returns FEAT-004 Rule 1 rows), so the verified
+  // indicator is truthful. Meta joins only non-null parts - the dropped
+  // `consultType` never renders.
+  const meta = [doctor.specialty, doctor.area].filter(Boolean).join(" \u00b7 ");
   return (
     <Link
-      href={`/providers/${doctor.id}`}
+      href={providerProfileHref(doctor.id)}
       className="flex flex-col items-start gap-1 rounded-lg border border-hairline bg-surface p-4 shadow-card transition-shadow hover:shadow-pop"
     >
       <span className="rounded-full bg-success-soft px-2 py-0.5 text-xs font-medium text-success-text">
         {verifiedLabel}
       </span>
       <strong className="text-txt">{doctor.name}</strong>
-      <span className="text-sm text-txt-muted">
-        {[doctor.specialty, doctor.consultType, doctor.area].join(" \u00b7 ")}
-      </span>
+      {meta ? <span className="text-sm text-txt-muted">{meta}</span> : null}
     </Link>
   );
 }

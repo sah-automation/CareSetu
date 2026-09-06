@@ -423,6 +423,95 @@ const en = {
     },
   },
 
+  // directory.* surface - PHASE-6 T05a (#317), the public /directory browse
+  // page (blueprint §3.1 row 2 look, PROTO-PHASE-6 finalized views are the
+  // visual binding). Copy rules baked in: the location indicator is the fixed
+  // launch beachhead (REQ-008) - never promise multi-city search; filters are
+  // provider type + doctor specialty (closed pick-list), never disease
+  // browsing (G1); the wider-area fallback labels results honestly "outside
+  // your area" with every other filter preserved (glossary).
+  directory: {
+    heading: {
+      all: "Find verified care near you",
+      doctor: "Find doctors near you",
+      lab: "Find labs near you",
+      chemist: "Find chemists near you",
+    },
+    subtitle:
+      "Only activated providers with valid credentials are listed, sorted by distance.",
+    searchLabel: "Search providers",
+    searchPlaceholder: "Search by name or specialty",
+    searchCta: "Search",
+    filtersLabel: "Filter by provider type and specialty",
+    typeAll: "All",
+    typeDoctor: "Doctors",
+    typeLab: "Labs",
+    typeChemist: "Chemists",
+    specialties: {
+      generalPhysician: "General Physician",
+      pediatrician: "Pediatrician",
+      gynecologist: "Gynecologist",
+      dentist: "Dentist",
+    },
+    verified: "Verified",
+    locationDaltonganj: "Daltonganj",
+    distanceKm: (km: string) => `${km} km`,
+    resultsCount: (n: number) =>
+      `${n} ${n === 1 ? "provider" : "providers"} found`,
+    loading: "Searching providers...",
+    emptyTitle: "No providers found for this search",
+    emptyBody: "Try broadening your search or check nearby areas.",
+    clearSearch: "Clear search",
+    outsideAreaLabel: "Showing providers outside your area",
+    outsideAreaBody:
+      "Nothing matched within your area with the filters you chose, so here are the nearest available providers. Your filters are kept.",
+    errorTitle: "We could not load the directory",
+    errorBody: "Check your connection and try again.",
+    retry: "Try again",
+  },
+
+  // providerProfile.* surface - PHASE-6 T06 (#312): the public provider
+  // profile at /providers/:id (blueprint §3.1 row 5, PROTO-PHASE-6
+  // doctor-profile.html / partner-profile.html as the visual binding). Shows
+  // only the verified-safe fields the profile API returns - name, partner
+  // type, doctor specialty, service area, the verified indicator and the
+  // verified credential type + expiry labels. `provider` is the display word
+  // legal in this route's copy; `partner` stays the domain word in data.
+  providerProfile: {
+    verifiedByCareSetu: "Verified by CareSetu",
+    verified: "Verified",
+    active: "Active",
+    credentialsHeading: "Credentials",
+    credentialsAndLicensesHeading: "Credentials & licenses",
+    practiceDetailsHeading: "Practice details",
+    detailsHeading: "Details",
+    typeLabel: "Type",
+    specialtyLabel: "Specialty",
+    areaLabel: "Service area",
+    expiresOn: (date: string) => `Expires ${date}`,
+    credentialTypes: {
+      medical_registration: "Medical registration",
+      qualification_certificate: "Qualification certificate",
+      lab_license: "Lab license",
+      accreditation: "Accreditation",
+      drug_license: "Drug license",
+      pharmacist_registration: "Pharmacist registration",
+    },
+    typeDoctor: "Doctor",
+    typeLab: "Laboratory",
+    typeChemist: "Chemist",
+    breadcrumbDirectory: "Directory",
+    loadingProfile: "Loading profile",
+    comingSoon: "Coming soon",
+    comingSoonBody: "Booking and ordering will be available in a future phase.",
+    notFoundTitle: "Provider not found",
+    notFoundBody:
+      "This provider is either not listed in the directory or is no longer active. Only activated and verified providers appear here.",
+    notFoundCta: "Browse the directory",
+    loadError: "We could not load this provider profile.",
+    retry: "Try again",
+  },
+
   // consent.* surface - PHASE-2.6 T12 (#203): the reusable consent-moment
   // bottom sheet (blueprint §5.10, finalized PROTO-PHASE-2.6 view
   // consent-sheet.html). Labels/buttons are component-owned; the per-request
@@ -1185,6 +1274,80 @@ export const STRINGS: Record<Lang, Dictionary> = {
         meta: "\u00a9 CareSetu - डालटनगंज और आसपास के इलाक़ों में",
         operatorConsole: "ऑपरेटर कंसोल",
       },
+    },
+
+    directory: {
+      heading: {
+        all: "अपने आसपास जाँची-परखी देखभाल खोजें",
+        doctor: "अपने आसपास डॉक्टर खोजें",
+        lab: "अपने आसपास लैब खोजें",
+        chemist: "अपने आसपास केमिस्ट खोजें",
+      },
+      subtitle:
+        "केवल सक्रिय और वैध प्रमाण वाले प्रोवाइडर ही सूचीबद्ध होते हैं, दूरी के हिसाब से।",
+      searchLabel: "प्रोवाइडर खोजें",
+      searchPlaceholder: "नाम या विशेषज्ञता से खोजें",
+      searchCta: "खोजें",
+      filtersLabel: "प्रोवाइडर प्रकार और विशेषज्ञता से छाँटें",
+      typeAll: "सभी",
+      typeDoctor: "डॉक्टर",
+      typeLab: "लैब",
+      typeChemist: "केमिस्ट",
+      specialties: {
+        generalPhysician: "जनरल फ़िज़िशियन",
+        pediatrician: "बाल रोग विशेषज्ञ",
+        gynecologist: "स्त्री रोग विशेषज्ञ",
+        dentist: "दंत चिकित्सक",
+      },
+      verified: "सत्यापित",
+      locationDaltonganj: "डालटनगंज",
+      distanceKm: (km: string) => `${km} किमी`,
+      resultsCount: (n: number) => `${n} प्रोवाइडर मिले`,
+      loading: "प्रोवाइडर खोजे जा रहे हैं...",
+      emptyTitle: "इस खोज के लिए कोई प्रोवाइडर नहीं मिला",
+      emptyBody: "अपनी खोज को और व्यापक बनाएँ या आस-पास के इलाक़े देखें।",
+      clearSearch: "खोज साफ़ करें",
+      outsideAreaLabel: "आपके इलाक़े के बाहर के प्रोवाइडर दिखाए जा रहे हैं",
+      outsideAreaBody:
+        "आपके चुने गए फ़िल्टर से आपके इलाक़े में कुछ नहीं मिला, इसलिए नज़दीकी उपलब्ध प्रोवाइडर दिखाए गए हैं। आपके फ़िल्टर वही रखे गए हैं।",
+      errorTitle: "डायरेक्टरी लोड नहीं हो सकी",
+      errorBody: "अपना कनेक्शन जाँचें और फिर कोशिश करें।",
+      retry: "फिर कोशिश करें",
+    },
+
+    providerProfile: {
+      verifiedByCareSetu: "CareSetu द्वारा सत्यापित",
+      verified: "सत्यापित",
+      active: "सक्रिय",
+      credentialsHeading: "प्रमाण",
+      credentialsAndLicensesHeading: "प्रमाण और लाइसेंस",
+      practiceDetailsHeading: "अभ्यास विवरण",
+      detailsHeading: "विवरण",
+      typeLabel: "प्रकार",
+      specialtyLabel: "विशेषज्ञता",
+      areaLabel: "सेवा क्षेत्र",
+      expiresOn: (date: string) => `${date} तक वैध`,
+      credentialTypes: {
+        medical_registration: "मेडिकल पंजीकरण",
+        qualification_certificate: "योग्यता प्रमाणपत्र",
+        lab_license: "लैब लाइसेंस",
+        accreditation: "मान्यता",
+        drug_license: "दवा लाइसेंस",
+        pharmacist_registration: "फार्मासिस्ट पंजीकरण",
+      },
+      typeDoctor: "डॉक्टर",
+      typeLab: "प्रयोगशाला",
+      typeChemist: "केमिस्ट",
+      breadcrumbDirectory: "डायरेक्टरी",
+      loadingProfile: "प्रोफ़ाइल लोड हो रही है",
+      comingSoon: "जल्द आ रहा है",
+      comingSoonBody: "बुकिंग और ऑर्डर एक भविष्य के चरण में उपलब्ध होंगे।",
+      notFoundTitle: "प्रोवाइडर नहीं मिला",
+      notFoundBody:
+        "यह प्रोवाइडर डायरेक्टरी में सूचीबद्ध नहीं है या अब सक्रिय नहीं है। केवल सक्रिय और सत्यापित प्रोवाइडर ही यहाँ दिखाए जाते हैं।",
+      notFoundCta: "डायरेक्टरी देखें",
+      loadError: "यह प्रोवाइडर प्रोफ़ाइल लोड नहीं हो सकी।",
+      retry: "फिर कोशिश करें",
     },
 
     record: {

@@ -21,6 +21,11 @@ dependencies = [
     # time-based one-time password checked against the stored ``iam_operator_mfa``
     # secret at operator login.
     "pyotp>=2.9",
+    # APScheduler 3.x (the stable line; 4 is still pre-release) for the worker's
+    # periodic jobs (PHASE-6 T04a, #315): the AsyncIOScheduler hosts the daily
+    # credential-expiry sweep that ADR-0011 runs on, in-process on the worker's
+    # event loop - the in-app replacement for the daily cron precedent.
+    "apscheduler>=3.11,<4",
 ]
 
 [dependency-groups]

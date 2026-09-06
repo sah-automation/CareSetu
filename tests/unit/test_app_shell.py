@@ -116,6 +116,15 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/auth/operator/mfa/enroll",
         # T05 (#298): partner-scoped session issuance for registered partners.
         "/v1/auth/partner/session",
+        # PHASE-6 T02a (#313): the public provider directory search (FEAT-004) -
+        # open surface, patients browse without logging in.
+        "/v1/directory/search",
+        # PHASE-6 T03 (#309): the public provider profile (FEAT-005) - open
+        # surface, patients view a provider's verified-safe profile.
+        "/v1/directory/providers/{partner_id}",
+        # PHASE-6 T4 (#326): the public directory-pick ingest (FEAT-004) -
+        # open surface, anonymous analytics, same gateway surface as search.
+        "/v1/directory/select",
     }
 
 

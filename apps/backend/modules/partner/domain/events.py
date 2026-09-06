@@ -19,10 +19,12 @@ from pydantic import BaseModel
 from bus.envelope import Envelope
 from bus.events import (
     EVENT_CREDENTIAL_INVALIDATED,
+    EVENT_DIRECTORY_SEARCH,
     EVENT_PARTNER_ACTIVATED,
     EVENT_PARTNER_CREDENTIAL_REVIEWED,
     EVENT_PARTNER_REGISTERED,
     EVENT_PARTNER_REJECTED,
+    EVENT_PARTNER_SELECTED,
     EVENT_PARTNER_VERIFICATION_STARTED,
 )
 
@@ -121,6 +123,44 @@ class CredentialInvalidatedPayload(BaseModel):
     reason: str
 
 
+class DirectorySearchPayload(BaseModel):
+    """Subject of ``directory.search``: one public directory search (analytics).
+
+    Emitted by the read facade once per search (FEAT-004 telemetry, PHASE-6
+    T02a #313). Carries only product-analytics facts - the filters/query the
+    patient used, the result count, and whether the wider-area fallback fired -
+    never PHI or partner document content. Anonymous patients have no identity,
+    so ``patient_id`` is nullable (cohort-tagged by the consuming analytics
+    surface, gap G2). Per parent #306, the payload also records the relaxed
+    (wider-area) run's own filters so the fallback event describes what was
+    actually served.
+    """
+
+    patient_id: int | None = None
+    query: str | None = None
+    partner_type: str | None = None
+    specialty: str | None = None
+    result_count: int
+    fell_back: bool
+
+
+class PartnerSelectedPayload(BaseModel):
+    """Subject of ``partner.selected``: one directory pick (analytics).
+
+    Emitted once per time a patient picks a provider from the directory - a
+    search card or a provider profile (FEAT-004 telemetry, PHASE-6 T4 #326).
+    Client-initiated product analytics, not a regulated act: carries only the
+    pick facts - the picked partner and the source surface - never PHI or
+    credential data. The public ingest route is unauthenticated, so there is no
+    actor field (anonymous by construction); the analytics consumer cohorts on
+    whatever context it has (gap G2).
+    """
+
+    partner_id: int
+    partner_type: str | None = None
+    source: str | None = None
+
+
 def partner_registered_envelope(
     partner_id: int, identity_id: int, partner_type: PartnerType
 ) -> Envelope[PartnerRegisteredPayload]:
@@ -211,5 +251,49 @@ def credential_invalidated_envelope(
             identity_id=identity_id,
             credential_id=credential_id,
             reason=reason,
+        ),
+    )
+
+
+def directory_search_envelope(
+    *,
+    patient_id: int | None,
+    query: str | None,
+    partner_type: str | None,
+    specialty: str | None,
+    result_count: int,
+    fell_back: bool,
+) -> Envelope[DirectorySearchPayload]:
+    """Build the ``directory.search`` analytics envelope for the partner outbox."""
+    return Envelope[DirectorySearchPayload](
+        event_id=uuid4(),
+        event_type=EVENT_DIRECTORY_SEARCH,
+        producer=PRODUCER_MODULE,
+        payload=DirectorySearchPayload(
+            patient_id=patient_id,
+            query=query,
+            partner_type=partner_type,
+            specialty=specialty,
+            result_count=result_count,
+            fell_back=fell_back,
+        ),
+    )
+
+
+def partner_selected_envelope(
+    *,
+    partner_id: int,
+    partner_type: str | None,
+    source: str | None,
+) -> Envelope[PartnerSelectedPayload]:
+    """Build the ``partner.selected`` analytics envelope for the partner outbox."""
+    return Envelope[PartnerSelectedPayload](
+        event_id=uuid4(),
+        event_type=EVENT_PARTNER_SELECTED,
+        producer=PRODUCER_MODULE,
+        payload=PartnerSelectedPayload(
+            partner_id=partner_id,
+            partner_type=partner_type,
+            source=source,
         ),
     )

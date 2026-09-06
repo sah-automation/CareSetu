@@ -24,6 +24,15 @@ DEFAULT_WHATSAPP_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 30.0
 # absent or unhealthy. p95 < 50 ms SLA on the hot path.
 DEFAULT_REDIS_URL = ""
 DEFAULT_REDIS_CONSENT_TTL_SECONDS = 300
+# Redis directory-search result cache (PHASE-6 T02b, #314): optional, same SQL
+# fallback + accelerator-only discipline (ADR-0011). p95 < 250 ms cached target.
+DEFAULT_REDIS_DIRECTORY_TTL_SECONDS = 300
+# Boundary directory result cap (PHASE-6 T2, #324): directory search never
+# returns an unbounded nearest-first list - the facade caps the returned items
+# at this top-N after distance ordering, on both the in-scope and the wider-area
+# fallback paths. A limit, not a correctness rule: filtering, distance ordering
+# and fallback semantics are unchanged (MOD-002).
+DEFAULT_DIRECTORY_MAX_RESULTS = 50
 # Auth-surface rate limit (``NFR-SEC-004``): the OTP/auth endpoints are the
 # abuse target, so the gateway caps them per caller. 10 requests / 60 s per
 # IP is a headroom-rich ceiling above the one-user flow (register + verify +
@@ -57,6 +66,12 @@ DEFAULT_PARTNER_RE_SUBMISSION_COOLDOWN_DAYS = 30
 # days out; the purge seam then deletes the documents so identity files are not
 # hoarded (spec phase-5 "Credential document storage"). Spec-pinned at 30 days.
 DEFAULT_PARTNER_CREDENTIAL_CLEANUP_DAYS = 30
+# Daily credential-expiry sweep cadence (ADR-0011): the worker's APScheduler
+# periodic job (PHASE-6 T04a, #315) runs the close-out pass on this crontab
+# expression. Defaults to the daily 01:30 cadence of the backup cron precedent
+# (deploy/cron/caresetu-backup.cron); the cadence is a changeable cost, never
+# architecture - one env var moves it.
+DEFAULT_PARTNER_CREDENTIAL_SWEEP_CRON = "30 1 * * *"
 # Operator MFA TOTP secret encryption (PHASE-5 S8, #261): the AES-256-GCM key
 # for encrypting/decrypting the TOTP secret stored in ``iam_operator_mfa.secret``
 # comes from the ``IAM_MFA_SECRET_KEY`` environment variable (never committed).
@@ -98,6 +113,11 @@ class Settings:
     )
     redis_url: str = DEFAULT_REDIS_URL
     redis_consent_ttl_seconds: int = DEFAULT_REDIS_CONSENT_TTL_SECONDS
+    redis_directory_ttl_seconds: int = DEFAULT_REDIS_DIRECTORY_TTL_SECONDS
+    # Directory result cap (PHASE-6 T2, #324): the top-N bound applied after
+    # distance ordering in ``search_directory`` (both the in-scope and fallback
+    # paths), so a patient's list tops out at the meaningful nearest matches.
+    directory_max_results: int = DEFAULT_DIRECTORY_MAX_RESULTS
     # The stub flag for audit retention (GAP-011): 0 means no expiry today; the
     # future 2555-day (7-year) policy is a one-line env change, never a code change.
     audit_retention_days: int = DEFAULT_AUDIT_RETENTION_DAYS
@@ -123,6 +143,9 @@ class Settings:
     # Credential-document cleanup window after permanent rejection (US-27) - a
     # retention policy, env-driven like the other phase-5 knobs.
     partner_credential_cleanup_days: int = DEFAULT_PARTNER_CREDENTIAL_CLEANUP_DAYS
+    # Daily credential-expiry sweep cadence (ADR-0011): the cron expression the
+    # worker's periodic job schedules the close-out pass on (PHASE-6 T04a, #315).
+    partner_credential_sweep_cron: str = DEFAULT_PARTNER_CREDENTIAL_SWEEP_CRON
     # Encrypted TOTP secret for operator MFA (PHASE-5 S8, #261): AES-256-GCM key
     # from the ``IAM_MFA_SECRET_KEY`` environment; ``issue_operator_session``
     # refuses to verify without it.
@@ -196,6 +219,10 @@ class Settings:
             )
         if self.redis_consent_ttl_seconds <= 0:
             raise ValueError("redis_consent_ttl_seconds must be positive")
+        if self.redis_directory_ttl_seconds <= 0:
+            raise ValueError("redis_directory_ttl_seconds must be positive")
+        if self.directory_max_results <= 0:
+            raise ValueError("directory_max_results must be positive")
         if self.audit_retention_days < 0:
             raise ValueError("audit_retention_days must be zero or positive (0 = no expiry)")
         if self.gateway_access_token_ttl_seconds <= 0:
@@ -326,6 +353,10 @@ def get_settings() -> Settings:
         redis_consent_ttl_seconds=_env_int(
             "REDIS_CONSENT_TTL_SECONDS", DEFAULT_REDIS_CONSENT_TTL_SECONDS
         ),
+        redis_directory_ttl_seconds=_env_int(
+            "REDIS_DIRECTORY_TTL_SECONDS", DEFAULT_REDIS_DIRECTORY_TTL_SECONDS
+        ),
+        directory_max_results=_env_int("DIRECTORY_MAX_RESULTS", DEFAULT_DIRECTORY_MAX_RESULTS),
         audit_retention_days=_env_int("AUDIT_RETENTION_DAYS", DEFAULT_AUDIT_RETENTION_DAYS),
         cors_allowed_origins=_env_csv("CORS_ALLOWED_ORIGINS"),
         demo_mode=_env_bool("DEMO_MODE", False),
@@ -343,6 +374,9 @@ def get_settings() -> Settings:
         partner_credential_cleanup_days=_env_int(
             "PARTNER_CREDENTIAL_CLEANUP_DAYS",
             DEFAULT_PARTNER_CREDENTIAL_CLEANUP_DAYS,
+        ),
+        partner_credential_sweep_cron=os.environ.get(
+            "PARTNER_CREDENTIAL_SWEEP_CRON", DEFAULT_PARTNER_CREDENTIAL_SWEEP_CRON
         ),
         iam_mfa_secret_key=os.environ.get("IAM_MFA_SECRET_KEY", ""),
     )

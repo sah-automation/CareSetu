@@ -29,7 +29,7 @@ from app.gateway.errors import error_response
 from app.gateway.idempotency import run_idempotent
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_operator, require_partner
-from modules.partner.domain.credentials import CredentialType
+from modules.partner.domain.credentials import CredentialType, Specialty
 from modules.partner.domain.events import PartnerType
 from modules.partner.domain.exceptions import (
     AppealAlreadyUsedError,
@@ -38,6 +38,7 @@ from modules.partner.domain.exceptions import (
     InvalidQueueStatusError,
     PartnerError,
     PartnerNotRejectedError,
+    ProviderProfileNotFoundError,
     RejectionReasonRequiredError,
     ReSubmissionThrottledError,
     ServiceAreaNotFoundError,
@@ -45,17 +46,140 @@ from modules.partner.domain.exceptions import (
 from modules.partner.facade import (
     CredentialSubmission,
     CredentialSubmissionResult,
+    DirectorySearchView,
     PartnerFacade,
     PartnerMeView,
     PartnerQueue,
     PartnerVerificationDetail,
     PartnerVerificationStatusView,
     PartnerView,
+    ProviderProfileView,
     RegisterPartnerResult,
     RejectionReasonView,
 )
 
 router = APIRouter(prefix="/v1/partner", tags=["partner"])
+
+# The public directory search surface (PHASE-6 T02a #313): a NEW unauthenticated
+# router under ``/v1/directory`` - patients browse the directory without logging
+# in (FEAT-004), so no auth dependency rides these routes. The gateway still
+# rate-limits them at the edge like the other public surfaces (api-standards).
+directory_router = APIRouter(prefix="/v1/directory", tags=["directory"])
+
+
+@directory_router.get(
+    "/search",
+    response_model=DirectorySearchView,
+    status_code=status.HTTP_200_OK,
+    summary="Search the public provider directory (open, no login required)",
+)
+async def public_directory_search(
+    request: Request,
+    q: Annotated[str | None, Query(max_length=120)] = None,
+    partner_type: Annotated[PartnerType | None, Query()] = None,
+    specialty: Annotated[Specialty | None, Query()] = None,
+    lat: Annotated[float | None, Query(ge=-90, le=90)] = None,
+    lng: Annotated[float | None, Query(ge=-180, le=180)] = None,
+) -> DirectorySearchView:
+    """Public provider directory search (FEAT-004, PHASE-6 T02a #313).
+
+    Thin unauthenticated adapter over the ``MOD-002`` search facade: patients
+    search ``[Active]`` partners with valid credentials, nearest-first from
+    their geo point. ``q`` is free-text over the practice name; ``partner_type``
+    and ``specialty`` (doctors only, closed pick-list) filter results; ``lat``/
+    ``lng`` anchor the distance sort. The facade owns the missing-geo default
+    (the Daltonganj centre, REQ-008) - the adapter stays geography-agnostic.
+    When nothing matches within the peri-urban scope the facade relaxes only
+    the location constraint and flags the view with ``fell_back`` so the client
+    labels the results "outside your area". No business logic here - filters,
+    ordering, the wider-area fallback, and the ``directory.search`` analytics
+    event all live in the facade.
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    return await facade.search_directory(
+        query=q,
+        partner_type=partner_type,
+        specialty=specialty.value if specialty is not None else None,
+        latitude=lat,
+        longitude=lng,
+    )
+
+
+@directory_router.get(
+    "/providers/{partner_id}",
+    response_model=ProviderProfileView,
+    status_code=status.HTTP_200_OK,
+    summary="Public provider profile (open, no login required)",
+)
+async def public_provider_profile(
+    request: Request,
+    partner_id: int,
+) -> ProviderProfileView:
+    """Public provider profile (FEAT-005, PHASE-6 T03 #309).
+
+    Thin unauthenticated adapter over the ``MOD-002`` profile facade:
+    patients view a provider's verified credentials (type + status labels,
+    expiry date), service area and a truthful ``verified`` indicator.
+    ``partner_id`` is the path parameter. The facade owns the visibility gate:
+    not ``[Active]``, no index row, no credentials or any invalid credential
+    raises :class:`ProviderProfileNotFoundError` mapped to the 404 envelope.
+    The route carries no business logic - visibility derivation, credential
+    display, and the service-area default live in the facade.
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    return await facade.get_provider_profile(partner_id)
+
+
+class PartnerSelectRequest(BaseModel):
+    """Body of ``POST /v1/directory/select``: one directory pick (FEAT-004).
+
+    Client-initiated product analytics, not a regulated act: carries only the
+    pick facts - the picked partner and the source surface - never PHI or
+    credential data. The public route is unauthenticated, so no actor is
+    recorded; the facade writes the anonymous ``partner.selected`` outbox row.
+    ``partner_type`` is the closed doctor/lab/chemist enum when the client
+    knows it; ``source`` names the surface the pick came from (e.g. a search
+    card or a provider profile).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    partner_id: int = Field(gt=0, description="The picked partner's identity id")
+    partner_type: PartnerType | None = Field(
+        default=None,
+        description="The picked partner's type: doctor, lab, or chemist",
+    )
+    source: str | None = Field(
+        default=None,
+        max_length=80,
+        description="Source surface of the pick (e.g. search card, profile page)",
+    )
+
+
+@directory_router.post(
+    "/select",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Record a directory pick (open, no login required; anonymous analytics)",
+)
+async def public_directory_select(
+    request: Request,
+    body: PartnerSelectRequest,
+) -> None:
+    """Record one anonymous ``partner.selected`` pick event (FEAT-004).
+
+    Thin unauthenticated adapter over the ``MOD-002`` pick facade: the patient
+    chose a provider from the directory (a search card or a provider profile)
+    and the client reports the pick for product analytics. No business logic
+    here - the facade writes the ``partner.selected`` outbox row in its own
+    transaction, and the gateway treats this route exactly like the other
+    ``/v1/directory/*`` surfaces (no login, same rate-limit surface).
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    await facade.record_partner_selected(
+        partner_id=body.partner_id,
+        partner_type=body.partner_type,
+        source=body.source,
+    )
 
 
 class RegisterPartnerRequest(BaseModel):
@@ -541,6 +665,16 @@ def register_error_handlers(app: FastAPI) -> None:
             request=request,
         )
 
+    async def _provider_profile_not_found(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        return error_response(
+            status.HTTP_404_NOT_FOUND,
+            "PROVIDER_PROFILE_NOT_FOUND",
+            "no public provider profile exists for this id",
+            log_tag="partner_profile",
+            request=request,
+        )
+
     app.add_exception_handler(RejectionReasonRequiredError, _rejection_reason_required)
     app.add_exception_handler(InvalidQueueSortError, _invalid_queue_sort)
     app.add_exception_handler(InvalidQueueStatusError, _invalid_queue_status)
@@ -549,4 +683,5 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(AppealAlreadyUsedError, _appeal_already_used)
     app.add_exception_handler(ReSubmissionThrottledError, _re_submission_throttled)
     app.add_exception_handler(IllegalPartnerTransitionError, _illegal_transition)
+    app.add_exception_handler(ProviderProfileNotFoundError, _provider_profile_not_found)
     app.add_exception_handler(PartnerError, _partner_failed)

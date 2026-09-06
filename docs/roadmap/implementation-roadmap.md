@@ -445,7 +445,7 @@ Still no new PRD feature - resolved chassis anchored to `REQ-003` + `REQ-006`, g
 
 - **Phase ID:** `PHASE-6-DIRECTORY`
 - **Phase Strategic Objective:** Let patients find and trust providers - distance-sorted search over **activated-only** partners with verified credential display, and automatic deactivation when a credential expires or is revoked (`FEAT-004`, `FEAT-005`).
-- **Release Readiness Criteria:** Search within Daltonganj + peri-urban returns only `[Active]` partners, sorted by distance (p95 < 250 ms cached); profile shows verified credentials + "verified" indicator; on credential expiry/revocation the partner is deindexed and the indicator removed; empty state shows "no providers found" + adjacent-area results; `directory_search` / `provider_selected` / `credential_invalidated` events emitted.
+- **Release Readiness Criteria:** Search within Daltonganj + peri-urban returns only `[Active]` partners, sorted by distance (p95 < 250 ms cached); profile shows verified credentials + "verified" indicator; on credential expiry/revocation the partner is deindexed and the indicator removed; empty state shows "no providers found" + adjacent-area results; `directory.search` / `partner.selected` (supersedes the PRD's legacy `provider_selected`) / `credential.invalidated` events emitted.
 
 #### 1. In-Scope Modules & Features
 
