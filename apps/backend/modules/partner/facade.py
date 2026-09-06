@@ -1,17 +1,24 @@
 """MOD-002 Partner lifecycle: typed public sync API (PHASE-5 T04, ticket #247).
 
 The only legal cross-module import target for the ``partner`` module
-(coding-standards §2, ADR-0003). This ticket lands the lifecycle engine that
-the two-step verification gate (ADR-0008) drives: every decision comes from the
-pure :mod:`modules.partner.domain.state_machine`; this layer only persists and
-writes the outbox.
+(coding-standards §2, ADR-0003). Since the WI-2 deepening pass the facade is a
+thin coordinator that delegates to lifecycle sub-facades (ADR-0006, parent
+#330): the registration lifecycle (:mod:`modules.partner.registration_facade`,
+WI-2 p1a #332) followed by credential-intake, operator-gate, and directory
+sub-facades. The coordinator re-exports the sub-facades' result models so the
+public surface and all routing/cross-module callers stay unchanged.
 
-Methods:
+Methods (delegated to the registration sub-facade - WI-2 p1a #332):
 - ``register`` opens a ``[Registered]`` profile from an open self-service
   registration (FEAT-014, T05): creates the iam credential account
   synchronously (ADR-0010) and emits ``partner.registered``; a duplicate phone
   resolves to the existing profile.
 - ``register_partner`` opens a profile in ``Registered``.
+- ``resolve_partner`` / ``resolve_partner_id_by_identity`` resolve an identity
+  to the partner profile (the latter non-throwing, for the session gate).
+- ``get_my_status`` reads the partner's own onboarding status.
+
+Remaining coordinator methods:
 - ``submit_credentials`` runs the Step-1 credential pre-filter (ADR-0008) and,
   on pass, encrypts the documents into ``partner/``, opens ``partner_credentials``
   rows and a verification round (``verification_started`` - including
@@ -148,6 +155,9 @@ from modules.partner.operator_gate_models import (
     VerificationRound as VerificationRound,
 )
 from modules.partner.outbox import PARTNER_OUTBOX_TABLE
+from modules.partner.registration_facade import (
+    RegistrationFacade as RegistrationFacade,
+)
 from modules.partner.registration_models import (
     PartnerMeView as PartnerMeView,
 )
@@ -175,9 +185,6 @@ from modules.partner.shared import (
 )
 from modules.partner.shared import (
     load_profile_by_identity as _load_profile_by_identity,
-)
-from modules.partner.shared import (
-    register_profile_race_retry as _register_profile_race_retry,
 )
 
 # The Phase-5 launch service area (REQ-008): a partner that does not declare a
@@ -406,7 +413,6 @@ class PartnerFacade:
         clock: Callable[[], datetime] = _default_clock,
     ) -> None:
         self._engine = engine
-        self._iam = iam_facade
         # Credential documents are encrypted into the ``partner/`` object-storage
         # prefix on a Step-1 pass (ADR-0008, T06). The store must be configured;
         # ``submit_credentials`` refuses to run a passing submission without one
@@ -446,6 +452,10 @@ class PartnerFacade:
         # owns the shared instance so sub-facades later receive it as a seam,
         # never reconstructing it.
         self._credential_validity = credential_validity_module
+        # Registration sub-facade (ADR-0006, WI-2 p1a #332): owns the open /
+        # resolve-your-partner lifecycle and the synchronous iam credential
+        # account (ADR-0010). The coordinator delegates below.
+        self._registration = RegistrationFacade(engine, credential_validity_module, iam_facade)
         # Directory-cache seam (PHASE-6 T02b, #314): the Redis accelerator
         # functions. The coordinator exposes the seam once so sub-facades
         # share the same cache without re-importing.
@@ -463,55 +473,22 @@ class PartnerFacade:
     ) -> RegisterPartnerResult:
         """Open partner registration (FEAT-014, ADR-0010): open + sync account.
 
-        A doctor/lab/chemist registers openly with their phone and basic
-        profile - no invite required. The iam credential account is created
-        synchronously first (ADR-0010) so a login-capable identity exists
-        before the partner can authenticate, then the ``[Registered]`` profile
-        row opens with ``partner.registered`` emitted. Both happen in the SAME
-        transaction (the iam seam runs on this method's connection) so the
-        identity and profile commit together as one atomic unit (ADR-0010,
-        ADR-0002 §1) - no orphan identity if the profile insert fails.
-
-        A phone that already resolves to a partner identity (duplicate
-        registration) returns the existing profile unchanged - never a second
-        row. Duplicate identities are resolved by the iam seam (``ON CONFLICT``
-        on ``phone_e164``) and duplicate profiles by ``on_conflict_do_nothing``
-        on ``uq_partner_profiles_identity``, so concurrent registrations of the
-        same phone converge instead of raising (accepted criterion 6).
+        Delegated to the registration sub-facade (ADR-0006, WI-2 p1a #332):
+        the iam credential account is created synchronously first (ADR-0010),
+        then the ``[Registered]`` profile opens with ``partner.registered``
+        emitted - both in the same transaction. A duplicate phone resolves to
+        the existing profile; concurrent registrations converge (accepted
+        criterion 6).
         """
-        async with self._engine.begin() as connection:
-            account = await self._iam.create_credential_account(phone, connection=connection)
-            identity_id = int(account.identity_id)
-
-            existing = await _load_profile_by_identity(connection, identity_id)
-            if existing is not None:
-                return RegisterPartnerResult(
-                    partner_id=existing.partner_id,
-                    identity_id=identity_id,
-                    partner_type=existing.partner_type,
-                    status=existing.status,
-                    round=existing.round,
-                    created=False,
-                )
-
-            profile, created = await _register_profile_race_retry(
-                connection,
-                identity_id=identity_id,
-                partner_type=partner_type,
-                practice_name=practice_name,
-                practice_address=practice_address,
-                practice_latitude=practice_latitude,
-                practice_longitude=practice_longitude,
-                service_area_id=service_area_id,
-            )
-            return RegisterPartnerResult(
-                partner_id=profile.partner_id,
-                identity_id=identity_id,
-                partner_type=profile.partner_type,
-                status=profile.status,
-                round=profile.round,
-                created=created,
-            )
+        return await self._registration.register(
+            phone=phone,
+            partner_type=partner_type,
+            practice_address=practice_address,
+            practice_latitude=practice_latitude,
+            practice_longitude=practice_longitude,
+            service_area_id=service_area_id,
+            practice_name=practice_name,
+        )
 
     async def register_partner(
         self,
@@ -524,83 +501,43 @@ class PartnerFacade:
     ) -> PartnerView:
         """Open a new partner profile in ``Registered`` (low-level seam).
 
-        Used by ``register`` and any caller that already holds an identity id;
-        inserts the profile row and emits ``partner.registered`` in the same
-        transaction (ADR-0002 §1). A profile that already exists for the
-        identity (the ``uq_partner_profiles_identity`` arbiter) is resolved and
-        returned unchanged - never a second row.
+        Delegated to the registration sub-facade (ADR-0006, WI-2 p1a #332).
         """
-        async with self._engine.begin() as connection:
-            profile, _created = await _register_profile_race_retry(
-                connection,
-                identity_id=identity_id,
-                partner_type=partner_type,
-                practice_address=practice_address,
-                practice_latitude=practice_latitude,
-                practice_longitude=practice_longitude,
-                service_area_id=service_area_id,
-            )
-            return PartnerView(
-                partner_id=profile.partner_id,
-                status=profile.status,
-                round=profile.round,
-            )
+        return await self._registration.register_partner(
+            identity_id=identity_id,
+            partner_type=partner_type,
+            practice_address=practice_address,
+            practice_latitude=practice_latitude,
+            practice_longitude=practice_longitude,
+            service_area_id=service_area_id,
+        )
 
     async def resolve_partner(self, identity_id: int) -> PartnerView:
         """Resolve the partner profile for an iam identity (credential route).
 
-        The self-service credential route is partner-scoped: the gateway hands
-        the authenticated partner principal carrying ``identity_id``, and this
-        seam resolves it to the partner profile id so the caller can only submit
-        against their own identity (no cross-partner submission/idor). Raises
-        :class:`PartnerNotFoundError` when the identity holds no profile.
+        Delegated to the registration sub-facade (ADR-0006, WI-2 p1a #332).
+        Raises :class:`PartnerNotFoundError` when the identity holds no profile.
         """
-        async with self._engine.begin() as connection:
-            profile = await _load_profile_by_identity(connection, identity_id)
-            if profile is None:
-                raise PartnerNotFoundError(identity_id)
-            return PartnerView(
-                partner_id=profile.partner_id,
-                status=profile.status,
-                round=profile.round,
-            )
+        return await self._registration.resolve_partner(identity_id)
 
     async def resolve_partner_id_by_identity(self, identity_id: int) -> int | None:
         """The partner profile id for an iam identity, or None if absent (T05, #298).
 
-        Non-throwing companion to ``resolve_partner``: returns the partner
-        profile id when one exists, or ``None`` when the identity holds no
-        partner profile (a patient-only phone). Used by the session facade's
-        partner-session gate to distinguish a registered partner from a patient
-        without crossing the module isolation boundary.
+        Non-throwing companion to ``resolve_partner``, delegated to the
+        registration sub-facade (ADR-0006, WI-2 p1a #332). Used by the session
+        facade's partner-session gate.
         """
-        async with self._engine.begin() as connection:
-            profile = await _load_profile_by_identity(connection, identity_id)
-            if profile is None:
-                return None
-            return profile.partner_id
+        return await self._registration.resolve_partner_id_by_identity(identity_id)
 
     async def get_my_status(self, identity_id: int) -> PartnerMeView:
         """Read the authenticated partner's own onboarding status (US-6, P2 #271).
 
         A partner-scoped read-only projection resolving the caller's identity to
         their partner profile and returning status/type/round/registration time.
-        Reuses the identity lookup ``_load_profile_by_identity``; raises
-        :class:`PartnerNotFoundError` when the identity holds no profile. Unlike
-        the operator ``get_verification_detail`` it emits no audit event and
-        exposes no credentials - the restricted pre-activation scope (spec).
+        Delegated to the registration sub-facade (ADR-0006, WI-2 p1a #332);
+        raises :class:`PartnerNotFoundError` when the identity holds no profile.
         """
-        async with self._engine.begin() as connection:
-            profile = await _load_profile_by_identity(connection, identity_id)
-            if profile is None:
-                raise PartnerNotFoundError(identity_id)
-            return PartnerMeView(
-                partner_id=profile.partner_id,
-                status=profile.status,
-                partner_type=profile.partner_type,
-                round=profile.round,
-                created_at=profile.created_at,
-            )
+        return await self._registration.get_my_status(identity_id)
 
     async def get_my_verification(self, identity_id: int) -> PartnerVerificationStatusView:
         """Read the partner's own credential review status (US-7, P3 #271).

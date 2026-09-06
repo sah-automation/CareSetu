@@ -1,7 +1,9 @@
-"""PHASE-5 T05: PartnerFacade.register facade seam (ticket #249, ADR-0010).
+"""PHASE-5 T05: RegistrationFacade.register facade seam (ticket #249, ADR-0010).
 
-Pins the atomicity and duplicate-resolution contract at the facade layer (the
-DB-backed row behavior is the integration suite's job):
+Drives the registration sub-facade (ADR-0006, WI-2 p1a #332) through a mocked
+engine, mirroring the iam MFA facade direct-seam suite. Pins the atomicity and
+duplicate-resolution contract at the facade layer (the DB-backed row behavior
+is the integration suite's job):
 
 - ``register`` holds ONE transaction and passes its own connection into the
   iam ``create_credential_account`` seam, so the iam identity insert and the
@@ -14,6 +16,9 @@ DB-backed row behavior is the integration suite's job):
   NOTHING`` on ``uq_partner_profiles_identity`` (never a bare SELECT-then-INSERT)
   and, when a concurrent registration wins the race, re-reads and returns that
   existing profile instead of raising ``IntegrityError``.
+- ``resolve_partner`` / ``get_my_status`` / ``register_partner`` / the
+  non-throwing ``resolve_partner_id_by_identity`` seam resolve the same
+  identity->profile projection.
 """
 
 from __future__ import annotations
@@ -26,8 +31,12 @@ from sqlalchemy.sql.dml import Insert
 
 from modules.iam.facade import IamFacade
 from modules.iam.identity_facade import PartnerCredentialCreatedResult
-from modules.partner.domain.exceptions import ServiceAreaNotFoundError
-from modules.partner.facade import PartnerFacade
+from modules.partner import credential_validity as credential_validity_module
+from modules.partner.domain.exceptions import (
+    PartnerNotFoundError,
+    ServiceAreaNotFoundError,
+)
+from modules.partner.registration_facade import RegistrationFacade
 from modules.partner.schema.models import partner_profiles
 
 
@@ -83,6 +92,14 @@ def _iam_facade(seen_connections: list[object]) -> AsyncMock:
     return iam
 
 
+def _facade(connection: AsyncMock, iam: AsyncMock) -> RegistrationFacade:
+    return RegistrationFacade(
+        engine=_engine(connection),
+        credential_validity=credential_validity_module,
+        iam_facade=iam,
+    )
+
+
 def _inserts(connection: AsyncMock) -> list[Insert]:
     return [
         call.args[0]
@@ -121,10 +138,7 @@ async def test_register_passes_its_connection_into_the_iam_seam() -> None:
         ]
     )
     seen_connections: list[object] = []
-    facade = PartnerFacade(
-        engine=_engine(connection),
-        iam_facade=_iam_facade(seen_connections),  # type: ignore[arg-type]
-    )
+    facade = _facade(connection, _iam_facade(seen_connections))
 
     result = await facade.register(**_register_kwargs("doctor"))
 
@@ -143,10 +157,7 @@ async def test_register_duplicate_phone_resolves_existing_profile_without_reemit
             _FakeResult(scalar=0),  # max(round) for the resolved view
         ]
     )
-    facade = PartnerFacade(
-        engine=_engine(connection),
-        iam_facade=_iam_facade([]),  # type: ignore[arg-type]
-    )
+    facade = _facade(connection, _iam_facade([]))
 
     result = await facade.register(**_register_kwargs("lab"))
 
@@ -170,10 +181,7 @@ async def test_register_concurrent_race_re_reads_winning_profile() -> None:
             _FakeResult(scalar=0),  # max(round) for the resolved view
         ]
     )
-    facade = PartnerFacade(
-        engine=_engine(connection),
-        iam_facade=_iam_facade([]),  # type: ignore[arg-type]
-    )
+    facade = _facade(connection, _iam_facade([]))
 
     result = await facade.register(**_register_kwargs("chemist"))
 
@@ -192,10 +200,7 @@ async def test_register_profile_insert_uses_on_conflict_do_nothing() -> None:
             _FakeResult(rowcount=1),  # partner outbox INSERT
         ]
     )
-    facade = PartnerFacade(
-        engine=_engine(connection),
-        iam_facade=_iam_facade([]),  # type: ignore[arg-type]
-    )
+    facade = _facade(connection, _iam_facade([]))
 
     await facade.register(**_register_kwargs("doctor"))
 
@@ -221,10 +226,7 @@ async def test_register_without_area_persists_the_daltonganj_default() -> None:
             _FakeResult(rowcount=1),  # partner outbox INSERT
         ]
     )
-    facade = PartnerFacade(
-        engine=_engine(connection),
-        iam_facade=_iam_facade([]),  # type: ignore[arg-type]
-    )
+    facade = _facade(connection, _iam_facade([]))
 
     await facade.register(**_register_kwargs("doctor"))
 
@@ -241,10 +243,7 @@ async def test_register_persists_an_explicit_service_area_id() -> None:
             _FakeResult(rowcount=1),  # partner outbox INSERT
         ]
     )
-    facade = PartnerFacade(
-        engine=_engine(connection),
-        iam_facade=_iam_facade([]),  # type: ignore[arg-type]
-    )
+    facade = _facade(connection, _iam_facade([]))
 
     await facade.register(
         **_register_kwargs("doctor"),
@@ -265,10 +264,7 @@ async def test_register_persists_a_provided_practice_name() -> None:
             _FakeResult(rowcount=1),  # partner outbox INSERT
         ]
     )
-    facade = PartnerFacade(
-        engine=_engine(connection),
-        iam_facade=_iam_facade([]),  # type: ignore[arg-type]
-    )
+    facade = _facade(connection, _iam_facade([]))
 
     await facade.register(
         **_register_kwargs("doctor"),
@@ -289,10 +285,7 @@ async def test_register_without_practice_name_inserts_null() -> None:
             _FakeResult(rowcount=1),  # partner outbox INSERT
         ]
     )
-    facade = PartnerFacade(
-        engine=_engine(connection),
-        iam_facade=_iam_facade([]),  # type: ignore[arg-type]
-    )
+    facade = _facade(connection, _iam_facade([]))
 
     await facade.register(**_register_kwargs("doctor"))
 
@@ -308,10 +301,7 @@ async def test_register_rejects_an_unknown_service_area_id() -> None:
             _FakeResult(scalar=None),  # service-area id lookup: not found
         ]
     )
-    facade = PartnerFacade(
-        engine=_engine(connection),
-        iam_facade=_iam_facade([]),  # type: ignore[arg-type]
-    )
+    facade = _facade(connection, _iam_facade([]))
 
     with pytest.raises(ServiceAreaNotFoundError) as excinfo:
         await facade.register(
@@ -322,3 +312,121 @@ async def test_register_rejects_an_unknown_service_area_id() -> None:
     assert excinfo.value.service_area_id == 999
     # No profile insert or outbox write happened.
     assert _inserts(connection) == []
+
+
+@pytest.mark.asyncio
+async def test_register_partner_opens_a_registered_profile() -> None:
+    """``register_partner`` opens the profile with the shared race-retry seam."""
+    connection = _connection(
+        [
+            _FakeResult(scalar=5),  # service-area default resolution (Daltonganj)
+            _FakeResult(rowcount=1, scalar=9),  # profile INSERT ... RETURNING id
+            _FakeResult(rowcount=1),  # partner outbox INSERT
+        ]
+    )
+    facade = _facade(connection, _iam_facade([]))
+
+    result = await facade.register_partner(
+        identity_id=7,
+        partner_type="doctor",
+        practice_address="Station Road, Daltonganj",
+        practice_latitude=24.04,
+        practice_longitude=84.07,
+    )
+
+    assert result.partner_id == 9
+    assert result.status == "Registered"
+    assert result.round == 0
+
+
+@pytest.mark.asyncio
+async def test_resolve_partner_projects_the_identity_profile() -> None:
+    connection = _connection(
+        [
+            _FakeResult(row=_profile_row(partner_id=3)),  # profile SELECT: found
+            _FakeResult(scalar=0),  # max(round) for the resolved view
+        ]
+    )
+    facade = _facade(connection, _iam_facade([]))
+
+    result = await facade.resolve_partner(7)
+
+    assert result.partner_id == 3
+    assert result.status == "Registered"
+    assert result.round == 0
+
+
+@pytest.mark.asyncio
+async def test_resolve_partner_raises_when_identity_has_no_profile() -> None:
+    connection = _connection(
+        [
+            _FakeResult(row=None),  # profile SELECT: absent
+        ]
+    )
+    facade = _facade(connection, _iam_facade([]))
+
+    with pytest.raises(PartnerNotFoundError) as excinfo:
+        await facade.resolve_partner(7)
+
+    assert excinfo.value.partner_id == 7
+
+
+@pytest.mark.asyncio
+async def test_resolve_partner_id_by_identity_is_the_non_throwing_seam() -> None:
+    """A patient-only phone resolves to None, never an exception (T05, #298)."""
+    connection = _connection(
+        [
+            _FakeResult(row=None),  # profile SELECT: absent
+        ]
+    )
+    facade = _facade(connection, _iam_facade([]))
+
+    assert await facade.resolve_partner_id_by_identity(7) is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_partner_id_by_identity_returns_the_profile_id() -> None:
+    connection = _connection(
+        [
+            _FakeResult(row=_profile_row(partner_id=3)),  # profile SELECT: found
+            _FakeResult(scalar=0),  # max(round) for the resolved view
+        ]
+    )
+    facade = _facade(connection, _iam_facade([]))
+
+    assert await facade.resolve_partner_id_by_identity(7) == 3
+
+
+@pytest.mark.asyncio
+async def test_get_my_status_projects_type_and_round() -> None:
+    """The partner's own status read (US-6) resolves the identity projection."""
+    connection = _connection(
+        [
+            _FakeResult(row=_profile_row(partner_id=3)),  # profile SELECT: found
+            _FakeResult(scalar=0),  # max(round) for the resolved view
+        ]
+    )
+    facade = _facade(connection, _iam_facade([]))
+
+    result = await facade.get_my_status(7)
+
+    assert result.partner_id == 3
+    assert result.status == "Registered"
+    assert result.partner_type == "doctor"
+    assert result.round == 0
+    assert result.created_at is None
+
+
+@pytest.mark.asyncio
+async def test_get_my_status_raises_when_identity_has_no_profile() -> None:
+    connection = _connection(
+        [
+            _FakeResult(row=None),  # profile SELECT: absent
+        ]
+    )
+    facade = _facade(connection, _iam_facade([]))
+
+    with pytest.raises(PartnerNotFoundError) as excinfo:
+        await facade.get_my_status(7)
+
+    assert excinfo.value.partner_id == 7
