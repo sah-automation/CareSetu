@@ -24,6 +24,7 @@ from bus.events import (
     EVENT_PARTNER_CREDENTIAL_REVIEWED,
     EVENT_PARTNER_REGISTERED,
     EVENT_PARTNER_REJECTED,
+    EVENT_PARTNER_SELECTED,
     EVENT_PARTNER_VERIFICATION_STARTED,
 )
 
@@ -143,6 +144,23 @@ class DirectorySearchPayload(BaseModel):
     fell_back: bool
 
 
+class PartnerSelectedPayload(BaseModel):
+    """Subject of ``partner.selected``: one directory pick (analytics).
+
+    Emitted once per time a patient picks a provider from the directory - a
+    search card or a provider profile (FEAT-004 telemetry, PHASE-6 T4 #326).
+    Client-initiated product analytics, not a regulated act: carries only the
+    pick facts - the picked partner and the source surface - never PHI or
+    credential data. The public ingest route is unauthenticated, so there is no
+    actor field (anonymous by construction); the analytics consumer cohorts on
+    whatever context it has (gap G2).
+    """
+
+    partner_id: int
+    partner_type: str | None = None
+    source: str | None = None
+
+
 def partner_registered_envelope(
     partner_id: int, identity_id: int, partner_type: PartnerType
 ) -> Envelope[PartnerRegisteredPayload]:
@@ -258,5 +276,24 @@ def directory_search_envelope(
             specialty=specialty,
             result_count=result_count,
             fell_back=fell_back,
+        ),
+    )
+
+
+def partner_selected_envelope(
+    *,
+    partner_id: int,
+    partner_type: str | None,
+    source: str | None,
+) -> Envelope[PartnerSelectedPayload]:
+    """Build the ``partner.selected`` analytics envelope for the partner outbox."""
+    return Envelope[PartnerSelectedPayload](
+        event_id=uuid4(),
+        event_type=EVENT_PARTNER_SELECTED,
+        producer=PRODUCER_MODULE,
+        payload=PartnerSelectedPayload(
+            partner_id=partner_id,
+            partner_type=partner_type,
+            source=source,
         ),
     )

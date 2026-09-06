@@ -130,6 +130,58 @@ async def public_provider_profile(
     return await facade.get_provider_profile(partner_id)
 
 
+class PartnerSelectRequest(BaseModel):
+    """Body of ``POST /v1/directory/select``: one directory pick (FEAT-004).
+
+    Client-initiated product analytics, not a regulated act: carries only the
+    pick facts - the picked partner and the source surface - never PHI or
+    credential data. The public route is unauthenticated, so no actor is
+    recorded; the facade writes the anonymous ``partner.selected`` outbox row.
+    ``partner_type`` is the closed doctor/lab/chemist enum when the client
+    knows it; ``source`` names the surface the pick came from (e.g. a search
+    card or a provider profile).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    partner_id: int = Field(gt=0, description="The picked partner's identity id")
+    partner_type: PartnerType | None = Field(
+        default=None,
+        description="The picked partner's type: doctor, lab, or chemist",
+    )
+    source: str | None = Field(
+        default=None,
+        max_length=80,
+        description="Source surface of the pick (e.g. search card, profile page)",
+    )
+
+
+@directory_router.post(
+    "/select",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Record a directory pick (open, no login required; anonymous analytics)",
+)
+async def public_directory_select(
+    request: Request,
+    body: PartnerSelectRequest,
+) -> None:
+    """Record one anonymous ``partner.selected`` pick event (FEAT-004).
+
+    Thin unauthenticated adapter over the ``MOD-002`` pick facade: the patient
+    chose a provider from the directory (a search card or a provider profile)
+    and the client reports the pick for product analytics. No business logic
+    here - the facade writes the ``partner.selected`` outbox row in its own
+    transaction, and the gateway treats this route exactly like the other
+    ``/v1/directory/*`` surfaces (no login, same rate-limit surface).
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    await facade.record_partner_selected(
+        partner_id=body.partner_id,
+        partner_type=body.partner_type,
+        source=body.source,
+    )
+
+
 class RegisterPartnerRequest(BaseModel):
     """Body of ``POST /v1/partner/register``: open registration (FEAT-014).
 

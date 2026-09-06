@@ -392,6 +392,49 @@ async def test_search_emits_directory_search_event_once_per_search(
 
 
 @pytest.mark.asyncio
+async def test_select_emits_partner_selected_once_per_pick(
+    database_url: str, clean_partner: None, tmp_path: Path
+) -> None:
+    """One ``partner.selected`` analytics row per pick - anonymous, pick-only facts.
+
+    The public ingest path (PHASE-6 T4 #326) writes into the same partner
+    outbox the search event uses: each facade call produces exactly one row
+    carrying only the pick facts. No patient id or actor ever lands - the
+    route is unauthenticated, so the payload stays anonymous by construction.
+    """
+    _, partner = _facade(database_url, tmp_path)
+
+    await partner.record_partner_selected(
+        partner_id=42, partner_type="doctor", source="search-card"
+    )
+
+    rows = await _query(
+        database_url,
+        "SELECT event_type, payload FROM partner.partner_outbox "
+        "WHERE event_type = 'partner.selected'",
+    )
+    assert len(rows) == 1
+    payload = rows[0]["payload"]
+    assert payload["partner_id"] == 42
+    assert payload["partner_type"] == "doctor"
+    assert payload["source"] == "search-card"
+    assert "patient_id" not in payload
+    assert "actor" not in payload
+
+    await partner.record_partner_selected(partner_id=43, partner_type="lab", source=None)
+
+    rows = await _query(
+        database_url,
+        "SELECT event_type, payload FROM partner.partner_outbox "
+        "WHERE event_type = 'partner.selected'",
+    )
+    assert len(rows) == 2
+    by_partner = {row["payload"]["partner_id"]: row["payload"] for row in rows}
+    assert by_partner[42]["source"] == "search-card"
+    assert by_partner[43]["source"] is None
+
+
+@pytest.mark.asyncio
 async def test_search_caps_in_scope_results_at_directory_max_results(
     database_url: str, clean_partner: None, tmp_path: Path
 ) -> None:

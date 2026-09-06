@@ -86,6 +86,7 @@ from modules.partner.domain.events import (
     partner_activated_envelope,
     partner_registered_envelope,
     partner_rejected_envelope,
+    partner_selected_envelope,
     verification_started_envelope,
 )
 from modules.partner.domain.exceptions import (
@@ -1976,6 +1977,38 @@ class PartnerFacade:
                 ttl_seconds=self._directory_ttl_seconds,
             )
         return view
+
+    async def record_partner_selected(
+        self,
+        *,
+        partner_id: int,
+        partner_type: str | None = None,
+        source: str | None = None,
+    ) -> None:
+        """Record one ``partner.selected`` analytics pick into the partner outbox.
+
+        Client-initiated product analytics (FEAT-004 telemetry, PHASE-6 T4
+        #326): ``POST /v1/directory/select`` reports that a patient picked a
+        provider from the directory, and this facade writes one
+        ``partner.selected`` outbox row in its own transaction. The payload
+        carries only the pick facts - the picked partner id + partner type and
+        the source surface - never a patient identity (the public route is
+        anonymous), never PHI or credential data. Deliberately NOT a regulated
+        act: the event stays out of ``REGULATED_ACT_TYPES``, mirroring the
+        ``directory.search`` analytics seam. The adapter calls only this
+        method; there is no business logic in the route.
+        """
+        async with self._engine.begin() as connection:
+            await write_outbox(
+                connection,
+                PARTNER_SCHEMA,
+                PARTNER_OUTBOX_TABLE,
+                partner_selected_envelope(
+                    partner_id=partner_id,
+                    partner_type=partner_type,
+                    source=source,
+                ),
+            )
 
     async def get_provider_profile(self, partner_id: int) -> ProviderProfileView:
         """Public provider profile (MOD-002, FEAT-005, PHASE-6 T03 #309).
