@@ -12,6 +12,8 @@ layout); the only tables they may hold are the five ``iam`` tables added
       Phase 5 also adds the ``iam`` idempotent-subscriber ledger
       (``v5.1__iam_consumed_events``, #248) and the MOD-010 notify schema
       foundation (``v5.0__init_notify``, #246).
+      Phase 6 adds the read-side provider directory index
+      (``v6.0__directory_index``, #307).
   2. The outbox/``consumed_events`` DDL template materializes into a throwaway
      schema with the documented row contract (issue #16), so the round-trip
      harness (T2c) can build on it.
@@ -87,6 +89,7 @@ EXPECTED_PARTNER_TABLES = {
     "partner.partner_credentials",
     "partner.partner_verifications",
     "partner.partner_service_areas",
+    "partner.partner_directory_index",
     "partner.partner_outbox",
     "partner.consumed_events",
 }
