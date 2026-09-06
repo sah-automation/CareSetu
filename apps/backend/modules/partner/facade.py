@@ -391,18 +391,22 @@ class DirectoryEntry(BaseModel):
 
     A verified-safe projection of an ``[Active]`` partner with valid
     credentials: display name (``practice_name``), partner type, specialty
-    (doctors only) and the derived ``verified`` indicator plus its great-circle
-    ``distance_km`` from the caller's geo point. The tick is always True for a
-    returned row - search visibility and the tick share one derivation, so a
-    separate visibility flag could never drift (ADR-0011 "tick gone = card
-    gone"). Named ``practice_name`` to stay on the partner schema vocabulary;
-    patient-facing clients may render it as the provider's name.
+    (doctors only), the partner's ``area`` (its recorded service area, with the
+    Daltonganj fallback when none is recorded - the same optionality and
+    derivation the provider profile uses), and the derived ``verified``
+    indicator plus its great-circle ``distance_km`` from the caller's geo
+    point. The tick is always True for a returned row - search visibility and
+    the tick share one derivation, so a separate visibility flag could never
+    drift (ADR-0011 "tick gone = card gone"). Named ``practice_name`` to stay
+    on the partner schema vocabulary; patient-facing clients may render it as
+    the provider's name.
     """
 
     partner_id: int
     practice_name: str | None
     partner_type: str
     specialty: str | None
+    area: str | None
     distance_km: float
     verified: bool
 
@@ -1888,15 +1892,23 @@ class PartnerFacade:
             return conditions
 
         async with self._engine.begin() as connection:
-            base = select(
-                partner_directory_index.c.partner_id,
-                partner_directory_index.c.partner_type,
-                partner_directory_index.c.specialty,
-                partner_profiles.c.practice_name,
-                distance_km.label("distance_km"),
-            ).join(
-                partner_profiles,
-                partner_profiles.c.id == partner_directory_index.c.partner_id,
+            base = (
+                select(
+                    partner_directory_index.c.partner_id,
+                    partner_directory_index.c.partner_type,
+                    partner_directory_index.c.specialty,
+                    partner_profiles.c.practice_name,
+                    partner_service_areas.c.name.label("area_name"),
+                    distance_km.label("distance_km"),
+                )
+                .join(
+                    partner_profiles,
+                    partner_profiles.c.id == partner_directory_index.c.partner_id,
+                )
+                .outerjoin(
+                    partner_service_areas,
+                    partner_service_areas.c.id == partner_profiles.c.service_area_id,
+                )
             )
 
             async def _rows(peri_urban_only: bool) -> list[Any]:
@@ -1940,6 +1952,11 @@ class PartnerFacade:
                     ),
                     partner_type=str(row.partner_type),
                     specialty=str(row.specialty) if row.specialty is not None else None,
+                    area=(
+                        str(row.area_name)
+                        if row.area_name is not None
+                        else DEFAULT_SERVICE_AREA_NAME
+                    ),
                     distance_km=float(row.distance_km),
                     verified=True,
                 )

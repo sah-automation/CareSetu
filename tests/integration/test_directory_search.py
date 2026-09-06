@@ -41,7 +41,12 @@ from sqlalchemy.pool import NullPool
 from modules.iam.adapters.sms import MockSmsAdapter
 from modules.iam.facade import IamFacade
 from modules.partner.adapters.artifact_store import CredentialArtifactStore
-from modules.partner.facade import DALTONGANJ_LATITUDE, DALTONGANJ_LONGITUDE, PartnerFacade
+from modules.partner.facade import (
+    DALTONGANJ_LATITUDE,
+    DALTONGANJ_LONGITUDE,
+    DEFAULT_SERVICE_AREA_NAME,
+    PartnerFacade,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_INI = REPO_ROOT / "apps" / "backend" / "alembic.ini"
@@ -126,13 +131,16 @@ async def _seed_partner(
     credential_revoked_at: datetime | None = None,
     indexed: bool = True,
     is_active: bool = True,
+    service_area_id: int | None = None,
 ) -> int:
     """Seed profile + current-round credential + directory index row directly.
 
     A single flat insert per partner table gives the search's read-time rules
     exact states to chew on (ADR-0011 lazy read-hide: the index row may claim
     ``is_active`` while the credential is already revoked/expired - the facade
-    must still hide it).
+    must still hide it). ``service_area_id`` is passed through to the profile so
+    tests can pin a partner's recorded service area (and its fallback when
+    omitted).
     """
     engine = create_async_engine(database_url, poolclass=NullPool)
     try:
@@ -141,9 +149,10 @@ async def _seed_partner(
                 text(
                     "INSERT INTO partner.partner_profiles "
                     "(identity_id, partner_type, status, practice_name, practice_address, "
-                    " practice_latitude, practice_longitude) "
+                    " practice_latitude, practice_longitude, service_area_id) "
                     "VALUES (:identity_id, :partner_type, :status, :practice_name, "
-                    " 'integration test address', :latitude, :longitude) RETURNING id"
+                    " 'integration test address', :latitude, :longitude, :service_area_id) "
+                    "RETURNING id"
                 ),
                 {
                     "identity_id": next(_identity_ids),
@@ -152,6 +161,7 @@ async def _seed_partner(
                     "practice_name": practice_name,
                     "latitude": latitude,
                     "longitude": longitude,
+                    "service_area_id": service_area_id,
                 },
             )
             partner_id = int(profile.scalar_one())
@@ -428,5 +438,46 @@ async def test_search_caps_fallback_results_at_directory_max_results(
 
     assert view.fell_back is True
     assert len(view.items) == 50
+    distances = [entry.distance_km for entry in view.items]
+    assert distances == sorted(distances)
+
+
+@pytest.mark.asyncio
+async def test_search_maps_area_from_recorded_service_area_with_fallback(
+    database_url: str, clean_partner: None, tmp_path: Path
+) -> None:
+    """The area on each entry comes from the recorded service area, exactly like
+    ``get_provider_profile``: a partner with no ``service_area_id`` falls back to
+    Daltonganj, never invented. Distance ordering is unaffected by the join."""
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO partner.partner_service_areas (id, name) "
+                    "VALUES (2, 'Hutar') ON CONFLICT (name) DO NOTHING"
+                )
+            )
+    finally:
+        await engine.dispose()
+
+    _, partner = _facade(database_url, tmp_path)
+    await _seed_partner(
+        database_url,
+        practice_name="Dr. Hutar Clinic",
+        longitude=DALTONGANJ_LONGITUDE + 0.008,
+        service_area_id=2,
+    )
+    await _seed_partner(
+        database_url,
+        practice_name="Dr. No Area",
+        longitude=DALTONGANJ_LONGITUDE + 0.030,
+    )
+
+    view = await partner.search_directory()
+
+    name_to_area = {entry.practice_name: entry.area for entry in view.items}
+    assert name_to_area["Dr. Hutar Clinic"] == "Hutar"
+    assert name_to_area["Dr. No Area"] == DEFAULT_SERVICE_AREA_NAME
     distances = [entry.distance_km for entry in view.items]
     assert distances == sorted(distances)

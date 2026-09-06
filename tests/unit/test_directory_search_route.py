@@ -19,6 +19,7 @@ from app.main import create_app
 from modules.partner.facade import (
     DALTONGANJ_LATITUDE,
     DALTONGANJ_LONGITUDE,
+    DEFAULT_SERVICE_AREA_NAME,
     DirectoryEntry,
     DirectorySearchView,
 )
@@ -98,6 +99,7 @@ def test_search_answers_typed_view_with_items() -> None:
                 practice_name="Shanti Clinic",
                 partner_type="doctor",
                 specialty="General Physician",
+                area=DEFAULT_SERVICE_AREA_NAME,
                 distance_km=1.2,
                 verified=True,
             )
@@ -116,6 +118,7 @@ def test_search_answers_typed_view_with_items() -> None:
                 "practice_name": "Shanti Clinic",
                 "partner_type": "doctor",
                 "specialty": "General Physician",
+                "area": DEFAULT_SERVICE_AREA_NAME,
                 "distance_km": 1.2,
                 "verified": True,
             }
@@ -123,6 +126,44 @@ def test_search_answers_typed_view_with_items() -> None:
         "fell_back": True,
     }
     assert facade.called_with[0]["partner_type"] == "doctor"
+
+
+def test_search_disallowed_fields_never_serialized() -> None:
+    """The public search response stays verified-safe: no artifacts, emails,
+    phones, PHI or identity keys ever appear in the payload."""
+
+    facade = StubDirectoryFacade()
+    facade.view = DirectorySearchView(
+        items=[
+            DirectoryEntry(
+                partner_id=11,
+                practice_name="Shanti Clinic",
+                partner_type="doctor",
+                specialty="General Physician",
+                area=DEFAULT_SERVICE_AREA_NAME,
+                distance_km=1.2,
+                verified=True,
+            )
+        ],
+        fell_back=False,
+    )
+    client = _client_with(facade)
+
+    response = client.get("/v1/directory/search")
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["area"] == DEFAULT_SERVICE_AREA_NAME
+    raw = response.text
+    for forbidden in (
+        "artifact_refs",
+        "artifact",
+        "email",
+        "phone",
+        "identity_id",
+        "practice_address",
+        "revoked_at",
+    ):
+        assert forbidden.lower() not in raw.lower()
 
 
 def test_search_rejects_unknown_specialty_with_422() -> None:
