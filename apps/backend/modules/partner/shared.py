@@ -8,7 +8,7 @@ are internal to the partner module and not part of the public facade surface.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import func, select
@@ -26,8 +26,10 @@ from modules.partner.domain.exceptions import (
 )
 from modules.partner.domain.state_machine import (
     REGISTERED,
+    PartnerAction,
     PartnerState,
     PartnerStatus,
+    transition,
 )
 from modules.partner.outbox import PARTNER_OUTBOX_TABLE
 from modules.partner.schema.models import (
@@ -66,6 +68,48 @@ class Profile:
     @property
     def state(self) -> PartnerState:
         return PartnerState(status=PartnerStatus(self.status), round=self.round)
+
+
+def default_clock() -> datetime:
+    """The wall-clock the lifecycle uses for scheduling windows (US-27, #263).
+
+    A plain UTC now, overridable for tests (the ``MutableClock`` pattern the
+    integration suite uses to walk the 30-day cleanup window).
+    """
+    return datetime.now(UTC)
+
+
+async def apply_transition(
+    connection: AsyncConnection,
+    profile: Profile,
+    action: PartnerAction,
+    verification: bool,
+) -> PartnerState:
+    """Decide with the pure machine and persist the status flip (shared operator gate).
+
+    Persists the state-machine decision on the profile row and, when
+    ``verification`` is set, opens a ``[queued]`` row on the current round of
+    ``partner_verifications`` so the operator gate can see the new round. Shared
+    by the coordinator's credential-intake methods (``submit_credentials``,
+    ``appeal``) and the operator-gate sub-facade (``operator_decision``,
+    ``grace_lapse``) - both lifecycle seams flip statuses the same way
+    (ADR-0002 §1: the write rides the caller's transaction).
+    """
+    next_state = transition(profile.state, action)
+    await connection.execute(
+        partner_profiles.update()
+        .where(partner_profiles.c.id == profile.partner_id)
+        .values(status=next_state.status.value, updated_at=func.now())
+    )
+    if verification:
+        await connection.execute(
+            partner_verifications.insert().values(
+                profile_id=profile.partner_id,
+                round=next_state.round,
+                status="queued",
+            )
+        )
+    return next_state
 
 
 _PROFILE_COLUMNS = (
