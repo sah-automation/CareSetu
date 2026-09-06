@@ -65,6 +65,12 @@ vi.mock("@/lib/directory/search", async (importOriginal) => {
   return { ...original, searchDirectory };
 });
 
+const { emitPartnerSelected } = vi.hoisted(() => ({
+  emitPartnerSelected: vi.fn(),
+}));
+
+vi.mock("@/lib/directory/emit", () => ({ emitPartnerSelected }));
+
 function view(
   items: DirectorySearchView["items"],
   fell_back = false,
@@ -102,6 +108,7 @@ beforeEach(() => {
   navigation.setParams(new URLSearchParams());
   mockReplace.mockClear();
   searchDirectory.mockReset();
+  emitPartnerSelected.mockClear();
   __resetLangForTests();
   document.documentElement.lang = "en";
 });
@@ -480,5 +487,49 @@ describe("DirectoryBrowser empty, error and fallback states", () => {
         "\u0938\u0924\u094D\u092F\u093E\u092A\u093F\u0924",
       ),
     ).toBeInTheDocument(); // verified badge rendered in Hindi
+  });
+});
+
+describe("DirectoryBrowser partner.selected emission (T6)", () => {
+  it("fires the anonymous pick once per card tap in the browse surface", async () => {
+    searchDirectory.mockResolvedValueOnce(
+      view([
+        doctor(1, "Dr. A. Kumar"),
+        {
+          partner_id: 2,
+          practice_name: "Sahyog Path Lab",
+          partner_type: "lab",
+          specialty: null,
+          area: null,
+          distance_km: 0.8,
+          verified: true,
+        },
+      ]),
+    );
+
+    render(<DirectoryBrowser />);
+    await screen.findByTestId("directory-cards");
+
+    // Rendering the browse surface alone emits nothing.
+    expect(emitPartnerSelected).not.toHaveBeenCalled();
+
+    // Tapping one card fires exactly one anonymous pick with its facts.
+    fireEvent.click(screen.getByText("Dr. A. Kumar"));
+
+    expect(emitPartnerSelected).toHaveBeenCalledTimes(1);
+    expect(emitPartnerSelected).toHaveBeenCalledWith({
+      partner_id: 1,
+      partner_type: "doctor",
+      source: "search_card",
+    });
+
+    // Tapping a different card fires a second, distinct pick.
+    fireEvent.click(screen.getByText("Sahyog Path Lab"));
+    expect(emitPartnerSelected).toHaveBeenCalledTimes(2);
+    expect(emitPartnerSelected).toHaveBeenLastCalledWith({
+      partner_id: 2,
+      partner_type: "lab",
+      source: "search_card",
+    });
   });
 });

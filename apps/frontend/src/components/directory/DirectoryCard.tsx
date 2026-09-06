@@ -13,6 +13,7 @@
 
 import Link from "next/link";
 
+import { emitPartnerSelected } from "@/lib/directory/emit";
 import { providerProfileHref } from "@/lib/directory/links";
 import type { DirectoryEntry } from "@/lib/directory/search";
 
@@ -53,6 +54,16 @@ export function DirectoryCard({
     <Link
       href={providerProfileHref(entry.partner_id)}
       data-testid="directory-card"
+      onClick={() =>
+        // T6 (#328): a card tap is one interaction - fire the anonymous
+        // `partner.selected` pick exactly once (onClick, not an effect that
+        // could re-run on re-render). Fire-and-forget; never blocks nav.
+        emitPartnerSelected({
+          partner_id: entry.partner_id,
+          partner_type: entry.partner_type,
+          source: "search_card",
+        })
+      }
       className="flex flex-col items-start gap-1 rounded-lg border border-hairline bg-surface p-4 shadow-card transition-shadow hover:shadow-pop"
     >
       <div className="flex w-full items-start justify-between gap-3">

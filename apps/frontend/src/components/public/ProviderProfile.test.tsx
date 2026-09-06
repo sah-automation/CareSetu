@@ -29,6 +29,12 @@ vi.mock("@/lib/directory/profile", async (importOriginal) => {
   return { ...original, fetchProviderProfile: vi.fn() };
 });
 
+const { emitPartnerSelected } = vi.hoisted(() => ({
+  emitPartnerSelected: vi.fn(),
+}));
+
+vi.mock("@/lib/directory/emit", () => ({ emitPartnerSelected }));
+
 // Import after the mock declaration so the suite binds the mocked function.
 import { fetchProviderProfile } from "@/lib/directory/profile";
 
@@ -95,6 +101,7 @@ function renderProfile(partnerId = 7) {
 
 beforeEach(() => {
   mockFetch.mockReset();
+  emitPartnerSelected.mockClear();
   __resetLangForTests();
   document.documentElement.lang = "en";
 });
@@ -269,6 +276,37 @@ describe("ProviderProfile bilingual parity (REQ-006)", () => {
       "Dr. Rakesh Sharma",
     );
     expect(screen.getByText("मेडिकल पंजीकरण")).toBeInTheDocument();
+    unmount();
+  });
+});
+
+describe("ProviderProfile partner.selected emission (T6)", () => {
+  it("fires the anonymous pick exactly once on mount", async () => {
+    mockFetch.mockResolvedValue({ status: "found", profile: doctorProfile() });
+
+    renderProfile();
+
+    // The pick fires on open - one anonymous emission with the profile facts.
+    await waitFor(() => expect(emitPartnerSelected).toHaveBeenCalledTimes(1));
+    expect(emitPartnerSelected).toHaveBeenCalledWith({
+      partner_id: 7,
+      partner_type: null,
+      source: "provider_profile",
+    });
+  });
+
+  it("fires once across re-renders - never double-fires on re-render", async () => {
+    mockFetch.mockResolvedValue({ status: "found", profile: doctorProfile() });
+    const { unmount } = renderProfile();
+
+    await screen.findByTestId("profile-hero");
+    expect(emitPartnerSelected).toHaveBeenCalledTimes(1);
+
+    // A language flip re-renders the surface; the mount-once pick stays single.
+    fireEvent.click(screen.getByRole("button", { name: "\u0939\u093F\u0902" }));
+    await screen.findByTestId("profile-verified");
+    expect(emitPartnerSelected).toHaveBeenCalledTimes(1);
+
     unmount();
   });
 });

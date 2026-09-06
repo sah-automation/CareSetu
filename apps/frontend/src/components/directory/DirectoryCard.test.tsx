@@ -4,11 +4,17 @@
 // renders no card at all (defensive second gate on the shared derivation).
 // The card renders area among non-null meta, never inventing a string.
 
-import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { DirectoryEntry } from "@/lib/directory/search";
 import { DirectoryCard, formatDistanceKm } from "./DirectoryCard";
+
+const { emitPartnerSelected } = vi.hoisted(() => ({
+  emitPartnerSelected: vi.fn(),
+}));
+
+vi.mock("@/lib/directory/emit", () => ({ emitPartnerSelected }));
 
 function entry(overrides: Partial<DirectoryEntry>): DirectoryEntry {
   return {
@@ -24,6 +30,7 @@ function entry(overrides: Partial<DirectoryEntry>): DirectoryEntry {
 }
 
 afterEach(() => {
+  emitPartnerSelected.mockClear();
   cleanup();
 });
 
@@ -133,5 +140,82 @@ describe("DirectoryCard", () => {
     // No specialty meta for a non-doctor, and no invented area string.
     expect(screen.queryByText(/specialty/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/area/i)).not.toBeInTheDocument();
+  });
+});
+
+describe("DirectoryCard partner.selected emission (T6)", () => {
+  it("fires the anonymous pick exactly once on a card tap", () => {
+    render(
+      <DirectoryCard
+        entry={entry({})}
+        typeLabel="Doctors"
+        specialtyLabel="General Physician"
+        verifiedLabel="Verified"
+        distanceLabel="1.2 km"
+      />,
+    );
+
+    // A rendered card starts with zero emissions - no fire on render.
+    expect(emitPartnerSelected).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId("directory-card"));
+
+    // Exactly one anonymous pick with the card's pick-only facts.
+    expect(emitPartnerSelected).toHaveBeenCalledTimes(1);
+    expect(emitPartnerSelected).toHaveBeenCalledWith({
+      partner_id: 1,
+      partner_type: "doctor",
+      source: "search_card",
+    });
+  });
+
+  it("does not double-fire on re-render - only the tap emits", () => {
+    const { rerender } = render(
+      <DirectoryCard
+        entry={entry({})}
+        typeLabel="Doctors"
+        specialtyLabel="General Physician"
+        verifiedLabel="Verified"
+        distanceLabel="1.2 km"
+      />,
+    );
+
+    rerender(
+      <DirectoryCard
+        entry={entry({})}
+        typeLabel="Doctors"
+        specialtyLabel="General Physician"
+        verifiedLabel="Verified"
+        distanceLabel="1.2 km"
+      />,
+    );
+
+    // Re-render alone must not emit - only a user tap does.
+    expect(emitPartnerSelected).not.toHaveBeenCalled();
+  });
+
+  it("carries the partner type and id of a lab card", () => {
+    render(
+      <DirectoryCard
+        entry={entry({
+          partner_id: 9,
+          partner_type: "lab",
+          specialty: null,
+        })}
+        typeLabel="Labs"
+        specialtyLabel={null}
+        verifiedLabel="Verified"
+        distanceLabel="0.8 km"
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("directory-card"));
+
+    expect(emitPartnerSelected).toHaveBeenCalledTimes(1);
+    expect(emitPartnerSelected).toHaveBeenCalledWith({
+      partner_id: 9,
+      partner_type: "lab",
+      source: "search_card",
+    });
   });
 });

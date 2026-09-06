@@ -16,6 +16,7 @@ import Link from "next/link";
 
 import { useEffect, useState } from "react";
 
+import { emitPartnerSelected } from "@/lib/directory/emit";
 import {
   fetchProviderProfile,
   type ProviderProfile,
@@ -66,6 +67,17 @@ export function ProviderProfile({ partnerId }: ProviderProfileProps) {
   const [status, setStatus] = useState<LoadStatus>("loading");
   const [profile, setProfile] = useState<ProviderProfile | null>(null);
   const [retryNonce, setRetryNonce] = useState(0);
+
+  useEffect(() => {
+    // T6 (#328): opening a provider profile is one interaction - fire the
+    // anonymous `partner.selected` pick exactly once on mount (mount-only
+    // effect; never re-fires on re-render or retry). Fire-and-forget.
+    emitPartnerSelected({
+      partner_id: partnerId,
+      partner_type: null,
+      source: "provider_profile",
+    });
+  }, [partnerId]);
 
   useEffect(() => {
     let active = true;
