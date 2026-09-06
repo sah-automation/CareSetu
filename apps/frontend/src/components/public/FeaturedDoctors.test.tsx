@@ -68,8 +68,7 @@ describe("FeaturedDoctors (gap G2)", () => {
     // Only activated providers are ever returned, so every card shows the
     // truthful verified indicator (FEAT-004 Rule 1 / FEAT-005). Meta joins
     // non-null parts only - the dropped `consultType` never renders, and a
-    // card without an area (the search projection never carries one) shows
-    // just its specialty.
+    // card without an area shows just its specialty.
     expect(screen.getAllByText("Verified")).toHaveLength(2);
     expect(
       screen.getByText(/General Physician \u00b7 Medininagar Rd/),

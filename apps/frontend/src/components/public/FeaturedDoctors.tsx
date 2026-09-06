@@ -30,8 +30,8 @@ function DoctorCard({
   // Cards deep-link to the provider profile surface that ships with
   // PHASE-6 T06. Every card is active-and-verified by construction (the
   // featured endpoint only returns FEAT-004 Rule 1 rows), so the verified
-  // indicator is truthful. Meta joins only non-null parts - the search
-  // projection never carries `area`, and `consultType` is dropped (PRD).
+  // indicator is truthful. Meta joins only non-null parts - the dropped
+  // `consultType` never renders.
   const meta = [doctor.specialty, doctor.area].filter(Boolean).join(" \u00b7 ");
   return (
     <Link

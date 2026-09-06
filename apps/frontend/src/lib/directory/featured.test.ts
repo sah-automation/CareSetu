@@ -1,9 +1,9 @@
 // PHASE-6 T05b (#318): featured-doctor integration wiring - the homepage
 // proof-of-supply endpoint now resolves through the real public directory
 // search API (gap G2), keeping the FeaturedDoctor shape minus the dropped
-// `consultType`. Only verified rows survive the mapping (FEAT-004 Rule 1 /
-// ADR-0011), and `area` stays null because the search projection never
-// carries it - no invented strings.
+// `consultType`. Every returned row is verified by construction (ADR-0011),
+// so the mapping carries `area` through without filtering on `entry.verified`
+// - no invented strings.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -15,6 +15,7 @@ function directoryRow(overrides: Record<string, unknown> = {}) {
     practice_name: "Dr. A. Kumar",
     partner_type: "doctor",
     specialty: "General Physician",
+    area: null,
     distance_km: 1.2,
     verified: true,
     ...overrides,
@@ -38,8 +39,13 @@ describe("fetchFeaturedDoctors (T05b - real search API wiring)", () => {
       jsonResponse({
         fell_back: false,
         items: [
-          directoryRow({ partner_id: 1 }),
-          directoryRow({ partner_id: 2, partner_type: "lab", specialty: null }),
+          directoryRow({ partner_id: 1, area: "Medininagar Rd" }),
+          directoryRow({
+            partner_id: 2,
+            partner_type: "lab",
+            specialty: null,
+            area: null,
+          }),
         ],
       }),
     );
@@ -50,7 +56,7 @@ describe("fetchFeaturedDoctors (T05b - real search API wiring)", () => {
         id: 1,
         name: "Dr. A. Kumar",
         specialty: "General Physician",
-        area: null,
+        area: "Medininagar Rd",
       },
       {
         id: 2,
@@ -89,7 +95,28 @@ describe("fetchFeaturedDoctors (T05b - real search API wiring)", () => {
     ]);
   });
 
-  it("drops any false-tick row defensively (tick gone = card gone)", async () => {
+  it("carries area through when the search row has one", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          fell_back: false,
+          items: [directoryRow({ area: "Medininagar Rd" })],
+        }),
+      ),
+    );
+
+    await expect(fetchFeaturedDoctors()).resolves.toEqual([
+      {
+        id: 1,
+        name: "Dr. A. Kumar",
+        specialty: "General Physician",
+        area: "Medininagar Rd",
+      },
+    ]);
+  });
+
+  it("does not filter on entry.verified - the API guarantees verified rows only", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(
@@ -103,14 +130,12 @@ describe("fetchFeaturedDoctors (T05b - real search API wiring)", () => {
       ),
     );
 
-    await expect(fetchFeaturedDoctors()).resolves.toEqual([
-      {
-        id: 1,
-        name: "Dr. A. Kumar",
-        specialty: "General Physician",
-        area: null,
-      },
-    ]);
+    // The dead `.filter((entry) => entry.verified)` is gone: the mapping
+    // trusts ADR-0011 that every returned row is verified and passes all of
+    // them straight through.
+    const result = await fetchFeaturedDoctors();
+    expect(result).toHaveLength(2);
+    expect(result[1]).toMatchObject({ id: 2 });
   });
 
   it("propagates search failures (the featured section degrades to its empty state)", async () => {

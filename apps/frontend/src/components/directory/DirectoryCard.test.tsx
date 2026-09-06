@@ -2,7 +2,7 @@
 // The card is the FEAT-005/ADR-0011 guarantee at the presentation layer:
 // the verified tick renders only for verified rows, and the unverified row
 // renders no card at all (defensive second gate on the shared derivation).
-// The card never invents an `area` string the search projection does not carry.
+// The card renders area among non-null meta, never inventing a string.
 
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
@@ -16,6 +16,7 @@ function entry(overrides: Partial<DirectoryEntry>): DirectoryEntry {
     practice_name: "Dr. A. Kumar",
     partner_type: "doctor",
     specialty: "General Physician",
+    area: null,
     distance_km: 1.2,
     verified: true,
     ...overrides,
@@ -56,6 +57,43 @@ describe("DirectoryCard", () => {
     ).toBeInTheDocument();
     // Exactly one verified badge - the tick is truthful and singular.
     expect(screen.getAllByText("Verified")).toHaveLength(1);
+  });
+
+  it("renders area in the meta line when non-null", () => {
+    render(
+      <DirectoryCard
+        entry={entry({ area: "Medininagar Rd" })}
+        typeLabel="Doctors"
+        specialtyLabel="General Physician"
+        verifiedLabel="Verified"
+        distanceLabel="1.2 km"
+      />,
+    );
+
+    expect(
+      screen.getByText(
+        /General Physician \u00b7 Doctors \u00b7 Medininagar Rd/,
+      ),
+    ).toBeInTheDocument();
+    // Exactly one verified badge.
+    expect(screen.getAllByText("Verified")).toHaveLength(1);
+  });
+
+  it("renders no area copy when area is null", () => {
+    render(
+      <DirectoryCard
+        entry={entry({ area: null })}
+        typeLabel="Doctors"
+        specialtyLabel="General Physician"
+        verifiedLabel="Verified"
+        distanceLabel="1.2 km"
+      />,
+    );
+
+    expect(
+      screen.getByText(/General Physician \u00b7 Doctors/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Medininagar/)).not.toBeInTheDocument();
   });
 
   it("renders no card for an unverified row (tick gone = card gone)", () => {

@@ -82,6 +82,7 @@ function doctor(
     practice_name: name,
     partner_type: "doctor",
     specialty: "General Physician",
+    area: null,
     distance_km: id,
     verified: true,
     ...overrides,
@@ -129,6 +130,7 @@ describe("DirectoryBrowser loading the directory", () => {
           practice_name: "Sahyog Path Lab",
           partner_type: "lab",
           specialty: null,
+          area: null,
           distance_km: 0.8,
           verified: true,
         },
@@ -157,6 +159,21 @@ describe("DirectoryBrowser loading the directory", () => {
     // Result count announced; no outside-area label without a fallback.
     expect(screen.getByText("2 providers found")).toBeInTheDocument();
     expect(screen.queryByTestId("outside-area")).not.toBeInTheDocument();
+  });
+
+  it("renders area in the card meta when the search response carries it", async () => {
+    searchDirectory.mockResolvedValueOnce(
+      view([doctor(1, "Dr. A. Kumar", { area: "Medininagar Rd" })]),
+    );
+
+    render(<DirectoryBrowser />);
+
+    await screen.findByTestId("directory-cards");
+    expect(
+      screen.getByText(
+        /General Physician \u00b7 Doctors \u00b7 Medininagar Rd/,
+      ),
+    ).toBeInTheDocument();
   });
 
   it("drops a false-tick row entirely - card and tick disappear together", async () => {

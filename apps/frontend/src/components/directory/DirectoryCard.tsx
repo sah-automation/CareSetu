@@ -8,8 +8,8 @@
 // Truthfulness rules (FEAT-005 / ADR-0011): the verified tick renders only
 // when the backend-derived flag is true (search visibility and the tick share
 // one derivation, so a false-tick row can never show), and the card renders
-// name, partner type and specialty - never the dropped `consultType`, never
-// an area string the search projection does not carry.
+// name, partner type, specialty and area - never the dropped `consultType`,
+// never an invented area string.
 
 import Link from "next/link";
 
@@ -45,10 +45,9 @@ export function DirectoryCard({
   // marks unverified must not surface a card ("tick gone = card gone").
   if (!entry.verified) return null;
 
-  const meta =
-    entry.specialty && specialtyLabel
-      ? [specialtyLabel, typeLabel].join(" \u00b7 ")
-      : typeLabel;
+  const meta = [entry.specialty && specialtyLabel, typeLabel, entry.area]
+    .filter(Boolean)
+    .join(" \u00b7 ");
 
   return (
     <Link

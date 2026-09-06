@@ -4,7 +4,8 @@
 // modules/partner/facade.py (DirectoryEntry / DirectorySearchView) exactly.
 // Only [Active] partners with valid credentials are ever returned, so every
 // card's verified tick is truthful by construction (ADR-0011 "tick gone =
-// card gone" - the client still drops any false-tick row defensively).
+// card gone" - the DirectoryCard gate still drops any false-tick row
+// defensively).
 
 import { guardShape, request } from "@/lib/request";
 
@@ -24,13 +25,14 @@ export type Specialty = (typeof DIRECTORIES_SPECIALTIES)[number];
 
 /** One public directory search result - the verified-safe projection of an
  * [Active] partner with valid credentials. `practice_name` is the display
- * name; `area` is not part of the search projection (distance_km only) - area
- * surfaces on the provider profile (T06), never invented here. */
+ * name; `area` carries the partner's locality when present (card renders it
+ * among non-null meta, never inventing a string when absent). */
 export interface DirectoryEntry {
   partner_id: number;
   practice_name: string | null;
   partner_type: ProviderType;
   specialty: string | null;
+  area: string | null;
   distance_km: number;
   verified: boolean;
 }
@@ -61,6 +63,7 @@ function isDirectoryEntry(value: unknown): value is DirectoryEntry {
       record.partner_type === "lab" ||
       record.partner_type === "chemist") &&
     (typeof record.specialty === "string" || record.specialty === null) &&
+    (typeof record.area === "string" || record.area === null) &&
     typeof record.distance_km === "number" &&
     typeof record.verified === "boolean"
   );
