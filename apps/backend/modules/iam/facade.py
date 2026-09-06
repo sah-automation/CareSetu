@@ -31,6 +31,9 @@ from modules.iam.domain import events
 from modules.iam.domain.exceptions import (
     InvalidAccessTokenError as InvalidAccessTokenError,
 )
+from modules.iam.domain.otp import (
+    OTP_TTL_SECONDS as OTP_TTL_SECONDS,
+)
 from modules.iam.domain.shared import (
     OtpSender as OtpSender,
 )

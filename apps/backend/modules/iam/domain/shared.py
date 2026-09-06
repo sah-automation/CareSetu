@@ -5,9 +5,11 @@ the identity and OTP sub-facades.  ``_invalidate_pending_challenges`` and
 ``_issue_challenge`` are the latest-wins challenge lifecycle helpers shared
 by ``register_patient`` and ``resend_otp``.  ``_latest_cooldown_until`` is
 the shared cooldown query used by both ``register_patient`` and ``resend_otp``.
-``_identity_phone`` resolves a phone_e164 from an identity id, shared by the
-access-denial emitter and the refresh-replay path.  ``OtpSender`` is the port
-that decouples sub-facades from the SMS adapter - the coordinator wires the
+``_reissue_otp_challenge`` composes those primitives into the one shared OTP
+challenge re-issue choreography (ticket #335, WI-4).  ``_identity_phone``
+resolves a phone_e164 from an identity id, shared by the access-denial
+emitter and the refresh-replay path.  ``OtpSender`` is the port that decouples
+sub-facades from the SMS adapter - the coordinator wires the
 ``SmsDeliveryQueue`` behind it.
 """
 
@@ -23,7 +25,9 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from bus.outbox_writer import write_outbox
 from modules.iam.domain import events
+from modules.iam.domain.exceptions import IamError
 from modules.iam.domain.otp import OTP_TTL_SECONDS, RESEND_COOLDOWN_SECONDS, generate_otp, hash_otp
+from modules.iam.domain.resend import evaluate_resend
 from modules.iam.domain.verify import CHALLENGE_EXPIRED, CHALLENGE_PENDING
 from modules.iam.outbox import IAM_OUTBOX_TABLE
 from modules.iam.schema.models import iam_identities, iam_otp_challenges
@@ -169,6 +173,92 @@ async def _latest_cooldown_until(connection: AsyncConnection, identity_id: int) 
             .limit(1)
         )
     ).scalar_one_or_none()
+
+
+@dataclass(frozen=True)
+class OtpReissueResult:
+    """Outcome of an OTP challenge re-issue attempt.
+
+    Composes the shared primitives (lock, cooldown check, invalidate, issue)
+    into a single call so both the registration and resend flows share identical
+    cooldown/lockout semantics. Each flow maps this outcome to its own result
+    type, preserving the distinct registration and resend responses.
+    """
+
+    outcome: str
+    identity_id: int
+    phone_e164: str
+    challenge_id: int | None = None
+    otp: str | None = None
+    cooldown_remaining_seconds: int | None = None
+    lockout_remaining_seconds: int | None = None
+
+    def sent_challenge(self) -> tuple[int, str]:
+        """The fresh challenge for a ``sent`` outcome, raising if absent.
+
+        Defines the ``sent`` implies bound-challenge invariant once, here, so
+        each flow collapses to plain tuple unpacking instead of re-guarding
+        the optional fields (WI-4, #335).
+        """
+        if self.outcome != "sent" or self.challenge_id is None or self.otp is None:
+            raise IamError("reissue sent without a challenge")
+        return self.challenge_id, self.otp
+
+
+async def _reissue_otp_challenge(
+    connection: AsyncConnection,
+    *,
+    identity_id: int,
+    phone_e164: str,
+    identity_status: str,
+    lockout_until: datetime | None,
+    now: datetime,
+) -> OtpReissueResult:
+    """Shared OTP challenge re-issue primitive (WI-4, ticket #335).
+
+    Composes the shared challenge primitives: evaluate the resend decision
+    against the guard state, and if allowed, invalidate pending challenges
+    and issue a fresh challenge. The registration and resend flows both use
+    this primitive, so cooldown and lockout semantics are defined once. Each
+    flow maps the shared outcome to its own result type, preserving the
+    distinct registration and resend responses.
+
+    The caller must hold the identity row ``FOR UPDATE`` (via
+    ``_lock_identity_row``) in the same transaction, so the guard state is
+    stable and the invalidation + issuance commit as one change.
+    """
+    cooldown_until = await _latest_cooldown_until(connection, identity_id)
+    decision = evaluate_resend(
+        identity_status=identity_status,
+        lockout_until=lockout_until,
+        cooldown_until=cooldown_until,
+        now=now,
+    )
+
+    if decision.outcome != "sent":
+        return OtpReissueResult(
+            outcome=decision.outcome,
+            identity_id=identity_id,
+            phone_e164=phone_e164,
+            cooldown_remaining_seconds=decision.cooldown_remaining_seconds,
+            lockout_remaining_seconds=decision.lockout_remaining_seconds,
+        )
+
+    await _invalidate_pending_challenges(connection, identity_id)
+    challenge_id, otp = await _issue_challenge(
+        connection,
+        identity_id=identity_id,
+        phone_e164=phone_e164,
+        now=now,
+    )
+
+    return OtpReissueResult(
+        outcome="sent",
+        identity_id=identity_id,
+        phone_e164=phone_e164,
+        challenge_id=challenge_id,
+        otp=otp,
+    )
 
 
 async def _identity_phone(connection: AsyncConnection, identity_id: int) -> str:

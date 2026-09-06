@@ -25,15 +25,12 @@ from modules.iam.domain.otp import (
     RESEND_COOLDOWN_SECONDS,
 )
 from modules.iam.domain.phone import normalize_phone
-from modules.iam.domain.resend import evaluate_resend
 from modules.iam.domain.shared import (
     _PATIENT_ROLE,
     IdentityGuardState,
     OtpSender,
-    _invalidate_pending_challenges,
-    _issue_challenge,
-    _latest_cooldown_until,
     _lock_identity_row,
+    _reissue_otp_challenge,
 )
 from modules.iam.domain.verify import (
     CHALLENGE_VERIFIED,
@@ -261,7 +258,10 @@ class OtpFacade:
 
         The identity row is locked ``FOR UPDATE`` so concurrent resends for one
         phone serialize: only one winner issues a challenge and the invalidation
-        never races a verification.
+        never races a verification. The re-issue choreography itself - evaluate
+        cooldown/lockout, invalidate, issue - is the shared primitive
+        ``_reissue_otp_challenge`` (WI-4, #335), identical on the registration
+        and resend paths.
         """
         phone_e164 = normalize_phone(phone)
         now = self._clock()
@@ -270,33 +270,25 @@ class OtpFacade:
             locked = await self._lock_identity(connection, phone_e164)
             if locked is None:
                 return ResendOtpResult(outcome="no_identity", phone_e164=phone_e164)
-            identity_id = locked.identity_id
-            identity_status = locked.status
-            lockout_until = locked.lockout_until
-            cooldown_until = await _latest_cooldown_until(connection, identity_id)
 
-            decision = evaluate_resend(
-                identity_status=identity_status,
-                lockout_until=lockout_until,
-                cooldown_until=cooldown_until,
-                now=now,
-            )
-            if decision.outcome != "sent":
-                return ResendOtpResult(
-                    outcome=decision.outcome,
-                    phone_e164=phone_e164,
-                    cooldown_remaining_seconds=decision.cooldown_remaining_seconds,
-                    lockout_remaining_seconds=decision.lockout_remaining_seconds,
-                )
-
-            await _invalidate_pending_challenges(connection, identity_id)
-            challenge_id, otp = await _issue_challenge(
+            reissue = await _reissue_otp_challenge(
                 connection,
-                identity_id=identity_id,
+                identity_id=locked.identity_id,
                 phone_e164=phone_e164,
+                identity_status=locked.status,
+                lockout_until=locked.lockout_until,
                 now=now,
             )
 
+        if reissue.outcome != "sent":
+            return ResendOtpResult(
+                outcome=reissue.outcome,
+                phone_e164=phone_e164,
+                cooldown_remaining_seconds=reissue.cooldown_remaining_seconds,
+                lockout_remaining_seconds=reissue.lockout_remaining_seconds,
+            )
+
+        challenge_id, otp = reissue.sent_challenge()
         await self._otp_sender(phone_e164, otp)
 
         return ResendOtpResult(
