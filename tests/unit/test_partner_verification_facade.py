@@ -220,6 +220,7 @@ async def test_operator_reject_of_an_active_partner_emits_invalidated() -> None:
             _FakeResult(),  # partner.rejected outbox insert
             _FakeResult(all=[SimpleNamespace(id=5, artifact_refs={})]),  # credential select
             _FakeResult(),  # credential cleanup_due_at update
+            _FakeResult(),  # directory index deindex
             _FakeResult(),  # credential.invalidated outbox insert
         ]
     )
@@ -369,6 +370,7 @@ async def test_operator_reject_schedules_cleanup_window_with_clock() -> None:
             _FakeResult(),  # partner.rejected outbox insert
             _FakeResult(all=[SimpleNamespace(id=5, artifact_refs={})]),  # credential select
             _FakeResult(),  # credential cleanup_due_at update
+            _FakeResult(),  # directory index deindex
             _FakeResult(),  # credential.invalidated outbox insert
         ]
     )
@@ -413,6 +415,7 @@ async def test_purge_deletes_credential_emits_invalidated_and_removes_artifact()
                 ]
             ),  # expired credential select
             _FakeResult(),  # credential delete
+            _FakeResult(),  # directory index deindex
             _FakeResult(),  # credential.invalidated outbox insert
         ]
     )
@@ -465,6 +468,7 @@ async def test_purge_handles_missing_artifact_store() -> None:
                 ]
             ),
             _FakeResult(),  # credential delete
+            _FakeResult(),  # directory index deindex
             _FakeResult(),  # credential.invalidated outbox insert
         ]
     )
