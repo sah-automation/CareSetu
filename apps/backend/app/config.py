@@ -72,6 +72,10 @@ DEFAULT_PARTNER_CREDENTIAL_CLEANUP_DAYS = 30
 # (deploy/cron/caresetu-backup.cron); the cadence is a changeable cost, never
 # architecture - one env var moves it.
 DEFAULT_PARTNER_CREDENTIAL_SWEEP_CRON = "30 1 * * *"
+# Langfuse AI observability host (plan-phase7-tracing-prep): the US-region
+# cloud endpoint for the CareSetu project. Overridable via ``LANGFUSE_HOST``
+# (e.g. a self-hosted instance). Tracing is a no-op until both keys are supplied.
+DEFAULT_LANGFUSE_HOST = "https://us.cloud.langfuse.com"
 # Operator MFA TOTP secret encryption (PHASE-5 S8, #261): the AES-256-GCM key
 # for encrypting/decrypting the TOTP secret stored in ``iam_operator_mfa.secret``
 # comes from the ``IAM_MFA_SECRET_KEY`` environment variable (never committed).
@@ -150,6 +154,13 @@ class Settings:
     # from the ``IAM_MFA_SECRET_KEY`` environment; ``issue_operator_session``
     # refuses to verify without it.
     iam_mfa_secret_key: str = ""
+    # Langfuse AI observability (plan-phase7-tracing-prep): the SDK keys for LLM
+    # call tracing, consumed by the AI gateway port from Phase 7 onward. Both
+    # empty by default = tracing disabled, the app boots cleanly without an
+    # account. ``__post_init__`` enforces both set or both empty.
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = DEFAULT_LANGFUSE_HOST
 
     def __post_init__(self) -> None:
         if self.gateway_jwt_verify_enabled and not self.gateway_jwt_signing_key:
@@ -243,6 +254,11 @@ class Settings:
             raise ValueError("partner_re_submission_cooldown_days must be positive")
         if self.partner_credential_cleanup_days <= 0:
             raise ValueError("partner_credential_cleanup_days must be positive")
+        if bool(self.langfuse_public_key) != bool(self.langfuse_secret_key):
+            raise ValueError(
+                "LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY must both be set or "
+                "both empty; refusing to initialise Langfuse with a partial key pair."
+            )
 
     @property
     def mock_otp_readback_enabled(self) -> bool:
@@ -379,4 +395,7 @@ def get_settings() -> Settings:
             "PARTNER_CREDENTIAL_SWEEP_CRON", DEFAULT_PARTNER_CREDENTIAL_SWEEP_CRON
         ),
         iam_mfa_secret_key=os.environ.get("IAM_MFA_SECRET_KEY", ""),
+        langfuse_public_key=os.environ.get("LANGFUSE_PUBLIC_KEY", ""),
+        langfuse_secret_key=os.environ.get("LANGFUSE_SECRET_KEY", ""),
+        langfuse_host=os.environ.get("LANGFUSE_HOST", DEFAULT_LANGFUSE_HOST),
     )

@@ -26,6 +26,11 @@ dependencies = [
     # credential-expiry sweep that ADR-0011 runs on, in-process on the worker's
     # event loop - the in-app replacement for the daily cron precedent.
     "apscheduler>=3.11,<4",
+    # Langfuse SDK for AI observability (plan-phase7-tracing-prep): LLM call
+    # tracing, cost metering, and quality evaluation. Used by the AI gateway
+    # port (standard A6) from Phase 7 onward. Tracing is a no-op when
+    # LANGFUSE_PUBLIC_KEY is absent - never blocks boot.
+    "langfuse>=2.0",
 ]
 
 [dependency-groups]
@@ -55,7 +60,7 @@ target-version = "py311"
 line-length = 100
 
 [tool.ruff.lint.isort]
-known-first-party = ["app", "bus", "modules", "worker"]
+known-first-party = ["app", "bus", "modules", "observability", "worker"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RUF"]

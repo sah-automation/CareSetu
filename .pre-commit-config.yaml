@@ -78,3 +78,10 @@ repos:
         additional_dependencies: []
         pass_filenames: false
         always_run: true
+      - id: check-ai-tracing
+        name: AI gateway Langfuse tracing gate (ai-engineering-standards A7)
+        entry: python apps/backend/scripts/check_ai_tracing.py
+        language: python
+        additional_dependencies: []
+        pass_filenames: false
+        always_run: true

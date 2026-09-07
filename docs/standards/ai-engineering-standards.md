@@ -43,6 +43,16 @@ An abstract **AI gateway port** sits behind `MOD-005`. All LLM calls go through 
 - **Caching:** identical/near-identical prompts are served from cache (cache key = prompt version + normalized input). Invalidation on prompt or output-schema version change. Provider-level prompt caching may be used where supported - but never caches PHI outside consented, audited paths.
 - **Versioning:** prompt contract and output schema are versioned together (A2). A model upgrade is a reviewed change gated by an A/B check against the previous model - never a silent swap in production.
 
+### A7. Observability & Tracing
+
+- Every LLM call flows through the AI gateway port and is traced via Langfuse SDK (`@observe` decorator from `observability.langfuse_client`).
+- Trace captures: provider, model, task_type, input/output tokens, latency_ms, cost_paise, confidence score, status.
+- **PHI is never sent to Langfuse** - only pseudonymous IDs and structured metadata (same boundary as `NFR-SEC-006`).
+- Prompt versions are managed in Langfuse UI and deployed via API (extends A6 versioning).
+- Quality evaluations run via Langfuse eval framework: confidence score distribution, doctor review outcomes.
+- The Langfuse client is a no-op when `LANGFUSE_PUBLIC_KEY` is absent - tracing never blocks boot or the care loop.
+- **Enforced by the `check-ai-tracing` pre-commit gate:** a concrete method on any `MOD-005` class named as the AI boundary (`*Gateway*`, `*Provider*`, `*LLM*`, `*AI*`) must reference `@observe` or the `langfuse` client, or the build fails (`apps/backend/scripts/check_ai_tracing.py`). Abstract stubs and `_private` helpers are exempt.
+
 ---
 
 ## B. Agent-Assisted Development (how agents build here)

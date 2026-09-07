@@ -65,3 +65,13 @@ services:
       # Dashboard during blueprint creation (DEPLOY-7), never synced from the repo.
       - key: IAM_MFA_SECRET_KEY
         sync: false
+      # Langfuse AI observability (plan-phase7-tracing-prep): SDK keys for LLM
+      # call tracing, consumed by the AI gateway port from Phase 7 onward. Set
+      # in the Render Dashboard during Langfuse account setup, never synced from
+      # the repo. Both must be set together or left absent (absent = disabled).
+      - key: LANGFUSE_PUBLIC_KEY
+        sync: false
+      - key: LANGFUSE_SECRET_KEY
+        sync: false
+      - key: LANGFUSE_HOST
+        value: https://us.cloud.langfuse.com
