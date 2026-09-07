@@ -4,12 +4,13 @@ The only legal cross-module import target for the ``partner`` module
 (coding-standards §2, ADR-0003). Since the WI-2 deepening pass the facade is a
 thin coordinator that delegates to lifecycle sub-facades (ADR-0006, parent
 #330): the registration lifecycle (:mod:`modules.partner.registration_facade`,
-WI-2 p1a #332), the operator gate (:mod:`modules.partner.operator_gate_facade`,
-WI-2 p2a #334), and the patient-facing directory reads
-(:mod:`modules.partner.directory_facade`, WI-2 p2b #337). A credential-intake
-sub-facade (WI-2 p2c #338) and the close-out family stay on the coordinator
-after WI-2. The coordinator re-exports the sub-facades' result models so the
-public surface and all routing/cross-module callers stay unchanged.
+WI-2 p1a #332), the credential-intake gate
+(:mod:`modules.partner.credential_intake_facade`, WI-2 p2c #338), the operator
+gate (:mod:`modules.partner.operator_gate_facade`, WI-2 p2a #334), and the
+patient-facing directory reads (:mod:`modules.partner.directory_facade`,
+WI-2 p2b #337). The close-out family stays on the coordinator after WI-2. The
+coordinator re-exports the sub-facades' result models so the public surface and
+all routing/cross-module callers stay unchanged.
 
 Methods (delegated to the registration sub-facade - WI-2 p1a #332):
 - ``register`` opens a ``[Registered]`` profile from an open self-service
@@ -45,13 +46,21 @@ Methods (delegated to the directory sub-facade - WI-2 p2b #337):
   verified-safe profile, hidden exactly when search hides the card.
 - ``record_partner_selected`` records one ``partner.selected`` analytics pick.
 
-Remaining coordinator methods:
+Methods (delegated to the credential-intake sub-facade - WI-2 p2c #338):
 - ``submit_credentials`` runs the Step-1 credential pre-filter (ADR-0008) and,
   on pass, encrypts the documents into ``partner/``, opens ``partner_credentials``
   rows and a verification round (``verification_started`` - including
   re-verification of an ``Active`` partner, who stays ``Active`` through the 7-day
   grace window) or, on auto-fail, rejects never queued (``partner.rejected`` with
   the specific pre-filter reason).
+- ``get_my_verification`` reads the partner's own credential review status
+  (US-7, P3 #271).
+- ``get_rejection_reason`` reads the specific failure reason back to a
+  ``[Rejected]`` partner so they can re-apply corrected credentials (PHASE-5 T09).
+- ``appeal`` files the one-time rejection appeal, re-entering the operator
+  queue (PHASE-5 T09).
+
+Remaining coordinator methods:
 - ``purge_expired_credentials`` (US-27, #263) is the deterministic credential-
   cleanup trigger: it deletes credential rows whose permanent-rejection 30-day
   cleanup window has lapsed (still ``[Rejected]``), removes their artifacts, and
@@ -84,19 +93,21 @@ the state transitions and event constants/builders they need already live in
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine
 
-from bus.outbox_writer import write_outbox
 from modules.audit.facade import AuditFacade
 from modules.iam.facade import IamFacade
 from modules.partner import credential_validity as credential_validity_module
 from modules.partner import directory_cache as directory_cache_module
 from modules.partner.adapters.artifact_store import CredentialArtifactStore
 from modules.partner.common_models import PartnerView as PartnerView
+from modules.partner.credential_intake_facade import (
+    CredentialIntakeFacade as CredentialIntakeFacade,
+)
 from modules.partner.credential_intake_models import (
     CredentialSubmission as CredentialSubmission,
 )
@@ -136,23 +147,25 @@ from modules.partner.directory_facade import (
 from modules.partner.domain.credentials import CredentialInvalidatedReason
 from modules.partner.domain.events import (
     PartnerType,
-    partner_rejected_envelope,
-    verification_started_envelope,
+)
+
+# The intake-facing domain exceptions are re-exported so the coordinator's public
+# surface stays unchanged (ADR-0006, #338): the credential-intake sub-facade
+# raises these, and prior cross-module callers imported them from the facade.
+from modules.partner.domain.exceptions import (
+    AppealAlreadyUsedError as AppealAlreadyUsedError,
 )
 from modules.partner.domain.exceptions import (
-    AppealAlreadyUsedError,
-    PartnerNotFoundError,
-    PartnerNotRejectedError,
-    ReSubmissionThrottledError,
+    PartnerNotFoundError as PartnerNotFoundError,
 )
-from modules.partner.domain.prefilter import evaluate_submission
-from modules.partner.domain.rejection import (
-    evaluate_re_submission,
+from modules.partner.domain.exceptions import (
+    PartnerNotRejectedError as PartnerNotRejectedError,
+)
+from modules.partner.domain.exceptions import (
+    ReSubmissionThrottledError as ReSubmissionThrottledError,
 )
 from modules.partner.domain.state_machine import (
-    PartnerAction,
     PartnerStatus,
-    transition,
 )
 from modules.partner.operator_gate_facade import (
     OperatorGateFacade as OperatorGateFacade,
@@ -175,7 +188,6 @@ from modules.partner.operator_gate_models import (
 from modules.partner.operator_gate_models import (
     VerificationRound as VerificationRound,
 )
-from modules.partner.outbox import PARTNER_OUTBOX_TABLE
 from modules.partner.registration_facade import (
     RegistrationFacade as RegistrationFacade,
 )
@@ -188,7 +200,6 @@ from modules.partner.registration_models import (
 from modules.partner.schema.models import (
     partner_credentials,
     partner_profiles,
-    partner_verifications,
 )
 from modules.partner.shared import (
     DEFAULT_SERVICE_AREA_NAME as DEFAULT_SERVICE_AREA_NAME,
@@ -200,16 +211,10 @@ from modules.partner.shared import (
     Profile as Profile,
 )
 from modules.partner.shared import (
-    apply_transition as _apply_transition,
-)
-from modules.partner.shared import (
     default_clock as _default_clock,
 )
 from modules.partner.shared import (
     load_profile as _load_profile,
-)
-from modules.partner.shared import (
-    load_profile_by_identity as _load_profile_by_identity,
 )
 
 # The Phase-5 launch service area (REQ-008): a partner that does not declare a
@@ -222,72 +227,6 @@ from modules.partner.shared import (
 # ``MAX_RE_SUBMISSIONS`` re-submission rounds before a cooldown protects the
 # operator queue (NFR-001 headcount, ADR-0008, PHASE-5 T09). Business rule -
 # never enforced via an iam/Redis limiter, which is not this module's seam.
-
-
-async def _load_live_credential_types(
-    connection: AsyncConnection, partner_id: int, current_round: int
-) -> frozenset[str]:
-    """Credential types submitted in the current round (duplicate gate input).
-
-    Only credential types from the *current* verification round that are still
-    live count as active for the duplicate gate (S13, #266; S14, #267).
-    "Live" means ``cleanup_due_at IS NULL`` (not yet purged/rejected).
-    Credentials from earlier rounds (including rejected rounds) are excluded
-    and a partner who was rejected for type X can re-offer type X in a fresh
-    round without tripping the gate.
-
-    The caller still passes ``frozenset()`` for ``Rejected`` / ``Active``
-    statuses (renewal / new-round bypass), so this loader is only reached for
-    ``Registered`` / ``Under Verification`` profiles.
-    """
-    rows = (
-        await connection.execute(
-            select(partner_credentials.c.credential_type).where(
-                partner_credentials.c.profile_id == partner_id,
-                partner_credentials.c.round == current_round,
-                partner_credentials.c.cleanup_due_at.is_(None),
-            )
-        )
-    ).all()
-    return frozenset(str(row.credential_type) for row in rows)
-
-
-async def _ingest_credentials(
-    connection: AsyncConnection,
-    partner_id: int,
-    credentials: list[CredentialSubmission],
-    artifact_store: CredentialArtifactStore,
-    round_value: int,
-) -> None:
-    """Encrypt documents into ``partner/`` and open ``partner_credentials`` rows.
-
-    Called only on a Step-1 pass with a configured store (the facade refuses to
-    run without one - see ``submit_credentials``), inside the submission
-    transaction (ADR-0002 §1). Each credential's artifact bytes are AES-encrypted
-    by the given store (refs persisted, never plaintext). ``round_value`` is the
-    verification round the submission opens - stamped on every credential so the
-    duplicate gate can scope to the current round (S13, #266).
-    """
-    for submission in credentials:
-        refs: dict[str, object] = {}
-        for artifact_index, data in enumerate(submission.artifacts):
-            refs[f"{submission.credential_type.value}_{artifact_index}"] = (
-                artifact_store.save_artifact(
-                    partner_id,
-                    submission.credential_type.value,
-                    artifact_index,
-                    data,
-                )
-            )
-        await connection.execute(
-            partner_credentials.insert().values(
-                profile_id=partner_id,
-                credential_type=submission.credential_type.value,
-                round=round_value,
-                verified=False,
-                artifact_refs=refs,
-            )
-        )
 
 
 class PartnerFacade:
@@ -318,12 +257,6 @@ class PartnerFacade:
         # its int->UUID derivation. Optional for testability - detail views without
         # an audit facade default to an empty ``audit_events`` list.
         self._audit_facade = audit_facade
-        # Rejected-partner re-submission throttle (PHASE-5 T09, #253): the queue-
-        # protection budget and cooldown come from configuration (coding-standards
-        # §9), injected here from the resolved Settings (see app/main.py), never
-        # hardcoded in the domain core.
-        self._re_submission_max = re_submission_max
-        self._re_submission_cooldown_days = re_submission_cooldown_days
         # Credential-document cleanup window after permanent rejection (US-27,
         # ticket #263): the rejection path schedules ``cleanup_due_at`` this many
         # days out, and ``purge_expired_credentials`` deletes the documents after
@@ -353,6 +286,22 @@ class PartnerFacade:
         # ``register`` consumes it; facades composed without it (the daily
         # credential-expiry sweep) fail loudly if registration is ever attempted.
         self._registration = RegistrationFacade(engine, credential_validity_module, iam_facade)
+        # Credential-intake sub-facade (ADR-0006, WI-2 p2c #338): owns the
+        # two-step verification intake gate - Step-1 pre-filter, submission,
+        # re-submission throttle, the partner's review-state read, the rejected-
+        # partner reason read, and the one-time rejection appeal - and its result
+        # models. The coordinator hands it the shared credential-validity deep
+        # module (WI-1 #331), the artifact store, and the re-submission throttle
+        # config knobs (PHASE-5 T09, ADR-0008; never hardcoded in the domain
+        # core - coding-standards §9).
+        self._credential_intake = CredentialIntakeFacade(
+            engine=engine,
+            credential_validity=credential_validity_module,
+            artifact_store=artifact_store,
+            re_submission_max=re_submission_max,
+            re_submission_cooldown_days=re_submission_cooldown_days,
+            clock=clock,
+        )
         # Directory-cache seam (PHASE-6 T02b, #314): the Redis accelerator
         # functions. The coordinator exposes the seam once so sub-facades
         # share the same cache without re-importing.
@@ -468,89 +417,12 @@ class PartnerFacade:
     async def get_my_verification(self, identity_id: int) -> PartnerVerificationStatusView:
         """Read the partner's own credential review status (US-7, P3 #271).
 
-        Resolves the caller's identity to their profile, then projects the
-        current verification round's review state (``queued``/``in_review`` or,
-        once decided, ``approved``/``rejected`` with reason + timestamp). A
-        ``[Registered]`` partner with no round answers ``round`` 0 and ``None``
-        review fields - a meaningful "not submitted yet" without exposing the
-        operator's detail surface. Raises :class:`PartnerNotFoundError` when the
-        identity holds no profile.
+        A partner-scoped read-only projection resolving the caller's identity to
+        their profile and returning the current round's review state.
+        Delegated to the credential-intake sub-facade (ADR-0006, WI-2 p2c #338);
+        raises :class:`PartnerNotFoundError` when the identity holds no profile.
         """
-        async with self._engine.begin() as connection:
-            profile = await _load_profile_by_identity(connection, identity_id)
-            if profile is None:
-                raise PartnerNotFoundError(identity_id)
-            if profile.round == 0:
-                return PartnerVerificationStatusView(
-                    partner_id=profile.partner_id,
-                    round=0,
-                    status=None,
-                    decision=None,
-                    decision_reason=None,
-                    decided_at=None,
-                )
-            row = (
-                await connection.execute(
-                    select(
-                        partner_verifications.c.status,
-                        partner_verifications.c.decision,
-                        partner_verifications.c.decision_reason,
-                        partner_verifications.c.decided_at,
-                    )
-                    .where(partner_verifications.c.profile_id == profile.partner_id)
-                    .where(partner_verifications.c.round == profile.round)
-                )
-            ).first()
-            if row is None:  # pragma: no cover - a round implies a verification row
-                raise AssertionError("current round has no verification row")
-            return PartnerVerificationStatusView(
-                partner_id=profile.partner_id,
-                round=profile.round,
-                status=str(row.status),
-                decision=str(row.decision) if row.decision is not None else None,
-                decision_reason=str(row.decision_reason)
-                if row.decision_reason is not None
-                else None,
-                decided_at=row.decided_at,
-            )
-
-    async def _persist_re_submission_throttle(
-        self, partner_id: int
-    ) -> ReSubmissionThrottledError | None:
-        """Persist the cooldown deadline for an exhausted re-submission budget.
-
-        A ``[Rejected]`` partner at the re-submission budget boundary is throttled
-        (PHASE-5 T09, ADR-0008): the cooldown deadline is written to the profile in
-        its OWN committed transaction so it is durable - the caller then raises the
-        returned error. This must not share the caller's (soon-aborting) transaction,
-        otherwise the deadline write would roll back with the error.
-        """
-        async with self._engine.begin() as connection:
-            profile = await _load_profile(connection, partner_id)
-            if profile.status != PartnerStatus.REJECTED.value:
-                return None
-            policy = evaluate_re_submission(
-                re_submission_count=profile.re_submission_count,
-                re_submission_blocked_until=profile.re_submission_blocked_until,
-                now=datetime.now(UTC),
-                max_re_submissions=self._re_submission_max,
-                cooldown=timedelta(days=self._re_submission_cooldown_days),
-            )
-            if policy.allowed:
-                return None
-            if policy.blocked_until is None:
-                raise AssertionError(
-                    "blocked re-submission policy did not carry a cooldown deadline"
-                )
-            await connection.execute(
-                partner_profiles.update()
-                .where(partner_profiles.c.id == partner_id)
-                .values(
-                    re_submission_blocked_until=policy.blocked_until,
-                    updated_at=func.now(),
-                )
-            )
-            return ReSubmissionThrottledError(partner_id, retry_at=policy.blocked_until.isoformat())
+        return await self._credential_intake.get_my_verification(identity_id)
 
     async def submit_credentials(
         self,
@@ -561,211 +433,38 @@ class PartnerFacade:
         """Submit professional credentials and run the Step-1 pre-filter (ADR-0008).
 
         The first half of the two-step gate, fully automatic and synchronous on
-        submission. The pre-filter (:func:`modules.partner.domain.prefilter`)
-        validates format (a known credential type appropriate for this partner
-        type, with documents uploaded) and duplicates (a like credential type is
-        not already live):
-
-        - On a **pass**: the documents are AES-encrypted into the ``partner/``
-          object-storage prefix (refs stored, never bytes), ``partner_credentials``
-          rows open, and the partner enters ``Under Verification`` with a new
-          round emitted as ``partner.verification_started``. This is NOT approval
-          - the submission then waits for the Step-2 operator gate.
-        - On an **auto-fail**: the partner returns to ``Rejected`` (never queued)
-          and ``partner.rejected`` fires with the specific pre-filter reason
-          (``invalid_credential_type`` / ``missing_artifacts`` / ``duplicate_credential``).
-
-        A previously-``Rejected`` partner re-submitting is a NEW round, not a
-        duplicate; an ``Under Verification``/``Active`` partner re-submitting
-        opens the next round (re-verification) with the round incremented.
-
-        A ``[Rejected]`` partner's re-submission is throttled (PHASE-5 T09,
-        ADR-0008): they may open at most ``MAX_RE_SUBMISSIONS`` re-submission
-        rounds before a cooldown, protecting the operator queue (NFR-001). Once
-        the budget is exhausted the next re-submission raises
-        :class:`ReSubmissionThrottledError` (with the cooldown's ``retry_at``).
-        The first submission from a fresh ``[Registered]`` profile is not a
-        re-submission and does not count against the budget.
+        submission: on a pass the documents are encrypted into ``partner/`` and
+        the partner enters ``Under Verification``; on an auto-fail the partner
+        returns to ``Rejected`` (never queued). A ``[Rejected]`` partner's
+        re-submission is throttled (PHASE-5 T09, ADR-0008).
+        Delegated to the credential-intake sub-facade (ADR-0006, WI-2 p2c #338).
         """
-        throttle_error = await self._persist_re_submission_throttle(partner_id)
-        if throttle_error is not None:
-            raise throttle_error
-
-        async with self._engine.begin() as connection:
-            profile = await _load_profile(connection, partner_id)
-
-            is_re_submission = profile.status == PartnerStatus.REJECTED.value
-
-            existing_types = await _load_live_credential_types(
-                connection, partner_id, profile.round
-            )
-            outcome = evaluate_submission(
-                partner_type=profile.partner_type,
-                credential_types=[c.credential_type for c in credentials],
-                has_artifacts=any(c.artifacts for c in credentials),
-                existing_active_credential_types=(
-                    frozenset()
-                    if profile.status in (PartnerStatus.REJECTED.value, PartnerStatus.ACTIVE.value)
-                    else existing_types
-                ),
-            )
-
-            if not outcome.passed:
-                if outcome.reason is None:
-                    raise AssertionError("pre-filter failure did not carry a reason")
-                next_state = await _apply_transition(
-                    connection, profile, PartnerAction.AUTO_FAIL, verification=False
-                )
-                await write_outbox(
-                    connection,
-                    PARTNER_SCHEMA,
-                    PARTNER_OUTBOX_TABLE,
-                    partner_rejected_envelope(
-                        partner_id,
-                        identity_id=profile.identity_id,
-                        reason=outcome.reason.value,
-                        round=next_state.round,
-                        decision_by=None,
-                    ),
-                )
-                return CredentialSubmissionResult(
-                    partner_id=partner_id,
-                    status=next_state.status.value,
-                    round=next_state.round,
-                    reason=outcome.reason.value,
-                )
-
-            if self._artifact_store is None:
-                # The Step-1 gate passed, so documents were submitted, yet no
-                # store is wired. Silently ingesting the credential with empty
-                # artifact references would queue the operator with nothing to
-                # review - fail loud rather than swallow the documents
-                # (coding-standards §8 "no silent swallowing").
-                raise RuntimeError("credential submission requires a configured artifact store")
-
-            # The round this submission opens (every START_VERIFICATION edge
-            # increments by one - state_machine). Stamped on the credentials so
-            # the duplicate gate can scope to the current round (S13, #266).
-            next_round = transition(profile.state, PartnerAction.START_VERIFICATION).round
-
-            await _ingest_credentials(
-                connection,
-                partner_id,
-                credentials,
-                self._artifact_store,
-                round_value=next_round,
-            )
-            next_state = await _apply_transition(
-                connection, profile, PartnerAction.START_VERIFICATION, verification=True
-            )
-            if is_re_submission:
-                # A rejected partner's accepted re-submission opens a fresh round
-                # and advances the throttle budget. A lapsed cooldown (a
-                # previously-persisted ``blocked_until`` that has now passed)
-                # refreshes the budget, so the new window starts at 1; otherwise
-                # the counter simply advances.
-                new_count = (
-                    1
-                    if profile.re_submission_blocked_until is not None
-                    else profile.re_submission_count + 1
-                )
-                await connection.execute(
-                    partner_profiles.update()
-                    .where(partner_profiles.c.id == partner_id)
-                    .values(
-                        re_submission_count=new_count,
-                        re_submission_blocked_until=None,
-                        updated_at=func.now(),
-                    )
-                )
-            await write_outbox(
-                connection,
-                PARTNER_SCHEMA,
-                PARTNER_OUTBOX_TABLE,
-                verification_started_envelope(partner_id, next_state.round),
-            )
-            return CredentialSubmissionResult(
-                partner_id=partner_id,
-                status=next_state.status.value,
-                round=next_state.round,
-            )
+        return await self._credential_intake.submit_credentials(
+            partner_id=partner_id,
+            credentials=credentials,
+        )
 
     async def get_rejection_reason(self, partner_id: int) -> RejectionReasonView:
         """Read the specific failure reason back to a ``[Rejected]`` partner (PHASE-5 T09).
 
         The partner learns WHY their application failed so they can re-apply with
-        corrected credentials (ADR-0008 recovery). The reason is the latest
-        ``[Rejected]`` round's ``decision_reason`` - the operator's reason or the
-        Step-1 pre-filter auto-fail reason recorded by T08/T06. Raises
+        corrected credentials (ADR-0008 recovery). Raises
         :class:`PartnerNotRejectedError` when the partner is not currently
-        ``[Rejected]``: the reason is only meaningful (and only revealed) for a
-        rejected partner.
+        ``[Rejected]``. Delegated to the credential-intake sub-facade
+        (ADR-0006, WI-2 p2c #338).
         """
-        async with self._engine.begin() as connection:
-            profile = await _load_profile(connection, partner_id)
-            if profile.status != PartnerStatus.REJECTED.value:
-                raise PartnerNotRejectedError(partner_id, profile.status)
-            row = (
-                await connection.execute(
-                    select(
-                        partner_verifications.c.round,
-                        partner_verifications.c.decision_reason,
-                    )
-                    .where(
-                        partner_verifications.c.profile_id == partner_id,
-                        partner_verifications.c.decision == "rejected",
-                    )
-                    .order_by(partner_verifications.c.round.desc())
-                    .limit(1)
-                )
-            ).first()
-            reason = str(row.decision_reason) if row is not None and row.decision_reason else None
-            rejected_round = int(row.round) if row is not None else 0
-            if reason is None:
-                raise PartnerNotRejectedError(partner_id, profile.status)
-            return RejectionReasonView(
-                partner_id=partner_id,
-                rejection_reason=reason,
-                round=rejected_round,
-            )
+        return await self._credential_intake.get_rejection_reason(partner_id)
 
     async def appeal(self, partner_id: int) -> PartnerView:
         """File the one-time rejection appeal, re-entering the operator queue (PHASE-5 T09).
 
         A ``[Rejected]`` partner may contest an operator decision once: the appeal
-        re-enters Step 2 (opens a fresh verification round and emits
-        ``partner.verification_started``) and consumes the one-time ``appeal_used``
-        flag - a second appeal is rejected with :class:`AppealAlreadyUsedError`.
-        The appeal DOES NOT advance the re-submission throttle budget; it is a
-        distinct recovery path from re-submitting corrected credentials. Raising
-        :class:`PartnerNotRejectedError` keeps the action legal only for a
-        ``[Rejected]`` partner.
+        re-enters Step 2 and consumes the one-time ``appeal_used`` flag - a second
+        appeal is rejected with :class:`AppealAlreadyUsedError`. The appeal does
+        not advance the re-submission throttle budget. Delegated to the
+        credential-intake sub-facade (ADR-0006, WI-2 p2c #338).
         """
-        async with self._engine.begin() as connection:
-            profile = await _load_profile(connection, partner_id)
-            if profile.status != PartnerStatus.REJECTED.value:
-                raise PartnerNotRejectedError(partner_id, profile.status)
-            if profile.appeal_used:
-                raise AppealAlreadyUsedError()
-            next_state = await _apply_transition(
-                connection, profile, PartnerAction.START_VERIFICATION, verification=True
-            )
-            await connection.execute(
-                partner_profiles.update()
-                .where(partner_profiles.c.id == partner_id)
-                .values(appeal_used=True, updated_at=func.now())
-            )
-            await write_outbox(
-                connection,
-                PARTNER_SCHEMA,
-                PARTNER_OUTBOX_TABLE,
-                verification_started_envelope(partner_id, next_state.round),
-            )
-            return PartnerView(
-                partner_id=partner_id,
-                status=next_state.status.value,
-                round=next_state.round,
-            )
+        return await self._credential_intake.appeal(partner_id)
 
     async def operator_decision(
         self,
