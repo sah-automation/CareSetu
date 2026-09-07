@@ -30,7 +30,7 @@ the coordinator re-exports them unchanged.
 
 from __future__ import annotations
 
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from modules.iam.facade import IamFacade
 from modules.partner.domain.events import PartnerType
@@ -49,6 +49,7 @@ from modules.partner.registration_models import (
 )
 from modules.partner.shared import (
     CredentialValidityPort,
+    load_profile,
     load_profile_by_identity,
     register_profile_race_retry,
 )
@@ -214,6 +215,23 @@ class RegistrationFacade:
             if profile is None:
                 return None
             return profile.partner_id
+
+    async def verify_partner_exists(self, connection: AsyncConnection, partner_id: int) -> bool:
+        """Confirm a partner profile still exists on the given open connection (#342).
+
+        Atomic safety-net mirror of ``resolve_partner_id_by_identity``, but runs
+        against a caller-provided connection instead of opening its own
+        transaction. The iam session gate re-checks profile existence inside its
+        own identity-row-locked transaction before minting, so a profile deleted
+        between the route pre-check and the mint is refused instead of silently
+        minting a partner-scoped token for a now-patient-only phone. Returns
+        ``True`` when the profile exists, ``False`` when it has been deleted.
+        """
+        try:
+            await load_profile(connection, partner_id)
+        except PartnerNotFoundError:
+            return False
+        return True
 
     async def get_my_status(self, identity_id: int) -> PartnerMeView:
         """Read the authenticated partner's own onboarding status (US-6, P2 #271).

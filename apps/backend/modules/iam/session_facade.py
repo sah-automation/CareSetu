@@ -8,7 +8,7 @@ and tests see the same public surface as before (ADR-0006 decision 2).
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -44,6 +44,9 @@ _IAM_SCHEMA = "iam"
 _PATIENT_ROLE = "patient"
 _PARTNER_ROLE = "partner"
 _OPERATOR_ROLE = "operator"
+
+
+VerifyPartnerExists = Callable[[AsyncConnection, int], Awaitable[None]]
 
 
 class SessionResult(BaseModel):
@@ -295,7 +298,12 @@ class SessionFacade:
             )
         return int(identity_id)
 
-    async def issue_partner_session(self, phone: str, partner_id: int) -> SessionResult:
+    async def issue_partner_session(
+        self,
+        phone: str,
+        partner_id: int,
+        verify_partner_exists: VerifyPartnerExists | None = None,
+    ) -> SessionResult:
         """Mint a partner-scoped access JWT for a registered partner (T05, #298).
 
         Unlike ``issue_session`` this does NOT require identity ``Active`` or an
@@ -307,6 +315,14 @@ class SessionFacade:
         ``partner_id`` into this method. iam no longer reaches into the partner
         module - a patient-only phone (identity exists but no partner profile) is
         refused 409 ``SESSION_REFUSED`` by the route before this method runs.
+
+        The upstream check is an early-rejection fast path only. Because the
+        profile could be deleted between that check and this mint, the caller may
+        pass an optional ``verify_partner_exists`` callback that re-confirms the
+        profile still exists (or raises ``SessionIssuanceError``) against this
+        method's open connection, atomically under the identity row lock, before
+        the JWT is minted (#342). Leaving it ``None`` keeps the pre-WI-3-F4
+        behavior of trusting the upstream partner_id.
         """
         from modules.iam.domain.phone import normalize_phone
 
@@ -329,6 +345,9 @@ class SessionFacade:
                     "register the phone before issuing a session"
                 )
             identity_id = locked.identity_id
+
+            if verify_partner_exists is not None:
+                await verify_partner_exists(connection, partner_id)
 
             jti, refresh_token, token = await self._mint_session_row(
                 connection, identity_id, _PARTNER_ROLE, now

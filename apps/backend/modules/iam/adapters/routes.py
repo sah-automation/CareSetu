@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.config import Settings
 from app.gateway.errors import error_response
@@ -286,6 +287,22 @@ async def issue_partner_session(
     facade = cast(IamFacade, request.app.state.iam_facade)
     partner_facade = cast("PartnerFacade", request.app.state.partner_facade)
 
+    async def _verify_partner_profile(connection: AsyncConnection, partner_id: int) -> None:
+        """Atomic safety-net re-check of profile existence under the iam row lock (#342).
+
+        The upstream pre-check (this route) is a fast path; between it and the
+        mint a concurrent deletion could remove the profile, which would otherwise
+        mint a partner-scoped token for a now-patient-only phone. Re-run the check
+        against iam's open connection so it is atomic with the mint. The partner
+        facade answers whether the profile still exists; absence becomes the
+        session-refused 409 contract.
+        """
+        exists = await partner_facade.verify_partner_exists(connection, partner_id)
+        if not exists:
+            raise SessionIssuanceError(
+                f"partner profile {partner_id} no longer exists at session mint"
+            )
+
     async def _issue_verified_partner_session(phone: str) -> SessionResult:
         identity_id = await facade.resolve_identity_id_by_phone(phone)
         partner_id = await partner_facade.resolve_partner_id_by_identity(identity_id)
@@ -293,7 +310,9 @@ async def issue_partner_session(
             raise SessionIssuanceError(
                 f"identity {identity_id} has no partner profile; this is a patient-only phone"
             )
-        return await facade.issue_partner_session(phone, partner_id=partner_id)
+        return await facade.issue_partner_session(
+            phone, partner_id=partner_id, verify_partner_exists=_verify_partner_profile
+        )
 
     result = await run_idempotent(request, lambda: _issue_verified_partner_session(body.phone))
     response = Response(

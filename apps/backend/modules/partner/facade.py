@@ -97,7 +97,7 @@ from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from modules.audit.facade import AuditFacade
 from modules.iam.facade import IamFacade
@@ -405,6 +405,17 @@ class PartnerFacade:
         facade's partner-session gate.
         """
         return await self._registration.resolve_partner_id_by_identity(identity_id)
+
+    async def verify_partner_exists(self, connection: AsyncConnection, partner_id: int) -> bool:
+        """Confirm a partner profile still exists on the given open connection (#342).
+
+        Atomic safety-net mirror of ``resolve_partner_id_by_identity``, delegated
+        to the registration sub-facade (ADR-0006, WI-2 p1a #332). Runs against a
+        caller-provided connection (iam's identity-row-locked transaction) rather
+        than opening its own, so the existence check is atomic with the session
+        mint. Returns ``True`` when the profile exists, ``False`` when deleted.
+        """
+        return await self._registration.verify_partner_exists(connection, partner_id)
 
     async def get_my_status(self, identity_id: int) -> PartnerMeView:
         """Read the authenticated partner's own onboarding status (US-6, P2 #271).

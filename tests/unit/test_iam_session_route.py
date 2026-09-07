@@ -10,6 +10,8 @@ DB-backed behavior is the integration suite's job.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -23,6 +25,8 @@ from modules.iam.domain.exceptions import IamError, SessionIssuanceError
 from modules.iam.facade import SessionResult
 
 _TRACE_ID = "unit-trace-1234abcd"
+
+MOCK_CONNECTION = SimpleNamespace()
 
 _RESULT = SessionResult(
     jwt="header.payload.signature",
@@ -330,8 +334,15 @@ class PartnerSessionIamStub:
             raise self.resolve_error
         return self.identity_id
 
-    async def issue_partner_session(self, phone: str, partner_id: int) -> SessionResult:
+    async def issue_partner_session(
+        self,
+        phone: str,
+        partner_id: int,
+        verify_partner_exists: Callable | None = None,
+    ) -> SessionResult:
         self.issued.append((phone, partner_id))
+        if verify_partner_exists is not None:
+            await verify_partner_exists(MOCK_CONNECTION, partner_id)
         if self.issue_error is not None:
             raise self.issue_error
         if self.result is None:
@@ -342,11 +353,22 @@ class PartnerSessionIamStub:
 class PartnerProfileStub:
     """Partner-facade stand-in behind the session gate (identity -> profile id)."""
 
-    def __init__(self, partner_id: int | None = 3) -> None:
+    def __init__(
+        self,
+        partner_id: int | None = 3,
+        *,
+        deleted_at_mint: bool = False,
+    ) -> None:
         self.partner_id = partner_id
+        self.deleted_at_mint = deleted_at_mint
+        self.verify_calls: list[tuple[int, int]] = []
 
     async def resolve_partner_id_by_identity(self, identity_id: int) -> int | None:
         return self.partner_id
+
+    async def verify_partner_exists(self, connection: object, partner_id: int) -> bool:
+        self.verify_calls.append((id(connection), partner_id))
+        return not self.deleted_at_mint
 
 
 def _partner_client_with(facade: PartnerSessionIamStub, partner: PartnerProfileStub) -> TestClient:
@@ -420,6 +442,41 @@ def test_partner_session_refused_with_409_for_patient_only_phone(
     assert "no partner profile" in body["message"]
     assert body["trace_id"] == _TRACE_ID
     assert facade.issued == []
+
+
+def test_partner_session_refused_409_when_profile_deleted_before_mint(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """F4 (#342): profile gone between the route pre-check and the mint -> 409.
+
+    The race scenario: ``resolve_partner_id_by_identity`` returns the profile at
+    the route gate, but a concurrent deletion removes it before the in-mint
+    atomic re-check (``verify_partner_exists``) runs. The route's verification
+    callable surfaces the gone profile as the session-refused 409 contract, and
+    no session result is produced.
+    """
+    caplog.set_level(logging.WARNING)
+    facade = PartnerSessionIamStub()
+    partner = PartnerProfileStub(partner_id=3, deleted_at_mint=True)
+    client = _partner_client_with(facade, partner)
+
+    response = client.post(
+        "/v1/auth/partner/session",
+        json={"phone": "9876543210"},
+        headers={"X-Request-Id": _TRACE_ID},
+    )
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["code"] == "SESSION_REFUSED"
+    assert "no longer exists" in body["message"]
+    assert body["trace_id"] == _TRACE_ID
+    # the route did resolve a partner profile at the gate...
+    assert facade.issued == [("9876543210", 3)]
+    # ...and the atomic re-check inside the mint refused the issuance.
+    assert len(partner.verify_calls) == 1
+    assert partner.verify_calls[0][1] == 3
+    assert "set-cookie" not in response.headers
 
 
 def test_partner_session_route_registered_in_openapi() -> None:

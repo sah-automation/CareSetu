@@ -84,6 +84,9 @@ from modules.iam.session_facade import (
     ValidatedAccessToken as ValidatedAccessToken,
 )
 from modules.iam.session_facade import (
+    VerifyPartnerExists as VerifyPartnerExists,
+)
+from modules.iam.session_facade import (
     _partner_role_status as _partner_role_status,
 )
 
@@ -219,7 +222,12 @@ class IamFacade:
         """
         return await self._sessions.issue_operator_session(phone, code)
 
-    async def issue_partner_session(self, phone: str, partner_id: int) -> SessionResult:
+    async def issue_partner_session(
+        self,
+        phone: str,
+        partner_id: int,
+        verify_partner_exists: VerifyPartnerExists | None = None,
+    ) -> SessionResult:
         """Mint a partner-scoped access JWT for a registered partner (T05, #298).
 
         Delegated to ``SessionFacade``; the session's ``scope`` resolves to
@@ -229,8 +237,13 @@ class IamFacade:
         grant - a fresh registrant is ``[Unverified]`` with no grant (ADR-0010).
         The partner-profile existence gate is verified upstream by the calling
         route (WI-3, #336), which passes the already-verified ``partner_id`` in.
+        An optional ``verify_partner_exists`` callback re-confirms the profile
+        still exists atomically under the identity row lock before the mint
+        (#342).
         """
-        return await self._sessions.issue_partner_session(phone, partner_id)
+        return await self._sessions.issue_partner_session(
+            phone, partner_id, verify_partner_exists=verify_partner_exists
+        )
 
     async def resolve_identity_id_by_phone(self, phone: str) -> int:
         """The identity id for a phone (delegated to ``SessionFacade``, WI-3 #336)."""
