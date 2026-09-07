@@ -46,9 +46,7 @@ from modules.partner.schema.models import (
     partner_directory_index,
     partner_profiles,
 )
-
-PARTNER_SCHEMA = "partner"
-
+from modules.partner.shared import PARTNER_SCHEMA
 
 # ---------------------------------------------------------------------------
 # Pure eligibility decision (unit-testable without a database)

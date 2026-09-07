@@ -63,7 +63,12 @@ from modules.partner.schema.models import (
     partner_profiles,
     partner_service_areas,
 )
-from modules.partner.shared import DEFAULT_SERVICE_AREA_NAME, PARTNER_SCHEMA
+from modules.partner.shared import (
+    DEFAULT_SERVICE_AREA_NAME,
+    PARTNER_SCHEMA,
+    CredentialValidityPort,
+    DirectoryCachePort,
+)
 
 # The peri-urban scope of the Phase-6 launch directory (FEAT-004, REQ-008):
 # Daltonganj plus its surrounding peri-urban belt. Search clamps results to this
@@ -108,8 +113,8 @@ class DirectoryFacade:
     def __init__(
         self,
         engine: AsyncEngine,
-        credential_validity: Any,
-        directory_cache: Any,
+        credential_validity: CredentialValidityPort,
+        directory_cache: DirectoryCachePort,
         *,
         directory_ttl_seconds: int = 0,
         directory_max_results: int = 50,

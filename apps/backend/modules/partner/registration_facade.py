@@ -30,8 +30,6 @@ the coordinator re-exports them unchanged.
 
 from __future__ import annotations
 
-from types import ModuleType
-
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from modules.iam.facade import IamFacade
@@ -48,6 +46,7 @@ from modules.partner.registration_models import (
     RegisterPartnerResult as RegisterPartnerResult,
 )
 from modules.partner.shared import (
+    CredentialValidityPort,
     load_profile_by_identity,
     register_profile_race_retry,
 )
@@ -59,7 +58,7 @@ class RegistrationFacade:
     def __init__(
         self,
         engine: AsyncEngine,
-        credential_validity: ModuleType,
+        credential_validity: CredentialValidityPort,
         iam_facade: IamFacade | None = None,
     ) -> None:
         self._engine = engine

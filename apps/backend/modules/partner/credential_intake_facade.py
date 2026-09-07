@@ -35,7 +35,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime, timedelta
-from types import ModuleType
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -74,6 +73,7 @@ from modules.partner.schema.models import (
 )
 from modules.partner.shared import (
     PARTNER_SCHEMA,
+    CredentialValidityPort,
     default_clock,
 )
 from modules.partner.shared import (
@@ -159,7 +159,7 @@ class CredentialIntakeFacade:
     def __init__(
         self,
         engine: AsyncEngine,
-        credential_validity: ModuleType,
+        credential_validity: CredentialValidityPort,
         artifact_store: CredentialArtifactStore | None = None,
         *,
         re_submission_max: int = 3,

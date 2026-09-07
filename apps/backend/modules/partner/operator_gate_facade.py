@@ -75,6 +75,8 @@ from modules.partner.schema.models import (
 )
 from modules.partner.shared import (
     PARTNER_SCHEMA,
+    CredentialValidityPort,
+    DirectoryCachePort,
     apply_transition,
     default_clock,
 )
@@ -148,8 +150,8 @@ class OperatorGateFacade:
     def __init__(
         self,
         engine: AsyncEngine,
-        credential_validity: Any,
-        directory_cache: Any,
+        credential_validity: CredentialValidityPort,
+        directory_cache: DirectoryCachePort,
         audit_facade: AuditFacade | None = None,
         *,
         credential_cleanup_days: int = 30,

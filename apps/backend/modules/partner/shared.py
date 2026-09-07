@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -38,7 +38,62 @@ from modules.partner.schema.models import (
     partner_verifications,
 )
 
+if TYPE_CHECKING:
+    from modules.partner.credential_validity import CloseOutCredential
+
 PARTNER_SCHEMA = "partner"
+
+
+class CredentialValidityPort(Protocol):
+    """Surface the credential-validity deep module exposes to sub-facades.
+
+    Captures the 3 SQL predicates and the single close-out transition so
+    sub-facades depend on a typed seam rather than ``Any`` or ``ModuleType``
+    (coding-standards S3).
+    """
+
+    def provider_visible(self, column: ColumnElement[Any]) -> ColumnElement[bool]: ...
+    def has_any_credential(self, column: ColumnElement[Any]) -> ColumnElement[bool]: ...
+    def has_invalid_credential(self, column: ColumnElement[Any]) -> ColumnElement[bool]: ...
+    async def close_out_credentials(
+        self,
+        connection: AsyncConnection,
+        credentials: list[CloseOutCredential],
+    ) -> list[int]: ...
+
+
+class DirectoryCachePort(Protocol):
+    """Surface the directory-cache seam exposed to sub-facades.
+
+    Captures the 3 async cache methods the directory and operator-gate
+    sub-facades call (coding-standards S3).
+    """
+
+    async def get_cached_search(
+        self,
+        *,
+        query: str | None,
+        partner_type: str | None,
+        specialty: str | None,
+        latitude: float,
+        longitude: float,
+        expanded: bool,
+    ) -> tuple[list[dict[str, Any]], bool] | None: ...
+    async def set_cached_search(
+        self,
+        *,
+        query: str | None,
+        partner_type: str | None,
+        specialty: str | None,
+        latitude: float,
+        longitude: float,
+        expanded: bool,
+        raw_items: list[dict[str, Any]],
+        fell_back: bool,
+        ttl_seconds: int,
+    ) -> None: ...
+    async def directory_visibility_changed(self) -> None: ...
+
 
 # The Phase-5 launch service area (REQ-008): a partner that does not declare a
 # ``service_area_id`` defaults to this vocabulary row (seeded by migration
