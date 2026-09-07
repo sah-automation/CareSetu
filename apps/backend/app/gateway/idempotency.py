@@ -27,10 +27,15 @@ from typing import TypeVar, cast
 
 from fastapi import Request
 
-# Entry TTL mirrors the OTP challenge lifetime (MOD-001 §3.1): a client retry
-# after a lost response needs the stored result for at least the window in which
-# the issued challenge stays usable.
-_DEFAULT_TTL_SECONDS = 300
+from modules.iam.facade import OTP_TTL_SECONDS
+
+# Entry TTL mirrors the OTP challenge lifetime by construction (WI-4, #335):
+# a client retry after a lost response needs the stored result for at least the
+# window in which the issued challenge stays usable, so this derives from the
+# same constant the challenge uses rather than a hand-copied literal. The
+# constant is read through the iam facade (the module's sole cross-module seam,
+# ADR-0003), never the domain package directly.
+_DEFAULT_TTL_SECONDS = OTP_TTL_SECONDS
 # Upper bound on tracked keys: once exceeded, expired entries are pruned and, if
 # the dict is still over the cap, the oldest live entries are evicted so a key
 # spray cannot grow the dict without bound (mirrors ``_MAX_TRACKED_BUCKETS``).

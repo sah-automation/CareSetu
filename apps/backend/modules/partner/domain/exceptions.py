@@ -28,6 +28,16 @@ class PartnerNotFoundError(PartnerError):
         self.partner_id = partner_id
 
 
+class PartnerIamUnavailableError(PartnerError):
+    """A partner operation genuinely requires the iam facade but none is composed.
+
+    Raised by ``register`` (WI-3, #336) when the facade was built without the iam
+    seam - e.g. the daily credential-expiry sweep, whose close-out never touches
+    iam. A missing dependency must fail loudly (this typed error), never silently
+    no-op: the sync credential account (ADR-0010) cannot be guaranteed otherwise.
+    """
+
+
 class ProviderProfileNotFoundError(PartnerError):
     """No public provider profile exists under the addressed id (PHASE-6 T03).
 

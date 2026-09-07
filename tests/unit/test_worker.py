@@ -27,6 +27,7 @@ import worker.main as worker_main
 from app.config import Settings
 from bus.bootstrap import MODULE_SCHEMAS
 from bus.registry import HandlerRegistry
+from modules.partner.facade import PartnerFacade
 
 
 def test_register_guard_mirrors_bootstrap_schemas() -> None:
@@ -186,6 +187,25 @@ def test_build_scheduler_honours_a_configured_cadence() -> None:
     job = scheduler.get_jobs()[0]
     next_fire = job.trigger.get_next_fire_time(None, datetime(2026, 9, 5, 12, 0, tzinfo=UTC))
     assert next_fire == datetime(2026, 9, 6, 3, 0, tzinfo=UTC)
+
+
+def test_build_sweep_facade_composes_without_an_iam_facade() -> None:
+    """WI-3 (#336): the daily sweep's partner stack carries no iam facade.
+
+    The sweep close-out never registers a partner, so composing the sweep facade
+    must not build an iam facade - no SMS adapter is constructed and no MFA
+    secret is read on this path. The sweep facade's registration seam is left
+    unset; a misuse that calls ``register`` fails loudly with
+    ``PartnerIamUnavailableError`` (pinned at unit and integration level).
+    """
+
+    class _FakeEngine:
+        pass
+
+    sweep_facade = worker_main._build_sweep_facade(Settings(), _FakeEngine())
+
+    assert isinstance(sweep_facade, PartnerFacade)
+    assert sweep_facade._registration._iam is None
 
 
 @pytest.mark.asyncio

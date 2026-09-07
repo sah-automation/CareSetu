@@ -27,15 +27,13 @@ from modules.iam.domain.otp import (
     RESEND_COOLDOWN_SECONDS,
 )
 from modules.iam.domain.phone import normalize_phone
-from modules.iam.domain.resend import evaluate_resend
 from modules.iam.domain.shared import (
     OtpSender as OtpSender,
 )
 from modules.iam.domain.shared import (
-    _invalidate_pending_challenges,
     _issue_challenge,
-    _latest_cooldown_until,
     _lock_identity_row,
+    _reissue_otp_challenge,
 )
 from modules.iam.outbox import IAM_OUTBOX_TABLE
 from modules.iam.schema.models import iam_identities
@@ -132,7 +130,9 @@ class IdentityFacade:
         locked phone back into the OTP flow. The identity row is locked
         ``FOR UPDATE`` so the refusal reads stable guard state and concurrent
         writers serialize. First-time registration and out-of-cooldown login
-        share the resend's latest-wins issuance: the pending challenge is
+        share the resend's latest-wins issuance via the shared re-issue
+        primitive ``_reissue_otp_challenge`` (WI-4, #335), which defines the
+        cooldown/lockout semantics once for both paths: the pending challenge is
         invalidated before a fresh hashed one is issued (the old code can no
         longer verify), ``otp.sent`` lands in the iam outbox in the same
         transaction as the change, and the EXT-001 adapter delivers it as a
@@ -161,6 +161,12 @@ class IdentityFacade:
                     IAM_OUTBOX_TABLE,
                     events.patient_registered_envelope(identity_id, phone_e164),
                 )
+                challenge_id, otp = await _issue_challenge(
+                    connection,
+                    identity_id=identity_id,
+                    phone_e164=phone_e164,
+                    now=now,
+                )
             else:
                 locked = await _lock_identity_row(
                     connection, iam_identities.c.phone_e164 == phone_e164
@@ -168,32 +174,26 @@ class IdentityFacade:
                 if locked is None:
                     raise IamError("existing identity disappeared between the insert and the lock")
                 identity_id = locked.identity_id
-                identity_status = locked.status
-                lockout_until = locked.lockout_until
-                latest_cooldown_until = await _latest_cooldown_until(connection, identity_id)
-                decision = evaluate_resend(
-                    identity_status=identity_status,
-                    lockout_until=lockout_until,
-                    cooldown_until=latest_cooldown_until,
+
+                reissue = await _reissue_otp_challenge(
+                    connection,
+                    identity_id=identity_id,
+                    phone_e164=phone_e164,
+                    identity_status=locked.status,
+                    lockout_until=locked.lockout_until,
                     now=now,
                 )
-                if decision.outcome != "sent":
+                if reissue.outcome != "sent":
                     return RegisterPatientResult(
-                        outcome=decision.outcome,
+                        outcome=reissue.outcome,
                         phone_e164=phone_e164,
-                        identity_id=identity_id,
+                        identity_id=reissue.identity_id,
                         is_existing=True,
                         flow="login",
-                        cooldown_remaining_seconds=decision.cooldown_remaining_seconds,
-                        lockout_remaining_seconds=decision.lockout_remaining_seconds,
+                        cooldown_remaining_seconds=reissue.cooldown_remaining_seconds,
+                        lockout_remaining_seconds=reissue.lockout_remaining_seconds,
                     )
-                await _invalidate_pending_challenges(connection, identity_id)
-            challenge_id, otp = await _issue_challenge(
-                connection,
-                identity_id=identity_id,
-                phone_e164=phone_e164,
-                now=now,
-            )
+                challenge_id, otp = reissue.sent_challenge()
 
         await self._otp_sender(phone_e164, otp)
 

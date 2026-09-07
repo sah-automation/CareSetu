@@ -1,30 +1,66 @@
 """MOD-002 Partner lifecycle: typed public sync API (PHASE-5 T04, ticket #247).
 
 The only legal cross-module import target for the ``partner`` module
-(coding-standards §2, ADR-0003). This ticket lands the lifecycle engine that
-the two-step verification gate (ADR-0008) drives: every decision comes from the
-pure :mod:`modules.partner.domain.state_machine`; this layer only persists and
-writes the outbox.
+(coding-standards §2, ADR-0003). Since the WI-2 deepening pass the facade is a
+thin coordinator that delegates to lifecycle sub-facades (ADR-0006, parent
+#330): the registration lifecycle (:mod:`modules.partner.registration_facade`,
+WI-2 p1a #332), the credential-intake gate
+(:mod:`modules.partner.credential_intake_facade`, WI-2 p2c #338), the operator
+gate (:mod:`modules.partner.operator_gate_facade`, WI-2 p2a #334), and the
+patient-facing directory reads (:mod:`modules.partner.directory_facade`,
+WI-2 p2b #337). The close-out family stays on the coordinator after WI-2. The
+coordinator re-exports the sub-facades' result models so the public surface and
+all routing/cross-module callers stay unchanged.
 
-Methods:
+Methods (delegated to the registration sub-facade - WI-2 p1a #332):
 - ``register`` opens a ``[Registered]`` profile from an open self-service
   registration (FEAT-014, T05): creates the iam credential account
   synchronously (ADR-0010) and emits ``partner.registered``; a duplicate phone
   resolves to the existing profile.
 - ``register_partner`` opens a profile in ``Registered``.
-- ``submit_credentials`` runs the Step-1 credential pre-filter (ADR-0008) and,
-  on pass, encrypts the documents into ``partner/``, opens ``partner_credentials``
-  rows and a verification round (``verification_started`` - including
-  re-verification of an ``Active`` partner, who stays ``Active`` through the 7-day
-  grace window) or, on auto-fail, rejects never queued (``partner.rejected`` with
-  the specific pre-filter reason).
+- ``resolve_partner`` / ``resolve_partner_id_by_identity`` resolve an identity
+  to the partner profile (the latter non-throwing, for the session gate).
+- ``get_my_status`` reads the partner's own onboarding status.
+
+Methods (delegated to the operator-gate sub-facade - WI-2 p2a #334):
 - ``operator_decision`` is the Step-2 manual gate: explicit operator approval
   reaches ``Active`` (``partner.activated``); operator reject reaches
   ``Rejected`` (``partner.rejected`` with reason + actor). No auto-approve.
 - ``grace_lapse`` (T10) applies the event-driven 7-day grace-window lapse that
   drops an ``[Active]`` re-verifying partner to ``[Under Verification]``; the
   opposite (deactivation) is ``operator_decision`` rejecting an ``[Active]``
-  partner, which emits ``credential.invalidated`` alongside ``partner.rejected``.
+  partner, which routes through the credential-validity deep module's single
+  close-out transition (WI-1, #331).
+- ``list_verification_queue`` lists the operator's verification queue,
+  age-prioritised for the activation-cycle KPI.
+- ``get_verification_detail`` opens the per-partner review: profile +
+  credentials + verification history + audit chain.
+
+Methods (delegated to the directory sub-facade - WI-2 p2b #337):
+- ``search_directory`` is the public directory search (FEAT-004): only
+  ``[Active]`` partners with all-verified, unexpired, unrevoked credentials,
+  nearest-first, with the wider-area fallback and the ``directory.search``
+  analytics event; Redis-accelerated with lazy validity re-derivation
+  (PHASE-6 T02b, #314).
+- ``get_provider_profile`` is the public provider profile (FEAT-005): the
+  verified-safe profile, hidden exactly when search hides the card.
+- ``record_partner_selected`` records one ``partner.selected`` analytics pick.
+
+Methods (delegated to the credential-intake sub-facade - WI-2 p2c #338):
+- ``submit_credentials`` runs the Step-1 credential pre-filter (ADR-0008) and,
+  on pass, encrypts the documents into ``partner/``, opens ``partner_credentials``
+  rows and a verification round (``verification_started`` - including
+  re-verification of an ``Active`` partner, who stays ``Active`` through the 7-day
+  grace window) or, on auto-fail, rejects never queued (``partner.rejected`` with
+  the specific pre-filter reason).
+- ``get_my_verification`` reads the partner's own credential review status
+  (US-7, P3 #271).
+- ``get_rejection_reason`` reads the specific failure reason back to a
+  ``[Rejected]`` partner so they can re-apply corrected credentials (PHASE-5 T09).
+- ``appeal`` files the one-time rejection appeal, re-entering the operator
+  queue (PHASE-5 T09).
+
+Remaining coordinator methods:
 - ``purge_expired_credentials`` (US-27, #263) is the deterministic credential-
   cleanup trigger: it deletes credential rows whose permanent-rejection 30-day
   cleanup window has lapsed (still ``[Rejected]``), removes their artifacts, and
@@ -57,93 +93,136 @@ the state transitions and event constants/builders they need already live in
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
-from typing import Any
+from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, Field
-from sqlalchemy import and_, func, or_, select
-from sqlalchemy.dialects.postgresql import insert as postgresql_insert
-from sqlalchemy.engine import Row
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from bus.outbox_writer import write_outbox
 from modules.audit.facade import AuditFacade
 from modules.iam.facade import IamFacade
+from modules.partner import credential_validity as credential_validity_module
+from modules.partner import directory_cache as directory_cache_module
 from modules.partner.adapters.artifact_store import CredentialArtifactStore
-from modules.partner.directory_cache import (
-    directory_visibility_changed,
-    get_cached_search,
-    set_cached_search,
+from modules.partner.credential_intake_facade import (
+    CredentialIntakeFacade as CredentialIntakeFacade,
 )
-from modules.partner.domain.credentials import CredentialInvalidatedReason, CredentialType
+from modules.partner.credential_intake_models import (
+    CredentialSubmission as CredentialSubmission,
+)
+from modules.partner.credential_intake_models import (
+    CredentialSubmissionResult as CredentialSubmissionResult,
+)
+from modules.partner.credential_intake_models import (
+    PartnerVerificationStatusView as PartnerVerificationStatusView,
+)
+from modules.partner.credential_intake_models import (
+    RejectionReasonView as RejectionReasonView,
+)
+from modules.partner.credential_validity import (
+    CloseOutCredential,
+)
+from modules.partner.directory_facade import (
+    DALTONGANJ_LATITUDE as DALTONGANJ_LATITUDE,
+)
+from modules.partner.directory_facade import (
+    DALTONGANJ_LONGITUDE as DALTONGANJ_LONGITUDE,
+)
+from modules.partner.directory_facade import (
+    DirectoryEntry as DirectoryEntry,
+)
+from modules.partner.directory_facade import (
+    DirectoryFacade as DirectoryFacade,
+)
+from modules.partner.directory_facade import (
+    DirectorySearchView as DirectorySearchView,
+)
+from modules.partner.directory_facade import (
+    ProviderCredential as ProviderCredential,
+)
+from modules.partner.directory_facade import (
+    ProviderProfileView as ProviderProfileView,
+)
+from modules.partner.domain.credentials import CredentialInvalidatedReason
 from modules.partner.domain.events import (
     PartnerType,
-    credential_invalidated_envelope,
-    credential_reviewed_envelope,
-    directory_search_envelope,
-    partner_activated_envelope,
-    partner_registered_envelope,
-    partner_rejected_envelope,
-    partner_selected_envelope,
-    verification_started_envelope,
-)
-from modules.partner.domain.exceptions import (
-    AppealAlreadyUsedError,
-    IllegalPartnerTransitionError,
-    InvalidQueueSortError,
-    InvalidQueueStatusError,
-    PartnerNotFoundError,
-    PartnerNotRejectedError,
-    ProviderProfileNotFoundError,
-    RejectionReasonRequiredError,
-    ReSubmissionThrottledError,
-    ServiceAreaNotFoundError,
-)
-from modules.partner.domain.prefilter import evaluate_submission
-from modules.partner.domain.rejection import (
-    evaluate_re_submission,
-)
-from modules.partner.domain.state_machine import (
-    REGISTERED,
-    PartnerAction,
-    PartnerState,
-    PartnerStatus,
-    transition,
-)
-from modules.partner.outbox import PARTNER_OUTBOX_TABLE
-from modules.partner.schema.models import (
-    partner_credentials,
-    partner_directory_index,
-    partner_profiles,
-    partner_service_areas,
-    partner_verifications,
 )
 
-PARTNER_SCHEMA = "partner"
+# The intake-facing domain exceptions are re-exported so the coordinator's public
+# surface stays unchanged (ADR-0006, #338): the credential-intake sub-facade
+# raises these, and prior cross-module callers imported them from the facade.
+from modules.partner.domain.exceptions import (
+    AppealAlreadyUsedError as AppealAlreadyUsedError,
+)
+from modules.partner.domain.exceptions import (
+    PartnerNotFoundError as PartnerNotFoundError,
+)
+from modules.partner.domain.exceptions import (
+    PartnerNotRejectedError as PartnerNotRejectedError,
+)
+from modules.partner.domain.exceptions import (
+    ReSubmissionThrottledError as ReSubmissionThrottledError,
+)
+from modules.partner.domain.state_machine import (
+    PartnerStatus,
+)
+from modules.partner.operator_gate_facade import (
+    OperatorGateFacade as OperatorGateFacade,
+)
+from modules.partner.operator_gate_models import (
+    AuditEventDetail as AuditEventDetail,
+)
+from modules.partner.operator_gate_models import (
+    CredentialDetail as CredentialDetail,
+)
+from modules.partner.operator_gate_models import (
+    PartnerQueue as PartnerQueue,
+)
+from modules.partner.operator_gate_models import (
+    PartnerQueueItem as PartnerQueueItem,
+)
+from modules.partner.operator_gate_models import (
+    PartnerVerificationDetail as PartnerVerificationDetail,
+)
+from modules.partner.operator_gate_models import (
+    VerificationRound as VerificationRound,
+)
+from modules.partner.registration_facade import (
+    RegistrationFacade as RegistrationFacade,
+)
+from modules.partner.registration_models import (
+    PartnerMeView as PartnerMeView,
+)
+from modules.partner.registration_models import (
+    PartnerView as PartnerView,
+)
+from modules.partner.registration_models import (
+    RegisterPartnerResult as RegisterPartnerResult,
+)
+from modules.partner.schema.models import (
+    partner_credentials,
+    partner_profiles,
+)
+from modules.partner.shared import (
+    DEFAULT_SERVICE_AREA_NAME as DEFAULT_SERVICE_AREA_NAME,
+)
+from modules.partner.shared import (
+    PARTNER_SCHEMA as PARTNER_SCHEMA,
+)
+from modules.partner.shared import (
+    Profile as Profile,
+)
+from modules.partner.shared import (
+    default_clock as _default_clock,
+)
+from modules.partner.shared import (
+    load_profile as _load_profile,
+)
 
 # The Phase-5 launch service area (REQ-008): a partner that does not declare a
 # ``service_area_id`` defaults to this vocabulary row (seeded by migration
 # v5.4). An unknown explicitly-declared ``service_area_id`` is rejected at the
 # facade (mapped to a 422) so a partner is never attached to a nonexistent area.
-DEFAULT_SERVICE_AREA_NAME = "Daltonganj"
-
-# The peri-urban scope of the Phase-6 launch directory (FEAT-004, REQ-008):
-# Daltonganj plus its surrounding peri-urban belt. Search clamps results to this
-# many km from the patient's geo point; when nothing matches inside it, the
-# wider-area fallback relaxes only the location constraint (filters kept) and
-# labels the results "outside your area". A single km constant - no PostGIS -
-# is the cost-floor SQL range (MOD-002 §4).
-PERI_URBAN_RADIUS_KM = 25.0
-
-# The launch directory's default origin (parent #306, FEAT-004): when the
-# anonymous patient does not supply a geo point, distance sort anchors on the
-# Daltonganj centre (the beachhead city, REQ-008). Single test-visible source
-# for the centre coordinates - the directory test suites import these rather
-# than duplicating the literals.
-DALTONGANJ_LATITUDE = 24.04
-DALTONGANJ_LONGITUDE = 84.07
 
 # The re-submission throttle policy lives in the domain core
 # (:mod:`modules.partner.domain.rejection`): a rejected partner may open at most
@@ -152,714 +231,13 @@ DALTONGANJ_LONGITUDE = 84.07
 # never enforced via an iam/Redis limiter, which is not this module's seam.
 
 
-@dataclass(frozen=True)
-class _Profile:
-    """One ``partner_profiles`` row, converted off the driver."""
-
-    partner_id: int
-    identity_id: int
-    partner_type: str
-    status: str
-    round: int
-    # Rejected-partner recovery state (PHASE-5 T09, #253): the one-time appeal
-    # flag and the re-submission throttle budget carried by the profile.
-    appeal_used: bool = False
-    re_submission_count: int = 0
-    re_submission_blocked_until: datetime | None = None
-    # Registration time (P2/P3 #271): surfaced on the partner self-service
-    # status view (US-6), read from the profile row's ``created_at``.
-    created_at: datetime | None = None
-
-    @property
-    def state(self) -> PartnerState:
-        return PartnerState(status=PartnerStatus(self.status), round=self.round)
-
-
-_PROFILE_COLUMNS = (
-    partner_profiles.c.id,
-    partner_profiles.c.identity_id,
-    partner_profiles.c.partner_type,
-    partner_profiles.c.status,
-    partner_profiles.c.appeal_used,
-    partner_profiles.c.re_submission_count,
-    partner_profiles.c.re_submission_blocked_until,
-    partner_profiles.c.created_at,
-)
-
-
-class PartnerView(BaseModel):
-    """The typed result of a partner lifecycle mutation."""
-
-    partner_id: int
-    status: str
-    round: int
-
-
-class RegisterPartnerResult(BaseModel):
-    """The outcome of open partner registration (FEAT-014, T05).
-
-    ``partner_id`` and ``status`` name the partner profile - a freshly opened
-    ``[Registered]`` profile on first registration, or the pre-existing
-    profile on a duplicate phone (accepted criterion 6: duplicate phone
-    resolves to the existing identity). ``identity_id`` is the iam gateway
-    principal the account was created/resolved for, and ``created`` tells the
-    caller whether this call introduced a new profile (``True``) or resolved
-    an existing one (``False``).
-    """
-
-    partner_id: int
-    identity_id: int
-    partner_type: str
-    status: str
-    round: int
-    created: bool
-
-
-class CredentialSubmission(BaseModel):
-    """One credential a partner submits for Step-1 review (ADR-0008).
-
-    ``credential_type`` is the closed per-partner-type type (a doctor's medical
-    registration, a lab's lab license, a chemist's drug license, or a supporting
-    document). ``artifacts`` are the encrypted-document source bytes the facade
-    AES-encrypts into the ``partner/`` object-storage prefix; the refs, not the
-    bytes, are persisted in ``partner_credentials.artifact_refs``.
-    """
-
-    credential_type: CredentialType
-    artifacts: list[bytes] = []
-
-
-class CredentialSubmissionResult(BaseModel):
-    """The typed outcome of a credential submission.
-
-    ``status`` is ``Under Verification`` on a Step-1 pass (a round opened,
-    ``partner.verification_started``); ``Rejected`` on a Step-1 auto-fail with
-    ``reason`` naming the specific pre-filter failure (never queued - ADR-0008).
-    ``reason`` is present only on the auto-fail path.
-    """
-
-    partner_id: int
-    status: str
-    round: int
-    reason: str | None = None
-
-
-class RejectionReasonView(BaseModel):
-    """The specific failure reason surfaced to a rejected partner (PHASE-5 T09).
-
-    Read back from the latest ``[Rejected]`` round's ``decision_reason`` (the
-    operator's reason or the Step-1 pre-filter auto-fail reason recorded by
-    T08/T06). Meaningful only for a ``[Rejected]`` partner - the facade raises
-    :class:`PartnerNotRejectedError` otherwise so the partner is never asked to
-    re-apply against a status they are not in.
-    """
-
-    partner_id: int
-    rejection_reason: str
-    round: int
-
-
-class PartnerQueueItem(BaseModel):
-    """One partner on the operator verification queue (FEAT-015, T08).
-
-    ``created_at`` is the registration time the age-prioritized default sort
-    orders by (KPI-004: oldest registrations first so the activation-cycle
-    median stays within 48 h). ``round`` is the partner's latest verification
-    round (0 = never entered a round).
-    """
-
-    partner_id: int
-    identity_id: int
-    partner_type: str
-    status: str
-    practice_name: str | None
-    practice_address: str
-    created_at: datetime
-    round: int
-    audit_link: str | None = None
-
-
-class PartnerQueue(BaseModel):
-    """The operator's verification queue view."""
-
-    items: list[PartnerQueueItem]
-
-
-class CredentialDetail(BaseModel):
-    """One submitted credential in the operator's per-partner detail view."""
-
-    credential_id: int
-    credential_type: str
-    verified: bool
-    expires_at: datetime | None
-    artifact_refs: dict[str, str]
-
-
-class VerificationRound(BaseModel):
-    """One verification round in the operator's history view."""
-
-    round: int
-    status: str
-    decision: str | None
-    decision_reason: str | None
-    decision_by: int | None
-    decided_at: datetime | None
-    created_at: datetime
-
-
-class AuditEventDetail(BaseModel):
-    """One ``audit_events`` row in the partner's verification detail view (S7).
-
-    A typed, read-only projection of a ledger row surfaced alongside the
-    profile/credentials/history so the operator can see the partner's full
-    audit chain (who-what-when + hash links) while making a decision. This is
-    the primary-schema read of the existing audit seam - no new write path.
-    """
-
-    id: UUID
-    event_type: str
-    actor_id: UUID | None
-    target_id: UUID | None
-    scope: str | None
-    metadata: dict[str, object]
-    timestamp: datetime
-    prev_hash: str
-    hash: str
-
-
-class PartnerVerificationDetail(BaseModel):
-    """The full per-partner review: profile + credentials + verification history.
-
-    What the operator sees when they open a queue item (FEAT-015 user story 17)
-    to make a defensible approve/reject decision. ``credentials`` are the
-    submitted documents (artifact refs, never bytes); ``verification_history``
-    is the per-round queue/decision trail; ``audit_events`` is the partner's
-    ledger chain (S7 read-only augmentation).
-    """
-
-    partner_id: int
-    identity_id: int
-    partner_type: str
-    status: str
-    practice_name: str | None
-    practice_address: str
-    service_area_id: int | None
-    created_at: datetime
-    credentials: list[CredentialDetail]
-    verification_history: list[VerificationRound]
-    audit_events: list[AuditEventDetail] = Field(default_factory=list)
-    audit_link: str | None = None
-
-
-class PartnerMeView(BaseModel):
-    """The partner's own self-service onboarding status (US-6, P2 #271).
-
-    A thin, partner-scoped read-only projection: ``status`` is the current
-    lifecycle state ([Registered]/[Under Verification]/[Active]/[Rejected]),
-    ``partner_type`` the registered type, ``round`` the latest verification
-    round (0 = never entered a round), and ``created_at`` the registration
-    time. None of the operator-scoped queue/credential detail is exposed -
-    the restricted pre-activation scope (spec) shows status only.
-    """
-
-    partner_id: int
-    status: str
-    partner_type: str
-    round: int
-    created_at: datetime | None
-
-
-class PartnerVerificationStatusView(BaseModel):
-    """The partner's own credential review status for the current round (US-7, P3 #271).
-
-    Surfaces whether the partner's credentials are under review, and on a
-    decided round the outcome (``decision``/``decision_reason``/``decided_at``),
-    without exposing the operator's artifact refs or audit chain. For a
-    ``[Registered]`` partner who has not entered a round ``round`` is 0 and the
-    round fields are ``None`` - a meaningful "no submission yet" response.
-    """
-
-    partner_id: int
-    round: int
-    status: str | None
-    decision: str | None
-    decision_reason: str | None
-    decided_at: datetime | None
-
-
-class DirectoryEntry(BaseModel):
-    """One public directory search result (FEAT-004, user story 7).
-
-    A verified-safe projection of an ``[Active]`` partner with valid
-    credentials: display name (``practice_name``), partner type, specialty
-    (doctors only), the partner's ``area`` (its recorded service area, with the
-    Daltonganj fallback when none is recorded - the same optionality and
-    derivation the provider profile uses), and the derived ``verified``
-    indicator plus its great-circle ``distance_km`` from the caller's geo
-    point. The tick is always True for a returned row - search visibility and
-    the tick share one derivation, so a separate visibility flag could never
-    drift (ADR-0011 "tick gone = card gone"). Named ``practice_name`` to stay
-    on the partner schema vocabulary; patient-facing clients may render it as
-    the provider's name.
-    """
-
-    partner_id: int
-    practice_name: str | None
-    partner_type: str
-    specialty: str | None
-    area: str | None
-    distance_km: float
-    verified: bool
-
-
-class DirectorySearchView(BaseModel):
-    """The public directory search response (MOD-002, FEAT-004).
-
-    ``items`` are active-only, distance-sorted entries after the caller's
-    filters (partner type, specialty for doctors, free-text over name);
-    ``fell_back`` marks the wider-area fallback: nothing matched within the
-    peri-urban scope, so the location constraint was relaxed (filters kept) and
-    the results must be labeled "outside your area" (glossary). The patient is
-    never silently served results that dropped a filter.
-    """
-
-    items: list[DirectoryEntry]
-    fell_back: bool
-
-
-class ProviderCredential(BaseModel):
-    """One credential on the public provider profile (FEAT-005, PHASE-6 T03).
-
-    Verified-safe projection: only the closed ``credential_type``, the derived
-    ``status`` label and the recorded ``expires_at`` - never the artifact refs,
-    never the document bytes (they stay in encrypted object storage). Every
-    credential on a returned profile is labelled ``verified`` because the
-    profile gate matches search visibility (ADR-0011): an unverified, expired
-    or revoked credential makes the whole profile unreachable, so no invalid
-    label can ever surface here.
-    """
-
-    credential_type: str
-    status: str
-    expires_at: datetime | None
-
-
-class ProviderProfileView(BaseModel):
-    """The public provider profile (MOD-002, FEAT-005, PHASE-6 T03 #309).
-
-    A verified-safe projection of an ``[Active]`` partner that has a
-    ``directory_index`` entry and valid (verified, unexpired, unrevoked)
-    credentials: display name (``practice_name``), partner type, specialty
-    (doctors only), the partner's service area, the derived ``verified``
-    indicator and per-credential type + status labels. ``verified`` is always
-    True for a reachable profile because reachability uses the same derivation
-    as search visibility - it can never drift from the card tick (ADR-0011
-    "tick gone = card gone"). Never exposed: artifact refs, emails, phones, PHI.
-    """
-
-    partner_id: int
-    practice_name: str | None
-    partner_type: str
-    specialty: str | None
-    area: str | None
-    verified: bool
-    credentials: list[ProviderCredential]
-
-
-_QUEUE_SORTS: dict[str, Any] = {
-    "registration_age": partner_profiles.c.created_at,
-    "partner_type": partner_profiles.c.partner_type,
-    "status": partner_profiles.c.status,
-}
-
-# The statuses the operator queue may be filtered by (api-standards §4): any
-# other value is an explicit error, never a silent empty queue (S15, #268).
-_QUEUE_STATUSES: frozenset[str] = frozenset(ps.value for ps in PartnerStatus)
-
-
-def _row_str(row: Any, name: str) -> str:
-    return str(getattr(row, name))
-
-
-def _haversine_km(latitude: float, longitude: float) -> Any:
-    """Haversine great-circle distance in km from the caller point to a row.
-
-    Computed in SQL over ``practice_latitude``/``practice_longitude`` so the
-    peri-urban range clamp and the nearest-first sort both stay in the
-    database (FEAT-004 geo via SQL range; PostGIS optional at the cost floor,
-    MOD-002 §4). Returns the SQL expression - 6371 km mean Earth radius.
-    """
-    rad_lat_me = func.radians(latitude)
-    rad_lng_me = func.radians(longitude)
-    rad_lat_row = func.radians(partner_directory_index.c.practice_latitude)
-    rad_lng_row = func.radians(partner_directory_index.c.practice_longitude)
-    dlat = rad_lat_row - rad_lat_me
-    dlon = rad_lng_row - rad_lng_me
-    a = func.power(func.sin(dlat / 2), 2) + func.cos(rad_lat_me) * func.cos(
-        rad_lat_row
-    ) * func.power(func.sin(dlon / 2), 2)
-    return 6371.0 * 2.0 * func.asin(func.sqrt(a))
-
-
-def _has_any_credential(column: Any) -> Any:
-    """Exists-subquery: the partner has at least one submitted credential.
-
-    Mirrors the directory backfill's ``EXISTS (SELECT 1 FROM credentials)``
-    guard so search and the index agree on the "verified on record" baseline.
-    """
-    return (
-        select(1)
-        .select_from(partner_credentials)
-        .where(partner_credentials.c.profile_id == column)
-        .exists()
-    )
-
-
-def _has_invalid_credential(column: Any) -> Any:
-    """Exists-subquery: the partner has any credential that is not valid.
-
-    The lazy read-hide (ADR-0011): a credential is invalid when it was never
-    verified, its recorded expiry date has passed, or it was revoked. Search
-    derives visibility from these recorded dates on every read - it never
-    trusts a cached ``is_active`` flag for the validity decision (T02b wraps
-    the cache later; correctness stays here).
-    """
-    return (
-        select(1)
-        .select_from(partner_credentials)
-        .where(
-            partner_credentials.c.profile_id == column,
-            or_(
-                partner_credentials.c.verified.is_(False),
-                and_(
-                    partner_credentials.c.expires_at.is_not(None),
-                    partner_credentials.c.expires_at <= func.now(),
-                ),
-                partner_credentials.c.revoked_at.is_not(None),
-            ),
-        )
-        .exists()
-    )
-
-
-def _provider_visible(column: Any) -> Any:
-    """The single provider-visibility predicate (REQ-028 + ADR-0011).
-
-    ``True`` iff the partner is ``[Active]``, has a ``directory_index`` entry,
-    holds at least one submitted credential AND every credential is verified,
-    unexpired and unrevoked. Both ``search_directory`` (which card shows) and
-    ``get_provider_profile`` (which profile resolves, and whose ``verified``
-    indicator reads True) use this SAME predicate, so the indicator can never
-    claim a partner the search hides - one source of truth for "tick gone =
-    card gone". Always derived on read from the recorded dates, never a cached
-    ``is_active``-only trust (ADR-0011).
-    """
-    return and_(
-        partner_directory_index.c.is_active.is_(True),
-        partner_profiles.c.status == "Active",
-        _has_any_credential(column),
-        ~_has_invalid_credential(column),
-    )
-
-
-def _default_clock() -> datetime:
-    """The wall-clock the lifecycle uses for scheduling windows (US-27, #263).
-
-    A plain UTC now, overridable for tests (the ``MutableClock`` pattern the
-    integration suite uses to walk the 30-day cleanup window).
-    """
-    return datetime.now(UTC)
-
-
-def _to_profile(row: Row[Any], round: int) -> _Profile:
-    appeal_used = getattr(row, "appeal_used", False)
-    blocked_until = getattr(row, "re_submission_blocked_until", None)
-    return _Profile(
-        partner_id=int(row.id),
-        identity_id=int(row.identity_id),
-        partner_type=str(row.partner_type),
-        status=str(row.status),
-        round=round,
-        appeal_used=bool(appeal_used),
-        re_submission_count=int(getattr(row, "re_submission_count", 0)),
-        re_submission_blocked_until=blocked_until,
-        created_at=getattr(row, "created_at", None),
-    )
-
-
-async def _load_profile(connection: AsyncConnection, partner_id: int) -> _Profile:
-    row = (
-        await connection.execute(
-            select(*_PROFILE_COLUMNS).where(partner_profiles.c.id == partner_id).with_for_update()
-        )
-    ).first()
-    if row is None:
-        raise PartnerNotFoundError(partner_id)
-    current_round = int(
-        (
-            await connection.execute(
-                select(func.coalesce(func.max(partner_verifications.c.round), 0)).where(
-                    partner_verifications.c.profile_id == partner_id
-                )
-            )
-        ).scalar_one()
-    )
-    return _to_profile(row, current_round)
-
-
-async def _load_profile_by_identity(
-    connection: AsyncConnection, identity_id: int
-) -> _Profile | None:
-    """The profile (with its round) for ``identity_id``, or ``None`` if absent.
-
-    Duplicate-phone resolution (accepted criterion 6): an existing partner
-    identity has at most one profile row (``uq_partner_profiles_identity``),
-    so this lookup decides between resolving the existing partner and opening
-    a new one. Round is computed the same way ``_load_profile`` does it so the
-    resolved view reports the partner's true verification round.
-    """
-    row = (
-        await connection.execute(
-            select(*_PROFILE_COLUMNS).where(partner_profiles.c.identity_id == identity_id)
-        )
-    ).first()
-    if row is None:
-        return None
-    current_round = int(
-        (
-            await connection.execute(
-                select(func.coalesce(func.max(partner_verifications.c.round), 0)).where(
-                    partner_verifications.c.profile_id == row.id
-                )
-            )
-        ).scalar_one()
-    )
-    return _to_profile(row, current_round)
-
-
-async def _resolve_service_area(connection: AsyncConnection, service_area_id: int | None) -> int:
-    """Resolve the ``service_area_id`` a registration persists (PHASE-5 #265).
-
-    When the partner declares no area, the row resolves to the Daltonganj
-    default (the seeded Phase-5 launch geography, REQ-008). When an id is
-    declared, it is validated against ``partner_service_areas`` first - an
-    unknown id raises :class:`ServiceAreaNotFoundError` (mapped to a 422) so a
-    partner can never be attached to a nonexistent area. The resolved id is
-    what ``_insert_registered_profile`` persists.
-    """
-    if service_area_id is not None:
-        found = (
-            await connection.execute(
-                select(partner_service_areas.c.id).where(
-                    partner_service_areas.c.id == service_area_id
-                )
-            )
-        ).scalar_one_or_none()
-        if found is None:
-            raise ServiceAreaNotFoundError(service_area_id)
-        return int(found)
-    resolved = await connection.execute(
-        select(partner_service_areas.c.id).where(
-            partner_service_areas.c.name == DEFAULT_SERVICE_AREA_NAME
-        )
-    )
-    # The Daltonganj default is guaranteed by migration v5.4; a missing row is
-    # a deployment error we want to surface, not an ``int(None)``.
-    return int(resolved.scalar_one())
-
-
-async def _insert_registered_profile(
-    connection: AsyncConnection,
-    *,
-    identity_id: int,
-    partner_type: PartnerType,
-    practice_name: str | None = None,
-    practice_address: str,
-    practice_latitude: float,
-    practice_longitude: float,
-    service_area_id: int | None,
-) -> int | None:
-    """Insert a ``[Registered]`` profile and emit ``partner.registered`` atomically.
-
-    Shared by ``register`` and ``register_partner`` (ADR-0002 §1: the outbox
-    row lands in the same transaction as the state change). Concurrency
-    converges on the ``uq_partner_profiles_identity`` unique constraint (the
-    single profile a partner identity may hold): ``INSERT ... ON CONFLICT DO
-    NOTHING`` - never SELECT-then-INSERT without a fallback, mirroring the iam
-    ``create_credential_account`` pattern. Returns the new profile id, or
-    ``None`` when a concurrent registration already opened a profile for the
-    same identity (the caller re-reads and returns that existing profile).
-    """
-    result = await connection.execute(
-        postgresql_insert(partner_profiles)
-        .values(
-            identity_id=identity_id,
-            partner_type=partner_type,
-            status=REGISTERED.status.value,
-            practice_name=practice_name,
-            practice_address=practice_address,
-            practice_latitude=practice_latitude,
-            practice_longitude=practice_longitude,
-            service_area_id=service_area_id,
-        )
-        .on_conflict_do_nothing(index_elements=["identity_id"])
-        .returning(partner_profiles.c.id)
-    )
-    partner_id = result.scalar_one_or_none()
-    if partner_id is None:
-        return None
-    await write_outbox(
-        connection,
-        PARTNER_SCHEMA,
-        PARTNER_OUTBOX_TABLE,
-        partner_registered_envelope(int(partner_id), identity_id, partner_type),
-    )
-    return int(partner_id)
-
-
-async def _apply_transition(
-    connection: AsyncConnection,
-    profile: _Profile,
-    action: PartnerAction,
-    verification: bool,
-) -> PartnerState:
-    """Decide with the pure machine and persist the status flip."""
-    next_state = transition(profile.state, action)
-    await connection.execute(
-        partner_profiles.update()
-        .where(partner_profiles.c.id == profile.partner_id)
-        .values(status=next_state.status.value, updated_at=func.now())
-    )
-    if verification:
-        await connection.execute(
-            partner_verifications.insert().values(
-                profile_id=profile.partner_id,
-                round=next_state.round,
-                status="queued",
-            )
-        )
-    return next_state
-
-
-async def _load_live_credential_types(
-    connection: AsyncConnection, partner_id: int, current_round: int
-) -> frozenset[str]:
-    """Credential types submitted in the current round (duplicate gate input).
-
-    Only credential types from the *current* verification round that are still
-    live count as active for the duplicate gate (S13, #266; S14, #267).
-    "Live" means ``cleanup_due_at IS NULL`` (not yet purged/rejected).
-    Credentials from earlier rounds (including rejected rounds) are excluded
-    and a partner who was rejected for type X can re-offer type X in a fresh
-    round without tripping the gate.
-
-    The caller still passes ``frozenset()`` for ``Rejected`` / ``Active``
-    statuses (renewal / new-round bypass), so this loader is only reached for
-    ``Registered`` / ``Under Verification`` profiles.
-    """
-    rows = (
-        await connection.execute(
-            select(partner_credentials.c.credential_type).where(
-                partner_credentials.c.profile_id == partner_id,
-                partner_credentials.c.round == current_round,
-                partner_credentials.c.cleanup_due_at.is_(None),
-            )
-        )
-    ).all()
-    return frozenset(str(row.credential_type) for row in rows)
-
-
-async def _ingest_credentials(
-    connection: AsyncConnection,
-    partner_id: int,
-    credentials: list[CredentialSubmission],
-    artifact_store: CredentialArtifactStore,
-    round_value: int,
-) -> None:
-    """Encrypt documents into ``partner/`` and open ``partner_credentials`` rows.
-
-    Called only on a Step-1 pass with a configured store (the facade refuses to
-    run without one - see ``submit_credentials``), inside the submission
-    transaction (ADR-0002 §1). Each credential's artifact bytes are AES-encrypted
-    by the given store (refs persisted, never plaintext). ``round_value`` is the
-    verification round the submission opens - stamped on every credential so the
-    duplicate gate can scope to the current round (S13, #266).
-    """
-    for submission in credentials:
-        refs: dict[str, object] = {}
-        for artifact_index, data in enumerate(submission.artifacts):
-            refs[f"{submission.credential_type.value}_{artifact_index}"] = (
-                artifact_store.save_artifact(
-                    partner_id,
-                    submission.credential_type.value,
-                    artifact_index,
-                    data,
-                )
-            )
-        await connection.execute(
-            partner_credentials.insert().values(
-                profile_id=partner_id,
-                credential_type=submission.credential_type.value,
-                round=round_value,
-                verified=False,
-                artifact_refs=refs,
-            )
-        )
-
-
-async def _schedule_credential_cleanup(
-    connection: AsyncConnection,
-    artifact_store: CredentialArtifactStore | None,
-    partner_id: int,
-    *,
-    due_at: datetime,
-) -> list[int]:
-    """Schedule a permanently-rejected partner's credential rows for cleanup (US-27).
-
-    Sets ``cleanup_due_at`` on every credential the partner submitted this
-    round - so the 30-day retention window starts at rejection - and answers
-    their ids in ``created_at`` order (the current round's credential on an
-    ``[Active]`` deactivation is the first). Runs in the caller's transaction so
-    the schedule commits with the state change (ADR-0002 §1). A partner with no
-    credential rows (e.g. a Step-1 auto-fail or a rejection before submitting)
-    schedules nothing.
-    """
-    rows = (
-        await connection.execute(
-            select(
-                partner_credentials.c.id,
-                partner_credentials.c.artifact_refs,
-            )
-            .where(
-                partner_credentials.c.profile_id == partner_id,
-                partner_credentials.c.cleanup_due_at.is_(None),
-            )
-            .order_by(partner_credentials.c.created_at)
-        )
-    ).all()
-    if not rows:
-        return []
-    await connection.execute(
-        partner_credentials.update()
-        .where(
-            partner_credentials.c.profile_id == partner_id,
-            partner_credentials.c.cleanup_due_at.is_(None),
-        )
-        .values(
-            cleanup_due_at=due_at,
-            updated_at=func.now(),
-        )
-    )
-    return [int(row.id) for row in rows]
-
-
 class PartnerFacade:
     """Typed public facade for the partner lifecycle surface."""
 
     def __init__(
         self,
         engine: AsyncEngine,
-        iam_facade: IamFacade,
+        iam_facade: IamFacade | None = None,
         artifact_store: CredentialArtifactStore | None = None,
         audit_facade: AuditFacade | None = None,
         *,
@@ -871,7 +249,6 @@ class PartnerFacade:
         clock: Callable[[], datetime] = _default_clock,
     ) -> None:
         self._engine = engine
-        self._iam = iam_facade
         # Credential documents are encrypted into the ``partner/`` object-storage
         # prefix on a Step-1 pass (ADR-0008, T06). The store must be configured;
         # ``submit_credentials`` refuses to run a passing submission without one
@@ -882,12 +259,6 @@ class PartnerFacade:
         # its int->UUID derivation. Optional for testability - detail views without
         # an audit facade default to an empty ``audit_events`` list.
         self._audit_facade = audit_facade
-        # Rejected-partner re-submission throttle (PHASE-5 T09, #253): the queue-
-        # protection budget and cooldown come from configuration (coding-standards
-        # §9), injected here from the resolved Settings (see app/main.py), never
-        # hardcoded in the domain core.
-        self._re_submission_max = re_submission_max
-        self._re_submission_cooldown_days = re_submission_cooldown_days
         # Credential-document cleanup window after permanent rejection (US-27,
         # ticket #263): the rejection path schedules ``cleanup_due_at`` this many
         # days out, and ``purge_expired_credentials`` deletes the documents after
@@ -907,6 +278,62 @@ class PartnerFacade:
         # ``MutableClock`` in tests to walk the boundary). Mirrors the iam
         # facades' ``clock`` convention.
         self._clock = clock
+        # The credential-validity deep module (WI-1, #331): the coordinator
+        # owns the shared instance so sub-facades later receive it as a seam,
+        # never reconstructing it.
+        self._credential_validity = credential_validity_module
+        # Registration sub-facade (ADR-0006, WI-2 p1a #332): owns the open /
+        # resolve-your-partner lifecycle and the synchronous iam credential
+        # account (ADR-0010). The iam seam is OPTIONAL (WI-3, #336): only
+        # ``register`` consumes it; facades composed without it (the daily
+        # credential-expiry sweep) fail loudly if registration is ever attempted.
+        self._registration = RegistrationFacade(engine, credential_validity_module, iam_facade)
+        # Credential-intake sub-facade (ADR-0006, WI-2 p2c #338): owns the
+        # two-step verification intake gate - Step-1 pre-filter, submission,
+        # re-submission throttle, the partner's review-state read, the rejected-
+        # partner reason read, and the one-time rejection appeal - and its result
+        # models. The coordinator hands it the shared credential-validity deep
+        # module (WI-1 #331), the artifact store, and the re-submission throttle
+        # config knobs (PHASE-5 T09, ADR-0008; never hardcoded in the domain
+        # core - coding-standards §9).
+        self._credential_intake = CredentialIntakeFacade(
+            engine=engine,
+            credential_validity=credential_validity_module,
+            artifact_store=artifact_store,
+            re_submission_max=re_submission_max,
+            re_submission_cooldown_days=re_submission_cooldown_days,
+            clock=clock,
+        )
+        # Directory-cache seam (PHASE-6 T02b, #314): the Redis accelerator
+        # functions. The coordinator exposes the seam once so sub-facades
+        # share the same cache without re-importing.
+        self._directory_cache = directory_cache_module
+        # Operator-gate sub-facade (ADR-0006, WI-2 p2a #334): owns the manual
+        # activation gate (operator decision, verification queue, per-partner
+        # detail, grace-window lapse) and its result models. The coordinator
+        # hands it the shared credential-validity deep module (WI-1 #331), the
+        # directory-cache seam, and the audit read seam, plus its config knobs.
+        self._operator_gate = OperatorGateFacade(
+            engine=engine,
+            credential_validity=credential_validity_module,
+            directory_cache=directory_cache_module,
+            audit_facade=audit_facade,
+            credential_cleanup_days=credential_cleanup_days,
+            clock=clock,
+        )
+        # Directory sub-facade (ADR-0006, WI-2 p2b #337): owns the patient-
+        # facing directory read lifecycle - search, provider profile, partner-
+        # selected analytics, and the cached-search accelerator - and its result
+        # models. The coordinator hands it the shared credential-validity deep
+        # module (WI-1 #331) and the directory-cache seam, plus its config
+        # knobs. The close-out family stays on this coordinator.
+        self._directory = DirectoryFacade(
+            engine=engine,
+            credential_validity=credential_validity_module,
+            directory_cache=directory_cache_module,
+            directory_ttl_seconds=directory_ttl_seconds,
+            directory_max_results=directory_max_results,
+        )
 
     async def register(
         self,
@@ -920,69 +347,25 @@ class PartnerFacade:
     ) -> RegisterPartnerResult:
         """Open partner registration (FEAT-014, ADR-0010): open + sync account.
 
-        A doctor/lab/chemist registers openly with their phone and basic
-        profile - no invite required. The iam credential account is created
-        synchronously first (ADR-0010) so a login-capable identity exists
-        before the partner can authenticate, then the ``[Registered]`` profile
-        row opens with ``partner.registered`` emitted. Both happen in the SAME
-        transaction (the iam seam runs on this method's connection) so the
-        identity and profile commit together as one atomic unit (ADR-0010,
-        ADR-0002 §1) - no orphan identity if the profile insert fails.
-
-        A phone that already resolves to a partner identity (duplicate
-        registration) returns the existing profile unchanged - never a second
-        row. Duplicate identities are resolved by the iam seam (``ON CONFLICT``
-        on ``phone_e164``) and duplicate profiles by ``on_conflict_do_nothing``
-        on ``uq_partner_profiles_identity``, so concurrent registrations of the
-        same phone converge instead of raising (accepted criterion 6).
+        Delegated to the registration sub-facade (ADR-0006, WI-2 p1a #332):
+        the iam credential account is created synchronously first (ADR-0010),
+        then the ``[Registered]`` profile opens with ``partner.registered``
+        emitted - both in the same transaction. A duplicate phone resolves to
+        the existing profile; concurrent registrations converge (accepted
+        criterion 6). When the facade was composed without the iam seam (WI-3,
+        #336 - the daily sweep builds no iam facade), this fails loudly with
+        ``PartnerIamUnavailableError`` rather than opening a profile that can
+        never authenticate.
         """
-        async with self._engine.begin() as connection:
-            account = await self._iam.create_credential_account(phone, connection=connection)
-            identity_id = int(account.identity_id)
-
-            existing = await _load_profile_by_identity(connection, identity_id)
-            if existing is not None:
-                return RegisterPartnerResult(
-                    partner_id=existing.partner_id,
-                    identity_id=identity_id,
-                    partner_type=existing.partner_type,
-                    status=existing.status,
-                    round=existing.round,
-                    created=False,
-                )
-
-            resolved_area_id = await _resolve_service_area(connection, service_area_id)
-            partner_id = await _insert_registered_profile(
-                connection,
-                identity_id=identity_id,
-                partner_type=partner_type,
-                practice_name=practice_name,
-                practice_address=practice_address,
-                practice_latitude=practice_latitude,
-                practice_longitude=practice_longitude,
-                service_area_id=resolved_area_id,
-            )
-            if partner_id is None:
-                # A concurrent registration opened the profile first - resolve it.
-                existing = await _load_profile_by_identity(connection, identity_id)
-                if existing is None:  # pragma: no cover - cannot lose a just-inserted row
-                    raise AssertionError("partner profile vanished between insert and conflict")
-                return RegisterPartnerResult(
-                    partner_id=existing.partner_id,
-                    identity_id=identity_id,
-                    partner_type=existing.partner_type,
-                    status=existing.status,
-                    round=existing.round,
-                    created=False,
-                )
-            return RegisterPartnerResult(
-                partner_id=partner_id,
-                identity_id=identity_id,
-                partner_type=partner_type,
-                status=REGISTERED.status.value,
-                round=0,
-                created=True,
-            )
+        return await self._registration.register(
+            phone=phone,
+            partner_type=partner_type,
+            practice_address=practice_address,
+            practice_latitude=practice_latitude,
+            practice_longitude=practice_longitude,
+            service_area_id=service_area_id,
+            practice_name=practice_name,
+        )
 
     async def register_partner(
         self,
@@ -995,180 +378,64 @@ class PartnerFacade:
     ) -> PartnerView:
         """Open a new partner profile in ``Registered`` (low-level seam).
 
-        Used by ``register`` and any caller that already holds an identity id;
-        inserts the profile row and emits ``partner.registered`` in the same
-        transaction (ADR-0002 §1). A profile that already exists for the
-        identity (the ``uq_partner_profiles_identity`` arbiter) is resolved and
-        returned unchanged - never a second row.
+        Delegated to the registration sub-facade (ADR-0006, WI-2 p1a #332).
         """
-        async with self._engine.begin() as connection:
-            resolved_area_id = await _resolve_service_area(connection, service_area_id)
-            partner_id = await _insert_registered_profile(
-                connection,
-                identity_id=identity_id,
-                partner_type=partner_type,
-                practice_address=practice_address,
-                practice_latitude=practice_latitude,
-                practice_longitude=practice_longitude,
-                service_area_id=resolved_area_id,
-            )
-            if partner_id is not None:
-                return PartnerView(
-                    partner_id=partner_id,
-                    status=REGISTERED.status.value,
-                    round=0,
-                )
-            existing = await _load_profile_by_identity(connection, identity_id)
-            if existing is None:  # pragma: no cover - cannot lose a just-inserted row
-                raise AssertionError("partner profile vanished between insert and conflict")
-            return PartnerView(
-                partner_id=existing.partner_id,
-                status=existing.status,
-                round=existing.round,
-            )
+        return await self._registration.register_partner(
+            identity_id=identity_id,
+            partner_type=partner_type,
+            practice_address=practice_address,
+            practice_latitude=practice_latitude,
+            practice_longitude=practice_longitude,
+            service_area_id=service_area_id,
+        )
 
     async def resolve_partner(self, identity_id: int) -> PartnerView:
         """Resolve the partner profile for an iam identity (credential route).
 
-        The self-service credential route is partner-scoped: the gateway hands
-        the authenticated partner principal carrying ``identity_id``, and this
-        seam resolves it to the partner profile id so the caller can only submit
-        against their own identity (no cross-partner submission/idor). Raises
-        :class:`PartnerNotFoundError` when the identity holds no profile.
+        Delegated to the registration sub-facade (ADR-0006, WI-2 p1a #332).
+        Raises :class:`PartnerNotFoundError` when the identity holds no profile.
         """
-        async with self._engine.begin() as connection:
-            profile = await _load_profile_by_identity(connection, identity_id)
-            if profile is None:
-                raise PartnerNotFoundError(identity_id)
-            return PartnerView(
-                partner_id=profile.partner_id,
-                status=profile.status,
-                round=profile.round,
-            )
+        return await self._registration.resolve_partner(identity_id)
 
     async def resolve_partner_id_by_identity(self, identity_id: int) -> int | None:
         """The partner profile id for an iam identity, or None if absent (T05, #298).
 
-        Non-throwing companion to ``resolve_partner``: returns the partner
-        profile id when one exists, or ``None`` when the identity holds no
-        partner profile (a patient-only phone). Used by the session facade's
-        partner-session gate to distinguish a registered partner from a patient
-        without crossing the module isolation boundary.
+        Non-throwing companion to ``resolve_partner``, delegated to the
+        registration sub-facade (ADR-0006, WI-2 p1a #332). Used by the session
+        facade's partner-session gate.
         """
-        async with self._engine.begin() as connection:
-            profile = await _load_profile_by_identity(connection, identity_id)
-            if profile is None:
-                return None
-            return profile.partner_id
+        return await self._registration.resolve_partner_id_by_identity(identity_id)
+
+    async def verify_partner_exists(self, connection: AsyncConnection, partner_id: int) -> bool:
+        """Confirm a partner profile still exists on the given open connection (#342).
+
+        Atomic safety-net mirror of ``resolve_partner_id_by_identity``, delegated
+        to the registration sub-facade (ADR-0006, WI-2 p1a #332). Runs against a
+        caller-provided connection (iam's identity-row-locked transaction) rather
+        than opening its own, so the existence check is atomic with the session
+        mint. Returns ``True`` when the profile exists, ``False`` when deleted.
+        """
+        return await self._registration.verify_partner_exists(connection, partner_id)
 
     async def get_my_status(self, identity_id: int) -> PartnerMeView:
         """Read the authenticated partner's own onboarding status (US-6, P2 #271).
 
         A partner-scoped read-only projection resolving the caller's identity to
         their partner profile and returning status/type/round/registration time.
-        Reuses the identity lookup ``_load_profile_by_identity``; raises
-        :class:`PartnerNotFoundError` when the identity holds no profile. Unlike
-        the operator ``get_verification_detail`` it emits no audit event and
-        exposes no credentials - the restricted pre-activation scope (spec).
+        Delegated to the registration sub-facade (ADR-0006, WI-2 p1a #332);
+        raises :class:`PartnerNotFoundError` when the identity holds no profile.
         """
-        async with self._engine.begin() as connection:
-            profile = await _load_profile_by_identity(connection, identity_id)
-            if profile is None:
-                raise PartnerNotFoundError(identity_id)
-            return PartnerMeView(
-                partner_id=profile.partner_id,
-                status=profile.status,
-                partner_type=profile.partner_type,
-                round=profile.round,
-                created_at=profile.created_at,
-            )
+        return await self._registration.get_my_status(identity_id)
 
     async def get_my_verification(self, identity_id: int) -> PartnerVerificationStatusView:
         """Read the partner's own credential review status (US-7, P3 #271).
 
-        Resolves the caller's identity to their profile, then projects the
-        current verification round's review state (``queued``/``in_review`` or,
-        once decided, ``approved``/``rejected`` with reason + timestamp). A
-        ``[Registered]`` partner with no round answers ``round`` 0 and ``None``
-        review fields - a meaningful "not submitted yet" without exposing the
-        operator's detail surface. Raises :class:`PartnerNotFoundError` when the
-        identity holds no profile.
+        A partner-scoped read-only projection resolving the caller's identity to
+        their profile and returning the current round's review state.
+        Delegated to the credential-intake sub-facade (ADR-0006, WI-2 p2c #338);
+        raises :class:`PartnerNotFoundError` when the identity holds no profile.
         """
-        async with self._engine.begin() as connection:
-            profile = await _load_profile_by_identity(connection, identity_id)
-            if profile is None:
-                raise PartnerNotFoundError(identity_id)
-            if profile.round == 0:
-                return PartnerVerificationStatusView(
-                    partner_id=profile.partner_id,
-                    round=0,
-                    status=None,
-                    decision=None,
-                    decision_reason=None,
-                    decided_at=None,
-                )
-            row = (
-                await connection.execute(
-                    select(
-                        partner_verifications.c.status,
-                        partner_verifications.c.decision,
-                        partner_verifications.c.decision_reason,
-                        partner_verifications.c.decided_at,
-                    )
-                    .where(partner_verifications.c.profile_id == profile.partner_id)
-                    .where(partner_verifications.c.round == profile.round)
-                )
-            ).first()
-            if row is None:  # pragma: no cover - a round implies a verification row
-                raise AssertionError("current round has no verification row")
-            return PartnerVerificationStatusView(
-                partner_id=profile.partner_id,
-                round=profile.round,
-                status=str(row.status),
-                decision=str(row.decision) if row.decision is not None else None,
-                decision_reason=str(row.decision_reason)
-                if row.decision_reason is not None
-                else None,
-                decided_at=row.decided_at,
-            )
-
-    async def _persist_re_submission_throttle(
-        self, partner_id: int
-    ) -> ReSubmissionThrottledError | None:
-        """Persist the cooldown deadline for an exhausted re-submission budget.
-
-        A ``[Rejected]`` partner at the re-submission budget boundary is throttled
-        (PHASE-5 T09, ADR-0008): the cooldown deadline is written to the profile in
-        its OWN committed transaction so it is durable - the caller then raises the
-        returned error. This must not share the caller's (soon-aborting) transaction,
-        otherwise the deadline write would roll back with the error.
-        """
-        async with self._engine.begin() as connection:
-            profile = await _load_profile(connection, partner_id)
-            if profile.status != PartnerStatus.REJECTED.value:
-                return None
-            policy = evaluate_re_submission(
-                re_submission_count=profile.re_submission_count,
-                re_submission_blocked_until=profile.re_submission_blocked_until,
-                now=datetime.now(UTC),
-                max_re_submissions=self._re_submission_max,
-                cooldown=timedelta(days=self._re_submission_cooldown_days),
-            )
-            if policy.allowed:
-                return None
-            if policy.blocked_until is None:
-                raise AssertionError(
-                    "blocked re-submission policy did not carry a cooldown deadline"
-                )
-            await connection.execute(
-                partner_profiles.update()
-                .where(partner_profiles.c.id == partner_id)
-                .values(
-                    re_submission_blocked_until=policy.blocked_until,
-                    updated_at=func.now(),
-                )
-            )
-            return ReSubmissionThrottledError(partner_id, retry_at=policy.blocked_until.isoformat())
+        return await self._credential_intake.get_my_verification(identity_id)
 
     async def submit_credentials(
         self,
@@ -1179,211 +446,38 @@ class PartnerFacade:
         """Submit professional credentials and run the Step-1 pre-filter (ADR-0008).
 
         The first half of the two-step gate, fully automatic and synchronous on
-        submission. The pre-filter (:func:`modules.partner.domain.prefilter`)
-        validates format (a known credential type appropriate for this partner
-        type, with documents uploaded) and duplicates (a like credential type is
-        not already live):
-
-        - On a **pass**: the documents are AES-encrypted into the ``partner/``
-          object-storage prefix (refs stored, never bytes), ``partner_credentials``
-          rows open, and the partner enters ``Under Verification`` with a new
-          round emitted as ``partner.verification_started``. This is NOT approval
-          - the submission then waits for the Step-2 operator gate.
-        - On an **auto-fail**: the partner returns to ``Rejected`` (never queued)
-          and ``partner.rejected`` fires with the specific pre-filter reason
-          (``invalid_credential_type`` / ``missing_artifacts`` / ``duplicate_credential``).
-
-        A previously-``Rejected`` partner re-submitting is a NEW round, not a
-        duplicate; an ``Under Verification``/``Active`` partner re-submitting
-        opens the next round (re-verification) with the round incremented.
-
-        A ``[Rejected]`` partner's re-submission is throttled (PHASE-5 T09,
-        ADR-0008): they may open at most ``MAX_RE_SUBMISSIONS`` re-submission
-        rounds before a cooldown, protecting the operator queue (NFR-001). Once
-        the budget is exhausted the next re-submission raises
-        :class:`ReSubmissionThrottledError` (with the cooldown's ``retry_at``).
-        The first submission from a fresh ``[Registered]`` profile is not a
-        re-submission and does not count against the budget.
+        submission: on a pass the documents are encrypted into ``partner/`` and
+        the partner enters ``Under Verification``; on an auto-fail the partner
+        returns to ``Rejected`` (never queued). A ``[Rejected]`` partner's
+        re-submission is throttled (PHASE-5 T09, ADR-0008).
+        Delegated to the credential-intake sub-facade (ADR-0006, WI-2 p2c #338).
         """
-        throttle_error = await self._persist_re_submission_throttle(partner_id)
-        if throttle_error is not None:
-            raise throttle_error
-
-        async with self._engine.begin() as connection:
-            profile = await _load_profile(connection, partner_id)
-
-            is_re_submission = profile.status == PartnerStatus.REJECTED.value
-
-            existing_types = await _load_live_credential_types(
-                connection, partner_id, profile.round
-            )
-            outcome = evaluate_submission(
-                partner_type=profile.partner_type,
-                credential_types=[c.credential_type for c in credentials],
-                has_artifacts=any(c.artifacts for c in credentials),
-                existing_active_credential_types=(
-                    frozenset()
-                    if profile.status in (PartnerStatus.REJECTED.value, PartnerStatus.ACTIVE.value)
-                    else existing_types
-                ),
-            )
-
-            if not outcome.passed:
-                if outcome.reason is None:
-                    raise AssertionError("pre-filter failure did not carry a reason")
-                next_state = await _apply_transition(
-                    connection, profile, PartnerAction.AUTO_FAIL, verification=False
-                )
-                await write_outbox(
-                    connection,
-                    PARTNER_SCHEMA,
-                    PARTNER_OUTBOX_TABLE,
-                    partner_rejected_envelope(
-                        partner_id,
-                        identity_id=profile.identity_id,
-                        reason=outcome.reason.value,
-                        round=next_state.round,
-                        decision_by=None,
-                    ),
-                )
-                return CredentialSubmissionResult(
-                    partner_id=partner_id,
-                    status=next_state.status.value,
-                    round=next_state.round,
-                    reason=outcome.reason.value,
-                )
-
-            if self._artifact_store is None:
-                # The Step-1 gate passed, so documents were submitted, yet no
-                # store is wired. Silently ingesting the credential with empty
-                # artifact references would queue the operator with nothing to
-                # review - fail loud rather than swallow the documents
-                # (coding-standards §8 "no silent swallowing").
-                raise RuntimeError("credential submission requires a configured artifact store")
-
-            # The round this submission opens (every START_VERIFICATION edge
-            # increments by one - state_machine). Stamped on the credentials so
-            # the duplicate gate can scope to the current round (S13, #266).
-            next_round = transition(profile.state, PartnerAction.START_VERIFICATION).round
-
-            await _ingest_credentials(
-                connection,
-                partner_id,
-                credentials,
-                self._artifact_store,
-                round_value=next_round,
-            )
-            next_state = await _apply_transition(
-                connection, profile, PartnerAction.START_VERIFICATION, verification=True
-            )
-            if is_re_submission:
-                # A rejected partner's accepted re-submission opens a fresh round
-                # and advances the throttle budget. A lapsed cooldown (a
-                # previously-persisted ``blocked_until`` that has now passed)
-                # refreshes the budget, so the new window starts at 1; otherwise
-                # the counter simply advances.
-                new_count = (
-                    1
-                    if profile.re_submission_blocked_until is not None
-                    else profile.re_submission_count + 1
-                )
-                await connection.execute(
-                    partner_profiles.update()
-                    .where(partner_profiles.c.id == partner_id)
-                    .values(
-                        re_submission_count=new_count,
-                        re_submission_blocked_until=None,
-                        updated_at=func.now(),
-                    )
-                )
-            await write_outbox(
-                connection,
-                PARTNER_SCHEMA,
-                PARTNER_OUTBOX_TABLE,
-                verification_started_envelope(partner_id, next_state.round),
-            )
-            return CredentialSubmissionResult(
-                partner_id=partner_id,
-                status=next_state.status.value,
-                round=next_state.round,
-            )
+        return await self._credential_intake.submit_credentials(
+            partner_id=partner_id,
+            credentials=credentials,
+        )
 
     async def get_rejection_reason(self, partner_id: int) -> RejectionReasonView:
         """Read the specific failure reason back to a ``[Rejected]`` partner (PHASE-5 T09).
 
         The partner learns WHY their application failed so they can re-apply with
-        corrected credentials (ADR-0008 recovery). The reason is the latest
-        ``[Rejected]`` round's ``decision_reason`` - the operator's reason or the
-        Step-1 pre-filter auto-fail reason recorded by T08/T06. Raises
+        corrected credentials (ADR-0008 recovery). Raises
         :class:`PartnerNotRejectedError` when the partner is not currently
-        ``[Rejected]``: the reason is only meaningful (and only revealed) for a
-        rejected partner.
+        ``[Rejected]``. Delegated to the credential-intake sub-facade
+        (ADR-0006, WI-2 p2c #338).
         """
-        async with self._engine.begin() as connection:
-            profile = await _load_profile(connection, partner_id)
-            if profile.status != PartnerStatus.REJECTED.value:
-                raise PartnerNotRejectedError(partner_id, profile.status)
-            row = (
-                await connection.execute(
-                    select(
-                        partner_verifications.c.round,
-                        partner_verifications.c.decision_reason,
-                    )
-                    .where(
-                        partner_verifications.c.profile_id == partner_id,
-                        partner_verifications.c.decision == "rejected",
-                    )
-                    .order_by(partner_verifications.c.round.desc())
-                    .limit(1)
-                )
-            ).first()
-            reason = str(row.decision_reason) if row is not None and row.decision_reason else None
-            rejected_round = int(row.round) if row is not None else 0
-            if reason is None:
-                raise PartnerNotRejectedError(partner_id, profile.status)
-            return RejectionReasonView(
-                partner_id=partner_id,
-                rejection_reason=reason,
-                round=rejected_round,
-            )
+        return await self._credential_intake.get_rejection_reason(partner_id)
 
     async def appeal(self, partner_id: int) -> PartnerView:
         """File the one-time rejection appeal, re-entering the operator queue (PHASE-5 T09).
 
         A ``[Rejected]`` partner may contest an operator decision once: the appeal
-        re-enters Step 2 (opens a fresh verification round and emits
-        ``partner.verification_started``) and consumes the one-time ``appeal_used``
-        flag - a second appeal is rejected with :class:`AppealAlreadyUsedError`.
-        The appeal DOES NOT advance the re-submission throttle budget; it is a
-        distinct recovery path from re-submitting corrected credentials. Raising
-        :class:`PartnerNotRejectedError` keeps the action legal only for a
-        ``[Rejected]`` partner.
+        re-enters Step 2 and consumes the one-time ``appeal_used`` flag - a second
+        appeal is rejected with :class:`AppealAlreadyUsedError`. The appeal does
+        not advance the re-submission throttle budget. Delegated to the
+        credential-intake sub-facade (ADR-0006, WI-2 p2c #338).
         """
-        async with self._engine.begin() as connection:
-            profile = await _load_profile(connection, partner_id)
-            if profile.status != PartnerStatus.REJECTED.value:
-                raise PartnerNotRejectedError(partner_id, profile.status)
-            if profile.appeal_used:
-                raise AppealAlreadyUsedError()
-            next_state = await _apply_transition(
-                connection, profile, PartnerAction.START_VERIFICATION, verification=True
-            )
-            await connection.execute(
-                partner_profiles.update()
-                .where(partner_profiles.c.id == partner_id)
-                .values(appeal_used=True, updated_at=func.now())
-            )
-            await write_outbox(
-                connection,
-                PARTNER_SCHEMA,
-                PARTNER_OUTBOX_TABLE,
-                verification_started_envelope(partner_id, next_state.round),
-            )
-            return PartnerView(
-                partner_id=partner_id,
-                status=next_state.status.value,
-                round=next_state.round,
-            )
+        return await self._credential_intake.appeal(partner_id)
 
     async def operator_decision(
         self,
@@ -1395,177 +489,31 @@ class PartnerFacade:
     ) -> PartnerView:
         """Step-2 manual gate: explicit operator approval or rejection.
 
+        Delegated to the operator-gate sub-facade (ADR-0006, WI-2 p2a #334).
         Approval is the ONLY path to ``Active`` (no auto-approve). Rejection
         REQUIRES a reason (raises :class:`RejectionReasonRequiredError` when
-        blank); it is carried into the ``partner.rejected`` payload. The
-        decision is recorded on the current round's ``partner_verifications``
-        row - status/decision flipped to ``approved`` or ``rejected`` with the
-        actor and ``decided_at`` - so the per-partner detail's verification
-        history and the rejection reason are queryable, then the terminal event
-        is emitted in the same transaction (ADR-0002 §1). Every decision is a
-        single, individually attributed action - there is no bulk path.
+        blank); it is carried into the ``partner.rejected`` payload. The reject
+        of an ``[Active]`` partner routes the close-out through the credential-
+        validity deep module's single close-out transition (WI-1, #331) - not
+        local choreography. Every decision is a single, individually attributed
+        action - there is no bulk path.
         """
-        if not approve and (reason is None or not reason.strip()):
-            raise RejectionReasonRequiredError()
-        async with self._engine.begin() as connection:
-            profile = await _load_profile(connection, partner_id)
-            action = PartnerAction.OPERATOR_APPROVE if approve else PartnerAction.OPERATOR_REJECT
-            next_state = await _apply_transition(connection, profile, action, verification=False)
-            decision = "approved" if approve else "rejected"
-            resolved_reason = None if approve else (reason or "rejected by operator")
-            await connection.execute(
-                partner_verifications.update()
-                .where(
-                    partner_verifications.c.profile_id == partner_id,
-                    partner_verifications.c.round == next_state.round,
-                )
-                .values(
-                    status=decision,
-                    decision=decision,
-                    decision_reason=resolved_reason,
-                    decision_by=decision_by,
-                    decided_at=func.now(),
-                )
-            )
-            if approve:
-                await write_outbox(
-                    connection,
-                    PARTNER_SCHEMA,
-                    PARTNER_OUTBOX_TABLE,
-                    partner_activated_envelope(partner_id, profile.identity_id, decision_by),
-                )
-                # PHASE-6 T02b (#314): activation changes which partners a
-                # directory search can return, so every cached search result is
-                # now potentially stale. Flush the namespace (best-effort Redis
-                # op - failure silently degrades to the lazy-correct read path).
-                await directory_visibility_changed()
-            else:
-                await write_outbox(
-                    connection,
-                    PARTNER_SCHEMA,
-                    PARTNER_OUTBOX_TABLE,
-                    partner_rejected_envelope(
-                        partner_id,
-                        identity_id=profile.identity_id,
-                        reason=resolved_reason or "rejected by operator",
-                        round=next_state.round,
-                        decision_by=decision_by,
-                    ),
-                )
-                # Permanent-rejection cleanup (US-27, ticket #263): rejecting a
-                # partner that held credentials schedules their documents for
-                # deletion after the 30-day retention window. ``cleanup_due_at``
-                # is written on the credential rows now (same transaction), and a
-                # Phase-6 ``purge_expired_credentials`` seam deletes them once the
-                # deadline lapses - no background scanner lives here (the
-                # "deliberately no scanner" doctrine). The window still runs when
-                # the partner had been ``[Active]`` (a deactivation) or was merely
-                # ``[Under Verification]`` (a first-time rejection); a partner
-                # rejected before submitting holds no rows to schedule.
-                credential_ids = await _schedule_credential_cleanup(
-                    connection,
-                    self._artifact_store,
-                    partner_id,
-                    due_at=self._clock() + timedelta(days=self._credential_cleanup_days),
-                )
-                # A re-verification failure on an ACTIVE partner is a clean
-                # deactivation (spec phase-5 "Deactivation on failed
-                # re-verification", ticket #254): besides ``partner.rejected``
-                # (role deny via the T03 chain) the credential is invalidated so
-                # the partner is deindexed from any directory AND the iam role
-                # denied again through ``credential.invalidated`` (MOD-001
-                # consumer suspends the grant). The mere grace-window lapse to
-                # ``[Under Verification]`` is NOT a deactivation and emits this
-                # only via the operator reject on an Active partner. The envelope
-                # carries the round's real ``credential_id`` (not ``None``) so the
-                # audit/iam consumers can act on the specific credential - the
-                # ``Active`` rejection always has the live credentials of the
-                # current round.
-                if profile.status == PartnerStatus.ACTIVE.value:
-                    first_credential_id = credential_ids[0] if credential_ids else None
-                    await write_outbox(
-                        connection,
-                        PARTNER_SCHEMA,
-                        PARTNER_OUTBOX_TABLE,
-                        credential_invalidated_envelope(
-                            partner_id,
-                            identity_id=profile.identity_id,
-                            credential_id=first_credential_id,
-                            reason=resolved_reason or "reverification_failed",
-                        ),
-                    )
-                    # PHASE-6 T02b (#314): the credential invalidation deindexes
-                    # this partner, making every cached search result potentially
-                    # stale. Flush the namespace (best-effort, silent on failure).
-                    await directory_visibility_changed()
-            return PartnerView(
-                partner_id=partner_id,
-                status=next_state.status.value,
-                round=next_state.round,
-            )
+        return await self._operator_gate.operator_decision(
+            partner_id=partner_id,
+            decision_by=decision_by,
+            approve=approve,
+            reason=reason,
+        )
 
     async def grace_lapse(self, partner_id: int) -> PartnerView:
         """Auto-drop an ``[Active]`` partner to ``[Under Verification]`` on grace-window lapse.
 
-        PHASE-5 T10 (ticket #254), the event-driven reverify-grace path: an
-        ``[Active]`` partner who re-submitted credentials (a re-verification
-        round opened, ``partner.verification_started``) stays ``[Active]``
-        through the 7-day grace window. When that deadline lapses without an
-        operator decision, THIS seam applies the ``GRACE_LAPSE`` transition -
-        the partner drops to ``[Under Verification]`` (round unchanged) and is
-        queued for the operator gate again, but is NOT deactivated: no
-        ``credential.invalidated`` fires, because the mere lapse is not a
-        rejection (brief handoff #254). A deactivation only happens on an
-        explicit operator reject of the re-verification (see
-        ``operator_decision``), which emits ``credential.invalidated``.
-
-        There is deliberately NO background scanner here - the caller (the
-        reverify flow's deadline check, Phase 6) invokes this when the window is
-        known to have lapsed; automated expiry-scanning is out of Phase-5 scope.
-
-        Two preconditions gate the lapse (both raise
-        :class:`IllegalPartnerTransitionError`, mapped to a 422): the partner
-        must be ``[Active]`` (the state machine edge) AND the current round must
-        be an open, undecided reverification round - that is the ``[Active]``
-        partner has re-submitted (``partner.verification_started`` queued them)
-        and the operator has not yet decided. A freshly-approved round-1
-        ``[Active]`` partner has an already-decided round and is NOT lapse-able:
-        AC2 ("window lapses without a decision") only covers a round that is
-        still undecided.
+        Delegated to the operator-gate sub-facade (ADR-0006, WI-2 p2a #334):
+        the event-driven 7-day grace-window auto-drop. Requires an open,
+        undecided reverification round; the mere lapse is NOT a deactivation,
+        so no ``credential.invalidated`` fires.
         """
-        async with self._engine.begin() as connection:
-            profile = await _load_profile(connection, partner_id)
-            latest = (
-                await connection.execute(
-                    select(partner_verifications.c.status).where(
-                        partner_verifications.c.profile_id == partner_id,
-                        partner_verifications.c.round == profile.round,
-                    )
-                )
-            ).first()
-            if latest is None or str(latest.status) != "queued":
-                raise IllegalPartnerTransitionError(
-                    "grace_lapse requires an open, undecided reverification round"
-                )
-            next_state = await _apply_transition(
-                connection, profile, PartnerAction.GRACE_LAPSE, verification=False
-            )
-            # The lapse drops ``[Active]`` back to ``[Under Verification]`` and
-            # re-queues the still-open round for the operator gate, so the same
-            # state change writes its event to the outbox in the same transaction
-            # as every other transition (coding-standards §4). ``partner.verification_started``
-            # (round unchanged) is what re-queues downstream consumers.
-            await write_outbox(
-                connection,
-                PARTNER_SCHEMA,
-                PARTNER_OUTBOX_TABLE,
-                verification_started_envelope(partner_id, next_state.round),
-            )
-            return PartnerView(
-                partner_id=partner_id,
-                status=next_state.status.value,
-                round=next_state.round,
-            )
+        return await self._operator_gate.grace_lapse(partner_id)
 
     async def invalidate_credential(
         self,
@@ -1593,8 +541,9 @@ class PartnerFacade:
         deliberately NO new lifecycle state (ADR-0008, brief handoff #315): the
         partner stays ``[Active]`` and recovers by submitting a fresh
         verification round through the Phase-5 flow, never by re-registering.
-        ``_has_invalid_credential`` derives the lazy read-hide against the
-        recorded ``revoked_at`` on every search/profile read, so the revoked
+        ``has_invalid_credential`` (credential-validity module) derives the lazy
+        read-hide against the recorded ``revoked_at`` on every search/profile
+        read, so the revoked
         partner disappears from directory reads instantly.
         """
         async with self._engine.begin() as connection:
@@ -1615,27 +564,18 @@ class PartnerFacade:
                     .returning(partner_credentials.c.id)
                 )
             ).all()
-            await connection.execute(
-                partner_directory_index.update()
-                .where(partner_directory_index.c.partner_id == partner_id)
-                .values(is_active=False, updated_at=func.now())
-            )
             first_credential_id = int(closed[0].id) if closed else None
-            await write_outbox(
+            await self._credential_validity.close_out_credentials(
                 connection,
-                PARTNER_SCHEMA,
-                PARTNER_OUTBOX_TABLE,
-                credential_invalidated_envelope(
-                    partner_id,
-                    identity_id=profile.identity_id,
-                    credential_id=first_credential_id,
-                    reason=reason,
-                ),
+                [
+                    CloseOutCredential(
+                        credential_id=first_credential_id,
+                        partner_id=partner_id,
+                        identity_id=profile.identity_id,
+                        reason=reason,
+                    )
+                ],
             )
-            # PHASE-6 T02b (#314): the credential invalidation deindexes this
-            # partner, making every cached search result potentially stale. Flush
-            # the namespace (best-effort, silent on failure).
-            await directory_visibility_changed()
             return PartnerView(
                 partner_id=partner_id,
                 status=profile.status,
@@ -1647,8 +587,9 @@ class PartnerFacade:
 
         The daily sweep is ADR-0011's second, non-scanner mechanism: lazy read-
         hide already suppresses an expired partner on every directory read (via
-        ``_has_invalid_credential`` against the recorded ``expires_at``), so this
-        pass performs ONLY the official close-out - the recorded event/audit that
+        ``has_invalid_credential`` (credential-validity module) against the
+        recorded ``expires_at``), so this pass performs ONLY the official
+        close-out - the recorded event/audit that
         the event-triggered chain (role denial, partner notification, audit
         ledger) fires exactly once on. It is invoked by the worker's daily
         APScheduler job (``worker.main`` ``_run_credential_sweep``), never by a
@@ -1714,32 +655,18 @@ class PartnerFacade:
                     updated_at=func.now(),
                 )
             )
-            affected_partners = {int(row.profile_id) for row in rows}
-            await connection.execute(
-                partner_directory_index.update()
-                .where(partner_directory_index.c.partner_id.in_(affected_partners))
-                .values(is_active=False, updated_at=func.now())
-            )
-            closed: list[int] = []
-            for row in rows:
-                credential_id = int(row.id)
-                await write_outbox(
-                    connection,
-                    PARTNER_SCHEMA,
-                    PARTNER_OUTBOX_TABLE,
-                    credential_invalidated_envelope(
-                        int(row.profile_id),
+            return await self._credential_validity.close_out_credentials(
+                connection,
+                [
+                    CloseOutCredential(
+                        credential_id=int(row.id),
+                        partner_id=int(row.profile_id),
                         identity_id=int(row.identity_id),
-                        credential_id=credential_id,
                         reason=closed_status,
-                    ),
-                )
-                closed.append(credential_id)
-            # PHASE-6 T02b (#314): the expiry close-out deindexes every affected
-            # partner, making each cached search result potentially stale. Flush
-            # the namespace once per pass (best-effort, silent on failure).
-            await directory_visibility_changed()
-            return closed
+                    )
+                    for row in rows
+                ],
+            )
 
     async def list_verification_queue(
         self,
@@ -1750,74 +677,17 @@ class PartnerFacade:
     ) -> PartnerQueue:
         """The operator verification queue (FEAT-015, user story 16).
 
-        Lists partner profiles with their latest verification round, defaulting
-        to the ``[Under Verification]`` queue the operator gates (Step 2,
-        ADR-0008). ``status`` filters on the profile lifecycle status - the
-        default ``Under Verification`` shows the active queue; a broader value
-        (``Active``/``Rejected``) drives the activation-cycle KPI view. Sortable
-        by registration age (default, ``created_at`` ascending so the oldest /
-        longest-waiting registrations surface first for the <= 48 h median,
-        KPI-004), partner type, or status. An unknown ``sort_by`` raises
+        Delegated to the operator-gate sub-facade (ADR-0006, WI-2 p2a #334):
+        lists partner profiles with their latest verification round, age-
+        prioritised for the activation-cycle KPI. An unknown ``sort_by`` raises
         :class:`InvalidQueueSortError` and an unknown ``status`` raises
         :class:`InvalidQueueStatusError`.
         """
-        sort_column = _QUEUE_SORTS.get(sort_by)
-        if sort_column is None:
-            raise InvalidQueueSortError(sort_by)
-        order: Any = sort_column.asc()
-
-        if status is not None and status not in _QUEUE_STATUSES:
-            raise InvalidQueueStatusError(status)
-
-        async with self._engine.begin() as connection:
-            stmt = (
-                select(
-                    partner_profiles.c.id,
-                    partner_profiles.c.identity_id,
-                    partner_profiles.c.partner_type,
-                    partner_profiles.c.status,
-                    partner_profiles.c.practice_name,
-                    partner_profiles.c.practice_address,
-                    partner_profiles.c.created_at,
-                    func.coalesce(func.max(partner_verifications.c.round), 0).label("round"),
-                )
-                .outerjoin(
-                    partner_verifications,
-                    partner_verifications.c.profile_id == partner_profiles.c.id,
-                )
-                .group_by(partner_profiles.c.id)
-                .order_by(order)
-            )
-            if status is not None:
-                stmt = stmt.where(partner_profiles.c.status == status)
-            if partner_type is not None:
-                stmt = stmt.where(partner_profiles.c.partner_type == partner_type)
-            rows = (await connection.execute(stmt)).all()
-
-            audit_links: dict[int, str] = {}
-            if self._audit_facade is not None and rows:
-                audit_links = self._audit_facade.get_partner_audit_links(
-                    [int(row.id) for row in rows]
-                )
-
-            return PartnerQueue(
-                items=[
-                    PartnerQueueItem(
-                        partner_id=int(row.id),
-                        identity_id=int(row.identity_id),
-                        partner_type=_row_str(row, "partner_type"),
-                        status=_row_str(row, "status"),
-                        practice_name=(
-                            str(row.practice_name) if row.practice_name is not None else None
-                        ),
-                        practice_address=str(row.practice_address),
-                        created_at=row.created_at,
-                        round=int(row.round),
-                        audit_link=audit_links.get(int(row.id)),
-                    )
-                    for row in rows
-                ]
-            )
+        return await self._operator_gate.list_verification_queue(
+            partner_type=partner_type,
+            status=status,
+            sort_by=sort_by,
+        )
 
     async def search_directory(
         self,
@@ -1831,40 +701,14 @@ class PartnerFacade:
     ) -> DirectorySearchView:
         """Public directory search (MOD-002, FEAT-004, PHASE-6 T02a #313).
 
-        Returns only ``[Active]`` partners whose credentials are all verified,
-        unexpired and unrevoked (the "provider" visibility rule - REQ-028 +
-        ADR-0011, both derived on read, never cached), nearest-first by
-        great-circle distance from the caller's geo point. ``partner_type``
-        filters on the closed doctor/lab/chemist enum; ``specialty`` applies the
-        closed pick-list and is doctors-only (a non-doctor type with a specialty
-        matches nothing); ``query`` is free-text over the practice name. A
-        missing geo point anchors the sort on the Daltonganj centre - the
-        launch-geography default the callers rely on (REQ-008 decision record;
-        the adapters stay geography-agnostic and let the domain own its default).
-
-        The wider-area fallback (glossary): when no entry matches within the
-        peri-urban scope, the location constraint alone is relaxed (type,
-        specialty and name filters are kept), the run is re-executed
-        nearest-first, and the view is flagged ``fell_back`` so the client
-        labels the results honestly as "outside your area". ``fell_back`` is
-        never silently served - the patient's other filters hold.
-
-        Emits the ``directory.search`` analytics event (one per search) into
-        the partner outbox in the SAME transaction as the read, carrying the
-        filters/query, the result count and the fallback flag (telemetry, not a
-        regulated act; anonymous patients have a ``None`` actor). Lab/chemist
-        entries always return ``specialty=None``.
+        Delegated to the directory sub-facade (ADR-0006, WI-2 p2b #337).
+        Returns only ``[Active]`` partners with all-verified, unexpired,
+        unrevoked credentials, nearest-first, with the wider-area fallback and
+        the ``directory.search`` analytics event; Redis-accelerated with lazy
+        validity re-derivation (PHASE-6 T02b, #314) - never a correctness
+        surface.
         """
-        latitude = DALTONGANJ_LATITUDE if latitude is None else latitude
-        longitude = DALTONGANJ_LONGITUDE if longitude is None else longitude
-
-        # PHASE-6 T02b (#314): the Redis accelerator, layered on top of the
-        # working SQL core. Redis is never a correctness surface (ADR-0011 lazy
-        # correctness) - on a cache hit we re-derive validity of the cached
-        # partner ids against the recorded dates; any invalidation/expiry drops
-        # the hit and recomputes SQL, so a stale row for a deactivated or
-        # expired partner never surfaces.
-        cached = await self._cached_search_view(
+        return await self._directory.search_directory(
             query=query,
             partner_type=partner_type,
             specialty=specialty,
@@ -1872,111 +716,6 @@ class PartnerFacade:
             longitude=longitude,
             patient_id=patient_id,
         )
-        if cached is not None:
-            return cached
-
-        distance_km = _haversine_km(latitude, longitude)
-
-        def _conditions(peri_urban_only: bool) -> list[Any]:
-            conditions: list[Any] = [_provider_visible(partner_directory_index.c.partner_id)]
-            if partner_type is not None:
-                conditions.append(partner_directory_index.c.partner_type == partner_type)
-            if specialty is not None:
-                # Specialty is doctors-only (closed pick-list, glossary); a
-                # lab/chemist row never carries one, so pin the type too.
-                conditions.append(partner_directory_index.c.partner_type == "doctor")
-                conditions.append(partner_directory_index.c.specialty == specialty)
-            if query and query.strip():
-                conditions.append(partner_profiles.c.practice_name.ilike(f"%{query.strip()}%"))
-            if peri_urban_only:
-                conditions.append(distance_km <= PERI_URBAN_RADIUS_KM)
-            return conditions
-
-        async with self._engine.begin() as connection:
-            base = (
-                select(
-                    partner_directory_index.c.partner_id,
-                    partner_directory_index.c.partner_type,
-                    partner_directory_index.c.specialty,
-                    partner_profiles.c.practice_name,
-                    partner_service_areas.c.name.label("area_name"),
-                    distance_km.label("distance_km"),
-                )
-                .join(
-                    partner_profiles,
-                    partner_profiles.c.id == partner_directory_index.c.partner_id,
-                )
-                .outerjoin(
-                    partner_service_areas,
-                    partner_service_areas.c.id == partner_profiles.c.service_area_id,
-                )
-            )
-
-            async def _rows(peri_urban_only: bool) -> list[Any]:
-                stmt = (
-                    base.where(*_conditions(peri_urban_only=peri_urban_only))
-                    .order_by(distance_km.asc())
-                    # PHASE-6 T2 (#324): the result list is bounded at the
-                    # configuration-driven top-N after distance ordering, on
-                    # both the in-scope and wider-area fallback paths. A cap,
-                    # not a filter/ordering/fallback change (MOD-002).
-                    .limit(self._directory_max_results)
-                )
-                return list((await connection.execute(stmt)).all())
-
-            rows = await _rows(peri_urban_only=True)
-            fell_back = len(rows) == 0
-            if fell_back:
-                rows = await _rows(peri_urban_only=False)
-
-            await write_outbox(
-                connection,
-                PARTNER_SCHEMA,
-                PARTNER_OUTBOX_TABLE,
-                directory_search_envelope(
-                    patient_id=patient_id,
-                    query=query,
-                    partner_type=partner_type,
-                    specialty=specialty,
-                    result_count=len(rows),
-                    fell_back=fell_back,
-                ),
-            )
-
-        view = DirectorySearchView(
-            fell_back=fell_back,
-            items=[
-                DirectoryEntry(
-                    partner_id=int(row.partner_id),
-                    practice_name=(
-                        str(row.practice_name) if row.practice_name is not None else None
-                    ),
-                    partner_type=str(row.partner_type),
-                    specialty=str(row.specialty) if row.specialty is not None else None,
-                    area=(
-                        str(row.area_name)
-                        if row.area_name is not None
-                        else DEFAULT_SERVICE_AREA_NAME
-                    ),
-                    distance_km=float(row.distance_km),
-                    verified=True,
-                )
-                for row in rows
-            ],
-        )
-        if self._directory_ttl_seconds > 0:
-            await set_cached_search(
-                query=query,
-                partner_type=partner_type,
-                specialty=specialty,
-                latitude=latitude,
-                longitude=longitude,
-                expanded=fell_back,
-                raw_items=[entry.model_dump() for entry in view.items],
-                fell_back=fell_back,
-                ttl_seconds=self._directory_ttl_seconds,
-            )
-        return view
 
     async def record_partner_selected(
         self,
@@ -1987,329 +726,43 @@ class PartnerFacade:
     ) -> None:
         """Record one ``partner.selected`` analytics pick into the partner outbox.
 
-        Client-initiated product analytics (FEAT-004 telemetry, PHASE-6 T4
-        #326): ``POST /v1/directory/select`` reports that a patient picked a
-        provider from the directory, and this facade writes one
-        ``partner.selected`` outbox row in its own transaction. The payload
-        carries only the pick facts - the picked partner id + partner type and
-        the source surface - never a patient identity (the public route is
-        anonymous), never PHI or credential data. Deliberately NOT a regulated
-        act: the event stays out of ``REGULATED_ACT_TYPES``, mirroring the
-        ``directory.search`` analytics seam. The adapter calls only this
-        method; there is no business logic in the route.
+        Delegated to the directory sub-facade (ADR-0006, WI-2 p2b #337): the
+        client-initiated pick (``POST /v1/directory/select``, PHASE-6 T4 #326)
+        is written as a single ``partner.selected`` outbox row in its own
+        transaction - telemetry, never a regulated act, never patient identity,
+        PHI or credential data.
         """
-        async with self._engine.begin() as connection:
-            await write_outbox(
-                connection,
-                PARTNER_SCHEMA,
-                PARTNER_OUTBOX_TABLE,
-                partner_selected_envelope(
-                    partner_id=partner_id,
-                    partner_type=partner_type,
-                    source=source,
-                ),
-            )
+        return await self._directory.record_partner_selected(
+            partner_id=partner_id,
+            partner_type=partner_type,
+            source=source,
+        )
 
     async def get_provider_profile(self, partner_id: int) -> ProviderProfileView:
         """Public provider profile (MOD-002, FEAT-005, PHASE-6 T03 #309).
 
-        Returns the verified-safe profile of an ``[Active]`` partner that has a
+        Delegated to the directory sub-facade (ADR-0006, WI-2 p2b #337): the
+        verified-safe profile of an ``[Active]`` partner with a
         ``directory_index`` entry and valid (verified, unexpired, unrevoked)
-        credentials. The four-condition visibility gate matches search exactly
-        (ADR-0011 "tick gone = card gone"): not ``[Active]``, no index row, no
-        credentials, or any invalid credential raises
-        :class:`ProviderProfileNotFoundError` (mapped to a 404) - the profile
-        is hidden exactly when search hides the card, so the indicator can
-        never drift.
-
-        Payload carries only verified-safe fields: display name
-        (``practice_name``), partner type, specialty (doctors only), service
-        area, the ``verified`` indicator (always True for a reachable profile)
-        and per-credential type + status label + expiry date. Never exposed:
-        artifact refs, emails, phones, PHI.
+        credentials. The visibility gate matches search exactly - the profile
+        is hidden (``ProviderProfileNotFoundError``, mapped to a 404) exactly
+        when search hides the card (ADR-0011 "tick gone = card gone"). Never
+        exposed: artifact refs, emails, phones, PHI.
         """
-        async with self._engine.begin() as connection:
-            row = (
-                await connection.execute(
-                    select(
-                        partner_directory_index.c.partner_id,
-                        partner_directory_index.c.partner_type,
-                        partner_directory_index.c.specialty,
-                        partner_profiles.c.practice_name,
-                        partner_service_areas.c.name.label("area_name"),
-                    )
-                    .join(
-                        partner_profiles,
-                        partner_profiles.c.id == partner_directory_index.c.partner_id,
-                    )
-                    .outerjoin(
-                        partner_service_areas,
-                        partner_service_areas.c.id == partner_profiles.c.service_area_id,
-                    )
-                    .where(
-                        partner_directory_index.c.partner_id == partner_id,
-                        _provider_visible(partner_directory_index.c.partner_id),
-                    )
-                )
-            ).first()
-            if row is None:
-                raise ProviderProfileNotFoundError(partner_id)
-
-            credential_rows = (
-                await connection.execute(
-                    select(
-                        partner_credentials.c.credential_type,
-                        partner_credentials.c.expires_at,
-                    )
-                    .where(
-                        partner_credentials.c.profile_id == partner_id,
-                    )
-                    .order_by(partner_credentials.c.credential_type)
-                )
-            ).all()
-
-        return ProviderProfileView(
-            partner_id=int(row.partner_id),
-            practice_name=(str(row.practice_name) if row.practice_name is not None else None),
-            partner_type=str(row.partner_type),
-            specialty=(str(row.specialty) if row.specialty is not None else None),
-            area=(str(row.area_name) if row.area_name is not None else DEFAULT_SERVICE_AREA_NAME),
-            verified=True,
-            credentials=[
-                ProviderCredential(
-                    credential_type=str(c.credential_type),
-                    status="verified",
-                    expires_at=c.expires_at,
-                )
-                for c in credential_rows
-            ],
-        )
-
-    async def _cached_search_view(
-        self,
-        *,
-        query: str | None,
-        partner_type: str | None,
-        specialty: str | None,
-        latitude: float,
-        longitude: float,
-        patient_id: int | None,
-    ) -> DirectorySearchView | None:
-        """Try the Redis accelerator for one search, re-deriving validity first.
-
-        PHASE-6 T02b (#314): the cache is an accelerator ONLY, never a
-        correctness surface (ADR-0011 lazy correctness). On a hit we re-derive
-        the visibility tick for the cached partner ids from the recorded dates
-        (``is_active``, ``Active`` status, verified/unexpired/unrevoked
-        credentials); if ANY cached partner no longer passes - deactivated,
-        revoked, expired, or unverified since the row was written - the hit is
-        rejected and the caller recomputes fresh SQL, so a stale row for a
-        deactivated/expired partner never surfaces. On a clean hit the cached
-        items are served as-is (their geo/distance already match the cached
-        key) and the ``directory.search`` analytics event still fires (one per
-        search - a cached search is still a real search).
-
-        Returns ``None`` when caching is disabled, the cache missed for both
-        expanded variants, or the cached ids no longer all pass validity.
-        """
-        if self._directory_ttl_seconds <= 0:
-            return None
-        cached = await get_cached_search(
-            query=query,
-            partner_type=partner_type,
-            specialty=specialty,
-            latitude=latitude,
-            longitude=longitude,
-            expanded=False,
-        )
-        raw_items: list[dict[str, Any]]
-        fell_back: bool
-        if cached is not None:
-            raw_items, fell_back = cached
-        else:
-            cached = await get_cached_search(
-                query=query,
-                partner_type=partner_type,
-                specialty=specialty,
-                latitude=latitude,
-                longitude=longitude,
-                expanded=True,
-            )
-            if cached is None:
-                return None
-            raw_items, fell_back = cached
-
-        partner_ids = sorted({int(item["partner_id"]) for item in raw_items})
-        async with self._engine.begin() as connection:
-            if not await self._cached_ids_still_valid(connection, partner_ids):
-                return None
-            await write_outbox(
-                connection,
-                PARTNER_SCHEMA,
-                PARTNER_OUTBOX_TABLE,
-                directory_search_envelope(
-                    patient_id=patient_id,
-                    query=query,
-                    partner_type=partner_type,
-                    specialty=specialty,
-                    result_count=len(raw_items),
-                    fell_back=fell_back,
-                ),
-            )
-        return DirectorySearchView(
-            fell_back=fell_back,
-            items=[DirectoryEntry(**item) for item in raw_items],
-        )
-
-    async def _cached_ids_still_valid(
-        self, connection: AsyncConnection, partner_ids: list[int]
-    ) -> bool:
-        """Whether every cached partner id still passes the visibility tick.
-
-        The one re-derivation the cache hit is allowed to skip is the distance
-        scan - the validity of each id is ALWAYS re-checked against the recorded
-        dates (ADR-0011), so a cached row can never surface a deactivated or
-        expired partner.
-        """
-        if not partner_ids:
-            return True
-        valid_count = int(
-            (
-                await connection.execute(
-                    select(func.count(partner_directory_index.c.partner_id))
-                    .join(
-                        partner_profiles,
-                        partner_profiles.c.id == partner_directory_index.c.partner_id,
-                    )
-                    .where(
-                        partner_directory_index.c.partner_id.in_(partner_ids),
-                        _provider_visible(partner_directory_index.c.partner_id),
-                    )
-                )
-            ).scalar_one()
-        )
-        return valid_count == len(partner_ids)
+        return await self._directory.get_provider_profile(partner_id)
 
     async def get_verification_detail(
         self, partner_id: int, actor_id: int
     ) -> PartnerVerificationDetail:
         """Open a queue item: the full per-partner review (FEAT-015, story 17).
 
-        Returns the profile, all submitted credentials, and the verification
-        history so the operator can make a defensible decision. Emits
-        ``partner.credential_reviewed`` (with ``actor_id``) for this view - the
-        "who saw this document" trail (spec: operator audit depth) - written to
-        the outbox in the same transaction as the read (ADR-0002 atomic
-        outbox). Consumed by the audit module in a later ticket (T13).
+        Delegated to the operator-gate sub-facade (ADR-0006, WI-2 p2a #334):
+        returns the profile, all submitted credentials, the verification history
+        and the partner's audit chain so the operator can make a defensible
+        decision, and emits ``partner.credential_reviewed`` (with ``actor_id``)
+        for the "who saw this document" trail.
         """
-        async with self._engine.begin() as connection:
-            row = (
-                await connection.execute(
-                    select(
-                        partner_profiles.c.id,
-                        partner_profiles.c.identity_id,
-                        partner_profiles.c.partner_type,
-                        partner_profiles.c.status,
-                        partner_profiles.c.practice_name,
-                        partner_profiles.c.practice_address,
-                        partner_profiles.c.service_area_id,
-                        partner_profiles.c.created_at,
-                    ).where(partner_profiles.c.id == partner_id)
-                )
-            ).first()
-            if row is None:
-                raise PartnerNotFoundError(partner_id)
-
-            credential_rows = (
-                await connection.execute(
-                    select(
-                        partner_credentials.c.id,
-                        partner_credentials.c.credential_type,
-                        partner_credentials.c.verified,
-                        partner_credentials.c.expires_at,
-                        partner_credentials.c.artifact_refs,
-                    ).where(partner_credentials.c.profile_id == partner_id)
-                )
-            ).all()
-
-            history_rows = (
-                await connection.execute(
-                    select(
-                        partner_verifications.c.round,
-                        partner_verifications.c.status,
-                        partner_verifications.c.decision,
-                        partner_verifications.c.decision_reason,
-                        partner_verifications.c.decision_by,
-                        partner_verifications.c.decided_at,
-                        partner_verifications.c.created_at,
-                    )
-                    .where(partner_verifications.c.profile_id == partner_id)
-                    .order_by(partner_verifications.c.round)
-                )
-            ).all()
-
-            await write_outbox(
-                connection,
-                PARTNER_SCHEMA,
-                PARTNER_OUTBOX_TABLE,
-                credential_reviewed_envelope(partner_id, actor_id),
-            )
-
-        audit_page = None
-        audit_link: str | None = None
-        if self._audit_facade is not None:
-            audit_page = await self._audit_facade.query_partner_audit(partner_id)
-            audit_link = self._audit_facade.get_partner_audit_link(partner_id)
-
-        return PartnerVerificationDetail(
-            partner_id=int(row.id),
-            identity_id=int(row.identity_id),
-            partner_type=_row_str(row, "partner_type"),
-            status=_row_str(row, "status"),
-            practice_name=str(row.practice_name) if row.practice_name is not None else None,
-            practice_address=str(row.practice_address),
-            service_area_id=int(row.service_area_id) if row.service_area_id is not None else None,
-            created_at=row.created_at,
-            credentials=[
-                CredentialDetail(
-                    credential_id=int(c.id),
-                    credential_type=str(c.credential_type),
-                    verified=bool(c.verified),
-                    expires_at=c.expires_at,
-                    artifact_refs=dict(c.artifact_refs or {}),
-                )
-                for c in credential_rows
-            ],
-            verification_history=[
-                VerificationRound(
-                    round=int(h.round),
-                    status=str(h.status),
-                    decision=str(h.decision) if h.decision is not None else None,
-                    decision_reason=(
-                        str(h.decision_reason) if h.decision_reason is not None else None
-                    ),
-                    decision_by=int(h.decision_by) if h.decision_by is not None else None,
-                    decided_at=h.decided_at,
-                    created_at=h.created_at,
-                )
-                for h in history_rows
-            ],
-            audit_events=[
-                AuditEventDetail(
-                    id=e.id,
-                    event_type=e.event_type,
-                    actor_id=e.actor_id,
-                    target_id=e.target_id,
-                    scope=e.scope,
-                    metadata=e.metadata,
-                    timestamp=e.timestamp,
-                    prev_hash=e.prev_hash,
-                    hash=e.hash,
-                )
-                for e in (audit_page.events if audit_page is not None else [])
-            ],
-            audit_link=audit_link,
-        )
+        return await self._operator_gate.get_verification_detail(partner_id, actor_id)
 
     async def purge_expired_credentials(self) -> list[int]:
         """Delete credentials past the 30-day cleanup window of a permanent rejection (US-27).
@@ -2357,32 +810,30 @@ class PartnerFacade:
                     .order_by(partner_credentials.c.id)
                 )
             ).all()
+            if not rows:
+                return []
             deleted: list[int] = []
             for row in rows:
                 credential_id = int(row.id)
-                partner_id = int(row.profile_id)
-                identity_id = int(row.identity_id)
                 refs = dict(row.artifact_refs or {})
                 await connection.execute(
-                    partner_credentials.delete().where(partner_credentials.c.id == credential_id)
+                    partner_credentials.delete().where(
+                        partner_credentials.c.id == credential_id,
+                    )
                 )
                 if self._artifact_store is not None:
                     self._artifact_store.delete_artifacts(refs)
-                await write_outbox(
-                    connection,
-                    PARTNER_SCHEMA,
-                    PARTNER_OUTBOX_TABLE,
-                    credential_invalidated_envelope(
-                        partner_id,
-                        identity_id=identity_id,
-                        credential_id=credential_id,
-                        reason="permanent_rejection_cleanup",
-                    ),
-                )
                 deleted.append(credential_id)
-            if deleted:
-                # PHASE-6 T02b (#314): credential close-out makes every cached
-                # directory search result potentially stale. The namespace flush
-                # fires once per purge run (best-effort, silent on failure).
-                await directory_visibility_changed()
+            await self._credential_validity.close_out_credentials(
+                connection,
+                [
+                    CloseOutCredential(
+                        credential_id=int(row.id),
+                        partner_id=int(row.profile_id),
+                        identity_id=int(row.identity_id),
+                        reason="permanent_rejection_cleanup",
+                    )
+                    for row in rows
+                ],
+            )
             return deleted

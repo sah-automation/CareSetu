@@ -23,9 +23,9 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.main import create_app
 from modules.iam.domain.jwt import issue_token
+from modules.partner.domain.exceptions import PartnerNotFoundError
 from modules.partner.facade import (
     PartnerMeView,
-    PartnerNotFoundError,
     PartnerVerificationStatusView,
 )
 

@@ -10,6 +10,8 @@ DB-backed behavior is the integration suite's job.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -23,6 +25,8 @@ from modules.iam.domain.exceptions import IamError, SessionIssuanceError
 from modules.iam.facade import SessionResult
 
 _TRACE_ID = "unit-trace-1234abcd"
+
+MOCK_CONNECTION = SimpleNamespace()
 
 _RESULT = SessionResult(
     jwt="header.payload.signature",
@@ -294,7 +298,7 @@ def test_session_failed_mutation_is_not_cached_for_replay() -> None:
 
 
 # ---------------------------------------------------------------------------
-# POST /v1/auth/partner/session (T05, #298)
+# POST /v1/auth/partner/session (T05, #298; orchestration WI-3, #336)
 # ---------------------------------------------------------------------------
 
 _PARTNER_RESULT = SessionResult(
@@ -307,32 +311,76 @@ _PARTNER_RESULT = SessionResult(
 )
 
 
-class PartnerStubFacade:
-    """Minimal facade stand-in for partner session routes."""
+class PartnerSessionIamStub:
+    """Facade stand-in recording the iam side of the partner-session flow.
+
+    Post-WI-3 (#336) the route orchestrates three steps: resolve the identity
+    for the phone, ask the partner facade whether a partner profile exists, and
+    mint with the already-verified ``partner_id``. This stub stands in for the
+    iam facade (identity resolve + mint); the profile resolve is a separate stub.
+    """
 
     def __init__(self) -> None:
-        self.called_with: list[str] = []
+        self.resolve_calls: list[str] = []
+        self.issued: list[tuple[str, int]] = []
+        self.identity_id = 42
+        self.resolve_error: IamError | None = None
         self.result: SessionResult | None = _PARTNER_RESULT
-        self.error: IamError | None = None
+        self.issue_error: IamError | None = None
 
-    async def issue_partner_session(self, phone: str) -> SessionResult:
-        self.called_with.append(phone)
-        if self.error is not None:
-            raise self.error
+    async def resolve_identity_id_by_phone(self, phone: str) -> int:
+        self.resolve_calls.append(phone)
+        if self.resolve_error is not None:
+            raise self.resolve_error
+        return self.identity_id
+
+    async def issue_partner_session(
+        self,
+        phone: str,
+        partner_id: int,
+        verify_partner_exists: Callable | None = None,
+    ) -> SessionResult:
+        self.issued.append((phone, partner_id))
+        if verify_partner_exists is not None:
+            await verify_partner_exists(MOCK_CONNECTION, partner_id)
+        if self.issue_error is not None:
+            raise self.issue_error
         if self.result is None:
             raise AssertionError("stub facade needs a result before the call")
         return self.result
 
 
-def _partner_client_with(facade: PartnerStubFacade) -> TestClient:
+class PartnerProfileStub:
+    """Partner-facade stand-in behind the session gate (identity -> profile id)."""
+
+    def __init__(
+        self,
+        partner_id: int | None = 3,
+        *,
+        deleted_at_mint: bool = False,
+    ) -> None:
+        self.partner_id = partner_id
+        self.deleted_at_mint = deleted_at_mint
+        self.verify_calls: list[tuple[int, int]] = []
+
+    async def resolve_partner_id_by_identity(self, identity_id: int) -> int | None:
+        return self.partner_id
+
+    async def verify_partner_exists(self, connection: object, partner_id: int) -> bool:
+        self.verify_calls.append((id(connection), partner_id))
+        return not self.deleted_at_mint
+
+
+def _partner_client_with(facade: PartnerSessionIamStub, partner: PartnerProfileStub) -> TestClient:
     app = create_app()
     app.state.iam_facade = facade
+    app.state.partner_facade = partner
     return TestClient(app)
 
 
 def test_partner_session_returns_minted_session_and_sets_cookie() -> None:
-    facade = PartnerStubFacade()
-    client = _partner_client_with(facade)
+    facade = PartnerSessionIamStub()
+    client = _partner_client_with(facade, PartnerProfileStub(partner_id=3))
 
     response = client.post("/v1/auth/partner/session", json={"phone": "9876543210"})
 
@@ -340,7 +388,10 @@ def test_partner_session_returns_minted_session_and_sets_cookie() -> None:
     body = response.json()
     assert body["scope"] == "partner"
     assert body["identity_id"] == 42
-    assert facade.called_with == ["9876543210"]
+    assert facade.resolve_calls == ["9876543210"]
+    # the route verified the partner profile upstream, then minted with the
+    # already-verified partner id - iam never reached back into partner.
+    assert facade.issued == [("9876543210", 3)]
     set_cookie = response.headers.get("set-cookie", "")
     assert "caresetu_session=" in set_cookie
     assert "partner.jwt.signature" in set_cookie
@@ -352,11 +403,11 @@ def test_partner_session_refused_with_409_for_unknown_phone(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.WARNING)
-    facade = PartnerStubFacade()
-    facade.error = SessionIssuanceError(
+    facade = PartnerSessionIamStub()
+    facade.resolve_error = SessionIssuanceError(
         "no identity for +919876543210; register the phone before issuing a session"
     )
-    client = _partner_client_with(facade)
+    client = _partner_client_with(facade, PartnerProfileStub())
 
     response = client.post(
         "/v1/auth/partner/session",
@@ -369,17 +420,15 @@ def test_partner_session_refused_with_409_for_unknown_phone(
     assert body["code"] == "SESSION_REFUSED"
     assert "+919876543210" not in body["message"]
     assert body["trace_id"] == _TRACE_ID
+    assert facade.issued == []
 
 
 def test_partner_session_refused_with_409_for_patient_only_phone(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.WARNING)
-    facade = PartnerStubFacade()
-    facade.error = SessionIssuanceError(
-        "identity 7 has no partner profile; this is a patient-only phone"
-    )
-    client = _partner_client_with(facade)
+    facade = PartnerSessionIamStub()
+    client = _partner_client_with(facade, PartnerProfileStub(partner_id=None))
 
     response = client.post(
         "/v1/auth/partner/session",
@@ -392,6 +441,42 @@ def test_partner_session_refused_with_409_for_patient_only_phone(
     assert body["code"] == "SESSION_REFUSED"
     assert "no partner profile" in body["message"]
     assert body["trace_id"] == _TRACE_ID
+    assert facade.issued == []
+
+
+def test_partner_session_refused_409_when_profile_deleted_before_mint(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """F4 (#342): profile gone between the route pre-check and the mint -> 409.
+
+    The race scenario: ``resolve_partner_id_by_identity`` returns the profile at
+    the route gate, but a concurrent deletion removes it before the in-mint
+    atomic re-check (``verify_partner_exists``) runs. The route's verification
+    callable surfaces the gone profile as the session-refused 409 contract, and
+    no session result is produced.
+    """
+    caplog.set_level(logging.WARNING)
+    facade = PartnerSessionIamStub()
+    partner = PartnerProfileStub(partner_id=3, deleted_at_mint=True)
+    client = _partner_client_with(facade, partner)
+
+    response = client.post(
+        "/v1/auth/partner/session",
+        json={"phone": "9876543210"},
+        headers={"X-Request-Id": _TRACE_ID},
+    )
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["code"] == "SESSION_REFUSED"
+    assert "no longer exists" in body["message"]
+    assert body["trace_id"] == _TRACE_ID
+    # the route did resolve a partner profile at the gate...
+    assert facade.issued == [("9876543210", 3)]
+    # ...and the atomic re-check inside the mint refused the issuance.
+    assert len(partner.verify_calls) == 1
+    assert partner.verify_calls[0][1] == 3
+    assert "set-cookie" not in response.headers
 
 
 def test_partner_session_route_registered_in_openapi() -> None:

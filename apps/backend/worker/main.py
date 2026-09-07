@@ -18,9 +18,10 @@ APScheduler ``AsyncIOScheduler`` on the same event loop for the scheduled jobs
 ADR-0011's daily-sweep mechanism runs on. Today that is exactly one job - the
 daily credential-expiry sweep, registered against the configurable cron in
 :func:`build_scheduler`. The sweep callback composes the minimal partner stack
-and runs the ``close_out_expired_credentials`` close-out pass (PHASE-6 T04b,
-#316); only the scheduler seam shipped in T04a. Job work stays in-process - no
-new dependency beyond APScheduler.
+(the facade's iam dependency is optional - WI-3 #336) and runs the
+``close_out_expired_credentials`` close-out pass (PHASE-6 T04b, #316); only the
+scheduler seam shipped in T04a. Job work stays in-process - no new dependency
+beyond APScheduler.
 """
 
 import asyncio
@@ -51,8 +52,6 @@ from modules.diagnostics.adapters import register_handlers as diagnostics_regist
 from modules.fulfillment.adapters import register_handlers as fulfillment_register_handlers
 from modules.health.adapters import register_handlers as health_register_handlers
 from modules.iam.adapters import register_handlers as iam_register_handlers
-from modules.iam.adapters.sms import build_sms_adapter
-from modules.iam.facade import IamFacade
 from modules.intake.adapters import register_handlers as intake_register_handlers
 from modules.notify.adapters import register_handlers as notify_register_handlers
 from modules.partner.adapters import register_handlers as partner_register_handlers
@@ -117,19 +116,17 @@ def _build_sweep_facade(settings: Settings, engine: AsyncEngine) -> PartnerFacad
     """Compose the minimal partner stack the daily expiry sweep needs.
 
     The sweep close-out only touches ``partner_credentials`` /
-    ``partner_directory_index`` and writes to the partner outbox, so the facade
-    is built from the shared engine + iam facade (mandatory constructor
-    dependency) - no artifact store, audit or notify facade is required on this
-    path, and the SMS adapter is never called (a sweep emits no OTP). Composed
-    here rather than in the API ``create_app`` so the two processes stay
-    independent composition roots (coding-standards §2).
+    ``partner_directory_index`` and writes to the partner outbox. The partner
+    facade's iam dependency is OPTIONAL (WI-3, #336): only the register path
+    consumes it, so this sweep facade is built from the shared engine alone -
+    no iam facade, so no SMS adapter is built and no MFA secret is read on this
+    path, and no artifact store, audit or notify facade is required either (a
+    sweep emits no OTP and never registers). Composed here rather than in the
+    API ``create_app`` so the two processes stay independent composition roots
+    (coding-standards §2).
     """
-    iam_facade = IamFacade(
-        engine=engine,
-        sms_adapter=build_sms_adapter(settings),
-        mfa_secret_key=settings.iam_mfa_secret_key,
-    )
-    return PartnerFacade(engine=engine, iam_facade=iam_facade)
+    del settings
+    return PartnerFacade(engine=engine)
 
 
 async def _run_credential_sweep() -> None:

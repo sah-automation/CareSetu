@@ -11,7 +11,7 @@ here for backward compatibility.  ``emit_access_denied`` and
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -30,6 +30,9 @@ from modules.iam.adapters.sms import (
 from modules.iam.domain import events
 from modules.iam.domain.exceptions import (
     InvalidAccessTokenError as InvalidAccessTokenError,
+)
+from modules.iam.domain.otp import (
+    OTP_TTL_SECONDS as OTP_TTL_SECONDS,
 )
 from modules.iam.domain.shared import (
     OtpSender as OtpSender,
@@ -79,6 +82,9 @@ from modules.iam.session_facade import (
 )
 from modules.iam.session_facade import (
     ValidatedAccessToken as ValidatedAccessToken,
+)
+from modules.iam.session_facade import (
+    VerifyPartnerExists as VerifyPartnerExists,
 )
 from modules.iam.session_facade import (
     _partner_role_status as _partner_role_status,
@@ -216,26 +222,32 @@ class IamFacade:
         """
         return await self._sessions.issue_operator_session(phone, code)
 
-    def set_partner_resolver(self, resolver: Callable[[int], Awaitable[int | None]]) -> None:
-        """Wire the partner-profile identity seam for partner session issuance (T05, #298).
-
-        Called by the composition root after both ``IamFacade`` and
-        ``PartnerFacade`` have been constructed.
-        """
-        self._sessions.set_partner_resolver(resolver)
-
-    async def issue_partner_session(self, phone: str) -> SessionResult:
+    async def issue_partner_session(
+        self,
+        phone: str,
+        partner_id: int,
+        verify_partner_exists: VerifyPartnerExists | None = None,
+    ) -> SessionResult:
         """Mint a partner-scoped access JWT for a registered partner (T05, #298).
 
         Delegated to ``SessionFacade``; the session's ``scope`` resolves to
         ``partner`` so the gateway's ``require_partner`` admits the caller for
         self-service (submit credentials, read own status, appeal). Unlike
         ``issue_session`` this does NOT require identity ``Active`` or a role
-        grant - a fresh registrant is ``[Unverified]`` with no grant (ADR-0010);
-        the gate is instead that a partner profile exists for the phone, keeping
-        patients from minting a ``partner``-scoped JWT.
+        grant - a fresh registrant is ``[Unverified]`` with no grant (ADR-0010).
+        The partner-profile existence gate is verified upstream by the calling
+        route (WI-3, #336), which passes the already-verified ``partner_id`` in.
+        An optional ``verify_partner_exists`` callback re-confirms the profile
+        still exists atomically under the identity row lock before the mint
+        (#342).
         """
-        return await self._sessions.issue_partner_session(phone)
+        return await self._sessions.issue_partner_session(
+            phone, partner_id, verify_partner_exists=verify_partner_exists
+        )
+
+    async def resolve_identity_id_by_phone(self, phone: str) -> int:
+        """The identity id for a phone (delegated to ``SessionFacade``, WI-3 #336)."""
+        return await self._sessions.resolve_identity_id_by_phone(phone)
 
     async def validate_token(self, token: str) -> ValidatedAccessToken:
         """Resolve a valid access JWT to its scope (delegated to ``SessionFacade``)."""

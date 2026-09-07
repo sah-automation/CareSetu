@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import statistics
 import time
+from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, patch
 
 import pytest
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from modules.iam.adapters.sms import MockSmsAdapter
@@ -22,6 +24,7 @@ from modules.iam.domain.exceptions import (
     AccessTokenExpiredError,
     AccessTokenMalformedError,
     AccessTokenSignatureError,
+    SessionIssuanceError,
 )
 from modules.iam.domain.jwt import issue_token
 from modules.iam.facade import IamFacade, ValidatedAccessToken
@@ -131,6 +134,145 @@ async def test_validate_token_fails_closed_without_a_configured_key() -> None:
 
     with pytest.raises(AccessTokenSignatureError, match="signing key is not configured"):
         await facade.validate_token(token)
+
+
+async def test_issue_partner_session_fails_closed_without_verified_partner_status() -> None:
+    """WI-3 (#336): the mint refuses an unverified partner status before DB work.
+
+    The partner-profile gate is verified upstream by the calling route, and the
+    already-verified ``partner_id`` is the only proof this method accepts. A
+    non-positive ``partner_id`` (never passed by the route) fails closed with
+    the 409 ``SESSION_REFUSED`` contract - against an unreachable engine, so any
+    accidental database round-trip would error instead of pass.
+    """
+    facade = _facade()
+
+    with pytest.raises(SessionIssuanceError, match="partner status was not verified"):
+        await facade.issue_partner_session("9876543210", partner_id=0)
+
+
+class _StubConnection:
+    pass
+
+
+_STUB_CONNECTION = _StubConnection()
+
+
+class _StubAsyncEngine:
+    """AsyncEngine stand-in whose ``begin()`` yields a sentinel connection.
+
+    The in-transaction re-check and the mint are stubbed in the tests below, so
+    the engine itself only has to provide a live transaction context without ever
+    touching a database (the NullPool engine would fail to connect).
+    """
+
+    def begin(self) -> AbstractAsyncContextManager[AsyncConnection]:
+        class _Transaction:
+            async def __aenter__(self) -> AsyncConnection:
+                return _STUB_CONNECTION
+
+            async def __aexit__(self, *exc_info: object) -> bool:
+                return False
+
+        return _Transaction()
+
+
+async def test_issue_partner_session_reverifies_profile_under_the_lock_at_mint() -> None:
+    """F4 (#342): the injected callback re-confirms the profile inside the mint tx.
+
+    A profile valid at the route-level pre-check can vanish before the mint (a
+    concurrent deletion). ``issue_partner_session`` must re-verify existence
+    atomically - on its own open connection, under the identity row lock and in
+    the same transaction as the mint - before the JWT is minted. The lock and
+    the session-row insert are stubbed so the callback's invocation and ordering
+    are what is under test; the callback receives the live transaction
+    connection, and the mint must not run ahead of it.
+    """
+
+    class _FakeLocked:
+        identity_id = 42
+
+    seen_connections: list[int] = []
+    mint_connections: list[int] = []
+    minted_scopes: list[str] = []
+
+    async def _profile_present(connection: AsyncConnection, partner_id: int) -> None:
+        seen_connections.append(id(connection))
+        assert partner_id == 3
+
+    async def _fake_mint(
+        connection: AsyncConnection, identity_id: int, scope: str, now: datetime
+    ) -> tuple[str, str, str]:
+        mint_connections.append(id(connection))
+        minted_scopes.append(scope)
+        assert identity_id == 42
+        return "jti-race-1", "refresh-race-1", "partner.jwt.race"
+
+    facade = _facade()
+    facade._sessions._engine = _StubAsyncEngine()
+    with (
+        patch(
+            "modules.iam.session_facade._lock_identity_by_phone",
+            new=AsyncMock(return_value=_FakeLocked()),
+        ),
+        patch(
+            "modules.iam.session_facade.SessionFacade._mint_session_row",
+            new=staticmethod(_fake_mint),
+        ),
+    ):
+        result = await facade.issue_partner_session(
+            "9876543210", partner_id=3, verify_partner_exists=_profile_present
+        )
+
+    assert result.scope == "partner"
+    assert result.jwt == "partner.jwt.race"
+    assert result.identity_id == 42
+    assert len(seen_connections) == 1
+    assert mint_connections == seen_connections
+
+
+async def test_issue_partner_session_refuses_a_profile_deleted_before_mint() -> None:
+    """F4 (#342): the atomic re-check surfaces as SessionIssuanceError, no mint.
+
+    The concurrent deletion scenario: the profile is present at the route-level
+    pre-check, then deleted before ``issue_partner_session`` reaches the mint.
+    The injected callback detects the gone profile (via the partner facade seam
+    against the mint transaction's connection) and raises
+    ``SessionIssuanceError``; the mint must not run and the error must propagate
+    as the 409 ``SESSION_REFUSED`` contract.
+    """
+
+    class _FakeLocked:
+        identity_id = 42
+
+    called: list[tuple[int, int]] = []
+
+    async def _profile_gone(connection: AsyncConnection, partner_id: int) -> None:
+        called.append((id(connection), partner_id))
+        raise SessionIssuanceError(f"partner profile {partner_id} no longer exists at session mint")
+
+    async def _fake_mint(*args: object, **kwargs: object) -> tuple[str, str, str]:
+        raise AssertionError("mint must not run when the re-check refuses the issuance")
+
+    facade = _facade()
+    facade._sessions._engine = _StubAsyncEngine()
+    with (
+        patch(
+            "modules.iam.session_facade._lock_identity_by_phone",
+            new=AsyncMock(return_value=_FakeLocked()),
+        ),
+        patch(
+            "modules.iam.session_facade.SessionFacade._mint_session_row",
+            new=staticmethod(_fake_mint),
+        ),
+        pytest.raises(SessionIssuanceError, match="no longer exists at session mint"),
+    ):
+        await facade.issue_partner_session(
+            "9876543210", partner_id=3, verify_partner_exists=_profile_gone
+        )
+
+    assert len(called) == 1
+    assert called[0][1] == 3
 
 
 async def test_validate_token_p95_stays_under_the_100ms_budget() -> None:

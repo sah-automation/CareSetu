@@ -46,6 +46,9 @@ _PARTNER_ROLE = "partner"
 _OPERATOR_ROLE = "operator"
 
 
+VerifyPartnerExists = Callable[[AsyncConnection, int], Awaitable[None]]
+
+
 class SessionResult(BaseModel):
     """A session, whether freshly issued or rotated (spec #51 section 2.5, tickets #57, #58).
 
@@ -96,7 +99,6 @@ class SessionFacade:
         access_token_ttl_seconds: int = jwt.ACCESS_TOKEN_TTL_SECONDS,
         refresh_token_ttl_seconds: int = refresh.REFRESH_TOKEN_TTL_SECONDS,
         mfa_secret_key: str = "",
-        resolve_partner_by_identity: Callable[[int], Awaitable[int | None]] | None = None,
     ) -> None:
         self._engine = engine
         self._clock = clock
@@ -104,18 +106,6 @@ class SessionFacade:
         self._access_token_ttl_seconds = access_token_ttl_seconds
         self._refresh_token_ttl_seconds = refresh_token_ttl_seconds
         self._mfa_secret_key = mfa_secret_key
-        self._resolve_partner_by_identity = resolve_partner_by_identity
-
-    def set_partner_resolver(self, resolver: Callable[[int], Awaitable[int | None]]) -> None:
-        """Wire the partner-profile identity seam (T05, #298).
-
-        Called by the composition root after both ``IamFacade`` and
-        ``PartnerFacade`` have been constructed - the circular dependency
-        (``PartnerFacade`` needs ``IamFacade``; the session facade needs a
-        partner resolver) makes constructor injection impossible, so the
-        resolver is set post-construction.
-        """
-        self._resolve_partner_by_identity = resolver
 
     async def issue_session(self, phone: str) -> SessionResult:
         """Mint an access JWT for a verified patient (spec #51 section 2.5, ticket #57).
@@ -278,21 +268,61 @@ class SessionFacade:
             refresh_token=refresh_token,
         )
 
-    async def issue_partner_session(self, phone: str) -> SessionResult:
-        """Mint a partner-scoped access JWT for a registered (pre-activation) partner (T05, #298).
+    async def resolve_identity_id_by_phone(self, phone: str) -> int:
+        """The identity id for a phone, without minting a session (WI-3, #336).
 
-        Unlike ``issue_session`` this does NOT require identity ``Active`` or
-        an active patient role grant - a fresh registrant is ``[Unverified]``
-        with no role grant (ADR-0010). The gate is partner-profile existence:
-        the ``_resolve_partner_by_identity`` seam (wired by the composition
-        root through dependency inversion, no cross-schema import) checks
-        whether a partner profile exists for the identity. A patient-only phone
-        (identity exists but no partner profile) is refused with
-        ``SessionIssuanceError`` mapped to 409 ``SESSION_REFUSED``.
+        Read-only companion for the partner session route: the calling route
+        resolves the identity for the phone so it can ask the partner facade
+        whether a partner profile exists (the verification happens at the
+        composition boundary, not inside the iam module). The mint
+        (:meth:`issue_partner_session`) independently re-asserts identity
+        existence under row lock, so this is an advisory pre-read. An unknown
+        phone is refused with the same 409 ``SESSION_REFUSED`` contract as
+        ``issue_partner_session``.
+        """
+        from modules.iam.domain.phone import normalize_phone
 
-        The minted ``scope`` resolves to ``partner`` so the gateway's
-        ``require_partner`` admits the caller for the self-service surface
-        (submit credentials, read own status, appeal).
+        phone_e164 = normalize_phone(phone)
+        async with self._engine.connect() as connection:
+            identity_id = (
+                await connection.execute(
+                    select(iam_identities.c.id)
+                    .where(iam_identities.c.phone_e164 == phone_e164)
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+        if identity_id is None:
+            raise SessionIssuanceError(
+                f"no identity for {mask_phone(phone_e164)}; "
+                "register the phone before issuing a session"
+            )
+        return int(identity_id)
+
+    async def issue_partner_session(
+        self,
+        phone: str,
+        partner_id: int,
+        verify_partner_exists: VerifyPartnerExists | None = None,
+    ) -> SessionResult:
+        """Mint a partner-scoped access JWT for a registered partner (T05, #298).
+
+        Unlike ``issue_session`` this does NOT require identity ``Active`` or an
+        active patient role grant - a fresh registrant is ``[Unverified]`` with
+        no role grant (ADR-0010). The gate is partner-profile existence, which is
+        verified UPSTREAM by the calling route (WI-3, #336): the route resolves
+        the identity through :meth:`resolve_identity_id_by_phone`, asks the
+        partner facade for the profile, and passes the already-verified
+        ``partner_id`` into this method. iam no longer reaches into the partner
+        module - a patient-only phone (identity exists but no partner profile) is
+        refused 409 ``SESSION_REFUSED`` by the route before this method runs.
+
+        The upstream check is an early-rejection fast path only. Because the
+        profile could be deleted between that check and this mint, the caller may
+        pass an optional ``verify_partner_exists`` callback that re-confirms the
+        profile still exists (or raises ``SessionIssuanceError``) against this
+        method's open connection, atomically under the identity row lock, before
+        the JWT is minted (#342). Leaving it ``None`` keeps the pre-WI-3-F4
+        behavior of trusting the upstream partner_id.
         """
         from modules.iam.domain.phone import normalize_phone
 
@@ -301,9 +331,9 @@ class SessionFacade:
             raise SessionIssuanceError(
                 "access-token signing key is not configured; refusing to issue a session"
             )
-        if self._resolve_partner_by_identity is None:
+        if partner_id < 1:
             raise SessionIssuanceError(
-                "partner identity resolver is not configured; cannot issue a partner session"
+                "partner status was not verified before issuing a partner session"
             )
         now = self._clock()
 
@@ -316,11 +346,8 @@ class SessionFacade:
                 )
             identity_id = locked.identity_id
 
-            partner_id = await self._resolve_partner_by_identity(identity_id)
-            if partner_id is None:
-                raise SessionIssuanceError(
-                    f"identity {identity_id} has no partner profile; this is a patient-only phone"
-                )
+            if verify_partner_exists is not None:
+                await verify_partner_exists(connection, partner_id)
 
             jti, refresh_token, token = await self._mint_session_row(
                 connection, identity_id, _PARTNER_ROLE, now
