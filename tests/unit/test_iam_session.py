@@ -22,6 +22,7 @@ from modules.iam.domain.exceptions import (
     AccessTokenExpiredError,
     AccessTokenMalformedError,
     AccessTokenSignatureError,
+    SessionIssuanceError,
 )
 from modules.iam.domain.jwt import issue_token
 from modules.iam.facade import IamFacade, ValidatedAccessToken
@@ -131,6 +132,21 @@ async def test_validate_token_fails_closed_without_a_configured_key() -> None:
 
     with pytest.raises(AccessTokenSignatureError, match="signing key is not configured"):
         await facade.validate_token(token)
+
+
+async def test_issue_partner_session_fails_closed_without_verified_partner_status() -> None:
+    """WI-3 (#336): the mint refuses an unverified partner status before DB work.
+
+    The partner-profile gate is verified upstream by the calling route, and the
+    already-verified ``partner_id`` is the only proof this method accepts. A
+    non-positive ``partner_id`` (never passed by the route) fails closed with
+    the 409 ``SESSION_REFUSED`` contract - against an unreachable engine, so any
+    accidental database round-trip would error instead of pass.
+    """
+    facade = _facade()
+
+    with pytest.raises(SessionIssuanceError, match="partner status was not verified"):
+        await facade.issue_partner_session("9876543210", partner_id=0)
 
 
 async def test_validate_token_p95_stays_under_the_100ms_budget() -> None:

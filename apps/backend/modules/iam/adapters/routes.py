@@ -16,7 +16,7 @@ key replays the stored result instead of re-executing.
 from __future__ import annotations
 
 import re
-from typing import Annotated, cast
+from typing import TYPE_CHECKING, Annotated, cast
 
 from fastapi import APIRouter, Depends, FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -49,6 +49,9 @@ from modules.iam.facade import (
     SessionResult,
     VerifyOtpResult,
 )
+
+if TYPE_CHECKING:
+    from modules.partner.facade import PartnerFacade
 
 router = APIRouter(prefix="/v1/auth", tags=["iam"])
 
@@ -270,9 +273,29 @@ async def issue_partner_session(
     partner profile for the phone and mints a ``partner``-scoped JWT
     (self-service surface only). Identity-state refusals (unknown phone, no
     partner profile) stay 409 ``SESSION_REFUSED``.
+
+    The partner-profile gate is verified here at the composition boundary (WI-3,
+    #336): the route resolves the identity for the phone through the iam facade,
+    asks the partner facade for that identity's profile (the non-throwing
+    ``resolve_partner_id_by_identity`` seam - no cross-schema import), then hands
+    the already-verified ``partner_id`` to the mint. iam itself never reaches
+    into the partner module, so the two facades construct independently with no
+    post-construction glue. The ``require_partner`` RBAC dependency on the
+    partner self-service routes keeps enforcing the minted scope downstream.
     """
     facade = cast(IamFacade, request.app.state.iam_facade)
-    result = await run_idempotent(request, lambda: facade.issue_partner_session(body.phone))
+    partner_facade = cast("PartnerFacade", request.app.state.partner_facade)
+
+    async def _issue_verified_partner_session(phone: str) -> SessionResult:
+        identity_id = await facade.resolve_identity_id_by_phone(phone)
+        partner_id = await partner_facade.resolve_partner_id_by_identity(identity_id)
+        if partner_id is None:
+            raise SessionIssuanceError(
+                f"identity {identity_id} has no partner profile; this is a patient-only phone"
+            )
+        return await facade.issue_partner_session(phone, partner_id=partner_id)
+
+    result = await run_idempotent(request, lambda: _issue_verified_partner_session(body.phone))
     response = Response(
         content=result.model_dump_json(),
         media_type="application/json",

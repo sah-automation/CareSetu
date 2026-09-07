@@ -317,7 +317,7 @@ class PartnerFacade:
     def __init__(
         self,
         engine: AsyncEngine,
-        iam_facade: IamFacade,
+        iam_facade: IamFacade | None = None,
         artifact_store: CredentialArtifactStore | None = None,
         audit_facade: AuditFacade | None = None,
         *,
@@ -370,7 +370,9 @@ class PartnerFacade:
         self._credential_validity = credential_validity_module
         # Registration sub-facade (ADR-0006, WI-2 p1a #332): owns the open /
         # resolve-your-partner lifecycle and the synchronous iam credential
-        # account (ADR-0010). The coordinator delegates below.
+        # account (ADR-0010). The iam seam is OPTIONAL (WI-3, #336): only
+        # ``register`` consumes it; facades composed without it (the daily
+        # credential-expiry sweep) fail loudly if registration is ever attempted.
         self._registration = RegistrationFacade(engine, credential_validity_module, iam_facade)
         # Directory-cache seam (PHASE-6 T02b, #314): the Redis accelerator
         # functions. The coordinator exposes the seam once so sub-facades
@@ -407,7 +409,10 @@ class PartnerFacade:
         then the ``[Registered]`` profile opens with ``partner.registered``
         emitted - both in the same transaction. A duplicate phone resolves to
         the existing profile; concurrent registrations converge (accepted
-        criterion 6).
+        criterion 6). When the facade was composed without the iam seam (WI-3,
+        #336 - the daily sweep builds no iam facade), this fails loudly with
+        ``PartnerIamUnavailableError`` rather than opening a profile that can
+        never authenticate.
         """
         return await self._registration.register(
             phone=phone,

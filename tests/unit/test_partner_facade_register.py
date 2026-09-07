@@ -33,6 +33,7 @@ from modules.iam.facade import IamFacade
 from modules.iam.identity_facade import PartnerCredentialCreatedResult
 from modules.partner import credential_validity as credential_validity_module
 from modules.partner.domain.exceptions import (
+    PartnerIamUnavailableError,
     PartnerNotFoundError,
     ServiceAreaNotFoundError,
 )
@@ -395,6 +396,25 @@ async def test_resolve_partner_id_by_identity_returns_the_profile_id() -> None:
     facade = _facade(connection, _iam_facade([]))
 
     assert await facade.resolve_partner_id_by_identity(7) == 3
+
+
+@pytest.mark.asyncio
+async def test_register_fails_loudly_without_the_iam_seam() -> None:
+    """WI-3 (#336): a facade built without iam refuses to register.
+
+    The daily credential-expiry sweep composes a ``PartnerFacade`` without an
+    iam facade. ``register`` needs the seam to create the sync credential
+    account (ADR-0010) and must fail with the typed
+    ``PartnerIamUnavailableError`` - never a silent no-op or a profile that can
+    never authenticate.
+    """
+    facade = RegistrationFacade(
+        engine=_engine(_connection([_FakeResult(row=None)])),
+        credential_validity=credential_validity_module,
+    )
+
+    with pytest.raises(PartnerIamUnavailableError):
+        await facade.register(**_register_kwargs("doctor"))
 
 
 @pytest.mark.asyncio

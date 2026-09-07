@@ -46,11 +46,16 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
+import worker.main as worker_main
+from app.config import Settings
 from modules.iam.adapters.sms import MockSmsAdapter
 from modules.iam.facade import IamFacade
 from modules.partner.adapters.artifact_store import CredentialArtifactStore
 from modules.partner.domain.credentials import CredentialType
-from modules.partner.domain.exceptions import ProviderProfileNotFoundError
+from modules.partner.domain.exceptions import (
+    PartnerIamUnavailableError,
+    ProviderProfileNotFoundError,
+)
 from modules.partner.facade import (
     DALTONGANJ_LATITUDE,
     DALTONGANJ_LONGITUDE,
@@ -400,3 +405,64 @@ async def test_sweep_leaves_unexpired_active_partner_untouched(
     assert await _query(database_url, "SELECT is_active FROM partner.partner_directory_index") == [
         {"is_active": True}
     ]
+
+
+@pytest.mark.asyncio
+async def test_sweep_runs_on_a_facade_composed_without_iam(
+    database_url: str, clean_partner: Any, tmp_path: Path
+) -> None:
+    """WI-3 (#336): the worker's sweep stack is iam-free and still closes out.
+
+    ``worker_main._build_sweep_facade`` composes a ``PartnerFacade`` on a bare
+    engine - no iam facade, no SMS adapter, no MFA secret. Against a real
+    database that is enough to run the daily close-out: an Active partner whose
+    credential has expired is deindexed and emits exactly the one
+    ``credential.invalidated`` event.
+    """
+    _, setup_partner = _facade(database_url, tmp_path)
+    partner_id = await _approve_active_partner(setup_partner, "9876543208")
+    await _make_visible(database_url, partner_id)
+    credential_id = await _expire_credentials(database_url, partner_id)
+
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    sweep_facade = worker_main._build_sweep_facade(Settings(), engine)
+    assert sweep_facade._registration._iam is None
+
+    closed = await sweep_facade.close_out_expired_credentials()
+    await engine.dispose()
+
+    assert closed == [credential_id]
+    assert await _query(database_url, "SELECT is_active FROM partner.partner_directory_index") == [
+        {"is_active": False}
+    ]
+
+    events = await _invalidated_events(database_url)
+    assert len(events) == 1
+    assert events[0]["payload"]["credential_id"] == credential_id
+    assert events[0]["payload"]["reason"] == "expired"
+
+
+@pytest.mark.asyncio
+async def test_register_fails_loudly_when_the_composed_facade_lacks_iam(
+    database_url: str, clean_partner: Any, tmp_path: Path
+) -> None:
+    """WI-3 (#336): an iam-free partner facade is unusable for registration.
+
+    The sweep stack never registers, but a caller that tries to register with a
+    facade that was composed without the iam seam gets a typed
+    ``PartnerIamUnavailableError`` before the transaction opens - the profile
+    cannot be written because the sync credential account would be silently
+    missing (ADR-0010 atomicity).
+    """
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    sweep_facade = worker_main._build_sweep_facade(Settings(), engine)
+
+    with pytest.raises(PartnerIamUnavailableError):
+        await sweep_facade.register(
+            phone="9876543209",
+            partner_type="doctor",
+            practice_address="Station Road, Daltonganj",
+            practice_latitude=DALTONGANJ_LATITUDE,
+            practice_longitude=DALTONGANJ_LONGITUDE,
+        )
+    await engine.dispose()

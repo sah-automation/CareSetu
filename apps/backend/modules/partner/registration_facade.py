@@ -19,9 +19,13 @@ The sub-facade owns the full registration lifecycle:
 - ``get_my_status`` reads the partner's own onboarding status.
 
 It takes the engine, the credential-validity deep module (WI-1, #331), and the
-iam facade (needed for the sync credential account - ADR-0010) in its
-constructor. It owns its result models (``PartnerView``, ``RegisterPartnerResult``,
-``PartnerMeView``) - the coordinator re-exports them unchanged.
+iam facade in its constructor. The iam seam is OPTIONAL (WI-3, #336): it is
+genuinely needed only by ``register``, which creates the sync credential
+account (ADR-0010). A facade composed without it - e.g. the daily
+credential-expiry sweep, which only closes out credentials - fails loudly with
+:class:`PartnerIamUnavailableError` if ``register`` is ever called. It owns its
+result models (``PartnerView``, ``RegisterPartnerResult``, ``PartnerMeView``) -
+the coordinator re-exports them unchanged.
 """
 
 from __future__ import annotations
@@ -33,7 +37,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from modules.iam.facade import IamFacade
 from modules.partner.common_models import PartnerView as PartnerView
 from modules.partner.domain.events import PartnerType
-from modules.partner.domain.exceptions import PartnerNotFoundError
+from modules.partner.domain.exceptions import (
+    PartnerIamUnavailableError,
+    PartnerNotFoundError,
+)
 from modules.partner.registration_models import (
     PartnerMeView as PartnerMeView,
 )
@@ -53,7 +60,7 @@ class RegistrationFacade:
         self,
         engine: AsyncEngine,
         credential_validity: ModuleType,
-        iam_facade: IamFacade,
+        iam_facade: IamFacade | None = None,
     ) -> None:
         self._engine = engine
         # The credential-validity deep module (WI-1, #331): the coordinator owns
@@ -62,6 +69,9 @@ class RegistrationFacade:
         # it keeps the reference for seam parity without calling into it.
         self._credential_validity = credential_validity
         # The iam facade seam for the synchronous credential account (ADR-0010).
+        # Optional (WI-3, #336): only ``register`` consumes it, and a facade
+        # built without iam (the daily sweep) raises the typed
+        # ``PartnerIamUnavailableError`` when misuse requires it.
         self._iam = iam_facade
 
     async def register(
@@ -91,9 +101,20 @@ class RegistrationFacade:
         on ``phone_e164``) and duplicate profiles by ``on_conflict_do_nothing``
         on ``uq_partner_profiles_identity``, so concurrent registrations of the
         same phone converge instead of raising (accepted criterion 6).
+
+        When the facade was composed without the iam seam (WI-3, #336 - the
+        daily sweep builds no iam facade), this fails loudly with
+        :class:`PartnerIamUnavailableError` rather than silently dropping the
+        sync credential account.
         """
+        iam = self._iam
+        if iam is None:
+            raise PartnerIamUnavailableError(
+                "partner registration requires the iam facade to create the "
+                "sync credential account (ADR-0010), but none was composed"
+            )
         async with self._engine.begin() as connection:
-            account = await self._iam.create_credential_account(phone, connection=connection)
+            account = await iam.create_credential_account(phone, connection=connection)
             identity_id = int(account.identity_id)
 
             existing = await load_profile_by_identity(connection, identity_id)
