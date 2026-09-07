@@ -104,7 +104,6 @@ from modules.iam.facade import IamFacade
 from modules.partner import credential_validity as credential_validity_module
 from modules.partner import directory_cache as directory_cache_module
 from modules.partner.adapters.artifact_store import CredentialArtifactStore
-from modules.partner.common_models import PartnerView as PartnerView
 from modules.partner.credential_intake_facade import (
     CredentialIntakeFacade as CredentialIntakeFacade,
 )
@@ -193,6 +192,9 @@ from modules.partner.registration_facade import (
 )
 from modules.partner.registration_models import (
     PartnerMeView as PartnerMeView,
+)
+from modules.partner.registration_models import (
+    PartnerView as PartnerView,
 )
 from modules.partner.registration_models import (
     RegisterPartnerResult as RegisterPartnerResult,

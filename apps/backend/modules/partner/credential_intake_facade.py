@@ -41,7 +41,6 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from bus.outbox_writer import write_outbox
 from modules.partner.adapters.artifact_store import CredentialArtifactStore
-from modules.partner.common_models import PartnerView
 from modules.partner.credential_intake_models import (
     CredentialSubmission,
     CredentialSubmissionResult,
@@ -66,6 +65,7 @@ from modules.partner.domain.state_machine import (
     transition,
 )
 from modules.partner.outbox import PARTNER_OUTBOX_TABLE
+from modules.partner.registration_models import PartnerView
 from modules.partner.schema.models import (
     partner_credentials,
     partner_profiles,

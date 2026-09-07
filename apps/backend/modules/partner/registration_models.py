@@ -5,6 +5,14 @@ from datetime import datetime
 from pydantic import BaseModel
 
 
+class PartnerView(BaseModel):
+    """The typed result of a partner lifecycle mutation."""
+
+    partner_id: int
+    status: str
+    round: int
+
+
 class RegisterPartnerResult(BaseModel):
     """The outcome of open partner registration (FEAT-014, T05).
 

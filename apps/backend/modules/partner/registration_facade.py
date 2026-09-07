@@ -33,7 +33,6 @@ from __future__ import annotations
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from modules.iam.facade import IamFacade
-from modules.partner.common_models import PartnerView as PartnerView
 from modules.partner.domain.events import PartnerType
 from modules.partner.domain.exceptions import (
     PartnerIamUnavailableError,
@@ -41,6 +40,9 @@ from modules.partner.domain.exceptions import (
 )
 from modules.partner.registration_models import (
     PartnerMeView as PartnerMeView,
+)
+from modules.partner.registration_models import (
+    PartnerView as PartnerView,
 )
 from modules.partner.registration_models import (
     RegisterPartnerResult as RegisterPartnerResult,

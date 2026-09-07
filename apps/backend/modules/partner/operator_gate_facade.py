@@ -40,7 +40,6 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from bus.outbox_writer import write_outbox
 from modules.audit.facade import AuditFacade
-from modules.partner.common_models import PartnerView
 from modules.partner.credential_validity import CloseOutCredential
 from modules.partner.domain.events import (
     credential_reviewed_envelope,
@@ -68,6 +67,7 @@ from modules.partner.operator_gate_models import (
     VerificationRound,
 )
 from modules.partner.outbox import PARTNER_OUTBOX_TABLE
+from modules.partner.registration_models import PartnerView
 from modules.partner.schema.models import (
     partner_credentials,
     partner_profiles,
