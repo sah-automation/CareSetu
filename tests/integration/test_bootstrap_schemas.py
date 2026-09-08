@@ -14,6 +14,9 @@ layout); the only tables they may hold are the five ``iam`` tables added
       foundation (``v5.0__init_notify``, #246).
       Phase 6 adds the read-side provider directory index
       (``v6.0__directory_index``, #307).
+      Phase 7 adds the MOD-005 intake schema storage foundation
+      (``v7.0__init_intake``) and the doctor-review attribution column
+      (``v7.1__intake_reviewed_by``, #353).
   2. The outbox/``consumed_events`` DDL template materializes into a throwaway
      schema with the documented row contract (issue #16), so the round-trip
      harness (T2c) can build on it.
@@ -98,6 +101,15 @@ EXPECTED_NOTIFY_TABLES = {
     "notify.notify_notifications",
     "notify.notify_outbox",
     "notify.consumed_events",
+}
+
+EXPECTED_INTAKE_TABLES = {
+    "intake.intake_intakes",
+    "intake.intake_outbox",
+    "intake.intake_media_refs",
+    "intake.intake_ai_jobs",
+    "intake.intake_pre_summaries",
+    "intake.consumed_events",
 }
 
 
@@ -188,12 +200,14 @@ def test_upgrade_head_creates_all_eleven_module_schemas(
             | EXPECTED_AUDIT_TABLES
             | EXPECTED_PARTNER_TABLES
             | EXPECTED_NOTIFY_TABLES
+            | EXPECTED_INTAKE_TABLES
         )
         assert set(tables) == expected_tables, (
-            "only the iam + health + consent + audit + partner + notify schemas "
-            "may hold tables after upgrade head (v1.0__init_iam, v2.0__init_health, "
-            "v2.1__init_consent, v3.0__init_audit, v4.0__init_partner, "
-            "v5.0__init_notify), "
+            "only the iam + health + consent + audit + partner + notify + "
+            "intake schemas may hold tables after upgrade head "
+            "(v1.0__init_iam, v2.0__init_health, v2.1__init_consent, "
+            "v3.0__init_audit, v4.0__init_partner, v5.0__init_notify, "
+            "v7.0__init_intake), "
             f"unexpected: {set(tables) - expected_tables}, "
             f"missing: {expected_tables - set(tables)}"
         )
