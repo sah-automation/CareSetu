@@ -93,6 +93,21 @@ EVENT_DIRECTORY_SEARCH = "directory.search"
 # snake_case form and ``check_event_names.py`` gates it repo-wide. Deliberately
 # NOT in ``REGULATED_ACT_TYPES``.
 EVENT_PARTNER_SELECTED = "partner.selected"
+# MOD-005 (intake): the symptom-intake + AI pre-summary event set.
+# internal-modules.md §4.2 registry; PHASE-7 T04 (#349). The intake facade
+# emits ``intake.captured`` / ``intake.retry_requested`` on intake capture /
+# re-record requests; the AI pipeline self-subscribes to ``intake.captured`` to
+# trigger structuring, publishes ``pre_summary.ready`` / ``pre_summary
+# .low_confidence`` when a pre-summary is finalized, ``ai_job.completed`` /
+# ``ai_job.failed`` per AI job, and ``ai_egress.recorded`` for the PHI-minimized
+# egress audit trail (MOD-011) and consent log (MOD-004).
+EVENT_INTAKE_CAPTURED = "intake.captured"
+EVENT_INTAKE_RETRY_REQUESTED = "intake.retry_requested"
+EVENT_PRE_SUMMARY_READY = "pre_summary.ready"
+EVENT_PRE_SUMMARY_LOW_CONFIDENCE = "pre_summary.low_confidence"
+EVENT_AI_JOB_COMPLETED = "ai_job.completed"
+EVENT_AI_JOB_FAILED = "ai_job.failed"
+EVENT_AI_EGRESS_RECORDED = "ai_egress.recorded"
 
 # PHASE-4 T3 (#237): the canonical regulated-act whitelist. MOD-011 appends an
 # ``audit.event`` payload to the hash chain only when its ``event_type`` is
