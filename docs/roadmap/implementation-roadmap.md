@@ -489,7 +489,7 @@ Still no new PRD feature - resolved chassis anchored to `REQ-003` + `REQ-006`, g
 
 - **Phase ID:** `PHASE-7-INTAKE-AI`
 - **Phase Strategic Objective:** Capture symptoms by voice or text in English/Hindi and turn them into a structured, consent-gated, budget-metered clinical pre-summary that the doctor will review before consulting (`FEAT-006`, `FEAT-007`).
-- **Release Readiness Criteria:** Voice and text intake both captured (`intake_started`/`intake_captured`), upload-resilient (auto-retry ×3, unusable audio prompts re-record); AI pipeline transcribe→structure produces a pre-summary; low-confidence output is flagged "low confidence - verify" and forces doctor review; `EXT-002` call timeouts ≤ 30 s and degrade gracefully (never block the loop); every LLM egress is consent-gated via `check_consent` + PHI-minimized (never the full record) and lands in audit; AI spend metered against `NFR-001`.
+- **Release Readiness Criteria:** Voice and text intake both captured (`intake.captured`), upload-resilient (auto-retry ×3, unusable audio prompts re-record via `intake.retry_requested`); AI pipeline transcribe→structure produces a pre-summary (`ai_job.completed`); low-confidence output is flagged "low confidence - verify" (`pre_summary.low_confidence`) and forces doctor review; `EXT-002` call timeouts ≤ 30 s and degrade gracefully (never block the loop, `ai_job.failed`); every LLM egress is consent-gated via `check_consent` + PHI-minimized (never the full record) and lands in audit (`ai_egress.recorded`); AI spend metered against `NFR-001`. See internal-modules.md §4.2 for the full event registry.
 
 #### 1. In-Scope Modules & Features
 

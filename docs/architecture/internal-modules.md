@@ -606,9 +606,12 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 | `consent.granted`                              | `MOD-004` (Consent)         | `MOD-003` (update share scope), `MOD-011`                                    | JSON           | At-least-once              |
 | `consent.revoked`                              | `MOD-004` (Consent)         | `MOD-003` (stop sharing), `MOD-011`                                          | JSON           | At-least-once              |
 | `intake.captured`                              | `MOD-005` (Intake)          | `MOD-005` (self: AI pipeline), `MOD-011`                                     | JSON           | At-least-once              |
+| `intake.retry_requested`                       | `MOD-005` (Intake)          | `MOD-005` (self: re-record flow), `MOD-011`                                  | JSON           | At-least-once              |
 | `pre_summary.ready`                            | `MOD-005` (Intake)          | `MOD-006` (attach case), `MOD-010` (in-app notify), `MOD-011`                | JSON           | At-least-once              |
 | `pre_summary.low_confidence`                   | `MOD-005` (Intake)          | `MOD-006` (force doctor review), `MOD-011`                                   | JSON           | At-least-once              |
+| `ai_job.completed`                             | `MOD-005` (Intake)          | `MOD-005` (self: pre-summary publish), `MOD-011`                             | JSON           | At-least-once              |
 | `ai_job.failed`                                | `MOD-005` (Intake)          | `MOD-011` (degrade path logged)                                              | JSON           | At-least-once              |
+| `ai_egress.recorded`                           | `MOD-005` (Intake)          | `MOD-011` (audit trail), `MOD-004` (consent log)                             | JSON           | At-least-once              |
 | `case.consult_complete`                        | `MOD-006` (Care)            | `MOD-010` (notify patient), `MOD-011`                                        | JSON           | At-least-once              |
 | `prescription.approved`                        | `MOD-006` (Care)            | `MOD-008` (route to chemist), `MOD-010` (dosage schedule), `MOD-011`         | JSON           | At-least-once              |
 | `prescription.rejected`                        | `MOD-006` (Care)            | `MOD-011`                                                                    | JSON           | At-least-once              |
