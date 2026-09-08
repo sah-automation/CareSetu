@@ -783,6 +783,49 @@ const en = {
     modeVoiceSub: "Record in Hindi or English",
     modeText: "Type",
     modeTextSub: "Type your symptoms",
+
+    // voice.- recording surface (PHASE-7 T16, #360): the voice recorder page
+    // (blueprint §5.4, finalized PROTO-PHASE-7/8 intake-voice.html is the
+    // binding copy spec). A large always-visible mic target, live duration
+    // counter capped at 180s, playback + re-record before submit, at most 3
+    // voice attempts before the patient types instead, and a plain-language
+    // re-record-or-type prompt on short or unclear audio (FEAT-006 scenario
+    // 2) - never a silent proceed. Submit uses an in-button Structuring
+    // pending state per §9.1; uploads auto-retry ×3 with backoff (§5.2).
+    voice: {
+      title: "Record your symptoms",
+      breadcrumb: "Voice intake",
+      reassure: "Just speak naturally - Hindi or English, both are fine.",
+      statusIdle: "Tap the mic and describe what's bothering you",
+      statusRecording: "Recording… tap to stop",
+      statusPaused: "Paused - tap to continue",
+      statusPreview: "Preview your recording",
+      statusPending: "Structuring… please wait",
+      statusDone: "Recording captured",
+      statusPoor: "We couldn't hear clearly",
+      pause: "Pause",
+      resume: "Resume",
+      stop: "Stop",
+      play: "Play preview",
+      recordAgain: "Record again",
+      submit: "Submit",
+      submitting: "Structuring…",
+      poorTitle: "We couldn't hear that clearly",
+      poorBody:
+        "We couldn't hear clearly. Please re-record or switch to typing.",
+      poorRetry: "Try again",
+      poorType: "Type instead",
+      attemptsExhausted:
+        "You've used all 3 voice attempts. Please type your symptoms instead.",
+      doneBody: "Taken. We're preparing your pre-summary.",
+      next: "See your pre-summary",
+      uploadErrorTitle: "We couldn't send your recording",
+      uploadErrorBody:
+        "Your recording is safe. Check your connection and try again.",
+      micUnavailableTitle: "We couldn't reach your microphone",
+      micUnavailableBody:
+        "Check that microphone access is allowed, then try again.",
+    },
   },
 };
 
@@ -1491,6 +1534,40 @@ export const STRINGS: Record<Lang, Dictionary> = {
       modeVoiceSub: "हिंदी या अंग्रेज़ी में रिकॉर्ड करें",
       modeText: "लिखिए",
       modeTextSub: "अपने लक्षण लिखें",
+
+      voice: {
+        title: "अपने लक्षण रिकॉर्ड करें",
+        breadcrumb: "वॉइस इंटेक",
+        reassure: "सीधे-सीधे बोलिए - हिंदी या अंग्रेज़ी, दोनों चल जाएँगी।",
+        statusIdle: "माइक दबाएँ और बताइए आपको क्या परेशानी है",
+        statusRecording: "रिकॉर्ड हो रहा है… रोकने के लिए दबाएँ",
+        statusPaused: "रुका हुआ - जारी रखने के लिए दबाएँ",
+        statusPreview: "अपनी रिकॉर्डिंग सुनें",
+        statusPending: "स्ट्रक्चरिंग… कृपया प्रतीक्षा करें",
+        statusDone: "रिकॉर्डिंग ले ली गई",
+        statusPoor: "साफ़ सुनाई नहीं दिया",
+        pause: "विराम",
+        resume: "फिर से शुरू",
+        stop: "रोकें",
+        play: "प्रीव्यू सुनें",
+        recordAgain: "फिर से रिकॉर्ड करें",
+        submit: "जमा करें",
+        submitting: "स्ट्रक्चरिंग…",
+        poorTitle: "हमें साफ़ सुनाई नहीं दिया",
+        poorBody:
+          "हम ठीक से सुन नहीं पाए। कृपया फिर से रिकॉर्ड करें या टाइप करें।",
+        poorRetry: "फिर कोशिश करें",
+        poorType: "टाइप करें",
+        attemptsExhausted:
+          "आपने 3 वॉइस सीमा पूरी कर ली है। कृपया अपने लक्षण टाइप करें।",
+        doneBody: "ले ली गई। आपका प्री-सारांश तैयार हो रहा है।",
+        next: "अपना प्री-सारांश देखें",
+        uploadErrorTitle: "हम आपकी रिकॉर्डिंग नहीं भेज पाए",
+        uploadErrorBody:
+          "आपकी रिकॉर्डिंग सुरक्षित है। कनेक्शन जाँचकर फिर कोशिश करें।",
+        micUnavailableTitle: "हम आपके माइक तक नहीं पहुँच पाए",
+        micUnavailableBody: "माइक की अनुमति जाँचकर फिर कोशिश करें।",
+      },
     },
   },
 };
