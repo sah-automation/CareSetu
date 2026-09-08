@@ -71,6 +71,12 @@ class IntakeAction(StrEnum):
 #: Hard cap on voice recording attempts (B3 fallback ladder).
 MAX_RECORD_ATTEMPTS: int = 3
 
+#: Hard cap on typed text intake length (spec #344 "text hard-capped at
+#: 2000 characters"). Pinned by the spec decision, so it rides as a named
+#: domain constant beside ``MAX_RECORD_ATTEMPTS`` (coding-standards S9.2
+#: pinned-constant exception).
+MAX_TEXT_LENGTH: int = 2000
+
 
 @dataclass(frozen=True)
 class IntakeState:

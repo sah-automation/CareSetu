@@ -28,3 +28,22 @@ class IllegalPreSummaryTransitionError(IntakeError):
     The low_confidence derived flag forces review before Final: an unreviewed
     low-confidence pre-summary cannot be finalized (the hard usage gate).
     """
+
+
+class IntakeNotFoundError(IntakeError):
+    """The requested intake does not exist or the caller does not own it.
+
+    Raised by ``get_intake`` and ``get_pre_summary`` when no row matches the
+    given intake id + patient id pair (spec #344: patient-scoped reads).
+    """
+
+
+class IntakeValidationError(IntakeError):
+    """A submit_intake request failed server-side validation.
+
+    Covers one-mode-per-intake enforcement and the text cap
+    (``MAX_TEXT_LENGTH`` = 2000 chars). The message carries the specific
+    failure reason so the route layer maps it to a typed error envelope.
+    The voice-attempt cap (3 attempts) is enforced by the domain state
+    machine at the re-record seam, not by this class.
+    """
