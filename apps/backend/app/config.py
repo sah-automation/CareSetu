@@ -76,6 +76,16 @@ DEFAULT_PARTNER_CREDENTIAL_SWEEP_CRON = "30 1 * * *"
 # cloud endpoint for the CareSetu project. Overridable via ``LANGFUSE_HOST``
 # (e.g. a self-hosted instance). Tracing is a no-op until both keys are supplied.
 DEFAULT_LANGFUSE_HOST = "https://us.cloud.langfuse.com"
+# EXT-002 LLM/AI gateway (PHASE-7 T05, #348): provider selection is a config
+# knob with a fail-closed default (mock). The real provider is gated to
+# staging/production by ``__post_init__`` - a real key in dev/test is refused
+# unless demo mode forces the mock. Timeout honours the EXT-002 call discipline
+# (<= 30 s, third-party-integration-standards §1).
+DEFAULT_AI_PROVIDER = "mock"
+DEFAULT_AI_TIMEOUT_SECONDS = 30.0
+DEFAULT_AI_MAX_RETRIES = 3
+DEFAULT_AI_CIRCUIT_BREAKER_THRESHOLD = 5
+DEFAULT_AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 30.0
 # Operator MFA TOTP secret encryption (PHASE-5 S8, #261): the AES-256-GCM key
 # for encrypting/decrypting the TOTP secret stored in ``iam_operator_mfa.secret``
 # comes from the ``IAM_MFA_SECRET_KEY`` environment variable (never committed).
@@ -161,6 +171,17 @@ class Settings:
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
     langfuse_host: str = DEFAULT_LANGFUSE_HOST
+    # EXT-002 LLM/AI gateway (PHASE-7 T05, #348): provider selection is a config
+    # knob (mock is the fail-closed default); the real provider key/base URL.
+    # ``__post_init__`` refuses a real provider in dev/test unless demo mode
+    # forces the mock, mirroring the SMS/WhatsApp fail-closed posture.
+    ai_provider: str = DEFAULT_AI_PROVIDER
+    ai_api_key: str = ""
+    ai_base_url: str = ""
+    ai_timeout_seconds: float = DEFAULT_AI_TIMEOUT_SECONDS
+    ai_max_retries: int = DEFAULT_AI_MAX_RETRIES
+    ai_circuit_breaker_threshold: int = DEFAULT_AI_CIRCUIT_BREAKER_THRESHOLD
+    ai_circuit_breaker_cooldown_seconds: float = DEFAULT_AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS
 
     def __post_init__(self) -> None:
         if self.gateway_jwt_verify_enabled and not self.gateway_jwt_signing_key:
@@ -228,6 +249,38 @@ class Settings:
                 "whatsapp_timeout_seconds must be in (0, 10] to honour the EXT-003 "
                 "call discipline (third-party-integration-standards §1)"
             )
+        ai_provider = self.ai_provider.strip().lower()
+        if ai_provider not in {"mock", "provider"}:
+            raise ValueError(
+                f"unsupported ai_provider {self.ai_provider!r}; expected 'mock' or 'provider'"
+            )
+        if self.demo_mode and ai_provider != "mock":
+            raise ValueError(
+                "demo_mode=True requires ai_provider='mock' (fail-closed): "
+                "the demo flag must never ride a real EXT-002 provider"
+            )
+        if ai_provider == "provider":
+            if self.app_environment.strip().lower() in _DEV_TEST_ENVIRONMENTS:
+                raise ValueError(
+                    "ai_provider='provider' is gated to staging/production: set "
+                    "APP_ENVIRONMENT to 'staging' or 'production' before using the "
+                    "real EXT-002 path. Refusing it in dev/test."
+                )
+            if not self.ai_api_key:
+                raise ValueError("ai_provider='provider' requires AI_API_KEY from the environment")
+            if not self.ai_base_url:
+                raise ValueError("ai_provider='provider' requires AI_BASE_URL from the environment")
+        if not (0 < self.ai_timeout_seconds <= 30):
+            raise ValueError(
+                "ai_timeout_seconds must be in (0, 30] to honour the EXT-002 "
+                "call discipline (third-party-integration-standards §1)"
+            )
+        if self.ai_max_retries <= 0:
+            raise ValueError("ai_max_retries must be positive")
+        if self.ai_circuit_breaker_threshold <= 0:
+            raise ValueError("ai_circuit_breaker_threshold must be positive")
+        if self.ai_circuit_breaker_cooldown_seconds <= 0:
+            raise ValueError("ai_circuit_breaker_cooldown_seconds must be positive")
         if self.redis_consent_ttl_seconds <= 0:
             raise ValueError("redis_consent_ttl_seconds must be positive")
         if self.redis_directory_ttl_seconds <= 0:
@@ -398,4 +451,16 @@ def get_settings() -> Settings:
         langfuse_public_key=os.environ.get("LANGFUSE_PUBLIC_KEY", ""),
         langfuse_secret_key=os.environ.get("LANGFUSE_SECRET_KEY", ""),
         langfuse_host=os.environ.get("LANGFUSE_HOST", DEFAULT_LANGFUSE_HOST),
+        ai_provider=os.environ.get("AI_PROVIDER", DEFAULT_AI_PROVIDER),
+        ai_api_key=os.environ.get("AI_API_KEY", ""),
+        ai_base_url=os.environ.get("AI_BASE_URL", ""),
+        ai_timeout_seconds=_env_float("AI_TIMEOUT_SECONDS", DEFAULT_AI_TIMEOUT_SECONDS),
+        ai_max_retries=_env_int("AI_MAX_RETRIES", DEFAULT_AI_MAX_RETRIES),
+        ai_circuit_breaker_threshold=_env_int(
+            "AI_CIRCUIT_BREAKER_THRESHOLD", DEFAULT_AI_CIRCUIT_BREAKER_THRESHOLD
+        ),
+        ai_circuit_breaker_cooldown_seconds=_env_float(
+            "AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS",
+            DEFAULT_AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+        ),
     )
