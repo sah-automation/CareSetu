@@ -767,6 +767,23 @@ const en = {
     },
     loadError: "Could not load your consent log.",
   },
+
+  // intake.* surface - MOD-005 symptom intake (PHASE-7 T15, #359): the
+  // intake-start mode chooser (blueprint §5.4, finalized PROTO-PHASE-7/8
+  // intake-start.html is the binding copy spec). Two oversized first-class
+  // inputs - voice is default-highlighted (recommended, never forced) and
+  // text is equally first-class (REQ-007 Rule 2). ADR-0001 honesty: the
+  // chooser never markets an AI diagnosis.
+  intake: {
+    breadcrumb: "Start visit",
+    title: "Tell us what's bothering you",
+    reassure:
+      "No forms, no typing. This helps your doctor understand you faster.",
+    modeVoice: "Speak",
+    modeVoiceSub: "Record in Hindi or English",
+    modeText: "Type",
+    modeTextSub: "Type your symptoms",
+  },
 };
 
 export type Dictionary = typeof en;
@@ -1464,6 +1481,16 @@ export const STRINGS: Record<Lang, Dictionary> = {
         body: "जैसे-जैसे आप अपने रिकॉर्ड की पहुँच साझा या प्रतिबंधित करेंगे, अनुमति इंटरैक्शन यहाँ दिखेंगे।",
       },
       loadError: "आपका अनुमति लॉग लोड नहीं हो सका।",
+    },
+
+    intake: {
+      breadcrumb: "विज़िट शुरू करें",
+      title: "बताइए, आपको क्या परेशानी है",
+      reassure: "न फ़ॉर्म, न टाइपिंग। इससे डॉक्टर आपको जल्दी समझ पाएँगे।",
+      modeVoice: "बोलिए",
+      modeVoiceSub: "हिंदी या अंग्रेज़ी में रिकॉर्ड करें",
+      modeText: "लिखिए",
+      modeTextSub: "अपने लक्षण लिखें",
     },
   },
 };
