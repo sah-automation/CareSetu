@@ -47,3 +47,14 @@ class IntakeValidationError(IntakeError):
     The voice-attempt cap (3 attempts) is enforced by the domain state
     machine at the re-record seam, not by this class.
     """
+
+
+class MediaTransferError(IntakeError):
+    """An intake-media upload exhausted every retry and was never captured.
+
+    Raised by ``upload_intake_media`` after the underlying object-store write
+    failed on all three upload-resilience attempts (NFR-PERF-002, spec #344).
+    This is the typed guarantee that a partial capture is never silently lost:
+    the caller either gets a durable media ref, or this typed error tells them
+    the transfer failed and the clip was not stored.
+    """

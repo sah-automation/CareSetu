@@ -40,12 +40,26 @@ from modules.intake.domain.exceptions import (
     IntakeValidationError,
 )
 from modules.intake.facade import IntakeFacade
-from modules.intake.intake_models import IntakeDetailView, PreSummaryView
+from modules.intake.intake_models import (
+    IntakeDetailView,
+    MediaUploadRef,
+    PreSummaryView,
+)
 from modules.intake.schema.models import (
     intake_intakes,
 )
 
 NOW = datetime.now(UTC)
+
+
+def _media_ref(*, object_key: str = "intake/abc-123") -> MediaUploadRef:
+    return MediaUploadRef(
+        object_key=object_key,
+        media_type="audio",
+        audio_duration_ms=90_000,
+        file_size_bytes=1_024_000,
+        record_attempt=1,
+    )
 
 
 class _FakeResult:
@@ -191,14 +205,20 @@ async def test_submit_intake_commits_row_and_captured_outbox_in_one_transaction(
 @pytest.mark.asyncio
 async def test_submit_intake_writes_the_captured_envelope_through_write_outbox() -> None:
     """The outbox write is a real ``intake.captured`` envelope, not a raw row."""
-    connection = _connection([_intake_id_result(intake_id=9), _outbox_result()])
+    connection = _connection(
+        [
+            _intake_id_result(intake_id=9),
+            _FakeResult(scalar=None),
+            _outbox_result(),
+        ]
+    )
     facade = _facade(connection)
 
     await facade.submit_intake(
         patient_id=7,
         mode="voice",
         language="en",
-        media_ref_id=5,
+        media_ref=_media_ref(),
     )
 
     # The zero-cost assertion: the write_outbox contract passed the same
@@ -207,10 +227,9 @@ async def test_submit_intake_writes_the_captured_envelope_through_write_outbox()
     calls = [
         call for call in connection.execute.await_args_list if isinstance(call.args[0], Insert)
     ]
-    # First insert is the intake row, second is the outbox row.
-    assert len(calls) == 2
-    outbox_write = calls[1]
-    assert outbox_write.args[0].table.name == "intake_outbox"
+    # Three inserts: intake row, media-ref row (voice attach), outbox row.
+    assert len(calls) == 3
+    outbox_write = next(c for c in calls if c.args[0].table.name == "intake_outbox")
     values = outbox_write.args[0].compile().params
     assert values["event_type"] == EVENT_INTAKE_CAPTURED
     assert values["status"] == "pending"
@@ -230,7 +249,7 @@ async def test_submit_intake_text_mode_demands_text_rejects_media_ref() -> None:
             patient_id=7,
             mode="text",
             language="en",
-            media_ref_id=3,
+            media_ref=_media_ref(),
         )
 
     with pytest.raises(IntakeValidationError, match="requires text content"):

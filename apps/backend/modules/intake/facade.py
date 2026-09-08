@@ -14,26 +14,41 @@ local transaction, so a later AI failure never rolls back the intake
 
 from __future__ import annotations
 
-from typing import Literal
+import asyncio
+from collections.abc import Awaitable, Callable
+from typing import Literal, cast
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bus.outbox_writer import write_outbox
-from modules.intake.domain.events import intake_captured_envelope
+from modules.intake.adapters.media_store import IntakeMediaStore
+from modules.intake.domain.events import (
+    intake_captured_envelope,
+    intake_retry_requested_envelope,
+)
 from modules.intake.domain.exceptions import (
     IntakeNotFoundError,
     IntakeValidationError,
+    MediaTransferError,
 )
 from modules.intake.domain.state_machine import (
     CAPTURED,
+    MAX_RECORD_ATTEMPTS,
     MAX_TEXT_LENGTH,
+    IntakeAction,
+    IntakeState,
+    IntakeStatus,
+    transition,
 )
 from modules.intake.intake_models import (
     IntakeDetailView,
     IntakeSubmitResult,
+    MediaFile,
     MediaRefView,
+    MediaUploadRef,
     PreSummaryView,
+    ReRecordResult,
 )
 from modules.intake.outbox import INTAKE_OUTBOX_TABLE
 from modules.intake.schema.models import (
@@ -41,6 +56,20 @@ from modules.intake.schema.models import (
     intake_media_refs,
     intake_pre_summaries,
 )
+
+#: Number of attempts (initial + retries) the upload-transfer ladder makes
+#: before it gives up on a flaky capture (NFR-PERF-002, spec #344 US-10).
+MAX_UPLOAD_ATTEMPTS: int = 3
+
+
+def _upload_backoff_delay(attempt: int) -> float:
+    """Exponential backoff (seconds) before retry ``attempt`` (loop count, 2+).
+
+    Retry ordinal ``r = attempt - 1`` scales ``base * 2**(r-1)``, so the two
+    retries after the first failure back off 0.5s then 1.0s.
+    """
+    return 0.5 * (2.0 ** (attempt - 2))
+
 
 INTAKE_SCHEMA = "intake"
 
@@ -53,8 +82,16 @@ class IntakeFacade:
     server-side with typed errors.
     """
 
-    def __init__(self, engine: AsyncEngine) -> None:
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        *,
+        media_store: IntakeMediaStore | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
         self._engine = engine
+        self._media_store = media_store
+        self._sleep = sleep
 
     async def submit_intake(
         self,
@@ -63,24 +100,29 @@ class IntakeFacade:
         mode: Literal["voice", "text"],
         language: Literal["hi", "en"],
         text: str | None = None,
-        media_ref_id: int | None = None,
+        media_ref: MediaUploadRef | None = None,
     ) -> IntakeSubmitResult:
         """Capture a symptom intake and emit ``intake.captured`` atomically.
 
         Validates one-mode-per-intake: exactly one of ``text`` or
-        ``media_ref_id`` must be provided, matching the declared ``mode``.
+        ``media_ref`` must be provided, matching the declared ``mode``.
         Enforces the text cap (``MAX_TEXT_LENGTH`` = 2000 chars). Commits
-        the intake row and the ``intake.captured`` outbox event in the SAME
+        the intake row, the ``intake.captured`` outbox event, and (for a
+        voice intake) the ``intake_media_refs`` row in the SAME
         transaction (ADR-0002 S1) so a crash between state change and
         dispatch cannot lose the event. The voice-attempt cap (3 attempts)
         is enforced by the domain state machine at the re-record seam
         (``MAX_RECORD_ATTEMPTS``, PHASE-7 T02) - a fresh capture always
         begins at record attempt 1.
 
+        ``media_ref`` is the opaque clip ticket returned by
+        ``upload_intake_media``; for a voice intake it is attached here as
+        record attempt 1 (the "attach later" contract, PHASE-7 T08).
+
         Raises :class:`IntakeValidationError` on validation failure.
         """
         if mode == "text":
-            if media_ref_id is not None:
+            if media_ref is not None:
                 raise IntakeValidationError("text mode intake must not include a media reference")
             if text is None:
                 raise IntakeValidationError("text mode intake requires text content")
@@ -91,7 +133,7 @@ class IntakeFacade:
         elif mode == "voice":
             if text is not None:
                 raise IntakeValidationError("voice mode intake must not include text content")
-            if media_ref_id is None:
+            if media_ref is None:
                 raise IntakeValidationError("voice mode intake requires a media reference")
 
         async with self._engine.begin() as connection:
@@ -111,6 +153,19 @@ class IntakeFacade:
             )
             intake_id = int(result.scalar_one())
 
+            if mode == "voice":
+                media_ref_attached = cast(MediaUploadRef, media_ref)
+                await connection.execute(
+                    intake_media_refs.insert().values(
+                        intake_id=intake_id,
+                        media_type=media_ref_attached.media_type,
+                        object_key=media_ref_attached.object_key,
+                        audio_duration_ms=media_ref_attached.audio_duration_ms,
+                        file_size_bytes=media_ref_attached.file_size_bytes,
+                        record_attempt=state.record_attempts,
+                    )
+                )
+
             envelope = intake_captured_envelope(intake_id=intake_id)
             await write_outbox(
                 connection,
@@ -122,6 +177,171 @@ class IntakeFacade:
         return IntakeSubmitResult(
             intake_id=intake_id,
             status=state.status.value,
+        )
+
+    async def upload_intake_media(
+        self,
+        *,
+        patient_id: int,
+        file: MediaFile,
+    ) -> MediaUploadRef:
+        """Capture an audio clip to the object store with upload resilience.
+
+        Runs the media-store write through an upload-resilience ladder
+        (NFR-PERF-002, spec #344 US-10): on a transient write failure it backs
+        off and retries up to ``MAX_UPLOAD_ATTEMPTS`` (3) attempts, then raises
+        the typed :class:`MediaTransferError` - a partial capture is never
+        silently lost. The clip is encrypted at rest under the ``intake/``
+        prefix before it touches disk (security-phii-standards, audio = PHI).
+
+        Answers an opaque :class:`MediaUploadRef` clip ticket recording the
+        object key, type, duration, size, and record attempt. No database row
+        is written here - the ticket is attached to an intake later, by
+        ``submit_intake`` (first take) or ``re_record_intake`` (retry), which
+        persists the ``intake_media_refs`` row against the intake.
+
+        Raises :class:`MediaTransferError` when every upload attempt fails.
+        """
+        if self._media_store is None:
+            raise IntakeValidationError("media store is not configured")
+
+        object_key: str | None = None
+        last_error: OSError | None = None
+        for attempt in range(1, MAX_UPLOAD_ATTEMPTS + 1):
+            if attempt > 1:
+                await self._sleep(_upload_backoff_delay(attempt))
+            try:
+                object_key = self._media_store.save(
+                    data=file.data,
+                    patient_id=patient_id,
+                )
+                break
+            except OSError as exc:
+                last_error = exc
+
+        if object_key is None:
+            raise MediaTransferError(
+                f"media upload failed after {MAX_UPLOAD_ATTEMPTS} attempts for patient {patient_id}"
+            ) from last_error
+
+        return MediaUploadRef(
+            object_key=object_key,
+            media_type=file.media_type,
+            audio_duration_ms=file.audio_duration_ms,
+            file_size_bytes=file.file_size_bytes,
+            record_attempt=file.record_attempt,
+        )
+
+    async def re_record_intake(
+        self,
+        *,
+        intake_id: int,
+        patient_id: int,
+        media_ref: MediaUploadRef,
+    ) -> ReRecordResult:
+        """Attach a fresh recording attempt to a re-record intake.
+
+        Patient-scoped: the intake must belong to ``patient_id``. The intake
+        must be in the ``re_record`` state (the patient was asked for a new
+        take, B3 ladder).
+
+        If the intake's server-side attempt count is already at
+        ``MAX_RECORD_ATTEMPTS`` (3) the request hard-stops - the machine routes
+        the intake to forced text (``FORCE_TEXT``, Ready for Review with
+        ``forced_text=True``) so the patient is never stuck, and no
+        ``intake.retry_requested`` is emitted. The cap is enforced here on the
+        server's own count, never trusted from the client.
+
+        Otherwise the fresh clip is attached as a new ``intake_media_refs`` row
+        (record attempt = the incremented count), the intake returns to
+        structuring (``RETRY_ACCEPTED``, attempt +1), and ``intake.retry_requested``
+        is emitted - all in one transaction (ADR-0002 A1).
+
+        Raises :class:`IntakeNotFoundError` when the intake does not belong to
+        the patient; :class:`IllegalIntakeTransitionError` when the intake is
+        not in a re-recordable state.
+        """
+        async with self._engine.begin() as connection:
+            row = (
+                await connection.execute(
+                    select(intake_intakes).where(
+                        intake_intakes.c.id == intake_id,
+                        intake_intakes.c.patient_id == patient_id,
+                    )
+                )
+            ).first()
+            if row is None:
+                raise IntakeNotFoundError(f"intake {intake_id} not found for patient {patient_id}")
+
+            current = IntakeState(
+                status=IntakeStatus(row.status),
+                record_attempts=int(row.record_attempts),
+                forced_text=bool(row.forced_text),
+            )
+
+            if current.record_attempts >= MAX_RECORD_ATTEMPTS:
+                next_state = transition(current, IntakeAction.FORCE_TEXT)
+                await connection.execute(
+                    intake_intakes.update()
+                    .where(intake_intakes.c.id == intake_id)
+                    .values(
+                        status=next_state.status.value,
+                        record_attempts=next_state.record_attempts,
+                        forced_text=next_state.forced_text,
+                    )
+                )
+                return ReRecordResult(
+                    intake_id=intake_id,
+                    accepted=False,
+                    status=next_state.status.value,
+                    record_attempts=next_state.record_attempts,
+                    forced_text=next_state.forced_text,
+                )
+
+            next_state = transition(current, IntakeAction.RETRY_ACCEPTED)
+
+            media_result = await connection.execute(
+                intake_media_refs.insert()
+                .values(
+                    intake_id=intake_id,
+                    media_type=media_ref.media_type,
+                    object_key=media_ref.object_key,
+                    audio_duration_ms=media_ref.audio_duration_ms,
+                    file_size_bytes=media_ref.file_size_bytes,
+                    record_attempt=next_state.record_attempts,
+                )
+                .returning(intake_media_refs.c.id)
+            )
+            media_ref_id = int(media_result.scalar_one())
+
+            await connection.execute(
+                intake_intakes.update()
+                .where(intake_intakes.c.id == intake_id)
+                .values(
+                    status=next_state.status.value,
+                    record_attempts=next_state.record_attempts,
+                    forced_text=next_state.forced_text,
+                )
+            )
+
+            envelope = intake_retry_requested_envelope(
+                intake_id=intake_id,
+                record_attempt=next_state.record_attempts,
+            )
+            await write_outbox(
+                connection,
+                INTAKE_SCHEMA,
+                INTAKE_OUTBOX_TABLE,
+                envelope,
+            )
+
+        return ReRecordResult(
+            intake_id=intake_id,
+            accepted=True,
+            status=next_state.status.value,
+            record_attempts=next_state.record_attempts,
+            forced_text=next_state.forced_text,
+            media_ref_id=media_ref_id,
         )
 
     async def get_intake(
