@@ -45,6 +45,11 @@ from modules.iam.adapters.routes import register_error_handlers
 from modules.iam.adapters.routes import router as iam_router
 from modules.iam.adapters.sms import MockSmsAdapter, build_sms_adapter
 from modules.iam.facade import IamFacade
+from modules.intake.adapters.routes import (
+    register_error_handlers as register_intake_error_handlers,
+)
+from modules.intake.adapters.routes import router as intake_router
+from modules.intake.facade import IntakeFacade
 from modules.partner.adapters.artifact_store import build_artifact_store
 from modules.partner.adapters.routes import directory_router
 from modules.partner.adapters.routes import (
@@ -196,6 +201,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         directory_ttl_seconds=resolved_settings.redis_directory_ttl_seconds,
         directory_max_results=resolved_settings.directory_max_results,
     )
+    # MOD-005 (PHASE-7 T12, #356): the intake facade shares the settled engine
+    # and is stored on state so the patient intake routes read one resolved
+    # instance and unit tests can stub it.
+    app.state.intake_facade = IntakeFacade(engine=engine)
 
     # MOD-001/MOD-002 independence (WI-3, #336): iam and partner are now
     # constructed independently with zero post-construction glue. The
@@ -267,11 +276,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(audit_router)
     app.include_router(partner_router)
     app.include_router(directory_router)
+    app.include_router(intake_router)
     register_error_handlers(app)
     register_gateway_error_handlers(app)
     register_health_error_handlers(app)
     register_consent_error_handlers(app)
     register_partner_error_handlers(app)
+    register_intake_error_handlers(app)
 
     # Catch-all for any unhandled exception that escapes the module-level
     # handlers above (e.g. SQLAlchemy OperationalError from a DB connection

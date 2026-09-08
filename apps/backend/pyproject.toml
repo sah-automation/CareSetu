@@ -31,6 +31,9 @@ dependencies = [
     # port (standard A6) from Phase 7 onward. Tracing is a no-op when
     # LANGFUSE_PUBLIC_KEY is absent - never blocks boot.
     "langfuse>=2.0",
+    # multipart/form-data parsing for the patient intake audio upload surface
+    # (PHASE-7 T12, #356): FastAPI's UploadFile/File requires python-multipart.
+    "python-multipart>=0.0.9",
 ]
 
 [dependency-groups]

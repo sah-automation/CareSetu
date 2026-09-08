@@ -125,6 +125,14 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         # PHASE-6 T4 (#326): the public directory-pick ingest (FEAT-004) -
         # open surface, anonymous analytics, same gateway surface as search.
         "/v1/directory/select",
+        # PHASE-7 T12 (#356): the patient intake surface - submit, upload
+        # media, re-record, read intake + pre-summary, save patient edits.
+        "/v1/intake/submit",
+        "/v1/intake/upload-media",
+        "/v1/intake/{intake_id}/re-record",
+        "/v1/intake/{intake_id}",
+        "/v1/intake/{intake_id}/pre-summary",
+        "/v1/intake/{intake_id}/patient-edits",
     }
 
 
