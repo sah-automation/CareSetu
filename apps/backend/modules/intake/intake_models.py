@@ -131,6 +131,50 @@ class PreSummaryView(BaseModel):
     patient_edits: dict[str, Any] | None
     doctor_corrections: dict[str, Any] | None
     review_attribution: str | None
+    reviewed_by: int | None
     reviewed_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+class PatientEditsResult(BaseModel):
+    """The result of ``save_patient_pre_summary_edits`` (PHASE-7 T09, #353).
+
+    Records the patient-spotted mistakes as informational corrections on the
+    pre-summary (spec #344 user story 14). This is advice to the doctor - it
+    never mutates the structured fields and never triggers a review transition;
+    ``patient_edits`` echoes the persisted informational corrections so the
+    patient/client can confirm the save.
+    """
+
+    intake_id: int
+    pre_summary_id: int
+    patient_edits: dict[str, Any] | None
+
+
+class PreSummaryReviewResult(BaseModel):
+    """The outcome of ``mark_pre_summary_reviewed`` (PHASE-7 T09, #353).
+
+    The doctor review-and-edit. ``review_state`` is ``reviewed`` when the
+    pre-summary is low-confidence (the hard gate into Reviewed) or ``final``
+    when a high-confidence pre-summary is reviewed-and-finalized by the single
+    attributed review action (user story 23).
+
+    ``reviewed_copy`` is the authoritative summary that wins over the AI
+    extraction: the original ``structured_fields`` with every doctor
+    ``corrections`` value overlaid (edits win, acceptance criterion 3).
+    ``changed_fields`` names the fields whose value the doctor actually
+    altered (the persisted change-list). ``review_attribution`` is always
+    ``doctor`` and ``reviewed_at`` the review timestamp - together the
+    persisted attribution + timestamp that make the reviewed copy trustworthy
+    (acceptance criterion 2).
+    """
+
+    intake_id: int
+    pre_summary_id: int
+    review_state: str
+    reviewed_copy: dict[str, Any]
+    changed_fields: list[str]
+    review_attribution: str
+    reviewed_by: int
+    reviewed_at: datetime

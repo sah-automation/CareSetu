@@ -75,6 +75,7 @@ def test_pre_summaries_is_registered_with_jsonb_and_attempts() -> None:
     assert "patient_edits" in table.c
     assert "doctor_corrections" in table.c
     assert "review_attribution" in table.c
+    assert "reviewed_by" in table.c
     assert "reviewed_at" in table.c
     assert not intake_pre_summaries.c.structured_fields.nullable
 

@@ -160,6 +160,7 @@ def _pre_summary_row(*, pre_summary_id: int = 5, intake_id: int = 1) -> object:
         patient_edits=None,
         doctor_corrections=None,
         review_attribution=None,
+        reviewed_by=None,
         reviewed_at=None,
         created_at=NOW,
         updated_at=NOW,

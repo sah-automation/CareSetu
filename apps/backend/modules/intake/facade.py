@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Literal, cast
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bus.outbox_writer import write_outbox
@@ -26,11 +27,21 @@ from modules.intake.adapters.media_store import IntakeMediaStore
 from modules.intake.domain.events import (
     intake_captured_envelope,
     intake_retry_requested_envelope,
+    pre_summary_ready_envelope,
 )
 from modules.intake.domain.exceptions import (
     IntakeNotFoundError,
     IntakeValidationError,
     MediaTransferError,
+)
+from modules.intake.domain.presummary_machine import (
+    PreSummaryAction,
+    PreSummaryState,
+    PreSummaryStatus,
+    is_low_confidence,
+)
+from modules.intake.domain.presummary_machine import (
+    transition as pre_summary_transition,
 )
 from modules.intake.domain.state_machine import (
     CAPTURED,
@@ -47,6 +58,8 @@ from modules.intake.intake_models import (
     MediaFile,
     MediaRefView,
     MediaUploadRef,
+    PatientEditsResult,
+    PreSummaryReviewResult,
     PreSummaryView,
     ReRecordResult,
 )
@@ -452,9 +465,181 @@ class IntakeFacade:
             patient_edits=dict(row.patient_edits) if row.patient_edits else None,
             doctor_corrections=dict(row.doctor_corrections) if row.doctor_corrections else None,
             review_attribution=row.review_attribution,
+            reviewed_by=int(row.reviewed_by) if row.reviewed_by is not None else None,
             reviewed_at=row.reviewed_at,
             created_at=row.created_at,
             updated_at=row.updated_at,
+        )
+
+    async def save_patient_pre_summary_edits(
+        self,
+        *,
+        intake_id: int,
+        patient_id: int,
+        fields: dict[str, object],
+    ) -> PatientEditsResult:
+        """Record patient-spotted mistakes as informational corrections (US-14).
+
+        Persists ``fields`` onto ``intake_pre_summaries.patient_edits`` as
+        informational corrections AVAILABLE TO THE DOCTOR - they never mutate
+        the AI ``structured_fields`` and never trigger a review transition
+        (patient edits are advice, not authority; only the doctor review has
+        edit-wins semantics). Corrections ACCUMULATE across saves (a later
+        save merges over the earlier ones), so a patient adding more mistakes
+        never loses the ones already marked. Patient-scoped: the caller must
+        own the intake.
+
+        Raises :class:`IntakeNotFoundError` when no pre-summary exists for the
+        patient's intake.
+        """
+        async with self._engine.begin() as connection:
+            intake_row = (
+                await connection.execute(
+                    select(intake_intakes.c.id).where(
+                        intake_intakes.c.id == intake_id,
+                        intake_intakes.c.patient_id == patient_id,
+                    )
+                )
+            ).first()
+            if intake_row is None:
+                raise IntakeNotFoundError(f"intake {intake_id} not found for patient {patient_id}")
+
+            row = (
+                await connection.execute(
+                    select(intake_pre_summaries).where(
+                        intake_pre_summaries.c.intake_id == intake_id,
+                    )
+                )
+            ).first()
+            if row is None:
+                raise IntakeNotFoundError(f"pre-summary not found for intake {intake_id}")
+
+            merged_edits = {**(row.patient_edits or {}), **fields}
+
+            await connection.execute(
+                intake_pre_summaries.update()
+                .where(intake_pre_summaries.c.id == row.id)
+                .values(
+                    patient_edits=merged_edits,
+                    updated_at=func.now(),
+                )
+            )
+
+        return PatientEditsResult(
+            intake_id=intake_id,
+            pre_summary_id=int(row.id),
+            patient_edits=merged_edits,
+        )
+
+    async def mark_pre_summary_reviewed(
+        self,
+        *,
+        intake_id: int,
+        doctor_id: int,
+        corrections: dict[str, object] | None = None,
+    ) -> PreSummaryReviewResult:
+        """Perform the attributed doctor review-and-edit (US-21 through US-24).
+
+        The single, individually-attributed review action. ``doctor_id`` is the
+        reviewing doctor (RBAC enforced at the route seam, PHASE-7 T13) and is
+        required for attribution. ``corrections`` maps the fields the doctor
+        edited to their corrected values; the doctor's edits WIN over the AI
+        extraction, so the resulting ``reviewed_copy`` is the original
+        ``structured_fields`` with every correction overlaid.
+
+        The transition the machine applies depends on confidence (the
+        AMB-006 0.70 threshold, structurally enforced here):
+
+        - **low_confidence** (below 0.70 or missing): the hard gate - the
+          pre-summary can ONLY reach ``Reviewed`` through this attributed
+          review action (``PreSummaryAction.REVIEW``). It never reaches
+          ``Final`` unreviewed.
+        - **high_confidence**: the clean path - a single attributed review
+          action reviews AND finalizes it (``PreSummaryAction.FINALIZE``,
+          ``Draft -> Final``), user story 23.
+
+        The confirming change-list (the correction keys whose value actually
+        changed), the reviewing doctor's identity (``reviewed_by`` =
+        ``doctor_id``), and the review timestamp are persisted in the same
+        transaction as the state change (ADR-0002 §1), making the reviewed
+        copy trustworthy and attributable to a specific doctor (US-22).
+
+        Raises :class:`IntakeNotFoundError` when no pre-summary exists for the
+        intake; :class:`IntakeValidationError` when ``doctor_id`` is missing;
+        :class:`~modules.intake.domain.exceptions.IllegalPreSummaryTransitionError`
+        when the review action is illegal in the current state (e.g. an already-
+        reviewed or finalized pre-summary).
+        """
+        if not doctor_id:
+            raise IntakeValidationError("a doctor identity is required for review attribution")
+        resolved = dict(corrections or {})
+
+        async with self._engine.begin() as connection:
+            row = (
+                await connection.execute(
+                    select(intake_pre_summaries).where(
+                        intake_pre_summaries.c.intake_id == intake_id,
+                    )
+                )
+            ).first()
+            if row is None:
+                raise IntakeNotFoundError(f"pre-summary not found for intake {intake_id}")
+
+            current = PreSummaryState(
+                status=PreSummaryStatus(row.review_state),
+                structuring_confidence=row.structuring_confidence,
+            )
+            low_conf = is_low_confidence(row.structuring_confidence)
+            action = PreSummaryAction.REVIEW if low_conf else PreSummaryAction.FINALIZE
+            next_state = pre_summary_transition(current, action)
+
+            original = dict(row.structured_fields or {})
+            reviewed_copy = {**original, **resolved}
+            changed_fields = [key for key in resolved if resolved.get(key) != original.get(key)]
+            reviewed_at = datetime.now(UTC)
+
+            await connection.execute(
+                intake_pre_summaries.update()
+                .where(intake_pre_summaries.c.id == row.id)
+                .values(
+                    structured_fields=reviewed_copy,
+                    doctor_corrections=resolved,
+                    review_state=next_state.status.value,
+                    review_attribution="doctor",
+                    reviewed_by=doctor_id,
+                    reviewed_at=reviewed_at,
+                    updated_at=func.now(),
+                )
+            )
+
+            # Every state change writes its outbox event in the SAME transaction
+            # (ADR-0002 S1). A review that REACHES ``Final`` (high-confidence
+            # single action) publishes ``pre_summary.ready`` so MOD-006 attaches
+            # the summary to the case and MOD-010 notifies the patient. The
+            # low-confidence gate to ``Reviewed`` publishes nothing: there is no
+            # "reviewed" event in the registry, the pre-summary is not yet ready
+            # for downstream use, and ``pre_summary.low_confidence`` (needs
+            # review) would be factually wrong once reviewed.
+            if next_state.status is PreSummaryStatus.FINAL:
+                await write_outbox(
+                    connection,
+                    INTAKE_SCHEMA,
+                    INTAKE_OUTBOX_TABLE,
+                    pre_summary_ready_envelope(
+                        intake_id=intake_id,
+                        pre_summary_id=int(row.id),
+                    ),
+                )
+
+        return PreSummaryReviewResult(
+            intake_id=intake_id,
+            pre_summary_id=int(row.id),
+            review_state=next_state.status.value,
+            reviewed_copy=reviewed_copy,
+            changed_fields=changed_fields,
+            review_attribution="doctor",
+            reviewed_by=doctor_id,
+            reviewed_at=reviewed_at,
         )
 
     async def request_rx_draft(

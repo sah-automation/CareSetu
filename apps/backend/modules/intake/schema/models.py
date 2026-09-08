@@ -116,6 +116,11 @@ intake_pre_summaries = Table(
     Column("doctor_corrections", JSONB, nullable=True),
     # Who reviewed: patient | doctor | system
     Column("review_attribution", String(40), nullable=True),
+    # The reviewing doctor's identity (MOD-001 gateway principal). No
+    # cross-schema FK - identity ids are gateway principals (ADR-0003).
+    # Null until an attributed doctor review is recorded; persists the specific
+    # doctor behind ``review_attribution`` so reviews are attributable (US-22).
+    Column("reviewed_by", BigInteger, nullable=True),
     Column("reviewed_at", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
