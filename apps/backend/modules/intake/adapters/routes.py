@@ -8,7 +8,10 @@ Every expected failure answers the shared error envelope at the top level
 (api-standards S2); ``register_error_handlers`` maps intake domain errors to
 that envelope. The patient RBAC guard (``require_patient``) rejects unauthenticated
 callers (401) and non-patient scopes (403) at the edge - partner/doctor-scope
-callers cannot hit patient intake routes.
+callers cannot hit patient intake routes. The doctor review route (PHASE-7 T13,
+#357) is the exception: ``require_partner`` admits any partner-scoped caller,
+then the resolved partner profile must be a doctor (partner scope +
+``partner_type == "doctor"``) or the caller is refused with 403.
 """
 
 from __future__ import annotations
@@ -19,9 +22,9 @@ from fastapi import APIRouter, Depends, FastAPI, File, Query, Request, UploadFil
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.gateway.errors import error_response
+from app.gateway.errors import InsufficientScopeError, error_response
 from app.gateway.principal import Principal
-from app.gateway.rbac import require_patient
+from app.gateway.rbac import require_partner, require_patient
 from modules.intake.domain.exceptions import (
     IllegalIntakeTransitionError,
     IllegalPreSummaryTransitionError,
@@ -37,9 +40,11 @@ from modules.intake.intake_models import (
     MediaFile,
     MediaUploadRef,
     PatientEditsResult,
+    PreSummaryReviewResult,
     PreSummaryView,
     ReRecordResult,
 )
+from modules.partner.facade import PartnerFacade
 
 router = APIRouter(prefix="/v1/intake", tags=["intake"])
 
@@ -96,6 +101,24 @@ class PatientEditsRequest(BaseModel):
     fields: dict[str, object] = Field(
         min_length=1,
         description="Field name -> corrected value mappings",
+    )
+
+
+class PreSummaryReviewRequest(BaseModel):
+    """Body of ``POST /v1/intake/{intake_id}/review``: attributed doctor review.
+
+    ``corrections`` maps the fields the doctor edited to their corrected
+    values (PHASE-7 T09, #353). The doctor's edits win over the AI extraction
+    and overlay the original ``structured_fields`` to produce the reviewed
+    copy. An omitted or empty ``corrections`` is a review with no edits - the
+    low-confidence gate still moves the draft to ``Reviewed``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    corrections: dict[str, object] | None = Field(
+        default=None,
+        description="Field name -> corrected value mappings (doctor edits win)",
     )
 
 
@@ -261,6 +284,42 @@ async def save_patient_edits(
         intake_id=intake_id,
         patient_id=int(_account.subject_id),
         fields=body.fields,
+    )
+
+
+@router.post(
+    "/{intake_id}/review",
+    response_model=PreSummaryReviewResult,
+    status_code=status.HTTP_200_OK,
+    summary="Review-and-edit an intake pre-summary (doctor only)",
+)
+async def review_pre_summary(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+    intake_id: int,
+    body: PreSummaryReviewRequest,
+) -> PreSummaryReviewResult:
+    """Perform the attributed doctor review-and-edit (US-21 through US-24).
+
+    Thin doctor-scoped adapter (PHASE-7 T13, #357): the ``require_partner``
+    gate admits any partner-scoped caller, then the principal is resolved to
+    their partner profile and a non-doctor partner is refused with 403 - the
+    doctor RBAC convention (partner scope + ``partner_type == "doctor"``,
+    matching the health routes). The patient and lab/chemist partner scopes
+    cannot reach this route. The facade applies the doctor's ``corrections``
+    over the AI ``structured_fields`` and returns the reviewed copy with the
+    attribution (``reviewed_by`` = the doctor's partner id).
+    """
+    facade = cast(IntakeFacade, request.app.state.intake_facade)
+    partner = await cast(PartnerFacade, request.app.state.partner_facade).resolve_partner(
+        int(account.subject_id)
+    )
+    if partner.partner_type != "doctor":
+        raise InsufficientScopeError("the doctor role is required for this route")
+    return await facade.mark_pre_summary_reviewed(
+        intake_id=intake_id,
+        doctor_id=partner.partner_id,
+        corrections=body.corrections,
     )
 
 

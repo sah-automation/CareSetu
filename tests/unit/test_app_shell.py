@@ -133,6 +133,8 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/intake/{intake_id}",
         "/v1/intake/{intake_id}/pre-summary",
         "/v1/intake/{intake_id}/patient-edits",
+        # PHASE-7 T13 (#357): the doctor review-and-edit route (contract only).
+        "/v1/intake/{intake_id}/review",
     }
 
 

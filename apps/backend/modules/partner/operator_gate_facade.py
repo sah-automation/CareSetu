@@ -294,6 +294,7 @@ class OperatorGateFacade:
                     )
             return PartnerView(
                 partner_id=partner_id,
+                partner_type=profile.partner_type,
                 status=next_state.status.value,
                 round=next_state.round,
             )
@@ -357,6 +358,7 @@ class OperatorGateFacade:
             )
             return PartnerView(
                 partner_id=partner_id,
+                partner_type=profile.partner_type,
                 status=next_state.status.value,
                 round=next_state.round,
             )
