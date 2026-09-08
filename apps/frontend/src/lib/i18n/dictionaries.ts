@@ -826,6 +826,59 @@ const en = {
       micUnavailableBody:
         "Check that microphone access is allowed, then try again.",
     },
+
+    // pre-summary review surface (PHASE-7 T18, #362): the AI draft shown to
+    // the patient with the honesty cue "AI draft - doctor will verify"
+    // (never "AI diagnosis", ADR-0001), the structuring confidence value +
+    // light indicator, and - for low_confidence drafts - a calm amber
+    // doctor-must-check notice with the forced-review framing (warn, never
+    // red). Structured fields render read-only; the patient can edit them
+    // and the edits persist via the save-edits route and render as
+    // corrections. A continuation CTA points toward consultation booking
+    // (FEAT-007, blueprint §5.4/§6.4; PROTO-PHASE-7/8 page is the copy spec).
+    preSummary: {
+      breadcrumb: "Pre-summary",
+      title: "Your pre-summary",
+      description:
+        "A quick look at what we understood. You can correct anything.",
+      bannerLine1: "AI draft - your doctor will verify this",
+      bannerLine2:
+        "This is not a diagnosis. Your doctor will review and confirm.",
+      lowBannerLine1: "AI is not fully sure here",
+      lowBannerLine2: "Doctor will need to check this before it can be used.",
+      lowVerifyLine:
+        "This pre-summary will force a doctor review before any prescription.",
+      confidence: "Structuring confidence",
+      lowTag: "Low confidence",
+      groupTitle: "What the AI understood",
+      editBtn: "Edit this summary",
+      confirmBtn: "Confirm & continue",
+      confirmBtnLow: "Continue to consultation",
+      editNote: "Your edits help the doctor understand you better.",
+      cancelEdit: "Cancel",
+      saveEdit: "Save edits",
+      savingEdit: "Saving…",
+      correctionsTag: "Corrected",
+      doneClean: "Use as is",
+      doneLow: "Summary noted. Doctor will verify.",
+      bookTitle: "Book consultation with this summary",
+      bookSub: "Find a doctor who can review your pre-summary.",
+      bookSubLow:
+        "Your doctor will verify this pre-summary before it can be used for a prescription.",
+      loading: "Checking your pre-summary…",
+      emptyTitle: "Your pre-summary isn't ready yet",
+      emptyBody:
+        "Check again in a moment - the doctor will review your symptoms.",
+      loadFailedTitle: "We couldn't load your pre-summary",
+      loadFailedBody: "Check your connection and try again.",
+      saveFailedTitle: "We couldn't save your edits",
+      saveFailedBody: "Check your connection and try again.",
+      fields: {
+        chief_complaints: "Chief complaints",
+        symptoms: "Symptoms",
+        duration: "Duration",
+      },
+    },
   },
 };
 
@@ -1567,6 +1620,52 @@ export const STRINGS: Record<Lang, Dictionary> = {
           "आपकी रिकॉर्डिंग सुरक्षित है। कनेक्शन जाँचकर फिर कोशिश करें।",
         micUnavailableTitle: "हम आपके माइक तक नहीं पहुँच पाए",
         micUnavailableBody: "माइक की अनुमति जाँचकर फिर कोशिश करें।",
+      },
+
+      // T18 (#362): प्री-सारांश रिव्यू पेज - ईमानदारी बैनर "AI ड्राफ़्ट -
+      // डॉक्टर पुष्टि करेंगे" (ADR-0001), स्ट्रक्चरिंग विश्वास स्तर + संकेतक,
+      // और कम-विश्वास ड्राफ़्ट के लिए शांत एम्बर (चेतावनी, लाल नहीं) डॉक्टर
+      // जाँच अनिवार्य नोटिस। फ़ील्ड संपादन save-edits रूट से सहेजे जाते हैं
+      // और सुधार के रूप में दिखते हैं। परामर्श बुकिंग की ओर जारी रखने का CTA।
+      preSummary: {
+        breadcrumb: "प्री-सारांश",
+        title: "आपका प्री-सारांश",
+        description: "हमने जो समझा उस पर एक नज़र। आप कुछ भी सुधार सकते हैं।",
+        bannerLine1: "AI ड्राफ़्ट - आपका डॉक्टर इसकी पुष्टि करेगा",
+        bannerLine2: "यह निदान नहीं है। आपका डॉक्टर इसकी पुष्टि करेगा।",
+        lowBannerLine1: "AI को पूरा भरोसा नहीं है",
+        lowBannerLine2: "इस्तेमाल से पहले डॉक्टर को यह जाँचना होगा।",
+        lowVerifyLine:
+          "यह प्री-सारांश किसी भी नुस्खे से पहले डॉक्टर की जाँच अनिवार्य करेगा।",
+        confidence: "स्ट्रक्चरिंग विश्वास स्तर",
+        lowTag: "कम विश्वास",
+        groupTitle: "हमने जो समझा",
+        editBtn: "इस सारांश को संपादित करें",
+        confirmBtn: "पुष्टि करें और आगे बढ़ें",
+        confirmBtnLow: "परामर्श जारी रखें",
+        editNote: "आपके संपादन डॉक्टर को बेहतर समझने में मदद करते हैं।",
+        cancelEdit: "रद्द करें",
+        saveEdit: "संपादन सहेजें",
+        savingEdit: "सहेजा जा रहा है…",
+        correctionsTag: "सुधारा गया",
+        doneClean: "ऐसे ही उपयोग करें",
+        doneLow: "सारांश तैयार। डॉक्टर पुष्टि करेंगे।",
+        bookTitle: "इस सारांश के साथ परामर्श बुक करें",
+        bookSub: "एक डॉक्टर खोजें जो आपके प्री-सारांश की जाँच कर सके।",
+        bookSubLow: "नुस्खे से पहले आपका डॉक्टर इस प्री-सारांश की जाँच करेगा।",
+        loading: "आपका प्री-सारांश देखा जा रहा है…",
+        emptyTitle: "आपका प्री-सारांश अभी तैयार नहीं है",
+        emptyBody:
+          "थोड़ी देर बाद फिर देखें - डॉक्टर आपके लक्षणों की समीक्षा करेंगे।",
+        loadFailedTitle: "हम आपका प्री-सारांश लोड नहीं कर पाए",
+        loadFailedBody: "कनेक्शन जाँचकर फिर कोशिश करें।",
+        saveFailedTitle: "हम आपके संपादन सहेज नहीं पाए",
+        saveFailedBody: "कनेक्शन जाँचकर फिर कोशिश करें।",
+        fields: {
+          chief_complaints: "मुख्य शिकायतें",
+          symptoms: "लक्षण",
+          duration: "अवधि",
+        },
       },
     },
   },
