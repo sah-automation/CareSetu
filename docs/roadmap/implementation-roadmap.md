@@ -530,6 +530,14 @@ _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade f
 - **Target for `prototype`:** Voice recorder + upload-resilient intake screen (hi/en toggle).
 - **Target for `to-spec` & `to-tickets`:** Scope boundary = `submit_intake`, `get_intake`, `get_pre_summary`, `mark_pre_summary_reviewed`, `request_rx_draft` (facade), AI pipeline worker + budget meter, intake PWA screen.
 
+#### 7. Scope Deviations (Delivered Beyond Boundary)
+
+- **`save_patient_pre_summary_edits`** (facade `intake/facade.py:532`, route `intake/adapters/routes.py:284`): Patient-side informational corrections to the AI pre-summary (US-14). This facade method was not listed in the original scope boundary above, but was delivered in Phase 7 T09 (#353) because:
+  1. The pre-summary review UI (T18/T09) required a way for patients to flag perceived mistakes.
+  2. The implementation is complete, tested (unit + integration), and carries no regulatory risk (patient edits are informational only; doctor review retains edit-wins authority).
+  3. Removing it would regress the pre-summary review surface that was already shipped and smoke-tested.
+     **Decision: keep.** The method is retained as a Phase 7 delivery that exceeded the original scope boundary. Documented here so the scope line above is understood as the _original_ boundary, not the _final_ delivered surface.
+
 ---
 
 ### 2.8 Phase 8: Care Case, Consult Handshake & E-Prescription
