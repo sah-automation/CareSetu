@@ -30,6 +30,7 @@ from modules.intake.domain.events import (
     pre_summary_ready_envelope,
 )
 from modules.intake.domain.exceptions import (
+    IllegalIntakeTransitionError,
     IntakeNotFoundError,
     IntakeValidationError,
     MediaTransferError,
@@ -62,6 +63,7 @@ from modules.intake.intake_models import (
     PreSummaryReviewResult,
     PreSummaryView,
     ReRecordResult,
+    StructuredFields,
 )
 from modules.intake.outbox import INTAKE_OUTBOX_TABLE
 from modules.intake.schema.models import (
@@ -292,6 +294,12 @@ class IntakeFacade:
                 forced_text=bool(row.forced_text),
             )
 
+            if current.status is not IntakeStatus.RE_RECORD:
+                raise IllegalIntakeTransitionError(
+                    f"intake {intake_id} is in status {current.status.value}, "
+                    "not re_record; re-record is only allowed on re-record intakes"
+                )
+
             if current.record_attempts >= MAX_RECORD_ATTEMPTS:
                 next_state = transition(current, IntakeAction.FORCE_TEXT)
                 await connection.execute(
@@ -458,7 +466,7 @@ class IntakeFacade:
         return PreSummaryView(
             pre_summary_id=int(row.id),
             intake_id=int(row.intake_id),
-            structured_fields=dict(row.structured_fields or {}),
+            structured_fields=StructuredFields.model_validate(row.structured_fields or {}),
             structuring_confidence=row.structuring_confidence,
             low_confidence=row.low_confidence,
             review_state=row.review_state,

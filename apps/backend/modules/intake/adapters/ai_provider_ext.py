@@ -33,6 +33,7 @@ import logging
 import random
 import time
 from collections.abc import Awaitable, Callable
+from typing import TypeVar
 
 import httpx
 from langfuse import observe
@@ -206,6 +207,9 @@ class Ext002AiProvider:
         return DraftRxResult.model_validate(data)
 
 
+_R = TypeVar("_R")
+
+
 class CircuitBreakerAiGateway:
     """Wraps the real provider: fast-fails every call while it is down.
 
@@ -257,53 +261,32 @@ class CircuitBreakerAiGateway:
                 self._consecutive_failures,
             )
 
-    @observe
-    async def transcribe(self, request: TranscribeRequest) -> TranscribeResult:
+    async def _run_with_breaker(self, name: str, fn: Awaitable[_R]) -> _R:
         if not self._allow():
             raise Ext002CallError(
                 "EXT-002 circuit breaker is open; call refused without the provider",
                 retries_exhausted=True,
             )
         try:
-            result = await self._adapter.transcribe(request)
+            result = await fn
         except Ext002CallError as exc:
             if exc.retries_exhausted:
                 self._record(ok=False)
             raise
         self._record(ok=True)
         return result
+
+    @observe
+    async def transcribe(self, request: TranscribeRequest) -> TranscribeResult:
+        return await self._run_with_breaker("transcribe", self._adapter.transcribe(request))
 
     @observe
     async def structure(self, request: StructureRequest) -> StructureResult:
-        if not self._allow():
-            raise Ext002CallError(
-                "EXT-002 circuit breaker is open; call refused without the provider",
-                retries_exhausted=True,
-            )
-        try:
-            result = await self._adapter.structure(request)
-        except Ext002CallError as exc:
-            if exc.retries_exhausted:
-                self._record(ok=False)
-            raise
-        self._record(ok=True)
-        return result
+        return await self._run_with_breaker("structure", self._adapter.structure(request))
 
     @observe
     async def draft_rx(self, request: DraftRxRequest) -> DraftRxResult:
-        if not self._allow():
-            raise Ext002CallError(
-                "EXT-002 circuit breaker is open; call refused without the provider",
-                retries_exhausted=True,
-            )
-        try:
-            result = await self._adapter.draft_rx(request)
-        except Ext002CallError as exc:
-            if exc.retries_exhausted:
-                self._record(ok=False)
-            raise
-        self._record(ok=True)
-        return result
+        return await self._run_with_breaker("draft_rx", self._adapter.draft_rx(request))
 
 
 def build_ai_gateway(settings: Settings) -> AiGateway:

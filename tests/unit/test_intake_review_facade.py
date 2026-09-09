@@ -37,6 +37,7 @@ from modules.intake.facade import IntakeFacade
 from modules.intake.intake_models import (
     PatientEditsResult,
     PreSummaryReviewResult,
+    StructuredFields,
 )
 from modules.intake.schema.models import (
     intake_pre_summaries,
@@ -218,7 +219,7 @@ async def test_get_pre_summary_surfaces_patient_edits_for_the_doctor() -> None:
 
     assert view.patient_edits == {"severity": "worse than stated"}
     # The informational corrections never leak into the AI structured fields.
-    assert view.structured_fields == {"symptoms": ["headache"], "severity": "mild"}
+    assert view.structured_fields == StructuredFields(symptoms=["headache"], severity="mild")
     assert view.review_state == "draft"
 
 

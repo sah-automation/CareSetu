@@ -4,9 +4,33 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class StructuredFields(BaseModel):
+    """The AI-structured clinical fields extracted from a symptom intake.
+
+    ``chief_complaints`` are the top-level complaints the patient mentions.
+    ``symptoms`` are the associated symptom descriptions. ``duration`` is the
+    time course (e.g. "3 days", "since last week") when the AI extracted one,
+    or None when absent.
+
+    Fields default to their empty shapes so a stored pre-summary that omits a
+    field (or carries extra doctor-review/patient-edit keys merged into
+    ``structured_fields``) still reads back losslessly - this is the pure-refactor
+    contract: the typed boundary must never change what ``get_pre_summary``
+    returns.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    chief_complaints: list[str] = Field(default_factory=list)
+    symptoms: list[str] = Field(default_factory=list)
+    duration: str | None = None
+
+
+ClinicalEdits = dict[str, str | list[str]]
 
 
 class MediaFile(BaseModel):
@@ -124,12 +148,12 @@ class PreSummaryView(BaseModel):
 
     pre_summary_id: int
     intake_id: int
-    structured_fields: dict[str, Any]
+    structured_fields: StructuredFields
     structuring_confidence: Decimal | float | None
     low_confidence: bool
     review_state: str
-    patient_edits: dict[str, Any] | None
-    doctor_corrections: dict[str, Any] | None
+    patient_edits: ClinicalEdits | None
+    doctor_corrections: ClinicalEdits | None
     review_attribution: str | None
     reviewed_by: int | None
     reviewed_at: datetime | None
@@ -149,7 +173,7 @@ class PatientEditsResult(BaseModel):
 
     intake_id: int
     pre_summary_id: int
-    patient_edits: dict[str, Any] | None
+    patient_edits: ClinicalEdits | None
 
 
 class PreSummaryReviewResult(BaseModel):
@@ -173,7 +197,7 @@ class PreSummaryReviewResult(BaseModel):
     intake_id: int
     pre_summary_id: int
     review_state: str
-    reviewed_copy: dict[str, Any]
+    reviewed_copy: ClinicalEdits
     changed_fields: list[str]
     review_attribution: str
     reviewed_by: int

@@ -66,15 +66,21 @@ export interface IntakeDetailView {
   updated_at: string;
 }
 
+export interface StructuredFields {
+  chief_complaints: string[];
+  symptoms: string[];
+  duration: string | null;
+}
+
 export interface PreSummaryView {
   pre_summary_id: number;
   intake_id: number;
-  structured_fields: Record<string, unknown>;
+  structured_fields: StructuredFields;
   structuring_confidence: number | null;
   low_confidence: boolean;
   review_state: string;
-  patient_edits: Record<string, unknown> | null;
-  doctor_corrections: Record<string, unknown> | null;
+  patient_edits: Record<string, string | string[]> | null;
+  doctor_corrections: Record<string, string | string[]> | null;
   review_attribution: string | null;
   reviewed_by: number | null;
   reviewed_at: string | null;
@@ -85,8 +91,10 @@ export interface PreSummaryView {
 export interface PatientEditsResult {
   intake_id: number;
   pre_summary_id: number;
-  patient_edits: Record<string, unknown> | null;
+  patient_edits: Record<string, string | string[]> | null;
 }
+
+export type ClinicalEdits = Record<string, string | string[]>;
 
 export interface SubmitIntakeRequest {
   mode: IntakeMode;

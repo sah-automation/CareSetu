@@ -44,6 +44,7 @@ from modules.intake.intake_models import (
     IntakeDetailView,
     MediaUploadRef,
     PreSummaryView,
+    StructuredFields,
 )
 from modules.intake.schema.models import (
     intake_intakes,
@@ -374,7 +375,7 @@ async def test_get_pre_summary_returns_draft_confidence_honesty_and_edits() -> N
     assert isinstance(view, PreSummaryView)
     assert view.pre_summary_id == 5
     assert view.intake_id == 1
-    assert view.structured_fields == {"symptoms": ["headache"], "severity": "mild"}
+    assert view.structured_fields == StructuredFields(symptoms=["headache"], severity="mild")
     assert view.structuring_confidence == 0.82
     assert view.low_confidence is False
     assert view.review_state == "draft"

@@ -58,6 +58,7 @@ from modules.intake.domain.state_machine import (
     transition,
 )
 from modules.intake.facade import INTAKE_SCHEMA
+from modules.intake.intake_models import StructuredFields
 from modules.intake.outbox import INTAKE_OUTBOX_TABLE
 from modules.intake.schema.models import (
     intake_ai_jobs,
@@ -257,11 +258,11 @@ async def _run_structuring_pipeline(
             confidence = structure_result.confidence
             low_conf = is_low_confidence(confidence)
 
-            structured_fields: dict[str, object] = {
-                "chief_complaints": structure_result.chief_complaints,
-                "symptoms": structure_result.symptoms,
-                "duration": structure_result.duration,
-            }
+            structured_fields = StructuredFields(
+                chief_complaints=structure_result.chief_complaints,
+                symptoms=structure_result.symptoms,
+                duration=structure_result.duration,
+            )
         except (Ext002CallError, ValidationError) as exc:
             await _fail_job(
                 connection,
@@ -412,7 +413,7 @@ async def _finalize_pipeline(
     ai_job_id: int,
     confidence: float,
     elapsed_ms: int,
-    structured_fields: dict[str, object],
+    structured_fields: StructuredFields,
     low_conf: bool,
     record_attempts: int,
     forced_text: bool,
@@ -452,7 +453,7 @@ async def _finalize_pipeline(
         intake_pre_summaries.insert()
         .values(
             intake_id=intake_id,
-            structured_fields=structured_fields,
+            structured_fields=structured_fields.model_dump(mode="json"),
             structuring_confidence=Decimal(str(confidence)),
             low_confidence=low_conf,
             review_state="draft",

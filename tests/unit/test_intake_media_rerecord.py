@@ -30,6 +30,7 @@ from modules.intake.domain.events import (
     IntakeRetryRequestedPayload,
 )
 from modules.intake.domain.exceptions import (
+    IllegalIntakeTransitionError,
     IntakeNotFoundError,
     IntakeValidationError,
     MediaTransferError,
@@ -408,6 +409,28 @@ async def test_re_record_refuses_an_intake_the_patient_does_not_own() -> None:
 
     with pytest.raises(IntakeNotFoundError, match="not found for patient"):
         await facade.re_record_intake(intake_id=1, patient_id=99, media_ref=_media_ref())
+
+
+# ---------------------------------------------------------------------------
+# re_record_intake - status guard
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_re_record_refuses_an_intake_not_in_re_record_status() -> None:
+    """Only re_record intakes can accept a fresh attempt (explicit status guard).
+
+    A captured intake is not yet in the re-record ladder; the facade refuses
+    before the attempt-cap check, and no row changes or events are written.
+    """
+    connection = _connection([_FakeResult(row=_intake_row(status="captured"))])
+    facade = _facade(connection)
+
+    with pytest.raises(IllegalIntakeTransitionError, match="not re_record"):
+        await facade.re_record_intake(intake_id=1, patient_id=7, media_ref=_media_ref())
+
+    assert _inserts(connection) == []
+    assert connection.execute.await_count == 1
 
 
 @pytest.mark.asyncio
