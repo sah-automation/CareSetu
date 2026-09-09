@@ -313,8 +313,8 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 #### 2. Inbound & Outbound Interfaces
 
 - **Inbound Sync APIs:** `submit_intake(patient, mode, language, media|text)`, `get_intake`, `get_pre_summary(intake_id)`, `mark_pre_summary_reviewed(intake_id, doctor)`, `request_rx_draft(doctor_input_ref, pre_summary_ref, history_summary)`.
-- **Inbound Events Subscribed:** `intake.captured` (self-trigger → async AI pipeline).
-- **Outbound Events Published:** `intake.captured`, `pre_summary.ready`, `pre_summary.low_confidence`, `ai_job.completed`, `ai_job.failed`, `ai_egress.recorded`.
+- **Inbound Events Subscribed:** `intake.captured` (self-trigger → async AI pipeline), `intake.started` (self: telemetry-only log + count - intake funnel entry, T05 #369).
+- **Outbound Events Published:** `intake.started`, `intake.captured`, `pre_summary.ready`, `pre_summary.low_confidence`, `ai_job.completed`, `ai_job.failed`, `ai_egress.recorded`.
 
 #### 3. Core Business Logic & State Machines
 
@@ -605,6 +605,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 | `consent.requested`                            | `MOD-004` (Consent)         | `MOD-003`, `MOD-011`                                                         | JSON           | At-least-once              |
 | `consent.granted`                              | `MOD-004` (Consent)         | `MOD-003` (update share scope), `MOD-011`                                    | JSON           | At-least-once              |
 | `consent.revoked`                              | `MOD-004` (Consent)         | `MOD-003` (stop sharing), `MOD-011`                                          | JSON           | At-least-once              |
+| `intake.started`                               | `MOD-005` (Intake)          | `MOD-005` (self: telemetry log + count)                                      | JSON           | At-least-once              |
 | `intake.captured`                              | `MOD-005` (Intake)          | `MOD-005` (self: AI pipeline), `MOD-011`                                     | JSON           | At-least-once              |
 | `intake.retry_requested`                       | `MOD-005` (Intake)          | `MOD-005` (self: re-record flow), `MOD-011`                                  | JSON           | At-least-once              |
 | `pre_summary.ready`                            | `MOD-005` (Intake)          | `MOD-006` (attach case), `MOD-010` (in-app notify), `MOD-011`                | JSON           | At-least-once              |

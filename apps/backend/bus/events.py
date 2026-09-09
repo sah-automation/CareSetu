@@ -95,12 +95,14 @@ EVENT_DIRECTORY_SEARCH = "directory.search"
 EVENT_PARTNER_SELECTED = "partner.selected"
 # MOD-005 (intake): the symptom-intake + AI pre-summary event set.
 # internal-modules.md §4.2 registry; PHASE-7 T04 (#349). The intake facade
-# emits ``intake.captured`` / ``intake.retry_requested`` on intake capture /
+# emits ``intake.started`` (telemetry funnel entry, PHASE-7 T05 #369) plus
+# ``intake.captured`` / ``intake.retry_requested`` on intake capture /
 # re-record requests; the AI pipeline self-subscribes to ``intake.captured`` to
 # trigger structuring, publishes ``pre_summary.ready`` / ``pre_summary
 # .low_confidence`` when a pre-summary is finalized, ``ai_job.completed`` /
 # ``ai_job.failed`` per AI job, and ``ai_egress.recorded`` for the PHI-minimized
 # egress audit trail (MOD-011) and consent log (MOD-004).
+EVENT_INTAKE_STARTED = "intake.started"
 EVENT_INTAKE_CAPTURED = "intake.captured"
 EVENT_INTAKE_RETRY_REQUESTED = "intake.retry_requested"
 EVENT_PRE_SUMMARY_READY = "pre_summary.ready"

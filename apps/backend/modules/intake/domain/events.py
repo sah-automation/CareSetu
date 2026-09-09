@@ -26,6 +26,7 @@ from bus.events import (
     EVENT_AI_JOB_FAILED,
     EVENT_INTAKE_CAPTURED,
     EVENT_INTAKE_RETRY_REQUESTED,
+    EVENT_INTAKE_STARTED,
     EVENT_PRE_SUMMARY_LOW_CONFIDENCE,
     EVENT_PRE_SUMMARY_READY,
 )
@@ -33,6 +34,25 @@ from bus.events import (
 PRODUCER_MODULE = "intake"
 
 AiTaskType = Literal["transcribe", "structure", "draft", "summarize"]
+
+IntakeMode = Literal["voice", "text"]
+IntakeLanguage = Literal["hi", "en"]
+
+
+class IntakeStartedPayload(BaseModel):
+    """Subject of ``intake.started``: a patient began a symptom intake.
+
+    Funnel-telemetry entry (PRD §4.3.1, PHASE-7 T05 #369) ride-along in the
+    same outbox transaction as ``intake.captured``; MOD-005 self-subscribes
+    to log + count it (KPI-001 pipeline counters). Carries only the funnel
+    facts - patient id, the mode (voice|text) and language - no clinical
+    content. Deliberately NOT a regulated act: it precedes capture, so no
+    intake row exists yet.
+    """
+
+    patient_id: int
+    mode: IntakeMode
+    language: IntakeLanguage
 
 
 class IntakeCapturedPayload(BaseModel):
@@ -120,6 +140,18 @@ class AiEgressRecordedPayload(BaseModel):
     intake_id: int
     ai_job_id: int
     reason: str
+
+
+def intake_started_envelope(
+    *, patient_id: int, mode: IntakeMode, language: IntakeLanguage
+) -> Envelope[IntakeStartedPayload]:
+    """Build the ``intake.started`` funnel-telemetry envelope for the intake outbox."""
+    return Envelope[IntakeStartedPayload](
+        event_id=uuid4(),
+        event_type=EVENT_INTAKE_STARTED,
+        producer=PRODUCER_MODULE,
+        payload=IntakeStartedPayload(patient_id=patient_id, mode=mode, language=language),
+    )
 
 
 def intake_captured_envelope(*, intake_id: int) -> Envelope[IntakeCapturedPayload]:

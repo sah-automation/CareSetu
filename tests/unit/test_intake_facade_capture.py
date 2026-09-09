@@ -5,11 +5,13 @@ partner registration sub-facade direct-seam suite
 (``test_partner_facade_register.py``). Pins the capture contract at the
 facade-with-fakes seam:
 
-- ``submit_intake`` commits the intake row and the ``intake.captured``
-  outbox row in the SAME transaction - the outbox write goes through
-  ``write_outbox`` on the same connection as the intake insert (ADR-0002
-  S1), so a crash between state change and dispatch cannot lose the
-  event (accepted criterion 1).
+- ``submit_intake`` commits the intake row and the ``intake.started`` +
+  ``intake.captured`` outbox rows in the SAME transaction - the outbox writes go
+  through ``write_outbox`` on the same connection as the intake insert
+  (ADR-0002 S1), so a crash between state change and dispatch cannot lose the
+  events (accepted criterion 1). ``intake.started`` is the PHASE-7 T05 #369
+  funnel-telemetry ride-along (patient id + mode + language) written ahead of
+  ``intake.captured`` to preserve funnel ordering.
 - One-mode-per-intake and the text cap (2000 chars) are enforced
   server-side with typed errors (accepted criterion 2).
 - ``get_intake`` / ``get_pre_summary`` return the agreed DTO shapes:
@@ -33,7 +35,9 @@ from sqlalchemy.sql.dml import Insert
 
 from modules.intake.domain.events import (
     EVENT_INTAKE_CAPTURED,
+    EVENT_INTAKE_STARTED,
     IntakeCapturedPayload,
+    IntakeStartedPayload,
 )
 from modules.intake.domain.exceptions import (
     IntakeNotFoundError,
@@ -176,10 +180,25 @@ def _outbox_result() -> _FakeResult:
     return _FakeResult(scalar=None)
 
 
+def _outbox_inserts(connection: AsyncMock) -> list[Insert]:
+    return [
+        call.args[0]
+        for call in connection.execute.await_args_list
+        if isinstance(call.args[0], Insert) and call.args[0].table.name == "intake_outbox"
+    ]
+
+
+def _outbox_array(connection: AsyncMock, event_type: str) -> Insert | None:
+    for stmt in _outbox_inserts(connection):
+        if stmt.compile().params["event_type"] == event_type:
+            return stmt
+    return None
+
+
 @pytest.mark.asyncio
 async def test_submit_intake_commits_row_and_captured_outbox_in_one_transaction() -> None:
-    """The intake insert and ``intake.captured`` outbox write share a connection."""
-    connection = _connection([_intake_id_result(intake_id=42), _outbox_result()])
+    """The intake insert and both outbox writes (started + captured) share a connection."""
+    connection = _connection([_intake_id_result(intake_id=42), _outbox_result(), _outbox_result()])
     facade = _facade(connection)
 
     result = await facade.submit_intake(
@@ -205,12 +224,49 @@ async def test_submit_intake_commits_row_and_captured_outbox_in_one_transaction(
 
 
 @pytest.mark.asyncio
+async def test_submit_intake_writes_started_then_captured_envelope_in_one_transaction() -> None:
+    """``intake.started`` (funnel) and ``intake.captured`` ride the same outbox write."""
+    connection = _connection(
+        [
+            _intake_id_result(intake_id=9),
+            _FakeResult(scalar=None),
+            _outbox_result(),
+            _outbox_result(),
+        ]
+    )
+    facade = _facade(connection)
+
+    await facade.submit_intake(
+        patient_id=7,
+        mode="voice",
+        language="en",
+        media_ref=_media_ref(),
+    )
+
+    # The zero-cost assertion: both outbox writes passed the same connection,
+    # the intake schema, the outbox table name, and typed envelopes - started
+    # first (funnel order), captured second, exactly like the PRD trail.
+    outboxes = _outbox_inserts(connection)
+    assert [stmt.compile().params["event_type"] for stmt in outboxes] == [
+        EVENT_INTAKE_STARTED,
+        EVENT_INTAKE_CAPTURED,
+    ]
+    started = IntakeStartedPayload.model_validate(outboxes[0].compile().params["payload"])
+    assert started.patient_id == 7
+    assert started.mode == "voice"
+    assert started.language == "en"
+    captured = IntakeCapturedPayload.model_validate(outboxes[1].compile().params["payload"])
+    assert captured.intake_id == 9
+
+
+@pytest.mark.asyncio
 async def test_submit_intake_writes_the_captured_envelope_through_write_outbox() -> None:
     """The outbox write is a real ``intake.captured`` envelope, not a raw row."""
     connection = _connection(
         [
             _intake_id_result(intake_id=9),
             _FakeResult(scalar=None),
+            _outbox_result(),
             _outbox_result(),
         ]
     )
@@ -229,10 +285,12 @@ async def test_submit_intake_writes_the_captured_envelope_through_write_outbox()
     calls = [
         call for call in connection.execute.await_args_list if isinstance(call.args[0], Insert)
     ]
-    # Three inserts: intake row, media-ref row (voice attach), outbox row.
-    assert len(calls) == 3
-    outbox_write = next(c for c in calls if c.args[0].table.name == "intake_outbox")
-    values = outbox_write.args[0].compile().params
+    # Four inserts: intake row, media-ref row (voice attach), and the two
+    # outbox rows (started + captured).
+    assert len(calls) == 4
+    captured_write = _outbox_array(connection, EVENT_INTAKE_CAPTURED)
+    assert captured_write is not None
+    values = captured_write.compile().params
     assert values["event_type"] == EVENT_INTAKE_CAPTURED
     assert values["status"] == "pending"
     payload = IntakeCapturedPayload.model_validate(values["payload"])
@@ -302,6 +360,7 @@ async def test_submit_intake_voice_duration_at_floor_is_accepted() -> None:
             _intake_id_result(intake_id=8),
             _FakeResult(scalar=None),
             _outbox_result(),
+            _outbox_result(),
         ]
     )
     facade = _facade(connection)
@@ -323,6 +382,7 @@ async def test_submit_intake_voice_duration_at_ceiling_is_accepted() -> None:
         [
             _intake_id_result(intake_id=8),
             _FakeResult(scalar=None),
+            _outbox_result(),
             _outbox_result(),
         ]
     )
@@ -372,7 +432,7 @@ async def test_submit_intake_text_exceeding_2000_chars_is_rejected() -> None:
 @pytest.mark.asyncio
 async def test_submit_intake_text_of_exactly_2000_chars_is_accepted() -> None:
     """The cap is inclusive: exactly 2000 chars is a valid submission."""
-    connection = _connection([_intake_id_result(intake_id=8), _outbox_result()])
+    connection = _connection([_intake_id_result(intake_id=8), _outbox_result(), _outbox_result()])
     facade = _facade(connection)
 
     result = await facade.submit_intake(
@@ -389,14 +449,14 @@ async def test_submit_intake_text_of_exactly_2000_chars_is_accepted() -> None:
 async def test_submit_intake_capture_commits_before_any_ai_runs() -> None:
     """A capture commits durably and never touches an AI seam (AC5, durable here).
 
-    The ticket's durability half is structural: the intake row and its
-    ``intake.captured`` outbox event are the ONLY writes in the submit
-    transaction - no AI gateway call is attempted on this facade at all.
-    The AI pipeline runs asynchronously from the captured event; its
-    failure handling (``ai_job.failed``, raw-review degrade) is tested at
-    the worker/pipeline seam in the later pipeline tickets.
+    The ticket's durability half is structural: the intake row and its outbox
+    events are the ONLY writes in the submit transaction - no AI gateway call
+    is attempted on this facade at all. The AI pipeline runs asynchronously
+    from the captured event; its failure handling (``ai_job.failed``,
+    raw-review degrade) is tested at the worker/pipeline seam in the later
+    pipeline tickets.
     """
-    connection = _connection([_intake_id_result(intake_id=42), _outbox_result()])
+    connection = _connection([_intake_id_result(intake_id=42), _outbox_result(), _outbox_result()])
     facade = _facade(connection)
 
     result = await facade.submit_intake(
@@ -407,10 +467,14 @@ async def test_submit_intake_capture_commits_before_any_ai_runs() -> None:
     )
 
     assert result.status == "captured"
-    # Exactly two inserts (row + outbox event) and nothing else touched the
-    # connection - no AI gateway seam exists on this facade.
+    # Exactly three inserts (row + the started/captured outbox events) and
+    # nothing else touched the connection - no AI gateway seam exists here.
     inserts = _inserts(connection)
-    assert [s.table.name for s in inserts] == ["intake_intakes", "intake_outbox"]
+    assert [s.table.name for s in inserts] == [
+        "intake_intakes",
+        "intake_outbox",
+        "intake_outbox",
+    ]
 
 
 @pytest.mark.asyncio

@@ -4,15 +4,21 @@ Pins the code-side mirror of the §4.2 registry names the intake module
 publishes: every event names the orchestration/audit facts (ids, the task
 kind, retry attempt, failure reason) and never carries PHI (transcript,
 structured clinical fields, confidence scores, egressed bytes stay in the
-``intake`` schema - security-phii-standards no-PHI). Covers the frozen event
+``intake`` schema - security-phii-standards no-PHI). ``intake.started``
+(PHASE-7 T05 #369) carries the funnel facts - patient id, mode, language -
+and has no intake id yet because it precedes capture. Covers the frozen event
 shapes, the ``register_handlers`` registration seam (payload models + the
-``intake.captured`` self-subscription), and an emitted-envelope round-trip
-through the registry validator - all without a database.
+``intake.started`` telemetry and ``intake.captured`` self-subscriptions), and
+an emitted-envelope round-trip through the registry validator - all without a
+database.
 """
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -26,11 +32,12 @@ from bus.events import (
     EVENT_AI_JOB_FAILED,
     EVENT_INTAKE_CAPTURED,
     EVENT_INTAKE_RETRY_REQUESTED,
+    EVENT_INTAKE_STARTED,
     EVENT_PRE_SUMMARY_LOW_CONFIDENCE,
     EVENT_PRE_SUMMARY_READY,
 )
 from bus.registry import HandlerRegistry
-from modules.intake.adapters import register_handlers
+from modules.intake.adapters import intake_started_count, register_handlers
 from modules.intake.domain.events import (
     PRODUCER_MODULE,
     ai_egress_recorded_envelope,
@@ -38,11 +45,13 @@ from modules.intake.domain.events import (
     ai_job_failed_envelope,
     intake_captured_envelope,
     intake_retry_requested_envelope,
+    intake_started_envelope,
     pre_summary_low_confidence_envelope,
     pre_summary_ready_envelope,
 )
 
 _ALL_EVENT_TYPES = (
+    EVENT_INTAKE_STARTED,
     EVENT_INTAKE_CAPTURED,
     EVENT_INTAKE_RETRY_REQUESTED,
     EVENT_PRE_SUMMARY_READY,
@@ -69,6 +78,7 @@ def test_every_intake_event_type_is_registered_in_bus_events() -> None:
     # The four-part names (pre_summary.*, ai_job.*, ai_egress.*) are not in the
     # legacy snake_case gated domains, but each must resolve to a canonical
     # dot-notation constant, not an ad hoc string.
+    assert EVENT_INTAKE_STARTED == "intake.started"
     assert EVENT_INTAKE_CAPTURED == "intake.captured"
     assert EVENT_INTAKE_RETRY_REQUESTED == "intake.retry_requested"
     assert EVENT_PRE_SUMMARY_READY == "pre_summary.ready"
@@ -80,6 +90,7 @@ def test_every_intake_event_type_is_registered_in_bus_events() -> None:
 
 def _capture_from_all_event_types() -> list[Envelope[BaseModel]]:
     return [
+        intake_started_envelope(patient_id=7, mode="voice", language="hi"),
         intake_captured_envelope(intake_id=1),
         intake_retry_requested_envelope(intake_id=1, record_attempt=2),
         pre_summary_ready_envelope(intake_id=1, pre_summary_id=5),
@@ -88,6 +99,16 @@ def _capture_from_all_event_types() -> list[Envelope[BaseModel]]:
         ai_job_failed_envelope(ai_job_id=9, intake_id=1, task_type="transcribe", reason="timeout"),
         ai_egress_recorded_envelope(intake_id=1, ai_job_id=9, reason="structure"),
     ]
+
+
+def test_intake_started_carries_patient_mode_and_language() -> None:
+    envelope = intake_started_envelope(patient_id=7, mode="voice", language="hi")
+
+    assert envelope.event_type == EVENT_INTAKE_STARTED
+    assert envelope.producer == PRODUCER_MODULE
+    assert envelope.payload.patient_id == 7
+    assert envelope.payload.mode == "voice"
+    assert envelope.payload.language == "hi"
 
 
 def test_captured_carries_only_the_intake_id() -> None:
@@ -154,10 +175,11 @@ def test_ai_egress_recorded_names_the_job_and_reason() -> None:
 
 def test_no_payload_carries_phi() -> None:
     # security-phii-standards: transcripts, clinical fields, confidence scores
-    # and egressed bytes never travel - only ids and operational facts.
+    # and egressed bytes never travel - only ids and operational facts (and, for
+    # ``intake.started``, the funnel facts that precede any captured content).
     for envelope in _capture_from_all_event_types():
         dumped = envelope.payload.model_dump(mode="json")
-        assert "intake_id" in dumped or "ai_job_id" in dumped
+        assert "intake_id" in dumped or "ai_job_id" in dumped or "patient_id" in dumped
     transcript_keys = {
         key
         for envelope in _capture_from_all_event_types()
@@ -181,13 +203,16 @@ def test_register_handlers_registers_payload_models_without_duplicates() -> None
         assert registry.payload_model_for(event_type) is not None
 
 
-def test_register_handlers_registers_both_self_subscriptions() -> None:
+def test_register_handlers_registers_the_self_subscriptions() -> None:
     registry = HandlerRegistry()
 
     register_handlers(registry)
 
-    # The §4.2 self-subscriptions: MOD-005 -> MOD-005 (async AI pipeline; and
-    # the re-record flow) - each has a handler seat at the composition root.
+    # The §4.2 self-subscriptions: MOD-005 -> MOD-005 - ``intake.started`` (the
+    # telemetry-only funnel log + count, T05 #369), ``intake.captured`` (async
+    # AI pipeline) and ``intake.retry_requested`` (re-record flow) - each has a
+    # handler seat at the composition root.
+    assert registry.handlers_for(EVENT_INTAKE_STARTED)
     assert registry.handlers_for(EVENT_INTAKE_CAPTURED)
     assert registry.handlers_for(EVENT_INTAKE_RETRY_REQUESTED)
     # No other intake event has a handler seat yet (pipeline bodies land in
@@ -212,6 +237,59 @@ def test_register_handlers_twice_on_one_registry_raises_duplicate() -> None:
 
     with pytest.raises(ValueError):
         register_handlers(registry)
+
+
+@pytest.mark.asyncio
+async def test_intake_started_telemetry_handler_logs_and_counts_distinct_events(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The telemetry handler counts once per distinct event_id (ledger-deduped).
+
+    Drives the registered ``intake.started`` handler through the same short-lived
+    engine + ledger seam as the live dispatcher: a replayed ``event_id`` is a
+    no-op (at-least-once delivery skips), so ``intake_started_count`` tracks
+    distinct starts even when the outbox redelivers a row.
+    """
+    registry = HandlerRegistry()
+    register_handlers(registry)
+    handler = registry.handlers_for(EVENT_INTAKE_STARTED)[0]
+
+    engine = MagicMock()
+    engine.begin.return_value.__aenter__ = AsyncMock(return_value=AsyncMock())
+    engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+    engine.dispose = AsyncMock()
+    monkeypatch.setattr("bus.handler_harness._delivery_engine", lambda: engine)
+
+    delivered: set[str] = set()
+
+    async def fake_ledger(
+        connection: Any, schema: str, envelope: Envelope[BaseModel], handler_result: object
+    ) -> bool:
+        del connection, schema, handler_result
+        if str(envelope.event_id) in delivered:
+            return False
+        delivered.add(str(envelope.event_id))
+        return True
+
+    monkeypatch.setattr("bus.handler_harness.record_consumed_event", fake_ledger)
+    caplog.set_level(logging.INFO, logger="modules.intake.adapters")
+
+    before = intake_started_count()
+    first = intake_started_envelope(patient_id=7, mode="text", language="en")
+    second = intake_started_envelope(patient_id=7, mode="voice", language="hi")
+
+    await handler(first)
+    assert intake_started_count() == before + 1
+
+    await handler(first)
+    assert intake_started_count() == before + 1
+
+    await handler(second)
+    assert intake_started_count() == before + 2
+
+    assert "intake.started telemetry" in caplog.text
+    assert "mode=text language=en" in caplog.text
+    assert "mode=voice language=hi" in caplog.text
 
 
 def _row_for(envelope: Envelope[BaseModel]) -> OutboxRow:

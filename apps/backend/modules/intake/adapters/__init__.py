@@ -5,13 +5,16 @@ worker entrypoint calls it to register this module's handlers on the shared
 ``HandlerRegistry``. PHASE-7 T04 (#349) freezes the module's event set: it
 owns the producer payload models for every intake / pre-summary / AI job
 event it publishes so a claimed ``intake_outbox`` row is reconstructed with
-a typed payload before fan-out, and registers the module's two §4.2 self-
-subscriptions - ``intake.captured`` (async AI pipeline) and
-``intake.retry_requested`` (re-record flow). The pipeline body lives in
-``pipeline.py`` (T01 #365); this file is the thin handler-registration front.
+a typed payload before fan-out, and registers the module's §4.2 self-
+subscriptions - ``intake.started`` (telemetry-only log + count, T05 #369),
+``intake.captured`` (async AI pipeline) and ``intake.retry_requested``
+(re-record flow). The pipeline body lives in ``pipeline.py`` (T01 #365);
+this file is the thin handler-registration front.
 """
 
 from __future__ import annotations
+
+import logging
 
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -23,6 +26,7 @@ from bus.events import (
     EVENT_AI_JOB_FAILED,
     EVENT_INTAKE_CAPTURED,
     EVENT_INTAKE_RETRY_REQUESTED,
+    EVENT_INTAKE_STARTED,
     EVENT_PRE_SUMMARY_LOW_CONFIDENCE,
     EVENT_PRE_SUMMARY_READY,
 )
@@ -36,10 +40,13 @@ from modules.intake.domain.events import (
     AiJobFailedPayload,
     IntakeCapturedPayload,
     IntakeRetryRequestedPayload,
+    IntakeStartedPayload,
     PreSummaryLowConfidencePayload,
     PreSummaryReadyPayload,
 )
 from modules.intake.facade import INTAKE_SCHEMA
+
+logger = logging.getLogger(__name__)
 
 #: Mock EXT-002 model id on the ai_jobs row (``{provider}-model`` convention).
 MOCK_AI_MODEL = "mock-model"
@@ -52,6 +59,19 @@ DEFAULT_EGRESS_SEX = "other"
 AI_EGRESS_COUNTERPARTY_TYPE = "doctor"
 AI_EGRESS_COUNTERPARTY_ID = "intake-ai"
 AI_EGRESS_RECORD_SCOPE = "consultations"
+
+#: Process-local running total of delivered ``intake.started`` telemetry events
+#: (KPI-001 "pipeline counters per loop stage"). Zero at process start and
+#: bumped once per ledger-deduped delivery, so a replayed ``event_id`` is
+#: idempotently skipped and the count tracks distinct starts. Telemetry only -
+#: no domain table and no outbox row is written by this seam (PHASE-7 T05 #369).
+_intakes_started_count: int = 0
+
+
+def intake_started_count() -> int:
+    """Return the process-local count of distinct ``intake.started`` deliveries."""
+    return _intakes_started_count
+
 
 #: Explicit re-exports for pipeline.py's ``_adapters`` indirection (test patch
 #: targets + constants); satisfies mypy --strict no_implicit_reexport.
@@ -77,6 +97,7 @@ def register_handlers(registry: HandlerRegistry) -> None:
     ``intake.retry_requested`` (the re-record body, T08).
     """
     for event_type, payload_model in (
+        (EVENT_INTAKE_STARTED, IntakeStartedPayload),
         (EVENT_INTAKE_CAPTURED, IntakeCapturedPayload),
         (EVENT_INTAKE_RETRY_REQUESTED, IntakeRetryRequestedPayload),
         (EVENT_PRE_SUMMARY_READY, PreSummaryReadyPayload),
@@ -87,8 +108,40 @@ def register_handlers(registry: HandlerRegistry) -> None:
     ):
         registry.register_payload_model(event_type, payload_model)
 
+    registry.register(EVENT_INTAKE_STARTED, _on_intake_started)
     registry.register(EVENT_INTAKE_CAPTURED, _on_intake_captured)
     registry.register(EVENT_INTAKE_RETRY_REQUESTED, _on_intake_retry_requested)
+
+
+async def _on_intake_started(envelope: Envelope[BaseModel]) -> None:
+    """Consume ``intake.started``: log + count the funnel-telemetry entry.
+
+    Telemetry-only (PHASE-7 T05 #369, KPI-001 pipeline counters). Ledger first
+    (``run_handler``) so a replayed ``event_id`` is a no-op, then a structured
+    log line carrying modal/language facts and the process-local running count.
+    Deliberately touches no domain table and emits no outbox row of its own -
+    this subscription IS the funnel metric, not an effect.
+    """
+
+    async def _impl(connection: AsyncConnection, payload: IntakeStartedPayload) -> None:
+        del connection
+        global _intakes_started_count
+        _intakes_started_count += 1
+        logger.info(
+            "intake.started telemetry: patient_id=%s mode=%s language=%s count=%s",
+            payload.patient_id,
+            payload.mode,
+            payload.language,
+            _intakes_started_count,
+        )
+
+    await run_handler(
+        envelope,
+        IntakeStartedPayload,
+        _impl,
+        "intake_started_telemetry",
+        INTAKE_SCHEMA,
+    )
 
 
 async def _on_intake_captured(envelope: Envelope[BaseModel]) -> None:

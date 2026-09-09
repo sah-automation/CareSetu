@@ -27,6 +27,7 @@ from modules.intake.adapters.media_store import IntakeMediaStore
 from modules.intake.domain.events import (
     intake_captured_envelope,
     intake_retry_requested_envelope,
+    intake_started_envelope,
     pre_summary_ready_envelope,
 )
 from modules.intake.domain.exceptions import (
@@ -142,15 +143,16 @@ class IntakeFacade:
         text: str | None = None,
         media_ref: MediaUploadRef | None = None,
     ) -> IntakeSubmitResult:
-        """Capture a symptom intake and emit ``intake.captured`` atomically.
+        """Capture a symptom intake and emit ``intake.started`` + ``intake.captured``.
 
         Validates one-mode-per-intake: exactly one of ``text`` or
         ``media_ref`` must be provided, matching the declared ``mode``.
         Enforces the text cap (``MAX_TEXT_LENGTH`` = 2000 chars). Commits
-        the intake row, the ``intake.captured`` outbox event, and (for a
+        the intake row, the ``intake.started`` funnel-telemetry event
+        (PHASE-7 T05 #369), the ``intake.captured`` outbox event, and (for a
         voice intake) the ``intake_media_refs`` row in the SAME
         transaction (ADR-0002 S1) so a crash between state change and
-        dispatch cannot lose the event. The voice-attempt cap (3 attempts)
+        dispatch cannot lose the event(s). The voice-attempt cap (3 attempts)
         is enforced by the domain state machine at the re-record seam
         (``MAX_RECORD_ATTEMPTS``, PHASE-7 T02) - a fresh capture always
         begins at record attempt 1.
@@ -206,6 +208,16 @@ class IntakeFacade:
                         record_attempt=state.record_attempts,
                     )
                 )
+
+            started_envelope = intake_started_envelope(
+                patient_id=patient_id, mode=mode, language=language
+            )
+            await write_outbox(
+                connection,
+                INTAKE_SCHEMA,
+                INTAKE_OUTBOX_TABLE,
+                started_envelope,
+            )
 
             envelope = intake_captured_envelope(intake_id=intake_id)
             await write_outbox(
