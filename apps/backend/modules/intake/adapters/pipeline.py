@@ -47,6 +47,7 @@ from modules.intake.domain.events import (
     ai_egress_recorded_envelope,
     ai_job_completed_envelope,
     ai_job_failed_envelope,
+    intake_retry_requested_envelope,
     pre_summary_low_confidence_envelope,
     pre_summary_ready_envelope,
 )
@@ -55,6 +56,8 @@ from modules.intake.domain.state_machine import (
     IntakeAction,
     IntakeState,
     IntakeStatus,
+    TranscriptUsability,
+    classify_transcript_usability,
     transition,
 )
 from modules.intake.facade import INTAKE_SCHEMA
@@ -222,30 +225,75 @@ async def _run_structuring_pipeline(
             )
             return
 
-        ai_job_id = await _insert_ai_job(connection, intake_id)
-        try:
-            if row.mode == "voice":
-                # transcribe leg (voice only): the current attempt's audio becomes
-                # the transcript, persisted onto the intake for downstream
-                # raw-text fallback.
-                transcribe_result = await gateway.transcribe(
-                    TranscribeRequest(
-                        audio_ref=audio_ref,
-                        mode="voice",
-                        context=context,
-                    )
+        if row.mode == "voice":
+            # transcribe leg (voice only): the current attempt's audio becomes
+            # the transcript, persisted onto the intake for downstream
+            # raw-text fallback.
+            transcribe_result = await gateway.transcribe(
+                TranscribeRequest(
+                    audio_ref=audio_ref,
+                    mode="voice",
+                    context=context,
                 )
-                transcript = transcribe_result.transcript
+            )
+            transcript = transcribe_result.transcript
+            usability = classify_transcript_usability(transcript)
+
+            if usability is TranscriptUsability.UNUSABLE:
+                unusable_state = transition(structing, IntakeAction.RECORD_UNUSABLE)
                 await connection.execute(
                     intake_intakes.update()
                     .where(intake_intakes.c.id == intake_id)
                     .values(
                         transcript=transcript,
-                        transcript_usability="usable",
+                        transcript_usability=TranscriptUsability.UNUSABLE,
+                        status=unusable_state.status.value,
+                        record_attempts=unusable_state.record_attempts,
+                        forced_text=unusable_state.forced_text,
                         updated_at=datetime.now(UTC),
                     )
                 )
+                if unusable_state.status is IntakeStatus.RE_RECORD:
+                    await write_outbox(
+                        connection,
+                        INTAKE_SCHEMA,
+                        INTAKE_OUTBOX_TABLE,
+                        intake_retry_requested_envelope(
+                            intake_id=intake_id,
+                            record_attempt=unusable_state.record_attempts,
+                        ),
+                    )
+                    logger.warning(
+                        "intake %s transcript unusable (%d chars); re-recording",
+                        intake_id,
+                        len(transcript.strip()),
+                    )
+                else:
+                    logger.warning(
+                        "intake %s transcript unusable at attempt cap; forced text fallback",
+                        intake_id,
+                    )
+                return
 
+            if usability is TranscriptUsability.PARTIAL:
+                logger.warning(
+                    "intake %s transcript partial (%d chars); proceeding degraded",
+                    intake_id,
+                    len(transcript.strip()),
+                )
+
+            await connection.execute(
+                intake_intakes.update()
+                .where(intake_intakes.c.id == intake_id)
+                .values(
+                    transcript=transcript,
+                    transcript_usability=usability,
+                    updated_at=datetime.now(UTC),
+                )
+            )
+
+        ai_job_id = await _insert_ai_job(connection, intake_id)
+        try:
             started = time.monotonic()
             structure_result = await gateway.structure(
                 StructureRequest(

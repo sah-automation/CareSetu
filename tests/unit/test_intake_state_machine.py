@@ -15,9 +15,12 @@ from modules.intake.domain.exceptions import IllegalIntakeTransitionError
 from modules.intake.domain.state_machine import (
     CAPTURED,
     MAX_RECORD_ATTEMPTS,
+    PARTIAL_MIN_CHARS,
+    USABLE_MIN_CHARS,
     IntakeAction,
     IntakeState,
     IntakeStatus,
+    classify_transcript_usability,
     transition,
 )
 
@@ -281,3 +284,34 @@ def test_failed_is_terminal() -> None:
     for action in IntakeAction:
         with pytest.raises(IllegalIntakeTransitionError):
             transition(_FAILED_1, action)
+
+
+# -- classify_transcript_usability heuristic --
+
+
+def test_empty_transcript_is_unusable() -> None:
+    assert classify_transcript_usability("") == "unusable"
+
+
+def test_whitespace_only_transcript_is_unusable() -> None:
+    assert classify_transcript_usability("   \n\t ") == "unusable"
+
+
+def test_short_transcript_is_unusable() -> None:
+    assert classify_transcript_usability("abc") == "unusable"
+
+
+def test_boundary_at_partial_min_is_partial() -> None:
+    assert classify_transcript_usability("a" * PARTIAL_MIN_CHARS) == "partial"
+
+
+def test_just_below_usable_is_partial() -> None:
+    assert classify_transcript_usability("a" * (USABLE_MIN_CHARS - 1)) == "partial"
+
+
+def test_boundary_at_usable_min_is_usable() -> None:
+    assert classify_transcript_usability("a" * USABLE_MIN_CHARS) == "usable"
+
+
+def test_long_transcript_is_usable() -> None:
+    assert classify_transcript_usability("the quick brown fox jumps over the lazy dog") == "usable"

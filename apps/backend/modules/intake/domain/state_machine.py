@@ -77,6 +77,34 @@ MAX_RECORD_ATTEMPTS: int = 3
 #: pinned-constant exception).
 MAX_TEXT_LENGTH: int = 2000
 
+#: Transcript usability heuristic thresholds (B3 fallback ladder).
+#: Below ``PARTIAL_MIN_CHARS`` is unusable; ``[PARTIAL_MIN_CHARS, USABLE_MIN_CHARS)``
+#: is partial (degraded but structurable); at or above ``USABLE_MIN_CHARS`` is usable.
+PARTIAL_MIN_CHARS: int = 5
+USABLE_MIN_CHARS: int = 21
+
+
+class TranscriptUsability(StrEnum):
+    """Transcript quality classification for the B3 fallback ladder."""
+
+    UNUSABLE = "unusable"
+    PARTIAL = "partial"
+    USABLE = "usable"
+
+
+def classify_transcript_usability(transcript: str) -> TranscriptUsability:
+    """Deterministic heuristic classifying a transcript's usability.
+
+    Empty / whitespace-only / fewer than 5 characters = ``"unusable"``;
+    5-20 characters = ``"partial"``; 21+ characters = ``"usable"``.
+    """
+    length = len(transcript.strip())
+    if length < PARTIAL_MIN_CHARS:
+        return TranscriptUsability.UNUSABLE
+    if length < USABLE_MIN_CHARS:
+        return TranscriptUsability.PARTIAL
+    return TranscriptUsability.USABLE
+
 
 @dataclass(frozen=True)
 class IntakeState:

@@ -32,10 +32,11 @@ from bus.envelope import Envelope
 from bus.events import (
     EVENT_AI_JOB_COMPLETED,
     EVENT_INTAKE_CAPTURED,
+    EVENT_INTAKE_RETRY_REQUESTED,
     EVENT_PRE_SUMMARY_READY,
 )
 from modules.intake.adapters import register_handlers
-from modules.intake.adapters.ai_provider_mock import MOCK_CONFIDENCE_CLEAN
+from modules.intake.adapters.ai_provider_mock import MOCK_CONFIDENCE_CLEAN, MockAiProvider
 from modules.intake.domain.events import IntakeCapturedPayload
 
 _PROVIDER = "mock"
@@ -333,8 +334,6 @@ async def test_text_mode_structures_the_text_directly_without_a_transcribe_leg()
     connection = _FakeConnection(intake_row=_text_intake_row())
     engine = _fake_engine(connection)
 
-    from modules.intake.adapters.ai_provider_mock import MockAiProvider
-
     with (
         patch("bus.handler_harness._delivery_engine", return_value=engine),
         patch(
@@ -368,7 +367,7 @@ async def test_voice_mode_runs_transcribe_then_structure_and_records_transcript(
     assert "select_media" in kinds
     transcript_updates = [r.params for r in connection.executed if r.kind == "transcript_update"]
     assert any(
-        p.get("transcript") == "mock transcript" and p.get("transcript_usability") == "usable"
+        p.get("transcript") == "mock transcript" and p.get("transcript_usability") == "partial"
         for p in transcript_updates
     )
     # The structure leg still produced the pre-summary + events.
@@ -393,6 +392,176 @@ async def test_voice_mode_without_a_media_ref_skips_pipeline() -> None:
     assert "insert_ai_job" not in kinds
     assert "insert_pre_summary" not in kinds
     assert "outbox" not in kinds
+
+
+@pytest.mark.asyncio
+async def test_voice_unusable_below_cap_emits_retry_requested_and_returns() -> None:
+    handler = _registered_handler()
+    connection = _FakeConnection(intake_row=_voice_intake_row(), media_row=_media_row())
+    engine = _fake_engine(connection)
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("modules.intake.adapters._build_egress_gate", return_value=_fake_egress_gate()),
+        patch.object(
+            MockAiProvider,
+            "transcribe",
+            new_callable=AsyncMock,
+            return_value=SimpleNamespace(transcript="", confidence=0.0, language="hi"),
+        ),
+    ):
+        await handler(_captured_envelope(intake_id=1))
+
+    kinds = [r.kind for r in connection.executed]
+    # Re-record: status update to re_record + retry event
+    assert any(
+        r.kind == "transcript_update" and r.params.get("status") == "re_record"
+        for r in connection.executed
+    )
+    outbox_types = [r.params["event_type"] for r in connection.executed if r.kind == "outbox"]
+    assert EVENT_INTAKE_RETRY_REQUESTED in outbox_types
+    # No structure / pre-summary produced (pipeline returned early)
+    assert "insert_ai_job" not in kinds
+    assert "insert_pre_summary" not in kinds
+
+
+@pytest.mark.asyncio
+async def test_voice_unusable_at_cap_forced_text_returns() -> None:
+    handler = _registered_handler()
+    row = _voice_intake_row()
+    row.record_attempts = 3
+    connection = _FakeConnection(intake_row=row, media_row=_media_row())
+    engine = _fake_engine(connection)
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("modules.intake.adapters._build_egress_gate", return_value=_fake_egress_gate()),
+        patch.object(
+            MockAiProvider,
+            "transcribe",
+            new_callable=AsyncMock,
+            return_value=SimpleNamespace(transcript="ab", confidence=0.0, language="hi"),
+        ),
+    ):
+        await handler(_captured_envelope(intake_id=1))
+
+    kinds = [r.kind for r in connection.executed]
+    # At cap: transitions to ready_for_review with forced_text=True
+    intake_updates = [r for r in connection.executed if r.kind == "transcript_update"]
+    assert any(
+        r.params.get("status") == "ready_for_review" and r.params.get("forced_text") is True
+        for r in intake_updates
+    )
+    # No ai_job or pre_summary created (pipeline returned early)
+    assert "insert_ai_job" not in kinds
+    assert "insert_pre_summary" not in kinds
+
+
+@pytest.mark.asyncio
+async def test_voice_partial_proceeds_to_structuring_with_warning() -> None:
+    handler = _registered_handler()
+    connection = _FakeConnection(intake_row=_voice_intake_row(), media_row=_media_row())
+    engine = _fake_engine(connection)
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("modules.intake.adapters._build_egress_gate", return_value=_fake_egress_gate()),
+        patch.object(
+            MockAiProvider,
+            "transcribe",
+            new_callable=AsyncMock,
+            return_value=SimpleNamespace(transcript="short", confidence=0.5, language="hi"),
+        ),
+    ):
+        await handler(_captured_envelope(intake_id=1))
+
+    kinds = [r.kind for r in connection.executed]
+    # Partial proceeds to structuring: ai_job + pre_summary created
+    assert "insert_ai_job" in kinds
+    assert "insert_pre_summary" in kinds
+    transcript_updates = [r for r in connection.executed if r.kind == "transcript_update"]
+    assert any(r.params.get("transcript_usability") == "partial" for r in transcript_updates)
+
+
+@pytest.mark.asyncio
+async def test_voice_usable_proceeds_to_structuring_normally() -> None:
+    handler = _registered_handler()
+    connection = _FakeConnection(intake_row=_voice_intake_row(), media_row=_media_row())
+    engine = _fake_engine(connection)
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("modules.intake.adapters._build_egress_gate", return_value=_fake_egress_gate()),
+        patch.object(
+            MockAiProvider,
+            "transcribe",
+            new_callable=AsyncMock,
+            return_value=SimpleNamespace(
+                transcript="long enough transcript text here", confidence=0.8, language="hi"
+            ),
+        ),
+    ):
+        await handler(_captured_envelope(intake_id=1))
+
+    kinds = [r.kind for r in connection.executed]
+    assert "insert_ai_job" in kinds
+    assert "insert_pre_summary" in kinds
+    transcript_updates = [r for r in connection.executed if r.kind == "transcript_update"]
+    assert any(r.params.get("transcript_usability") == "usable" for r in transcript_updates)
+
+
+@pytest.mark.asyncio
+async def test_voice_empty_transcript_treated_as_unusable() -> None:
+    handler = _registered_handler()
+    connection = _FakeConnection(intake_row=_voice_intake_row(), media_row=_media_row())
+    engine = _fake_engine(connection)
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("modules.intake.adapters._build_egress_gate", return_value=_fake_egress_gate()),
+        patch.object(
+            MockAiProvider,
+            "transcribe",
+            new_callable=AsyncMock,
+            return_value=SimpleNamespace(transcript="   ", confidence=0.0, language="hi"),
+        ),
+    ):
+        await handler(_captured_envelope(intake_id=1))
+
+    kinds = [r.kind for r in connection.executed]
+    # Whitespace-only transcript is unusable -> re_record
+    assert any(
+        r.kind == "transcript_update" and r.params.get("status") == "re_record"
+        for r in connection.executed
+    )
+    outbox_types = [r.params["event_type"] for r in connection.executed if r.kind == "outbox"]
+    assert EVENT_INTAKE_RETRY_REQUESTED in outbox_types
+    assert "insert_ai_job" not in kinds
 
 
 @pytest.mark.asyncio
