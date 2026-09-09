@@ -827,6 +827,43 @@ const en = {
         "Check that microphone access is allowed, then try again.",
     },
 
+    // text- intake surface (PHASE-7 T17, #361): the text form (blueprint §5.4,
+    // finalized PROTO-PHASE-7/8 intake-text.html is the binding copy spec). A
+    // prominent large textarea capped at 2000 chars in-page (server caps too,
+    // T07/T12) with a bilingual hint - Hindi and English both accepted. The
+    // optional voice-note attach is a doctor-only audio artifact: stored for
+    // the doctor to listen to, never fed to the structuring pipeline, and
+    // strictly non-blocking (the note is never required and never blocks the
+    // text). Submit shows the same in-button Structuring pending state per
+    // §9.1 (never a full-page spinner), then advances to the pre-summary
+    // review link once the intake reaches ready_for_review.
+    text: {
+      title: "Type your symptoms",
+      breadcrumb: "Text intake",
+      reassure:
+        "Describe what's bothering you in your own words - Hindi or English.",
+      placeholder: "e.g. Fever since 2 days, dry cough, body ache...",
+      langHint: "Hindi and English both accepted",
+      emptyTitle: "Add your symptoms to continue",
+      emptyBody: "Please type what's bothering you before submitting.",
+      voiceAttach: "Add a voice note",
+      voiceAttachHint: "Optional - record a voice note to go with your text",
+      voiceRecording: "Recording… tap to stop",
+      voiceStop: "Stop",
+      voicePreview: "Voice note attached",
+      voiceRemove: "Remove",
+      submit: "Submit",
+      submitting: "Structuring…",
+      doneBody: "Taken. We're preparing your pre-summary.",
+      next: "See your pre-summary",
+      uploadErrorTitle: "We couldn't send your recording",
+      uploadErrorBody:
+        "Your recording is safe. Check your connection and try again.",
+      micUnavailableTitle: "We couldn't reach your microphone",
+      micUnavailableBody:
+        "Check that microphone access is allowed, then try again.",
+    },
+
     // pre-summary review surface (PHASE-7 T18, #362): the AI draft shown to
     // the patient with the honesty cue "AI draft - doctor will verify"
     // (never "AI diagnosis", ADR-0001), the structuring confidence value +
@@ -1647,6 +1684,32 @@ export const STRINGS: Record<Lang, Dictionary> = {
         attemptsExhausted:
           "आपने 3 वॉइस सीमा पूरी कर ली है। कृपया अपने लक्षण टाइप करें।",
         doneBody: "ले ली गई। आपका प्री-सारांश तैयार हो रहा है।",
+        next: "अपना प्री-सारांश देखें",
+        uploadErrorTitle: "हम आपकी रिकॉर्डिंग नहीं भेज पाए",
+        uploadErrorBody:
+          "आपकी रिकॉर्डिंग सुरक्षित है। कनेक्शन जाँचकर फिर कोशिश करें।",
+        micUnavailableTitle: "हम आपके माइक तक नहीं पहुँच पाए",
+        micUnavailableBody: "माइक की अनुमति जाँचकर फिर कोशिश करें।",
+      },
+      text: {
+        title: "अपने लक्षण लिखें",
+        breadcrumb: "टेक्स्ट इंटेक",
+        reassure:
+          "अपने शब्दों में बताइए आपको क्या परेशानी है - हिंदी या अंग्रेज़ी।",
+        placeholder: "जैसे- बुख़ार 2 दिन से, सूखी खाँसी, शरीर में दर्द...",
+        langHint: "हिंदी और अंग्रेज़ी दोनों चलते हैं",
+        emptyTitle: "आगे बढ़ने के लिए लक्षण लिखें",
+        emptyBody: "कृपया सबमिट करने से पहले बताइए क्या परेशानी है।",
+        voiceAttach: "वॉइस नोट जोड़ें",
+        voiceAttachHint:
+          "वैकल्पिक - अपने टेक्स्ट के साथ एक वॉइस रिकॉर्डिंग जोड़ें",
+        voiceRecording: "रिकॉर्ड हो रहा है… रोकने के लिए दबाएँ",
+        voiceStop: "रोकें",
+        voicePreview: "वॉइस नोट जुड़ गया",
+        voiceRemove: "हटाएँ",
+        submit: "जमा करें",
+        submitting: "स्ट्रक्चरिंग…",
+        doneBody: "ले लिए गए। आपका प्री-सारांश तैयार हो रहा है।",
         next: "अपना प्री-सारांश देखें",
         uploadErrorTitle: "हम आपकी रिकॉर्डिंग नहीं भेज पाए",
         uploadErrorBody:

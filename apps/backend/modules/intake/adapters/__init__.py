@@ -32,9 +32,10 @@ import time
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.config import get_settings
 from bus.envelope import Envelope
@@ -50,12 +51,14 @@ from bus.events import (
 from bus.handler_harness import run_handler
 from bus.outbox_writer import write_outbox
 from bus.registry import HandlerRegistry
+from modules.consent.facade import ConsentFacade
 from modules.intake.adapters.ai_gateway import (
     AiEgressContext,
     StructureRequest,
     TranscribeRequest,
 )
-from modules.intake.adapters.ai_provider_ext import build_ai_gateway
+from modules.intake.adapters.ai_provider_ext import Ext002CallError, build_ai_gateway
+from modules.intake.budget_meter import BudgetMeter
 from modules.intake.domain.events import (
     AiEgressRecordedPayload,
     AiJobCompletedPayload,
@@ -64,7 +67,10 @@ from modules.intake.domain.events import (
     IntakeRetryRequestedPayload,
     PreSummaryLowConfidencePayload,
     PreSummaryReadyPayload,
+    ai_egress_recorded_envelope,
     ai_job_completed_envelope,
+    ai_job_failed_envelope,
+    pre_summary_low_confidence_envelope,
     pre_summary_ready_envelope,
 )
 from modules.intake.domain.presummary_machine import is_low_confidence
@@ -98,6 +104,16 @@ MOCK_AI_MODEL = "mock-model"
 DEFAULT_EGRESS_AGE_RANGE = "30-40"
 DEFAULT_EGRESS_SEX = "other"
 
+#: The consent gate the intake AI egress is authorised under (NFR-SEC-006).
+#: The AI drafts a clinical pre-summary for the treating doctor, so the egress
+#: rides the patient's live doctor-grant on the ``consultations`` scope
+#: (``full_record`` subsumes it). No specific doctor is attached to an intake at
+#: capture, so the counterparty id is the stable AI-processing identity the
+#: patient's consent log and the egress audit cite.
+AI_EGRESS_COUNTERPARTY_TYPE = "doctor"
+AI_EGRESS_COUNTERPARTY_ID = "intake-ai"
+AI_EGRESS_RECORD_SCOPE = "consultations"
+
 
 def _egress_context(language: str) -> AiEgressContext:
     """Build the PHI-minimized egress context from the intake row.
@@ -111,6 +127,27 @@ def _egress_context(language: str) -> AiEgressContext:
         language=language,
         age_range=DEFAULT_EGRESS_AGE_RANGE,
         sex=DEFAULT_EGRESS_SEX,
+    )
+
+
+def _build_egress_gate() -> tuple[AsyncEngine, ConsentFacade, BudgetMeter]:
+    """Compose the consent gate + NFR-001 budget meter for one pipeline run.
+
+    The AI pipeline is a worker handler: it receives only the delivery
+    connection, while ``ConsentFacade`` and ``BudgetMeter`` own their own
+    transactions (consent check, egress audit, month spend aggregate). A
+    short-lived ``NullPool`` engine mirrors the delivery-engine lifecycle
+    (``bus.handler_harness``); the caller disposes it with the run. Tests
+    patch this seam to inject fakes.
+    """
+    engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
+    return (
+        engine,
+        ConsentFacade(engine=engine),
+        BudgetMeter(
+            engine=engine,
+            monthly_budget_paise=get_settings().ai_monthly_budget_paise,
+        ),
     )
 
 
@@ -181,13 +218,18 @@ async def _run_structuring_pipeline(
 ) -> None:
     """Run transcribe -> structure on a captured intake and publish a Draft pre_summary.
 
-    Pure happy-path (T10): a single ``structure`` ai_jobs row records the whole
-    pass (provider/model/tokens/cost/latency/status/attempts). The intake is
-    moved Captured -> Structuring -> Ready for Review, a Draft pre_summary is
-    written with the provider confidence + honesty fields, and ``pre_summary.ready``
-    + ``ai_job.completed`` are emitted - all in the SAME transaction as the
-    ledger-first dedupe (so a replay is a no-op). Any missing/unstructurable
-    intake logs and returns - it must never raise out to the patient.
+    The T11 pipeline is gated and degradable: a single ``structure`` ai_jobs row
+    records the whole pass (provider/model/tokens/cost/latency/status/attempts),
+    and the intake is moved Captured -> Structuring -> Ready for Review. Before
+    any egress the NFR-001 budget meter is consulted (hard stop) and the consent
+    gate is checked fail-closed (missing/revoked grant -> raw doctor review with
+    no PHI sent); every successful egress is PHI-minimized (intake context only)
+    and audited via ``record_egress_disclosure``. Timeout-after-3-retries and
+    malformed provider output mark the job ``failed`` and degrade to raw review;
+    a low-confidence structuring outcome publishes ``pre_summary.low_confidence``
+    and forces doctor review. All effects ride the SAME transaction as the
+    ledger-first dedupe (replay is a no-op); the handler never raises a
+    user-visible error to the patient.
     """
     row = (
         await connection.execute(select(intake_intakes).where(intake_intakes.c.id == intake_id))
@@ -224,53 +266,168 @@ async def _run_structuring_pipeline(
     )
 
     context = _egress_context(row.language)
-    gateway = build_ai_gateway(get_settings())
-
-    # transcribe leg (voice only): the current attempt's audio becomes the
-    # transcript, persisted onto the intake for downstream raw-text fallback.
-    transcript = row.text
-    source = "text"
-    if row.mode == "voice":
-        source = "voice"
-        media_row = (
-            await connection.execute(
-                select(intake_media_refs)
-                .where(intake_media_refs.c.intake_id == intake_id)
-                .order_by(intake_media_refs.c.record_attempt.desc())
+    gate_engine, consent_facade, budget_meter = _build_egress_gate()
+    try:
+        # NFR-001 hard stop: no egress when the monthly meter is exhausted - the
+        # intake degrades to raw doctor review rather than overspending.
+        if not await budget_meter.allows_ai_call():
+            await _degrade_to_raw_review(
+                connection,
+                intake_id,
+                state=structing,
+                reason="monthly AI budget exhausted (NFR-001 hard stop)",
             )
-        ).first()
-        if media_row is None or not media_row.object_key:
+            return
+
+        # Consent gate (fail-closed, NFR-SEC-006): a live doctor-grant on the
+        # consultations scope is required before ANY content leaves for EXT-002.
+        # A missing or revoked grant means no egress and raw doctor review.
+        decision = await consent_facade.check_consent(
+            patient_id=row.patient_id,
+            counterparty_type=AI_EGRESS_COUNTERPARTY_TYPE,  # type: ignore[arg-type]
+            counterparty_id=AI_EGRESS_COUNTERPARTY_ID,
+            record_scope=AI_EGRESS_RECORD_SCOPE,
+        )
+        if not decision.allowed:
+            await _degrade_to_raw_review(
+                connection,
+                intake_id,
+                state=structing,
+                reason="consent for AI processing is missing or revoked (fail-closed)",
+            )
+            return
+
+        gateway = build_ai_gateway(get_settings())
+
+        # Resolve the transcript before any job is created, so an unstructurable
+        # intake (voice with no clip, or no text at all) degrades to a logged
+        # skip with NO ai_job row - mirroring the T10 skip semantics.
+        transcript = row.text
+        source = "text"
+        audio_ref: str | None = None
+        if row.mode == "voice":
+            source = "voice"
+            media_row = (
+                await connection.execute(
+                    select(intake_media_refs)
+                    .where(intake_media_refs.c.intake_id == intake_id)
+                    .order_by(intake_media_refs.c.record_attempt.desc())
+                )
+            ).first()
+            if media_row is None or not media_row.object_key:
+                logger.warning(
+                    "intake %s voice mode has no media ref to transcribe; skipping pipeline",
+                    intake_id,
+                )
+                return
+            audio_ref = media_row.object_key
+        if not transcript and row.mode == "text":
             logger.warning(
-                "intake %s voice mode has no media ref to transcribe; skipping pipeline",
+                "intake %s has no text/transcript to structure; skipping pipeline",
                 intake_id,
             )
             return
-        transcribe_result = await gateway.transcribe(
-            TranscribeRequest(
-                audio_ref=media_row.object_key,
-                mode="voice",
-                context=context,
+
+        ai_job_id = await _insert_ai_job(connection, intake_id)
+        try:
+            if row.mode == "voice":
+                # transcribe leg (voice only): the current attempt's audio becomes
+                # the transcript, persisted onto the intake for downstream
+                # raw-text fallback.
+                transcribe_result = await gateway.transcribe(
+                    TranscribeRequest(
+                        audio_ref=audio_ref,
+                        mode="voice",
+                        context=context,
+                    )
+                )
+                transcript = transcribe_result.transcript
+                await connection.execute(
+                    intake_intakes.update()
+                    .where(intake_intakes.c.id == intake_id)
+                    .values(
+                        transcript=transcript,
+                        transcript_usability="usable",
+                        updated_at=datetime.now(UTC),
+                    )
+                )
+
+            started = time.monotonic()
+            structure_result = await gateway.structure(
+                StructureRequest(
+                    transcript=transcript,
+                    source=source,
+                    context=context,
+                )
             )
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            confidence = structure_result.confidence
+            low_conf = is_low_confidence(confidence)
+
+            structured_fields: dict[str, object] = {
+                "chief_complaints": structure_result.chief_complaints,
+                "symptoms": structure_result.symptoms,
+                "duration": structure_result.duration,
+            }
+        except (Ext002CallError, ValidationError) as exc:
+            await _fail_job(
+                connection,
+                ai_job_id=ai_job_id,
+                intake_id=intake_id,
+                task_type="structure",
+                reason=_failure_reason(exc),
+            )
+            await _degrade_to_raw_review(
+                connection,
+                intake_id,
+                state=structing,
+                reason=(
+                    "AI provider call failed after retry/timeout or malformed "
+                    f"output: {_failure_reason(exc)}"
+                ),
+            )
+            return
+
+        # Every successful egress is audited via the consent facade's egress
+        # log (NFR-SEC-006) - the intake context was sent to EXT-002 under the
+        # checked grant, and ``ai_egress.recorded`` notifies the audit trail.
+        await consent_facade.record_egress_disclosure(
+            patient_id=row.patient_id,
+            consent_id=decision.consent_id,
+            version=decision.version or 0,
+            counterparty_type=AI_EGRESS_COUNTERPARTY_TYPE,
+            counterparty_id=AI_EGRESS_COUNTERPARTY_ID,
+            record_scope=AI_EGRESS_RECORD_SCOPE,
+            disclosed_entry_ids=[intake_id],
         )
-        transcript = transcribe_result.transcript
-        await connection.execute(
-            intake_intakes.update()
-            .where(intake_intakes.c.id == intake_id)
-            .values(
-                transcript=transcript,
-                transcript_usability="usable",
-                updated_at=datetime.now(UTC),
-            )
+        await write_outbox(
+            connection,
+            INTAKE_SCHEMA,
+            INTAKE_OUTBOX_TABLE,
+            ai_egress_recorded_envelope(
+                intake_id=intake_id,
+                ai_job_id=ai_job_id,
+                reason="structure egress of intake context to EXT-002",
+            ),
         )
 
-    if not transcript:
-        logger.warning(
-            "intake %s has no text/transcript to structure; skipping pipeline",
-            intake_id,
+        await _finalize_pipeline(
+            connection,
+            intake_id=intake_id,
+            ai_job_id=ai_job_id,
+            confidence=confidence,
+            elapsed_ms=elapsed_ms,
+            structured_fields=structured_fields,
+            low_conf=low_conf,
+            record_attempts=structing.record_attempts,
+            forced_text=structing.forced_text,
         )
-        return
+    finally:
+        await gate_engine.dispose()
 
-    started = time.monotonic()
+
+async def _insert_ai_job(connection: AsyncConnection, intake_id: int) -> int:
+    """Create the running ai_jobs row for this pass (markable failed on error)."""
     job_insert = await connection.execute(
         intake_ai_jobs.insert()
         .values(
@@ -283,35 +440,75 @@ async def _run_structuring_pipeline(
         )
         .returning(intake_ai_jobs.c.id)
     )
-    ai_job_id = int(job_insert.scalar_one())
+    return int(job_insert.scalar_one())
 
-    structure_result = await gateway.structure(
-        StructureRequest(
-            transcript=transcript,
-            source=source,
-            context=context,
+
+def _failure_reason(exc: BaseException) -> str:
+    """A short, PHI-free operational failure reason for the job + event."""
+    return type(exc).__name__
+
+
+async def _degrade_to_raw_review(
+    connection: AsyncConnection,
+    intake_id: int,
+    *,
+    state: IntakeState,
+    reason: str,
+) -> None:
+    """Move the intake Structuring -> Ready for Review via ``RAW_TEXT`` (durable).
+
+    The captured text/transcript is already durable; the doctor reviews it raw.
+    The degradation transition never touches ``forced_text`` (its RAW_TEXT
+    semantic) and writes the intake update in the SAME transaction as the
+    ledger-first pipeline effects, so a replay stays a no-op.
+    """
+    degraded = transition(state, IntakeAction.RAW_TEXT)
+    await connection.execute(
+        intake_intakes.update()
+        .where(intake_intakes.c.id == intake_id)
+        .values(
+            status=degraded.status.value,
+            record_attempts=degraded.record_attempts,
+            forced_text=degraded.forced_text,
+            updated_at=datetime.now(UTC),
         )
     )
-    elapsed_ms = int((time.monotonic() - started) * 1000)
-    confidence = structure_result.confidence
-    low_conf = is_low_confidence(confidence)
+    logger.warning("intake %s degraded to raw doctor review: %s", intake_id, reason)
 
-    structured_fields: dict[str, object] = {
-        "chief_complaints": structure_result.chief_complaints,
-        "symptoms": structure_result.symptoms,
-        "duration": structure_result.duration,
-    }
 
-    await _finalize_pipeline(
+async def _fail_job(
+    connection: AsyncConnection,
+    *,
+    ai_job_id: int,
+    intake_id: int,
+    task_type: str,
+    reason: str,
+) -> None:
+    """Mark the ai_jobs row ``failed`` and publish ``ai_job.failed``.
+
+    Runs in the SAME transaction as the intake degradation, so a timeout/
+    malformed-output failure durably records the failed job and its bus event
+    alongside the raw-review transition (ADR-0002 §1).
+    """
+    await connection.execute(
+        intake_ai_jobs.update()
+        .where(intake_ai_jobs.c.id == ai_job_id)
+        .values(
+            status="failed",
+            error_message=reason,
+            updated_at=datetime.now(UTC),
+        )
+    )
+    await write_outbox(
         connection,
-        intake_id=intake_id,
-        ai_job_id=ai_job_id,
-        confidence=confidence,
-        elapsed_ms=elapsed_ms,
-        structured_fields=structured_fields,
-        low_conf=low_conf,
-        record_attempts=structing.record_attempts,
-        forced_text=structing.forced_text,
+        INTAKE_SCHEMA,
+        INTAKE_OUTBOX_TABLE,
+        ai_job_failed_envelope(
+            ai_job_id=ai_job_id,
+            intake_id=intake_id,
+            task_type=task_type,  # type: ignore[arg-type]
+            reason=reason,
+        ),
     )
 
 
@@ -334,8 +531,11 @@ async def _finalize_pipeline(
     attempts, the Draft ``intake_pre_summaries`` row is written with the
     provider confidence + honesty fields, the intake moves to
     ``ready_for_review``, and ``pre_summary.ready`` + ``ai_job.completed`` are
-    emitted (ADR-0002 S1). A downstream failure here rolls the whole pass back,
-    so at-least-once redelivery re-runs it - never a partial pre-summary.
+    emitted. A low-confidence outcome ALSO publishes ``pre_summary.low_confidence``
+    (AMB-006) - the honesty cue that structurally forces doctor review before
+    the pre-summary can finalize (ADR-0001). ADR-0002 S1. A downstream failure
+    here rolls the whole pass back, so at-least-once redelivery re-runs it -
+    never a partial pre-summary.
     """
     token_input = 0
     token_output = 0
@@ -395,6 +595,16 @@ async def _finalize_pipeline(
             pre_summary_id=pre_summary_id,
         ),
     )
+    if low_conf:
+        await write_outbox(
+            connection,
+            INTAKE_SCHEMA,
+            INTAKE_OUTBOX_TABLE,
+            pre_summary_low_confidence_envelope(
+                intake_id=intake_id,
+                pre_summary_id=pre_summary_id,
+            ),
+        )
     await write_outbox(
         connection,
         INTAKE_SCHEMA,

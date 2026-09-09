@@ -86,6 +86,10 @@ DEFAULT_AI_TIMEOUT_SECONDS = 30.0
 DEFAULT_AI_MAX_RETRIES = 3
 DEFAULT_AI_CIRCUIT_BREAKER_THRESHOLD = 5
 DEFAULT_AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 30.0
+# NFR-001 freemium AI spend cap (PHASE-7 T06/T11): the hard monthly budget in
+# paise that, once spent, hard-stops new AI calls and degrades the intake to raw
+# doctor review (standard A4/A5, spec #344). Rs 2,000 / month = 200,000 paise.
+DEFAULT_AI_MONTHLY_BUDGET_PAISE = 200_000
 # Operator MFA TOTP secret encryption (PHASE-5 S8, #261): the AES-256-GCM key
 # for encrypting/decrypting the TOTP secret stored in ``iam_operator_mfa.secret``
 # comes from the ``IAM_MFA_SECRET_KEY`` environment variable (never committed).
@@ -182,6 +186,7 @@ class Settings:
     ai_max_retries: int = DEFAULT_AI_MAX_RETRIES
     ai_circuit_breaker_threshold: int = DEFAULT_AI_CIRCUIT_BREAKER_THRESHOLD
     ai_circuit_breaker_cooldown_seconds: float = DEFAULT_AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS
+    ai_monthly_budget_paise: int = DEFAULT_AI_MONTHLY_BUDGET_PAISE
 
     def __post_init__(self) -> None:
         if self.gateway_jwt_verify_enabled and not self.gateway_jwt_signing_key:
@@ -279,6 +284,8 @@ class Settings:
             raise ValueError("ai_max_retries must be positive")
         if self.ai_circuit_breaker_threshold <= 0:
             raise ValueError("ai_circuit_breaker_threshold must be positive")
+        if self.ai_monthly_budget_paise <= 0:
+            raise ValueError("ai_monthly_budget_paise must be positive")
         if self.ai_circuit_breaker_cooldown_seconds <= 0:
             raise ValueError("ai_circuit_breaker_cooldown_seconds must be positive")
         if self.redis_consent_ttl_seconds <= 0:
@@ -462,5 +469,8 @@ def get_settings() -> Settings:
         ai_circuit_breaker_cooldown_seconds=_env_float(
             "AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS",
             DEFAULT_AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+        ),
+        ai_monthly_budget_paise=_env_int(
+            "AI_MONTHLY_BUDGET_PAISE", DEFAULT_AI_MONTHLY_BUDGET_PAISE
         ),
     )

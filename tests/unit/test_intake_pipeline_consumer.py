@@ -159,6 +159,7 @@ def _registered_handler() -> object:
 def _text_intake_row(*, intake_id: int = 1, status: str = "captured") -> SimpleNamespace:
     return SimpleNamespace(
         id=intake_id,
+        patient_id=42,
         mode="text",
         language="hi",
         status=status,
@@ -173,6 +174,7 @@ def _text_intake_row(*, intake_id: int = 1, status: str = "captured") -> SimpleN
 def _voice_intake_row(*, intake_id: int = 1) -> SimpleNamespace:
     return SimpleNamespace(
         id=intake_id,
+        patient_id=42,
         mode="voice",
         language="hi",
         status="captured",
@@ -205,6 +207,31 @@ def _captured_envelope(intake_id: int = 1) -> Envelope[IntakeCapturedPayload]:
     )
 
 
+def _consent_decision(*, allowed: bool = True) -> SimpleNamespace:
+    return SimpleNamespace(allowed=allowed, consent_id=3, version=1)
+
+
+def _fake_egress_gate(
+    *,
+    allows_ai_call: bool = True,
+    consent_allowed: bool = True,
+) -> tuple[MagicMock, MagicMock, MagicMock]:
+    """A fake consent gate + budget meter standing in for ``_build_egress_gate``.
+
+    ``dispose`` is an AsyncMock so the pipeline's ``finally`` can await it; the
+    budget meter and consent facade expose exactly the surfaces the pipeline
+    calls - ``allows_ai_call``, ``check_consent``, ``record_egress_disclosure``.
+    """
+    gate_engine = MagicMock()
+    gate_engine.dispose = AsyncMock()
+    budget_meter = MagicMock()
+    budget_meter.allows_ai_call = AsyncMock(return_value=allows_ai_call)
+    consent = MagicMock()
+    consent.check_consent = AsyncMock(return_value=_consent_decision(allowed=consent_allowed))
+    consent.record_egress_disclosure = AsyncMock()
+    return gate_engine, consent, budget_meter
+
+
 async def _run(handler: object, envelope: Envelope[BaseModel], engine: MagicMock) -> None:
     with (
         patch("bus.handler_harness._delivery_engine", return_value=engine),
@@ -213,6 +240,7 @@ async def _run(handler: object, envelope: Envelope[BaseModel], engine: MagicMock
             new_callable=AsyncMock,
             return_value=True,
         ) as record_patch,
+        patch("modules.intake.adapters._build_egress_gate", return_value=_fake_egress_gate()),
     ):
         await handler(envelope)
     assert record_patch.await_count == 1
@@ -314,6 +342,7 @@ async def test_text_mode_structures_the_text_directly_without_a_transcribe_leg()
             new_callable=AsyncMock,
             return_value=True,
         ),
+        patch("modules.intake.adapters._build_egress_gate", return_value=_fake_egress_gate()),
         patch.object(
             MockAiProvider,
             "transcribe",
