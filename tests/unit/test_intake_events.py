@@ -91,8 +91,8 @@ def test_every_intake_event_type_is_registered_in_bus_events() -> None:
 def _capture_from_all_event_types() -> list[Envelope[BaseModel]]:
     return [
         intake_started_envelope(patient_id=7, mode="voice", language="hi"),
-        intake_captured_envelope(intake_id=1),
-        intake_retry_requested_envelope(intake_id=1, record_attempt=2),
+        intake_captured_envelope(intake_id=1, patient_id=7, mode="voice", duration_s=12.5),
+        intake_retry_requested_envelope(intake_id=1, record_attempt=2, reason="unusable_audio"),
         pre_summary_ready_envelope(intake_id=1, pre_summary_id=5),
         pre_summary_low_confidence_envelope(intake_id=1, pre_summary_id=5),
         ai_job_completed_envelope(ai_job_id=9, intake_id=1, task_type="structure"),
@@ -111,20 +111,33 @@ def test_intake_started_carries_patient_mode_and_language() -> None:
     assert envelope.payload.language == "hi"
 
 
-def test_captured_carries_only_the_intake_id() -> None:
-    envelope = intake_captured_envelope(intake_id=42)
+def test_captured_carries_intake_id_patient_id_mode_and_duration() -> None:
+    envelope = intake_captured_envelope(intake_id=42, patient_id=7, mode="voice", duration_s=12.5)
 
     assert envelope.event_type == EVENT_INTAKE_CAPTURED
     assert envelope.producer == PRODUCER_MODULE
     assert envelope.payload.intake_id == 42
+    assert envelope.payload.patient_id == 7
+    assert envelope.payload.mode == "voice"
+    assert envelope.payload.duration_s == 12.5
 
 
-def test_retry_requested_carries_the_record_attempt() -> None:
-    envelope = intake_retry_requested_envelope(intake_id=42, record_attempt=3)
+def test_captured_text_mode_carries_none_duration() -> None:
+    envelope = intake_captured_envelope(intake_id=42, patient_id=7, mode="text", duration_s=None)
+
+    assert envelope.payload.mode == "text"
+    assert envelope.payload.duration_s is None
+
+
+def test_retry_requested_carries_the_record_attempt_and_reason() -> None:
+    envelope = intake_retry_requested_envelope(
+        intake_id=42, record_attempt=3, reason="unusable_audio"
+    )
 
     assert envelope.event_type == EVENT_INTAKE_RETRY_REQUESTED
     assert envelope.payload.intake_id == 42
     assert envelope.payload.record_attempt == 3
+    assert envelope.payload.reason == "unusable_audio"
 
 
 def test_pre_summary_ready_names_the_summary() -> None:

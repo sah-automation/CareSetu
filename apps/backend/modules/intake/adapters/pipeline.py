@@ -261,6 +261,7 @@ async def _run_structuring_pipeline(
                         intake_retry_requested_envelope(
                             intake_id=intake_id,
                             record_attempt=unusable_state.record_attempts,
+                            reason="unusable_audio",
                         ),
                     )
                     logger.warning(

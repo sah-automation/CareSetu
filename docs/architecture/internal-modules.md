@@ -651,6 +651,10 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 | `record.denied`                                | `MOD-003` (LHR)             | `MOD-011`                                                                    | JSON           | At-least-once              |
 | `audit.tamper_detected`                        | `MOD-011` (trigger)         | (telemetry, alert delivery deferred)                                         | JSON           | At-least-once              |
 
+> `intake.captured` carries `patient_id` (int), `mode` (`voice` | `text`), and `duration_s` (float | None) alongside `intake_id`; `duration_s` is the audio duration in seconds for voice intake, None for text (T06 #370).
+
+> `intake.retry_requested` carries a PHI-free `reason` string (e.g. `unusable_audio`) alongside `intake_id` and `record_attempt` (T06 #370).
+
 > `otp.failed` carries a `reason`: `lockout` when the brute-force lockout triggers (MOD-001, ADR-0004) or `delivery` when an SMS send has exhausted every retry and the code never reached the phone (MOD-001, PHASE-2 REM T5 #81).
 
 > `patient.auth_failed` carries a `reason`; the shared failure-reason vocabulary includes `access_denied`, emitted when an authenticated caller is refused on a protected route (403, insufficient scope or missing role) so the denial is auditable, and written to the iam outbox in its own transaction. Anonymous denials (401) carry no identity to attribute and stay log-only - no outbox write (MOD-001, PHASE-2 REM T7 #87).

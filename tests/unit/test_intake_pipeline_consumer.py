@@ -204,7 +204,12 @@ def _captured_envelope(intake_id: int = 1) -> Envelope[IntakeCapturedPayload]:
         event_id=uuid4(),
         event_type=EVENT_INTAKE_CAPTURED,
         producer="intake",
-        payload=IntakeCapturedPayload(intake_id=intake_id),
+        payload=IntakeCapturedPayload(
+            intake_id=intake_id,
+            patient_id=42,
+            mode="voice",
+            duration_s=90.0,
+        ),
     )
 
 

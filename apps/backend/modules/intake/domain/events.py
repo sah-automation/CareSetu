@@ -59,11 +59,16 @@ class IntakeCapturedPayload(BaseModel):
     """Subject of ``intake.captured``: a symptom intake was just captured.
 
     MOD-005 self-subscribes to this event to trigger the async AI pipeline
-    (structuring), and MOD-011 records it on the audit trail; only the intake
-    id travels - the captured text/transcript stays in the intake schema.
+    (structuring), and MOD-011 records it on the audit trail. Carries the
+    intake id plus the funnel facts (patient id, mode, duration) so
+    telemetry consumers have the fields they need without a schema lookup.
+    The captured text/transcript stays in the intake schema.
     """
 
     intake_id: int
+    patient_id: int
+    mode: IntakeMode
+    duration_s: float | None
 
 
 class IntakeRetryRequestedPayload(BaseModel):
@@ -71,11 +76,13 @@ class IntakeRetryRequestedPayload(BaseModel):
 
     Fired by the auto-retry flow (NFR-PERF-002) when ASR input is unusable;
     MOD-005 consumes it to drive the re-record flow and MOD-011 logs it.
-    ``record_attempt`` names the retry round (≤ 3 per NFR-PERF-003).
+    ``record_attempt`` names the retry round (<= 3 per NFR-PERF-003);
+    ``reason`` is a short, PHI-free descriptor (e.g. "unusable_audio").
     """
 
     intake_id: int
     record_attempt: int
+    reason: str
 
 
 class PreSummaryReadyPayload(BaseModel):
@@ -154,25 +161,38 @@ def intake_started_envelope(
     )
 
 
-def intake_captured_envelope(*, intake_id: int) -> Envelope[IntakeCapturedPayload]:
+def intake_captured_envelope(
+    *,
+    intake_id: int,
+    patient_id: int,
+    mode: IntakeMode,
+    duration_s: float | None,
+) -> Envelope[IntakeCapturedPayload]:
     """Build the ``intake.captured`` envelope for the intake outbox."""
     return Envelope[IntakeCapturedPayload](
         event_id=uuid4(),
         event_type=EVENT_INTAKE_CAPTURED,
         producer=PRODUCER_MODULE,
-        payload=IntakeCapturedPayload(intake_id=intake_id),
+        payload=IntakeCapturedPayload(
+            intake_id=intake_id,
+            patient_id=patient_id,
+            mode=mode,
+            duration_s=duration_s,
+        ),
     )
 
 
 def intake_retry_requested_envelope(
-    *, intake_id: int, record_attempt: int
+    *, intake_id: int, record_attempt: int, reason: str
 ) -> Envelope[IntakeRetryRequestedPayload]:
     """Build the ``intake.retry_requested`` envelope for the intake outbox."""
     return Envelope[IntakeRetryRequestedPayload](
         event_id=uuid4(),
         event_type=EVENT_INTAKE_RETRY_REQUESTED,
         producer=PRODUCER_MODULE,
-        payload=IntakeRetryRequestedPayload(intake_id=intake_id, record_attempt=record_attempt),
+        payload=IntakeRetryRequestedPayload(
+            intake_id=intake_id, record_attempt=record_attempt, reason=reason
+        ),
     )
 
 

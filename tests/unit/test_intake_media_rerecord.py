@@ -300,6 +300,7 @@ async def test_re_record_increments_attempt_and_emits_retry_requested() -> None:
     payload = IntakeRetryRequestedPayload.model_validate(values["payload"])
     assert payload.intake_id == 1
     assert payload.record_attempt == 2
+    assert payload.reason == "patient_re_record"
 
 
 @pytest.mark.asyncio

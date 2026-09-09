@@ -219,7 +219,15 @@ class IntakeFacade:
                 started_envelope,
             )
 
-            envelope = intake_captured_envelope(intake_id=intake_id)
+            duration_s = None
+            if media_ref is not None and media_ref.audio_duration_ms is not None:
+                duration_s = media_ref.audio_duration_ms / 1000.0
+            envelope = intake_captured_envelope(
+                intake_id=intake_id,
+                patient_id=patient_id,
+                mode=mode,
+                duration_s=duration_s,
+            )
             await write_outbox(
                 connection,
                 INTAKE_SCHEMA,
@@ -389,6 +397,7 @@ class IntakeFacade:
             envelope = intake_retry_requested_envelope(
                 intake_id=intake_id,
                 record_attempt=next_state.record_attempts,
+                reason="patient_re_record",
             )
             await write_outbox(
                 connection,
