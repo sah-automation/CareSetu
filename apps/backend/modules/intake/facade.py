@@ -17,8 +17,9 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Literal, cast
+from typing import Literal
 
+from cryptography.exceptions import InvalidTag
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -57,6 +58,7 @@ from modules.intake.domain.state_machine import (
     transition,
 )
 from modules.intake.intake_models import (
+    INTAKE_SCHEMA,
     IntakeDetailView,
     IntakeSubmitResult,
     MediaFile,
@@ -112,9 +114,6 @@ def _validate_audio_duration(media_ref: MediaUploadRef) -> None:
         )
 
 
-INTAKE_SCHEMA = "intake"
-
-
 class IntakeFacade:
     """Typed public facade for intake capture and read projections.
 
@@ -145,17 +144,21 @@ class IntakeFacade:
     ) -> IntakeSubmitResult:
         """Capture a symptom intake and emit ``intake.started`` + ``intake.captured``.
 
-        Validates one-mode-per-intake: exactly one of ``text`` or
-        ``media_ref`` must be provided, matching the declared ``mode``.
-        Enforces the text cap (``MAX_TEXT_LENGTH`` = 2000 chars). Commits
-        the intake row, the ``intake.started`` funnel-telemetry event
-        (PHASE-7 T05 #369), the ``intake.captured`` outbox event, and (for a
-        voice intake) the ``intake_media_refs`` row in the SAME
-        transaction (ADR-0002 S1) so a crash between state change and
-        dispatch cannot lose the event(s). The voice-attempt cap (3 attempts)
-        is enforced by the domain state machine at the re-record seam
-        (``MAX_RECORD_ATTEMPTS``, PHASE-7 T02) - a fresh capture always
-        begins at record attempt 1.
+        Validates one-mode-per-intake: text mode requires ``text``, voice mode
+        requires ``media_ref``. Text mode ALSO accepts an optional ``media_ref``
+        - a doctor-only voice note that rides with the typed symptoms (PHASE-7
+        T17 brief): it is persisted as an ``intake_media_refs`` row so the
+        doctor hears it on review, and it is NEVER fed to the
+        ``transcribe -> structure`` pipeline (the mode gate only transcribes
+        ``mode == "voice"``). Enforces the text cap (``MAX_TEXT_LENGTH`` =
+        2000 chars). Commits the intake row, the ``intake.started``
+        funnel-telemetry event (PHASE-7 T05 #369), the ``intake.captured``
+        outbox event, and the ``intake_media_refs`` row (when a media ref is
+        present) in the SAME transaction (ADR-0002 S1) so a crash between
+        state change and dispatch cannot lose the event(s). The voice-attempt
+        cap (3 attempts) is enforced by the domain state machine at the
+        re-record seam (``MAX_RECORD_ATTEMPTS``, PHASE-7 T02) - a fresh capture
+        always begins at record attempt 1.
 
         ``media_ref`` is the opaque clip ticket returned by
         ``upload_intake_media``; for a voice intake it is attached here as
@@ -164,8 +167,6 @@ class IntakeFacade:
         Raises :class:`IntakeValidationError` on validation failure.
         """
         if mode == "text":
-            if media_ref is not None:
-                raise IntakeValidationError("text mode intake must not include a media reference")
             if text is None:
                 raise IntakeValidationError("text mode intake requires text content")
             if len(text) > MAX_TEXT_LENGTH:
@@ -196,15 +197,14 @@ class IntakeFacade:
             )
             intake_id = int(result.scalar_one())
 
-            if mode == "voice":
-                media_ref_attached = cast(MediaUploadRef, media_ref)
+            if media_ref is not None:
                 await connection.execute(
                     intake_media_refs.insert().values(
                         intake_id=intake_id,
-                        media_type=media_ref_attached.media_type,
-                        object_key=media_ref_attached.object_key,
-                        audio_duration_ms=media_ref_attached.audio_duration_ms,
-                        file_size_bytes=media_ref_attached.file_size_bytes,
+                        media_type=media_ref.media_type,
+                        object_key=media_ref.object_key,
+                        audio_duration_ms=media_ref.audio_duration_ms,
+                        file_size_bytes=media_ref.file_size_bytes,
                         record_attempt=state.record_attempts,
                     )
                 )
@@ -474,6 +474,72 @@ class IntakeFacade:
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
+
+    async def get_intake_media(
+        self,
+        *,
+        intake_id: int,
+        media_ref_id: int,
+        caller_id: int,
+        caller_role: Literal["patient", "doctor"],
+    ) -> bytes:
+        """Decrypt and return the audio bytes for a media ref on an intake.
+
+        Authorization gate (PHASE-7 T13/T17, #373): the clip is only served to
+        the owning patient (``caller_role == "patient"`` and ``caller_id``
+        matching the intake's patient) or to a doctor partner
+        (``caller_role == "doctor"``; the route seam has already verified the
+        partner is an active doctor via ``require_partner`` +
+        ``partner_type == "doctor"``). Audio is PHI, so the returned bytes are
+        never logged.
+
+        The intake must exist and the ``media_ref_id`` must belong to it.
+        Raises :class:`IntakeNotFoundError` when either lookup misses;
+        :class:`IntakeValidationError` when the store is not configured;
+        :class:`MediaTransferError` when the clip cannot be read/decrypted.
+        """
+        if self._media_store is None:
+            raise IntakeValidationError("media store is not configured")
+
+        async with self._engine.begin() as connection:
+            if caller_role == "patient":
+                intake_row = (
+                    await connection.execute(
+                        select(intake_intakes).where(
+                            intake_intakes.c.id == intake_id,
+                            intake_intakes.c.patient_id == caller_id,
+                        )
+                    )
+                ).first()
+            else:
+                intake_row = (
+                    await connection.execute(
+                        select(intake_intakes).where(intake_intakes.c.id == intake_id)
+                    )
+                ).first()
+            if intake_row is None:
+                raise IntakeNotFoundError(f"intake {intake_id} not found for caller {caller_id}")
+
+            media_row = (
+                await connection.execute(
+                    select(intake_media_refs).where(
+                        intake_media_refs.c.intake_id == intake_id,
+                        intake_media_refs.c.id == media_ref_id,
+                    )
+                )
+            ).first()
+            if media_row is None:
+                raise IntakeNotFoundError(
+                    f"media ref {media_ref_id} not found on intake {intake_id}"
+                )
+            object_key = str(media_row.object_key)
+
+        try:
+            return self._media_store.read(object_key=object_key)
+        except (OSError, InvalidTag) as exc:
+            raise MediaTransferError(
+                f"failed to read media ref {media_ref_id} for intake {intake_id}"
+            ) from exc
 
     async def get_pre_summary(
         self,

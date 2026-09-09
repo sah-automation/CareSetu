@@ -13,7 +13,9 @@ facade-with-fakes seam:
   funnel-telemetry ride-along (patient id + mode + language) written ahead of
   ``intake.captured`` to preserve funnel ordering.
 - One-mode-per-intake and the text cap (2000 chars) are enforced
-  server-side with typed errors (accepted criterion 2).
+  server-side with typed errors (accepted criterion 2). Text mode also accepts
+  an optional doctor-only ``media_ref`` voice note (T17 brief, #373) that is
+  persisted to ``intake_media_refs`` and never fed to transcription.
 - ``get_intake`` / ``get_pre_summary`` return the agreed DTO shapes:
   status from the state machine, honesty (``low_confidence``) fields
   present (accepted criterion 3).
@@ -52,6 +54,7 @@ from modules.intake.intake_models import (
 )
 from modules.intake.schema.models import (
     intake_intakes,
+    intake_media_refs,
 )
 
 NOW = datetime.now(UTC)
@@ -298,19 +301,41 @@ async def test_submit_intake_writes_the_captured_envelope_through_write_outbox()
 
 
 @pytest.mark.asyncio
-async def test_submit_intake_text_mode_demands_text_rejects_media_ref() -> None:
-    facade = _facade(_connection([]))
+async def test_submit_intake_text_mode_accepts_optional_doctor_only_media_ref() -> None:
+    """A text-mode intake may carry a doctor-only voice note (T17 brief, #373).
 
-    with pytest.raises(
-        IntakeValidationError,
-        match="text mode intake must not include a media reference",
-    ):
-        await facade.submit_intake(
-            patient_id=7,
-            mode="text",
-            language="en",
-            media_ref=_media_ref(),
-        )
+    The note rides with the typed symptoms: the ``media_ref`` is persisted as
+    an ``intake_media_refs`` row alongside the intake (exactly like the voice
+    attach), so the doctor hears it on review. It is never transcribed - the
+    pipeline's mode gate only reads ``mode == "voice"`` clips.
+    """
+    connection = _connection(
+        [
+            _intake_id_result(intake_id=42),
+            _FakeResult(scalar=None),
+            _outbox_result(),
+            _outbox_result(),
+        ]
+    )
+    facade = _facade(connection)
+
+    result = await facade.submit_intake(
+        patient_id=7,
+        mode="text",
+        language="en",
+        text="sir dard hai, aage bol raha hoon",
+        media_ref=_media_ref(),
+    )
+
+    assert result.intake_id == 42
+    assert result.status == "captured"
+    # The media ref is persisted into intake_media_refs with the intake's id.
+    ref_params = _insert_params(_inserts(connection), intake_media_refs.name)
+    assert ref_params is not None
+    assert ref_params["intake_id"] == 42
+    assert ref_params["media_type"] == "audio"
+    assert ref_params["object_key"] == "intake/abc-123"
+    assert ref_params["record_attempt"] == 1
 
     with pytest.raises(IntakeValidationError, match="requires text content"):
         await facade.submit_intake(patient_id=7, mode="text", language="en")

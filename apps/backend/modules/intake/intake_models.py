@@ -7,6 +7,11 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+#: The MOD-005 database schema. Kept here (a leaf module free of facade
+#: imports) so the facade, adapters, and pipeline all import it without
+#: the circular-import hazard that importing from ``facade.py`` caused.
+INTAKE_SCHEMA = "intake"
+
 
 class StructuredFields(BaseModel):
     """The AI-structured clinical fields extracted from a symptom intake.

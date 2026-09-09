@@ -54,6 +54,12 @@ DEFAULT_AUDIT_RETENTION_DAYS = 0
 # is a base64 32-byte AES-256 key from the environment (never committed); the
 # store refuses a blank/malformed key (fail-closed, security-phii-standards §4).
 DEFAULT_PARTNER_ARTIFACT_ROOT = "var/partner-artifacts"
+# MOD-006 intake audio (PHASE-7 T08, #373): encrypted local filesystem store
+# under the ``intake/`` object-storage prefix. ``INTAKE_MEDIA_KEY`` is a base64
+# 32-byte AES-256 key from the environment (never committed); empty derives an
+# ephemeral dev/test key so the encrypted write path always runs (same
+# convention as the partner artifact store).
+DEFAULT_INTAKE_MEDIA_ROOT = "var/intake-media"
 # Rejected-partner re-submission throttle (PHASE-5 T09, #253): the max
 # re-submission rounds a rejected partner may open before the operator queue is
 # protected, and the cooldown (days) after which the budget refreshes. Queue
@@ -153,6 +159,12 @@ class Settings:
     # ephemeral dev key, never committed).
     partner_artifact_root: str = DEFAULT_PARTNER_ARTIFACT_ROOT
     partner_artifact_key: str = ""
+    # MOD-006 intake audio media store (PHASE-7 T08, #373): local root and the
+    # base64 AES-256 key, mirroring the partner artifact store. Root defaults to
+    # a repo-local ``var/`` dir; the key is empty unless supplied by the
+    # environment (the store derives an ephemeral dev key, never committed).
+    intake_media_root: str = DEFAULT_INTAKE_MEDIA_ROOT
+    intake_media_key: str = ""
     # Rejected-partner re-submission throttle (PHASE-5 T09, #253): environment
     # driven like the SMS/WhatsApp knobs (coding-standards §9.1). ``max`` is the
     # re-submission budget before cooldown; ``cooldown_days`` the cooldown length.
@@ -440,6 +452,8 @@ def get_settings() -> Settings:
             "PARTNER_ARTIFACT_ROOT", DEFAULT_PARTNER_ARTIFACT_ROOT
         ),
         partner_artifact_key=os.environ.get("PARTNER_ARTIFACT_KEY", ""),
+        intake_media_root=os.environ.get("INTAKE_MEDIA_ROOT", DEFAULT_INTAKE_MEDIA_ROOT),
+        intake_media_key=os.environ.get("INTAKE_MEDIA_KEY", ""),
         partner_re_submission_max=_env_int(
             "PARTNER_RE_SUBMISSION_MAX", DEFAULT_PARTNER_RE_SUBMISSION_MAX
         ),

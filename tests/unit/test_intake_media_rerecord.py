@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from cryptography.exceptions import InvalidTag
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.sql.dml import Insert
 
@@ -68,11 +69,14 @@ class _FakeResult:
 class _FakeMediaStore:
     """A controllable media store: fails the first ``n_failures`` writes, then succeeds."""
 
-    def __init__(self, *, n_failures: int = 0) -> None:
+    def __init__(self, *, n_failures: int = 0, stored_data: bytes = b"\xff" * 16) -> None:
         self.n_failures = n_failures
         self.save_calls: int = 0
         self.captured_patient_ids: list[int] = []
         self.captured_data: list[bytes] = []
+        self.read_calls: int = 0
+        self.read_object_keys: list[str] = []
+        self.stored_data = stored_data
 
     def save(self, *, data: bytes, patient_id: int) -> str:
         self.save_calls += 1
@@ -81,6 +85,11 @@ class _FakeMediaStore:
         if self.save_calls <= self.n_failures:
             raise OSError("disk full")
         return f"intake/{patient_id}/clip-{self.save_calls}.enc"
+
+    def read(self, *, object_key: str) -> bytes:
+        self.read_calls += 1
+        self.read_object_keys.append(object_key)
+        return self.stored_data
 
 
 class _FakeSleep:
@@ -494,3 +503,164 @@ async def test_re_record_refuses_an_intake_not_in_re_record_status() -> None:
 @pytest.mark.asyncio
 async def test_upload_attempt_constant_matches_spec() -> None:
     assert MAX_UPLOAD_ATTEMPTS == 3
+
+
+# ---------------------------------------------------------------------------
+# get_intake_media - authorized playback (PHASE-7 T13/T17, #373)
+# ---------------------------------------------------------------------------
+
+
+def _media_row(*, media_ref_id: int = 11, object_key: str = "intake/7/clip-1.enc") -> object:
+    return SimpleNamespace(
+        id=media_ref_id,
+        intake_id=1,
+        media_type="audio",
+        object_key=object_key,
+        audio_duration_ms=90_000,
+        file_size_bytes=1_024_000,
+        record_attempt=1,
+    )
+
+
+def _playback_patient_results(
+    *,
+    intake_row: object | None = None,
+    media_row: object | None = None,
+) -> list[object]:
+    # select(intake) -> select(media refs)
+    return [
+        _FakeResult(row=intake_row if intake_row is not None else _intake_row(status="captured")),
+        _FakeResult(row=media_row if media_row is not None else _media_row()),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_intake_media_returns_decrypted_bytes_to_the_owning_patient() -> None:
+    """Playback returns the same bytes the patient uploaded (decrypt round-trip)."""
+    store = _FakeMediaStore(stored_data=b"\x00" * 512)
+    connection = _connection(_playback_patient_results())
+    facade = _facade(connection, store=store)
+
+    data = await facade.get_intake_media(
+        intake_id=1,
+        media_ref_id=11,
+        caller_id=7,
+        caller_role="patient",
+    )
+
+    assert data == b"\x00" * 512
+    assert store.read_object_keys == ["intake/7/clip-1.enc"]
+
+
+@pytest.mark.asyncio
+async def test_get_intake_media_serves_a_doctor_partner_without_ownership_match() -> None:
+    """A doctor partner streams any intake's clip - no ownership check (route gates RBAC)."""
+    store = _FakeMediaStore(stored_data=b"doctor-audio")
+    # Doctor path selects the intake WITHOUT the patient-id predicate, so a row
+    # whose patient id differs from the caller is still served.
+    connection = _connection(_playback_patient_results(intake_row=_intake_row(patient_id=42)))
+    facade = _facade(connection, store=store)
+
+    data = await facade.get_intake_media(
+        intake_id=1,
+        media_ref_id=11,
+        caller_id=909,
+        caller_role="doctor",
+    )
+
+    assert data == b"doctor-audio"
+
+
+@pytest.mark.asyncio
+async def test_get_intake_media_refuses_a_non_owner_patient() -> None:
+    """A patient who does not own the intake gets IntakeNotFoundError (404)."""
+    connection = _connection(
+        [
+            _FakeResult(row=None),
+            _FakeResult(row=_media_row()),
+        ]
+    )
+    facade = _facade(connection, store=_FakeMediaStore())
+
+    with pytest.raises(IntakeNotFoundError, match="not found for caller 99"):
+        await facade.get_intake_media(
+            intake_id=1,
+            media_ref_id=11,
+            caller_id=99,
+            caller_role="patient",
+        )
+
+
+@pytest.mark.asyncio
+async def test_get_intake_media_refuses_a_media_ref_not_on_the_intake() -> None:
+    """A ref that does not belong to the intake is refused (404), never streamed."""
+    connection = _connection(
+        [
+            _FakeResult(row=_intake_row(status="captured")),
+            _FakeResult(row=None),
+        ]
+    )
+    facade = _facade(connection, store=_FakeMediaStore())
+
+    with pytest.raises(IntakeNotFoundError, match="not found on intake 1"):
+        await facade.get_intake_media(
+            intake_id=1,
+            media_ref_id=999,
+            caller_id=7,
+            caller_role="patient",
+        )
+
+
+@pytest.mark.asyncio
+async def test_get_intake_media_requires_a_configured_media_store() -> None:
+    facade = _facade(_connection([]))
+
+    with pytest.raises(IntakeValidationError, match="media store is not configured"):
+        await facade.get_intake_media(
+            intake_id=1,
+            media_ref_id=11,
+            caller_id=7,
+            caller_role="patient",
+        )
+
+
+@pytest.mark.asyncio
+async def test_get_intake_media_read_failure_raises_media_transfer_error() -> None:
+    """A clip that cannot be read from the store surfaces as the typed transfer error."""
+
+    class _FailingStore(_FakeMediaStore):
+        def read(self, *, object_key: str) -> bytes:
+            del object_key
+            raise OSError("missing clip")
+
+    connection = _connection(_playback_patient_results())
+    facade = _facade(connection, store=_FailingStore())
+
+    with pytest.raises(MediaTransferError, match="failed to read media ref 11"):
+        await facade.get_intake_media(
+            intake_id=1,
+            media_ref_id=11,
+            caller_id=7,
+            caller_role="patient",
+        )
+
+
+@pytest.mark.asyncio
+async def test_get_intake_media_tampered_ciphertext_raises_media_transfer_error() -> None:
+    """A clip whose tag fails AES-GCM verification is a transfer failure, not a 500."""
+
+    class _TamperedStore(_FakeMediaStore):
+        def read(self, *, object_key: str) -> bytes:
+            del object_key
+            raise InvalidTag
+
+    connection = _connection(_playback_patient_results())
+    facade = _facade(connection, store=_TamperedStore())
+
+    with pytest.raises(MediaTransferError, match="failed to read media ref 11"):
+        await facade.get_intake_media(
+            intake_id=1,
+            media_ref_id=11,
+            caller_id=7,
+            caller_role="patient",
+        )

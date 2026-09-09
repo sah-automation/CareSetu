@@ -44,7 +44,7 @@ from modules.intake.domain.events import (
     PreSummaryLowConfidencePayload,
     PreSummaryReadyPayload,
 )
-from modules.intake.facade import INTAKE_SCHEMA
+from modules.intake.intake_models import INTAKE_SCHEMA
 
 logger = logging.getLogger(__name__)
 

@@ -19,12 +19,12 @@ from __future__ import annotations
 from typing import Annotated, Literal, cast
 
 from fastapi import APIRouter, Depends, FastAPI, File, Query, Request, UploadFile, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.gateway.errors import InsufficientScopeError, error_response
 from app.gateway.principal import Principal
-from app.gateway.rbac import require_partner, require_patient
+from app.gateway.rbac import require_authenticated, require_partner, require_patient
 from modules.intake.domain.exceptions import (
     IllegalIntakeTransitionError,
     IllegalPreSummaryTransitionError,
@@ -58,10 +58,12 @@ router = APIRouter(prefix="/v1/intake", tags=["intake"])
 class SubmitIntakeRequest(BaseModel):
     """Body of ``POST /v1/intake/submit``: capture a symptom intake (PHASE-7 T07).
 
-    Exactly one of ``text`` (text mode) or ``media_ref`` (voice mode, from
-    ``upload_media``) must be provided, matching the declared ``mode``.
-    The text cap (2000 chars) and one-mode-per-intake enforcement live in the
-    facade; the route is a thin adapter.
+    Voice mode requires ``media_ref`` (from ``upload_media``); text mode
+    requires ``text`` and optionally accepts a ``media_ref`` - a doctor-only
+    voice note that rides with the typed symptoms (PHASE-7 T17 brief, #373),
+    persisted as a media ref and never fed to the AI pipeline. The text cap
+    (2000 chars) and mode validation live in the facade; the route is a thin
+    adapter.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -74,7 +76,10 @@ class SubmitIntakeRequest(BaseModel):
     )
     media_ref: MediaUploadRef | None = Field(
         default=None,
-        description="Opaque clip ticket from upload_media for voice-mode intake",
+        description=(
+            "Clip ticket from upload_media: required for voice mode, "
+            "optional doctor-only note for text mode"
+        ),
     )
 
 
@@ -322,6 +327,56 @@ async def review_pre_summary(
         doctor_id=partner.partner_id,
         corrections=body.corrections,
     )
+
+
+@router.get(
+    "/{intake_id}/media/{media_ref_id}",
+    response_class=Response,
+    status_code=status.HTTP_200_OK,
+    summary="Stream an intake's audio clip (owning patient or doctor partner)",
+)
+async def get_intake_media(
+    request: Request,
+    account: Annotated[Principal, Depends(require_authenticated)],
+    intake_id: int,
+    media_ref_id: int,
+) -> Response:
+    """Stream the decrypted audio bytes of a media ref on an intake (#373).
+
+    The dual-role playback route serves the owning patient or an allowed
+    doctor partner (ui-blueprint §6.2a). The ``require_authenticated`` gate
+    admits any logged-in caller, then the role branches:
+    ``patient`` calls the facade with patient ownership (verified against the
+    intake's patient), ``partner`` resolves the profile and requires
+    ``partner_type == "doctor"`` (the doctor RBAC convention, matching the
+    review route) before calling with the doctor authorization. Any other
+    scope is refused with 403 - audio is PHI and only ever reaches these two
+    callers. The facade decrypts the clip for the authorized caller; the bytes
+    are never logged.
+    """
+    facade = cast(IntakeFacade, request.app.state.intake_facade)
+    if "patient" in account.roles:
+        data = await facade.get_intake_media(
+            intake_id=intake_id,
+            media_ref_id=media_ref_id,
+            caller_id=int(account.subject_id),
+            caller_role="patient",
+        )
+    elif "partner" in account.roles:
+        partner = await cast(PartnerFacade, request.app.state.partner_facade).resolve_partner(
+            int(account.subject_id)
+        )
+        if partner.partner_type != "doctor":
+            raise InsufficientScopeError("the doctor role is required for this route")
+        data = await facade.get_intake_media(
+            intake_id=intake_id,
+            media_ref_id=media_ref_id,
+            caller_id=partner.partner_id,
+            caller_role="doctor",
+        )
+    else:
+        raise InsufficientScopeError("the patient or doctor role is required for this route")
+    return Response(content=data, media_type="audio/webm")
 
 
 # ---------------------------------------------------------------------------

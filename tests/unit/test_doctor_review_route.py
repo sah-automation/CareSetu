@@ -69,6 +69,7 @@ class StubIntakeFacade:
     def __init__(self) -> None:
         self.called_with: list[dict] = []
         self.review_result: PreSummaryReviewResult = _REVIEW_RESULT
+        self.media_bytes: bytes = b"\xff" * 16
         self.error: Exception | None = None
 
     async def mark_pre_summary_reviewed(self, **kwargs: object) -> PreSummaryReviewResult:
@@ -76,6 +77,12 @@ class StubIntakeFacade:
         if self.error is not None:
             raise self.error
         return self.review_result
+
+    async def get_intake_media(self, **kwargs: object) -> bytes:
+        self.called_with.append(dict(kwargs))
+        if self.error is not None:
+            raise self.error
+        return self.media_bytes
 
 
 class StubPartnerFacade:
@@ -261,3 +268,59 @@ def test_review_route_sits_behind_the_gateway_stack() -> None:
     assert RateLimitMiddleware in middlewares
     assert TraceMiddleware in middlewares
     assert "/v1/intake/{intake_id}/review" in app.openapi()["paths"]
+    assert "/v1/intake/{intake_id}/media/{media_ref_id}" in app.openapi()["paths"]
+
+
+# ---------------------------------------------------------------------------
+# Tests: get intake media (doctor playback, #373)
+# ---------------------------------------------------------------------------
+
+
+def test_doctor_partner_streams_an_intake_audio_clip() -> None:
+    intake_facade = StubIntakeFacade()
+    intake_facade.media_bytes = b"doctor-audio"
+    client = _client(intake_facade, StubPartnerFacade(partner_type="doctor"))
+
+    response = client.get(
+        "/v1/intake/42/media/11",
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 200
+    assert response.content == b"doctor-audio"
+    assert intake_facade.called_with == [
+        {
+            "intake_id": 42,
+            "media_ref_id": 11,
+            "caller_id": _PARTNER_ID,
+            "caller_role": "doctor",
+        }
+    ]
+
+
+def test_non_doctor_partner_stream_is_rejected_with_403() -> None:
+    intake_facade = StubIntakeFacade()
+    client = _client(intake_facade, StubPartnerFacade(partner_type="lab"))
+
+    response = client.get(
+        "/v1/intake/42/media/11",
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "AUTH_INSUFFICIENT_SCOPE"
+    assert intake_facade.called_with == []
+
+
+def test_patient_scope_is_still_served_by_the_playback_route() -> None:
+    # The route is dual-role: owning patients (checked in the facade) stream too.
+    intake_facade = StubIntakeFacade()
+    client = _client(intake_facade)
+
+    response = client.get(
+        "/v1/intake/42/media/11",
+        headers=_bearer(_token(scope="patient")),
+    )
+
+    assert response.status_code == 200
+    assert intake_facade.called_with[0]["caller_role"] == "patient"

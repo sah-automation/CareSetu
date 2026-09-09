@@ -81,6 +81,25 @@ class IntakeMediaStore:
         path.write_bytes(payload)
         return f"{PREFIX}/{patient_id}/{filename}"
 
+    def read(self, *, object_key: str) -> bytes:
+        """Decrypt and return the clip filed under ``object_key``.
+
+        The mirror of :meth:`save`: reads ``<root>/<object_key>``, strips the
+        prepended 12-byte nonce, and AES-GCM-decrypts with the same key,
+        answering the original plaintext audio bytes. Called only after a
+        facade-level authorization check (owning patient or reviewing doctor) -
+        bytes are never logged. Raises :class:`OSError` (or
+        :class:`cryptography.exceptions.InvalidTag`) when the file is missing
+        or the ciphertext is not authentic.
+        """
+        rel_path = Path(object_key)
+        if rel_path.parts[0] != PREFIX or len(rel_path.parts) != 3:
+            raise OSError(f"object key is outside the {PREFIX}/ prefix")
+        path = self._root / rel_path
+        payload = path.read_bytes()
+        nonce, ciphertext = payload[:12], payload[12:]
+        return AESGCM(self._key).decrypt(nonce, ciphertext, None)
+
 
 def decode_key(b64_key: str) -> bytes:
     """Decode a base64 AES-256 key, raising a clear error on malformed input."""

@@ -130,6 +130,7 @@ class StubIntakeFacade:
         self.media_ref: MediaUploadRef = _MEDIA_REF
         self.rerecord_result: ReRecordResult = _RERECORD_RESULT
         self.patient_edits_result: PatientEditsResult = _PATIENT_EDITS_RESULT
+        self.media_bytes: bytes = b"\xff" * 16
         self.error: Exception | None = None
 
     def _maybe_raise(self) -> None:
@@ -165,6 +166,11 @@ class StubIntakeFacade:
         self.called_with.append(("save_patient_pre_summary_edits", dict(kwargs)))
         self._maybe_raise()
         return self.patient_edits_result
+
+    async def get_intake_media(self, **kwargs: object) -> bytes:
+        self.called_with.append(("get_intake_media", dict(kwargs)))
+        self._maybe_raise()
+        return self.media_bytes
 
 
 # ---------------------------------------------------------------------------
@@ -594,3 +600,66 @@ def test_re_record_unknown_field_rejected() -> None:
     )
 
     assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Tests: get intake media (playback, #373)
+# ---------------------------------------------------------------------------
+
+
+def test_get_intake_media_returns_audio_to_the_owning_patient() -> None:
+    facade = StubIntakeFacade()
+    facade.media_bytes = b"decrypted-audio-bytes"
+    client = _client(facade)
+
+    response = client.get(
+        "/v1/intake/42/media/11",
+        headers=_bearer(_token(subject_id=7)),
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "audio/webm"
+    assert response.content == b"decrypted-audio-bytes"
+    call_kwargs = facade.called_with[0][1]
+    assert call_kwargs == {
+        "intake_id": 42,
+        "media_ref_id": 11,
+        "caller_id": 7,
+        "caller_role": "patient",
+    }
+
+
+def test_get_intake_media_unauthenticated_rejected() -> None:
+    client = _client()
+
+    response = client.get("/v1/intake/42/media/11")
+
+    assert response.status_code == 401
+
+
+def test_get_intake_media_not_found_envelope() -> None:
+    facade = StubIntakeFacade()
+    facade.error = IntakeNotFoundError("media ref 11 not found on intake 42")
+    client = _client(facade)
+
+    response = client.get(
+        "/v1/intake/42/media/11",
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "INTAKE_NOT_FOUND"
+
+
+def test_get_intake_media_transfer_failure_envelope() -> None:
+    facade = StubIntakeFacade()
+    facade.error = MediaTransferError("failed to read media ref 11")
+    client = _client(facade)
+
+    response = client.get(
+        "/v1/intake/42/media/11",
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "MEDIA_TRANSFER_FAILED"

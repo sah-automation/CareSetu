@@ -60,8 +60,7 @@ from modules.intake.domain.state_machine import (
     classify_transcript_usability,
     transition,
 )
-from modules.intake.facade import INTAKE_SCHEMA
-from modules.intake.intake_models import StructuredFields
+from modules.intake.intake_models import INTAKE_SCHEMA, StructuredFields
 from modules.intake.outbox import INTAKE_OUTBOX_TABLE
 from modules.intake.schema.models import (
     intake_ai_jobs,
