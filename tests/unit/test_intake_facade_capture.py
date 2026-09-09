@@ -53,11 +53,11 @@ from modules.intake.schema.models import (
 NOW = datetime.now(UTC)
 
 
-def _media_ref(*, object_key: str = "intake/abc-123") -> MediaUploadRef:
+def _media_ref(*, object_key: str = "intake/abc-123", duration_ms: int = 90_000) -> MediaUploadRef:
     return MediaUploadRef(
         object_key=object_key,
         media_type="audio",
-        audio_duration_ms=90_000,
+        audio_duration_ms=duration_ms,
         file_size_bytes=1_024_000,
         record_attempt=1,
     )
@@ -275,6 +275,84 @@ async def test_submit_intake_voice_mode_demands_media_ref_rejects_text() -> None
 
     with pytest.raises(IntakeValidationError, match="requires a media reference"):
         await facade.submit_intake(patient_id=7, mode="voice", language="en")
+
+
+@pytest.mark.asyncio
+async def test_submit_intake_voice_duration_below_floor_is_rejected() -> None:
+    """A clip under the 3s floor is unusable and must not waste AI budget."""
+    facade = _facade(_connection([]))
+
+    with pytest.raises(
+        IntakeValidationError,
+        match="audio duration 2999ms is below minimum 3000ms",
+    ):
+        await facade.submit_intake(
+            patient_id=7,
+            mode="voice",
+            language="en",
+            media_ref=_media_ref(duration_ms=2999),
+        )
+
+
+@pytest.mark.asyncio
+async def test_submit_intake_voice_duration_at_floor_is_accepted() -> None:
+    """The floor is inclusive: exactly 3s (3000ms) is a valid submission."""
+    connection = _connection(
+        [
+            _intake_id_result(intake_id=8),
+            _FakeResult(scalar=None),
+            _outbox_result(),
+        ]
+    )
+    facade = _facade(connection)
+
+    result = await facade.submit_intake(
+        patient_id=7,
+        mode="voice",
+        language="en",
+        media_ref=_media_ref(duration_ms=3000),
+    )
+
+    assert result.intake_id == 8
+
+
+@pytest.mark.asyncio
+async def test_submit_intake_voice_duration_at_ceiling_is_accepted() -> None:
+    """The ceiling is inclusive: exactly 180s (180000ms) is a valid submission."""
+    connection = _connection(
+        [
+            _intake_id_result(intake_id=8),
+            _FakeResult(scalar=None),
+            _outbox_result(),
+        ]
+    )
+    facade = _facade(connection)
+
+    result = await facade.submit_intake(
+        patient_id=7,
+        mode="voice",
+        language="en",
+        media_ref=_media_ref(duration_ms=180_000),
+    )
+
+    assert result.intake_id == 8
+
+
+@pytest.mark.asyncio
+async def test_submit_intake_voice_duration_above_ceiling_is_rejected() -> None:
+    """A clip over the 180s ceiling exceeds the AI pipeline context window."""
+    facade = _facade(_connection([]))
+
+    with pytest.raises(
+        IntakeValidationError,
+        match="audio duration 180001ms exceeds maximum 180000ms",
+    ):
+        await facade.submit_intake(
+            patient_id=7,
+            mode="voice",
+            language="en",
+            media_ref=_media_ref(duration_ms=180_001),
+        )
 
 
 @pytest.mark.asyncio

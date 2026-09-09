@@ -77,6 +77,14 @@ MAX_RECORD_ATTEMPTS: int = 3
 #: pinned-constant exception).
 MAX_TEXT_LENGTH: int = 2000
 
+#: Minimum audio duration in milliseconds (3 seconds). Clips shorter than
+#: this are unusable by the AI pipeline and waste budget on a doomed call.
+MIN_AUDIO_DURATION_MS: int = 3000
+
+#: Maximum audio duration in milliseconds (180 seconds = 3 minutes). Clips
+#: longer than this exceed the AI pipeline's context window and waste budget.
+MAX_AUDIO_DURATION_MS: int = 180_000
+
 #: Transcript usability heuristic thresholds (B3 fallback ladder).
 #: Below ``PARTIAL_MIN_CHARS`` is unusable; ``[PARTIAL_MIN_CHARS, USABLE_MIN_CHARS)``
 #: is partial (degraded but structurable); at or above ``USABLE_MIN_CHARS`` is usable.

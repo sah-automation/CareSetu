@@ -324,6 +324,21 @@ def test_upload_media_returns_clip_ticket() -> None:
     assert facade.called_with[0][1]["patient_id"] == 7
 
 
+def test_upload_media_rejects_duration_below_floor_at_route() -> None:
+    """The query parameter enforces the 3s floor before the facade is reached."""
+    facade = StubIntakeFacade()
+    client = _client(facade)
+
+    response = client.post(
+        "/v1/intake/upload-media?audio_duration_ms=2999",
+        files={"file": ("clip.webm", b"audio-bytes", "audio/webm")},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 422
+    assert facade.called_with == []
+
+
 def test_upload_media_unauthenticated_rejected() -> None:
     client = _client()
 

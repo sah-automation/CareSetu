@@ -33,6 +33,7 @@ from modules.intake.domain.exceptions import (
     IntakeValidationError,
     MediaTransferError,
 )
+from modules.intake.domain.state_machine import MIN_AUDIO_DURATION_MS
 from modules.intake.facade import IntakeFacade
 from modules.intake.intake_models import (
     IntakeDetailView,
@@ -164,7 +165,7 @@ async def upload_media(
     request: Request,
     account: Annotated[Principal, Depends(require_patient)],
     file: UploadFile = File(description="Audio file to upload"),  # noqa: B008
-    audio_duration_ms: Annotated[int | None, Query(ge=0)] = None,
+    audio_duration_ms: Annotated[int | None, Query(ge=MIN_AUDIO_DURATION_MS)] = None,
     file_size_bytes: Annotated[int | None, Query(ge=0)] = None,
 ) -> MediaUploadRef:
     """Upload an audio clip to the object store with upload resilience.

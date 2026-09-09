@@ -135,11 +135,13 @@ def _file(
     )
 
 
-def _media_ref(*, object_key: str = "intake/7/clip-1.enc") -> MediaUploadRef:
+def _media_ref(
+    *, object_key: str = "intake/7/clip-1.enc", duration_ms: int = 90_000
+) -> MediaUploadRef:
     return MediaUploadRef(
         object_key=object_key,
         media_type="audio",
-        audio_duration_ms=90_000,
+        audio_duration_ms=duration_ms,
         file_size_bytes=1_024_000,
         record_attempt=1,
     )
@@ -339,6 +341,61 @@ async def test_re_record_increments_attempt_a_second_time_towards_the_cap() -> N
     outbox_write = _insert_by_table(connection, "intake_outbox")
     payload = IntakeRetryRequestedPayload.model_validate(outbox_write.compile().params["payload"])
     assert payload.record_attempt == 3
+
+
+@pytest.mark.asyncio
+async def test_re_record_rejects_duration_below_floor() -> None:
+    """A fresh clip under the 3s floor is refused regardless of attempt state."""
+    connection = _connection(_accepting_results())
+    facade = _facade(connection)
+
+    with pytest.raises(
+        IntakeValidationError,
+        match="audio duration 2999ms is below minimum 3000ms",
+    ):
+        await facade.re_record_intake(
+            intake_id=1,
+            patient_id=7,
+            media_ref=_media_ref(duration_ms=2999),
+        )
+
+    assert connection.execute.await_args_list == []
+
+
+@pytest.mark.asyncio
+async def test_re_record_accepts_duration_at_floor_and_ceiling() -> None:
+    """The 3s floor and 180s ceiling are inclusive for a retake."""
+    for duration_ms in (3000, 180_000):
+        connection = _connection(_accepting_results())
+        facade = _facade(connection)
+
+        result = await facade.re_record_intake(
+            intake_id=1,
+            patient_id=7,
+            media_ref=_media_ref(duration_ms=duration_ms),
+        )
+
+        assert result.accepted is True
+        assert result.record_attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_re_record_rejects_duration_above_ceiling() -> None:
+    """A fresh clip over the 180s ceiling is refused regardless of attempt state."""
+    connection = _connection(_accepting_results())
+    facade = _facade(connection)
+
+    with pytest.raises(
+        IntakeValidationError,
+        match="audio duration 180001ms exceeds maximum 180000ms",
+    ):
+        await facade.re_record_intake(
+            intake_id=1,
+            patient_id=7,
+            media_ref=_media_ref(duration_ms=180_001),
+        )
+
+    assert connection.execute.await_args_list == []
 
 
 # ---------------------------------------------------------------------------

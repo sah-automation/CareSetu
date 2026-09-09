@@ -46,8 +46,10 @@ from modules.intake.domain.presummary_machine import (
 )
 from modules.intake.domain.state_machine import (
     CAPTURED,
+    MAX_AUDIO_DURATION_MS,
     MAX_RECORD_ATTEMPTS,
     MAX_TEXT_LENGTH,
+    MIN_AUDIO_DURATION_MS,
     IntakeAction,
     IntakeState,
     IntakeStatus,
@@ -84,6 +86,29 @@ def _upload_backoff_delay(attempt: int) -> float:
     retries after the first failure back off 0.5s then 1.0s.
     """
     return 0.5 * (2.0 ** (attempt - 2))
+
+
+def _validate_audio_duration(media_ref: MediaUploadRef) -> None:
+    """Enforce the voice-audio duration floor and ceiling (T04).
+
+    A bypass client must not submit unusable audio that wastes AI budget:
+    clips under ``MIN_AUDIO_DURATION_MS`` (3s) or over ``MAX_AUDIO_DURATION_MS``
+    (180s) are rejected with the actual and allowed duration in the message so
+    clients get a clear 422. Short clips carry no speech signal, and long clips
+    exceed the AI pipeline's context window.
+    """
+    if media_ref.audio_duration_ms is None:
+        return
+    if media_ref.audio_duration_ms < MIN_AUDIO_DURATION_MS:
+        raise IntakeValidationError(
+            f"audio duration {media_ref.audio_duration_ms}ms is below "
+            f"minimum {MIN_AUDIO_DURATION_MS}ms"
+        )
+    if media_ref.audio_duration_ms > MAX_AUDIO_DURATION_MS:
+        raise IntakeValidationError(
+            f"audio duration {media_ref.audio_duration_ms}ms exceeds "
+            f"maximum {MAX_AUDIO_DURATION_MS}ms"
+        )
 
 
 INTAKE_SCHEMA = "intake"
@@ -150,6 +175,7 @@ class IntakeFacade:
                 raise IntakeValidationError("voice mode intake must not include text content")
             if media_ref is None:
                 raise IntakeValidationError("voice mode intake requires a media reference")
+            _validate_audio_duration(media_ref)
 
         async with self._engine.begin() as connection:
             state = CAPTURED
@@ -274,8 +300,11 @@ class IntakeFacade:
 
         Raises :class:`IntakeNotFoundError` when the intake does not belong to
         the patient; :class:`IllegalIntakeTransitionError` when the intake is
-        not in a re-recordable state.
+        not in a re-recordable state; :class:`IntakeValidationError` when the
+        fresh clip duration is outside the accepted range.
         """
+        _validate_audio_duration(media_ref)
+
         async with self._engine.begin() as connection:
             row = (
                 await connection.execute(
