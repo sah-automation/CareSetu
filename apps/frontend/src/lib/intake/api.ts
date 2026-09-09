@@ -11,6 +11,14 @@ import { guardShape, request } from "@/lib/request";
 export type IntakeMode = "voice" | "text";
 export type IntakeLanguage = "hi" | "en";
 
+/** Backend intake lifecycle status values (state_machine.py IntakeStatus). */
+export type IntakeStatus =
+  | "captured"
+  | "structuring"
+  | "ready_for_review"
+  | "re_record"
+  | "failed";
+
 export interface MediaUploadRef {
   object_key: string;
   media_type: string;
@@ -47,7 +55,7 @@ export interface IntakeDetailView {
   patient_id: number;
   mode: IntakeMode;
   language: IntakeLanguage;
-  status: string;
+  status: IntakeStatus;
   record_attempts: number;
   text: string | null;
   transcript: string | null;

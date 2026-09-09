@@ -879,6 +879,39 @@ const en = {
         duration: "Duration",
       },
     },
+
+    // status.- intake status list surface (PHASE-7 T19, #363): the patient
+    // sees where each submission stands with four statuses - Captured /
+    // Structuring / Ready for Review / Recapture needed - mapped 1:1 onto the
+    // backend machine status values (T02 state_machine.py). Statuses refresh
+    // from the backend (get_intake / get_pre_summary) in-page. A ready
+    // pre-summary offers a continue affordance into consultation booking
+    // (Phase 8 boundary). Bilingual EN/HI.
+    status: {
+      breadcrumb: "Status",
+      title: "Your intake status",
+      description: "Track where your submission stands",
+      refresh: "Refresh",
+      refreshing: "Checking\u2026",
+      captured: "Captured",
+      capturedDesc: "Your symptoms have been recorded.",
+      structuring: "Structuring",
+      structuringDesc: "AI is organizing your information for the doctor.",
+      readyForReview: "Ready for Review",
+      readyForReviewDesc:
+        "Your pre-summary is ready. You can continue to consultation.",
+      reRecord: "Recapture needed",
+      reRecordDesc:
+        "We couldn't process your recording clearly. Please re-record or type your symptoms.",
+      failed: "Something went wrong",
+      failedDesc: "We couldn't process your intake. Please start a new visit.",
+      continue: "Continue to consultation",
+      reRecordAction: "Re-record",
+      typeInstead: "Type instead",
+      loading: "Loading your intake status\u2026",
+      loadFailedTitle: "We couldn't load your status",
+      loadFailedBody: "Check your connection and try again.",
+    },
   },
 };
 
@@ -1666,6 +1699,38 @@ export const STRINGS: Record<Lang, Dictionary> = {
           symptoms: "लक्षण",
           duration: "अवधि",
         },
+      },
+
+      // T19 (#363): इंटेक स्थिति सूची - चार स्थितियाँ: सहेजा गया /
+      // व्यवस्थित हो रहा है / जाँच के लिए तैयार / फिर से रिकॉर्ड करें,
+      // बैकएंड मशीन स्थिति मानों पर 1:1 मैप (T02)। बैकएंड से ताज़ा
+      // (get_intake / get_pre_summary)। तैयार प्री-सारांश पर जारी रखने का CTA।
+      status: {
+        breadcrumb: "स्थिति",
+        title: "आपकी इंटेक स्थिति",
+        description: "देखें आपकी जानकारी कहाँ तक पहुँची",
+        refresh: "ताज़ा करें",
+        refreshing: "जाँच हो रही है\u2026",
+        captured: "सहेजा गया",
+        capturedDesc: "आपके लक्षण दर्ज हो गए हैं।",
+        structuring: "व्यवस्थित हो रहा है",
+        structuringDesc:
+          "AI आपकी जानकारी को डॉक्टर के लिए व्यवस्थित कर रहा है।",
+        readyForReview: "जाँच के लिए तैयार",
+        readyForReviewDesc:
+          "आपका प्री-सारांश तैयार है। आप परामर्श जारी रख सकते हैं।",
+        reRecord: "फिर से रिकॉर्ड करें",
+        reRecordDesc:
+          "हम आपकी रिकॉर्डिंग ठीक से समझ नहीं पाए। कृपया फिर से रिकॉर्ड करें या लक्षण टाइप करें।",
+        failed: "कुछ गड़बड़ हो गई",
+        failedDesc:
+          "हम आपकी जानकारी प्रोसेस नहीं कर पाए। कृपया नई विज़िट शुरू करें।",
+        continue: "परामर्श जारी रखें",
+        reRecordAction: "फिर से रिकॉर्ड करें",
+        typeInstead: "टाइप करें",
+        loading: "आपकी इंटेक स्थिति लोड हो रही है\u2026",
+        loadFailedTitle: "हम आपकी स्थिति लोड नहीं कर पाए",
+        loadFailedBody: "कनेक्शन जाँचकर फिर कोशिश करें।",
       },
     },
   },
