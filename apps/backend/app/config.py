@@ -9,7 +9,7 @@ import os
 from dataclasses import dataclass
 
 DEFAULT_DATABASE_URL = "postgresql+asyncpg://caresetu:caresetu@localhost:5432/caresetu"
-DEFAULT_APP_ENVIRONMENT = "production"
+DEFAULT_APP_ENVIRONMENT = "dev"
 DEFAULT_SMS_PROVIDER = "mock"
 DEFAULT_SMS_TIMEOUT_SECONDS = 10.0
 DEFAULT_SMS_MAX_RETRIES = 3

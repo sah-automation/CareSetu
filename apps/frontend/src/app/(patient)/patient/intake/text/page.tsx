@@ -343,120 +343,123 @@ export default function TextIntakePage() {
             idle -> recording -> preview; the recorded note uploads with the
             text submit as an opaque media ref the doctor can listen to. */}
         <div data-testid="voice-attach-zone">
-          <button
-            type="button"
-            data-testid="note-attach"
-            onClick={() => void handleAttach()}
-            disabled={submitStage === "pending"}
-            aria-disabled={submitStage === "pending" || undefined}
-            hidden={noteStage !== "idle"}
-            className="flex w-full items-center gap-2.5 rounded-md border border-dashed border-hairline bg-hairline-soft/40 px-3.5 py-2.5 text-left transition-[border-color,background-color] hover:border-accent-border hover:bg-accent-soft disabled:pointer-events-none disabled:opacity-50"
-          >
-            <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-hairline-soft text-txt-sub">
-              <Mic size={16} strokeWidth={1.8} aria-hidden="true" />
-            </span>
-            <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <strong className="text-sm font-semibold text-txt">
-                {t.voiceAttach}
-              </strong>
-              <span className="text-xs text-txt-muted">
-                {t.voiceAttachHint}
-              </span>
-            </span>
-          </button>
-
-          <div
-            className="flex items-center gap-2 rounded-md bg-accent-soft px-3.5 py-2.5"
-            data-testid="note-recording"
-            hidden={noteStage !== "recording"}
-          >
-            <span className="h-2.5 w-2.5 shrink-0 rounded-full bg-danger animate-pulse" />
-            <span className="flex-1 text-sm font-medium text-accent-strong">
-              {t.voiceRecording}
-            </span>
-            <output
-              className="text-sm font-semibold tabular-nums text-txt-sub"
-              data-testid="note-rec-dur"
-              aria-live="off"
-            >
-              {fmtDuration(noteElapsed)}
-            </output>
-            <Button
-              type="button"
-              size="sm"
-              data-testid="note-stop"
-              onClick={() => void handleStop()}
-            >
-              <Square size={14} className="mr-1.5" aria-hidden="true" />
-              {t.voiceStop}
-            </Button>
-          </div>
-
-          <div
-            className="flex items-center gap-2 rounded-md bg-accent-soft px-3.5 py-2.5"
-            data-testid="note-preview"
-            hidden={noteStage !== "preview"}
-          >
-            <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent text-on-accent">
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="currentColor"
-                aria-hidden="true"
-              >
-                <path d="M8 5v14l11-7z" />
-              </svg>
-            </span>
-            <span className="flex-1 text-sm font-medium text-accent-strong">
-              {t.voicePreview}
-            </span>
+          {noteStage === "idle" && (
             <button
               type="button"
-              data-testid="note-remove"
-              onClick={handleRemoveNote}
+              data-testid="note-attach"
+              onClick={() => void handleAttach()}
               disabled={submitStage === "pending"}
-              className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-xs text-txt-muted transition-[color,background-color] hover:bg-danger-soft hover:text-danger"
+              aria-disabled={submitStage === "pending" || undefined}
+              className="flex w-full items-center gap-2.5 rounded-md border border-dashed border-hairline bg-hairline-soft/40 px-3.5 py-2.5 text-left transition-[border-color,background-color] hover:border-accent-border hover:bg-accent-soft disabled:pointer-events-none disabled:opacity-50"
             >
-              <X size={14} aria-hidden="true" />
-              {t.voiceRemove}
+              <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-hairline-soft text-txt-sub">
+                <Mic size={16} strokeWidth={1.8} aria-hidden="true" />
+              </span>
+              <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <strong className="text-sm font-semibold text-txt">
+                  {t.voiceAttach}
+                </strong>
+                <span className="text-xs text-txt-muted">
+                  {t.voiceAttachHint}
+                </span>
+              </span>
             </button>
-          </div>
+          )}
+
+          {noteStage === "recording" && (
+            <div
+              className="flex items-center gap-2 rounded-md bg-accent-soft px-3.5 py-2.5"
+              data-testid="note-recording"
+            >
+              <span className="h-2.5 w-2.5 shrink-0 rounded-full bg-danger animate-pulse" />
+              <span className="flex-1 text-sm font-medium text-accent-strong">
+                {t.voiceRecording}
+              </span>
+              <output
+                className="text-sm font-semibold tabular-nums text-txt-sub"
+                data-testid="note-rec-dur"
+                aria-live="off"
+              >
+                {fmtDuration(noteElapsed)}
+              </output>
+              <Button
+                type="button"
+                size="sm"
+                data-testid="note-stop"
+                onClick={() => void handleStop()}
+              >
+                <Square size={14} className="mr-1.5" aria-hidden="true" />
+                {t.voiceStop}
+              </Button>
+            </div>
+          )}
+
+          {noteStage === "preview" && (
+            <div
+              className="flex items-center gap-2 rounded-md bg-accent-soft px-3.5 py-2.5"
+              data-testid="note-preview"
+            >
+              <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent text-on-accent">
+                <svg
+                  width="18"
+                  height="18"
+                  viewBox="0 0 24 24"
+                  fill="currentColor"
+                  aria-hidden="true"
+                >
+                  <path d="M8 5v14l11-7z" />
+                </svg>
+              </span>
+              <span className="flex-1 text-sm font-medium text-accent-strong">
+                {t.voicePreview}
+              </span>
+              <button
+                type="button"
+                data-testid="note-remove"
+                onClick={handleRemoveNote}
+                disabled={submitStage === "pending"}
+                className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-xs text-txt-muted transition-[color,background-color] hover:bg-danger-soft hover:text-danger"
+              >
+                <X size={14} aria-hidden="true" />
+                {t.voiceRemove}
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Submit / Structuring pending / done (§9.1 in-button spinner, never
             a full-page spinner). */}
-        <div
-          className="flex flex-col gap-2"
-          data-testid="submit-zone"
-          hidden={!synopsisReady}
-        >
-          {text.trim().length === 0 && (
-            <p
-              className="rounded-md bg-warn-soft px-3 py-2 text-sm text-warn-text"
-              data-testid="warn-empty"
+        {synopsisReady && (
+          <div className="flex flex-col gap-2" data-testid="submit-zone">
+            {text.trim().length === 0 && (
+              <p
+                className="rounded-md bg-warn-soft px-3 py-2 text-sm text-warn-text"
+                data-testid="warn-empty"
+              >
+                <strong className="font-semibold">{t.emptyTitle}</strong>
+                <span className="block">{t.emptyBody}</span>
+              </p>
+            )}
+            <Button
+              type="button"
+              size="lg"
+              className="w-full"
+              data-testid="btn-submit"
+              disabled={!canSubmit}
+              onClick={() => void handleSubmit()}
             >
-              <strong className="font-semibold">{t.emptyTitle}</strong>
-              <span className="block">{t.emptyBody}</span>
-            </p>
-          )}
-          <Button
-            type="button"
-            size="lg"
-            className="w-full"
-            data-testid="btn-submit"
-            disabled={!canSubmit}
-            onClick={() => void handleSubmit()}
-          >
-            {t.submit}
-          </Button>
-        </div>
+              {t.submit}
+            </Button>
+          </div>
+        )}
 
-        <div data-testid="ctrl-pending" hidden={submitStage !== "pending"}>
-          <Button type="button" size="lg" className="w-full" disabled loading>
-            {t.submitting}
-          </Button>
-        </div>
+        {submitStage === "pending" && (
+          <div data-testid="ctrl-pending">
+            <Button type="button" size="lg" className="w-full" disabled loading>
+              {t.submitting}
+            </Button>
+          </div>
+        )}
 
         {submitStage === "done" && intakeId !== null && (
           <div className="flex flex-col gap-3" data-testid="done-zone">

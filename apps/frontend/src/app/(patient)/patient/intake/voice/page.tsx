@@ -415,78 +415,81 @@ export default function VoiceIntakePage() {
         )}
 
         {/* RECORDING controls */}
-        <div
-          className="flex flex-wrap justify-center gap-2"
-          data-testid="ctrl-record"
-          hidden={stage !== "recording"}
-        >
-          <Button
-            type="button"
-            variant="outline"
-            size="lg"
-            data-testid="btn-pause"
-            onClick={handlePauseToggle}
+        {stage === "recording" && (
+          <div
+            className="flex flex-wrap justify-center gap-2"
+            data-testid="ctrl-record"
           >
-            <Pause size={16} className="mr-2" aria-hidden="true" />
-            {paused ? t.resume : t.pause}
-          </Button>
-          <Button
-            type="button"
-            size="lg"
-            data-testid="btn-stop"
-            onClick={() => void handleStopCapture()}
-          >
-            <Square size={16} className="mr-2" aria-hidden="true" />
-            {t.stop}
-          </Button>
-        </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="lg"
+              data-testid="btn-pause"
+              onClick={handlePauseToggle}
+            >
+              <Pause size={16} className="mr-2" aria-hidden="true" />
+              {paused ? t.resume : t.pause}
+            </Button>
+            <Button
+              type="button"
+              size="lg"
+              data-testid="btn-stop"
+              onClick={() => void handleStopCapture()}
+            >
+              <Square size={16} className="mr-2" aria-hidden="true" />
+              {t.stop}
+            </Button>
+          </div>
+        )}
 
         {/* PLAYBACK controls */}
-        <div
-          className="flex flex-wrap justify-center gap-2"
-          data-testid="ctrl-preview"
-          hidden={stage !== "preview"}
-        >
-          <Button
-            type="button"
-            variant="outline"
-            size="lg"
-            data-testid="btn-play"
-            onClick={handlePlayPreview}
+        {stage === "preview" && (
+          <div
+            className="flex flex-wrap justify-center gap-2"
+            data-testid="ctrl-preview"
           >
-            <Play size={16} className="mr-2" aria-hidden="true" />
-            {t.play}
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="lg"
-            data-testid="btn-again"
-            onClick={handleRecordAgain}
-          >
-            <RotateCcw size={16} className="mr-2" aria-hidden="true" />
-            {t.recordAgain}
-          </Button>
-          <Button
-            type="button"
-            size="lg"
-            data-testid="btn-submit"
-            onClick={() => void handleSubmit()}
-          >
-            {t.submit}
-          </Button>
-        </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="lg"
+              data-testid="btn-play"
+              onClick={handlePlayPreview}
+            >
+              <Play size={16} className="mr-2" aria-hidden="true" />
+              {t.play}
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="lg"
+              data-testid="btn-again"
+              onClick={handleRecordAgain}
+            >
+              <RotateCcw size={16} className="mr-2" aria-hidden="true" />
+              {t.recordAgain}
+            </Button>
+            <Button
+              type="button"
+              size="lg"
+              data-testid="btn-submit"
+              onClick={() => void handleSubmit()}
+            >
+              {t.submit}
+            </Button>
+          </div>
+        )}
 
         {/* SUBMIT-PENDING: in-button Structuring state, never a page spinner */}
-        <div
-          className="flex flex-wrap justify-center gap-2"
-          data-testid="ctrl-pending"
-          hidden={stage !== "pending"}
-        >
-          <Button type="button" size="lg" disabled loading>
-            {t.submitting}
-          </Button>
-        </div>
+        {stage === "pending" && (
+          <div
+            className="flex flex-wrap justify-center gap-2"
+            data-testid="ctrl-pending"
+          >
+            <Button type="button" size="lg" disabled loading>
+              {t.submitting}
+            </Button>
+          </div>
+        )}
 
         {/* POOR-AUDIO (FEAT-006 scenario 2): re-record or switch to typing,
             never a silent proceed. At the 3-attempt cap, typing is the only

@@ -267,7 +267,7 @@ describe("TextIntakePage optional voice-note attach (doctor-only)", () => {
     await flush();
 
     expect(recorder.start).toHaveBeenCalled();
-    expect(screen.getByTestId("note-attach")).toHaveAttribute("hidden");
+    expect(screen.queryByTestId("note-attach")).not.toBeInTheDocument();
     expectVisible("note-recording");
 
     await advance(4000);
@@ -277,7 +277,7 @@ describe("TextIntakePage optional voice-note attach (doctor-only)", () => {
     await flush();
 
     expect(recorder.stop).toHaveBeenCalled();
-    expect(screen.getByTestId("note-recording")).toHaveAttribute("hidden");
+    expect(screen.queryByTestId("note-recording")).not.toBeInTheDocument();
     expectVisible("note-preview");
     expect(screen.getByTestId("note-preview")).toHaveTextContent(
       text.voicePreview,
@@ -285,7 +285,7 @@ describe("TextIntakePage optional voice-note attach (doctor-only)", () => {
 
     fireEvent.click(screen.getByTestId("note-remove"));
     await flush();
-    expect(screen.getByTestId("note-preview")).toHaveAttribute("hidden");
+    expect(screen.queryByTestId("note-preview")).not.toBeInTheDocument();
     expectVisible("note-attach");
   });
 
@@ -297,12 +297,16 @@ describe("TextIntakePage optional voice-note attach (doctor-only)", () => {
     await flush();
     await flush();
 
-    await advance(180_000);
+    // The live counter rides inside the recording zone (unmounted once the
+    // note stops), so pin 03:00 just before the cap trip, then verify the
+    // cap trips into preview.
+    await advance(179_000);
+    expect(screen.getByTestId("note-rec-dur")).toHaveTextContent("02:59");
+    await advance(1_000);
     await flush();
 
     expect(recorder.stop).toHaveBeenCalled();
     expectVisible("note-preview");
-    expect(screen.getByTestId("note-rec-dur")).toHaveTextContent("03:00");
   });
 
   it("does not gate the text submit: submit stays disabled only while recording", async () => {
