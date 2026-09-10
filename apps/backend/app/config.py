@@ -85,9 +85,12 @@ DEFAULT_LANGFUSE_HOST = "https://us.cloud.langfuse.com"
 # EXT-002 LLM/AI gateway (PHASE-7 T05, #348): provider selection is a config
 # knob with a fail-closed default (mock). The real provider is gated to
 # staging/production by ``__post_init__`` - a real key in dev/test is refused
-# unless demo mode forces the mock. Timeout honours the EXT-002 call discipline
-# (<= 30 s, third-party-integration-standards §1).
+# unless demo mode forces the mock or ``AI_ALLOW_DEV_PROVIDER`` overrides the
+# gate. Timeout honours the EXT-002 call discipline (<= 30 s,
+# third-party-integration-standards §1).
 DEFAULT_AI_PROVIDER = "mock"
+DEFAULT_AI_MODEL = ""
+DEFAULT_AI_ALLOW_DEV_PROVIDER = False
 DEFAULT_AI_TIMEOUT_SECONDS = 30.0
 DEFAULT_AI_MAX_RETRIES = 3
 DEFAULT_AI_CIRCUIT_BREAKER_THRESHOLD = 5
@@ -96,6 +99,10 @@ DEFAULT_AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 30.0
 # paise that, once spent, hard-stops new AI calls and degrades the intake to raw
 # doctor review (standard A4/A5, spec #344). Rs 2,000 / month = 200,000 paise.
 DEFAULT_AI_MONTHLY_BUDGET_PAISE = 200_000
+DEFAULT_AI_FALLBACK_PROVIDER = ""
+DEFAULT_AI_FALLBACK_BASE_URL = ""
+DEFAULT_AI_FALLBACK_API_KEY = ""
+DEFAULT_AI_FALLBACK_MODEL = ""
 # Operator MFA TOTP secret encryption (PHASE-5 S8, #261): the AES-256-GCM key
 # for encrypting/decrypting the TOTP secret stored in ``iam_operator_mfa.secret``
 # comes from the ``IAM_MFA_SECRET_KEY`` environment variable (never committed).
@@ -188,10 +195,13 @@ class Settings:
     langfuse_secret_key: str = ""
     langfuse_host: str = DEFAULT_LANGFUSE_HOST
     # EXT-002 LLM/AI gateway (PHASE-7 T05, #348): provider selection is a config
-    # knob (mock is the fail-closed default); the real provider key/base URL.
-    # ``__post_init__`` refuses a real provider in dev/test unless demo mode
-    # forces the mock, mirroring the SMS/WhatsApp fail-closed posture.
+    # knob (mock is the fail-closed default); the real provider key/base URL/
+    # model. ``__post_init__`` refuses a real provider in dev/test unless demo
+    # mode forces the mock or ``ai_allow_dev_provider`` overrides the gate,
+    # mirroring the SMS/WhatsApp fail-closed posture.
     ai_provider: str = DEFAULT_AI_PROVIDER
+    ai_model: str = DEFAULT_AI_MODEL
+    ai_allow_dev_provider: bool = DEFAULT_AI_ALLOW_DEV_PROVIDER
     ai_api_key: str = ""
     ai_base_url: str = ""
     ai_timeout_seconds: float = DEFAULT_AI_TIMEOUT_SECONDS
@@ -199,6 +209,10 @@ class Settings:
     ai_circuit_breaker_threshold: int = DEFAULT_AI_CIRCUIT_BREAKER_THRESHOLD
     ai_circuit_breaker_cooldown_seconds: float = DEFAULT_AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS
     ai_monthly_budget_paise: int = DEFAULT_AI_MONTHLY_BUDGET_PAISE
+    ai_fallback_provider: str = DEFAULT_AI_FALLBACK_PROVIDER
+    ai_fallback_base_url: str = DEFAULT_AI_FALLBACK_BASE_URL
+    ai_fallback_api_key: str = DEFAULT_AI_FALLBACK_API_KEY
+    ai_fallback_model: str = DEFAULT_AI_FALLBACK_MODEL
 
     def __post_init__(self) -> None:
         if self.gateway_jwt_verify_enabled and not self.gateway_jwt_signing_key:
@@ -267,26 +281,56 @@ class Settings:
                 "call discipline (third-party-integration-standards §1)"
             )
         ai_provider = self.ai_provider.strip().lower()
-        if ai_provider not in {"mock", "provider"}:
+        if ai_provider not in {"mock", "openai_compatible"}:
             raise ValueError(
-                f"unsupported ai_provider {self.ai_provider!r}; expected 'mock' or 'provider'"
+                f"unsupported ai_provider {self.ai_provider!r}; expected "
+                "'mock' or 'openai_compatible'"
             )
         if self.demo_mode and ai_provider != "mock":
             raise ValueError(
                 "demo_mode=True requires ai_provider='mock' (fail-closed): "
                 "the demo flag must never ride a real EXT-002 provider"
             )
-        if ai_provider == "provider":
-            if self.app_environment.strip().lower() in _DEV_TEST_ENVIRONMENTS:
+        if ai_provider == "openai_compatible":
+            if (
+                self.app_environment.strip().lower() in _DEV_TEST_ENVIRONMENTS
+                and not self.ai_allow_dev_provider
+            ):
                 raise ValueError(
-                    "ai_provider='provider' is gated to staging/production: set "
-                    "APP_ENVIRONMENT to 'staging' or 'production' before using the "
+                    "ai_provider='openai_compatible' is gated to staging/production: set "
+                    "APP_ENVIRONMENT to 'staging' or 'production' (or set "
+                    "AI_ALLOW_DEV_PROVIDER=true for dev/test) before using the "
                     "real EXT-002 path. Refusing it in dev/test."
                 )
             if not self.ai_api_key:
-                raise ValueError("ai_provider='provider' requires AI_API_KEY from the environment")
+                raise ValueError(
+                    "ai_provider='openai_compatible' requires AI_API_KEY from the environment"
+                )
             if not self.ai_base_url:
-                raise ValueError("ai_provider='provider' requires AI_BASE_URL from the environment")
+                raise ValueError(
+                    "ai_provider='openai_compatible' requires AI_BASE_URL from the environment"
+                )
+            if not self.ai_model:
+                raise ValueError(
+                    "ai_provider='openai_compatible' requires AI_MODEL from the environment"
+                )
+        fallback_vars = {
+            "AI_FALLBACK_PROVIDER": self.ai_fallback_provider,
+            "AI_FALLBACK_BASE_URL": self.ai_fallback_base_url,
+            "AI_FALLBACK_API_KEY": self.ai_fallback_api_key,
+            "AI_FALLBACK_MODEL": self.ai_fallback_model,
+        }
+        if any(value.strip() for value in fallback_vars.values()):
+            unset = [name for name, value in fallback_vars.items() if not value.strip()]
+            if unset:
+                raise ValueError(
+                    "AI fallback must be all-or-none; missing: " + ", ".join(sorted(unset))
+                )
+            if self.ai_fallback_provider.strip().lower() != "openai_compatible":
+                raise ValueError(
+                    "ai_fallback_provider must be 'openai_compatible'; got "
+                    f"{self.ai_fallback_provider!r}"
+                )
         if not (0 < self.ai_timeout_seconds <= 30):
             raise ValueError(
                 "ai_timeout_seconds must be in (0, 30] to honour the EXT-002 "
@@ -473,6 +517,8 @@ def get_settings() -> Settings:
         langfuse_secret_key=os.environ.get("LANGFUSE_SECRET_KEY", ""),
         langfuse_host=os.environ.get("LANGFUSE_HOST", DEFAULT_LANGFUSE_HOST),
         ai_provider=os.environ.get("AI_PROVIDER", DEFAULT_AI_PROVIDER),
+        ai_model=os.environ.get("AI_MODEL", DEFAULT_AI_MODEL),
+        ai_allow_dev_provider=_env_bool("AI_ALLOW_DEV_PROVIDER", DEFAULT_AI_ALLOW_DEV_PROVIDER),
         ai_api_key=os.environ.get("AI_API_KEY", ""),
         ai_base_url=os.environ.get("AI_BASE_URL", ""),
         ai_timeout_seconds=_env_float("AI_TIMEOUT_SECONDS", DEFAULT_AI_TIMEOUT_SECONDS),
@@ -487,4 +533,8 @@ def get_settings() -> Settings:
         ai_monthly_budget_paise=_env_int(
             "AI_MONTHLY_BUDGET_PAISE", DEFAULT_AI_MONTHLY_BUDGET_PAISE
         ),
+        ai_fallback_provider=os.environ.get("AI_FALLBACK_PROVIDER", DEFAULT_AI_FALLBACK_PROVIDER),
+        ai_fallback_base_url=os.environ.get("AI_FALLBACK_BASE_URL", DEFAULT_AI_FALLBACK_BASE_URL),
+        ai_fallback_api_key=os.environ.get("AI_FALLBACK_API_KEY", DEFAULT_AI_FALLBACK_API_KEY),
+        ai_fallback_model=os.environ.get("AI_FALLBACK_MODEL", DEFAULT_AI_FALLBACK_MODEL),
     )

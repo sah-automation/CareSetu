@@ -182,17 +182,18 @@ def test_build_ai_gateway_mock_knob() -> None:
     assert isinstance(gateway, MockAiProvider)
 
 
-def _staging_provider_settings() -> Settings:
+def _staging_openai_settings() -> Settings:
     return Settings(
         app_environment="staging",
-        ai_provider="provider",
+        ai_provider="openai_compatible",
         ai_api_key="secret-key",
         ai_base_url="https://ext.example",
+        ai_model="grok-3",
     )
 
 
 def test_build_ai_gateway_provider_path() -> None:
-    gateway = build_ai_gateway(_staging_provider_settings())
+    gateway = build_ai_gateway(_staging_openai_settings())
 
     assert isinstance(gateway, CircuitBreakerAiGateway)
 
@@ -209,19 +210,39 @@ def test_ai_provider_key_refused_in_dev_test_without_demo(environment: str) -> N
     with pytest.raises(ValueError, match="gated to staging/production"):
         Settings(
             app_environment=environment,
-            ai_provider="provider",
+            ai_provider="openai_compatible",
             ai_api_key="secret-key",
             ai_base_url="https://ext.example",
+            ai_model="grok-3",
         )
+
+
+def test_ai_provider_dev_override_permits_dev_use() -> None:
+    Settings(
+        app_environment="dev",
+        ai_provider="openai_compatible",
+        ai_api_key="secret-key",
+        ai_base_url="https://ext.example",
+        ai_model="grok-3",
+        ai_allow_dev_provider=True,
+    )
+
+
+def test_ai_provider_openai_compatible_accepted_in_staging() -> None:
+    settings = _staging_openai_settings()
+
+    assert settings.ai_provider == "openai_compatible"
+    assert settings.ai_model == "grok-3"
 
 
 def test_ai_provider_production_requires_key() -> None:
     with pytest.raises(ValueError, match="AI_API_KEY"):
         Settings(
             app_environment="production",
-            ai_provider="provider",
+            ai_provider="openai_compatible",
             ai_api_key="",
             ai_base_url="https://ext.example",
+            ai_model="grok-3",
         )
 
 
@@ -229,9 +250,21 @@ def test_ai_provider_production_requires_base_url() -> None:
     with pytest.raises(ValueError, match="AI_BASE_URL"):
         Settings(
             app_environment="production",
-            ai_provider="provider",
+            ai_provider="openai_compatible",
             ai_api_key="secret-key",
             ai_base_url="",
+            ai_model="grok-3",
+        )
+
+
+def test_ai_provider_production_requires_model() -> None:
+    with pytest.raises(ValueError, match="AI_MODEL"):
+        Settings(
+            app_environment="production",
+            ai_provider="openai_compatible",
+            ai_api_key="secret-key",
+            ai_base_url="https://ext.example",
+            ai_model="",
         )
 
 
@@ -240,9 +273,10 @@ def test_demo_mode_forces_mock() -> None:
         Settings(
             app_environment="production",
             demo_mode=True,
-            ai_provider="provider",
+            ai_provider="openai_compatible",
             ai_api_key="secret-key",
             ai_base_url="https://ext.example",
+            ai_model="grok-3",
         )
 
 
@@ -253,6 +287,55 @@ def test_demo_mode_with_mock_is_allowed() -> None:
 def test_unsupported_ai_provider_is_refused() -> None:
     with pytest.raises(ValueError, match="unsupported ai_provider"):
         Settings(ai_provider="gemini")
+
+
+def test_fallback_partial_set_refused() -> None:
+    with pytest.raises(ValueError, match="all-or-none"):
+        Settings(
+            ai_fallback_provider="openai_compatible",
+            ai_fallback_base_url="https://fallback.example",
+            ai_fallback_api_key="fallback-key",
+        )
+
+
+def test_fallback_all_or_none_missing_provider_refused() -> None:
+    with pytest.raises(ValueError, match="AI_FALLBACK_PROVIDER"):
+        Settings(
+            ai_fallback_base_url="https://fallback.example",
+            ai_fallback_api_key="fallback-key",
+            ai_fallback_model="fallback-model",
+        )
+
+
+def test_fallback_all_or_none_missing_model_refused() -> None:
+    with pytest.raises(ValueError, match="AI_FALLBACK_MODEL"):
+        Settings(
+            ai_fallback_provider="openai_compatible",
+            ai_fallback_base_url="https://fallback.example",
+            ai_fallback_api_key="fallback-key",
+        )
+
+
+def test_fallback_provider_value_whitelist() -> None:
+    with pytest.raises(ValueError, match="ai_fallback_provider must be"):
+        Settings(
+            ai_fallback_provider="mock",
+            ai_fallback_base_url="https://fallback.example",
+            ai_fallback_api_key="fallback-key",
+            ai_fallback_model="fallback-model",
+        )
+
+
+def test_fallback_complete_set_accepted() -> None:
+    settings = Settings(
+        ai_fallback_provider="openai_compatible",
+        ai_fallback_base_url="https://fallback.example",
+        ai_fallback_api_key="fallback-key",
+        ai_fallback_model="fallback-model",
+    )
+
+    assert settings.ai_fallback_provider == "openai_compatible"
+    assert settings.ai_fallback_model == "fallback-model"
 
 
 def test_ai_timeout_must_honour_ext002_discipline() -> None:
