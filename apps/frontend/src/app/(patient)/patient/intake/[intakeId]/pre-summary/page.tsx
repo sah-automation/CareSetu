@@ -242,7 +242,13 @@ export default function PreSummaryReviewPage() {
 
   const lowConfidence = summary?.low_confidence === true;
   const fieldKeys = useMemo(
-    () => (summary ? orderedFieldKeys(summary.structured_fields ?? {}) : []),
+    () =>
+      summary
+        ? orderedFieldKeys(
+            (summary.structured_fields as unknown as Record<string, unknown>) ??
+              {},
+          )
+        : [],
     [summary],
   );
 
@@ -251,7 +257,10 @@ export default function PreSummaryReviewPage() {
     (fieldKey: string): string => {
       if (!summary) return "";
       const merged =
-        corrections[fieldKey] ?? summary.structured_fields[fieldKey];
+        corrections[fieldKey] ??
+        (summary.structured_fields as unknown as Record<string, unknown>)[
+          fieldKey
+        ];
       return formatFieldValue(merged);
     },
     [summary, corrections],

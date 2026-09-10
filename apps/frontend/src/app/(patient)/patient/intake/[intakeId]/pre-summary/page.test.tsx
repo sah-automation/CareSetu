@@ -29,6 +29,7 @@ import {
   fetchPreSummary,
   savePatientEdits,
   type PreSummaryView,
+  type StructuredFields,
 } from "@/lib/intake/api";
 
 vi.mock("next/navigation", () => ({
@@ -361,7 +362,7 @@ describe("PreSummaryReviewPage failure and edge cases", () => {
   });
 
   it("renders the empty structured-fields state without crashing", async () => {
-    await renderLoaded({ structured_fields: {} });
+    await renderLoaded({ structured_fields: {} as StructuredFields });
     expect(screen.getByTestId("fields-empty")).toHaveTextContent(t.emptyTitle);
   });
 

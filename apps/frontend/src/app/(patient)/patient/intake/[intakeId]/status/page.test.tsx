@@ -97,7 +97,11 @@ function preSummary(overrides: Partial<PreSummaryView> = {}): PreSummaryView {
   return {
     pre_summary_id: 9,
     intake_id: 42,
-    structured_fields: { chief_complaints: ["fever"] },
+    structured_fields: {
+      chief_complaints: ["fever"],
+      symptoms: [],
+      duration: null,
+    },
     structuring_confidence: 0.82,
     low_confidence: false,
     review_state: "draft",
