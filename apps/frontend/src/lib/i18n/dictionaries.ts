@@ -856,6 +856,9 @@ const en = {
       submitting: "Structuring…",
       doneBody: "Taken. We're preparing your pre-summary.",
       next: "See your pre-summary",
+      voiceTooShortTitle: "Your voice note is too short",
+      voiceTooShortBody:
+        "Keep the note above 3 seconds, remove it, or type your symptoms instead.",
       uploadErrorTitle: "We couldn't send your recording",
       uploadErrorBody:
         "Your recording is safe. Check your connection and try again.",
@@ -908,6 +911,12 @@ const en = {
         "Check again in a moment - the doctor will review your symptoms.",
       loadFailedTitle: "We couldn't load your pre-summary",
       loadFailedBody: "Check your connection and try again.",
+      processingTitle: "Your summary is still being prepared",
+      processingBody:
+        "The AI is finishing your summary. This usually takes a few seconds.",
+      processingFailedTitle: "Your summary took too long",
+      processingFailedBody:
+        "We couldn't find your pre-summary. Please go back and try again.",
       saveFailedTitle: "We couldn't save your edits",
       saveFailedBody: "Check your connection and try again.",
       fields: {
@@ -1706,6 +1715,9 @@ export const STRINGS: Record<Lang, Dictionary> = {
         voiceRecording: "रिकॉर्ड हो रहा है… रोकने के लिए दबाएँ",
         voiceStop: "रोकें",
         voicePreview: "वॉइस नोट जुड़ गया",
+        voiceTooShortTitle: "आपका वॉइस नोट बहुत छोटा है",
+        voiceTooShortBody:
+          "नोट को 3 सेकंड से अधिक रखें, हटाएँ, या इसके बजाय अपने लक्षण टाइप करें।",
         voiceRemove: "हटाएँ",
         submit: "जमा करें",
         submitting: "स्ट्रक्चरिंग…",
@@ -1755,6 +1767,12 @@ export const STRINGS: Record<Lang, Dictionary> = {
           "थोड़ी देर बाद फिर देखें - डॉक्टर आपके लक्षणों की समीक्षा करेंगे।",
         loadFailedTitle: "हम आपका प्री-सारांश लोड नहीं कर पाए",
         loadFailedBody: "कनेक्शन जाँचकर फिर कोशिश करें।",
+        processingTitle: "आपका सारांश अभी तैयार हो रहा है",
+        processingBody:
+          "एआई आपका सारांश बना रहा है। इसमें आम तौर पर कुछ सेकंड लगते हैं।",
+        processingFailedTitle: "आपका सारांश तैयार होने में बहुत समय लग गया",
+        processingFailedBody:
+          "हमें आपका प्री-सारांश नहीं मिला। कृपया वापस जाकर फिर से कोशिश करें।",
         saveFailedTitle: "हम आपके संपादन सहेज नहीं पाए",
         saveFailedBody: "कनेक्शन जाँचकर फिर कोशिश करें।",
         fields: {

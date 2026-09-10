@@ -559,6 +559,40 @@ describe("TextIntakePage failure paths (no silent loss, non-blocking note)", () 
       "fever since two days",
     );
   });
+
+  it("refuses to submit a voice note under the 3s floor and keeps the note for re-record or removal", async () => {
+    await recordNote(2);
+    typeSymptoms("fever");
+    upload.mockResolvedValue(mediaTicket());
+    submit.mockResolvedValue({ intake_id: 42, status: "captured" });
+
+    fireEvent.click(screen.getByTestId("btn-submit"));
+    await flush();
+
+    // Catch the too-short note client-side before any network call: no
+    // upload ticket, no submit (mirrors the voice page MIN_RECORD_MS floor).
+    expect(upload).not.toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled();
+    const banner = screen.getByTestId("error-banner");
+    expect(banner).toHaveTextContent(text.voiceTooShortTitle);
+
+    // The note stays attached (never silently lost) so the patient can
+    // re-record or remove it; the text remains intact and submittable.
+    expectVisible("note-preview");
+    expect((screen.getByTestId("textarea") as HTMLTextAreaElement).value).toBe(
+      "fever",
+    );
+
+    // Removing the short note unlocks a clean text-only submit.
+    fireEvent.click(screen.getByTestId("note-remove"));
+    await flush();
+    fireEvent.click(screen.getByTestId("btn-submit"));
+    await flush();
+    expect(upload).not.toHaveBeenCalled();
+    expect(submit).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: "text", text: "fever" }),
+    );
+  });
 });
 
 describe("TextIntakePage bilingual EN/HI (REQ-006)", () => {

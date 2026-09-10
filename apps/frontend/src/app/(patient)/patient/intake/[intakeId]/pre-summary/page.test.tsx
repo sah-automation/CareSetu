@@ -25,6 +25,7 @@ import { ApiError } from "@/lib/api-errors";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { __resetLangForTests, useLang } from "@/lib/i18n/LangContext";
 import {
+  fetchIntake,
   fetchPreSummary,
   savePatientEdits,
   type PreSummaryView,
@@ -66,12 +67,14 @@ vi.mock("@/lib/auth/AuthContext", () => ({
 
 vi.mock("@/lib/intake/api", () => ({
   fetchPreSummary: vi.fn(),
+  fetchIntake: vi.fn(),
   savePatientEdits: vi.fn(),
 }));
 
 const t = STRINGS.en.intake.preSummary;
 const hiT = STRINGS.hi.intake.preSummary;
 const getSummary = vi.mocked(fetchPreSummary);
+const getIntake = vi.mocked(fetchIntake);
 const saveEdits = vi.mocked(savePatientEdits);
 
 function preSummary(overrides: Partial<PreSummaryView> = {}): PreSummaryView {
@@ -91,6 +94,25 @@ function preSummary(overrides: Partial<PreSummaryView> = {}): PreSummaryView {
     review_attribution: null,
     reviewed_by: null,
     reviewed_at: null,
+    created_at: "2026-09-08T10:00:00Z",
+    updated_at: "2026-09-08T10:00:00Z",
+    ...overrides,
+  };
+}
+
+function intakeDetail(overrides: Record<string, unknown> = {}) {
+  return {
+    intake_id: 42,
+    patient_id: 7,
+    mode: "voice" as const,
+    language: "en" as const,
+    status: "structuring" as const,
+    record_attempts: 1,
+    text: null,
+    transcript: null,
+    transcript_usability: null,
+    forced_text: false,
+    media_refs: [],
     created_at: "2026-09-08T10:00:00Z",
     updated_at: "2026-09-08T10:00:00Z",
     ...overrides,
@@ -125,6 +147,7 @@ async function renderLoaded(overrides: Partial<PreSummaryView> = {}) {
 beforeEach(() => {
   __resetLangForTests();
   getSummary.mockReset();
+  getIntake.mockReset();
   // Safe default so bare renders (which don't call renderLoaded) don't
   // blow up on .then(undefined). Individual tests still override as needed.
   getSummary.mockResolvedValue(preSummary());
@@ -384,6 +407,109 @@ describe("PreSummaryReviewPage failure and edge cases", () => {
     render(<PreSummaryReviewPage />);
     await flush();
     expect(getSummary).toHaveBeenCalledWith(42);
+  });
+});
+
+describe("PreSummaryReviewPage still-processing poll state (issue 2: 404 race)", () => {
+  const notFound = new ApiError({
+    code: "INTAKE_NOT_FOUND",
+    message: "not found",
+    trace_id: "",
+    details: {},
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("enters the still-processing state on 404 while structuring, then resolves when the pipeline finishes", async () => {
+    vi.useFakeTimers();
+    getSummary.mockRejectedValueOnce(notFound).mockResolvedValue(preSummary());
+    getIntake.mockResolvedValue(intakeDetail({ status: "structuring" }));
+
+    render(<PreSummaryReviewPage />);
+    await flush();
+
+    // The row does not exist yet: the page shows the calm preparing state
+    // instead of an error banner, and the intake detail was consulted.
+    expect(screen.getByTestId("load-processing")).toHaveTextContent(
+      t.processingTitle,
+    );
+    expect(screen.queryByTestId("error-banner")).not.toBeInTheDocument();
+    expect(getIntake).toHaveBeenCalledWith(42);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+
+    expect(screen.getByTestId("honesty-banner")).toBeInTheDocument();
+    expect(getSummary).toHaveBeenCalledTimes(2);
+  });
+
+  it("waits for the pre-summary past the voice/text page handoff window", async () => {
+    vi.useFakeTimers();
+    // 404s for the first 14 polls (structuring), then the row appears.
+    getSummary
+      .mockRejectedValueOnce(notFound) // initial load
+      .mockRejectedValueOnce(notFound) // poll 1
+      .mockRejectedValueOnce(notFound) // poll 2
+      .mockResolvedValue(preSummary()); // poll 3
+    getIntake.mockResolvedValue(intakeDetail({ status: "structuring" }));
+
+    render(<PreSummaryReviewPage />);
+    await flush();
+    expect(screen.getByTestId("load-processing")).toBeInTheDocument();
+
+    for (let i = 0; i < 3; i += 1) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+    }
+
+    expect(screen.getByTestId("honesty-banner")).toBeInTheDocument();
+    expect(getSummary).toHaveBeenCalledTimes(4);
+  });
+
+  it("shows the timeout banner when the pre-summary never appears after all polls", async () => {
+    vi.useFakeTimers();
+    getSummary.mockRejectedValue(notFound);
+    getIntake.mockResolvedValue(intakeDetail({ status: "structuring" }));
+
+    render(<PreSummaryReviewPage />);
+    await flush();
+    expect(screen.getByTestId("load-processing")).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15 * 2000 + 100);
+    });
+
+    const banner = screen.getByTestId("error-banner");
+    expect(banner).toHaveTextContent(t.processingFailedTitle);
+    expect(screen.queryByTestId("load-processing")).not.toBeInTheDocument();
+  });
+
+  it("shows the load-failure banner when the intake has already failed", async () => {
+    getSummary.mockRejectedValueOnce(notFound);
+    getIntake.mockResolvedValue(intakeDetail({ status: "failed" }));
+
+    render(<PreSummaryReviewPage />);
+    await flush();
+
+    expect(screen.getByTestId("error-banner")).toHaveTextContent(
+      t.loadFailedTitle,
+    );
+    expect(getSummary).toHaveBeenCalledTimes(1);
+  });
+
+  it("enters the still-processing state when the intake is still captured", async () => {
+    getSummary.mockRejectedValueOnce(notFound);
+    getIntake.mockResolvedValue(intakeDetail({ status: "captured" }));
+
+    render(<PreSummaryReviewPage />);
+    await flush();
+
+    expect(screen.getByTestId("load-processing")).toBeInTheDocument();
+    expect(screen.queryByTestId("error-banner")).not.toBeInTheDocument();
   });
 });
 

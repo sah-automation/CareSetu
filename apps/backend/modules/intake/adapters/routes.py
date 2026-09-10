@@ -16,15 +16,22 @@ then the resolved partner profile must be a doctor (partner scope +
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated, Literal, cast
 
 from fastapi import APIRouter, Depends, FastAPI, File, Query, Request, UploadFile, status
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.exc import SQLAlchemyError
 
-from app.gateway.errors import InsufficientScopeError, error_response
+from app.gateway.errors import (
+    AuthenticationRequiredError,
+    InsufficientScopeError,
+    error_response,
+)
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_authenticated, require_partner, require_patient
+from app.gateway.trace import resolve_trace_id
 from modules.intake.domain.exceptions import (
     IllegalIntakeTransitionError,
     IllegalPreSummaryTransitionError,
@@ -47,7 +54,21 @@ from modules.intake.intake_models import (
 )
 from modules.partner.facade import PartnerFacade
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/v1/intake", tags=["intake"])
+
+
+def _resolve_subject_id(principal: Principal) -> int:
+    """Extract the numeric subject id from the JWT principal.
+
+    A non-numeric subject id indicates an invalid token; the caller is
+    refused with 401 instead of a 500 from the ``int()`` cast.
+    """
+    try:
+        return int(principal.subject_id)
+    except (ValueError, TypeError) as err:
+        raise AuthenticationRequiredError("invalid subject id in token") from err
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +173,7 @@ async def submit_intake(
     """
     facade = cast(IntakeFacade, request.app.state.intake_facade)
     return await facade.submit_intake(
-        patient_id=int(_account.subject_id),
+        patient_id=_resolve_subject_id(_account),
         mode=body.mode,
         language=body.language,
         text=body.text,
@@ -191,7 +212,7 @@ async def upload_media(
         record_attempt=1,
     )
     return await facade.upload_intake_media(
-        patient_id=int(account.subject_id),
+        patient_id=_resolve_subject_id(account),
         file=media_file,
     )
 
@@ -217,7 +238,7 @@ async def re_record_intake(
     facade = cast(IntakeFacade, request.app.state.intake_facade)
     return await facade.re_record_intake(
         intake_id=intake_id,
-        patient_id=int(_account.subject_id),
+        patient_id=_resolve_subject_id(_account),
         media_ref=body.media_ref,
     )
 
@@ -240,7 +261,7 @@ async def get_intake(
     facade = cast(IntakeFacade, request.app.state.intake_facade)
     return await facade.get_intake(
         intake_id=intake_id,
-        patient_id=int(_account.subject_id),
+        patient_id=_resolve_subject_id(_account),
     )
 
 
@@ -263,7 +284,7 @@ async def get_pre_summary(
     facade = cast(IntakeFacade, request.app.state.intake_facade)
     return await facade.get_pre_summary(
         intake_id=intake_id,
-        patient_id=int(_account.subject_id),
+        patient_id=_resolve_subject_id(_account),
     )
 
 
@@ -288,7 +309,7 @@ async def save_patient_edits(
     facade = cast(IntakeFacade, request.app.state.intake_facade)
     return await facade.save_patient_pre_summary_edits(
         intake_id=intake_id,
-        patient_id=int(_account.subject_id),
+        patient_id=_resolve_subject_id(_account),
         fields=body.fields,
     )
 
@@ -318,7 +339,7 @@ async def review_pre_summary(
     """
     facade = cast(IntakeFacade, request.app.state.intake_facade)
     partner = await cast(PartnerFacade, request.app.state.partner_facade).resolve_partner(
-        int(account.subject_id)
+        _resolve_subject_id(account)
     )
     if partner.partner_type != "doctor":
         raise InsufficientScopeError("the doctor role is required for this route")
@@ -359,12 +380,12 @@ async def get_intake_media(
         data = await facade.get_intake_media(
             intake_id=intake_id,
             media_ref_id=media_ref_id,
-            caller_id=int(account.subject_id),
+            caller_id=_resolve_subject_id(account),
             caller_role="patient",
         )
     elif "partner" in account.roles:
         partner = await cast(PartnerFacade, request.app.state.partner_facade).resolve_partner(
-            int(account.subject_id)
+            _resolve_subject_id(account)
         )
         if partner.partner_type != "doctor":
             raise InsufficientScopeError("the doctor role is required for this route")
@@ -452,9 +473,25 @@ def register_error_handlers(app: FastAPI) -> None:
             request=request,
         )
 
+    async def _sqlalchemy_error(request: Request, exc: Exception) -> JSONResponse:
+        logger.error(
+            "intake_db_error trace_id=%s path=%s exc=%s",
+            resolve_trace_id(request),
+            request.url.path,
+            exc,
+        )
+        return error_response(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "INTAKE_INTERNAL",
+            "Internal intake error",
+            log_tag="intake_route",
+            request=request,
+        )
+
     app.add_exception_handler(IntakeNotFoundError, _intake_not_found)
     app.add_exception_handler(IntakeValidationError, _intake_validation_error)
     app.add_exception_handler(IllegalIntakeTransitionError, _illegal_intake_transition)
     app.add_exception_handler(IllegalPreSummaryTransitionError, _illegal_pre_summary_transition)
     app.add_exception_handler(MediaTransferError, _media_transfer_error)
     app.add_exception_handler(IntakeError, _intake_error)
+    app.add_exception_handler(SQLAlchemyError, _sqlalchemy_error)

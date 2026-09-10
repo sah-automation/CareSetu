@@ -32,6 +32,7 @@ import {
   INTAKE_POLL_INTERVAL_MS,
   MAX_INTAKE_POLLS,
   MAX_RECORD_MS,
+  MIN_RECORD_MS,
   fmtDuration,
   uploadWithRetry,
 } from "@/lib/intake/voice";
@@ -144,12 +145,25 @@ export default function TextIntakePage() {
     if (content.length === 0) {
       return;
     }
+    const blob = captureRef.current;
+    // Client-side usability floor (mirrors the voice page): a note under
+    // MIN_RECORD_MS carries no speech signal and the server rejects it with
+    // 422 anyway, so refuse to silently fail the upload. The note is strictly
+    // non-blocking (FEAT-006 Rule 2): it never gates the text submit, so the
+    // patient keeps the input and can remove or re-record the note.
+    if (blob && noteElapsedRef.current * 1000 < MIN_RECORD_MS) {
+      setErrorBanner({
+        title: t.voiceTooShortTitle,
+        body: t.voiceTooShortBody,
+      });
+      setErrorKind("upload");
+      return;
+    }
     setSubmitStage("pending");
     setErrorBanner(null);
     setErrorKind(null);
     setStructuringId(null);
 
-    const blob = captureRef.current;
     try {
       // The voice note is doctor-only: it rides as an opaque media_ref,
       // stored for the doctor to listen to and never fed as text or into the
@@ -183,7 +197,7 @@ export default function TextIntakePage() {
         error instanceof ApiError ? error.traceId : undefined,
       );
     }
-  }, [text, lang, failWith]);
+  }, [text, lang, t, failWith]);
 
   // Poll the server detail while Structuring (in-button pending, §9.1):
   // ready_for_review -> done (pre-summary link), failed -> error with the

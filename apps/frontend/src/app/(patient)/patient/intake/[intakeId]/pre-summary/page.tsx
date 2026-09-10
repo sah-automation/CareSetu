@@ -27,13 +27,16 @@ import { ApiError } from "@/lib/api-errors";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import {
+  fetchIntake,
   fetchPreSummary,
   savePatientEdits,
+  type IntakeStatus,
   type PatientEditsResult,
   type PreSummaryView,
 } from "@/lib/intake/api";
+import { INTAKE_POLL_INTERVAL_MS, MAX_INTAKE_POLLS } from "@/lib/intake/voice";
 
-type LoadStage = "loading" | "ready" | "error";
+type LoadStage = "loading" | "processing" | "ready" | "error";
 type SaveStage = "idle" | "pending";
 type BannerState = {
   title: string;
@@ -90,18 +93,53 @@ export default function PreSummaryReviewPage() {
     langRef.current = lang;
   }, [lang]);
 
+  const applySummary = useCallback((next: PreSummaryView) => {
+    setSummary(next);
+    setCorrections(next.patient_edits ?? {});
+    setLoadStage("ready");
+  }, []);
+
   const load = useCallback(() => {
     // No synchronous setState here: only the async continuations mutate
     // state, so the mount effect below stays a pure "subscribe" (the
     // react-hooks lint only grows loud when setState runs synchronously in
     // an effect body).
     fetchPreSummary(intakeId)
-      .then((next) => {
-        setSummary(next);
-        setCorrections(next.patient_edits ?? {});
-        setLoadStage("ready");
-      })
+      .then(applySummary)
       .catch((error: unknown) => {
+        // not-found means the async pipeline has not created the pre-summary
+        // row yet (the submit pages release to this link at MAX_INTAKE_POLLS
+        // by design, so it can legitimately still be absent). Peek at the
+        // intake: still processing -> enter the polling "still preparing"
+        // state instead of failing the page; any terminal status is a real
+        // failure.
+        if (error instanceof ApiError && error.code === "INTAKE_NOT_FOUND") {
+          void fetchIntake(intakeId)
+            .then((detail) => {
+              if (
+                detail.status === "structuring" ||
+                detail.status === "captured"
+              ) {
+                setLoadStage("processing");
+              } else {
+                setLoadStage("error");
+                const preSummary = STRINGS[langRef.current].intake.preSummary;
+                setLoadError({
+                  title: preSummary.loadFailedTitle,
+                  body: preSummary.loadFailedBody,
+                });
+              }
+            })
+            .catch(() => {
+              setLoadStage("error");
+              const preSummary = STRINGS[langRef.current].intake.preSummary;
+              setLoadError({
+                title: preSummary.loadFailedTitle,
+                body: preSummary.loadFailedBody,
+              });
+            });
+          return;
+        }
         setLoadStage("error");
         const preSummary = STRINGS[langRef.current].intake.preSummary;
         setLoadError({
@@ -110,11 +148,89 @@ export default function PreSummaryReviewPage() {
           traceId: error instanceof ApiError ? error.traceId : undefined,
         });
       });
-  }, [intakeId]);
+  }, [intakeId, applySummary]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  // While the pipeline is still structuring, poll for the pre-summary row
+  // instead of erroring on the first not-found: the submit pages hand off to
+  // this link at MAX_INTAKE_POLLS (30s) by design, so the row may not exist
+  // yet when this page mounts. A terminal status (failed / re_record) or a
+  // too-long wait falls back to the error banner; a failed intake-detail read
+  // never kills the poll loop (the next tick just re-checks).
+  useEffect(() => {
+    if (loadStage !== "processing") {
+      return;
+    }
+    let cancelled = false;
+    let ticks = 0;
+    const timer = window.setInterval(() => {
+      ticks += 1;
+      void (async () => {
+        if (cancelled) {
+          return;
+        }
+        try {
+          const next = await fetchPreSummary(intakeId);
+          if (cancelled) {
+            return;
+          }
+          applySummary(next);
+          window.clearInterval(timer);
+        } catch (error) {
+          if (cancelled) {
+            return;
+          }
+          if (error instanceof ApiError && error.code === "INTAKE_NOT_FOUND") {
+            let status: IntakeStatus | null = null;
+            try {
+              const detail = await fetchIntake(intakeId);
+              status = detail.status;
+            } catch {
+              // Ignore a failed detail read; the next tick re-checks.
+            }
+            if (cancelled) {
+              return;
+            }
+            if (status === "failed" || status === "re_record") {
+              window.clearInterval(timer);
+              const preSummary = STRINGS[langRef.current].intake.preSummary;
+              setLoadStage("error");
+              setLoadError({
+                title: preSummary.loadFailedTitle,
+                body: preSummary.loadFailedBody,
+              });
+              return;
+            }
+            if (ticks >= MAX_INTAKE_POLLS) {
+              window.clearInterval(timer);
+              const preSummary = STRINGS[langRef.current].intake.preSummary;
+              setLoadStage("error");
+              setLoadError({
+                title: preSummary.processingFailedTitle,
+                body: preSummary.processingFailedBody,
+              });
+            }
+          } else {
+            window.clearInterval(timer);
+            const preSummary = STRINGS[langRef.current].intake.preSummary;
+            setLoadStage("error");
+            setLoadError({
+              title: preSummary.loadFailedTitle,
+              body: preSummary.loadFailedBody,
+              traceId: error instanceof ApiError ? error.traceId : undefined,
+            });
+          }
+        }
+      })();
+    }, INTAKE_POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [loadStage, intakeId, applySummary]);
 
   // One reload path for banner Retry: flips back to loading (event handler,
   // not an effect) and re-reads the pre-summary.
@@ -195,7 +311,11 @@ export default function PreSummaryReviewPage() {
     setConfirmed(true);
   }, []);
 
-  if (loadStage === "loading" || (loadStage === "ready" && !summary)) {
+  if (
+    loadStage === "loading" ||
+    loadStage === "processing" ||
+    (loadStage === "ready" && !summary)
+  ) {
     return (
       <>
         <PageHeader
@@ -208,13 +328,15 @@ export default function PreSummaryReviewPage() {
         />
         <p
           className="inline-flex items-center gap-2 text-sm text-txt-muted"
-          data-testid="load-pending"
+          data-testid={
+            loadStage === "processing" ? "load-processing" : "load-pending"
+          }
         >
           <span
             className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-hairline border-t-accent"
             aria-hidden="true"
           />
-          {t.loading}
+          {loadStage === "processing" ? t.processingTitle : t.loading}
         </p>
       </>
     );
