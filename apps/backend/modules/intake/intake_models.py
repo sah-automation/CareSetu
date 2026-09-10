@@ -5,12 +5,36 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
 #: The MOD-005 database schema. Kept here (a leaf module free of facade
 #: imports) so the facade, adapters, and pipeline all import it without
 #: the circular-import hazard that importing from ``facade.py`` caused.
 INTAKE_SCHEMA = "intake"
+
+#: Canonical intake media types - the model's vocabulary at the typed boundary,
+#: mirroring the ``ck_intake_media_refs_media_type`` CHECK constraint in
+#: ``schema/models.py``. The upload adapter normalizes the raw MIME content type
+#: (e.g. ``audio/webm``) down to one of these before a ``MediaUploadRef`` is ever
+#: built, so a real browser recording never trips an IntegrityError at submit.
+MEDIA_TYPE_AUDIO = "audio"
+MEDIA_TYPE_PHOTO = "photo"
+_CANONICAL_MEDIA_TYPES = frozenset({MEDIA_TYPE_AUDIO, MEDIA_TYPE_PHOTO})
+
+
+def canonical_media_type(content_type: str | None) -> str:
+    """Map a raw MIME content type to its canonical :data:`MEDIA_TYPE_*` value.
+
+    ``audio/*`` maps to ``audio``, ``image/*`` maps to ``photo``; anything else
+    (or blank) falls back to ``audio`` (the intake capture surface is an audio
+    recording today). Kept here so the upload route and any future adapter
+    share the same normalization as the DB CHECK constraint.
+    """
+    if content_type:
+        mime = content_type.split(";", 1)[0].strip().lower()
+        if mime.startswith("image/"):
+            return MEDIA_TYPE_PHOTO
+    return MEDIA_TYPE_AUDIO
 
 
 class StructuredFields(BaseModel):
@@ -72,6 +96,24 @@ class MediaUploadRef(BaseModel):
     audio_duration_ms: int | None
     file_size_bytes: int | None
     record_attempt: int
+
+    @field_validator("media_type")
+    @classmethod
+    def _media_type_must_be_canonical(cls, value: str) -> str:
+        """Reject a non-canonical media_type at the typed boundary.
+
+        The DB CHECK constraint ``ck_intake_media_refs_media_type`` only admits
+        ``audio``/``photo``; a client crafting a ``MediaUploadRef`` with the raw
+        browser MIME type (e.g. ``audio/webm``) otherwise reaches the facade as
+        an IntegrityError and surfaces as a 500. A 422 here is the honest early
+        answer - the upload route normalizes the real browser content type, so
+        this path only ever fires for a hand-built bad ref.
+        """
+        if value not in _CANONICAL_MEDIA_TYPES:
+            raise ValueError(
+                f"media_type must be one of {sorted(_CANONICAL_MEDIA_TYPES)}; got {value!r}"
+            )
+        return value
 
 
 class ReRecordResult(BaseModel):
@@ -164,6 +206,16 @@ class PreSummaryView(BaseModel):
     reviewed_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+    @field_serializer("structuring_confidence")
+    def _serialize_confidence(self, value: Decimal | float | None) -> float | None:
+        """Emit the confidence as a JSON number, never a Decimal-backed string.
+
+        The SQL column is ``Numeric(5,4)``, and Pydantic v2 serializes
+        ``Decimal`` to a string by default; the pre-summary UI calls
+        ``Math.round``/``toFixed`` on this value.
+        """
+        return float(value) if value is not None else None
 
 
 class PatientEditsResult(BaseModel):

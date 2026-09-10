@@ -51,6 +51,7 @@ from modules.intake.intake_models import (
     PreSummaryReviewResult,
     PreSummaryView,
     ReRecordResult,
+    canonical_media_type,
 )
 from modules.partner.facade import PartnerFacade
 
@@ -206,7 +207,7 @@ async def upload_media(
     media_file = MediaFile(
         data=data,
         filename=file.filename or "recording.webm",
-        media_type=file.content_type or "audio",
+        media_type=canonical_media_type(file.content_type),
         audio_duration_ms=audio_duration_ms,
         file_size_bytes=file_size_bytes or len(data),
         record_attempt=1,

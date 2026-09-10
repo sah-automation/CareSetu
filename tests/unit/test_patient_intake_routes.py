@@ -223,6 +223,26 @@ def test_submit_voice_intake_forwards_media_ref() -> None:
     assert call_kwargs["media_ref"] is not None
 
 
+def test_submit_voice_ref_with_raw_mime_media_type_rejected() -> None:
+    """A crafted ref carrying the browser MIME type is a 422, never a 500.
+
+    The DB only admits ``audio``/``photo`` (issue #375); a caller that skips
+    upload and hands ``audio/webm`` straight to submit must be refused at the
+    boundary instead of tripping the IntegrityError path.
+    """
+    client = _client()
+
+    media_ref = {**_MEDIA_REF.model_dump(mode="json"), "media_type": "audio/webm"}
+    response = client.post(
+        "/v1/intake/submit",
+        json={"mode": "voice", "language": "en", "media_ref": media_ref},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "VALIDATION_ERROR"
+
+
 def test_submit_intake_unauthenticated_rejected() -> None:
     client = _client()
 
@@ -328,6 +348,42 @@ def test_upload_media_returns_clip_ticket() -> None:
     assert body["object_key"] == "intake/patient-7/clip-abc.webm"
     assert facade.called_with[0][0] == "upload_intake_media"
     assert facade.called_with[0][1]["patient_id"] == 7
+
+
+def test_upload_media_normalises_browser_mime_to_canonical_type() -> None:
+    """A real browser sends ``audio/webm``; the route must store ``audio``.
+
+    The DB CHECK constraint ``ck_intake_media_refs_media_type`` only admits
+    ``audio``/``photo``; echoing the raw MIME type into the clip ticket used to
+    surface as an IntegrityError (500) at submit (issue #375).
+    """
+    facade = StubIntakeFacade()
+    client = _client(facade)
+
+    response = client.post(
+        "/v1/intake/upload-media",
+        files={"file": ("clip.webm", b"audio-bytes", "audio/webm")},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 200
+    media_file = facade.called_with[0][1]["file"]
+    assert media_file.media_type == "audio"
+
+
+def test_upload_media_photo_mime_maps_to_photo() -> None:
+    facade = StubIntakeFacade()
+    client = _client(facade)
+
+    response = client.post(
+        "/v1/intake/upload-media",
+        files={"file": ("clip.jpg", b"jpeg-bytes", "image/jpeg")},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 200
+    media_file = facade.called_with[0][1]["file"]
+    assert media_file.media_type == "photo"
 
 
 def test_upload_media_rejects_duration_below_floor_at_route() -> None:
@@ -489,6 +545,18 @@ def test_get_pre_summary_returns_view() -> None:
     assert response.status_code == 200
     assert response.json() == _PRE_SUMMARY_VIEW.model_dump(mode="json")
     assert facade.called_with == [("get_pre_summary", {"intake_id": 42, "patient_id": 7})]
+
+
+def test_get_pre_summary_confidence_serializes_as_number() -> None:
+    facade = StubIntakeFacade()
+    client = _client(facade)
+
+    response = client.get("/v1/intake/42/pre-summary", headers=_bearer(_token()))
+
+    assert response.status_code == 200
+    confidence = response.json()["structuring_confidence"]
+    assert isinstance(confidence, float)
+    assert confidence == 0.85
 
 
 def test_get_pre_summary_unauthenticated_rejected() -> None:
