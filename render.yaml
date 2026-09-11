@@ -75,6 +75,17 @@ services:
         sync: false
       - key: LANGFUSE_HOST
         value: https://us.cloud.langfuse.com
+      # Durable intake-media backend (PHASE-7 fix #385): the production backend
+      # is a private Supabase Storage bucket so voice captures survive Render's
+      # ephemeral disk (wiped on redeploy). SUPABASE_URL and
+      # SUPABASE_SERVICE_ROLE_KEY are set in the Render Dashboard during
+      # provisioning (DEPLOY-7) like DATABASE_URL, never synced from the repo.
+      - key: INTAKE_MEDIA_BACKEND
+        value: supabase
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
       # AI provider gateway (T04, #381): demo stays on mock (fail-closed) via
       # DEMO_MODE=true.  To point at a real OpenAI-compatible provider, set
       # AI_PROVIDER, AI_MODEL, AI_API_KEY, AI_BASE_URL, and optionally the

@@ -272,7 +272,7 @@ class IntakeFacade:
             if attempt > 1:
                 await self._sleep(_upload_backoff_delay(attempt))
             try:
-                object_key = self._media_store.save(
+                object_key = await self._media_store.save(
                     data=file.data,
                     patient_id=patient_id,
                 )
@@ -535,7 +535,7 @@ class IntakeFacade:
             object_key = str(media_row.object_key)
 
         try:
-            return self._media_store.read(object_key=object_key)
+            return await self._media_store.read(object_key=object_key)
         except (OSError, InvalidTag) as exc:
             raise MediaTransferError(
                 f"failed to read media ref {media_ref_id} for intake {intake_id}"

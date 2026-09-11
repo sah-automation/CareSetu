@@ -204,14 +204,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     # MOD-005 (PHASE-7 T12, #356): the intake facade shares the settled engine
     # and is stored on state so the patient intake routes read one resolved
-    # instance and unit tests can stub it. MOD-006 (PHASE-7 T08, #373): intake
-    # audio clips are AES-256-GCM encrypted into the ``intake/`` object-storage
-    # prefix via the injected media store - the store's key/root come from the
-    # environment (never committed), and dev/test without a key derives an
-    # ephemeral one so the encrypted write path still runs.
+    # instance and unit tests can stub it. MOD-006 (PHASE-7 T08, #373; #385):
+    # intake audio clips are AES-256-GCM encrypted into the ``intake/``
+    # object-storage prefix via the injected media store. The store's key comes
+    # from the environment (never committed), dev/test without a key derives an
+    # ephemeral one, and the concrete backend is selected by
+    # ``INTAKE_MEDIA_BACKEND``: local disk (default) or a private Supabase
+    # Storage bucket (production, so captures survive Render's ephemeral disk).
     intake_media_store = build_media_store(
         root=resolved_settings.intake_media_root,
         b64_key=resolved_settings.intake_media_key,
+        backend=resolved_settings.intake_media_backend,
+        supabase_url=resolved_settings.supabase_url,
+        supabase_service_role_key=resolved_settings.supabase_service_role_key,
     )
     app.state.intake_facade = IntakeFacade(engine=engine, media_store=intake_media_store)
 

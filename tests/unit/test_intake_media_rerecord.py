@@ -78,7 +78,7 @@ class _FakeMediaStore:
         self.read_object_keys: list[str] = []
         self.stored_data = stored_data
 
-    def save(self, *, data: bytes, patient_id: int) -> str:
+    async def save(self, *, data: bytes, patient_id: int) -> str:
         self.save_calls += 1
         self.captured_patient_ids.append(patient_id)
         self.captured_data.append(data)
@@ -86,7 +86,7 @@ class _FakeMediaStore:
             raise OSError("disk full")
         return f"intake/{patient_id}/clip-{self.save_calls}.enc"
 
-    def read(self, *, object_key: str) -> bytes:
+    async def read(self, *, object_key: str) -> bytes:
         self.read_calls += 1
         self.read_object_keys.append(object_key)
         return self.stored_data
@@ -629,7 +629,7 @@ async def test_get_intake_media_read_failure_raises_media_transfer_error() -> No
     """A clip that cannot be read from the store surfaces as the typed transfer error."""
 
     class _FailingStore(_FakeMediaStore):
-        def read(self, *, object_key: str) -> bytes:
+        async def read(self, *, object_key: str) -> bytes:
             del object_key
             raise OSError("missing clip")
 
@@ -650,7 +650,7 @@ async def test_get_intake_media_tampered_ciphertext_raises_media_transfer_error(
     """A clip whose tag fails AES-GCM verification is a transfer failure, not a 500."""
 
     class _TamperedStore(_FakeMediaStore):
-        def read(self, *, object_key: str) -> bytes:
+        async def read(self, *, object_key: str) -> bytes:
             del object_key
             raise InvalidTag
 

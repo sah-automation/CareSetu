@@ -60,6 +60,12 @@ DEFAULT_PARTNER_ARTIFACT_ROOT = "var/partner-artifacts"
 # ephemeral dev/test key so the encrypted write path always runs (same
 # convention as the partner artifact store).
 DEFAULT_INTAKE_MEDIA_ROOT = "var/intake-media"
+# Durable intake-media backend (PHASE-7 fix, #385): ``local`` files the
+# ciphertext under ``var/intake-media`` (dev/CI/tests, byte-identical to the
+# original store); ``supabase`` POSTs it into a private Supabase Storage bucket
+# so hosted captures survive Render's ephemeral disk. Default ``local`` keeps
+# dev/CI/tests unchanged - nothing depends on the network.
+DEFAULT_INTAKE_MEDIA_BACKEND = "local"
 # Rejected-partner re-submission throttle (PHASE-5 T09, #253): the max
 # re-submission rounds a rejected partner may open before the operator queue is
 # protected, and the cooldown (days) after which the budget refreshes. Queue
@@ -170,12 +176,21 @@ class Settings:
     # ephemeral dev key, never committed).
     partner_artifact_root: str = DEFAULT_PARTNER_ARTIFACT_ROOT
     partner_artifact_key: str = ""
-    # MOD-006 intake audio media store (PHASE-7 T08, #373): local root and the
-    # base64 AES-256 key, mirroring the partner artifact store. Root defaults to
-    # a repo-local ``var/`` dir; the key is empty unless supplied by the
-    # environment (the store derives an ephemeral dev key, never committed).
+    # MOD-006 intake audio media store (PHASE-7 T08, #373; fix #385): the
+    # concrete backend is selected by ``intake_media_backend`` - ``local``
+    # (default, dev/CI/tests) files encrypted clips under a repo-local ``var/``
+    # dir, ``supabase`` (production) stores the same ciphertext in a private
+    # Supabase Storage bucket so captures survive Render's ephemeral disk. The
+    # AES key ``intake_media_key`` is empty unless supplied by the environment
+    # (the store derives an ephemeral dev key, never committed).
+    # ``__post_init__`` requires BOTH ``supabase_url`` and
+    # ``supabase_service_role_key`` when the backend is ``supabase``
+    # (fail-fast boot - a misconfigured production box never boots half-wired).
     intake_media_root: str = DEFAULT_INTAKE_MEDIA_ROOT
     intake_media_key: str = ""
+    intake_media_backend: str = DEFAULT_INTAKE_MEDIA_BACKEND
+    supabase_url: str = ""
+    supabase_service_role_key: str = ""
     # Rejected-partner re-submission throttle (PHASE-5 T09, #253): environment
     # driven like the SMS/WhatsApp knobs (coding-standards §9.1). ``max`` is the
     # re-submission budget before cooldown; ``cooldown_days`` the cooldown length.
@@ -384,6 +399,22 @@ class Settings:
                 "LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY must both be set or "
                 "both empty; refusing to initialise Langfuse with a partial key pair."
             )
+        intake_backend = self.intake_media_backend.strip().lower()
+        if intake_backend not in {"local", "supabase"}:
+            raise ValueError(
+                f"unsupported intake_media_backend {self.intake_media_backend!r}; "
+                "expected 'local' or 'supabase'"
+            )
+        if intake_backend == "supabase":
+            if not self.supabase_url.strip():
+                raise ValueError(
+                    "intake_media_backend='supabase' requires SUPABASE_URL from the environment"
+                )
+            if not self.supabase_service_role_key.strip():
+                raise ValueError(
+                    "intake_media_backend='supabase' requires "
+                    "SUPABASE_SERVICE_ROLE_KEY from the environment"
+                )
 
     @property
     def mock_otp_readback_enabled(self) -> bool:
@@ -507,6 +538,9 @@ def get_settings() -> Settings:
         partner_artifact_key=os.environ.get("PARTNER_ARTIFACT_KEY", ""),
         intake_media_root=os.environ.get("INTAKE_MEDIA_ROOT", DEFAULT_INTAKE_MEDIA_ROOT),
         intake_media_key=os.environ.get("INTAKE_MEDIA_KEY", ""),
+        intake_media_backend=os.environ.get("INTAKE_MEDIA_BACKEND", DEFAULT_INTAKE_MEDIA_BACKEND),
+        supabase_url=os.environ.get("SUPABASE_URL", ""),
+        supabase_service_role_key=os.environ.get("SUPABASE_SERVICE_ROLE_KEY", ""),
         partner_re_submission_max=_env_int(
             "PARTNER_RE_SUBMISSION_MAX", DEFAULT_PARTNER_RE_SUBMISSION_MAX
         ),

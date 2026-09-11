@@ -807,6 +807,69 @@ def test_settings_directory_max_results_refuses_invalid_int(
         get_settings()
 
 
+# ---------------------------------------------------------------------------
+# Phase 7 intake-media Supabase backend config (ticket #385)
+# ---------------------------------------------------------------------------
+
+
+def test_settings_intake_media_backend_defaults_to_local() -> None:
+    settings = Settings()
+
+    assert settings.intake_media_backend == "local"
+    assert settings.supabase_url == ""
+    assert settings.supabase_service_role_key == ""
+
+
+def test_settings_intake_media_backend_reads_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INTAKE_MEDIA_BACKEND", "supabase")
+    monkeypatch.setenv("SUPABASE_URL", "https://abc.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "sb-test-key")
+
+    settings = get_settings()
+
+    assert settings.intake_media_backend == "supabase"
+    assert settings.supabase_url == "https://abc.supabase.co"
+    assert settings.supabase_service_role_key == "sb-test-key"
+
+
+def test_settings_supabase_backend_requires_url_and_service_role_key() -> None:
+    with pytest.raises(ValueError, match="SUPABASE_URL"):
+        Settings(intake_media_backend="supabase")
+    with pytest.raises(ValueError, match="SUPABASE_SERVICE_ROLE_KEY"):
+        Settings(
+            intake_media_backend="supabase",
+            supabase_url="https://abc.supabase.co",
+        )
+
+
+def test_settings_rejects_unknown_intake_media_backend() -> None:
+    with pytest.raises(ValueError, match="unsupported intake_media_backend"):
+        Settings(intake_media_backend="s3")
+
+
+def test_settings_supabase_backend_needs_url_env_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INTAKE_MEDIA_BACKEND", "supabase")
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+
+    with pytest.raises(ValueError, match="SUPABASE_URL"):
+        get_settings()
+
+
+def test_settings_local_backend_needs_no_supabase_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+
+    settings = Settings(intake_media_backend="local")
+
+    assert settings.intake_media_backend == "local"
+
+
 def _env_example_text() -> str:
     return _ENV_EXAMPLE.read_text(encoding="utf-8")
 
@@ -818,6 +881,15 @@ def test_env_example_documents_every_phase6_directory_variable() -> None:
     assert "DIRECTORY_MAX_RESULTS=50" in text
     assert "REDIS_DIRECTORY_TTL_SECONDS=300" in text
     assert "PARTNER_CREDENTIAL_SWEEP_CRON=" in text
+
+
+def test_env_example_documents_intake_media_supabase_switch() -> None:
+    text = _env_example_text()
+    # The intake-media backend switch (#385) must be documented with both
+    # backends and the three new env vars so the config is discoverable at boot.
+    assert "INTAKE_MEDIA_BACKEND=" in text
+    assert "SUPABASE_URL=" in text
+    assert "SUPABASE_SERVICE_ROLE_KEY=" in text
 
 
 def test_env_example_redis_directory_ttl_comments_the_default() -> None:
