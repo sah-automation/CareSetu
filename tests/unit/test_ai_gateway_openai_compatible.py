@@ -289,9 +289,7 @@ async def test_structure_non_json_response_non_retryable() -> None:
 
 
 async def test_structure_wrong_json_shape_non_retryable() -> None:
-    transport = httpx.MockTransport(
-        lambda request: _success_response({"not": "the right shape"})
-    )
+    transport = httpx.MockTransport(lambda request: _success_response({"not": "the right shape"}))
     adapter = _make_adapter(transport)
 
     with pytest.raises(Ext002CallError) as exc_info:
@@ -404,9 +402,7 @@ async def test_egress_no_patient_identifiers_in_payload() -> None:
 
 
 async def test_transcribe_raises_not_supported() -> None:
-    adapter = _make_adapter(
-        httpx.MockTransport(lambda request: _success_response({}))
-    )
+    adapter = _make_adapter(httpx.MockTransport(lambda request: _success_response({})))
 
     with pytest.raises(Ext002CallError) as exc_info:
         await adapter.transcribe(
@@ -418,9 +414,7 @@ async def test_transcribe_raises_not_supported() -> None:
 
 
 async def test_draft_rx_raises_not_supported() -> None:
-    adapter = _make_adapter(
-        httpx.MockTransport(lambda request: _success_response({}))
-    )
+    adapter = _make_adapter(httpx.MockTransport(lambda request: _success_response({})))
 
     with pytest.raises(Ext002CallError) as exc_info:
         await adapter.draft_rx(
@@ -452,9 +446,7 @@ async def test_adapter_implements_all_three_operations() -> None:
 
 
 async def test_adapter_typed_as_port() -> None:
-    transport = httpx.MockTransport(
-        lambda request: _success_response(_mock_structure_response())
-    )
+    transport = httpx.MockTransport(lambda request: _success_response(_mock_structure_response()))
     client = httpx.AsyncClient(transport=transport, timeout=5.0)
     gateway: AiGateway = OpenAiCompatibleAdapter(
         api_key="k",
@@ -474,9 +466,7 @@ async def test_adapter_typed_as_port() -> None:
 
 
 async def test_build_openai_compatible_gateway_returns_adapter() -> None:
-    transport = httpx.MockTransport(
-        lambda request: _success_response(_mock_structure_response())
-    )
+    transport = httpx.MockTransport(lambda request: _success_response(_mock_structure_response()))
     client = httpx.AsyncClient(transport=transport, timeout=5.0)
     gateway: AiGateway = build_openai_compatible_gateway(
         api_key="k",

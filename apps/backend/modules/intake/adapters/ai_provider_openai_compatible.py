@@ -21,19 +21,17 @@ from collections.abc import Awaitable, Callable
 import httpx
 from langfuse import observe
 
+from app.config import DEFAULT_AI_MAX_RETRIES, DEFAULT_AI_TIMEOUT_SECONDS
 from modules.intake.adapters.ai_gateway import (
     AiEgressContext,
     AiGateway,
     DraftRxRequest,
     DraftRxResult,
+    Ext002CallError,
     StructureRequest,
     StructureResult,
     TranscribeRequest,
     TranscribeResult,
-)
-from app.config import DEFAULT_AI_MAX_RETRIES, DEFAULT_AI_TIMEOUT_SECONDS
-from modules.intake.adapters.ai_provider_ext import (
-    Ext002CallError,
     _backoff_delay,
 )
 
@@ -74,6 +72,16 @@ class OpenAiCompatibleAdapter:
         self._max_retries = max_retries
         self._sleep = sleep
         self._client = client or httpx.AsyncClient(timeout=timeout_seconds)
+
+    @property
+    def effective_provider(self) -> str:
+        """The ``ai_provider`` whitelist value this adapter serves."""
+        return "openai_compatible"
+
+    @property
+    def effective_model(self) -> str:
+        """The configured model name sent in the chat-completions body."""
+        return self._model
 
     def _build_messages(
         self,
@@ -131,9 +139,7 @@ class OpenAiCompatibleAdapter:
                 try:
                     data = response.json()
                 except ValueError as exc:
-                    logger.error(
-                        "OpenAI-compatible /chat/completions returned a non-JSON response"
-                    )
+                    logger.error("OpenAI-compatible /chat/completions returned a non-JSON response")
                     raise Ext002CallError(
                         "OpenAI-compatible /chat/completions returned a non-JSON response",
                         retries_exhausted=False,

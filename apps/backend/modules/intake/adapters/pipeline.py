@@ -7,6 +7,15 @@ registration seam; it routes ``intake.captured`` here via
 pre_summary) lives here. This is a pure extraction refactor (T01, #365): zero
 behavioral change from the prior single-file layout.
 
+T04 (#381) adds config-driven bookkeeping: ``_insert_ai_job`` accepts the
+configured provider/model as a pre-call booking (provider + placeholder model);
+after a successful structure call the pipeline reads the effective serving
+provider and model off the ``AiGateway`` port and passes them to
+``_finalize_pipeline`` which writes them on the completed ai_jobs row,
+replacing the placeholder. The ``MOCK_AI_MODEL`` constant now comes from the
+mock adapter and serves as the insert-time placeholder only; the finalized row
+carries the real serving values (or ``"mock-model"`` when the mock served).
+
 The ``intake.captured`` handler is the async AI pipeline (MOD-005 self-
 subscription). It is ledger-first (ADR-0002 §3): the ``consumed_events`` row
 is written in the SAME transaction as the pipeline effects, so replaying a
@@ -193,7 +202,8 @@ async def _run_structuring_pipeline(
             )
             return
 
-        gateway = _adapters.build_ai_gateway(get_settings())
+        settings = get_settings()
+        gateway = _adapters.build_ai_gateway(settings)
 
         # Resolve the transcript before any job is created, so an unstructurable
         # intake (voice with no clip, or no text at all) degrades to a logged
@@ -292,7 +302,12 @@ async def _run_structuring_pipeline(
                 )
             )
 
-        ai_job_id = await _insert_ai_job(connection, intake_id)
+        ai_job_id = await _insert_ai_job(
+            connection,
+            intake_id,
+            provider=settings.ai_provider.strip().lower(),
+            model=settings.ai_model or _adapters.MOCK_AI_MODEL,
+        )
         try:
             started = time.monotonic()
             structure_result = await gateway.structure(
@@ -305,6 +320,15 @@ async def _run_structuring_pipeline(
             elapsed_ms = int((time.monotonic() - started) * 1000)
             confidence = structure_result.confidence
             low_conf = is_low_confidence(confidence)
+
+            # Effective (serving) provider/model read off the gateway after the
+            # call - on the fallback chain this is whichever provider answered;
+            # on mock/single-provider paths it is the configured value. Falls
+            # back to the configured plan if the gateway has no serving record yet.
+            effective_provider = gateway.effective_provider or settings.ai_provider.strip().lower()
+            effective_model = (
+                gateway.effective_model or settings.ai_model or _adapters.MOCK_AI_MODEL
+            )
 
             structured_fields = StructuredFields(
                 chief_complaints=structure_result.chief_complaints,
@@ -357,6 +381,8 @@ async def _run_structuring_pipeline(
             connection,
             intake_id=intake_id,
             ai_job_id=ai_job_id,
+            provider=effective_provider,
+            model=effective_model,
             confidence=confidence,
             elapsed_ms=elapsed_ms,
             structured_fields=structured_fields,
@@ -368,15 +394,28 @@ async def _run_structuring_pipeline(
         await gate_engine.dispose()
 
 
-async def _insert_ai_job(connection: AsyncConnection, intake_id: int) -> int:
-    """Create the running ai_jobs row for this pass (markable failed on error)."""
+async def _insert_ai_job(
+    connection: AsyncConnection,
+    intake_id: int,
+    *,
+    provider: str,
+    model: str,
+) -> int:
+    """Create the running ai_jobs row for this pass (markable failed on error).
+
+    The row is a booking marked BEFORE the provider call, so its provider/model
+    are the configured plan (provider + placeholder model). A later successful
+    ``_finalize_pipeline`` overwrites them with the effective serving values;
+    a failure path only touches status/error_message. ``task_type`` is fixed to
+    ``structure`` - the only leg this ticket wires.
+    """
     job_insert = await connection.execute(
         intake_ai_jobs.insert()
         .values(
             intake_id=intake_id,
             task_type="structure",
-            provider=get_settings().ai_provider.strip().lower(),
-            model=_adapters.MOCK_AI_MODEL,
+            provider=provider,
+            model=model,
             status="running",
             attempts=1,
         )
@@ -459,6 +498,8 @@ async def _finalize_pipeline(
     *,
     intake_id: int,
     ai_job_id: int,
+    provider: str,
+    model: str,
     confidence: float,
     elapsed_ms: int,
     structured_fields: StructuredFields,
@@ -469,15 +510,15 @@ async def _finalize_pipeline(
     """Persist the completed structure job + Draft pre_summary, then publish.
 
     Runs in the SAME transaction as the ledger dedupe: the ai_jobs row is
-    marked completed with the metered provider/model/tokens/cost/latency/
-    attempts, the Draft ``intake_pre_summaries`` row is written with the
-    provider confidence + honesty fields, the intake moves to
-    ``ready_for_review``, and ``pre_summary.ready`` + ``ai_job.completed`` are
-    emitted. A low-confidence outcome ALSO publishes ``pre_summary.low_confidence``
-    (AMB-006) - the honesty cue that structurally forces doctor review before
-    the pre-summary can finalize (ADR-0001). ADR-0002 S1. A downstream failure
-    here rolls the whole pass back, so at-least-once redelivery re-runs it -
-    never a partial pre-summary.
+    marked completed with the effective (serving) provider/model, the metered
+    confidence/tokens/cost/latency/attempts, the Draft ``intake_pre_summaries``
+    row is written with the provider confidence + honesty fields, the intake
+    moves to ``ready_for_review``, and ``pre_summary.ready`` +
+    ``ai_job.completed`` are emitted. A low-confidence outcome ALSO publishes
+    ``pre_summary.low_confidence`` (AMB-006) - the honesty cue that structurally
+    forces doctor review before the pre-summary can finalize (ADR-0001).
+    ADR-0002 S1. A downstream failure here rolls the whole pass back, so
+    at-least-once redelivery re-runs it - never a partial pre-summary.
     """
     token_input = 0
     token_output = 0
@@ -488,6 +529,8 @@ async def _finalize_pipeline(
         .where(intake_ai_jobs.c.id == ai_job_id)
         .values(
             status="completed",
+            provider=provider,
+            model=model,
             confidence=Decimal(str(confidence)),
             input_tokens=token_input,
             output_tokens=token_output,

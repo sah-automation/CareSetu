@@ -75,3 +75,10 @@ services:
         sync: false
       - key: LANGFUSE_HOST
         value: https://us.cloud.langfuse.com
+      # AI provider gateway (T04, #381): demo stays on mock (fail-closed) via
+      # DEMO_MODE=true.  To point at a real OpenAI-compatible provider, set
+      # AI_PROVIDER, AI_MODEL, AI_API_KEY, AI_BASE_URL, and optionally the
+      # all-or-none fallback set (AI_FALLBACK_*).  See .env.example for a
+      # quick-switch table (Groq, Gemini, OpenRouter, OpenAI).
+      - key: AI_PROVIDER
+        value: mock

@@ -32,12 +32,12 @@ from modules.intake.adapters.ai_gateway import (
     AiGateway,
     DraftRxRequest,
     DraftRxResult,
+    Ext002CallError,
     StructureRequest,
     StructureResult,
     TranscribeRequest,
     TranscribeResult,
 )
-from modules.intake.adapters.ai_provider_ext import Ext002CallError
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +84,16 @@ class FallbackAiGateway:
     @property
     def last_effective_model(self) -> str | None:
         return self._last_effective.model if self._last_effective else None
+
+    @property
+    def effective_provider(self) -> str | None:
+        """Port-surface accessor: the serving provider of the last success."""
+        return self.last_effective_provider
+
+    @property
+    def effective_model(self) -> str | None:
+        """Port-surface accessor: the serving model of the last success."""
+        return self.last_effective_model
 
     async def _route(
         self,

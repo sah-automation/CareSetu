@@ -13,8 +13,10 @@ sex, plus the transcript/text (and the audio clip being transcribed) - never a
 patient's name, phone, or the full record. ``AiEgressContext`` is the one
 patient-shaped thing that may cross the wire.
 
-This module carries the DTOs and the abstract ``AiGateway`` protocol only; the
-concrete adapters (mock and provider) live next to it and implement the port.
+This module carries the DTOs, the typed ``Ext002CallError`` every adapter
+raises, the shared ``_backoff_delay`` retry helper, and the abstract
+``AiGateway`` protocol only; the concrete adapters (mock, EXT-002 provider,
+OpenAI-compatible chat, fallback chain) live next to it and implement the port.
 The protocol methods are abstract stubs, so no tracing is required here - the
 concrete LLM-calling methods carry the ``@observe`` annotations where the
 concrete adapters are defined.
@@ -22,6 +24,7 @@ concrete adapters are defined.
 
 from __future__ import annotations
 
+import random
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict
@@ -32,6 +35,19 @@ LANG_EN = "en"
 SEX_MALE = "male"
 SEX_FEMALE = "female"
 SEX_OTHER = "other"
+
+
+def _backoff_delay(attempt: int, base_seconds: float = 1.0) -> float:
+    """Exponential backoff with jitter for retry ``attempt`` (1-based).
+
+    Package-internal retry helper shared by every EXT-002 adapter so the
+    exponential + jitter curve is defined once (third-party-integration-
+    standards §1).
+    """
+    if attempt < 1:
+        return 0.0
+    exponential = base_seconds * (1 << (attempt - 1))
+    return exponential + random.uniform(0.0, exponential * 0.25)  # nosec B311
 
 
 class AiEgressContext(BaseModel):
@@ -130,12 +146,40 @@ class DraftRxResult(BaseModel):
     confidence: float
 
 
+class Ext002CallError(RuntimeError):
+    """A failed EXT-002 call, typed for the circuit breaker (error taxonomy).
+
+    ``retries_exhausted`` separates genuine outages (network error, timeout,
+    HTTP 429/5xx after the retry budget) - the only events that trip the
+    breaker - from contract rejections (HTTP 4xx, malformed payload) that are
+    the caller's problem and never trip it. Owned by the port so every adapter
+    (EXT-002 provider, OpenAI-compatible chat, fallback chain) raises and
+    routes on the same typed error.
+    """
+
+    def __init__(self, message: str, *, retries_exhausted: bool) -> None:
+        super().__init__(message)
+        self.retries_exhausted = retries_exhausted
+
+
 class AiGateway(Protocol):
     """Port every EXT-002 adapter satisfies (A6) - the three egress operations.
 
     Abstract by declaration; concrete adapters implement each operation and own
     the tracing (``@observe``) on the methods that make the LLM call.
+
+    ``effective_provider`` / ``effective_model`` expose the provider that
+    actually served the most recent successful call so pipeline bookkeeping can
+    record reality. On the fallback chain they are ``None`` until the first
+    success; on the mock and single-provider paths the values are static and
+    always set.
     """
+
+    @property
+    def effective_provider(self) -> str | None: ...
+
+    @property
+    def effective_model(self) -> str | None: ...
 
     async def transcribe(self, request: TranscribeRequest) -> TranscribeResult: ...
 
@@ -154,6 +198,7 @@ __all__ = [
     "AiGateway",
     "DraftRxRequest",
     "DraftRxResult",
+    "Ext002CallError",
     "RxItem",
     "StructureRequest",
     "StructureResult",

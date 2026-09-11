@@ -33,6 +33,7 @@ from bus.events import (
 from bus.handler_harness import run_handler
 from bus.registry import HandlerRegistry
 from modules.intake.adapters.ai_provider_ext import build_ai_gateway
+from modules.intake.adapters.ai_provider_mock import MOCK_AI_MODEL, MOCK_AI_PROVIDER
 from modules.intake.adapters.pipeline import _build_egress_gate, _run_structuring_pipeline
 from modules.intake.domain.events import (
     AiEgressRecordedPayload,
@@ -48,8 +49,12 @@ from modules.intake.intake_models import INTAKE_SCHEMA
 
 logger = logging.getLogger(__name__)
 
-#: Mock EXT-002 model id on the ai_jobs row (``{provider}-model`` convention).
-MOCK_AI_MODEL = "mock-model"
+#: Mock EXT-002 identity on the ai_jobs row (``{provider}-model`` convention)
+#: and the insert-time model placeholder until the effective provider/model is
+#: known after a successful structure call. Owned by the mock adapter and
+#: re-exported here for the pipeline's ``_adapters`` indirection.
+MOCK_AI_PROVIDER = MOCK_AI_PROVIDER
+MOCK_AI_MODEL = MOCK_AI_MODEL
 
 #: Egress-context placeholders until real patient-profile sourcing lands (T11).
 DEFAULT_EGRESS_AGE_RANGE = "30-40"
@@ -82,6 +87,7 @@ __all__ = [
     "DEFAULT_EGRESS_AGE_RANGE",
     "DEFAULT_EGRESS_SEX",
     "MOCK_AI_MODEL",
+    "MOCK_AI_PROVIDER",
     "_build_egress_gate",
     "build_ai_gateway",
 ]

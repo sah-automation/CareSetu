@@ -32,12 +32,16 @@ from modules.intake.adapters.ai_provider_ext import (
     Ext002CallError,
     build_ai_gateway,
 )
+from modules.intake.adapters.ai_provider_fallback import FallbackAiGateway
 from modules.intake.adapters.ai_provider_mock import (
+    MOCK_AI_MODEL,
+    MOCK_AI_PROVIDER,
     MOCK_CONFIDENCE_CLEAN,
     MOCK_CONFIDENCE_LOW,
     MockAiProvider,
     build_mock_ai_gateway,
 )
+from modules.intake.adapters.ai_provider_openai_compatible import OpenAiCompatibleAdapter
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -146,6 +150,13 @@ def test_mock_rejects_unknown_confidence_level() -> None:
         MockAiProvider(confidence_level=cast(ConfidenceLevel, "medium"))
 
 
+def test_mock_exposes_effective_provider_and_model() -> None:
+    provider = MockAiProvider()
+
+    assert provider.effective_provider == MOCK_AI_PROVIDER
+    assert provider.effective_model == MOCK_AI_MODEL
+
+
 async def test_provider_adapter_implements_all_three_operations() -> None:
     provider = Ext002AiProvider(api_key="k", base_url="https://ext.example")
 
@@ -192,10 +203,65 @@ def _staging_openai_settings() -> Settings:
     )
 
 
-def test_build_ai_gateway_provider_path() -> None:
+def test_build_ai_gateway_provider_path_wraps_openai_compatible() -> None:
     gateway = build_ai_gateway(_staging_openai_settings())
 
     assert isinstance(gateway, CircuitBreakerAiGateway)
+    assert isinstance(gateway._adapter, OpenAiCompatibleAdapter)
+    assert gateway.effective_provider == "openai_compatible"
+    assert gateway.effective_model == "grok-3"
+
+
+def _staging_openai_fallback_settings() -> Settings:
+    return Settings(
+        app_environment="staging",
+        ai_provider="openai_compatible",
+        ai_api_key="secret-key",
+        ai_base_url="https://api.groq.example/openai/v1",
+        ai_model="llama-3.3-70b-versatile",
+        ai_fallback_provider="openai_compatible",
+        ai_fallback_api_key="fallback-key",
+        ai_fallback_base_url="https://gemini.example/v1",
+        ai_fallback_model="gemini-2.0-flash",
+    )
+
+
+def test_build_ai_gateway_openai_compatible_without_fallback_is_breaker_wrapped() -> None:
+    gateway = build_ai_gateway(_staging_openai_settings())
+
+    assert isinstance(gateway, CircuitBreakerAiGateway)
+    assert not isinstance(gateway, FallbackAiGateway)
+
+
+def test_build_ai_gateway_openai_compatible_with_fallback_composes_chain() -> None:
+    gateway = build_ai_gateway(_staging_openai_fallback_settings())
+
+    assert isinstance(gateway, FallbackAiGateway)
+    # Each chain leg is itself a breaker-wrapped OpenAI-compatible adapter.
+    assert isinstance(gateway._primary, CircuitBreakerAiGateway)
+    assert isinstance(gateway._primary._adapter, OpenAiCompatibleAdapter)
+    assert isinstance(gateway._secondary, CircuitBreakerAiGateway)
+    assert isinstance(gateway._secondary._adapter, OpenAiCompatibleAdapter)
+    # The effective surface is None until the first successful call - the
+    # pipeline reads it only after a success.
+    assert gateway.effective_provider is None
+    assert gateway.effective_model is None
+
+
+def test_build_ai_gateway_dev_override_wires_openai_compatible() -> None:
+    settings = Settings(
+        app_environment="dev",
+        ai_provider="openai_compatible",
+        ai_api_key="secret-key",
+        ai_base_url="https://ext.example",
+        ai_model="grok-3",
+        ai_allow_dev_provider=True,
+    )
+
+    gateway = build_ai_gateway(settings)
+
+    assert isinstance(gateway, CircuitBreakerAiGateway)
+    assert gateway.effective_model == "grok-3"
 
 
 @pytest.mark.parametrize(

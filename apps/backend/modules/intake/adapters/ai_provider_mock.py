@@ -33,6 +33,13 @@ from modules.intake.adapters.ai_gateway import (
 MOCK_CONFIDENCE_CLEAN = 0.8
 MOCK_CONFIDENCE_LOW = 0.5
 
+#: The mock's identity on the ``intake_ai_jobs`` provider/model columns
+#: (``{provider}-model`` convention). Owned here - the mock adapter is the only
+#: thing that knows its own name - and re-exported from ``adapters/__init__.py``
+#: so the pipeline bookkeeping reads one constant.
+MOCK_AI_PROVIDER = "mock"
+MOCK_AI_MODEL = "mock-model"
+
 ConfidenceLevel = Literal["clean", "low"]
 
 
@@ -58,6 +65,16 @@ class MockAiProvider:
     def confidence(self) -> float:
         """The confidence value this mock currently returns."""
         return self._confidence
+
+    @property
+    def effective_provider(self) -> str:
+        """The mock's provider identity (the ``ai_provider`` whitelist value)."""
+        return MOCK_AI_PROVIDER
+
+    @property
+    def effective_model(self) -> str:
+        """The mock's model identity, stable regardless of the confidence knob."""
+        return MOCK_AI_MODEL
 
     @property
     def calls(self) -> list[object]:
@@ -112,6 +129,8 @@ def build_mock_ai_gateway(
 
 
 __all__ = [
+    "MOCK_AI_MODEL",
+    "MOCK_AI_PROVIDER",
     "MOCK_CONFIDENCE_CLEAN",
     "MOCK_CONFIDENCE_LOW",
     "ConfidenceLevel",

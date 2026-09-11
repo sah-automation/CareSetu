@@ -39,6 +39,8 @@ from bus.events import (
 )
 from modules.intake.adapters.ai_provider_ext import Ext002CallError
 from modules.intake.adapters.ai_provider_mock import (
+    MOCK_AI_MODEL,
+    MOCK_AI_PROVIDER,
     MOCK_CONFIDENCE_LOW,
     MockAiProvider,
 )
@@ -435,6 +437,10 @@ async def test_low_confidence_flags_and_publishes_low_confidence_event() -> None
     pre_insert = next(r for r in connection.executed if r.kind == "insert_pre_summary")
     assert pre_insert.params["low_confidence"] is True
     assert float(pre_insert.params["structuring_confidence"]) == pytest.approx(MOCK_CONFIDENCE_LOW)
+    completed_update = next(r for r in connection.executed if r.kind == "update_ai_job")
+    assert completed_update.params["status"] == "completed"
+    assert completed_update.params["provider"] == MOCK_AI_PROVIDER
+    assert completed_update.params["model"] == MOCK_AI_MODEL
     outbox = _outbox_types(connection)
     assert outbox.count(EVENT_PRE_SUMMARY_LOW_CONFIDENCE) == 1
     assert outbox.count(EVENT_PRE_SUMMARY_READY) == 1

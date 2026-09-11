@@ -279,6 +279,8 @@ async def test_happy_path_writes_draft_pre_summary_and_publishes_ready_and_compl
     ai_insert = next(r for r in connection.executed if r.kind == "insert_ai_job")
     assert ai_insert.params["intake_id"] == 1
     assert ai_insert.params["task_type"] == "structure"
+    # At insert the row carries the configured provider + placeholder model - the
+    # effective serving values only land on the completed update (T04 #381).
     assert ai_insert.params["provider"] == _PROVIDER
     assert ai_insert.params["model"] == _MODEL
     assert ai_insert.params["status"] == "running"
@@ -286,6 +288,10 @@ async def test_happy_path_writes_draft_pre_summary_and_publishes_ready_and_compl
 
     ai_update = next(r for r in connection.executed if r.kind == "update_ai_job")
     assert ai_update.params["status"] == "completed"
+    # The completed row records the effective (serving) provider/model read off
+    # the gateway after the successful call, replacing the placeholder.
+    assert ai_update.params["provider"] == _PROVIDER
+    assert ai_update.params["model"] == _MODEL
     assert float(ai_update.params["confidence"]) == pytest.approx(MOCK_CONFIDENCE_CLEAN)
     assert ai_update.params["input_tokens"] == 0
     assert ai_update.params["output_tokens"] == 0
