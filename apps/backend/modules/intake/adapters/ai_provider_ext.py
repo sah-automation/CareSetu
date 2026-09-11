@@ -225,7 +225,7 @@ class CircuitBreakerAiGateway:
 
     def __init__(
         self,
-        adapter: Ext002AiProvider,
+        adapter: AiGateway,
         *,
         threshold: int,
         cooldown_seconds: float,
