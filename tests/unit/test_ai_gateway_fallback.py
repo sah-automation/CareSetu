@@ -34,7 +34,6 @@ from modules.intake.adapters.ai_provider_fallback import (
     FallbackAiGateway,
 )
 from modules.intake.adapters.ai_provider_openai_compatible import (
-    OpenAiCompatibleAdapter,
     build_openai_compatible_gateway,
 )
 
@@ -402,13 +401,11 @@ async def test_primary_contract_rejection_propagates_without_fallback() -> None:
 
 
 async def test_unsupported_leg_rejection_never_falls_back() -> None:
-    # The OpenAI-compatible adapter rejects transcribe/draft_rx in this phase
-    # (retries_exhausted=False); the secondary must not be invoked for them.
-    primary = OpenAiCompatibleAdapter(
-        api_key="k",
-        base_url=_GROQ_URL,
-        model="llama-3.3-70b-versatile",
-    )
+    # A contract rejection on the OpenAI-compatible adapter must not engage the
+    # secondary - fallback is reserved for genuine outages. transcribe now posts
+    # to the real /audio/transcriptions leg (#387), so its rejection is a 4xx;
+    # draft_rx still raises the not-supported rejection (retries_exhausted=False).
+    primary = _openai_gateway(_RecordingTransport(_rejection_response()))
     secondary_transport = _RecordingTransport(httpx.Response(200, json=_TRANSCRIBE_BODY))
 
     gateway = FallbackAiGateway(
@@ -418,7 +415,7 @@ async def test_unsupported_leg_rejection_never_falls_back() -> None:
         _META_GEMINI,
     )
 
-    with pytest.raises(Ext002CallError, match="not supported"):
+    with pytest.raises(Ext002CallError, match="400"):
         await gateway.transcribe(_TRANSCRIBE_REQUEST)
     with pytest.raises(Ext002CallError, match="not supported"):
         await gateway.draft_rx(_DRAFT_RX_REQUEST)

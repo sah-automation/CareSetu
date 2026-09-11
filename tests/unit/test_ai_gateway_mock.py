@@ -212,6 +212,29 @@ def test_build_ai_gateway_provider_path_wraps_openai_compatible() -> None:
     assert gateway.effective_model == "grok-3"
 
 
+def test_build_ai_gateway_wires_asr_model_from_settings() -> None:
+    settings = Settings(
+        app_environment="staging",
+        ai_provider="openai_compatible",
+        ai_api_key="secret-key",
+        ai_base_url="https://ext.example",
+        ai_model="grok-3",
+        ai_asr_model="whisper-large-v3",
+    )
+
+    gateway = build_ai_gateway(settings)
+
+    assert isinstance(gateway, CircuitBreakerAiGateway)
+    assert gateway._adapter._asr_model == "whisper-large-v3"
+
+
+def test_build_ai_gateway_asr_model_defaults_to_freemium_tier() -> None:
+    gateway = build_ai_gateway(_staging_openai_settings())
+
+    assert isinstance(gateway, CircuitBreakerAiGateway)
+    assert gateway._adapter._asr_model == "whisper-large-v3-turbo"
+
+
 def _staging_openai_fallback_settings() -> Settings:
     return Settings(
         app_environment="staging",

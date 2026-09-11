@@ -1,8 +1,14 @@
-"""PHASE-7 T02 (#379): OpenAI-compatible adapter unit tests.
+"""OpenAI-compatible adapter unit tests (#379 structure leg, #387 ASR leg).
 
-Acceptance contract from the ticket: happy-path parse, token extraction,
+Structure-leg acceptance contract (#379): happy-path parse, token extraction,
 429/5xx retry then outage, 4xx non-retryable, malformed payload non-retryable,
 egress payload carries only intake context (never name/phone).
+
+Transcribe-leg acceptance contract (#387): happy-path parse into
+``TranscribeResult``, transcription confidence proxy and per-segment
+confidence, usage extraction when present (top-level and vendor extension),
+429/5xx retry-then-outage, 4xx/malformed non-retryable, egress carries the
+audio clip reference + model + intake context (never raw bytes / name / phone).
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ from modules.intake.adapters.ai_gateway import (
     StructureRequest,
     StructureResult,
     TranscribeRequest,
+    TranscribeResult,
 )
 from modules.intake.adapters.ai_provider_ext import Ext002CallError
 from modules.intake.adapters.ai_provider_openai_compatible import (
@@ -38,6 +45,34 @@ def _structure_request() -> StructureRequest:
         source="voice",
         context=_context(),
     )
+
+
+def _transcribe_request() -> TranscribeRequest:
+    return TranscribeRequest(
+        audio_ref="media/abc.mp3",
+        mode="voice",
+        context=_context(),
+    )
+
+
+def _mock_transcription_response(
+    *,
+    text: str = "mujhe bukhar hai",
+    language: str | None = None,
+    segments: list[dict[str, Any]] | None = None,
+    usage: dict[str, Any] | None = None,
+    vendor_usage: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    response: dict[str, Any] = {"text": text}
+    if language is not None:
+        response["language"] = language
+    if segments is not None:
+        response["segments"] = segments
+    if usage is not None:
+        response["usage"] = usage
+    if vendor_usage is not None:
+        response["x_groq"] = {"usage": vendor_usage}
+    return response
 
 
 def _mock_structure_response(
@@ -398,19 +433,354 @@ async def test_egress_no_patient_identifiers_in_payload() -> None:
     assert "patient_id" not in body
 
 
-# --- transcribe / draft_rx raise non-retryable error ---
+# --- transcribe: happy path ---
 
 
-async def test_transcribe_raises_not_supported() -> None:
-    adapter = _make_adapter(httpx.MockTransport(lambda request: _success_response({})))
+async def test_transcribe_happy_path_parse() -> None:
+    mock_resp = _mock_transcription_response()
+    transport = httpx.MockTransport(lambda request: _success_response(mock_resp))
+    adapter = _make_adapter(transport)
+
+    result = await adapter.transcribe(_transcribe_request())
+
+    assert isinstance(result, TranscribeResult)
+    assert result.transcript == "mujhe bukhar hai"
+    assert result.language == "hi"
+
+
+async def test_transcribe_strips_transcript_whitespace() -> None:
+    mock_resp = _mock_transcription_response(text="  mujhe bukhar hai  ")
+    transport = httpx.MockTransport(lambda request: _success_response(mock_resp))
+    adapter = _make_adapter(transport)
+
+    result = await adapter.transcribe(_transcribe_request())
+
+    assert result.transcript == "mujhe bukhar hai"
+
+
+# --- transcribe: confidence proxy ---
+
+
+async def test_transcribe_confidence_proxy_defaults_when_absent() -> None:
+    mock_resp = _mock_transcription_response()
+    transport = httpx.MockTransport(lambda request: _success_response(mock_resp))
+    adapter = _make_adapter(transport)
+
+    result = await adapter.transcribe(_transcribe_request())
+
+    assert result.confidence == pytest.approx(0.8)
+
+
+async def test_transcribe_confidence_proxy_averages_segment_confidence() -> None:
+    mock_resp = _mock_transcription_response(
+        segments=[
+            {"id": 0, "confidence": 0.9},
+            {"id": 1, "confidence": 0.7},
+            {"id": 2, "confidence": 0.8},
+        ]
+    )
+    transport = httpx.MockTransport(lambda request: _success_response(mock_resp))
+    adapter = _make_adapter(transport)
+
+    result = await adapter.transcribe(_transcribe_request())
+
+    assert result.confidence == pytest.approx(0.8)
+
+
+async def test_transcribe_confidence_proxy_ignores_non_confidence_segments() -> None:
+    mock_resp = _mock_transcription_response(
+        segments=[{"id": 0, "no_speech_prob": 0.1}, {"id": 1, "confidence": 0.6}]
+    )
+    transport = httpx.MockTransport(lambda request: _success_response(mock_resp))
+    adapter = _make_adapter(transport)
+
+    result = await adapter.transcribe(_transcribe_request())
+
+    assert result.confidence == pytest.approx(0.6)
+
+
+# --- transcribe: language handling ---
+
+
+async def test_transcribe_language_defaults_to_context_language() -> None:
+    mock_resp = _mock_transcription_response()
+    transport = httpx.MockTransport(lambda request: _success_response(mock_resp))
+    adapter = _make_adapter(transport)
+
+    result = await adapter.transcribe(_transcribe_request())
+
+    assert result.language == "hi"
+
+
+async def test_transcribe_uses_provider_language_when_present() -> None:
+    mock_resp = _mock_transcription_response(language="en")
+    transport = httpx.MockTransport(lambda request: _success_response(mock_resp))
+    adapter = _make_adapter(transport)
+
+    result = await adapter.transcribe(_transcribe_request())
+
+    assert result.language == "en"
+
+
+async def test_transcribe_unexpected_language_non_retryable() -> None:
+    mock_resp = _mock_transcription_response(language="english")
+    transport = httpx.MockTransport(lambda request: _success_response(mock_resp))
+    adapter = _make_adapter(transport)
 
     with pytest.raises(Ext002CallError) as exc_info:
-        await adapter.transcribe(
-            TranscribeRequest(audio_ref="media/abc", mode="voice", context=_context())
-        )
+        await adapter.transcribe(_transcribe_request())
 
     assert exc_info.value.retries_exhausted is False
-    assert "not supported" in str(exc_info.value)
+
+
+# --- transcribe: usage extraction ---
+
+
+async def test_transcribe_usage_extracted_when_present() -> None:
+    mock_resp = _mock_transcription_response(usage={"prompt_tokens": 10, "completion_tokens": 5})
+    transport = httpx.MockTransport(lambda request: _success_response(mock_resp))
+    adapter = _make_adapter(transport)
+
+    result = await adapter.transcribe(_transcribe_request())
+
+    assert isinstance(result, TranscribeResult)
+
+
+async def test_transcribe_usage_extracted_from_vendor_extension() -> None:
+    mock_resp = _mock_transcription_response(
+        vendor_usage={"prompt_tokens": 7, "completion_tokens": 3}
+    )
+    transport = httpx.MockTransport(lambda request: _success_response(mock_resp))
+    adapter = _make_adapter(transport)
+
+    result = await adapter.transcribe(_transcribe_request())
+
+    assert isinstance(result, TranscribeResult)
+
+
+# --- transcribe: 429 / 5xx retry then outage ---
+
+
+async def test_transcribe_429_retry_then_outage() -> None:
+    call_count = 0
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return _error_response(429)
+
+    transport = httpx.MockTransport(_handler)
+    adapter = _make_adapter(transport, max_retries=2)
+
+    with pytest.raises(Ext002CallError) as exc_info:
+        await adapter.transcribe(_transcribe_request())
+
+    assert exc_info.value.retries_exhausted is True
+    assert call_count == 3  # initial + 2 retries
+
+
+async def test_transcribe_500_retry_then_outage() -> None:
+    call_count = 0
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return _error_response(500)
+
+    transport = httpx.MockTransport(_handler)
+    adapter = _make_adapter(transport, max_retries=2)
+
+    with pytest.raises(Ext002CallError) as exc_info:
+        await adapter.transcribe(_transcribe_request())
+
+    assert exc_info.value.retries_exhausted is True
+    assert call_count == 3
+
+
+# --- transcribe: 4xx non-retryable ---
+
+
+async def test_transcribe_400_non_retryable() -> None:
+    call_count = 0
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return _error_response(400, '{"error": "bad request"}')
+
+    transport = httpx.MockTransport(_handler)
+    adapter = _make_adapter(transport, max_retries=2)
+
+    with pytest.raises(Ext002CallError) as exc_info:
+        await adapter.transcribe(_transcribe_request())
+
+    assert exc_info.value.retries_exhausted is False
+    assert call_count == 1  # no retries
+
+
+async def test_transcribe_403_non_retryable() -> None:
+    call_count = 0
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return _error_response(403)
+
+    transport = httpx.MockTransport(_handler)
+    adapter = _make_adapter(transport, max_retries=2)
+
+    with pytest.raises(Ext002CallError) as exc_info:
+        await adapter.transcribe(_transcribe_request())
+
+    assert exc_info.value.retries_exhausted is False
+    assert call_count == 1
+
+
+# --- transcribe: malformed payload non-retryable ---
+
+
+async def test_transcribe_non_json_response_non_retryable() -> None:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            status_code=200,
+            content=b"not json at all",
+            request=httpx.Request("POST", "https://ext.example/audio/transcriptions"),
+        )
+    )
+    adapter = _make_adapter(transport)
+
+    with pytest.raises(Ext002CallError) as exc_info:
+        await adapter.transcribe(_transcribe_request())
+
+    assert exc_info.value.retries_exhausted is False
+
+
+async def test_transcribe_wrong_json_shape_non_retryable() -> None:
+    transport = httpx.MockTransport(
+        lambda request: _success_response(
+            {"not": "the right shape"},
+        )
+    )
+    adapter = _make_adapter(transport)
+
+    with pytest.raises(Ext002CallError) as exc_info:
+        await adapter.transcribe(_transcribe_request())
+
+    assert exc_info.value.retries_exhausted is False
+
+
+async def test_transcribe_missing_text_non_retryable() -> None:
+    mock_resp = _mock_transcription_response(text="")
+    transport = httpx.MockTransport(lambda request: _success_response(mock_resp))
+    adapter = _make_adapter(transport)
+
+    with pytest.raises(Ext002CallError) as exc_info:
+        await adapter.transcribe(_transcribe_request())
+
+    assert exc_info.value.retries_exhausted is False
+
+
+# --- transcribe: network error ---
+
+
+async def test_transcribe_network_error_retry_then_outage() -> None:
+    transport = httpx.MockTransport(lambda request: _network_error_request())
+    adapter = _make_adapter(transport, max_retries=2)
+
+    with pytest.raises(Ext002CallError) as exc_info:
+        await adapter.transcribe(_transcribe_request())
+
+    assert exc_info.value.retries_exhausted is True
+
+
+# --- transcribe: egress only carries reference + intake context ---
+
+
+async def test_transcribe_posts_audio_transcriptions_endpoint() -> None:
+    captured_requests: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured_requests.append(request)
+        return _success_response(_mock_transcription_response())
+
+    transport = httpx.MockTransport(_handler)
+    adapter = _make_adapter(transport)
+
+    await adapter.transcribe(_transcribe_request())
+
+    assert len(captured_requests) == 1
+    assert captured_requests[0].url.path == "/audio/transcriptions"
+
+
+async def test_transcribe_sends_bearer_auth_and_asr_model() -> None:
+    captured_requests: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured_requests.append(request)
+        return _success_response(_mock_transcription_response())
+
+    transport = httpx.MockTransport(_handler)
+    adapter = _make_adapter(transport)
+
+    await adapter.transcribe(_transcribe_request())
+
+    assert len(captured_requests) == 1
+    assert captured_requests[0].headers.get("authorization") == "Bearer test-key"
+    body = json.loads(captured_requests[0].content)
+    assert body["model"] == "whisper-large-v3-turbo"
+
+
+async def test_transcribe_asr_model_overridable() -> None:
+    captured_requests: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured_requests.append(request)
+        return _success_response(_mock_transcription_response())
+
+    transport = httpx.MockTransport(_handler)
+    client = httpx.AsyncClient(transport=transport, timeout=5.0)
+    adapter = OpenAiCompatibleAdapter(
+        api_key="test-key",
+        base_url="https://ext.example",
+        model="test-model",
+        asr_model="whisper-large-v3",
+        client=client,
+        sleep=_noop_sleep,
+    )
+
+    await adapter.transcribe(_transcribe_request())
+
+    body = json.loads(captured_requests[0].content)
+    assert body["model"] == "whisper-large-v3"
+    assert adapter.effective_model == "test-model"
+
+
+async def test_transcribe_egress_carries_only_reference_and_context() -> None:
+    captured_requests: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured_requests.append(request)
+        return _success_response(_mock_transcription_response())
+
+    transport = httpx.MockTransport(_handler)
+    adapter = _make_adapter(transport)
+
+    await adapter.transcribe(_transcribe_request())
+
+    body = json.loads(captured_requests[0].content)
+    assert body["audio_ref"] == "media/abc.mp3"
+    assert body["mode"] == "voice"
+    assert body["language"] == "hi"
+    assert body["age_range"] == "30-40"
+    assert body["sex"] == "male"
+    assert "name" not in body
+    assert "phone" not in body
+    assert "patient_id" not in body
+    assert "file" not in body
+    assert "bytes" not in body
+
+
+# --- draft_rx raises non-retryable error ---
 
 
 async def test_draft_rx_raises_not_supported() -> None:

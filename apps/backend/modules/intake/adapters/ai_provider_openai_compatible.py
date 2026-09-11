@@ -1,14 +1,23 @@
-"""MOD-005: OpenAI-compatible adapter for any standard chat-completions endpoint.
+"""MOD-005: OpenAI-compatible adapter for standard OpenAI REST endpoints.
 
 This adapter implements the ``AiGateway`` port against any REST endpoint that
-conforms to the OpenAI chat-completions API (POST /chat/completions). It covers
-the structure leg only - ``transcribe`` and ``draft_rx`` raise the typed
+conforms to the OpenAI-compatible API. ``structure`` posts to
+``{base_url}/chat/completions``; ``transcribe`` posts to
+``{base_url}/audio/transcriptions`` (the real-ASR leg, ticket #387) carrying an
+audio clip reference, never raw bytes. ``draft_rx`` raises the typed
 non-retryable error with "not supported in this phase" per ticket #379 scope.
 
-Egress carries only the ``AiEgressContext`` plus the transcript - never name,
-phone, or the full record (NFR-SEC-006). Timeout and retry discipline are
-reused from the existing ``Ext002AiProvider`` plumbing (third-party-integration-
-standards S1): exponential + jitter backoff, injectable ``sleep``.
+A transcribe outage (network/timeout/429/5xx after retries) is typed
+``retries_exhausted=True`` so the fallback chain engages the secondary
+provider; a contract rejection (4xx, malformed payload, schema validation
+failure) is typed ``retries_exhausted=False`` and the degrade-to-raw-doctor-
+review path (ticket #386) is the safety net beneath this leg.
+
+Egress carries only the ``AiEgressContext`` plus the audio clip reference /
+transcript - never name, phone, or the full record (NFR-SEC-006). Timeout and
+retry discipline are reused from the existing ``Ext002AiProvider`` plumbing
+(third-party-integration-standards S1): exponential + jitter backoff,
+injectable ``sleep``.
 """
 
 from __future__ import annotations
@@ -17,11 +26,16 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from typing import Literal
 
 import httpx
 from langfuse import observe
 
-from app.config import DEFAULT_AI_MAX_RETRIES, DEFAULT_AI_TIMEOUT_SECONDS
+from app.config import (
+    DEFAULT_AI_ASR_MODEL,
+    DEFAULT_AI_MAX_RETRIES,
+    DEFAULT_AI_TIMEOUT_SECONDS,
+)
 from modules.intake.adapters.ai_gateway import (
     AiEgressContext,
     AiGateway,
@@ -44,14 +58,23 @@ _SYSTEM_ROLE = (
     "confidence (float 0.0-1.0)."
 )
 
+#: Transcription confidence proxy when the ASR endpoint reports no per-segment
+#: confidence (ticket #387). Matches the mock adapter's clean-confidence
+#: convention (MOCK_CONFIDENCE_CLEAN) - a successfully produced transcript is
+#: treated as a clean transcription; the AMB-006 low-confidence gate operates on
+#: the structure leg, not here.
+_CONFIDENCE_PROXY_DEFAULT = 0.8
+
 
 class OpenAiCompatibleAdapter:
-    """Adapter for any OpenAI-compatible chat-completions endpoint (structure leg).
+    """Adapter for any OpenAI-compatible chat /audio transcription endpoint.
 
-    ``transcribe`` and ``draft_rx`` raise ``Ext002CallError(retries_exhausted=False)``
-    with "not supported in this phase" - those legs are not yet implemented.
     ``structure`` posts to ``{base_url}/chat/completions`` with Bearer auth and
-    JSON-mode response format.
+    JSON-mode response format. ``transcribe`` posts the audio clip reference to
+    ``{base_url}/audio/transcriptions`` and parses the result into a
+    ``TranscribeResult`` (ticket #387). ``draft_rx`` raises
+    ``Ext002CallError(retries_exhausted=False)`` with "not supported in this
+    phase" - that leg is not yet implemented.
     """
 
     def __init__(
@@ -60,6 +83,7 @@ class OpenAiCompatibleAdapter:
         api_key: str,
         base_url: str,
         model: str,
+        asr_model: str = DEFAULT_AI_ASR_MODEL,
         timeout_seconds: float = DEFAULT_AI_TIMEOUT_SECONDS,
         max_retries: int = DEFAULT_AI_MAX_RETRIES,
         client: httpx.AsyncClient | None = None,
@@ -68,6 +92,7 @@ class OpenAiCompatibleAdapter:
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._model = model
+        self._asr_model = asr_model
         self._timeout_seconds = timeout_seconds
         self._max_retries = max_retries
         self._sleep = sleep
@@ -99,15 +124,11 @@ class OpenAiCompatibleAdapter:
             {"role": "user", "content": user_content},
         ]
 
-    async def _post_chat(
+    async def _post_json(
         self,
-        messages: list[dict[str, str]],
+        path: str,
+        payload: dict[str, object],
     ) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "model": self._model,
-            "messages": messages,
-            "response_format": {"type": "json_object"},
-        }
         headers = {"Authorization": f"Bearer {self._api_key}"}
         last_status = 0
         for attempt in range(self._max_retries + 1):
@@ -115,19 +136,19 @@ class OpenAiCompatibleAdapter:
                 await self._sleep(_backoff_delay(attempt))
             try:
                 response = await self._client.post(
-                    f"{self._base_url}/chat/completions",
+                    f"{self._base_url}{path}",
                     json=payload,
                     headers=headers,
                 )
             except httpx.HTTPError as exc:
                 if attempt == self._max_retries:
                     logger.error(
-                        "OpenAI-compatible /chat/completions failed after %d attempts "
-                        "(network error)",
+                        "OpenAI-compatible %s failed after %d attempts (network error)",
+                        path,
                         self._max_retries + 1,
                     )
                     raise Ext002CallError(
-                        f"OpenAI-compatible /chat/completions failed after "
+                        f"OpenAI-compatible {path} failed after "
                         f"{self._max_retries + 1} attempts (network error)",
                         retries_exhausted=True,
                     ) from exc
@@ -139,38 +160,49 @@ class OpenAiCompatibleAdapter:
                 try:
                     data = response.json()
                 except ValueError as exc:
-                    logger.error("OpenAI-compatible /chat/completions returned a non-JSON response")
+                    logger.error("OpenAI-compatible %s returned a non-JSON response", path)
                     raise Ext002CallError(
-                        "OpenAI-compatible /chat/completions returned a non-JSON response",
+                        f"OpenAI-compatible {path} returned a non-JSON response",
                         retries_exhausted=False,
                     ) from exc
                 if not isinstance(data, dict):
-                    logger.error(
-                        "OpenAI-compatible /chat/completions returned an unexpected payload"
-                    )
+                    logger.error("OpenAI-compatible %s returned an unexpected payload", path)
                     raise Ext002CallError(
-                        "OpenAI-compatible /chat/completions returned an unexpected payload",
+                        f"OpenAI-compatible {path} returned an unexpected payload",
                         retries_exhausted=False,
                     )
                 return data
             logger.warning(
-                "OpenAI-compatible /chat/completions rejected with HTTP %d",
+                "OpenAI-compatible %s rejected with HTTP %d",
+                path,
                 response.status_code,
             )
             raise Ext002CallError(
-                f"OpenAI-compatible /chat/completions rejected with HTTP {response.status_code}",
+                f"OpenAI-compatible {path} rejected with HTTP {response.status_code}",
                 retries_exhausted=False,
             )
         logger.error(
-            "OpenAI-compatible /chat/completions failed after %d attempts (last HTTP %d)",
+            "OpenAI-compatible %s failed after %d attempts (last HTTP %d)",
+            path,
             self._max_retries + 1,
             last_status,
         )
         raise Ext002CallError(
-            f"OpenAI-compatible /chat/completions failed after {self._max_retries + 1} "
+            f"OpenAI-compatible {path} failed after {self._max_retries + 1} "
             f"attempts (last HTTP {last_status})",
             retries_exhausted=True,
         )
+
+    async def _post_chat(
+        self,
+        messages: list[dict[str, str]],
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "model": self._model,
+            "messages": messages,
+            "response_format": {"type": "json_object"},
+        }
+        return await self._post_json("/chat/completions", payload)
 
     def _parse_structure_response(
         self,
@@ -223,6 +255,9 @@ class OpenAiCompatibleAdapter:
         usage = data.get("usage")
         if not isinstance(usage, dict):
             return 0, 0
+        return self._parse_usage(usage)
+
+    def _parse_usage(self, usage: dict[str, object]) -> tuple[int, int]:
         prompt_tokens = usage.get("prompt_tokens", 0)
         completion_tokens = usage.get("completion_tokens", 0)
         return (
@@ -230,12 +265,81 @@ class OpenAiCompatibleAdapter:
             int(completion_tokens) if isinstance(completion_tokens, (int, float)) else 0,
         )
 
+    def _extract_transcription_usage_tokens(
+        self,
+        data: dict[str, object],
+    ) -> tuple[int, int]:
+        usage = data.get("usage")
+        if isinstance(usage, dict):
+            return self._parse_usage(usage)
+        vendor = data.get("x_groq")
+        if isinstance(vendor, dict):
+            usage = vendor.get("usage")
+            if isinstance(usage, dict):
+                return self._parse_usage(usage)
+        return 0, 0
+
+    def _transcription_confidence_proxy(self, data: dict[str, object]) -> float:
+        segments = data.get("segments")
+        if isinstance(segments, list) and segments:
+            scores: list[float] = []
+            for segment in segments:
+                if not isinstance(segment, dict):
+                    continue
+                confidence = segment.get("confidence")
+                if isinstance(confidence, (int, float)):
+                    scores.append(float(confidence))
+            if scores:
+                return sum(scores) / len(scores)
+        return _CONFIDENCE_PROXY_DEFAULT
+
+    def _parse_transcribe_response(
+        self,
+        data: dict[str, object],
+        context_language: Literal["hi", "en"],
+    ) -> TranscribeResult:
+        text = data.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise Ext002CallError(
+                "OpenAI-compatible /audio/transcriptions returned no transcript text",
+                retries_exhausted=False,
+            )
+        language = data.get("language")
+        if not isinstance(language, str):
+            language = context_language
+        try:
+            return TranscribeResult(
+                transcript=text.strip(),
+                confidence=self._transcription_confidence_proxy(data),
+                language=language,
+            )
+        except Exception as exc:
+            raise Ext002CallError(
+                "OpenAI-compatible /audio/transcriptions content failed "
+                "TranscribeResult validation",
+                retries_exhausted=False,
+            ) from exc
+
     @observe
     async def transcribe(self, request: TranscribeRequest) -> TranscribeResult:
-        raise Ext002CallError(
-            "transcribe not supported in this phase",
-            retries_exhausted=False,
-        )
+        payload: dict[str, object] = {
+            "model": self._asr_model,
+            "audio_ref": request.audio_ref,
+            "mode": request.mode,
+            "language": request.context.language,
+            "age_range": request.context.age_range,
+            "sex": request.context.sex,
+        }
+        data = await self._post_json("/audio/transcriptions", payload)
+        result = self._parse_transcribe_response(data, request.context.language)
+        prompt_tokens, completion_tokens = self._extract_transcription_usage_tokens(data)
+        if prompt_tokens or completion_tokens:
+            logger.info(
+                "OpenAI-compatible transcribe tokens: prompt=%d completion=%d",
+                prompt_tokens,
+                completion_tokens,
+            )
+        return result
 
     @observe
     async def structure(self, request: StructureRequest) -> StructureResult:
@@ -264,6 +368,7 @@ def build_openai_compatible_gateway(
     api_key: str,
     base_url: str,
     model: str,
+    asr_model: str = DEFAULT_AI_ASR_MODEL,
     timeout_seconds: float = DEFAULT_AI_TIMEOUT_SECONDS,
     max_retries: int = DEFAULT_AI_MAX_RETRIES,
     client: httpx.AsyncClient | None = None,
@@ -274,6 +379,7 @@ def build_openai_compatible_gateway(
         api_key=api_key,
         base_url=base_url,
         model=model,
+        asr_model=asr_model,
         timeout_seconds=timeout_seconds,
         max_retries=max_retries,
         client=client,

@@ -90,6 +90,10 @@ DEFAULT_LANGFUSE_HOST = "https://us.cloud.langfuse.com"
 # third-party-integration-standards §1).
 DEFAULT_AI_PROVIDER = "mock"
 DEFAULT_AI_MODEL = ""
+# ASR model for the OpenAI-compatible /audio/transcriptions leg (#387): the
+# freemium default tier (Groq ``whisper-large-v3-turbo``); overridable via
+# ``AI_ASR_MODEL`` so the transcription model is decoupled from the structurer.
+DEFAULT_AI_ASR_MODEL = "whisper-large-v3-turbo"
 DEFAULT_AI_ALLOW_DEV_PROVIDER = False
 DEFAULT_AI_TIMEOUT_SECONDS = 30.0
 DEFAULT_AI_MAX_RETRIES = 3
@@ -201,6 +205,7 @@ class Settings:
     # mirroring the SMS/WhatsApp fail-closed posture.
     ai_provider: str = DEFAULT_AI_PROVIDER
     ai_model: str = DEFAULT_AI_MODEL
+    ai_asr_model: str = DEFAULT_AI_ASR_MODEL
     ai_allow_dev_provider: bool = DEFAULT_AI_ALLOW_DEV_PROVIDER
     ai_api_key: str = ""
     ai_base_url: str = ""
@@ -313,6 +318,10 @@ class Settings:
             if not self.ai_model:
                 raise ValueError(
                     "ai_provider='openai_compatible' requires AI_MODEL from the environment"
+                )
+            if not self.ai_asr_model:
+                raise ValueError(
+                    "ai_provider='openai_compatible' requires AI_ASR_MODEL from the environment"
                 )
         fallback_vars = {
             "AI_FALLBACK_PROVIDER": self.ai_fallback_provider,
@@ -518,6 +527,7 @@ def get_settings() -> Settings:
         langfuse_host=os.environ.get("LANGFUSE_HOST", DEFAULT_LANGFUSE_HOST),
         ai_provider=os.environ.get("AI_PROVIDER", DEFAULT_AI_PROVIDER),
         ai_model=os.environ.get("AI_MODEL", DEFAULT_AI_MODEL),
+        ai_asr_model=os.environ.get("AI_ASR_MODEL", DEFAULT_AI_ASR_MODEL),
         ai_allow_dev_provider=_env_bool("AI_ALLOW_DEV_PROVIDER", DEFAULT_AI_ALLOW_DEV_PROVIDER),
         ai_api_key=os.environ.get("AI_API_KEY", ""),
         ai_base_url=os.environ.get("AI_BASE_URL", ""),
