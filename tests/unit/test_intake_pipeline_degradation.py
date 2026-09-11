@@ -179,6 +179,35 @@ def _text_intake_row(*, intake_id: int = 1, status: str = "captured") -> SimpleN
     )
 
 
+def _voice_intake_row(
+    *, intake_id: int = 1, status: str = "captured", record_attempts: int = 1
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=intake_id,
+        patient_id=42,
+        mode="voice",
+        language="hi",
+        status=status,
+        record_attempts=record_attempts,
+        text=None,
+        transcript=None,
+        transcript_usability=None,
+        forced_text=False,
+    )
+
+
+def _media_row(*, object_key: str = "intake/abc-123") -> SimpleNamespace:
+    return SimpleNamespace(
+        id=11,
+        intake_id=1,
+        media_type="audio",
+        object_key=object_key,
+        audio_duration_ms=90_000,
+        file_size_bytes=1_024_000,
+        record_attempt=1,
+    )
+
+
 def _captured_envelope(intake_id: int = 1) -> Envelope[IntakeCapturedPayload]:
     return Envelope[IntakeCapturedPayload](
         event_id=uuid4(),
@@ -316,6 +345,105 @@ async def test_malformed_output_marks_job_failed_and_degrades() -> None:
     assert "insert_pre_summary" not in [r.kind for r in connection.executed]
     assert EVENT_AI_JOB_FAILED in _outbox_types(connection)
     assert _statuses(connection) == ["structuring", "ready_for_review"]
+
+
+async def _run_voice_exception(
+    handler: object,
+    connection: _FakeConnection,
+    transcribe_side_effect: BaseException,
+) -> _FakeConnection:
+    """Drive a voice intake (with a media ref) whose transcribe leg raises."""
+    engine = _fake_engine(connection)
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("modules.intake.adapters._build_egress_gate", return_value=_fake_egress_gate()),
+        patch.object(MockAiProvider, "transcribe", side_effect=transcribe_side_effect),
+    ):
+        await handler(_captured_envelope())
+    return connection
+
+
+def _assert_transcribe_failure_degrades(
+    connection: _FakeConnection,
+    *,
+    reason: str,
+) -> None:
+    """Pin the transcribe-failure degrade contract: a failed ``transcribe``
+    ai_job row + ``ai_job.failed`` event, raw doctor review, and no pre-summary
+    / no structure job / no completed event."""
+    kinds = [r.kind for r in connection.executed]
+    assert "select_media" in kinds
+    ai_insert = next(r for r in connection.executed if r.kind == "insert_ai_job")
+    assert ai_insert.params["task_type"] == "transcribe"
+    failed_update = next(r for r in connection.executed if r.kind == "update_ai_job")
+    assert failed_update.params["status"] == "failed"
+    assert failed_update.params["error_message"] == reason
+    outbox = _outbox_types(connection)
+    assert outbox.count(EVENT_AI_JOB_FAILED) == 1
+    failed_payload = next(
+        r
+        for r in connection.executed
+        if r.kind == "outbox" and r.params["event_type"] == EVENT_AI_JOB_FAILED
+    ).params["payload"]
+    assert failed_payload["task_type"] == "transcribe"
+    assert failed_payload["reason"] == reason
+    assert EVENT_PRE_SUMMARY_READY not in outbox
+    assert EVENT_AI_JOB_COMPLETED not in outbox
+    assert "insert_pre_summary" not in kinds
+    assert _statuses(connection) == ["structuring", "ready_for_review"]
+
+
+@pytest.mark.asyncio
+async def test_transcribe_not_supported_degrades_to_raw_review() -> None:
+    """A "transcribe not supported" contract rejection (``Ext002CallError`` with
+    ``retries_exhausted=False``) on a voice intake books a failed transcribe
+    job, publishes ``ai_job.failed``, degrades to raw doctor review, and never
+    raises to the patient."""
+    handler = _registered_handler()
+    connection = _FakeConnection(intake_row=_voice_intake_row(), media_row=_media_row())
+
+    connection = await _run_voice_exception(
+        handler,
+        connection,
+        Ext002CallError("transcribe not supported", retries_exhausted=False),
+    )
+
+    _assert_transcribe_failure_degrades(connection, reason="Ext002CallError")
+
+
+@pytest.mark.asyncio
+async def test_transcribe_outage_degrades_to_raw_review() -> None:
+    """A genuine EXT-002 outage (``Ext002CallError`` with
+    ``retries_exhausted=True``) degrades identically - pinning the same path
+    for a future real-ASR outage."""
+    handler = _registered_handler()
+    connection = _FakeConnection(intake_row=_voice_intake_row(), media_row=_media_row())
+
+    connection = await _run_voice_exception(
+        handler,
+        connection,
+        Ext002CallError("provider timeout after retries", retries_exhausted=True),
+    )
+
+    _assert_transcribe_failure_degrades(connection, reason="Ext002CallError")
+
+
+@pytest.mark.asyncio
+async def test_transcribe_malformed_output_degrades_to_raw_review() -> None:
+    """A ``ValidationError`` raised from transcribe degrades identically with
+    ``reason="ValidationError"``."""
+    handler = _registered_handler()
+    connection = _FakeConnection(intake_row=_voice_intake_row(), media_row=_media_row())
+    malformed = ValidationError.from_exception_data("TranscribeResult", [])
+
+    connection = await _run_voice_exception(handler, connection, malformed)
+
+    _assert_transcribe_failure_degrades(connection, reason="ValidationError")
 
 
 @pytest.mark.asyncio

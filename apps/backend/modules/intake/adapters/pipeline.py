@@ -237,14 +237,45 @@ async def _run_structuring_pipeline(
         if row.mode == "voice":
             # transcribe leg (voice only): the current attempt's audio becomes
             # the transcript, persisted onto the intake for downstream
-            # raw-text fallback.
-            transcribe_result = await gateway.transcribe(
-                TranscribeRequest(
-                    audio_ref=audio_ref,
-                    mode="voice",
-                    context=context,
+            # raw-text fallback. A failed/provider-rejected transcribe call
+            # (``Ext002CallError``) or malformed result (``ValidationError``)
+            # books a failed ``transcribe`` ai_job, publishes ``ai_job.failed``,
+            # and degrades the intake to raw doctor review - the same durable
+            # path the structure leg uses, so a real-ASR outage never stalls a
+            # captured intake at Structuring (ticket #386).
+            try:
+                transcribe_result = await gateway.transcribe(
+                    TranscribeRequest(
+                        audio_ref=audio_ref,
+                        mode="voice",
+                        context=context,
+                    )
                 )
-            )
+            except (Ext002CallError, ValidationError) as exc:
+                ai_job_id = await _insert_ai_job(
+                    connection,
+                    intake_id,
+                    provider=settings.ai_provider.strip().lower(),
+                    model=settings.ai_model or _adapters.MOCK_AI_MODEL,
+                    task_type="transcribe",
+                )
+                await _fail_job(
+                    connection,
+                    ai_job_id=ai_job_id,
+                    intake_id=intake_id,
+                    task_type="transcribe",
+                    reason=_failure_reason(exc),
+                )
+                await _degrade_to_raw_review(
+                    connection,
+                    intake_id,
+                    state=structing,
+                    reason=(
+                        "AI voice transcription failed (transcribe unsupported "
+                        f"or provider outage): {_failure_reason(exc)}"
+                    ),
+                )
+                return
             transcript = transcribe_result.transcript
             usability = classify_transcript_usability(transcript)
 
@@ -400,20 +431,22 @@ async def _insert_ai_job(
     *,
     provider: str,
     model: str,
+    task_type: str = "structure",
 ) -> int:
     """Create the running ai_jobs row for this pass (markable failed on error).
 
     The row is a booking marked BEFORE the provider call, so its provider/model
     are the configured plan (provider + placeholder model). A later successful
     ``_finalize_pipeline`` overwrites them with the effective serving values;
-    a failure path only touches status/error_message. ``task_type`` is fixed to
-    ``structure`` - the only leg this ticket wires.
+    a failure path only touches status/error_message. ``task_type`` defaults to
+    ``structure`` (the success-path charge); the transcribe-failure path books a
+    failed ``transcribe`` row in its except leg (ticket #386).
     """
     job_insert = await connection.execute(
         intake_ai_jobs.insert()
         .values(
             intake_id=intake_id,
-            task_type="structure",
+            task_type=task_type,
             provider=provider,
             model=model,
             status="running",
