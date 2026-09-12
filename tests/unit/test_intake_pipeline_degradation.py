@@ -153,6 +153,33 @@ def _fake_engine(connection: _FakeConnection) -> MagicMock:
     return engine
 
 
+class _FakeMediaStore:
+    """A stub intake media store: ``read`` answers the clip's decrypted bytes.
+
+    ``read_error`` (when set) is raised from ``read`` instead, so a missing
+    object / storage outage / tampered ciphertext degrades through the pipeline.
+    """
+
+    def __init__(
+        self,
+        *,
+        clip_bytes: bytes = b"fake-voice-clip-bytes",
+        read_error: BaseException | None = None,
+    ) -> None:
+        self.read = AsyncMock(
+            side_effect=read_error if read_error is not None else (lambda **_kwargs: clip_bytes)
+        )
+        self.close = AsyncMock()
+
+
+def _media_store_patch(*, read_error: BaseException | None = None) -> patch:
+    """Patch the pipeline's per-run media-store seam (ticket #393)."""
+    return patch(
+        "modules.intake.adapters._build_media_store",
+        return_value=_FakeMediaStore(read_error=read_error),
+    )
+
+
 def _registered_handler() -> object:
     from bus.registry import HandlerRegistry
     from modules.intake.adapters import register_handlers
@@ -362,6 +389,7 @@ async def _run_voice_exception(
             return_value=True,
         ),
         patch("modules.intake.adapters._build_egress_gate", return_value=_fake_egress_gate()),
+        _media_store_patch(),
         patch.object(MockAiProvider, "transcribe", side_effect=transcribe_side_effect),
     ):
         await handler(_captured_envelope())
@@ -591,3 +619,126 @@ async def test_low_confidence_presummary_structurally_requires_doctor_review() -
     # the edge, so low-confidence output can never reach Final unreviewed.
     with pytest.raises(IllegalPreSummaryTransitionError):
         transition(DRAFT, PreSummaryAction.FINALIZE)
+
+
+@pytest.mark.asyncio
+async def test_media_store_missing_clip_degrades_to_raw_review() -> None:
+    """A missing media object (``FileNotFoundError``) is handled exactly like a
+    transcribe failure (ticket #393): a failed ``transcribe`` ai_job is booked
+    with the failure reason, ``ai_job.failed`` is published, the intake degrades
+    to raw doctor review, and the handler never raises - an infra error can
+    never strand a captured intake."""
+    handler = _registered_handler()
+    connection = _FakeConnection(intake_row=_voice_intake_row(), media_row=_media_row())
+    engine = _fake_engine(connection)
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("modules.intake.adapters._build_egress_gate", return_value=_fake_egress_gate()),
+        _media_store_patch(read_error=FileNotFoundError("object intake/abc-123 not found")),
+    ):
+        await handler(_captured_envelope())
+
+    _assert_transcribe_failure_degrades(connection, reason="FileNotFoundError")
+
+
+@pytest.mark.asyncio
+async def test_media_store_storage_outage_degrades_to_raw_review() -> None:
+    """A storage outage (``OSError``) on the media read degrades identically."""
+    handler = _registered_handler()
+    connection = _FakeConnection(intake_row=_voice_intake_row(), media_row=_media_row())
+    engine = _fake_engine(connection)
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("modules.intake.adapters._build_egress_gate", return_value=_fake_egress_gate()),
+        _media_store_patch(read_error=OSError("failed to reach storage")),
+    ):
+        await handler(_captured_envelope())
+
+    _assert_transcribe_failure_degrades(connection, reason="OSError")
+
+
+@pytest.mark.asyncio
+async def test_media_ciphertext_tampering_degrades_to_raw_review() -> None:
+    """Ciphertext authentication failure (tampered clip -> ``InvalidTag``)
+    degrades identically to a media-read failure - never a dead-letter."""
+    from cryptography.exceptions import InvalidTag
+
+    handler = _registered_handler()
+    connection = _FakeConnection(intake_row=_voice_intake_row(), media_row=_media_row())
+    engine = _fake_engine(connection)
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("modules.intake.adapters._build_egress_gate", return_value=_fake_egress_gate()),
+        _media_store_patch(read_error=InvalidTag()),
+    ):
+        await handler(_captured_envelope())
+
+    _assert_transcribe_failure_degrades(connection, reason="InvalidTag")
+
+
+@pytest.mark.asyncio
+async def test_voice_transcribe_receives_decrypted_clip_bytes_from_media_store() -> None:
+    """The transcribe leg selects the latest clip through the intake media store
+    and puts the decrypted bytes on the ``TranscribeRequest`` (bytes flow
+    store -> request); the happy path is unchanged - a single ``structure`` job,
+    never a ``transcribe`` booking."""
+    handler = _registered_handler()
+    connection = _FakeConnection(
+        intake_row=_voice_intake_row(),
+        media_row=_media_row(object_key="intake/42/clip.enc"),
+    )
+    engine = _fake_engine(connection)
+
+    media_store = _FakeMediaStore(clip_bytes=b"decrypted-clip-bytes")
+    transcribe = AsyncMock(
+        return_value=SimpleNamespace(
+            transcript="long enough transcript text here",
+            confidence=0.8,
+            language="hi",
+        )
+    )
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("modules.intake.adapters._build_egress_gate", return_value=_fake_egress_gate()),
+        patch("modules.intake.adapters._build_media_store", return_value=media_store),
+        patch.object(MockAiProvider, "transcribe", transcribe),
+    ):
+        await handler(_captured_envelope())
+
+    # The store was asked to read the latest clip by its object key, and the
+    # decrypted bytes flowed onto the transcribe request exactly as returned.
+    assert media_store.read.await_args.kwargs["object_key"] == "intake/42/clip.enc"
+    request = transcribe.await_args.args[0]
+    assert request.audio_ref == "intake/42/clip.enc"
+    assert request.audio_bytes == b"decrypted-clip-bytes"
+    # Happy path unchanged: success books a single structure job (never a
+    # transcribe row), records the transcript, and finalizes normally.
+    kinds = [r.kind for r in connection.executed]
+    ai_insert = next(r for r in connection.executed if r.kind == "insert_ai_job")
+    assert ai_insert.params["task_type"] == "structure"
+    assert "insert_pre_summary" in kinds
+    assert _statuses(connection) == ["structuring", "ready_for_review"]
+    assert "transcript_update" in kinds

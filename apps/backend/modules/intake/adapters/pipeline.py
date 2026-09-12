@@ -35,7 +35,9 @@ import logging
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import cast
 
+from cryptography.exceptions import InvalidTag
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
@@ -51,6 +53,7 @@ from modules.intake.adapters.ai_gateway import (
     TranscribeRequest,
 )
 from modules.intake.adapters.ai_provider_ext import Ext002CallError
+from modules.intake.adapters.media_store import IntakeMediaStore, build_media_store
 from modules.intake.budget_meter import BudgetMeter
 from modules.intake.domain.events import (
     ai_egress_recorded_envelope,
@@ -114,6 +117,26 @@ def _build_egress_gate() -> tuple[AsyncEngine, ConsentFacade, BudgetMeter]:
             engine=engine,
             monthly_budget_paise=get_settings().ai_monthly_budget_paise,
         ),
+    )
+
+
+def _build_media_store() -> IntakeMediaStore:
+    """Compose the intake media store for one pipeline run (worker seam, #393).
+
+    Mirrors ``_build_egress_gate``: the pipeline is a worker handler with no app
+    state, so the store is composed per run from ``Settings``. The default
+    ``local`` backend files under ``intake_media_root`` and derives an ephemeral
+    dev/test key; production uses the ``supabase`` backend with the configured
+    URL + service-role key (ticket #385). Tests patch this seam (as they do
+    ``_build_egress_gate``) to inject a stub store.
+    """
+    settings = get_settings()
+    return build_media_store(
+        root=settings.intake_media_root,
+        b64_key=settings.intake_media_key,
+        backend=settings.intake_media_backend,
+        supabase_url=settings.supabase_url,
+        supabase_service_role_key=settings.supabase_service_role_key,
     )
 
 
@@ -235,23 +258,33 @@ async def _run_structuring_pipeline(
             return
 
         if row.mode == "voice":
-            # transcribe leg (voice only): the current attempt's audio becomes
-            # the transcript, persisted onto the intake for downstream
-            # raw-text fallback. A failed/provider-rejected transcribe call
-            # (``Ext002CallError``) or malformed result (``ValidationError``)
+            # transcribe leg (voice only): the latest clip is read and decrypted
+            # through the intake media store and its bytes travel on the
+            # ``TranscribeRequest``, so a voice intake transcribes against a
+            # healthy ASR provider like a text intake (ticket #393). A media-
+            # store read failure (missing object, storage outage, ciphertext
+            # authentication failure - ``OSError``/``FileNotFoundError``/
+            # ``InvalidTag``), a failed/provider-rejected transcribe call
+            # (``Ext002CallError``) or a malformed result (``ValidationError``)
             # books a failed ``transcribe`` ai_job, publishes ``ai_job.failed``,
             # and degrades the intake to raw doctor review - the same durable
-            # path the structure leg uses, so a real-ASR outage never stalls a
-            # captured intake at Structuring (ticket #386).
+            # path the structure leg uses, so an ASR/media outage never stalls a
+            # captured intake at Structuring (ticket #386 / #393).
+            media_store = _adapters._build_media_store()
+            # The media-ref guard above already returned for a missing/empty
+            # object key, so ``audio_ref`` is non-None here (typing-only cast).
+            audio_key = cast(str, audio_ref)
             try:
+                audio_bytes = await media_store.read(object_key=audio_key)
                 transcribe_result = await gateway.transcribe(
                     TranscribeRequest(
-                        audio_ref=audio_ref,
+                        audio_ref=audio_key,
+                        audio_bytes=audio_bytes,
                         mode="voice",
                         context=context,
                     )
                 )
-            except (Ext002CallError, ValidationError) as exc:
+            except (Ext002CallError, ValidationError, OSError, InvalidTag) as exc:
                 ai_job_id = await _insert_ai_job(
                     connection,
                     intake_id,
@@ -276,6 +309,8 @@ async def _run_structuring_pipeline(
                     ),
                 )
                 return
+            finally:
+                await media_store.close()
             transcript = transcribe_result.transcript
             usability = classify_transcript_usability(transcript)
 

@@ -66,14 +66,21 @@ _STORAGE_TIMEOUT: Final[httpx.Timeout] = httpx.Timeout(30.0)
 class IntakeMediaStore(Protocol):
     """Port every intake-media backend satisfies: ``save`` then ``read``.
 
-    Exactly two operations (ticket #385 US-5) - the facade, routes, and
-    pipeline never need to know the backing provider. Both methods are async:
-    the local filesystem backend and the Supabase backend implement them alike.
+    The facade, routes, and pipeline never need to know the backing provider.
+    Both data methods are async and the local filesystem and Supabase backends
+    implement them alike.
+
+    ``close`` releases any resources the store owns (the Supabase backend's
+    ``httpx.AsyncClient`` pool; a no-op locally). An app-lifetime store never
+    calls it; the pipeline builds one store per voice run and closes it, so a
+    per-clip store never leaks a connection pool (ticket #393).
     """
 
     async def save(self, *, data: bytes, patient_id: int) -> str: ...
 
     async def read(self, *, object_key: str) -> bytes: ...
+
+    async def close(self) -> None: ...
 
 
 def _encrypt(key: bytes, data: bytes) -> bytes:
@@ -155,6 +162,9 @@ class LocalFilesystemIntakeMediaStore:
         path = self._root / _validate_object_key(object_key)
         return _decrypt(self._key, path.read_bytes())
 
+    async def close(self) -> None:
+        """No resources to release: the local backend owns no network client."""
+
 
 class SupabaseStorageIntakeMediaStore:
     """Encrypts intake-audio bytes into a private Supabase Storage bucket.
@@ -203,6 +213,7 @@ class SupabaseStorageIntakeMediaStore:
         if len(key_bytes) != 32:
             raise ValueError("SupabaseStorageIntakeMediaStore requires a 32-byte AES-256 key")
         self._key = key_bytes
+        self._owns_client = client is None
         self._client = client or httpx.AsyncClient(timeout=_STORAGE_TIMEOUT)
 
     def _headers(self) -> dict[str, str]:
@@ -261,6 +272,16 @@ class SupabaseStorageIntakeMediaStore:
                 f"Supabase Storage refused object {object_key} with HTTP {response.status_code}"
             )
         return _decrypt(self._key, response.content)
+
+    async def close(self) -> None:
+        """Release the owned ``httpx.AsyncClient`` connection pool.
+
+        A store built without an injected client owns its pool (production);
+        the pipeline builds one store per voice run, so it must close it or
+        leak a pool per clip. An injected client (tests) is left to its owner.
+        """
+        if self._owns_client:
+            await self._client.aclose()
 
 
 def decode_key(b64_key: str) -> bytes:

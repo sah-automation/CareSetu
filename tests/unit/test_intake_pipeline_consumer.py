@@ -147,6 +147,19 @@ def _fake_engine(connection: _FakeConnection) -> MagicMock:
     return engine
 
 
+class _FakeMediaStore:
+    """A stub intake media store: ``read`` answers the clip's decrypted bytes."""
+
+    def __init__(self, clip_bytes: bytes = b"fake-voice-clip-bytes") -> None:
+        self.read = AsyncMock(return_value=clip_bytes)
+        self.close = AsyncMock()
+
+
+def _media_store_patch() -> patch:
+    """Patch the pipeline's per-run media-store seam with the stub (ticket #393)."""
+    return patch("modules.intake.adapters._build_media_store", return_value=_FakeMediaStore())
+
+
 def _registered_handler() -> object:
     from bus.registry import HandlerRegistry
 
@@ -247,6 +260,7 @@ async def _run(handler: object, envelope: Envelope[BaseModel], engine: MagicMock
             return_value=True,
         ) as record_patch,
         patch("modules.intake.adapters._build_egress_gate", return_value=_fake_egress_gate()),
+        _media_store_patch(),
     ):
         await handler(envelope)
     assert record_patch.await_count == 1
@@ -353,6 +367,7 @@ async def test_text_mode_structures_the_text_directly_without_a_transcribe_leg()
             return_value=True,
         ),
         patch("modules.intake.adapters._build_egress_gate", return_value=_fake_egress_gate()),
+        _media_store_patch(),
         patch.object(
             MockAiProvider,
             "transcribe",
@@ -419,6 +434,7 @@ async def test_voice_unusable_below_cap_emits_retry_requested_and_returns() -> N
             return_value=True,
         ),
         patch("modules.intake.adapters._build_egress_gate", return_value=_fake_egress_gate()),
+        _media_store_patch(),
         patch.object(
             MockAiProvider,
             "transcribe",
@@ -457,6 +473,7 @@ async def test_voice_unusable_at_cap_forced_text_returns() -> None:
             return_value=True,
         ),
         patch("modules.intake.adapters._build_egress_gate", return_value=_fake_egress_gate()),
+        _media_store_patch(),
         patch.object(
             MockAiProvider,
             "transcribe",
@@ -492,6 +509,7 @@ async def test_voice_partial_proceeds_to_structuring_with_warning() -> None:
             return_value=True,
         ),
         patch("modules.intake.adapters._build_egress_gate", return_value=_fake_egress_gate()),
+        _media_store_patch(),
         patch.object(
             MockAiProvider,
             "transcribe",
@@ -523,6 +541,7 @@ async def test_voice_usable_proceeds_to_structuring_normally() -> None:
             return_value=True,
         ),
         patch("modules.intake.adapters._build_egress_gate", return_value=_fake_egress_gate()),
+        _media_store_patch(),
         patch.object(
             MockAiProvider,
             "transcribe",
@@ -555,6 +574,7 @@ async def test_voice_empty_transcript_treated_as_unusable() -> None:
             return_value=True,
         ),
         patch("modules.intake.adapters._build_egress_gate", return_value=_fake_egress_gate()),
+        _media_store_patch(),
         patch.object(
             MockAiProvider,
             "transcribe",

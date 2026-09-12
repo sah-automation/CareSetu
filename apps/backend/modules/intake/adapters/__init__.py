@@ -34,7 +34,11 @@ from bus.handler_harness import run_handler
 from bus.registry import HandlerRegistry
 from modules.intake.adapters.ai_provider_ext import build_ai_gateway
 from modules.intake.adapters.ai_provider_mock import MOCK_AI_MODEL, MOCK_AI_PROVIDER
-from modules.intake.adapters.pipeline import _build_egress_gate, _run_structuring_pipeline
+from modules.intake.adapters.pipeline import (
+    _build_egress_gate,
+    _build_media_store,
+    _run_structuring_pipeline,
+)
 from modules.intake.domain.events import (
     AiEgressRecordedPayload,
     AiJobCompletedPayload,
@@ -89,6 +93,7 @@ __all__ = [
     "MOCK_AI_MODEL",
     "MOCK_AI_PROVIDER",
     "_build_egress_gate",
+    "_build_media_store",
     "build_ai_gateway",
 ]
 
