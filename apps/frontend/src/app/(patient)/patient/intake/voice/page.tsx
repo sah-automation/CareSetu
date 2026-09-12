@@ -15,7 +15,14 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Mic, Pause, Play, RotateCcw, Square } from "lucide-react";
+import {
+  LoaderCircle,
+  Mic,
+  Pause,
+  Play,
+  RotateCcw,
+  Square,
+} from "lucide-react";
 
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -75,16 +82,33 @@ export default function VoiceIntakePage() {
   const audioElRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlRef = useRef<string | null>(null);
 
-  function revokeAudioUrl() {
+  const [playing, setPlaying] = useState(false);
+
+  const handleAudioPlay = useCallback(() => {
+    setPlaying(true);
+  }, []);
+
+  const handleAudioStop = useCallback(() => {
+    setPlaying(false);
+  }, []);
+
+  /** Pause and detach any in-flight playback and release the object URL. */
+  const revokeAudioUrl = useCallback(() => {
+    const audioEl = audioElRef.current;
+    if (audioEl) {
+      audioEl.removeEventListener("play", handleAudioPlay);
+      audioEl.removeEventListener("pause", handleAudioStop);
+      audioEl.removeEventListener("ended", handleAudioStop);
+      audioEl.pause();
+      audioEl.currentTime = 0;
+    }
+    audioElRef.current = null;
     if (audioUrlRef.current && typeof URL.revokeObjectURL === "function") {
       URL.revokeObjectURL(audioUrlRef.current);
     }
     audioUrlRef.current = null;
-    if (audioElRef.current) {
-      audioElRef.current.src = "";
-      audioElRef.current = null;
-    }
-  }
+    setPlaying(false);
+  }, [handleAudioPlay, handleAudioStop]);
 
   /** Surface a terminal failure as a banner plus the stage to fall back into. */
   const failWith = useCallback(
@@ -115,7 +139,7 @@ export default function VoiceIntakePage() {
     } catch {
       failWith("mic", "idle");
     }
-  }, [t, failWith]);
+  }, [failWith, revokeAudioUrl]);
 
   const handleStopCapture = useCallback(async () => {
     const recorder = recorderRef.current;
@@ -172,6 +196,13 @@ export default function VoiceIntakePage() {
     if (!blob || typeof URL.createObjectURL !== "function") {
       return;
     }
+    // Second click while playing stops playback and rewinds - always restart
+    // from the top, never a paused playhead resume.
+    if (playing && audioElRef.current) {
+      audioElRef.current.pause();
+      audioElRef.current.currentTime = 0;
+      return;
+    }
     if (audioUrlRef.current) {
       revokeAudioUrl();
     }
@@ -182,15 +213,24 @@ export default function VoiceIntakePage() {
         audioElRef.current = new Audio();
       }
       audioElRef.current.src = url;
+      audioElRef.current.addEventListener("play", handleAudioPlay);
+      audioElRef.current.addEventListener("pause", handleAudioStop);
+      audioElRef.current.addEventListener("ended", handleAudioStop);
       void audioElRef.current.play();
     }
   };
+
+  // Page teardown mid-playback must stop audio and detach its listeners, so
+  // leaving the page never leaves a stale in-progress state or leaked audio.
+  useEffect(() => {
+    return () => revokeAudioUrl();
+  }, [revokeAudioUrl]);
 
   const handleRecordAgain = useCallback(() => {
     revokeAudioUrl();
     captureRef.current = null;
     void handleStartRecording();
-  }, [handleStartRecording]);
+  }, [handleStartRecording, revokeAudioUrl]);
 
   const handleSubmit = useCallback(async () => {
     const blob = captureRef.current;
@@ -252,7 +292,7 @@ export default function VoiceIntakePage() {
         error instanceof ApiError ? error.traceId : undefined,
       );
     }
-  }, [intakeId, lang, failWith]);
+  }, [intakeId, lang, failWith, revokeAudioUrl]);
 
   // Poll the server detail while Structuring (in-button pending, §9.1):
   // ready_for_review -> done (pre-summary link), re_record / unusable ->
@@ -452,11 +492,27 @@ export default function VoiceIntakePage() {
               type="button"
               variant="outline"
               size="lg"
+              className={
+                playing
+                  ? "bg-accent text-on-accent hover:bg-accent hover:text-on-accent"
+                  : undefined
+              }
+              aria-label={playing ? t.playing : t.play}
+              aria-busy={playing || undefined}
               data-testid="btn-play"
               onClick={handlePlayPreview}
             >
-              <Play size={16} className="mr-2" aria-hidden="true" />
-              {t.play}
+              {playing ? (
+                <LoaderCircle
+                  size={16}
+                  className="mr-2 shrink-0 animate-spin"
+                  aria-hidden="true"
+                  data-testid="button-spinner"
+                />
+              ) : (
+                <Play size={16} className="mr-2" aria-hidden="true" />
+              )}
+              {playing ? t.playing : t.play}
             </Button>
             <Button
               type="button"

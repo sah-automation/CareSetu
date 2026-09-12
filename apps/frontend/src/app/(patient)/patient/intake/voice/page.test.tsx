@@ -122,6 +122,49 @@ function mediaTicket() {
   };
 }
 
+// jsdom cannot execute playback, so the page's `Audio` constructor is faked:
+// it records `play`/`pause` calls and lets tests dispatch synthetic end
+// events (testing decision: fake audio element/Audio constructor).
+class FakeAudio {
+  static instances: FakeAudio[] = [];
+  src = "";
+  currentTime = 0;
+  paused = true;
+  private listeners = new Map<string, Set<() => void>>();
+
+  constructor() {
+    FakeAudio.instances.push(this);
+  }
+
+  play = vi.fn(() => {
+    this.paused = false;
+    this.emit("play");
+    return Promise.resolve();
+  });
+
+  pause = vi.fn(() => {
+    this.paused = true;
+    this.emit("pause");
+  });
+
+  addEventListener = vi.fn((type: string, cb: () => void) => {
+    const set = this.listeners.get(type) ?? new Set<() => void>();
+    set.add(cb);
+    this.listeners.set(type, set);
+  });
+
+  removeEventListener = vi.fn((type: string, cb: () => void) => {
+    const set = this.listeners.get(type);
+    if (set === undefined) return;
+    set.delete(cb);
+    if (set.size === 0) this.listeners.delete(type);
+  });
+
+  emit(type: string) {
+    this.listeners.get(type)?.forEach((cb) => cb());
+  }
+}
+
 function LangFlipHost() {
   const { lang, setLang } = useLang();
   return (
@@ -145,12 +188,19 @@ beforeEach(() => {
   submit.mockReset();
   rerecord.mockReset();
   pollIntake.mockReset();
+  FakeAudio.instances = [];
+  URL.createObjectURL = vi.fn(
+    () => "blob:mock-audio",
+  ) as typeof URL.createObjectURL;
+  URL.revokeObjectURL = vi.fn() as unknown as typeof URL.revokeObjectURL;
+  vi.stubGlobal("Audio", FakeAudio as unknown as typeof Audio);
 });
 
 afterEach(() => {
   vi.useRealTimers();
   cleanup();
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
 });
 
 /** Flush pending microtasks (mock resolutions) inside act. */
@@ -271,6 +321,139 @@ describe("VoiceIntakePage recording / playback / cap", () => {
     expect(screen.getByTestId("btn-play")).toBeInTheDocument();
     expect(screen.getByTestId("btn-again")).toBeInTheDocument();
     expect(screen.getByTestId("btn-submit")).toBeInTheDocument();
+  });
+});
+
+describe("VoiceIntakePage playback state toggle (#395)", () => {
+  it("starts playback and swaps the button to the active Playing state", async () => {
+    await recordTake(4);
+    fireEvent.click(screen.getByTestId("btn-play"));
+    await flush();
+
+    const audio = FakeAudio.instances[0];
+    expect(audio.play).toHaveBeenCalled();
+    const btn = screen.getByTestId("btn-play");
+    expect(btn).toHaveTextContent(voice.playing);
+    expect(btn).toHaveAttribute("aria-busy", "true");
+    expect(btn).toHaveAttribute("aria-label", voice.playing);
+    expect(btn).not.toBeDisabled();
+    expect(screen.getByTestId("button-spinner")).toBeInTheDocument();
+  });
+
+  it("second click stops playback and reverts to Play preview", async () => {
+    await recordTake(4);
+    fireEvent.click(screen.getByTestId("btn-play"));
+    await flush();
+    const audio = FakeAudio.instances[0];
+
+    fireEvent.click(screen.getByTestId("btn-play"));
+    await flush();
+
+    expect(audio.pause).toHaveBeenCalled();
+    expect(audio.currentTime).toBe(0);
+    const btn = screen.getByTestId("btn-play");
+    expect(btn).toHaveTextContent(voice.play);
+    expect(btn).not.toHaveAttribute("aria-busy");
+    expect(btn).toHaveAttribute("aria-label", voice.play);
+    expect(screen.queryByTestId("button-spinner")).not.toBeInTheDocument();
+  });
+
+  it("reverts automatically when the clip ends on its own", async () => {
+    await recordTake(4);
+    fireEvent.click(screen.getByTestId("btn-play"));
+    await flush();
+    const audio = FakeAudio.instances[0];
+    expect(screen.getByTestId("btn-play")).toHaveTextContent(voice.playing);
+
+    act(() => audio.emit("ended"));
+    await flush();
+
+    const btn = screen.getByTestId("btn-play");
+    expect(btn).toHaveTextContent(voice.play);
+    expect(btn).not.toHaveAttribute("aria-busy");
+    expect(screen.queryByTestId("button-spinner")).not.toBeInTheDocument();
+
+    // A repeated play after completion restarts from the beginning.
+    fireEvent.click(btn);
+    await flush();
+    expect(screen.getByTestId("btn-play")).toHaveTextContent(voice.playing);
+    const restarted = FakeAudio.instances[FakeAudio.instances.length - 1];
+    expect(restarted.play).toHaveBeenCalled();
+  });
+
+  it("clears the active state on Record again even mid-playback", async () => {
+    await recordTake(4);
+    fireEvent.click(screen.getByTestId("btn-play"));
+    await flush();
+    const audio = FakeAudio.instances[0];
+
+    fireEvent.click(screen.getByTestId("btn-again"));
+    await flush();
+
+    expect(audio.pause).toHaveBeenCalled();
+    expect(URL.revokeObjectURL).toHaveBeenCalled();
+    expect(screen.getByTestId("status-line")).toHaveTextContent(
+      voice.statusRecording,
+    );
+    expect(screen.queryByTestId("btn-play")).not.toBeInTheDocument();
+  });
+
+  it("clears the active state on submit even mid-playback", async () => {
+    await recordTake(4);
+    fireEvent.click(screen.getByTestId("btn-play"));
+    await flush();
+    const audio = FakeAudio.instances[0];
+
+    upload.mockResolvedValue(mediaTicket());
+    submit.mockResolvedValue({ intake_id: 42, status: "captured" });
+    pollIntake.mockResolvedValue(intakeDetail({ status: "ready_for_review" }));
+
+    fireEvent.click(screen.getByTestId("btn-submit"));
+    await flush();
+
+    expect(audio.pause).toHaveBeenCalled();
+    expect(URL.revokeObjectURL).toHaveBeenCalled();
+    expectVisible("ctrl-pending");
+    expect(screen.queryByTestId("btn-play")).not.toBeInTheDocument();
+  });
+
+  it("unmounts mid-playback without error and detaches audio", async () => {
+    render(<VoiceIntakePage />);
+    const recorder = fakeRecorder();
+    openMic.mockResolvedValue(recorder);
+    fireEvent.click(screen.getByTestId("mic-button"));
+    await flush();
+    await advance(4000);
+    fireEvent.click(screen.getByTestId("btn-stop"));
+    await flush();
+    fireEvent.click(screen.getByTestId("btn-play"));
+    await flush();
+    const audio = FakeAudio.instances[0];
+
+    expect(() => cleanup()).not.toThrow();
+    expect(audio.pause).toHaveBeenCalled();
+    expect(audio.removeEventListener).toHaveBeenCalled();
+    expect(URL.revokeObjectURL).toHaveBeenCalled();
+  });
+
+  it("shows the Hindi Playing label while playing", async () => {
+    render(<LangFlipHost />);
+    fireEvent.click(screen.getByText("flip-lang"));
+    await flush();
+
+    openMic.mockResolvedValue(fakeRecorder());
+    fireEvent.click(screen.getByTestId("mic-button"));
+    await flush();
+    await advance(4000);
+    fireEvent.click(screen.getByTestId("btn-stop"));
+    await flush();
+    fireEvent.click(screen.getByTestId("btn-play"));
+    await flush();
+
+    const btn = screen.getByTestId("btn-play");
+    expect(btn).toHaveTextContent(STRINGS.hi.intake.voice.playing);
+    expect(screen.getByTestId("button-spinner")).toBeInTheDocument();
+    expect(btn).toHaveAttribute("aria-busy", "true");
   });
 });
 
