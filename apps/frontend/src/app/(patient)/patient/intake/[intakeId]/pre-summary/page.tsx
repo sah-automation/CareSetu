@@ -14,7 +14,14 @@
 // "Save edits" persists the changes via the patient-edits route, where they
 // merge as informational corrections to the doctor (never mutating the AI
 // fields, FEAT-007 / US-14). "Confirm & continue" opens the continuation CTA
-// toward consultation booking. Bilingual EN/HI.
+// toward consultation booking. When the pipeline degrades to raw doctor review
+// (#389) - intake detail reports ready_for_review but no pre-summary row
+// exists (INTAKE_NOT_FOUND) - the page renders the doctor-reviews-directly
+// surface instead: the evidence under review (raw symptom text or a
+// recording-shared confirmation), a patient-language note that the doctor
+// reviews directly, a link back to the status page, and a live refresh;
+// no confirm/continue affordance and never a technical error banner.
+// Bilingual EN/HI.
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
@@ -30,13 +37,13 @@ import {
   fetchIntake,
   fetchPreSummary,
   savePatientEdits,
-  type IntakeStatus,
+  type IntakeDetailView,
   type PatientEditsResult,
   type PreSummaryView,
 } from "@/lib/intake/api";
 import { INTAKE_POLL_INTERVAL_MS, MAX_INTAKE_POLLS } from "@/lib/intake/voice";
 
-type LoadStage = "loading" | "processing" | "ready" | "error";
+type LoadStage = "loading" | "processing" | "ready" | "degraded" | "error";
 type SaveStage = "idle" | "pending";
 type BannerState = {
   title: string;
@@ -79,6 +86,9 @@ export default function PreSummaryReviewPage() {
   const [summary, setSummary] = useState<PreSummaryView | null>(null);
   const [loadStage, setLoadStage] = useState<LoadStage>("loading");
   const [loadError, setLoadError] = useState<BannerState>(null);
+  const [degradedDetail, setDegradedDetail] = useState<IntakeDetailView | null>(
+    null,
+  );
   const [editing, setEditing] = useState(false);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [corrections, setCorrections] = useState<Record<string, unknown>>({});
@@ -121,6 +131,13 @@ export default function PreSummaryReviewPage() {
                 detail.status === "captured"
               ) {
                 setLoadStage("processing");
+              } else if (detail.status === "ready_for_review") {
+                // No pre-summary row on a ready_for_review intake is the
+                // degraded signature (#389): the pipeline fell back to raw
+                // doctor review, so render the doctor-reviews-directly
+                // surface instead of failing the page.
+                setDegradedDetail(detail);
+                setLoadStage("degraded");
               } else {
                 setLoadStage("error");
                 const preSummary = STRINGS[langRef.current].intake.preSummary;
@@ -184,17 +201,19 @@ export default function PreSummaryReviewPage() {
             return;
           }
           if (error instanceof ApiError && error.code === "INTAKE_NOT_FOUND") {
-            let status: IntakeStatus | null = null;
+            let detail: IntakeDetailView | null = null;
             try {
-              const detail = await fetchIntake(intakeId);
-              status = detail.status;
+              detail = await fetchIntake(intakeId);
             } catch {
               // Ignore a failed detail read; the next tick re-checks.
             }
             if (cancelled) {
               return;
             }
-            if (status === "failed" || status === "re_record") {
+            if (
+              detail &&
+              (detail.status === "failed" || detail.status === "re_record")
+            ) {
               window.clearInterval(timer);
               const preSummary = STRINGS[langRef.current].intake.preSummary;
               setLoadStage("error");
@@ -202,6 +221,15 @@ export default function PreSummaryReviewPage() {
                 title: preSummary.loadFailedTitle,
                 body: preSummary.loadFailedBody,
               });
+              return;
+            }
+            if (detail && detail.status === "ready_for_review") {
+              // Degraded signature reached mid-poll: the intake stopped being
+              // processed without ever creating a pre-summary row. Stop the
+              // poll and render the doctor-reviews-directly surface.
+              window.clearInterval(timer);
+              setDegradedDetail(detail);
+              setLoadStage("degraded");
               return;
             }
             if (ticks >= MAX_INTAKE_POLLS) {
@@ -231,6 +259,22 @@ export default function PreSummaryReviewPage() {
       window.clearInterval(timer);
     };
   }, [loadStage, intakeId, applySummary]);
+
+  // Degraded (ready_for_review with no pre-summary row): keep the same light
+  // poll so the patient is notified when the doctor acts - the moment a
+  // pre-summary row appears the page flips to the ready state, and a change
+  // of intake status follows the normal processing / error paths (#389).
+  useEffect(() => {
+    if (loadStage !== "degraded") {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      load();
+    }, INTAKE_POLL_INTERVAL_MS);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [loadStage, load]);
 
   // One reload path for banner Retry: flips back to loading (event handler,
   // not an effect) and re-reads the pre-summary.
@@ -323,7 +367,8 @@ export default function PreSummaryReviewPage() {
   if (
     loadStage === "loading" ||
     loadStage === "processing" ||
-    (loadStage === "ready" && !summary)
+    (loadStage === "ready" && !summary) ||
+    (loadStage === "degraded" && !degradedDetail)
   ) {
     return (
       <>
@@ -347,6 +392,103 @@ export default function PreSummaryReviewPage() {
           />
           {loadStage === "processing" ? t.processingTitle : t.loading}
         </p>
+      </>
+    );
+  }
+
+  if (loadStage === "degraded" && degradedDetail) {
+    return (
+      <>
+        <PageHeader
+          title={t.degradedTitle}
+          breadcrumbs={[
+            { label: nav.home, href: "/patient" },
+            { label: dict.breadcrumb, href: "/patient/intake" },
+            { label: t.breadcrumb },
+          ]}
+        />
+
+        <div
+          className="mx-auto flex max-w-xl flex-col gap-4"
+          data-testid="degraded-surface"
+        >
+          {/*** Evidence under review - the raw symptom text for a text intake,
+              or a recording-shared confirmation for a voice intake (#389) */}
+          <section
+            className="rounded-lg border border-hairline bg-surface p-0 shadow-card"
+            data-testid="degraded-evidence-card"
+          >
+            <header className="border-b border-hairline bg-bg-subtle px-4 py-3">
+              <h2 className="text-sm font-semibold text-txt">
+                {t.degradedEvidenceTitle}
+              </h2>
+            </header>
+            {degradedDetail.mode === "voice" ? (
+              <p
+                className="flex items-start gap-2 px-4 py-3 text-sm font-medium text-txt"
+                data-testid="degraded-evidence-voice"
+              >
+                <svg
+                  width="18"
+                  height="18"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                  className="mt-0.5 shrink-0 text-accent-strong"
+                >
+                  <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+                  <path d="M22 4L12 14.01l-3-3" />
+                </svg>
+                <span>{t.degradedVoiceNote}</span>
+              </p>
+            ) : (
+              <p
+                className="px-4 py-3 text-sm whitespace-pre-wrap text-txt"
+                data-testid="degraded-evidence-text"
+              >
+                {degradedDetail.text}
+              </p>
+            )}
+          </section>
+
+          {/*** Patient-language explanation - no pre-summary, the doctor
+              reviews the symptoms directly. Never a technical error here. */}
+          <p className="text-sm text-txt-muted" data-testid="degraded-note">
+            {t.degradedBody}
+          </p>
+
+          {/*** Live refresh - the page keeps polling so the patient is
+              notified when the doctor acts (#389) */}
+          <p
+            className="flex items-center gap-2 text-xs text-txt-muted"
+            role="status"
+            data-testid="degraded-refresh"
+          >
+            <span
+              className="h-3 w-3 shrink-0 animate-spin rounded-full border-2 border-hairline border-t-accent"
+              aria-hidden="true"
+            />
+            {t.degradedRefresh}
+          </p>
+
+          {/*** Back to the status page - the only action in the degraded
+              state; no confirm / continue-to-consultation affordance. */}
+          <Button
+            asChild
+            variant="secondary"
+            size="lg"
+            className="w-full"
+            data-testid="btn-degraded-status"
+          >
+            <Link href={`/patient/intake/${intakeId}/status`}>
+              {t.degradedStatusLink}
+            </Link>
+          </Button>
+        </div>
       </>
     );
   }

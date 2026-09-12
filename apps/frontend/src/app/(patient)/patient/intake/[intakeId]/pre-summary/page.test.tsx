@@ -7,7 +7,10 @@
 // the fields card, "Continue to consultation" + verify book sub), patient
 // edits persisting via the save-edits route and rendering as corrections
 // (only changed fields sent; existing patient_edits render as corrected), load
-// failure paths with trace id + retry, and bilingual EN/HI. The intake API is
+// failure paths with trace id + retry, the degraded raw-doctor-review surface
+// (#389: ready_for_review + INTAKE_NOT_FOUND on first load and mid-poll, raw
+// text or recording-shared evidence, no confirm affordance, live refresh into
+// the ready state), and bilingual EN/HI. The intake API is
 // mocked at the seam (the client smoke-tests the real route contracts).
 
 import {
@@ -511,6 +514,134 @@ describe("PreSummaryReviewPage still-processing poll state (issue 2: 404 race)",
 
     expect(screen.getByTestId("load-processing")).toBeInTheDocument();
     expect(screen.queryByTestId("error-banner")).not.toBeInTheDocument();
+  });
+});
+
+describe("PreSummaryReviewPage degraded raw doctor review surface (#389)", () => {
+  const notFound = new ApiError({
+    code: "INTAKE_NOT_FOUND",
+    message: "not found",
+    trace_id: "",
+    details: {},
+  });
+  const readyIntake = (overrides: Record<string, unknown> = {}) =>
+    intakeDetail({ status: "ready_for_review", ...overrides });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("renders the doctor-reviews-directly surface (not the error banner) on first load for a text intake", async () => {
+    getSummary.mockRejectedValueOnce(notFound);
+    getIntake.mockResolvedValue(
+      readyIntake({
+        mode: "text",
+        text: "fever since 2 days and a dry cough",
+      }),
+    );
+
+    render(<PreSummaryReviewPage />);
+    await flush();
+
+    expect(screen.getByTestId("degraded-surface")).toBeInTheDocument();
+    // The degraded state never shows a technical error surface.
+    expect(screen.queryByTestId("error-banner")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("error-banner-trace-id"),
+    ).not.toBeInTheDocument();
+    // Evidence under review: the raw symptom text for a text intake.
+    expect(screen.getByTestId("degraded-evidence-text")).toHaveTextContent(
+      "fever since 2 days and a dry cough",
+    );
+    // Patient-language explanation that the doctor reviews directly.
+    expect(screen.getByTestId("degraded-note")).toHaveTextContent(
+      t.degradedBody,
+    );
+    // Live refresh so the patient is notified when the doctor acts.
+    expect(screen.getByTestId("degraded-refresh")).toHaveTextContent(
+      t.degradedRefresh,
+    );
+    // Links back to the status page.
+    expect(screen.getByTestId("btn-degraded-status")).toHaveAttribute(
+      "href",
+      "/patient/intake/42/status",
+    );
+    // No confirm / continue-to-consultation affordance in the degraded state.
+    expect(screen.queryByTestId("btn-confirm")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("confirmed-zone")).not.toBeInTheDocument();
+  });
+
+  it("shows the recording-shared confirmation for a voice intake, not the raw text", async () => {
+    getSummary.mockRejectedValueOnce(notFound);
+    getIntake.mockResolvedValue(readyIntake({ mode: "voice" }));
+
+    render(<PreSummaryReviewPage />);
+    await flush();
+
+    expect(screen.getByTestId("degraded-surface")).toBeInTheDocument();
+    expect(screen.getByTestId("degraded-evidence-voice")).toHaveTextContent(
+      t.degradedVoiceNote,
+    );
+    expect(
+      screen.queryByTestId("degraded-evidence-text"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("enters the degraded surface from the poll loop when the intake flips to ready_for_review, not the took-too-long banner", async () => {
+    vi.useFakeTimers();
+    getSummary.mockRejectedValue(notFound);
+    getIntake
+      .mockResolvedValueOnce(intakeDetail({ status: "structuring" }))
+      .mockResolvedValue(readyIntake());
+
+    render(<PreSummaryReviewPage />);
+    await flush();
+    expect(screen.getByTestId("load-processing")).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+
+    expect(screen.getByTestId("degraded-surface")).toBeInTheDocument();
+    expect(screen.queryByTestId("load-processing")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("error-banner")).not.toBeInTheDocument();
+  });
+
+  it("flips to the ready summary when the doctor acts and the pre-summary row appears (live refresh)", async () => {
+    vi.useFakeTimers();
+    getSummary.mockRejectedValueOnce(notFound).mockResolvedValue(preSummary());
+    getIntake.mockResolvedValue(readyIntake({ mode: "text", text: "fever" }));
+
+    render(<PreSummaryReviewPage />);
+    await flush();
+    expect(screen.getByTestId("degraded-surface")).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+
+    expect(screen.getByTestId("honesty-banner")).toBeInTheDocument();
+    expect(screen.queryByTestId("degraded-surface")).not.toBeInTheDocument();
+    expect(getSummary).toHaveBeenCalledTimes(2);
+  });
+
+  it("renders the degraded copy in Hindi when the locale flips", async () => {
+    getSummary.mockRejectedValueOnce(notFound);
+    getIntake.mockResolvedValue(readyIntake({ mode: "text", text: "बुखार" }));
+
+    render(<LangFlipHost />);
+    await flush();
+    expect(screen.getByTestId("degraded-surface")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("flip-lang"));
+    await flush();
+
+    expect(screen.getByTestId("degraded-note")).toHaveTextContent(
+      hiT.degradedBody,
+    );
+    expect(screen.getByTestId("btn-degraded-status")).toHaveTextContent(
+      hiT.degradedStatusLink,
+    );
   });
 });
 

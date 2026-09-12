@@ -917,6 +917,14 @@ const en = {
       processingFailedTitle: "Your summary took too long",
       processingFailedBody:
         "We couldn't find your pre-summary. Please go back and try again.",
+      degradedTitle: "Your doctor will review this directly",
+      degradedEvidenceTitle: "What the doctor will review",
+      degradedVoiceNote: "Your recording has been shared with the doctor.",
+      degradedBody:
+        "There is no AI pre-summary for this visit. Your doctor will review your symptoms directly.",
+      degradedRefresh:
+        "This page updates automatically when your doctor takes action.",
+      degradedStatusLink: "Back to intake status",
       saveFailedTitle: "We couldn't save your edits",
       saveFailedBody: "Check your connection and try again.",
       fields: {
@@ -1773,6 +1781,14 @@ export const STRINGS: Record<Lang, Dictionary> = {
         processingFailedTitle: "आपका सारांश तैयार होने में बहुत समय लग गया",
         processingFailedBody:
           "हमें आपका प्री-सारांश नहीं मिला। कृपया वापस जाकर फिर से कोशिश करें।",
+        degradedTitle: "आपका डॉक्टर इसे सीधे देखेंगे",
+        degradedEvidenceTitle: "डॉक्टर क्या देखेंगे",
+        degradedVoiceNote: "आपकी रिकॉर्डिंग डॉक्टर के साथ साझा कर दी गई है।",
+        degradedBody:
+          "इस विज़िट के लिए कोई AI प्री-सारांश नहीं है। आपका डॉक्टर आपके लक्षणों की सीधे समीक्षा करेगा।",
+        degradedRefresh:
+          "डॉक्टर की कार्रवाई होने पर यह पेज अपने आप अपडेट होगा।",
+        degradedStatusLink: "इंटेक स्थिति पर वापस जाएँ",
         saveFailedTitle: "हम आपके संपादन सहेज नहीं पाए",
         saveFailedBody: "कनेक्शन जाँचकर फिर कोशिश करें।",
         fields: {
