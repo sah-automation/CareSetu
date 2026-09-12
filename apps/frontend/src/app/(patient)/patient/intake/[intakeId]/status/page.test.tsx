@@ -1,10 +1,13 @@
-// PHASE-7 T19 (#363): intake status list page suite - renders the four intake
-// statuses (Captured / Structuring / Ready for Review / Recapture needed)
-// mapped from the backend machine status values, refreshes statuses from the
-// backend in-page (get_intake / get_pre_summary), marks the current + done
-// steps, shows a ready pre-summary's continue affordance into consultation
-// booking, and surfaces the re-record / type instead path on recapture-needed.
-// Bilingual EN/HI. The intake API is mocked at the seam.
+// PHASE-7 T19 (#363) + #390: intake status list page suite - renders the four
+// intake statuses (Captured / Structuring / Ready for Review / Recapture
+// needed) mapped from the backend machine status values, refreshes statuses
+// from the backend in-page (get_intake / get_pre_summary), marks the current +
+// done steps, shows a ready pre-summary's continue affordance into
+// consultation booking, and surfaces the re-record / type instead path on
+// recapture-needed. When a ready intake has no pre-summary (INTAKE_NOT_FOUND)
+// the page degrades to a raw-review note instead of the dead-end affordance
+// and does not flip to the error banner. Bilingual EN/HI. The intake API is
+// mocked at the seam.
 
 import {
   act,
@@ -114,6 +117,15 @@ function preSummary(overrides: Partial<PreSummaryView> = {}): PreSummaryView {
     updated_at: "2026-09-08T10:00:00Z",
     ...overrides,
   };
+}
+
+function apiError(code: string): ApiError {
+  return new ApiError({
+    code,
+    message: "boom",
+    trace_id: "trace-st999001",
+    details: {},
+  });
 }
 
 function LangFlipHost() {
@@ -243,6 +255,30 @@ describe("IntakeStatusPage status refresh", () => {
       expect(
         screen.getByTestId("status-current-ready_for_review"),
       ).toBeInTheDocument();
+      expect(screen.getByTestId("continue-zone")).toBeInTheDocument();
+      expect(screen.queryByTestId("raw-review-note")).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("flips to the error banner when the pre-summary genuinely fails during a poll transition", async () => {
+    vi.useFakeTimers();
+    try {
+      getIntake.mockResolvedValue(intake({ status: "structuring" }));
+      render(<IntakeStatusPage />);
+      await flush();
+
+      getIntake.mockResolvedValue(intake({ status: "ready_for_review" }));
+      getPreSummary.mockRejectedValue(apiError("INTERNAL_ERROR"));
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+
+      expect(screen.getByTestId("error-banner")).toBeInTheDocument();
+      expect(screen.queryByTestId("raw-review-note")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("continue-zone")).not.toBeInTheDocument();
     } finally {
       vi.useRealTimers();
     }
@@ -265,6 +301,58 @@ describe("IntakeStatusPage continue affordance", () => {
 
   it("hides the continue affordance until the pre-summary is ready", async () => {
     await renderLoaded({ status: "structuring" });
+    expect(screen.queryByTestId("continue-zone")).not.toBeInTheDocument();
+  });
+
+  it("hides the continue affordance and shows the raw-review note when ready with no pre-summary", async () => {
+    getIntake.mockResolvedValue(intake({ status: "ready_for_review" }));
+    getPreSummary.mockRejectedValue(apiError("INTAKE_NOT_FOUND"));
+    await renderLoaded({ status: "ready_for_review" });
+
+    expect(screen.queryByTestId("error-banner")).not.toBeInTheDocument();
+    expect(screen.getByTestId("status-list")).toBeInTheDocument();
+    expect(screen.queryByTestId("continue-zone")).not.toBeInTheDocument();
+    expect(screen.getByTestId("raw-review-note")).toBeInTheDocument();
+    expect(screen.getByTestId("raw-review-note")).toHaveTextContent(
+      t.rawReviewNote,
+    );
+  });
+
+  it("keeps the raw-review note after a manual refresh when the pre-summary is still missing", async () => {
+    getIntake.mockResolvedValue(intake({ status: "ready_for_review" }));
+    getPreSummary.mockRejectedValue(apiError("INTAKE_NOT_FOUND"));
+    await renderLoaded({ status: "ready_for_review" });
+    expect(screen.getByTestId("raw-review-note")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("btn-refresh"));
+    await flush();
+
+    expect(screen.queryByTestId("continue-zone")).not.toBeInTheDocument();
+    expect(screen.getByTestId("raw-review-note")).toBeInTheDocument();
+  });
+
+  it("recovers the continue affordance after a refresh once the pre-summary exists", async () => {
+    getIntake.mockResolvedValue(intake({ status: "ready_for_review" }));
+    getPreSummary.mockRejectedValue(apiError("INTAKE_NOT_FOUND"));
+    await renderLoaded({ status: "ready_for_review" });
+    expect(screen.getByTestId("raw-review-note")).toBeInTheDocument();
+
+    getPreSummary.mockResolvedValue(preSummary());
+    fireEvent.click(screen.getByTestId("btn-refresh"));
+    await flush();
+
+    expect(screen.queryByTestId("raw-review-note")).not.toBeInTheDocument();
+    expect(screen.getByTestId("continue-zone")).toBeInTheDocument();
+  });
+
+  it("flips to the error banner when the ready pre-summary fails with a real error", async () => {
+    getIntake.mockResolvedValue(intake({ status: "ready_for_review" }));
+    getPreSummary.mockRejectedValue(apiError("INTERNAL_ERROR"));
+    render(<IntakeStatusPage />);
+    await flush();
+
+    expect(screen.getByTestId("error-banner")).toBeInTheDocument();
+    expect(screen.queryByTestId("raw-review-note")).not.toBeInTheDocument();
     expect(screen.queryByTestId("continue-zone")).not.toBeInTheDocument();
   });
 });
@@ -358,5 +446,23 @@ describe("IntakeStatusPage bilingual EN/HI (REQ-006)", () => {
       hiT.reRecord,
     );
     expect(screen.getByTestId("btn-continue")).toHaveTextContent(hiT.continue);
+  });
+
+  it("shows the raw-review note in Hindi when the locale flips (degraded)", async () => {
+    getIntake.mockResolvedValue(intake({ status: "ready_for_review" }));
+    getPreSummary.mockRejectedValue(apiError("INTAKE_NOT_FOUND"));
+    render(<LangFlipHost />);
+    await flush();
+
+    expect(screen.getByTestId("raw-review-note")).toHaveTextContent(
+      t.rawReviewNote,
+    );
+
+    fireEvent.click(screen.getByText("flip-lang"));
+    await flush();
+
+    expect(screen.getByTestId("raw-review-note")).toHaveTextContent(
+      hiT.rawReviewNote,
+    );
   });
 });

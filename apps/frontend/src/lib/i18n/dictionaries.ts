@@ -952,8 +952,9 @@ const en = {
       structuring: "Structuring",
       structuringDesc: "AI is organizing your information for the doctor.",
       readyForReview: "Ready for Review",
-      readyForReviewDesc:
-        "Your pre-summary is ready. You can continue to consultation.",
+      readyForReviewDesc: "Your information is ready for the doctor to review.",
+      rawReviewNote:
+        "There is no AI pre-summary for this visit. Your doctor will review the submitted evidence directly.",
       reRecord: "Recapture needed",
       reRecordDesc:
         "We couldn't process your recording clearly. Please re-record or type your symptoms.",
@@ -1814,8 +1815,9 @@ export const STRINGS: Record<Lang, Dictionary> = {
         structuringDesc:
           "AI आपकी जानकारी को डॉक्टर के लिए व्यवस्थित कर रहा है।",
         readyForReview: "जाँच के लिए तैयार",
-        readyForReviewDesc:
-          "आपका प्री-सारांश तैयार है। आप परामर्श जारी रख सकते हैं।",
+        readyForReviewDesc: "आपकी जानकारी डॉक्टर द्वारा जाँच के लिए तैयार है।",
+        rawReviewNote:
+          "इस विज़िट के लिए कोई AI प्री-सारांश नहीं है। आपका डॉक्टर आपकी दी गई जानकारी की सीधे समीक्षा करेगा।",
         reRecord: "फिर से रिकॉर्ड करें",
         reRecordDesc:
           "हम आपकी रिकॉर्डिंग ठीक से समझ नहीं पाए। कृपया फिर से रिकॉर्ड करें या लक्षण टाइप करें।",

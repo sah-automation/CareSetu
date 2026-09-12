@@ -5,8 +5,9 @@
 // Review / Recapture needed) mapped 1:1 onto the backend machine status
 // values (T02 state_machine.py). Statuses refresh from the backend
 // (fetchIntake / fetchPreSummary) in-page via polling. A ready pre-summary
-// offers a continue affordance into consultation booking (Phase 8 boundary).
-// Bilingual EN/HI per REQ-006.
+// offers a continue affordance into consultation booking (Phase 8 boundary);
+// a ready intake with no pre-summary degrades to a raw-review note instead
+// of the dead-end affordance (#390). Bilingual EN/HI per REQ-006.
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
@@ -71,6 +72,15 @@ function statusIndex(status: IntakeStatus): number {
   return STATUS_STEPS.findIndex((s) => s.key === status);
 }
 
+/**
+ * True when a fetchPreSummary rejection means no pre-summary exists for the
+ * intake (ready_for_review degraded to raw doctor review). Any other failure
+ * is a genuine error and keeps the page's error branch.
+ */
+function isMissingPreSummary(error: unknown): boolean {
+  return error instanceof ApiError && error.code === "INTAKE_NOT_FOUND";
+}
+
 export default function IntakeStatusPage() {
   const params = useParams<{ intakeId: string }>();
   const intakeId = Number(params.intakeId);
@@ -82,6 +92,7 @@ export default function IntakeStatusPage() {
 
   const [intake, setIntake] = useState<IntakeDetailView | null>(null);
   const [preSummary, setPreSummary] = useState<PreSummaryView | null>(null);
+  const [preSummaryMissing, setPreSummaryMissing] = useState(false);
   const [loadStage, setLoadStage] = useState<LoadStage>("loading");
   const [loadError, setLoadError] = useState<BannerState>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -91,25 +102,52 @@ export default function IntakeStatusPage() {
     langRef.current = lang;
   }, [lang]);
 
+  /**
+   * Fetch the pre-summary for a ready intake. A not-found is absorbed as the
+   * degraded state (pre-summary absent, raw-review note shown); any other
+   * failure is re-thrown so the caller keeps its own error/silent branch.
+   */
+  const applyPreSummary = useCallback(async () => {
+    try {
+      const ps = await fetchPreSummary(intakeId);
+      setPreSummary(ps);
+      setPreSummaryMissing(false);
+    } catch (error: unknown) {
+      if (isMissingPreSummary(error)) {
+        setPreSummary(null);
+        setPreSummaryMissing(true);
+        return;
+      }
+      throw error;
+    }
+  }, [intakeId]);
+
+  const failLoad = useCallback(
+    (error: unknown) => {
+      setLoadStage("error");
+      setLoadError({
+        title: t.loadFailedTitle,
+        body: t.loadFailedBody,
+        traceId: error instanceof ApiError ? error.traceId : undefined,
+      });
+    },
+    [t.loadFailedTitle, t.loadFailedBody],
+  );
+
   const load = useCallback(() => {
     fetchIntake(intakeId)
       .then((detail) => {
         setIntake(detail);
         setLoadStage("ready");
-        if (detail.status === "ready_for_review") {
-          return fetchPreSummary(intakeId).then(setPreSummary);
+        if (detail.status !== "ready_for_review") {
+          setPreSummary(null);
+          setPreSummaryMissing(false);
+          return;
         }
-        setPreSummary(null);
+        return applyPreSummary();
       })
-      .catch((error: unknown) => {
-        setLoadStage("error");
-        setLoadError({
-          title: t.loadFailedTitle,
-          body: t.loadFailedBody,
-          traceId: error instanceof ApiError ? error.traceId : undefined,
-        });
-      });
-  }, [intakeId, t.loadFailedTitle, t.loadFailedBody]);
+      .catch(failLoad);
+  }, [intakeId, applyPreSummary, failLoad]);
 
   useEffect(() => {
     load();
@@ -126,18 +164,17 @@ export default function IntakeStatusPage() {
     try {
       const detail = await fetchIntake(intakeId);
       setIntake(detail);
+      setPreSummary(null);
+      setPreSummaryMissing(false);
       if (detail.status === "ready_for_review") {
-        const ps = await fetchPreSummary(intakeId);
-        setPreSummary(ps);
-      } else {
-        setPreSummary(null);
+        await applyPreSummary();
       }
     } catch {
       // Silent - the existing state stays visible.
     } finally {
       setRefreshing(false);
     }
-  }, [intakeId]);
+  }, [intakeId, applyPreSummary]);
 
   // Poll while structuring so the patient never has to manually refresh.
   useEffect(() => {
@@ -153,10 +190,13 @@ export default function IntakeStatusPage() {
           if (cancelled) return;
           setIntake(detail);
           if (detail.status === "ready_for_review") {
-            cancelled = true;
             window.clearInterval(timer);
-            const ps = await fetchPreSummary(intakeId);
-            if (!cancelled) setPreSummary(ps);
+            cancelled = true;
+            try {
+              await applyPreSummary();
+            } catch (error: unknown) {
+              failLoad(error);
+            }
           } else if (
             detail.status === "re_record" ||
             detail.status === "failed"
@@ -179,7 +219,7 @@ export default function IntakeStatusPage() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [intakeId, intake?.status]);
+  }, [intakeId, applyPreSummary, failLoad, intake?.status]);
 
   if (loadStage === "loading" || (loadStage === "ready" && !intake)) {
     return (
@@ -356,8 +396,8 @@ export default function IntakeStatusPage() {
           </Button>
         </div>
 
-        {/* Continue affordance - only when pre-summary is ready */}
-        {isReady && (
+        {/* Continue affordance - only when the pre-summary exists */}
+        {isReady && preSummary && (
           <div className="flex flex-col gap-2" data-testid="continue-zone">
             <Button
               asChild
@@ -367,6 +407,16 @@ export default function IntakeStatusPage() {
             >
               <Link href={`/doctors?intake=${intakeId}`}>{t.continue}</Link>
             </Button>
+          </div>
+        )}
+
+        {/* Degraded - ready for review, no pre-summary (raw doctor review) */}
+        {isReady && preSummaryMissing && (
+          <div
+            className="flex flex-col gap-1 rounded-lg border border-hairline bg-surface px-4 py-3 shadow-card"
+            data-testid="raw-review-note"
+          >
+            <p className="text-sm text-txt-muted">{t.rawReviewNote}</p>
           </div>
         )}
 
