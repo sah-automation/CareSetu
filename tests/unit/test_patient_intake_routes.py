@@ -132,6 +132,7 @@ class StubIntakeFacade:
         self.patient_edits_result: PatientEditsResult = _PATIENT_EDITS_RESULT
         self.media_bytes: bytes = b"\xff" * 16
         self.error: Exception | None = None
+        self.pre_summary_error: Exception | None = None
 
     def _maybe_raise(self) -> None:
         if self.error is not None:
@@ -159,6 +160,8 @@ class StubIntakeFacade:
 
     async def get_pre_summary(self, **kwargs: object) -> PreSummaryView:
         self.called_with.append(("get_pre_summary", dict(kwargs)))
+        if self.pre_summary_error is not None:
+            raise self.pre_summary_error
         self._maybe_raise()
         return self.pre_summary_view
 
@@ -577,6 +580,40 @@ def test_get_pre_summary_not_found_envelope() -> None:
     assert response.status_code == 404
     body = response.json()
     assert body["code"] == "INTAKE_NOT_FOUND"
+
+
+# ---------------------------------------------------------------------------
+# Contract pin: degraded signature (ticket #391)
+# ---------------------------------------------------------------------------
+
+
+def test_degraded_signature_contract_ready_for_review_without_pre_summary() -> None:
+    """#391: pin the API signature the degraded frontend branch depends on.
+
+    A Ready-for-Review intake with no pre-summary row must answer the
+    not-found envelope from the pre-summary endpoint while the intake-detail
+    endpoint reports ``ready_for_review`` - the exact pairing the degraded
+    frontend branch (tickets #389/#390) branches on. ``get_pre_summary``
+    raising ``IntakeNotFoundError`` mirrors the real facade when no
+    pre-summary row exists (see the facade seam in
+    ``test_intake_facade_capture.py``). Pins existing behavior only - no
+    endpoint change is driven here.
+    """
+    facade = StubIntakeFacade()
+    facade.detail_view = _DETAIL_VIEW.model_copy(update={"status": "ready_for_review"})
+    facade.pre_summary_error = IntakeNotFoundError("pre-summary not found for intake 42")
+    client = _client(facade)
+    headers = _bearer(_token())
+
+    detail_response = client.get("/v1/intake/42", headers=headers)
+
+    assert detail_response.status_code == 200
+    assert detail_response.json()["status"] == "ready_for_review"
+
+    pre_summary_response = client.get("/v1/intake/42/pre-summary", headers=headers)
+
+    assert pre_summary_response.status_code == 404
+    assert pre_summary_response.json()["code"] == "INTAKE_NOT_FOUND"
 
 
 # ---------------------------------------------------------------------------
