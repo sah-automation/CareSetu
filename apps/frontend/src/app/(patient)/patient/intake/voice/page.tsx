@@ -15,14 +15,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import {
-  LoaderCircle,
-  Mic,
-  Pause,
-  Play,
-  RotateCcw,
-  Square,
-} from "lucide-react";
+import { Mic, Pause, Play, RotateCcw, Square } from "lucide-react";
 
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -191,7 +184,7 @@ export default function VoiceIntakePage() {
     }
   };
 
-  const handlePlayPreview = () => {
+  const handlePlayPreviewToggle = () => {
     const blob = captureRef.current;
     if (!blob || typeof URL.createObjectURL !== "function") {
       return;
@@ -239,6 +232,10 @@ export default function VoiceIntakePage() {
     }
     const durationMs = elapsedRef.current;
 
+    // In-flight playback stops on every submit path, including the
+    // unusable-floor branch below that routes straight to the poor prompt.
+    revokeAudioUrl();
+
     // Client-side usability floor: a take under MIN_RECORD_MS is never
     // submitted silently - the re-record-or-type prompt is shown instead.
     if (durationMs < MIN_RECORD_MS) {
@@ -250,7 +247,6 @@ export default function VoiceIntakePage() {
     setErrorBanner(null);
     setErrorKind(null);
     setStructuringId(null);
-    revokeAudioUrl();
 
     try {
       const mediaRef = await uploadWithRetry(() =>
@@ -497,22 +493,16 @@ export default function VoiceIntakePage() {
                   ? "bg-accent text-on-accent hover:bg-accent hover:text-on-accent"
                   : undefined
               }
-              aria-label={playing ? t.playing : t.play}
-              aria-busy={playing || undefined}
+              aria-label={playing ? t.stopPreview : t.play}
               data-testid="btn-play"
-              onClick={handlePlayPreview}
+              onClick={handlePlayPreviewToggle}
             >
               {playing ? (
-                <LoaderCircle
-                  size={16}
-                  className="mr-2 shrink-0 animate-spin"
-                  aria-hidden="true"
-                  data-testid="button-spinner"
-                />
+                <Square size={16} className="mr-2" aria-hidden="true" />
               ) : (
                 <Play size={16} className="mr-2" aria-hidden="true" />
               )}
-              {playing ? t.playing : t.play}
+              {playing ? t.stopPreview : t.play}
             </Button>
             <Button
               type="button"

@@ -325,7 +325,7 @@ describe("VoiceIntakePage recording / playback / cap", () => {
 });
 
 describe("VoiceIntakePage playback state toggle (#395)", () => {
-  it("starts playback and swaps the button to the active Playing state", async () => {
+  it("starts playback and swaps the button to the active Stop preview state", async () => {
     await recordTake(4);
     fireEvent.click(screen.getByTestId("btn-play"));
     await flush();
@@ -333,11 +333,9 @@ describe("VoiceIntakePage playback state toggle (#395)", () => {
     const audio = FakeAudio.instances[0];
     expect(audio.play).toHaveBeenCalled();
     const btn = screen.getByTestId("btn-play");
-    expect(btn).toHaveTextContent(voice.playing);
-    expect(btn).toHaveAttribute("aria-busy", "true");
-    expect(btn).toHaveAttribute("aria-label", voice.playing);
+    expect(btn).toHaveTextContent(voice.stopPreview);
+    expect(btn).toHaveAttribute("aria-label", voice.stopPreview);
     expect(btn).not.toBeDisabled();
-    expect(screen.getByTestId("button-spinner")).toBeInTheDocument();
   });
 
   it("second click stops playback and reverts to Play preview", async () => {
@@ -353,9 +351,7 @@ describe("VoiceIntakePage playback state toggle (#395)", () => {
     expect(audio.currentTime).toBe(0);
     const btn = screen.getByTestId("btn-play");
     expect(btn).toHaveTextContent(voice.play);
-    expect(btn).not.toHaveAttribute("aria-busy");
     expect(btn).toHaveAttribute("aria-label", voice.play);
-    expect(screen.queryByTestId("button-spinner")).not.toBeInTheDocument();
   });
 
   it("reverts automatically when the clip ends on its own", async () => {
@@ -363,20 +359,19 @@ describe("VoiceIntakePage playback state toggle (#395)", () => {
     fireEvent.click(screen.getByTestId("btn-play"));
     await flush();
     const audio = FakeAudio.instances[0];
-    expect(screen.getByTestId("btn-play")).toHaveTextContent(voice.playing);
+    expect(screen.getByTestId("btn-play")).toHaveTextContent(voice.stopPreview);
 
     act(() => audio.emit("ended"));
     await flush();
 
     const btn = screen.getByTestId("btn-play");
     expect(btn).toHaveTextContent(voice.play);
-    expect(btn).not.toHaveAttribute("aria-busy");
-    expect(screen.queryByTestId("button-spinner")).not.toBeInTheDocument();
+    expect(btn).toHaveAttribute("aria-label", voice.play);
 
     // A repeated play after completion restarts from the beginning.
     fireEvent.click(btn);
     await flush();
-    expect(screen.getByTestId("btn-play")).toHaveTextContent(voice.playing);
+    expect(screen.getByTestId("btn-play")).toHaveTextContent(voice.stopPreview);
     const restarted = FakeAudio.instances[FakeAudio.instances.length - 1];
     expect(restarted.play).toHaveBeenCalled();
   });
@@ -417,6 +412,21 @@ describe("VoiceIntakePage playback state toggle (#395)", () => {
     expect(screen.queryByTestId("btn-play")).not.toBeInTheDocument();
   });
 
+  it("stops playback on submit of a too-short take into the poor prompt", async () => {
+    await recordTake(2);
+    fireEvent.click(screen.getByTestId("btn-play"));
+    await flush();
+    const audio = FakeAudio.instances[0];
+
+    fireEvent.click(screen.getByTestId("btn-submit"));
+    await flush();
+
+    expect(audio.pause).toHaveBeenCalled();
+    expect(URL.revokeObjectURL).toHaveBeenCalled();
+    expect(screen.getByTestId("warn-zone")).toBeInTheDocument();
+    expect(screen.queryByTestId("btn-play")).not.toBeInTheDocument();
+  });
+
   it("unmounts mid-playback without error and detaches audio", async () => {
     render(<VoiceIntakePage />);
     const recorder = fakeRecorder();
@@ -436,7 +446,7 @@ describe("VoiceIntakePage playback state toggle (#395)", () => {
     expect(URL.revokeObjectURL).toHaveBeenCalled();
   });
 
-  it("shows the Hindi Playing label while playing", async () => {
+  it("shows the Hindi Stop preview label while playing", async () => {
     render(<LangFlipHost />);
     fireEvent.click(screen.getByText("flip-lang"));
     await flush();
@@ -451,9 +461,11 @@ describe("VoiceIntakePage playback state toggle (#395)", () => {
     await flush();
 
     const btn = screen.getByTestId("btn-play");
-    expect(btn).toHaveTextContent(STRINGS.hi.intake.voice.playing);
-    expect(screen.getByTestId("button-spinner")).toBeInTheDocument();
-    expect(btn).toHaveAttribute("aria-busy", "true");
+    expect(btn).toHaveTextContent(STRINGS.hi.intake.voice.stopPreview);
+    expect(btn).toHaveAttribute(
+      "aria-label",
+      STRINGS.hi.intake.voice.stopPreview,
+    );
   });
 });
 
