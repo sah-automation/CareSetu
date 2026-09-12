@@ -438,6 +438,7 @@ def test_egress_transcribe_payload_carries_only_intake_context() -> None:
     payload = request.model_dump()
     assert payload == {
         "audio_ref": "media/abc",
+        "audio_bytes": None,
         "mode": "voice",
         "context": {"language": "hi", "age_range": "30-40", "sex": "male"},
     }

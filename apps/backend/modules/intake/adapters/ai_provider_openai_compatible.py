@@ -2,20 +2,23 @@
 
 This adapter implements the ``AiGateway`` port against any REST endpoint that
 conforms to the OpenAI-compatible API. ``structure`` posts to
-``{base_url}/chat/completions``; ``transcribe`` posts to
-``{base_url}/audio/transcriptions`` (the real-ASR leg, ticket #387) carrying an
-audio clip reference, never raw bytes. ``draft_rx`` raises the typed
-non-retryable error with "not supported in this phase" per ticket #379 scope.
+``{base_url}/chat/completions``; ``transcribe`` posts the decrypted clip as
+``multipart/form-data`` (audio file + configured ASR model + declared language)
+to ``{base_url}/audio/transcriptions`` (the real-ASR leg, tickets #387/#392).
+``draft_rx`` raises the typed non-retryable error with "not supported in this
+phase" per ticket #379 scope.
 
 A transcribe outage (network/timeout/429/5xx after retries) is typed
 ``retries_exhausted=True`` so the fallback chain engages the secondary
 provider; a contract rejection (4xx, malformed payload, schema validation
-failure) is typed ``retries_exhausted=False`` and the degrade-to-raw-doctor-
-review path (ticket #386) is the safety net beneath this leg.
+failure, or a request with no clip bytes) is typed ``retries_exhausted=False``
+and propagates immediately without tripping the breaker. The degrade-to-raw-
+doctor-review path (ticket #386) is the safety net beneath this leg.
 
-Egress carries only the ``AiEgressContext`` plus the audio clip reference /
-transcript - never name, phone, or the full record (NFR-SEC-006). Timeout and
-retry discipline are reused from the existing ``Ext002AiProvider`` plumbing
+Egress carries only the decrypted audio clip plus the ``AiEgressContext``
+(declared language) and the pseudonymous ``audio_ref``-derived filename - never
+name, phone, or the full record (NFR-SEC-006). Timeout and retry discipline are
+reused from the existing ``Ext002AiProvider`` plumbing
 (third-party-integration-standards S1): exponential + jitter backoff,
 injectable ``sleep``.
 """
@@ -25,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import posixpath
 from collections.abc import Awaitable, Callable
 from typing import Literal
 
@@ -66,13 +70,49 @@ _SYSTEM_ROLE = (
 _CONFIDENCE_PROXY_DEFAULT = 0.8
 
 
+def _clip_filename(audio_ref: str) -> str:
+    """A filename for the multipart ``file`` field (pseudonymous, keep the ext).
+
+    Derives the basename from the pseudonymous media reference so the provider
+    receives a real audio filename (extension included); falls back to a plain
+    ``audio.mp3`` when the reference has none. Never carries an identity field.
+    """
+    basename = posixpath.basename(audio_ref)
+    if basename and "." in basename:
+        return basename
+    return "audio.mp3"
+
+
+_AUDIO_MIME_BY_SUFFIX = {
+    ".flac": "audio/flac",
+    ".m4a": "audio/mp4",
+    ".mp3": "audio/mpeg",
+    ".mp4": "audio/mp4",
+    ".ogg": "audio/ogg",
+    ".wav": "audio/wav",
+    ".webm": "audio/webm",
+}
+
+
+def _clip_mime_type(filename: str) -> str:
+    """The audio content type for the multipart ``file`` field.
+
+    Matches the clip's extension so the provider never sees a format mismatch
+    (a ``.wav`` clip labelled ``audio/mpeg``); unknown/absent extensions default
+    to ``audio/mpeg``.
+    """
+    suffix = posixpath.splitext(filename)[1].lower()
+    return _AUDIO_MIME_BY_SUFFIX.get(suffix, "audio/mpeg")
+
+
 class OpenAiCompatibleAdapter:
     """Adapter for any OpenAI-compatible chat /audio transcription endpoint.
 
     ``structure`` posts to ``{base_url}/chat/completions`` with Bearer auth and
-    JSON-mode response format. ``transcribe`` posts the audio clip reference to
-    ``{base_url}/audio/transcriptions`` and parses the result into a
-    ``TranscribeResult`` (ticket #387). ``draft_rx`` raises
+    JSON-mode response format. ``transcribe`` posts the clip bytes as
+    ``multipart/form-data`` to ``{base_url}/audio/transcriptions`` and parses
+    the result into a ``TranscribeResult`` (tickets #387/#392); a request with
+    no clip bytes fails closed as a contract rejection. ``draft_rx`` raises
     ``Ext002CallError(retries_exhausted=False)`` with "not supported in this
     phase" - that leg is not yet implemented.
     """
@@ -124,10 +164,13 @@ class OpenAiCompatibleAdapter:
             {"role": "user", "content": user_content},
         ]
 
-    async def _post_json(
+    async def _post(
         self,
         path: str,
-        payload: dict[str, object],
+        *,
+        json: dict[str, object] | None = None,
+        data: dict[str, str] | None = None,
+        files: dict[str, tuple[str, bytes, str]] | None = None,
     ) -> dict[str, object]:
         headers = {"Authorization": f"Bearer {self._api_key}"}
         last_status = 0
@@ -137,7 +180,9 @@ class OpenAiCompatibleAdapter:
             try:
                 response = await self._client.post(
                     f"{self._base_url}{path}",
-                    json=payload,
+                    json=json,
+                    data=data,
+                    files=files,
                     headers=headers,
                 )
             except httpx.HTTPError as exc:
@@ -158,20 +203,20 @@ class OpenAiCompatibleAdapter:
                 continue
             if response.is_success:
                 try:
-                    data = response.json()
+                    body = response.json()
                 except ValueError as exc:
                     logger.error("OpenAI-compatible %s returned a non-JSON response", path)
                     raise Ext002CallError(
                         f"OpenAI-compatible {path} returned a non-JSON response",
                         retries_exhausted=False,
                     ) from exc
-                if not isinstance(data, dict):
+                if not isinstance(body, dict):
                     logger.error("OpenAI-compatible %s returned an unexpected payload", path)
                     raise Ext002CallError(
                         f"OpenAI-compatible {path} returned an unexpected payload",
                         retries_exhausted=False,
                     )
-                return data
+                return body
             logger.warning(
                 "OpenAI-compatible %s rejected with HTTP %d",
                 path,
@@ -202,7 +247,7 @@ class OpenAiCompatibleAdapter:
             "messages": messages,
             "response_format": {"type": "json_object"},
         }
-        return await self._post_json("/chat/completions", payload)
+        return await self._post("/chat/completions", json=payload)
 
     def _parse_structure_response(
         self,
@@ -322,15 +367,22 @@ class OpenAiCompatibleAdapter:
 
     @observe
     async def transcribe(self, request: TranscribeRequest) -> TranscribeResult:
-        payload: dict[str, object] = {
-            "model": self._asr_model,
-            "audio_ref": request.audio_ref,
-            "mode": request.mode,
-            "language": request.context.language,
-            "age_range": request.context.age_range,
-            "sex": request.context.sex,
-        }
-        data = await self._post_json("/audio/transcriptions", payload)
+        if request.audio_bytes is None:
+            logger.error("OpenAI-compatible transcribe called without the audio clip bytes")
+            raise Ext002CallError(
+                "OpenAI-compatible transcribe requires the audio clip bytes "
+                "(audio_bytes); no bytes supplied",
+                retries_exhausted=False,
+            )
+        filename = _clip_filename(request.audio_ref)
+        data = await self._post(
+            "/audio/transcriptions",
+            data={
+                "model": self._asr_model,
+                "language": request.context.language,
+            },
+            files={"file": (filename, request.audio_bytes, _clip_mime_type(filename))},
+        )
         result = self._parse_transcribe_response(data, request.context.language)
         prompt_tokens, completion_tokens = self._extract_transcription_usage_tokens(data)
         if prompt_tokens or completion_tokens:

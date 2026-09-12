@@ -80,7 +80,12 @@ _CHAT_SUCCESS_BODY = {
 _STRUCTURE_REQUEST = StructureRequest(
     transcript="mujhe bukhar hai", source="voice", context=_COMMON_CONTEXT
 )
-_TRANSCRIBE_REQUEST = TranscribeRequest(audio_ref="media/1", mode="voice", context=_COMMON_CONTEXT)
+_TRANSCRIBE_REQUEST = TranscribeRequest(
+    audio_ref="media/1",
+    audio_bytes=b"fake-pcm-audio-bytes",
+    mode="voice",
+    context=_COMMON_CONTEXT,
+)
 _DRAFT_RX_REQUEST = DraftRxRequest(
     doctor_input_ref="voice_note/1",
     pre_summary_ref="pre_summary/2",

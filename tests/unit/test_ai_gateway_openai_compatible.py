@@ -4,11 +4,13 @@ Structure-leg acceptance contract (#379): happy-path parse, token extraction,
 429/5xx retry then outage, 4xx non-retryable, malformed payload non-retryable,
 egress payload carries only intake context (never name/phone).
 
-Transcribe-leg acceptance contract (#387): happy-path parse into
+Transcribe-leg acceptance contract (#387/#392): happy-path parse into
 ``TranscribeResult``, transcription confidence proxy and per-segment
 confidence, usage extraction when present (top-level and vendor extension),
-429/5xx retry-then-outage, 4xx/malformed non-retryable, egress carries the
-audio clip reference + model + intake context (never raw bytes / name / phone).
+429/5xx retry-then-outage, 4xx/malformed non-retryable, multipart egress
+carries the decrypted clip + model + declared language (never audio_ref /
+name / phone / full context), and a request with no clip bytes fails closed as
+a contract rejection.
 """
 
 from __future__ import annotations
@@ -47,12 +49,41 @@ def _structure_request() -> StructureRequest:
     )
 
 
+_AUDIO_BYTES = b"fake-pcm-audio-bytes"
+
+
 def _transcribe_request() -> TranscribeRequest:
     return TranscribeRequest(
         audio_ref="media/abc.mp3",
+        audio_bytes=_AUDIO_BYTES,
         mode="voice",
         context=_context(),
     )
+
+
+def _parse_multipart(request: httpx.Request) -> dict[str, bytes]:
+    """Parse a multipart/form-data request body into {field: bytes}."""
+    content_type = request.headers.get("content-type", "")
+    assert content_type.startswith("multipart/form-data"), content_type
+    boundary = content_type.split("boundary=", 1)[1].strip().strip('"').encode()
+    parts: dict[str, bytes] = {}
+    for chunk in request.content.split(b"--" + boundary):
+        if not chunk or chunk == b"--":
+            continue
+        if b"\r\n\r\n" not in chunk:
+            continue
+        head, value = chunk.split(b"\r\n\r\n", 1)
+        name: str | None = None
+        for line in head.split(b"\r\n"):
+            if not line.lower().startswith(b"content-disposition"):
+                continue
+            for param in line.decode(errors="ignore").split(";"):
+                param = param.strip()
+                if param.startswith("name="):
+                    name = param.split("=", 1)[1].strip('"')
+        if name is not None:
+            parts[name] = value.removesuffix(b"\r\n")
+    return parts
 
 
 def _mock_transcription_response(
@@ -696,7 +727,7 @@ async def test_transcribe_network_error_retry_then_outage() -> None:
 # --- transcribe: egress only carries reference + intake context ---
 
 
-async def test_transcribe_posts_audio_transcriptions_endpoint() -> None:
+async def test_transcribe_posts_multipart_form_data() -> None:
     captured_requests: list[httpx.Request] = []
 
     def _handler(request: httpx.Request) -> httpx.Response:
@@ -710,9 +741,15 @@ async def test_transcribe_posts_audio_transcriptions_endpoint() -> None:
 
     assert len(captured_requests) == 1
     assert captured_requests[0].url.path == "/audio/transcriptions"
+    assert captured_requests[0].headers.get("authorization") == "Bearer test-key"
+    parts = _parse_multipart(captured_requests[0])
+    assert parts["model"] == b"whisper-large-v3-turbo"
+    assert parts["language"] == b"hi"
+    assert parts["file"] == _AUDIO_BYTES
+    assert b"Content-Type: audio/mpeg" in captured_requests[0].content
 
 
-async def test_transcribe_sends_bearer_auth_and_asr_model() -> None:
+async def test_transcribe_multipart_mime_matches_clip_extension() -> None:
     captured_requests: list[httpx.Request] = []
 
     def _handler(request: httpx.Request) -> httpx.Response:
@@ -722,12 +759,19 @@ async def test_transcribe_sends_bearer_auth_and_asr_model() -> None:
     transport = httpx.MockTransport(_handler)
     adapter = _make_adapter(transport)
 
-    await adapter.transcribe(_transcribe_request())
+    await adapter.transcribe(
+        TranscribeRequest(
+            audio_ref="media/record.wav",
+            audio_bytes=_AUDIO_BYTES,
+            mode="voice",
+            context=_context(),
+        )
+    )
 
-    assert len(captured_requests) == 1
-    assert captured_requests[0].headers.get("authorization") == "Bearer test-key"
-    body = json.loads(captured_requests[0].content)
-    assert body["model"] == "whisper-large-v3-turbo"
+    body = captured_requests[0].content
+    assert b"Content-Type: audio/wav" in body
+    assert b'filename="record.wav"' in body
+    assert b"audio/mpeg" not in body
 
 
 async def test_transcribe_asr_model_overridable() -> None:
@@ -750,12 +794,12 @@ async def test_transcribe_asr_model_overridable() -> None:
 
     await adapter.transcribe(_transcribe_request())
 
-    body = json.loads(captured_requests[0].content)
-    assert body["model"] == "whisper-large-v3"
+    parts = _parse_multipart(captured_requests[0])
+    assert parts["model"] == b"whisper-large-v3"
     assert adapter.effective_model == "test-model"
 
 
-async def test_transcribe_egress_carries_only_reference_and_context() -> None:
+async def test_transcribe_egress_carries_only_clip_and_context() -> None:
     captured_requests: list[httpx.Request] = []
 
     def _handler(request: httpx.Request) -> httpx.Response:
@@ -767,17 +811,36 @@ async def test_transcribe_egress_carries_only_reference_and_context() -> None:
 
     await adapter.transcribe(_transcribe_request())
 
-    body = json.loads(captured_requests[0].content)
-    assert body["audio_ref"] == "media/abc.mp3"
-    assert body["mode"] == "voice"
-    assert body["language"] == "hi"
-    assert body["age_range"] == "30-40"
-    assert body["sex"] == "male"
-    assert "name" not in body
-    assert "phone" not in body
-    assert "patient_id" not in body
-    assert "file" not in body
-    assert "bytes" not in body
+    parts = _parse_multipart(captured_requests[0])
+    assert parts["file"] == _AUDIO_BYTES
+    assert parts["model"] == b"whisper-large-v3-turbo"
+    assert parts["language"] == b"hi"
+    for forbidden in ("audio_ref", "mode", "age_range", "sex", "name", "phone", "patient_id"):
+        assert forbidden not in parts, f"egress carried forbidden field {forbidden!r}"
+
+
+async def test_transcribe_no_bytes_fails_closed() -> None:
+    captured_requests: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured_requests.append(request)
+        return _success_response(_mock_transcription_response())
+
+    transport = httpx.MockTransport(_handler)
+    adapter = _make_adapter(transport)
+
+    with pytest.raises(Ext002CallError) as exc_info:
+        await adapter.transcribe(
+            TranscribeRequest(
+                audio_ref="media/abc.mp3",
+                mode="voice",
+                context=_context(),
+            )
+        )
+
+    assert exc_info.value.retries_exhausted is False
+    assert "no bytes" in str(exc_info.value)
+    assert captured_requests == []  # fails closed before any HTTP call
 
 
 # --- draft_rx raises non-retryable error ---

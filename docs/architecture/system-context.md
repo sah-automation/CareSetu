@@ -114,7 +114,7 @@ _(All software systems, platforms, or APIs outside the blackbox perimeter)_
 - **Ingress / Egress Direction:** Egress only (platform → provider), synchronous long-running calls with server-side orchestration; no inbound webhooks.
 - **Network Protocol:** `HTTPS (TLS 1.2+)`, REST, `JSON`, multipart upload for audio / photo.
 - **Data Payload Schema:**
-  - `transcribe`: `{ "audio_ref", "language": "hi|en", "mode": "voice" }` → `{ "transcript", "confidence", "language" }`
+  - `transcribe`: `{ "audio clip (multipart upload)", "language": "hi|en", "model" }` → `{ "transcript", "confidence", "language" }` - the decrypted clip plus the declared language only, never name/phone/full record
   - `structure`: `{ "transcript", "source": "voice|text" }` → `{ "chief_complaints": [], "symptoms": [], "duration", "confidence" }`
   - `draft_rx`: `{ "doctor_input_ref": "voice_note|photo", "pre_summary_ref", "patient_history_summary" }` → `{ "rx_items": [ { "name", "dose", "duration" } ], "confidence" }`
 - **Error & Retry Behavior:** HTTP 5xx / 429 → exponential backoff, max 3 retries; per-call timeout ≤ 30 s; on timeout, repeated failure, or low structuring confidence → degrade to the `AMB-006` baseline: flag **"low confidence - verify"** and force doctor review (`FEAT-007`, `FEAT-009`); never present unverified output as final. A Hindi-voice feasibility spike precedes launch (`RISK-EVAL-006`).

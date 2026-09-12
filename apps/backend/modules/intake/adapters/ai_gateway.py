@@ -69,15 +69,18 @@ class AiEgressContext(BaseModel):
 class TranscribeRequest(BaseModel):
     """Input to the transcribe leg: one intake audio clip plus minimal context.
 
-    ``audio_ref`` is a pseudonymous reference to the intake media (the patient's
-    own words, expected by the transcribe leg), not a patient identifier. The
-    patient-shaped context is bounded to ``AiEgressContext``; extra fields are
-    rejected (fail-closed).
+    ``audio_bytes`` is the decrypted clip sent to the ASR provider (the
+    patient's own words, expected by the transcribe leg - within the egress
+    boundary as the clip itself). ``audio_ref`` is the pseudonymous reference to
+    the intake media, carried for the proxy-style adapter and audit, not a
+    patient identifier. The patient-shaped context is bounded to
+    ``AiEgressContext``; extra fields are rejected (fail-closed).
     """
 
     model_config = ConfigDict(extra="forbid")
 
     audio_ref: str
+    audio_bytes: bytes | None = None
     mode: Literal["voice"]
     context: AiEgressContext
 
