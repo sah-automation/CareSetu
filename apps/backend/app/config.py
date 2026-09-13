@@ -105,9 +105,10 @@ DEFAULT_AI_TIMEOUT_SECONDS = 30.0
 DEFAULT_AI_MAX_RETRIES = 3
 DEFAULT_AI_CIRCUIT_BREAKER_THRESHOLD = 5
 DEFAULT_AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 30.0
-# NFR-001 freemium AI spend cap (PHASE-7 T06/T11): the hard monthly budget in
-# paise that, once spent, hard-stops new AI calls and degrades the intake to raw
-# doctor review (standard A4/A5, spec #344). Rs 2,000 / month = 200,000 paise.
+# NFR-001 freemium AI spend cap (PHASE-7 T06/T11): the monthly budget in paise
+# the meter reports spend against - observe-and-warn only (PS-10, #408), the
+# meter never blocks: the knob stays so a hard cap can be reintroduced later
+# without a rewrite. Rs 2,000 / month = 200,000 paise.
 DEFAULT_AI_MONTHLY_BUDGET_PAISE = 200_000
 DEFAULT_AI_FALLBACK_PROVIDER = ""
 DEFAULT_AI_FALLBACK_BASE_URL = ""

@@ -1,17 +1,20 @@
-"""MOD-005: NFR-001 monthly AI budget meter with a hard stop (PHASE-7 T06 #350).
+"""MOD-005: NFR-001 monthly AI budget meter - observe-and-warn (PHASE-7 T11 #408).
 
 Concentrates the ``NFR-001`` freemium AI-spend cap into one deep module. The
 authoritative monthly spend is the SQL aggregate over the ``intake_ai_jobs``
 table for the current calendar month (Postgres-first, per standard B1 - a SQL
 counter over a cached/Redis counter; a Redis accelerator may speed reads up but
 never overrides the SQL truth). The meter reports spend + remaining against the
-configured budget, and fattens an exhausted budget into a hard gate: once the
-budget is spent no new AI call may be made - the intake degrades to raw doctor
-review (spec #344, standard A4/A5).
+configured budget.
 
-The hard stop is enforced as a gate, not a recommendation: :meth:`allows_ai_call`
-returns ``False`` the moment the aggregate for the month reaches the budget, so
-the AI pipeline consults it before every call and never overspends ``NFR-001``.
+Recorded deviation from spec #344's hard-stop wording (PS-10, issue #408): the
+meter is observe-and-warn ONLY - an exhausted budget never blocks an AI call.
+The pipeline consults it before egress and proceeds regardless; exhaustion is
+logged/reportable only. ``ai_monthly_budget_paise`` stays a Settings knob so a
+cap can be reintroduced later without a rewrite, and the Postgres-first SQL read
+path is the Phase 14 cost-dashboard source. :meth:`allows_ai_call` is advisory:
+it reports ``False`` at exhaustion, but nothing blocks on it.
+
 The pipeline's job-insertion still records each real call's cost into
 ``ai_jobs`` (standard A4), and the next aggregate read reflects those rows - so
 the meter stays correct purely from what the pipeline writes.
@@ -44,10 +47,10 @@ class BudgetMeterResult:
     """The current monthly AI-spend state against the configured budget.
 
     ``spend_paise`` is the authoritative SQL aggregate over ``intake_ai_jobs``
-    for the current month; ``remaining_paise`` is what is left before the cap;
-    ``exhausted`` is the hard-stop flag - ``True`` exactly when the spend has
-    reached the budget, meaning no further AI call is allowed this month
-    (standard A4/A5 degradation to raw doctor review).
+    for the current month; ``remaining_paise`` is what is left before the
+    configured budget; ``exhausted`` is the observe-and-warn flag - ``True``
+    exactly when the spend has reached the budget. It is advisory (PS-10,
+    #408): the pipeline reads it and proceeds - it never blocks a call.
     """
 
     spend_paise: int
@@ -57,22 +60,24 @@ class BudgetMeterResult:
 
     @property
     def allows_ai_call(self) -> bool:
-        """Whether a new AI call is permitted - the hard-stop gate.
+        """Advisory: whether a new AI call is permitted this month.
 
-        ``False`` (blocked) exactly when the budget is exhausted. The pipeline
-        consults this before every call (spec #344: "hard stop: budget
-        exhausted => no new AI calls").
+        ``False`` exactly when the budget is exhausted. Advisory only (PS-10,
+        #408): observed spend against the budget; an exhausted meter never
+        blocks the pipeline, which warns/logs and proceeds.
         """
         return not self.exhausted
 
 
 class BudgetMeter:
-    """NFR-001 monthly AI budget meter: SQL aggregate + hard-stop gate.
+    """NFR-001 monthly AI budget meter: SQL aggregate, observe-and-warn report.
 
     Takes the engine and the configured monthly budget (paise) in its
     constructor, mirroring the directory/deep-module seam convention. Reads the
     authoritative spend from the ``intake_ai_jobs`` SQL aggregate (Postgres
-    first, standard B1) - no in-memory counter is authoritative.
+    first, standard B1) - no in-memory counter is authoritative. Deviation from
+    spec #344's hard-stop wording (PS-10, #408): the meter is advisory -
+    exhaustion is observed and reported, never enforced as a block.
     """
 
     def __init__(self, engine: AsyncEngine, *, monthly_budget_paise: int) -> None:
@@ -101,7 +106,8 @@ class BudgetMeter:
         """Report monthly spend + remaining against the configured budget.
 
         Returns the populated :class:`BudgetMeterResult`; an exhausted budget is
-        expressed as ``exhausted=True`` (the hard-stop result).
+        expressed as ``exhausted=True`` (the observe-and-warn result). Advisory
+        - the caller reads it and proceeds; exhaustion never blocks (PS-10).
         """
         spend = await self.read_spend_paise()
         remaining = max(0, self._monthly_budget_paise - spend)
@@ -113,10 +119,10 @@ class BudgetMeter:
         )
 
     async def allows_ai_call(self) -> bool:
-        """The hard-stop gate: whether a new AI call is permitted this month.
+        """Advisory read of whether a new AI call is permitted this month.
 
-        ``False`` the moment the monthly SQL aggregate reaches the budget - the
-        intake degrades to raw doctor review and no further AI call is made
-        (standard A4/A5, spec #344). The gate, not a recommendation.
+        ``False`` the moment the monthly SQL aggregate reaches the budget -
+        observed/reportable only (PS-10, #408): an exhausted meter warns and
+        the pipeline proceeds; it never blocks a call.
         """
         return (await self.meter()).allows_ai_call

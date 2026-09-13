@@ -21,7 +21,8 @@ provider throughout (deterministic clean confidence).
 The consent gate and budget meter are the REAL facades wired by the pipeline's
 ``_build_egress_gate``: a patient grant is seeded via ``ConsentFacade.grant_consent``
 so ``check_consent`` allows (fail-open here deliberately), and the mock AI job
-costs 0 paise against the NFR-001 default budget so the hard stop never trips.
+costs 0 paise against the NFR-001 default budget so the meter stays well under
+budget (observe-and-warn, PS-10 - exhaustion never blocks anyway).
 The pipeline therefore runs the genuine closed loop, and its egress is recorded
 in ``consent_egress_log`` (NFR-SEC-006).
 """

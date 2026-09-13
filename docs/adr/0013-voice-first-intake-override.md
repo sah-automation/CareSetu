@@ -37,7 +37,7 @@ Voice attempt 1
 
 - Intake capture is saved **before any AI runs**; AI failure never rolls back patient input.
 - A consent gate (`check_consent`) blocks every LLM egress; no-live-grant degrades to raw review.
-- Budget meter hard-stops at `NFR-001` cap; subsequent intakes degrade to raw review.
+- The budget meter observes spend against the `NFR-001` cap and is advisory (PS-10, #408): exhaustion is logged/reportable only and never blocks intake - the pipeline proceeds observe-and-warn, deviating from spec #344's original hard-stop wording.
 - The doctor can always review raw transcript + audio regardless of AI pipeline state.
 
 ### 3. ASR-improvement plan (near-term)

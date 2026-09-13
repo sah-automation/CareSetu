@@ -1,9 +1,10 @@
-"""PHASE-7 T06 (#350): NFR-001 budget meter + hard stop.
+"""PHASE-7 T06 (#350): NFR-001 budget meter, observe-and-warn (T11 #408).
 
 The meter reads the authoritative monthly AI spend via a SQL aggregate over the
-``intake_ai_jobs`` table (Postgres-first, standard B1), reports spend + remaining
-against the configured budget, and fattens exhaustion into a hard gate that
-blocks new AI calls - the intake degrades to raw doctor review (spec #344). The
+``intake_ai_jobs`` table (Postgres-first, standard B1) and reports spend +
+remaining against the configured budget. Exhaustion is observed and reported,
+never enforced: ``allows_ai_call`` is advisory (PS-10, #408) - a hard-stop was
+deliberately dropped, the pipeline reads the meter and proceeds regardless. The
 unit tier drives the meter through a fake engine (mirroring the
 directory/consent direct-seam suite convention): no SQL plumbing, the fake
 connection's ``scalar_one`` supplies the aggregate, and the tests pin the seam
@@ -18,7 +19,7 @@ Pins:
   True - and the reported spend comes straight from the fake engine's aggregate
   (rows inserted through the fake engine are reflected).
 - Over budget: ``meter()`` reports exhaustion and ``allows_ai_call()`` is False
-  (the hard stop) - a gate, not a recommendation.
+  - the observe-and-warn signal, advisory only (never a block).
 - Budget boundary and constructor guard.
 """
 
@@ -118,9 +119,10 @@ async def test_spend_below_budget_allows_the_call_and_reflects_the_fake_aggregat
 
 
 @pytest.mark.asyncio
-async def test_spend_above_budget_blocks_the_call_as_a_hard_gate() -> None:
-    """Over budget the meter reports exhaustion and the gate blocks the AI call
-    decision - the hard stop, not a recommendation."""
+async def test_spend_above_budget_reports_exhaustion_as_advisory() -> None:
+    """Over budget the meter reports exhaustion and ``allows_ai_call()`` is
+    False - the observe-and-warn signal (PS-10, #408), advisory only: the
+    pipeline reads it and proceeds, the meter never blocks a call."""
     meter = BudgetMeter(
         engine=_engine(spend_aggregate=DEFAULT_MONTHLY_BUDGET_PAISE + 1),
         monthly_budget_paise=DEFAULT_MONTHLY_BUDGET_PAISE,
@@ -136,9 +138,9 @@ async def test_spend_above_budget_blocks_the_call_as_a_hard_gate() -> None:
 
 
 @pytest.mark.asyncio
-async def test_spend_exactly_at_budget_is_exhausted_and_blocks() -> None:
-    """A spend that reaches the budget exactly is exhausted - at the cap no
-    further AI call is allowed."""
+async def test_spend_exactly_at_budget_is_exhausted_advisory() -> None:
+    """A spend that reaches the budget exactly is exhausted - reported as such,
+    observe-and-warn: no hard block, the meter only observes and reports."""
     meter = BudgetMeter(
         engine=_engine(spend_aggregate=DEFAULT_MONTHLY_BUDGET_PAISE),
         monthly_budget_paise=DEFAULT_MONTHLY_BUDGET_PAISE,

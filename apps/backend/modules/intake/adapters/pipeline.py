@@ -103,7 +103,9 @@ def _build_egress_gate() -> tuple[AsyncEngine, ConsentFacade, BudgetMeter]:
     transactions (consent check, egress audit, month spend aggregate). A
     short-lived ``NullPool`` engine mirrors the delivery-engine lifecycle
     (``bus.handler_harness``); the caller disposes it with the run. Tests
-    patch this seam to inject fakes.
+    patch this seam to inject fakes. The meter is advisory observe-and-warn
+    (PS-10, #408): it reports spend against the budget; exhaustion is logged,
+    never a block.
     """
     engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
     return (
@@ -150,10 +152,10 @@ async def _run_structuring_pipeline(
     moved Structuring -> Ready for Review. A voice pass is two metered rows
     where both legs ran (transcribe + structure, PS-03); a text pass is one
     structure row. Before any egress the NFR-001 budget meter is consulted
-    (hard stop) and the consent gate is checked fail-closed (missing/revoked
-    grant -> raw doctor review with no PHI sent); every successful egress is
-    PHI-minimized (intake context only) and audited via
-    ``record_egress_disclosure``. Timeout-after-3-retries and malformed
+    (observe-and-warn, advisory - never a block) and the consent gate is checked
+    fail-closed (missing/revoked grant -> raw doctor review with no PHI sent);
+    every successful egress is PHI-minimized (intake context only) and audited
+    via ``record_egress_disclosure``. Timeout-after-3-retries and malformed
     provider output mark the job ``failed`` and degrade to raw review; a
     low-confidence structuring outcome publishes ``pre_summary.low_confidence``
     and forces doctor review. All effects ride the SAME transaction as the
@@ -214,16 +216,17 @@ async def _run_structuring_pipeline(
     context = _egress_context(row.language)
     gate_engine, consent_facade, budget_meter = _adapters._build_egress_gate()
     try:
-        # NFR-001 hard stop: no egress when the monthly meter is exhausted - the
-        # intake degrades to raw doctor review rather than overspending.
+        # NFR-001 observe-and-warn (PS-10, #408): the monthly meter is advisory.
+        # An exhausted budget is logged/reportable only - the pipeline reads the
+        # meter and proceeds regardless; it never hard-stops a call (spec #344's
+        # hard-stop wording was deliberately dropped; see the roadmap decision
+        # note and the budget-meter docstring).
         if not await budget_meter.allows_ai_call():
-            await _degrade_to_raw_review(
-                connection,
+            logger.warning(
+                "intake %s: monthly AI budget exhausted (NFR-001 advisory); "
+                "proceeding observe-and-warn - no hard stop",
                 intake_id,
-                state=structing,
-                reason="monthly AI budget exhausted (NFR-001 hard stop)",
             )
-            return
 
         # Consent gate (fail-closed, NFR-SEC-006): a live doctor-grant on the
         # consultations scope is required before ANY content leaves for EXT-002.

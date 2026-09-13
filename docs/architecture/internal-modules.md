@@ -327,7 +327,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 - **Language/Runtime:** Python 3.11+ (asyncio).
 - **Framework:** FastAPI + Pydantic v2; `httpx` for LLM calls.
 - **Persistence Layer:** PostgreSQL (`intake` schema); object storage for media.
-- **Constraint:** `EXT-002` freemium tier; hard token/₹ budget meter enforced (`NFR-001`, `NFR-COST-001`); egress carries only intake/prescription context - never the full record (`NFR-SEC-006`).
+- **Constraint:** `EXT-002` freemium tier; monthly token/₹ budget meter, observe-and-warn (PS-10, #408) - reports against `NFR-001`, never blocks a call; egress carries only intake/prescription context - never the full record (`NFR-SEC-006`).
 
 #### 5. Module NFR Allocation
 

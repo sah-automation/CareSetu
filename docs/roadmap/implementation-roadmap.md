@@ -513,16 +513,16 @@ _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade f
 
 #### 4. Infrastructure, DevOps & Environment Targets
 
-- **Hosting / Cloud Provisioning:** `EXT-002` freemium provider key (chosen in Phase 0); hard token/₹ budget meter + alert (`NFR-001`); bucket policies restricting `intake/` to `MOD-005`.
+- **Hosting / Cloud Provisioning:** `EXT-002` freemium provider key (chosen in Phase 0); monthly token/₹ budget meter, observe-and-warn (PS-10, #408 - reports against `NFR-001`, never blocks); bucket policies restricting `intake/` to `MOD-005`.
 - **CI/CD Requirements:** AI pipeline tests against a mock `EXT-002` (deterministic confidence), low-confidence fallback test, budget-meter overrun test, upload-resilience test (≥ 1 Mbps, 3 retries).
 
 #### 5. Phase Dependency & Risk Matrix
 
-| Dependency / Blocked By                 | Potential Risk                                 | Mitigation Plan                                                            |
-| :-------------------------------------- | :--------------------------------------------- | :------------------------------------------------------------------------- |
-| `PHASE-0` (go/no-go gate)               | Hindi ASR quality below floor on low-cost tier | No-go → text-first intake fallback; forced doctor review on low confidence |
-| `PHASE-2`/`PHASE-3` (identity, consent) | PHI egress to `EXT-002` violates `NFR-SEC-006` | `check_consent` gate + PHI-minimized context + audit `egress_log`          |
-| `EXT-002` latency/freemium quota        | LLM outage or cost blowout blocks intake       | ≤ 30 s timeout, 3 retries, degrade to review path; budget meter hard-stop  |
+| Dependency / Blocked By                 | Potential Risk                                      | Mitigation Plan                                                                                                           |
+| :-------------------------------------- | :-------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------ |
+| `PHASE-0` (go/no-go gate)               | Hindi ASR quality below floor on low-cost tier      | No-go → text-first intake fallback; forced doctor review on low confidence                                                |
+| `PHASE-2`/`PHASE-3` (identity, consent) | PHI egress to `EXT-002` violates `NFR-SEC-006`      | `check_consent` gate + PHI-minimized context + audit `egress_log`                                                         |
+| `EXT-002` latency/freemium quota        | LLM outage or cost blowout inflates `NFR-001` spend | ≤ 30 s timeout, 3 retries, degrade to review path; budget meter observe-and-warn (PS-10; spend reportable, never a block) |
 
 #### 6. Downstream AI Engineering Handoff Specs
 
@@ -537,6 +537,7 @@ _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade f
   2. The implementation is complete, tested (unit + integration), and carries no regulatory risk (patient edits are informational only; doctor review retains edit-wins authority).
   3. Removing it would regress the pre-summary review surface that was already shipped and smoke-tested.
      **Decision: keep.** The method is retained as a Phase 7 delivery that exceeded the original scope boundary. Documented here so the scope line above is understood as the _original_ boundary, not the _final_ delivered surface.
+- **AI budget observe-and-warn (PS-10, #408):** deliberate deviation from spec #344's hard-stop wording ("hard stop: budget exhausted ⇒ no new AI calls") and the original `NFR-001` degrades-to-review reading. The monthly budget meter reports spend against the `ai_monthly_budget_paise` knob but never blocks an AI call; an exhausted meter is logged/reportable only and the pipeline proceeds. The SQL read path and the Settings knob stay untouched so a hard cap can be reintroduced later without a rewrite; Phase 14 builds the dashboard/alert off the same Postgres-first aggregate. Wording reconciled in ADR-0013, `ai-engineering-standards` A4/A6, system-context EXT-002, internal-modules MOD-005, the worker runbook's degradation list, and this phase's infrastructure/risk-matrix rows.
 
 ---
 

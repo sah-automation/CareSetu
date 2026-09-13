@@ -6,8 +6,9 @@ suite) and pins the degradation contract (spec #344 MOD-005):
 
 - Timeout-after-3-retries and malformed provider output mark ``ai_job.failed``,
   leave the intake durable, and publish ``ai_job.failed``.
-- NFR-001 budget exhaustion hard-stops new AI calls and degrades the intake to
-  raw doctor review (no egress, no job, no pre-summary).
+- NFR-001 budget exhaustion is observe-and-warn (PS-10, #408): an exhausted
+  meter never blocks the pipeline - it warns/logs and proceeds to a completed
+  job + pre-summary (advisory, not a hard stop).
 - A missing or revoked consent blocks egress fail-closed (no PHI sent) and
   degrades to raw review.
 - Successful egress is PHI-minimized (intake context only, never name/phone/full
@@ -477,10 +478,10 @@ async def test_transcribe_malformed_output_degrades_to_raw_review() -> None:
 
 
 @pytest.mark.asyncio
-async def test_budget_exhaustion_hard_stops_new_ai_calls_and_degrades() -> None:
-    """An exhausted NFR-001 meter hard-stops the pipeline BEFORE any egress: no
-    consent check, no provider call, no job, no pre-summary - only the durable
-    raw-review transition."""
+async def test_budget_exhaustion_warns_but_proceeds_observe_and_warn() -> None:
+    """PS-10 (#408): an exhausted NFR-001 meter is advisory - the pipeline reads
+    it, warns, and proceeds; it never hard-stops. Consent is still checked and
+    the run completes with a job, pre-summary, and ready/completed events."""
     handler = _registered_handler()
     connection = _FakeConnection(intake_row=_text_intake_row())
     engine = _fake_engine(connection)
@@ -493,12 +494,18 @@ async def test_budget_exhaustion_hard_stops_new_ai_calls_and_degrades() -> None:
     )
 
     meter.allows_ai_call.assert_awaited_once()
-    consent.check_consent.assert_not_awaited()
+    # The pipeline proceeded observe-and-warn: consent still checked, an ai_job
+    # was booked, and the intake completed with a Draft pre-summary + ready/
+    # completed events - never degraded on an exhausted meter.
+    consent.check_consent.assert_awaited_once()
     kinds = [r.kind for r in connection.executed]
-    assert "insert_ai_job" not in kinds
-    assert "insert_pre_summary" not in kinds
-    assert "outbox" not in kinds
+    assert "insert_ai_job" in kinds
+    assert "insert_pre_summary" in kinds
+    assert "outbox" in kinds
     assert _statuses(connection) == ["structuring", "ready_for_review"]
+    outbox = _outbox_types(connection)
+    assert EVENT_PRE_SUMMARY_READY in outbox
+    assert EVENT_AI_JOB_COMPLETED in outbox
     gate_engine.dispose.assert_awaited_once()
 
 
