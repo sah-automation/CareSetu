@@ -115,6 +115,20 @@ def test_structuring_success_preserves_existing_forced_text() -> None:
     assert next_state.forced_text is True
 
 
+def test_re_record_to_structuring_success_reaches_ready_for_review() -> None:
+    """The re-record pipeline chain (PS-07): Re-record -> Structuring (attempt
+    +1) -> Ready for Review, carrying the incremented attempt through the
+    success edge and never forcing text."""
+    s = transition(_RE_RECORD_1, IntakeAction.RETRY_ACCEPTED)
+    assert s.status is IntakeStatus.STRUCTURING
+    assert s.record_attempts == 2
+
+    s = transition(s, IntakeAction.STRUCTURING_SUCCESS)
+    assert s.status is IntakeStatus.READY_FOR_REVIEW
+    assert s.record_attempts == 2
+    assert s.forced_text is False
+
+
 def test_full_b3_ladder_exactly_three_attempts() -> None:
     """Exercise the B3 fallback ladder: attempts 1, 2, 3 then forced text."""
     # Start and enter structuring on attempt 1.

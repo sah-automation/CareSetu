@@ -139,31 +139,42 @@ def _build_media_store() -> IntakeMediaStore:
 async def _run_structuring_pipeline(
     connection: AsyncConnection,
     intake_id: int,
+    *,
+    expected_status: IntakeStatus = IntakeStatus.CAPTURED,
 ) -> None:
-    """Run transcribe -> structure on a captured intake and publish a Draft pre_summary.
+    """Run transcribe -> structure on an intake and publish a Draft pre_summary.
 
     The T11 pipeline is gated and degradable: one metered ``ai_jobs`` row per
     leg that ran (``transcribe`` then ``structure``) records the pass
     (provider/model/tokens/cost/latency/status/attempts), and the intake is
-    moved Captured -> Structuring -> Ready for Review. A voice pass is two
-    metered rows where both legs ran (transcribe + structure, PS-03); a text
-    pass is one structure row. Before
-    any egress the NFR-001 budget meter is consulted (hard stop) and the consent
-    gate is checked fail-closed (missing/revoked grant -> raw doctor review with
-    no PHI sent); every successful egress is PHI-minimized (intake context only)
-    and audited via ``record_egress_disclosure``. Timeout-after-3-retries and
-    malformed provider output mark the job ``failed`` and degrade to raw review;
-    a low-confidence structuring outcome publishes ``pre_summary.low_confidence``
+    moved Structuring -> Ready for Review. A voice pass is two metered rows
+    where both legs ran (transcribe + structure, PS-03); a text pass is one
+    structure row. Before any egress the NFR-001 budget meter is consulted
+    (hard stop) and the consent gate is checked fail-closed (missing/revoked
+    grant -> raw doctor review with no PHI sent); every successful egress is
+    PHI-minimized (intake context only) and audited via
+    ``record_egress_disclosure``. Timeout-after-3-retries and malformed
+    provider output mark the job ``failed`` and degrade to raw review; a
+    low-confidence structuring outcome publishes ``pre_summary.low_confidence``
     and forces doctor review. All effects ride the SAME transaction as the
     ledger-first dedupe (replay is a no-op); the handler never raises a
     user-visible error to the patient.
+
+    ``expected_status`` pins which entry the pipeline will open a run for. The
+    first take (``intake.captured``) passes the default ``CAPTURED`` - strict,
+    so a replayed captured on an in-flight intake still skips. The re-record
+    re-trigger (``intake.retry_requested``, PS-07) passes ``STRUCTURING`` -
+    the facade already ran the Re-record -> Structuring ``RETRY_ACCEPTED`` edge
+    and incremented the record attempt, so the pipeline resumes the run exactly
+    like a first take (the fresh clip and incremented attempt count flow in) and
+    never re-transitions Structuring.
     """
     row = (
         await connection.execute(select(intake_intakes).where(intake_intakes.c.id == intake_id))
     ).first()
     if row is None:
         logger.warning(
-            "intake.captured consumed for missing intake %s; skipping pipeline",
+            "intake pipeline consumed for missing intake %s; skipping",
             intake_id,
         )
         return
@@ -173,24 +184,32 @@ async def _run_structuring_pipeline(
         record_attempts=int(row.record_attempts),
         forced_text=bool(row.forced_text),
     )
-    if current.status is not IntakeStatus.CAPTURED:
+    if current.status is not expected_status:
         logger.warning(
-            "intake %s is %s, not captured; skipping AI pipeline (already structured?)",
+            "intake %s is %s, not %s; skipping AI pipeline",
             intake_id,
             current.status.value,
+            expected_status.value,
         )
         return
 
-    structing = transition(current, IntakeAction.START_STRUCTURING)
-    await connection.execute(
-        intake_intakes.update()
-        .where(intake_intakes.c.id == intake_id)
-        .values(
-            status=structing.status.value,
-            record_attempts=structing.record_attempts,
-            forced_text=structing.forced_text,
+    # A first take arrives ``captured``: the run opens with the
+    # START_STRUCTURING transition. A re-record arrives ``structuring`` with the
+    # attempt already incremented by the facade - the current state IS the
+    # running state, so no transition and no status write (PS-07).
+    if current.status is IntakeStatus.CAPTURED:
+        structing = transition(current, IntakeAction.START_STRUCTURING)
+        await connection.execute(
+            intake_intakes.update()
+            .where(intake_intakes.c.id == intake_id)
+            .values(
+                status=structing.status.value,
+                record_attempts=structing.record_attempts,
+                forced_text=structing.forced_text,
+            )
         )
-    )
+    else:
+        structing = current
 
     context = _egress_context(row.language)
     gate_engine, consent_facade, budget_meter = _adapters._build_egress_gate()

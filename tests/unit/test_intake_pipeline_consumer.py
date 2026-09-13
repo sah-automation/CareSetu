@@ -40,7 +40,7 @@ from bus.events import (
 from modules.intake.adapters import register_handlers
 from modules.intake.adapters.ai_gateway import StructureResult, TranscribeResult
 from modules.intake.adapters.ai_provider_mock import MOCK_CONFIDENCE_CLEAN, MockAiProvider
-from modules.intake.domain.events import IntakeCapturedPayload
+from modules.intake.domain.events import IntakeCapturedPayload, IntakeRetryRequestedPayload
 from modules.intake.pricing import ModelPrice
 
 _PROVIDER = "mock"
@@ -166,12 +166,12 @@ def _media_store_patch() -> patch:
     return patch("modules.intake.adapters._build_media_store", return_value=_FakeMediaStore())
 
 
-def _registered_handler() -> object:
+def _registered_handler(event_type: str = EVENT_INTAKE_CAPTURED) -> object:
     from bus.registry import HandlerRegistry
 
     registry = HandlerRegistry()
     register_handlers(registry)
-    handlers = registry.handlers_for(EVENT_INTAKE_CAPTURED)
+    handlers = registry.handlers_for(event_type)
     assert len(handlers) == 1
     return handlers[0]
 
@@ -191,14 +191,16 @@ def _text_intake_row(*, intake_id: int = 1, status: str = "captured") -> SimpleN
     )
 
 
-def _voice_intake_row(*, intake_id: int = 1) -> SimpleNamespace:
+def _voice_intake_row(
+    *, intake_id: int = 1, status: str = "captured", record_attempts: int = 1
+) -> SimpleNamespace:
     return SimpleNamespace(
         id=intake_id,
         patient_id=42,
         mode="voice",
         language="hi",
-        status="captured",
-        record_attempts=1,
+        status=status,
+        record_attempts=record_attempts,
         text=None,
         transcript=None,
         transcript_usability=None,
@@ -206,7 +208,7 @@ def _voice_intake_row(*, intake_id: int = 1) -> SimpleNamespace:
     )
 
 
-def _media_row(*, object_key: str = "intake/abc-123") -> SimpleNamespace:
+def _media_row(*, object_key: str = "intake/abc-123", record_attempt: int = 1) -> SimpleNamespace:
     return SimpleNamespace(
         id=11,
         intake_id=1,
@@ -214,7 +216,7 @@ def _media_row(*, object_key: str = "intake/abc-123") -> SimpleNamespace:
         object_key=object_key,
         audio_duration_ms=90_000,
         file_size_bytes=1_024_000,
-        record_attempt=1,
+        record_attempt=record_attempt,
     )
 
 
@@ -228,6 +230,22 @@ def _captured_envelope(intake_id: int = 1) -> Envelope[IntakeCapturedPayload]:
             patient_id=42,
             mode="voice",
             duration_s=90.0,
+        ),
+    )
+
+
+def _retry_envelope(
+    intake_id: int = 1, record_attempt: int = 2
+) -> Envelope[IntakeRetryRequestedPayload]:
+    """A facade-emitted re-record trigger (``patient_re_record``) for intake 1."""
+    return Envelope[IntakeRetryRequestedPayload](
+        event_id=uuid4(),
+        event_type=EVENT_INTAKE_RETRY_REQUESTED,
+        producer="intake",
+        payload=IntakeRetryRequestedPayload(
+            intake_id=intake_id,
+            record_attempt=record_attempt,
+            reason="patient_re_record",
         ),
     )
 
@@ -793,3 +811,132 @@ async def test_non_captured_intake_skips_pipeline() -> None:
 
     # Only the lookup happened - a non-captured intake is skipped, not re-run.
     assert [r.kind for r in connection.executed] == ["select_intake"]
+
+
+# ---------------------------------------------------------------------------
+# intake.retry_requested - the re-record pipeline re-trigger (PS-07)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_retry_requested_reruns_pipeline_from_structuring_with_new_presummary() -> None:
+    """PS-07: a re-recorded intake never stalls in ``structuring``. The
+    ``intake.retry_requested`` handler re-runs the structuring pipeline on the
+    fresh (attempt-2) clip; the run resumes from ``structuring`` - no
+    re-transition - and ties the completed job + new Draft pre-summary to the
+    incremented attempt count, ending Ready for Review."""
+    handler = _registered_handler(EVENT_INTAKE_RETRY_REQUESTED)
+    connection = _FakeConnection(
+        intake_row=_voice_intake_row(status="structuring", record_attempts=2),
+        media_row=_media_row(object_key="intake/7/clip-2.enc", record_attempt=2),
+    )
+    engine = _fake_engine(connection)
+    media_store = _FakeMediaStore(clip_bytes=b"decrypted-clip-bytes")
+    transcribe = AsyncMock(
+        return_value=SimpleNamespace(
+            transcript="long enough transcript text here",
+            confidence=0.8,
+            language="hi",
+            input_tokens=0,
+            output_tokens=0,
+        )
+    )
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("modules.intake.adapters._build_egress_gate", return_value=_fake_egress_gate()),
+        patch("modules.intake.adapters._build_media_store", return_value=media_store),
+        patch.object(MockAiProvider, "transcribe", transcribe),
+    ):
+        await handler(_retry_envelope())
+
+    # The run consumed the NEW clip: the intent-2 media ref (latest by record
+    # attempt) is the one read and placed on the transcribe request.
+    assert media_store.read.await_args.kwargs["object_key"] == "intake/7/clip-2.enc"
+    request = transcribe.await_args.args[0]
+    assert request.audio_ref == "intake/7/clip-2.enc"
+
+    kinds = [r.kind for r in connection.executed]
+    # Transcribe + structure ran as on a first take, and a NEW pre-summary was
+    # produced (never a stall in structuring).
+    ai_inserts = [r for r in connection.executed if r.kind == "insert_ai_job"]
+    assert [r.params["task_type"] for r in ai_inserts] == ["transcribe", "structure"]
+    assert "insert_pre_summary" in kinds
+    outbox_types = [r.params["event_type"] for r in connection.executed if r.kind == "outbox"]
+    assert EVENT_PRE_SUMMARY_READY in outbox_types
+    assert outbox_types.count(EVENT_AI_JOB_COMPLETED) == 2
+    assert outbox_types.count(EVENT_AI_EGRESS_RECORDED) == 2
+
+    # Resumed from structuring: the only intake status write is the final
+    # ready_for_review (the facade already transitioned Re-record -> Structuring
+    # with the attempt incremented - never a START_STRUCTURING re-transition).
+    assert [r.params["status"] for r in connection.executed if r.kind == "status_update"] == [
+        "ready_for_review"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_retry_requested_on_intake_still_in_re_record_skips() -> None:
+    """The pipeline's own ``unusable_audio`` retry fires while the intake is
+    still ``re_record`` (no fresh clip yet); the re-trigger entry only accepts
+    ``structuring``, so that earlier event is a strict skip - the actual re-run
+    waits for the facade's ``patient_re_record`` event."""
+    handler = _registered_handler(EVENT_INTAKE_RETRY_REQUESTED)
+    connection = _FakeConnection(intake_row=_voice_intake_row(status="re_record"))
+    engine = _fake_engine(connection)
+
+    await _run(handler, _retry_envelope(), engine)
+
+    # Only the lookup happened - nothing re-ran against a re_record intake.
+    assert [r.kind for r in connection.executed] == ["select_intake"]
+
+
+@pytest.mark.asyncio
+async def test_replayed_captured_on_in_flight_structuring_intake_skips() -> None:
+    """PS-07: the captured-path guard stays strict. When an ``intake.captured``
+    event arrives for an intake already in ``structuring`` (e.g. a post-re-record
+    captured event, or any out-of-order delivery), the pipeline skips - only the
+    ``intake.retry_requested`` entry may resume it. Pins the pipeline-level guard
+    independently of ledger dedupe."""
+    handler = _registered_handler()
+    connection = _FakeConnection(
+        intake_row=_voice_intake_row(status="structuring", record_attempts=2)
+    )
+    engine = _fake_engine(connection)
+
+    await _run(handler, _captured_envelope(), engine)
+
+    # Only the lookup happened - the structuring intake is not re-structured.
+    assert [r.kind for r in connection.executed] == ["select_intake"]
+
+
+@pytest.mark.asyncio
+async def test_retry_requested_replay_of_same_event_id_is_a_no_op() -> None:
+    """Coding-standards §6: every outbox consumer has an idempotency test. A
+    replayed ``intake.retry_requested`` event_id finds its ledger row and is a
+    no-op - the pipeline never re-runs for the same retry delivery."""
+    handler = _registered_handler(EVENT_INTAKE_RETRY_REQUESTED)
+    connection = _FakeConnection(
+        intake_row=_voice_intake_row(status="structuring", record_attempts=2),
+        media_row=_media_row(object_key="intake/7/clip-2.enc", record_attempt=2),
+    )
+    engine = _fake_engine(connection)
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=False,
+        ) as record_consumed,
+    ):
+        await handler(_retry_envelope())
+
+    record_consumed.assert_awaited_once()
+    # Ledger returned False (replay) so nothing else ran - no re-run effects.
+    assert connection.executed == []

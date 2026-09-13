@@ -49,6 +49,7 @@ from modules.intake.domain.events import (
     PreSummaryLowConfidencePayload,
     PreSummaryReadyPayload,
 )
+from modules.intake.domain.state_machine import IntakeStatus
 from modules.intake.intake_models import INTAKE_SCHEMA
 
 logger = logging.getLogger(__name__)
@@ -99,7 +100,7 @@ def register_handlers(registry: HandlerRegistry) -> None:
     dispatcher reconstructs a claimed ``intake_outbox`` row with each before
     fan-out. The two §4.2 self-subscriptions (MOD-005 -> MOD-005 self) are
     ``intake.captured`` (the async AI pipeline happy path, T10 #354) and
-    ``intake.retry_requested`` (the re-record body, T08).
+    ``intake.retry_requested`` (the re-record pipeline re-trigger, T09 #406).
     """
     for event_type, payload_model in (
         (EVENT_INTAKE_STARTED, IntakeStartedPayload),
@@ -172,10 +173,24 @@ async def _on_intake_captured(envelope: Envelope[BaseModel]) -> None:
 
 
 async def _on_intake_retry_requested(envelope: Envelope[BaseModel]) -> None:
-    """Re-record flow seam (T08 #352). Registered here for the composition root."""
+    """Consume ``intake.retry_requested``: re-run the structuring pipeline.
+
+    Ledger first (``run_handler``), pipeline second, one transaction boundary.
+    The re-record facade emits this event AFTER attaching the fresh clip and
+    incrementing the record attempt (Re-record -> Structuring, ``RETRY_ACCEPTED``);
+    consuming it re-runs ``transcribe -> structure -> pre_summary`` on the new
+    clip so a re-recorded intake never stalls in ``structuring`` (PS-07, #406).
+    The pipeline's retry entry accepts an intake already in ``structuring``; a
+    replayed ``event_id`` finds its ledger row and skips, and the ``intake.captured``
+    entry stays strict so a replayed captured on an in-flight intake still skips.
+    """
 
     async def _impl(connection: AsyncConnection, payload: IntakeRetryRequestedPayload) -> None:
-        del connection, payload
+        await _run_structuring_pipeline(
+            connection,
+            payload.intake_id,
+            expected_status=IntakeStatus.STRUCTURING,
+        )
 
     await run_handler(
         envelope,
