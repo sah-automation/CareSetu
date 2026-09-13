@@ -252,6 +252,9 @@ class OpenAiCompatibleAdapter:
     def _parse_structure_response(
         self,
         data: dict[str, object],
+        *,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
     ) -> StructureResult:
         choices = data.get("choices")
         if not isinstance(choices, list) or len(choices) == 0:
@@ -291,7 +294,14 @@ class OpenAiCompatibleAdapter:
                 "OpenAI-compatible /chat/completions content failed StructureResult validation",
                 retries_exhausted=False,
             ) from exc
-        return result
+        return StructureResult(
+            chief_complaints=result.chief_complaints,
+            symptoms=result.symptoms,
+            duration=result.duration,
+            confidence=result.confidence,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
 
     def _extract_usage_tokens(
         self,
@@ -342,6 +352,9 @@ class OpenAiCompatibleAdapter:
         self,
         data: dict[str, object],
         context_language: Literal["hi", "en"],
+        *,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
     ) -> TranscribeResult:
         text = data.get("text")
         if not isinstance(text, str) or not text.strip():
@@ -357,6 +370,8 @@ class OpenAiCompatibleAdapter:
                 transcript=text.strip(),
                 confidence=self._transcription_confidence_proxy(data),
                 language=language,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
             )
         except Exception as exc:
             raise Ext002CallError(
@@ -383,7 +398,6 @@ class OpenAiCompatibleAdapter:
             },
             files={"file": (filename, request.audio_bytes, _clip_mime_type(filename))},
         )
-        result = self._parse_transcribe_response(data, request.context.language)
         prompt_tokens, completion_tokens = self._extract_transcription_usage_tokens(data)
         if prompt_tokens or completion_tokens:
             logger.info(
@@ -391,13 +405,17 @@ class OpenAiCompatibleAdapter:
                 prompt_tokens,
                 completion_tokens,
             )
-        return result
+        return self._parse_transcribe_response(
+            data,
+            request.context.language,
+            input_tokens=prompt_tokens,
+            output_tokens=completion_tokens,
+        )
 
     @observe
     async def structure(self, request: StructureRequest) -> StructureResult:
         messages = self._build_messages(request.transcript, request.context)
         data = await self._post_chat(messages)
-        result = self._parse_structure_response(data)
         prompt_tokens, completion_tokens = self._extract_usage_tokens(data)
         if prompt_tokens or completion_tokens:
             logger.info(
@@ -405,7 +423,11 @@ class OpenAiCompatibleAdapter:
                 prompt_tokens,
                 completion_tokens,
             )
-        return result
+        return self._parse_structure_response(
+            data,
+            input_tokens=prompt_tokens,
+            output_tokens=completion_tokens,
+        )
 
     @observe
     async def draft_rx(self, request: DraftRxRequest) -> DraftRxResult:

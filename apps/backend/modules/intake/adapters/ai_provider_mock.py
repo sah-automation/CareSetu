@@ -88,6 +88,8 @@ class MockAiProvider:
             transcript="mock transcript",
             confidence=self._confidence,
             language=request.context.language,
+            input_tokens=0,
+            output_tokens=0,
         )
 
     @observe
@@ -98,6 +100,8 @@ class MockAiProvider:
             symptoms=["mock symptom"],
             duration="1 week",
             confidence=self._confidence,
+            input_tokens=0,
+            output_tokens=0,
         )
 
     @observe
@@ -112,6 +116,8 @@ class MockAiProvider:
                 )
             ],
             confidence=self._confidence,
+            input_tokens=0,
+            output_tokens=0,
         )
 
 

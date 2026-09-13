@@ -65,6 +65,8 @@ async def test_mock_transcribe_clean_confidence() -> None:
     assert result.transcript
     assert result.confidence == MOCK_CONFIDENCE_CLEAN
     assert result.language == "hi"
+    assert result.input_tokens == 0
+    assert result.output_tokens == 0
 
 
 async def test_mock_structure_clean_confidence() -> None:
@@ -77,6 +79,8 @@ async def test_mock_structure_clean_confidence() -> None:
     assert result.symptoms == ["mock symptom"]
     assert result.duration == "1 week"
     assert result.confidence == MOCK_CONFIDENCE_CLEAN
+    assert result.input_tokens == 0
+    assert result.output_tokens == 0
 
 
 async def test_mock_draft_rx_clean_confidence_declared_contract() -> None:
@@ -93,6 +97,8 @@ async def test_mock_draft_rx_clean_confidence_declared_contract() -> None:
     assert len(result.rx_items) == 1
     assert result.rx_items[0].name == "mock medication"
     assert result.confidence == MOCK_CONFIDENCE_CLEAN
+    assert result.input_tokens == 0
+    assert result.output_tokens == 0
 
 
 @pytest.mark.parametrize(

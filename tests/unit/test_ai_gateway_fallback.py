@@ -244,12 +244,36 @@ def _gemini_fallback() -> tuple[FallbackAiGateway, _RecordingTransport]:
 # ---------------------------------------------------------------------------
 
 
+async def test_fallback_passes_through_serving_provider_usage_tokens() -> None:
+    serving_body = dict(_CHAT_SUCCESS_BODY)
+    serving_body["usage"] = {"prompt_tokens": 120, "completion_tokens": 40}
+    primary_transport = _RecordingTransport(httpx.Response(200, json=serving_body))
+    secondary_transport = _RecordingTransport(httpx.Response(200, json=_CHAT_SUCCESS_BODY))
+    gateway = FallbackAiGateway(
+        _openai_gateway(primary_transport),
+        _META_GROQ,
+        _openai_gateway(
+            secondary_transport,
+            base_url=_GEMINI_URL,
+            model="gemini-2.0-flash",
+        ),
+        _META_GEMINI,
+    )
+
+    result = await gateway.structure(_STRUCTURE_REQUEST)
+
+    # The chain never fabricates usage - it passes through the serving
+    # provider's real token counts on the result (PS-01 metering seam).
+    assert result.input_tokens == 120
+    assert result.output_tokens == 40
+
+
 async def test_primary_success_returns_primary_and_never_calls_secondary() -> None:
     gateway, primary_transport, secondary_transport = _groq_ok()
 
     result = await gateway.structure(_STRUCTURE_REQUEST)
 
-    assert result.model_dump() == _STRUCTURE_BODY
+    assert result.model_dump() == dict(_STRUCTURE_BODY, input_tokens=0, output_tokens=0)
     assert len(primary_transport.requests) >= 1
     assert secondary_transport.requests == []
 
@@ -284,7 +308,7 @@ async def test_primary_outage_falls_back_to_secondary_success() -> None:
 
     result = await gateway.structure(_STRUCTURE_REQUEST)
 
-    assert result.model_dump() == _STRUCTURE_BODY
+    assert result.model_dump() == dict(_STRUCTURE_BODY, input_tokens=0, output_tokens=0)
     # Primary exhausted its full retry budget (1 + max_retries HTTP attempts).
     assert len(primary_transport.requests) == DEFAULT_AI_MAX_RETRIES + 1
     assert len(secondary_transport.requests) >= 1
@@ -476,7 +500,7 @@ async def test_open_primary_breaker_routes_to_secondary() -> None:
 
     result = await gateway.structure(_STRUCTURE_REQUEST)
 
-    assert result.model_dump() == _STRUCTURE_BODY
+    assert result.model_dump() == dict(_STRUCTURE_BODY, input_tokens=0, output_tokens=0)
     # The open breaker refused without touching the primary provider again:
     # 2 tripped calls x (1 + max_retries) attempts.
     assert len(outage.requests) == 2 * (DEFAULT_AI_MAX_RETRIES + 1)
@@ -594,7 +618,7 @@ async def test_fallback_gateway_typed_as_port() -> None:
 
     result = await port.structure(_STRUCTURE_REQUEST)
 
-    assert result.model_dump() == _STRUCTURE_BODY
+    assert result.model_dump() == dict(_STRUCTURE_BODY, input_tokens=0, output_tokens=0)
 
 
 # ---------------------------------------------------------------------------

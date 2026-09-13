@@ -228,6 +228,8 @@ async def test_structure_usage_tokens_extracted() -> None:
     result = await adapter.structure(_structure_request())
 
     assert isinstance(result, StructureResult)
+    assert result.input_tokens == 150
+    assert result.output_tokens == 75
 
 
 async def test_structure_usage_tokens_missing() -> None:
@@ -255,6 +257,8 @@ async def test_structure_usage_tokens_missing() -> None:
     result = await adapter.structure(_structure_request())
 
     assert isinstance(result, StructureResult)
+    assert result.input_tokens == 0
+    assert result.output_tokens == 0
 
 
 # --- 429 / 5xx retry then outage ---
@@ -575,6 +579,8 @@ async def test_transcribe_usage_extracted_when_present() -> None:
     result = await adapter.transcribe(_transcribe_request())
 
     assert isinstance(result, TranscribeResult)
+    assert result.input_tokens == 10
+    assert result.output_tokens == 5
 
 
 async def test_transcribe_usage_extracted_from_vendor_extension() -> None:
@@ -587,6 +593,21 @@ async def test_transcribe_usage_extracted_from_vendor_extension() -> None:
     result = await adapter.transcribe(_transcribe_request())
 
     assert isinstance(result, TranscribeResult)
+    assert result.input_tokens == 7
+    assert result.output_tokens == 3
+
+
+async def test_transcribe_usage_zero_when_absent() -> None:
+    transport = httpx.MockTransport(
+        lambda request: _success_response(_mock_transcription_response())
+    )
+    adapter = _make_adapter(transport)
+
+    result = await adapter.transcribe(_transcribe_request())
+
+    assert isinstance(result, TranscribeResult)
+    assert result.input_tokens == 0
+    assert result.output_tokens == 0
 
 
 # --- transcribe: 429 / 5xx retry then outage ---

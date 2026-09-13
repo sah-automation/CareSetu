@@ -86,11 +86,19 @@ class TranscribeRequest(BaseModel):
 
 
 class TranscribeResult(BaseModel):
-    """The transcript plus the provider's measured transcription confidence."""
+    """The transcript plus the provider's measured transcription confidence.
+
+    ``input_tokens`` / ``output_tokens`` are the provider's reported usage for
+    the call (default 0 - the metering seam (PS-01) so downstream bookkeeping
+    can record real costs; the OpenAI-compatible adapter reports the real
+    numbers, the mock and fallback paths report real 0).
+    """
 
     transcript: str
     confidence: float
     language: Literal["hi", "en"]
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 class StructureRequest(BaseModel):
@@ -109,12 +117,16 @@ class StructureResult(BaseModel):
     ``confidence`` is the provider's ``structuring_confidence`` (ADR-0001 /
     glossary): compared against the 0.70 threshold downstream to derive the
     ``low_confidence`` flag and force doctor review when below.
+    ``input_tokens`` / ``output_tokens`` carry the provider's reported usage
+    (default 0) for metering (PS-01).
     """
 
     chief_complaints: list[str]
     symptoms: list[str]
     duration: str
     confidence: float
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 class DraftRxRequest(BaseModel):
@@ -143,10 +155,16 @@ class RxItem(BaseModel):
 
 
 class DraftRxResult(BaseModel):
-    """The drafted prescription lines plus provider confidence."""
+    """The drafted prescription lines plus provider confidence.
+
+    ``input_tokens`` / ``output_tokens`` carry the provider's reported usage
+    (default 0) for metering (PS-01).
+    """
 
     rx_items: list[RxItem]
     confidence: float
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 class Ext002CallError(RuntimeError):
