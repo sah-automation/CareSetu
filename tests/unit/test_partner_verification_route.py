@@ -89,8 +89,8 @@ _DETAIL = PartnerVerificationDetail(
     ],
 )
 
-_APPROVE_RESULT = PartnerView(partner_id=3, status="Active", round=1)
-_REJECT_RESULT = PartnerView(partner_id=3, status="Rejected", round=1)
+_APPROVE_RESULT = PartnerView(partner_id=3, partner_type="doctor", status="Active", round=1)
+_REJECT_RESULT = PartnerView(partner_id=3, partner_type="doctor", status="Rejected", round=1)
 
 
 class StubPartnerFacade:
@@ -141,7 +141,9 @@ class StubPartnerFacade:
 
     async def grace_lapse(self, partner_id: int) -> PartnerView:
         self.calls.append({"method": "grace_lapse", "partner_id": partner_id})
-        return PartnerView(partner_id=partner_id, status="Under Verification", round=1)
+        return PartnerView(
+            partner_id=partner_id, partner_type="doctor", status="Under Verification", round=1
+        )
 
 
 def _token(*, scope: str = "operator", subject_id: int = _OPERATOR_ID) -> str:
@@ -353,7 +355,7 @@ def test_grace_lapse_forwards_to_facade() -> None:
 
     assert response.status_code == 200
     assert response.json() == PartnerView(
-        partner_id=3, status="Under Verification", round=1
+        partner_id=3, partner_type="doctor", status="Under Verification", round=1
     ).model_dump(mode="json")
     assert facade.calls == [{"method": "grace_lapse", "partner_id": 3}]
 

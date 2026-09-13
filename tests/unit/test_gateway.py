@@ -211,20 +211,23 @@ def _assert_gateway_rejection_logged(caplog: pytest.LogCaptureFixture, trace_id:
     )
 
 
-def _auth_request(client_ip: str) -> Request:
-    """A crafted ``/v1/auth`` scope presenting ``client_ip`` as the caller's host.
+def _dispatch_request(
+    client_ip: str, *, path: str = "/v1/auth/register", method: str = "POST"
+) -> Request:
+    """A crafted HTTP scope presenting ``client_ip`` as the caller's host.
 
-    ``TestClient`` hardcodes a single client IP, so the per-IP isolation test
-    (B4) builds its own scopes and drives ``RateLimitMiddleware.dispatch``
-    directly instead of going through the app.
+    ``TestClient`` hardcodes a single client IP, so the per-IP isolation tests
+    (B4) build their own scopes and drive ``RateLimitMiddleware.dispatch``
+    directly instead of going through the app. ``path``/``method`` are
+    overridable so the intake-surface scope tests reuse the same harness.
     """
     return Request(
         scope={
             "type": "http",
-            "method": "POST",
+            "method": method,
             "scheme": "http",
-            "path": "/v1/auth/register",
-            "raw_path": b"/v1/auth/register",
+            "path": path,
+            "raw_path": path.encode(),
             "query_string": b"",
             "root_path": "",
             "headers": [],
@@ -232,6 +235,11 @@ def _auth_request(client_ip: str) -> Request:
             "server": ("testserver", 80),
         }
     )
+
+
+def _auth_request(client_ip: str) -> Request:
+    """A crafted ``/v1/auth`` scope presenting ``client_ip`` as the caller's host."""
+    return _dispatch_request(client_ip)
 
 
 # ---------------------------------------------------------------------------
@@ -701,6 +709,91 @@ async def test_rate_limit_keys_buckets_per_client_ip() -> None:
     assert (await middleware.dispatch(ip_a, stub_call_next)).status_code == 429
 
 
+async def test_rate_limit_counts_intake_write_surface_only() -> None:
+    """PS-05 AC1: the intake write trio counts toward its own strict per-IP cap.
+
+    The widened scope covers exactly the media-and-row-writing surfaces -
+    ``upload-media``, ``submit``, and the ``{intake_id}/re-record`` shape -
+    each counted into the intake surface's own per-IP bucket. Reading an intake
+    back (detail, pre-summary, clip playback) is never counted and never capped.
+    """
+    middleware = RateLimitMiddleware(app=None, enabled=True, max_requests=3, window_seconds=60)
+
+    async def stub_call_next(request: Request) -> Response:
+        return Response(status_code=200)
+
+    for path in ("/v1/intake/submit", "/v1/intake/upload-media", "/v1/intake/42/re-record"):
+        assert (
+            await middleware.dispatch(_dispatch_request("9.9.9.9", path=path), stub_call_next)
+        ).status_code == 200
+
+    response = await middleware.dispatch(
+        _dispatch_request("9.9.9.9", path="/v1/intake/submit"), stub_call_next
+    )
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "60"
+
+    for path in ("/v1/intake/42", "/v1/intake/42/pre-summary", "/v1/intake/42/media/11", "/probe"):
+        assert (
+            await middleware.dispatch(
+                _dispatch_request("9.9.9.9", path=path, method="GET"), stub_call_next
+            )
+        ).status_code == 200
+
+
+async def test_rate_limit_intake_and_auth_are_independent_tiers() -> None:
+    """PS-05: the intake surface keeps its OWN strict tier, independent of auth.
+
+    Each surface owns a separate per-IP bucket, so exhausting the intake tier
+    leaves the auth tier untouched (and vice versa) - ``"auth-only limiting
+    semantics still hold"``: a patient's upload burst can never lock them out
+    of their own OTP/verify flow.
+    """
+    middleware = RateLimitMiddleware(app=None, enabled=True, max_requests=2, window_seconds=60)
+
+    async def stub_call_next(request: Request) -> Response:
+        return Response(status_code=200)
+
+    ip = "1.2.3.4"
+    auth_path = "/v1/auth/register"
+
+    # Exhaust the auth tier: the third auth request 429s...
+    assert (
+        await middleware.dispatch(_dispatch_request(ip, path=auth_path), stub_call_next)
+    ).status_code == 200
+    assert (
+        await middleware.dispatch(_dispatch_request(ip, path=auth_path), stub_call_next)
+    ).status_code == 200
+    assert (
+        await middleware.dispatch(_dispatch_request(ip, path=auth_path), stub_call_next)
+    ).status_code == 429
+
+    # ...but the intake tier is still fresh, so an intake write answers 200.
+    response = await middleware.dispatch(
+        _dispatch_request(ip, path="/v1/intake/submit"), stub_call_next
+    )
+    assert response.status_code == 200
+
+    # Exhaust the intake tier independently; the auth tier stays unchanged.
+    intake_probe = "/v1/intake/upload-media"
+    assert (
+        await middleware.dispatch(_dispatch_request(ip, path=intake_probe), stub_call_next)
+    ).status_code == 200
+    assert (
+        await middleware.dispatch(_dispatch_request(ip, path=intake_probe), stub_call_next)
+    ).status_code == 429
+
+    # A separate caller still has both tiers at their own budgets.
+    assert (
+        await middleware.dispatch(_dispatch_request("5.6.7.8", path=auth_path), stub_call_next)
+    ).status_code == 200
+    assert (
+        await middleware.dispatch(
+            _dispatch_request("5.6.7.8", path="/v1/intake/submit"), stub_call_next
+        )
+    ).status_code == 200
+
+
 # ---------------------------------------------------------------------------
 # Settings
 # ---------------------------------------------------------------------------
@@ -807,6 +900,69 @@ def test_settings_directory_max_results_refuses_invalid_int(
         get_settings()
 
 
+# ---------------------------------------------------------------------------
+# Phase 7 intake-media Supabase backend config (ticket #385)
+# ---------------------------------------------------------------------------
+
+
+def test_settings_intake_media_backend_defaults_to_local() -> None:
+    settings = Settings()
+
+    assert settings.intake_media_backend == "local"
+    assert settings.supabase_url == ""
+    assert settings.supabase_service_role_key == ""
+
+
+def test_settings_intake_media_backend_reads_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INTAKE_MEDIA_BACKEND", "supabase")
+    monkeypatch.setenv("SUPABASE_URL", "https://abc.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "sb-test-key")
+
+    settings = get_settings()
+
+    assert settings.intake_media_backend == "supabase"
+    assert settings.supabase_url == "https://abc.supabase.co"
+    assert settings.supabase_service_role_key == "sb-test-key"
+
+
+def test_settings_supabase_backend_requires_url_and_service_role_key() -> None:
+    with pytest.raises(ValueError, match="SUPABASE_URL"):
+        Settings(intake_media_backend="supabase")
+    with pytest.raises(ValueError, match="SUPABASE_SERVICE_ROLE_KEY"):
+        Settings(
+            intake_media_backend="supabase",
+            supabase_url="https://abc.supabase.co",
+        )
+
+
+def test_settings_rejects_unknown_intake_media_backend() -> None:
+    with pytest.raises(ValueError, match="unsupported intake_media_backend"):
+        Settings(intake_media_backend="s3")
+
+
+def test_settings_supabase_backend_needs_url_env_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INTAKE_MEDIA_BACKEND", "supabase")
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+
+    with pytest.raises(ValueError, match="SUPABASE_URL"):
+        get_settings()
+
+
+def test_settings_local_backend_needs_no_supabase_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+
+    settings = Settings(intake_media_backend="local")
+
+    assert settings.intake_media_backend == "local"
+
+
 def _env_example_text() -> str:
     return _ENV_EXAMPLE.read_text(encoding="utf-8")
 
@@ -818,6 +974,15 @@ def test_env_example_documents_every_phase6_directory_variable() -> None:
     assert "DIRECTORY_MAX_RESULTS=50" in text
     assert "REDIS_DIRECTORY_TTL_SECONDS=300" in text
     assert "PARTNER_CREDENTIAL_SWEEP_CRON=" in text
+
+
+def test_env_example_documents_intake_media_supabase_switch() -> None:
+    text = _env_example_text()
+    # The intake-media backend switch (#385) must be documented with both
+    # backends and the three new env vars so the config is discoverable at boot.
+    assert "INTAKE_MEDIA_BACKEND=" in text
+    assert "SUPABASE_URL=" in text
+    assert "SUPABASE_SERVICE_ROLE_KEY=" in text
 
 
 def test_env_example_redis_directory_ttl_comments_the_default() -> None:

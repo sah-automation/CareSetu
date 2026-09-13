@@ -38,7 +38,9 @@ _SUBMISSION_RESULT = CredentialSubmissionResult(
     auto_fail_reason=None,
 )
 
-_RESOLVED_PARTNER = PartnerView(partner_id=_PARTNER_ID, status="Registered", round=0)
+_RESOLVED_PARTNER = PartnerView(
+    partner_id=_PARTNER_ID, partner_type="doctor", status="Registered", round=0
+)
 
 
 class StubPartnerFacade:

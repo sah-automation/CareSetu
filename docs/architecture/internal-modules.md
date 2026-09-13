@@ -313,8 +313,8 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 #### 2. Inbound & Outbound Interfaces
 
 - **Inbound Sync APIs:** `submit_intake(patient, mode, language, media|text)`, `get_intake`, `get_pre_summary(intake_id)`, `mark_pre_summary_reviewed(intake_id, doctor)`, `request_rx_draft(doctor_input_ref, pre_summary_ref, history_summary)`.
-- **Inbound Events Subscribed:** `intake.captured` (self-trigger → async AI pipeline).
-- **Outbound Events Published:** `intake.captured`, `pre_summary.ready`, `pre_summary.low_confidence`, `ai_job.completed`, `ai_job.failed`, `ai_egress.recorded`.
+- **Inbound Events Subscribed:** `intake.captured` (self-trigger → async AI pipeline), `intake.started` (self: telemetry-only log + count - intake funnel entry, T05 #369).
+- **Outbound Events Published:** `intake.started`, `intake.captured`, `pre_summary.ready`, `pre_summary.low_confidence`, `ai_job.completed`, `ai_job.failed`, `ai_egress.recorded`.
 
 #### 3. Core Business Logic & State Machines
 
@@ -327,7 +327,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 - **Language/Runtime:** Python 3.11+ (asyncio).
 - **Framework:** FastAPI + Pydantic v2; `httpx` for LLM calls.
 - **Persistence Layer:** PostgreSQL (`intake` schema); object storage for media.
-- **Constraint:** `EXT-002` freemium tier; hard token/₹ budget meter enforced (`NFR-001`, `NFR-COST-001`); egress carries only intake/prescription context - never the full record (`NFR-SEC-006`).
+- **Constraint:** `EXT-002` freemium tier; monthly token/₹ budget meter, observe-and-warn (PS-10, #408) - reports against `NFR-001`, never blocks a call; egress carries only intake/prescription context - never the full record (`NFR-SEC-006`).
 
 #### 5. Module NFR Allocation
 
@@ -570,28 +570,28 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 
 ### 4.1 Synchronous Communication Matrix
 
-| Initiating Module          | Target Module                   | Protocol                       | Data Schema                               | Purpose                                                               | Traceability                  |
-| :------------------------- | :------------------------------ | :----------------------------- | :---------------------------------------- | :-------------------------------------------------------------------- | :---------------------------- |
-| API Gateway / Edge         | `MOD-001` (IAM)                 | Internal HTTP / in-process     | JWT claims + scope                        | Token validation & RBAC scope resolution on every request             | `NFR-SEC-002/003`, `FEAT-001` |
-| `MOD-003` (LHR)            | `MOD-004` (Consent)             | Internal API                   | ConsentRequest                            | `check_consent(patient, scope, counterparty)` before any record share | `FEAT-002`, `NFR-SEC-006`     |
-| `MOD-006` (Care)           | `MOD-005` (Intake)              | Internal API                   | PreSummary DTO                            | `get_finalized_pre_summary` - gate handshake on reviewed summary      | `FEAT-008`                    |
-| `MOD-006` (Care)           | `MOD-003` (LHR)                 | Internal API                   | RecordEntry[]                             | `read_consented_history` for rx drafting context (consent-gated)      | `FEAT-009`                    |
-| `MOD-006` (Care)           | `MOD-001` (IAM)                 | Internal API                   | Actor DTO                                 | Resolve doctor identity & verify active partner role                  | `FEAT-009`, `NFR-SEC-003`     |
-| `MOD-008` (Fulfillment)    | `MOD-006` (Care)                | Internal API                   | RxDTO (items, patient)                    | `get_approved_prescription` - routing source of truth                 | `FEAT-012`                    |
-| `MOD-008` (Fulfillment)    | `MOD-001` (IAM)                 | Internal API                   | Actor DTO                                 | Resolve chemist identity & verify active role                         | `FEAT-012`, `NFR-SEC-003`     |
-| `MOD-007` (Diagnostics)    | `MOD-001` (IAM)                 | Internal API                   | Actor DTO                                 | Resolve lab identity & verify active role                             | `FEAT-010`, `NFR-SEC-003`     |
-| `MOD-007` (Diagnostics)    | `MOD-003` (LHR)                 | Internal API                   | PatientDTO                                | Resolve consented patient for order→patient binding                   | `FEAT-011`                    |
-| `MOD-009` (Settlement)     | `MOD-006`/`MOD-007` (Care/Diag) | Internal API                   | OrderDTO                                  | `get_order_context(order_ref)` for settlement amount/reference        | `FEAT-016`                    |
-| `MOD-010` (Notify)         | `MOD-001` (IAM)                 | Internal API                   | ContactDTO                                | `resolve_contact` - phone + language for template send                | `FEAT-019`                    |
-| `MOD-010` (Notify)         | `MOD-006` (Care)                | Internal API                   | RxScheduleDTO                             | `get_rx_schedule` - dosage reminder scheduling                        | `FEAT-019`                    |
-| `MOD-010` (Notify)         | `MOD-003` (LHR)                 | Internal API                   | FollowUpPlanDTO                           | `get_follow_up_plan` - re-test nudge scheduling                       | `FEAT-018`                    |
-| `MOD-005` (Intake)         | `MOD-001` (IAM)                 | Internal API                   | PatientDTO                                | Resolve patient identity for intake attribution                       | `FEAT-006`                    |
-| `MOD-002` (Partner)        | `MOD-001` (IAM)                 | Internal API                   | CredentialAccountDTO                      | `create_credential_account` / activate role on gated activation       | `FEAT-014/015`                |
-| Operator / Patient channel | `MOD-011` (Audit)               | Gateway → Internal API         | AuditQuery                                | `query_audit` (operator) / `get_access_history` (patient)             | `FEAT-003`, `FEAT-020`        |
-| `MOD-001` (IAM)            | `EXT-001` (SMS/OTP)             | Outbound REST                  | OTP payload (JSON)                        | Deliver verification OTP                                              | `FEAT-001`, `NFR-002`         |
-| `MOD-005` (Intake)         | `EXT-002` (LLM/AI)              | Outbound REST (≤ 30 s)         | transcribe/structure/draft (JSON + media) | Pre-summary & rx drafting                                             | `FEAT-006/007/009`, `NFR-001` |
-| `MOD-010` (Notify)         | `EXT-003` (WhatsApp)            | Outbound REST + signed webhook | Template payload / delivery status        | Template notifications; delivery callbacks                            | `FEAT-019`, `NFR-SEC-005`     |
-| `MOD-009` (Settlement)     | `EXT-004` (UPI GW)              | Outbound REST + HMAC webhook   | Initiate / status JSON                    | Facilitated-payment exception path                                    | `FEAT-016`, `NFR-SEC-005`     |
+| Initiating Module          | Target Module                   | Protocol                       | Data Schema                                                                                                                             | Purpose                                                               | Traceability                  |
+| :------------------------- | :------------------------------ | :----------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------- | :---------------------------- |
+| API Gateway / Edge         | `MOD-001` (IAM)                 | Internal HTTP / in-process     | JWT claims + scope                                                                                                                      | Token validation & RBAC scope resolution on every request             | `NFR-SEC-002/003`, `FEAT-001` |
+| `MOD-003` (LHR)            | `MOD-004` (Consent)             | Internal API                   | ConsentRequest                                                                                                                          | `check_consent(patient, scope, counterparty)` before any record share | `FEAT-002`, `NFR-SEC-006`     |
+| `MOD-006` (Care)           | `MOD-005` (Intake)              | Internal API                   | PreSummary DTO                                                                                                                          | `get_finalized_pre_summary` - gate handshake on reviewed summary      | `FEAT-008`                    |
+| `MOD-006` (Care)           | `MOD-003` (LHR)                 | Internal API                   | RecordEntry[]                                                                                                                           | `read_consented_history` for rx drafting context (consent-gated)      | `FEAT-009`                    |
+| `MOD-006` (Care)           | `MOD-001` (IAM)                 | Internal API                   | Actor DTO                                                                                                                               | Resolve doctor identity & verify active partner role                  | `FEAT-009`, `NFR-SEC-003`     |
+| `MOD-008` (Fulfillment)    | `MOD-006` (Care)                | Internal API                   | RxDTO (items, patient)                                                                                                                  | `get_approved_prescription` - routing source of truth                 | `FEAT-012`                    |
+| `MOD-008` (Fulfillment)    | `MOD-001` (IAM)                 | Internal API                   | Actor DTO                                                                                                                               | Resolve chemist identity & verify active role                         | `FEAT-012`, `NFR-SEC-003`     |
+| `MOD-007` (Diagnostics)    | `MOD-001` (IAM)                 | Internal API                   | Actor DTO                                                                                                                               | Resolve lab identity & verify active role                             | `FEAT-010`, `NFR-SEC-003`     |
+| `MOD-007` (Diagnostics)    | `MOD-003` (LHR)                 | Internal API                   | PatientDTO                                                                                                                              | Resolve consented patient for order→patient binding                   | `FEAT-011`                    |
+| `MOD-009` (Settlement)     | `MOD-006`/`MOD-007` (Care/Diag) | Internal API                   | OrderDTO                                                                                                                                | `get_order_context(order_ref)` for settlement amount/reference        | `FEAT-016`                    |
+| `MOD-010` (Notify)         | `MOD-001` (IAM)                 | Internal API                   | ContactDTO                                                                                                                              | `resolve_contact` - phone + language for template send                | `FEAT-019`                    |
+| `MOD-010` (Notify)         | `MOD-006` (Care)                | Internal API                   | RxScheduleDTO                                                                                                                           | `get_rx_schedule` - dosage reminder scheduling                        | `FEAT-019`                    |
+| `MOD-010` (Notify)         | `MOD-003` (LHR)                 | Internal API                   | FollowUpPlanDTO                                                                                                                         | `get_follow_up_plan` - re-test nudge scheduling                       | `FEAT-018`                    |
+| `MOD-005` (Intake)         | `MOD-001` (IAM)                 | Internal API                   | PatientDTO                                                                                                                              | Resolve patient identity for intake attribution                       | `FEAT-006`                    |
+| `MOD-002` (Partner)        | `MOD-001` (IAM)                 | Internal API                   | CredentialAccountDTO                                                                                                                    | `create_credential_account` / activate role on gated activation       | `FEAT-014/015`                |
+| Operator / Patient channel | `MOD-011` (Audit)               | Gateway → Internal API         | AuditQuery                                                                                                                              | `query_audit` (operator) / `get_access_history` (patient)             | `FEAT-003`, `FEAT-020`        |
+| `MOD-001` (IAM)            | `EXT-001` (SMS/OTP)             | Outbound REST                  | OTP payload (JSON)                                                                                                                      | Deliver verification OTP                                              | `FEAT-001`, `NFR-002`         |
+| `MOD-005` (Intake)         | `EXT-002` (LLM/AI)              | Outbound REST (≤ 30 s)         | transcribe/structure/draft (JSON + multipart media): decrypted clip + declared context only, never name/phone/full record (NFR-SEC-006) | Pre-summary & rx drafting                                             | `FEAT-006/007/009`, `NFR-001` |
+| `MOD-010` (Notify)         | `EXT-003` (WhatsApp)            | Outbound REST + signed webhook | Template payload / delivery status                                                                                                      | Template notifications; delivery callbacks                            | `FEAT-019`, `NFR-SEC-005`     |
+| `MOD-009` (Settlement)     | `EXT-004` (UPI GW)              | Outbound REST + HMAC webhook   | Initiate / status JSON                                                                                                                  | Facilitated-payment exception path                                    | `FEAT-016`, `NFR-SEC-005`     |
 
 ### 4.2 Asynchronous Event Registry
 
@@ -605,10 +605,14 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 | `consent.requested`                            | `MOD-004` (Consent)         | `MOD-003`, `MOD-011`                                                         | JSON           | At-least-once              |
 | `consent.granted`                              | `MOD-004` (Consent)         | `MOD-003` (update share scope), `MOD-011`                                    | JSON           | At-least-once              |
 | `consent.revoked`                              | `MOD-004` (Consent)         | `MOD-003` (stop sharing), `MOD-011`                                          | JSON           | At-least-once              |
+| `intake.started`                               | `MOD-005` (Intake)          | `MOD-005` (self: telemetry log + count)                                      | JSON           | At-least-once              |
 | `intake.captured`                              | `MOD-005` (Intake)          | `MOD-005` (self: AI pipeline), `MOD-011`                                     | JSON           | At-least-once              |
+| `intake.retry_requested`                       | `MOD-005` (Intake)          | `MOD-005` (self: re-record flow), `MOD-011`                                  | JSON           | At-least-once              |
 | `pre_summary.ready`                            | `MOD-005` (Intake)          | `MOD-006` (attach case), `MOD-010` (in-app notify), `MOD-011`                | JSON           | At-least-once              |
 | `pre_summary.low_confidence`                   | `MOD-005` (Intake)          | `MOD-006` (force doctor review), `MOD-011`                                   | JSON           | At-least-once              |
+| `ai_job.completed`                             | `MOD-005` (Intake)          | `MOD-005` (self: pre-summary publish), `MOD-011`                             | JSON           | At-least-once              |
 | `ai_job.failed`                                | `MOD-005` (Intake)          | `MOD-011` (degrade path logged)                                              | JSON           | At-least-once              |
+| `ai_egress.recorded`                           | `MOD-005` (Intake)          | `MOD-011` (audit trail), `MOD-004` (consent log)                             | JSON           | At-least-once              |
 | `case.consult_complete`                        | `MOD-006` (Care)            | `MOD-010` (notify patient), `MOD-011`                                        | JSON           | At-least-once              |
 | `prescription.approved`                        | `MOD-006` (Care)            | `MOD-008` (route to chemist), `MOD-010` (dosage schedule), `MOD-011`         | JSON           | At-least-once              |
 | `prescription.rejected`                        | `MOD-006` (Care)            | `MOD-011`                                                                    | JSON           | At-least-once              |
@@ -646,6 +650,10 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 | `record.accessed`                              | `MOD-003` (LHR)             | `MOD-011`                                                                    | JSON           | At-least-once              |
 | `record.denied`                                | `MOD-003` (LHR)             | `MOD-011`                                                                    | JSON           | At-least-once              |
 | `audit.tamper_detected`                        | `MOD-011` (trigger)         | (telemetry, alert delivery deferred)                                         | JSON           | At-least-once              |
+
+> `intake.captured` carries `patient_id` (int), `mode` (`voice` | `text`), and `duration_s` (float | None) alongside `intake_id`; `duration_s` is the audio duration in seconds for voice intake, None for text (T06 #370).
+
+> `intake.retry_requested` carries a PHI-free `reason` string (e.g. `unusable_audio`) alongside `intake_id` and `record_attempt` (T06 #370).
 
 > `otp.failed` carries a `reason`: `lockout` when the brute-force lockout triggers (MOD-001, ADR-0004) or `delivery` when an SMS send has exhausted every retry and the code never reached the phone (MOD-001, PHASE-2 REM T5 #81).
 

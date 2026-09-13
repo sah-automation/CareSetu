@@ -26,7 +26,7 @@
 ### A4. Cost & budget metering
 
 - Every AI call records provider, tokens, and ₹cost to `ai_jobs`; counters persist (`NFR-001`, `NFR-COST-001`).
-- Hard monthly budget: when exhausted, AI degrades to its fallback (doctor-review) path - no overspend.
+- Monthly budget is **observe-and-warn**, never a block (PS-10, #408): spend is reported against the configured `ai_monthly_budget_paise` knob and an exhausted budget is logged/reportable only - the pipeline proceeds. This deliberately deviates from spec #344's hard-stop wording so internal engineering does not delay the care loop on spend; the knob stays so a cap can be reintroduced later without a rewrite.
 - Egress is **PHI-minimized and consent-gated** (`NFR-SEC-006`): only intake/prescription context leaves, never the full record; each egress is audited.
 
 ### A5. Degradation
@@ -38,10 +38,20 @@
 An abstract **AI gateway port** sits behind `MOD-005`. All LLM calls go through one typed interface; domain code never touches a concrete provider.
 
 - **Routing & per-task model selection:** each task (transcribe / structure / draft) declares a model _tier_ (e.g. cheap-capable vs. strong). The gateway picks the cheapest model meeting the task's quality bar. Selection is config-driven.
-- **Multi-provider fallback chains:** a task can list ordered fallback providers. On provider failure, budget cap, or timeout → try the next in the chain before degrading. Still bounded by the hard rule: never block the care loop (A5).
-- **Cost-aware routing:** the gateway consults the budget meter and routes to the cheapest eligible provider; at budget exhaustion it degrades, never overspends (`NFR-001`).
+- **Multi-provider fallback chains:** a task can list ordered fallback providers. On provider failure, budget cap, or timeout → try the next in the chain before degrading. Still bounded by the hard rule: never block the care loop (A5). On an exhausted monthly budget the meter reports spend and the call proceeds observe-and-warn (PS-10, #408) - the exhaustion is never a routing stop.
+- **Cost-aware routing:** the gateway consults the budget meter and routes to the cheapest eligible provider; the meter reports spend against `NFR-001` but never blocks a call - exhaustion is observed/warned, never an overspend gate (PS-10, #408).
 - **Caching:** identical/near-identical prompts are served from cache (cache key = prompt version + normalized input). Invalidation on prompt or output-schema version change. Provider-level prompt caching may be used where supported - but never caches PHI outside consented, audited paths.
 - **Versioning:** prompt contract and output schema are versioned together (A2). A model upgrade is a reviewed change gated by an A/B check against the previous model - never a silent swap in production.
+
+### A7. Observability & Tracing
+
+- Every LLM call flows through the AI gateway port and is traced via Langfuse SDK (`@observe` decorator from `observability.langfuse_client`).
+- Trace captures: provider, model, task_type, input/output tokens, latency_ms, cost_paise, confidence score, status.
+- **PHI is never sent to Langfuse** - only pseudonymous IDs and structured metadata (same boundary as `NFR-SEC-006`).
+- Prompt versions are managed in Langfuse UI and deployed via API (extends A6 versioning).
+- Quality evaluations run via Langfuse eval framework: confidence score distribution, doctor review outcomes.
+- The Langfuse client is a no-op when `LANGFUSE_PUBLIC_KEY` is absent - tracing never blocks boot or the care loop.
+- **Enforced by the `check-ai-tracing` pre-commit gate:** a concrete method on any `MOD-005` class named as the AI boundary (`*Gateway*`, `*Provider*`, `*LLM*`, `*AI*`) must reference `@observe` or the `langfuse` client, or the build fails (`apps/backend/scripts/check_ai_tracing.py`). Abstract stubs and `_private` helpers are exempt.
 
 ---
 

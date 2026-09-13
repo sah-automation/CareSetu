@@ -178,6 +178,7 @@ class RegistrationFacade:
             )
             return PartnerView(
                 partner_id=profile.partner_id,
+                partner_type=profile.partner_type,
                 status=profile.status,
                 round=profile.round,
             )
@@ -197,6 +198,7 @@ class RegistrationFacade:
                 raise PartnerNotFoundError(identity_id)
             return PartnerView(
                 partner_id=profile.partner_id,
+                partner_type=profile.partner_type,
                 status=profile.status,
                 round=profile.round,
             )

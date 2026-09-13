@@ -8,16 +8,16 @@ import "./globals.css";
 // Single webfont, Latin + Devanagari (blueprint §1.3); self-hosted by
 // next/font at build time. tokens.css appends the fallback stack.
 //
-// preload: false (PHASE-2.6 T14 #205): next/font otherwise emits <link
-// rel=preload> for every weight x subset file - eight woff2 (~320 KB) that
-// race the CSS/JS critical path on throttled 4G and sank the Lighthouse
-// performance gate on the resolved homepage. With swap + unicode-range the
-// browser still fetches exactly the files a surface renders (Latin up front,
-// Devanagari when the locale flips), just not all eight unconditionally.
+// display: swap (PHASE-2.6 #205) was measured to drop CLS to ~0.22 on the
+// throttled-4G homepage gate: on Linux CI runners the metric-matching fallback
+// face (next/font's local('Arial') src) cannot resolve, so the late font swap
+// shifts layout. display: optional makes the swap conditional on the font
+// being ready before paint - no CLS on slow first visits, full Mukta once the
+// files are cached (the homepage font budget ships ~160 KB).
 const mukta = Mukta({
   subsets: ["devanagari", "latin"],
   weight: ["400", "500", "600", "700"],
-  display: "swap",
+  display: "optional",
   preload: false,
   variable: "--font-mukta",
 });

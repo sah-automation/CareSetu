@@ -41,19 +41,19 @@ The plan is written to double as a migration reference: section 8 covers moving 
 
 ### 2.2 Gaps to close (the change list)
 
-| #   | Gap                                                                                  | Change                                      |
-| :-- | :----------------------------------------------------------------------------------- | :------------------------------------------ |
-| 1   | CORS hardcodes `localhost:3000`; production was designed for same-origin Caddy proxy | Make allowed origins env-driven             |
-| 2   | Demo OTP read-back is gated to dev/test environments                                 | Gate on `DEMO_MODE` as well                 |
-| 3   | `alembic.ini` hardcodes the localhost URL; `env.py` ignores `DATABASE_URL`           | Read `DATABASE_URL` in `env.py`             |
-| 4   | No demo data                                                                         | Idempotent seed script                      |
-| 5   | No Render/Vercel provisioning                                                        | `render.yaml` + Vercel project config       |
-| 6   | No CD                                                                                | `.github/workflows/deploy.yml`              |
-| 7   | No runbook                                                                           | this folder (`docs/plans/deployment-plan/`) |
+| #   | Gap                                                                                  | Change                                                                    |
+| :-- | :----------------------------------------------------------------------------------- | :------------------------------------------------------------------------ |
+| 1   | CORS hardcodes `localhost:3000`; production was designed for same-origin Caddy proxy | Make allowed origins env-driven                                           |
+| 2   | Demo OTP read-back is gated to dev/test environments                                 | Gate on `DEMO_MODE` as well                                               |
+| 3   | `alembic.ini` hardcodes the localhost URL; `env.py` ignores `DATABASE_URL`           | Read `DATABASE_URL` in `env.py`                                           |
+| 4   | No demo data                                                                         | Idempotent seed script                                                    |
+| 5   | No Render/Vercel provisioning                                                        | `render.yaml` + Vercel project config                                     |
+| 6   | No CD                                                                                | `.github/workflows/deploy.yml`                                            |
+| 7   | No runbook                                                                           | `worker-outbox-runbook.md` in this folder (`docs/plans/deployment-plan/`) |
 
 ### 2.3 Deliberately deferred (do NOT build now)
 
-- **Async worker** (`worker/main.py`): Render free has no free background workers. No business event handlers are registered yet (Phase 1/2 registers are empty), so the outbox/dispatcher does nothing useful in production today. Outbox rows accumulate harmlessly and the dispatcher's reclaim design handles them later. From Phase 4 (audit) run the dispatcher in-process via a FastAPI lifespan task instead of a separate process.
+- **Async worker** (`worker/main.py`): Render free has no free background workers. No business event handlers are registered yet (Phase 1/2 registers are empty), so the outbox/dispatcher does nothing useful in production today. Outbox rows accumulate harmlessly and the dispatcher's reclaim design handles them later. From Phase 4 (audit) run the dispatcher in-process via a FastAPI lifespan task instead of a separate process. Whenever the dispatcher runs (standalone now, in-process later), the **single-worker rule** applies - exactly one poll loop across the whole deployment, never two - and the operator runbook (`worker-outbox-runbook.md` in this folder, ticket #394) is the operational reference for that rule and for repairing stranded outbox rows.
 - **MinIO / object storage**: not wired into `Settings`; first needed at Phase 7 (intake media). Later free options: Supabase Storage or Cloudflare R2 (free 10 GB).
 - **Gemini / EXT-002 AI**: Phase 7 concern only.
 - **Backup cron** (`deploy/cron/backup.sh`): VM/`pg_dump` based; Supabase free has no automated backups. Accept for demo (see caveats).
@@ -252,18 +252,18 @@ Audit of the live free-tier stack. Three code changes + two dashboard settings, 
 
 The roadmap's launch target is one VM (`FastAPI + worker + Next.js + Postgres + MinIO + Caddy edge + backup cron`, roadmap §2.14). When moving off the free tiers, do the reverse of this plan:
 
-| Free-tier artifact                        | VM replacement                                                                  |
-| :---------------------------------------- | :------------------------------------------------------------------------------ |
-| `NEXT_PUBLIC_API_BASE_URL` (cross-origin) | same-origin `/api/*` via `deploy/edge/Caddyfile`; unset the env var             |
-| Render web service                        | systemd service running `uvicorn app.main:app` (workers via gunicorn if needed) |
-| Worker deferred                           | run `python -m worker.main` as its own systemd unit (outbox/dispatcher drains)  |
-| Supabase `DATABASE_URL`                   | local PostgreSQL URL; `alembic upgrade head` at deploy                          |
-| MinIO (Phase 7+)                          | local MinIO, or keep Supabase Storage/R2 if still convenient                    |
-| Vercel                                    | `next build && next start` behind Caddy, or static export                       |
-| `CORS_ALLOWED_ORIGINS`                    | leave empty (same-origin)                                                       |
-| `DEMO_MODE=true`                          | `false`; use `SMS_PROVIDER=provider` with a real SMS_API_KEY/BASE_URL           |
-| No automated backups                      | `deploy/cron/backup.sh` + `deploy/cron/caresetu-backup.cron` (already in repo)  |
-| No keep-alive                             | always-on VM; no pause issue                                                    |
+| Free-tier artifact                        | VM replacement                                                                                                                                                                                          |
+| :---------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `NEXT_PUBLIC_API_BASE_URL` (cross-origin) | same-origin `/api/*` via `deploy/edge/Caddyfile`; unset the env var                                                                                                                                     |
+| Render web service                        | systemd service running `uvicorn app.main:app` (workers via gunicorn if needed)                                                                                                                         |
+| Worker deferred                           | run `python -m worker.main` as its own systemd unit (outbox/dispatcher drains). Exactly one such unit - the single-worker rule + stranded-row repair live in `worker-outbox-runbook.md` in this folder. |
+| Supabase `DATABASE_URL`                   | local PostgreSQL URL; `alembic upgrade head` at deploy                                                                                                                                                  |
+| MinIO (Phase 7+)                          | local MinIO, or keep Supabase Storage/R2 if still convenient                                                                                                                                            |
+| Vercel                                    | `next build && next start` behind Caddy, or static export                                                                                                                                               |
+| `CORS_ALLOWED_ORIGINS`                    | leave empty (same-origin)                                                                                                                                                                               |
+| `DEMO_MODE=true`                          | `false`; use `SMS_PROVIDER=provider` with a real SMS_API_KEY/BASE_URL                                                                                                                                   |
+| No automated backups                      | `deploy/cron/backup.sh` + `deploy/cron/caresetu-backup.cron` (already in repo)                                                                                                                          |
+| No keep-alive                             | always-on VM; no pause issue                                                                                                                                                                            |
 
 The code changes in section 4 are all env-driven (off by default), so the same codebase runs both topologies - only env vars and deployment config differ.
 

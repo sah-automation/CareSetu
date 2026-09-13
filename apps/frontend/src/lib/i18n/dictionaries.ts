@@ -767,6 +767,208 @@ const en = {
     },
     loadError: "Could not load your consent log.",
   },
+
+  // intake.* surface - MOD-005 symptom intake (PHASE-7 T15, #359): the
+  // intake-start mode chooser (blueprint §5.4, finalized PROTO-PHASE-7/8
+  // intake-start.html is the binding copy spec). Two oversized first-class
+  // inputs - voice is default-highlighted (recommended, never forced) and
+  // text is equally first-class (REQ-007 Rule 2). ADR-0001 honesty: the
+  // chooser never markets an AI diagnosis.
+  intake: {
+    breadcrumb: "Start visit",
+    title: "Tell us what's bothering you",
+    reassure:
+      "No forms, no typing. This helps your doctor understand you faster.",
+    modeVoice: "Speak",
+    modeVoiceSub: "Record in Hindi or English",
+    modeText: "Type",
+    modeTextSub: "Type your symptoms",
+
+    // voice.- recording surface (PHASE-7 T16, #360): the voice recorder page
+    // (blueprint §5.4, finalized PROTO-PHASE-7/8 intake-voice.html is the
+    // binding copy spec). A large always-visible mic target, live duration
+    // counter capped at 180s, playback + re-record before submit, at most 3
+    // voice attempts before the patient types instead, and a plain-language
+    // re-record-or-type prompt on short or unclear audio (FEAT-006 scenario
+    // 2) - never a silent proceed. Submit uses an in-button Structuring
+    // pending state per §9.1; uploads auto-retry ×3 with backoff (§5.2).
+    voice: {
+      title: "Record your symptoms",
+      breadcrumb: "Voice intake",
+      reassure: "Just speak naturally - Hindi or English, both are fine.",
+      statusIdle: "Tap the mic and describe what's bothering you",
+      statusRecording: "Recording… tap to stop",
+      statusPaused: "Paused - tap to continue",
+      statusPreview: "Preview your recording",
+      statusPending: "Structuring… please wait",
+      statusDone: "Recording captured",
+      statusPoor: "We couldn't hear clearly",
+      pause: "Pause",
+      resume: "Resume",
+      stop: "Stop",
+      play: "Play preview",
+      stopPreview: "Stop preview",
+      recordAgain: "Record again",
+      submit: "Submit",
+      submitting: "Structuring…",
+      poorTitle: "We couldn't hear that clearly",
+      poorBody:
+        "We couldn't hear clearly. Please re-record or switch to typing.",
+      poorRetry: "Try again",
+      poorType: "Type instead",
+      attemptsExhausted:
+        "You've used all 3 voice attempts. Please type your symptoms instead.",
+      doneBody: "Taken. We're preparing your pre-summary.",
+      next: "See your pre-summary",
+      uploadErrorTitle: "We couldn't send your recording",
+      uploadErrorBody:
+        "Your recording is safe. Check your connection and try again.",
+      micUnavailableTitle: "We couldn't reach your microphone",
+      micUnavailableBody:
+        "Check that microphone access is allowed, then try again.",
+    },
+
+    // text- intake surface (PHASE-7 T17, #361): the text form (blueprint §5.4,
+    // finalized PROTO-PHASE-7/8 intake-text.html is the binding copy spec). A
+    // prominent large textarea capped at 2000 chars in-page (server caps too,
+    // T07/T12) with a bilingual hint - Hindi and English both accepted. The
+    // optional voice-note attach is a doctor-only audio artifact: stored for
+    // the doctor to listen to, never fed to the structuring pipeline, and
+    // strictly non-blocking (the note is never required and never blocks the
+    // text). Submit shows the same in-button Structuring pending state per
+    // §9.1 (never a full-page spinner), then advances to the pre-summary
+    // review link once the intake reaches ready_for_review.
+    text: {
+      title: "Type your symptoms",
+      breadcrumb: "Text intake",
+      reassure:
+        "Describe what's bothering you in your own words - Hindi or English.",
+      placeholder: "e.g. Fever since 2 days, dry cough, body ache...",
+      langHint: "Hindi and English both accepted",
+      emptyTitle: "Add your symptoms to continue",
+      emptyBody: "Please type what's bothering you before submitting.",
+      voiceAttach: "Add a voice note",
+      voiceAttachHint: "Optional - record a voice note to go with your text",
+      voiceRecording: "Recording… tap to stop",
+      voiceStop: "Stop",
+      voicePreview: "Voice note attached",
+      voiceRemove: "Remove",
+      submit: "Submit",
+      submitting: "Structuring…",
+      doneBody: "Taken. We're preparing your pre-summary.",
+      next: "See your pre-summary",
+      voiceTooShortTitle: "Your voice note is too short",
+      voiceTooShortBody:
+        "Keep the note above 3 seconds, remove it, or type your symptoms instead.",
+      uploadErrorTitle: "We couldn't send your recording",
+      uploadErrorBody:
+        "Your recording is safe. Check your connection and try again.",
+      micUnavailableTitle: "We couldn't reach your microphone",
+      micUnavailableBody:
+        "Check that microphone access is allowed, then try again.",
+    },
+
+    // pre-summary review surface (PHASE-7 T18, #362): the AI draft shown to
+    // the patient with the honesty cue "AI draft - doctor will verify"
+    // (never "AI diagnosis", ADR-0001), the structuring confidence value +
+    // light indicator, and - for low_confidence drafts - a calm amber
+    // doctor-must-check notice with the forced-review framing (warn, never
+    // red). Structured fields render read-only; the patient can edit them
+    // and the edits persist via the save-edits route and render as
+    // corrections. A continuation CTA points toward consultation booking
+    // (FEAT-007, blueprint §5.4/§6.4; PROTO-PHASE-7/8 page is the copy spec).
+    preSummary: {
+      breadcrumb: "Pre-summary",
+      title: "Your pre-summary",
+      description:
+        "A quick look at what we understood. You can correct anything.",
+      bannerLine1: "AI draft - your doctor will verify this",
+      bannerLine2:
+        "This is not a diagnosis. Your doctor will review and confirm.",
+      lowBannerLine1: "AI is not fully sure here",
+      lowBannerLine2: "Doctor will need to check this before it can be used.",
+      lowVerifyLine:
+        "This pre-summary will force a doctor review before any prescription.",
+      confidence: "Structuring confidence",
+      lowTag: "Low confidence",
+      groupTitle: "What the AI understood",
+      editBtn: "Edit this summary",
+      confirmBtn: "Confirm & continue",
+      confirmBtnLow: "Continue to consultation",
+      editNote: "Your edits help the doctor understand you better.",
+      cancelEdit: "Cancel",
+      saveEdit: "Save edits",
+      savingEdit: "Saving…",
+      correctionsTag: "Corrected",
+      doneClean: "Use as is",
+      doneLow: "Summary noted. Doctor will verify.",
+      bookTitle: "Book consultation with this summary",
+      bookSub: "Find a doctor who can review your pre-summary.",
+      bookSubLow:
+        "Your doctor will verify this pre-summary before it can be used for a prescription.",
+      loading: "Checking your pre-summary…",
+      emptyTitle: "Your pre-summary isn't ready yet",
+      emptyBody:
+        "Check again in a moment - the doctor will review your symptoms.",
+      loadFailedTitle: "We couldn't load your pre-summary",
+      loadFailedBody: "Check your connection and try again.",
+      processingTitle: "Your summary is still being prepared",
+      processingBody:
+        "The AI is finishing your summary. This usually takes a few seconds.",
+      processingFailedTitle: "Your summary took too long",
+      processingFailedBody:
+        "We couldn't find your pre-summary. Please go back and try again.",
+      degradedTitle: "Your doctor will review this directly",
+      degradedEvidenceTitle: "What the doctor will review",
+      degradedVoiceNote: "Your recording has been shared with the doctor.",
+      degradedBody:
+        "There is no AI pre-summary for this visit. Your doctor will review your symptoms directly.",
+      degradedRefresh:
+        "This page updates automatically when your doctor takes action.",
+      degradedStatusLink: "Back to intake status",
+      saveFailedTitle: "We couldn't save your edits",
+      saveFailedBody: "Check your connection and try again.",
+      fields: {
+        chief_complaints: "Chief complaints",
+        symptoms: "Symptoms",
+        duration: "Duration",
+      },
+    },
+
+    // status.- intake status list surface (PHASE-7 T19, #363): the patient
+    // sees where each submission stands with four statuses - Captured /
+    // Structuring / Ready for Review / Recapture needed - mapped 1:1 onto the
+    // backend machine status values (T02 state_machine.py). Statuses refresh
+    // from the backend (get_intake / get_pre_summary) in-page. A ready
+    // pre-summary offers a continue affordance into consultation booking
+    // (Phase 8 boundary). Bilingual EN/HI.
+    status: {
+      breadcrumb: "Status",
+      title: "Your intake status",
+      description: "Track where your submission stands",
+      refresh: "Refresh",
+      refreshing: "Checking\u2026",
+      captured: "Captured",
+      capturedDesc: "Your symptoms have been recorded.",
+      structuring: "Structuring",
+      structuringDesc: "AI is organizing your information for the doctor.",
+      readyForReview: "Ready for Review",
+      readyForReviewDesc: "Your information is ready for the doctor to review.",
+      rawReviewNote:
+        "There is no AI pre-summary for this visit. Your doctor will review the submitted evidence directly.",
+      reRecord: "Recapture needed",
+      reRecordDesc:
+        "We couldn't process your recording clearly. Please re-record or type your symptoms.",
+      failed: "Something went wrong",
+      failedDesc: "We couldn't process your intake. Please start a new visit.",
+      continue: "Continue to consultation",
+      reRecordAction: "Re-record",
+      typeInstead: "Type instead",
+      loading: "Loading your intake status\u2026",
+      loadFailedTitle: "We couldn't load your status",
+      loadFailedBody: "Check your connection and try again.",
+    },
+  },
 };
 
 export type Dictionary = typeof en;
@@ -1464,6 +1666,173 @@ export const STRINGS: Record<Lang, Dictionary> = {
         body: "जैसे-जैसे आप अपने रिकॉर्ड की पहुँच साझा या प्रतिबंधित करेंगे, अनुमति इंटरैक्शन यहाँ दिखेंगे।",
       },
       loadError: "आपका अनुमति लॉग लोड नहीं हो सका।",
+    },
+
+    intake: {
+      breadcrumb: "विज़िट शुरू करें",
+      title: "बताइए, आपको क्या परेशानी है",
+      reassure: "न फ़ॉर्म, न टाइपिंग। इससे डॉक्टर आपको जल्दी समझ पाएँगे।",
+      modeVoice: "बोलिए",
+      modeVoiceSub: "हिंदी या अंग्रेज़ी में रिकॉर्ड करें",
+      modeText: "लिखिए",
+      modeTextSub: "अपने लक्षण लिखें",
+
+      voice: {
+        title: "अपने लक्षण रिकॉर्ड करें",
+        breadcrumb: "वॉइस इंटेक",
+        reassure: "सीधे-सीधे बोलिए - हिंदी या अंग्रेज़ी, दोनों चल जाएँगी।",
+        statusIdle: "माइक दबाएँ और बताइए आपको क्या परेशानी है",
+        statusRecording: "रिकॉर्ड हो रहा है… रोकने के लिए दबाएँ",
+        statusPaused: "रुका हुआ - जारी रखने के लिए दबाएँ",
+        statusPreview: "अपनी रिकॉर्डिंग सुनें",
+        statusPending: "स्ट्रक्चरिंग… कृपया प्रतीक्षा करें",
+        statusDone: "रिकॉर्डिंग ले ली गई",
+        statusPoor: "साफ़ सुनाई नहीं दिया",
+        pause: "विराम",
+        resume: "फिर से शुरू",
+        stop: "रोकें",
+        play: "प्रीव्यू सुनें",
+        stopPreview: "प्रीव्यू रोकें",
+        recordAgain: "फिर से रिकॉर्ड करें",
+        submit: "जमा करें",
+        submitting: "स्ट्रक्चरिंग…",
+        poorTitle: "हमें साफ़ सुनाई नहीं दिया",
+        poorBody:
+          "हम ठीक से सुन नहीं पाए। कृपया फिर से रिकॉर्ड करें या टाइप करें।",
+        poorRetry: "फिर कोशिश करें",
+        poorType: "टाइप करें",
+        attemptsExhausted:
+          "आपने 3 वॉइस सीमा पूरी कर ली है। कृपया अपने लक्षण टाइप करें।",
+        doneBody: "ले ली गई। आपका प्री-सारांश तैयार हो रहा है।",
+        next: "अपना प्री-सारांश देखें",
+        uploadErrorTitle: "हम आपकी रिकॉर्डिंग नहीं भेज पाए",
+        uploadErrorBody:
+          "आपकी रिकॉर्डिंग सुरक्षित है। कनेक्शन जाँचकर फिर कोशिश करें।",
+        micUnavailableTitle: "हम आपके माइक तक नहीं पहुँच पाए",
+        micUnavailableBody: "माइक की अनुमति जाँचकर फिर कोशिश करें।",
+      },
+      text: {
+        title: "अपने लक्षण लिखें",
+        breadcrumb: "टेक्स्ट इंटेक",
+        reassure:
+          "अपने शब्दों में बताइए आपको क्या परेशानी है - हिंदी या अंग्रेज़ी।",
+        placeholder: "जैसे- बुख़ार 2 दिन से, सूखी खाँसी, शरीर में दर्द...",
+        langHint: "हिंदी और अंग्रेज़ी दोनों चलते हैं",
+        emptyTitle: "आगे बढ़ने के लिए लक्षण लिखें",
+        emptyBody: "कृपया सबमिट करने से पहले बताइए क्या परेशानी है।",
+        voiceAttach: "वॉइस नोट जोड़ें",
+        voiceAttachHint:
+          "वैकल्पिक - अपने टेक्स्ट के साथ एक वॉइस रिकॉर्डिंग जोड़ें",
+        voiceRecording: "रिकॉर्ड हो रहा है… रोकने के लिए दबाएँ",
+        voiceStop: "रोकें",
+        voicePreview: "वॉइस नोट जुड़ गया",
+        voiceTooShortTitle: "आपका वॉइस नोट बहुत छोटा है",
+        voiceTooShortBody:
+          "नोट को 3 सेकंड से अधिक रखें, हटाएँ, या इसके बजाय अपने लक्षण टाइप करें।",
+        voiceRemove: "हटाएँ",
+        submit: "जमा करें",
+        submitting: "स्ट्रक्चरिंग…",
+        doneBody: "ले लिए गए। आपका प्री-सारांश तैयार हो रहा है।",
+        next: "अपना प्री-सारांश देखें",
+        uploadErrorTitle: "हम आपकी रिकॉर्डिंग नहीं भेज पाए",
+        uploadErrorBody:
+          "आपकी रिकॉर्डिंग सुरक्षित है। कनेक्शन जाँचकर फिर कोशिश करें।",
+        micUnavailableTitle: "हम आपके माइक तक नहीं पहुँच पाए",
+        micUnavailableBody: "माइक की अनुमति जाँचकर फिर कोशिश करें।",
+      },
+
+      // T18 (#362): प्री-सारांश रिव्यू पेज - ईमानदारी बैनर "AI ड्राफ़्ट -
+      // डॉक्टर पुष्टि करेंगे" (ADR-0001), स्ट्रक्चरिंग विश्वास स्तर + संकेतक,
+      // और कम-विश्वास ड्राफ़्ट के लिए शांत एम्बर (चेतावनी, लाल नहीं) डॉक्टर
+      // जाँच अनिवार्य नोटिस। फ़ील्ड संपादन save-edits रूट से सहेजे जाते हैं
+      // और सुधार के रूप में दिखते हैं। परामर्श बुकिंग की ओर जारी रखने का CTA।
+      preSummary: {
+        breadcrumb: "प्री-सारांश",
+        title: "आपका प्री-सारांश",
+        description: "हमने जो समझा उस पर एक नज़र। आप कुछ भी सुधार सकते हैं।",
+        bannerLine1: "AI ड्राफ़्ट - आपका डॉक्टर इसकी पुष्टि करेगा",
+        bannerLine2: "यह निदान नहीं है। आपका डॉक्टर इसकी पुष्टि करेगा।",
+        lowBannerLine1: "AI को पूरा भरोसा नहीं है",
+        lowBannerLine2: "इस्तेमाल से पहले डॉक्टर को यह जाँचना होगा।",
+        lowVerifyLine:
+          "यह प्री-सारांश किसी भी नुस्खे से पहले डॉक्टर की जाँच अनिवार्य करेगा।",
+        confidence: "स्ट्रक्चरिंग विश्वास स्तर",
+        lowTag: "कम विश्वास",
+        groupTitle: "हमने जो समझा",
+        editBtn: "इस सारांश को संपादित करें",
+        confirmBtn: "पुष्टि करें और आगे बढ़ें",
+        confirmBtnLow: "परामर्श जारी रखें",
+        editNote: "आपके संपादन डॉक्टर को बेहतर समझने में मदद करते हैं।",
+        cancelEdit: "रद्द करें",
+        saveEdit: "संपादन सहेजें",
+        savingEdit: "सहेजा जा रहा है…",
+        correctionsTag: "सुधारा गया",
+        doneClean: "ऐसे ही उपयोग करें",
+        doneLow: "सारांश तैयार। डॉक्टर पुष्टि करेंगे।",
+        bookTitle: "इस सारांश के साथ परामर्श बुक करें",
+        bookSub: "एक डॉक्टर खोजें जो आपके प्री-सारांश की जाँच कर सके।",
+        bookSubLow: "नुस्खे से पहले आपका डॉक्टर इस प्री-सारांश की जाँच करेगा।",
+        loading: "आपका प्री-सारांश देखा जा रहा है…",
+        emptyTitle: "आपका प्री-सारांश अभी तैयार नहीं है",
+        emptyBody:
+          "थोड़ी देर बाद फिर देखें - डॉक्टर आपके लक्षणों की समीक्षा करेंगे।",
+        loadFailedTitle: "हम आपका प्री-सारांश लोड नहीं कर पाए",
+        loadFailedBody: "कनेक्शन जाँचकर फिर कोशिश करें।",
+        processingTitle: "आपका सारांश अभी तैयार हो रहा है",
+        processingBody:
+          "एआई आपका सारांश बना रहा है। इसमें आम तौर पर कुछ सेकंड लगते हैं।",
+        processingFailedTitle: "आपका सारांश तैयार होने में बहुत समय लग गया",
+        processingFailedBody:
+          "हमें आपका प्री-सारांश नहीं मिला। कृपया वापस जाकर फिर से कोशिश करें।",
+        degradedTitle: "आपका डॉक्टर इसे सीधे देखेंगे",
+        degradedEvidenceTitle: "डॉक्टर क्या देखेंगे",
+        degradedVoiceNote: "आपकी रिकॉर्डिंग डॉक्टर के साथ साझा कर दी गई है।",
+        degradedBody:
+          "इस विज़िट के लिए कोई AI प्री-सारांश नहीं है। आपका डॉक्टर आपके लक्षणों की सीधे समीक्षा करेगा।",
+        degradedRefresh:
+          "डॉक्टर की कार्रवाई होने पर यह पेज अपने आप अपडेट होगा।",
+        degradedStatusLink: "इंटेक स्थिति पर वापस जाएँ",
+        saveFailedTitle: "हम आपके संपादन सहेज नहीं पाए",
+        saveFailedBody: "कनेक्शन जाँचकर फिर कोशिश करें।",
+        fields: {
+          chief_complaints: "मुख्य शिकायतें",
+          symptoms: "लक्षण",
+          duration: "अवधि",
+        },
+      },
+
+      // T19 (#363): इंटेक स्थिति सूची - चार स्थितियाँ: सहेजा गया /
+      // व्यवस्थित हो रहा है / जाँच के लिए तैयार / फिर से रिकॉर्ड करें,
+      // बैकएंड मशीन स्थिति मानों पर 1:1 मैप (T02)। बैकएंड से ताज़ा
+      // (get_intake / get_pre_summary)। तैयार प्री-सारांश पर जारी रखने का CTA।
+      status: {
+        breadcrumb: "स्थिति",
+        title: "आपकी इंटेक स्थिति",
+        description: "देखें आपकी जानकारी कहाँ तक पहुँची",
+        refresh: "ताज़ा करें",
+        refreshing: "जाँच हो रही है\u2026",
+        captured: "सहेजा गया",
+        capturedDesc: "आपके लक्षण दर्ज हो गए हैं।",
+        structuring: "व्यवस्थित हो रहा है",
+        structuringDesc:
+          "AI आपकी जानकारी को डॉक्टर के लिए व्यवस्थित कर रहा है।",
+        readyForReview: "जाँच के लिए तैयार",
+        readyForReviewDesc: "आपकी जानकारी डॉक्टर द्वारा जाँच के लिए तैयार है।",
+        rawReviewNote:
+          "इस विज़िट के लिए कोई AI प्री-सारांश नहीं है। आपका डॉक्टर आपकी दी गई जानकारी की सीधे समीक्षा करेगा।",
+        reRecord: "फिर से रिकॉर्ड करें",
+        reRecordDesc:
+          "हम आपकी रिकॉर्डिंग ठीक से समझ नहीं पाए। कृपया फिर से रिकॉर्ड करें या लक्षण टाइप करें।",
+        failed: "कुछ गड़बड़ हो गई",
+        failedDesc:
+          "हम आपकी जानकारी प्रोसेस नहीं कर पाए। कृपया नई विज़िट शुरू करें।",
+        continue: "परामर्श जारी रखें",
+        reRecordAction: "फिर से रिकॉर्ड करें",
+        typeInstead: "टाइप करें",
+        loading: "आपकी इंटेक स्थिति लोड हो रही है\u2026",
+        loadFailedTitle: "हम आपकी स्थिति लोड नहीं कर पाए",
+        loadFailedBody: "कनेक्शन जाँचकर फिर कोशिश करें।",
+      },
     },
   },
 };

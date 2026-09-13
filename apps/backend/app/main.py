@@ -45,6 +45,12 @@ from modules.iam.adapters.routes import register_error_handlers
 from modules.iam.adapters.routes import router as iam_router
 from modules.iam.adapters.sms import MockSmsAdapter, build_sms_adapter
 from modules.iam.facade import IamFacade
+from modules.intake.adapters.media_store import build_media_store
+from modules.intake.adapters.routes import (
+    register_error_handlers as register_intake_error_handlers,
+)
+from modules.intake.adapters.routes import router as intake_router
+from modules.intake.facade import IntakeFacade
 from modules.partner.adapters.artifact_store import build_artifact_store
 from modules.partner.adapters.routes import directory_router
 from modules.partner.adapters.routes import (
@@ -196,6 +202,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         directory_ttl_seconds=resolved_settings.redis_directory_ttl_seconds,
         directory_max_results=resolved_settings.directory_max_results,
     )
+    # MOD-005 (PHASE-7 T12, #356): the intake facade shares the settled engine
+    # and is stored on state so the patient intake routes read one resolved
+    # instance and unit tests can stub it. MOD-006 (PHASE-7 T08, #373; #385):
+    # intake audio clips are AES-256-GCM encrypted into the ``intake/``
+    # object-storage prefix via the injected media store. The store's key comes
+    # from the environment (never committed), dev/test without a key derives an
+    # ephemeral one, and the concrete backend is selected by
+    # ``INTAKE_MEDIA_BACKEND``: local disk (default) or a private Supabase
+    # Storage bucket (production, so captures survive Render's ephemeral disk).
+    intake_media_store = build_media_store(
+        root=resolved_settings.intake_media_root,
+        b64_key=resolved_settings.intake_media_key,
+        backend=resolved_settings.intake_media_backend,
+        supabase_url=resolved_settings.supabase_url,
+        supabase_service_role_key=resolved_settings.supabase_service_role_key,
+    )
+    app.state.intake_facade = IntakeFacade(engine=engine, media_store=intake_media_store)
 
     # MOD-001/MOD-002 independence (WI-3, #336): iam and partner are now
     # constructed independently with zero post-construction glue. The
@@ -217,12 +240,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.mock_sms_adapter = cast(MockSmsAdapter, sms_adapter)
 
     # Gateway middleware stack (PHASE-1 T7b, #29; PHASE-2 T8, #59; REM T6, #77;
-    # REM T8, #78). The auth surface is unauthenticated, so rate_limit is the
-    # outermost of the gateway pair: every /v1/auth/* request - valid, invalid,
-    # or missing token - is counted toward the per-client-IP cap before
-    # jwt_verify can short-circuit on a bad token. jwt_verify runs inside the
-    # limiter and attaches the settled Principal for the routes and the
-    # protected-route dependency.
+    # REM T8, #78; PS-05, #403). The auth and intake-write surfaces are
+    # unauthenticated entry points, so rate_limit is the outermost of the
+    # gateway pair: every /v1/auth/* request plus the intake write trio
+    # (upload-media, submit, re-record) - valid, invalid, or missing token - is
+    # counted toward its per-surface, per-client-IP cap before jwt_verify can
+    # short-circuit on a bad token. Each surface keeps an independent tier so a
+    # burst on one can never exhaust the other's budget ("auth-only limiting
+    # semantics still hold", PS-05). jwt_verify runs inside the limiter and
+    # attaches the settled Principal for the routes and the protected-route
+    # dependency.
     app.add_middleware(
         JWTVerifyMiddleware,
         enabled=resolved_settings.gateway_jwt_verify_enabled,
@@ -233,6 +260,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         enabled=resolved_settings.gateway_rate_limit_enabled,
         max_requests=resolved_settings.gateway_rate_limit_auth_max_requests,
         window_seconds=resolved_settings.gateway_rate_limit_auth_window_seconds,
+        intake_max_requests=resolved_settings.gateway_rate_limit_intake_max_requests,
+        intake_window_seconds=resolved_settings.gateway_rate_limit_intake_window_seconds,
     )
     # CORS for the local-dev PWA origin (added so the allow-origin header
     # reaches every response, including 401/403 from the gateway stack). The
@@ -267,11 +296,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(audit_router)
     app.include_router(partner_router)
     app.include_router(directory_router)
+    app.include_router(intake_router)
     register_error_handlers(app)
     register_gateway_error_handlers(app)
     register_health_error_handlers(app)
     register_consent_error_handlers(app)
     register_partner_error_handlers(app)
+    register_intake_error_handlers(app)
 
     # Catch-all for any unhandled exception that escapes the module-level
     # handlers above (e.g. SQLAlchemy OperationalError from a DB connection

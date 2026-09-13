@@ -33,7 +33,9 @@ _PARTNER_ID = 42
 _REASON = "documents unreadable"
 
 _REJECTION_VIEW = RejectionReasonView(partner_id=_PARTNER_ID, rejection_reason=_REASON, round=2)
-_APPEAL_RESULT = PartnerView(partner_id=_PARTNER_ID, status="Under Verification", round=3)
+_APPEAL_RESULT = PartnerView(
+    partner_id=_PARTNER_ID, partner_type="doctor", status="Under Verification", round=3
+)
 
 
 class StubPartnerFacade:
@@ -46,7 +48,9 @@ class StubPartnerFacade:
 
     async def resolve_partner(self, identity_id: int) -> PartnerView:
         self.calls.append({"method": "resolve_partner", "identity_id": identity_id})
-        return PartnerView(partner_id=_PARTNER_ID, status="Rejected", round=2)
+        return PartnerView(
+            partner_id=_PARTNER_ID, partner_type="doctor", status="Rejected", round=2
+        )
 
     async def get_rejection_reason(self, partner_id: int) -> RejectionReasonView:
         self.calls.append({"method": "get_rejection_reason", "partner_id": partner_id})

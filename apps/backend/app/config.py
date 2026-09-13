@@ -54,6 +54,18 @@ DEFAULT_AUDIT_RETENTION_DAYS = 0
 # is a base64 32-byte AES-256 key from the environment (never committed); the
 # store refuses a blank/malformed key (fail-closed, security-phii-standards §4).
 DEFAULT_PARTNER_ARTIFACT_ROOT = "var/partner-artifacts"
+# MOD-006 intake audio (PHASE-7 T08, #373): encrypted local filesystem store
+# under the ``intake/`` object-storage prefix. ``INTAKE_MEDIA_KEY`` is a base64
+# 32-byte AES-256 key from the environment (never committed); empty derives an
+# ephemeral dev/test key so the encrypted write path always runs (same
+# convention as the partner artifact store).
+DEFAULT_INTAKE_MEDIA_ROOT = "var/intake-media"
+# Durable intake-media backend (PHASE-7 fix, #385): ``local`` files the
+# ciphertext under ``var/intake-media`` (dev/CI/tests, byte-identical to the
+# original store); ``supabase`` POSTs it into a private Supabase Storage bucket
+# so hosted captures survive Render's ephemeral disk. Default ``local`` keeps
+# dev/CI/tests unchanged - nothing depends on the network.
+DEFAULT_INTAKE_MEDIA_BACKEND = "local"
 # Rejected-partner re-submission throttle (PHASE-5 T09, #253): the max
 # re-submission rounds a rejected partner may open before the operator queue is
 # protected, and the cooldown (days) after which the budget refreshes. Queue
@@ -72,6 +84,36 @@ DEFAULT_PARTNER_CREDENTIAL_CLEANUP_DAYS = 30
 # (deploy/cron/caresetu-backup.cron); the cadence is a changeable cost, never
 # architecture - one env var moves it.
 DEFAULT_PARTNER_CREDENTIAL_SWEEP_CRON = "30 1 * * *"
+# Langfuse AI observability host (plan-phase7-tracing-prep): the US-region
+# cloud endpoint for the CareSetu project. Overridable via ``LANGFUSE_HOST``
+# (e.g. a self-hosted instance). Tracing is a no-op until both keys are supplied.
+DEFAULT_LANGFUSE_HOST = "https://us.cloud.langfuse.com"
+# EXT-002 LLM/AI gateway (PHASE-7 T05, #348): provider selection is a config
+# knob with a fail-closed default (mock). The real provider is gated to
+# staging/production by ``__post_init__`` - a real key in dev/test is refused
+# unless demo mode forces the mock or ``AI_ALLOW_DEV_PROVIDER`` overrides the
+# gate. Timeout honours the EXT-002 call discipline (<= 30 s,
+# third-party-integration-standards §1).
+DEFAULT_AI_PROVIDER = "mock"
+DEFAULT_AI_MODEL = ""
+# ASR model for the OpenAI-compatible /audio/transcriptions leg (#387): the
+# freemium default tier (Groq ``whisper-large-v3-turbo``); overridable via
+# ``AI_ASR_MODEL`` so the transcription model is decoupled from the structurer.
+DEFAULT_AI_ASR_MODEL = "whisper-large-v3-turbo"
+DEFAULT_AI_ALLOW_DEV_PROVIDER = False
+DEFAULT_AI_TIMEOUT_SECONDS = 30.0
+DEFAULT_AI_MAX_RETRIES = 3
+DEFAULT_AI_CIRCUIT_BREAKER_THRESHOLD = 5
+DEFAULT_AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 30.0
+# NFR-001 freemium AI spend cap (PHASE-7 T06/T11): the monthly budget in paise
+# the meter reports spend against - observe-and-warn only (PS-10, #408), the
+# meter never blocks: the knob stays so a hard cap can be reintroduced later
+# without a rewrite. Rs 2,000 / month = 200,000 paise.
+DEFAULT_AI_MONTHLY_BUDGET_PAISE = 200_000
+DEFAULT_AI_FALLBACK_PROVIDER = ""
+DEFAULT_AI_FALLBACK_BASE_URL = ""
+DEFAULT_AI_FALLBACK_API_KEY = ""
+DEFAULT_AI_FALLBACK_MODEL = ""
 # Operator MFA TOTP secret encryption (PHASE-5 S8, #261): the AES-256-GCM key
 # for encrypting/decrypting the TOTP secret stored in ``iam_operator_mfa.secret``
 # comes from the ``IAM_MFA_SECRET_KEY`` environment variable (never committed).
@@ -95,6 +137,12 @@ class Settings:
     gateway_refresh_token_ttl_seconds: int = DEFAULT_REFRESH_TOKEN_TTL_SECONDS
     gateway_rate_limit_auth_max_requests: int = DEFAULT_AUTH_RATE_LIMIT_MAX_REQUESTS
     gateway_rate_limit_auth_window_seconds: int = DEFAULT_AUTH_RATE_LIMIT_WINDOW_SECONDS
+    # Intake strict tier (PS-05, #403): its own settings, defaulting to the
+    # auth tier values so both surfaces are strict by default and only diverge
+    # when configured. Each surface keeps an independent per-client-IP bucket,
+    # so a burst on one can never exhaust the other's budget.
+    gateway_rate_limit_intake_max_requests: int = DEFAULT_AUTH_RATE_LIMIT_MAX_REQUESTS
+    gateway_rate_limit_intake_window_seconds: int = DEFAULT_AUTH_RATE_LIMIT_WINDOW_SECONDS
     sms_provider: str = DEFAULT_SMS_PROVIDER
     sms_api_key: str = ""
     sms_base_url: str = ""
@@ -135,6 +183,21 @@ class Settings:
     # ephemeral dev key, never committed).
     partner_artifact_root: str = DEFAULT_PARTNER_ARTIFACT_ROOT
     partner_artifact_key: str = ""
+    # MOD-006 intake audio media store (PHASE-7 T08, #373; fix #385): the
+    # concrete backend is selected by ``intake_media_backend`` - ``local``
+    # (default, dev/CI/tests) files encrypted clips under a repo-local ``var/``
+    # dir, ``supabase`` (production) stores the same ciphertext in a private
+    # Supabase Storage bucket so captures survive Render's ephemeral disk. The
+    # AES key ``intake_media_key`` is empty unless supplied by the environment
+    # (the store derives an ephemeral dev key, never committed).
+    # ``__post_init__`` requires BOTH ``supabase_url`` and
+    # ``supabase_service_role_key`` when the backend is ``supabase``
+    # (fail-fast boot - a misconfigured production box never boots half-wired).
+    intake_media_root: str = DEFAULT_INTAKE_MEDIA_ROOT
+    intake_media_key: str = ""
+    intake_media_backend: str = DEFAULT_INTAKE_MEDIA_BACKEND
+    supabase_url: str = ""
+    supabase_service_role_key: str = ""
     # Rejected-partner re-submission throttle (PHASE-5 T09, #253): environment
     # driven like the SMS/WhatsApp knobs (coding-standards §9.1). ``max`` is the
     # re-submission budget before cooldown; ``cooldown_days`` the cooldown length.
@@ -150,6 +213,33 @@ class Settings:
     # from the ``IAM_MFA_SECRET_KEY`` environment; ``issue_operator_session``
     # refuses to verify without it.
     iam_mfa_secret_key: str = ""
+    # Langfuse AI observability (plan-phase7-tracing-prep): the SDK keys for LLM
+    # call tracing, consumed by the AI gateway port from Phase 7 onward. Both
+    # empty by default = tracing disabled, the app boots cleanly without an
+    # account. ``__post_init__`` enforces both set or both empty.
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = DEFAULT_LANGFUSE_HOST
+    # EXT-002 LLM/AI gateway (PHASE-7 T05, #348): provider selection is a config
+    # knob (mock is the fail-closed default); the real provider key/base URL/
+    # model. ``__post_init__`` refuses a real provider in dev/test unless demo
+    # mode forces the mock or ``ai_allow_dev_provider`` overrides the gate,
+    # mirroring the SMS/WhatsApp fail-closed posture.
+    ai_provider: str = DEFAULT_AI_PROVIDER
+    ai_model: str = DEFAULT_AI_MODEL
+    ai_asr_model: str = DEFAULT_AI_ASR_MODEL
+    ai_allow_dev_provider: bool = DEFAULT_AI_ALLOW_DEV_PROVIDER
+    ai_api_key: str = ""
+    ai_base_url: str = ""
+    ai_timeout_seconds: float = DEFAULT_AI_TIMEOUT_SECONDS
+    ai_max_retries: int = DEFAULT_AI_MAX_RETRIES
+    ai_circuit_breaker_threshold: int = DEFAULT_AI_CIRCUIT_BREAKER_THRESHOLD
+    ai_circuit_breaker_cooldown_seconds: float = DEFAULT_AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS
+    ai_monthly_budget_paise: int = DEFAULT_AI_MONTHLY_BUDGET_PAISE
+    ai_fallback_provider: str = DEFAULT_AI_FALLBACK_PROVIDER
+    ai_fallback_base_url: str = DEFAULT_AI_FALLBACK_BASE_URL
+    ai_fallback_api_key: str = DEFAULT_AI_FALLBACK_API_KEY
+    ai_fallback_model: str = DEFAULT_AI_FALLBACK_MODEL
 
     def __post_init__(self) -> None:
         if self.gateway_jwt_verify_enabled and not self.gateway_jwt_signing_key:
@@ -217,6 +307,74 @@ class Settings:
                 "whatsapp_timeout_seconds must be in (0, 10] to honour the EXT-003 "
                 "call discipline (third-party-integration-standards §1)"
             )
+        ai_provider = self.ai_provider.strip().lower()
+        if ai_provider not in {"mock", "openai_compatible"}:
+            raise ValueError(
+                f"unsupported ai_provider {self.ai_provider!r}; expected "
+                "'mock' or 'openai_compatible'"
+            )
+        if self.demo_mode and ai_provider != "mock":
+            raise ValueError(
+                "demo_mode=True requires ai_provider='mock' (fail-closed): "
+                "the demo flag must never ride a real EXT-002 provider"
+            )
+        if ai_provider == "openai_compatible":
+            if (
+                self.app_environment.strip().lower() in _DEV_TEST_ENVIRONMENTS
+                and not self.ai_allow_dev_provider
+            ):
+                raise ValueError(
+                    "ai_provider='openai_compatible' is gated to staging/production: set "
+                    "APP_ENVIRONMENT to 'staging' or 'production' (or set "
+                    "AI_ALLOW_DEV_PROVIDER=true for dev/test) before using the "
+                    "real EXT-002 path. Refusing it in dev/test."
+                )
+            if not self.ai_api_key:
+                raise ValueError(
+                    "ai_provider='openai_compatible' requires AI_API_KEY from the environment"
+                )
+            if not self.ai_base_url:
+                raise ValueError(
+                    "ai_provider='openai_compatible' requires AI_BASE_URL from the environment"
+                )
+            if not self.ai_model:
+                raise ValueError(
+                    "ai_provider='openai_compatible' requires AI_MODEL from the environment"
+                )
+            if not self.ai_asr_model:
+                raise ValueError(
+                    "ai_provider='openai_compatible' requires AI_ASR_MODEL from the environment"
+                )
+        fallback_vars = {
+            "AI_FALLBACK_PROVIDER": self.ai_fallback_provider,
+            "AI_FALLBACK_BASE_URL": self.ai_fallback_base_url,
+            "AI_FALLBACK_API_KEY": self.ai_fallback_api_key,
+            "AI_FALLBACK_MODEL": self.ai_fallback_model,
+        }
+        if any(value.strip() for value in fallback_vars.values()):
+            unset = [name for name, value in fallback_vars.items() if not value.strip()]
+            if unset:
+                raise ValueError(
+                    "AI fallback must be all-or-none; missing: " + ", ".join(sorted(unset))
+                )
+            if self.ai_fallback_provider.strip().lower() != "openai_compatible":
+                raise ValueError(
+                    "ai_fallback_provider must be 'openai_compatible'; got "
+                    f"{self.ai_fallback_provider!r}"
+                )
+        if not (0 < self.ai_timeout_seconds <= 30):
+            raise ValueError(
+                "ai_timeout_seconds must be in (0, 30] to honour the EXT-002 "
+                "call discipline (third-party-integration-standards §1)"
+            )
+        if self.ai_max_retries <= 0:
+            raise ValueError("ai_max_retries must be positive")
+        if self.ai_circuit_breaker_threshold <= 0:
+            raise ValueError("ai_circuit_breaker_threshold must be positive")
+        if self.ai_monthly_budget_paise <= 0:
+            raise ValueError("ai_monthly_budget_paise must be positive")
+        if self.ai_circuit_breaker_cooldown_seconds <= 0:
+            raise ValueError("ai_circuit_breaker_cooldown_seconds must be positive")
         if self.redis_consent_ttl_seconds <= 0:
             raise ValueError("redis_consent_ttl_seconds must be positive")
         if self.redis_directory_ttl_seconds <= 0:
@@ -243,6 +401,27 @@ class Settings:
             raise ValueError("partner_re_submission_cooldown_days must be positive")
         if self.partner_credential_cleanup_days <= 0:
             raise ValueError("partner_credential_cleanup_days must be positive")
+        if bool(self.langfuse_public_key) != bool(self.langfuse_secret_key):
+            raise ValueError(
+                "LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY must both be set or "
+                "both empty; refusing to initialise Langfuse with a partial key pair."
+            )
+        intake_backend = self.intake_media_backend.strip().lower()
+        if intake_backend not in {"local", "supabase"}:
+            raise ValueError(
+                f"unsupported intake_media_backend {self.intake_media_backend!r}; "
+                "expected 'local' or 'supabase'"
+            )
+        if intake_backend == "supabase":
+            if not self.supabase_url.strip():
+                raise ValueError(
+                    "intake_media_backend='supabase' requires SUPABASE_URL from the environment"
+                )
+            if not self.supabase_service_role_key.strip():
+                raise ValueError(
+                    "intake_media_backend='supabase' requires "
+                    "SUPABASE_SERVICE_ROLE_KEY from the environment"
+                )
 
     @property
     def mock_otp_readback_enabled(self) -> bool:
@@ -322,6 +501,12 @@ def get_settings() -> Settings:
         gateway_rate_limit_auth_window_seconds=_env_int(
             "GATEWAY_RATE_LIMIT_AUTH_WINDOW_SECONDS", DEFAULT_AUTH_RATE_LIMIT_WINDOW_SECONDS
         ),
+        gateway_rate_limit_intake_max_requests=_env_int(
+            "GATEWAY_RATE_LIMIT_INTAKE_MAX_REQUESTS", DEFAULT_AUTH_RATE_LIMIT_MAX_REQUESTS
+        ),
+        gateway_rate_limit_intake_window_seconds=_env_int(
+            "GATEWAY_RATE_LIMIT_INTAKE_WINDOW_SECONDS", DEFAULT_AUTH_RATE_LIMIT_WINDOW_SECONDS
+        ),
         sms_provider=os.environ.get("SMS_PROVIDER", DEFAULT_SMS_PROVIDER),
         sms_api_key=os.environ.get("SMS_API_KEY", ""),
         sms_base_url=os.environ.get("SMS_BASE_URL", ""),
@@ -364,6 +549,11 @@ def get_settings() -> Settings:
             "PARTNER_ARTIFACT_ROOT", DEFAULT_PARTNER_ARTIFACT_ROOT
         ),
         partner_artifact_key=os.environ.get("PARTNER_ARTIFACT_KEY", ""),
+        intake_media_root=os.environ.get("INTAKE_MEDIA_ROOT", DEFAULT_INTAKE_MEDIA_ROOT),
+        intake_media_key=os.environ.get("INTAKE_MEDIA_KEY", ""),
+        intake_media_backend=os.environ.get("INTAKE_MEDIA_BACKEND", DEFAULT_INTAKE_MEDIA_BACKEND),
+        supabase_url=os.environ.get("SUPABASE_URL", ""),
+        supabase_service_role_key=os.environ.get("SUPABASE_SERVICE_ROLE_KEY", ""),
         partner_re_submission_max=_env_int(
             "PARTNER_RE_SUBMISSION_MAX", DEFAULT_PARTNER_RE_SUBMISSION_MAX
         ),
@@ -379,4 +569,29 @@ def get_settings() -> Settings:
             "PARTNER_CREDENTIAL_SWEEP_CRON", DEFAULT_PARTNER_CREDENTIAL_SWEEP_CRON
         ),
         iam_mfa_secret_key=os.environ.get("IAM_MFA_SECRET_KEY", ""),
+        langfuse_public_key=os.environ.get("LANGFUSE_PUBLIC_KEY", ""),
+        langfuse_secret_key=os.environ.get("LANGFUSE_SECRET_KEY", ""),
+        langfuse_host=os.environ.get("LANGFUSE_HOST", DEFAULT_LANGFUSE_HOST),
+        ai_provider=os.environ.get("AI_PROVIDER", DEFAULT_AI_PROVIDER),
+        ai_model=os.environ.get("AI_MODEL", DEFAULT_AI_MODEL),
+        ai_asr_model=os.environ.get("AI_ASR_MODEL", DEFAULT_AI_ASR_MODEL),
+        ai_allow_dev_provider=_env_bool("AI_ALLOW_DEV_PROVIDER", DEFAULT_AI_ALLOW_DEV_PROVIDER),
+        ai_api_key=os.environ.get("AI_API_KEY", ""),
+        ai_base_url=os.environ.get("AI_BASE_URL", ""),
+        ai_timeout_seconds=_env_float("AI_TIMEOUT_SECONDS", DEFAULT_AI_TIMEOUT_SECONDS),
+        ai_max_retries=_env_int("AI_MAX_RETRIES", DEFAULT_AI_MAX_RETRIES),
+        ai_circuit_breaker_threshold=_env_int(
+            "AI_CIRCUIT_BREAKER_THRESHOLD", DEFAULT_AI_CIRCUIT_BREAKER_THRESHOLD
+        ),
+        ai_circuit_breaker_cooldown_seconds=_env_float(
+            "AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS",
+            DEFAULT_AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+        ),
+        ai_monthly_budget_paise=_env_int(
+            "AI_MONTHLY_BUDGET_PAISE", DEFAULT_AI_MONTHLY_BUDGET_PAISE
+        ),
+        ai_fallback_provider=os.environ.get("AI_FALLBACK_PROVIDER", DEFAULT_AI_FALLBACK_PROVIDER),
+        ai_fallback_base_url=os.environ.get("AI_FALLBACK_BASE_URL", DEFAULT_AI_FALLBACK_BASE_URL),
+        ai_fallback_api_key=os.environ.get("AI_FALLBACK_API_KEY", DEFAULT_AI_FALLBACK_API_KEY),
+        ai_fallback_model=os.environ.get("AI_FALLBACK_MODEL", DEFAULT_AI_FALLBACK_MODEL),
     )

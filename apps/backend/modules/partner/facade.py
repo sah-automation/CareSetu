@@ -578,6 +578,7 @@ class PartnerFacade:
             )
             return PartnerView(
                 partner_id=partner_id,
+                partner_type=profile.partner_type,
                 status=profile.status,
                 round=profile.round,
             )
