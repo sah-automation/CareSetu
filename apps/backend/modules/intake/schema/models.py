@@ -105,9 +105,9 @@ intake_pre_summaries = Table(
     Column("structured_fields", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
     # LLM confidence score (0-1, AMB-006 threshold)
     Column("structuring_confidence", Numeric(5, 4), nullable=True),
-    # Low-confidence flag: when below threshold forces review_required
+    # Low-confidence flag: when below threshold forces doctor review (never a state)
     Column("low_confidence", Boolean, nullable=False, server_default=text("false")),
-    # Review lifecycle: draft -> review_required | reviewed -> final
+    # Review lifecycle: draft -> reviewed -> final (three states, never a fourth)
     # (FEAT-007)
     Column("review_state", String(20), nullable=False, server_default=text("'draft'")),
     # Patient's edits to the structured summary (FEAT-007)
@@ -125,7 +125,7 @@ intake_pre_summaries = Table(
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     CheckConstraint(
-        "review_state IN ('draft', 'review_required', 'reviewed', 'final')",
+        "review_state IN ('draft', 'reviewed', 'final')",
         name="ck_intake_pre_summaries_review_state",
     ),
     CheckConstraint(

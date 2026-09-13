@@ -82,8 +82,9 @@ def test_pre_summaries_is_registered_with_jsonb_and_attempts() -> None:
 
 def test_pre_summaries_review_state_check() -> None:
     states = _constraint_text(intake_pre_summaries, "ck_intake_pre_summaries_review_state")
-    for value in ("draft", "review_required", "reviewed", "final"):
+    for value in ("draft", "reviewed", "final"):
         assert f"'{value}'" in states
+    assert "'review_required'" not in states
 
 
 def test_ai_jobs_is_registered_with_cost_fields() -> None:
