@@ -305,7 +305,7 @@ async def test_ext002_http_stub_serves_the_provider_contract(database_url: str) 
         client=client,
         max_retries=1,
     )
-    context = AiEgressContext(language="hi", age_range="30-40", sex="male")
+    context = AiEgressContext(language="hi")
     try:
         transcribed = await provider.transcribe(
             TranscribeRequest(audio_ref="intake/abc", mode="voice", context=context)

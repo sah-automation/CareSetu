@@ -163,8 +163,6 @@ class Ext002AiProvider:
             "audio_ref": request.audio_ref,
             "mode": request.mode,
             "language": request.context.language,
-            "age_range": request.context.age_range,
-            "sex": request.context.sex,
         }
         data = await self._post_json(_TRANSCRIBE_PATH, payload)
         return TranscribeResult.model_validate(data)
@@ -175,8 +173,6 @@ class Ext002AiProvider:
             "transcript": request.transcript,
             "source": request.source,
             "language": request.context.language,
-            "age_range": request.context.age_range,
-            "sex": request.context.sex,
         }
         data = await self._post_json(_STRUCTURE_PATH, payload)
         return StructureResult.model_validate(data)
@@ -188,8 +184,6 @@ class Ext002AiProvider:
             "pre_summary_ref": request.pre_summary_ref,
             "patient_history_summary": request.patient_history_summary,
             "language": request.context.language,
-            "age_range": request.context.age_range,
-            "sex": request.context.sex,
         }
         data = await self._post_json(_DRAFT_RX_PATH, payload)
         return DraftRxResult.model_validate(data)

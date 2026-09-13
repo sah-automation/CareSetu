@@ -38,7 +38,7 @@ from modules.intake.adapters.ai_provider_openai_compatible import (
 
 
 def _context() -> AiEgressContext:
-    return AiEgressContext(language="hi", age_range="30-40", sex="male")
+    return AiEgressContext(language="hi")
 
 
 def _structure_request() -> StructureRequest:
@@ -443,11 +443,9 @@ async def test_egress_payload_carries_only_intake_context() -> None:
     messages = body["messages"]
     user_message = messages[1]["content"]
     assert "mujhe bukhar hai" in user_message
-    assert "hi" in user_message
-    assert "30-40" in user_message
-    assert "male" in user_message
-    assert "name" not in user_message
-    assert "phone" not in user_message
+    assert "Language: hi" in user_message
+    for forbidden in ("Age range", "Sex", "name", "phone"):
+        assert forbidden not in user_message, f"prompt carried forbidden term {forbidden!r}"
 
 
 async def test_egress_no_patient_identifiers_in_payload() -> None:
@@ -466,6 +464,22 @@ async def test_egress_no_patient_identifiers_in_payload() -> None:
     assert "name" not in body
     assert "phone" not in body
     assert "patient_id" not in body
+
+
+def test_built_structure_prompt_admits_only_language_and_transcript() -> None:
+    """Guardrail (PS-02): the built prompt admits exactly language + transcript.
+
+    The user message is the composed prompt that actually reaches the provider;
+    pinning its shape prevents age/sex/identity from re-entering the egress
+    boundary through the prompt leg.
+    """
+    adapter = _make_adapter(httpx.MockTransport(lambda request: _success_response({})))
+    messages = adapter._build_messages("mujhe bukhar hai", _context())
+
+    assert messages[0]["role"] == "system"
+    user_message = messages[1]
+    assert user_message["role"] == "user"
+    assert user_message["content"] == "Transcript: mujhe bukhar hai\nLanguage: hi"
 
 
 # --- transcribe: happy path ---
@@ -836,7 +850,8 @@ async def test_transcribe_egress_carries_only_clip_and_context() -> None:
     assert parts["file"] == _AUDIO_BYTES
     assert parts["model"] == b"whisper-large-v3-turbo"
     assert parts["language"] == b"hi"
-    for forbidden in ("audio_ref", "mode", "age_range", "sex", "name", "phone", "patient_id"):
+    assert set(parts) == {"file", "model", "language"}
+    for forbidden in ("name", "phone", "patient_id"):
         assert forbidden not in parts, f"egress carried forbidden field {forbidden!r}"
 
 

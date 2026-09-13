@@ -575,8 +575,7 @@ async def test_phi_minimized_context_is_all_that_reaches_the_provider() -> None:
     assert structure_request.transcript == "sir dard hai"
     assert structure_request.source == "text"
     assert structure_request.context.language == "hi"
-    assert structure_request.context.age_range == "30-40"
-    assert structure_request.context.sex == "other"
+    assert structure_request.context.model_dump() == {"language": "hi"}
 
 
 @pytest.mark.asyncio

@@ -60,10 +60,6 @@ logger = logging.getLogger(__name__)
 MOCK_AI_PROVIDER = MOCK_AI_PROVIDER
 MOCK_AI_MODEL = MOCK_AI_MODEL
 
-#: Egress-context placeholders until real patient-profile sourcing lands (T11).
-DEFAULT_EGRESS_AGE_RANGE = "30-40"
-DEFAULT_EGRESS_SEX = "other"
-
 #: Consent gate the intake AI egress is authorised under (NFR-SEC-006).
 AI_EGRESS_COUNTERPARTY_TYPE = "doctor"
 AI_EGRESS_COUNTERPARTY_ID = "intake-ai"
@@ -88,8 +84,6 @@ __all__ = [
     "AI_EGRESS_COUNTERPARTY_ID",
     "AI_EGRESS_COUNTERPARTY_TYPE",
     "AI_EGRESS_RECORD_SCOPE",
-    "DEFAULT_EGRESS_AGE_RANGE",
-    "DEFAULT_EGRESS_SEX",
     "MOCK_AI_MODEL",
     "MOCK_AI_PROVIDER",
     "_build_egress_gate",

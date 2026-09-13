@@ -52,7 +52,7 @@ def _intake_adapter_files() -> list[Path]:
 
 
 def _context() -> AiEgressContext:
-    return AiEgressContext(language="hi", age_range="30-40", sex="male")
+    return AiEgressContext(language="hi")
 
 
 async def test_mock_transcribe_clean_confidence() -> None:
@@ -446,7 +446,7 @@ def test_egress_transcribe_payload_carries_only_intake_context() -> None:
         "audio_ref": "media/abc",
         "audio_bytes": None,
         "mode": "voice",
-        "context": {"language": "hi", "age_range": "30-40", "sex": "male"},
+        "context": {"language": "hi"},
     }
     assert "name" not in payload
     assert "phone" not in payload
@@ -486,15 +486,25 @@ def test_egress_rejects_patient_identifiers() -> None:
             {
                 "audio_ref": "media/abc",
                 "mode": "voice",
-                "context": {"language": "hi", "age_range": "30-40", "sex": "male"},
+                "context": {"language": "hi"},
                 "name": "Raj",
             }
         )
 
 
-def test_egress_rejects_unhealthy_sex_value() -> None:
-    with pytest.raises(ValidationError):
-        AiEgressContext.model_validate({"language": "hi", "age_range": "30-40", "sex": "unknown"})
+def test_egress_context_admits_exactly_language() -> None:
+    """Guardrail (PS-02): the egress context admits exactly the language field.
+
+    ``AiEgressContext`` is the only patient-shaped thing allowed to cross to
+    EXT-002 (NFR-SEC-006). Pinning its field set here - and proving extra keys
+    are structurally rejected by ``extra="forbid"`` - keeps identity and
+    fabricated demographics from silently re-entering the egress boundary.
+    """
+    assert set(AiEgressContext.model_fields) == {"language"}
+
+    for forbidden in ("age_range", "sex", "name", "phone", "patient_id"):
+        with pytest.raises(ValidationError):
+            AiEgressContext.model_validate({"language": "hi", forbidden: "x"})
 
 
 async def test_build_mock_gateway_typed_as_port() -> None:
@@ -540,15 +550,13 @@ async def test_provider_wire_payloads_carry_only_intake_context(
     for payload in captured:
         assert "name" not in payload
         assert "phone" not in payload
-    assert set(captured[0]) == {"audio_ref", "mode", "language", "age_range", "sex"}
-    assert set(captured[1]) == {"transcript", "source", "language", "age_range", "sex"}
+    assert set(captured[0]) == {"audio_ref", "mode", "language"}
+    assert set(captured[1]) == {"transcript", "source", "language"}
     assert set(captured[2]) == {
         "doctor_input_ref",
         "pre_summary_ref",
         "patient_history_summary",
         "language",
-        "age_range",
-        "sex",
     }
 
 

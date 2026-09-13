@@ -88,16 +88,11 @@ logger = logging.getLogger(__name__)
 def _egress_context(language: str) -> AiEgressContext:
     """Build the PHI-minimized egress context from the intake row.
 
-    ``language`` is real (declared at capture); ``age_range``/``sex`` are
-    placeholder defaults until the patient-profile source lands (T11). The
-    context is the only patient-shaped data allowed to cross to EXT-002
-    (NFR-SEC-006) - never name/phone/full record.
+    ``language`` is real (declared at capture). The context is the only
+    patient-shaped data allowed to cross to EXT-002 (NFR-SEC-006) - never
+    name/phone/demographics/full record.
     """
-    return AiEgressContext(
-        language=language,
-        age_range=_adapters.DEFAULT_EGRESS_AGE_RANGE,
-        sex=_adapters.DEFAULT_EGRESS_SEX,
-    )
+    return AiEgressContext(language=language)
 
 
 def _build_egress_gate() -> tuple[AsyncEngine, ConsentFacade, BudgetMeter]:

@@ -49,7 +49,7 @@ pytestmark = pytest.mark.filterwarnings("ignore:.*was never awaited.*")
 _META_GROQ = AiGatewayMeta(provider="groq", model="llama-3.3-70b-versatile")
 _META_GEMINI = AiGatewayMeta(provider="gemini", model="gemini-2.0-flash")
 
-_COMMON_CONTEXT = AiEgressContext(language="hi", age_range="30-40", sex="male")
+_COMMON_CONTEXT = AiEgressContext(language="hi")
 
 _TRANSCRIBE_BODY = {
     "transcript": "mujhe bukhar hai",

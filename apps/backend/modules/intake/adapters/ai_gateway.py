@@ -8,10 +8,11 @@ by code - swapping a provider is a new adapter, zero domain changes
 (third-party-integration-standards §7).
 
 The request models declare the **egress boundary** (``NFR-SEC-006``): a call to
-EXT-002 may carry only intake context - the declared language, age range, and
-sex, plus the transcript/text (and the audio clip being transcribed) - never a
-patient's name, phone, or the full record. ``AiEgressContext`` is the one
-patient-shaped thing that may cross the wire.
+EXT-002 may carry only intake context - the declared language, plus the
+transcript/text (and the audio clip being transcribed) - never a patient's name,
+phone, demographics, or the full record. ``AiEgressContext`` is the one
+patient-shaped thing that may cross the wire, and it admits only the declared
+language.
 
 This module carries the DTOs, the typed ``Ext002CallError`` every adapter
 raises, the shared ``_backoff_delay`` retry helper, and the abstract
@@ -32,10 +33,6 @@ from pydantic import BaseModel, ConfigDict
 LANG_HI = "hi"
 LANG_EN = "en"
 
-SEX_MALE = "male"
-SEX_FEMALE = "female"
-SEX_OTHER = "other"
-
 
 def _backoff_delay(attempt: int, base_seconds: float = 1.0) -> float:
     """Exponential backoff with jitter for retry ``attempt`` (1-based).
@@ -53,8 +50,8 @@ def _backoff_delay(attempt: int, base_seconds: float = 1.0) -> float:
 class AiEgressContext(BaseModel):
     """The only patient context allowed to leave MOD-005 (NFR-SEC-006).
 
-    Egress to EXT-002 carries intake context only - the declared language, the
-    age range, and sex - never name, phone, or the full record. Every request
+    Egress to EXT-002 carries intake context only - the declared language, never
+    a patient's name, phone, demographics, or the full record. Every request
     model that travels to the provider embeds exactly this. Unknown fields are
     rejected (fail-closed), never silently carried.
     """
@@ -62,8 +59,6 @@ class AiEgressContext(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     language: Literal["hi", "en"]
-    age_range: str
-    sex: Literal["male", "female", "other"]
 
 
 class TranscribeRequest(BaseModel):
@@ -212,9 +207,6 @@ class AiGateway(Protocol):
 __all__ = [
     "LANG_EN",
     "LANG_HI",
-    "SEX_FEMALE",
-    "SEX_MALE",
-    "SEX_OTHER",
     "AiEgressContext",
     "AiGateway",
     "DraftRxRequest",

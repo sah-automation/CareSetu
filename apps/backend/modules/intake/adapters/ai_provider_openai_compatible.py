@@ -153,12 +153,7 @@ class OpenAiCompatibleAdapter:
         transcript: str,
         context: AiEgressContext,
     ) -> list[dict[str, str]]:
-        user_content = (
-            f"Transcript: {transcript}\n"
-            f"Language: {context.language}\n"
-            f"Age range: {context.age_range}\n"
-            f"Sex: {context.sex}"
-        )
+        user_content = f"Transcript: {transcript}\nLanguage: {context.language}"
         return [
             {"role": "system", "content": _SYSTEM_ROLE},
             {"role": "user", "content": user_content},
