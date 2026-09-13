@@ -211,20 +211,23 @@ def _assert_gateway_rejection_logged(caplog: pytest.LogCaptureFixture, trace_id:
     )
 
 
-def _auth_request(client_ip: str) -> Request:
-    """A crafted ``/v1/auth`` scope presenting ``client_ip`` as the caller's host.
+def _dispatch_request(
+    client_ip: str, *, path: str = "/v1/auth/register", method: str = "POST"
+) -> Request:
+    """A crafted HTTP scope presenting ``client_ip`` as the caller's host.
 
-    ``TestClient`` hardcodes a single client IP, so the per-IP isolation test
-    (B4) builds its own scopes and drives ``RateLimitMiddleware.dispatch``
-    directly instead of going through the app.
+    ``TestClient`` hardcodes a single client IP, so the per-IP isolation tests
+    (B4) build their own scopes and drive ``RateLimitMiddleware.dispatch``
+    directly instead of going through the app. ``path``/``method`` are
+    overridable so the intake-surface scope tests reuse the same harness.
     """
     return Request(
         scope={
             "type": "http",
-            "method": "POST",
+            "method": method,
             "scheme": "http",
-            "path": "/v1/auth/register",
-            "raw_path": b"/v1/auth/register",
+            "path": path,
+            "raw_path": path.encode(),
             "query_string": b"",
             "root_path": "",
             "headers": [],
@@ -232,6 +235,11 @@ def _auth_request(client_ip: str) -> Request:
             "server": ("testserver", 80),
         }
     )
+
+
+def _auth_request(client_ip: str) -> Request:
+    """A crafted ``/v1/auth`` scope presenting ``client_ip`` as the caller's host."""
+    return _dispatch_request(client_ip)
 
 
 # ---------------------------------------------------------------------------
@@ -699,6 +707,67 @@ async def test_rate_limit_keys_buckets_per_client_ip() -> None:
     assert (await middleware.dispatch(ip_b, stub_call_next)).status_code == 429
 
     assert (await middleware.dispatch(ip_a, stub_call_next)).status_code == 429
+
+
+async def test_rate_limit_counts_intake_write_surface_only() -> None:
+    """PS-05 AC1: the intake write trio counts toward the strict per-IP cap.
+
+    The widened scope covers exactly the media-and-row-writing surfaces -
+    ``upload-media``, ``submit``, and the ``{intake_id}/re-record`` shape -
+    each counted into the same shared per-IP bucket. Reading an intake back
+    (detail, pre-summary, clip playback) is never counted and never capped.
+    """
+    middleware = RateLimitMiddleware(app=None, enabled=True, max_requests=3, window_seconds=60)
+
+    async def stub_call_next(request: Request) -> Response:
+        return Response(status_code=200)
+
+    for path in ("/v1/intake/submit", "/v1/intake/upload-media", "/v1/intake/42/re-record"):
+        assert (
+            await middleware.dispatch(_dispatch_request("9.9.9.9", path=path), stub_call_next)
+        ).status_code == 200
+
+    response = await middleware.dispatch(
+        _dispatch_request("9.9.9.9", path="/v1/intake/submit"), stub_call_next
+    )
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "60"
+
+    for path in ("/v1/intake/42", "/v1/intake/42/pre-summary", "/v1/intake/42/media/11", "/probe"):
+        assert (
+            await middleware.dispatch(
+                _dispatch_request("9.9.9.9", path=path, method="GET"), stub_call_next
+            )
+        ).status_code == 200
+
+
+async def test_rate_limit_intake_and_auth_share_one_per_ip_tier() -> None:
+    """PS-05: the intake surface rides the SAME strict tier as auth.
+
+    One middleware scope, one shared per-IP bucket: spend already counted on
+    the auth surface leaves that much less for intake, so the third request
+    across both surfaces answers 429 whichever side it lands on.
+    """
+    middleware = RateLimitMiddleware(app=None, enabled=True, max_requests=2, window_seconds=60)
+
+    async def stub_call_next(request: Request) -> Response:
+        return Response(status_code=200)
+
+    assert (
+        await middleware.dispatch(
+            _dispatch_request("1.2.3.4", path="/v1/auth/register"), stub_call_next
+        )
+    ).status_code == 200
+    assert (
+        await middleware.dispatch(
+            _dispatch_request("1.2.3.4", path="/v1/intake/submit"), stub_call_next
+        )
+    ).status_code == 200
+    response = await middleware.dispatch(
+        _dispatch_request("1.2.3.4", path="/v1/intake/upload-media"), stub_call_next
+    )
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "60"
 
 
 # ---------------------------------------------------------------------------

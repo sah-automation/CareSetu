@@ -57,6 +57,27 @@ def _client(facade: StubIntakeFacade | None = None) -> TestClient:
     return TestClient(app)
 
 
+def _rate_limited_client(
+    facade: StubIntakeFacade | None = None, *, max_requests: int = 2
+) -> TestClient:
+    """Like ``_client`` but with the strict-tier gateway limiter enabled.
+
+    The intake write surface joins the OTP/auth routes under the same per-IP
+    cap (PS-05, #403), so the 429 + ``Retry-After`` boundary tests drive a
+    small exhausted tier instead of the 10/60s production default.
+    """
+    settings = Settings(
+        gateway_jwt_verify_enabled=True,
+        gateway_jwt_signing_key=_SIGNING_KEY,
+        gateway_rate_limit_enabled=True,
+        gateway_rate_limit_auth_max_requests=max_requests,
+        gateway_rate_limit_auth_window_seconds=60,
+    )
+    app = create_app(settings=settings)
+    app.state.intake_facade = facade if facade is not None else StubIntakeFacade()
+    return TestClient(app)
+
+
 # ---------------------------------------------------------------------------
 # Stubbed facade
 # ---------------------------------------------------------------------------
@@ -768,3 +789,90 @@ def test_get_intake_media_transfer_failure_envelope() -> None:
 
     assert response.status_code == 502
     assert response.json()["code"] == "MEDIA_TRANSFER_FAILED"
+
+
+# ---------------------------------------------------------------------------
+# Tests: intake surface rate limiting (PS-05, #403)
+# ---------------------------------------------------------------------------
+
+
+def test_submit_exhausted_cap_answers_429_with_retry_after() -> None:
+    """AC2: a row-writing intake route answers the shared 429 when the tier empties.
+
+    The limiter runs before ``jwt_verify``, so the exhausted response is the
+    shared gateway envelope - ``RATE_LIMIT_EXCEEDED`` with a trace id and a
+    ``Retry-After`` header - never the route's own error shape.
+    """
+    client = _rate_limited_client(max_requests=2)
+    headers = _bearer(_token())
+    body = {"mode": "text", "language": "hi", "text": "Mujhe sar dard hai"}
+
+    assert client.post("/v1/intake/submit", json=body, headers=headers).status_code == 200
+    assert client.post("/v1/intake/submit", json=body, headers=headers).status_code == 200
+
+    response = client.post("/v1/intake/submit", json=body, headers=headers)
+
+    assert response.status_code == 429
+    body_429 = response.json()
+    assert body_429["code"] == "RATE_LIMIT_EXCEEDED"
+    assert body_429["trace_id"]
+    assert body_429["details"] == {}
+    assert response.headers["Retry-After"] == "60"
+
+
+def test_upload_media_exhausted_cap_answers_429_with_retry_after() -> None:
+    """AC2 for the media-writing surface: uploads exhaust their own 429 tier."""
+    client = _rate_limited_client(max_requests=2)
+    headers = _bearer(_token())
+    files = {"file": ("clip.webm", b"audio-bytes", "audio/webm")}
+
+    assert client.post("/v1/intake/upload-media", files=files, headers=headers).status_code == 200
+    assert client.post("/v1/intake/upload-media", files=files, headers=headers).status_code == 200
+
+    response = client.post("/v1/intake/upload-media", files=files, headers=headers)
+
+    assert response.status_code == 429
+    body_429 = response.json()
+    assert body_429["code"] == "RATE_LIMIT_EXCEEDED"
+    assert body_429["trace_id"]
+    assert body_429["details"] == {}
+    assert response.headers["Retry-After"] == "60"
+
+
+def test_re_record_exhausted_cap_answers_429_with_retry_after() -> None:
+    """AC2 for the re-record surface: the dynamic-path write answers 429 too."""
+    client = _rate_limited_client(max_requests=2)
+    headers = _bearer(_token())
+    payload = {"media_ref": _MEDIA_REF.model_dump(mode="json")}
+
+    assert client.post("/v1/intake/42/re-record", json=payload, headers=headers).status_code == 200
+    assert client.post("/v1/intake/42/re-record", json=payload, headers=headers).status_code == 200
+
+    response = client.post("/v1/intake/42/re-record", json=payload, headers=headers)
+
+    assert response.status_code == 429
+    body_429 = response.json()
+    assert body_429["code"] == "RATE_LIMIT_EXCEEDED"
+    assert body_429["trace_id"]
+    assert body_429["details"] == {}
+    assert response.headers["Retry-After"] == "60"
+
+
+def test_intake_reads_bypass_rate_cap() -> None:
+    """The write tier never caps the read surfaces.
+
+    Exhausting submit still leaves the intake detail, pre-summary, and clip
+    playback routes answering normally - the limiter matches only the
+    media-and-row-writing trio, not ``/v1/intake/*`` wholesale.
+    """
+    client = _rate_limited_client(max_requests=2)
+    headers = _bearer(_token())
+    body = {"mode": "text", "language": "hi", "text": "Mujhe sar dard hai"}
+
+    assert client.post("/v1/intake/submit", json=body, headers=headers).status_code == 200
+    assert client.post("/v1/intake/submit", json=body, headers=headers).status_code == 200
+    assert client.post("/v1/intake/submit", json=body, headers=headers).status_code == 429
+
+    assert client.get("/v1/intake/42", headers=headers).status_code == 200
+    assert client.get("/v1/intake/42/pre-summary", headers=headers).status_code == 200
+    assert client.get("/v1/intake/42/media/11", headers=headers).status_code == 200

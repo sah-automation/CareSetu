@@ -240,12 +240,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.mock_sms_adapter = cast(MockSmsAdapter, sms_adapter)
 
     # Gateway middleware stack (PHASE-1 T7b, #29; PHASE-2 T8, #59; REM T6, #77;
-    # REM T8, #78). The auth surface is unauthenticated, so rate_limit is the
-    # outermost of the gateway pair: every /v1/auth/* request - valid, invalid,
-    # or missing token - is counted toward the per-client-IP cap before
-    # jwt_verify can short-circuit on a bad token. jwt_verify runs inside the
-    # limiter and attaches the settled Principal for the routes and the
-    # protected-route dependency.
+    # REM T8, #78; PS-05, #403). The auth and intake-write surfaces are
+    # unauthenticated entry points, so rate_limit is the outermost of the
+    # gateway pair: every /v1/auth/* request plus the intake write trio
+    # (upload-media, submit, re-record) - valid, invalid, or missing token - is
+    # counted toward one shared per-client-IP cap before jwt_verify can
+    # short-circuit on a bad token. jwt_verify runs inside the limiter and
+    # attaches the settled Principal for the routes and the protected-route
+    # dependency.
     app.add_middleware(
         JWTVerifyMiddleware,
         enabled=resolved_settings.gateway_jwt_verify_enabled,
