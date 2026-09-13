@@ -110,7 +110,9 @@ class _FakeConnection:
         if isinstance(statement, Insert):
             if table == "intake_ai_jobs" and getattr(statement, "_returning", None):
                 self.executed.append(_Recorded("insert_ai_job", statement))
-                return _FakeResult(scalar=self._ai_job_id)
+                job_id = self._ai_job_id
+                self._ai_job_id += 1
+                return _FakeResult(scalar=job_id)
             if table == "intake_pre_summaries" and getattr(statement, "_returning", None):
                 self.executed.append(_Recorded("insert_pre_summary", statement))
                 return _FakeResult(scalar=self._pre_summary_id)
@@ -697,8 +699,8 @@ async def test_media_ciphertext_tampering_degrades_to_raw_review() -> None:
 async def test_voice_transcribe_receives_decrypted_clip_bytes_from_media_store() -> None:
     """The transcribe leg selects the latest clip through the intake media store
     and puts the decrypted bytes on the ``TranscribeRequest`` (bytes flow
-    store -> request); the happy path is unchanged - a single ``structure`` job,
-    never a ``transcribe`` booking."""
+    store -> request); the happy path is now two metered rows - a completed
+    ``transcribe`` booking plus the structure job (PS-03)."""
     handler = _registered_handler()
     connection = _FakeConnection(
         intake_row=_voice_intake_row(),
@@ -712,6 +714,8 @@ async def test_voice_transcribe_receives_decrypted_clip_bytes_from_media_store()
             transcript="long enough transcript text here",
             confidence=0.8,
             language="hi",
+            input_tokens=0,
+            output_tokens=0,
         )
     )
     with (
@@ -733,11 +737,16 @@ async def test_voice_transcribe_receives_decrypted_clip_bytes_from_media_store()
     request = transcribe.await_args.args[0]
     assert request.audio_ref == "intake/42/clip.enc"
     assert request.audio_bytes == b"decrypted-clip-bytes"
-    # Happy path unchanged: success books a single structure job (never a
-    # transcribe row), records the transcript, and finalizes normally.
+    # Happy path (PS-03): success books a transcribe job AND a structure job -
+    # two metered rows - with ``ai_egress.recorded`` published for each leg.
     kinds = [r.kind for r in connection.executed]
-    ai_insert = next(r for r in connection.executed if r.kind == "insert_ai_job")
-    assert ai_insert.params["task_type"] == "structure"
+    ai_inserts = [r for r in connection.executed if r.kind == "insert_ai_job"]
+    assert [r.params["task_type"] for r in ai_inserts] == ["transcribe", "structure"]
+    completed = [r for r in connection.executed if r.kind == "update_ai_job"]
+    assert all(r.params["status"] == "completed" for r in completed)
+    outbox = _outbox_types(connection)
+    assert outbox.count(EVENT_AI_EGRESS_RECORDED) == 2
+    assert outbox.count(EVENT_AI_JOB_COMPLETED) == 2
     assert "insert_pre_summary" in kinds
     assert _statuses(connection) == ["structuring", "ready_for_review"]
     assert "transcript_update" in kinds

@@ -31,13 +31,14 @@ from sqlalchemy.sql.selectable import Select
 
 from bus.envelope import Envelope
 from bus.events import (
+    EVENT_AI_EGRESS_RECORDED,
     EVENT_AI_JOB_COMPLETED,
     EVENT_INTAKE_CAPTURED,
     EVENT_INTAKE_RETRY_REQUESTED,
     EVENT_PRE_SUMMARY_READY,
 )
 from modules.intake.adapters import register_handlers
-from modules.intake.adapters.ai_gateway import StructureResult
+from modules.intake.adapters.ai_gateway import StructureResult, TranscribeResult
 from modules.intake.adapters.ai_provider_mock import MOCK_CONFIDENCE_CLEAN, MockAiProvider
 from modules.intake.domain.events import IntakeCapturedPayload
 from modules.intake.pricing import ModelPrice
@@ -107,7 +108,9 @@ class _FakeConnection:
         if isinstance(statement, Insert):
             if table == "intake_ai_jobs" and getattr(statement, "_returning", None):
                 self.executed.append(_Recorded("insert_ai_job", statement))
-                return _FakeResult(scalar=self._ai_job_id)
+                job_id = self._ai_job_id
+                self._ai_job_id += 1
+                return _FakeResult(scalar=job_id)
             if table == "intake_pre_summaries" and getattr(statement, "_returning", None):
                 self.executed.append(_Recorded("insert_pre_summary", statement))
                 return _FakeResult(scalar=self._pre_summary_id)
@@ -387,6 +390,77 @@ async def test_completed_job_carries_real_tokens_and_priced_cost() -> None:
 
 
 @pytest.mark.asyncio
+async def test_transcribe_success_is_metered_and_audited_as_an_egress() -> None:
+    """PS-03: a successful voice transcribe writes a ``transcribe`` ai_jobs row
+    with real provider/model/tokens/cost/duration, records the egress disclosure,
+    and publishes ``ai_egress.recorded`` - all in the same transaction as the
+    ledger dedupe (the structure leg rides along as its own metered row)."""
+    handler = _registered_handler()
+    connection = _FakeConnection(intake_row=_voice_intake_row(), media_row=_media_row())
+    engine = _fake_engine(connection)
+    gate_engine, consent, _meter = _fake_egress_gate()
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "modules.intake.adapters._build_egress_gate",
+            return_value=(gate_engine, consent, _meter),
+        ),
+        _media_store_patch(),
+        patch.object(
+            MockAiProvider,
+            "transcribe",
+            new_callable=AsyncMock,
+            return_value=TranscribeResult(
+                transcript="long enough transcript text here",
+                confidence=0.8,
+                language="hi",
+                input_tokens=500,
+                output_tokens=80,
+            ),
+        ),
+        patch(
+            "modules.intake.pricing.PRICING_TABLE",
+            {
+                "mock-model": ModelPrice(
+                    price_in_paise=Decimal("0.02"), price_out_paise=Decimal("0.04")
+                )
+            },
+        ),
+    ):
+        await handler(_captured_envelope(intake_id=1))
+
+    # The transcribe job was booked pre-call and finalized with the effective
+    # serving values + real token usage priced into cost (10 + 3.2 = 13 paise).
+    ai_inserts = [r for r in connection.executed if r.kind == "insert_ai_job"]
+    assert [r.params["task_type"] for r in ai_inserts] == ["transcribe", "structure"]
+    transcribe_completed = next(
+        r
+        for r in connection.executed
+        if r.kind == "update_ai_job" and r.params["status"] == "completed"
+    )
+    assert transcribe_completed.params["provider"] == "mock"
+    assert transcribe_completed.params["model"] == "mock-model"
+    assert transcribe_completed.params["input_tokens"] == 500
+    assert transcribe_completed.params["output_tokens"] == 80
+    assert transcribe_completed.params["cost_paise"] == 13
+    assert isinstance(transcribe_completed.params["duration_ms"], int)
+
+    # The clip's departure was disclosed under the checked grant once per leg,
+    # and ``ai_egress.recorded`` names the transcribe job (9) + structure (10).
+    consent.record_egress_disclosure.assert_awaited()
+    outbox = [r.params for r in connection.executed if r.kind == "outbox"]
+    egress_events = [p for p in outbox if p["event_type"] == EVENT_AI_EGRESS_RECORDED]
+    assert len(egress_events) == 2
+    assert {e["payload"]["ai_job_id"] for e in egress_events} == {9, 10}
+
+
+@pytest.mark.asyncio
 async def test_replay_of_same_event_id_is_a_no_op_no_pipeline_effects() -> None:
     handler = _registered_handler()
     connection = _FakeConnection(intake_row=_text_intake_row())
@@ -450,11 +524,27 @@ async def test_voice_mode_runs_transcribe_then_structure_and_records_transcript(
         p.get("transcript") == "mock transcript" and p.get("transcript_usability") == "partial"
         for p in transcript_updates
     )
-    # The structure leg still produced the pre-summary + events.
-    assert "insert_pre_summary" in kinds
+    # A voice pass is two metered rows (PS-03): a completed transcribe job
+    # booked before the call, then the completed structure job.
+    ai_inserts = [r for r in connection.executed if r.kind == "insert_ai_job"]
+    assert [r.params["task_type"] for r in ai_inserts] == ["transcribe", "structure"]
+    completed = [r for r in connection.executed if r.kind == "update_ai_job"]
+    assert len(completed) == 2
+    assert all(r.params["status"] == "completed" for r in completed)
+    # The transcribe job finalized with the effective serving values.
+    assert completed[0].params["provider"] == _PROVIDER
+    assert completed[0].params["model"] == _MODEL
+    assert completed[0].params["input_tokens"] == 0
+    assert completed[0].params["output_tokens"] == 0
+    assert completed[0].params["cost_paise"] == 0
+    assert isinstance(completed[0].params["duration_ms"], int)
+    # Both legs' egresses are disclosed and ``ai_egress.recorded`` published.
     outbox_types = [r.params["event_type"] for r in connection.executed if r.kind == "outbox"]
+    assert outbox_types.count(EVENT_AI_EGRESS_RECORDED) == 2
+    assert outbox_types.count(EVENT_AI_JOB_COMPLETED) == 2
     assert EVENT_PRE_SUMMARY_READY in outbox_types
-    assert EVENT_AI_JOB_COMPLETED in outbox_types
+    # The structure leg still produced the pre-summary.
+    assert "insert_pre_summary" in kinds
 
 
 @pytest.mark.asyncio
@@ -493,21 +583,31 @@ async def test_voice_unusable_below_cap_emits_retry_requested_and_returns() -> N
             MockAiProvider,
             "transcribe",
             new_callable=AsyncMock,
-            return_value=SimpleNamespace(transcript="", confidence=0.0, language="hi"),
+            return_value=SimpleNamespace(
+                transcript="", confidence=0.0, language="hi", input_tokens=0, output_tokens=0
+            ),
         ),
     ):
         await handler(_captured_envelope(intake_id=1))
 
     kinds = [r.kind for r in connection.executed]
+    # The successful transcribe is still metered + disclosed (PS-03): one
+    # completed transcribe job row and its ``ai_egress.recorded`` event ride
+    # the same transaction before the unusable branch.
+    ai_inserts = [r for r in connection.executed if r.kind == "insert_ai_job"]
+    assert [r.params["task_type"] for r in ai_inserts] == ["transcribe"]
+    completed = next(r for r in connection.executed if r.kind == "update_ai_job")
+    assert completed.params["status"] == "completed"
+    outbox_types = [r.params["event_type"] for r in connection.executed if r.kind == "outbox"]
+    assert EVENT_AI_EGRESS_RECORDED in outbox_types
+    assert EVENT_AI_JOB_COMPLETED in outbox_types
     # Re-record: status update to re_record + retry event
     assert any(
         r.kind == "transcript_update" and r.params.get("status") == "re_record"
         for r in connection.executed
     )
-    outbox_types = [r.params["event_type"] for r in connection.executed if r.kind == "outbox"]
     assert EVENT_INTAKE_RETRY_REQUESTED in outbox_types
     # No structure / pre-summary produced (pipeline returned early)
-    assert "insert_ai_job" not in kinds
     assert "insert_pre_summary" not in kinds
 
 
@@ -532,7 +632,9 @@ async def test_voice_unusable_at_cap_forced_text_returns() -> None:
             MockAiProvider,
             "transcribe",
             new_callable=AsyncMock,
-            return_value=SimpleNamespace(transcript="ab", confidence=0.0, language="hi"),
+            return_value=SimpleNamespace(
+                transcript="ab", confidence=0.0, language="hi", input_tokens=0, output_tokens=0
+            ),
         ),
     ):
         await handler(_captured_envelope(intake_id=1))
@@ -544,8 +646,12 @@ async def test_voice_unusable_at_cap_forced_text_returns() -> None:
         r.params.get("status") == "ready_for_review" and r.params.get("forced_text") is True
         for r in intake_updates
     )
-    # No ai_job or pre_summary created (pipeline returned early)
-    assert "insert_ai_job" not in kinds
+    # The transcribe leg is still metered (one completed row); the structure
+    # leg and pre_summary never ran (pipeline returned early at the cap).
+    ai_inserts = [r for r in connection.executed if r.kind == "insert_ai_job"]
+    assert [r.params["task_type"] for r in ai_inserts] == ["transcribe"]
+    completed = next(r for r in connection.executed if r.kind == "update_ai_job")
+    assert completed.params["status"] == "completed"
     assert "insert_pre_summary" not in kinds
 
 
@@ -568,14 +674,21 @@ async def test_voice_partial_proceeds_to_structuring_with_warning() -> None:
             MockAiProvider,
             "transcribe",
             new_callable=AsyncMock,
-            return_value=SimpleNamespace(transcript="short", confidence=0.5, language="hi"),
+            return_value=SimpleNamespace(
+                transcript="short",
+                confidence=0.5,
+                language="hi",
+                input_tokens=0,
+                output_tokens=0,
+            ),
         ),
     ):
         await handler(_captured_envelope(intake_id=1))
 
     kinds = [r.kind for r in connection.executed]
-    # Partial proceeds to structuring: ai_job + pre_summary created
-    assert "insert_ai_job" in kinds
+    # Partial proceeds to structuring: both legs book metered rows + pre_summary
+    ai_inserts = [r for r in connection.executed if r.kind == "insert_ai_job"]
+    assert [r.params["task_type"] for r in ai_inserts] == ["transcribe", "structure"]
     assert "insert_pre_summary" in kinds
     transcript_updates = [r for r in connection.executed if r.kind == "transcript_update"]
     assert any(r.params.get("transcript_usability") == "partial" for r in transcript_updates)
@@ -601,14 +714,19 @@ async def test_voice_usable_proceeds_to_structuring_normally() -> None:
             "transcribe",
             new_callable=AsyncMock,
             return_value=SimpleNamespace(
-                transcript="long enough transcript text here", confidence=0.8, language="hi"
+                transcript="long enough transcript text here",
+                confidence=0.8,
+                language="hi",
+                input_tokens=0,
+                output_tokens=0,
             ),
         ),
     ):
         await handler(_captured_envelope(intake_id=1))
 
     kinds = [r.kind for r in connection.executed]
-    assert "insert_ai_job" in kinds
+    ai_inserts = [r for r in connection.executed if r.kind == "insert_ai_job"]
+    assert [r.params["task_type"] for r in ai_inserts] == ["transcribe", "structure"]
     assert "insert_pre_summary" in kinds
     transcript_updates = [r for r in connection.executed if r.kind == "transcript_update"]
     assert any(r.params.get("transcript_usability") == "usable" for r in transcript_updates)
@@ -633,20 +751,23 @@ async def test_voice_empty_transcript_treated_as_unusable() -> None:
             MockAiProvider,
             "transcribe",
             new_callable=AsyncMock,
-            return_value=SimpleNamespace(transcript="   ", confidence=0.0, language="hi"),
+            return_value=SimpleNamespace(
+                transcript="   ", confidence=0.0, language="hi", input_tokens=0, output_tokens=0
+            ),
         ),
     ):
         await handler(_captured_envelope(intake_id=1))
 
-    kinds = [r.kind for r in connection.executed]
-    # Whitespace-only transcript is unusable -> re_record
+    # Whitespace-only transcript is unusable -> re_record (the successful
+    # transcribe leg is still metered as one completed row, PS-03).
     assert any(
         r.kind == "transcript_update" and r.params.get("status") == "re_record"
         for r in connection.executed
     )
     outbox_types = [r.params["event_type"] for r in connection.executed if r.kind == "outbox"]
     assert EVENT_INTAKE_RETRY_REQUESTED in outbox_types
-    assert "insert_ai_job" not in kinds
+    ai_inserts = [r for r in connection.executed if r.kind == "insert_ai_job"]
+    assert [r.params["task_type"] for r in ai_inserts] == ["transcribe"]
 
 
 @pytest.mark.asyncio

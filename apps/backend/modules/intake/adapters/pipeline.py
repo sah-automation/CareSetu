@@ -20,8 +20,8 @@ The ``intake.captured`` handler is the async AI pipeline (MOD-005 self-
 subscription). It is ledger-first (ADR-0002 §3): the ``consumed_events`` row
 is written in the SAME transaction as the pipeline effects, so replaying a
 delivered ``event_id`` finds its ledger row and is a no-op - exactly one
-pre-summary per captured event. It creates an ``intake_ai_jobs`` row, runs
-transcribe (voice) then structure through the ``AiGateway`` port (the mock
+pre-summary per captured event. It writes one metered ``intake_ai_jobs`` row
+per leg that ran (transcribe then structure) through the ``AiGateway`` port (the mock
 provider is the fail-closed default), writes a Draft pre_summary, and
 publishes ``pre_summary.ready`` + ``ai_job.completed`` on success. Budget
 meter and consent-gate enforcement land in T11; the happy path never raises
@@ -142,9 +142,12 @@ async def _run_structuring_pipeline(
 ) -> None:
     """Run transcribe -> structure on a captured intake and publish a Draft pre_summary.
 
-    The T11 pipeline is gated and degradable: a single ``structure`` ai_jobs row
-    records the whole pass (provider/model/tokens/cost/latency/status/attempts),
-    and the intake is moved Captured -> Structuring -> Ready for Review. Before
+    The T11 pipeline is gated and degradable: one metered ``ai_jobs`` row per
+    leg that ran (``transcribe`` then ``structure``) records the pass
+    (provider/model/tokens/cost/latency/status/attempts), and the intake is
+    moved Captured -> Structuring -> Ready for Review. A voice pass is two
+    metered rows where both legs ran (transcribe + structure, PS-03); a text
+    pass is one structure row. Before
     any egress the NFR-001 budget meter is consulted (hard stop) and the consent
     gate is checked fail-closed (missing/revoked grant -> raw doctor review with
     no PHI sent); every successful egress is PHI-minimized (intake context only)
@@ -262,7 +265,7 @@ async def _run_structuring_pipeline(
             # authentication failure - ``OSError``/``FileNotFoundError``/
             # ``InvalidTag``), a failed/provider-rejected transcribe call
             # (``Ext002CallError``) or a malformed result (``ValidationError``)
-            # books a failed ``transcribe`` ai_job, publishes ``ai_job.failed``,
+            # books its ``transcribe`` ai_job failed, publishes ``ai_job.failed``,
             # and degrades the intake to raw doctor review - the same durable
             # path the structure leg uses, so an ASR/media outage never stalls a
             # captured intake at Structuring (ticket #386 / #393).
@@ -270,8 +273,20 @@ async def _run_structuring_pipeline(
             # The media-ref guard above already returned for a missing/empty
             # object key, so ``audio_ref`` is non-None here (typing-only cast).
             audio_key = cast(str, audio_ref)
+            # The transcribe job is booked BEFORE the provider call (mirroring
+            # the structure leg) so a successful call finalizes THIS row with
+            # the effective (serving) provider/model + metered tokens/cost/
+            # duration (PS-03) and a failed call marks the same row failed.
+            transcribe_job_id = await _insert_ai_job(
+                connection,
+                intake_id,
+                provider=settings.ai_provider.strip().lower(),
+                model=settings.ai_model or _adapters.MOCK_AI_MODEL,
+                task_type="transcribe",
+            )
             try:
                 audio_bytes = await media_store.read(object_key=audio_key)
+                transcribe_started = time.monotonic()
                 transcribe_result = await gateway.transcribe(
                     TranscribeRequest(
                         audio_ref=audio_key,
@@ -280,17 +295,11 @@ async def _run_structuring_pipeline(
                         context=context,
                     )
                 )
+                transcribe_elapsed_ms = int((time.monotonic() - transcribe_started) * 1000)
             except (Ext002CallError, ValidationError, OSError, InvalidTag) as exc:
-                ai_job_id = await _insert_ai_job(
-                    connection,
-                    intake_id,
-                    provider=settings.ai_provider.strip().lower(),
-                    model=settings.ai_model or _adapters.MOCK_AI_MODEL,
-                    task_type="transcribe",
-                )
                 await _fail_job(
                     connection,
-                    ai_job_id=ai_job_id,
+                    ai_job_id=transcribe_job_id,
                     intake_id=intake_id,
                     task_type="transcribe",
                     reason=_failure_reason(exc),
@@ -307,6 +316,53 @@ async def _run_structuring_pipeline(
                 return
             finally:
                 await media_store.close()
+
+            # A successful transcribe is a metered, audited egress (PS-03): the
+            # job row is finalized with the effective serving values and the
+            # real token usage priced into cost_paise (the structure-leg
+            # ``_finalize_pipeline`` shape). The clip's departure for EXT-002 is
+            # disclosed under the checked grant - the consent facade's own,
+            # sanctioned transaction, exactly as the structure leg - and
+            # ``ai_egress.recorded`` notifies the audit trail. This runs before
+            # the usability branch so an unusable/partial transcript is still
+            # booked and disclosed: the clip DID leave.
+            effective_transcribe_provider = (
+                gateway.effective_provider or settings.ai_provider.strip().lower()
+            )
+            effective_transcribe_model = (
+                gateway.effective_model or settings.ai_model or _adapters.MOCK_AI_MODEL
+            )
+            await _complete_transcribe_job(
+                connection,
+                ai_job_id=transcribe_job_id,
+                intake_id=intake_id,
+                provider=effective_transcribe_provider,
+                model=effective_transcribe_model,
+                confidence=transcribe_result.confidence,
+                elapsed_ms=transcribe_elapsed_ms,
+                input_tokens=transcribe_result.input_tokens,
+                output_tokens=transcribe_result.output_tokens,
+            )
+            await consent_facade.record_egress_disclosure(
+                patient_id=row.patient_id,
+                consent_id=decision.consent_id,
+                version=decision.version or 0,
+                counterparty_type=_adapters.AI_EGRESS_COUNTERPARTY_TYPE,
+                counterparty_id=_adapters.AI_EGRESS_COUNTERPARTY_ID,
+                record_scope=_adapters.AI_EGRESS_RECORD_SCOPE,
+                disclosed_entry_ids=[intake_id],
+            )
+            await write_outbox(
+                connection,
+                INTAKE_SCHEMA,
+                INTAKE_OUTBOX_TABLE,
+                ai_egress_recorded_envelope(
+                    intake_id=intake_id,
+                    ai_job_id=transcribe_job_id,
+                    reason="transcribe egress of intake audio clip to EXT-002",
+                ),
+            )
+
             transcript = transcribe_result.transcript
             usability = classify_transcript_usability(transcript)
 
@@ -470,10 +526,11 @@ async def _insert_ai_job(
 
     The row is a booking marked BEFORE the provider call, so its provider/model
     are the configured plan (provider + placeholder model). A later successful
-    ``_finalize_pipeline`` overwrites them with the effective serving values;
-    a failure path only touches status/error_message. ``task_type`` defaults to
-    ``structure`` (the success-path charge); the transcribe-failure path books a
-    failed ``transcribe`` row in its except leg (ticket #386).
+    leg finalization (``_finalize_pipeline`` for structure, ``_complete_transcribe_job``
+    for transcribe) overwrites them with the effective serving values; a
+    failure path only touches status/error_message. ``task_type`` defaults to
+    ``structure`` (the success-path charge); the transcribe leg books a
+    ``transcribe`` row (success or failure) with the SAME pre-call shape.
     """
     job_insert = await connection.execute(
         intake_ai_jobs.insert()
@@ -555,6 +612,60 @@ async def _fail_job(
             intake_id=intake_id,
             task_type=task_type,  # type: ignore[arg-type]
             reason=reason,
+        ),
+    )
+
+
+async def _complete_transcribe_job(
+    connection: AsyncConnection,
+    *,
+    ai_job_id: int,
+    intake_id: int,
+    provider: str,
+    model: str,
+    confidence: float,
+    elapsed_ms: int,
+    input_tokens: int,
+    output_tokens: int,
+) -> None:
+    """Persist a successful transcribe job + publish ``ai_job.completed`` (PS-03).
+
+    Mirrors the structure leg's completion: the ``transcribe`` row is marked
+    ``completed`` with the effective (serving) provider/model, the transcription
+    confidence, the provider-reported token usage priced into ``cost_paise`` by
+    the per-model pricing helper (#399), and the call latency, then
+    ``ai_job.completed`` is emitted. Runs in the SAME transaction as the ledger
+    dedupe, so a voice pass is a metered row per leg that ran (transcribe then
+    structure) - the transcribe leg is never a silent, unlogged egress.
+    """
+    cost_paise = compute_cost_paise(
+        model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
+    await connection.execute(
+        intake_ai_jobs.update()
+        .where(intake_ai_jobs.c.id == ai_job_id)
+        .values(
+            status="completed",
+            provider=provider,
+            model=model,
+            confidence=Decimal(str(confidence)),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_paise=cost_paise,
+            duration_ms=elapsed_ms,
+            updated_at=datetime.now(UTC),
+        )
+    )
+    await write_outbox(
+        connection,
+        INTAKE_SCHEMA,
+        INTAKE_OUTBOX_TABLE,
+        ai_job_completed_envelope(
+            ai_job_id=ai_job_id,
+            intake_id=intake_id,
+            task_type="transcribe",
         ),
     )
 
