@@ -56,6 +56,7 @@ from modules.intake.adapters.ai_provider_ext import Ext002CallError
 from modules.intake.adapters.media_store import IntakeMediaStore, build_media_store
 from modules.intake.budget_meter import BudgetMeter
 from modules.intake.domain.events import (
+    AiTaskType,
     ai_egress_recorded_envelope,
     ai_job_completed_envelope,
     ai_job_failed_envelope,
@@ -210,8 +211,15 @@ async def _run_structuring_pipeline(
                 forced_text=structing.forced_text,
             )
         )
-    else:
+    elif current.status is IntakeStatus.STRUCTURING:
         structing = current
+    else:
+        logger.warning(
+            "intake %s unexpected status %s at pipeline entry; skipping AI pipeline",
+            intake_id,
+            current.status.value,
+        )
+        return
 
     context = _egress_context(row.language)
     gate_engine, consent_facade, budget_meter = _adapters._build_egress_gate()
@@ -340,11 +348,11 @@ async def _run_structuring_pipeline(
                 await media_store.close()
 
             # A successful transcribe is a metered, audited egress (PS-03): the
-            # job row is finalized with the effective serving values and the
-            # real token usage priced into cost_paise (the structure-leg
-            # ``_finalize_pipeline`` shape). The clip's departure for EXT-002 is
-            # disclosed under the checked grant - the consent facade's own,
-            # sanctioned transaction, exactly as the structure leg - and
+            # job row is finalized by the shared ``_complete_ai_job`` leg shape
+            # with the effective serving values and the real token usage priced
+            # into cost_paise. The clip's departure for EXT-002 is disclosed
+            # under the checked grant via ``_audit_egress`` (the consent
+            # facade's own, sanctioned transaction, as the structure leg), and
             # ``ai_egress.recorded`` notifies the audit trail. This runs before
             # the usability branch so an unusable/partial transcript is still
             # booked and disclosed: the clip DID leave.
@@ -354,10 +362,11 @@ async def _run_structuring_pipeline(
             effective_transcribe_model = (
                 gateway.effective_model or settings.ai_model or _adapters.MOCK_AI_MODEL
             )
-            await _complete_transcribe_job(
+            await _complete_ai_job(
                 connection,
                 ai_job_id=transcribe_job_id,
                 intake_id=intake_id,
+                task_type="transcribe",
                 provider=effective_transcribe_provider,
                 model=effective_transcribe_model,
                 confidence=transcribe_result.confidence,
@@ -365,24 +374,15 @@ async def _run_structuring_pipeline(
                 input_tokens=transcribe_result.input_tokens,
                 output_tokens=transcribe_result.output_tokens,
             )
-            await consent_facade.record_egress_disclosure(
+            await _audit_egress(
+                consent_facade,
+                connection=connection,
                 patient_id=row.patient_id,
                 consent_id=decision.consent_id,
                 version=decision.version or 0,
-                counterparty_type=_adapters.AI_EGRESS_COUNTERPARTY_TYPE,
-                counterparty_id=_adapters.AI_EGRESS_COUNTERPARTY_ID,
-                record_scope=_adapters.AI_EGRESS_RECORD_SCOPE,
-                disclosed_entry_ids=[intake_id],
-            )
-            await write_outbox(
-                connection,
-                INTAKE_SCHEMA,
-                INTAKE_OUTBOX_TABLE,
-                ai_egress_recorded_envelope(
-                    intake_id=intake_id,
-                    ai_job_id=transcribe_job_id,
-                    reason="transcribe egress of intake audio clip to EXT-002",
-                ),
+                intake_id=intake_id,
+                ai_job_id=transcribe_job_id,
+                reason="transcribe egress of intake audio clip to EXT-002",
             )
 
             transcript = transcribe_result.transcript
@@ -497,24 +497,15 @@ async def _run_structuring_pipeline(
         # Every successful egress is audited via the consent facade's egress
         # log (NFR-SEC-006) - the intake context was sent to EXT-002 under the
         # checked grant, and ``ai_egress.recorded`` notifies the audit trail.
-        await consent_facade.record_egress_disclosure(
+        await _audit_egress(
+            consent_facade,
+            connection=connection,
             patient_id=row.patient_id,
             consent_id=decision.consent_id,
             version=decision.version or 0,
-            counterparty_type=_adapters.AI_EGRESS_COUNTERPARTY_TYPE,
-            counterparty_id=_adapters.AI_EGRESS_COUNTERPARTY_ID,
-            record_scope=_adapters.AI_EGRESS_RECORD_SCOPE,
-            disclosed_entry_ids=[intake_id],
-        )
-        await write_outbox(
-            connection,
-            INTAKE_SCHEMA,
-            INTAKE_OUTBOX_TABLE,
-            ai_egress_recorded_envelope(
-                intake_id=intake_id,
-                ai_job_id=ai_job_id,
-                reason="structure egress of intake context to EXT-002",
-            ),
+            intake_id=intake_id,
+            ai_job_id=ai_job_id,
+            reason="structure egress of intake context to EXT-002",
         )
 
         await _finalize_pipeline(
@@ -548,11 +539,11 @@ async def _insert_ai_job(
 
     The row is a booking marked BEFORE the provider call, so its provider/model
     are the configured plan (provider + placeholder model). A later successful
-    leg finalization (``_finalize_pipeline`` for structure, ``_complete_transcribe_job``
-    for transcribe) overwrites them with the effective serving values; a
-    failure path only touches status/error_message. ``task_type`` defaults to
-    ``structure`` (the success-path charge); the transcribe leg books a
-    ``transcribe`` row (success or failure) with the SAME pre-call shape.
+    leg finalization (``_complete_ai_job``) overwrites them with the effective
+    serving values; a failure path only touches status/error_message.
+    ``task_type`` defaults to ``structure`` (the success-path charge); the
+    transcribe leg books a ``transcribe`` row (success or failure) with the
+    SAME pre-call shape.
     """
     job_insert = await connection.execute(
         intake_ai_jobs.insert()
@@ -638,11 +629,52 @@ async def _fail_job(
     )
 
 
-async def _complete_transcribe_job(
+async def _audit_egress(
+    consent_facade: ConsentFacade,
+    *,
+    connection: AsyncConnection,
+    patient_id: int,
+    consent_id: int | None,
+    version: int,
+    intake_id: int,
+    ai_job_id: int,
+    reason: str,
+) -> None:
+    """Audit one metered AI egress: consent disclosure + ``ai_egress.recorded``.
+
+    The clip/context left for EXT-002 under the checked grant: the consent
+    facade records the disclosure in its own sanctioned transaction (the
+    consent schema is a separate module, ADR-0003) and the intake outbox row
+    notifies the audit trail (NFR-SEC-006). Shared by the transcribe leg
+    (#401) and the structure leg so the audit shape cannot drift between them.
+    """
+    await consent_facade.record_egress_disclosure(
+        patient_id=patient_id,
+        consent_id=consent_id,
+        version=version,
+        counterparty_type=_adapters.AI_EGRESS_COUNTERPARTY_TYPE,
+        counterparty_id=_adapters.AI_EGRESS_COUNTERPARTY_ID,
+        record_scope=_adapters.AI_EGRESS_RECORD_SCOPE,
+        disclosed_entry_ids=[intake_id],
+    )
+    await write_outbox(
+        connection,
+        INTAKE_SCHEMA,
+        INTAKE_OUTBOX_TABLE,
+        ai_egress_recorded_envelope(
+            intake_id=intake_id,
+            ai_job_id=ai_job_id,
+            reason=reason,
+        ),
+    )
+
+
+async def _complete_ai_job(
     connection: AsyncConnection,
     *,
     ai_job_id: int,
     intake_id: int,
+    task_type: AiTaskType,
     provider: str,
     model: str,
     confidence: float,
@@ -650,21 +682,18 @@ async def _complete_transcribe_job(
     input_tokens: int,
     output_tokens: int,
 ) -> None:
-    """Persist a successful transcribe job + publish ``ai_job.completed`` (PS-03).
+    """Persist a successful AI job + publish ``ai_job.completed`` (shared leg shape).
 
-    Mirrors the structure leg's completion: the ``transcribe`` row is marked
-    ``completed`` with the effective (serving) provider/model, the transcription
-    confidence, the provider-reported token usage priced into ``cost_paise`` by
-    the per-model pricing helper (#399), and the call latency, then
-    ``ai_job.completed`` is emitted. Runs in the SAME transaction as the ledger
-    dedupe, so a voice pass is a metered row per leg that ran (transcribe then
-    structure) - the transcribe leg is never a silent, unlogged egress.
+    The completed row carries the effective (serving) provider/model, the
+    provider confidence, the provider's reported token usage priced into
+    ``cost_paise`` by the per-model pricing helper (#399), and the call latency;
+    then ``ai_job.completed`` is emitted. Runs in the SAME transaction as the
+    ledger dedupe so a pass is a metered row per leg that ran - never a silent,
+    unlogged egress (PS-03). Shared by the transcribe leg
+    (``task_type="transcribe"``, #401) and the structure leg
+    (``task_type="structure"``) so the completion shape cannot drift between them.
     """
-    cost_paise = compute_cost_paise(
-        model,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-    )
+    cost_paise = compute_cost_paise(model, input_tokens=input_tokens, output_tokens=output_tokens)
     await connection.execute(
         intake_ai_jobs.update()
         .where(intake_ai_jobs.c.id == ai_job_id)
@@ -687,7 +716,7 @@ async def _complete_transcribe_job(
         ai_job_completed_envelope(
             ai_job_id=ai_job_id,
             intake_id=intake_id,
-            task_type="transcribe",
+            task_type=task_type,
         ),
     )
 
@@ -710,12 +739,11 @@ async def _finalize_pipeline(
 ) -> None:
     """Persist the completed structure job + Draft pre_summary, then publish.
 
-    Runs in the SAME transaction as the ledger dedupe: the ai_jobs row is
-    marked completed with the effective (serving) provider/model, the metered
-    confidence/tokens/cost/latency/attempts, the Draft ``intake_pre_summaries``
-    row is written with the provider confidence + honesty fields, the intake
-    moves to ``ready_for_review``, and ``pre_summary.ready`` +
-    ``ai_job.completed`` are emitted. A low-confidence outcome ALSO publishes
+    Runs in the SAME transaction as the ledger dedupe: the Draft
+    ``intake_pre_summaries`` row is written with the provider confidence +
+    honesty fields, the intake moves to ``ready_for_review``, and
+    ``pre_summary.ready`` + ``ai_job.completed`` are emitted via the shared
+    ``_complete_ai_job`` leg. A low-confidence outcome ALSO publishes
     ``pre_summary.low_confidence`` (AMB-006) - the honesty cue that structurally
     forces doctor review before the pre-summary can finalize (ADR-0001).
     ``input_tokens``/``output_tokens`` are the provider's reported usage off the
@@ -725,28 +753,6 @@ async def _finalize_pipeline(
     ADR-0002 S1. A downstream failure here rolls the whole pass back, so
     at-least-once redelivery re-runs it - never a partial pre-summary.
     """
-    cost_paise = compute_cost_paise(
-        model,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-    )
-
-    await connection.execute(
-        intake_ai_jobs.update()
-        .where(intake_ai_jobs.c.id == ai_job_id)
-        .values(
-            status="completed",
-            provider=provider,
-            model=model,
-            confidence=Decimal(str(confidence)),
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cost_paise=cost_paise,
-            duration_ms=elapsed_ms,
-            updated_at=datetime.now(UTC),
-        )
-    )
-
     pre_insert = await connection.execute(
         intake_pre_summaries.insert()
         .values(
@@ -797,13 +803,15 @@ async def _finalize_pipeline(
                 pre_summary_id=pre_summary_id,
             ),
         )
-    await write_outbox(
+    await _complete_ai_job(
         connection,
-        INTAKE_SCHEMA,
-        INTAKE_OUTBOX_TABLE,
-        ai_job_completed_envelope(
-            ai_job_id=ai_job_id,
-            intake_id=intake_id,
-            task_type="structure",
-        ),
+        ai_job_id=ai_job_id,
+        intake_id=intake_id,
+        task_type="structure",
+        provider=provider,
+        model=model,
+        confidence=confidence,
+        elapsed_ms=elapsed_ms,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
     )

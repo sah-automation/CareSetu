@@ -710,12 +710,12 @@ async def test_rate_limit_keys_buckets_per_client_ip() -> None:
 
 
 async def test_rate_limit_counts_intake_write_surface_only() -> None:
-    """PS-05 AC1: the intake write trio counts toward the strict per-IP cap.
+    """PS-05 AC1: the intake write trio counts toward its own strict per-IP cap.
 
     The widened scope covers exactly the media-and-row-writing surfaces -
     ``upload-media``, ``submit``, and the ``{intake_id}/re-record`` shape -
-    each counted into the same shared per-IP bucket. Reading an intake back
-    (detail, pre-summary, clip playback) is never counted and never capped.
+    each counted into the intake surface's own per-IP bucket. Reading an intake
+    back (detail, pre-summary, clip playback) is never counted and never capped.
     """
     middleware = RateLimitMiddleware(app=None, enabled=True, max_requests=3, window_seconds=60)
 
@@ -741,33 +741,57 @@ async def test_rate_limit_counts_intake_write_surface_only() -> None:
         ).status_code == 200
 
 
-async def test_rate_limit_intake_and_auth_share_one_per_ip_tier() -> None:
-    """PS-05: the intake surface rides the SAME strict tier as auth.
+async def test_rate_limit_intake_and_auth_are_independent_tiers() -> None:
+    """PS-05: the intake surface keeps its OWN strict tier, independent of auth.
 
-    One middleware scope, one shared per-IP bucket: spend already counted on
-    the auth surface leaves that much less for intake, so the third request
-    across both surfaces answers 429 whichever side it lands on.
+    Each surface owns a separate per-IP bucket, so exhausting the intake tier
+    leaves the auth tier untouched (and vice versa) - ``"auth-only limiting
+    semantics still hold"``: a patient's upload burst can never lock them out
+    of their own OTP/verify flow.
     """
     middleware = RateLimitMiddleware(app=None, enabled=True, max_requests=2, window_seconds=60)
 
     async def stub_call_next(request: Request) -> Response:
         return Response(status_code=200)
 
+    ip = "1.2.3.4"
+    auth_path = "/v1/auth/register"
+
+    # Exhaust the auth tier: the third auth request 429s...
     assert (
-        await middleware.dispatch(
-            _dispatch_request("1.2.3.4", path="/v1/auth/register"), stub_call_next
-        )
+        await middleware.dispatch(_dispatch_request(ip, path=auth_path), stub_call_next)
     ).status_code == 200
     assert (
-        await middleware.dispatch(
-            _dispatch_request("1.2.3.4", path="/v1/intake/submit"), stub_call_next
-        )
+        await middleware.dispatch(_dispatch_request(ip, path=auth_path), stub_call_next)
     ).status_code == 200
+    assert (
+        await middleware.dispatch(_dispatch_request(ip, path=auth_path), stub_call_next)
+    ).status_code == 429
+
+    # ...but the intake tier is still fresh, so an intake write answers 200.
     response = await middleware.dispatch(
-        _dispatch_request("1.2.3.4", path="/v1/intake/upload-media"), stub_call_next
+        _dispatch_request(ip, path="/v1/intake/submit"), stub_call_next
     )
-    assert response.status_code == 429
-    assert response.headers["Retry-After"] == "60"
+    assert response.status_code == 200
+
+    # Exhaust the intake tier independently; the auth tier stays unchanged.
+    intake_probe = "/v1/intake/upload-media"
+    assert (
+        await middleware.dispatch(_dispatch_request(ip, path=intake_probe), stub_call_next)
+    ).status_code == 200
+    assert (
+        await middleware.dispatch(_dispatch_request(ip, path=intake_probe), stub_call_next)
+    ).status_code == 429
+
+    # A separate caller still has both tiers at their own budgets.
+    assert (
+        await middleware.dispatch(_dispatch_request("5.6.7.8", path=auth_path), stub_call_next)
+    ).status_code == 200
+    assert (
+        await middleware.dispatch(
+            _dispatch_request("5.6.7.8", path="/v1/intake/submit"), stub_call_next
+        )
+    ).status_code == 200
 
 
 # ---------------------------------------------------------------------------

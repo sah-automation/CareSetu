@@ -244,8 +244,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # unauthenticated entry points, so rate_limit is the outermost of the
     # gateway pair: every /v1/auth/* request plus the intake write trio
     # (upload-media, submit, re-record) - valid, invalid, or missing token - is
-    # counted toward one shared per-client-IP cap before jwt_verify can
-    # short-circuit on a bad token. jwt_verify runs inside the limiter and
+    # counted toward its per-surface, per-client-IP cap before jwt_verify can
+    # short-circuit on a bad token. Each surface keeps an independent tier so a
+    # burst on one can never exhaust the other's budget ("auth-only limiting
+    # semantics still hold", PS-05). jwt_verify runs inside the limiter and
     # attaches the settled Principal for the routes and the protected-route
     # dependency.
     app.add_middleware(
@@ -258,6 +260,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         enabled=resolved_settings.gateway_rate_limit_enabled,
         max_requests=resolved_settings.gateway_rate_limit_auth_max_requests,
         window_seconds=resolved_settings.gateway_rate_limit_auth_window_seconds,
+        intake_max_requests=resolved_settings.gateway_rate_limit_intake_max_requests,
+        intake_window_seconds=resolved_settings.gateway_rate_limit_intake_window_seconds,
     )
     # CORS for the local-dev PWA origin (added so the allow-origin header
     # reaches every response, including 401/403 from the gateway stack). The

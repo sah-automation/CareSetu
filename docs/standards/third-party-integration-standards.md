@@ -44,7 +44,7 @@
 ## 5. Cost Metering (EXT-002, paid tiers)
 
 - Every AI call records provider, tokens, ₹cost to `ai_jobs`; counters persisted - `NFR-001`, `NFR-COST-001`.
-- Hard budget enforcement: when the monthly meter is exhausted, AI features degrade to their fallback path instead of spending over budget.
+- Monthly budget is **observe-and-warn, never a block** (PS-10, #408): spend is reported against the configured `ai_monthly_budget_paise` knob and an exhausted budget is logged/reportable only - the AI pipeline proceeds. This deliberately deviates from spec #344's hard-stop wording so spend can never stall the care loop; the knob stays so a cap can be reintroduced later without a rewrite. Reconciles the AI engineering standard A4/A6 clause and ADR-0013.
 - Egress carries only intake/prescription context - **never the full record** - and is consent-gated + audited (`NFR-SEC-006`).
 
 ## 6. Provider Changes

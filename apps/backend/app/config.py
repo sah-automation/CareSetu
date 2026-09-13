@@ -137,6 +137,12 @@ class Settings:
     gateway_refresh_token_ttl_seconds: int = DEFAULT_REFRESH_TOKEN_TTL_SECONDS
     gateway_rate_limit_auth_max_requests: int = DEFAULT_AUTH_RATE_LIMIT_MAX_REQUESTS
     gateway_rate_limit_auth_window_seconds: int = DEFAULT_AUTH_RATE_LIMIT_WINDOW_SECONDS
+    # Intake strict tier (PS-05, #403): its own settings, defaulting to the
+    # auth tier values so both surfaces are strict by default and only diverge
+    # when configured. Each surface keeps an independent per-client-IP bucket,
+    # so a burst on one can never exhaust the other's budget.
+    gateway_rate_limit_intake_max_requests: int = DEFAULT_AUTH_RATE_LIMIT_MAX_REQUESTS
+    gateway_rate_limit_intake_window_seconds: int = DEFAULT_AUTH_RATE_LIMIT_WINDOW_SECONDS
     sms_provider: str = DEFAULT_SMS_PROVIDER
     sms_api_key: str = ""
     sms_base_url: str = ""
@@ -494,6 +500,12 @@ def get_settings() -> Settings:
         ),
         gateway_rate_limit_auth_window_seconds=_env_int(
             "GATEWAY_RATE_LIMIT_AUTH_WINDOW_SECONDS", DEFAULT_AUTH_RATE_LIMIT_WINDOW_SECONDS
+        ),
+        gateway_rate_limit_intake_max_requests=_env_int(
+            "GATEWAY_RATE_LIMIT_INTAKE_MAX_REQUESTS", DEFAULT_AUTH_RATE_LIMIT_MAX_REQUESTS
+        ),
+        gateway_rate_limit_intake_window_seconds=_env_int(
+            "GATEWAY_RATE_LIMIT_INTAKE_WINDOW_SECONDS", DEFAULT_AUTH_RATE_LIMIT_WINDOW_SECONDS
         ),
         sms_provider=os.environ.get("SMS_PROVIDER", DEFAULT_SMS_PROVIDER),
         sms_api_key=os.environ.get("SMS_API_KEY", ""),

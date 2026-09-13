@@ -62,9 +62,10 @@ def _rate_limited_client(
 ) -> TestClient:
     """Like ``_client`` but with the strict-tier gateway limiter enabled.
 
-    The intake write surface joins the OTP/auth routes under the same per-IP
-    cap (PS-05, #403), so the 429 + ``Retry-After`` boundary tests drive a
-    small exhausted tier instead of the 10/60s production default.
+    The intake write surface and the OTP/auth routes each keep an independent
+    per-IP tier (PS-05, #403): the intake tier is exhausted by the row-writing
+    trio below while auth-only limiting semantics remain untouched. Tests drive
+    a small exhausted tier instead of the 10/60s production default.
     """
     settings = Settings(
         gateway_jwt_verify_enabled=True,
@@ -72,6 +73,8 @@ def _rate_limited_client(
         gateway_rate_limit_enabled=True,
         gateway_rate_limit_auth_max_requests=max_requests,
         gateway_rate_limit_auth_window_seconds=60,
+        gateway_rate_limit_intake_max_requests=max_requests,
+        gateway_rate_limit_intake_window_seconds=60,
     )
     app = create_app(settings=settings)
     app.state.intake_facade = facade if facade is not None else StubIntakeFacade()
