@@ -29,7 +29,10 @@ in ``consent_egress_log`` (NFR-SEC-006).
 
 from __future__ import annotations
 
+import base64
 import json
+import logging
+import secrets
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
@@ -56,8 +59,10 @@ from modules.intake.adapters.ai_gateway import (
 )
 from modules.intake.adapters.ai_provider_mock import MOCK_CONFIDENCE_CLEAN
 from modules.intake.adapters.ai_provider_openai_compatible import OpenAiCompatibleAdapter
+from modules.intake.adapters.media_store import LocalFilesystemIntakeMediaStore
 from modules.intake.domain.state_machine import IntakeStatus
 from modules.intake.facade import IntakeFacade
+from modules.intake.intake_models import MediaUploadRef
 from modules.intake.outbox import INTAKE_OUTBOX_TABLE
 from worker.main import build_registry
 
@@ -68,6 +73,13 @@ INTAKE_SCHEMA = "intake"
 INTAKE_GATE_COUNTERPARTY_TYPE = "doctor"
 INTAKE_GATE_COUNTERPARTY_ID = "intake-ai"
 INTAKE_GATE_RECORD_SCOPE = "consultations"
+
+#: AES-256 key shared by the test media store and the pipeline's per-run store
+#: (set via ``INTAKE_MEDIA_KEY``) so a voice clip seeded once decrypts
+#: consistently on read. Derived once per session so no key literal is ever
+#: committed - the pipeline reads the same env var at runtime.
+_MEDIA_KEY_BYTES = secrets.token_bytes(32)
+_MEDIA_KEY_B64 = base64.b64encode(_MEDIA_KEY_BYTES).decode()
 
 _INTAKE_TABLES = (
     "intake.intake_outbox",
@@ -223,12 +235,17 @@ async def test_closed_loop_capture_pipeline_review_finalizes_with_mock_provider(
 
         ai_jobs = await _query(
             database_url,
-            "SELECT task_type, provider, model, status FROM intake.intake_ai_jobs",
+            "SELECT task_type, provider, model, status, input_tokens, output_tokens, "
+            "cost_paise FROM intake.intake_ai_jobs",
         )
         assert len(ai_jobs) == 1
         assert ai_jobs[0]["task_type"] == "structure"
         assert ai_jobs[0]["provider"] == "mock"
         assert ai_jobs[0]["status"] == "completed"
+        assert ai_jobs[0]["model"] == "mock-model"
+        assert ai_jobs[0]["input_tokens"] == 0
+        assert ai_jobs[0]["output_tokens"] == 0
+        assert ai_jobs[0]["cost_paise"] == 0
 
         egress_rows = await _query(
             database_url,
@@ -271,15 +288,244 @@ async def test_closed_loop_capture_pipeline_review_finalizes_with_mock_provider(
 
 
 @pytest.mark.asyncio
+async def test_closed_loop_voice_intake_books_transcribe_and_structure_jobs(
+    database_url: str,
+    clean_intake_tables: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A voice intake runs BOTH legs in the real closed loop, metered + audited
+    (T12 #409 over MOD-005).
+
+    The clip is seeded through a real ``LocalFilesystemIntakeMediaStore`` under
+    the same root/key the pipeline's per-run store reads (``INTAKE_MEDIA_*``
+    env), so the transcribe leg decrypts it like production. Assertions: one
+    ``transcribe`` + one ``structure`` job row, both completed with the mock's
+    real provider/model and (zero) token/cost metering, and an egress audit row
+    for each of the two legs (PS-03, NFR-SEC-006).
+    """
+    patient_id = uuid.uuid4().int % (2**53)
+    intake_engine = _intake_engine(database_url)
+    try:
+        monkeypatch.setenv("INTAKE_MEDIA_BACKEND", "local")
+        monkeypatch.setenv("INTAKE_MEDIA_ROOT", str(tmp_path))
+        monkeypatch.setenv("INTAKE_MEDIA_KEY", _MEDIA_KEY_B64)
+
+        store = LocalFilesystemIntakeMediaStore(root=tmp_path, key_bytes=_MEDIA_KEY_BYTES)
+        audio_key = await store.save(
+            data=b"fake-pcm-audio-bytes-for-closed-loop",
+            patient_id=patient_id,
+        )
+        await store.close()
+
+        intake_facade = IntakeFacade(engine=intake_engine)
+        consent_facade = ConsentFacade(engine=intake_engine)
+
+        grant = await consent_facade.grant_consent(
+            patient_id,
+            INTAKE_GATE_COUNTERPARTY_TYPE,  # type: ignore[arg-type]
+            INTAKE_GATE_COUNTERPARTY_ID,
+            INTAKE_GATE_RECORD_SCOPE,
+        )
+        assert grant.status == "granted"
+
+        submitted = await intake_facade.submit_intake(
+            patient_id=patient_id,
+            mode="voice",
+            language="hi",
+            media_ref=MediaUploadRef(
+                object_key=audio_key,
+                media_type="audio",
+                audio_duration_ms=5000,
+                file_size_bytes=len(b"fake-pcm-audio-bytes-for-closed-loop"),
+                record_attempt=1,
+            ),
+        )
+        intake_id = submitted.intake_id
+        assert submitted.status == IntakeStatus.CAPTURED.value
+
+        registry = build_registry()
+        poll_engine = _intake_engine(database_url)
+        try:
+            result = await process_outbox_table(
+                poll_engine,
+                OutboxTable(INTAKE_SCHEMA, INTAKE_OUTBOX_TABLE),
+                registry,
+                DispatcherConfig(),
+            )
+        finally:
+            await poll_engine.dispose()
+
+        assert result.claimed >= 1
+        assert result.fanned_out >= 1
+        assert result.deleted >= 1
+
+        intake_now = await _query(
+            database_url,
+            f"SELECT id, status, transcript FROM intake.intake_intakes WHERE id = {intake_id}",
+        )
+        assert intake_now[0]["status"] == IntakeStatus.READY_FOR_REVIEW.value
+        assert intake_now[0]["transcript"] == "mock transcript"
+
+        ai_jobs = await _query(
+            database_url,
+            "SELECT task_type, provider, model, status, input_tokens, output_tokens, "
+            "cost_paise FROM intake.intake_ai_jobs",
+        )
+        assert len(ai_jobs) == 2
+        jobs_by_task = {row["task_type"]: row for row in ai_jobs}
+        assert set(jobs_by_task) == {"transcribe", "structure"}
+        for row in ai_jobs:
+            assert row["status"] == "completed"
+            assert row["provider"] == "mock"
+            assert row["model"] == "mock-model"
+            assert row["input_tokens"] == 0
+            assert row["output_tokens"] == 0
+            assert row["cost_paise"] == 0
+
+        egress_rows = await _query(
+            database_url,
+            f"SELECT patient_id, counterparty_id, record_scope, disclosed_entry_ids "
+            f"FROM consent.consent_egress_log WHERE patient_id = {patient_id}",
+        )
+        assert len(egress_rows) == 2
+        assert all(row["counterparty_id"] == INTAKE_GATE_COUNTERPARTY_ID for row in egress_rows)
+        assert all(row["record_scope"] == INTAKE_GATE_RECORD_SCOPE for row in egress_rows)
+        assert all(row["disclosed_entry_ids"] == [intake_id] for row in egress_rows)
+
+        pre_summaries = await _query(
+            database_url,
+            "SELECT intake_id, review_state, low_confidence FROM intake.intake_pre_summaries",
+        )
+        assert len(pre_summaries) == 1
+        assert pre_summaries[0]["review_state"] == "draft"
+        assert pre_summaries[0]["low_confidence"] is False
+    finally:
+        await intake_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_closed_loop_exhausted_budget_still_completes(
+    database_url: str,
+    clean_intake_tables: None,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An exhausted NFR-001 meter is observe-and-warn: it never blocks the pipeline
+    (T12 #409, post-T11 #408).
+
+    The budget knob is set to a 1-paise cap and a seeded completed job prices
+    the month's spend over it, so ``BudgetMeter.allows_ai_call()`` answers
+    ``False`` (PS-10, #408). The pipeline must still run the structure leg and
+    land the intake at ``ready_for_review`` with a metered job - the advisory
+    banner, not a hard stop (spec #344's hard-stop wording was dropped).
+    """
+    patient_id = uuid.uuid4().int % (2**53)
+    intake_engine = _intake_engine(database_url)
+    caplog.set_level(logging.WARNING, logger="modules.intake.adapters.pipeline")
+    try:
+        monkeypatch.setenv("AI_MONTHLY_BUDGET_PAISE", "1")
+
+        intake_facade = IntakeFacade(engine=intake_engine)
+        consent_facade = ConsentFacade(engine=intake_engine)
+
+        grant = await consent_facade.grant_consent(
+            patient_id,
+            INTAKE_GATE_COUNTERPARTY_TYPE,  # type: ignore[arg-type]
+            INTAKE_GATE_COUNTERPARTY_ID,
+            INTAKE_GATE_RECORD_SCOPE,
+        )
+        assert grant.status == "granted"
+
+        submitted = await intake_facade.submit_intake(
+            patient_id=patient_id,
+            mode="text",
+            language="hi",
+            text="sir dard hai aur bukhar bhi",
+        )
+        intake_id = submitted.intake_id
+
+        # Price the month over the 1-paise cap with a completed job so the
+        # meter reports exhausted before the pipeline runs.
+        seeder = create_async_engine(database_url, poolclass=NullPool)
+        try:
+            async with seeder.begin() as connection:
+                await connection.execute(
+                    text(
+                        "INSERT INTO intake.intake_ai_jobs "
+                        "(intake_id, task_type, provider, model, status, cost_paise) "
+                        "VALUES (:intake_id, 'structure', 'mock', 'mock-model', "
+                        "'completed', :cost_paise)"
+                    ),
+                    {"intake_id": intake_id, "cost_paise": 10},
+                )
+        finally:
+            await seeder.dispose()
+
+        registry = build_registry()
+        poll_engine = _intake_engine(database_url)
+        try:
+            result = await process_outbox_table(
+                poll_engine,
+                OutboxTable(INTAKE_SCHEMA, INTAKE_OUTBOX_TABLE),
+                registry,
+                DispatcherConfig(),
+            )
+        finally:
+            await poll_engine.dispose()
+
+        assert result.claimed >= 1
+        assert result.fanned_out >= 1
+        assert result.deleted >= 1
+
+        intake_now = await _query(
+            database_url,
+            f"SELECT id, status FROM intake.intake_intakes WHERE id = {intake_id}",
+        )
+        assert intake_now[0]["status"] == IntakeStatus.READY_FOR_REVIEW.value
+
+        ai_jobs = await _query(
+            database_url,
+            "SELECT task_type, provider, status, input_tokens, output_tokens, cost_paise "
+            "FROM intake.intake_ai_jobs ORDER BY cost_paise",
+        )
+        assert len(ai_jobs) == 2
+        assert [row["cost_paise"] for row in ai_jobs] == [0, 10]
+        assert all(row["status"] == "completed" for row in ai_jobs)
+
+        assert any(
+            "monthly AI budget exhausted" in record.message
+            for record in caplog.records
+            if record.name == "modules.intake.adapters.pipeline"
+        )
+    finally:
+        await intake_engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_openai_compatible_http_stub_serves_the_provider_contract(database_url: str) -> None:
-    """EXT-002 is served by an HTTP stub: the wire boundary round-trips locally."""
+    """EXT-002 is served by an HTTP stub: the wire boundary round-trips locally (T12 #409).
+
+    The stub answers the OpenAI-compatible endpoint shapes the shipping
+    adapter posts to - ``/audio/transcriptions`` (multipart, with a
+    ``x_groq.usage`` block) and ``/chat/completions`` (top-level ``usage``) - so
+    the metered token counts real providers report flow off the wire onto the
+    ``TranscribeResult``/``StructureResult`` (PS-01, #398).
+    """
     del database_url
 
     def _stub(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/audio/transcriptions":
             return httpx.Response(
                 200,
-                json={"text": "mujhe bukhar hai", "language": "hi"},
+                json={
+                    "text": "mujhe bukhar hai",
+                    "language": "hi",
+                    # Vendor-specific usage block (Groq-style): the transcription
+                    # usage extraction path reads ``x_groq.usage`` when there is
+                    # no top-level ``usage``.
+                    "x_groq": {"usage": {"prompt_tokens": 42, "completion_tokens": 7}},
+                },
             )
         if request.url.path == "/chat/completions":
             return httpx.Response(
@@ -298,7 +544,8 @@ async def test_openai_compatible_http_stub_serves_the_provider_contract(database
                                 )
                             }
                         }
-                    ]
+                    ],
+                    "usage": {"prompt_tokens": 120, "completion_tokens": 30},
                 },
             )
         return httpx.Response(404)
@@ -338,6 +585,11 @@ async def test_openai_compatible_http_stub_serves_the_provider_contract(database
         await client.aclose()
 
     assert transcribed.transcript == "mujhe bukhar hai"
+    assert transcribed.language == "hi"
     assert transcribed.confidence == MOCK_CONFIDENCE_CLEAN
+    assert transcribed.input_tokens == 42
+    assert transcribed.output_tokens == 7
     assert structured.chief_complaints == ["bukhar"]
     assert structured.duration == "1 week"
+    assert structured.input_tokens == 120
+    assert structured.output_tokens == 30
