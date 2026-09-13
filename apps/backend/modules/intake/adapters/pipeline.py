@@ -74,6 +74,7 @@ from modules.intake.domain.state_machine import (
 )
 from modules.intake.intake_models import INTAKE_SCHEMA, StructuredFields
 from modules.intake.outbox import INTAKE_OUTBOX_TABLE
+from modules.intake.pricing import compute_cost_paise
 from modules.intake.schema.models import (
     intake_ai_jobs,
     intake_intakes,
@@ -455,6 +456,8 @@ async def _run_structuring_pipeline(
             low_conf=low_conf,
             record_attempts=structing.record_attempts,
             forced_text=structing.forced_text,
+            input_tokens=structure_result.input_tokens,
+            output_tokens=structure_result.output_tokens,
         )
     finally:
         await gate_engine.dispose()
@@ -574,6 +577,8 @@ async def _finalize_pipeline(
     low_conf: bool,
     record_attempts: int,
     forced_text: bool,
+    input_tokens: int,
+    output_tokens: int,
 ) -> None:
     """Persist the completed structure job + Draft pre_summary, then publish.
 
@@ -585,12 +590,18 @@ async def _finalize_pipeline(
     ``ai_job.completed`` are emitted. A low-confidence outcome ALSO publishes
     ``pre_summary.low_confidence`` (AMB-006) - the honesty cue that structurally
     forces doctor review before the pre-summary can finalize (ADR-0001).
+    ``input_tokens``/``output_tokens`` are the provider's reported usage off the
+    structure result (the metering seam, #398); ``cost_paise`` is priced from
+    them by the per-model pricing helper (#399), so the budget meter reads real
+    spend - a free or unknown model records real 0, never a fabricated constant.
     ADR-0002 S1. A downstream failure here rolls the whole pass back, so
     at-least-once redelivery re-runs it - never a partial pre-summary.
     """
-    token_input = 0
-    token_output = 0
-    cost_paise = 0
+    cost_paise = compute_cost_paise(
+        model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
 
     await connection.execute(
         intake_ai_jobs.update()
@@ -600,8 +611,8 @@ async def _finalize_pipeline(
             provider=provider,
             model=model,
             confidence=Decimal(str(confidence)),
-            input_tokens=token_input,
-            output_tokens=token_output,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
             cost_paise=cost_paise,
             duration_ms=elapsed_ms,
             updated_at=datetime.now(UTC),

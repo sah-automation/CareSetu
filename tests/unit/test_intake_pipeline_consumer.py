@@ -19,6 +19,7 @@ Pins the ledger-first pipeline contract:
 
 from __future__ import annotations
 
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -36,8 +37,10 @@ from bus.events import (
     EVENT_PRE_SUMMARY_READY,
 )
 from modules.intake.adapters import register_handlers
+from modules.intake.adapters.ai_gateway import StructureResult
 from modules.intake.adapters.ai_provider_mock import MOCK_CONFIDENCE_CLEAN, MockAiProvider
 from modules.intake.domain.events import IntakeCapturedPayload
+from modules.intake.pricing import ModelPrice
 
 _PROVIDER = "mock"
 _MODEL = "mock-model"
@@ -330,6 +333,57 @@ async def test_happy_path_writes_draft_pre_summary_and_publishes_ready_and_compl
     # Intake moved Captured -> Structuring -> Ready for Review.
     intake_statuses = [r.params["status"] for r in connection.executed if r.kind == "status_update"]
     assert intake_statuses == ["structuring", "ready_for_review"]
+
+
+@pytest.mark.asyncio
+async def test_completed_job_carries_real_tokens_and_priced_cost() -> None:
+    """A completed structure job row records the real provider/model, the
+    provider-reported token usage, and cost priced from them by the per-model
+    pricing helper (#399) - never a fabricated constant."""
+    handler = _registered_handler()
+    connection = _FakeConnection(intake_row=_text_intake_row())
+    engine = _fake_engine(connection)
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("modules.intake.adapters._build_egress_gate", return_value=_fake_egress_gate()),
+        _media_store_patch(),
+        patch.object(
+            MockAiProvider,
+            "structure",
+            new_callable=AsyncMock,
+            return_value=StructureResult(
+                chief_complaints=["sir dard hai"],
+                symptoms=["sir dard"],
+                duration="2 din",
+                confidence=MOCK_CONFIDENCE_CLEAN,
+                input_tokens=900,
+                output_tokens=150,
+            ),
+        ),
+        patch(
+            "modules.intake.pricing.PRICING_TABLE",
+            {
+                "mock-model": ModelPrice(
+                    price_in_paise=Decimal("0.02"), price_out_paise=Decimal("0.04")
+                )
+            },
+        ),
+    ):
+        await handler(_captured_envelope(intake_id=1))
+
+    ai_update = next(r for r in connection.executed if r.kind == "update_ai_job")
+    assert ai_update.params["status"] == "completed"
+    assert ai_update.params["provider"] == _PROVIDER
+    assert ai_update.params["model"] == _MODEL
+    assert ai_update.params["input_tokens"] == 900
+    assert ai_update.params["output_tokens"] == 150
+    assert ai_update.params["cost_paise"] == 18 + 6
 
 
 @pytest.mark.asyncio
