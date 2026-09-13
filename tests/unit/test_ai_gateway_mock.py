@@ -28,7 +28,6 @@ from modules.intake.adapters.ai_gateway import (
 )
 from modules.intake.adapters.ai_provider_ext import (
     CircuitBreakerAiGateway,
-    Ext002AiProvider,
     Ext002CallError,
     build_ai_gateway,
 )
@@ -163,17 +162,13 @@ def test_mock_exposes_effective_provider_and_model() -> None:
     assert provider.effective_model == MOCK_AI_MODEL
 
 
-async def test_provider_adapter_implements_all_three_operations() -> None:
-    provider = Ext002AiProvider(api_key="k", base_url="https://ext.example")
-
-    assert callable(provider.transcribe)
-    assert callable(provider.structure)
-    assert callable(provider.draft_rx)
-
-
 async def test_breaker_adapter_implements_all_three_operations() -> None:
     gateway = CircuitBreakerAiGateway(
-        Ext002AiProvider(api_key="k", base_url="https://ext.example"),
+        OpenAiCompatibleAdapter(
+            api_key="k",
+            base_url="https://ext.example",
+            model="test-model",
+        ),
         threshold=2,
         cooldown_seconds=1.0,
     )
@@ -517,60 +512,23 @@ async def test_build_mock_gateway_typed_as_port() -> None:
     assert result.confidence == MOCK_CONFIDENCE_LOW
 
 
-async def test_provider_wire_payloads_carry_only_intake_context(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    provider = Ext002AiProvider(api_key="k", base_url="https://ext.example")
-    captured: list[dict[str, object]] = []
-
-    async def _fake_post(path: str, payload: dict[str, object]) -> dict[str, object]:
-        captured.append(payload)
-        if path.endswith("transcribe"):
-            return {"transcript": "t", "confidence": 0.8, "language": "hi"}
-        if path.endswith("structure"):
-            return {"chief_complaints": [], "symptoms": [], "duration": "", "confidence": 0.8}
-        return {"rx_items": [{"name": "n", "dose": "d", "duration": "u"}], "confidence": 0.8}
-
-    monkeypatch.setattr(provider, "_post_json", _fake_post)
-
-    await provider.transcribe(
-        TranscribeRequest(audio_ref="media/1", mode="voice", context=_context())
-    )
-    await provider.structure(StructureRequest(transcript="x", source="text", context=_context()))
-    await provider.draft_rx(
-        DraftRxRequest(
-            doctor_input_ref="voice_note/1",
-            pre_summary_ref="pre_summary/2",
-            patient_history_summary="mock history",
-            context=_context(),
-        )
-    )
-
-    assert len(captured) == 3
-    for payload in captured:
-        assert "name" not in payload
-        assert "phone" not in payload
-    assert set(captured[0]) == {"audio_ref", "mode", "language"}
-    assert set(captured[1]) == {"transcript", "source", "language"}
-    assert set(captured[2]) == {
-        "doctor_input_ref",
-        "pre_summary_ref",
-        "patient_history_summary",
-        "language",
-    }
-
-
 async def test_breaker_trips_only_on_outage_not_contract_rejection() -> None:
     calls = 0
 
-    class _FailingProvider(Ext002AiProvider):
+    class _RejectingTranscriber:
         async def transcribe(self, request: TranscribeRequest) -> TranscribeResult:
             nonlocal calls
             calls += 1
             raise Ext002CallError("rejected", retries_exhausted=False)
 
+        async def structure(self, request: StructureRequest) -> object:
+            raise NotImplementedError
+
+        async def draft_rx(self, request: DraftRxRequest) -> object:
+            raise NotImplementedError
+
     breaker = CircuitBreakerAiGateway(
-        _FailingProvider(api_key="k", base_url="https://ext.example"),
+        _RejectingTranscriber(),
         threshold=2,
         cooldown_seconds=30.0,
         clock=lambda: 0.0,

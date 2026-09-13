@@ -11,11 +11,12 @@ consumer, budget meter and consent gate seams actually connect, not just pass in
 isolation (spec #344 testing decisions, "closed loop capture -> pipeline ->
 review").
 
-EXT-002 is served by an in-test HTTP stub: the real ``Ext002AiProvider`` HTTP
-adapter round-trips against a local ``httpx.MockTransport`` server for the
-``/v1/transcribe``, ``/v1/structure`` and ``/v1/draft-rx`` contract, so the
-EXT-002 wire boundary is answerable without any external network. The closed
-loop itself uses the mock provider throughout (deterministic clean confidence).
+EXT-002 is served by an in-test HTTP stub: the shipping ``OpenAiCompatibleAdapter``
+round-trips against a local ``httpx.MockTransport`` server for the
+``/audio/transcriptions`` and ``/chat/completions`` contract (``draft_rx``
+raises the typed not-supported rejection), so the EXT-002 wire boundary is
+answerable without any external network. The closed loop itself uses the mock
+provider throughout (deterministic clean confidence).
 
 The consent gate and budget meter are the REAL facades wired by the pipeline's
 ``_build_egress_gate``: a patient grant is seeded via ``ConsentFacade.grant_consent``
@@ -27,6 +28,7 @@ in ``consent_egress_log`` (NFR-SEC-006).
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
@@ -47,11 +49,12 @@ from modules.consent.facade import ConsentFacade
 from modules.intake.adapters.ai_gateway import (
     AiEgressContext,
     DraftRxRequest,
+    Ext002CallError,
     StructureRequest,
     TranscribeRequest,
 )
-from modules.intake.adapters.ai_provider_ext import Ext002AiProvider
 from modules.intake.adapters.ai_provider_mock import MOCK_CONFIDENCE_CLEAN
+from modules.intake.adapters.ai_provider_openai_compatible import OpenAiCompatibleAdapter
 from modules.intake.domain.state_machine import IntakeStatus
 from modules.intake.facade import IntakeFacade
 from modules.intake.outbox import INTAKE_OUTBOX_TABLE
@@ -267,60 +270,69 @@ async def test_closed_loop_capture_pipeline_review_finalizes_with_mock_provider(
 
 
 @pytest.mark.asyncio
-async def test_ext002_http_stub_serves_the_provider_contract(database_url: str) -> None:
+async def test_openai_compatible_http_stub_serves_the_provider_contract(database_url: str) -> None:
     """EXT-002 is served by an HTTP stub: the wire boundary round-trips locally."""
     del database_url
 
     def _stub(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/v1/transcribe":
+        if request.url.path == "/audio/transcriptions":
             return httpx.Response(
                 200,
-                json={"transcript": "mujhe bukhar hai", "confidence": 0.8, "language": "hi"},
+                json={"text": "mujhe bukhar hai", "language": "hi"},
             )
-        if request.url.path == "/v1/structure":
+        if request.url.path == "/chat/completions":
             return httpx.Response(
                 200,
                 json={
-                    "chief_complaints": ["bukhar"],
-                    "symptoms": ["sirdard"],
-                    "duration": "1 week",
-                    "confidence": 0.8,
-                },
-            )
-        if request.url.path == "/v1/draft-rx":
-            return httpx.Response(
-                200,
-                json={
-                    "rx_items": [{"name": "dolo", "dose": "650mg", "duration": "3 days"}],
-                    "confidence": 0.8,
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "chief_complaints": ["bukhar"],
+                                        "symptoms": ["sirdard"],
+                                        "duration": "1 week",
+                                        "confidence": 0.8,
+                                    }
+                                )
+                            }
+                        }
+                    ]
                 },
             )
         return httpx.Response(404)
 
     transport = httpx.MockTransport(_stub)
     client = httpx.AsyncClient(transport=transport)
-    provider = Ext002AiProvider(
+    provider = OpenAiCompatibleAdapter(
         api_key="test-key",
         base_url="https://ext002.local",
+        model="test-model",
         client=client,
         max_retries=1,
     )
     context = AiEgressContext(language="hi")
     try:
         transcribed = await provider.transcribe(
-            TranscribeRequest(audio_ref="intake/abc", mode="voice", context=context)
+            TranscribeRequest(
+                audio_ref="intake/abc",
+                audio_bytes=b"fake-pcm-audio-bytes",
+                mode="voice",
+                context=context,
+            )
         )
         structured = await provider.structure(
             StructureRequest(transcript="sir dard hai", source="text", context=context)
         )
-        drafted = await provider.draft_rx(
-            DraftRxRequest(
-                doctor_input_ref="voice_note/1",
-                pre_summary_ref="pre_summary/2",
-                patient_history_summary="mock history",
-                context=context,
+        with pytest.raises(Ext002CallError, match="not supported"):
+            await provider.draft_rx(
+                DraftRxRequest(
+                    doctor_input_ref="voice_note/1",
+                    pre_summary_ref="pre_summary/2",
+                    patient_history_summary="mock history",
+                    context=context,
+                )
             )
-        )
     finally:
         await client.aclose()
 
@@ -328,5 +340,3 @@ async def test_ext002_http_stub_serves_the_provider_contract(database_url: str) 
     assert transcribed.confidence == MOCK_CONFIDENCE_CLEAN
     assert structured.chief_complaints == ["bukhar"]
     assert structured.duration == "1 week"
-    assert len(drafted.rx_items) == 1
-    assert drafted.rx_items[0].name == "dolo"

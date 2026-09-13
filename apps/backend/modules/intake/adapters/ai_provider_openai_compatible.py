@@ -18,7 +18,7 @@ doctor-review path (ticket #386) is the safety net beneath this leg.
 Egress carries only the decrypted audio clip plus the ``AiEgressContext``
 (declared language) and the pseudonymous ``audio_ref``-derived filename - never
 name, phone, or the full record (NFR-SEC-006). Timeout and retry discipline are
-reused from the existing ``Ext002AiProvider`` plumbing
+reused from the shared ``ai_gateway`` plumbing
 (third-party-integration-standards S1): exponential + jitter backoff,
 injectable ``sleep``.
 """

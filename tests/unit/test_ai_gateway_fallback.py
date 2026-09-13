@@ -4,8 +4,10 @@ Acceptance contract from the ticket: the fallback gateway tries primary first,
 falls back to secondary on genuine outage (retries_exhausted=True) or open
 breaker; contract rejection propagates immediately; low confidence never triggers
 fallback; effective provider+model exposed after success; both-outaged raises
-the outage error with no fabricated result. All tests drive the real adapters
-through ``httpx.MockTransport`` with an injectable no-op sleep.
+the outage error with no fabricated result. Structure and transcribe legs drive
+the real OpenAI-compatible adapter through ``httpx.MockTransport`` with an
+injectable no-op sleep; the draft_rx leg (not yet supported by the shipping
+adapter) is exercised with minimal in-file fakes.
 """
 
 from __future__ import annotations
@@ -21,12 +23,12 @@ from modules.intake.adapters.ai_gateway import (
     AiEgressContext,
     AiGateway,
     DraftRxRequest,
+    DraftRxResult,
     StructureRequest,
     TranscribeRequest,
 )
 from modules.intake.adapters.ai_provider_ext import (
     CircuitBreakerAiGateway,
-    Ext002AiProvider,
     Ext002CallError,
 )
 from modules.intake.adapters.ai_provider_fallback import (
@@ -54,6 +56,12 @@ _COMMON_CONTEXT = AiEgressContext(language="hi")
 _TRANSCRIBE_BODY = {
     "transcript": "mujhe bukhar hai",
     "confidence": 0.85,
+    "language": "hi",
+}
+# The OpenAI-compatible /audio/transcriptions leg returns the transcript under
+# ``text`` (plus an optional declared language), not the legacy ``transcript`` key.
+_TRANSCRIPTION_BODY = {
+    "text": "mujhe bukhar hai",
     "language": "hi",
 }
 _STRUCTURE_BODY = {
@@ -95,7 +103,6 @@ _DRAFT_RX_REQUEST = DraftRxRequest(
 
 _GROQ_URL = "https://groq.example"
 _GEMINI_URL = "https://gemini.example"
-_EXT_URL = "https://ext.example"
 
 
 class _RecordingTransport:
@@ -165,15 +172,6 @@ def _openai_gateway(
     )
 
 
-def _ext_gateway(handler: object) -> AiGateway:
-    return Ext002AiProvider(
-        api_key="test-key",
-        base_url=_EXT_URL,
-        client=_client(handler),
-        sleep=_noop_sleep,
-    )
-
-
 class _FailingStub:
     """An AiGateway that raises a distinctive error on every operation.
 
@@ -192,6 +190,31 @@ class _FailingStub:
 
     async def draft_rx(self, request: DraftRxRequest) -> object:
         raise self._error
+
+
+class _DraftRxLegFake:
+    """Minimal in-file AiGateway fake for the draft_rx leg of the fallback chain.
+
+    The shipping OpenAI-compatible adapter rejects draft_rx as unsupported
+    (``retries_exhausted=False``), so it cannot drive an outage round-trip on
+    that leg. These fakes keep the chain's outage routing on draft_rx covered:
+    ``outage`` makes the leg raise the typed outage error, otherwise it returns a
+    canned ``DraftRxResult``.
+    """
+
+    def __init__(self, *, outage: bool = False) -> None:
+        self._outage = outage
+
+    async def transcribe(self, request: TranscribeRequest) -> object:
+        raise NotImplementedError("transcribe not exercised by the draft_rx leg")
+
+    async def structure(self, request: StructureRequest) -> object:
+        raise NotImplementedError("structure not exercised by the draft_rx leg")
+
+    async def draft_rx(self, request: DraftRxRequest) -> DraftRxResult:
+        if self._outage:
+            raise Ext002CallError("draft_rx outage", retries_exhausted=True)
+        return DraftRxResult.model_validate(_DRAFT_RX_BODY)
 
 
 def _breaker(
@@ -352,49 +375,49 @@ async def test_fallback_engagement_logs_degradation(
 
 
 # ---------------------------------------------------------------------------
-# Outage fallback on transcribe / draft_rx legs (full Ext002AiProvider)
+# Outage fallback on transcribe / draft_rx legs
 # ---------------------------------------------------------------------------
 
 
 async def test_transcribe_outage_falls_back_to_secondary() -> None:
     primary_transport = _RecordingTransport(_outage_response())
-    secondary_transport = _RecordingTransport(httpx.Response(200, json=_TRANSCRIBE_BODY))
+    secondary_transport = _RecordingTransport(httpx.Response(200, json=_TRANSCRIPTION_BODY))
     gateway = FallbackAiGateway(
-        _ext_gateway(primary_transport),
+        _openai_gateway(primary_transport),
         _META_GROQ,
-        _ext_gateway(secondary_transport),
+        _openai_gateway(secondary_transport),
         _META_GEMINI,
     )
 
     result = await gateway.transcribe(_TRANSCRIBE_REQUEST)
 
-    assert result.transcript == _TRANSCRIBE_BODY["transcript"]
+    assert result.transcript == _TRANSCRIPTION_BODY["text"]
     assert len(secondary_transport.requests) >= 1
     assert gateway.last_effective_provider == "gemini"
 
 
 async def test_draft_rx_outage_falls_back_to_secondary() -> None:
-    primary_transport = _RecordingTransport(_outage_response())
-    secondary_transport = _RecordingTransport(httpx.Response(200, json=_DRAFT_RX_BODY))
+    # No wire-layer assertion on the draft_rx leg: the shipping adapter rejects
+    # it as unsupported, so the chain's outage routing here runs on in-file fakes
+    # (see _DraftRxLegFake). Secondary-serving is proven by the effective model.
     gateway = FallbackAiGateway(
-        _ext_gateway(primary_transport),
+        _DraftRxLegFake(outage=True),
         _META_GROQ,
-        _ext_gateway(secondary_transport),
+        _DraftRxLegFake(),
         _META_GEMINI,
     )
 
     result = await gateway.draft_rx(_DRAFT_RX_REQUEST)
 
     assert result.rx_items[0].name == "paracetamol"
-    assert len(secondary_transport.requests) >= 1
     assert gateway.last_effective_model == "gemini-2.0-flash"
 
 
 async def test_transcribe_outage_both_down_raises() -> None:
     gateway = FallbackAiGateway(
-        _ext_gateway(_RecordingTransport(_outage_response())),
+        _openai_gateway(_RecordingTransport(_outage_response())),
         _META_GROQ,
-        _ext_gateway(_RecordingTransport(_outage_response())),
+        _openai_gateway(_RecordingTransport(_outage_response())),
         _META_GEMINI,
     )
 
@@ -440,7 +463,11 @@ async def test_unsupported_leg_rejection_never_falls_back() -> None:
     gateway = FallbackAiGateway(
         primary,
         _META_GROQ,
-        _ext_gateway(secondary_transport),
+        _openai_gateway(
+            secondary_transport,
+            base_url=_GEMINI_URL,
+            model="gemini-2.0-flash",
+        ),
         _META_GEMINI,
     )
 
