@@ -50,7 +50,7 @@ from modules.intake.adapters.ai_gateway import (
     StructureResult,
     TranscribeRequest,
     TranscribeResult,
-    _backoff_delay,
+    post_with_backoff,
 )
 
 logger = logging.getLogger(__name__)
@@ -167,70 +167,24 @@ class OpenAiCompatibleAdapter:
         data: dict[str, str] | None = None,
         files: dict[str, tuple[str, bytes, str]] | None = None,
     ) -> dict[str, object]:
-        headers = {"Authorization": f"Bearer {self._api_key}"}
-        last_status = 0
-        for attempt in range(self._max_retries + 1):
-            if attempt > 0:
-                await self._sleep(_backoff_delay(attempt))
-            try:
-                response = await self._client.post(
-                    f"{self._base_url}{path}",
-                    json=json,
-                    data=data,
-                    files=files,
-                    headers=headers,
-                )
-            except httpx.HTTPError as exc:
-                if attempt == self._max_retries:
-                    logger.error(
-                        "OpenAI-compatible %s failed after %d attempts (network error)",
-                        path,
-                        self._max_retries + 1,
-                    )
-                    raise Ext002CallError(
-                        f"OpenAI-compatible {path} failed after "
-                        f"{self._max_retries + 1} attempts (network error)",
-                        retries_exhausted=True,
-                    ) from exc
-                continue
-            if response.status_code == 429 or response.status_code >= 500:
-                last_status = response.status_code
-                continue
-            if response.is_success:
-                try:
-                    body = response.json()
-                except ValueError as exc:
-                    logger.error("OpenAI-compatible %s returned a non-JSON response", path)
-                    raise Ext002CallError(
-                        f"OpenAI-compatible {path} returned a non-JSON response",
-                        retries_exhausted=False,
-                    ) from exc
-                if not isinstance(body, dict):
-                    logger.error("OpenAI-compatible %s returned an unexpected payload", path)
-                    raise Ext002CallError(
-                        f"OpenAI-compatible {path} returned an unexpected payload",
-                        retries_exhausted=False,
-                    )
-                return body
-            logger.warning(
-                "OpenAI-compatible %s rejected with HTTP %d",
-                path,
-                response.status_code,
-            )
-            raise Ext002CallError(
-                f"OpenAI-compatible {path} rejected with HTTP {response.status_code}",
-                retries_exhausted=False,
-            )
-        logger.error(
-            "OpenAI-compatible %s failed after %d attempts (last HTTP %d)",
-            path,
-            self._max_retries + 1,
-            last_status,
-        )
-        raise Ext002CallError(
-            f"OpenAI-compatible {path} failed after {self._max_retries + 1} "
-            f"attempts (last HTTP {last_status})",
-            retries_exhausted=True,
+        """POST with the shared retry/backoff discipline (PS-09 #405).
+
+        Delegates to ``ai_gateway.post_with_backoff`` - the single
+        implementation of the ≤30 s-timeout / exactly-``max_retries`` retries /
+        typed outage-vs-contract error split shared by every real provider
+        adapter. Both call shapes route through it: the JSON chat-completions
+        body and the multipart transcription upload.
+        """
+        return await post_with_backoff(
+            self._client,
+            f"{self._base_url}{path}",
+            json_body=json,
+            data=data,
+            files=files,
+            headers={"Authorization": f"Bearer {self._api_key}"},
+            max_retries=self._max_retries,
+            sleep=self._sleep,
+            label="OpenAI-compatible",
         )
 
     async def _post_chat(

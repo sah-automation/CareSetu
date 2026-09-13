@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 import pytest
 
+from app.config import DEFAULT_AI_MAX_RETRIES
 from modules.intake.adapters.ai_gateway import (
     AiEgressContext,
     AiGateway,
@@ -298,6 +299,38 @@ async def test_structure_500_retry_then_outage() -> None:
 
     assert exc_info.value.retries_exhausted is True
     assert call_count == 3
+
+
+async def test_structure_default_retry_budget_is_three() -> None:
+    """The adapter's default is the shared exactly-3-retries budget (#405).
+
+    With no ``max_retries`` passed to the adapter, the config default
+    ``DEFAULT_AI_MAX_RETRIES`` (3) is delegated to the shared
+    ``post_with_backoff`` helper: a 5xx outage exhausts after 4 attempts and is
+    typed as an outage.
+    """
+    call_count = 0
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return _error_response(503, '{"error": "provider unavailable"}')
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(_handler), timeout=5.0)
+    adapter = OpenAiCompatibleAdapter(
+        api_key="test-key",
+        base_url="https://ext.example",
+        model="test-model",
+        timeout_seconds=5.0,
+        client=client,
+        sleep=_noop_sleep,
+    )
+
+    with pytest.raises(Ext002CallError) as exc_info:
+        await adapter.structure(_structure_request())
+
+    assert exc_info.value.retries_exhausted is True
+    assert call_count == DEFAULT_AI_MAX_RETRIES + 1
 
 
 # --- 4xx non-retryable ---

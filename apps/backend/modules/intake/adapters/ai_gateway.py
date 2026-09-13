@@ -15,20 +15,26 @@ patient-shaped thing that may cross the wire, and it admits only the declared
 language.
 
 This module carries the DTOs, the typed ``Ext002CallError`` every adapter
-raises, the shared ``_backoff_delay`` retry helper, and the abstract
-``AiGateway`` protocol only; the concrete adapters (mock, EXT-002 provider,
-OpenAI-compatible chat, fallback chain) live next to it and implement the port.
-The protocol methods are abstract stubs, so no tracing is required here - the
-concrete LLM-calling methods carry the ``@observe`` annotations where the
-concrete adapters are defined.
+raises, the shared retry plumbing (``_backoff_delay`` + ``post_with_backoff``),
+and the abstract ``AiGateway`` protocol only; the concrete adapters (mock,
+EXT-002 provider, OpenAI-compatible chat, fallback chain) live next to it and
+implement the port. The protocol methods are abstract stubs, so no tracing is
+required here - the concrete LLM-calling methods carry the ``@observe``
+annotations where the concrete adapters are defined.
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import random
+from collections.abc import Awaitable, Callable
 from typing import Literal, Protocol
 
+import httpx
 from pydantic import BaseModel, ConfigDict
+
+logger = logging.getLogger(__name__)
 
 LANG_HI = "hi"
 LANG_EN = "en"
@@ -45,6 +51,101 @@ def _backoff_delay(attempt: int, base_seconds: float = 1.0) -> float:
         return 0.0
     exponential = base_seconds * (1 << (attempt - 1))
     return exponential + random.uniform(0.0, exponential * 0.25)  # nosec B311
+
+
+async def post_with_backoff(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    json_body: dict[str, object] | None = None,
+    data: dict[str, str] | None = None,
+    files: dict[str, tuple[str, bytes, str]] | None = None,
+    headers: dict[str, str],
+    max_retries: int,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    label: str = "provider",
+) -> dict[str, object]:
+    """POST an EXT-002 endpoint with the shared retry/backoff discipline.
+
+    The single implementation of the call-error loop every real provider
+    adapter delegates to (PS-09, third-party-integration-standards §1). Accepts
+    both call shapes the adapters post: a JSON body (``json_body``) and a
+    ``multipart/form-data`` body (``data`` + ``files``). The caller supplies the
+    :class:`httpx.AsyncClient`, which owns the ≤30 s client timeout; the helper
+    enforces the exactly-``max_retries`` retry budget with exponential + jitter
+    backoff (``_backoff_delay``) and an injectable ``sleep`` for tests.
+
+    The typed outage-vs-contract split is preserved so the circuit breaker and
+    fallback chain route correctly:
+
+    - retryable (``Ext002CallError(retries_exhausted=True)`` on exhaustion):
+      network errors, timeouts, HTTP 429, HTTP ≥ 500;
+    - non-retryable (``retries_exhausted=False``, propagated immediately): HTTP
+      4xx, a non-JSON success body, or a success body that is not a JSON object.
+
+    ``label`` names the provider in logs and error messages so an outage is
+    attributable to the serving adapter.
+    """
+    last_status = 0
+    for attempt in range(max_retries + 1):
+        if attempt > 0:
+            await sleep(_backoff_delay(attempt))
+        try:
+            response = await client.post(
+                url,
+                json=json_body,
+                data=data,
+                files=files,
+                headers=headers,
+            )
+        except httpx.HTTPError as exc:
+            if attempt == max_retries:
+                logger.error(
+                    "%s %s failed after %d attempts (network error)",
+                    label,
+                    url,
+                    max_retries + 1,
+                )
+                raise Ext002CallError(
+                    f"{label} {url} failed after {max_retries + 1} attempts (network error)",
+                    retries_exhausted=True,
+                ) from exc
+            continue
+        if response.status_code == 429 or response.status_code >= 500:
+            last_status = response.status_code
+            continue
+        if response.is_success:
+            try:
+                body = response.json()
+            except ValueError as exc:
+                logger.error("%s %s returned a non-JSON response", label, url)
+                raise Ext002CallError(
+                    f"{label} {url} returned a non-JSON response",
+                    retries_exhausted=False,
+                ) from exc
+            if not isinstance(body, dict):
+                logger.error("%s %s returned an unexpected payload", label, url)
+                raise Ext002CallError(
+                    f"{label} {url} returned an unexpected payload",
+                    retries_exhausted=False,
+                )
+            return body
+        logger.warning("%s %s rejected with HTTP %d", label, url, response.status_code)
+        raise Ext002CallError(
+            f"{label} {url} rejected with HTTP {response.status_code}",
+            retries_exhausted=False,
+        )
+    logger.error(
+        "%s %s failed after %d attempts (last HTTP %d)",
+        label,
+        url,
+        max_retries + 1,
+        last_status,
+    )
+    raise Ext002CallError(
+        f"{label} {url} failed after {max_retries + 1} attempts (last HTTP {last_status})",
+        retries_exhausted=True,
+    )
 
 
 class AiEgressContext(BaseModel):
@@ -217,4 +318,5 @@ __all__ = [
     "StructureResult",
     "TranscribeRequest",
     "TranscribeResult",
+    "post_with_backoff",
 ]
