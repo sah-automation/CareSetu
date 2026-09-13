@@ -23,16 +23,18 @@ jobs:
   changes:
     name: detect changed paths
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
     permissions:
       pull-requests: read
     outputs:
-      backend: ${{ steps.filter.outputs.backend }}
-      frontend: ${{ steps.filter.outputs.frontend }}
+      backend: ${{ steps.filter.outputs.backend || 'true' }}
+      frontend: ${{ steps.filter.outputs.frontend || 'true' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dorny/paths-filter@v3
         id: filter
+        if: github.event_name == 'pull_request'
         with:
           filters: |
             backend:
