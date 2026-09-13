@@ -27,6 +27,10 @@ vi.mock("@/lib/partner/api", () => ({
   appealRejection: vi.fn(),
 }));
 
+vi.mock("@/lib/config", () => ({
+  STATUS_POLL_INTERVAL_MS: 42_000,
+}));
+
 function mockSession(roles: string[] | null) {
   vi.mocked(useAuth).mockReturnValue({
     user: roles === null ? null : { id: 7, phone: "+911234567890", roles },
@@ -285,10 +289,6 @@ describe("PartnerStatusRejectedPage (inside the full shell)", () => {
   });
 
   it("reads STATUS_POLL_INTERVAL_MS from the shared config module", async () => {
-    vi.mock("@/lib/config", () => ({
-      STATUS_POLL_INTERVAL_MS: 42_000,
-    }));
-
     const { fetchPartnerMe, fetchRejectionReason } = await import(
       "@/lib/partner/api"
     );
