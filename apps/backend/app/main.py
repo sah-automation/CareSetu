@@ -9,6 +9,8 @@ adapter, clock - is resolved once from ``Settings`` and stored on
 protected route that proves the edge admit/deny.
 """
 
+import asyncio
+import contextlib
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -62,6 +64,7 @@ from modules.partner.directory_cache import (
     init_directory_redis_client,
 )
 from modules.partner.facade import PartnerFacade
+from worker.main import run_worker_until_stopped
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +122,39 @@ class MeResponse(BaseModel):
     phone: str
 
 
+async def _run_in_process_dispatcher(
+    stop_event: asyncio.Event,
+    settings: Settings,
+    *,
+    restart_delay_seconds: float = 5.0,
+) -> None:
+    """Run the outbox poll loop in-process, restarting it after a crash.
+
+    Mirrors how the standalone worker recovers under an orchestrator
+    (systemd/Render restart the crashed process): a dispatcher failure here
+    would otherwise strand outbox rows silently for the process's lifetime.
+    Each restart builds a fresh engine + scheduler via
+    ``run_worker_until_stopped``; a crash is logged + re-scheduled, and the
+    loop only exits on ``stop_event`` (graceful shutdown drain). Never grows a
+    second loop - exactly one ``run_worker_until_stopped`` coroutine is in
+    flight at any time.
+    """
+    while not stop_event.is_set():
+        try:
+            await run_worker_until_stopped(stop_event, settings=settings)
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "in-process dispatcher loop crashed; restarting in %ss "
+                "(single poll loop preserved)",
+                restart_delay_seconds,
+            )
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(stop_event.wait(), timeout=restart_delay_seconds)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Create the FastAPI application, resolving config when none is given.
 
@@ -133,10 +169,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # caches (both degrade to SQL when absent/unhealthy)
         await init_redis_client(resolved_settings)
         await init_directory_redis_client(resolved_settings)
-        yield
-        # Close Redis clients on shutdown
-        await close_directory_redis_client()
-        await close_redis_client()
+        # In-process dispatcher (worker-outbox-runbook Rule 1, Render free
+        # worker gap): when DISPATCHER_IN_PROCESS_ENABLED=true the lifespan
+        # hosts exactly one outbox poll loop (intake pipeline, audit/consent/
+        # partner handlers, credential-expiry sweep) inside the web process
+        # instead of a separate Render worker - free compute covers web
+        # services only (background workers need a paid instance). Single
+        # poll-loop rule: valid ONLY under uvicorn --workers 1 (the Render
+        # startCommand), never alongside `python -m worker.main`, never with
+        # more than one uvicorn worker.
+        dispatcher_task: asyncio.Task[None] | None = None
+        dispatcher_stop = asyncio.Event()
+        if resolved_settings.dispatcher_in_process_enabled:
+            logger.warning(
+                "in-process dispatcher enabled; single poll loop under uvicorn --workers 1"
+            )
+            dispatcher_task = asyncio.create_task(
+                _run_in_process_dispatcher(dispatcher_stop, resolved_settings)
+            )
+        try:
+            yield
+        finally:
+            if dispatcher_task is not None:
+                # Signal a graceful drain: run_poll_loop honours stop_event
+                # between passes, so the pass in flight finishes and inflight
+                # claims already under delivery drain before the loop returns
+                # (ADR-0002 §2, worker-outbox-runbook Rule 1).
+                dispatcher_stop.set()
+                await dispatcher_task
+            # Close Redis clients on shutdown
+            await close_directory_redis_client()
+            await close_redis_client()
 
     app = FastAPI(title="CareSetu API", version="0.1.0", lifespan=lifespan)
     app.state.settings = resolved_settings

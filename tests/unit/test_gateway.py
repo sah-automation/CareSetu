@@ -952,6 +952,22 @@ def test_settings_supabase_backend_needs_url_env_too(
         get_settings()
 
 
+def test_settings_dispatcher_in_process_defaults_off() -> None:
+    settings = Settings()
+
+    assert settings.dispatcher_in_process_enabled is False
+
+
+def test_settings_dispatcher_in_process_reads_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DISPATCHER_IN_PROCESS_ENABLED", "true")
+
+    settings = get_settings()
+
+    assert settings.dispatcher_in_process_enabled is True
+
+
 def test_settings_local_backend_needs_no_supabase_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -177,6 +177,15 @@ class Settings:
     # in production so the deployed portfolio demo can drive register -> verify
     # (deployment plan 4.3). Fail-closed: never valid with a real provider.
     demo_mode: bool = False
+    # In-process dispatcher (worker-outbox-runbook Rule 1): when enabled the
+    # FastAPI lifespan runs exactly one outbox poll loop (dispatcher +
+    # credential-expiry sweep) inside the web process instead of a separate
+    # worker process. Only valid at uvicorn --workers 1 (the single-worker
+    # rule); default OFF so localhost dev / CI keeps the standalone-worker
+    # workflow untouched. Turned ON via DISPATCHER_IN_PROCESS_ENABLED=true in
+    # the Render web service's env vars (free compute covers web services
+    # only - background workers require a paid instance).
+    dispatcher_in_process_enabled: bool = False
     # Encrypted credential-document store (PHASE-5 T06, #251): local root and
     # the base64 AES-256 key. Root defaults to a repo-local ``var/`` dir; the
     # key is empty unless supplied by the environment (the store derives an
@@ -545,6 +554,7 @@ def get_settings() -> Settings:
         audit_retention_days=_env_int("AUDIT_RETENTION_DAYS", DEFAULT_AUDIT_RETENTION_DAYS),
         cors_allowed_origins=_env_csv("CORS_ALLOWED_ORIGINS"),
         demo_mode=_env_bool("DEMO_MODE", False),
+        dispatcher_in_process_enabled=_env_bool("DISPATCHER_IN_PROCESS_ENABLED", False),
         partner_artifact_root=os.environ.get(
             "PARTNER_ARTIFACT_ROOT", DEFAULT_PARTNER_ARTIFACT_ROOT
         ),
