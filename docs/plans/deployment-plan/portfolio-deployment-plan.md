@@ -53,7 +53,7 @@ The plan is written to double as a migration reference: section 8 covers moving 
 
 ### 2.3 Deliberately deferred (do NOT build now)
 
-- **Async worker** (`worker/main.py`): Render free has no free background workers. No business event handlers are registered yet (Phase 1/2 registers are empty), so the outbox/dispatcher does nothing useful in production today. Outbox rows accumulate harmlessly and the dispatcher's reclaim design handles them later. From Phase 4 (audit) run the dispatcher in-process via a FastAPI lifespan task instead of a separate process. Whenever the dispatcher runs (standalone now, in-process later), the **single-worker rule** applies - exactly one poll loop across the whole deployment, never two - and the operator runbook (`worker-outbox-runbook.md` in this folder, ticket #394) is the operational reference for that rule and for repairing stranded outbox rows.
+- **Async worker** (`worker/main.py`): Render free has no free background workers, so the dispatcher does not run as a separate process in production. Instead, from PHASE-7 (#385 follow-up) the Render web service runs the dispatcher **in-process via a FastAPI lifespan task** (`DISPATCHER_IN_PROCESS_ENABLED=true`), which also fixes the deployed `/v1/intake/{id}/pre-summary` 404 (the intake pipeline runs inside the web process, not a never-deployed worker). Localhost dev/CI keep the standalone `python -m worker.main`. Whenever the dispatcher runs (standalone or in-process), the **single-worker rule** applies - exactly one poll loop across the whole deployment, never two - and the operator runbook (`worker-outbox-runbook.md` in this folder, ticket #394) is the operational reference for that rule and for repairing stranded outbox rows.
 - **MinIO / object storage**: not wired into `Settings`; first needed at Phase 7 (intake media). Later free options: Supabase Storage or Cloudflare R2 (free 10 GB).
 - **Gemini / EXT-002 AI**: Phase 7 concern only.
 - **Backup cron** (`deploy/cron/backup.sh`): VM/`pg_dump` based; Supabase free has no automated backups. Accept for demo (see caveats).
@@ -159,16 +159,20 @@ Free-tier constraints (accepted):
 3. Start command: `alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT` (migration is idempotent; runs every boot as belt-and-suspenders even though `deploy.yml` also migrates).
 4. Env vars:
 
-| Var                          | Value                                       |
-| :--------------------------- | :------------------------------------------ |
-| `DATABASE_URL`               | Supabase direct connection string           |
-| `APP_ENVIRONMENT`            | `production`                                |
-| `GATEWAY_JWT_VERIFY_ENABLED` | `true`                                      |
-| `GATEWAY_JWT_SIGNING_KEY`    | strong random secret (openssl rand -hex 32) |
-| `GATEWAY_RATE_LIMIT_ENABLED` | `true`                                      |
-| `SMS_PROVIDER`               | `mock`                                      |
-| `DEMO_MODE`                  | `true`                                      |
-| `CORS_ALLOWED_ORIGINS`       | `https://<frontend>.vercel.app`             |
+| Var                             | Value                                       |
+| :------------------------------ | :------------------------------------------ |
+| `DATABASE_URL`                  | Supabase direct connection string           |
+| `APP_ENVIRONMENT`               | `production`                                |
+| `GATEWAY_JWT_VERIFY_ENABLED`    | `true`                                      |
+| `GATEWAY_JWT_SIGNING_KEY`       | strong random secret (openssl rand -hex 32) |
+| `GATEWAY_RATE_LIMIT_ENABLED`    | `true`                                      |
+| `SMS_PROVIDER`                  | `mock`                                      |
+| `DEMO_MODE`                     | `true`                                      |
+| `CORS_ALLOWED_ORIGINS`          | `https://<frontend>.vercel.app`             |
+| `INTAKE_MEDIA_BACKEND`          | `supabase` (PHASE-7 #385)                   |
+| `SUPABASE_URL`                  | Supabase project URL (PHASE-7 #385)         |
+| `SUPABASE_SERVICE_ROLE_KEY`     | Supabase service role key (PHASE-7 #385)    |
+| `DISPATCHER_IN_PROCESS_ENABLED` | `true` (PHASE-7 #385 follow-up)             |
 
 5. Create a **deploy hook** (Render dashboard → service → Deploy Hooks) and copy its URL into the GitHub secret `RENDER_DEPLOY_HOOK_URL`.
 
@@ -225,14 +229,14 @@ Vercel is not part of the workflow - it deploys itself from the same push. Order
 
 ## 7. Free-tier caveats (accepted)
 
-| Caveat                                          | Impact                                                              | Workaround chosen                                   |
-| :---------------------------------------------- | :------------------------------------------------------------------ | :-------------------------------------------------- |
-| Render spins down after 15 min idle             | first request per idle period ~1 min cold start                     | none (accepted)                                     |
-| Supabase pauses after 7 days idle               | DB unavailable; paused projects must be restored from the dashboard | none (accepted); restore before a demo              |
-| Supabase free: no automated backups             | data loss on delete/incident; diverges from roadmap `NFR-004`       | manual `pg_dump`; acceptable for demo data          |
-| Render free: no background workers              | the outbox dispatcher cannot run as a process                       | defer worker; in-process lifespan loop from Phase 4 |
-| Free SMS providers don't match EXT-001 contract | real OTP delivery impossible                                        | demo-mode OTP in UI (`DEMO_MODE=true`, mock SMS)    |
-| Cold-start load                                 | concurrent demo traffic may see slow first responses                | none (single evaluator use case)                    |
+| Caveat                                          | Impact                                                              | Workaround chosen                                                                                                                  |
+| :---------------------------------------------- | :------------------------------------------------------------------ | :--------------------------------------------------------------------------------------------------------------------------------- |
+| Render spins down after 15 min idle             | first request per idle period ~1 min cold start                     | none (accepted)                                                                                                                    |
+| Supabase pauses after 7 days idle               | DB unavailable; paused projects must be restored from the dashboard | none (accepted); restore before a demo                                                                                             |
+| Supabase free: no automated backups             | data loss on delete/incident; diverges from roadmap `NFR-004`       | manual `pg_dump`; acceptable for demo data                                                                                         |
+| Render free: no background workers              | the outbox dispatcher cannot run as a process                       | in-process lifespan loop on the web service (`DISPATCHER_IN_PROCESS_ENABLED=true`, PHASE-7 #385 follow-up); never a second process |
+| Free SMS providers don't match EXT-001 contract | real OTP delivery impossible                                        | demo-mode OTP in UI (`DEMO_MODE=true`, mock SMS)                                                                                   |
+| Cold-start load                                 | concurrent demo traffic may see slow first responses                | none (single evaluator use case)                                                                                                   |
 
 ### 7.1 Post-deploy optimizations (applied 2026-08-16, POST-DEPLOY-OPTS)
 

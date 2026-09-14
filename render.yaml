@@ -1,8 +1,13 @@
 # CareSetu Render Blueprint (DEPLOY-5, ticket #115).
 #
-# One web service for the backend, reproduced from this repo instead of a
-# hand-built dashboard service. Source of truth for the commands and env vars
-# is plan section 5.2 (docs/plans/deployment-plan/portfolio-deployment-plan.md);
+# One web service for the backend. The async event dispatcher (outbox poll
+# loop, intake pipeline, credential-expiry sweep) runs IN-PROCESS in the web
+# service's FastAPI lifespan instead of a separate Render worker: Render free
+# compute covers web services only (background workers need a paid instance),
+# and with DISPATCHER_IN_PROCESS_ENABLED=true the web service runs exactly one
+# poll loop at uvicorn --workers 1 (the single-worker rule, worker-outbox
+# runbook Rule 1). Source of truth for the commands and env vars is plan
+# section 5.2 (docs/plans/deployment-plan/portfolio-deployment-plan.md);
 # provisioning and live verification are DEPLOY-7 (ticket #117).
 
 services:
@@ -93,3 +98,10 @@ services:
       # quick-switch table (Groq, Gemini, OpenRouter, OpenAI).
       - key: AI_PROVIDER
         value: mock
+      # In-process dispatcher (worker-outbox-runbook Rule 1): the outbox poll
+      # loop, intake structuring pipeline, and credential-expiry sweep all run
+      # inside this web service's FastAPI lifespan rather than a separate Render
+      # worker (free compute covers web services only). Requires
+      # uvicorn --workers 1; the startCommand above satisfies that constraint.
+      - key: DISPATCHER_IN_PROCESS_ENABLED
+        value: "true"

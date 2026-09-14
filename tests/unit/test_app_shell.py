@@ -17,6 +17,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.testclient import TestClient
 
+import app.main as app_main
 from app.config import DEFAULT_DATABASE_URL, Settings
 from app.main import create_app
 from modules.iam.adapters.sms import MockSmsAdapter, SmsSendRequest, SmsTemplateParams
@@ -290,3 +291,74 @@ def test_dev_otp_returns_null_in_demo_mode_when_nothing_sent() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"code": None}
+
+
+def test_lifespan_starts_in_process_dispatcher_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = {"called": False, "stopped": False}
+
+    async def fake_run_worker(
+        stop_event: asyncio.Event,
+        settings: Settings | None = None,
+        config: object = None,
+    ) -> None:
+        entered["called"] = True
+        await stop_event.wait()
+        entered["stopped"] = True
+
+    monkeypatch.setattr(app_main, "run_worker_until_stopped", fake_run_worker)
+
+    app = create_app(settings=Settings(dispatcher_in_process_enabled=True))
+
+    with TestClient(app):
+        assert entered["called"] is True
+
+    assert entered["stopped"] is True
+
+
+def test_lifespan_skips_in_process_dispatcher_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = False
+
+    async def fake_run_worker(*_args: object, **_kwargs: object) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(app_main, "run_worker_until_stopped", fake_run_worker)
+
+    app = create_app(settings=Settings(dispatcher_in_process_enabled=False))
+
+    with TestClient(app):
+        pass
+
+    assert called is False
+
+
+def test_in_process_dispatcher_restarts_after_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    stop_event = asyncio.Event()
+
+    async def flaky_run_worker(current_stop: asyncio.Event, **_: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("transient db blip")
+        await current_stop.wait()
+
+    monkeypatch.setattr(app_main, "run_worker_until_stopped", flaky_run_worker)
+
+    async def run() -> None:
+        await asyncio.wait_for(
+            app_main._run_in_process_dispatcher(stop_event, Settings(), restart_delay_seconds=0.01),
+            timeout=1.0,
+        )
+
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(run())
+
+    assert calls >= 2
+    stop_event.set()

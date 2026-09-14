@@ -32,7 +32,10 @@ Read this section once; every procedure below is just these facts applied.
 
 Across the whole deployment, exactly **one** dispatcher run-loop may poll the module outboxes. A second must not be started.
 
-Today the run-loop lives in the standalone worker process `apps/backend/worker/main.py` (`python -m worker.main` from `apps/backend`) - the composition root that builds the `HandlerRegistry`, discovers the module outboxes over `MODULE_SCHEMAS`, and runs `run_poll_loop`. The FastAPI app (`app.main`) does **not** run the dispatcher in its lifespan; its lifespan only inits Redis clients.
+Today the run-loop lives in either of two placements (one at a time):
+
+- The standalone worker process `apps/backend/worker/main.py` (`python -m worker.main` from `apps/backend`) - the composition root that builds the `HandlerRegistry`, discovers the module outboxes over `MODULE_SCHEMAS`, and runs `run_poll_loop`. Localhost dev/CI use this.
+- The **in-process dispatcher** (PHASE-7 #385 follow-up): the Render web service runs the same `run_poll_loop` inside its FastAPI lifespan when `DISPATCHER_IN_PROCESS_ENABLED=true` (Render free covers web services only - background workers need a paid instance, so this is the production placement). `create_app`'s lifespan additionally initializes Redis clients and, when the flag is set, starts `run_worker_until_stopped` as a background task that the shutdown path drains via the stop event.
 
 ### Why
 
@@ -43,7 +46,7 @@ Today the run-loop lives in the standalone worker process `apps/backend/worker/m
 
 ### Enforcement
 
-- **Never** start a second worker. The VM path runs it as one systemd unit (`portfolio-deployment-plan.md` §8 maps the deferred worker to exactly that unit); the Render port is a separate process in a process manager.
+- **Never** start a second worker. The VM path runs it as one systemd unit (`portfolio-deployment-plan.md` §8 maps the deferred worker to exactly that unit); the Render web service runs the in-process dispatcher and must never also run `python -m worker.main` (two poll loops).
 - **Verify** before and during an incident, and after any deploy/restart:
 
   ```
@@ -54,8 +57,12 @@ Today the run-loop lives in the standalone worker process `apps/backend/worker/m
   # not committed to the repo - it is created during VM provisioning).
   systemctl list-units 'worker*'
 
-  # Render (if ever moved off the deferred worker note) - one web service
-  # instance running the worker; never a second process in a separate service.
+  # Render - the in-process dispatcher (PHASE-7 #385 follow-up) runs inside ONE
+  # web service instance under uvicorn --workers 1 (DISPATCHER_IN_PROCESS_ENABLED=true)
+  # and never as a separate process at the same time. Check its log for the
+  # "in-process dispatcher enabled" startup line; if any existing intake event
+  # sits stranded on page load, confirm the deploy had the flag set before
+  # blaming the loop, then run Rule 2.
   ```
 
 - **Do NOT** run the dispatcher both in-process (FastAPI lifespan) and as a standalone process. That is two poll loops by definition. If the in-process option is ever adopted, the app must run at `uvicorn --workers 1` with the worker process removed, and both must never coexist.
