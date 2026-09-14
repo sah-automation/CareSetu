@@ -340,32 +340,34 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 ### 3.6 Module: `MOD-006` Care Case & E-Prescription
 
 - **Module ID:** `MOD-006`
-- **Primary Scope:** The consult orchestration handshake (doctor-initiated baseline `CFL-003`), case stage machine, e-prescription lifecycle (AI draft → doctor review/edits → approval gate → issued), and the **hard rule that no prescription is ever issued without doctor approval** (`REQ-023`).
+- **Primary Scope:** The consult orchestration handshake (doctor-initiated handshake, baseline `CFL-003` **resolved**), case stage machine, e-prescription lifecycle (AI draft → doctor review/edits → revision-freeze approval gate → issued), and the **hard rule that no prescription is ever issued without doctor approval** (`REQ-023`).
 - **Traceability Link:** `FEAT-008`, `FEAT-009`, `ACT-002`, `EXT-002`(draft via `MOD-005`), `NFR-SEC-003`, `RISK-EVAL-003`/`CFL-002`
+- **Baseline Resolutions:** AI-assisted drafting posture confirmed as drafting-assistant-only under the licensed doctor's authority (ADR-0015, resolves `CFL-002`/`RISK-EVAL-003`); doctor-initiated handshake delivered (resolves `CFL-003`/`GAP-003`); issued-prescription approval contract frozen via revision-freeze approval, `verification_declaration` and `edited_yn` (ADR-0014).
 
 #### 1. Data Ownership & Storage Isolation
 
-- **Storage Type:** Relational - PostgreSQL schema `care`: `cases` (patient, doctor, stage), `prescriptions` (status, issued_at, attributed_doctor), `rx_items` (name, dose, duration), `rx_approvals` (doctor_id, edited_yn, decision, reason), `doctor_inputs` (voice_note/photo refs); doctor input media in object storage.
+- **Storage Type:** Relational - PostgreSQL schema `care`: `care_cases` (patient_id, doctor_id, pre_summary_id, stage), `care_prescriptions` (case_id, status, source, issued_at, attributed_doctor), `care_rx_items` (rx_id, name, dose, duration), `care_rx_approvals` (rx_id, doctor_id, decision, reason, edited_yn, verification_declaration, revision snapshot ref), `care_doctor_inputs` (case_id, input_type voice|photo, media_ref, sensitive_class); doctor input media in object storage under `rx_input/`.
 - **Caching Strategy:** Doctor's pending-cases list cached in Redis; prescription (post-approval) cached for fulfilment read.
-- **Data Isolation Rule:** Private `care` schema; `MOD-008` reads approved prescriptions via the facade.
+- **Data Isolation Rule:** Private `care` schema; `MOD-008` reads approved prescriptions via the `CareFacade` facade.
 
 #### 2. Inbound & Outbound Interfaces
 
-- **Inbound Sync APIs:** `mark_consult_complete(doctor, case)`, `get_case`, `list_doctor_cases(doctor)`, `submit_doctor_input(case, voice|photo)`, `approve_prescription(case, edits?)`, `reject_prescription(case, reason)`, `get_approved_prescription(rx_id)`.
-- **Inbound Events Subscribed:** `pre_summary.ready` (attach summary to case), `pre_summary.low_confidence` (flag for forced review before handshake), `report.filed` (attach to case context).
-- **Outbound Events Published:** `case.consult_complete`, `prescription.draft_created`, `prescription.reviewed`, `prescription.approved`, `prescription.rejected`, `prescription.issued`.
+- **Inbound Sync APIs:** `mark_consult_complete(doctor, case_id)`, `get_case(doctor, case_id)`, `list_doctor_cases(doctor)`, `submit_doctor_input(case_id, input_type, media_ref)`, `create_rx_draft(case_id, input_type, media_ref)`, `save_rx_revision(case_id, rx_items)` (drafting cap: 3 attempts), `approve_prescription(case_id, rx_items, verification_declaration)`, `reject_prescription(case_id, reason)`, `get_approved_prescription(rx_id)`.
+- **Inbound Events Subscribed:** `pre_summary.ready` (case-birth signal), `pre_summary.low_confidence` (forced-review signal before handshake), `report.filed` (case-context seam, Phase 9).
+- **Outbound Events Published:** `case.consult_complete`, `case.closed`, `prescription.draft_created`, `prescription.reviewed`, `prescription.approved`, `prescription.rejected`, `prescription.issued`.
+- **Event Wiring (PHASE-8 T08 #424):** `register_handlers` in `care/adapters/__init__.py` owns the producer payload models for the six case/rx events care publishes (so a claimed `care_outbox` row is reconstructed with a typed payload before fan-out; `prescription.issued`'s registry model is owned by `MOD-003`) and subscribes to the three inbound events as ledgered telemetry seams. The case-birth write for `pre_summary.ready` is gated on the producer event carrying the patient identity (the payload currently carries only `intake_id` + `pre_summary_id`, and `care_cases.patient_id` is NOT NULL); the payload enrichment is a named follow-on seam, not this phase's inventory.
 
 #### 3. Core Business Logic & State Machines
 
-- **Case machine:** `[Case: Pre-Summary] → [Case: Consult Complete] → [Case: Prescription Pending]`; handshake **requires a finalized pre-summary** (`FEAT-008` edge case).
-- **Prescription machine:** `[Rx: Draft] → [Rx: Doctor Reviewed] → [Rx: Approved & Issued] → [Rx: Fulfilled]` with branch `[Rx: Rejected]`; edits recorded via `edited_yn` (`FEAT-009`).
+- **Case machine:** `[Case: Pre-Summary] → (consult complete milestone) → [Case: Prescription Pending] → (close) → [Case: Closed]`; the one-action handshake **requires a finalized pre-summary** (`FEAT-008` edge case); `closed` is terminal and only the doctor's deliberate close-without-prescription reaches it (`case.closed`).
+- **Prescription machine:** `[Rx: Draft] → [Rx: Doctor Reviewed] → [Rx: Approved & Issued → Fulfilled]` with branch `[Rx: Rejected]`; **revision-freeze approval** freezes exactly the doctor's saved working revision (never the raw AI draft snapshot, ADR-0014); approval requires the `verification_declaration` assertion (`REQ-023`); `edited_yn` is derived on issuance comparing the issued revision to the immutable draft snapshot (`FEAT-009`); a rejected draft never auto-closes the case.
 
 #### 4. High-Level Tech Stack & Framework Constraints
 
 - **Language/Runtime:** Python 3.11+ (asyncio).
 - **Framework:** FastAPI + Pydantic v2 + SQLAlchemy 2.0 (async).
 - **Persistence Layer:** PostgreSQL (`care` schema); object storage for doctor inputs.
-- **Constraint:** Draft comes from `MOD-005`; issuance authority stays with the licensed doctor (baseline `CFL-002`/`RISK-EVAL-003`).
+- **Constraint:** Draft comes from `MOD-005` (`request_rx_draft` seam, drafting cap 3); issuance authority stays with the licensed doctor (ADR-0015, baseline `CFL-002`/`RISK-EVAL-003` resolved).
 
 #### 5. Module NFR Allocation
 
@@ -574,7 +576,8 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 | :------------------------- | :------------------------------ | :----------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------- | :---------------------------- |
 | API Gateway / Edge         | `MOD-001` (IAM)                 | Internal HTTP / in-process     | JWT claims + scope                                                                                                                      | Token validation & RBAC scope resolution on every request             | `NFR-SEC-002/003`, `FEAT-001` |
 | `MOD-003` (LHR)            | `MOD-004` (Consent)             | Internal API                   | ConsentRequest                                                                                                                          | `check_consent(patient, scope, counterparty)` before any record share | `FEAT-002`, `NFR-SEC-006`     |
-| `MOD-006` (Care)           | `MOD-005` (Intake)              | Internal API                   | PreSummary DTO                                                                                                                          | `get_finalized_pre_summary` - gate handshake on reviewed summary      | `FEAT-008`                    |
+| `MOD-006` (Care)           | `MOD-005` (Intake)              | Internal API                   | PreSummary DTO                                                                                                                          | `get_finalized_pre_summary` - gate handshake on **finalized** summary | `FEAT-008`                    |
+| `MOD-006` (Care)           | `MOD-005` (Intake)              | Internal API                   | DraftDTO                                                                                                                                | `request_rx_draft` - AI drafting-assistant seam (drafting cap 3)      | `FEAT-009`                    |
 | `MOD-006` (Care)           | `MOD-003` (LHR)                 | Internal API                   | RecordEntry[]                                                                                                                           | `read_consented_history` for rx drafting context (consent-gated)      | `FEAT-009`                    |
 | `MOD-006` (Care)           | `MOD-001` (IAM)                 | Internal API                   | Actor DTO                                                                                                                               | Resolve doctor identity & verify active partner role                  | `FEAT-009`, `NFR-SEC-003`     |
 | `MOD-008` (Fulfillment)    | `MOD-006` (Care)                | Internal API                   | RxDTO (items, patient)                                                                                                                  | `get_approved_prescription` - routing source of truth                 | `FEAT-012`                    |
@@ -595,62 +598,65 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 
 ### 4.2 Asynchronous Event Registry
 
-| Event Name                                     | Publishing Module           | Subscribing Modules                                                          | Payload Format | Delivery Guarantee         |
-| :--------------------------------------------- | :-------------------------- | :--------------------------------------------------------------------------- | :------------- | :------------------------- |
-| `patient.registered`                           | `MOD-001` (IAM)             | `MOD-003` (create record shell), `MOD-004` (init consent profile), `MOD-011` | JSON           | At-least-once (idempotent) |
-| `patient.verified`                             | `MOD-001` (IAM)             | `MOD-011`, `MOD-010` (in-app welcome)                                        | JSON           | At-least-once              |
-| `patient.auth_failed`                          | `MOD-001` (IAM)             | `MOD-011`                                                                    | JSON           | At-least-once              |
-| `otp.sent`                                     | `MOD-001` (IAM)             | `MOD-011`                                                                    | JSON           | At-least-once              |
-| `otp.failed`                                   | `MOD-001` (IAM)             | `MOD-011`                                                                    | JSON           | At-least-once              |
-| `consent.requested`                            | `MOD-004` (Consent)         | `MOD-003`, `MOD-011`                                                         | JSON           | At-least-once              |
-| `consent.granted`                              | `MOD-004` (Consent)         | `MOD-003` (update share scope), `MOD-011`                                    | JSON           | At-least-once              |
-| `consent.revoked`                              | `MOD-004` (Consent)         | `MOD-003` (stop sharing), `MOD-011`                                          | JSON           | At-least-once              |
-| `intake.started`                               | `MOD-005` (Intake)          | `MOD-005` (self: telemetry log + count)                                      | JSON           | At-least-once              |
-| `intake.captured`                              | `MOD-005` (Intake)          | `MOD-005` (self: AI pipeline), `MOD-011`                                     | JSON           | At-least-once              |
-| `intake.retry_requested`                       | `MOD-005` (Intake)          | `MOD-005` (self: re-record flow), `MOD-011`                                  | JSON           | At-least-once              |
-| `pre_summary.ready`                            | `MOD-005` (Intake)          | `MOD-006` (attach case), `MOD-010` (in-app notify), `MOD-011`                | JSON           | At-least-once              |
-| `pre_summary.low_confidence`                   | `MOD-005` (Intake)          | `MOD-006` (force doctor review), `MOD-011`                                   | JSON           | At-least-once              |
-| `ai_job.completed`                             | `MOD-005` (Intake)          | `MOD-005` (self: pre-summary publish), `MOD-011`                             | JSON           | At-least-once              |
-| `ai_job.failed`                                | `MOD-005` (Intake)          | `MOD-011` (degrade path logged)                                              | JSON           | At-least-once              |
-| `ai_egress.recorded`                           | `MOD-005` (Intake)          | `MOD-011` (audit trail), `MOD-004` (consent log)                             | JSON           | At-least-once              |
-| `case.consult_complete`                        | `MOD-006` (Care)            | `MOD-010` (notify patient), `MOD-011`                                        | JSON           | At-least-once              |
-| `prescription.approved`                        | `MOD-006` (Care)            | `MOD-008` (route to chemist), `MOD-010` (dosage schedule), `MOD-011`         | JSON           | At-least-once              |
-| `prescription.rejected`                        | `MOD-006` (Care)            | `MOD-011`                                                                    | JSON           | At-least-once              |
-| `prescription.reviewed`                        | `MOD-006` (Care)            | `MOD-011`                                                                    | JSON           | At-least-once              |
-| `prescription.routed`                          | `MOD-008` (Fulfillment)     | `MOD-010`, `MOD-011`                                                         | JSON           | At-least-once              |
-| `order.preparing`                              | `MOD-008` (Fulfillment)     | `MOD-010`, `MOD-011`                                                         | JSON           | At-least-once              |
-| `order.out_for_delivery`                       | `MOD-008` (Fulfillment)     | `MOD-010`, `MOD-011`                                                         | JSON           | At-least-once              |
-| `order.delivered`                              | `MOD-008` (Fulfillment)     | `MOD-003` (attach to record), `MOD-010`, `MOD-011`                           | JSON           | At-least-once              |
-| `out_of_stock.notified`                        | `MOD-008` (Fulfillment)     | `MOD-010`, `MOD-011`                                                         | JSON           | At-least-once              |
-| `patient_choice.partial` / `.cancel`           | `MOD-008` (Fulfillment)     | `MOD-010`, `MOD-011`                                                         | JSON           | At-least-once              |
-| `delivery.failure`                             | `MOD-008` (Fulfillment)     | `MOD-010`, `MOD-011`                                                         | JSON           | At-least-once              |
-| `retry_path.selected`                          | `MOD-008` (Fulfillment)     | `MOD-010`, `MOD-011`                                                         | JSON           | At-least-once              |
-| `diagnostic.order_booked`                      | `MOD-007` (Diagnostics)     | `MOD-003` (attach to record), `MOD-010`, `MOD-011`                           | JSON           | At-least-once              |
-| `sample.collected`                             | `MOD-007` (Diagnostics)     | `MOD-011`                                                                    | JSON           | At-least-once              |
-| `report.filed`                                 | `MOD-007` (Diagnostics)     | `MOD-003` (file into record), `MOD-010` (notify), `MOD-011`                  | JSON           | At-least-once              |
-| `report.rejected_mismatch`                     | `MOD-007` (Diagnostics)     | `MOD-010` (notify re-upload), `MOD-011`                                      | JSON           | At-least-once              |
-| `settlement.recorded`                          | `MOD-009` (Settlement)      | `MOD-011`, `MOD-003` (attach to record)                                      | JSON           | At-least-once              |
-| `platform_payment.initiated`                   | `MOD-009` (Settlement)      | `MOD-011`                                                                    | JSON           | At-least-once              |
-| `payment.webhook_received`                     | `MOD-009` (Settlement)      | `MOD-011` (reconcile + audit)                                                | JSON           | At-least-once              |
-| `order.cancelled`                              | `MOD-009` (Settlement)      | `MOD-010`, `MOD-011`                                                         | JSON           | At-least-once              |
-| `refund.partner_direct`                        | `MOD-009` (Settlement)      | `MOD-011`                                                                    | JSON           | At-least-once              |
-| `metric.logged`                                | `MOD-003` (LHR)             | `MOD-011`, `MOD-003` (self: follow-up eval)                                  | JSON           | At-least-once              |
-| `metric_out_of_range`                          | `MOD-003` (LHR)             | `MOD-011`                                                                    | JSON           | At-least-once              |
-| `follow_up.due`                                | `MOD-003` (LHR) / Scheduler | `MOD-010` (send re-test nudge), `MOD-011`                                    | JSON           | At-least-once              |
-| `notification.sent` / `.delivered` / `.failed` | `MOD-010` (Notify)          | `MOD-011`                                                                    | JSON           | At-least-once              |
-| `partner.registered`                           | `MOD-002` (Partner)         | `MOD-011`                                                                    | JSON           | At-least-once              |
-| `operator.invited`                             | `MOD-001` (IAM)             | `MOD-011`                                                                    | JSON           | At-least-once              |
-| `partner.verification_started`                 | `MOD-002` (Partner)         | `MOD-011`                                                                    | JSON           | At-least-once              |
-| `partner.credential_reviewed`                  | `MOD-002` (Partner)         | `MOD-011`                                                                    | JSON           | At-least-once              |
-| `partner.activated`                            | `MOD-002` (Partner)         | `MOD-001` (activate role), `MOD-010` (notify partner), `MOD-011`             | JSON           | At-least-once              |
-| `partner.rejected`                             | `MOD-002` (Partner)         | `MOD-001` (deny role), `MOD-010`, `MOD-011`                                  | JSON           | At-least-once              |
-| `credential.invalidated`                       | `MOD-002` (Partner)         | `MOD-011`, (self: deindex directory)                                         | JSON           | At-least-once              |
-| `directory.search`                             | `MOD-002` (Partner)         | analytics (telemetry; no regulated-act subscriber)                           | JSON           | At-least-once              |
-| `partner.selected`                             | `MOD-002` (Partner)         | analytics (telemetry; no regulated-act subscriber)                           | JSON           | At-least-once              |
-| `audit.event` (generic)                        | All modules                 | `MOD-011` (append to hash chain)                                             | JSON           | At-least-once              |
-| `record.accessed`                              | `MOD-003` (LHR)             | `MOD-011`                                                                    | JSON           | At-least-once              |
-| `record.denied`                                | `MOD-003` (LHR)             | `MOD-011`                                                                    | JSON           | At-least-once              |
-| `audit.tamper_detected`                        | `MOD-011` (trigger)         | (telemetry, alert delivery deferred)                                         | JSON           | At-least-once              |
+| Event Name                                     | Publishing Module           | Subscribing Modules                                                                            | Payload Format | Delivery Guarantee         |
+| :--------------------------------------------- | :-------------------------- | :--------------------------------------------------------------------------------------------- | :------------- | :------------------------- |
+| `patient.registered`                           | `MOD-001` (IAM)             | `MOD-003` (create record shell), `MOD-004` (init consent profile), `MOD-011`                   | JSON           | At-least-once (idempotent) |
+| `patient.verified`                             | `MOD-001` (IAM)             | `MOD-011`, `MOD-010` (in-app welcome)                                                          | JSON           | At-least-once              |
+| `patient.auth_failed`                          | `MOD-001` (IAM)             | `MOD-011`                                                                                      | JSON           | At-least-once              |
+| `otp.sent`                                     | `MOD-001` (IAM)             | `MOD-011`                                                                                      | JSON           | At-least-once              |
+| `otp.failed`                                   | `MOD-001` (IAM)             | `MOD-011`                                                                                      | JSON           | At-least-once              |
+| `consent.requested`                            | `MOD-004` (Consent)         | `MOD-003`, `MOD-011`                                                                           | JSON           | At-least-once              |
+| `consent.granted`                              | `MOD-004` (Consent)         | `MOD-003` (update share scope), `MOD-011`                                                      | JSON           | At-least-once              |
+| `consent.revoked`                              | `MOD-004` (Consent)         | `MOD-003` (stop sharing), `MOD-011`                                                            | JSON           | At-least-once              |
+| `intake.started`                               | `MOD-005` (Intake)          | `MOD-005` (self: telemetry log + count)                                                        | JSON           | At-least-once              |
+| `intake.captured`                              | `MOD-005` (Intake)          | `MOD-005` (self: AI pipeline), `MOD-011`                                                       | JSON           | At-least-once              |
+| `intake.retry_requested`                       | `MOD-005` (Intake)          | `MOD-005` (self: re-record flow), `MOD-011`                                                    | JSON           | At-least-once              |
+| `pre_summary.ready`                            | `MOD-005` (Intake)          | `MOD-006` (case-birth seam), `MOD-010` (in-app notify), `MOD-011`                              | JSON           | At-least-once              |
+| `pre_summary.low_confidence`                   | `MOD-005` (Intake)          | `MOD-006` (forced-review signal), `MOD-011`                                                    | JSON           | At-least-once              |
+| `ai_job.completed`                             | `MOD-005` (Intake)          | `MOD-005` (self: pre-summary publish), `MOD-011`                                               | JSON           | At-least-once              |
+| `ai_job.failed`                                | `MOD-005` (Intake)          | `MOD-011` (degrade path logged)                                                                | JSON           | At-least-once              |
+| `ai_egress.recorded`                           | `MOD-005` (Intake)          | `MOD-011` (audit trail), `MOD-004` (consent log)                                               | JSON           | At-least-once              |
+| `case.consult_complete`                        | `MOD-006` (Care)            | `MOD-010` (notify patient), `MOD-011`                                                          | JSON           | At-least-once              |
+| `case.closed`                                  | `MOD-006` (Care)            | `MOD-010`, `MOD-011`                                                                           | JSON           | At-least-once              |
+| `prescription.approved`                        | `MOD-006` (Care)            | `MOD-008` (route to chemist), `MOD-010` (dosage schedule), `MOD-011`                           | JSON           | At-least-once              |
+| `prescription.rejected`                        | `MOD-006` (Care)            | `MOD-011`                                                                                      | JSON           | At-least-once              |
+| `prescription.reviewed`                        | `MOD-006` (Care)            | `MOD-011`                                                                                      | JSON           | At-least-once              |
+| `prescription.draft_created`                   | `MOD-006` (Care)            | `MOD-011`                                                                                      | JSON           | At-least-once              |
+| `prescription.issued`                          | `MOD-006` (Care)            | `MOD-003` (attach issued artifact to record), `MOD-011`                                        | JSON           | At-least-once              |
+| `prescription.routed`                          | `MOD-008` (Fulfillment)     | `MOD-010`, `MOD-011`                                                                           | JSON           | At-least-once              |
+| `order.preparing`                              | `MOD-008` (Fulfillment)     | `MOD-010`, `MOD-011`                                                                           | JSON           | At-least-once              |
+| `order.out_for_delivery`                       | `MOD-008` (Fulfillment)     | `MOD-010`, `MOD-011`                                                                           | JSON           | At-least-once              |
+| `order.delivered`                              | `MOD-008` (Fulfillment)     | `MOD-003` (attach to record), `MOD-010`, `MOD-011`                                             | JSON           | At-least-once              |
+| `out_of_stock.notified`                        | `MOD-008` (Fulfillment)     | `MOD-010`, `MOD-011`                                                                           | JSON           | At-least-once              |
+| `patient_choice.partial` / `.cancel`           | `MOD-008` (Fulfillment)     | `MOD-010`, `MOD-011`                                                                           | JSON           | At-least-once              |
+| `delivery.failure`                             | `MOD-008` (Fulfillment)     | `MOD-010`, `MOD-011`                                                                           | JSON           | At-least-once              |
+| `retry_path.selected`                          | `MOD-008` (Fulfillment)     | `MOD-010`, `MOD-011`                                                                           | JSON           | At-least-once              |
+| `diagnostic.order_booked`                      | `MOD-007` (Diagnostics)     | `MOD-003` (attach to record), `MOD-010`, `MOD-011`                                             | JSON           | At-least-once              |
+| `sample.collected`                             | `MOD-007` (Diagnostics)     | `MOD-011`                                                                                      | JSON           | At-least-once              |
+| `report.filed`                                 | `MOD-007` (Diagnostics)     | `MOD-003` (file into record), `MOD-006` (case-context, Phase 9), `MOD-010` (notify), `MOD-011` | JSON           | At-least-once              |
+| `report.rejected_mismatch`                     | `MOD-007` (Diagnostics)     | `MOD-010` (notify re-upload), `MOD-011`                                                        | JSON           | At-least-once              |
+| `settlement.recorded`                          | `MOD-009` (Settlement)      | `MOD-011`, `MOD-003` (attach to record)                                                        | JSON           | At-least-once              |
+| `platform_payment.initiated`                   | `MOD-009` (Settlement)      | `MOD-011`                                                                                      | JSON           | At-least-once              |
+| `payment.webhook_received`                     | `MOD-009` (Settlement)      | `MOD-011` (reconcile + audit)                                                                  | JSON           | At-least-once              |
+| `order.cancelled`                              | `MOD-009` (Settlement)      | `MOD-010`, `MOD-011`                                                                           | JSON           | At-least-once              |
+| `refund.partner_direct`                        | `MOD-009` (Settlement)      | `MOD-011`                                                                                      | JSON           | At-least-once              |
+| `metric.logged`                                | `MOD-003` (LHR)             | `MOD-011`, `MOD-003` (self: follow-up eval)                                                    | JSON           | At-least-once              |
+| `metric_out_of_range`                          | `MOD-003` (LHR)             | `MOD-011`                                                                                      | JSON           | At-least-once              |
+| `follow_up.due`                                | `MOD-003` (LHR) / Scheduler | `MOD-010` (send re-test nudge), `MOD-011`                                                      | JSON           | At-least-once              |
+| `notification.sent` / `.delivered` / `.failed` | `MOD-010` (Notify)          | `MOD-011`                                                                                      | JSON           | At-least-once              |
+| `partner.registered`                           | `MOD-002` (Partner)         | `MOD-011`                                                                                      | JSON           | At-least-once              |
+| `operator.invited`                             | `MOD-001` (IAM)             | `MOD-011`                                                                                      | JSON           | At-least-once              |
+| `partner.verification_started`                 | `MOD-002` (Partner)         | `MOD-011`                                                                                      | JSON           | At-least-once              |
+| `partner.credential_reviewed`                  | `MOD-002` (Partner)         | `MOD-011`                                                                                      | JSON           | At-least-once              |
+| `partner.activated`                            | `MOD-002` (Partner)         | `MOD-001` (activate role), `MOD-010` (notify partner), `MOD-011`                               | JSON           | At-least-once              |
+| `partner.rejected`                             | `MOD-002` (Partner)         | `MOD-001` (deny role), `MOD-010`, `MOD-011`                                                    | JSON           | At-least-once              |
+| `credential.invalidated`                       | `MOD-002` (Partner)         | `MOD-011`, (self: deindex directory)                                                           | JSON           | At-least-once              |
+| `directory.search`                             | `MOD-002` (Partner)         | analytics (telemetry; no regulated-act subscriber)                                             | JSON           | At-least-once              |
+| `partner.selected`                             | `MOD-002` (Partner)         | analytics (telemetry; no regulated-act subscriber)                                             | JSON           | At-least-once              |
+| `audit.event` (generic)                        | All modules                 | `MOD-011` (append to hash chain)                                                               | JSON           | At-least-once              |
+| `record.accessed`                              | `MOD-003` (LHR)             | `MOD-011`                                                                                      | JSON           | At-least-once              |
+| `record.denied`                                | `MOD-003` (LHR)             | `MOD-011`                                                                                      | JSON           | At-least-once              |
+| `audit.tamper_detected`                        | `MOD-011` (trigger)         | (telemetry, alert delivery deferred)                                                           | JSON           | At-least-once              |
 
 > `intake.captured` carries `patient_id` (int), `mode` (`voice` | `text`), and `duration_s` (float | None) alongside `intake_id`; `duration_s` is the audio duration in seconds for voice intake, None for text (T06 #370).
 

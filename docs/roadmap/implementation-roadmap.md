@@ -544,6 +544,7 @@ _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade f
 ### 2.8 Phase 8: Care Case, Consult Handshake & E-Prescription
 
 - **Phase ID:** `PHASE-8-CARE-RX`
+- **Status:** Delivered - tickets #417-#425 (T00-T08); MOD-006 case + rx lifecycle, the doctor approval gate, and the cross-module event wiring of `care/adapters/__init__.py` are live on the backend (doctor-review console UI lands in the Phase 14 channel work).
 - **Phase Strategic Objective:** Orchestrate the off-platform consult handshake into an on-platform e-prescription that is only ever issued under a licensed doctor's explicit approval - the highest-regulatory-stakes slice (`FEAT-008`, `FEAT-009`).
 - **Release Readiness Criteria:** Doctor marks consult complete only after a finalized pre-summary (else blocked); case moves Pre-Summary → Consult Complete → Prescription Pending; AI draft produced from voice note/photo; doctor edits recorded (`edited_yn`) and approval issues the prescription timestamped + attributed; reject path recorded; **hard gate test: zero prescriptions issued without doctor approval** (`REQ-023`); `prescription.approved` event published for downstream phases.
 
@@ -556,14 +557,14 @@ _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade f
 
 #### 2. Deferred / Out-of-Scope Items
 
-- Patient-initiated handshake (open `CFL-003` - doctor-initiated baseline kept).
-- Regulatory sign-off beyond the baseline (open `CFL-002`/`RISK-EVAL-003` - AI as drafting assistant under doctor authority).
+- Patient-initiated handshake (doctor-initiated baseline delivered, `CFL-003` **resolved**).
+- Regulatory sign-off beyond the AI-drafting-assistant baseline (`CFL-002`/`RISK-EVAL-003` **resolved** by ADR-0015; AI drafts are a drafting assistant under the licensed doctor's authority, drafting cap 3).
 
 #### 3. Data Schema & Entity Delta (Phase Data Model)
 
 - **Databases Introduced/Updated:** PostgreSQL `care` schema; object storage `rx_input/` prefix.
 - **Tables / Entities Created/Modified:** `cases` (patient, doctor, stage), `prescriptions` (status Draft/Doctor Reviewed/Approved & Issued/Fulfilled, issued_at, attributed_doctor), `rx_items` (name, dose, duration), `rx_approvals` (doctor_id, edited_yn, decision, reason), `doctor_inputs` (voice_note/photo refs), `care_outbox`.
-- **Migration Scripts:** `v7.0__init_care.sql`.
+- **Migration Scripts:** `v8_0__init_care` (alembic `145ca8587d12`), `v8_1__care_consult_complete` (alembic `384cef07d101`).
 
 #### 4. Infrastructure, DevOps & Environment Targets
 
@@ -866,8 +867,8 @@ _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade f
 | `FEAT-005` (profiles & credentials)               | `MOD-002`                                  | Phase 6        | `partner` - partner_credentials (expiry/revoked)                                              | Credential-expiry deactivation            | Scheduled   |
 | `FEAT-006` (symptom intake)                       | `MOD-005`                                  | Phase 7        | `intake` - intakes, media_refs                                                                | Object storage `intake/`                  | Scheduled   |
 | `FEAT-007` (AI pre-summary)                       | `MOD-005`                                  | Phase 7        | `intake` - pre_summaries, ai_jobs                                                             | LLM adapter + budget meter                | Scheduled   |
-| `FEAT-008` (consult handshake)                    | `MOD-006`                                  | Phase 8        | `care` - cases                                                                                | Doctor channel                            | Scheduled   |
-| `FEAT-009` (e-prescription)                       | `MOD-006`, `MOD-005`                       | Phase 8        | `care` - prescriptions, rx_items, rx_approvals, doctor_inputs                                 | Object storage `rx_input/`; approval gate | Scheduled   |
+| `FEAT-008` (consult handshake)                    | `MOD-006`                                  | Phase 8        | `care` - cases                                                                                | Doctor channel                            | Delivered   |
+| `FEAT-009` (e-prescription)                       | `MOD-006`, `MOD-005`                       | Phase 8        | `care` - prescriptions, rx_items, rx_approvals, doctor_inputs                                 | Object storage `rx_input/`; approval gate | Delivered   |
 | `FEAT-010` (diagnostics booking)                  | `MOD-007`                                  | Phase 9        | `diagnostics` - diagnostic_orders, sample_pickups                                             | Lab channel                               | Scheduled   |
 | `FEAT-011` (report match & filing)                | `MOD-007`                                  | Phase 9        | `diagnostics` - lab_reports, report_uploads, upload_matches                                   | Upload scanning; `reports/` bucket        | Scheduled   |
 | `FEAT-012` (fulfilment routing)                   | `MOD-008`                                  | Phase 10       | `fulfillment` - fulfillment_orders, fulfillment_events                                        | Chemist channel                           | Scheduled   |
