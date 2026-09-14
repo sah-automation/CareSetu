@@ -108,6 +108,11 @@ care_cases = Table(
     Column("doctor_id", BigInteger, nullable=True),
     Column("pre_summary_id", BigInteger, nullable=True),
     Column("stage", String(30), nullable=False, server_default=text("'pre_summary'")),
+    # Consult-complete milestone on the PreSummary -> PrescriptionPending
+    # transition (CONTEXT.md glossary): the recorded timestamp and the
+    # attributing doctor. Milestone fields, never a dwell stage.
+    Column("consult_completed_at", DateTime(timezone=True), nullable=True),
+    Column("consult_completed_by", BigInteger, nullable=True),
     Column("closed_at", DateTime(timezone=True), nullable=True),
     Column("close_reason", String(50), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),

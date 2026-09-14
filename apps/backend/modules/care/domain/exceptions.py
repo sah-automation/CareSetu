@@ -10,6 +10,26 @@ class CareError(Exception):
     """Base error for the care module."""
 
 
+class CareNotFoundError(CareError):
+    """Raised when a care entity is not found or the caller lacks access.
+
+    Mirrors :class:`~modules.intake.domain.exceptions.IntakeNotFoundError`
+    for the MOD-006 care module (PHASE-8 T04, ticket #420): the facade
+    raises this when a care case lookup misses, or when the requesting
+    doctor does not own the case.
+    """
+
+
+class CareValidationError(CareError):
+    """Raised when a care write is rejected by a state/input validation.
+
+    Mirrors :class:`~modules.intake.domain.exceptions.IntakeValidationError`
+    for the MOD-006 care module (PHASE-8 T04, ticket #420): raised for a
+    non-transition state or input check the case machine does not decide
+    (e.g. a closed case rejecting a fresh doctor input).
+    """
+
+
 class IllegalCareTransitionError(CareError):
     """Raised when a care case is asked to take an illegal lifecycle action.
 

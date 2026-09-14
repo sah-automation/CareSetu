@@ -595,6 +595,59 @@ class IntakeFacade:
             updated_at=row.updated_at,
         )
 
+    async def get_finalized_pre_summary(
+        self,
+        *,
+        pre_summary_id: int,
+    ) -> PreSummaryView:
+        """Return the pre-summary ONLY when it is in the terminal ``final`` state.
+
+        The MOD-006 consult-handshake gate (CONTEXT.md glossary, ``finalized
+        pre-summary``): the sole acceptable input to
+        ``mark_consult_complete``. Queries ``intake_pre_summaries`` and
+        returns a :class:`PreSummaryView` only when ``review_state == final``
+        - a working copy (draft/reviewed) is never served, so a
+        prescription-stage case can never arise from an unreviewed summary
+        (FEAT-008 edge case).
+
+        Raises :class:`IntakeNotFoundError` when no pre-summary row exists for
+        the id; :class:`IntakeValidationError` when the summary exists but is
+        not yet ``final``.
+        """
+        async with self._engine.begin() as connection:
+            row = (
+                await connection.execute(
+                    select(intake_pre_summaries).where(
+                        intake_pre_summaries.c.id == pre_summary_id,
+                    )
+                )
+            ).first()
+            if row is None:
+                raise IntakeNotFoundError(f"pre-summary {pre_summary_id} not found")
+
+            if row.review_state != PreSummaryStatus.FINAL.value:
+                raise IntakeValidationError(
+                    f"pre-summary {pre_summary_id} is not finalized "
+                    f"(review_state={row.review_state}); the consult handshake "
+                    "requires a final-state summary"
+                )
+
+        return PreSummaryView(
+            pre_summary_id=int(row.id),
+            intake_id=int(row.intake_id),
+            structured_fields=StructuredFields.model_validate(row.structured_fields or {}),
+            structuring_confidence=row.structuring_confidence,
+            low_confidence=row.low_confidence,
+            review_state=row.review_state,
+            patient_edits=dict(row.patient_edits) if row.patient_edits else None,
+            doctor_corrections=dict(row.doctor_corrections) if row.doctor_corrections else None,
+            review_attribution=row.review_attribution,
+            reviewed_by=int(row.reviewed_by) if row.reviewed_by is not None else None,
+            reviewed_at=row.reviewed_at,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
     async def save_patient_pre_summary_edits(
         self,
         *,
