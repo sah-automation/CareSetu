@@ -139,6 +139,18 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         # PHASE-7 T13/T17 (#373): the audio playback route - owning patient or
         # doctor partner streams the decrypted clip.
         "/v1/intake/{intake_id}/media/{media_ref_id}",
+        # PHASE-8 T06 (#422): the doctor care surface - consult-complete,
+        # open-case list/detail, doctor input, rx draft/revision/approve/
+        # reject, and the approved e-prescription read.
+        "/v1/care/cases",
+        "/v1/care/cases/{case_id}",
+        "/v1/care/cases/{case_id}/consult-complete",
+        "/v1/care/cases/{case_id}/doctor-input",
+        "/v1/care/cases/{case_id}/rx/draft",
+        "/v1/care/cases/{case_id}/rx/{rx_id}/revision",
+        "/v1/care/cases/{case_id}/rx/{rx_id}/approve",
+        "/v1/care/cases/{case_id}/rx/{rx_id}/reject",
+        "/v1/care/prescriptions/{rx_id}",
     }
 
 
