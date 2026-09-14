@@ -359,7 +359,7 @@ def test_ai_provider_production_requires_model() -> None:
 
 
 def test_demo_mode_forces_mock() -> None:
-    with pytest.raises(ValueError, match="demo flag must never ride"):
+    with pytest.raises(ValueError, match="requires AI_ALLOW_DEMO_PROVIDER"):
         Settings(
             app_environment="production",
             demo_mode=True,
@@ -372,6 +372,118 @@ def test_demo_mode_forces_mock() -> None:
 
 def test_demo_mode_with_mock_is_allowed() -> None:
     Settings(demo_mode=True, ai_provider="mock")
+
+
+def test_demo_mode_openai_compatible_without_flag_refused() -> None:
+    with pytest.raises(ValueError, match="AI_ALLOW_DEMO_PROVIDER"):
+        Settings(
+            app_environment="production",
+            demo_mode=True,
+            ai_provider="openai_compatible",
+            ai_api_key="secret-key",
+            ai_base_url="https://ext.example",
+            ai_model="grok-3",
+        )
+
+
+def test_demo_mode_openai_compatible_with_flag_boots() -> None:
+    settings = Settings(
+        app_environment="production",
+        demo_mode=True,
+        ai_provider="openai_compatible",
+        ai_allow_demo_provider=True,
+        ai_api_key="secret-key",
+        ai_base_url="https://ext.example",
+        ai_model="grok-3",
+    )
+
+    assert settings.ai_allow_demo_provider is True
+    assert settings.ai_provider == "openai_compatible"
+
+
+def test_demo_mode_openai_compatible_with_flag_still_requires_key() -> None:
+    with pytest.raises(ValueError, match="AI_API_KEY"):
+        Settings(
+            app_environment="production",
+            demo_mode=True,
+            ai_provider="openai_compatible",
+            ai_allow_demo_provider=True,
+            ai_base_url="https://ext.example",
+            ai_model="grok-3",
+        )
+
+
+def test_demo_mode_openai_compatible_with_flag_still_requires_base_url() -> None:
+    with pytest.raises(ValueError, match="AI_BASE_URL"):
+        Settings(
+            app_environment="production",
+            demo_mode=True,
+            ai_provider="openai_compatible",
+            ai_allow_demo_provider=True,
+            ai_api_key="secret-key",
+            ai_base_url="",
+            ai_model="grok-3",
+        )
+
+
+def test_demo_flag_is_ignored_without_demo_mode() -> None:
+    settings = Settings(
+        app_environment="production",
+        demo_mode=False,
+        ai_provider="openai_compatible",
+        ai_allow_demo_provider=True,
+        ai_api_key="secret-key",
+        ai_base_url="https://ext.example",
+        ai_model="grok-3",
+    )
+
+    assert settings.ai_allow_demo_provider is True
+
+
+def test_demo_flag_off_in_non_demo_boots_unflagged() -> None:
+    settings = Settings(
+        app_environment="production",
+        demo_mode=False,
+        ai_provider="openai_compatible",
+        ai_api_key="secret-key",
+        ai_base_url="https://ext.example",
+        ai_model="grok-3",
+    )
+
+    assert settings.ai_allow_demo_provider is False
+
+
+def test_demo_flag_does_not_relax_dev_test_gate() -> None:
+    with pytest.raises(ValueError, match="gated to staging/production"):
+        Settings(
+            app_environment="dev",
+            demo_mode=True,
+            ai_provider="openai_compatible",
+            ai_allow_demo_provider=True,
+            ai_allow_dev_provider=False,
+            ai_api_key="secret-key",
+            ai_base_url="https://ext.example",
+            ai_model="grok-3",
+        )
+
+
+def test_build_ai_gateway_demo_flag_wires_openai_compatible() -> None:
+    settings = Settings(
+        app_environment="production",
+        demo_mode=True,
+        ai_provider="openai_compatible",
+        ai_allow_demo_provider=True,
+        ai_api_key="secret-key",
+        ai_base_url="https://ext.example",
+        ai_model="grok-3",
+    )
+
+    gateway = build_ai_gateway(settings)
+
+    assert isinstance(gateway, CircuitBreakerAiGateway)
+    assert isinstance(gateway._adapter, OpenAiCompatibleAdapter)
+    assert gateway.effective_provider == "openai_compatible"
+    assert gateway.effective_model == "grok-3"
 
 
 def test_unsupported_ai_provider_is_refused() -> None:

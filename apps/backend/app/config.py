@@ -92,8 +92,9 @@ DEFAULT_LANGFUSE_HOST = "https://us.cloud.langfuse.com"
 # knob with a fail-closed default (mock). The real provider is gated to
 # staging/production by ``__post_init__`` - a real key in dev/test is refused
 # unless demo mode forces the mock or ``AI_ALLOW_DEV_PROVIDER`` overrides the
-# gate. Timeout honours the EXT-002 call discipline (<= 30 s,
-# third-party-integration-standards §1).
+# gate, and a real provider under demo_mode is refused unless
+# ``AI_ALLOW_DEMO_PROVIDER`` opts in (T14, #414). Timeout honours the EXT-002
+# call discipline (<= 30 s, third-party-integration-standards §1).
 DEFAULT_AI_PROVIDER = "mock"
 DEFAULT_AI_MODEL = ""
 # ASR model for the OpenAI-compatible /audio/transcriptions leg (#387): the
@@ -101,6 +102,10 @@ DEFAULT_AI_MODEL = ""
 # ``AI_ASR_MODEL`` so the transcription model is decoupled from the structurer.
 DEFAULT_AI_ASR_MODEL = "whisper-large-v3-turbo"
 DEFAULT_AI_ALLOW_DEV_PROVIDER = False
+# Opt-in that lets a real OpenAI-compatible provider run under demo_mode (T14,
+# #414). Defaults False so demo+mock stays the fail-closed posture; the flag is
+# ignored when demo_mode is False. Orthogonal to AI_ALLOW_DEV_PROVIDER.
+DEFAULT_AI_ALLOW_DEMO_PROVIDER = False
 DEFAULT_AI_TIMEOUT_SECONDS = 30.0
 DEFAULT_AI_MAX_RETRIES = 3
 DEFAULT_AI_CIRCUIT_BREAKER_THRESHOLD = 5
@@ -232,12 +237,14 @@ class Settings:
     # EXT-002 LLM/AI gateway (PHASE-7 T05, #348): provider selection is a config
     # knob (mock is the fail-closed default); the real provider key/base URL/
     # model. ``__post_init__`` refuses a real provider in dev/test unless demo
-    # mode forces the mock or ``ai_allow_dev_provider`` overrides the gate,
-    # mirroring the SMS/WhatsApp fail-closed posture.
+    # mode forces the mock or ``ai_allow_dev_provider`` overrides the gate, and
+    # refuses a real provider under demo_mode unless ``ai_allow_demo_provider``
+    # opts in (T14, #414), mirroring the SMS/WhatsApp fail-closed posture.
     ai_provider: str = DEFAULT_AI_PROVIDER
     ai_model: str = DEFAULT_AI_MODEL
     ai_asr_model: str = DEFAULT_AI_ASR_MODEL
     ai_allow_dev_provider: bool = DEFAULT_AI_ALLOW_DEV_PROVIDER
+    ai_allow_demo_provider: bool = DEFAULT_AI_ALLOW_DEMO_PROVIDER
     ai_api_key: str = ""
     ai_base_url: str = ""
     ai_timeout_seconds: float = DEFAULT_AI_TIMEOUT_SECONDS
@@ -322,10 +329,11 @@ class Settings:
                 f"unsupported ai_provider {self.ai_provider!r}; expected "
                 "'mock' or 'openai_compatible'"
             )
-        if self.demo_mode and ai_provider != "mock":
+        if self.demo_mode and ai_provider != "mock" and not self.ai_allow_demo_provider:
             raise ValueError(
-                "demo_mode=True requires ai_provider='mock' (fail-closed): "
-                "the demo flag must never ride a real EXT-002 provider"
+                "demo_mode=True requires ai_provider='mock' unless "
+                "AI_ALLOW_DEMO_PROVIDER=true (fail-closed): the demo flag requires "
+                "AI_ALLOW_DEMO_PROVIDER to ride a real EXT-002 provider"
             )
         if ai_provider == "openai_compatible":
             if (
@@ -586,6 +594,7 @@ def get_settings() -> Settings:
         ai_model=os.environ.get("AI_MODEL", DEFAULT_AI_MODEL),
         ai_asr_model=os.environ.get("AI_ASR_MODEL", DEFAULT_AI_ASR_MODEL),
         ai_allow_dev_provider=_env_bool("AI_ALLOW_DEV_PROVIDER", DEFAULT_AI_ALLOW_DEV_PROVIDER),
+        ai_allow_demo_provider=_env_bool("AI_ALLOW_DEMO_PROVIDER", DEFAULT_AI_ALLOW_DEMO_PROVIDER),
         ai_api_key=os.environ.get("AI_API_KEY", ""),
         ai_base_url=os.environ.get("AI_BASE_URL", ""),
         ai_timeout_seconds=_env_float("AI_TIMEOUT_SECONDS", DEFAULT_AI_TIMEOUT_SECONDS),
