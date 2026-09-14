@@ -201,6 +201,60 @@ _Avoid_: suspension
 The `FEAT-004` no-results shape: when no directory entry matches the patient's filters within the Daltonganj peri-urban scope, relax only the location constraint (keep type and specialty filters), show nearest-first, and label the results "outside your area". The patient is never silently served results that dropped a filter.
 _Avoid_: fuzzy match, relaxed filters
 
+### Consultation orchestration & e-prescription (Phase 8)
+
+**care case**:
+The per-visit work record in `MOD-006` (the `care` schema), born the moment its pre-summary is finalized, one per visit, carrying the patient, the attending doctor, and the prescription lineage.
+_Avoid_: case (bare), visit record (the visit is the off-platform consult that precedes the case), consultation (that is the off-platform event)
+
+**case stage**:
+The closed enum dwell state of a care case: `PreSummary → PrescriptionPending → Closed`. `ConsultComplete` is not a stage - it is the milestone on the `PreSummary → PrescriptionPending` transition. A rejected draft never changes the case stage; `Closed` comes only from the doctor's deliberate close-without-prescription.
+_Avoid_: case status (the column is `stage`, and status implies free transitions), lifecycle phase
+
+**consult complete milestone**:
+The audited marker recorded on the `PreSummary → PrescriptionPending` transition when the doctor closes the off-platform consult on-platform in one action - a milestone on the transition, never a dwell state. It fires `case.consult_complete` and the patient's single notification, then the case enters prescription pending.
+_Avoid_: consult complete state, consult-closed flag
+
+**finalized pre-summary**:
+The Phase-7 pre-summary in its terminal `final` state - the only summary the handshake gate `get_finalized_pre_summary` ever returns. `mark_consult_complete` is blocked while none exists, so a prescription-stage case can never arise from an unreviewed summary.
+_Avoid_: completed summary, reviewed summary (that is the intermediate `reviewed` state, not the gate's `final` state)
+
+**e-prescription**:
+The issued, immutable prescription a doctor approves and the patient's record stores: the frozen approved revision, timestamped and attributed to the issuing doctor, with no supersede or void path - corrections require a fresh visit. `get_approved_prescription` serves only these.
+_Avoid_: digital prescription, electronic prescription, Rx (in model language; fine in UI copy)
+
+**prescription source**:
+The closed enum on a prescription recording where its revision came from: `ai_draft` (from the drafting assistant's immutable draft snapshot) or `manual` (the doctor authored `rx_items` directly). Keeps the audit trail honest about AI involvement.
+_Avoid_: origin, provenance
+
+**draft snapshot**:
+The immutable AI-draft artifact captured when `request_rx_draft` produces a draft - the frozen baseline against which `edited_yn` is derived on approval. Editing never touches it; the working revision (the current `Draft`/`DoctorReviewed` row and its `rx_items`) is the only thing that changes.
+_Avoid_: AI output, stored draft
+
+**drafting cap**:
+The guard that a new AI draft is only generated while the care case has fewer than 2 rejected drafts - at most 3 draft attempts per case. The cap limits only AI draft generation; manual authoring, edit-and-approve, and close-without-prescription stay open regardless, so an AI outage never strands a patient's visit.
+_Avoid_: retry limit, draft budget
+
+**revision-freeze approval**:
+The core issuance guarantee: approval saves and freezes exactly the doctor's working revision (the current `Draft`/`DoctorReviewed` row and its `rx_items`), sets `issued_at` and `attributed_doctor`, and derives `edited_yn` against the immutable draft snapshot. If the revision save fails the approval is blocked - the raw AI draft is never approvable, so a lost edit can never mean a wrong prescription issued.
+_Avoid_: one-click approve, approve-draft
+
+**verification declaration**:
+The mandatory double-check: `approve_prescription` accepts only a `verification_declaration = true`, stored on `care_rx_approvals` with `declared_at`. A declaration-less approval is rejected, so no prescription is issued without the doctor's recorded, double-checked review.
+_Avoid_: consent, agree-checkbox
+
+**edited_yn**:
+The derived flag on an approval computed by comparing the frozen revision against the immutable draft snapshot - `edited` tells an auditor whether the issued prescription differs from the AI draft. Never set by hand or from client input.
+_Avoid_: modified flag, changed flag
+
+**doctor input**:
+A voice note or photo the doctor submits as prescribing input for the AI drafting assistant, stored as a sensitive-class object in the `rx_input/` storage prefix. Any use of the patient's record history to shape an AI draft goes through consent-gated reads (`check_consent`), fail-closed.
+_Avoid_: media upload, attachment
+
+**close-without-prescription**:
+The doctor's deliberate terminal action that moves a care case to `Closed` with no prescription - recorded with a close reason and leaving the pending list. A rejected draft never auto-closes the case; only this explicit action closes a visit when no medicine is needed.
+_Avoid_: close case, end-visit-without-prescription
+
 ### Event bus & module seams
 
 **outbox**:
