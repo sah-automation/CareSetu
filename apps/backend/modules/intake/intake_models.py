@@ -259,3 +259,33 @@ class PreSummaryReviewResult(BaseModel):
     review_attribution: str
     reviewed_by: int
     reviewed_at: datetime
+
+
+class RxDraftItem(BaseModel):
+    """One drafted prescription line returned by the rx-drafting leg.
+
+    Mirrors the AI gateway's ``RxItem`` shape (``ai_gateway.py``) at the
+    facade boundary so callers depend on the typed facade surface, never the
+    concrete adapter DTOs. ``dose`` and ``duration`` are optional in the
+    stored revision even though the drafting leg always supplies them:
+    ``save_rx_revision`` accepts a doctor-authored working revision.
+    """
+
+    name: str
+    dose: str | None = None
+    duration: str | None = None
+
+
+class RxDraftResult(BaseModel):
+    """The typed outcome of ``IntakeFacade.request_rx_draft`` (PHASE-8 T05).
+
+    Carries the drafting-leg result: the AI-drafted ``rx_items`` plus the
+    provider confidence. ``doctor_input_ref`` / ``pre_summary_ref`` echo the
+    drafting inputs so a caller (``CareFacade.create_rx_draft``) can store the
+    immutable draft snapshot without re-reading the gateway result.
+    """
+
+    doctor_input_ref: int
+    pre_summary_ref: int
+    rx_items: list[RxDraftItem]
+    confidence: float

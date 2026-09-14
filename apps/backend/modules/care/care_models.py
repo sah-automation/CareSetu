@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, field_validator
 
@@ -21,10 +22,12 @@ from modules.care.schema.models import (
 #: the circular-import hazard that importing from ``facade.py`` caused.
 CARE_SCHEMA = "care"
 
-#: Typed alias for the JSONB prescription draft snapshot payload -
-#: a flat map of scalar or list-of-scalar clinical fields (mirrors the
-#: ``ClinicalEdits`` shape used by the intake pre-summary snapshot).
-DraftSnapshot = dict[str, str | list[str]]
+#: Typed alias for the JSONB prescription draft snapshot payload. The JSONB
+#: column stores arbitrary JSON (the AI drafting leg's frozen baseline, e.g.
+#: ``{"rx_items": [{"name", "dose", "duration"}, ...]}``); ``Any`` values keep
+#: the typed boundary honest about a JSONB artifact (CONTEXT.md glossary,
+#: ``draft snapshot``). ``edited_yn`` derivation reads this frozen shape.
+DraftSnapshot = dict[str, Any]
 
 
 class CaseDetailView(BaseModel):
@@ -80,6 +83,21 @@ class RxItemView(BaseModel):
     name: str
     dose: str | None
     duration: str | None
+
+
+class RxItemInput(BaseModel):
+    """A medication line a doctor authors or edits in the working revision.
+
+    The typed input shape for ``create_rx_draft(source="manual")`` and
+    ``save_rx_revision``: ``name`` is required, ``dose``/``duration`` optional
+    (a doctor may leave a dosage open for the pharmacist). It deliberately
+    carries no ids - the facade assigns ``sequence`` and the row ids when the
+    working revision is persisted to ``care_rx_items``.
+    """
+
+    name: str
+    dose: str | None = None
+    duration: str | None = None
 
 
 class PrescriptionDetailView(BaseModel):

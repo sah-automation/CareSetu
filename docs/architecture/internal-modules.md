@@ -353,7 +353,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 
 - **Inbound Sync APIs:** `mark_consult_complete(doctor, case)`, `get_case`, `list_doctor_cases(doctor)`, `submit_doctor_input(case, voice|photo)`, `approve_prescription(case, edits?)`, `reject_prescription(case, reason)`, `get_approved_prescription(rx_id)`.
 - **Inbound Events Subscribed:** `pre_summary.ready` (attach summary to case), `pre_summary.low_confidence` (flag for forced review before handshake), `report.filed` (attach to case context).
-- **Outbound Events Published:** `case.consult_complete`, `prescription.draft_created`, `prescription.approved`, `prescription.rejected`, `prescription.issued`.
+- **Outbound Events Published:** `case.consult_complete`, `prescription.draft_created`, `prescription.reviewed`, `prescription.approved`, `prescription.rejected`, `prescription.issued`.
 
 #### 3. Core Business Logic & State Machines
 
@@ -616,6 +616,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 | `case.consult_complete`                        | `MOD-006` (Care)            | `MOD-010` (notify patient), `MOD-011`                                        | JSON           | At-least-once              |
 | `prescription.approved`                        | `MOD-006` (Care)            | `MOD-008` (route to chemist), `MOD-010` (dosage schedule), `MOD-011`         | JSON           | At-least-once              |
 | `prescription.rejected`                        | `MOD-006` (Care)            | `MOD-011`                                                                    | JSON           | At-least-once              |
+| `prescription.reviewed`                        | `MOD-006` (Care)            | `MOD-011`                                                                    | JSON           | At-least-once              |
 | `prescription.routed`                          | `MOD-008` (Fulfillment)     | `MOD-010`, `MOD-011`                                                         | JSON           | At-least-once              |
 | `order.preparing`                              | `MOD-008` (Fulfillment)     | `MOD-010`, `MOD-011`                                                         | JSON           | At-least-once              |
 | `order.out_for_delivery`                       | `MOD-008` (Fulfillment)     | `MOD-010`, `MOD-011`                                                         | JSON           | At-least-once              |

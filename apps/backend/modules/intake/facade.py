@@ -4,8 +4,12 @@ The only legal cross-module import target for the ``intake`` module
 (coding-standards S2, ADR-0003). Thin coordinator that validates intake
 submissions, commits the intake row + outbox event in one transaction
 (ADR-0002 S1), and provides read projections for intake and pre-summary
-data. ``request_rx_draft`` is declared as a contract stub only (verified
-in Phase 8).
+data. ``request_rx_draft`` is the Phase 8 rx-drafting seam (PHASE-8 T05,
+#421): it produces a structured rx draft from the doctor input through the
+intake AI gateway port and returns it as a typed result. The caller
+(``CareFacade.create_rx_draft``) supplies the consent-gated history context
+via ``history_summary`` (NFR-SEC-006); this facade never performs a raw
+history read.
 
 Capture durability is structural: the row + outbox event commit in one
 local transaction, so a later AI failure never rolls back the intake
@@ -23,7 +27,15 @@ from cryptography.exceptions import InvalidTag
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.config import get_settings
 from bus.outbox_writer import write_outbox
+from modules.intake.adapters import build_ai_gateway
+from modules.intake.adapters.ai_gateway import (
+    AiEgressContext,
+    AiGateway,
+    DraftRxRequest,
+    DraftRxResult,
+)
 from modules.intake.adapters.media_store import IntakeMediaStore
 from modules.intake.domain.events import (
     intake_captured_envelope,
@@ -68,6 +80,8 @@ from modules.intake.intake_models import (
     PreSummaryReviewResult,
     PreSummaryView,
     ReRecordResult,
+    RxDraftItem,
+    RxDraftResult,
     StructuredFields,
 )
 from modules.intake.outbox import INTAKE_OUTBOX_TABLE
@@ -127,10 +141,12 @@ class IntakeFacade:
         engine: AsyncEngine,
         *,
         media_store: IntakeMediaStore | None = None,
+        ai_gateway: AiGateway | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._engine = engine
         self._media_store = media_store
+        self._ai_gateway = ai_gateway
         self._sleep = sleep
 
     async def submit_intake(
@@ -825,13 +841,61 @@ class IntakeFacade:
         doctor_input_ref: int,
         pre_summary_ref: int,
         history_summary: str | None = None,
-    ) -> None:
-        """Contract stub for rx-draft generation (Phase 8 makes it live).
+    ) -> RxDraftResult:
+        """Produce a structured rx draft from the doctor input (PHASE-8 T05).
 
-        Declared here so the facade surface matches the spec API
-        (spec #344). The actual implementation lands in Phase 8 when the
-        AI pipeline and doctor-approval flow are wired.
+        Delegates to the AI gateway ``draft_rx`` leg (the Phase 7 providers
+        - mock/fallback/openai-compatible) and returns a typed result with the
+        draft ``rx_items`` and the provider confidence. The caller
+        (``CareFacade.create_rx_draft``) supplies the consent-gated history
+        context via ``history_summary`` (NFR-SEC-006) - this facade never
+        performs a raw history read.
+
+        Resolves the declared language from the intake record associated with
+        ``pre_summary_ref`` so the AI gateway's ``AiEgressContext`` carries
+        only the intake context (NFR-SEC-006 egress boundary). Raises
+        :class:`~modules.intake.domain.exceptions.IntakeNotFoundError` when no
+        pre-summary or intake exists for the given references.
         """
-        raise NotImplementedError(
-            "request_rx_draft is a contract stub; implementation lands in Phase 8"
+        gateway = self._ai_gateway
+        if gateway is None:
+            gateway = build_ai_gateway(get_settings())
+
+        async with self._engine.begin() as connection:
+            ps_row = (
+                await connection.execute(
+                    select(intake_pre_summaries).where(
+                        intake_pre_summaries.c.id == pre_summary_ref,
+                    )
+                )
+            ).first()
+            if ps_row is None:
+                raise IntakeNotFoundError(f"pre-summary {pre_summary_ref} not found for rx-draft")
+
+            intake_row = (
+                await connection.execute(
+                    select(intake_intakes).where(
+                        intake_intakes.c.id == ps_row.intake_id,
+                    )
+                )
+            ).first()
+            language: str = intake_row.language if intake_row is not None else "en"
+
+        draft_result: DraftRxResult = await gateway.draft_rx(
+            DraftRxRequest(
+                doctor_input_ref=str(doctor_input_ref),
+                pre_summary_ref=str(pre_summary_ref),
+                patient_history_summary=history_summary or "",
+                context=AiEgressContext(language=language),
+            )
+        )
+
+        return RxDraftResult(
+            doctor_input_ref=doctor_input_ref,
+            pre_summary_ref=pre_summary_ref,
+            rx_items=[
+                RxDraftItem(name=item.name, dose=item.dose, duration=item.duration)
+                for item in draft_result.rx_items
+            ],
+            confidence=draft_result.confidence,
         )
