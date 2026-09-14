@@ -91,13 +91,37 @@ services:
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
-      # AI provider gateway (T04, #381): demo stays on mock (fail-closed) via
-      # DEMO_MODE=true.  To point at a real OpenAI-compatible provider, set
-      # AI_PROVIDER, AI_MODEL, AI_API_KEY, AI_BASE_URL, and optionally the
-      # all-or-none fallback set (AI_FALLBACK_*).  See .env.example for a
-      # quick-switch table (Groq, Gemini, OpenRouter, OpenAI).
+      # AI provider gateway (T04, #381; T14, #414): the demo now rides a real
+      # OpenAI-compatible provider instead of mock canned pre-summaries.
+      # AI_PROVIDER and AI_ALLOW_DEMO_PROVIDER are blueprint-managed toggles so
+      # a blueprint sync cannot silently flip production back to mock (seen
+      # live on the demo site). The provider model/base URL and both API keys
+      # are set in the Render Dashboard like DATABASE_URL - never committed.
+      # AI_ALLOW_DEMO_PROVIDER=true is the explicit opt-in (T14, #414) that lets
+      # the real EXT-002 provider run under DEMO_MODE=true (fail-closed default
+      # is off); it is ignored when DEMO_MODE is false.
       - key: AI_PROVIDER
-        value: mock
+        value: openai_compatible
+      - key: AI_ALLOW_DEMO_PROVIDER
+        value: "true"
+      - key: AI_API_KEY
+        sync: false
+      - key: AI_BASE_URL
+        sync: false
+      - key: AI_MODEL
+        sync: false
+      # ASR model for the /audio/transcriptions leg (#387) - dashboard-managed.
+      - key: AI_ASR_MODEL
+        sync: false
+      # Fallback provider chain (all-or-none, T04 #381): dashboard-managed.
+      - key: AI_FALLBACK_PROVIDER
+        sync: false
+      - key: AI_FALLBACK_BASE_URL
+        sync: false
+      - key: AI_FALLBACK_API_KEY
+        sync: false
+      - key: AI_FALLBACK_MODEL
+        sync: false
       # In-process dispatcher (worker-outbox-runbook Rule 1): the outbox poll
       # loop, intake structuring pipeline, and credential-expiry sweep all run
       # inside this web service's FastAPI lifespan rather than a separate Render
