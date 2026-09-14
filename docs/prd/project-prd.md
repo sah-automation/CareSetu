@@ -358,7 +358,7 @@ _Traceability: `REQ-004`, `REQ-013`, `REQ-023`, `REQ-005`, `CFL-002`, `CFL-003`,
 
 - **Rule 1:** The consult itself happens off-platform (`REQ-004`); the platform only orchestrates the handshake and downstream stages.
 - **Rule 2:** **Resolved `CFL-003`:** who initiates the handshake (doctor vs. patient vs. dual). **Decision:** doctor-initiated - delivered in Phase 8 (`CareFacade.mark_consult_complete`). See ADR-0014 and Section 7.1.
-- **State Change:** `[Case: Pre-Summary]` → `[Case: Consult Complete]` → `[Case: Prescription Pending]`.
+- **State Change:** `[Case: Pre-Summary]` → _consult-complete milestone_ → `[Case: Prescription Pending]` → (close-without-prescription) → `[Case: Closed]`.
 
 **Telemetry & Event Tracking:**
 
@@ -398,7 +398,7 @@ _Traceability: `REQ-004`, `REQ-013`, `REQ-023`, `REQ-005`, `CFL-002`, `CFL-003`,
 - `prescription.reviewed`: `case_id`, `prescription_id`, `patient_id`, `doctor_id`
 - `prescription.approved`: `case_id`, `prescription_id`, `patient_id`, `doctor_id`, `edited_yn`
 - `prescription.rejected`: `case_id`, `prescription_id`, `patient_id`, `doctor_id`, `reason`
-- `prescription.issued`: `case_id`, `prescription_id`, `patient_id`, `doctor_id`
+- `prescription.issued`: `case_id`, `prescription_id`, `patient_id`, `doctor_id`, `occurred_at`
 
 (registry dot-notation - supersedes the legacy `prescription_draft_created`/`prescription_approved`/`prescription_rejected` snake_case spellings)
 

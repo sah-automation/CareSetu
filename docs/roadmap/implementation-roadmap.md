@@ -546,7 +546,7 @@ _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade f
 - **Phase ID:** `PHASE-8-CARE-RX`
 - **Status:** Delivered - tickets #417-#425 (T00-T08); MOD-006 case + rx lifecycle, the doctor approval gate, and the cross-module event wiring of `care/adapters/__init__.py` are live on the backend (doctor-review console UI lands in the Phase 14 channel work).
 - **Phase Strategic Objective:** Orchestrate the off-platform consult handshake into an on-platform e-prescription that is only ever issued under a licensed doctor's explicit approval - the highest-regulatory-stakes slice (`FEAT-008`, `FEAT-009`).
-- **Release Readiness Criteria:** Doctor marks consult complete only after a finalized pre-summary (else blocked); case moves Pre-Summary → Consult Complete → Prescription Pending; AI draft produced from voice note/photo; doctor edits recorded (`edited_yn`) and approval issues the prescription timestamped + attributed; reject path recorded; **hard gate test: zero prescriptions issued without doctor approval** (`REQ-023`); `prescription.approved` event published for downstream phases.
+- **Release Readiness Criteria:** Doctor marks consult complete only after a finalized pre-summary (else blocked); case moves Pre-Summary → consult-complete milestone → Prescription Pending, closing via close-without-prescription (terminal `[Case: Closed]`); AI draft produced from voice note/photo; doctor edits recorded (`edited_yn`) and approval issues the prescription timestamped + attributed; reject path recorded; **hard gate test: zero prescriptions issued without doctor approval** (`REQ-023`); `prescription.approved` event published for downstream phases.
 
 #### 1. In-Scope Modules & Features
 

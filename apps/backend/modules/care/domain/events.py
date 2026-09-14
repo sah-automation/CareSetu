@@ -182,13 +182,17 @@ class PrescriptionIssuedPayload(BaseModel):
     Fired together with ``prescription.approved`` when approval freezes the
     doctor's working revision into the issued e-prescription (CONTEXT.md
     glossary, ``e-prescription``): the issued artifact is immutable and
-    attributed to the doctor, with no supersede or void path. Regulated act.
+    attributed to the doctor, with no supersede or void path. ``occurred_at``
+    is the clinical time of issuance (ISO 8601), carried so consumers like
+    MOD-003's record timeline can timestamp the entry without re-deriving it.
+    Regulated act.
     """
 
     case_id: int
     prescription_id: int
     patient_id: int
     doctor_id: int
+    occurred_at: str  # ISO 8601 datetime string
 
 
 def prescription_draft_created_envelope(
@@ -280,7 +284,12 @@ def prescription_rejected_envelope(
 
 
 def prescription_issued_envelope(
-    *, case_id: int, prescription_id: int, patient_id: int, doctor_id: int
+    *,
+    case_id: int,
+    prescription_id: int,
+    patient_id: int,
+    doctor_id: int,
+    occurred_at: str,
 ) -> Envelope[PrescriptionIssuedPayload]:
     """Build the ``prescription.issued`` envelope for the ``care`` outbox."""
     return Envelope[PrescriptionIssuedPayload](
@@ -292,5 +301,6 @@ def prescription_issued_envelope(
             prescription_id=prescription_id,
             patient_id=patient_id,
             doctor_id=doctor_id,
+            occurred_at=occurred_at,
         ),
     )

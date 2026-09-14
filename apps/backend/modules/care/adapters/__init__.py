@@ -4,10 +4,15 @@
 worker entrypoint calls it to register this module's handlers on the shared
 ``HandlerRegistry``. PHASE-8 T08 (#424) freezes the module's event set: care
 owns the producer payload models for every case / prescription event it
-publishes so a claimed ``care_outbox`` row is reconstructed with a typed
-payload before fan-out, and registers the module's §4.2 inbound
-subscriptions - ``pre_summary.ready``, ``pre_summary.low_confidence`` and
-``report.filed`` - as ledgered telemetry seams (#424).
+publishes - ``case.consult_complete``, ``case.closed``,
+``prescription.draft_created``, ``prescription.reviewed``,
+``prescription.approved``, ``prescription.rejected`` **and**
+``prescription.issued`` - so a claimed ``care_outbox`` row is reconstructed
+with a typed payload before fan-out (producer owns its contract; health
+consumes ``prescription.issued`` through its own tolerant mirror). It also
+registers the module's §4.2 inbound subscriptions - ``pre_summary.ready``,
+``pre_summary.low_confidence`` and ``report.filed`` - as ledgered telemetry
+seams (#424).
 
 The subscription bodies are deliberately connector-only: a finalized /
 low-confidence pre-summary reaching the care module is a funnel fact, not a
@@ -17,8 +22,9 @@ event carries the patient identity (the payload today carries only
 ``intake_id`` + ``pre_summary_id``, and ``care_cases.patient_id`` is NOT
 NULL); ``report.filed`` case-context attachment is Phase 9. Each handler
 ledgers first (``run_handler``) so a replayed ``event_id`` is a no-op, then
-logs a structured, PHI-free line and bumps its process-local counter -
-mirroring the ``intake.started`` funnel telemetry seam (PHASE-7 T05 #369).
+logs a structured, PHI-free line keyed by that ``event_id`` (error-handling-
+observability §3) with its process-local counter - mirroring the
+``intake.started`` funnel telemetry seam (PHASE-7 T05 #369).
 """
 
 from __future__ import annotations
@@ -36,18 +42,20 @@ from bus.events import (
     EVENT_PRE_SUMMARY_READY,
     EVENT_PRESCRIPTION_APPROVED,
     EVENT_PRESCRIPTION_DRAFT_CREATED,
+    EVENT_PRESCRIPTION_ISSUED,
     EVENT_PRESCRIPTION_REJECTED,
     EVENT_PRESCRIPTION_REVIEWED,
     EVENT_REPORT_FILED,
 )
 from bus.handler_harness import run_handler
-from bus.registry import HandlerRegistry
+from bus.registry import Handler, HandlerRegistry
 from modules.care.care_models import CARE_SCHEMA
 from modules.care.domain.events import (
     CaseClosedPayload,
     CaseConsultCompletePayload,
     PrescriptionApprovedPayload,
     PrescriptionDraftCreatedPayload,
+    PrescriptionIssuedPayload,
     PrescriptionRejectedPayload,
     PrescriptionReviewedPayload,
 )
@@ -85,35 +93,69 @@ class CareReportFiledPayload(BaseModel):
 #: once per ledger-deduped delivery, so a replayed ``event_id`` is idempotently
 #: skipped and each count tracks distinct deliveries. Telemetry only - no
 #: domain table and no outbox row is written by these seams (PHASE-8 T08 #424).
-_pre_summary_ready_count: int = 0
-_pre_summary_low_confidence_count: int = 0
-_report_filed_count: int = 0
+_COUNTERS: dict[str, int] = {}
 
 
 def pre_summary_ready_count() -> int:
     """Return the process-local count of distinct ``pre_summary.ready`` deliveries."""
-    return _pre_summary_ready_count
+    return _COUNTERS.get(EVENT_PRE_SUMMARY_READY, 0)
 
 
 def pre_summary_low_confidence_count() -> int:
     """Return the process-local count of distinct ``pre_summary.low_confidence`` deliveries."""
-    return _pre_summary_low_confidence_count
+    return _COUNTERS.get(EVENT_PRE_SUMMARY_LOW_CONFIDENCE, 0)
 
 
 def report_filed_count() -> int:
     """Return the process-local count of distinct ``report.filed`` deliveries."""
-    return _report_filed_count
+    return _COUNTERS.get(EVENT_REPORT_FILED, 0)
+
+
+def _format_payload_fields(payload: BaseModel, field_names: tuple[str, ...]) -> str:
+    """Render a PHI-free ``name=value`` context for a telemetry log line."""
+    return " ".join(f"{name}={getattr(payload, name)}" for name in field_names)
+
+
+def _make_telemetry_handler(
+    *,
+    event_type: str,
+    label: str,
+    payload_model: type[BaseModel],
+    ledger_suffix: str,
+    field_names: tuple[str, ...],
+) -> Handler:
+    """Build a ledgered, PHI-free telemetry seam handler for one inbound event.
+
+    Connector-only by design: ledger first (``run_handler``) so a replayed
+    ``event_id`` is a no-op, then a log line keyed by that ``event_id``
+    (error-handling-observability §3) with the process-local running count.
+    Touches no domain table and emits no outbox row (PHASE-8 T08 #424).
+    """
+
+    async def handler(envelope: Envelope[BaseModel]) -> None:
+        async def _impl(connection: AsyncConnection, payload: BaseModel) -> None:
+            del connection
+            _COUNTERS[event_type] = _COUNTERS.get(event_type, 0) + 1
+            logger.info(
+                "%s telemetry event_id=%s %s count=%s",
+                label,
+                envelope.event_id,
+                _format_payload_fields(payload, field_names),
+                _COUNTERS[event_type],
+            )
+
+        await run_handler(envelope, payload_model, _impl, ledger_suffix, CARE_SCHEMA)
+
+    return handler
 
 
 def register_handlers(registry: HandlerRegistry) -> None:
     """Register the care module's event payload models + inbound subscriptions.
 
-    MOD-006 owns the producer payload models for its own published events; the
+    MOD-006 owns the producer payload models for the seven events it publishes,
+    incl. ``prescription.issued`` (the producer owns its contract); the
     dispatcher reconstructs a claimed ``care_outbox`` row with each before
-    fan-out. ``prescription.issued`` is deliberately absent - its registry model
-    is owned by MOD-003 (health), whose ``register_payload_model`` runs before
-    care's in the composition order, so re-registering it would trip the
-    duplicate guard. The three §4.2 inbound subscriptions (MOD-005 -> MOD-006,
+    fan-out. The three §4.2 inbound subscriptions (MOD-005 -> MOD-006,
     MOD-007 -> MOD-006) are ledgered telemetry seams.
     """
     for event_type, payload_model in (
@@ -123,106 +165,46 @@ def register_handlers(registry: HandlerRegistry) -> None:
         (EVENT_PRESCRIPTION_REVIEWED, PrescriptionReviewedPayload),
         (EVENT_PRESCRIPTION_APPROVED, PrescriptionApprovedPayload),
         (EVENT_PRESCRIPTION_REJECTED, PrescriptionRejectedPayload),
+        (EVENT_PRESCRIPTION_ISSUED, PrescriptionIssuedPayload),
     ):
         registry.register_payload_model(event_type, payload_model)
 
-    registry.register(EVENT_PRE_SUMMARY_READY, _on_pre_summary_ready)
-    registry.register(EVENT_PRE_SUMMARY_LOW_CONFIDENCE, _on_pre_summary_low_confidence)
-    registry.register(EVENT_REPORT_FILED, _on_report_filed)
-
-
-async def _on_pre_summary_ready(envelope: Envelope[BaseModel]) -> None:
-    """Consume ``pre_summary.ready``: log the finalized pre-summary reaching care.
-
-    This is the case-birth signal: a care case is born when its pre-summary is
-    finalized (CONTEXT.md glossary). The spawn write is deferred - the producer
-    payload carries no patient identity (``care_cases.patient_id`` is NOT NULL)
-    - so this seam records the funnel fact only: ledger first (``run_handler``)
-    so a replayed ``event_id`` is a no-op, then a structured, PHI-free log line
-    with the process-local running count. Deliberately touches no domain table
-    and emits no outbox row of its own (PHASE-8 T08 #424).
-    """
-
-    async def _impl(connection: AsyncConnection, payload: CarePreSummaryReadyPayload) -> None:
-        del connection
-        global _pre_summary_ready_count
-        _pre_summary_ready_count += 1
-        logger.info(
-            "pre_summary.ready telemetry: intake_id=%s pre_summary_id=%s count=%s",
-            payload.intake_id,
-            payload.pre_summary_id,
-            _pre_summary_ready_count,
-        )
-
-    await run_handler(
-        envelope,
-        CarePreSummaryReadyPayload,
-        _impl,
-        "pre_summary_ready_telemetry",
-        CARE_SCHEMA,
+    # pre_summary.ready: the case-birth signal - a case is born when its
+    # pre-summary is finalized. The spawn write is deferred (the producer
+    # payload carries no patient identity), so this seam records the funnel
+    # fact and the count only (AMB-006, ADR-0001).
+    registry.register(
+        EVENT_PRE_SUMMARY_READY,
+        _make_telemetry_handler(
+            event_type=EVENT_PRE_SUMMARY_READY,
+            label="pre_summary.ready",
+            payload_model=CarePreSummaryReadyPayload,
+            ledger_suffix="pre_summary_ready_telemetry",
+            field_names=("intake_id", "pre_summary_id"),
+        ),
     )
-
-
-async def _on_pre_summary_low_confidence(envelope: Envelope[BaseModel]) -> None:
-    """Consume ``pre_summary.low_confidence``: log the forced-review signal.
-
-    The outset of the forced-review handshake gate (AMB-006, ADR-0001): a
-    below-confidence pre-summary must be reviewed before the consult handshake.
-    The gate itself already lives at ``CareFacade.mark_consult_complete`` via
-    the finalized-pre-summary check; this subscription records the funnel fact
-    that a low-confidence summary reached the care module. Ledger first
-    (``run_handler``) so a replayed ``event_id`` is a no-op, then a structured,
-    PHI-free log line with the process-local running count (PHASE-8 T08 #424).
-    """
-
-    async def _impl(
-        connection: AsyncConnection, payload: CarePreSummaryLowConfidencePayload
-    ) -> None:
-        del connection
-        global _pre_summary_low_confidence_count
-        _pre_summary_low_confidence_count += 1
-        logger.info(
-            "pre_summary.low_confidence telemetry: intake_id=%s pre_summary_id=%s count=%s",
-            payload.intake_id,
-            payload.pre_summary_id,
-            _pre_summary_low_confidence_count,
-        )
-
-    await run_handler(
-        envelope,
-        CarePreSummaryLowConfidencePayload,
-        _impl,
-        "pre_summary_low_confidence_telemetry",
-        CARE_SCHEMA,
+    # pre_summary.low_confidence: the forced-review handshake-gate outset. The
+    # gate lives at CareFacade.mark_consult_complete; this seam records the
+    # funnel fact that a low-confidence summary reached the care module.
+    registry.register(
+        EVENT_PRE_SUMMARY_LOW_CONFIDENCE,
+        _make_telemetry_handler(
+            event_type=EVENT_PRE_SUMMARY_LOW_CONFIDENCE,
+            label="pre_summary.low_confidence",
+            payload_model=CarePreSummaryLowConfidencePayload,
+            ledger_suffix="pre_summary_low_confidence_telemetry",
+            field_names=("intake_id", "pre_summary_id"),
+        ),
     )
-
-
-async def _on_report_filed(envelope: Envelope[BaseModel]) -> None:
-    """Consume ``report.filed``: log the report-filing fact for case context.
-
-    Phase 9 (MOD-007) attachment seam: a filed report's case context (which
-    visit, which clinician) is attached in that phase. Today MOD-003 already
-    persists ``report.filed`` into the patient timeline; this subscription
-    records the funnel fact that the filing reached the care module. Ledger
-    first (``run_handler``) so a replayed ``event_id`` is a no-op, then a
-    structured, PHI-free log line (order id only - never filename or patient)
-    with the process-local running count (PHASE-8 T08 #424).
-    """
-
-    async def _impl(connection: AsyncConnection, payload: CareReportFiledPayload) -> None:
-        del connection
-        global _report_filed_count
-        _report_filed_count += 1
-        logger.info(
-            "report.filed telemetry: order_id=%s count=%s",
-            payload.order_id,
-            _report_filed_count,
-        )
-
-    await run_handler(
-        envelope,
-        CareReportFiledPayload,
-        _impl,
-        "report_filed_telemetry",
-        CARE_SCHEMA,
+    # report.filed: Phase 9 (MOD-007) case-context attachment seam. MOD-003
+    # persists report.filed into the timeline; here only the order id travels.
+    registry.register(
+        EVENT_REPORT_FILED,
+        _make_telemetry_handler(
+            event_type=EVENT_REPORT_FILED,
+            label="report.filed",
+            payload_model=CareReportFiledPayload,
+            ledger_suffix="report_filed_telemetry",
+            field_names=("order_id",),
+        ),
     )

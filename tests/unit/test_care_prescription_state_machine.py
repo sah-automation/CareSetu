@@ -577,7 +577,11 @@ def test_prescription_event_envelopes_build_typed_payloads() -> None:
     assert rejected.payload.reason == "wrong_dosage"
 
     issued = prescription_issued_envelope(
-        case_id=1, prescription_id=10, patient_id=100, doctor_id=42
+        case_id=1,
+        prescription_id=10,
+        patient_id=100,
+        doctor_id=42,
+        occurred_at="2026-09-15T10:00:00+00:00",
     )
     assert isinstance(issued.payload, PrescriptionIssuedPayload)
     assert issued.event_type == EVENT_PRESCRIPTION_ISSUED

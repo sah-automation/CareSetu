@@ -40,11 +40,11 @@ from bus.dispatcher import DispatcherConfig, discover_outbox_tables, run_poll_lo
 from bus.envelope import Envelope
 from bus.outbox_ddl import materialize_consumed_events, materialize_outbox
 from bus.outbox_writer import write_outbox
+from modules.care.domain.events import PrescriptionIssuedPayload
 from modules.consent.domain.events import consent_granted_envelope, consent_revoked_envelope
 from modules.health.domain.events import (
     PatientRegisteredPayload,
     PrescriptionDeliveredPayload,
-    PrescriptionIssuedPayload,
     ReportFiledPayload,
     SettlementRecordedPayload,
 )
@@ -164,13 +164,22 @@ def _report_filed_envelope(
 def _prescription_issued_envelope(
     patient_id: int, event_id: uuid.UUID | None = None
 ) -> Envelope[PrescriptionIssuedPayload]:
+    """Producer-shaped ``prescription.issued`` envelope (care owns the registry contract).
+
+    Mirrors what care's ``prescription_issued_envelope`` writes into
+    ``care_outbox`` - the dispatcher re-validates this row payload against
+    care's registered payload model before fan-out, and health's consumer
+    mirror accepts it.
+    """
     return Envelope[PrescriptionIssuedPayload](
         event_id=event_id or uuid4(),
         event_type="prescription.issued",
         producer="care",
         payload=PrescriptionIssuedPayload(
+            case_id=100,
             prescription_id=2001,
             patient_id=patient_id,
+            doctor_id=10,
             occurred_at=datetime.now(UTC).isoformat(),
         ),
     )

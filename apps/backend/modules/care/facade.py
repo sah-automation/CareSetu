@@ -763,6 +763,7 @@ class CareFacade:
                     prescription_id=rx_id,
                     patient_id=int(case_row.patient_id),
                     doctor_id=doctor_id,
+                    occurred_at=issued_at.isoformat(),
                 ),
             )
 
