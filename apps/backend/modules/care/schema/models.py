@@ -127,6 +127,11 @@ care_cases = Table(
     ),
     Index("ix_care_cases_patient", "patient_id", "created_at"),
     Index("ix_care_cases_doctor", "doctor_id", "stage"),
+    Index(
+        "uq_care_cases_pre_summary_id",
+        "pre_summary_id",
+        unique=True,
+    ),
 )
 
 

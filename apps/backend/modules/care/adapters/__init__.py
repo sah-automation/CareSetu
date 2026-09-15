@@ -44,6 +44,7 @@ import logging
 
 from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from bus.envelope import Envelope
@@ -172,10 +173,13 @@ async def _on_pre_summary_ready(envelope: Envelope[BaseModel]) -> None:
     mark (``run_handler``), so an at-least-once replay of the same ``event_id``
     is a ledger no-op and can never double-insert. A second *distinct* ready
     delivery naming an already-born pre_summary (intake emits the event at both
-    Draft creation and Final review) is skip-guarded per ``pre_summary_id`` -
-    exactly one care case per finalized pre-summary. Pre-T2 in-flight payloads
-    carry no patient identity and degrade to the telemetry-only log (the old
-    behaviour) instead of crashing.
+    Draft creation and Final review) is guarded two ways: the SELECT fast path
+    catches the common case, and ``INSERT ... ON CONFLICT DO NOTHING`` on the
+    DB-level unique index ``uq_care_cases_pre_summary_id`` catches the
+    concurrent-distinct-event race. Both paths yield exactly one care case per
+    finalized pre-summary (US2). Pre-T2 in-flight payloads carry no patient
+    identity and degrade to the telemetry-only log (the old behaviour) instead of
+    crashing.
     """
 
     async def _impl(connection: AsyncConnection, payload: CarePreSummaryReadyPayload) -> None:
@@ -209,14 +213,24 @@ async def _on_pre_summary_ready(envelope: Envelope[BaseModel]) -> None:
             )
             return
 
-        await connection.execute(
-            care_cases.insert().values(
+        result = await connection.execute(
+            insert(care_cases)
+            .values(
                 patient_id=payload.patient_id,
                 pre_summary_id=payload.pre_summary_id,
                 stage=STAGE_PRE_SUMMARY,
                 forced_review=False,
             )
+            .on_conflict_do_nothing(index_elements=["pre_summary_id"])
         )
+        if result.rowcount == 0:
+            logger.info(
+                "pre_summary.ready event_id=%s pre_summary_id=%s case already born "
+                "(concurrent); skipping",
+                envelope.event_id,
+                payload.pre_summary_id,
+            )
+            return
         logger.info(
             "pre_summary.ready event_id=%s birthed care case for pre_summary_id=%s",
             envelope.event_id,

@@ -293,14 +293,21 @@ def test_emitted_envelope_round_trips_through_the_registry_validator() -> None:
 
 
 class _FakeResult:
-    """Mimics ``Insert``/``Select`` result shapes: ``first``, ``all``.
+    """Mimics ``Insert``/``Select`` result shapes: ``first``, ``all``, ``rowcount``.
 
     Added by the PHASE-8 review-close T2 case-birth set (#428, #426, FEAT-008/FEAT-009).
+    ``rowcount`` was added by T9 (#437) for the ``ON CONFLICT DO NOTHING`` conflict path.
     """
 
-    def __init__(self, row: object | None = None, rows: list[object] | None = None) -> None:
+    def __init__(
+        self,
+        row: object | None = None,
+        rows: list[object] | None = None,
+        rowcount: int = 1,
+    ) -> None:
         self._row = row
         self._rows = rows or []
+        self.rowcount = rowcount
 
     def first(self) -> object:
         return self._row
@@ -335,20 +342,26 @@ class _ScriptedCaseConnection:
 
     Mirrors the intake pipeline consumer's ``_FakeConnection``: selects answer
     the next scripted row (None = not yet born), inserts/updates are recorded so
-    tests can assert the case-birth and forced-review writes.
+    tests can assert the case-birth and forced-review writes. The ``rowcount``
+    of an insert is scripted via ``insert_rowcounts`` (default 1); T9 (#437)
+    uses ``rowcount=0`` for the ``ON CONFLICT DO NOTHING`` conflict path.
 
     Added by the PHASE-8 review-close T2 case-birth set (#428, #426, FEAT-008).
     """
 
-    def __init__(self, select_rows: list[object | None]) -> None:
+    def __init__(
+        self, select_rows: list[object | None], insert_rowcounts: list[int] | None = None
+    ) -> None:
         self._select_rows = iter(select_rows)
+        self._insert_rowcounts = list(insert_rowcounts or [])
         self.executed: list[_Recorded] = []
 
     async def execute(self, statement: object) -> _FakeResult:
         table = _statement_table(statement)
         if isinstance(statement, Insert) and table == "care_cases":
             self.executed.append(_Recorded("insert_case", statement))
-            return _FakeResult()
+            rowcount = self._insert_rowcounts.pop(0) if self._insert_rowcounts else 1
+            return _FakeResult(rowcount=rowcount)
         if isinstance(statement, Update) and table == "care_cases":
             self.executed.append(_Recorded("update_case", statement))
             return _FakeResult()
@@ -363,12 +376,14 @@ def _wire_case_delivery_mocks(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     select_rows: list[object | None],
+    insert_rowcounts: list[int] | None = None,
 ) -> _ScriptedCaseConnection:
     """Stub the run_handler engine + ledger onto a scripted care connection.
 
-    Added by the PHASE-8 review-close T2 case-birth set (#428, #426, FEAT-008).
+    Added by the PHASE-8 review-close T2 case-birth set (#428, #426, FEAT-008);
+    ``insert_rowcounts`` added by T9 (#437) for the conflict path.
     """
-    connection = _ScriptedCaseConnection(select_rows=select_rows)
+    connection = _ScriptedCaseConnection(select_rows=select_rows, insert_rowcounts=insert_rowcounts)
     engine = MagicMock()
     engine.begin.return_value.__aenter__ = AsyncMock(return_value=connection)
     engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -453,6 +468,36 @@ async def test_pre_summary_ready_same_pre_summary_two_event_ids_births_one_case(
     inserts = [r for r in connection.executed if r.kind == "insert_case"]
     assert len(inserts) == 1
     assert "case already born" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_pre_summary_ready_two_distinct_event_ids_racing_one_insert_conflicts(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """US2 backed by the DB: two DISTINCT event_ids naming one pre_summary can
+    race through the SELECT guard (both see "no row") - the second INSERT hits
+    ``uq_care_cases_pre_summary_id`` and lands ``ON CONFLICT DO NOTHING`` with
+    rowcount 0, so exactly one care case is born. (T9 #437, #426, FEAT-008)"""
+    registry = HandlerRegistry()
+    register_handlers(registry)
+    handler = registry.handlers_for(EVENT_PRE_SUMMARY_READY)[0]
+
+    connection = _wire_case_delivery_mocks(
+        monkeypatch, caplog, select_rows=[None, None], insert_rowcounts=[1, 0]
+    )
+
+    first = pre_summary_ready_envelope(intake_id=1, pre_summary_id=5, patient_id=7)
+    second = pre_summary_ready_envelope(intake_id=1, pre_summary_id=5, patient_id=7)
+
+    await handler(first)
+    await handler(second)
+
+    inserts = [r for r in connection.executed if r.kind == "insert_case"]
+    assert len(inserts) == 2
+    assert all(r.params["pre_summary_id"] == 5 for r in inserts)
+    assert "birthed care case" in caplog.text
+    assert "case already born (concurrent)" in caplog.text
+    assert caplog.text.count("birthed care case") == 1
 
 
 @pytest.mark.asyncio
