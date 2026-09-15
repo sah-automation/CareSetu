@@ -53,6 +53,8 @@ from modules.partner.facade import PartnerFacade
 
 logger = logging.getLogger(__name__)
 
+MESSAGE_CARE_VALIDATION_ERROR = "care validation failed; check the request and try again"
+
 router = APIRouter(prefix="/v1/care", tags=["care"])
 
 
@@ -497,10 +499,15 @@ def register_error_handlers(app: FastAPI) -> None:
 
     async def _care_validation_error(request: Request, exc: Exception) -> JSONResponse:
         care_exc = cast(CareValidationError, exc)
+        logger.warning(
+            "care_validation_error trace_id=%s detail=%s",
+            resolve_trace_id(request),
+            care_exc,
+        )
         return error_response(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "CARE_VALIDATION_ERROR",
-            str(care_exc),
+            MESSAGE_CARE_VALIDATION_ERROR,
             log_tag="care_route",
             request=request,
         )

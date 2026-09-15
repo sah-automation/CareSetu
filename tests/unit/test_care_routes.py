@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.gateway.idempotency import IdempotencyStore
 from app.main import create_app
+from modules.care.adapters.routes import MESSAGE_CARE_VALIDATION_ERROR
 from modules.care.care_models import (
     CaseDetailView,
     DoctorInputResult,
@@ -613,6 +614,8 @@ def test_doctor_input_closed_case_envelope() -> None:
 
     assert response.status_code == 422
     assert response.json()["code"] == "CARE_VALIDATION_ERROR"
+    assert response.json()["message"] == MESSAGE_CARE_VALIDATION_ERROR
+    assert "submit_doctor_input is illegal while the case is closed" not in response.text
 
 
 # ---------------------------------------------------------------------------
@@ -773,6 +776,8 @@ def test_approve_missing_declaration_envelope_via_facade() -> None:
 
     assert response.status_code == 422
     assert response.json()["code"] == "CARE_VALIDATION_ERROR"
+    assert response.json()["message"] == MESSAGE_CARE_VALIDATION_ERROR
+    assert "approval requires verification_declaration=true" not in response.text
 
 
 def test_approve_not_found_envelope() -> None:
