@@ -814,6 +814,13 @@ class IntakeFacade:
             # for downstream use, and ``pre_summary.low_confidence`` (needs
             # review) would be factually wrong once reviewed.
             if next_state.status is PreSummaryStatus.FINAL:
+                patient_id = (
+                    await connection.execute(
+                        select(intake_intakes.c.patient_id).where(
+                            intake_intakes.c.id == intake_id,
+                        )
+                    )
+                ).scalar_one()
                 await write_outbox(
                     connection,
                     INTAKE_SCHEMA,
@@ -821,6 +828,7 @@ class IntakeFacade:
                     pre_summary_ready_envelope(
                         intake_id=intake_id,
                         pre_summary_id=int(row.id),
+                        patient_id=int(patient_id),
                     ),
                 )
 

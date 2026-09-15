@@ -1,31 +1,36 @@
 """PHASE-8 T08: care event wiring - payload models, subscriptions, telemetry
-(#424, FEAT-008/FEAT-009).
+(#424, FEAT-008/FEAT-009) + PHASE-8 T2 case birth / forced-review (#428).
 
 Pins the code-side mirror of the ``MOD-006`` rows of the §4.2 registry: care
 publishes ``case.consult_complete``, ``case.closed``,
 ``prescription.draft_created``, ``prescription.reviewed``,
 ``prescription.approved``, ``prescription.rejected`` and
 ``prescription.issued`` (all typed, no-PHI: ids and lifecycle facts only), and
-subscribes to ``pre_summary.ready``, ``pre_summary.low_confidence`` and
-``report.filed`` as ledgered telemetry seams. care owns every producer payload
+subscribes to ``pre_summary.ready`` (births the care case),
+``pre_summary.low_confidence`` (sets ``forced_review`` on the matching case)
+and ``report.filed`` (ledgered telemetry seam). care owns every producer payload
 model it registers, incl. ``prescription.issued`` (producer owns its contract);
 health consumes ``prescription.issued`` through its own tolerant mirror and
 registers no model for it, so the composition registers each event type exactly
 once. Covers the frozen event shapes, the ``register_handlers`` registration
-seam, the ledger-deduped telemetry handlers, and an emitted-envelope
-round-trip through the registry validator - all without a database.
+seam, the ledger-deduped handlers - case birth, forced-review flag and the
+``report.filed`` telemetry seam - and an emitted-envelope round-trip through the
+registry validator - all without a database.
 """
 
 from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
 from pydantic import BaseModel
+from sqlalchemy.sql.dml import Insert, Update
+from sqlalchemy.sql.selectable import Select
 
 from bus.dispatcher import OutboxRow, envelope_from_row
 from bus.envelope import Envelope, is_valid_event_type
@@ -43,6 +48,7 @@ from bus.events import (
 )
 from bus.registry import HandlerRegistry
 from modules.care.adapters import (
+    CarePreSummaryReadyPayload,
     pre_summary_low_confidence_count,
     pre_summary_ready_count,
     register_handlers,
@@ -286,12 +292,77 @@ def test_emitted_envelope_round_trips_through_the_registry_validator() -> None:
         assert reconstructed.payload.model_dump(mode="json") == row.payload
 
 
-def _wire_delivery_mocks(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> set[str]:
-    """Stub the run_handler engine + ledger so deliveries dedupe in-memory."""
+class _FakeResult:
+    """Mimics ``Insert``/``Select`` result shapes: ``first``, ``all``."""
+
+    def __init__(self, row: object | None = None, rows: list[object] | None = None) -> None:
+        self._row = row
+        self._rows = rows or []
+
+    def first(self) -> object:
+        return self._row
+
+    def all(self) -> list:
+        return self._rows
+
+    def scalar_one(self) -> object:
+        return self._row
+
+
+class _Recorded:
+    def __init__(self, kind: str, statement: object) -> None:
+        self.kind = kind
+        self.statement = statement
+        self.params = dict(statement.compile().params)
+        self.sql = str(statement.compile(compile_kwargs={"literal_binds": True}))
+        self.table = getattr(getattr(statement, "table", None), "name", None)
+
+
+def _statement_table(statement: object) -> str | None:
+    if isinstance(statement, (Insert, Update)):
+        return getattr(statement.table, "name", None)
+    if isinstance(statement, Select):
+        froms = statement.get_final_froms()
+        return getattr(froms[0], "name", None) if froms else None
+    return None
+
+
+class _ScriptedCaseConnection:
+    """Records every executed statement and scripts care_cases select answers.
+
+    Mirrors the intake pipeline consumer's ``_FakeConnection``: selects answer
+    the next scripted row (None = not yet born), inserts/updates are recorded so
+    tests can assert the case-birth and forced-review writes.
+    """
+
+    def __init__(self, select_rows: list[object | None]) -> None:
+        self._select_rows = iter(select_rows)
+        self.executed: list[_Recorded] = []
+
+    async def execute(self, statement: object) -> _FakeResult:
+        table = _statement_table(statement)
+        if isinstance(statement, Insert) and table == "care_cases":
+            self.executed.append(_Recorded("insert_case", statement))
+            return _FakeResult()
+        if isinstance(statement, Update) and table == "care_cases":
+            self.executed.append(_Recorded("update_case", statement))
+            return _FakeResult()
+        if table == "care_cases":
+            self.executed.append(_Recorded("select_case", statement))
+            return _FakeResult(row=next(self._select_rows))
+        self.executed.append(_Recorded("other", statement))
+        return _FakeResult()
+
+
+def _wire_case_delivery_mocks(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    select_rows: list[object | None],
+) -> _ScriptedCaseConnection:
+    """Stub the run_handler engine + ledger onto a scripted care connection."""
+    connection = _ScriptedCaseConnection(select_rows=select_rows)
     engine = MagicMock()
-    engine.begin.return_value.__aenter__ = AsyncMock(return_value=AsyncMock())
+    engine.begin.return_value.__aenter__ = AsyncMock(return_value=connection)
     engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
     engine.dispose = AsyncMock()
     monkeypatch.setattr("bus.handler_harness._delivery_engine", lambda: engine)
@@ -309,22 +380,22 @@ def _wire_delivery_mocks(
 
     monkeypatch.setattr("bus.handler_harness.record_consumed_event", fake_ledger)
     caplog.set_level(logging.INFO, logger="modules.care.adapters")
-    return delivered
+    return connection
 
 
 @pytest.mark.asyncio
-async def test_pre_summary_ready_telemetry_logs_and_counts_distinct_events(
+async def test_pre_summary_ready_births_a_case_and_counts_distinct_events(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     registry = HandlerRegistry()
     register_handlers(registry)
     handler = registry.handlers_for(EVENT_PRE_SUMMARY_READY)[0]
 
-    _wire_delivery_mocks(monkeypatch, caplog)
+    connection = _wire_case_delivery_mocks(monkeypatch, caplog, select_rows=[None, None])
 
     before = pre_summary_ready_count()
-    first = pre_summary_ready_envelope(intake_id=1, pre_summary_id=5)
-    second = pre_summary_ready_envelope(intake_id=2, pre_summary_id=8)
+    first = pre_summary_ready_envelope(intake_id=1, pre_summary_id=5, patient_id=7)
+    second = pre_summary_ready_envelope(intake_id=2, pre_summary_id=8, patient_id=9)
 
     await handler(first)
     assert pre_summary_ready_count() == before + 1
@@ -335,6 +406,16 @@ async def test_pre_summary_ready_telemetry_logs_and_counts_distinct_events(
     await handler(second)
     assert pre_summary_ready_count() == before + 2
 
+    # Exactly one case insert per distinct event (the replayed event_id was a
+    # ledger no-op) - the birth write shares the consumed-event transaction.
+    inserts = [r for r in connection.executed if r.kind == "insert_case"]
+    assert len(inserts) == 2
+    assert inserts[0].table == "care_cases"
+    assert inserts[0].params["patient_id"] == 7
+    assert inserts[0].params["pre_summary_id"] == 5
+    assert inserts[0].params["stage"] == "pre_summary"
+    assert inserts[0].params["forced_review"] is False
+
     assert "pre_summary.ready telemetry" in caplog.text
     assert "intake_id=1 pre_summary_id=5" in caplog.text
     # The outbox event_id is the async correlation key (error-handling-observability §3).
@@ -342,14 +423,67 @@ async def test_pre_summary_ready_telemetry_logs_and_counts_distinct_events(
 
 
 @pytest.mark.asyncio
-async def test_pre_summary_low_confidence_telemetry_logs_and_counts_distinct_events(
+async def test_pre_summary_ready_same_pre_summary_two_event_ids_births_one_case(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Intake emits ready at Draft creation AND Final review - two DISTINCT
+    event_ids may name the same pre_summary_id. The per-pre_summary guard must
+    yield exactly one care case, never two."""
+    registry = HandlerRegistry()
+    register_handlers(registry)
+    handler = registry.handlers_for(EVENT_PRE_SUMMARY_READY)[0]
+
+    already_born = SimpleNamespace(id=1)
+    connection = _wire_case_delivery_mocks(monkeypatch, caplog, select_rows=[None, already_born])
+
+    first = pre_summary_ready_envelope(intake_id=1, pre_summary_id=5, patient_id=7)
+    second = pre_summary_ready_envelope(intake_id=1, pre_summary_id=5, patient_id=7)
+
+    await handler(first)
+    await handler(second)
+
+    inserts = [r for r in connection.executed if r.kind == "insert_case"]
+    assert len(inserts) == 1
+    assert "case already born" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_pre_summary_ready_tolerant_mirror_skips_birth_without_patient_id(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A pre-T2 in-flight payload (no patient identity) must not crash the
+    consumer - it degrades to the telemetry-only log and writes no case."""
+    registry = HandlerRegistry()
+    register_handlers(registry)
+    handler = registry.handlers_for(EVENT_PRE_SUMMARY_READY)[0]
+
+    connection = _wire_case_delivery_mocks(monkeypatch, caplog, select_rows=[])
+    legacy = Envelope[CarePreSummaryReadyPayload](
+        event_id=uuid4(),
+        event_type=EVENT_PRE_SUMMARY_READY,
+        producer="intake",
+        payload=CarePreSummaryReadyPayload(intake_id=1, pre_summary_id=5),
+    )
+
+    await handler(legacy)
+
+    assert pre_summary_ready_count() >= 1
+    assert [r.kind for r in connection.executed] == []
+    assert "no patient identity" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_pre_summary_low_confidence_sets_forced_review_on_the_case(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     registry = HandlerRegistry()
     register_handlers(registry)
     handler = registry.handlers_for(EVENT_PRE_SUMMARY_LOW_CONFIDENCE)[0]
 
-    _wire_delivery_mocks(monkeypatch, caplog)
+    existing_case = SimpleNamespace(id=1)
+    connection = _wire_case_delivery_mocks(
+        monkeypatch, caplog, select_rows=[existing_case, existing_case]
+    )
 
     before = pre_summary_low_confidence_count()
     first = pre_summary_low_confidence_envelope(intake_id=1, pre_summary_id=5)
@@ -364,9 +498,34 @@ async def test_pre_summary_low_confidence_telemetry_logs_and_counts_distinct_eve
     await handler(second)
     assert pre_summary_low_confidence_count() == before + 2
 
+    updates = [r for r in connection.executed if r.kind == "update_case"]
+    assert len(updates) == 2
+    assert all(r.params["forced_review"] is True for r in updates)
+    assert all("pre_summary_id = 5" in r.sql or "pre_summary_id = 8" in r.sql for r in updates)
+
     assert "pre_summary.low_confidence telemetry" in caplog.text
     assert "intake_id=2 pre_summary_id=8" in caplog.text
     assert str(first.event_id) in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_pre_summary_low_confidence_before_birth_is_a_logged_no_op(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Delivery order across outboxes is not guaranteed: ``low_confidence`` may
+    arrive before ``pre_summary.ready``. No case yet - a logged no-op, never an
+    error, and nothing is written."""
+    registry = HandlerRegistry()
+    register_handlers(registry)
+    handler = registry.handlers_for(EVENT_PRE_SUMMARY_LOW_CONFIDENCE)[0]
+
+    connection = _wire_case_delivery_mocks(monkeypatch, caplog, select_rows=[None])
+    envelope = pre_summary_low_confidence_envelope(intake_id=1, pre_summary_id=5)
+
+    await handler(envelope)
+
+    assert [r.kind for r in connection.executed] == ["select_case"]
+    assert "no care case" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -377,7 +536,7 @@ async def test_report_filed_telemetry_logs_and_counts_ignoring_producer_extra_fi
     register_handlers(registry)
     handler = registry.handlers_for(EVENT_REPORT_FILED)[0]
 
-    _wire_delivery_mocks(monkeypatch, caplog)
+    connection = _wire_case_delivery_mocks(monkeypatch, caplog, select_rows=[])
 
     before = report_filed_count()
     first = _report_filed_envelope(order_id=31, patient_id=7, filename="report_31.pdf")
@@ -392,6 +551,7 @@ async def test_report_filed_telemetry_logs_and_counts_ignoring_producer_extra_fi
     await handler(second)
     assert report_filed_count() == before + 2
 
+    assert [r.kind for r in connection.executed] == []
     assert "report.filed telemetry" in caplog.text
     assert "order_id=31" in caplog.text
     assert str(first.event_id) in caplog.text

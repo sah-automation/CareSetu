@@ -93,7 +93,7 @@ def _capture_from_all_event_types() -> list[Envelope[BaseModel]]:
         intake_started_envelope(patient_id=7, mode="voice", language="hi"),
         intake_captured_envelope(intake_id=1, patient_id=7, mode="voice", duration_s=12.5),
         intake_retry_requested_envelope(intake_id=1, record_attempt=2, reason="unusable_audio"),
-        pre_summary_ready_envelope(intake_id=1, pre_summary_id=5),
+        pre_summary_ready_envelope(intake_id=1, pre_summary_id=5, patient_id=7),
         pre_summary_low_confidence_envelope(intake_id=1, pre_summary_id=5),
         ai_job_completed_envelope(ai_job_id=9, intake_id=1, task_type="structure"),
         ai_job_failed_envelope(ai_job_id=9, intake_id=1, task_type="transcribe", reason="timeout"),
@@ -140,12 +140,13 @@ def test_retry_requested_carries_the_record_attempt_and_reason() -> None:
     assert envelope.payload.reason == "unusable_audio"
 
 
-def test_pre_summary_ready_names_the_summary() -> None:
-    envelope = pre_summary_ready_envelope(intake_id=42, pre_summary_id=7)
+def test_pre_summary_ready_names_the_summary_and_patient() -> None:
+    envelope = pre_summary_ready_envelope(intake_id=42, pre_summary_id=7, patient_id=7)
 
     assert envelope.event_type == EVENT_PRE_SUMMARY_READY
     assert envelope.payload.intake_id == 42
     assert envelope.payload.pre_summary_id == 7
+    assert envelope.payload.patient_id == 7
 
 
 def test_pre_summary_low_confidence_names_the_summary() -> None:

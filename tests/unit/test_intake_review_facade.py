@@ -277,7 +277,14 @@ async def test_mark_pre_summary_reviewed_high_confidence_finalizes_single_action
         low_confidence=False,
         review_state="draft",
     )
-    connection = _connection([_FakeResult(row=row), _FakeResult(row=None), _FakeResult(row=None)])
+    connection = _connection(
+        [
+            _FakeResult(row=row),
+            _FakeResult(row=None),
+            _FakeResult(scalar=7),
+            _FakeResult(row=None),
+        ]
+    )
     facade = _facade(connection)
 
     result = await facade.mark_pre_summary_reviewed(
@@ -303,7 +310,9 @@ async def test_mark_pre_summary_reviewed_high_confidence_finalizes_single_action
     assert params["reviewed_by"] == 12
 
     # Reaching Final publishes pre_summary.ready in the SAME transaction
-    # (ADR-0002 S1) so MOD-006/MOD-010 can attach and notify.
+    # (ADR-0002 S1) so MOD-006/MOD-010 can attach and notify. The payload
+    # carries the owning patient identity so the care module can birth the case
+    # (PHASE-8 T2, #428).
     outbox = [
         call.args[0]
         for call in connection.execute.await_args_list
@@ -312,6 +321,9 @@ async def test_mark_pre_summary_reviewed_high_confidence_finalizes_single_action
     assert len(outbox) == 1
     outbox_values = outbox[0].compile().params
     assert outbox_values["status"] == "pending"
+    assert outbox_values["payload"]["intake_id"] == 1
+    assert outbox_values["payload"]["pre_summary_id"] == 5
+    assert outbox_values["payload"]["patient_id"] == 7
 
 
 @pytest.mark.asyncio
