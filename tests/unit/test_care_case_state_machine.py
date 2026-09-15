@@ -1,4 +1,4 @@
-"""PHASE-8 T02: care-case lifecycle state-machine transition legality (#418).
+"""PHASE-8 T02: care-case lifecycle state-machine transition legality (#418, #426, FEAT-008).
 
 Three dwell stages (CONTEXT.md glossary: ``case stage``): PreSummary ->
 PrescriptionPending -> Closed.  ``ConsultComplete`` is the audited milestone

@@ -1,4 +1,4 @@
-"""PHASE-8 T06: doctor care routes & RBAC (ticket #422).
+"""PHASE-8 T06: doctor care routes & RBAC (ticket #422, #426, FEAT-008/FEAT-009).
 
 Thin adapters: parse the typed request, call the care facade, answer the
 typed result. The facade is stubbed here - the DB-backed behavior is the

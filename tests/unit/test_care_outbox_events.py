@@ -1,4 +1,5 @@
-"""PHASE-8 T07: care outbox events - typed envelopes in one transaction (#423).
+"""PHASE-8 T07: care outbox events - typed envelopes in one transaction.
+(#423, #426, FEAT-008/FEAT-009)
 
 Validates every ``care_outbox`` write the ``CareFacade`` publishes against its
 typed Pydantic payload model (coding-standards §3, MOD-006 §4.2 event names):

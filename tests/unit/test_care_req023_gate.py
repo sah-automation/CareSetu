@@ -1,5 +1,5 @@
 """PHASE-8 T07: REQ-023 hard gate - no prescription is issued without the
-doctor's recorded double-check (ticket #423).
+doctor's recorded double-check (ticket #423, #426, FEAT-009).
 
 Pins the mandatory-approval invariant that sits across the prescription
 machine and the facade (CONTEXT.md glossary, ``verification declaration``

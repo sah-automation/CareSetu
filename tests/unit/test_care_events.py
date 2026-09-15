@@ -1,5 +1,5 @@
 """PHASE-8 T08: care event wiring - payload models, subscriptions, telemetry
-(#424, FEAT-008/FEAT-009) + PHASE-8 T2 case birth / forced-review (#428).
+(#424, FEAT-008/FEAT-009) + PHASE-8 T2 case birth / forced-review (#428, #426, FEAT-008/FEAT-009).
 
 Pins the code-side mirror of the ``MOD-006`` rows of the §4.2 registry: care
 publishes ``case.consult_complete``, ``case.closed``,
@@ -293,7 +293,10 @@ def test_emitted_envelope_round_trips_through_the_registry_validator() -> None:
 
 
 class _FakeResult:
-    """Mimics ``Insert``/``Select`` result shapes: ``first``, ``all``."""
+    """Mimics ``Insert``/``Select`` result shapes: ``first``, ``all``.
+
+    Added by the PHASE-8 review-close T2 case-birth set (#428, #426, FEAT-008/FEAT-009).
+    """
 
     def __init__(self, row: object | None = None, rows: list[object] | None = None) -> None:
         self._row = row
@@ -333,6 +336,8 @@ class _ScriptedCaseConnection:
     Mirrors the intake pipeline consumer's ``_FakeConnection``: selects answer
     the next scripted row (None = not yet born), inserts/updates are recorded so
     tests can assert the case-birth and forced-review writes.
+
+    Added by the PHASE-8 review-close T2 case-birth set (#428, #426, FEAT-008).
     """
 
     def __init__(self, select_rows: list[object | None]) -> None:
@@ -359,7 +364,10 @@ def _wire_case_delivery_mocks(
     caplog: pytest.LogCaptureFixture,
     select_rows: list[object | None],
 ) -> _ScriptedCaseConnection:
-    """Stub the run_handler engine + ledger onto a scripted care connection."""
+    """Stub the run_handler engine + ledger onto a scripted care connection.
+
+    Added by the PHASE-8 review-close T2 case-birth set (#428, #426, FEAT-008).
+    """
     connection = _ScriptedCaseConnection(select_rows=select_rows)
     engine = MagicMock()
     engine.begin.return_value.__aenter__ = AsyncMock(return_value=connection)
@@ -428,7 +436,7 @@ async def test_pre_summary_ready_same_pre_summary_two_event_ids_births_one_case(
 ) -> None:
     """Intake emits ready at Draft creation AND Final review - two DISTINCT
     event_ids may name the same pre_summary_id. The per-pre_summary guard must
-    yield exactly one care case, never two."""
+    yield exactly one care case, never two. (T2 #428, #426, FEAT-008)"""
     registry = HandlerRegistry()
     register_handlers(registry)
     handler = registry.handlers_for(EVENT_PRE_SUMMARY_READY)[0]
@@ -452,7 +460,10 @@ async def test_pre_summary_ready_tolerant_mirror_skips_birth_without_patient_id(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A pre-T2 in-flight payload (no patient identity) must not crash the
-    consumer - it degrades to the telemetry-only log and writes no case."""
+    consumer - it degrades to the telemetry-only log and writes no case.
+
+    (T2 #428, #426, FEAT-008)
+    """
     registry = HandlerRegistry()
     register_handlers(registry)
     handler = registry.handlers_for(EVENT_PRE_SUMMARY_READY)[0]
@@ -514,7 +525,7 @@ async def test_pre_summary_low_confidence_before_birth_is_a_logged_no_op(
 ) -> None:
     """Delivery order across outboxes is not guaranteed: ``low_confidence`` may
     arrive before ``pre_summary.ready``. No case yet - a logged no-op, never an
-    error, and nothing is written."""
+    error, and nothing is written. (T2 #428, #426, FEAT-008)"""
     registry = HandlerRegistry()
     register_handlers(registry)
     handler = registry.handlers_for(EVENT_PRE_SUMMARY_LOW_CONFIDENCE)[0]

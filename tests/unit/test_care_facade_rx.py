@@ -1,4 +1,4 @@
-"""PHASE-8 T05: prescription workflow facade (ticket #421).
+"""PHASE-8 T05: prescription workflow facade (ticket #421, #426, FEAT-009).
 
 Drives the prescription half of ``CareFacade`` through a mocked engine at the
 facade-with-fakes seam, mirroring ``test_care_facade_consult.py``. Pins the

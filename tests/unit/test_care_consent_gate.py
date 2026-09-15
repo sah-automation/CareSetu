@@ -1,4 +1,4 @@
-"""PHASE-8 T07: consent-gated history - fail-closed drafting (ticket #423).
+"""PHASE-8 T07: consent-gated history - fail-closed drafting (ticket #423, #426, FEAT-009).
 
 Pins the NFR-SEC-006 fail-closed seam that the AI-draft leg of ``CareFacade``
 delegates history reads through (``HealthFacade.read_consented_history``, which

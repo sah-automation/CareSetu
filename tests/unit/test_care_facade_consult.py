@@ -1,4 +1,4 @@
-"""PHASE-8 T04: consultation workflow facade (ticket #420).
+"""PHASE-8 T04: consultation workflow facade (ticket #420, #426, FEAT-008).
 
 Drives ``mark_consult_complete``, ``get_case``, ``list_doctor_cases``,
 ``submit_doctor_input``, ``close_case_without_rx`` and the new
@@ -320,6 +320,7 @@ async def test_mark_consult_complete_machine_gate_blocks_unreviewed_summary() ->
     Even when the intake seam publishes a non-final view (which the contract
     forbids, but defense-in-depth must catch), the machine's own gate blocks
     the transition - the real ``pre_summary_finalized`` result is passed in.
+    (review-close #427, #426, FEAT-008)
     """
 
     class _LenientIntake:  # pragmatic test double: lenient about finality

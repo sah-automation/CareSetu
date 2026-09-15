@@ -1,4 +1,5 @@
-"""PHASE-8 T07: full lifecycle integration walks across the care facade (#423).
+"""PHASE-8 T07: full lifecycle integration walks across the care facade
+(#423, #426, FEAT-008/FEAT-009).
 
 Drives the consultation + prescription halves of ``CareFacade`` as CHAINED
 walks - each step runs the real facade method against a fresh faked engine,
@@ -550,6 +551,7 @@ class TestCloseWithoutRx:
 
     def test_case_closed_envelope_round_trips_into_the_typed_payload(self) -> None:
         """``case.closed`` is published by ``close_case_without_rx`` (review-close #429).
+        Spec ref #426, FEAT-008.
 
         Its event name and payload must round-trip into ``CaseClosedPayload``
         with only ids and a PHI-free close reason - the payload shape the
