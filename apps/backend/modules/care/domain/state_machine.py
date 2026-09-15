@@ -11,7 +11,7 @@ Case lifecycle
 --------------
 
     [Pre-summary] --MARK_CONSULT_COMPLETE (finalized gate)--> [Prescription Pending]
-         |                                                          |
+         |
          +--CLOSE_WITHOUT_RX (reason)--> [Closed] <--CLOSE_WITHOUT_RX--+
 
 The case is born in ``PreSummary`` when its pre-summary is finalized.
@@ -20,11 +20,12 @@ off-platform consult on-platform: it is the audited ``consult complete
 milestone`` on the ``PreSummary -> PrescriptionPending`` transition (never a
 dwell state) and is gated on a finalized pre-summary - a prescription-stage
 case can never arise from an unreviewed summary. ``CLOSE_WITHOUT_RX`` is the
-doctor's deliberate terminal close-without-prescription; it requires a
-non-empty close reason and is available while the case is open (PreSummary or
-PrescriptionPending). ``Closed`` is terminal: once closed, no action moves the
-case. A rejected draft never changes the case stage (that decision belongs to
-the prescription machine, not this one).
+doctor's deliberate terminal close-without-prescription: it requires a
+non-empty close reason and is legal only once the consult-complete handshake
+has landed, so it fires from ``PrescriptionPending`` alone - a case is never
+closed mid-handshake (review-close T3, #429). ``Closed`` is terminal: once
+closed, no action moves the case. A rejected draft never changes the case
+stage (that decision belongs to the prescription machine, not this one).
 
 Pure decision logic only: no schema, facade or adapter imports - the
 persistence layer applies what this module decides (coding-standards §3).
@@ -57,7 +58,7 @@ class CaseAction(StrEnum):
     # finalized pre-summary; records the consult-complete milestone).
     MARK_CONSULT_COMPLETE = "mark_consult_complete"
     # Doctor's deliberate terminal close-without-prescription (requires a
-    # close reason); Pre-summary/Prescription Pending -> Closed.
+    # close reason); PrescriptionPending -> Closed.
     CLOSE_WITHOUT_RX = "close_without_rx"
 
 
@@ -94,10 +95,12 @@ def transition(
     from Pre-Summary only - the milestone recording is the facade's audited
     write, never a dwell stage here.
 
-    ``CLOSE_WITHOUT_RX`` is the doctor's deliberate terminal action: it
-    requires a non-empty ``close_reason`` and moves any open stage to
-    ``Closed``, answering a snapshot that carries the reason. ``Closed`` is
-    terminal for every action.
+    ``CLOSE_WITHOUT_RX`` is the doctor's deliberate terminal action: it is
+    legal only once the consult-complete handshake has landed (from
+    ``PrescriptionPending`` - a case is never closed mid-handshake, #429),
+    requires a non-empty ``close_reason``, and moves to ``Closed``, answering
+    a snapshot that carries the reason. ``Closed`` is terminal for every
+    action.
 
     Raises :class:`IllegalCareTransitionError` for every edge outside the
     bound transitions and for missing transition prerequisites.
@@ -112,7 +115,7 @@ def transition(
         return CaseState(stage=CaseStage.PRESCRIPTION_PENDING, close_reason=None)
 
     if action is CaseAction.CLOSE_WITHOUT_RX:
-        if state.stage is CaseStage.CLOSED:
+        if state.stage is not CaseStage.PRESCRIPTION_PENDING:
             raise IllegalCareTransitionError(
                 f"{action.value} is illegal while the case is {state.stage.value}"
             )

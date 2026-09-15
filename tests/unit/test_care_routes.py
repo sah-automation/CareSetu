@@ -84,6 +84,18 @@ _CASE_VIEW = CaseDetailView(
     updated_at=_T,
 )
 
+_CLOSED_CASE_VIEW = CaseDetailView(
+    case_id=42,
+    patient_id=7,
+    doctor_id=5,
+    pre_summary_id=101,
+    stage="closed",
+    closed_at=datetime(2026, 9, 3, 9, 30, tzinfo=UTC),
+    close_reason="no_show",
+    created_at=_T,
+    updated_at=datetime(2026, 9, 3, 9, 30, tzinfo=UTC),
+)
+
 _OPEN_CASES = [
     CaseDetailView(
         case_id=1,
@@ -161,6 +173,7 @@ class StubCareFacade:
     def __init__(self) -> None:
         self.called_with: list[tuple[str, dict]] = []
         self.case_view: CaseDetailView = _CASE_VIEW
+        self.closed_case_view: CaseDetailView = _CLOSED_CASE_VIEW
         self.open_cases: list[CaseDetailView] = _OPEN_CASES
         self.doctor_input_result: DoctorInputResult = _DOCTOR_INPUT_RESULT
         self.rx_draft_view: PrescriptionDetailView = _RX_DRAFT_VIEW
@@ -175,6 +188,11 @@ class StubCareFacade:
         self.called_with.append(("mark_consult_complete", dict(kwargs)))
         self._maybe_raise()
         return self.case_view
+
+    async def close_case_without_rx(self, **kwargs: object) -> CaseDetailView:
+        self.called_with.append(("close_case_without_rx", dict(kwargs)))
+        self._maybe_raise()
+        return self.closed_case_view
 
     async def list_doctor_cases(self, **kwargs: object) -> list[CaseDetailView]:
         self.called_with.append(("list_doctor_cases", dict(kwargs)))
@@ -329,6 +347,103 @@ def test_consult_complete_not_found_envelope() -> None:
 
     assert response.status_code == 404
     assert response.json()["code"] == "CARE_NOT_FOUND"
+
+
+# ---------------------------------------------------------------------------
+# Tests: close_case_without_rx
+# ---------------------------------------------------------------------------
+
+
+def test_close_returns_closed_case_view() -> None:
+    facade = StubCareFacade()
+    client = _client(facade)
+
+    response = client.post(
+        "/v1/care/cases/42/close",
+        json={"close_reason": "no_show"},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == _CLOSED_CASE_VIEW.model_dump(mode="json")
+    assert facade.called_with == [
+        (
+            "close_case_without_rx",
+            {"case_id": 42, "doctor_id": 5, "close_reason": "no_show"},
+        )
+    ]
+
+
+def test_close_missing_reason_is_a_validation_failure() -> None:
+    facade = StubCareFacade()
+    client = _client(facade)
+
+    response = client.post(
+        "/v1/care/cases/42/close",
+        json={},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "VALIDATION_ERROR"
+    assert facade.called_with == []
+
+
+def test_close_illegal_transition_envelope() -> None:
+    facade = StubCareFacade()
+    facade.error = IllegalCareTransitionError(
+        "close_without_rx is illegal while the case is pre_summary"
+    )
+    client = _client(facade)
+
+    response = client.post(
+        "/v1/care/cases/42/close",
+        json={"close_reason": "no_show"},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["code"] == "ILLEGAL_CARE_TRANSITION"
+
+
+def test_close_not_found_envelope() -> None:
+    facade = StubCareFacade()
+    facade.error = CareNotFoundError("case 99 not found for doctor 5")
+    client = _client(facade)
+
+    response = client.post(
+        "/v1/care/cases/99/close",
+        json={"close_reason": "no_show"},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "CARE_NOT_FOUND"
+
+
+def test_close_unauthenticated_rejected() -> None:
+    client = _client()
+
+    response = client.post("/v1/care/cases/42/close", json={"close_reason": "no_show"})
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "AUTH_UNAUTHENTICATED"
+
+
+def test_close_non_doctor_partner_rejected_with_403() -> None:
+    facade = StubCareFacade()
+    client = _client(facade, partner=_LAB_PARTNER)
+
+    response = client.post(
+        "/v1/care/cases/42/close",
+        json={"close_reason": "no_show"},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "AUTH_INSUFFICIENT_SCOPE"
+    assert facade.called_with == []
 
 
 # ---------------------------------------------------------------------------

@@ -14,9 +14,10 @@ story (CONTEXT.md glossary: ``revision-freeze approval``, ``drafting cap``,
 - **Rejection path:** draft -> reject (reason) -> fresh AI draft (attempt 2)
   -> edit -> approve -> issued; the case stage is never touched by a
   rejection.
-- **Close-without-RX:** the case machine chains its terminal close from both
-  open stages (reason carried, Closed terminal), and the facade refuses every
-  mutating call on a closed case with no writes.
+- **Close-without-RX:** the case machine chains its terminal close from
+  PrescriptionPending only (never mid-handshake, review-close #429), reason
+  carried and Closed terminal, and the facade refuses every mutating call on
+  a closed case with no writes.
 - **Drafting cap:** two rejects -> the 3rd AI draft is blocked while manual
   authoring stays open.
 - **edited_yn:** an unchanged revision audits as never-edited; an edited one
@@ -484,19 +485,16 @@ class TestRejectionPath:
 class TestCloseWithoutRx:
     """The terminal close-with-prescription-never-issued path."""
 
-    def test_machine_closes_from_every_open_stage_and_is_terminal(self) -> None:
-        # Close with no reason is refused from PreSummary.
-        with pytest.raises(IllegalCareTransitionError, match="close reason"):
-            case_transition(PRE_SUMMARY, CaseAction.CLOSE_WITHOUT_RX, close_reason="")
+    def test_machine_closes_from_prescription_pending_only_and_is_terminal(self) -> None:
+        # Close is refused from PreSummary even with a valid reason: the case
+        # is never closed mid-handshake (review-close #429).
+        with pytest.raises(IllegalCareTransitionError, match="pre_summary"):
+            case_transition(
+                PRE_SUMMARY, CaseAction.CLOSE_WITHOUT_RX, close_reason="patient_withdrew"
+            )
 
-        # PreSummary -> closed, carrying the reason.
-        closed_from_pre = case_transition(
-            PRE_SUMMARY, CaseAction.CLOSE_WITHOUT_RX, close_reason="patient_withdrew"
-        )
-        assert closed_from_pre.stage is CaseStage.CLOSED
-        assert closed_from_pre.close_reason == "patient_withdrew"
-
-        # PreSummary -> PrescriptionPending (consult complete) -> closed.
+        # PreSummary -> PrescriptionPending (consult complete) -> closed,
+        # carrying the reason.
         pending = case_transition(
             PRE_SUMMARY, CaseAction.MARK_CONSULT_COMPLETE, pre_summary_finalized=True
         )
@@ -508,13 +506,12 @@ class TestCloseWithoutRx:
         assert closed_from_pending.close_reason == "duplicate_visit"
 
         # Closed is terminal for every action.
-        for closed in (closed_from_pre, closed_from_pending):
-            with pytest.raises(IllegalCareTransitionError, match="closed"):
-                case_transition(
-                    closed, CaseAction.MARK_CONSULT_COMPLETE, pre_summary_finalized=True
-                )
-            with pytest.raises(IllegalCareTransitionError, match="closed"):
-                case_transition(closed, CaseAction.CLOSE_WITHOUT_RX, close_reason="again")
+        with pytest.raises(IllegalCareTransitionError, match="closed"):
+            case_transition(
+                closed_from_pending, CaseAction.MARK_CONSULT_COMPLETE, pre_summary_finalized=True
+            )
+        with pytest.raises(IllegalCareTransitionError, match="closed"):
+            case_transition(closed_from_pending, CaseAction.CLOSE_WITHOUT_RX, close_reason="again")
 
     @pytest.mark.asyncio
     async def test_facade_refuses_every_mutating_call_on_a_closed_case(self) -> None:
@@ -551,11 +548,11 @@ class TestCloseWithoutRx:
             ).mark_consult_complete(doctor_id=42, case_id=1)
 
     def test_case_closed_envelope_round_trips_into_the_typed_payload(self) -> None:
-        """``case.closed`` has no facade publisher yet, so unit-validate the builder.
+        """``case.closed`` is published by ``close_case_without_rx`` (review-close #429).
 
-        The envelope builder is the close-without-prescription production
-        surface available today: its event name and payload must round-trip
-        into ``CaseClosedPayload`` with only ids and a PHI-free close reason.
+        Its event name and payload must round-trip into ``CaseClosedPayload``
+        with only ids and a PHI-free close reason - the payload shape the
+        facade's same-transaction outbox write stores.
         """
         envelope = case_closed_envelope(
             case_id=1, patient_id=7, doctor_id=42, close_reason="patient_withdrew"

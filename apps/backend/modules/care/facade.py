@@ -38,6 +38,7 @@ from modules.care.care_models import (
     RxItemView,
 )
 from modules.care.domain.events import (
+    case_closed_envelope,
     case_consult_complete_envelope,
     prescription_approved_envelope,
     prescription_draft_created_envelope,
@@ -195,8 +196,8 @@ class CareFacade:
         doctor; :class:`~modules.intake.domain.exceptions.IntakeNotFoundError`
         / :class:`~modules.intake.domain.exceptions.IntakeValidationError`
         when the pre-summary is missing or not yet ``final``;
-        :class:`IllegalCareTransitionError` when the case is not in
-        ``PreSummary`` (e.g. a re-entrant completion).
+        :class:`~modules.care.domain.exceptions.IllegalCareTransitionError`
+        when the case is not in ``PreSummary`` (e.g. a re-entrant completion).
         """
         async with self._engine.begin() as connection:
             row = (
@@ -252,6 +253,84 @@ class CareFacade:
                 close_reason=row.close_reason,
                 created_at=row.created_at,
                 updated_at=milestone_at,
+            )
+
+        return view
+
+    async def close_case_without_rx(
+        self,
+        *,
+        doctor_id: int,
+        case_id: int,
+        close_reason: str,
+    ) -> CaseDetailView:
+        """Close a visit with no prescription in one deliberate action.
+
+        Doctor-scoped: the case must belong to ``doctor_id``. Legal only
+        from ``PrescriptionPending`` (the consult-complete milestone must
+        have landed - a case is never closed mid-handshake, user story 6).
+        Runs the case machine's ``CLOSE_WITHOUT_RX`` action, which is the
+        single gate: it enforces the PrescriptionPending-only legality, the
+        non-empty close reason, and ``Closed`` terminality. Records
+        ``closed_at`` and the ``close_reason`` on ``care_cases`` and
+        publishes ``case.closed`` through the care outbox in the same
+        transaction as the close write (ADR-0002 S1).
+
+        A rejected AI draft never closes the case - closing stays the
+        doctor's deliberate action.
+
+        Raises :class:`CareNotFoundError` when the case does not exist for
+        the doctor; :class:`~modules.care.domain.exceptions.IllegalCareTransitionError`
+        when the case is not in ``PrescriptionPending`` (pre-handshake or
+        already closed) or the close reason is empty.
+        """
+        async with self._engine.begin() as connection:
+            row = (
+                await connection.execute(select(care_cases).where(care_cases.c.id == case_id))
+            ).first()
+            if row is None or row.doctor_id is None or int(row.doctor_id) != doctor_id:
+                raise CareNotFoundError(f"case {case_id} not found for doctor {doctor_id}")
+
+            current = CaseState(stage=CaseStage(row.stage))
+            next_state = transition(current, CaseAction.CLOSE_WITHOUT_RX, close_reason=close_reason)
+
+            now = datetime.now(UTC)
+            await connection.execute(
+                care_cases.update()
+                .where(care_cases.c.id == case_id)
+                .values(
+                    stage=next_state.stage.value,
+                    closed_at=now,
+                    close_reason=close_reason,
+                    updated_at=now,
+                )
+            )
+
+            await write_outbox(
+                connection,
+                CARE_SCHEMA,
+                CARE_OUTBOX_TABLE,
+                case_closed_envelope(
+                    case_id=case_id,
+                    patient_id=int(row.patient_id),
+                    doctor_id=doctor_id,
+                    close_reason=close_reason,
+                ),
+            )
+
+            view = CaseDetailView(
+                case_id=case_id,
+                patient_id=int(row.patient_id),
+                doctor_id=doctor_id,
+                pre_summary_id=(
+                    int(row.pre_summary_id) if row.pre_summary_id is not None else None
+                ),
+                stage=next_state.stage.value,
+                forced_review=bool(row.forced_review),
+                closed_at=now,
+                close_reason=close_reason,
+                created_at=row.created_at,
+                updated_at=now,
             )
 
         return view

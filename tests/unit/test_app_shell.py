@@ -150,6 +150,7 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/care/cases/{case_id}/rx/{rx_id}/revision",
         "/v1/care/cases/{case_id}/rx/{rx_id}/approve",
         "/v1/care/cases/{case_id}/rx/{rx_id}/reject",
+        "/v1/care/cases/{case_id}/close",
         "/v1/care/prescriptions/{rx_id}",
     }
 

@@ -170,6 +170,21 @@ class RxRejectRequest(BaseModel):
     reason: str = Field(description="Why the draft is rejected (recorded for the draft retry)")
 
 
+class CaseCloseRequest(BaseModel):
+    """Body of ``POST /v1/care/cases/{case_id}/close``.
+
+    ``close_reason`` is required and typed to the canonical close-reason
+    vocabulary (``CANONICAL_CLOSE_REASONS``), so a missing or invalid value
+    is rejected at the boundary before any write.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    close_reason: Literal[
+        "patient_withdrawn", "doctor_rejected", "no_show", "duplicate", "system"
+    ] = Field(description="Why the visit is closed without a prescription")
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -403,6 +418,35 @@ async def get_approved_prescription(
     facade = cast(CareFacade, request.app.state.care_facade)
     await _require_doctor(request, account)
     return await facade.get_approved_prescription(rx_id=rx_id)
+
+
+@router.post(
+    "/cases/{case_id}/close",
+    response_model=CaseDetailView,
+    status_code=status.HTTP_200_OK,
+    summary="Close a visit without a prescription (doctor only)",
+)
+async def close_case_without_rx(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+    case_id: int,
+    body: CaseCloseRequest,
+) -> CaseDetailView:
+    """Close a visit with no prescription in one deliberate action.
+
+    Thin doctor-scoped adapter: a required ``close_reason`` is validated
+    by the request body and the case machine. The transition is legal only
+    from ``PrescriptionPending``; any other stage raises
+    ``ILLEGAL_CARE_TRANSITION``. Publishes ``case.closed`` in the same
+    transaction as the close write.
+    """
+    facade = cast(CareFacade, request.app.state.care_facade)
+    doctor_id = await _require_doctor(request, account)
+    return await facade.close_case_without_rx(
+        case_id=case_id,
+        doctor_id=doctor_id,
+        close_reason=body.close_reason,
+    )
 
 
 # ---------------------------------------------------------------------------

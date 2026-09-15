@@ -1,10 +1,10 @@
 """PHASE-8 T04: consultation workflow facade (ticket #420).
 
 Drives ``mark_consult_complete``, ``get_case``, ``list_doctor_cases``,
-``submit_doctor_input`` and the new ``IntakeFacade.get_finalized_pre_summary``
-handshake seam through a mocked engine at the facade-with-fakes seam,
-mirroring ``test_intake_review_facade.py``. Pins the consult workflow
-contract:
+``submit_doctor_input``, ``close_case_without_rx`` and the new
+``IntakeFacade.get_finalized_pre_summary`` handshake seam through a mocked
+engine at the facade-with-fakes seam, mirroring ``test_intake_review_facade.py``.
+Pins the consult workflow contract:
 
 - ``get_finalized_pre_summary`` returns only ``final``-state summaries and
   raises otherwise (intake seam, acceptance criterion 1).
@@ -17,6 +17,9 @@ contract:
   returns only open cases (acceptance criterion 4).
 - ``submit_doctor_input`` records a voice/photo input and validates the case
   state (acceptance criterion 5).
+- ``close_case_without_rx`` closes from PrescriptionPending only, records
+  ``closed_at``/``close_reason``, and publishes ``case.closed`` in the same
+  transaction (PHASE-8 review-close T3, ticket #429).
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ import pytest
 from sqlalchemy import ClauseElement
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from bus.events import EVENT_CASE_CONSULT_COMPLETE
+from bus.events import EVENT_CASE_CLOSED, EVENT_CASE_CONSULT_COMPLETE
 from modules.care.care_models import CaseDetailView, DoctorInputResult
 from modules.care.domain.exceptions import (
     CareNotFoundError,
@@ -452,3 +455,78 @@ async def test_submit_doctor_input_rejects_unowned_case() -> None:
             input_type="voice",
             media_ref="rx_input/a.webm",
         )
+
+
+# ========================================================================
+# close_case_without_rx
+# ========================================================================
+
+
+@pytest.mark.asyncio
+async def test_close_case_without_rx_transitions_and_publishes() -> None:
+    case_conn = _connection(
+        [
+            _FakeResult(row=_case_row(stage="prescription_pending")),
+            _FakeResult(),
+            _FakeResult(),
+        ]
+    )
+    facade = _care_facade(case_conn, _intake_facade(_connection([])))
+
+    result = await facade.close_case_without_rx(doctor_id=42, case_id=1, close_reason="no_show")
+
+    assert isinstance(result, CaseDetailView)
+    assert result.case_id == 1
+    assert result.stage == "closed"
+    assert result.close_reason == "no_show"
+    assert result.closed_at is not None
+    assert result.doctor_id == 42
+
+    update_params = _stmt_params(_statements(case_conn), care_cases.name)
+    assert update_params is not None
+    assert update_params["stage"] == "closed"
+    assert update_params["close_reason"] == "no_show"
+    assert update_params["closed_at"] is not None
+
+    outbox_params = _stmt_params(_statements(case_conn), CARE_OUTBOX_TABLE)
+    assert outbox_params is not None
+    assert outbox_params["event_type"] == EVENT_CASE_CLOSED
+
+
+@pytest.mark.asyncio
+async def test_close_case_without_rx_raises_from_pre_summary() -> None:
+    case_conn = _connection([_FakeResult(row=_case_row(stage="pre_summary"))])
+    facade = _care_facade(case_conn, _intake_facade(_connection([])))
+
+    with pytest.raises(IllegalCareTransitionError, match="pre_summary"):
+        await facade.close_case_without_rx(doctor_id=42, case_id=1, close_reason="no_show")
+
+    assert _stmt_params(_statements(case_conn), care_cases.name) is None
+    assert _stmt_params(_statements(case_conn), CARE_OUTBOX_TABLE) is None
+
+
+@pytest.mark.asyncio
+async def test_close_case_without_rx_raises_from_closed() -> None:
+    case_conn = _connection([_FakeResult(row=_case_row(stage="closed"))])
+    facade = _care_facade(case_conn, _intake_facade(_connection([])))
+
+    with pytest.raises(IllegalCareTransitionError, match="closed"):
+        await facade.close_case_without_rx(doctor_id=42, case_id=1, close_reason="no_show")
+
+
+@pytest.mark.asyncio
+async def test_close_case_without_rx_raises_for_missing_case() -> None:
+    case_conn = _connection([_FakeResult(row=None)])
+    facade = _care_facade(case_conn, _intake_facade(_connection([])))
+
+    with pytest.raises(CareNotFoundError):
+        await facade.close_case_without_rx(doctor_id=42, case_id=99, close_reason="no_show")
+
+
+@pytest.mark.asyncio
+async def test_close_case_without_rx_raises_for_unowned_case() -> None:
+    case_conn = _connection([_FakeResult(row=_case_row(doctor_id=7))])
+    facade = _care_facade(case_conn, _intake_facade(_connection([])))
+
+    with pytest.raises(CareNotFoundError):
+        await facade.close_case_without_rx(doctor_id=42, case_id=1, close_reason="no_show")

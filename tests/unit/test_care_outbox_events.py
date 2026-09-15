@@ -3,11 +3,11 @@
 Validates every ``care_outbox`` write the ``CareFacade`` publishes against its
 typed Pydantic payload model (coding-standards §3, MOD-006 §4.2 event names):
 
-- Each publishing facade method ("consult_complete", draft_created (AI and
-  manual), reviewed, approved, issued, rejected) writes its event through
-  ``write_outbox`` on the SAME connection/transaction as the domain write
-  (ADR-0002 §1), and the stored ``payload`` round-trips into the matching
-  typed model.
+- Each publishing facade method ("consult_complete", "closed", draft_created
+  (AI and manual), reviewed, approved, issued, rejected) writes its event
+  through ``write_outbox`` on the SAME connection/transaction as the domain
+  write (ADR-0002 §1), and the stored ``payload`` round-trips into the
+  matching typed model.
 - ``approve_prescription`` publishes ``approved`` then ``issued`` - both in
   one transaction, in order.
 - Every stored payload round-trips through ``model_validate`` against its typed
@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.sql.dml import Insert
 
 from bus.events import (
+    EVENT_CASE_CLOSED,
     EVENT_CASE_CONSULT_COMPLETE,
     EVENT_PRESCRIPTION_APPROVED,
     EVENT_PRESCRIPTION_DRAFT_CREATED,
@@ -37,6 +38,7 @@ from bus.events import (
 )
 from modules.care.care_models import RxItemInput
 from modules.care.domain.events import (
+    CaseClosedPayload,
     CaseConsultCompletePayload,
     PrescriptionApprovedPayload,
     PrescriptionDraftCreatedPayload,
@@ -255,6 +257,34 @@ class TestCaseConsultCompleteOutbox:
         assert payload.doctor_id == 42
         assert payload.pre_summary_id == 5
         # One transaction: the update and the outbox write share the connection.
+        engine.begin.assert_called_once()
+
+
+class TestCaseClosedOutbox:
+    @pytest.mark.asyncio
+    async def test_case_closed_payload_round_trips_in_one_transaction(self) -> None:
+        case_conn = _connection(
+            [
+                _FakeResult(row=_case_row(stage="prescription_pending")),
+                _FakeResult(),
+                _FakeResult(),
+            ]
+        )
+        engine = _engine(case_conn)
+        facade = _care_facade(case_conn, _intake_facade(_connection([])), engine=engine)
+
+        result = await facade.close_case_without_rx(doctor_id=42, case_id=1, close_reason="no_show")
+
+        assert result.stage == "closed"
+        outbox = _single_outbox(case_conn)
+        params = outbox.compile().params
+        assert params["event_type"] == EVENT_CASE_CLOSED
+        payload = CaseClosedPayload.model_validate(params["payload"])
+        assert payload.case_id == 1
+        assert payload.patient_id == 7
+        assert payload.doctor_id == 42
+        assert payload.close_reason == "no_show"
+        # One transaction: the close write and the outbox write share the connection.
         engine.begin.assert_called_once()
 
 

@@ -4,7 +4,8 @@ Three dwell stages (CONTEXT.md glossary: ``case stage``): PreSummary ->
 PrescriptionPending -> Closed.  ``ConsultComplete`` is the audited milestone
 on the PreSummary -> PrescriptionPending transition (gated on a finalized
 pre-summary), never a dwell state; ``CLOSE_WITHOUT_RX`` is the doctor's
-deliberate terminal close and requires a close reason.  The machine is pure
+deliberate terminal close-from-PrescriptionPending, requires a close reason,
+and is never legal mid-handshake (review-close T3, #429).  The machine is pure
 (no I/O, no schema imports), so the unit suite pins the full status x action
 matrix without a database -- every illegal edge raises the typed
 :class:`IllegalCareTransitionError`.
@@ -65,13 +66,9 @@ def test_consult_complete_is_illegal_from_closed() -> None:
         transition(_CLOSED, CaseAction.MARK_CONSULT_COMPLETE, pre_summary_finalized=True)
 
 
-def test_close_without_rx_from_pre_summary_is_terminal_with_reason() -> None:
-    next_state = transition(
-        _PRE_SUMMARY, CaseAction.CLOSE_WITHOUT_RX, close_reason="doctor_rejected"
-    )
-
-    assert next_state.stage is CaseStage.CLOSED
-    assert next_state.close_reason == "doctor_rejected"
+def test_close_without_rx_is_illegal_from_pre_summary() -> None:
+    with pytest.raises(IllegalCareTransitionError, match="pre_summary"):
+        transition(_PRE_SUMMARY, CaseAction.CLOSE_WITHOUT_RX, close_reason="doctor_rejected")
 
 
 def test_close_without_rx_from_prescription_pending_is_terminal() -> None:
@@ -85,7 +82,7 @@ def test_close_without_rx_from_prescription_pending_is_terminal() -> None:
 
 def test_close_without_rx_requires_reason() -> None:
     with pytest.raises(IllegalCareTransitionError, match="requires a close reason"):
-        transition(_PRE_SUMMARY, CaseAction.CLOSE_WITHOUT_RX)
+        transition(_PRESCRIPTION_PENDING, CaseAction.CLOSE_WITHOUT_RX)
 
 
 def test_close_without_rx_rejects_empty_reason() -> None:
@@ -131,16 +128,13 @@ def test_illegal_message_names_the_action_and_stage() -> None:
 
 # Legal edges: (stage, action, kwargs) -> expected next state
 # CONTEXT.md glossary: ConsultComplete is the milestone on PreSummary ->
-# PrescriptionPending, never a dwell state. Close is available from any open
-# stage. Closed is terminal.
+# PrescriptionPending, never a dwell state. Close is legal from
+# PrescriptionPending only (#429): a case is never closed mid-handshake.
+# Closed is terminal.
 _LEGAL_EDGES: dict[tuple[CaseStage, CaseAction], tuple[CaseStage, dict[str, object]]] = {
     (CaseStage.PRE_SUMMARY, CaseAction.MARK_CONSULT_COMPLETE): (
         CaseStage.PRESCRIPTION_PENDING,
         {"pre_summary_finalized": True},
-    ),
-    (CaseStage.PRE_SUMMARY, CaseAction.CLOSE_WITHOUT_RX): (
-        CaseStage.CLOSED,
-        {"close_reason": "patient_withdrawn"},
     ),
     (CaseStage.PRESCRIPTION_PENDING, CaseAction.CLOSE_WITHOUT_RX): (
         CaseStage.CLOSED,
@@ -187,16 +181,10 @@ def test_consult_complete_gate_boundary_with_finalized_flag_only() -> None:
     assert result.close_reason is None
 
 
-def test_close_from_pre_summary_with_patient_withdrawn_reason() -> None:
-    result = transition(_PRE_SUMMARY, CaseAction.CLOSE_WITHOUT_RX, close_reason="patient_withdrawn")
-    assert result.stage is CaseStage.CLOSED
-    assert result.close_reason == "patient_withdrawn"
-
-
-def test_close_from_pre_summary_with_duplicate_reason() -> None:
-    result = transition(_PRE_SUMMARY, CaseAction.CLOSE_WITHOUT_RX, close_reason="duplicate")
-    assert result.stage is CaseStage.CLOSED
-    assert result.close_reason == "duplicate"
+def test_close_with_valid_reason_is_still_illegal_from_pre_summary() -> None:
+    for reason in ("patient_withdrawn", "duplicate"):
+        with pytest.raises(IllegalCareTransitionError, match="pre_summary"):
+            transition(_PRE_SUMMARY, CaseAction.CLOSE_WITHOUT_RX, close_reason=reason)
 
 
 def test_close_from_prescription_pending_with_system_reason() -> None:
