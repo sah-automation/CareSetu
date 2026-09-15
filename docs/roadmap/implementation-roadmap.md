@@ -65,7 +65,7 @@ PHASE-14 E2E + Observability + Release ◄─ all phases
 
 **Module primary build phases:** `MOD-001`→2, `MOD-002`→5, `MOD-003`→3, `MOD-004`→3, `MOD-005`→7, `MOD-006`→8, `MOD-007`→9, `MOD-008`→10, `MOD-009`→11, `MOD-010`→13, `MOD-011`→4. (Phase 1 scaffolds all modules; later phases extend already-built modules' facades where the traceability matrix in §5 shows it.)
 
-**Delivery status (2026-08-23):** `PHASE-0`, `PHASE-1`, `PHASE-2`, and the two chassis inserts `PHASE-2.5` (#146) / `PHASE-2.6` (spec #191) are built, verified, and deployed to the split-origin demo (Vercel frontend + Render backend - see `ADR-0007`). All later phases remain scheduled. Canonical written form for the insert IDs is dotted (`PHASE-2.5`, `PHASE-2.6`); ticket brief folders spell them dash-style (`PHASE-2-5-*`, `PHASE-2-6-*`) for filesystem safety.
+**Delivery status (2026-09-15):** `PHASE-0`, `PHASE-1`, `PHASE-2`, and the two chassis inserts `PHASE-2.5` (#146) / `PHASE-2.6` (spec #191) are built, verified, and deployed to the split-origin demo (Vercel frontend + Render backend - see `ADR-0007`). `PHASE-8` (MOD-006 care case + e-prescription) is delivered on the backend - see its §2.8 status; the doctor-review console UI lands in the Phase 14 channel work. All other phases stay as the §3.1 delivery matrix records. Canonical written form for the insert IDs is dotted (`PHASE-2.5`, `PHASE-2.6`); ticket brief folders spell them dash-style (`PHASE-2-5-*`, `PHASE-2-6-*`) for filesystem safety.
 
 ---
 
@@ -544,7 +544,7 @@ _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade f
 ### 2.8 Phase 8: Care Case, Consult Handshake & E-Prescription
 
 - **Phase ID:** `PHASE-8-CARE-RX`
-- **Status:** Delivered - tickets #417-#425 (T00-T08); MOD-006 case + rx lifecycle, the doctor approval gate, and the cross-module event wiring of `care/adapters/__init__.py` are live on the backend (doctor-review console UI lands in the Phase 14 channel work).
+- **Status:** Delivered - base build tickets #417-#425 (T00-T08) plus the review-close hardening #427-#434 (T1-T6b, #433 T7, #435 T8a). Delivered reality: a care case is born on `pre_summary.ready` (real case-birth write, idempotent under replay), close-without-prescription is a doctor operation publishing `case.closed` in the same transaction, the `pre_summary.low_confidence` forced-review flag is recorded and surfaced on case views (record-and-surface only - no handshake gate), every case/rx read and write is doctor-scoped in the facade (incl. `get_approved_prescription`), the care facade is split into `CaseConsoleFacade` + `PrescriptionFacade`, and all care mutations honour the Idempotency-Key contract. MOD-006 case + rx lifecycle, the doctor approval gate, and the cross-module event wiring of `care/adapters/__init__.py` are live on the backend (doctor-review console UI lands in the Phase 14 channel work).
 - **Phase Strategic Objective:** Orchestrate the off-platform consult handshake into an on-platform e-prescription that is only ever issued under a licensed doctor's explicit approval - the highest-regulatory-stakes slice (`FEAT-008`, `FEAT-009`).
 - **Release Readiness Criteria:** Doctor marks consult complete only after a finalized pre-summary (else blocked); case moves Pre-Summary → consult-complete milestone → Prescription Pending, closing via close-without-prescription (terminal `[Case: Closed]`); AI draft produced from voice note/photo; doctor edits recorded (`edited_yn`) and approval issues the prescription timestamped + attributed; reject path recorded; **hard gate test: zero prescriptions issued without doctor approval** (`REQ-023`); `prescription.approved` event published for downstream phases.
 
@@ -558,13 +558,13 @@ _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade f
 #### 2. Deferred / Out-of-Scope Items
 
 - Patient-initiated handshake (doctor-initiated baseline delivered, `CFL-003` **resolved**).
-- Regulatory sign-off beyond the AI-drafting-assistant baseline (`CFL-002`/`RISK-EVAL-003` **resolved** by ADR-0015; AI drafts are a drafting assistant under the licensed doctor's authority, drafting cap 3).
+- Regulatory sign-off beyond the AI-drafting-assistant baseline (`CFL-002`/`RISK-EVAL-003` **resolved** by ADR-0015; AI drafts are a drafting assistant under the licensed doctor's authority, drafting cap two AI drafts per care case).
 
 #### 3. Data Schema & Entity Delta (Phase Data Model)
 
 - **Databases Introduced/Updated:** PostgreSQL `care` schema; object storage `rx_input/` prefix.
-- **Tables / Entities Created/Modified:** `cases` (patient, doctor, stage), `prescriptions` (status Draft/Doctor Reviewed/Approved & Issued/Fulfilled, issued_at, attributed_doctor), `rx_items` (name, dose, duration), `rx_approvals` (doctor_id, edited_yn, decision, reason), `doctor_inputs` (voice_note/photo refs), `care_outbox`.
-- **Migration Scripts:** `v8_0__init_care` (alembic `145ca8587d12`), `v8_1__care_consult_complete` (alembic `384cef07d101`).
+- **Tables / Entities Created/Modified:** `care_cases` (patient, doctor, pre_summary_id NOT NULL, stage, forced_review, close_reason), `care_prescriptions` (status Draft/Doctor Reviewed/Approved & Issued/Fulfilled, issued_at, attributed_doctor), `care_rx_items` (name, dose, duration), `care_rx_approvals` (doctor_id, edited_yn, decision, reason, verification_declaration boolean), `care_doctor_inputs` (voice_note/photo refs), `care_outbox`.
+- **Migration Scripts:** `v8_0__init_care` (alembic `145ca8587d12`), `v8_1__care_consult_complete` (alembic `384cef07d101`) - delivered originally; `v8_2__care_vocabulary_hardening` (alembic `ee3394de5a38`) - review-close T1 (#427): drops `consult_complete` as a case stage and `approved` as a prescription status, converts `verification_declaration` to a boolean, makes `pre_summary_id` NOT NULL, adds `forced_review` (false default).
 
 #### 4. Infrastructure, DevOps & Environment Targets
 
@@ -854,7 +854,7 @@ _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade f
 
 ## 3. End-to-End Traceability Matrix (Phased Delivery)
 
-> **Chassis inserts:** `PHASE-2.5` (#146) and `PHASE-2.6` (spec #191) sit between Phases 2 and 3. They deliver cross-cutting `REQ-003`/`REQ-006` frontend surfaces ahead of their feature phases, create no PRD features and no schema deltas (one additive `MeResponse.phone` field), so they carry no rows below - their scope is governed by `docs/design/ui-blueprint.md` and their specs in §2.2a/§2.2b. Statuses reflect delivery through PHASE-2.6 (2026-08-23): single-phase rows whose phase is shipped read `Delivered`; multi-phase rows read `In progress`.
+> **Chassis inserts:** `PHASE-2.5` (#146) and `PHASE-2.6` (spec #191) sit between Phases 2 and 3. They deliver cross-cutting `REQ-003`/`REQ-006` frontend surfaces ahead of their feature phases, create no PRD features and no schema deltas (one additive `MeResponse.phone` field), so they carry no rows below - their scope is governed by `docs/design/ui-blueprint.md` and their specs in §2.2a/§2.2b. Statuses reflect delivery through PHASE-8 (2026-09-15): single-phase rows whose phase is shipped read `Delivered`; multi-phase rows read `In progress`.
 
 ### 3.1 Feature → Module → Phase Traceability
 

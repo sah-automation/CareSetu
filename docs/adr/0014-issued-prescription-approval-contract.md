@@ -4,7 +4,7 @@
 **Date:** 2026-09-15
 **Decides:** What the approval action freezes into the issued e-prescription, what it requires, and how the doctor's edits are recorded - the `FEAT-009` issuance contract.
 **Traceability:** `FEAT-009`, `FEAT-008`, `MOD-006`, `REQ-023`, `CFL-003`, `GAP-003`.
-**Evidence:** Phase 8 delivery (tickets #417-#425): `CareFacade.approve_prescription` + `_check_approval_declaration`, the prescription state machine, `care_rx_approvals`, `prescription.approved` / `prescription.issued` payloads.
+**Evidence:** Phase 8 delivery (tickets #417-#425) + review-close #426-#434: `PrescriptionFacade.approve_prescription` + `_check_approval_declaration` (facade split landed in #432/#434, wrapper deleted), the prescription state machine, `care_rx_approvals`, `prescription.approved` / `prescription.issued` payloads.
 
 ## Context
 
@@ -35,10 +35,11 @@ Issuance stamps `issued_at` and `attributed_doctor`; the issued artifact is immu
 
 ### 5. Doctor-initiated handshake is the delivered baseline
 
-`CFL-003` / `GAP-003` (who triggers the off-platform consult to on-platform prescription handshake) is resolved: the doctor initiates, delivered via `CareFacade.mark_consult_complete`. Patient-initiated handshake remains out of scope.
+`CFL-003` / `GAP-003` (who triggers the off-platform consult to on-platform prescription handshake) is resolved: the doctor initiates, delivered via `CaseConsoleFacade.mark_consult_complete` (the care-console half of the facade split, #432/#434). Patient-initiated handshake remains out of scope.
 
 ## Consequences
 
 - A rejecting draft never auto-closes the case; closing is the doctor's deliberate `close-without-prescription` action (`case.closed`).
 - The approval seam is the single substitution point if a stricter gate ever lands: tighten this action, not the drafting pipeline.
+- **CFL-002 seam landed (review-close #430/#432):** the verification-declaration gate is the documented replaceable compliance seam - `PrescriptionFacade._check_approval_declaration` sits at the facade as the single site that records the declaration timestamp, with the prescription machine's own declaration guard kept as defense-in-depth. A stricter regulatory rule (e.g. human-in-the-loop sign-off) slots into this facade gate without redesign.
 - The drafting cap and AI posture are decided separately in ADR-0015.

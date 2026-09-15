@@ -353,11 +353,15 @@ _Traceability: `REQ-004`, `REQ-013`, `REQ-023`, `REQ-005`, `CFL-002`, `CFL-003`,
   - **Given** a doctor attempts to complete a consult for a patient without a reviewed pre-summary
   - **When** the handshake is submitted
   - **Then** the platform requires the pre-summary to be finalized before the prescription stage opens
+- **Scenario 3: Edge Case - doctor closes the visit without a prescription**
+  - **Given** the case is in the Prescription Pending stage and the doctor decides no medicine is needed
+  - **When** the doctor deliberately closes the visit and records a close reason
+  - **Then** the case moves to `Closed` and leaves the pending list, the close reason is recorded, and `case.closed` is published (a rejected AI draft never triggers this - only the doctor's deliberate action)
 
 **Business Rules & State Transitions:**
 
 - **Rule 1:** The consult itself happens off-platform (`REQ-004`); the platform only orchestrates the handshake and downstream stages.
-- **Rule 2:** **Resolved `CFL-003`:** who initiates the handshake (doctor vs. patient vs. dual). **Decision:** doctor-initiated - delivered in Phase 8 (`CareFacade.mark_consult_complete`). See ADR-0014 and Section 7.1.
+- **Rule 2:** **Resolved `CFL-003`:** who initiates the handshake (doctor vs. patient vs. dual). **Decision:** doctor-initiated - delivered in Phase 8 (`CaseConsoleFacade.mark_consult_complete`). See ADR-0014 and Section 7.1.
 - **State Change:** `[Case: Pre-Summary]` → _consult-complete milestone_ → `[Case: Prescription Pending]` → (close-without-prescription) → `[Case: Closed]`.
 
 **Telemetry & Event Tracking:**
@@ -389,7 +393,7 @@ _Traceability: `REQ-004`, `REQ-013`, `REQ-023`, `REQ-005`, `CFL-002`, `CFL-003`,
 **Business Rules & State Transitions:**
 
 - **Rule 1:** An e-prescription is never issued without doctor review and approval (`REQ-023`).
-- **Rule 2:** **Resolved `CFL-002`/`RISK-EVAL-003`:** the regulatory posture of AI-drafted e-prescriptions. **Decision (ADR-0015):** AI is a drafting assistant under the licensed doctor's authority - drafting cap 3, manual-authoring fallback; a stricter gate slots into the existing approval seam without redesign. See Section 7.1.
+- **Rule 2:** **Resolved `CFL-002`/`RISK-EVAL-003`:** the regulatory posture of AI-drafted e-prescriptions. **Decision (ADR-0015):** AI is a drafting assistant under the licensed doctor's authority - drafting cap two AI drafts per care case (a new AI draft requires fewer than two rejected drafts), manual-authoring fallback; a stricter gate slots into the existing approval seam without redesign (CFL-002 seam landed at the facade). See Section 7.1.
 - **State Change:** `[Rx: Draft]` → `[Rx: Doctor Reviewed]` → `[Rx: Approved & Issued]` → `[Rx: Fulfilled]`.
 
 **Telemetry & Event Tracking:**
@@ -848,8 +852,8 @@ _Traceability: `REQ-005`, `NFR-002`, `GAP-011`, `GAP-013`_
 
 > Carried forward from the Conflict & Gap Report. Each is flagged inline at the affected feature with its **baseline assumption** in use until the stakeholder decides.
 
-- **`CFL-002` / `RISK-EVAL-003`** - Regulatory posture of AI-drafted e-prescriptions under the pure-facilitator model. **RESOLVED (ADR-0015):** AI is a drafting assistant under the doctor's authority - drafting cap 3, manual-authoring fallback, approval gate live (`FEAT-009`).
-- **`CFL-003` / `GAP-003`** - Who triggers the off-platform consult → on-platform prescription handshake. **RESOLVED:** doctor-initiated, delivered in Phase 8 via `CareFacade.mark_consult_complete` (`FEAT-008`).
+- **`CFL-002` / `RISK-EVAL-003`** - Regulatory posture of AI-drafted e-prescriptions under the pure-facilitator model. **RESOLVED (ADR-0015):** AI is a drafting assistant under the doctor's authority - drafting cap two AI drafts per care case, manual-authoring fallback, approval gate live, CFL-002 seam landed at the facade (`FEAT-009`).
+- **`CFL-003` / `GAP-003`** - Who triggers the off-platform consult → on-platform prescription handshake. **RESOLVED:** doctor-initiated, delivered in Phase 8 via `CaseConsoleFacade.mark_consult_complete` (`FEAT-008`).
 - **`CFL-004` / `AMB-005`** - Counterparty of chronic-care "follow-up interactions." **Baseline:** patient self-service logging + nudges; doctor interaction stays off-platform (`FEAT-018`).
 - **`GAP-001`** - Patient identity strength (OTP vs. stronger verification). **Baseline:** phone OTP (`FEAT-001`).
 - **`GAP-004` / `GAP-008`** - Report→order→patient matching mechanism. **Baseline:** order-ID binding + patient confirmation (`FEAT-011`).
@@ -864,14 +868,14 @@ _Traceability: `REQ-005`, `NFR-002`, `GAP-011`, `GAP-013`_
 
 ### 7.2 Risk Register & Operational Mitigations
 
-| Risk ID             | Risk Description                                                | Category                         | Impact | Mitigation Strategy                                                                                         | Traceability                     |
-| :------------------ | :-------------------------------------------------------------- | :------------------------------- | :----- | :---------------------------------------------------------------------------------------------------------- | :------------------------------- |
-| **`RISK-001`**      | Payment fraud between patient and partner                       | Financial                        | Medium | Cash/UPI direct primary; platform-facilitated only on risk signal (REQ-030)                                 | `REQ-030`, `FEAT-016`            |
-| **`RISK-002`**      | Wrong/mismatched lab report attached to wrong patient           | Data integrity / clinical safety | High   | Order-ID + patient confirmation binding before filing (FEAT-011); KPI-003 = 0 mismatches                    | `REQ-025`, `FEAT-011`            |
-| **`RISK-EVAL-003`** | AI-drafted prescription regulatory exposure                     | Legal/Regulatory                 | High   | Resolved (ADR-0015): drafting-assistant posture + drafting cap 3; doctor approval gate live before issuance | `REQ-005`, `REQ-023`, `FEAT-009` |
-| **`RISK-EVAL-004`** | Single-city dependency on Daltonganj partner supply & demand    | Commercial                       | Medium | Activation-cycle KPI (KPI-004); open supply-side elicitation; ISSUE-004 gates expansion                     | `REQ-002`, `REQ-008`             |
-| **`RISK-EVAL-005`** | Data loss on longitudinal record under best-effort availability | Data                             | High   | Daily backup floor (RPO ≤ 24 h), monthly restore validation (NFR-004)                                       | `REQ-021`, `NFR-004`             |
-| **`RISK-EVAL-006`** | Hindi voice extraction quality vs. near-zero AI cost            | Feasibility                      | Medium | Early spike to validate; low-confidence fallback to doctor review (AMB-006)                                 | `REQ-007`, `NFR-001`, `FEAT-007` |
+| Risk ID             | Risk Description                                                | Category                         | Impact | Mitigation Strategy                                                                                                                   | Traceability                     |
+| :------------------ | :-------------------------------------------------------------- | :------------------------------- | :----- | :------------------------------------------------------------------------------------------------------------------------------------ | :------------------------------- |
+| **`RISK-001`**      | Payment fraud between patient and partner                       | Financial                        | Medium | Cash/UPI direct primary; platform-facilitated only on risk signal (REQ-030)                                                           | `REQ-030`, `FEAT-016`            |
+| **`RISK-002`**      | Wrong/mismatched lab report attached to wrong patient           | Data integrity / clinical safety | High   | Order-ID + patient confirmation binding before filing (FEAT-011); KPI-003 = 0 mismatches                                              | `REQ-025`, `FEAT-011`            |
+| **`RISK-EVAL-003`** | AI-drafted prescription regulatory exposure                     | Legal/Regulatory                 | High   | Resolved (ADR-0015): drafting-assistant posture + drafting cap two AI drafts per care case; doctor approval gate live before issuance | `REQ-005`, `REQ-023`, `FEAT-009` |
+| **`RISK-EVAL-004`** | Single-city dependency on Daltonganj partner supply & demand    | Commercial                       | Medium | Activation-cycle KPI (KPI-004); open supply-side elicitation; ISSUE-004 gates expansion                                               | `REQ-002`, `REQ-008`             |
+| **`RISK-EVAL-005`** | Data loss on longitudinal record under best-effort availability | Data                             | High   | Daily backup floor (RPO ≤ 24 h), monthly restore validation (NFR-004)                                                                 | `REQ-021`, `NFR-004`             |
+| **`RISK-EVAL-006`** | Hindi voice extraction quality vs. near-zero AI cost            | Feasibility                      | Medium | Early spike to validate; low-confidence fallback to doctor review (AMB-006)                                                           | `REQ-007`, `NFR-001`, `FEAT-007` |
 
 ---
 

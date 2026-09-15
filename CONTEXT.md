@@ -232,7 +232,7 @@ The immutable AI-draft artifact captured when `request_rx_draft` produces a draf
 _Avoid_: AI output, stored draft
 
 **drafting cap**:
-The guard that a new AI draft is only generated while the care case has fewer than 2 rejected drafts - at most 3 draft attempts per case. The cap limits only AI draft generation; manual authoring, edit-and-approve, and close-without-prescription stay open regardless, so an AI outage never strands a patient's visit.
+The guard that a new AI draft is only generated while the care case has fewer than 2 rejected drafts - so at most two AI drafts per care case (`MAX_REJECTED_DRAFTS = 2`, `can_create_draft(rejected_count) = rejected_count < 2`); a rejected draft never auto-closes the case. The cap limits only AI draft generation; manual authoring, edit-and-approve, and close-without-prescription stay open regardless, so an AI outage never strands a patient's visit.
 _Avoid_: retry limit, draft budget
 
 **revision-freeze approval**:
