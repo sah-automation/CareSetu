@@ -286,9 +286,61 @@ async def test_mark_consult_complete_raises_for_unowned_case() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mark_consult_complete_claims_unclaimed_born_case() -> None:
+    case_conn = _connection(
+        [
+            _FakeResult(row=_case_row(doctor_id=None)),
+            _FakeResult(),
+            _FakeResult(),
+        ]
+    )
+    intake_conn = _connection([_FakeResult(row=_pre_summary_row())])
+    facade = _care_facade(case_conn, _intake_facade(intake_conn))
+
+    result = await facade.mark_consult_complete(doctor_id=42, case_id=1)
+
+    assert isinstance(result, CaseDetailView)
+    assert result.case_id == 1
+    assert result.doctor_id == 42
+
+    update_params = _stmt_params(_statements(case_conn), care_cases.name)
+    assert update_params is not None
+    assert update_params["doctor_id"] == 42
+    assert update_params["consult_completed_by"] == 42
+
+    outbox_params = _stmt_params(_statements(case_conn), CARE_OUTBOX_TABLE)
+    assert outbox_params is not None
+    assert outbox_params["event_type"] == EVENT_CASE_CONSULT_COMPLETE
+
+
+@pytest.mark.asyncio
+async def test_mark_consult_complete_machine_gate_blocks_unreviewed_summary() -> None:
+    """The real finalized-state result reaches the machine gate.
+
+    Even when the intake seam publishes a non-final view (which the contract
+    forbids, but defense-in-depth must catch), the machine's own gate blocks
+    the transition - the real ``pre_summary_finalized`` result is passed in.
+    """
+
+    class _LenientIntake:  # pragmatic test double: lenient about finality
+        async def get_finalized_pre_summary(self, *, pre_summary_id: int) -> object:
+            return SimpleNamespace(review_state="draft")
+
+    case_conn = _connection([_FakeResult(row=_case_row())])
+    facade = _care_facade(case_conn, _LenientIntake())  # type: ignore[arg-type]
+
+    with pytest.raises(IllegalCareTransitionError, match="finalized"):
+        await facade.mark_consult_complete(doctor_id=42, case_id=1)
+
+    assert _stmt_params(_statements(case_conn), care_cases.name) is None
+    assert _stmt_params(_statements(case_conn), CARE_OUTBOX_TABLE) is None
+
+
+@pytest.mark.asyncio
 async def test_mark_consult_complete_rejects_reentrant_completion() -> None:
     case_conn = _connection([_FakeResult(row=_case_row(stage="prescription_pending"))])
-    facade = _care_facade(case_conn, _intake_facade(_connection([])))
+    intake_conn = _connection([_FakeResult(row=_pre_summary_row())])
+    facade = _care_facade(case_conn, _intake_facade(intake_conn))
 
     with pytest.raises(IllegalCareTransitionError, match="prescription_pending"):
         await facade.mark_consult_complete(doctor_id=42, case_id=1)
@@ -317,6 +369,15 @@ async def test_get_case_returns_typed_view() -> None:
 @pytest.mark.asyncio
 async def test_get_case_raises_for_unowned_case() -> None:
     connection = _connection([_FakeResult(row=None)])
+    facade = _care_facade(connection, _intake_facade(_connection([])))
+
+    with pytest.raises(CareNotFoundError, match="not found for doctor"):
+        await facade.get_case(doctor_id=42, case_id=1)
+
+
+@pytest.mark.asyncio
+async def test_get_case_raises_for_foreign_doctor() -> None:
+    connection = _connection([_FakeResult(row=_case_row(doctor_id=7))])
     facade = _care_facade(connection, _intake_facade(_connection([])))
 
     with pytest.raises(CareNotFoundError, match="not found for doctor"):
@@ -446,6 +507,20 @@ async def test_submit_doctor_input_rejects_missing_case() -> None:
 @pytest.mark.asyncio
 async def test_submit_doctor_input_rejects_unowned_case() -> None:
     connection = _connection([_FakeResult(row=_case_row(doctor_id=7))])
+    facade = _care_facade(connection, _intake_facade(_connection([])))
+
+    with pytest.raises(CareNotFoundError):
+        await facade.submit_doctor_input(
+            doctor_id=42,
+            case_id=1,
+            input_type="voice",
+            media_ref="rx_input/a.webm",
+        )
+
+
+@pytest.mark.asyncio
+async def test_submit_doctor_input_rejects_unclaimed_born_case() -> None:
+    connection = _connection([_FakeResult(row=_case_row(doctor_id=None))])
     facade = _care_facade(connection, _intake_facade(_connection([])))
 
     with pytest.raises(CareNotFoundError):

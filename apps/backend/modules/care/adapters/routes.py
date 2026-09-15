@@ -413,11 +413,13 @@ async def get_approved_prescription(
 
     Thin doctor-scoped adapter: serves ONLY approved-and-issued prescriptions
     (status ``issued`` and ``issued_at`` set); a draft, rejected, or not-yet-
-    issued prescription reads as ``CARE_NOT_FOUND`` from the facade.
+    issued prescription reads as ``CARE_NOT_FOUND`` from the facade. The
+    authenticated ``doctor_id`` is forwarded so the facade refuses a foreign
+    doctor's prescription with the not-found envelope.
     """
     facade = cast(CareFacade, request.app.state.care_facade)
-    await _require_doctor(request, account)
-    return await facade.get_approved_prescription(rx_id=rx_id)
+    doctor_id = await _require_doctor(request, account)
+    return await facade.get_approved_prescription(rx_id=rx_id, doctor_id=doctor_id)
 
 
 @router.post(

@@ -362,12 +362,13 @@ class TestHappyPath:
                         attributed_doctor=42,
                     )
                 ),
+                _FakeResult(row=_case_row()),
                 _FakeResult(rows=_revised_item_rows()),
             ]
         )
         artifact = await _care_facade(
             read_conn, _intake_facade(_connection([]))
-        ).get_approved_prescription(rx_id=1)
+        ).get_approved_prescription(rx_id=1, doctor_id=42)
         assert artifact.status == "issued"
         assert [item.name for item in artifact.items] == REVISED_NAMES
         snapshot_names = [item["name"] for item in AI_SNAPSHOT["rx_items"]]
@@ -544,7 +545,7 @@ class TestCloseWithoutRx:
         with pytest.raises(IllegalCareTransitionError, match="closed"):
             await _care_facade(
                 _connection([_FakeResult(row=_case_row(stage="closed"))]),
-                _intake_facade(_connection([])),
+                _intake_facade(_connection([_FakeResult(row=_pre_summary_row())])),
             ).mark_consult_complete(doctor_id=42, case_id=1)
 
     def test_case_closed_envelope_round_trips_into_the_typed_payload(self) -> None:

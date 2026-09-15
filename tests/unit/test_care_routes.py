@@ -833,7 +833,7 @@ def test_get_approved_prescription_returns_view() -> None:
 
     assert response.status_code == 200
     assert response.json() == _RX_ISSUED_VIEW.model_dump(mode="json")
-    assert facade.called_with == [("get_approved_prescription", {"rx_id": 301})]
+    assert facade.called_with == [("get_approved_prescription", {"rx_id": 301, "doctor_id": 5})]
 
 
 def test_get_approved_prescription_not_found_envelope() -> None:

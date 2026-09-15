@@ -187,6 +187,10 @@ def transition(
                 f"{action.value} is illegal while the prescription is {state.status.value}"
             )
         if action is PrescriptionAction.APPROVE:
+            # Defense-in-depth: the facade's ``_check_approval_declaration``
+            # (the one replaceable CFL-002 compliance seam, ADR-0014/0015) is
+            # the primary gate; this machine guard blocks a declaration-less
+            # approval independently.
             if not verification_declaration:
                 raise IllegalPrescriptionTransitionError(
                     f"{action.value} requires verification_declaration=true"

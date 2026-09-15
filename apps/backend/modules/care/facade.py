@@ -79,6 +79,13 @@ if TYPE_CHECKING:
 #: ``HealthFacade.read_consented_history`` (fail-closed).
 RX_DRAFT_HISTORY_SCOPE = "prescriptions"
 
+#: The intake pre-summary terminal ``review_state`` that qualifies for the
+#: consult-complete handshake. Mirrors the intake seam's canonical
+#: ``PreSummaryStatus.FINAL`` value - ``get_finalized_pre_summary`` only
+#: returns when ``review_state`` equals this, so comparing against it here
+#: keeps the care side free of an intake runtime import (ADR-0003).
+FINALIZED_PRE_SUMMARY_STATE = "final"
+
 
 def _to_case_detail(row: Row[Any]) -> CaseDetailView:
     """Build the typed read projection from a ``care_cases`` row."""
@@ -179,18 +186,21 @@ class CareFacade:
     ) -> CaseDetailView:
         """Close the off-platform consult on-platform in one action.
 
-        Doctor-scoped: the case must belong to ``doctor_id``. Runs the
-        ``PreSummary -> PrescriptionPending`` transition, records the
-        consult-complete milestone (``consult_completed_at`` +
-        ``consult_completed_by`` on ``care_cases``), and publishes
-        ``case.consult_complete`` via ``care_outbox`` - the UPDATE and the
-        outbox write commit in the SAME transaction (ADR-0002 §1).
+        Doctor-scoped: the case must belong to ``doctor_id``; an unclaimed
+        born case (``doctor_id`` unset) is claimable by the first doctor who
+        completes this handshake. Runs the ``PreSummary -> PrescriptionPending``
+        transition, records the consult-complete milestone
+        (``consult_completed_at`` + ``consult_completed_by`` on ``care_cases``),
+        and publishes ``case.consult_complete`` via ``care_outbox`` - the
+        UPDATE and the outbox write commit in the SAME transaction (ADR-0002
+        §1).
 
-        The handshake is gated on the finalized pre-summary: the
-        intake-facade seam ``get_finalized_pre_summary`` raises unless the
-        case's pre-summary is in the terminal ``final`` state, so a
-        prescription-stage case can never arise from an unreviewed summary
-        (FEAT-008 edge case).
+        The handshake resolves the finalized pre-summary FIRST via the
+        intake-facade seam ``get_finalized_pre_summary`` and passes its real
+        result into the case-machine transition so the machine's own gate
+        (``pre_summary_finalized``) is the single boundary - the facade
+        verification-declaration gate is the one replaceable CFL-002 seam, with
+        the machine's guard as defense-in-depth.
 
         Raises :class:`CareNotFoundError` when the case does not exist for the
         doctor; :class:`~modules.intake.domain.exceptions.IntakeNotFoundError`
@@ -200,28 +210,40 @@ class CareFacade:
         when the case is not in ``PreSummary`` (e.g. a re-entrant completion).
         """
         async with self._engine.begin() as connection:
-            row = (
-                await connection.execute(select(care_cases).where(care_cases.c.id == case_id))
-            ).first()
-            if row is None or row.doctor_id is None or int(row.doctor_id) != doctor_id:
-                raise CareNotFoundError(f"case {case_id} not found for doctor {doctor_id}")
-
-            current = CaseState(stage=CaseStage(row.stage))
-            next_state = transition(
-                current, CaseAction.MARK_CONSULT_COMPLETE, pre_summary_finalized=True
+            row = await self._check_case_ownership(
+                connection, doctor_id=doctor_id, case_id=case_id, allow_unclaimed=True
             )
 
-            # The finalized-pre-summary gate: the sole acceptable input to the
-            # handshake. Raises (blocking the transition) while it is missing
-            # or not yet final.
-            await self._intake_facade.get_finalized_pre_summary(pre_summary_id=row.pre_summary_id)
+            # Resolve the finalized pre-summary FIRST (the real result).
+            # Raises (blocking the transition) while it is missing or not yet
+            # final; when it returns, derive the REAL finalized state from the
+            # view so the machine's own gate decides.
+            pre_summary = await self._intake_facade.get_finalized_pre_summary(
+                pre_summary_id=row.pre_summary_id
+            )
+            pre_summary_finalized = pre_summary.review_state == FINALIZED_PRE_SUMMARY_STATE
+
+            current = CaseState(stage=CaseStage(row.stage))
+            # The machine's pre_summary_finalized gate is defense-in-depth:
+            # the intake seam already guarantees a final summary above, but the
+            # machine blocks the transition independently (CFL-002 seam).
+            next_state = transition(
+                current,
+                CaseAction.MARK_CONSULT_COMPLETE,
+                pre_summary_finalized=pre_summary_finalized,
+            )
 
             milestone_at = datetime.now(UTC)
+            # Claim-on-handshake: a born case with no doctor_id yet is claimed
+            # by the doctor completing this milestone, so the update writes
+            # doctor_id alongside the milestone; on an already-claimed case
+            # the write is a no-op (same value).
             await connection.execute(
                 care_cases.update()
                 .where(care_cases.c.id == case_id)
                 .values(
                     stage=next_state.stage.value,
+                    doctor_id=doctor_id,
                     consult_completed_at=milestone_at,
                     consult_completed_by=doctor_id,
                     updated_at=milestone_at,
@@ -285,11 +307,7 @@ class CareFacade:
         already closed) or the close reason is empty.
         """
         async with self._engine.begin() as connection:
-            row = (
-                await connection.execute(select(care_cases).where(care_cases.c.id == case_id))
-            ).first()
-            if row is None or row.doctor_id is None or int(row.doctor_id) != doctor_id:
-                raise CareNotFoundError(f"case {case_id} not found for doctor {doctor_id}")
+            row = await self._check_case_ownership(connection, doctor_id=doctor_id, case_id=case_id)
 
             current = CaseState(stage=CaseStage(row.stage))
             next_state = transition(current, CaseAction.CLOSE_WITHOUT_RX, close_reason=close_reason)
@@ -348,16 +366,7 @@ class CareFacade:
         Raises :class:`CareNotFoundError` when no case exists for the doctor.
         """
         async with self._engine.begin() as connection:
-            row = (
-                await connection.execute(
-                    select(care_cases).where(
-                        care_cases.c.id == case_id,
-                        care_cases.c.doctor_id == doctor_id,
-                    )
-                )
-            ).first()
-            if row is None:
-                raise CareNotFoundError(f"case {case_id} not found for doctor {doctor_id}")
+            row = await self._check_case_ownership(connection, doctor_id=doctor_id, case_id=case_id)
 
         return _to_case_detail(row)
 
@@ -410,11 +419,7 @@ class CareFacade:
         doctor; :class:`CareValidationError` when the case is closed.
         """
         async with self._engine.begin() as connection:
-            row = (
-                await connection.execute(select(care_cases).where(care_cases.c.id == case_id))
-            ).first()
-            if row is None or row.doctor_id is None or int(row.doctor_id) != doctor_id:
-                raise CareNotFoundError(f"case {case_id} not found for doctor {doctor_id}")
+            row = await self._check_case_ownership(connection, doctor_id=doctor_id, case_id=case_id)
 
             if row.stage == CaseStage.CLOSED.value:
                 raise CareValidationError(
@@ -477,15 +482,9 @@ class CareFacade:
         when the drafting cap blocks the AI draft.
         """
         async with self._engine.begin() as connection:
-            case_row = (
-                await connection.execute(select(care_cases).where(care_cases.c.id == case_id))
-            ).first()
-            if (
-                case_row is None
-                or case_row.doctor_id is None
-                or int(case_row.doctor_id) != doctor_id
-            ):
-                raise CareNotFoundError(f"case {case_id} not found for doctor {doctor_id}")
+            case_row = await self._check_case_ownership(
+                connection, doctor_id=doctor_id, case_id=case_id
+            )
 
             if case_row.stage == CaseStage.CLOSED.value:
                 raise CareValidationError(
@@ -658,15 +657,9 @@ class CareFacade:
             if rx_row is None:
                 raise CareNotFoundError(f"prescription {rx_id} not found")
 
-            case_row = (
-                await connection.execute(select(care_cases).where(care_cases.c.id == case_id))
-            ).first()
-            if (
-                case_row is None
-                or case_row.doctor_id is None
-                or int(case_row.doctor_id) != doctor_id
-            ):
-                raise CareNotFoundError(f"case {case_id} not found for doctor {doctor_id}")
+            case_row = await self._check_case_ownership(
+                connection, doctor_id=doctor_id, case_id=case_id
+            )
             if int(rx_row.case_id) != case_id:
                 raise CareValidationError(f"prescription {rx_id} does not belong to case {case_id}")
 
@@ -746,6 +739,10 @@ class CareFacade:
         Publishes ``prescription.approved`` and ``prescription.issued`` in the
         SAME transaction.
 
+        The approval-gate seam (``_check_approval_declaration``) is the one
+        replaceable CFL-002 compliance seam (ADR-0014/0015); the machine's
+        declaration guard is defense-in-depth.
+
         Raises :class:`CareNotFoundError` when the case/prescription does not
         exist for the doctor; :class:`CareValidationError` when the declaration
         is missing or no revision is saved;
@@ -761,15 +758,9 @@ class CareFacade:
             if rx_row is None:
                 raise CareNotFoundError(f"prescription {rx_id} not found")
 
-            case_row = (
-                await connection.execute(select(care_cases).where(care_cases.c.id == case_id))
-            ).first()
-            if (
-                case_row is None
-                or case_row.doctor_id is None
-                or int(case_row.doctor_id) != doctor_id
-            ):
-                raise CareNotFoundError(f"case {case_id} not found for doctor {doctor_id}")
+            case_row = await self._check_case_ownership(
+                connection, doctor_id=doctor_id, case_id=case_id
+            )
             if int(rx_row.case_id) != case_id:
                 raise CareValidationError(f"prescription {rx_id} does not belong to case {case_id}")
 
@@ -895,15 +886,9 @@ class CareFacade:
             if rx_row is None:
                 raise CareNotFoundError(f"prescription {rx_id} not found")
 
-            case_row = (
-                await connection.execute(select(care_cases).where(care_cases.c.id == case_id))
-            ).first()
-            if (
-                case_row is None
-                or case_row.doctor_id is None
-                or int(case_row.doctor_id) != doctor_id
-            ):
-                raise CareNotFoundError(f"case {case_id} not found for doctor {doctor_id}")
+            case_row = await self._check_case_ownership(
+                connection, doctor_id=doctor_id, case_id=case_id
+            )
             if int(rx_row.case_id) != case_id:
                 raise CareValidationError(f"prescription {rx_id} does not belong to case {case_id}")
 
@@ -962,8 +947,13 @@ class CareFacade:
                 updated_at=now,
             )
 
-    async def get_approved_prescription(self, *, rx_id: int) -> PrescriptionDetailView:
+    async def get_approved_prescription(
+        self, *, rx_id: int, doctor_id: int
+    ) -> PrescriptionDetailView:
         """Read an issued e-prescription - the Phase-10 source of truth.
+
+        Doctor-scoped: the prescription's owning case must belong to
+        ``doctor_id``; a foreign doctor reads as not found.
 
         Serves ONLY approved-and-issued prescriptions (``status = issued`` AND
         ``issued_at`` set - CONTEXT.md glossary, ``e-prescription``): the
@@ -971,7 +961,7 @@ class CareFacade:
         rejected, or not-yet-issued prescription reads as not found.
 
         Raises :class:`CareNotFoundError` when no issued prescription exists
-        for ``rx_id``.
+        for ``rx_id`` or the doctor does not own the case.
         """
         async with self._engine.begin() as connection:
             rx_row = (
@@ -985,6 +975,10 @@ class CareFacade:
             ).first()
             if rx_row is None:
                 raise CareNotFoundError(f"approved prescription {rx_id} not found")
+
+            await self._check_case_ownership(
+                connection, doctor_id=doctor_id, case_id=int(rx_row.case_id)
+            )
 
             item_rows = (
                 await connection.execute(
@@ -1007,6 +1001,50 @@ class CareFacade:
             created_at=rx_row.created_at,
             updated_at=rx_row.updated_at,
         )
+
+    # -----------------------------------------------------------------
+    # Ownership guard
+    # -----------------------------------------------------------------
+
+    async def _check_case_ownership(
+        self,
+        connection: AsyncConnection,
+        *,
+        doctor_id: int,
+        case_id: int,
+        allow_unclaimed: bool = False,
+    ) -> Row[Any]:
+        """Load a case row and enforce the ownership boundary.
+
+        Every case-scoped operation goes through this single guard; no
+        duplicated check remains at call sites. A foreign doctor on any
+        case-scoped read or write, including ``get_approved_prescription``,
+        gets ``CareNotFoundError`` (the not-found envelope).
+
+        A born case (``doctor_id`` NULL at birth) is claimable by the first
+        doctor who completes the ``mark_consult_complete`` handshake, so the
+        guard allows an unclaimed case through when ``allow_unclaimed=True``
+        and blocks it for every other operation. After claim, ownership is
+        enforced normally.
+
+        Returns the loaded row so callers can use ``row.patient_id``,
+        ``row.stage`` etc. without a second query.
+        """
+        row = (
+            await connection.execute(select(care_cases).where(care_cases.c.id == case_id))
+        ).first()
+        if row is None:
+            raise CareNotFoundError(f"case {case_id} not found for doctor {doctor_id}")
+        if row.doctor_id is None:
+            if not allow_unclaimed:
+                raise CareNotFoundError(f"case {case_id} not found for doctor {doctor_id}")
+        elif int(row.doctor_id) != doctor_id:
+            raise CareNotFoundError(f"case {case_id} not found for doctor {doctor_id}")
+        return row
+
+    # -----------------------------------------------------------------
+    # AI-draft generation (private)
+    # -----------------------------------------------------------------
 
     async def _create_ai_draft(
         self,
@@ -1153,6 +1191,11 @@ class CareFacade:
         true``, CONTEXT.md glossary). A stricter regulatory rule (CFL-002) can
         subclass/extend this method with additional checks; the declaration is
         stored on ``care_rx_approvals`` with ``declared_at`` downstream.
+
+        CFL-002 seam: this facade gate is the ONE replaceable compliance seam
+        (ADR-0014/0015). The prescription machine's ``APPROVE`` declaration
+        guard is deliberate defense-in-depth - the facade gate is what a
+        stricter rule slots into.
         """
         if not verification_declaration:
             raise CareValidationError(

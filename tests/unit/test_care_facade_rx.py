@@ -678,6 +678,20 @@ async def test_save_rx_revision_rejects_stale_issued_prescription() -> None:
     assert _stmt_params(_statements(care_conn), care_rx_items.name) is None
 
 
+@pytest.mark.asyncio
+async def test_save_rx_revision_rejects_unowned_case() -> None:
+    care_conn = _connection([_FakeResult(row=_rx_row()), _FakeResult(row=_case_row(doctor_id=7))])
+    facade = _care_facade(care_conn, _intake_facade(_connection([])))
+
+    with pytest.raises(CareNotFoundError):
+        await facade.save_rx_revision(
+            case_id=1,
+            rx_id=1,
+            doctor_id=42,
+            rx_items=[RxItemInput(name="Paracetamol")],
+        )
+
+
 # ========================================================================
 # approve_prescription
 # ========================================================================
@@ -922,6 +936,15 @@ async def test_reject_requires_reason() -> None:
         await facade.reject_prescription(case_id=1, rx_id=1, doctor_id=42, reason="")
 
 
+@pytest.mark.asyncio
+async def test_reject_rejects_unowned_case() -> None:
+    care_conn = _connection([_FakeResult(row=_rx_row()), _FakeResult(row=_case_row(doctor_id=7))])
+    facade = _care_facade(care_conn, _intake_facade(_connection([])))
+
+    with pytest.raises(CareNotFoundError):
+        await facade.reject_prescription(case_id=1, rx_id=1, doctor_id=42, reason="wrong_dosage")
+
+
 # ========================================================================
 # get_approved_prescription
 # ========================================================================
@@ -940,12 +963,13 @@ async def test_get_approved_prescription_returns_issued_only() -> None:
                     attributed_doctor=42,
                 )
             ),
+            _FakeResult(row=_case_row()),
             _FakeResult(rows=[_rx_item_row()]),
         ]
     )
     facade = _care_facade(care_conn, _intake_facade(_connection([])))
 
-    result = await facade.get_approved_prescription(rx_id=1)
+    result = await facade.get_approved_prescription(rx_id=1, doctor_id=42)
 
     assert isinstance(result, PrescriptionDetailView)
     assert result.status == "issued"
@@ -967,4 +991,32 @@ async def test_get_approved_prescription_raises_for_draft() -> None:
     facade = _care_facade(care_conn, _intake_facade(_connection([])))
 
     with pytest.raises(CareNotFoundError, match="approved prescription"):
-        await facade.get_approved_prescription(rx_id=1)
+        await facade.get_approved_prescription(rx_id=1, doctor_id=42)
+
+
+@pytest.mark.asyncio
+async def test_get_approved_prescription_rejects_foreign_doctor() -> None:
+    care_conn = _connection(
+        [
+            _FakeResult(row=_rx_row(status="issued", issued_at=NOW)),
+            _FakeResult(row=_case_row(doctor_id=7)),
+        ]
+    )
+    facade = _care_facade(care_conn, _intake_facade(_connection([])))
+
+    with pytest.raises(CareNotFoundError, match="not found for doctor"):
+        await facade.get_approved_prescription(rx_id=1, doctor_id=42)
+
+
+@pytest.mark.asyncio
+async def test_get_approved_prescription_rejects_unclaimed_born_case() -> None:
+    care_conn = _connection(
+        [
+            _FakeResult(row=_rx_row(status="issued", issued_at=NOW)),
+            _FakeResult(row=_case_row(doctor_id=None)),
+        ]
+    )
+    facade = _care_facade(care_conn, _intake_facade(_connection([])))
+
+    with pytest.raises(CareNotFoundError, match="not found for doctor"):
+        await facade.get_approved_prescription(rx_id=1, doctor_id=42)
