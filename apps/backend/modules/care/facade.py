@@ -87,6 +87,7 @@ def _to_case_detail(row: Row[Any]) -> CaseDetailView:
         doctor_id=int(row.doctor_id) if row.doctor_id is not None else None,
         pre_summary_id=int(row.pre_summary_id) if row.pre_summary_id is not None else None,
         stage=row.stage,
+        forced_review=bool(row.forced_review),
         closed_at=row.closed_at,
         close_reason=row.close_reason,
         created_at=row.created_at,
@@ -246,6 +247,7 @@ class CareFacade:
                     int(row.pre_summary_id) if row.pre_summary_id is not None else None
                 ),
                 stage=next_state.stage.value,
+                forced_review=bool(row.forced_review),
                 closed_at=row.closed_at,
                 close_reason=row.close_reason,
                 created_at=row.created_at,
@@ -736,7 +738,7 @@ class CareFacade:
                     doctor_id=doctor_id,
                     decision="approved",
                     edited_yn=edited_yn,
-                    verification_declaration="true",
+                    verification_declaration=True,
                     declared_at=issued_at,
                     approved_at=issued_at,
                 )

@@ -9,7 +9,6 @@ from pydantic import BaseModel, field_validator
 
 from modules.care.schema.models import (
     CANONICAL_CLOSE_REASONS,
-    CANONICAL_DECISIONS,
     CANONICAL_INPUT_TYPES,
     CANONICAL_RX_SOURCES,
     CANONICAL_RX_STATUSES,
@@ -44,6 +43,7 @@ class CaseDetailView(BaseModel):
     doctor_id: int | None
     pre_summary_id: int | None
     stage: str
+    forced_review: bool = False
     closed_at: datetime | None
     close_reason: str | None
     created_at: datetime
@@ -135,31 +135,6 @@ class PrescriptionDetailView(BaseModel):
         """Reject a non-canonical source at the typed boundary."""
         if value not in CANONICAL_RX_SOURCES:
             raise ValueError(f"source must be one of {sorted(CANONICAL_RX_SOURCES)}; got {value!r}")
-        return value
-
-
-class RxApprovalView(BaseModel):
-    """A doctor approval/rejection record for a prescription."""
-
-    approval_id: int
-    prescription_id: int
-    doctor_id: int
-    decision: str
-    edited_yn: bool
-    reason: str | None
-    verification_declaration: str | None
-    declared_at: datetime | None
-    approved_at: datetime | None
-    created_at: datetime
-
-    @field_validator("decision")
-    @classmethod
-    def _decision_must_be_canonical(cls, value: str) -> str:
-        """Reject a non-canonical decision at the typed boundary."""
-        if value not in CANONICAL_DECISIONS:
-            raise ValueError(
-                f"decision must be one of {sorted(CANONICAL_DECISIONS)}; got {value!r}"
-            )
         return value
 
 

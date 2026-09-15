@@ -235,6 +235,7 @@ def _case_row(
     doctor_id: int | None = 42,
     pre_summary_id: int | None = 5,
     stage: str = "prescription_pending",
+    forced_review: bool = False,
 ) -> object:
     return SimpleNamespace(
         id=case_id,
@@ -242,6 +243,7 @@ def _case_row(
         doctor_id=doctor_id,
         pre_summary_id=pre_summary_id,
         stage=stage,
+        forced_review=forced_review,
         closed_at=None,
         close_reason=None,
         created_at=NOW,
@@ -391,7 +393,7 @@ class TestFacadeApprovalGate:
         assert approval_params is not None
         assert approval_params["decision"] == "approved"
         assert approval_params["edited_yn"] is True
-        assert approval_params["verification_declaration"] == "true"
+        assert approval_params["verification_declaration"] is True
 
     @pytest.mark.asyncio
     async def test_unchanged_revision_is_audited_as_never_edited(self) -> None:
@@ -425,4 +427,4 @@ class TestFacadeApprovalGate:
         approval_params = _stmt_params(_statements(care_conn), care_rx_approvals.name)
         assert approval_params is not None
         assert approval_params["edited_yn"] is False
-        assert approval_params["verification_declaration"] == "true"
+        assert approval_params["verification_declaration"] is True

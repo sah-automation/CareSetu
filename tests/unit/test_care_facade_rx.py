@@ -194,6 +194,7 @@ def _case_row(
     doctor_id: int | None = 42,
     pre_summary_id: int | None = 5,
     stage: str = "prescription_pending",
+    forced_review: bool = False,
 ) -> object:
     return SimpleNamespace(
         id=case_id,
@@ -201,6 +202,7 @@ def _case_row(
         doctor_id=doctor_id,
         pre_summary_id=pre_summary_id,
         stage=stage,
+        forced_review=forced_review,
         closed_at=None,
         close_reason=None,
         created_at=NOW,
@@ -716,7 +718,7 @@ async def test_approve_freezes_revision_and_publishes_approved_plus_issued() -> 
     assert approval_params is not None
     assert approval_params["decision"] == "approved"
     assert approval_params["doctor_id"] == 42
-    assert approval_params["verification_declaration"] == "true"
+    assert approval_params["verification_declaration"] is True
     assert approval_params["declared_at"] is not None
     assert approval_params["approved_at"] is not None
 

@@ -168,6 +168,7 @@ def _case_row(
     doctor_id: int | None = 42,
     pre_summary_id: int | None = 5,
     stage: str = "pre_summary",
+    forced_review: bool = False,
 ) -> object:
     return SimpleNamespace(
         id=case_id,
@@ -175,6 +176,7 @@ def _case_row(
         doctor_id=doctor_id,
         pre_summary_id=pre_summary_id,
         stage=stage,
+        forced_review=forced_review,
         closed_at=None,
         close_reason=None,
         created_at=NOW,
@@ -682,7 +684,7 @@ class TestEditedYnLifecycle:
         )
         approval = _stmt_params(_statements(approve_conn), "care_rx_approvals")
         assert approval["edited_yn"] is False
-        assert approval["verification_declaration"] == "true"
+        assert approval["verification_declaration"] is True
 
     @pytest.mark.asyncio
     async def test_edited_revision_audits_as_edited(self) -> None:

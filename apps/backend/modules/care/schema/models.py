@@ -29,16 +29,15 @@ MODULE_METADATA = MetaData(schema="care")
 
 #: Canonical vocabulary mirrored by the CHECK constraints below - the single
 #: source of truth for the ``care`` namespace. DTO result views in
-#: ``care_models.py`` import these frozensets so the DB vocabulary and the
-#: typed boundary never drift apart.
+#: ``care_models.py`` import the frozensets that back a validated field, so
+#: the DB vocabulary and the typed boundary never drift apart; a set with no
+#: DTO field (e.g. ``decision``) still pins the CHECK values it names.
 STAGE_PRE_SUMMARY = "pre_summary"
-STAGE_CONSULT_COMPLETE = "consult_complete"
 STAGE_PRESCRIPTION_PENDING = "prescription_pending"
 STAGE_CLOSED = "closed"
 CANONICAL_STAGES = frozenset(
     {
         STAGE_PRE_SUMMARY,
-        STAGE_CONSULT_COMPLETE,
         STAGE_PRESCRIPTION_PENDING,
         STAGE_CLOSED,
     }
@@ -61,7 +60,6 @@ CANONICAL_CLOSE_REASONS = frozenset(
 
 RX_STATUS_DRAFT = "draft"
 RX_STATUS_DOCTOR_REVIEWED = "doctor_reviewed"
-RX_STATUS_APPROVED = "approved"
 RX_STATUS_REJECTED = "rejected"
 RX_STATUS_ISSUED = "issued"
 RX_STATUS_FULFILLED = "fulfilled"
@@ -69,7 +67,6 @@ CANONICAL_RX_STATUSES = frozenset(
     {
         RX_STATUS_DRAFT,
         RX_STATUS_DOCTOR_REVIEWED,
-        RX_STATUS_APPROVED,
         RX_STATUS_REJECTED,
         RX_STATUS_ISSUED,
         RX_STATUS_FULFILLED,
@@ -106,8 +103,9 @@ care_cases = Table(
     Column("id", BigInteger, primary_key=True),
     Column("patient_id", BigInteger, nullable=False),
     Column("doctor_id", BigInteger, nullable=True),
-    Column("pre_summary_id", BigInteger, nullable=True),
+    Column("pre_summary_id", BigInteger, nullable=False),
     Column("stage", String(30), nullable=False, server_default=text("'pre_summary'")),
+    Column("forced_review", Boolean, nullable=False, server_default=text("false")),
     # Consult-complete milestone on the PreSummary -> PrescriptionPending
     # transition (CONTEXT.md glossary): the recorded timestamp and the
     # attributing doctor. Milestone fields, never a dwell stage.
@@ -118,7 +116,7 @@ care_cases = Table(
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     CheckConstraint(
-        "stage IN ('pre_summary', 'consult_complete', 'prescription_pending', 'closed')",
+        "stage IN ('pre_summary', 'prescription_pending', 'closed')",
         name="ck_care_cases_stage",
     ),
     CheckConstraint(
@@ -151,7 +149,7 @@ care_prescriptions = Table(
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     CheckConstraint(
-        "status IN ('draft', 'doctor_reviewed', 'approved', 'rejected', 'issued', 'fulfilled')",
+        "status IN ('draft', 'doctor_reviewed', 'rejected', 'issued', 'fulfilled')",
         name="ck_care_prescriptions_status",
     ),
     CheckConstraint(
@@ -195,7 +193,7 @@ care_rx_approvals = Table(
     Column("decision", String(20), nullable=False),
     Column("edited_yn", Boolean, nullable=False, server_default=text("false")),
     Column("reason", Text, nullable=True),
-    Column("verification_declaration", Text, nullable=True),
+    Column("verification_declaration", Boolean, nullable=True, server_default=text("false")),
     Column("declared_at", DateTime(timezone=True), nullable=True),
     Column("approved_at", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),

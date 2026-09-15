@@ -296,6 +296,7 @@ def _case_row(
     doctor_id: int | None = 42,
     pre_summary_id: int | None = 5,
     stage: str = "prescription_pending",
+    forced_review: bool = False,
 ) -> object:
     return SimpleNamespace(
         id=case_id,
@@ -303,6 +304,7 @@ def _case_row(
         doctor_id=doctor_id,
         pre_summary_id=pre_summary_id,
         stage=stage,
+        forced_review=forced_review,
         closed_at=None,
         close_reason=None,
         created_at=NOW,
