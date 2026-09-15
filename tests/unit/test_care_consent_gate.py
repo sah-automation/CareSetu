@@ -1,7 +1,7 @@
 """PHASE-8 T07: consent-gated history - fail-closed drafting (ticket #423, #426, FEAT-009).
 
-Pins the NFR-SEC-006 fail-closed seam that the AI-draft leg of ``CareFacade``
-delegates history reads through (``HealthFacade.read_consented_history``, which
+Pins the NFR-SEC-006 fail-closed seam that the AI-draft leg of the
+prescription facade delegates history reads through (``HealthFacade.read_consented_history``, which
 calls ``ConsentFacade.check_consent``):
 
 - The consented history read calls ``check_consent`` with the FULL
@@ -24,8 +24,8 @@ import pytest
 from sqlalchemy import ClauseElement
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from modules.care.facade import RX_DRAFT_HISTORY_SCOPE, CareFacade
 from modules.care.outbox import CARE_OUTBOX_TABLE
+from modules.care.rx_facade import RX_DRAFT_HISTORY_SCOPE, PrescriptionFacade
 from modules.care.schema.models import care_prescriptions
 from modules.consent.facade import ConsentDecision
 from modules.health.domain.exceptions import RecordAccessDeniedError
@@ -315,9 +315,9 @@ def _case_row(
 def _care_facade(
     case_connection: AsyncMock,
     health_facade: HealthFacade,
-) -> CareFacade:
+) -> PrescriptionFacade:
     intake = IntakeFacade(engine=_engine(_connection([])), ai_gateway=MockAiProvider())
-    return CareFacade(
+    return PrescriptionFacade(
         engine=_engine(case_connection),
         intake_facade=intake,
         health_facade=health_facade,

@@ -1,8 +1,9 @@
 """MOD-006: HTTP adapters for the care planning module (PHASE-8 T06, #422).
 
-Thin adapters (api-standards S1): parse the typed request, call the ``care``
-facade, return the typed result. Routes read the facade from app state and
-contain no business logic - route-boundary tests use a stubbed facade.
+Thin adapters (api-standards S1): parse the typed request, call the owning
+``care`` facade, return the typed result. Routes read the facade from app
+state and contain no business logic - route-boundary tests use a stubbed
+facade.
 
 Every expected failure answers the shared error envelope at the top level
 (api-standards S2); ``register_error_handlers`` maps care domain errors to
@@ -41,6 +42,7 @@ from modules.care.care_models import (
     PrescriptionDetailView,
     RxItemInput,
 )
+from modules.care.case_facade import CaseConsoleFacade
 from modules.care.domain.exceptions import (
     CareError,
     CareNotFoundError,
@@ -48,7 +50,7 @@ from modules.care.domain.exceptions import (
     IllegalCareTransitionError,
     IllegalPrescriptionTransitionError,
 )
-from modules.care.facade import CareFacade
+from modules.care.rx_facade import PrescriptionFacade
 from modules.partner.facade import PartnerFacade
 
 logger = logging.getLogger(__name__)
@@ -212,7 +214,7 @@ async def mark_consult_complete(
     PrescriptionPending`` transition (gated on the finalized pre-summary) and
     publishes ``case.consult_complete`` in the same transaction.
     """
-    facade = cast(CareFacade, request.app.state.care_facade)
+    facade = cast(CaseConsoleFacade, request.app.state.care_console_facade)
     doctor_id = await _require_doctor(request, account)
     return await run_idempotent(
         request, lambda: facade.mark_consult_complete(doctor_id=doctor_id, case_id=case_id)
@@ -234,7 +236,7 @@ async def list_open_cases(
     Thin doctor-scoped adapter: the facade returns the typed ``CaseDetailView``
     pending list the doctor works from, ordered by creation time ascending.
     """
-    facade = cast(CareFacade, request.app.state.care_facade)
+    facade = cast(CaseConsoleFacade, request.app.state.care_console_facade)
     doctor_id = await _require_doctor(request, account)
     return await facade.list_doctor_cases(doctor_id=doctor_id)
 
@@ -256,7 +258,7 @@ async def get_case(
     unless the case belongs to the doctor, so a doctor can never read another
     doctor's case.
     """
-    facade = cast(CareFacade, request.app.state.care_facade)
+    facade = cast(CaseConsoleFacade, request.app.state.care_console_facade)
     doctor_id = await _require_doctor(request, account)
     return await facade.get_case(doctor_id=doctor_id, case_id=case_id)
 
@@ -278,7 +280,7 @@ async def submit_doctor_input(
     Thin doctor-scoped adapter: input type/sensitivity are typed at the
     boundary; the facade enforces case ownership and rejects a closed case.
     """
-    facade = cast(CareFacade, request.app.state.care_facade)
+    facade = cast(CaseConsoleFacade, request.app.state.care_console_facade)
     doctor_id = await _require_doctor(request, account)
     return await run_idempotent(
         request,
@@ -310,7 +312,7 @@ async def create_rx_draft(
     facade enforces case ownership, the closed-case rule, and the AI drafting
     cap, and runs the consent-gated history read for ``ai_draft``.
     """
-    facade = cast(CareFacade, request.app.state.care_facade)
+    facade = cast(PrescriptionFacade, request.app.state.prescription_facade)
     doctor_id = await _require_doctor(request, account)
     return await run_idempotent(
         request,
@@ -341,7 +343,7 @@ async def save_rx_revision(
     Thin doctor-scoped adapter: the facade replaces the prescription's items,
     moves it to ``doctor_reviewed``, and publishes ``prescription.reviewed``.
     """
-    facade = cast(CareFacade, request.app.state.care_facade)
+    facade = cast(PrescriptionFacade, request.app.state.prescription_facade)
     doctor_id = await _require_doctor(request, account)
     return await run_idempotent(
         request,
@@ -373,7 +375,7 @@ async def approve_prescription(
     no-approval-without-revision rule live in the facade; approval publishes
     ``prescription.approved`` and ``prescription.issued`` in one transaction.
     """
-    facade = cast(CareFacade, request.app.state.care_facade)
+    facade = cast(PrescriptionFacade, request.app.state.prescription_facade)
     doctor_id = await _require_doctor(request, account)
     return await run_idempotent(
         request,
@@ -405,7 +407,7 @@ async def reject_prescription(
     the rejection moves the prescription to ``rejected`` (draft retry allowed,
     cap-gated) and leaves the case stage untouched.
     """
-    facade = cast(CareFacade, request.app.state.care_facade)
+    facade = cast(PrescriptionFacade, request.app.state.prescription_facade)
     doctor_id = await _require_doctor(request, account)
     return await run_idempotent(
         request,
@@ -437,7 +439,7 @@ async def get_approved_prescription(
     authenticated ``doctor_id`` is forwarded so the facade refuses a foreign
     doctor's prescription with the not-found envelope.
     """
-    facade = cast(CareFacade, request.app.state.care_facade)
+    facade = cast(PrescriptionFacade, request.app.state.prescription_facade)
     doctor_id = await _require_doctor(request, account)
     return await facade.get_approved_prescription(rx_id=rx_id, doctor_id=doctor_id)
 
@@ -462,7 +464,7 @@ async def close_case_without_rx(
     ``ILLEGAL_CARE_TRANSITION``. Publishes ``case.closed`` in the same
     transaction as the close write.
     """
-    facade = cast(CareFacade, request.app.state.care_facade)
+    facade = cast(CaseConsoleFacade, request.app.state.care_console_facade)
     doctor_id = await _require_doctor(request, account)
     return await run_idempotent(
         request,

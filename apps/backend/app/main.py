@@ -38,7 +38,8 @@ from modules.care.adapters.routes import (
     register_error_handlers as register_care_error_handlers,
 )
 from modules.care.adapters.routes import router as care_router
-from modules.care.facade import CareFacade
+from modules.care.case_facade import CaseConsoleFacade
+from modules.care.rx_facade import PrescriptionFacade
 from modules.consent.adapters.routes import (
     register_error_handlers as register_consent_error_handlers,
 )
@@ -287,13 +288,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         supabase_service_role_key=resolved_settings.supabase_service_role_key,
     )
     app.state.intake_facade = IntakeFacade(engine=engine, media_store=intake_media_store)
-    # MOD-006 (PHASE-8 T06, #422): the care facade shares the settled engine
-    # and the settled intake/health facades - the consult-complete handshake
-    # gates on ``get_finalized_pre_summary`` (intake) and AI drafting draws the
-    # consent-gated history via the health facade (fail-closed, NFR-SEC-006).
-    # Stored on state so the doctor routes read one resolved instance and unit
-    # tests stub it.
-    app.state.care_facade = CareFacade(
+    # MOD-006 (PHASE-8 T06, #422): the two care facades share the settled
+    # engine and the settled intake/health facades - the consult-complete
+    # handshake gates on ``get_finalized_pre_summary`` (intake) and AI drafting
+    # draws the consent-gated history via the health facade (fail-closed,
+    # NFR-SEC-006). Stored on state so the doctor routes read one resolved
+    # instance per state machine and unit tests stub them.
+    app.state.care_console_facade = CaseConsoleFacade(
+        engine=engine,
+        intake_facade=app.state.intake_facade,
+    )
+    app.state.prescription_facade = PrescriptionFacade(
         engine=engine,
         intake_facade=app.state.intake_facade,
         health_facade=app.state.health_facade,

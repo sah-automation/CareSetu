@@ -2,7 +2,7 @@
 
 Handles the case lifecycle from finalized pre-summary, through the
 consult-complete milestone, to case closure - plus the doctor-input
-recording. This half of the original ``CareFacade`` covers the case
+recording. This half of the care module's public surface covers the case
 state machine exclusively; the prescription half lives in
 :mod:`modules.care.rx_facade`.
 

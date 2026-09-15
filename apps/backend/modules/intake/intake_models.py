@@ -281,7 +281,8 @@ class RxDraftResult(BaseModel):
 
     Carries the drafting-leg result: the AI-drafted ``rx_items`` plus the
     provider confidence. ``doctor_input_ref`` / ``pre_summary_ref`` echo the
-    drafting inputs so a caller (``CareFacade.create_rx_draft``) can store the
+    drafting inputs so a caller (``PrescriptionFacade.create_rx_draft``) can
+    store the
     immutable draft snapshot without re-reading the gateway result.
     """
 

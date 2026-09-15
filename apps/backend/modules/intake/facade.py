@@ -7,7 +7,8 @@ submissions, commits the intake row + outbox event in one transaction
 data. ``request_rx_draft`` is the Phase 8 rx-drafting seam (PHASE-8 T05,
 #421): it produces a structured rx draft from the doctor input through the
 intake AI gateway port and returns it as a typed result. The caller
-(``CareFacade.create_rx_draft``) supplies the consent-gated history context
+(``PrescriptionFacade.create_rx_draft``) supplies the consent-gated history
+context
 via ``history_summary`` (NFR-SEC-006); this facade never performs a raw
 history read.
 
@@ -855,7 +856,8 @@ class IntakeFacade:
         Delegates to the AI gateway ``draft_rx`` leg (the Phase 7 providers
         - mock/fallback/openai-compatible) and returns a typed result with the
         draft ``rx_items`` and the provider confidence. The caller
-        (``CareFacade.create_rx_draft``) supplies the consent-gated history
+        (``PrescriptionFacade.create_rx_draft``) supplies the consent-gated
+        history
         context via ``history_summary`` (NFR-SEC-006) - this facade never
         performs a raw history read.
 

@@ -3,8 +3,8 @@
 Handles AI-drafted and manual prescriptions through approval and issuance -
 ``create_rx_draft``, ``save_rx_revision``, ``approve_prescription``,
 ``reject_prescription`` and ``get_approved_prescription``. This half of the
-original ``CareFacade`` covers the prescription state machine exclusively;
-the case-console half lives in :mod:`modules.care.case_facade`.
+care module's public surface covers the prescription state machine
+exclusively; the case-console half lives in :mod:`modules.care.case_facade`.
 
 All state-changing writes commit their ``care_outbox`` event in the SAME
 transaction as the domain write (ADR-0002 S1), so a crash between state

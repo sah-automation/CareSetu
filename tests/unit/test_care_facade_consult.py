@@ -35,12 +35,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bus.events import EVENT_CASE_CLOSED, EVENT_CASE_CONSULT_COMPLETE
 from modules.care.care_models import CaseDetailView, DoctorInputResult
+from modules.care.case_facade import CaseConsoleFacade
 from modules.care.domain.exceptions import (
     CareNotFoundError,
     CareValidationError,
     IllegalCareTransitionError,
 )
-from modules.care.facade import CareFacade
 from modules.care.outbox import CARE_OUTBOX_TABLE
 from modules.care.schema.models import care_cases, care_doctor_inputs
 from modules.intake.domain.exceptions import IntakeNotFoundError, IntakeValidationError
@@ -95,8 +95,8 @@ def _intake_facade(connection: AsyncMock) -> IntakeFacade:
     return IntakeFacade(engine=_engine(connection))
 
 
-def _care_facade(case_connection: AsyncMock, intake_facade: IntakeFacade) -> CareFacade:
-    return CareFacade(engine=_engine(case_connection), intake_facade=intake_facade)
+def _care_facade(case_connection: AsyncMock, intake_facade: IntakeFacade) -> CaseConsoleFacade:
+    return CaseConsoleFacade(engine=_engine(case_connection), intake_facade=intake_facade)
 
 
 def _statements(connection: AsyncMock) -> list[ClauseElement]:

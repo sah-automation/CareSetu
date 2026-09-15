@@ -1,7 +1,8 @@
 """PHASE-8 T07: care outbox events - typed envelopes in one transaction.
 (#423, #426, FEAT-008/FEAT-009)
 
-Validates every ``care_outbox`` write the ``CareFacade`` publishes against its
+Validates every ``care_outbox`` write the case-console and prescription
+facades publish against its
 typed Pydantic payload model (coding-standards §3, MOD-006 §4.2 event names):
 
 - Each publishing facade method ("consult_complete", "closed", draft_created
@@ -38,6 +39,7 @@ from bus.events import (
     EVENT_PRESCRIPTION_REVIEWED,
 )
 from modules.care.care_models import RxItemInput
+from modules.care.case_facade import CaseConsoleFacade
 from modules.care.domain.events import (
     CaseClosedPayload,
     CaseConsultCompletePayload,
@@ -47,8 +49,8 @@ from modules.care.domain.events import (
     PrescriptionRejectedPayload,
     PrescriptionReviewedPayload,
 )
-from modules.care.facade import CareFacade
 from modules.care.outbox import CARE_OUTBOX_TABLE
+from modules.care.rx_facade import PrescriptionFacade
 from modules.intake.adapters.ai_provider_mock import MockAiProvider
 from modules.intake.facade import IntakeFacade
 
@@ -111,13 +113,24 @@ def _intake_facade(connection: AsyncMock, gateway: MockAiProvider | None = None)
     return IntakeFacade(engine=_engine(connection), ai_gateway=gateway)
 
 
-def _care_facade(
+def _case_facade(
+    case_connection: AsyncMock,
+    intake_facade: IntakeFacade,
+    engine: AsyncMock | None = None,
+) -> CaseConsoleFacade:
+    return CaseConsoleFacade(
+        engine=engine or _engine(case_connection),
+        intake_facade=intake_facade,
+    )
+
+
+def _rx_facade(
     case_connection: AsyncMock,
     intake_facade: IntakeFacade,
     health_facade: _FakeHealthFacade | None = None,
     engine: AsyncMock | None = None,
-) -> CareFacade:
-    return CareFacade(
+) -> PrescriptionFacade:
+    return PrescriptionFacade(
         engine=engine or _engine(case_connection),
         intake_facade=intake_facade,
         health_facade=health_facade,
@@ -244,7 +257,7 @@ class TestCaseConsultCompleteOutbox:
         case_conn = _connection([_FakeResult(row=_case_row()), _FakeResult(), _FakeResult()])
         intake_conn = _connection([_FakeResult(row=_pre_summary_row())])
         engine = _engine(case_conn)
-        facade = _care_facade(case_conn, _intake_facade(intake_conn), engine=engine)
+        facade = _case_facade(case_conn, _intake_facade(intake_conn), engine=engine)
 
         result = await facade.mark_consult_complete(doctor_id=42, case_id=1)
 
@@ -272,7 +285,7 @@ class TestCaseClosedOutbox:
             ]
         )
         engine = _engine(case_conn)
-        facade = _care_facade(case_conn, _intake_facade(_connection([])), engine=engine)
+        facade = _case_facade(case_conn, _intake_facade(_connection([])), engine=engine)
 
         result = await facade.close_case_without_rx(doctor_id=42, case_id=1, close_reason="no_show")
 
@@ -306,7 +319,7 @@ class TestDraftCreatedOutbox:
             [_FakeResult(row=_pre_summary_row()), _FakeResult(row=_intake_row())]
         )
         engine = _engine(care_conn)
-        facade = _care_facade(
+        facade = _rx_facade(
             care_conn,
             _intake_facade(intake_conn, MockAiProvider()),
             _FakeHealthFacade(),
@@ -339,7 +352,7 @@ class TestDraftCreatedOutbox:
             ]
         )
         engine = _engine(care_conn)
-        facade = _care_facade(care_conn, _intake_facade(_connection([])), engine=engine)
+        facade = _rx_facade(care_conn, _intake_facade(_connection([])), engine=engine)
 
         result = await facade.create_rx_draft(
             case_id=1,
@@ -373,7 +386,7 @@ class TestReviewedOutbox:
             ]
         )
         engine = _engine(care_conn)
-        facade = _care_facade(care_conn, _intake_facade(_connection([])), engine=engine)
+        facade = _rx_facade(care_conn, _intake_facade(_connection([])), engine=engine)
 
         result = await facade.save_rx_revision(
             case_id=1,
@@ -417,7 +430,7 @@ class TestApprovedAndIssuedOutbox:
             ]
         )
         engine = _engine(care_conn)
-        facade = _care_facade(care_conn, _intake_facade(_connection([])), engine=engine)
+        facade = _rx_facade(care_conn, _intake_facade(_connection([])), engine=engine)
 
         result = await facade.approve_prescription(
             case_id=1, rx_id=1, doctor_id=42, verification_declaration=True
@@ -458,7 +471,7 @@ class TestRejectedOutbox:
             ]
         )
         engine = _engine(care_conn)
-        facade = _care_facade(care_conn, _intake_facade(_connection([])), engine=engine)
+        facade = _rx_facade(care_conn, _intake_facade(_connection([])), engine=engine)
 
         result = await facade.reject_prescription(
             case_id=1, rx_id=1, doctor_id=42, reason="wrong_dosage"

@@ -1,6 +1,6 @@
 """PHASE-8 T05: prescription workflow facade (ticket #421, #426, FEAT-009).
 
-Drives the prescription half of ``CareFacade`` through a mocked engine at the
+Drives ``PrescriptionFacade`` through a mocked engine at the
 facade-with-fakes seam, mirroring ``test_care_facade_consult.py``. Pins the
 prescription workflow contract (brief acceptance criteria):
 
@@ -51,8 +51,8 @@ from modules.care.domain.exceptions import (
     CareValidationError,
     IllegalPrescriptionTransitionError,
 )
-from modules.care.facade import RX_DRAFT_HISTORY_SCOPE, CareFacade
 from modules.care.outbox import CARE_OUTBOX_TABLE
+from modules.care.rx_facade import RX_DRAFT_HISTORY_SCOPE, PrescriptionFacade
 from modules.care.schema.models import (
     care_cases,
     care_prescriptions,
@@ -147,8 +147,8 @@ def _care_facade(
     case_connection: AsyncMock,
     intake_facade: IntakeFacade,
     health_facade: _FakeHealthFacade | None = None,
-) -> CareFacade:
-    return CareFacade(
+) -> PrescriptionFacade:
+    return PrescriptionFacade(
         engine=_engine(case_connection),
         intake_facade=intake_facade,
         health_facade=health_facade,

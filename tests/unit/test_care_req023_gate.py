@@ -38,8 +38,8 @@ from modules.care.domain.prescription_machine import (
 from modules.care.domain.prescription_machine import (
     transition as prescription_transition,
 )
-from modules.care.facade import CareFacade
 from modules.care.outbox import CARE_OUTBOX_TABLE
+from modules.care.rx_facade import PrescriptionFacade
 from modules.care.schema.models import (
     care_prescriptions,
     care_rx_approvals,
@@ -199,9 +199,9 @@ def _engine(connection: AsyncMock) -> AsyncMock:
     return engine
 
 
-def _care_facade(case_connection: AsyncMock) -> CareFacade:
+def _care_facade(case_connection: AsyncMock) -> PrescriptionFacade:
     intake = IntakeFacade(engine=_engine(_connection([])))
-    return CareFacade(engine=_engine(case_connection), intake_facade=intake)
+    return PrescriptionFacade(engine=_engine(case_connection), intake_facade=intake)
 
 
 def _statements(connection: AsyncMock) -> list[ClauseElement]:

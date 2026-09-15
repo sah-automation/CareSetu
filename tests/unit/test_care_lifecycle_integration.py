@@ -1,7 +1,7 @@
-"""PHASE-8 T07: full lifecycle integration walks across the care facade
+"""PHASE-8 T07: full lifecycle integration walks across the care facades
 (#423, #426, FEAT-008/FEAT-009).
 
-Drives the consultation + prescription halves of ``CareFacade`` as CHAINED
+Drives the case-console + prescription facades as CHAINED
 walks - each step runs the real facade method against a fresh faked engine,
 carrying the case/prescription state forward by hand exactly as the DB would.
 The different calls in each chain never touch the same transaction, matching
@@ -45,6 +45,7 @@ from bus.events import (
     EVENT_PRESCRIPTION_REJECTED,
 )
 from modules.care.care_models import RxItemInput
+from modules.care.case_facade import CaseConsoleFacade
 from modules.care.domain.events import CaseClosedPayload, case_closed_envelope
 from modules.care.domain.exceptions import (
     CareValidationError,
@@ -59,8 +60,8 @@ from modules.care.domain.state_machine import (
 from modules.care.domain.state_machine import (
     transition as case_transition,
 )
-from modules.care.facade import CareFacade
 from modules.care.outbox import CARE_OUTBOX_TABLE
+from modules.care.rx_facade import PrescriptionFacade
 from modules.care.schema.models import care_cases
 from modules.health.facade import RecordEntryView, RecordTimeline
 from modules.intake.adapters.ai_provider_mock import MockAiProvider
@@ -131,8 +132,15 @@ def _intake_facade(connection: AsyncMock, gateway: MockAiProvider | None = None)
     return IntakeFacade(engine=_engine(connection), ai_gateway=gateway)
 
 
-def _care_facade(case_connection: AsyncMock, intake_facade: IntakeFacade) -> CareFacade:
-    return CareFacade(
+def _case_facade(case_connection: AsyncMock, intake_facade: IntakeFacade) -> CaseConsoleFacade:
+    return CaseConsoleFacade(
+        engine=_engine(case_connection),
+        intake_facade=intake_facade,
+    )
+
+
+def _rx_facade(case_connection: AsyncMock, intake_facade: IntakeFacade) -> PrescriptionFacade:
+    return PrescriptionFacade(
         engine=_engine(case_connection),
         intake_facade=intake_facade,
         health_facade=_FakeHealthFacade(),
@@ -275,7 +283,7 @@ class TestHappyPath:
     async def test_full_lifecycle_lands_issued_and_reads_back_the_frozen_revision(self) -> None:
         # Step 1: consult completes, moving the case to PrescriptionPending.
         consult_conn = _connection([_FakeResult(row=_case_row()), _FakeResult(), _FakeResult()])
-        consult = await _care_facade(
+        consult = await _case_facade(
             consult_conn, _intake_facade(_connection([_FakeResult(row=_pre_summary_row())]))
         ).mark_consult_complete(doctor_id=42, case_id=1)
         assert consult.stage == "prescription_pending"
@@ -294,7 +302,7 @@ class TestHappyPath:
                 _FakeResult(),
             ]
         )
-        draft = await _care_facade(
+        draft = await _rx_facade(
             draft_conn,
             _intake_facade(
                 _connection([_FakeResult(row=_pre_summary_row()), _FakeResult(row=_intake_row())]),
@@ -318,9 +326,9 @@ class TestHappyPath:
                 _FakeResult(),
             ]
         )
-        reviewed = await _care_facade(
-            review_conn, _intake_facade(_connection([]))
-        ).save_rx_revision(case_id=1, rx_id=1, doctor_id=42, rx_items=REVISED_ITEMS)
+        reviewed = await _rx_facade(review_conn, _intake_facade(_connection([]))).save_rx_revision(
+            case_id=1, rx_id=1, doctor_id=42, rx_items=REVISED_ITEMS
+        )
         assert reviewed.status == "doctor_reviewed"
 
         # Step 4: declared approval freezes the revision and issues it.
@@ -335,7 +343,7 @@ class TestHappyPath:
                 _FakeResult(),
             ]
         )
-        issued = await _care_facade(
+        issued = await _rx_facade(
             approve_conn, _intake_facade(_connection([]))
         ).approve_prescription(case_id=1, rx_id=1, doctor_id=42, verification_declaration=True)
         assert issued.status == "issued"
@@ -367,7 +375,7 @@ class TestHappyPath:
                 _FakeResult(rows=_revised_item_rows()),
             ]
         )
-        artifact = await _care_facade(
+        artifact = await _rx_facade(
             read_conn, _intake_facade(_connection([]))
         ).get_approved_prescription(rx_id=1, doctor_id=42)
         assert artifact.status == "issued"
@@ -392,7 +400,7 @@ class TestRejectionPath:
                 _FakeResult(),
             ]
         )
-        draft = await _care_facade(
+        draft = await _rx_facade(
             draft_conn,
             _intake_facade(
                 _connection([_FakeResult(row=_pre_summary_row()), _FakeResult(row=_intake_row())]),
@@ -412,7 +420,7 @@ class TestRejectionPath:
                 _FakeResult(rows=[]),
             ]
         )
-        rejected = await _care_facade(
+        rejected = await _rx_facade(
             reject_conn, _intake_facade(_connection([]))
         ).reject_prescription(case_id=1, rx_id=1, doctor_id=42, reason="wrong_dosage")
         assert rejected.status == "rejected"
@@ -435,7 +443,7 @@ class TestRejectionPath:
                 _FakeResult(),
             ]
         )
-        redraft = await _care_facade(
+        redraft = await _rx_facade(
             redraft_conn,
             _intake_facade(
                 _connection([_FakeResult(row=_pre_summary_row()), _FakeResult(row=_intake_row())]),
@@ -457,9 +465,9 @@ class TestRejectionPath:
                 _FakeResult(),
             ]
         )
-        reviewed = await _care_facade(
-            review_conn, _intake_facade(_connection([]))
-        ).save_rx_revision(case_id=1, rx_id=1, doctor_id=42, rx_items=REVISED_ITEMS)
+        reviewed = await _rx_facade(review_conn, _intake_facade(_connection([]))).save_rx_revision(
+            case_id=1, rx_id=1, doctor_id=42, rx_items=REVISED_ITEMS
+        )
         assert reviewed.status == "doctor_reviewed"
 
         # Step 5: declared approval issues.
@@ -476,7 +484,7 @@ class TestRejectionPath:
                 _FakeResult(),
             ]
         )
-        issued = await _care_facade(
+        issued = await _rx_facade(
             approve_conn, _intake_facade(_connection([]))
         ).approve_prescription(case_id=1, rx_id=1, doctor_id=42, verification_declaration=True)
         assert issued.status == "issued"
@@ -520,7 +528,7 @@ class TestCloseWithoutRx:
         """Once the case closes, the whole prescription workflow is refused."""
         # A new prescription draft on a closed case.
         with pytest.raises(CareValidationError, match="closed"):
-            await _care_facade(
+            await _rx_facade(
                 _connection([_FakeResult(row=_case_row(stage="closed"))]),
                 _intake_facade(_connection([])),
             ).create_rx_draft(
@@ -532,7 +540,7 @@ class TestCloseWithoutRx:
 
         # A new doctor input on a closed case.
         with pytest.raises(CareValidationError, match="closed"):
-            await _care_facade(
+            await _case_facade(
                 _connection([_FakeResult(row=_case_row(stage="closed"))]),
                 _intake_facade(_connection([])),
             ).submit_doctor_input(
@@ -544,7 +552,7 @@ class TestCloseWithoutRx:
 
         # The consult-complete milestone is illegal once the case has closed.
         with pytest.raises(IllegalCareTransitionError, match="closed"):
-            await _care_facade(
+            await _case_facade(
                 _connection([_FakeResult(row=_case_row(stage="closed"))]),
                 _intake_facade(_connection([_FakeResult(row=_pre_summary_row())])),
             ).mark_consult_complete(doctor_id=42, case_id=1)
@@ -588,7 +596,7 @@ class TestDraftingCap:
                     _FakeResult(rows=[]),
                 ]
             )
-            await _care_facade(reject_conn, _intake_facade(_connection([]))).reject_prescription(
+            await _rx_facade(reject_conn, _intake_facade(_connection([]))).reject_prescription(
                 case_id=1, rx_id=1, doctor_id=42, reason="wrong_dosage"
             )
 
@@ -609,7 +617,7 @@ class TestDraftingCap:
             ]
         )
         with pytest.raises(IllegalPrescriptionTransitionError, match="drafting cap"):
-            await _care_facade(cap_conn, _intake_facade(_connection([]))).create_rx_draft(
+            await _rx_facade(cap_conn, _intake_facade(_connection([]))).create_rx_draft(
                 case_id=1, doctor_id=42, source="ai_draft"
             )
 
@@ -627,7 +635,7 @@ class TestDraftingCap:
                 _FakeResult(),
             ]
         )
-        manual = await _care_facade(manual_conn, _intake_facade(_connection([]))).create_rx_draft(
+        manual = await _rx_facade(manual_conn, _intake_facade(_connection([]))).create_rx_draft(
             case_id=1,
             doctor_id=42,
             source="manual",
@@ -664,7 +672,7 @@ class TestEditedYnLifecycle:
                 _FakeResult(),
             ]
         )
-        await _care_facade(save_conn, _intake_facade(_connection([]))).save_rx_revision(
+        await _rx_facade(save_conn, _intake_facade(_connection([]))).save_rx_revision(
             case_id=1, rx_id=1, doctor_id=42, rx_items=unchanged_items
         )
 
@@ -679,7 +687,7 @@ class TestEditedYnLifecycle:
                 _FakeResult(),
             ]
         )
-        await _care_facade(approve_conn, _intake_facade(_connection([]))).approve_prescription(
+        await _rx_facade(approve_conn, _intake_facade(_connection([]))).approve_prescription(
             case_id=1, rx_id=1, doctor_id=42, verification_declaration=True
         )
         approval = _stmt_params(_statements(approve_conn), "care_rx_approvals")
@@ -699,7 +707,7 @@ class TestEditedYnLifecycle:
                 _FakeResult(),
             ]
         )
-        await _care_facade(save_conn, _intake_facade(_connection([]))).save_rx_revision(
+        await _rx_facade(save_conn, _intake_facade(_connection([]))).save_rx_revision(
             case_id=1, rx_id=1, doctor_id=42, rx_items=REVISED_ITEMS
         )
 
@@ -714,7 +722,7 @@ class TestEditedYnLifecycle:
                 _FakeResult(),
             ]
         )
-        await _care_facade(approve_conn, _intake_facade(_connection([]))).approve_prescription(
+        await _rx_facade(approve_conn, _intake_facade(_connection([]))).approve_prescription(
             case_id=1, rx_id=1, doctor_id=42, verification_declaration=True
         )
         approval = _stmt_params(_statements(approve_conn), "care_rx_approvals")

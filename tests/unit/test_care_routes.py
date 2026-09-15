@@ -52,12 +52,16 @@ def _bearer(token: str) -> dict[str, str]:
 
 
 def _client(
-    facade: StubCareFacade | None = None,
+    case_facade: StubCaseConsoleFacade | None = None,
+    rx_facade: StubPrescriptionFacade | None = None,
     partner: PartnerView | None = None,
 ) -> TestClient:
     settings = Settings(gateway_jwt_verify_enabled=True, gateway_jwt_signing_key=_SIGNING_KEY)
     app = create_app(settings=settings)
-    app.state.care_facade = facade if facade is not None else StubCareFacade()
+    app.state.care_console_facade = (
+        case_facade if case_facade is not None else StubCaseConsoleFacade()
+    )
+    app.state.prescription_facade = rx_facade if rx_facade is not None else StubPrescriptionFacade()
     app.state.partner_facade = StubPartnerFacade(
         partner if partner is not None else _DOCTOR_PARTNER
     )
@@ -65,13 +69,13 @@ def _client(
 
 
 def _client_with_store(
-    facade: StubCareFacade,
+    rx_facade: StubPrescriptionFacade,
     store: IdempotencyStore,
     partner: PartnerView | None = None,
 ) -> TestClient:
     settings = Settings(gateway_jwt_verify_enabled=True, gateway_jwt_signing_key=_SIGNING_KEY)
     app = create_app(settings=settings)
-    app.state.care_facade = facade
+    app.state.prescription_facade = rx_facade
     app.state.partner_facade = StubPartnerFacade(
         partner if partner is not None else _DOCTOR_PARTNER
     )
@@ -184,22 +188,29 @@ _RX_ISSUED_VIEW = PrescriptionDetailView(
 )
 
 
-class StubCareFacade:
-    """Minimal facade stand-in recording calls and replaying canned answers."""
+class _StubCareBase:
+    """Shared stub plumbing: records calls, replays canned answers, or raises.
+    (#426, FEAT-008/FEAT-009)."""
 
     def __init__(self) -> None:
         self.called_with: list[tuple[str, dict]] = []
-        self.case_view: CaseDetailView = _CASE_VIEW
-        self.closed_case_view: CaseDetailView = _CLOSED_CASE_VIEW
-        self.open_cases: list[CaseDetailView] = _OPEN_CASES
-        self.doctor_input_result: DoctorInputResult = _DOCTOR_INPUT_RESULT
-        self.rx_draft_view: PrescriptionDetailView = _RX_DRAFT_VIEW
-        self.rx_issued_view: PrescriptionDetailView = _RX_ISSUED_VIEW
         self.error: Exception | None = None
 
     def _maybe_raise(self) -> None:
         if self.error is not None:
             raise self.error
+
+
+class StubCaseConsoleFacade(_StubCareBase):
+    """Case-console facade stand-in for the case routes (consult/close/list/get/input).
+    (#426, FEAT-008)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.case_view: CaseDetailView = _CASE_VIEW
+        self.closed_case_view: CaseDetailView = _CLOSED_CASE_VIEW
+        self.open_cases: list[CaseDetailView] = _OPEN_CASES
+        self.doctor_input_result: DoctorInputResult = _DOCTOR_INPUT_RESULT
 
     async def mark_consult_complete(self, **kwargs: object) -> CaseDetailView:
         self.called_with.append(("mark_consult_complete", dict(kwargs)))
@@ -225,6 +236,16 @@ class StubCareFacade:
         self.called_with.append(("submit_doctor_input", dict(kwargs)))
         self._maybe_raise()
         return self.doctor_input_result
+
+
+class StubPrescriptionFacade(_StubCareBase):
+    """Prescription-facade stand-in for the rx routes (draft/revision/approve/reject/read).
+    (#426, FEAT-009)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rx_draft_view: PrescriptionDetailView = _RX_DRAFT_VIEW
+        self.rx_issued_view: PrescriptionDetailView = _RX_ISSUED_VIEW
 
     async def create_rx_draft(self, **kwargs: object) -> PrescriptionDetailView:
         self.called_with.append(("create_rx_draft", dict(kwargs)))
@@ -291,8 +312,8 @@ def test_patient_scope_rejected_with_403() -> None:
 
 
 def test_non_doctor_partner_rejected_with_403() -> None:
-    facade = StubCareFacade()
-    client = _client(facade, partner=_LAB_PARTNER)
+    facade = StubCaseConsoleFacade()
+    client = _client(case_facade=facade, partner=_LAB_PARTNER)
 
     response = client.post(
         "/v1/care/cases/42/consult-complete",
@@ -324,8 +345,8 @@ def test_non_active_doctor_rejected_with_403() -> None:
 
 
 def test_consult_complete_returns_case_view() -> None:
-    facade = StubCareFacade()
-    client = _client(facade)
+    facade = StubCaseConsoleFacade()
+    client = _client(case_facade=facade)
 
     response = client.post(
         "/v1/care/cases/42/consult-complete",
@@ -338,9 +359,9 @@ def test_consult_complete_returns_case_view() -> None:
 
 
 def test_consult_complete_illegal_transition_envelope() -> None:
-    facade = StubCareFacade()
+    facade = StubCaseConsoleFacade()
     facade.error = IllegalCareTransitionError("MARK_CONSULT_COMPLETE is illegal while pre_summary")
-    client = _client(facade)
+    client = _client(case_facade=facade)
 
     response = client.post(
         "/v1/care/cases/42/consult-complete",
@@ -353,9 +374,9 @@ def test_consult_complete_illegal_transition_envelope() -> None:
 
 
 def test_consult_complete_not_found_envelope() -> None:
-    facade = StubCareFacade()
+    facade = StubCaseConsoleFacade()
     facade.error = CareNotFoundError("case 99 not found for doctor 5")
-    client = _client(facade)
+    client = _client(case_facade=facade)
 
     response = client.post(
         "/v1/care/cases/99/consult-complete",
@@ -372,8 +393,8 @@ def test_consult_complete_not_found_envelope() -> None:
 
 
 def test_close_returns_closed_case_view() -> None:
-    facade = StubCareFacade()
-    client = _client(facade)
+    facade = StubCaseConsoleFacade()
+    client = _client(case_facade=facade)
 
     response = client.post(
         "/v1/care/cases/42/close",
@@ -392,8 +413,8 @@ def test_close_returns_closed_case_view() -> None:
 
 
 def test_close_missing_reason_is_a_validation_failure() -> None:
-    facade = StubCareFacade()
-    client = _client(facade)
+    facade = StubCaseConsoleFacade()
+    client = _client(case_facade=facade)
 
     response = client.post(
         "/v1/care/cases/42/close",
@@ -407,11 +428,11 @@ def test_close_missing_reason_is_a_validation_failure() -> None:
 
 
 def test_close_illegal_transition_envelope() -> None:
-    facade = StubCareFacade()
+    facade = StubCaseConsoleFacade()
     facade.error = IllegalCareTransitionError(
         "close_without_rx is illegal while the case is pre_summary"
     )
-    client = _client(facade)
+    client = _client(case_facade=facade)
 
     response = client.post(
         "/v1/care/cases/42/close",
@@ -425,9 +446,9 @@ def test_close_illegal_transition_envelope() -> None:
 
 
 def test_close_not_found_envelope() -> None:
-    facade = StubCareFacade()
+    facade = StubCaseConsoleFacade()
     facade.error = CareNotFoundError("case 99 not found for doctor 5")
-    client = _client(facade)
+    client = _client(case_facade=facade)
 
     response = client.post(
         "/v1/care/cases/99/close",
@@ -449,8 +470,8 @@ def test_close_unauthenticated_rejected() -> None:
 
 
 def test_close_non_doctor_partner_rejected_with_403() -> None:
-    facade = StubCareFacade()
-    client = _client(facade, partner=_LAB_PARTNER)
+    facade = StubCaseConsoleFacade()
+    client = _client(case_facade=facade, partner=_LAB_PARTNER)
 
     response = client.post(
         "/v1/care/cases/42/close",
@@ -469,8 +490,8 @@ def test_close_non_doctor_partner_rejected_with_403() -> None:
 
 
 def test_list_cases_returns_open_case_views() -> None:
-    facade = StubCareFacade()
-    client = _client(facade)
+    facade = StubCaseConsoleFacade()
+    client = _client(case_facade=facade)
 
     response = client.get("/v1/care/cases", headers=_bearer(_token()))
 
@@ -502,8 +523,8 @@ def test_list_cases_non_doctor_rejected() -> None:
 
 
 def test_get_case_returns_case_view() -> None:
-    facade = StubCareFacade()
-    client = _client(facade)
+    facade = StubCaseConsoleFacade()
+    client = _client(case_facade=facade)
 
     response = client.get("/v1/care/cases/42", headers=_bearer(_token()))
 
@@ -513,9 +534,9 @@ def test_get_case_returns_case_view() -> None:
 
 
 def test_get_case_not_found_envelope() -> None:
-    facade = StubCareFacade()
+    facade = StubCaseConsoleFacade()
     facade.error = CareNotFoundError("case 99 not found for doctor 5")
-    client = _client(facade)
+    client = _client(case_facade=facade)
 
     response = client.get("/v1/care/cases/99", headers=_bearer(_token()))
 
@@ -529,8 +550,8 @@ def test_get_case_not_found_envelope() -> None:
 
 
 def test_doctor_input_returns_result() -> None:
-    facade = StubCareFacade()
-    client = _client(facade)
+    facade = StubCaseConsoleFacade()
+    client = _client(case_facade=facade)
 
     response = client.post(
         "/v1/care/cases/42/doctor-input",
@@ -559,8 +580,8 @@ def test_doctor_input_returns_result() -> None:
 
 
 def test_doctor_input_without_sensitive_class_defaults_none() -> None:
-    facade = StubCareFacade()
-    client = _client(facade)
+    facade = StubCaseConsoleFacade()
+    client = _client(case_facade=facade)
 
     response = client.post(
         "/v1/care/cases/42/doctor-input",
@@ -602,9 +623,9 @@ def test_doctor_input_unknown_field_rejected() -> None:
 
 
 def test_doctor_input_closed_case_envelope() -> None:
-    facade = StubCareFacade()
+    facade = StubCaseConsoleFacade()
     facade.error = CareValidationError("submit_doctor_input is illegal while the case is closed")
-    client = _client(facade)
+    client = _client(case_facade=facade)
 
     response = client.post(
         "/v1/care/cases/42/doctor-input",
@@ -624,8 +645,8 @@ def test_doctor_input_closed_case_envelope() -> None:
 
 
 def test_rx_draft_ai_source_returns_prescription_view() -> None:
-    facade = StubCareFacade()
-    client = _client(facade)
+    facade = StubPrescriptionFacade()
+    client = _client(rx_facade=facade)
 
     response = client.post(
         "/v1/care/cases/42/rx/draft",
@@ -641,8 +662,8 @@ def test_rx_draft_ai_source_returns_prescription_view() -> None:
 
 
 def test_rx_draft_manual_forwards_items() -> None:
-    facade = StubCareFacade()
-    client = _client(facade)
+    facade = StubPrescriptionFacade()
+    client = _client(rx_facade=facade)
 
     response = client.post(
         "/v1/care/cases/42/rx/draft",
@@ -672,9 +693,9 @@ def test_rx_draft_invalid_source_rejected() -> None:
 
 
 def test_rx_draft_drafting_cap_envelope() -> None:
-    facade = StubCareFacade()
+    facade = StubPrescriptionFacade()
     facade.error = IllegalPrescriptionTransitionError("CREATE_DRAFT is illegal: drafting cap met")
-    client = _client(facade)
+    client = _client(rx_facade=facade)
 
     response = client.post(
         "/v1/care/cases/42/rx/draft",
@@ -692,8 +713,8 @@ def test_rx_draft_drafting_cap_envelope() -> None:
 
 
 def test_revision_returns_prescription_view() -> None:
-    facade = StubCareFacade()
-    client = _client(facade)
+    facade = StubPrescriptionFacade()
+    client = _client(rx_facade=facade)
 
     response = client.post(
         "/v1/care/cases/42/rx/301/revision",
@@ -739,8 +760,8 @@ def test_revision_unauthenticated_rejected() -> None:
 
 
 def test_approve_returns_issued_prescription_view() -> None:
-    facade = StubCareFacade()
-    client = _client(facade)
+    facade = StubPrescriptionFacade()
+    client = _client(rx_facade=facade)
 
     response = client.post(
         "/v1/care/cases/42/rx/301/approve",
@@ -764,9 +785,9 @@ def test_approve_returns_issued_prescription_view() -> None:
 
 
 def test_approve_missing_declaration_envelope_via_facade() -> None:
-    facade = StubCareFacade()
+    facade = StubPrescriptionFacade()
     facade.error = CareValidationError("approval requires verification_declaration=true")
-    client = _client(facade)
+    client = _client(rx_facade=facade)
 
     response = client.post(
         "/v1/care/cases/42/rx/301/approve",
@@ -781,9 +802,9 @@ def test_approve_missing_declaration_envelope_via_facade() -> None:
 
 
 def test_approve_not_found_envelope() -> None:
-    facade = StubCareFacade()
+    facade = StubPrescriptionFacade()
     facade.error = CareNotFoundError("case 42 not found for doctor 5")
-    client = _client(facade)
+    client = _client(rx_facade=facade)
 
     response = client.post(
         "/v1/care/cases/42/rx/301/approve",
@@ -801,8 +822,8 @@ def test_approve_not_found_envelope() -> None:
 
 
 def test_reject_returns_prescription_view() -> None:
-    facade = StubCareFacade()
-    client = _client(facade)
+    facade = StubPrescriptionFacade()
+    client = _client(rx_facade=facade)
 
     response = client.post(
         "/v1/care/cases/42/rx/301/reject",
@@ -826,8 +847,8 @@ def test_reject_returns_prescription_view() -> None:
 
 
 def test_reject_empty_reason_left_to_machine() -> None:
-    facade = StubCareFacade()
-    client = _client(facade)
+    facade = StubPrescriptionFacade()
+    client = _client(rx_facade=facade)
 
     response = client.post(
         "/v1/care/cases/42/rx/301/reject",
@@ -847,8 +868,8 @@ def test_reject_empty_reason_left_to_machine() -> None:
 
 
 def test_get_approved_prescription_returns_view() -> None:
-    facade = StubCareFacade()
-    client = _client(facade)
+    facade = StubPrescriptionFacade()
+    client = _client(rx_facade=facade)
 
     response = client.get("/v1/care/prescriptions/301", headers=_bearer(_token()))
 
@@ -858,9 +879,9 @@ def test_get_approved_prescription_returns_view() -> None:
 
 
 def test_get_approved_prescription_not_found_envelope() -> None:
-    facade = StubCareFacade()
+    facade = StubPrescriptionFacade()
     facade.error = CareNotFoundError("approved prescription 999 not found")
-    client = _client(facade)
+    client = _client(rx_facade=facade)
 
     response = client.get("/v1/care/prescriptions/999", headers=_bearer(_token()))
 
@@ -891,8 +912,8 @@ def test_get_approved_prescription_non_doctor_rejected() -> None:
 
 
 def test_approve_replays_same_key_without_second_facade_call() -> None:
-    facade = StubCareFacade()
-    client = _client(facade)
+    facade = StubPrescriptionFacade()
+    client = _client(rx_facade=facade)
     headers = {"Idempotency-Key": "retry-abc-123"}
 
     first = client.post(
@@ -913,8 +934,8 @@ def test_approve_replays_same_key_without_second_facade_call() -> None:
 
 
 def test_approve_different_keys_execute_each_mutation() -> None:
-    facade = StubCareFacade()
-    client = _client(facade)
+    facade = StubPrescriptionFacade()
+    client = _client(rx_facade=facade)
 
     client.post(
         "/v1/care/cases/42/rx/301/approve",
@@ -934,8 +955,8 @@ def test_approve_different_keys_execute_each_mutation() -> None:
 
 
 def test_approve_no_key_passes_through_without_store_interaction() -> None:
-    facade = StubCareFacade()
-    client = _client(facade)
+    facade = StubPrescriptionFacade()
+    client = _client(rx_facade=facade)
 
     client.post(
         "/v1/care/cases/42/rx/301/approve",
@@ -955,8 +976,8 @@ def test_approve_no_key_passes_through_without_store_interaction() -> None:
 
 
 def test_approve_blank_key_passes_through_as_no_key() -> None:
-    facade = StubCareFacade()
-    client = _client(facade)
+    facade = StubPrescriptionFacade()
+    client = _client(rx_facade=facade)
 
     client.post(
         "/v1/care/cases/42/rx/301/approve",
@@ -977,8 +998,8 @@ def test_approve_blank_key_passes_through_as_no_key() -> None:
 
 def test_approve_replayed_key_expired_by_ttl_reexecutes(fake_clock) -> None:
     store = IdempotencyStore(ttl_seconds=300, clock=fake_clock)
-    facade = StubCareFacade()
-    client = _client_with_store(facade, store)
+    facade = StubPrescriptionFacade()
+    client = _client_with_store(rx_facade=facade, store=store)
     headers = {"Idempotency-Key": "retry-abc-123"}
 
     client.post(
@@ -1000,8 +1021,8 @@ def test_approve_replayed_key_expired_by_ttl_reexecutes(fake_clock) -> None:
 
 
 def test_approve_failed_mutation_is_not_cached_for_replay() -> None:
-    facade = StubCareFacade()
-    client = _client(facade)
+    facade = StubPrescriptionFacade()
+    client = _client(rx_facade=facade)
     headers = {"Idempotency-Key": "retry-abc-123"}
 
     facade.error = IllegalPrescriptionTransitionError(
@@ -1027,8 +1048,8 @@ def test_approve_failed_mutation_is_not_cached_for_replay() -> None:
 
 
 def test_consult_complete_replays_same_key_without_second_facade_call() -> None:
-    facade = StubCareFacade()
-    client = _client(facade)
+    facade = StubCaseConsoleFacade()
+    client = _client(case_facade=facade)
     headers = {"Idempotency-Key": "retry-abc-123"}
 
     first = client.post(
@@ -1047,8 +1068,8 @@ def test_consult_complete_replays_same_key_without_second_facade_call() -> None:
 
 
 def test_consult_complete_different_keys_execute_each_mutation() -> None:
-    facade = StubCareFacade()
-    client = _client(facade)
+    facade = StubCaseConsoleFacade()
+    client = _client(case_facade=facade)
 
     client.post(
         "/v1/care/cases/42/consult-complete",
@@ -1066,8 +1087,8 @@ def test_consult_complete_different_keys_execute_each_mutation() -> None:
 
 
 def test_consult_complete_no_key_passes_through_without_store_interaction() -> None:
-    facade = StubCareFacade()
-    client = _client(facade)
+    facade = StubCaseConsoleFacade()
+    client = _client(case_facade=facade)
 
     client.post("/v1/care/cases/42/consult-complete", headers=_bearer(_token()))
     client.post("/v1/care/cases/42/consult-complete", headers=_bearer(_token()))
@@ -1079,8 +1100,8 @@ def test_consult_complete_no_key_passes_through_without_store_interaction() -> N
 
 
 def test_close_replays_same_key_without_second_facade_call() -> None:
-    facade = StubCareFacade()
-    client = _client(facade)
+    facade = StubCaseConsoleFacade()
+    client = _client(case_facade=facade)
     headers = {"Idempotency-Key": "retry-abc-123"}
 
     first = client.post(
@@ -1101,8 +1122,8 @@ def test_close_replays_same_key_without_second_facade_call() -> None:
 
 
 def test_close_different_keys_execute_each_mutation() -> None:
-    facade = StubCareFacade()
-    client = _client(facade)
+    facade = StubCaseConsoleFacade()
+    client = _client(case_facade=facade)
 
     client.post(
         "/v1/care/cases/42/close",
@@ -1122,8 +1143,8 @@ def test_close_different_keys_execute_each_mutation() -> None:
 
 
 def test_close_no_key_passes_through_without_store_interaction() -> None:
-    facade = StubCareFacade()
-    client = _client(facade)
+    facade = StubCaseConsoleFacade()
+    client = _client(case_facade=facade)
 
     client.post(
         "/v1/care/cases/42/close",
