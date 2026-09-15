@@ -563,7 +563,7 @@ _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade f
 #### 3. Data Schema & Entity Delta (Phase Data Model)
 
 - **Databases Introduced/Updated:** PostgreSQL `care` schema; object storage `rx_input/` prefix.
-- **Tables / Entities Created/Modified:** `care_cases` (patient, doctor, pre_summary_id NOT NULL, stage, forced_review, close_reason), `care_prescriptions` (status Draft/Doctor Reviewed/Approved & Issued/Fulfilled, issued_at, attributed_doctor), `care_rx_items` (name, dose, duration), `care_rx_approvals` (doctor_id, edited_yn, decision, reason, verification_declaration boolean), `care_doctor_inputs` (voice_note/photo refs), `care_outbox`.
+- **Tables / Entities Created/Modified:** `care_cases` (patient, doctor, pre_summary_id NOT NULL, stage, forced_review, closed_at, close_reason), `care_prescriptions` (status Draft/Doctor Reviewed/Approved & Issued/Fulfilled, issued_at, attributed_doctor), `care_rx_items` (name, dose, duration), `care_rx_approvals` (doctor_id, edited_yn, decision, reason, verification_declaration boolean), `care_doctor_inputs` (voice_note/photo refs), `care_outbox`.
 - **Migration Scripts:** `v8_0__init_care` (alembic `145ca8587d12`), `v8_1__care_consult_complete` (alembic `384cef07d101`) - delivered originally; `v8_2__care_vocabulary_hardening` (alembic `ee3394de5a38`) - review-close T1 (#427): drops `consult_complete` as a case stage and `approved` as a prescription status, converts `verification_declaration` to a boolean, makes `pre_summary_id` NOT NULL, adds `forced_review` (false default).
 
 #### 4. Infrastructure, DevOps & Environment Targets

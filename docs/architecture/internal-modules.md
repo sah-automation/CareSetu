@@ -346,7 +346,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 
 #### 1. Data Ownership & Storage Isolation
 
-- **Storage Type:** Relational - PostgreSQL schema `care`: `care_cases` (patient_id, doctor_id, pre_summary_id NOT NULL, stage, forced_review, closed_at, close_reason), `care_prescriptions` (case_id, status, source, issued_at, attributed_doctor), `care_rx_items` (rx_id, name, dose, duration), `care_rx_approvals` (rx_id, doctor_id, decision, reason, edited_yn, verification_declaration boolean, revision snapshot ref), `care_doctor_inputs` (case_id, input_type voice|photo, media_ref, sensitive_class); doctor input media in object storage under `rx_input/`.
+- **Storage Type:** Relational - PostgreSQL schema `care`: `care_cases` (patient_id, doctor_id, pre_summary_id NOT NULL, stage, forced_review, closed_at, close_reason), `care_prescriptions` (case_id, status, source, issued_at, attributed_doctor), `care_rx_items` (rx_id, name, dose, duration), `care_rx_approvals` (rx_id, doctor_id, decision, reason, edited_yn, verification_declaration boolean, declared_at, revision snapshot ref), `care_doctor_inputs` (case_id, input_type voice|photo, media_ref, sensitive_class); doctor input media in object storage under `rx_input/`.
 - **Caching Strategy:** Doctor's pending-cases list cached in Redis; prescription (post-approval) cached for fulfilment read.
 - **Data Isolation Rule:** Private `care` schema; `MOD-008` reads approved prescriptions via the doctor-scoped `PrescriptionFacade.get_approved_prescription` (the facade split landed in the Phase 8 review-close - #432/#434).
 
