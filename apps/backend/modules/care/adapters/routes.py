@@ -31,6 +31,7 @@ from app.gateway.errors import (
     InsufficientScopeError,
     error_response,
 )
+from app.gateway.idempotency import run_idempotent
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_partner
 from app.gateway.trace import resolve_trace_id
@@ -211,7 +212,9 @@ async def mark_consult_complete(
     """
     facade = cast(CareFacade, request.app.state.care_facade)
     doctor_id = await _require_doctor(request, account)
-    return await facade.mark_consult_complete(doctor_id=doctor_id, case_id=case_id)
+    return await run_idempotent(
+        request, lambda: facade.mark_consult_complete(doctor_id=doctor_id, case_id=case_id)
+    )
 
 
 @router.get(
@@ -275,12 +278,15 @@ async def submit_doctor_input(
     """
     facade = cast(CareFacade, request.app.state.care_facade)
     doctor_id = await _require_doctor(request, account)
-    return await facade.submit_doctor_input(
-        doctor_id=doctor_id,
-        case_id=case_id,
-        input_type=body.input_type,
-        media_ref=body.media_ref,
-        sensitive_class=body.sensitive_class,
+    return await run_idempotent(
+        request,
+        lambda: facade.submit_doctor_input(
+            doctor_id=doctor_id,
+            case_id=case_id,
+            input_type=body.input_type,
+            media_ref=body.media_ref,
+            sensitive_class=body.sensitive_class,
+        ),
     )
 
 
@@ -304,11 +310,14 @@ async def create_rx_draft(
     """
     facade = cast(CareFacade, request.app.state.care_facade)
     doctor_id = await _require_doctor(request, account)
-    return await facade.create_rx_draft(
-        case_id=case_id,
-        doctor_id=doctor_id,
-        source=body.source,
-        items=body.items,
+    return await run_idempotent(
+        request,
+        lambda: facade.create_rx_draft(
+            case_id=case_id,
+            doctor_id=doctor_id,
+            source=body.source,
+            items=body.items,
+        ),
     )
 
 
@@ -332,11 +341,14 @@ async def save_rx_revision(
     """
     facade = cast(CareFacade, request.app.state.care_facade)
     doctor_id = await _require_doctor(request, account)
-    return await facade.save_rx_revision(
-        case_id=case_id,
-        rx_id=rx_id,
-        doctor_id=doctor_id,
-        rx_items=body.rx_items,
+    return await run_idempotent(
+        request,
+        lambda: facade.save_rx_revision(
+            case_id=case_id,
+            rx_id=rx_id,
+            doctor_id=doctor_id,
+            rx_items=body.rx_items,
+        ),
     )
 
 
@@ -361,11 +373,14 @@ async def approve_prescription(
     """
     facade = cast(CareFacade, request.app.state.care_facade)
     doctor_id = await _require_doctor(request, account)
-    return await facade.approve_prescription(
-        case_id=case_id,
-        rx_id=rx_id,
-        doctor_id=doctor_id,
-        verification_declaration=body.verification_declaration,
+    return await run_idempotent(
+        request,
+        lambda: facade.approve_prescription(
+            case_id=case_id,
+            rx_id=rx_id,
+            doctor_id=doctor_id,
+            verification_declaration=body.verification_declaration,
+        ),
     )
 
 
@@ -390,11 +405,14 @@ async def reject_prescription(
     """
     facade = cast(CareFacade, request.app.state.care_facade)
     doctor_id = await _require_doctor(request, account)
-    return await facade.reject_prescription(
-        case_id=case_id,
-        rx_id=rx_id,
-        doctor_id=doctor_id,
-        reason=body.reason,
+    return await run_idempotent(
+        request,
+        lambda: facade.reject_prescription(
+            case_id=case_id,
+            rx_id=rx_id,
+            doctor_id=doctor_id,
+            reason=body.reason,
+        ),
     )
 
 
@@ -444,10 +462,13 @@ async def close_case_without_rx(
     """
     facade = cast(CareFacade, request.app.state.care_facade)
     doctor_id = await _require_doctor(request, account)
-    return await facade.close_case_without_rx(
-        case_id=case_id,
-        doctor_id=doctor_id,
-        close_reason=body.close_reason,
+    return await run_idempotent(
+        request,
+        lambda: facade.close_case_without_rx(
+            case_id=case_id,
+            doctor_id=doctor_id,
+            close_reason=body.close_reason,
+        ),
     )
 
 

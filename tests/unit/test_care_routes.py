@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from fastapi.testclient import TestClient
 
 from app.config import Settings
+from app.gateway.idempotency import IdempotencyStore
 from app.main import create_app
 from modules.care.care_models import (
     CaseDetailView,
@@ -59,6 +60,21 @@ def _client(
     app.state.partner_facade = StubPartnerFacade(
         partner if partner is not None else _DOCTOR_PARTNER
     )
+    return TestClient(app)
+
+
+def _client_with_store(
+    facade: StubCareFacade,
+    store: IdempotencyStore,
+    partner: PartnerView | None = None,
+) -> TestClient:
+    settings = Settings(gateway_jwt_verify_enabled=True, gateway_jwt_signing_key=_SIGNING_KEY)
+    app = create_app(settings=settings)
+    app.state.care_facade = facade
+    app.state.partner_facade = StubPartnerFacade(
+        partner if partner is not None else _DOCTOR_PARTNER
+    )
+    app.state.idempotency_store = store
     return TestClient(app)
 
 
@@ -862,3 +878,260 @@ def test_get_approved_prescription_non_doctor_rejected() -> None:
 
     assert response.status_code == 403
     assert response.json()["code"] == "AUTH_INSUFFICIENT_SCOPE"
+
+
+# ---------------------------------------------------------------------------
+# Idempotency-Key on the care POST mutations (api-standards §5, T5 #431)
+# ---------------------------------------------------------------------------
+
+
+def test_approve_replays_same_key_without_second_facade_call() -> None:
+    facade = StubCareFacade()
+    client = _client(facade)
+    headers = {"Idempotency-Key": "retry-abc-123"}
+
+    first = client.post(
+        "/v1/care/cases/42/rx/301/approve",
+        json={"verification_declaration": True},
+        headers={**_bearer(_token()), **headers},
+    )
+    replay = client.post(
+        "/v1/care/cases/42/rx/301/approve",
+        json={"verification_declaration": True},
+        headers={**_bearer(_token()), **headers},
+    )
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert replay.json() == first.json() == _RX_ISSUED_VIEW.model_dump(mode="json")
+    assert [call[0] for call in facade.called_with] == ["approve_prescription"]
+
+
+def test_approve_different_keys_execute_each_mutation() -> None:
+    facade = StubCareFacade()
+    client = _client(facade)
+
+    client.post(
+        "/v1/care/cases/42/rx/301/approve",
+        json={"verification_declaration": True},
+        headers={**_bearer(_token()), "Idempotency-Key": "k-1"},
+    )
+    client.post(
+        "/v1/care/cases/42/rx/301/approve",
+        json={"verification_declaration": True},
+        headers={**_bearer(_token()), "Idempotency-Key": "k-2"},
+    )
+
+    assert [call[0] for call in facade.called_with] == [
+        "approve_prescription",
+        "approve_prescription",
+    ]
+
+
+def test_approve_no_key_passes_through_without_store_interaction() -> None:
+    facade = StubCareFacade()
+    client = _client(facade)
+
+    client.post(
+        "/v1/care/cases/42/rx/301/approve",
+        json={"verification_declaration": True},
+        headers=_bearer(_token()),
+    )
+    client.post(
+        "/v1/care/cases/42/rx/301/approve",
+        json={"verification_declaration": True},
+        headers=_bearer(_token()),
+    )
+
+    assert [call[0] for call in facade.called_with] == [
+        "approve_prescription",
+        "approve_prescription",
+    ]
+
+
+def test_approve_blank_key_passes_through_as_no_key() -> None:
+    facade = StubCareFacade()
+    client = _client(facade)
+
+    client.post(
+        "/v1/care/cases/42/rx/301/approve",
+        json={"verification_declaration": True},
+        headers={**_bearer(_token()), "Idempotency-Key": "   "},
+    )
+    client.post(
+        "/v1/care/cases/42/rx/301/approve",
+        json={"verification_declaration": True},
+        headers={**_bearer(_token()), "Idempotency-Key": "   "},
+    )
+
+    assert [call[0] for call in facade.called_with] == [
+        "approve_prescription",
+        "approve_prescription",
+    ]
+
+
+def test_approve_replayed_key_expired_by_ttl_reexecutes(fake_clock) -> None:
+    store = IdempotencyStore(ttl_seconds=300, clock=fake_clock)
+    facade = StubCareFacade()
+    client = _client_with_store(facade, store)
+    headers = {"Idempotency-Key": "retry-abc-123"}
+
+    client.post(
+        "/v1/care/cases/42/rx/301/approve",
+        json={"verification_declaration": True},
+        headers={**_bearer(_token()), **headers},
+    )
+    fake_clock.advance(301)
+    client.post(
+        "/v1/care/cases/42/rx/301/approve",
+        json={"verification_declaration": True},
+        headers={**_bearer(_token()), **headers},
+    )
+
+    assert [call[0] for call in facade.called_with] == [
+        "approve_prescription",
+        "approve_prescription",
+    ]
+
+
+def test_approve_failed_mutation_is_not_cached_for_replay() -> None:
+    facade = StubCareFacade()
+    client = _client(facade)
+    headers = {"Idempotency-Key": "retry-abc-123"}
+
+    facade.error = IllegalPrescriptionTransitionError(
+        "APPROVE is illegal while the prescription is draft without revision"
+    )
+    client.post(
+        "/v1/care/cases/42/rx/301/approve",
+        json={"verification_declaration": True},
+        headers={**_bearer(_token()), **headers},
+    )
+    facade.error = None
+    retried = client.post(
+        "/v1/care/cases/42/rx/301/approve",
+        json={"verification_declaration": True},
+        headers={**_bearer(_token()), **headers},
+    )
+
+    assert retried.status_code == 200
+    assert [call[0] for call in facade.called_with] == [
+        "approve_prescription",
+        "approve_prescription",
+    ]
+
+
+def test_consult_complete_replays_same_key_without_second_facade_call() -> None:
+    facade = StubCareFacade()
+    client = _client(facade)
+    headers = {"Idempotency-Key": "retry-abc-123"}
+
+    first = client.post(
+        "/v1/care/cases/42/consult-complete",
+        headers={**_bearer(_token()), **headers},
+    )
+    replay = client.post(
+        "/v1/care/cases/42/consult-complete",
+        headers={**_bearer(_token()), **headers},
+    )
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert replay.json() == first.json() == _CASE_VIEW.model_dump(mode="json")
+    assert [call[0] for call in facade.called_with] == ["mark_consult_complete"]
+
+
+def test_consult_complete_different_keys_execute_each_mutation() -> None:
+    facade = StubCareFacade()
+    client = _client(facade)
+
+    client.post(
+        "/v1/care/cases/42/consult-complete",
+        headers={**_bearer(_token()), "Idempotency-Key": "k-1"},
+    )
+    client.post(
+        "/v1/care/cases/42/consult-complete",
+        headers={**_bearer(_token()), "Idempotency-Key": "k-2"},
+    )
+
+    assert [call[0] for call in facade.called_with] == [
+        "mark_consult_complete",
+        "mark_consult_complete",
+    ]
+
+
+def test_consult_complete_no_key_passes_through_without_store_interaction() -> None:
+    facade = StubCareFacade()
+    client = _client(facade)
+
+    client.post("/v1/care/cases/42/consult-complete", headers=_bearer(_token()))
+    client.post("/v1/care/cases/42/consult-complete", headers=_bearer(_token()))
+
+    assert [call[0] for call in facade.called_with] == [
+        "mark_consult_complete",
+        "mark_consult_complete",
+    ]
+
+
+def test_close_replays_same_key_without_second_facade_call() -> None:
+    facade = StubCareFacade()
+    client = _client(facade)
+    headers = {"Idempotency-Key": "retry-abc-123"}
+
+    first = client.post(
+        "/v1/care/cases/42/close",
+        json={"close_reason": "no_show"},
+        headers={**_bearer(_token()), **headers},
+    )
+    replay = client.post(
+        "/v1/care/cases/42/close",
+        json={"close_reason": "no_show"},
+        headers={**_bearer(_token()), **headers},
+    )
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert replay.json() == first.json() == _CLOSED_CASE_VIEW.model_dump(mode="json")
+    assert [call[0] for call in facade.called_with] == ["close_case_without_rx"]
+
+
+def test_close_different_keys_execute_each_mutation() -> None:
+    facade = StubCareFacade()
+    client = _client(facade)
+
+    client.post(
+        "/v1/care/cases/42/close",
+        json={"close_reason": "no_show"},
+        headers={**_bearer(_token()), "Idempotency-Key": "k-1"},
+    )
+    client.post(
+        "/v1/care/cases/42/close",
+        json={"close_reason": "no_show"},
+        headers={**_bearer(_token()), "Idempotency-Key": "k-2"},
+    )
+
+    assert [call[0] for call in facade.called_with] == [
+        "close_case_without_rx",
+        "close_case_without_rx",
+    ]
+
+
+def test_close_no_key_passes_through_without_store_interaction() -> None:
+    facade = StubCareFacade()
+    client = _client(facade)
+
+    client.post(
+        "/v1/care/cases/42/close",
+        json={"close_reason": "no_show"},
+        headers=_bearer(_token()),
+    )
+    client.post(
+        "/v1/care/cases/42/close",
+        json={"close_reason": "no_show"},
+        headers=_bearer(_token()),
+    )
+
+    assert [call[0] for call in facade.called_with] == [
+        "close_case_without_rx",
+        "close_case_without_rx",
+    ]
