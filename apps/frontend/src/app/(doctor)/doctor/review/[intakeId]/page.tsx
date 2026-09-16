@@ -8,6 +8,9 @@
 //
 // 1. Fetch the full pre-summary for the assigned doctor (#448).
 // 2. Resolve the matching care case via listOpenCases (patient_id + case_id).
+//    A queue-originated review starts with no case (the outbox consumer births
+//    it on pre_summary.ready), so after a one-action finalize the page re-reads
+//    the case list until the async-birthed case shows up.
 // 3. Show case stage, forced-review requirement, full pre-summary, and the
 //    patient's consented health history.
 // 4. One-action review-and-finalize for low-confidence pre-summaries (#442).
@@ -88,6 +91,26 @@ function formatDate(iso: string, lang: "en" | "hi"): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(iso));
+}
+
+// The care case for a pre-summary is birthed asynchronously (the outbox
+// consumer behind pre_summary.ready), so a queue-originated review that just
+// finalized has no case yet. Re-read the open-cases list a few times so the
+// handshake and consented-history sections appear without a manual refresh.
+async function refreshMatchedCase(
+  preSummaryId: number,
+  fetchCases: () => Promise<CaseDetailView[]>,
+  retryCount = 5,
+): Promise<CaseDetailView | null> {
+  for (let attempt = 0; attempt < retryCount; attempt += 1) {
+    const cases = await fetchCases();
+    const matched = cases.find((c) => c.pre_summary_id === preSummaryId);
+    if (matched) return matched;
+    if (attempt < retryCount - 1) {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+  }
+  return null;
 }
 
 // ---- sub-components ----
@@ -188,23 +211,21 @@ export default function ReviewWorkspacePage({
               reviewed_by: result.reviewed_by,
               reviewed_at: result.reviewed_at,
               doctor_corrections: null,
+              // The server returns the authoritative copy (original fields overlaid
+              // with the doctor's corrections). Merge it wholesale so no edited
+              // field - including ones the current UI does not surface - is lost.
               structured_fields: {
-                chief_complaints:
-                  (result.reviewed_copy.chief_complaints as
-                    | string[]
-                    | undefined) ?? prev.structured_fields.chief_complaints,
-                symptoms:
-                  (result.reviewed_copy.symptoms as string[] | undefined) ??
-                  prev.structured_fields.symptoms,
-                duration:
-                  (result.reviewed_copy.duration as
-                    | string
-                    | null
-                    | undefined) ?? prev.structured_fields.duration,
+                ...prev.structured_fields,
+                ...result.reviewed_copy,
               },
             }
           : prev,
       );
+      const birthed = await refreshMatchedCase(
+        preSummary.pre_summary_id,
+        listOpenCases,
+      );
+      if (birthed) setCareCase(birthed);
       setFinalizeSuccess(true);
     } catch {
       setFinalizeError(true);

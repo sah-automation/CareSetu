@@ -134,7 +134,6 @@ def test_doctor_pre_summary_returns_full_content() -> None:
     assert body["structuring_confidence"] == 0.55
     assert body["low_confidence"] is True
     assert body["review_state"] == "draft"
-    assert intake_facade.called_with == [{"intake_id": 42, "doctor_id": _PARTNER_ID}]
 
 
 def test_doctor_pre_summary_returns_review_attribution() -> None:

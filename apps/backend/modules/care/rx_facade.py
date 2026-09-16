@@ -716,7 +716,9 @@ class PrescriptionFacade:
             await check_case_ownership(connection, doctor_id=doctor_id, case_id=case_id)
             rx_row = (
                 await connection.execute(
-                    select(care_prescriptions).where(care_prescriptions.c.case_id == case_id)
+                    select(care_prescriptions)
+                    .where(care_prescriptions.c.case_id == case_id)
+                    .order_by(care_prescriptions.c.id.desc())
                 )
             ).first()
             if rx_row is None:

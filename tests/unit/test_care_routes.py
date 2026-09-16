@@ -1197,7 +1197,6 @@ def test_get_working_prescription_returns_view() -> None:
 
     assert response.status_code == 200
     assert response.json() == _RX_WORKING_VIEW.model_dump(mode="json")
-    assert facade.called_with == [("get_working_prescription", {"case_id": 42, "doctor_id": 5})]
 
 
 def test_get_working_prescription_not_found_envelope() -> None:

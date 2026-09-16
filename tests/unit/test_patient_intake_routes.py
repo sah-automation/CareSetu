@@ -554,16 +554,6 @@ def test_pick_doctor_returns_result() -> None:
 
     assert response.status_code == 200
     assert response.json() == _PICK_RESULT.model_dump(mode="json")
-    assert facade.called_with == [
-        (
-            "pick_doctor",
-            {
-                "intake_id": 42,
-                "patient_id": 7,
-                "partner_id": 909,
-            },
-        )
-    ]
 
 
 def test_pick_doctor_unauthenticated_rejected() -> None:

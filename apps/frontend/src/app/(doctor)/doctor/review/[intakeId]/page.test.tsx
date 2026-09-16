@@ -436,6 +436,25 @@ describe("ReviewWorkspacePage handshake (US-24)", () => {
     );
   });
 
+  it("re-reads the case list after a queue-originated finalize so the handshake and history become reachable", async () => {
+    // Queue path: at load no care case exists yet (the outbox consumer births
+    // it on pre_summary.ready). The post-finalize re-read must pick it up.
+    getCases.mockResolvedValueOnce([]);
+    getCases.mockResolvedValueOnce([caseItem(11)]);
+    doReview.mockResolvedValue(reviewResult());
+    render(<ReviewWorkspacePage params={{ intakeId: "42" }} />);
+    await waitFor(() => screen.getByTestId("workspace-content"));
+
+    expect(screen.queryByTestId("workspace-handshake")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("workspace-history")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("finalize-action"));
+
+    await waitFor(() => screen.getByTestId("handshake-action"));
+    expect(screen.getByTestId("workspace-history")).toBeInTheDocument();
+    expect(getCases.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
   it("surfaces a failure message when the handshake errors", async () => {
     doReview.mockResolvedValue(reviewResult());
     doHandshake.mockRejectedValue(
