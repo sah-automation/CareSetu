@@ -572,6 +572,8 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 
 ### 4.1 Synchronous Communication Matrix
 
+> **Initiating Module column convention.** Most callers are internal modules (`MOD-xxx`). Rows starting with an actor label + `(channel)` denote an external actor (patient, doctor, operator) acting through the frontend channel; the target module is the owning module. This convention was established by the `Operator / Patient channel` row and extended by PHASE-8.1.
+
 | Initiating Module          | Target Module                   | Protocol                       | Data Schema                                                                                                                             | Purpose                                                                                              | Traceability                  |
 | :------------------------- | :------------------------------ | :----------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------- | :---------------------------- |
 | API Gateway / Edge         | `MOD-001` (IAM)                 | Internal HTTP / in-process     | JWT claims + scope                                                                                                                      | Token validation & RBAC scope resolution on every request                                            | `NFR-SEC-002/003`, `FEAT-001` |
