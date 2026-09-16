@@ -1,16 +1,19 @@
 "use client";
 
-// PHASE-8.1 T13/T14 (#451/#452): case workspace for the open-cases entry
-// path. The console's "Open cases" deep-links to /doctor/cases/[caseId] (one
-// per active care case). This page shows the case stage, the forced-review
-// requirement (if any), the patient's consented health history, and the
-// consult-complete handshake for pre_summary-stage cases. For
+// PHASE-8.1 T13/T14/T15 (#451/#452/#453): case workspace for the open-cases
+// entry path. The console's "Open cases" deep-links to /doctor/cases/[caseId]
+// (one per active care case). This page shows the case stage, the forced-
+// review requirement (if any), the patient's consented health history, and
+// the consult-complete handshake for pre_summary-stage cases. For
 // prescription-pending cases it hosts prescription drafting (US-18): request
 // an AI draft, edit the rx items, and save the working revision. A hard
 // refresh of a pending case reloads the in-progress revision from the
-// working-rx read so a navigation mistake is not data loss. Every care
-// mutation here sends the idempotency-key header via the shared client
-// helper (#446). Approval/rejection/close are built by #453.
+// working-rx read so a navigation mistake is not data loss. Issuance and
+// closure (US-19..22): approve the reviewed prescription only behind the
+// verification declaration, render the issued prescription after approval,
+// reject a draft with a patient-understandable reason, and close the case
+// without prescribing. Every care mutation here sends the idempotency-key
+// header via the shared client helper (#446).
 //
 // All copy bilingual en/hi (REQ-006).
 
@@ -25,13 +28,17 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { ApiError } from "@/lib/api-errors";
 import {
+  approvePrescription,
+  closeCaseWithoutRx,
   createRxDraft,
   fetchCareCase,
   fetchWorkingPrescription,
   markConsultComplete,
+  rejectPrescription,
   saveRxRevision,
-  type CaseDetailView,
   type CareCaseStage,
+  type CaseDetailView,
+  type CloseReason,
   type PrescriptionDetailView,
   type RxItemInput,
   type RxItemView,
@@ -67,6 +74,36 @@ function stageDisplayName(
     default:
       return stage;
   }
+}
+
+function rxStatusDisplayName(
+  status: PrescriptionDetailView["status"],
+  t: Dictionary["caseWorkspace"],
+): string {
+  switch (status) {
+    case "draft":
+      return t.rxStatusDraft;
+    case "doctor_reviewed":
+      return t.rxStatusReviewed;
+    case "rejected":
+      return t.rxStatusRejected;
+    case "issued":
+      return t.rxStatusIssued;
+    case "fulfilled":
+      return t.rxStatusFulfilled;
+    default:
+      return status;
+  }
+}
+
+function formatDateTime(iso: string, lang: "en" | "hi"): string {
+  return new Intl.DateTimeFormat(lang === "hi" ? "hi-IN" : "en-IN", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(iso));
 }
 
 function LoadingSkeleton() {
@@ -122,6 +159,24 @@ export default function CaseWorkspacePage({
   const [saveError, setSaveError] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
 
+  // Issuance + closure state (US-19..22, #453). The approve request is only
+  // ever sent once the doctor ticks the verification declaration; rejection
+  // carries a plain-language reason; close-without-prescription ends the case.
+  const [approving, setApproving] = useState(false);
+  const [approveError, setApproveError] = useState(false);
+  const [declaration, setDeclaration] = useState(false);
+  const [rejecting, setRejecting] = useState(false);
+  const [rejectError, setRejectError] = useState(false);
+  const [rejectReason, setRejectReason] = useState("");
+  const [closing, setClosing] = useState(false);
+  const [closeError, setCloseError] = useState(false);
+  const [closeReason, setCloseReason] = useState<CloseReason | "">("");
+
+  function resetDecisionState() {
+    setDeclaration(false);
+    setRejectReason("");
+  }
+
   // Load the doctor's in-progress working revision for a pending case. This
   // is the refresh-reload seam: a hard refresh lands back here and the editor
   // is repopulated from the working-rx read, never from the immutable draft
@@ -129,6 +184,7 @@ export default function CaseWorkspacePage({
   const loadWorkingRx = useCallback(async () => {
     setRxLoadState("loading");
     setDraftError(null);
+    resetDecisionState();
     try {
       const rx = await fetchWorkingPrescription(caseId);
       setWorkingRx(rx);
@@ -189,6 +245,7 @@ export default function CaseWorkspacePage({
     if (!careCase) return;
     setDrafting(true);
     setDraftError(null);
+    resetDecisionState();
     try {
       const rx = await createRxDraft(careCase.case_id, {
         source: "ai_draft",
@@ -223,6 +280,7 @@ export default function CaseWorkspacePage({
     setSaving(true);
     setSaveError(false);
     setSaveSuccess(false);
+    resetDecisionState();
     try {
       const rx = await saveRxRevision(
         careCase.case_id,
@@ -236,6 +294,72 @@ export default function CaseWorkspacePage({
       setSaveError(true);
     } finally {
       setSaving(false);
+    }
+  }
+
+  // Approval never fires without the verification declaration: the UI keeps
+  // the declare-then-approve sequence and only sends the request once the
+  // checkbox is true (mirrors the backend's declaration gate - #453). The
+  // issued prescription renders from the approve response so the doctor sees
+  // exactly what the patient receives after issuance.
+  async function handleApprove() {
+    if (!careCase || !workingRx || !declaration) return;
+    setApproving(true);
+    setApproveError(false);
+    try {
+      const rx = await approvePrescription(
+        careCase.case_id,
+        workingRx.prescription_id,
+      );
+      setWorkingRx(rx);
+      resetDecisionState();
+    } catch {
+      setApproveError(true);
+    } finally {
+      setApproving(false);
+    }
+  }
+
+  // Rejection records a plain-language reason for the patient; the draft is
+  // never approved and the case stays open for a new draft or a close.
+  async function handleReject(e: FormEvent) {
+    e.preventDefault();
+    if (!careCase || !workingRx) return;
+    const reason = rejectReason.trim();
+    if (reason === "") return;
+    setRejecting(true);
+    setRejectError(false);
+    try {
+      const rx = await rejectPrescription(
+        careCase.case_id,
+        workingRx.prescription_id,
+        { reason },
+      );
+      setWorkingRx(rx);
+    } catch {
+      setRejectError(true);
+    } finally {
+      setRejecting(false);
+    }
+  }
+
+  // Close-without-prescription is the doctor's deliberate terminal action:
+  // it moves the case to Closed (recorded with a reason) so it leaves the
+  // pending list, per the close-without-prescription glossary term.
+  async function handleClose(e: FormEvent) {
+    e.preventDefault();
+    if (!careCase || closeReason === "") return;
+    setClosing(true);
+    setCloseError(false);
+    try {
+      const updated = await closeCaseWithoutRx(careCase.case_id, {
+        close_reason: closeReason,
+      });
+      setCareCase(updated);
+    } catch {
+      setCloseError(true);
+    } finally {
+      setClosing(false);
     }
   }
 
@@ -269,8 +393,21 @@ export default function CaseWorkspacePage({
   const currentStage = careCase?.stage ?? "pre_summary";
   const isPreSummaryStage = currentStage === "pre_summary";
   const isPrescriptionPending =
-    currentStage === "prescription_pending" || handshakeDone;
+    currentStage === "prescription_pending" ||
+    (handshakeDone && currentStage !== "closed");
   const showHandshake = isPreSummaryStage && !handshakeDone;
+
+  const rxStatus = workingRx?.status;
+  const isReviewableRx = rxStatus === "draft" || rxStatus === "doctor_reviewed";
+  const isIssuedRx = rxStatus === "issued" || rxStatus === "fulfilled";
+  const isRejectedRx = rxStatus === "rejected";
+
+  const closeReasons: Array<{ value: CloseReason; label: string }> = [
+    { value: "patient_withdrawn", label: t.closeReasons.patientWithdrawn },
+    { value: "doctor_rejected", label: t.closeReasons.doctorRejected },
+    { value: "no_show", label: t.closeReasons.noShow },
+    { value: "duplicate", label: t.closeReasons.duplicate },
+  ];
 
   return (
     <>
@@ -468,142 +605,392 @@ export default function CaseWorkspacePage({
                 )}
 
                 {rxLoadState === "ready" && workingRx != null && (
-                  <form
-                    onSubmit={handleSaveRevision}
-                    data-testid="prescription-editor"
-                  >
-                    <div className="flex items-center gap-3">
+                  <div className="mt-3" data-testid="prescription-review">
+                    <div className="flex items-center gap-4">
                       <span className="text-xs font-medium text-txt-muted">
                         {t.sourceLabel}:{" "}
                         <span className="text-txt" data-testid="rx-source">
                           {sourceDisplayName(workingRx.source)}
                         </span>
                       </span>
+                      <span className="text-xs font-medium text-txt-muted">
+                        {t.rxStatusLabel}:{" "}
+                        <span className="text-txt" data-testid="rx-status">
+                          {rxStatusDisplayName(workingRx.status, t)}
+                        </span>
+                      </span>
                     </div>
 
-                    <div className="mt-3">
-                      <span className="text-xs font-medium text-txt-muted">
-                        {t.rxItemsLabel}
-                      </span>
-                      {rxItems.length === 0 ? (
-                        <p className="mt-1 text-xs text-txt-muted">
-                          {t.rxEmptyItems}
-                        </p>
-                      ) : (
-                        <ul className="mt-2 space-y-2">
-                          {rxItems.map((row, idx) => (
-                            <li
-                              key={idx}
-                              className="flex flex-wrap items-center gap-2"
-                              data-testid="rx-item-row"
-                            >
-                              <label className="flex-1 min-w-40">
-                                <span className="sr-only">
-                                  {t.rxNameLabel}: {idx + 1}
-                                </span>
-                                <input
-                                  type="text"
-                                  value={row.name}
-                                  onChange={(e) =>
-                                    updateRxItem(idx, "name", e.target.value)
-                                  }
-                                  placeholder={t.rxNameLabel}
-                                  className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-                                  data-testid={`rx-item-name-${idx}`}
-                                />
-                              </label>
-                              <label className="flex-1 min-w-28">
-                                <span className="sr-only">
-                                  {t.rxDoseLabel}: {idx + 1}
-                                </span>
-                                <input
-                                  type="text"
-                                  value={row.dose}
-                                  onChange={(e) =>
-                                    updateRxItem(idx, "dose", e.target.value)
-                                  }
-                                  placeholder={t.rxDoseLabel}
-                                  className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-                                  data-testid={`rx-item-dose-${idx}`}
-                                />
-                              </label>
-                              <label className="flex-1 min-w-28">
-                                <span className="sr-only">
-                                  {t.rxDurationLabel}: {idx + 1}
-                                </span>
-                                <input
-                                  type="text"
-                                  value={row.duration}
-                                  onChange={(e) =>
-                                    updateRxItem(
-                                      idx,
-                                      "duration",
-                                      e.target.value,
-                                    )
-                                  }
-                                  placeholder={t.rxDurationLabel}
-                                  className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-                                  data-testid={`rx-item-duration-${idx}`}
-                                />
-                              </label>
-                              <Button
-                                type="button"
-                                size="sm"
-                                variant="ghost"
-                                disabled={rxItems.length <= 1}
-                                onClick={() => removeRxItem(idx)}
-                                data-testid={`rx-item-remove-${idx}`}
+                    {/* Editor - drafting/reviewed states only, rejected rows
+                        are not editable (#452/#453). */}
+                    {isReviewableRx && (
+                      <form
+                        onSubmit={handleSaveRevision}
+                        className="mt-3"
+                        data-testid="prescription-editor"
+                      >
+                        <span className="text-xs font-medium text-txt-muted">
+                          {t.rxItemsLabel}
+                        </span>
+                        {rxItems.length === 0 ? (
+                          <p className="mt-1 text-xs text-txt-muted">
+                            {t.rxEmptyItems}
+                          </p>
+                        ) : (
+                          <ul className="mt-2 space-y-2">
+                            {rxItems.map((row, idx) => (
+                              <li
+                                key={idx}
+                                className="flex flex-wrap items-center gap-2"
+                                data-testid="rx-item-row"
                               >
-                                {t.removeItemAction}
-                              </Button>
+                                <label className="flex-1 min-w-40">
+                                  <span className="sr-only">
+                                    {t.rxNameLabel}: {idx + 1}
+                                  </span>
+                                  <input
+                                    type="text"
+                                    value={row.name}
+                                    onChange={(e) =>
+                                      updateRxItem(idx, "name", e.target.value)
+                                    }
+                                    placeholder={t.rxNameLabel}
+                                    className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                                    data-testid={`rx-item-name-${idx}`}
+                                  />
+                                </label>
+                                <label className="flex-1 min-w-28">
+                                  <span className="sr-only">
+                                    {t.rxDoseLabel}: {idx + 1}
+                                  </span>
+                                  <input
+                                    type="text"
+                                    value={row.dose}
+                                    onChange={(e) =>
+                                      updateRxItem(idx, "dose", e.target.value)
+                                    }
+                                    placeholder={t.rxDoseLabel}
+                                    className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                                    data-testid={`rx-item-dose-${idx}`}
+                                  />
+                                </label>
+                                <label className="flex-1 min-w-28">
+                                  <span className="sr-only">
+                                    {t.rxDurationLabel}: {idx + 1}
+                                  </span>
+                                  <input
+                                    type="text"
+                                    value={row.duration}
+                                    onChange={(e) =>
+                                      updateRxItem(
+                                        idx,
+                                        "duration",
+                                        e.target.value,
+                                      )
+                                    }
+                                    placeholder={t.rxDurationLabel}
+                                    className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                                    data-testid={`rx-item-duration-${idx}`}
+                                  />
+                                </label>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="ghost"
+                                  disabled={rxItems.length <= 1}
+                                  onClick={() => removeRxItem(idx)}
+                                  data-testid={`rx-item-remove-${idx}`}
+                                >
+                                  {t.removeItemAction}
+                                </Button>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="mt-2"
+                          onClick={addRxItem}
+                          data-testid="add-rx-item"
+                        >
+                          {t.addItemAction}
+                        </Button>
+
+                        <div className="mt-4 flex items-center gap-3">
+                          <Button
+                            type="submit"
+                            size="sm"
+                            disabled={saving}
+                            loading={saving}
+                            data-testid="save-revision-action"
+                          >
+                            {saving ? t.savingRevision : t.saveRevisionAction}
+                          </Button>
+                          {saveSuccess && (
+                            <p
+                              className="text-sm text-success"
+                              data-testid="revision-saved"
+                            >
+                              {t.revisionSaved}
+                            </p>
+                          )}
+                          {saveError && (
+                            <p
+                              className="text-sm text-danger"
+                              role="alert"
+                              data-testid="revision-save-error"
+                            >
+                              {t.saveRevisionFail}
+                            </p>
+                          )}
+                        </div>
+                      </form>
+                    )}
+
+                    {/* Issued e-prescription after approval (US-20) - rendered
+                        from the approve response so the doctor sees what the
+                        patient receives. */}
+                    {isIssuedRx && (
+                      <div
+                        className="mt-3 rounded-md border border-hairline bg-surface p-3"
+                        data-testid="issued-rx"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <h3 className="text-sm font-semibold text-success">
+                            {t.issuedHeading}
+                          </h3>
+                          {workingRx.issued_at != null && (
+                            <span
+                              className="text-xs text-txt-muted"
+                              data-testid="issued-at"
+                            >
+                              {t.issuedAtLabel}:{" "}
+                              {formatDateTime(workingRx.issued_at, lang)}
+                            </span>
+                          )}
+                        </div>
+                        <p className="mt-1 text-xs text-txt-muted">
+                          {t.issuedImmutableNote}
+                        </p>
+                        <ul className="mt-2 space-y-1">
+                          {workingRx.items.map((item) => (
+                            <li
+                              key={item.rx_item_id}
+                              className="text-sm text-txt"
+                              data-testid="issued-rx-item"
+                            >
+                              {item.name}
+                              {item.dose != null ? ` - ${item.dose}` : ""}
+                              {item.duration != null
+                                ? ` - ${item.duration}`
+                                : ""}
                             </li>
                           ))}
                         </ul>
-                      )}
-
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="mt-2"
-                        onClick={addRxItem}
-                        data-testid="add-rx-item"
-                      >
-                        {t.addItemAction}
-                      </Button>
-                    </div>
-
-                    <div className="mt-4 flex items-center gap-3">
-                      <Button
-                        type="submit"
-                        size="sm"
-                        disabled={saving}
-                        loading={saving}
-                        data-testid="save-revision-action"
-                      >
-                        {saving ? t.savingRevision : t.saveRevisionAction}
-                      </Button>
-                      {saveSuccess && (
                         <p
-                          className="text-sm text-success"
-                          data-testid="revision-saved"
+                          className="mt-2 text-xs text-txt-muted"
+                          data-testid="issued-attribution"
                         >
-                          {t.revisionSaved}
+                          {t.issuedAttributedTo}
                         </p>
-                      )}
-                      {saveError && (
-                        <p
-                          className="text-sm text-danger"
-                          role="alert"
-                          data-testid="revision-save-error"
+                      </div>
+                    )}
+
+                    {/* Rejected-draft state (US-21): reason recorded for the
+                        patient, case stays open for a re-draft or a close. */}
+                    {isRejectedRx && (
+                      <div
+                        className="mt-3 rounded-md border border-warning/30 bg-warning-soft/40 p-3"
+                        data-testid="rx-rejected"
+                      >
+                        <h3 className="text-sm font-semibold text-warning-text">
+                          {t.rejectedHeading}
+                        </h3>
+                        <p className="mt-1 text-xs text-txt-muted">
+                          {t.rejectedHelp}
+                        </p>
+                        {rejectReason !== "" && (
+                          <p
+                            className="mt-2 text-xs text-txt-muted"
+                            data-testid="recorded-reason"
+                          >
+                            {t.rejectedReasonLabel}: {rejectReason}
+                          </p>
+                        )}
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="mt-2"
+                          disabled={drafting}
+                          loading={drafting}
+                          onClick={() => void handleRequestDraft()}
+                          data-testid="reject-redraft-action"
                         >
-                          {t.saveRevisionFail}
-                        </p>
-                      )}
-                    </div>
-                  </form>
+                          {drafting ? t.requestingDraft : t.requestDraftAction}
+                        </Button>
+                      </div>
+                    )}
+
+                    {/* Doctor decision (US-19..21): approve gated on the
+                        verification declaration, plus reject-with-reason. */}
+                    {isReviewableRx && (
+                      <div
+                        className="mt-4 rounded-md border border-hairline bg-surface p-3"
+                        data-testid="review-decision"
+                      >
+                        <h3 className="text-sm font-semibold text-txt">
+                          {t.decisionHeading}
+                        </h3>
+
+                        <div className="mt-2" data-testid="approval-gate">
+                          <p className="text-xs text-txt-muted">
+                            {t.approvalGateTitle}. {t.approvalGateHelp}
+                          </p>
+                          <label className="mt-2 flex items-start gap-2 text-sm text-txt">
+                            <input
+                              type="checkbox"
+                              checked={declaration}
+                              onChange={(e) => setDeclaration(e.target.checked)}
+                              className="mt-0.5 h-4 w-4"
+                              data-testid="verification-declaration"
+                            />
+                            <span>{t.verificationDeclaration}</span>
+                          </label>
+                          {!declaration && (
+                            <p
+                              className="mt-1 text-xs text-txt-muted"
+                              data-testid="approve-blocked-help"
+                            >
+                              {t.approveBlockedHelp}
+                            </p>
+                          )}
+                          <Button
+                            type="button"
+                            size="sm"
+                            className="mt-2"
+                            disabled={!declaration}
+                            loading={approving}
+                            onClick={() => void handleApprove()}
+                            data-testid="approve-issue-action"
+                          >
+                            {approving
+                              ? t.approvingIssuance
+                              : t.approveIssueAction}
+                          </Button>
+                          {approveError && (
+                            <p
+                              className="mt-1 text-sm text-danger"
+                              role="alert"
+                              data-testid="approve-error"
+                            >
+                              {t.approveFail}
+                            </p>
+                          )}
+                        </div>
+
+                        <form onSubmit={handleReject} className="mt-4">
+                          <label
+                            htmlFor="reject-reason"
+                            className="block text-xs font-medium text-txt-muted"
+                          >
+                            {t.rejectReasonLabel}
+                          </label>
+                          <textarea
+                            id="reject-reason"
+                            value={rejectReason}
+                            onChange={(e) => setRejectReason(e.target.value)}
+                            rows={2}
+                            placeholder={t.rejectReasonPlaceholder}
+                            className="mt-1 w-full rounded-md border border-hairline bg-bg px-3 py-2 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                            data-testid="reject-reason"
+                          />
+                          <Button
+                            type="submit"
+                            size="sm"
+                            variant="outline"
+                            className="mt-2"
+                            disabled={rejecting || rejectReason.trim() === ""}
+                            loading={rejecting}
+                            data-testid="reject-action"
+                          >
+                            {rejecting ? t.rejectingDraft : t.rejectAction}
+                          </Button>
+                          {rejectError && (
+                            <p
+                              className="mt-1 text-sm text-danger"
+                              role="alert"
+                              data-testid="reject-error"
+                            >
+                              {t.rejectFail}
+                            </p>
+                          )}
+                        </form>
+                      </div>
+                    )}
+                  </div>
                 )}
               </div>
+            </section>
+          )}
+
+          {/* Close-without-prescription (US-22) - pending cases only */}
+          {isPrescriptionPending && careCase != null && (
+            <section
+              className="rounded-lg border border-hairline bg-bg p-4"
+              data-testid="case-close"
+            >
+              <h2 className="text-sm font-semibold text-txt">
+                {t.closeWithoutRxHeading}
+              </h2>
+              <p className="mt-1 text-xs text-txt-muted">
+                {t.closeWithoutRxHelp}
+              </p>
+              <form
+                onSubmit={handleClose}
+                className="mt-3 flex flex-wrap items-end gap-3"
+              >
+                <label className="flex-1 min-w-48">
+                  <span className="sr-only">{t.closeReasonLabel}</span>
+                  <select
+                    value={closeReason}
+                    onChange={(e) =>
+                      setCloseReason(e.target.value as CloseReason | "")
+                    }
+                    className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                    data-testid="close-reason-input"
+                  >
+                    <option value="">{t.closeReasonLabel}</option>
+                    {closeReasons.map(({ value, label }) => (
+                      <option key={value} value={value}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <Button
+                  type="submit"
+                  size="sm"
+                  variant="destructive"
+                  disabled={closing || closeReason === ""}
+                  loading={closing}
+                  data-testid="close-case-action"
+                >
+                  {closing ? t.closingCase : t.closeCaseAction}
+                </Button>
+                {closeError && (
+                  <p
+                    className="w-full text-sm text-danger"
+                    role="alert"
+                    data-testid="close-error"
+                  >
+                    {t.closeFail}
+                  </p>
+                )}
+              </form>
             </section>
           )}
 

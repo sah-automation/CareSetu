@@ -1081,6 +1081,53 @@ const en = {
     sourceLabel: "Source",
     sourceAiDraft: "AI draft",
     sourceManual: "Manual",
+    // Approval/rejection/close (#453, US-19..22): the review decision on the
+    // prescription plus close-without-prescription for the case.
+    rxStatusLabel: "Prescription status",
+    rxStatusDraft: "Draft",
+    rxStatusReviewed: "Reviewed",
+    rxStatusRejected: "Rejected",
+    rxStatusIssued: "Issued",
+    rxStatusFulfilled: "Fulfilled",
+    decisionHeading: "Doctor decision",
+    approvalGateTitle: "Review & approve",
+    approvalGateHelp:
+      "Confirm you reviewed every item against the patient record before issuing.",
+    verificationDeclaration:
+      "I have reviewed this prescription (Maine check kar liya)",
+    approveIssueAction: "Approve & issue",
+    approvingIssuance: "Approving",
+    approveBlockedHelp:
+      "Tick the verification declaration to approve and issue the prescription.",
+    approveFail: "Could not approve and issue this prescription.",
+    issuedHeading: "Prescription issued",
+    issuedImmutableNote:
+      "The issued prescription is final and cannot be changed.",
+    issuedAtLabel: "Issued on",
+    issuedAttributedTo: "Attributed to you",
+    rejectAction: "Reject draft",
+    rejectingDraft: "Rejecting",
+    rejectReasonLabel: "Reason for the patient",
+    rejectReasonPlaceholder:
+      "Explain in plain language why this draft was not approved, so the patient understands.",
+    rejectFail: "Could not reject the draft.",
+    rejectedHeading: "Draft rejected",
+    rejectedHelp:
+      "The reason is recorded for the patient. The case stays open - you can request a new draft or close without prescribing.",
+    rejectedReasonLabel: "Recorded reason",
+    closeWithoutRxHeading: "Close without prescription",
+    closeWithoutRxHelp:
+      "Use when no medicine is needed. The case moves to Closed and leaves your pending list.",
+    closeReasonLabel: "Close reason",
+    closeCaseAction: "Close case",
+    closingCase: "Closing",
+    closeFail: "Could not close the case.",
+    closeReasons: {
+      patientWithdrawn: "Patient withdrew",
+      doctorRejected: "Doctor declined treatment",
+      noShow: "Patient did not show up",
+      duplicate: "Duplicate visit",
+    },
   },
 
   // pick.* surface - PHASE-8.1 T11 (#449): the patient pick-a-doctor step
@@ -2093,6 +2140,52 @@ export const STRINGS: Record<Lang, Dictionary> = {
       sourceLabel: "स्रोत",
       sourceAiDraft: "AI मसौदा",
       sourceManual: "मैनुअल",
+      // अनुमोदन/अस्वीकृति/बंद करना (#453, US-19..22): नुस्ख़े पर डॉक्टर का निर्णय
+      // और बिना नुस्ख़े के मामला बंद करना।
+      rxStatusLabel: "नुस्ख़े की स्थिति",
+      rxStatusDraft: "मसौदा",
+      rxStatusReviewed: "समीक्षित",
+      rxStatusRejected: "अस्वीकृत",
+      rxStatusIssued: "जारी हुई",
+      rxStatusFulfilled: "पूर्ण हुई",
+      decisionHeading: "डॉक्टर का निर्णय",
+      approvalGateTitle: "समीक्षा करें और अनुमोदित करें",
+      approvalGateHelp:
+        "जारी करने से पहले पुष्टि करें कि आपने हर वस्तु मरीज़ के रिकॉर्ड के अनुसार जाँची है।",
+      verificationDeclaration:
+        "मैंने यह नुस्ख़ा जाँच लिया है (Maine check kar liya)",
+      approveIssueAction: "अनुमोदित करें और जारी करें",
+      approvingIssuance: "अनुमोदित हो रहा है",
+      approveBlockedHelp:
+        "नुस्ख़ा अनुमोदित और जारी करने के लिए सत्यापन घोषणा पर टिक करें।",
+      approveFail: "यह नुस्ख़ा अनुमोदित और जारी नहीं हो सका।",
+      issuedHeading: "नुस्ख़ा जारी हुआ",
+      issuedImmutableNote: "जारी नुस्ख़ा अंतिम है और बदला नहीं जा सकता।",
+      issuedAtLabel: "जारी हुआ",
+      issuedAttributedTo: "आपको श्रेय",
+      rejectAction: "मसौदा अस्वीकार करें",
+      rejectingDraft: "अस्वीकार हो रहा है",
+      rejectReasonLabel: "मरीज़ के लिए कारण",
+      rejectReasonPlaceholder:
+        "सरल भाषा में बताएँ कि यह मसौदा क्यों अनुमोदित नहीं हुआ, ताकि मरीज़ समझ सके।",
+      rejectFail: "मसौदा अस्वीकार नहीं हो सका।",
+      rejectedHeading: "मसौदा अस्वीकृत",
+      rejectedHelp:
+        "कारण मरीज़ के लिए दर्ज है। मामला खुला रहता है - आप नया मसौदा माँग सकते हैं या बिना नुस्ख़े के बंद कर सकते हैं।",
+      rejectedReasonLabel: "दर्ज कारण",
+      closeWithoutRxHeading: "बिना नुस्ख़े के बंद करें",
+      closeWithoutRxHelp:
+        "जब कोई दवा ज़रूरी न हो तब उपयोग करें। मामला बंद होकर आपकी लंबित सूची से हट जाता है।",
+      closeReasonLabel: "बंद करने का कारण",
+      closeCaseAction: "मामला बंद करें",
+      closingCase: "बंद हो रहा है",
+      closeFail: "मामला बंद नहीं हो सका।",
+      closeReasons: {
+        patientWithdrawn: "मरीज़ ने वापसी ली",
+        doctorRejected: "डॉक्टर ने उपचार अस्वीकार किया",
+        noShow: "मरीज़ उपस्थित नहीं हुए",
+        duplicate: "डुप्लीकेट मुलाक़ात",
+      },
     },
 
     // pick.* सतह - PHASE-8.1 T11 (#449): मरीज़ का डॉक्टर-चुनाव चरण
