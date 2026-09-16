@@ -144,6 +144,10 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         # PHASE-8.1 T07 (#447): the doctor review-queue read - assigned
         # pre-summaries awaiting review, low-confidence first.
         "/v1/intake/review-queue",
+        # PHASE-8.1 T08 (#448): the doctor full pre-summary read - the assigned
+        # doctor reads the pre-summary content (structured summary, confidence
+        # flag, review state) before reviewing it.
+        "/v1/intake/{intake_id}/pre-summary/review",
         # PHASE-8.1 T06 (#444): the doctor-owned consultation fee
         # (integer paise; null = not set) - partner-scoped update surface.
         "/v1/partner/consultation-fee",

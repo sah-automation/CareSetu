@@ -812,6 +812,73 @@ class IntakeFacade:
             for row in rows
         ]
 
+    async def get_doctor_pre_summary(
+        self,
+        *,
+        intake_id: int,
+        doctor_id: int,
+    ) -> PreSummaryView:
+        """Read the full pre-summary content for the assigned doctor (US-13, #448, FEAT-008).
+
+        The doctor full pre-summary read (PHASE-8.1 T08): the first
+        doctor-scoped read to return the pre-summary's CONTENT - the structured
+        summary (``structured_fields``: symptoms, duration, severity, history,
+        medications, allergies), the structuring confidence, the
+        ``low_confidence`` honesty flag (AMB-006), and the review state - so
+        the doctor's review is informed by the patient's own words and the AI
+        summary. Today every other pre-summary read is patient-only and the
+        care-case view returns only the pre-summary id, so this is a genuinely
+        new surface required by any review flow (backend delta 3, #438).
+
+        Assigned-partner scoping (#443), matching ``get_intake_media``: the
+        intake's health information is served only to the doctor recorded in
+        ``assigned_partner_id``. The scoping predicate lives in the JOIN WHERE
+        (data minimization, security standards §2) - an unassigned doctor
+        partner (or one reading before any pick, or a different doctor) matches
+        no row and gets the same 404 as a non-owner, so the intake's existence
+        is never revealed. The read returns any review state (draft/reviewed/
+        final) - it carries state, it does not gate on it.
+
+        Raises :class:`IntakeNotFoundError` when no intake assigned to
+        ``doctor_id`` has a pre-summary for the given ``intake_id``.
+        """
+        async with self._engine.begin() as connection:
+            row = (
+                await connection.execute(
+                    select(intake_pre_summaries)
+                    .select_from(
+                        intake_pre_summaries.join(
+                            intake_intakes,
+                            intake_intakes.c.id == intake_pre_summaries.c.intake_id,
+                        )
+                    )
+                    .where(
+                        intake_pre_summaries.c.intake_id == intake_id,
+                        intake_intakes.c.assigned_partner_id == doctor_id,
+                    )
+                )
+            ).first()
+            if row is None:
+                raise IntakeNotFoundError(
+                    f"pre-summary not found for intake {intake_id} assigned to doctor {doctor_id}"
+                )
+
+        return PreSummaryView(
+            pre_summary_id=int(row.id),
+            intake_id=int(row.intake_id),
+            structured_fields=StructuredFields.model_validate(row.structured_fields or {}),
+            structuring_confidence=row.structuring_confidence,
+            low_confidence=row.low_confidence,
+            review_state=row.review_state,
+            patient_edits=dict(row.patient_edits) if row.patient_edits else None,
+            doctor_corrections=dict(row.doctor_corrections) if row.doctor_corrections else None,
+            review_attribution=row.review_attribution,
+            reviewed_by=int(row.reviewed_by) if row.reviewed_by is not None else None,
+            reviewed_at=row.reviewed_at,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
     async def mark_pre_summary_reviewed(
         self,
         *,

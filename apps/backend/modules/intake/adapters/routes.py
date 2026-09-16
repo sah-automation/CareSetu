@@ -295,6 +295,42 @@ async def list_review_queue(
 
 
 @router.get(
+    "/{intake_id}/pre-summary/review",
+    response_model=PreSummaryView,
+    status_code=status.HTTP_200_OK,
+    summary="Read the full pre-summary content for review (doctor only)",
+)
+async def get_doctor_pre_summary(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+    intake_id: int,
+) -> PreSummaryView:
+    """Read the full pre-summary content for the assigned doctor (US-13, #448, FEAT-008).
+
+    Thin doctor-scoped adapter (PHASE-8.1 T08): the ``require_partner`` gate
+    admits any partner-scoped caller, then the principal is resolved to their
+    partner profile and a non-doctor partner is refused with 403 - the doctor
+    RBAC convention (partner scope + ``partner_type == "doctor"``, matching
+    the review and queue routes). The facade returns the full pre-summary
+    content (structured summary, symptoms, confidence flag, review state) only
+    for an intake the patient assigned to this doctor (#443); an unassigned or
+    other doctor gets the same 404 as a non-owner. A distinct surface from the
+    patient GET ``/{intake_id}/pre-summary`` - the patient's read is unchanged
+    and the care-case view keeps returning only the pre-summary id.
+    """
+    facade = cast(IntakeFacade, request.app.state.intake_facade)
+    partner = await cast(PartnerFacade, request.app.state.partner_facade).resolve_partner(
+        _resolve_subject_id(account)
+    )
+    if partner.partner_type != "doctor":
+        raise InsufficientScopeError("the doctor role is required for this route")
+    return await facade.get_doctor_pre_summary(
+        intake_id=intake_id,
+        doctor_id=partner.partner_id,
+    )
+
+
+@router.get(
     "/{intake_id}",
     response_model=IntakeDetailView,
     status_code=status.HTTP_200_OK,
