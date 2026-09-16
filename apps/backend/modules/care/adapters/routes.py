@@ -444,6 +444,32 @@ async def get_approved_prescription(
     return await facade.get_approved_prescription(rx_id=rx_id, doctor_id=doctor_id)
 
 
+@router.get(
+    "/cases/{case_id}/rx/current",
+    response_model=PrescriptionDetailView,
+    status_code=status.HTTP_200_OK,
+    summary="Get the doctor's in-progress prescription revision (doctor only)",
+)
+async def get_working_prescription(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+    case_id: int,
+) -> PrescriptionDetailView:
+    """Read the in-progress prescription revision for a pending case.
+
+    Thin doctor-scoped adapter: the facade serves ONLY the working revision -
+    ``Draft``, ``DoctorReviewed``, or ``Rejected`` - so a pending case's
+    in-progress prescription work survives a hard refresh (PHASE-8.1 US-23).
+    An issued prescription reads as ``CARE_NOT_FOUND`` from here; the
+    approved read (``get_approved_prescription``) remains the single
+    issued-artifact path, and a foreign or unassigned doctor's case is
+    refused with the not-found envelope.
+    """
+    facade = cast(PrescriptionFacade, request.app.state.prescription_facade)
+    doctor_id = await _require_doctor(request, account)
+    return await facade.get_working_prescription(case_id=case_id, doctor_id=doctor_id)
+
+
 @router.post(
     "/cases/{case_id}/close",
     response_model=CaseDetailView,

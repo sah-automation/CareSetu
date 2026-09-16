@@ -684,6 +684,73 @@ class PrescriptionFacade:
             updated_at=rx_row.updated_at,
         )
 
+    async def get_working_prescription(
+        self, *, case_id: int, doctor_id: int
+    ) -> PrescriptionDetailView:
+        """Read the doctor's in-progress prescription revision for a case.
+
+        The reload seam for a pending case (PHASE-8.1 US-23 / #452): returns
+        the current ``care_prescriptions`` row while it is still in work -
+        ``Draft`` (a raw ``ai_draft`` with no saved revision reads as an empty
+        working revision against the immutable ``draft_snapshot``), the
+        ``DoctorReviewed`` state, or a ``Rejected`` revision awaiting a redraft
+        (CONTEXT.md glossary, ``drafting cap``). The payload is the working
+        revision - the same row and ``care_rx_items`` the revision-save
+        mutation writes - never a reconstruction from the draft snapshot.
+
+        The issued-prescription path is deliberately untouched: an approved
+        ``issued`` or ``Fulfilled`` prescription is NOT served here, so
+        ``get_approved_prescription`` stays the single issued-artifact source
+        (CONTEXT.md glossary, ``e-prescription``) for a PrescriptionPending
+        or Closed case. A case with no prescription row yet reads as not
+        found too.
+
+        Doctor-scoped: raises unless the case belongs to ``doctor_id``; a
+        foreign doctor or unassigned case reads as not found.
+
+        Raises :class:`CareNotFoundError` when the case does not exist for the
+        doctor, when it has no prescription row, or when the prescription is
+        not an in-progress (draft / doctor_reviewed / rejected) revision.
+        """
+        async with self._engine.begin() as connection:
+            await check_case_ownership(connection, doctor_id=doctor_id, case_id=case_id)
+            rx_row = (
+                await connection.execute(
+                    select(care_prescriptions).where(care_prescriptions.c.case_id == case_id)
+                )
+            ).first()
+            if rx_row is None:
+                raise CareNotFoundError(f"no working prescription for case {case_id}")
+            current = PrescriptionStatus(rx_row.status)
+            if current not in (
+                PrescriptionStatus.DRAFT,
+                PrescriptionStatus.DOCTOR_REVIEWED,
+                PrescriptionStatus.REJECTED,
+            ):
+                raise CareNotFoundError(f"no working prescription for case {case_id}")
+
+            item_rows = (
+                await connection.execute(
+                    select(care_rx_items)
+                    .where(care_rx_items.c.prescription_id == int(rx_row.id))
+                    .order_by(care_rx_items.c.sequence.asc())
+                )
+            ).all()
+
+        return PrescriptionDetailView(
+            prescription_id=int(rx_row.id),
+            case_id=case_id,
+            status=rx_row.status,
+            source=rx_row.source,
+            attempt_no=int(rx_row.attempt_no),
+            draft_snapshot=rx_row.draft_snapshot,
+            issued_at=rx_row.issued_at,
+            attributed_doctor=rx_row.attributed_doctor,
+            items=[_to_rx_item_view(row) for row in item_rows],
+            created_at=rx_row.created_at,
+            updated_at=rx_row.updated_at,
+        )
+
     # -----------------------------------------------------------------
     # AI-draft generation (private)
     # -----------------------------------------------------------------

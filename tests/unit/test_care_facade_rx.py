@@ -1020,3 +1020,104 @@ async def test_get_approved_prescription_rejects_unclaimed_born_case() -> None:
 
     with pytest.raises(CareNotFoundError, match="not found for doctor"):
         await facade.get_approved_prescription(rx_id=1, doctor_id=42)
+
+
+# ========================================================================
+# get_working_prescription
+# ========================================================================
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rx_status", ["draft", "doctor_reviewed", "rejected"])
+async def test_get_working_prescription_returns_in_progress_state(rx_status: str) -> None:
+    care_conn = _connection(
+        [
+            _FakeResult(row=_case_row()),
+            _FakeResult(row=_rx_row(status=rx_status)),
+            _FakeResult(rows=[_rx_item_row()]),
+        ]
+    )
+    facade = _care_facade(care_conn, _intake_facade(_connection([])))
+
+    result = await facade.get_working_prescription(case_id=1, doctor_id=42)
+
+    assert isinstance(result, PrescriptionDetailView)
+    assert result.status == rx_status
+    assert len(result.items) == 1
+    stmts = _statements(care_conn)
+    rx_select = stmts[1]
+    compiled_params = dict(rx_select.compile().params)
+    assert 1 in compiled_params.values()
+    assert "care_prescriptions" in str(rx_select.compile())
+
+
+@pytest.mark.asyncio
+async def test_get_working_prescription_draft_without_revision_has_empty_items() -> None:
+    care_conn = _connection(
+        [
+            _FakeResult(row=_case_row()),
+            _FakeResult(row=_rx_row(status="draft", draft_snapshot=AI_SNAPSHOT)),
+            _FakeResult(rows=[]),
+        ]
+    )
+    facade = _care_facade(care_conn, _intake_facade(_connection([])))
+
+    result = await facade.get_working_prescription(case_id=1, doctor_id=42)
+
+    assert result.status == "draft"
+    assert result.items == []
+    assert result.draft_snapshot == AI_SNAPSHOT
+
+
+@pytest.mark.asyncio
+async def test_get_working_prescription_raises_when_no_prescription_row() -> None:
+    care_conn = _connection(
+        [
+            _FakeResult(row=_case_row()),
+            _FakeResult(row=None),
+        ]
+    )
+    facade = _care_facade(care_conn, _intake_facade(_connection([])))
+
+    with pytest.raises(CareNotFoundError, match="no working prescription for case"):
+        await facade.get_working_prescription(case_id=1, doctor_id=42)
+
+
+@pytest.mark.asyncio
+async def test_get_working_prescription_raises_for_issued_prescription() -> None:
+    care_conn = _connection(
+        [
+            _FakeResult(row=_case_row()),
+            _FakeResult(row=_rx_row(status="issued", issued_at=NOW, attributed_doctor=42)),
+        ]
+    )
+    facade = _care_facade(care_conn, _intake_facade(_connection([])))
+
+    with pytest.raises(CareNotFoundError, match="no working prescription for case"):
+        await facade.get_working_prescription(case_id=1, doctor_id=42)
+
+
+@pytest.mark.asyncio
+async def test_get_working_prescription_rejects_foreign_doctor() -> None:
+    care_conn = _connection(
+        [
+            _FakeResult(row=_case_row(doctor_id=7)),
+        ]
+    )
+    facade = _care_facade(care_conn, _intake_facade(_connection([])))
+
+    with pytest.raises(CareNotFoundError, match="not found for doctor"):
+        await facade.get_working_prescription(case_id=1, doctor_id=42)
+
+
+@pytest.mark.asyncio
+async def test_get_working_prescription_rejects_unclaimed_born_case() -> None:
+    care_conn = _connection(
+        [
+            _FakeResult(row=_case_row(doctor_id=None)),
+        ]
+    )
+    facade = _care_facade(care_conn, _intake_facade(_connection([])))
+
+    with pytest.raises(CareNotFoundError, match="not found for doctor"):
+        await facade.get_working_prescription(case_id=1, doctor_id=42)

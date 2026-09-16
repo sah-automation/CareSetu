@@ -272,6 +272,11 @@ class StubPrescriptionFacade(_StubCareBase):
         self._maybe_raise()
         return self.rx_issued_view
 
+    async def get_working_prescription(self, **kwargs: object) -> PrescriptionDetailView:
+        self.called_with.append(("get_working_prescription", dict(kwargs)))
+        self._maybe_raise()
+        return self.rx_draft_view
+
 
 class StubPartnerFacade:
     """Minimal partner facade stand-in: resolve_partner replays one profile."""
@@ -1161,3 +1166,64 @@ def test_close_no_key_passes_through_without_store_interaction() -> None:
         "close_case_without_rx",
         "close_case_without_rx",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Tests: get_working_prescription
+# ---------------------------------------------------------------------------
+
+
+_RX_WORKING_VIEW = PrescriptionDetailView(
+    prescription_id=301,
+    case_id=42,
+    status="draft",
+    source="ai_draft",
+    attempt_no=1,
+    draft_snapshot={},
+    issued_at=None,
+    attributed_doctor=None,
+    items=[],
+    created_at=_T,
+    updated_at=_T,
+)
+
+
+def test_get_working_prescription_returns_view() -> None:
+    facade = StubPrescriptionFacade()
+    facade.rx_draft_view = _RX_WORKING_VIEW
+    client = _client(rx_facade=facade)
+
+    response = client.get("/v1/care/cases/42/rx/current", headers=_bearer(_token()))
+
+    assert response.status_code == 200
+    assert response.json() == _RX_WORKING_VIEW.model_dump(mode="json")
+    assert facade.called_with == [("get_working_prescription", {"case_id": 42, "doctor_id": 5})]
+
+
+def test_get_working_prescription_not_found_envelope() -> None:
+    facade = StubPrescriptionFacade()
+    facade.error = CareNotFoundError("no working prescription for case 42")
+    client = _client(rx_facade=facade)
+
+    response = client.get("/v1/care/cases/42/rx/current", headers=_bearer(_token()))
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "CARE_NOT_FOUND"
+
+
+def test_get_working_prescription_unauthenticated_rejected() -> None:
+    client = _client()
+
+    response = client.get("/v1/care/cases/42/rx/current")
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "AUTH_UNAUTHENTICATED"
+
+
+def test_get_working_prescription_non_doctor_rejected() -> None:
+    client = _client(partner=_LAB_PARTNER)
+
+    response = client.get("/v1/care/cases/42/rx/current", headers=_bearer(_token()))
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "AUTH_INSUFFICIENT_SCOPE"
