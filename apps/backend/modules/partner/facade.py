@@ -155,6 +155,9 @@ from modules.partner.domain.exceptions import (
     AppealAlreadyUsedError as AppealAlreadyUsedError,
 )
 from modules.partner.domain.exceptions import (
+    ConsultationFeeNotAllowedError as ConsultationFeeNotAllowedError,
+)
+from modules.partner.domain.exceptions import (
     PartnerNotFoundError as PartnerNotFoundError,
 )
 from modules.partner.domain.exceptions import (
@@ -217,6 +220,9 @@ from modules.partner.shared import (
 )
 from modules.partner.shared import (
     load_profile as _load_profile,
+)
+from modules.partner.shared import (
+    load_profile_by_identity as _load_profile_by_identity,
 )
 
 # The Phase-5 launch service area (REQ-008): a partner that does not declare a
@@ -751,6 +757,63 @@ class PartnerFacade:
         exposed: artifact refs, emails, phones, PHI.
         """
         return await self._directory.get_provider_profile(partner_id)
+
+    async def update_consultation_fee(
+        self,
+        identity_id: int,
+        *,
+        fee_paise: int | None,
+    ) -> PartnerView:
+        """Set or clear the calling doctor's consultation fee (PHASE-8.1 T06, #444).
+
+        Partner-scoped profile mutation: resolves the authenticated partner
+        principal (``identity_id``) to their own profile and writes the nullable
+        ``consultation_fee_paise`` (integer paise). Only a doctor partner may
+        set a fee - a lab or chemist (or any other principal) is refused with
+        :class:`ConsultationFeeNotAllowedError` (mapped to a 403); the check
+        lives here in the facade, never just the router (coding-standards §4
+        pre-conditions in the domain core).
+
+        ``fee_paise`` is the integer-paise amount the doctor charges, or ``None``
+        to clear the fee back to unset (null). No credential gate rides the fee -
+        it is NOT PHI and never blocks a pick: an unset fee stays null on the
+        directory entry and provider profile projection and the client renders
+        "fee not set" (the pick never requires a fee).
+
+        The fee surfaces on the directory search cache, so after the commit the
+        directory-search namespace is flushed (best-effort Redis op). A failed
+        flush leaves the accelerator serving the previous fee until its TTL -
+        never a correctness surface, since the fee is non-PHI and never gates a
+        pick; a later fee change or the accelerated item's expiry reconciles it.
+        This is the same best-effort pattern the operator gate uses on
+        activation.
+        """
+        async with self._engine.begin() as connection:
+            profile = await _load_profile_by_identity(connection, identity_id)
+            if profile is None:
+                raise PartnerNotFoundError(identity_id)
+            if profile.partner_type != "doctor":
+                raise ConsultationFeeNotAllowedError()
+            await connection.execute(
+                partner_profiles.update()
+                .where(partner_profiles.c.id == profile.partner_id)
+                .values(
+                    consultation_fee_paise=fee_paise,
+                    updated_at=func.now(),
+                )
+            )
+        # A fee change makes every cached search result potentially stale (the
+        # cached items serialize the fee). Flush the namespace best-effort; a
+        # failed flush serves the previous fee until TTL - acceptable for a
+        # non-PHI, never-gating display field (ADR-0011 keeps SQL authoritative
+        # and the accelerator purely a freshness accelerator).
+        await self._directory_cache.directory_visibility_changed()
+        return PartnerView(
+            partner_id=profile.partner_id,
+            partner_type=profile.partner_type,
+            status=profile.status,
+            round=profile.round,
+        )
 
     async def get_verification_detail(
         self, partner_id: int, actor_id: int

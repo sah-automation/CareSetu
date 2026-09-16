@@ -87,6 +87,19 @@ DALTONGANJ_LATITUDE = 24.04
 DALTONGANJ_LONGITUDE = 84.07
 
 
+def _row_fee_paise(row: Any) -> int | None:
+    """The projected ``consultation_fee`` column, or ``None`` when absent.
+
+    The search and profile SELECTs always carry the fee as an integer-paise
+    column, but rows read from the Redis accelerator's older payloads (or the
+    mocked seams) may lack it - exactly like ``appeal_used`` in
+    ``shared._to_profile``, a defensive attribute read keeps those surfaces
+    ``None`` instead of raising (PHASE-8.1 T06, #444).
+    """
+    value = getattr(row, "consultation_fee", None)
+    return None if value is None else int(value)
+
+
 def _haversine_km(latitude: float, longitude: float) -> Any:
     """Haversine great-circle distance in km from the caller point to a row.
 
@@ -225,6 +238,7 @@ class DirectoryFacade:
                     partner_directory_index.c.specialty,
                     partner_profiles.c.practice_name,
                     partner_service_areas.c.name.label("area_name"),
+                    partner_profiles.c.consultation_fee_paise.label("consultation_fee"),
                     distance_km.label("distance_km"),
                 )
                 .join(
@@ -285,6 +299,7 @@ class DirectoryFacade:
                     ),
                     distance_km=float(row.distance_km),
                     verified=True,
+                    consultation_fee=_row_fee_paise(row),
                 )
                 for row in rows
             ],
@@ -362,6 +377,7 @@ class DirectoryFacade:
                         partner_directory_index.c.specialty,
                         partner_profiles.c.practice_name,
                         partner_service_areas.c.name.label("area_name"),
+                        partner_profiles.c.consultation_fee_paise.label("consultation_fee"),
                     )
                     .join(
                         partner_profiles,
@@ -402,6 +418,7 @@ class DirectoryFacade:
             specialty=(str(row.specialty) if row.specialty is not None else None),
             area=(str(row.area_name) if row.area_name is not None else DEFAULT_SERVICE_AREA_NAME),
             verified=True,
+            consultation_fee=_row_fee_paise(row),
             credentials=[
                 ProviderCredential(
                     credential_type=str(c.credential_type),

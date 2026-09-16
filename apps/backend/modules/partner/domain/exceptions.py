@@ -85,6 +85,17 @@ class RejectionReasonRequiredError(PartnerError):
     """
 
 
+class ConsultationFeeNotAllowedError(PartnerError):
+    """Only a doctor partner may set or update a consultation fee (PHASE-8.1 #444).
+
+    Raised when a non-doctor partner (lab, chemist) attempts to update their
+    consultation fee through the partner-scoped endpoint. The fee is
+    doctor-only by design (glossary: consultation fee applies to doctor
+    consultations only). The route maps this to a 403 with the envelope code
+    ``CONSULTATION_FEE_NOT_ALLOWED``.
+    """
+
+
 class PartnerNotRejectedError(PartnerError):
     """The recovery action requires the partner to be in the ``[Rejected]`` state.
 

@@ -80,6 +80,11 @@ partner_profiles = Table(
     Column("re_submission_count", BigInteger, nullable=False, server_default=text("0")),
     Column("re_submission_blocked_until", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column(
+        "consultation_fee_paise",
+        BigInteger,
+        nullable=True,
+    ),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     UniqueConstraint("identity_id", name="uq_partner_profiles_identity"),
     CheckConstraint(
@@ -97,6 +102,10 @@ partner_profiles = Table(
     CheckConstraint(
         "practice_latitude BETWEEN -90 AND 90",
         name="ck_partner_profiles_latitude",
+    ),
+    CheckConstraint(
+        "consultation_fee_paise IS NULL OR consultation_fee_paise >= 0",
+        name="ck_partner_profiles_consultation_fee",
     ),
 )
 

@@ -33,6 +33,7 @@ class StubProfileFacade:
             specialty="General Physician",
             area="Daltonganj",
             verified=True,
+            consultation_fee=50000,
             credentials=[
                 ProviderCredential(
                     credential_type="medical_registration",
@@ -79,7 +80,20 @@ def test_profile_answers_typed_view_with_safe_fields() -> None:
     assert body["specialty"] == "General Physician"
     assert body["area"] == "Daltonganj"
     assert body["verified"] is True
+    assert body["consultation_fee"] == 50000
     assert body["credentials"] == [facade.view.credentials[0].model_dump(mode="json")]
+
+
+def test_profile_serializes_unset_fee_as_null() -> None:
+    """An unset consultation fee stays null on the profile projection - never a 0."""
+    facade = StubProfileFacade()
+    facade.view = facade.view.model_copy(update={"consultation_fee": None})
+    client = _client_with(facade)
+
+    response = client.get("/v1/directory/providers/11")
+
+    assert response.status_code == 200
+    assert response.json()["consultation_fee"] is None
 
 
 def test_profile_disallowed_fields_never_serialized() -> None:

@@ -33,6 +33,7 @@ from modules.partner.domain.credentials import CredentialType, Specialty
 from modules.partner.domain.events import PartnerType
 from modules.partner.domain.exceptions import (
     AppealAlreadyUsedError,
+    ConsultationFeeNotAllowedError,
     IllegalPartnerTransitionError,
     InvalidQueueSortError,
     InvalidQueueStatusError,
@@ -545,6 +546,58 @@ async def grace_window_lapse(
     return await facade.grace_lapse(int(partner_id))
 
 
+class ConsultationFeeRequest(BaseModel):
+    """Body of ``PATCH /v1/partner/consultation-fee`` (PHASE-8.1 T06, #444).
+
+    ``fee_paise`` is the doctor's consultation fee in integer paise
+    (api-standards §3), REQUIRED but nullable: a non-null value sets the fee,
+    ``null`` clears it back to unset. The fee is NOT PHI and needs no credential
+    gate - an unset fee never blocks a pick (the client renders "fee not set").
+    The doctor-only rule (a lab/chemist partner may not set a fee) is enforced
+    in the facade, not this adapter.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    fee_paise: int | None = Field(
+        ge=0,
+        description="Consultation fee in integer paise; null clears it back to unset",
+    )
+
+
+@router.patch(
+    "/consultation-fee",
+    response_model=PartnerView,
+    status_code=status.HTTP_200_OK,
+    summary="Set or clear the doctor's own consultation fee (partner only, doctor only)",
+)
+async def update_consultation_fee(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+    body: ConsultationFeeRequest,
+) -> PartnerView:
+    """A doctor sets (or clears) their own consultation fee (PHASE-8.1, #444).
+
+    A thin partner-scoped adapter: resolves the authenticated partner principal
+    to their own profile and writes the nullable fee. The facade refuses any
+    non-doctor partner with :class:`ConsultationFeeNotAllowedError` (mapped to
+    the 403 ``CONSULTATION_FEE_NOT_ALLOWED`` envelope) - a lab or chemist cannot
+    carry a consultation fee. Only the caller's own record is touched - no
+    cross-partner mutation (restricted scope). Idempotent (api-standards 5): a
+    duplicate ``Idempotency-Key`` replays the stored result without re-executing
+    the facade call.
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+
+    async def _call() -> PartnerView:
+        return await facade.update_consultation_fee(
+            int(account.subject_id),
+            fee_paise=body.fee_paise,
+        )
+
+    return await run_idempotent(request, _call)
+
+
 def _decode_artifact(b64: str) -> bytes:
     """Decode a base64 artifact, rejecting malformed input (never stored raw)."""
     try:
@@ -665,6 +718,16 @@ def register_error_handlers(app: FastAPI) -> None:
             request=request,
         )
 
+    async def _consultation_fee_not_allowed(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        return error_response(
+            status.HTTP_403_FORBIDDEN,
+            "CONSULTATION_FEE_NOT_ALLOWED",
+            "only a doctor partner can set a consultation fee",
+            log_tag="partner_fee",
+            request=request,
+        )
+
     async def _provider_profile_not_found(request: Request, exc: Exception) -> JSONResponse:
         del exc
         return error_response(
@@ -683,5 +746,6 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(AppealAlreadyUsedError, _appeal_already_used)
     app.add_exception_handler(ReSubmissionThrottledError, _re_submission_throttled)
     app.add_exception_handler(IllegalPartnerTransitionError, _illegal_transition)
+    app.add_exception_handler(ConsultationFeeNotAllowedError, _consultation_fee_not_allowed)
     app.add_exception_handler(ProviderProfileNotFoundError, _provider_profile_not_found)
     app.add_exception_handler(PartnerError, _partner_failed)
