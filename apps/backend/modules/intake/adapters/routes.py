@@ -53,6 +53,7 @@ from modules.intake.intake_models import (
     PreSummaryReviewResult,
     PreSummaryView,
     ReRecordResult,
+    ReviewQueueItem,
     canonical_media_type,
 )
 from modules.partner.facade import PartnerFacade
@@ -260,6 +261,37 @@ async def re_record_intake(
         patient_id=_resolve_subject_id(_account),
         media_ref=body.media_ref,
     )
+
+
+@router.get(
+    "/review-queue",
+    response_model=list[ReviewQueueItem],
+    status_code=status.HTTP_200_OK,
+    summary="List pre-summaries awaiting the calling doctor's review (doctor only)",
+)
+async def list_review_queue(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+) -> list[ReviewQueueItem]:
+    """List the doctor's assigned pre-summaries awaiting review (US-11/12, #447).
+
+    Thin doctor-scoped adapter (PHASE-8.1 T07): the ``require_partner`` gate
+    admits any partner-scoped caller, then the principal is resolved to their
+    partner profile and a non-doctor partner is refused with 403 - the doctor
+    RBAC convention (partner scope + ``partner_type == "doctor"``, matching
+    the review route). The facade returns only pre-summaries on intakes the
+    patient assigned to this doctor (#443) that still await review,
+    low-confidence first and each carrying the confidence flag. Open care
+    cases continue to come from the existing doctor-scoped case list; the
+    console merges the two lists client-side (backend delta 2, #438).
+    """
+    facade = cast(IntakeFacade, request.app.state.intake_facade)
+    partner = await cast(PartnerFacade, request.app.state.partner_facade).resolve_partner(
+        _resolve_subject_id(account)
+    )
+    if partner.partner_type != "doctor":
+        raise InsufficientScopeError("the doctor role is required for this route")
+    return await facade.list_review_queue(doctor_id=partner.partner_id)
 
 
 @router.get(

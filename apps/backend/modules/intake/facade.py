@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
 from cryptography.exceptions import InvalidTag
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.config import get_settings
@@ -82,6 +82,7 @@ from modules.intake.intake_models import (
     PreSummaryReviewResult,
     PreSummaryView,
     ReRecordResult,
+    ReviewQueueItem,
     RxDraftItem,
     RxDraftResult,
     StructuredFields,
@@ -744,6 +745,72 @@ class IntakeFacade:
             pre_summary_id=int(row.id),
             patient_edits=merged_edits,
         )
+
+    async def list_review_queue(
+        self,
+        *,
+        doctor_id: int,
+    ) -> list[ReviewQueueItem]:
+        """List the doctor's assigned pre-summaries still awaiting review (US-11/12).
+
+        The doctor review-queue read (PHASE-8.1 T07, #447): every pre-summary
+        on an intake the patient assigned to ``doctor_id`` (pick, #443) that
+        is still in the ``draft`` review state - awaiting the doctor's review.
+        Ordered low-confidence first (US-12, the AMB-006 honesty priority:
+        the summaries that most need the doctor's attention surface before the
+        clean ones), then newest-created first within each confidence class so
+        a waiting list never reorders under concurrent review activity. Each
+        item carries the ``low_confidence`` flag (the AMB-006 cue).
+
+        ``doctor_id`` is the partner identity of the calling doctor (RBAC
+        enforced at the route seam). The scoping predicate lives in the JOIN
+        WHERE (data minimization, security standards §2): an unassigned doctor
+        matches no rows, so an intake assigned to a different doctor is never
+        revealed. Open care cases continue to come from the existing
+        doctor-scoped case list; this endpoint returns only the review queue
+        and the console merges the two lists client-side.
+        """
+        async with self._engine.begin() as connection:
+            rows = (
+                await connection.execute(
+                    select(
+                        intake_pre_summaries.c.id,
+                        intake_pre_summaries.c.intake_id,
+                        intake_pre_summaries.c.structuring_confidence,
+                        intake_pre_summaries.c.low_confidence,
+                        intake_pre_summaries.c.review_state,
+                        intake_pre_summaries.c.created_at,
+                        intake_pre_summaries.c.updated_at,
+                    )
+                    .select_from(
+                        intake_pre_summaries.join(
+                            intake_intakes,
+                            intake_intakes.c.id == intake_pre_summaries.c.intake_id,
+                        )
+                    )
+                    .where(
+                        intake_intakes.c.assigned_partner_id == doctor_id,
+                        intake_pre_summaries.c.review_state == PreSummaryStatus.DRAFT.value,
+                    )
+                    .order_by(
+                        case((intake_pre_summaries.c.low_confidence.is_(True), 0), else_=1),
+                        intake_pre_summaries.c.created_at.desc(),
+                    )
+                )
+            ).all()
+
+        return [
+            ReviewQueueItem(
+                pre_summary_id=int(row.id),
+                intake_id=int(row.intake_id),
+                structuring_confidence=row.structuring_confidence,
+                low_confidence=row.low_confidence,
+                review_state=row.review_state,
+                created_at=row.created_at,
+                updated_at=row.updated_at,
+            )
+            for row in rows
+        ]
 
     async def mark_pre_summary_reviewed(
         self,

@@ -141,6 +141,9 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/intake/{intake_id}/media/{media_ref_id}",
         # PHASE-8.1 T05 (#443): the patient pick-a-doctor + consent write.
         "/v1/intake/{intake_id}/pick-doctor",
+        # PHASE-8.1 T07 (#447): the doctor review-queue read - assigned
+        # pre-summaries awaiting review, low-confidence first.
+        "/v1/intake/review-queue",
         # PHASE-8.1 T06 (#444): the doctor-owned consultation fee
         # (integer paise; null = not set) - partner-scoped update surface.
         "/v1/partner/consultation-fee",

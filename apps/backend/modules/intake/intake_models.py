@@ -218,6 +218,31 @@ class PreSummaryView(BaseModel):
         return float(value) if value is not None else None
 
 
+class ReviewQueueItem(BaseModel):
+    """One pre-summary awaiting the assigned doctor's review (PHASE-8.1 T07, #447).
+
+    The doctor review-queue read (backend delta 2, #438): an assigned
+    pre-summary still in ``draft`` - awaiting review - surfaced low-confidence
+    first and carrying its confidence flag, so the doctor console queue can
+    prioritize the summaries that most need attention (US-11/12).
+    ``pre_summary_id`` + ``intake_id`` are the keys the console uses to open
+    the review workspace; ``low_confidence`` is the AMB-006 honesty cue.
+    """
+
+    pre_summary_id: int
+    intake_id: int
+    structuring_confidence: Decimal | float | None
+    low_confidence: bool
+    review_state: str
+    created_at: datetime
+    updated_at: datetime
+
+    @field_serializer("structuring_confidence")
+    def _serialize_confidence(self, value: Decimal | float | None) -> float | None:
+        """Emit the confidence as a JSON number, never a Decimal-backed string."""
+        return float(value) if value is not None else None
+
+
 class PatientEditsResult(BaseModel):
     """The result of ``save_patient_pre_summary_edits`` (PHASE-7 T09, #353).
 
