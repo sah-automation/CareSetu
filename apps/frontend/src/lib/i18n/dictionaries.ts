@@ -984,20 +984,43 @@ const en = {
     profileComingSoon: "Profile - coming soon",
   },
 
-  // pick.* surface - PHASE-8.1 T10 (#446): the patient pick-a-doctor step
-  // skeleton (suggested specialty, verified doctor cards, consent sheet,
-  // confirmation). Skeleton strings only - the pick screens land in the later
-  // PHASE-8.1 tickets.
+  // pick.* surface - PHASE-8.1 T11 (#449): the patient pick-a-doctor step
+  // (suggested specialty, verified doctor cards, consent sheet, confirmation).
+  // Suggested specialty is a start-here filter, not blocking choice (US-2/US-3).
   pick: {
     title: "Choose your doctor",
     subtitle: "Pick the doctor who will review your pre-summary",
     suggestedSpecialtyLabel: "Suggested for you",
+    suggestionNote: "You can choose any verified doctor",
     bookCta: "Book with this doctor",
+    viewProfile: "View verified profile",
     feeNotSet: "Fee not set",
+    feeLabel: "Consultation fee",
+    credentialsVerified: "Credentials verified",
+    noDoctorsTitle: "No doctors found",
+    noDoctorsBody:
+      "There are no verified doctors available for this specialty right now.",
+    lowConfidenceHint:
+      "Your pre-summary needs review. You can edit your symptoms before choosing a doctor.",
+    editSymptoms: "Edit symptoms",
     allow: "Allow",
     consentTitle: "Sharing your pre-summary",
+    consentScope:
+      "This doctor will see your symptoms summary and relevant health history to guide your consultation.",
+    consentValidity: "This access lasts until you revoke it.",
     confirmTitle: "Doctor chosen",
     confirmBody: "Your pre-summary is now visible to this doctor only.",
+    whatHappensNext: "What happens next",
+    whatHappensNextItems:
+      "The doctor reviews your pre-summary. If needed, they will contact you for a consultation. You can track the status from your intake page.",
+    loading: "Finding verified doctors…",
+    recordingChoice: "Recording your choice…",
+    genericError: "Something went wrong. Please try again.",
+    viewIntakeStatus: "View intake status",
+    errorTitle: "We couldn't load the doctor list",
+    errorBody: "Check your connection and try again.",
+    retry: "Try again",
+    breadcrumb: "Choose doctor",
   },
 };
 
@@ -1878,19 +1901,43 @@ export const STRINGS: Record<Lang, Dictionary> = {
       profileComingSoon: "प्रोफ़ाइल - जल्द आ रहा है",
     },
 
-    // pick.* सतह - PHASE-8.1 T10 (#446): मरीज़ का डॉक्टर-चुनाव चरण स्केलेटन
+    // pick.* सतह - PHASE-8.1 T11 (#449): मरीज़ का डॉक्टर-चुनाव चरण
     // (सुझाया गया विशेषज्ञता, सत्यापित डॉक्टर कार्ड, सहमति शीट, पुष्टि)।
-    // केवल स्केलेटन स्ट्रिंग - पिक स्क्रीन बाद के PHASE-8.1 टिकटों में आएँगी।
+    // सुझाव शुरू-यहाँ से फ़िल्टर है, पूरे चुनाव में बाधा नहीं (US-2/US-3)।
     pick: {
       title: "अपना डॉक्टर चुनें",
       subtitle: "अपना डॉक्टर चुनें जो आपके प्री-सारांश की जाँच करेगा",
       suggestedSpecialtyLabel: "आपके लिए सुझाव",
+      suggestionNote: "आप कोई भी सत्यापित डॉक्टर चुन सकते हैं",
       bookCta: "इस डॉक्टर के साथ बुक करें",
+      viewProfile: "सत्यापित प्रोफ़ाइल देखें",
       feeNotSet: "फ़ीस निर्धारित नहीं",
+      feeLabel: "परामर्श शुल्क",
+      credentialsVerified: "प्रमाणपत्र सत्यापित",
+      noDoctorsTitle: "कोई डॉक्टर नहीं मिला",
+      noDoctorsBody:
+        "अभी इस विशेषज्ञता में कोई सत्यापित डॉक्टर उपलब्ध नहीं है।",
+      lowConfidenceHint:
+        "आपके प्री-सारांश की समीक्षा ज़रूरी है। डॉक्टर चुनने से पहले अपने लक्षण बदल सकते हैं।",
+      editSymptoms: "लक्षण बदलें",
       allow: "मंज़ूर करें",
       consentTitle: "अपना प्री-सारांश साझा करना",
+      consentScope:
+        "यह डॉक्टर आपके लक्षणों का सारांश और संबंधित स्वास्थ्य इतिहास देखेगा ताकि परामर्श में मदद मिले।",
+      consentValidity: "यह पहुँच तब तक मान्य है जब तक आप इसे रद्द नहीं करते।",
       confirmTitle: "डॉक्टर चुन लिया गया",
       confirmBody: "अब आपका प्री-सारांश केवल इसी डॉक्टर को दिखेगा।",
+      whatHappensNext: "आगे क्या होगा",
+      whatHappensNextItems:
+        "डॉक्टर आपके प्री-सारांश की समीक्षा करेंगे। ज़रूरत पड़ने पर वे परामर्श के लिए संपर्क करेंगे। आप अपनी इनटेक स्थिति से ट्रैक कर सकते हैं।",
+      loading: "सत्यापित डॉक्टर खोजे जा रहे हैं…",
+      recordingChoice: "आपका चुनाव दर्ज किया जा रहा है…",
+      genericError: "कुछ गलत हुआ। फिर से प्रयास करें।",
+      viewIntakeStatus: "इनटेक स्थिति देखें",
+      errorTitle: "डॉक्टर सूची लोड नहीं हो सकी",
+      errorBody: "अपना कनेक्शन जाँचें और फिर से प्रयास करें।",
+      retry: "फिर से प्रयास करें",
+      breadcrumb: "डॉक्टर चुनें",
     },
   },
 };

@@ -294,7 +294,7 @@ describe("IntakeStatusPage continue affordance", () => {
     expect(screen.getByTestId("continue-zone")).toBeInTheDocument();
     expect(screen.getByTestId("btn-continue")).toHaveAttribute(
       "href",
-      "/doctors?intake=42",
+      "/patient/intake/42/pick",
     );
     expect(screen.getByTestId("btn-continue")).toHaveTextContent(t.continue);
   });

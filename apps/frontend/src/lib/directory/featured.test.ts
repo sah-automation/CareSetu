@@ -18,6 +18,7 @@ function directoryRow(overrides: Record<string, unknown> = {}) {
     area: null,
     distance_km: 1.2,
     verified: true,
+    consultation_fee: null,
     ...overrides,
   };
 }

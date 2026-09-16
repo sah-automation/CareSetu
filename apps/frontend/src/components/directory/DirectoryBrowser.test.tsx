@@ -91,6 +91,7 @@ function doctor(
     area: null,
     distance_km: id,
     verified: true,
+    consultation_fee: null,
     ...overrides,
   };
 }
@@ -140,6 +141,7 @@ describe("DirectoryBrowser loading the directory", () => {
           area: null,
           distance_km: 0.8,
           verified: true,
+          consultation_fee: null,
         },
       ]),
     );
@@ -503,6 +505,7 @@ describe("DirectoryBrowser partner.selected emission (T6)", () => {
           area: null,
           distance_km: 0.8,
           verified: true,
+          consultation_fee: null,
         },
       ]),
     );

@@ -33,6 +33,7 @@ describe("searchDirectory", () => {
             area: "Medininagar Rd",
             distance_km: 1.2,
             verified: true,
+            consultation_fee: 50000,
           },
         ],
       }),
@@ -56,6 +57,7 @@ describe("searchDirectory", () => {
           area: "Medininagar Rd",
           distance_km: 1.2,
           verified: true,
+          consultation_fee: 50000,
         },
       ],
     });
@@ -136,6 +138,7 @@ describe("searchDirectory", () => {
               area: null,
               distance_km: 1,
               verified: true,
+              consultation_fee: null,
             },
           ],
         }),

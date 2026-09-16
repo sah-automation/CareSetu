@@ -405,7 +405,9 @@ export default function IntakeStatusPage() {
               className="w-full"
               data-testid="btn-continue"
             >
-              <Link href={`/doctors?intake=${intakeId}`}>{t.continue}</Link>
+              <Link href={`/patient/intake/${intakeId}/pick`}>
+                {t.continue}
+              </Link>
             </Button>
           </div>
         )}

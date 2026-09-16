@@ -25,6 +25,7 @@ function entry(overrides: Partial<DirectoryEntry>): DirectoryEntry {
     area: null,
     distance_km: 1.2,
     verified: true,
+    consultation_fee: null,
     ...overrides,
   };
 }

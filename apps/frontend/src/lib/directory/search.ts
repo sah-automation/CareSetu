@@ -26,7 +26,8 @@ export type Specialty = (typeof DIRECTORIES_SPECIALTIES)[number];
 /** One public directory search result - the verified-safe projection of an
  * [Active] partner with valid credentials. `practice_name` is the display
  * name; `area` carries the partner's locality when present (card renders it
- * among non-null meta, never inventing a string when absent). */
+ * among non-null meta, never inventing a string when absent).
+ * `consultation_fee` is in integer paise (null until the doctor sets one). */
 export interface DirectoryEntry {
   partner_id: number;
   practice_name: string | null;
@@ -35,6 +36,7 @@ export interface DirectoryEntry {
   area: string | null;
   distance_km: number;
   verified: boolean;
+  consultation_fee: number | null;
 }
 
 /** The public directory search response. `fell_back` marks the wider-area
@@ -65,7 +67,9 @@ function isDirectoryEntry(value: unknown): value is DirectoryEntry {
     (typeof record.specialty === "string" || record.specialty === null) &&
     (typeof record.area === "string" || record.area === null) &&
     typeof record.distance_km === "number" &&
-    typeof record.verified === "boolean"
+    typeof record.verified === "boolean" &&
+    (typeof record.consultation_fee === "number" ||
+      record.consultation_fee === null)
   );
 }
 
