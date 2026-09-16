@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from cryptography.exceptions import InvalidTag
 from sqlalchemy import func, select
@@ -78,6 +78,7 @@ from modules.intake.intake_models import (
     MediaRefView,
     MediaUploadRef,
     PatientEditsResult,
+    PickDoctorResult,
     PreSummaryReviewResult,
     PreSummaryView,
     ReRecordResult,
@@ -91,6 +92,9 @@ from modules.intake.schema.models import (
     intake_media_refs,
     intake_pre_summaries,
 )
+
+if TYPE_CHECKING:
+    from modules.consent.facade import ConsentFacade
 
 #: Number of attempts (initial + retries) the upload-transfer ladder makes
 #: before it gives up on a flaky capture (NFR-PERF-002, spec #344 US-10).
@@ -144,11 +148,13 @@ class IntakeFacade:
         media_store: IntakeMediaStore | None = None,
         ai_gateway: AiGateway | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        consent_facade: ConsentFacade | None = None,
     ) -> None:
         self._engine = engine
         self._media_store = media_store
         self._ai_gateway = ai_gateway
         self._sleep = sleep
+        self._consent_facade = consent_facade
 
     async def submit_intake(
         self,
@@ -507,11 +513,15 @@ class IntakeFacade:
         matching the intake's patient) or to a doctor partner
         (``caller_role == "doctor"``; the route seam has already verified the
         partner is an active doctor via ``require_partner`` +
-        ``partner_type == "doctor"``). Audio is PHI, so the returned bytes are
-        never logged.
+        ``partner_type == "doctor"``). PHASE-8.1 (#443) scopes doctor reads to
+        the patient's pick: only the doctor recorded in ``assigned_partner_id``
+        is served - an unassigned doctor (or one reading before any pick) gets
+        the same 404 as a non-owner so the intake's existence is never
+        revealed. Audio is PHI, so the returned bytes are never logged.
 
         The intake must exist and the ``media_ref_id`` must belong to it.
-        Raises :class:`IntakeNotFoundError` when either lookup misses;
+        Raises :class:`IntakeNotFoundError` when either lookup misses or the
+        doctor caller is not the assigned doctor;
         :class:`IntakeValidationError` when the store is not configured;
         :class:`MediaTransferError` when the clip cannot be read/decrypted.
         """
@@ -529,9 +539,19 @@ class IntakeFacade:
                     )
                 ).first()
             else:
+                # PHASE-8.1 assigned-partner scoping (#443): after the patient
+                # picks a doctor, the intake's health information is served only
+                # to that doctor. The scoping predicate is in the WHERE clause
+                # (data minimization, security standards §2) - an unassigned
+                # doctor partner (or one reading before any pick, or a
+                # different doctor) matches no row and gets the same 404 as a
+                # non-owner, so the intake's existence is never revealed.
                 intake_row = (
                     await connection.execute(
-                        select(intake_intakes).where(intake_intakes.c.id == intake_id)
+                        select(intake_intakes).where(
+                            intake_intakes.c.id == intake_id,
+                            intake_intakes.c.assigned_partner_id == caller_id,
+                        )
                     )
                 ).first()
             if intake_row is None:
@@ -854,6 +874,98 @@ class IntakeFacade:
             review_attribution="doctor",
             reviewed_by=doctor_id,
             reviewed_at=reviewed_at,
+        )
+
+    async def pick_doctor(
+        self,
+        *,
+        intake_id: int,
+        patient_id: int,
+        partner_id: int,
+    ) -> PickDoctorResult:
+        """Record the patient's pick-a-doctor and its consent in ONE write (#443).
+
+        Consent-at-pick (MOD-004): the pick IS the consent moment. The chosen
+        doctor's partner identity is written to ``intake_intakes``
+        (``assigned_partner_id``) and the standing grant for the
+        (patient, doctor, consultations) triple is recorded in the SAME
+        transaction via ``ConsentFacade.grant_consent_on`` - one atomic write,
+        no second gate. From this moment the pre-summary is assigned to that
+        doctor: doctor-facing reads (``get_intake_media`` here, the review-queue
+        and pre-summary reads #447/#448) are scoped to the assigned partner.
+
+        The write is patient-scoped: the intake must belong to ``patient_id`` or
+        :class:`IntakeNotFoundError` is raised (404, mirroring the ownership
+        reads). Exactly one doctor is ever picked: an intake already assigned
+        (``assigned_partner_id`` set, to any doctor) refuses the pick with
+        :class:`IllegalIntakeTransitionError` - a client retry of the same pick
+        is safe via the idempotency header at the route seam (api-standards S5),
+        never by re-picking.
+
+        The consent cache is invalidated after the commit (the grant only became
+        visible when this transaction committed), so a later ``check_consent``
+        never answers from a stale decision.
+
+        Raises :class:`IntakeNotFoundError` when the intake is not the caller's;
+        :class:`IllegalIntakeTransitionError` when a doctor is already assigned;
+        :class:`IntakeValidationError` when ``partner_id`` is missing.
+        """
+        if not partner_id:
+            raise IntakeValidationError("a doctor must be chosen to pick")
+        if self._consent_facade is None:
+            raise IntakeValidationError("consent facade is not configured")
+
+        counterparty_type: Literal["doctor", "lab", "chemist"] = "doctor"
+        counterparty_id = str(partner_id)
+        record_scope = "consultations"
+
+        async with self._engine.begin() as connection:
+            row = (
+                await connection.execute(
+                    select(
+                        intake_intakes.c.id,
+                        intake_intakes.c.patient_id,
+                        intake_intakes.c.assigned_partner_id,
+                    )
+                    .where(intake_intakes.c.id == intake_id)
+                    .with_for_update()
+                )
+            ).first()
+            if row is None or row.patient_id != patient_id:
+                raise IntakeNotFoundError(f"intake {intake_id} not found for patient {patient_id}")
+            if row.assigned_partner_id is not None:
+                raise IllegalIntakeTransitionError(
+                    f"a doctor is already assigned to intake {intake_id}"
+                )
+
+            await connection.execute(
+                intake_intakes.update()
+                .where(intake_intakes.c.id == intake_id)
+                .values(
+                    assigned_partner_id=partner_id,
+                    updated_at=func.now(),
+                )
+            )
+            consent_view = await self._consent_facade.grant_consent_on(
+                connection,
+                patient_id,
+                counterparty_type,
+                counterparty_id,
+                record_scope,
+            )
+
+        # The grant is only visible once THIS transaction committed; invalidate
+        # the gate cache only now (outside the transaction, post-commit).
+        await self._consent_facade.invalidate_consent_cache(
+            patient_id, counterparty_type, counterparty_id, record_scope
+        )
+
+        return PickDoctorResult(
+            intake_id=intake_id,
+            assigned_partner_id=partner_id,
+            consent_id=consent_view.consent_id,
+            consent_lineage_ref=consent_view.lineage_ref,
+            consent_version=consent_view.version,
         )
 
     async def request_rx_draft(

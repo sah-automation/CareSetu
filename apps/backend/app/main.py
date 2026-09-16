@@ -287,7 +287,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         supabase_url=resolved_settings.supabase_url,
         supabase_service_role_key=resolved_settings.supabase_service_role_key,
     )
-    app.state.intake_facade = IntakeFacade(engine=engine, media_store=intake_media_store)
+    app.state.intake_facade = IntakeFacade(
+        engine=engine,
+        media_store=intake_media_store,
+        # PHASE-8.1 (#443): the pick-a-doctor write grants its consent in the
+        # SAME transaction as the doctor assignment (consent-at-pick, MOD-004)
+        # via ``ConsentFacade.grant_consent_on``.
+        consent_facade=app.state.consent_facade,
+    )
     # MOD-006 (PHASE-8 T06, #422): the two care facades share the settled
     # engine and the settled intake/health facades - the consult-complete
     # handshake gates on ``get_finalized_pre_summary`` (intake) and AI drafting

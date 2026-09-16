@@ -29,6 +29,7 @@ from modules.intake.intake_models import (
     IntakeSubmitResult,
     MediaUploadRef,
     PatientEditsResult,
+    PickDoctorResult,
     PreSummaryView,
     ReRecordResult,
 )
@@ -142,6 +143,14 @@ _PATIENT_EDITS_RESULT = PatientEditsResult(
     patient_edits={"duration": "3 days, not 1 day"},
 )
 
+_PICK_RESULT = PickDoctorResult(
+    intake_id=42,
+    assigned_partner_id=909,
+    consent_id=55,
+    consent_lineage_ref="consent/patient-7/doctor-909/55",
+    consent_version=1,
+)
+
 
 class StubIntakeFacade:
     """Minimal facade stand-in recording calls and replaying canned answers."""
@@ -154,6 +163,7 @@ class StubIntakeFacade:
         self.media_ref: MediaUploadRef = _MEDIA_REF
         self.rerecord_result: ReRecordResult = _RERECORD_RESULT
         self.patient_edits_result: PatientEditsResult = _PATIENT_EDITS_RESULT
+        self.pick_result: PickDoctorResult = _PICK_RESULT
         self.media_bytes: bytes = b"\xff" * 16
         self.error: Exception | None = None
         self.pre_summary_error: Exception | None = None
@@ -198,6 +208,11 @@ class StubIntakeFacade:
         self.called_with.append(("get_intake_media", dict(kwargs)))
         self._maybe_raise()
         return self.media_bytes
+
+    async def pick_doctor(self, **kwargs: object) -> PickDoctorResult:
+        self.called_with.append(("pick_doctor", dict(kwargs)))
+        self._maybe_raise()
+        return self.pick_result
 
 
 # ---------------------------------------------------------------------------
@@ -520,6 +535,137 @@ def test_re_record_illegal_transition_envelope() -> None:
     assert response.status_code == 422
     body = response.json()
     assert body["code"] == "ILLEGAL_INTAKE_TRANSITION"
+
+
+# ---------------------------------------------------------------------------
+# Tests: pick_doctor (PHASE-8.1 T05, #443)
+# ---------------------------------------------------------------------------
+
+
+def test_pick_doctor_returns_result() -> None:
+    facade = StubIntakeFacade()
+    client = _client(facade)
+
+    response = client.post(
+        "/v1/intake/42/pick-doctor",
+        json={"partner_id": 909},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == _PICK_RESULT.model_dump(mode="json")
+    assert facade.called_with == [
+        (
+            "pick_doctor",
+            {
+                "intake_id": 42,
+                "patient_id": 7,
+                "partner_id": 909,
+            },
+        )
+    ]
+
+
+def test_pick_doctor_unauthenticated_rejected() -> None:
+    client = _client()
+
+    response = client.post(
+        "/v1/intake/42/pick-doctor",
+        json={"partner_id": 909},
+    )
+
+    assert response.status_code == 401
+    body = response.json()
+    assert body["code"] == "AUTH_UNAUTHENTICATED"
+
+
+def test_pick_doctor_partner_scope_rejected() -> None:
+    client = _client()
+
+    response = client.post(
+        "/v1/intake/42/pick-doctor",
+        json={"partner_id": 909},
+        headers=_bearer(_token(scope="partner")),
+    )
+
+    assert response.status_code == 403
+    body = response.json()
+    assert body["code"] == "AUTH_INSUFFICIENT_SCOPE"
+
+
+def test_pick_doctor_not_found_envelope() -> None:
+    facade = StubIntakeFacade()
+    facade.error = IntakeNotFoundError("intake 999 not found for patient 7")
+    client = _client(facade)
+
+    response = client.post(
+        "/v1/intake/999/pick-doctor",
+        json={"partner_id": 909},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 404
+    body = response.json()
+    assert body["code"] == "INTAKE_NOT_FOUND"
+
+
+def test_pick_doctor_second_pick_illegal_transition_envelope() -> None:
+    facade = StubIntakeFacade()
+    facade.error = IllegalIntakeTransitionError("intake 42 already assigned to doctor 909")
+    client = _client(facade)
+
+    response = client.post(
+        "/v1/intake/42/pick-doctor",
+        json={"partner_id": 909},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["code"] == "ILLEGAL_INTAKE_TRANSITION"
+
+
+def test_pick_doctor_unknown_field_rejected() -> None:
+    client = _client()
+
+    response = client.post(
+        "/v1/intake/42/pick-doctor",
+        json={"partner_id": 909, "extra": "no"},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["code"] == "VALIDATION_ERROR"
+
+
+def test_pick_doctor_replayed_idempotency_key_does_not_reexecute() -> None:
+    facade = StubIntakeFacade()
+    client = _client(facade)
+    headers = {**_bearer(_token()), "Idempotency-Key": "pick-42"}
+    payload = {"partner_id": 909}
+
+    first = client.post("/v1/intake/42/pick-doctor", json=payload, headers=headers)
+    second = client.post("/v1/intake/42/pick-doctor", json=payload, headers=headers)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json() == second.json() == _PICK_RESULT.model_dump(mode="json")
+    pick_calls = [name for name, _ in facade.called_with if name == "pick_doctor"]
+    assert len(pick_calls) == 1
+
+
+def test_pick_doctor_exhausted_cap_answers_429_with_retry_after() -> None:
+    facade = StubIntakeFacade()
+    client = _rate_limited_client(facade, max_requests=1)
+    headers = _bearer(_token())
+
+    first = client.post("/v1/intake/42/pick-doctor", json={"partner_id": 909}, headers=headers)
+    assert first.status_code == 200
+
+    second = client.post("/v1/intake/42/pick-doctor", json={"partner_id": 909}, headers=headers)
+    assert second.status_code == 429
+    assert second.headers["Retry-After"] == "60"
 
 
 # ---------------------------------------------------------------------------

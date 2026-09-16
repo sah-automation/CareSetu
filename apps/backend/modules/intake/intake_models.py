@@ -262,6 +262,25 @@ class PreSummaryReviewResult(BaseModel):
     reviewed_at: datetime
 
 
+class PickDoctorResult(BaseModel):
+    """The outcome of ``pick_doctor`` (PHASE-8.1 T05, #443).
+
+    ``intake_id`` names the intake the choice was recorded against and
+    ``assigned_partner_id`` the chosen doctor's partner identity - locked from
+    this moment (a second pick is refused, so exactly one doctor ever serves an
+    intake). ``consent_id`` / ``consent_lineage_ref`` / ``consent_version``
+    identify the standing grant recorded in the SAME transaction as the pick
+    (consent-at-pick, MOD-004): the doctor's access to the patient's
+    consultations record rests on this grant lineage.
+    """
+
+    intake_id: int
+    assigned_partner_id: int
+    consent_id: int
+    consent_lineage_ref: str
+    consent_version: int
+
+
 class RxDraftItem(BaseModel):
     """One drafted prescription line returned by the rx-drafting leg.
 

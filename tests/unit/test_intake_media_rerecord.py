@@ -163,6 +163,7 @@ def _intake_row(
     status: str = "re_record",
     record_attempts: int = 1,
     forced_text: bool = False,
+    assigned_partner_id: int | None = None,
 ) -> object:
     return SimpleNamespace(
         id=intake_id,
@@ -175,6 +176,7 @@ def _intake_row(
         transcript=None,
         transcript_usability=None,
         forced_text=forced_text,
+        assigned_partner_id=assigned_partner_id,
         created_at=NOW,
         updated_at=NOW,
     )
@@ -554,11 +556,20 @@ async def test_get_intake_media_returns_decrypted_bytes_to_the_owning_patient() 
 
 @pytest.mark.asyncio
 async def test_get_intake_media_serves_a_doctor_partner_without_ownership_match() -> None:
-    """A doctor partner streams any intake's clip - no ownership check (route gates RBAC)."""
+    """The assigned doctor partner streams the intake's clip - no ownership match.
+
+    PHASE-8.1 (#443): the doctor branch checks the intake's
+    ``assigned_partner_id`` (the patient's pick), NOT patient ownership, so a
+    row whose patient id differs from the doctor caller is still served to the
+    assigned doctor.
+    """
     store = _FakeMediaStore(stored_data=b"doctor-audio")
     # Doctor path selects the intake WITHOUT the patient-id predicate, so a row
-    # whose patient id differs from the caller is still served.
-    connection = _connection(_playback_patient_results(intake_row=_intake_row(patient_id=42)))
+    # whose patient id differs from the caller is still served when the caller
+    # is the assigned partner (partner id 909).
+    connection = _connection(
+        _playback_patient_results(intake_row=_intake_row(patient_id=42, assigned_partner_id=909))
+    )
     facade = _facade(connection, store=store)
 
     data = await facade.get_intake_media(
@@ -569,6 +580,37 @@ async def test_get_intake_media_serves_a_doctor_partner_without_ownership_match(
     )
 
     assert data == b"doctor-audio"
+
+
+@pytest.mark.asyncio
+async def test_get_intake_media_refuses_an_unassigned_doctor() -> None:
+    """A doctor who was NOT the patient's pick is refused (404), never streamed.
+
+    PHASE-8.1 (#443): after a pick the intake's audio is PHI served only to
+    the assigned doctor. The doctor SELECT runs with ``assigned_partner_id = :caller_id``
+    in the WHERE clause (data minimization) - an unassigned doctor (or one
+    reading before any pick - ``assigned_partner_id`` NULL) matches no row and
+    gets the same ``IntakeNotFoundError`` as a non-owner, so the intake's
+    existence is never revealed.
+    """
+    store = _FakeMediaStore(stored_data=b"doctor-audio")
+    connection = _connection(
+        [
+            _FakeResult(row=None),  # no row matched the scoping predicate
+            _FakeResult(row=_media_row()),
+        ]
+    )
+    facade = _facade(connection, store=store)
+
+    with pytest.raises(IntakeNotFoundError, match="not found for caller 777"):
+        await facade.get_intake_media(
+            intake_id=1,
+            media_ref_id=11,
+            caller_id=777,
+            caller_role="doctor",
+        )
+
+    assert store.read_object_keys == []
 
 
 @pytest.mark.asyncio

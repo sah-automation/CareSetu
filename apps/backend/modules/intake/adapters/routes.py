@@ -29,6 +29,7 @@ from app.gateway.errors import (
     InsufficientScopeError,
     error_response,
 )
+from app.gateway.idempotency import run_idempotent
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_authenticated, require_partner, require_patient
 from app.gateway.trace import resolve_trace_id
@@ -48,6 +49,7 @@ from modules.intake.intake_models import (
     MediaFile,
     MediaUploadRef,
     PatientEditsResult,
+    PickDoctorResult,
     PreSummaryReviewResult,
     PreSummaryView,
     ReRecordResult,
@@ -147,6 +149,22 @@ class PreSummaryReviewRequest(BaseModel):
     corrections: dict[str, object] | None = Field(
         default=None,
         description="Field name -> corrected value mappings (doctor edits win)",
+    )
+
+
+class PickDoctorRequest(BaseModel):
+    """Body of ``POST /v1/intake/{intake_id}/pick-doctor``: the consent pick.
+
+    ``partner_id`` is the chosen doctor's partner identity from the verified
+    directory the pick screen renders. The pick IS the consent moment (#443):
+    the choice and the standing grant are recorded in one atomic transaction,
+    no second gate.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    partner_id: int = Field(
+        description="The chosen doctor's partner identity on the intake",
     )
 
 
@@ -348,6 +366,40 @@ async def review_pre_summary(
         intake_id=intake_id,
         doctor_id=partner.partner_id,
         corrections=body.corrections,
+    )
+
+
+@router.post(
+    "/{intake_id}/pick-doctor",
+    response_model=PickDoctorResult,
+    status_code=status.HTTP_200_OK,
+    summary="Record the patient's pick-a-doctor and consent atomically (patient only)",
+)
+async def pick_doctor(
+    request: Request,
+    account: Annotated[Principal, Depends(require_patient)],
+    intake_id: int,
+    body: PickDoctorRequest,
+) -> PickDoctorResult:
+    """Record the patient's chosen doctor and the consent grant (US-5/US-6, #443).
+
+    Thin patient-scoped adapter (PHASE-8.1 T05): the ``require_patient`` gate
+    rejects unauthenticated (401) and non-patient scopes (403) at the edge. The
+    facade commits the intake's ``assigned_partner_id`` and the standing grant
+    (consent-at-pick, MOD-004) in ONE transaction - there is no second consent
+    gate. The route is idempotent (api-standards S5): a client retry replayed
+    with the same ``Idempotency-Key`` answers the stored result without
+    re-executing, and a retry without the header (a second pick) is refused by
+    the facade's exactly-one-doctor rule.
+    """
+    facade = cast(IntakeFacade, request.app.state.intake_facade)
+    return await run_idempotent(
+        request,
+        lambda: facade.pick_doctor(
+            intake_id=intake_id,
+            patient_id=_resolve_subject_id(account),
+            partner_id=body.partner_id,
+        ),
     )
 
 

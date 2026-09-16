@@ -507,6 +507,26 @@ class ConsentFacade:
             )
             return await _view_after_write(connection, lineage)
 
+    async def _grant_on_connection(
+        self,
+        connection: AsyncConnection,
+        patient_id: int,
+        counterparty_type: CounterpartyTypeLiteral,
+        counterparty_id: str,
+        record_scope: str,
+    ) -> ConsentView:
+        """Run the standing-grant write on the given open connection.
+
+        The shared body of ``grant_consent`` and ``grant_consent_on``: mirror
+        ``_upsert_lineage`` + ``_persist_transition(GRANT)`` + the read-back
+        view, committing nothing itself - the caller's transaction frames it.
+        """
+        lineage, _created = await _upsert_lineage(
+            connection, patient_id, counterparty_type, counterparty_id, record_scope
+        )
+        await _persist_transition(connection, lineage, ConsentAction.GRANT)
+        return await _view_after_write(connection, lineage)
+
     async def grant_consent(
         self,
         patient_id: int,
@@ -522,14 +542,50 @@ class ConsentFacade:
         pure machine.
         """
         async with self._engine.begin() as connection:
-            lineage, _created = await _upsert_lineage(
+            view = await self._grant_on_connection(
                 connection, patient_id, counterparty_type, counterparty_id, record_scope
             )
-            await _persist_transition(connection, lineage, ConsentAction.GRANT)
-            view = await _view_after_write(connection, lineage)
         # Invalidate cache after commit (outside transaction)
         await self._invalidate_cache(patient_id, counterparty_type, counterparty_id, record_scope)
         return view
+
+    async def grant_consent_on(
+        self,
+        connection: AsyncConnection,
+        patient_id: int,
+        counterparty_type: CounterpartyTypeLiteral,
+        counterparty_id: str,
+        record_scope: str,
+    ) -> ConsentView:
+        """Grant a standing consent on a caller-provided open connection (#443).
+
+        Mirrors ``grant_consent`` but runs on the given connection instead of
+        opening its own transaction (the ``verify_partner_exists`` pattern,
+        #342). The intake facade's pick-doctor write calls this on ITS open
+        transaction so the doctor assignment and the consent grant commit or
+        roll back together - the consent-at-pick atomicity the route contract
+        demands. The caller must invalidate the gate cache after its own
+        commit (see ``invalidate_consent_cache``).
+        """
+        return await self._grant_on_connection(
+            connection, patient_id, counterparty_type, counterparty_id, record_scope
+        )
+
+    async def invalidate_consent_cache(
+        self,
+        patient_id: int,
+        counterparty_type: str,
+        counterparty_id: str,
+        record_scope: str,
+    ) -> None:
+        """Best-effort gate-cache invalidation after a caller-framed grant (#443).
+
+        For callers that ran ``grant_consent_on`` inside their own transaction,
+        the cache must be invalidated only after THEIR commit is visible - this
+        method answers that need without tying the consent module to the
+        caller's transaction boundary.
+        """
+        await self._invalidate_cache(patient_id, counterparty_type, counterparty_id, record_scope)
 
     async def grant_requested(self, patient_id: int, consent_id: int) -> ConsentView:
         """Promote an existing ``Requested`` lineage to its first live grant."""

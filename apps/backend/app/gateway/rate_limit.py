@@ -33,14 +33,17 @@ from app.gateway.errors import (
 )
 
 _DEFAULT_AUTH_PATH_PREFIX = "/v1/auth/"
-# Intake write surface (PS-05, #403): the media-and-row-writing trio that
-# uploads and persists on the strict tier. ``upload-media`` and ``submit`` are
-# exact paths; ``re-record`` is a per-intake dynamic route, matched by the
-# ``/v1/intake/`` prefix plus the ``/re-record`` suffix so the GET read shapes
-# (``/{intake_id}``, ``/pre-summary``, ``/media/{id}``) never match.
+# Intake write surface (PS-05, #403): the media-and-row-writing shapes that
+# upload and persist on the strict tier. ``upload-media``, ``submit`` and
+# ``pick-doctor`` are exact paths; ``re-record`` is a per-intake dynamic route,
+# matched by the ``/v1/intake/`` prefix plus the ``/re-record`` suffix so the
+# GET read shapes (``/{intake_id}``, ``/pre-summary``, ``/media/{id}``) never
+# match. ``pick-doctor`` counts because the pick IS a row write plus a consent
+# grant (PHASE-8.1 T05, #443) - the same abuse target as the media trio.
 _DEFAULT_INTAKE_PATH_PREFIX = "/v1/intake/"
 _INTAKE_UPLOAD_MEDIA_PATH = f"{_DEFAULT_INTAKE_PATH_PREFIX}upload-media"
 _INTAKE_SUBMIT_PATH = f"{_DEFAULT_INTAKE_PATH_PREFIX}submit"
+_INTAKE_PICK_DOCTOR_PATH_SUFFIX = "/pick-doctor"
 _INTAKE_RE_RECORD_PATH_SUFFIX = "/re-record"
 # Upper bound on tracked buckets: once exceeded, stale windows are pruned and,
 # if the dict is still over the cap, the oldest live buckets are evicted so an
@@ -132,7 +135,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return _SURFACE_AUTH
         if path in (_INTAKE_UPLOAD_MEDIA_PATH, _INTAKE_SUBMIT_PATH) or (
             path.startswith(_DEFAULT_INTAKE_PATH_PREFIX)
-            and path.endswith(_INTAKE_RE_RECORD_PATH_SUFFIX)
+            and (
+                path.endswith(_INTAKE_PICK_DOCTOR_PATH_SUFFIX)
+                or path.endswith(_INTAKE_RE_RECORD_PATH_SUFFIX)
+            )
         ):
             return _SURFACE_INTAKE
         return None
