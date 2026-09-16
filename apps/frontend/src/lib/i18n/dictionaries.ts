@@ -1008,13 +1008,15 @@ const en = {
     retry: "Try again",
   },
 
-  // caseWorkspace.* surface - PHASE-8.1 T13 (#451): the case workspace review
-  // stage. Serves both the review-entry (queue -> review/[intakeId]) and the
-  // case-entry (open cases -> cases/[caseId]) routes: case stage chip, the
+  // caseWorkspace.* surface - PHASE-8.1 T13/T14 (#451/#452): the case
+  // workspace. Serves both the review-entry (queue -> review/[intakeId]) and
+  // the case-entry (open cases -> cases/[caseId]) routes: case stage chip, the
   // forced-review requirement, the full pre-summary content, the patient's
   // consented health history, the single-action attributed review+finalize,
   // and the consult-complete handshake into prescription-pending (US-13/14/16/
-  // 17/24). Prescription drafting/approval stages are built by #452/#453.
+  // 17/24). Prescription drafting (US-18/#452) covers the AI-draft request,
+  // the editable rx-item rows, save-revision, and reload of the in-progress
+  // working revision; approval/rejection/close are built by #453.
   caseWorkspace: {
     title: "Case workspace",
     backToConsole: "Back to console",
@@ -1053,7 +1055,32 @@ const en = {
     handshakeFail: "Could not complete the consultation.",
     handshakeSuccess:
       "Consultation complete - the case is now prescription pending.",
-    prescriptionPendingCta: "Prescription drafting opens next.",
+    prescriptionPendingCta: "The prescription editor is ready below.",
+    prescriptionHeading: "Prescription",
+    prescriptionHelp:
+      "Request an AI draft, then edit the items to match your clinical judgment before saving.",
+    requestDraftAction: "Request AI draft",
+    requestingDraft: "Requesting",
+    requestDraftFail: "Could not generate the AI draft.",
+    draftCapReached:
+      "The AI drafting limit for this case has been reached. Edit and save the current draft instead.",
+    noDraftYet:
+      "No prescription draft yet. Request an AI draft to get started.",
+    workingRxLoadFail: "Could not load the in-progress prescription.",
+    rxItemsLabel: "Prescription items",
+    rxNameLabel: "Medicine",
+    rxDoseLabel: "Dose",
+    rxDurationLabel: "Duration",
+    rxEmptyItems: "No items yet. Add the first one below.",
+    addItemAction: "Add item",
+    removeItemAction: "Remove",
+    saveRevisionAction: "Save revision",
+    savingRevision: "Saving",
+    revisionSaved: "Revision saved.",
+    saveRevisionFail: "Could not save this revision.",
+    sourceLabel: "Source",
+    sourceAiDraft: "AI draft",
+    sourceManual: "Manual",
   },
 
   // pick.* surface - PHASE-8.1 T11 (#449): the patient pick-a-doctor step
@@ -1997,11 +2024,12 @@ export const STRINGS: Record<Lang, Dictionary> = {
       retry: "फिर से कोशिश करें",
     },
 
-    // caseWorkspace.* सतह - PHASE-8.1 T13 (#451): केस वर्कस्पेस की समीक्षा अवस्था।
+    // caseWorkspace.* सतह - PHASE-8.1 T13/T14 (#451/#452): केस वर्कस्पेस।
     // दोनों प्रवेश मार्ग (कतार -> review/[intakeId] और खुले मामले -> cases/[caseId]):
     // केस स्टेज चिप, अनिवार्य समीक्षा आवश्यकता, पूरा प्री-सारांश, मरीज़ का सहमति-प्राप्त
     // स्वास्थ्य इतिहास, एक-क्रिया में समीक्षा+अंतिमकरण, और नुस्ख़ा-लंबित की ओर हैंडशेक।
-    // नुस्ख़े के मसौदा/अनुमोदन चरण #452/#453 में बनेंगे।
+    // नुस्ख़ा मसौदा (US-18/#452): AI मसौदा अनुरोध, संपादन योग्य rx-आइटम पंक्तियाँ,
+    // रिवीज़न सहेजना, और चालू वर्किंग रिवीज़न को पुनः लोड करना। अनुमोदन/अस्वीकृति #453 में।
     caseWorkspace: {
       title: "केस वर्कस्पेस",
       backToConsole: "कंसोल पर वापस",
@@ -2039,7 +2067,32 @@ export const STRINGS: Record<Lang, Dictionary> = {
       handshakeHelp: "मामले को नुस्ख़ा-लंबित अवस्था में ले जाता है।",
       handshakeFail: "परामर्श पूर्ण नहीं हो सका।",
       handshakeSuccess: "परामर्श पूर्ण - मामला अब नुस्ख़ा-लंबित है।",
-      prescriptionPendingCta: "इसके बाद नुस्ख़ा मसौदा खुलता है।",
+      prescriptionPendingCta: "नीचे नुस्ख़ा संपादक तैयार है।",
+      prescriptionHeading: "नुस्ख़ा",
+      prescriptionHelp:
+        "AI मसौदा माँगें, फिर सहेजने से पहले आइटमों को अपने नैदानिक निर्णय के अनुसार संपादित करें।",
+      requestDraftAction: "AI मसौदा माँगें",
+      requestingDraft: "माँग रहा है",
+      requestDraftFail: "AI मसौदा बनाया नहीं जा सका।",
+      draftCapReached:
+        "इस मामले के लिए AI मसौदा सीमा पूरी हो गई है। मौजूदा मसौदा संपादित करके सहेजें।",
+      noDraftYet:
+        "अभी कोई नुस्ख़ा मसौदा नहीं है। शुरू करने के लिए AI मसौदा माँगें।",
+      workingRxLoadFail: "चालू नुस्ख़ा लोड नहीं हो सका।",
+      rxItemsLabel: "नुस्ख़े की वस्तुएँ",
+      rxNameLabel: "दवा",
+      rxDoseLabel: "मात्रा",
+      rxDurationLabel: "अवधि",
+      rxEmptyItems: "अभी कोई वस्तु नहीं। नीचे पहली वस्तु जोड़ें।",
+      addItemAction: "वस्तु जोड़ें",
+      removeItemAction: "हटाएँ",
+      saveRevisionAction: "रिवीज़न सहेजें",
+      savingRevision: "सहेज रहा है",
+      revisionSaved: "रिवीज़न सहेजा गया।",
+      saveRevisionFail: "यह रिवीज़न सहेजा नहीं जा सका।",
+      sourceLabel: "स्रोत",
+      sourceAiDraft: "AI मसौदा",
+      sourceManual: "मैनुअल",
     },
 
     // pick.* सतह - PHASE-8.1 T11 (#449): मरीज़ का डॉक्टर-चुनाव चरण
