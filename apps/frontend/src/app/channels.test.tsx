@@ -17,13 +17,32 @@ vi.mock("@/lib/operator/api", async (importOriginal) => {
   };
 });
 
+// PHASE-8.1 T12 (#450): the doctor page now loads review queue + open cases
+// on mount via fetchReviewQueue and listOpenCases; mock both seams so the
+// scaffold render is synchronous.
+
+vi.mock("@/lib/intake/api", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("@/lib/intake/api")>();
+  return { ...mod, fetchReviewQueue: vi.fn().mockResolvedValue([]) };
+});
+
+vi.mock("@/lib/care/api", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("@/lib/care/api")>();
+  return { ...mod, listOpenCases: vi.fn().mockResolvedValue([]) };
+});
+
+vi.mock("@/lib/partner/api", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("@/lib/partner/api")>();
+  return { ...mod, updateConsultationFee: vi.fn().mockResolvedValue({}) };
+});
+
 // PHASE-2.6 T07 (#198): the single generic dashboard group split into
 // per-role route groups - each stub page re-homed under its role's group.
 
 describe("per-role route-group scaffold pages", () => {
   it.each([
     ["patient", PatientDashboardPage, "Welcome, Patient"],
-    ["doctor", DoctorDashboardPage, "Welcome, Doctor"],
+    ["doctor", DoctorDashboardPage, "Doctor console"],
     ["partner", PartnerDashboardPage, "Welcome, Partner"],
     ["operator", OperatorDashboardPage, "Verification queue"],
   ] as const)(

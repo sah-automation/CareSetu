@@ -12,6 +12,7 @@ import {
   fetchIntake,
   fetchPreSummary,
   savePatientEdits,
+  fetchReviewQueue,
 } from "./api";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -323,6 +324,57 @@ describe("savePatientEdits", () => {
     );
     await expect(savePatientEdits(999, { x: 1 })).rejects.toMatchObject({
       code: "INTAKE_NOT_FOUND",
+    });
+  });
+});
+
+describe("fetchReviewQueue", () => {
+  const reviewQueueItem = {
+    pre_summary_id: 9,
+    intake_id: 42,
+    structuring_confidence: 0.54,
+    low_confidence: true,
+    review_state: "draft",
+    created_at: "2026-09-10T00:00:00Z",
+    updated_at: "2026-09-10T00:00:00Z",
+  };
+
+  it("GETs the doctor review queue and resolves the item list", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse([reviewQueueItem]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchReviewQueue()).resolves.toEqual([reviewQueueItem]);
+    const [url] = fetchMock.mock.calls[0] as [string];
+    expect(url).toBe("http://localhost:8000/v1/intake/review-queue");
+  });
+
+  it("throws ApiError on a malformed queue shape", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ items: [] })),
+    );
+    await expect(fetchReviewQueue()).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it("throws ApiError with the envelope code on a 403", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          {
+            code: "INSUFFICIENT_SCOPE",
+            message: "the doctor role is required for this route",
+            trace_id: "t",
+            details: {},
+          },
+          403,
+        ),
+      ),
+    );
+    await expect(fetchReviewQueue()).rejects.toMatchObject({
+      code: "INSUFFICIENT_SCOPE",
     });
   });
 });

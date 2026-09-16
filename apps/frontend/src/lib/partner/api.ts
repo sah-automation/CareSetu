@@ -4,6 +4,7 @@
 // Session cookie auth follows the same pattern as record/api.ts and
 // consent/api.ts (ADR-0005).
 
+import { IDEMPOTENCY_KEY_HEADER, idempotencyKey } from "@/lib/idempotency";
 import { guardShape, request } from "@/lib/request";
 
 export type PartnerType = "doctor" | "lab" | "chemist";
@@ -219,5 +220,31 @@ export async function appealRejection(): Promise<PartnerView> {
     data,
     isPartnerView,
     "The API returned an unexpected appeal result shape",
+  );
+}
+
+/**
+ * Set or clear the calling doctor's consultation fee (PHASE-8.1 T06, #444).
+ * `fee_paise` is the fee in integer paise - required but nullable: a non-null
+ * value sets the fee, `null` clears it back to unset. The mutation carries the
+ * shared Idempotency-Key header so a client retry cannot double-execute it.
+ */
+export async function updateConsultationFee(
+  feePaise: number | null,
+  retryKey?: string,
+): Promise<PartnerView> {
+  const key = idempotencyKey(retryKey);
+  const data = await request<unknown>("/v1/partner/consultation-fee", {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      [IDEMPOTENCY_KEY_HEADER]: key,
+    },
+    body: JSON.stringify({ fee_paise: feePaise }),
+  });
+  return guardShape(
+    data,
+    isPartnerView,
+    "The API returned an unexpected consultation-fee result shape",
   );
 }

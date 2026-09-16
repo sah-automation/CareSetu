@@ -4,6 +4,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { IDEMPOTENCY_KEY_HEADER } from "@/lib/idempotency";
 import { ApiError } from "@/lib/api-errors";
 import {
   appealRejection,
@@ -12,6 +13,7 @@ import {
   fetchRejectionReason,
   registerPartner,
   submitCredentials,
+  updateConsultationFee,
 } from "./api";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -315,5 +317,76 @@ describe("appealRejection", () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("http://localhost:8000/v1/partner/appeal");
     expect(init.method).toBe("POST");
+  });
+});
+
+describe("updateConsultationFee", () => {
+  it("PATCHes the fee in paise and resolves the partner view", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse({ partner_id: 7, status: "Active", round: 0 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(updateConsultationFee(40000)).resolves.toEqual({
+      partner_id: 7,
+      status: "Active",
+      round: 0,
+    });
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://localhost:8000/v1/partner/consultation-fee");
+    expect(init.method).toBe("PATCH");
+    expect(JSON.parse(init.body as string)).toEqual({ fee_paise: 40000 });
+  });
+
+  it("sends the Idempotency-Key header on the mutation", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse({ partner_id: 7, status: "Active", round: 0 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await updateConsultationFee(40000);
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = new Headers(init.headers);
+    expect(headers.get(IDEMPOTENCY_KEY_HEADER)).toBeTruthy();
+  });
+
+  it("clears the fee when given null", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse({ partner_id: 7, status: "Active", round: 0 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await updateConsultationFee(null);
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ fee_paise: null });
+  });
+
+  it("throws ApiError with the envelope code on a 403", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          {
+            code: "CONSULTATION_FEE_NOT_ALLOWED",
+            message: "only a doctor partner can set a consultation fee",
+            trace_id: "t",
+            details: {},
+          },
+          403,
+        ),
+      ),
+    );
+    await expect(updateConsultationFee(40000)).rejects.toMatchObject({
+      code: "CONSULTATION_FEE_NOT_ALLOWED",
+    });
   });
 });

@@ -970,18 +970,42 @@ const en = {
     },
   },
 
-  // doctorConsole.* surface - PHASE-8.1 T10 (#446): the doctor console
-  // skeleton (review queue + open care cases). Skeleton strings only - the
-  // console pages land in the later PHASE-8.1 tickets (doctor landing, case
-  // workspace).
+  // doctorConsole.* surface - PHASE-8.1 T12 (#450): the doctor console
+  // landing page. Two stacked sections: review queue (low-confidence first,
+  // oldest-first within each group) and open care cases, plus the fee editor,
+  // coming-soon patients/profile, and a retry path on load failure. All copy
+  // bilingual en/hi (REQ-006).
   doctorConsole: {
     title: "Doctor console",
+    consoleDescription: "Your review queue and open cases",
     queueHeading: "Review queue",
     queueEmpty: "No pre-summaries waiting for review",
+    queueItemMeta: (id: number) => `Intake #${id}`,
+    caseItemMeta: (id: number) => `Case #${id}`,
+    verifyChip: "Verify",
+    confidenceLabel: "Confidence",
+    waitingFor: (time: string) => `Waiting ${time}`,
+    reviewAction: "Review",
     casesHeading: "Open cases",
     casesEmpty: "No open care cases",
+    stagePreSummary: "Pre-summary",
+    stagePrescriptionPending: "Prescription pending",
+    stageClosed: "Closed",
+    openCaseAction: "Open",
+    feeEditorHeading: "Consultation fee",
+    feeEditorHelp:
+      "Set the fee patients see when choosing you. Leave blank until set.",
+    feeFieldLabel: "Fee (\u20B9)",
+    feeFieldPlaceholder: "e.g. 400",
+    saveFee: "Save fee",
+    clearFee: "Clear fee",
+    feeSaved: "Fee saved.",
+    feeSaveFailed: "Could not save the fee.",
     patientsComingSoon: "Patients - coming soon",
     profileComingSoon: "Profile - coming soon",
+    comingSoonBody: "This area opens in a later update.",
+    loadFailed: "Could not load the console.",
+    retry: "Try again",
   },
 
   // pick.* surface - PHASE-8.1 T11 (#449): the patient pick-a-doctor step
@@ -1888,17 +1912,41 @@ export const STRINGS: Record<Lang, Dictionary> = {
       },
     },
 
-    // doctorConsole.* सतह - PHASE-8.1 T10 (#446): डॉक्टर कंसोल का स्केलेटन
-    // (समीक्षा कतार + खुले केयर केस)। केवल स्केलेटन स्ट्रिंग - कंसोल पेज
-    // बाद के PHASE-8.1 टिकटों में आएँगे।
+    // doctorConsole.* सतह - PHASE-8.1 T12 (#450): डॉक्टर कंसोल लैंडिंग पेज।
+    // दो सेक्शन: समीक्षा कतार (कम विश्वास पहले, पुराने पहले) और खुले केयर केस,
+    // साथ ही शुल्क संपादक, आने वाले मरीज़/प्रोफ़ाइल, और लोड विफलता पर पुनः प्रयास।
+    // सभी कॉपी द्विभाषी en/hi (REQ-006)।
     doctorConsole: {
       title: "डॉक्टर कंसोल",
+      consoleDescription: "आपकी समीक्षा कतार और खुले मामले",
       queueHeading: "समीक्षा कतार",
       queueEmpty: "समीक्षा के लिए कोई प्री-सारांश नहीं",
+      queueItemMeta: (id: number) => `इनटेक #${id}`,
+      caseItemMeta: (id: number) => `केस #${id}`,
+      verifyChip: "जाँचें",
+      confidenceLabel: "विश्वास",
+      waitingFor: (time: string) => `${time} से प्रतीक्षा`,
+      reviewAction: "समीक्षा करें",
       casesHeading: "खुले मामले",
       casesEmpty: "कोई खुला केयर केस नहीं",
+      stagePreSummary: "प्री-सारांश",
+      stagePrescriptionPending: "नुस्ख़ा लंबित",
+      stageClosed: "बंद",
+      openCaseAction: "खोलें",
+      feeEditorHeading: "परामर्श शुल्क",
+      feeEditorHelp:
+        "वह शुल्क सेट करें जो मरीज़ आपको चुनने पर देखें। सेट न होने तक खाली रहेगा।",
+      feeFieldLabel: "शुल्क (\u20B9)",
+      feeFieldPlaceholder: "जैसे 400",
+      saveFee: "शुल्क सहेजें",
+      clearFee: "शुल्क हटाएँ",
+      feeSaved: "शुल्क सहेजा गया।",
+      feeSaveFailed: "शुल्क सहेजा नहीं जा सका।",
       patientsComingSoon: "मरीज़ - जल्द आ रहा है",
       profileComingSoon: "प्रोफ़ाइल - जल्द आ रहा है",
+      comingSoonBody: "यह क्षेत्र बाद के अपडेट में खुलेगा।",
+      loadFailed: "कंसोल लोड नहीं हो सका।",
+      retry: "फिर से कोशिश करें",
     },
 
     // pick.* सतह - PHASE-8.1 T11 (#449): मरीज़ का डॉक्टर-चुनाव चरण

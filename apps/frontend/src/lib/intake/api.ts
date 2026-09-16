@@ -96,6 +96,17 @@ export interface PatientEditsResult {
 
 export type ClinicalEdits = Record<string, string | string[]>;
 
+/** One pre-summary awaiting the assigned doctor's review (PHASE-8.1 T07, #447). */
+export interface ReviewQueueItem {
+  pre_summary_id: number;
+  intake_id: number;
+  structuring_confidence: number | null;
+  low_confidence: boolean;
+  review_state: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface SubmitIntakeRequest {
   mode: IntakeMode;
   language: IntakeLanguage;
@@ -189,6 +200,20 @@ function isPatientEditsResult(value: unknown): value is PatientEditsResult {
     "intake_id" in value &&
     "pre_summary_id" in value &&
     "patient_edits" in value
+  );
+}
+
+function isReviewQueueItem(value: unknown): value is ReviewQueueItem {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "pre_summary_id" in value &&
+    "intake_id" in value &&
+    "structuring_confidence" in value &&
+    "low_confidence" in value &&
+    "review_state" in value &&
+    "created_at" in value &&
+    "updated_at" in value
   );
 }
 
@@ -297,5 +322,21 @@ export async function savePatientEdits(
     data,
     isPatientEditsResult,
     "The API returned an unexpected patient-edits result shape",
+  );
+}
+
+/**
+ * List pre-summaries assigned to the calling doctor that await review,
+ * low-confidence first (PHASE-8.1 T07, #447). Each item carries the
+ * confidence flag so the console can surface the items that most need
+ * the doctor's attention (US-11/12).
+ */
+export async function fetchReviewQueue(): Promise<ReviewQueueItem[]> {
+  const data = await request<unknown>("/v1/intake/review-queue");
+  return guardShape(
+    data,
+    (value): value is ReviewQueueItem[] =>
+      Array.isArray(value) && value.every(isReviewQueueItem),
+    "The API returned an unexpected review-queue shape",
   );
 }
