@@ -1008,6 +1008,54 @@ const en = {
     retry: "Try again",
   },
 
+  // caseWorkspace.* surface - PHASE-8.1 T13 (#451): the case workspace review
+  // stage. Serves both the review-entry (queue -> review/[intakeId]) and the
+  // case-entry (open cases -> cases/[caseId]) routes: case stage chip, the
+  // forced-review requirement, the full pre-summary content, the patient's
+  // consented health history, the single-action attributed review+finalize,
+  // and the consult-complete handshake into prescription-pending (US-13/14/16/
+  // 17/24). Prescription drafting/approval stages are built by #452/#453.
+  caseWorkspace: {
+    title: "Case workspace",
+    backToConsole: "Back to console",
+    stageLabel: "Stage",
+    forcedReviewChip: "Review required",
+    forcedReviewDetail:
+      "This pre-summary has low confidence and needs your review before any prescription.",
+    summaryHeading: "Pre-summary to review",
+    confidenceLabel: "Confidence",
+    chiefComplaintsLabel: "Chief complaints",
+    symptomsLabel: "Symptoms",
+    durationLabel: "Duration",
+    durationNotSet: "Not captured",
+    patientEditsLabel: "Patient edits",
+    patientEditsNone: "No patient edits",
+    reviewStateLabel: "Review state",
+    reviewStateDraft: "Awaiting your review",
+    reviewStateReviewed: "Reviewed",
+    reviewStateFinal: "Finalized",
+    attributionLabel: "Attributed to",
+    reviewedOnLabel: "Reviewed on",
+    notReviewedYet: "Not yet attributed",
+    historyHeading: "Patient history",
+    historyConsentNote: "Only what the patient consented to share.",
+    historyEmpty: "No consented history available for this patient.",
+    historyLoadFail: "Could not load patient history.",
+    loadFailed: "Could not load this case workspace.",
+    retry: "Try again",
+    finalizeAction: "Finalize + attribute review",
+    finalizeHelp:
+      "One action records your review and finalizes the pre-summary.",
+    finalizeSuccess: "Pre-summary finalized and attributed to you.",
+    finalizeFail: "Could not finalize this pre-summary.",
+    handshakeAction: "Complete consultation",
+    handshakeHelp: "Moves the case to prescription pending.",
+    handshakeFail: "Could not complete the consultation.",
+    handshakeSuccess:
+      "Consultation complete - the case is now prescription pending.",
+    prescriptionPendingCta: "Prescription drafting opens next.",
+  },
+
   // pick.* surface - PHASE-8.1 T11 (#449): the patient pick-a-doctor step
   // (suggested specialty, verified doctor cards, consent sheet, confirmation).
   // Suggested specialty is a start-here filter, not blocking choice (US-2/US-3).
@@ -1947,6 +1995,51 @@ export const STRINGS: Record<Lang, Dictionary> = {
       comingSoonBody: "यह क्षेत्र बाद के अपडेट में खुलेगा।",
       loadFailed: "कंसोल लोड नहीं हो सका।",
       retry: "फिर से कोशिश करें",
+    },
+
+    // caseWorkspace.* सतह - PHASE-8.1 T13 (#451): केस वर्कस्पेस की समीक्षा अवस्था।
+    // दोनों प्रवेश मार्ग (कतार -> review/[intakeId] और खुले मामले -> cases/[caseId]):
+    // केस स्टेज चिप, अनिवार्य समीक्षा आवश्यकता, पूरा प्री-सारांश, मरीज़ का सहमति-प्राप्त
+    // स्वास्थ्य इतिहास, एक-क्रिया में समीक्षा+अंतिमकरण, और नुस्ख़ा-लंबित की ओर हैंडशेक।
+    // नुस्ख़े के मसौदा/अनुमोदन चरण #452/#453 में बनेंगे।
+    caseWorkspace: {
+      title: "केस वर्कस्पेस",
+      backToConsole: "कंसोल पर वापस",
+      stageLabel: "अवस्था",
+      forcedReviewChip: "समीक्षा ज़रूरी",
+      forcedReviewDetail:
+        "इस प्री-सारांश का विश्वास कम है और किसी नुस्ख़े से पहले आपकी समीक्षा ज़रूरी है।",
+      summaryHeading: "समीक्षा के लिए प्री-सारांश",
+      confidenceLabel: "विश्वास",
+      chiefComplaintsLabel: "मुख्य शिकायतें",
+      symptomsLabel: "लक्षण",
+      durationLabel: "अवधि",
+      durationNotSet: "दर्ज नहीं",
+      patientEditsLabel: "मरीज़ के संपादन",
+      patientEditsNone: "कोई मरीज़ संपादन नहीं",
+      reviewStateLabel: "समीक्षा स्थिति",
+      reviewStateDraft: "आपकी समीक्षा की प्रतीक्षा",
+      reviewStateReviewed: "समीक्षित",
+      reviewStateFinal: "अंतिम",
+      attributionLabel: "श्रेय",
+      reviewedOnLabel: "समीक्षा तिथि",
+      notReviewedYet: "अभी श्रेय नहीं",
+      historyHeading: "मरीज़ का इतिहास",
+      historyConsentNote: "केवल वही जो मरीज़ ने साझा करने की सहमति दी।",
+      historyEmpty: "इस मरीज़ के लिए कोई सहमति-प्राप्त इतिहास उपलब्ध नहीं।",
+      historyLoadFail: "मरीज़ का इतिहास लोड नहीं हो सका।",
+      loadFailed: "यह केस वर्कस्पेस लोड नहीं हो सका।",
+      retry: "फिर कोशिश करें",
+      finalizeAction: "अंतिम करें + समीक्षा का श्रेय",
+      finalizeHelp:
+        "एक क्रिया से आपकी समीक्षा दर्ज होती है और प्री-सारांश अंतिम हो जाता है।",
+      finalizeSuccess: "प्री-सारांश अंतिम हुआ और आपको श्रेय मिला।",
+      finalizeFail: "यह प्री-सारांश अंतिम नहीं हो सका।",
+      handshakeAction: "परामर्श पूर्ण करें",
+      handshakeHelp: "मामले को नुस्ख़ा-लंबित अवस्था में ले जाता है।",
+      handshakeFail: "परामर्श पूर्ण नहीं हो सका।",
+      handshakeSuccess: "परामर्श पूर्ण - मामला अब नुस्ख़ा-लंबित है।",
+      prescriptionPendingCta: "इसके बाद नुस्ख़ा मसौदा खुलता है।",
     },
 
     // pick.* सतह - PHASE-8.1 T11 (#449): मरीज़ का डॉक्टर-चुनाव चरण
