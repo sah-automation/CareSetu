@@ -969,6 +969,36 @@ const en = {
       loadFailedBody: "Check your connection and try again.",
     },
   },
+
+  // doctorConsole.* surface - PHASE-8.1 T10 (#446): the doctor console
+  // skeleton (review queue + open care cases). Skeleton strings only - the
+  // console pages land in the later PHASE-8.1 tickets (doctor landing, case
+  // workspace).
+  doctorConsole: {
+    title: "Doctor console",
+    queueHeading: "Review queue",
+    queueEmpty: "No pre-summaries waiting for review",
+    casesHeading: "Open cases",
+    casesEmpty: "No open care cases",
+    patientsComingSoon: "Patients - coming soon",
+    profileComingSoon: "Profile - coming soon",
+  },
+
+  // pick.* surface - PHASE-8.1 T10 (#446): the patient pick-a-doctor step
+  // skeleton (suggested specialty, verified doctor cards, consent sheet,
+  // confirmation). Skeleton strings only - the pick screens land in the later
+  // PHASE-8.1 tickets.
+  pick: {
+    title: "Choose your doctor",
+    subtitle: "Pick the doctor who will review your pre-summary",
+    suggestedSpecialtyLabel: "Suggested for you",
+    bookCta: "Book with this doctor",
+    feeNotSet: "Fee not set",
+    allow: "Allow",
+    consentTitle: "Sharing your pre-summary",
+    confirmTitle: "Doctor chosen",
+    confirmBody: "Your pre-summary is now visible to this doctor only.",
+  },
 };
 
 export type Dictionary = typeof en;
@@ -1833,6 +1863,34 @@ export const STRINGS: Record<Lang, Dictionary> = {
         loadFailedTitle: "हम आपकी स्थिति लोड नहीं कर पाए",
         loadFailedBody: "कनेक्शन जाँचकर फिर कोशिश करें।",
       },
+    },
+
+    // doctorConsole.* सतह - PHASE-8.1 T10 (#446): डॉक्टर कंसोल का स्केलेटन
+    // (समीक्षा कतार + खुले केयर केस)। केवल स्केलेटन स्ट्रिंग - कंसोल पेज
+    // बाद के PHASE-8.1 टिकटों में आएँगे।
+    doctorConsole: {
+      title: "डॉक्टर कंसोल",
+      queueHeading: "समीक्षा कतार",
+      queueEmpty: "समीक्षा के लिए कोई प्री-सारांश नहीं",
+      casesHeading: "खुले मामले",
+      casesEmpty: "कोई खुला केयर केस नहीं",
+      patientsComingSoon: "मरीज़ - जल्द आ रहा है",
+      profileComingSoon: "प्रोफ़ाइल - जल्द आ रहा है",
+    },
+
+    // pick.* सतह - PHASE-8.1 T10 (#446): मरीज़ का डॉक्टर-चुनाव चरण स्केलेटन
+    // (सुझाया गया विशेषज्ञता, सत्यापित डॉक्टर कार्ड, सहमति शीट, पुष्टि)।
+    // केवल स्केलेटन स्ट्रिंग - पिक स्क्रीन बाद के PHASE-8.1 टिकटों में आएँगी।
+    pick: {
+      title: "अपना डॉक्टर चुनें",
+      subtitle: "अपना डॉक्टर चुनें जो आपके प्री-सारांश की जाँच करेगा",
+      suggestedSpecialtyLabel: "आपके लिए सुझाव",
+      bookCta: "इस डॉक्टर के साथ बुक करें",
+      feeNotSet: "फ़ीस निर्धारित नहीं",
+      allow: "मंज़ूर करें",
+      consentTitle: "अपना प्री-सारांश साझा करना",
+      confirmTitle: "डॉक्टर चुन लिया गया",
+      confirmBody: "अब आपका प्री-सारांश केवल इसी डॉक्टर को दिखेगा।",
     },
   },
 };
