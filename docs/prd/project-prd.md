@@ -369,6 +369,11 @@ _Traceability: `REQ-004`, `REQ-013`, `REQ-023`, `REQ-005`, `CFL-002`, `CFL-003`,
 - `case.consult_complete`: `case_id`, `doctor_id`, `patient_id`, `pre_summary_id` (registry dot-notation - supersedes the legacy `consult_marked_complete` spelling)
 - `case.closed`: `case_id`, `doctor_id`, `patient_id`, `close_reason` (registry dot-notation - supersedes the legacy `case_stage_changed` spelling)
 
+**Delivery Notes (PHASE-8.1):**
+
+- The pick-a-doctor step delivered with the doctor-console chassis insert: after completing the pre-summary (editable before pick if low-confidence), the patient picks exactly one doctor from the filtered verified directory - pre-filtered by the suggested specialty (child → Pediatrician, pregnancy/menstrual → Gynecologist, dental → Dentist, otherwise General Physician), each card showing verified tick, practice, specialty, distance, consultation fee (renders "fee not set" when unset and never blocks care), and a credentials summary. The pick is the consent moment (`MOD-004`): one plain-language sheet names what the chosen doctor will see, and the choice plus the consent grant are recorded atomically; thereafter the pre-summary is visible only to that doctor. A confirmation screen follows with next steps.
+- The doctor side of this feature is delivered inside the console: a review queue of assigned pre-summaries awaiting review (low-confidence first, amber "Verify" chip) and a case workspace where one attributed review finalizes a low-confidence pre-summary in the same action (no stuck cases), and the "Mark consult complete" handshake moves the case to Prescription Pending. This delivery covers the blueprint §6.1-§6.4 doctor-channel shell; Patients and Profile console areas render as "coming soon" placeholders in this phase.
+
 #### Feature 4.4.2: E-Prescription - AI Draft & Doctor Approval
 
 - **Feature ID:** `FEAT-009`
@@ -405,6 +410,11 @@ _Traceability: `REQ-004`, `REQ-013`, `REQ-023`, `REQ-005`, `CFL-002`, `CFL-003`,
 - `prescription.issued`: `case_id`, `prescription_id`, `patient_id`, `doctor_id`, `occurred_at`
 
 (registry dot-notation - supersedes the legacy `prescription_draft_created`/`prescription_approved`/`prescription_rejected` snake_case spellings)
+
+**Delivery Notes (PHASE-8.1):**
+
+- The e-prescription frontend shipped inside the doctor console: the prescription tab lives in the case workspace, stage-locked until the pre-summary is finalized and the consult handshake is complete (the locked state names exactly what is missing with a one-tap jump to it). Unlocked, it accepts the Persona-002 input modes - voice note ("Boliye / Voice note"), photo, or a typed addendum - and renders the AI draft as editable item rows (drug / dose / frequency / duration) with doctor edits surfaced ("2 items edited by you"), per the blueprint §6.2c.
+- Approval follows the two-step gate from the blueprint §6.5: "Review & approve" full-screen preview, then a confirmation sheet with the "Maine check kar liya / I have reviewed this prescription" verification declaration before "Approve & issue" stamps timestamp and doctor attribution. Reject-with-reason returns the case for re-drafting; close-without-prescription records a close reason and publishes `case.closed`. The delivery consumes the PHASE-8 backend seams (`CaseConsoleFacade`, `PrescriptionFacade`), preserves the AI drafting-cap rule (ADR-0015), and never auto-issues (`REQ-023`).
 
 ---
 

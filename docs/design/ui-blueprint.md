@@ -358,7 +358,9 @@ Grant writes `consent_granted`; every sheet links to Record > Consent log; revoc
 
 ---
 
-## 6. Doctor channel (full shell)
+## 6. Doctor channel (full shell, delivered by PHASE-8.1)
+
+> **Delivered:** PHASE-8.1 (#438, 2026-09-15) shipped this surface - the doctor console UI (review queue with low-confidence-first sort, case workspace, prescription flow) plus the patient pick-a-doctor step that routes a finalized case to exactly one doctor with consent-at-pick. It is no longer future Phase 14 work. Within the delivered console, the Patients and Profile areas render as "coming soon" placeholders; full consent-history directory and profile tooling land later.
 
 Fixed inputs: §2 shell conventions and Persona-002 (time-constrained local physician, prefers voice-note/photo input): queue-first landing, few-tap flows. Canonical vocabulary from `CONTEXT.md` throughout: pre-summary, structuring confidence vs the 0.70 threshold, low_confidence flag, forced doctor review.
 
