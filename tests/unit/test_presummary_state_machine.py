@@ -1,10 +1,12 @@
 """PHASE-7 T02: pre-summary review-state machine transition legality (ticket #346).
 
 Three explicit states (ADR-0001, never a fourth): Draft -> Reviewed -> Final,
-plus the high-confidence clean path Draft -> Final (single review action, user
-story 23). ``low_confidence`` is a derived property, not a state - boundary-
-tested at the 0.70 threshold per AMB-006. The machine is pure (no I/O, no
-schema imports), so the unit suite pins the full matrix without a database.
+plus the single-action finalize edges - the high-confidence clean path
+Draft -> Final (user story 23) and the low-confidence one-action finalize
+Draft -> Final via the attributed Review edge (ticket #442). ``low_confidence``
+is a derived property, not a state - boundary-tested at the 0.70 threshold per
+AMB-006. The machine is pure (no I/O, no schema imports), so the unit suite
+pins the full matrix without a database.
 """
 
 from __future__ import annotations
@@ -36,10 +38,27 @@ def test_fresh_pre_summary_starts_draft() -> None:
     assert DRAFT.structuring_confidence is None
 
 
-def test_review_moves_draft_to_reviewed() -> None:
-    next_state = transition(_DRAFT_NONE, PreSummaryAction.REVIEW)
+def test_review_moves_high_confidence_draft_to_reviewed() -> None:
+    """High-confidence stepwise path: a review records Reviewed (not Final)."""
+    next_state = transition(_DRAFT_CLEAN, PreSummaryAction.REVIEW)
 
     assert next_state.status is PreSummaryStatus.REVIEWED
+    assert next_state.structuring_confidence == Decimal("0.75")
+
+
+def test_review_from_draft_low_confidence_finalizes_single_action() -> None:
+    """Low-confidence one-action finalize (#442): a single review lands Final."""
+    next_state = transition(_DRAFT_LOW, PreSummaryAction.REVIEW)
+
+    assert next_state.status is PreSummaryStatus.FINAL
+    assert next_state.structuring_confidence == Decimal("0.50")
+
+
+def test_review_from_draft_missing_confidence_finalizes_single_action() -> None:
+    """A confidence-less Draft is low-confidence: one review lands Final (#442)."""
+    next_state = transition(_DRAFT_NONE, PreSummaryAction.REVIEW)
+
+    assert next_state.status is PreSummaryStatus.FINAL
     assert next_state.structuring_confidence is None
 
 
@@ -94,14 +113,16 @@ def test_transition_returns_new_immutable_states() -> None:
 
 
 def test_structuring_confidence_is_preserved_through_transitions() -> None:
-    low = Decimal("0.60")
-    state = PreSummaryState(PreSummaryStatus.DRAFT, structuring_confidence=low)
+    high = Decimal("0.85")
+    state = PreSummaryState(PreSummaryStatus.DRAFT, structuring_confidence=high)
 
     reviewed = transition(state, PreSummaryAction.REVIEW)
-    assert reviewed.structuring_confidence == low
+    assert reviewed.status is PreSummaryStatus.REVIEWED
+    assert reviewed.structuring_confidence == high
 
     final = transition(reviewed, PreSummaryAction.FINALIZE)
-    assert final.structuring_confidence == low
+    assert final.status is PreSummaryStatus.FINAL
+    assert final.structuring_confidence == high
 
 
 # ---------------------------------------------------------------------------
@@ -141,3 +162,14 @@ def test_every_status_action_pair_matches_the_binding_machine(
             transition(state, action)
     else:
         assert transition(state, action).status is expected
+
+
+@pytest.mark.parametrize("draft", [_DRAFT_NONE, _DRAFT_LOW])
+@pytest.mark.parametrize("action", _ALL_ACTIONS)
+def test_low_confidence_draft_matrix(draft: PreSummaryState, action: PreSummaryAction) -> None:
+    """Low-confidence Draft edges (#442): Review finalizes, Finalize is illegal."""
+    if action is PreSummaryAction.REVIEW:
+        assert transition(draft, action).status is PreSummaryStatus.FINAL
+    else:
+        with pytest.raises(IllegalPreSummaryTransitionError, match="review is required"):
+            transition(draft, action)

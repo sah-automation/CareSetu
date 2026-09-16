@@ -236,10 +236,11 @@ class PatientEditsResult(BaseModel):
 class PreSummaryReviewResult(BaseModel):
     """The outcome of ``mark_pre_summary_reviewed`` (PHASE-7 T09, #353).
 
-    The doctor review-and-edit. ``review_state`` is ``reviewed`` when the
-    pre-summary is low-confidence (the hard gate into Reviewed) or ``final``
-    when a high-confidence pre-summary is reviewed-and-finalized by the single
-    attributed review action (user story 23).
+    The doctor review-and-edit. ``review_state`` is ``final`` - the single
+    attributed review action is always a one-action finalize for BOTH confidence
+    classes (high-confidence clean path, user story 23; low-confidence one-action
+    finalize, #442). A low-confidence summary can only reach ``final`` this way:
+    the machine blocks auto-finalize and any patient-only path.
 
     ``reviewed_copy`` is the authoritative summary that wins over the AI
     extraction: the original ``structured_fields`` with every doctor

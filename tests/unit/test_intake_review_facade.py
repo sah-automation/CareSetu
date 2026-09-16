@@ -7,13 +7,14 @@ through a mocked engine at the facade-with-fakes seam, mirroring
 - Patient edits are saved as informational corrections and returned through
   the facade (never mutating structured fields, never triggering a review
   transition) (acceptance criterion 1).
-- ``mark_pre_summary_reviewed`` transitions Draft -> Reviewed with a changed-
-  fields record, attribution and timestamp for a low_confidence pre-summary
-  (acceptance criterion 2).
+- ``mark_pre_summary_reviewed`` transitions Draft -> Final with a changed-
+  fields record, attribution and timestamp for a low_confidence pre-summary in
+  a SINGLE attributed review action (PHASE-8.1 one-action finalize, #442).
 - Doctor edits win over the AI-extracted values in the resulting reviewed
   copy (acceptance criterion 3).
-- A low_confidence pre-summary cannot reach Reviewed without the attributed
-  review action, and never reaches Final unreviewed (acceptance criterion 4).
+- A low_confidence pre-summary can only reach Final through the attributed
+  review action - never unreviewed, no auto-finalize, no patient-only path
+  (acceptance criteria 2 and 4).
 - A high-confidence pre-summary is finalized by a single attributed review
   action (acceptance criterion 5).
 """
@@ -224,14 +225,21 @@ async def test_get_pre_summary_surfaces_patient_edits_for_the_doctor() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mark_pre_summary_reviewed_low_confidence_gates_into_reviewed() -> None:
-    """A low_confidence pre-summary reaches Reviewed only via the review (AC-2/4)."""
+async def test_mark_pre_summary_reviewed_low_confidence_finalizes_single_action() -> None:
+    """A low_confidence pre-summary reaches Final in one attributed review (#442)."""
     row = _pre_summary_row(
         confidence=0.55,
         low_confidence=True,
         review_state="draft",
     )
-    connection = _connection([_FakeResult(row=row), _FakeResult(row=None)])
+    connection = _connection(
+        [
+            _FakeResult(row=row),
+            _FakeResult(row=None),
+            _FakeResult(scalar=7),
+            _FakeResult(row=None),
+        ]
+    )
     facade = _facade(connection)
 
     result = await facade.mark_pre_summary_reviewed(
@@ -241,9 +249,9 @@ async def test_mark_pre_summary_reviewed_low_confidence_gates_into_reviewed() ->
     )
 
     assert isinstance(result, PreSummaryReviewResult)
-    # Hard gate: the low-confidence pre-summary can only reach Reviewed, never
-    # Final, through this attributed review action.
-    assert result.review_state == "reviewed"
+    # One-action finalize: the attributed low-confidence review lands Final in
+    # the same action - no low-confidence case is ever left stuck at reviewed.
+    assert result.review_state == "final"
     assert result.review_attribution == "doctor"
     assert result.reviewed_by == 12
     assert result.reviewed_at is not None
@@ -253,20 +261,25 @@ async def test_mark_pre_summary_reviewed_low_confidence_gates_into_reviewed() ->
 
     params = _update_params(_statements(connection), intake_pre_summaries.name)
     assert params is not None
-    assert params["review_state"] == "reviewed"
+    assert params["review_state"] == "final"
     assert params["review_attribution"] == "doctor"
     assert params["reviewed_by"] == 12
     assert params["reviewed_at"] is not None
     assert params["doctor_corrections"] == {"severity": "moderate"}
-    # A review that only reaches Reviewed publishes no outbox event: there is
-    # no "reviewed" event in the registry, and the pre-summary is not yet ready
-    # for downstream use. No intake_outbox insert happened.
-    inserts = [
+
+    # Reaching Final publishes pre_summary.ready in the SAME transaction
+    # (ADR-0002 S1) so MOD-006 births the case and MOD-010 notifies the patient.
+    outbox = [
         call.args[0]
         for call in connection.execute.await_args_list
         if isinstance(call.args[0], Insert) and call.args[0].table.name == "intake_outbox"
     ]
-    assert inserts == []
+    assert len(outbox) == 1
+    outbox_values = outbox[0].compile().params
+    assert outbox_values["status"] == "pending"
+    assert outbox_values["payload"]["intake_id"] == 1
+    assert outbox_values["payload"]["pre_summary_id"] == 5
+    assert outbox_values["payload"]["patient_id"] == 7
 
 
 @pytest.mark.asyncio
@@ -334,7 +347,14 @@ async def test_mark_pre_summary_low_confidence_unchanged_edits_are_not_changed()
         low_confidence=True,
         review_state="draft",
     )
-    connection = _connection([_FakeResult(row=row), _FakeResult(row=None)])
+    connection = _connection(
+        [
+            _FakeResult(row=row),
+            _FakeResult(row=None),
+            _FakeResult(scalar=7),
+            _FakeResult(row=None),
+        ]
+    )
     facade = _facade(connection)
 
     result = await facade.mark_pre_summary_reviewed(
@@ -343,9 +363,43 @@ async def test_mark_pre_summary_low_confidence_unchanged_edits_are_not_changed()
         corrections={"severity": "mild"},  # matches extraction -> no change
     )
 
-    assert result.review_state == "reviewed"
+    assert result.review_state == "final"
     assert result.changed_fields == []
     assert result.reviewed_copy["severity"] == "mild"
+
+
+@pytest.mark.asyncio
+async def test_mark_pre_summary_reviewed_finalizes_legacy_low_confidence_reviewed_row() -> None:
+    """A low-confidence row already stuck at 'reviewed' survives the dead-end.
+
+    A single further attributed review action (the same facade seam) finalizes
+    it through the Reviewed -> Final edge (PHASE-8.1, #442).
+    """
+    row = _pre_summary_row(
+        confidence=0.45,
+        low_confidence=True,
+        review_state="reviewed",
+    )
+    connection = _connection(
+        [
+            _FakeResult(row=row),
+            _FakeResult(row=None),
+            _FakeResult(scalar=7),
+            _FakeResult(row=None),
+        ]
+    )
+    facade = _facade(connection)
+
+    result = await facade.mark_pre_summary_reviewed(
+        intake_id=1,
+        doctor_id=12,
+        corrections={"severity": "moderate"},
+    )
+
+    assert result.review_state == "final"
+    assert result.review_attribution == "doctor"
+    assert result.reviewed_by == 12
+    assert result.reviewed_copy == {"symptoms": ["headache"], "severity": "moderate"}
 
 
 @pytest.mark.asyncio

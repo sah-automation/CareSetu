@@ -744,10 +744,15 @@ class IntakeFacade:
         The transition the machine applies depends on confidence (the
         AMB-006 0.70 threshold, structurally enforced here):
 
-        - **low_confidence** (below 0.70 or missing): the hard gate - the
-          pre-summary can ONLY reach ``Reviewed`` through this attributed
-          review action (``PreSummaryAction.REVIEW``). It never reaches
-          ``Final`` unreviewed.
+        - **low_confidence** (below 0.70 or missing): the one-action finalize
+          (PHASE-8.1, #442) - this attributed review action reviews AND
+          finalizes the pre-summary (``PreSummaryAction.REVIEW``,
+          ``Draft -> Final``), so no low-confidence case is left stuck at
+          ``Reviewed``. The machine structurally blocks every other route to
+          ``Final`` for a low-confidence pre-summary, keeping the attribution
+          gate a real doctor action. A row already at ``reviewed`` (a legacy
+          dead-end) is finalized by the same review action through the
+          ``Reviewed -> Final`` edge.
         - **high_confidence**: the clean path - a single attributed review
           action reviews AND finalizes it (``PreSummaryAction.FINALIZE``,
           ``Draft -> Final``), user story 23.
@@ -784,7 +789,15 @@ class IntakeFacade:
                 structuring_confidence=row.structuring_confidence,
             )
             low_conf = is_low_confidence(row.structuring_confidence)
-            action = PreSummaryAction.REVIEW if low_conf else PreSummaryAction.FINALIZE
+            # PHASE-8.1 one-action finalize (#442): the attributed review of a
+            # low-confidence pre-summary lands Final in this SAME action - via
+            # the low-confidence Review edge while DRAFT, or via the always-legal
+            # Reviewed -> Finalize edge for a row already stuck at 'reviewed'.
+            # High-confidence rows keep the single-action Finalize clean path.
+            if low_conf and current.status is PreSummaryStatus.DRAFT:
+                action = PreSummaryAction.REVIEW
+            else:
+                action = PreSummaryAction.FINALIZE
             next_state = pre_summary_transition(current, action)
 
             original = dict(row.structured_fields or {})
@@ -807,13 +820,12 @@ class IntakeFacade:
             )
 
             # Every state change writes its outbox event in the SAME transaction
-            # (ADR-0002 S1). A review that REACHES ``Final`` (high-confidence
-            # single action) publishes ``pre_summary.ready`` so MOD-006 attaches
-            # the summary to the case and MOD-010 notifies the patient. The
-            # low-confidence gate to ``Reviewed`` publishes nothing: there is no
-            # "reviewed" event in the registry, the pre-summary is not yet ready
-            # for downstream use, and ``pre_summary.low_confidence`` (needs
-            # review) would be factually wrong once reviewed.
+            # (ADR-0002 S1). Every attributed review is now a single-action
+            # finalize (the high-confidence clean path and the low-confidence
+            # one-action finalize, #442), so reaching ``Final`` publishes
+            # ``pre_summary.ready`` and MOD-006 attaches the summary to the case
+            # while MOD-010 notifies the patient - no low-confidence case is ever
+            # left stuck at ``reviewed``. The machine-driven guard below stays.
             if next_state.status is PreSummaryStatus.FINAL:
                 patient_id = (
                     await connection.execute(
