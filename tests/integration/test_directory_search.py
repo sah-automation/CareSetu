@@ -1,14 +1,18 @@
 """PHASE-6 T02a: the public provider directory search against Postgres (#313).
 
 Exercises the ``MOD-002`` ``search_directory`` facade against a live PostgreSQL
-mirroring ``test_partner_verification_queue.py`` (alembic head + raw seeding of
-profiles/credentials/index rows so each partner state is a single flat insert):
+(alembic head). Directory-visible partners are constructed through the real
+Phase-5 operator-approval path - the activation seam (#456): register, submit
+credentials, then an attributed operator approve stamps the round's credentials
+verified and upserts the ``partner_directory_index`` row in the same
+transaction, exactly as a real doctor becomes visible. No fixture hand-builds
+SQL rows to fake partner state (#459).
 
 - Only ``[Active]`` partners whose credentials are all verified, unexpired and
   unrevoked appear (the provider visibility rule - REQ-028 + ADR-0011, derived
   on read, never cached). Under Verification partners and partners whose
-  credentials expired/revoked stay hidden even when their directory_index row
-  still claims ``is_active``.
+  credentials expired/revoked stay hidden even though they held an ``Active``
+  index entry before their state changed.
 - The wider-area fallback relaxes ONLY the location constraint - type,
   specialty and free-text filters hold while ``fell_back`` labels the results
   "outside your area"; a match inside the peri-urban scope never falls back.
@@ -41,10 +45,12 @@ from sqlalchemy.pool import NullPool
 from modules.iam.adapters.sms import MockSmsAdapter
 from modules.iam.facade import IamFacade
 from modules.partner.adapters.artifact_store import CredentialArtifactStore
+from modules.partner.domain.credentials import CredentialType
 from modules.partner.facade import (
     DALTONGANJ_LATITUDE,
     DALTONGANJ_LONGITUDE,
     DEFAULT_SERVICE_AREA_NAME,
+    CredentialSubmission,
     PartnerFacade,
 )
 
@@ -56,7 +62,21 @@ ALEMBIC_INI = REPO_ROOT / "apps" / "backend" / "alembic.ini"
 _FAR_LATITUDE = 24.90
 _FAR_LONGITUDE = DALTONGANJ_LONGITUDE
 
-_identity_ids = count(1001)
+_OPERATOR_ID = 77
+_DOC_BYTES = b"medical registration certificate image"
+
+#: Unique phones drive the real registration seam - every activation needs its
+#: own identity (a duplicate phone resolves to the existing partner).
+_phone_numbers = count(9100000000)
+
+#: The primary closed credential type a partner of each type must submit
+#: (ADR-0008, PHASE-5 T06): a doctor a medical registration, a lab a lab
+#: license, a chemist a drug license. A mismatched type auto-fails Step 1.
+_CREDENTIAL_TYPE_BY_PARTNER_TYPE: dict[str, CredentialType] = {
+    "doctor": CredentialType.MEDICAL_REGISTRATION,
+    "lab": CredentialType.LAB_LICENSE,
+    "chemist": CredentialType.DRUG_LICENSE,
+}
 
 
 def _alembic_config(database_url: str) -> Config:
@@ -117,122 +137,145 @@ def _facade(database_url: str, tmp_path: Path) -> tuple[IamFacade, PartnerFacade
     return iam, partner
 
 
-async def _seed_partner(
+async def _execute(database_url: str, sql: str, params: dict[str, Any]) -> None:
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(text(sql), params)
+    finally:
+        await engine.dispose()
+
+
+async def _seed_specialty(database_url: str, partner_id: int, specialty: str) -> None:
+    """Publish a doctor's closed pick-list specialty onto its index entry (#459).
+
+    The activation seam (#456) creates the partner's ``directory_index`` row
+    with ``specialty = NULL`` (no profile specialty source exists yet), so no
+    writer seam publishes the value. Seeding the single column on that
+    seam-created row is a legitimate data-field seed, not a hand-written index
+    row - the row itself always comes from operator approval.
+    """
+    await _execute(
+        database_url,
+        "UPDATE partner.partner_directory_index SET specialty = :specialty "
+        "WHERE partner_id = :partner_id",
+        {"partner_id": partner_id, "specialty": specialty},
+    )
+
+
+async def _expire_credentials(database_url: str, partner_id: int) -> None:
+    """Stamp the partner's recorded ``expires_at`` far in the past (#459).
+
+    The review-acceptance expiry writer lives in the Phase-6 verification
+    wiring (not this ticket's scope), so the date field is injected directly -
+    mirroring the credential-expiry-sweep test. The partner reaches the
+    directory through the activation seam first.
+    """
+    await _execute(
+        database_url,
+        "UPDATE partner.partner_credentials SET expires_at = :expires "
+        "WHERE profile_id = :partner_id",
+        {"partner_id": partner_id, "expires": datetime.now(UTC) - timedelta(days=400)},
+    )
+
+
+async def _activate_partner(
     database_url: str,
+    partner: PartnerFacade,
     *,
     partner_type: str = "doctor",
-    status: str = "Active",
     practice_name: str,
     latitude: float = DALTONGANJ_LATITUDE,
     longitude: float = DALTONGANJ_LONGITUDE,
     specialty: str | None = None,
-    credential_verified: bool = True,
-    credential_expires_at: datetime | None = None,
-    credential_revoked_at: datetime | None = None,
-    indexed: bool = True,
-    is_active: bool = True,
     service_area_id: int | None = None,
 ) -> int:
-    """Seed profile + current-round credential + directory index row directly.
+    """Drive the real Phase-5 operator-approval path to directory visibility.
 
-    A single flat insert per partner table gives the search's read-time rules
-    exact states to chew on (ADR-0011 lazy read-hide: the index row may claim
-    ``is_active`` while the credential is already revoked/expired - the facade
-    must still hide it). ``service_area_id`` is passed through to the profile so
-    tests can pin a partner's recorded service area (and its fallback when
-    omitted).
+    The operator-approval path (the activation seam, #456) is the ONLY way a
+    real doctor becomes directory-visible: register, submit credentials (Step-1
+    pre-filter), then an attributed operator approve stamps the round's
+    credentials ``verified`` and upserts the ``partner_directory_index`` row in
+    the same transaction - no fixture hand-builds those rows. ``specialty`` is a
+    data-field seed over the seam-created entry (see ``_seed_specialty``);
+    ``service_area_id`` pins the recorded service area exactly like the profile
+    route.
     """
-    engine = create_async_engine(database_url, poolclass=NullPool)
-    try:
-        async with engine.begin() as connection:
-            profile = await connection.execute(
-                text(
-                    "INSERT INTO partner.partner_profiles "
-                    "(identity_id, partner_type, status, practice_name, practice_address, "
-                    " practice_latitude, practice_longitude, service_area_id) "
-                    "VALUES (:identity_id, :partner_type, :status, :practice_name, "
-                    " 'integration test address', :latitude, :longitude, :service_area_id) "
-                    "RETURNING id"
-                ),
-                {
-                    "identity_id": next(_identity_ids),
-                    "partner_type": partner_type,
-                    "status": status,
-                    "practice_name": practice_name,
-                    "latitude": latitude,
-                    "longitude": longitude,
-                    "service_area_id": service_area_id,
-                },
+    registered = await partner.register(
+        phone=str(next(_phone_numbers)),
+        partner_type=partner_type,
+        practice_name=practice_name,
+        practice_address="integration test address",
+        practice_latitude=latitude,
+        practice_longitude=longitude,
+        service_area_id=service_area_id,
+    )
+    await partner.submit_credentials(
+        registered.partner_id,
+        credentials=[
+            CredentialSubmission(
+                credential_type=_CREDENTIAL_TYPE_BY_PARTNER_TYPE[partner_type],
+                artifacts=[_DOC_BYTES],
             )
-            partner_id = int(profile.scalar_one())
-            await connection.execute(
-                text(
-                    "INSERT INTO partner.partner_credentials "
-                    "(profile_id, credential_type, verified, expires_at, revoked_at) "
-                    "VALUES (:profile_id, 'medical_registration', :verified, "
-                    " :expires_at, :revoked_at)"
-                ),
-                {
-                    "profile_id": partner_id,
-                    "verified": credential_verified,
-                    "expires_at": credential_expires_at,
-                    "revoked_at": credential_revoked_at,
-                },
+        ],
+    )
+    await partner.operator_decision(registered.partner_id, decision_by=_OPERATOR_ID, approve=True)
+    if specialty is not None:
+        await _seed_specialty(database_url, registered.partner_id, specialty)
+    return registered.partner_id
+
+
+async def _pending_partner(
+    partner: PartnerFacade,
+    *,
+    partner_type: str = "doctor",
+    practice_name: str,
+    latitude: float = DALTONGANJ_LATITUDE,
+    longitude: float = DALTONGANJ_LONGITUDE,
+) -> int:
+    """Open a partner held at the operator gate: registered and submitted.
+
+    A real ``[Under Verification]`` applicant - never approved, so no index
+    row and no ``verified`` stamp; directory reads hide it exactly like a live
+    queue row.
+    """
+    registered = await partner.register(
+        phone=str(next(_phone_numbers)),
+        partner_type=partner_type,
+        practice_name=practice_name,
+        practice_address="integration test address",
+        practice_latitude=latitude,
+        practice_longitude=longitude,
+    )
+    await partner.submit_credentials(
+        registered.partner_id,
+        credentials=[
+            CredentialSubmission(
+                credential_type=_CREDENTIAL_TYPE_BY_PARTNER_TYPE[partner_type],
+                artifacts=[_DOC_BYTES],
             )
-            if indexed:
-                await connection.execute(
-                    text(
-                        "INSERT INTO partner.partner_directory_index "
-                        "(partner_id, practice_latitude, practice_longitude, partner_type, "
-                        " specialty, is_active) "
-                        "VALUES (:partner_id, :latitude, :longitude, :partner_type, "
-                        " :specialty, :is_active)"
-                    ),
-                    {
-                        "partner_id": partner_id,
-                        "latitude": latitude,
-                        "longitude": longitude,
-                        "partner_type": partner_type,
-                        "specialty": specialty,
-                        "is_active": is_active,
-                    },
-                )
-            return partner_id
-    finally:
-        await engine.dispose()
+        ],
+    )
+    return registered.partner_id
 
 
 @pytest.mark.asyncio
 async def test_search_returns_only_active_with_valid_credentials(
     database_url: str, clean_partner: None, tmp_path: Path
 ) -> None:
-    """Visibility rule (REQ-028 + ADR-0011): status-free, credential-free rows stay out."""
+    """Visibility rule (REQ-028 + ADR-0011): only the activated doctor appears."""
     _, partner = _facade(database_url, tmp_path)
-    await _seed_partner(
-        database_url,
-        practice_name="Dr. Sharma Clinic",
-        specialty="General Physician",
+    await _activate_partner(
+        database_url, partner, practice_name="Dr. Sharma Clinic", specialty="General Physician"
     )
-    await _seed_partner(
-        database_url,
-        practice_name="Dr. Pending",
-        status="Under Verification",
-    )
-    await _seed_partner(
-        database_url,
-        practice_name="Dr. Lapsed",
-        credential_expires_at=datetime.now(UTC) - timedelta(days=400),
-    )
-    await _seed_partner(
-        database_url,
-        practice_name="Dr. Revoked",
-        credential_revoked_at=datetime.now(UTC) - timedelta(days=1),
-    )
-    await _seed_partner(
-        database_url,
-        practice_name="Dr. Unverified",
-        credential_verified=False,
-    )
+    # Held at the operator gate, never approved - no index row, no verified stamp.
+    await _pending_partner(partner, practice_name="Dr. Pending")
+    # Approved, then the recorded expiry date passes: lazy read-hide removes it.
+    lapsed_id = await _activate_partner(database_url, partner, practice_name="Dr. Lapsed")
+    await _expire_credentials(database_url, lapsed_id)
+    # Approved, then revoked through the real close-out seam: deindexed instantly.
+    revoked_id = await _activate_partner(database_url, partner, practice_name="Dr. Revoked")
+    await partner.invalidate_credential(revoked_id)
 
     view = await partner.search_directory()
 
@@ -249,8 +292,9 @@ async def test_wider_area_fallback_relaxes_only_location(
 ) -> None:
     """Fallback is location-only: filters hold, and the label tells the truth."""
     _, partner = _facade(database_url, tmp_path)
-    far_id = await _seed_partner(
+    far_id = await _activate_partner(
         database_url,
+        partner,
         practice_name="Dr. Far",
         latitude=_FAR_LATITUDE,
         longitude=_FAR_LONGITUDE,
@@ -272,8 +316,9 @@ async def test_wider_area_fallback_relaxes_only_location(
     # A nearby match kills the fallback: an in-scope result means the far row
     # is NOT served (the wider-area relaxation only fires when nothing matches
     # in scope - "outside your area" is never mixed with local listings).
-    near_id = await _seed_partner(
+    near_id = await _activate_partner(
         database_url,
+        partner,
         practice_name="Dr. Nearby",
         specialty="General Physician",
     )
@@ -289,18 +334,21 @@ async def test_search_orders_nearest_first(
     """Distance sort is ascending from the caller's geo point."""
     _, partner = _facade(database_url, tmp_path)
     # Longitude offsets grow the great-circle distance from the Daltonganj centre.
-    await _seed_partner(
+    await _activate_partner(
         database_url,
+        partner,
         practice_name="Dr. Farther",
         longitude=DALTONGANJ_LONGITUDE + 0.070,
     )
-    await _seed_partner(
+    await _activate_partner(
         database_url,
+        partner,
         practice_name="Dr. Mid",
         longitude=DALTONGANJ_LONGITUDE + 0.030,
     )
-    await _seed_partner(
+    await _activate_partner(
         database_url,
+        partner,
         practice_name="Dr. Closest",
         longitude=DALTONGANJ_LONGITUDE + 0.008,
     )
@@ -322,17 +370,19 @@ async def test_search_composes_partner_type_specialty_and_free_text(
 ) -> None:
     """Filters compose: closed type enum, doctors-only specialty, ILIKE name."""
     _, partner = _facade(database_url, tmp_path)
-    await _seed_partner(
+    await _activate_partner(
         database_url,
+        partner,
         practice_name="Sharma Clinic and Sons",
         specialty="General Physician",
     )
-    await _seed_partner(
+    await _activate_partner(
         database_url,
+        partner,
         practice_name="Mehta Children's Clinic",
         specialty="Pediatrician",
     )
-    await _seed_partner(database_url, practice_name="MedPlus Lab", partner_type="lab")
+    await _activate_partner(database_url, partner, practice_name="MedPlus Lab", partner_type="lab")
 
     doctors = await partner.search_directory(partner_type="doctor")
     assert {e.practice_name for e in doctors.items} == {
@@ -361,7 +411,7 @@ async def test_search_emits_directory_search_event_once_per_search(
 ) -> None:
     """One ``directory.search`` analytics row per search, in the same transaction."""
     _, partner = _facade(database_url, tmp_path)
-    await _seed_partner(database_url, practice_name="Dr. Sharma Clinic")
+    await _activate_partner(database_url, partner, practice_name="Dr. Sharma Clinic")
 
     await partner.search_directory(query="sharma")
     rows = await _query(
@@ -446,8 +496,9 @@ async def test_search_caps_in_scope_results_at_directory_max_results(
     expected_count = 50
     for index, offset in enumerate(offsets):
         for _ in range(6):
-            await _seed_partner(
+            await _activate_partner(
                 database_url,
+                partner,
                 practice_name=f"Dr. Offset {offset:.3f} #{index}",
                 longitude=DALTONGANJ_LONGITUDE + offset,
             )
@@ -471,8 +522,9 @@ async def test_search_caps_fallback_results_at_directory_max_results(
     # All partners sit beyond the peri-urban scope (~50 km east) so every search
     # falls back; the relaxed run must still cap at the top-50 nearest.
     for index in range(72):
-        await _seed_partner(
+        await _activate_partner(
             database_url,
+            partner,
             practice_name=f"Dr. Far #{index}",
             longitude=DALTONGANJ_LONGITUDE + 0.50 + 0.005 * index,
         )
@@ -505,14 +557,16 @@ async def test_search_maps_area_from_recorded_service_area_with_fallback(
         await engine.dispose()
 
     _, partner = _facade(database_url, tmp_path)
-    await _seed_partner(
+    await _activate_partner(
         database_url,
+        partner,
         practice_name="Dr. Hutar Clinic",
         longitude=DALTONGANJ_LONGITUDE + 0.008,
         service_area_id=2,
     )
-    await _seed_partner(
+    await _activate_partner(
         database_url,
+        partner,
         practice_name="Dr. No Area",
         longitude=DALTONGANJ_LONGITUDE + 0.030,
     )
