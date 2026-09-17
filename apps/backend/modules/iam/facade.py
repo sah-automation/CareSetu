@@ -65,6 +65,12 @@ from modules.iam.otp_facade import (
     OtpFacade as OtpFacade,
 )
 from modules.iam.otp_facade import (
+    PartnerLoginOtpResult as PartnerLoginOtpResult,
+)
+from modules.iam.otp_facade import (
+    PartnerLoginProfileGate as PartnerLoginProfileGate,
+)
+from modules.iam.otp_facade import (
     ResendOtpResult as ResendOtpResult,
 )
 from modules.iam.otp_facade import (
@@ -181,6 +187,20 @@ class IamFacade:
     async def resend_otp(self, phone: str) -> ResendOtpResult:
         """Request a fresh code: latest-wins over the pending challenge."""
         return await self._otp.resend_otp(phone)
+
+    async def partner_login(
+        self, phone: str, partner_gate: PartnerLoginProfileGate
+    ) -> PartnerLoginOtpResult:
+        """Start a partner phone-OTP login (ADR-0016, F014-T02 #462).
+
+        Delegated to ``OtpFacade``. ``partner_gate`` resolves the partner
+        profile id for the caller's identity (or None) at the module boundary;
+        the calling route wires the partner facade's non-throwing
+        ``resolve_partner_id_by_identity`` seam into the port so iam never
+        imports or queries the partner schema (ADR-0003). A phone with no
+        partner profile is refused ``no_account`` - never creating an identity.
+        """
+        return await self._otp.partner_login(phone, partner_gate)
 
     # -- MFA delegation (ADR-0006, T07 ticket #250) ------------------------
 

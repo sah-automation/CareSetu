@@ -117,6 +117,9 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/auth/operator/mfa/enroll",
         # T05 (#298): partner-scoped session issuance for registered partners.
         "/v1/auth/partner/session",
+        # F014 T02 (#462): partner OTP login - sends a challenge only when the
+        # phone resolves to a registered partner profile.
+        "/v1/auth/partner/login",
         # PHASE-6 T02a (#313): the public provider directory search (FEAT-004) -
         # open surface, patients browse without logging in.
         "/v1/directory/search",

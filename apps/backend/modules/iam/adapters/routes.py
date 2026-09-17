@@ -45,6 +45,7 @@ from modules.iam.facade import (
     EnrollMfaResult,
     IamFacade,
     OperatorInvitedResult,
+    PartnerLoginOtpResult,
     RegisterPatientResult,
     ResendOtpResult,
     SessionResult,
@@ -79,6 +80,14 @@ class VerifyOtpRequest(BaseModel):
 
 class ResendOtpRequest(BaseModel):
     """Body of ``POST /v1/auth/resend``: the phone needing a fresh code."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    phone: str = Field(min_length=1, description="10-digit Indian mobile number, or with 91 prefix")
+
+
+class PartnerLoginRequest(BaseModel):
+    """Body of ``POST /v1/auth/partner/login`` (ADR-0016, F014-T02 #462)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -252,6 +261,42 @@ async def issue_session(
         secure=_is_secure_cookie(request),
     )
     return response
+
+
+@router.post(
+    "/partner/login",
+    response_model=PartnerLoginOtpResult,
+    status_code=status.HTTP_200_OK,
+    summary="Begin partner phone-OTP login",
+)
+async def partner_login(
+    request: Request,
+    body: PartnerLoginRequest,
+) -> PartnerLoginOtpResult:
+    """Start a returning partner's phone-OTP login (ADR-0016, F014-T02 #462).
+
+    Issues a fresh OTP challenge ONLY for a phone that already has a partner
+    profile (doctor/lab/chemist). A phone with no partner account - including a
+    patient-only phone - is refused with the ``no_account`` outcome pointing to
+    registration: no identity is ever created and no SMS is sent. Cooldown /
+    brute-force lockout / suspended refusals behave exactly as on the patient
+    OTP surface (``cooldown``/``locked`` with countdown/``suspended``).
+
+    The partner-profile gate is resolved at the composition boundary (WI-3,
+    #336): the route wires the partner facade's non-throwing
+    ``resolve_partner_id_by_identity`` seam into the iam facade as a port, then
+    hands it to ``partner_login`` - iam itself never reaches into the partner
+    module (no cross-schema import, ADR-0003). The challenge issuance reuses
+    the shared OTP machine unchanged and registers no new event name
+    (ADR-0016 §Events): only ``otp.sent``.
+    """
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    partner_facade = cast("PartnerFacade", request.app.state.partner_facade)
+
+    async def _partner_profile(identity_id: int) -> int | None:
+        return await partner_facade.resolve_partner_id_by_identity(identity_id)
+
+    return await run_idempotent(request, lambda: facade.partner_login(body.phone, _partner_profile))
 
 
 @router.post(

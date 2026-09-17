@@ -8,7 +8,7 @@ types, and imports lockout/challenge helpers from ``domain/shared.py``.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Literal
 
@@ -82,6 +82,39 @@ class ResendOtpResult(BaseModel):
     """
 
     outcome: Literal["sent", "cooldown", "locked", "suspended", "no_identity"]
+    phone_e164: str
+    challenge_id: int | None = None
+    expires_in_seconds: int | None = None
+    cooldown_remaining_seconds: int | None = None
+    attempts_left: int | None = None
+    lockout_remaining_seconds: int | None = None
+
+
+PartnerLoginProfileGate = Callable[[int], Awaitable[int | None]]
+"""Port: ``(identity_id) -> partner profile id or None`` (ADR-0016).
+
+Given an iam identity id, resolve the matching partner profile id, or ``None``
+when the identity holds no partner profile (a patient-only phone). The route
+wires this to the partner facade's non-throwing ``resolve_partner_id_by_identity``
+seam, so iam never imports or queries the partner schema (ADR-0003) - the seam
+is read at the module boundary exactly like ``OtpSender``/``VerifyPartnerExists``.
+"""
+
+
+class PartnerLoginOtpResult(BaseModel):
+    """Outcome of starting a partner phone-OTP login (ADR-0016, F014-T02 #462).
+
+    ``sent``: a phone with a partner profile got a fresh challenge through the
+    shared OTP machine - latest-wins invalidation, resend cooldown, 5-attempt
+    budget, 5-minute TTL, hashed at rest, never logged, and only the existing
+    ``otp.sent`` event (no new event name). ``no_account``: the phone had no
+    partner profile (identity absent or present as a patient-only phone) - the
+    caller is pointed to registration, and NO identity was created and NO SMS
+    was sent. ``cooldown``/``locked``/``suspended`` are refused exactly as on
+    the patient OTP surface, with the matching countdown.
+    """
+
+    outcome: Literal["sent", "no_account", "cooldown", "locked", "suspended"]
     phone_e164: str
     challenge_id: int | None = None
     expires_in_seconds: int | None = None
@@ -292,6 +325,71 @@ class OtpFacade:
         await self._otp_sender(phone_e164, otp)
 
         return ResendOtpResult(
+            outcome="sent",
+            phone_e164=phone_e164,
+            challenge_id=challenge_id,
+            expires_in_seconds=OTP_TTL_SECONDS,
+            cooldown_remaining_seconds=RESEND_COOLDOWN_SECONDS,
+            attempts_left=MAX_ATTEMPTS,
+        )
+
+    async def partner_login(
+        self, phone: str, partner_gate: PartnerLoginProfileGate
+    ) -> PartnerLoginOtpResult:
+        """Start a returning partner's phone-OTP login (ADR-0016, F014-T02 #462).
+
+        The dedicated partner login issues a fresh challenge ONLY for a phone
+        that already has a partner profile. The partner-profile gate is the
+        injected ``partner_gate`` port (identity id -> partner profile id or
+        None), wired at the route to the partner facade's
+        ``resolve_partner_id_by_identity`` seam so iam never reaches into the
+        partner module (ADR-0003). A phone with no identity - or an identity
+        with no partner profile, including a patient-only phone - is refused
+        ``no_account`` WITHOUT creating an identity row and WITHOUT dispatching
+        an SMS; the caller is pointed to registration (register as a
+        doctor/lab/chemist).
+
+        The issuance itself reuses the shared OTP machine exactly as the
+        patient resend path: the identity row is locked ``FOR UPDATE``,
+        ``evaluate_resend`` honors Suspended / brute-force lockout / resend
+        cooldown with the same precedence, a pass invalidates the pending
+        challenge (latest-wins) and issues a fresh hashed one, ``otp.sent``
+        lands in the iam outbox in the same transaction, and the EXT-001
+        delivery is dispatched as a background task afterwards (PHASE-2 REM
+        T4, #86) - the request never blocks on the provider. No new event name
+        is introduced (ADR-0016 §Events): only ``otp.sent``.
+        """
+        phone_e164 = normalize_phone(phone)
+        now = self._clock()
+
+        async with self._engine.begin() as connection:
+            locked = await self._lock_identity(connection, phone_e164)
+            if locked is None:
+                return PartnerLoginOtpResult(outcome="no_account", phone_e164=phone_e164)
+            if await partner_gate(locked.identity_id) is None:
+                return PartnerLoginOtpResult(outcome="no_account", phone_e164=phone_e164)
+
+            reissue = await _reissue_otp_challenge(
+                connection,
+                identity_id=locked.identity_id,
+                phone_e164=phone_e164,
+                identity_status=locked.status,
+                lockout_until=locked.lockout_until,
+                now=now,
+            )
+
+        if reissue.outcome != "sent":
+            return PartnerLoginOtpResult(
+                outcome=reissue.outcome,
+                phone_e164=phone_e164,
+                cooldown_remaining_seconds=reissue.cooldown_remaining_seconds,
+                lockout_remaining_seconds=reissue.lockout_remaining_seconds,
+            )
+
+        challenge_id, otp = reissue.sent_challenge()
+        await self._otp_sender(phone_e164, otp)
+
+        return PartnerLoginOtpResult(
             outcome="sent",
             phone_e164=phone_e164,
             challenge_id=challenge_id,
