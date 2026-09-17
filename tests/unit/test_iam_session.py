@@ -191,6 +191,7 @@ async def test_issue_partner_session_reverifies_profile_under_the_lock_at_mint()
 
     class _FakeLocked:
         identity_id = 42
+        phone_verified = True
 
     seen_connections: list[int] = []
     mint_connections: list[int] = []
@@ -244,6 +245,7 @@ async def test_issue_partner_session_refuses_a_profile_deleted_before_mint() -> 
 
     class _FakeLocked:
         identity_id = 42
+        phone_verified = True
 
     called: list[tuple[int, int]] = []
 
@@ -273,6 +275,45 @@ async def test_issue_partner_session_refuses_a_profile_deleted_before_mint() -> 
 
     assert len(called) == 1
     assert called[0][1] == 3
+
+
+async def test_issue_partner_session_refuses_a_phone_not_phone_verified() -> None:
+    """F014-T04 (#464): the mint refuses an unverified phone, no mint, no callback.
+
+    Knowing a partner's number is no longer enough to become them: the mint
+    reads the ``phone_verified`` marker from the locked identity row and refuses
+    the issuance with the 409 ``SESSION_REFUSED`` contract when it is not set -
+    a brand-new registrant who skipped the OTP step stays locked out until they
+    verify. The identity guard is under test, so the profile re-check and the
+    session-row mint must not run.
+    """
+
+    class _FakeLocked:
+        identity_id = 42
+        phone_verified = False
+
+    async def _profile_present(connection: AsyncConnection, partner_id: int) -> None:
+        raise AssertionError("the profile re-check must not run for an unverified phone")
+
+    async def _fake_mint(*args: object, **kwargs: object) -> tuple[str, str, str]:
+        raise AssertionError("mint must not run when the phone is not phone-verified")
+
+    facade = _facade()
+    facade._sessions._engine = _StubAsyncEngine()
+    with (
+        patch(
+            "modules.iam.session_facade._lock_identity_by_phone",
+            new=AsyncMock(return_value=_FakeLocked()),
+        ),
+        patch(
+            "modules.iam.session_facade.SessionFacade._mint_session_row",
+            new=staticmethod(_fake_mint),
+        ),
+        pytest.raises(SessionIssuanceError, match="not phone-verified"),
+    ):
+        await facade.issue_partner_session(
+            "9876543210", partner_id=3, verify_partner_exists=_profile_present
+        )
 
 
 async def test_validate_token_p95_stays_under_the_100ms_budget() -> None:

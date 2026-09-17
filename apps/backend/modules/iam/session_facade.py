@@ -308,21 +308,31 @@ class SessionFacade:
 
         Unlike ``issue_session`` this does NOT require identity ``Active`` or an
         active patient role grant - a fresh registrant is ``[Unverified]`` with
-        no role grant (ADR-0010). The gate is partner-profile existence, which is
-        verified UPSTREAM by the calling route (WI-3, #336): the route resolves
-        the identity through :meth:`resolve_identity_id_by_phone`, asks the
-        partner facade for the profile, and passes the already-verified
-        ``partner_id`` into this method. iam no longer reaches into the partner
-        module - a patient-only phone (identity exists but no partner profile) is
-        refused 409 ``SESSION_REFUSED`` by the route before this method runs.
+        no role grant (ADR-0010). The gate is partner-profile existence plus a
+        phone-verified identity (F014-T04, #464): the phone must have completed
+        a phone-code verification (ticket 03 sets the ``phone_verified`` marker,
+        also set by the patient verification path) so knowing a partner's number
+        is never enough to become them. The profile-existence gate is verified
+        UPSTREAM by the calling route (WI-3, #336): the route resolves the
+        identity through :meth:`resolve_identity_id_by_phone`, asks the partner
+        facade for the profile, and passes the already-verified ``partner_id``
+        into this method. iam no longer reaches into the partner module - a
+        patient-only phone (identity exists but no partner profile) is refused
+        409 ``SESSION_REFUSED`` by the route before this method runs. The
+        phone-verified gate is enforced HERE, read atomically from the locked
+        identity row as described below.
 
         The upstream check is an early-rejection fast path only. Because the
         profile could be deleted between that check and this mint, the caller may
         pass an optional ``verify_partner_exists`` callback that re-confirms the
         profile still exists (or raises ``SessionIssuanceError``) against this
         method's open connection, atomically under the identity row lock, before
-        the JWT is minted (#342). Leaving it ``None`` keeps the pre-WI-3-F4
-        behavior of trusting the upstream partner_id.
+        the JWT is minted (#342). The phone-verified gate is enforced in the
+        same locked transaction: the marker is read from the locked identity row
+        and an unverified phone is refused 409 ``SESSION_REFUSED``, so the marker
+        can never change between the route pre-check and the mint. Leaving the
+        callback ``None`` keeps the pre-WI-3-F4 behavior of trusting the
+        upstream partner_id, though the phone-verified gate always applies.
         """
         from modules.iam.domain.phone import normalize_phone
 
@@ -345,6 +355,12 @@ class SessionFacade:
                     "register the phone before issuing a session"
                 )
             identity_id = locked.identity_id
+
+            if not locked.phone_verified:
+                raise SessionIssuanceError(
+                    f"identity {identity_id} is not phone-verified; "
+                    "verify the phone before issuing a partner session"
+                )
 
             if verify_partner_exists is not None:
                 await verify_partner_exists(connection, partner_id)

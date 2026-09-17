@@ -273,7 +273,9 @@ class IamFacade:
         route (WI-3, #336), which passes the already-verified ``partner_id`` in.
         An optional ``verify_partner_exists`` callback re-confirms the profile
         still exists atomically under the identity row lock before the mint
-        (#342).
+        (#342). F014-T04 (#464) additionally refuses a phone whose identity is
+        not ``phone_verified`` - a brand-new registrant who skipped the phone
+        OTP step is refused 409 ``SESSION_REFUSED`` until they verify.
         """
         return await self._sessions.issue_partner_session(
             phone, partner_id, verify_partner_exists=verify_partner_exists

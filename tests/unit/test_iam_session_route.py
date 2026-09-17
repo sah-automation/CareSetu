@@ -444,6 +444,39 @@ def test_partner_session_refused_with_409_for_patient_only_phone(
     assert facade.issued == []
 
 
+def test_partner_session_refused_with_409_for_a_phone_not_phone_verified(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """F014-T04 (#464): a partner profile without a phone-verified identity -> 409.
+
+    The phone-verified gate is enforced inside the mint under the identity row
+    lock, so the route hands the verified ``partner_id`` in and the mint refuses
+    the issuance (as on the other refusal paths the error surfaces 409
+    ``SESSION_REFUSED`` with no cookie). A brand-new registrant who skipped the
+    OTP step hits exactly this envelope until they verify.
+    """
+    caplog.set_level(logging.WARNING)
+    facade = PartnerSessionIamStub()
+    facade.issue_error = SessionIssuanceError(
+        "identity 42 is not phone-verified; verify the phone before issuing a partner session"
+    )
+    client = _partner_client_with(facade, PartnerProfileStub(partner_id=3))
+
+    response = client.post(
+        "/v1/auth/partner/session",
+        json={"phone": "9876543210"},
+        headers={"X-Request-Id": _TRACE_ID},
+    )
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["code"] == "SESSION_REFUSED"
+    assert "not phone-verified" in body["message"]
+    assert body["trace_id"] == _TRACE_ID
+    assert facade.issued == [("9876543210", 3)]
+    assert "set-cookie" not in response.headers
+
+
 def test_partner_session_refused_409_when_profile_deleted_before_mint(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

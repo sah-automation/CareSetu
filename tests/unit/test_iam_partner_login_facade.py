@@ -82,6 +82,7 @@ def _row(status: str = "Unverified") -> _MappedRow:
         status=status,
         lockout_failed_attempts=0,
         lockout_until=None,
+        phone_verified=False,
     )
 
 
@@ -194,6 +195,7 @@ async def test_locked_outcome_carries_lockout_countdown() -> None:
         status="Unverified",
         lockout_failed_attempts=10,
         lockout_until=_NOW + timedelta(seconds=900),
+        phone_verified=False,
     )
     facade, gate, sender, connection = _facade(
         [_LockResult(row), _CooldownResult(None), MagicMock()]

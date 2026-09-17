@@ -59,12 +59,14 @@ def _identity_row(
     status: str = "Unverified",
     lockout_failed_attempts: int = 0,
     lockout_until: datetime | None = None,
+    phone_verified: bool = False,
 ) -> _MappedRow:
     return _MappedRow(
         id=7,
         status=status,
         lockout_failed_attempts=lockout_failed_attempts,
         lockout_until=lockout_until,
+        phone_verified=phone_verified,
     )
 
 
