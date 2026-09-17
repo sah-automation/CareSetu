@@ -69,6 +69,10 @@ class CredentialRecord:
     function can be tested with plain dataclasses - no SQLAlchemy row, no
     connection. Mirrors the partner state-machine pure-domain pattern
     (``tests/unit/test_partner_state_machine.py``).
+
+    ``verified`` marks the credential as belonging to an approved round (the
+    #456 activation seam stamps the approved round's rows ``verified = true``);
+    pending re-verification rows are ``verified = False``.
     """
 
     id: int
@@ -82,12 +86,13 @@ class CredentialRecord:
 class EligibilityDecision:
     """The result of :func:`evaluate_eligibility`.
 
-    ``has_any`` is True when the partner holds at least one submitted
-    credential. ``has_invalid`` is True when any credential was never
-    verified, its recorded expiry date has passed, or it was revoked - the
-    same three predicates the SQL ``has_invalid_credential`` tests (ADR-0011
-    lazy read-hide). The caller (the visibility predicate) combines both to
-    decide directory visibility.
+    ``has_any`` is True when the partner holds at least one credential in an
+    approved round. ``has_invalid`` is True when any approved-round credential
+    has its recorded expiry date in the past or was revoked - matching the SQL
+    ``has_invalid_credential`` predicate (ADR-0011 lazy read-hide). Pending
+    new-round rows (``verified = False``) are not part of the approved-round
+    credential set and never de-list an ``[Active]`` partner. The caller (the
+    visibility predicate) combines both to decide directory visibility.
     """
 
     has_any: bool
@@ -106,8 +111,13 @@ def evaluate_eligibility(
     in-memory list of credential records. ``now`` defaults to
     ``datetime.now(UTC)`` when omitted; tests inject a fixed clock.
 
-    A credential is **invalid** when:
-    - it was never verified (``verified is False``), OR
+    Only credentials stamped ``verified`` (an approved round - the #456
+    activation seal) count. A re-verification round's pending rows arrive
+    ``verified = False`` and are scoped out, so an ``[Active]`` partner stays
+    eligible through the grace window; an unverified row alone never
+    establishes eligibility.
+
+    An approved-round credential is **invalid** when:
     - its recorded expiry date has passed (``expires_at <= now``), OR
     - it was revoked (``revoked_at is not None``).
 
@@ -115,14 +125,13 @@ def evaluate_eligibility(
     working while an expired credential has not yet been swept; the pure
     decision reflects "expired counts as not-valid" even before sweep.
     """
-    if not credentials:
+    approved = [c for c in credentials if c.verified]
+    if not approved:
         return EligibilityDecision(has_any=False, has_invalid=False)
     ts = now or datetime.now(UTC)
     has_invalid = any(
-        not c.verified
-        or (c.expires_at is not None and c.expires_at <= ts)
-        or c.revoked_at is not None
-        for c in credentials
+        (c.expires_at is not None and c.expires_at <= ts) or c.revoked_at is not None
+        for c in approved
     )
     return EligibilityDecision(has_any=True, has_invalid=has_invalid)
 
@@ -133,35 +142,43 @@ def evaluate_eligibility(
 
 
 def has_any_credential(column: Any) -> Any:
-    """Exists-subquery: the partner has at least one submitted credential.
+    """Exists-subquery: the partner has at least one approved-round credential.
 
-    Mirrors the directory backfill's ``EXISTS (SELECT 1 FROM credentials)``
-    guard so search and the index agree on the "verified on record" baseline.
-    """
-    return (
-        select(1)
-        .select_from(partner_credentials)
-        .where(partner_credentials.c.profile_id == column)
-        .exists()
-    )
-
-
-def has_invalid_credential(column: Any) -> Any:
-    """Exists-subquery: the partner has any credential that is not valid.
-
-    The lazy read-hide (ADR-0011): a credential is invalid when it was never
-    verified, its recorded expiry date has passed, or it was revoked. Search
-    derives visibility from these recorded dates on every read - it never
-    trusts a cached ``is_active`` flag for the validity decision (T02b wraps
-    the cache later; correctness stays here).
+    Scoped to ``verified = True`` rows - the rows the #456 activation seam
+    stamps on approval, and the only rows that count toward the approved-round
+    credential set. A re-verification round's pending rows arrive
+    ``verified = False`` and are scoped out, so an ``[Active]`` partner stays
+    eligible through the grace window.
     """
     return (
         select(1)
         .select_from(partner_credentials)
         .where(
             partner_credentials.c.profile_id == column,
+            partner_credentials.c.verified.is_(True),
+        )
+        .exists()
+    )
+
+
+def has_invalid_credential(column: Any) -> Any:
+    """Exists-subquery: the partner has any approved-round credential that is not valid.
+
+    Scoped to the same ``verified = True`` approved-round rows as
+    ``has_any_credential``: a credential is invalid when its recorded expiry
+    date has passed, or it was revoked. Pending new-round rows
+    (``verified = False``) are never counted, so an ``[Active]`` partner who
+    re-submits cannot be de-listed before an operator decision (ADR-0011 lazy
+    read-hide still applies to approved-round rows - revoked/expired ones hide
+    on every read).
+    """
+    return (
+        select(1)
+        .select_from(partner_credentials)
+        .where(
+            partner_credentials.c.profile_id == column,
+            partner_credentials.c.verified.is_(True),
             or_(
-                partner_credentials.c.verified.is_(False),
                 and_(
                     partner_credentials.c.expires_at.is_not(None),
                     partner_credentials.c.expires_at <= func.now(),
@@ -177,13 +194,16 @@ def provider_visible(column: Any) -> Any:
     """The single provider-visibility predicate (REQ-028 + ADR-0011).
 
     ``True`` iff the partner is ``[Active]``, has a ``directory_index``
-    entry, holds at least one submitted credential AND every credential is
-    verified, unexpired and unrevoked. Both ``search_directory`` (which card
-    shows) and ``get_provider_profile`` (which profile resolves, and whose
-    ``verified`` indicator reads True) use this SAME predicate, so the
-    indicator can never claim a partner the search hides - one source of
-    truth for "tick gone = card gone". Always derived on read from the
-    recorded dates, never a cached ``is_active``-only trust (ADR-0011).
+    entry, holds at least one approved-round credential (``verified = True``)
+    AND every approved-round credential is unexpired and unrevoked. Both
+    ``search_directory`` (which card shows) and ``get_provider_profile``
+    (which profile resolves, and whose ``verified`` indicator reads True) use
+    this SAME predicate, so the indicator can never claim a partner the search
+    hides - one source of truth for "tick gone = card gone". Always derived on
+    read from the recorded dates, never a cached ``is_active``-only trust
+    (ADR-0011). A pending re-verification round's unverified rows never count
+    (grace window, #457) - only an operator decision (approve/reject) changes
+    visibility.
     """
     return and_(
         partner_directory_index.c.is_active.is_(True),

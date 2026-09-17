@@ -198,6 +198,12 @@ async def test_reverification_submit_stays_active_within_grace_window(
     assert rounds[0]["round"] == 1 and rounds[0]["status"] == "approved"
     assert rounds[1]["round"] == 2 and rounds[1]["status"] == "queued"
 
+    # AC1 (#457, FEAT-004): the pending new-round credentials (verified = False)
+    # must not de-list the Active partner - it stays visible in directory search
+    # during the grace window.
+    view = await partner.search_directory()
+    assert [entry.partner_id for entry in view.items] == [partner_id]
+
     # The role stays Active - the grace window keeps practicing.
     assert await iam.partner_role_status(identity_id) == "Active"
 
@@ -206,6 +212,51 @@ async def test_reverification_submit_stays_active_within_grace_window(
     event_types = [row["event_type"] for row in outbox]
     assert "credential.invalidated" not in event_types
     assert event_types.count("partner.verification_started") == 2
+
+
+@pytest.mark.asyncio
+async def test_reverification_approve_refreshes_visibility(
+    database_url: str, clean_partner: Any, tmp_path: Path
+) -> None:
+    """AC3 (#457, FEAT-004): operator approval of the re-verification round
+    keeps/refreshes the partner's directory visibility (activation seam), while
+    the newly-approved round's rows are stamped verified = True."""
+    iam, partner = _facade(database_url, tmp_path)
+    partner_id, identity_id = await _register_approve_activate(partner)
+
+    registry = _registry()
+    await _dispatch_to_iam(
+        registry,
+        partner_activated_envelope(partner_id, identity_id, _OPERATOR_ID),
+    )
+    assert await iam.partner_role_status(identity_id) == "Active"
+
+    # Active partner re-submits -> round 2 queued, still visible in search.
+    submission = await partner.submit_credentials(
+        partner_id,
+        credentials=[
+            CredentialSubmission(
+                credential_type=CredentialType.MEDICAL_REGISTRATION, artifacts=[_DOC_BYTES_2]
+            )
+        ],
+    )
+    assert submission.status == "Active"
+    assert submission.round == 2
+    view = await partner.search_directory()
+    assert [entry.partner_id for entry in view.items] == [partner_id]
+
+    # Operator approves the re-verification: visibility keeps (activation seam).
+    decision = await partner.operator_decision(partner_id, decision_by=_OPERATOR_ID, approve=True)
+    assert decision.status == "Active"
+    view = await partner.search_directory()
+    assert [entry.partner_id for entry in view.items] == [partner_id]
+
+    # The newly-approved round (round 2) is now stamped verified = True.
+    creds = await _query(
+        database_url,
+        "SELECT round, verified FROM partner.partner_credentials ORDER BY round",
+    )
+    assert [c["verified"] for c in creds] == [True, True]
 
 
 @pytest.mark.asyncio
