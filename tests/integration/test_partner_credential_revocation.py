@@ -16,11 +16,11 @@ skips when unreachable):
   the revocation, a fresh round re-opens and re-approves, and the profile is
   still ``[Active]`` on the SAME row (no new profile, no lifecycle detour).
 
-Two seams are injected as raw SQL exactly like ``test_directory_search.py``
-does: the index row (the app picks it up at migration-backfill time and the
-activation index writer lands with the T01/T05 wiring) and the verified flag the
-review-acceptance path will set (the search gate requires verified credentials).
-The revocation itself goes through the real facade.
+Partners reach directory-visibility through the real register → submit →
+operator-approve flow (the activation seam, #456), which stamps the approved
+round's credentials verified and upserts the ``partner_directory_index`` row -
+no fixture hand-writes those rows. The revocation itself goes through the real
+facade.
 
 Requires the native PostgreSQL; the suite skips cleanly when unreachable.
 """
@@ -124,10 +124,8 @@ async def _approve_active_partner(partner: PartnerFacade, iam: IamFacade, phone:
     """Run the real Phase-5 flow to a visible ``[Active]`` partner.
 
     Register → submit one medical-registration credential → operator approve.
-    The review-acceptance index writer and verified flag live in the T01/T05
-    wiring (not this ticket's scope), so the directory index row and the
-    ``verified`` mark are injected as raw SQL right after, exactly mirroring
-    ``test_directory_search.py``'s flat seeding.
+    The approval routes through the activation seam (#456), which stamps the
+    round's credentials verified and upserts the directory index row.
     """
     registered = await partner.register(
         phone=phone,
@@ -150,36 +148,6 @@ async def _approve_active_partner(partner: PartnerFacade, iam: IamFacade, phone:
     return partner_id
 
 
-async def _make_visible(database_url: str, partner_id: int) -> None:
-    """Inject the index row + verified flag the Phase-6 writer seams still own."""
-    engine = create_async_engine(database_url, poolclass=NullPool)
-    try:
-        async with engine.begin() as connection:
-            await connection.execute(
-                text(
-                    "INSERT INTO partner.partner_directory_index "
-                    "(partner_id, practice_latitude, practice_longitude, "
-                    " partner_type, is_active) "
-                    "VALUES (:partner_id, :lat, :lon, 'doctor', true) "
-                    "ON CONFLICT (partner_id) DO NOTHING"
-                ),
-                {
-                    "partner_id": partner_id,
-                    "lat": DALTONGANJ_LATITUDE,
-                    "lon": DALTONGANJ_LONGITUDE,
-                },
-            )
-            await connection.execute(
-                text(
-                    "UPDATE partner.partner_credentials SET verified = true "
-                    "WHERE profile_id = :partner_id"
-                ),
-                {"partner_id": partner_id},
-            )
-    finally:
-        await engine.dispose()
-
-
 @pytest.mark.asyncio
 async def test_invalidate_credential_revokes_deindexes_and_hides_from_search(
     database_url: str, clean_partner: Any, tmp_path: Path
@@ -194,7 +162,6 @@ async def test_invalidate_credential_revokes_deindexes_and_hides_from_search(
     """
     iam, partner = _facade(database_url, tmp_path)
     partner_id = await _approve_active_partner(partner, iam, "9876543210")
-    await _make_visible(database_url, partner_id)
 
     before = await partner.search_directory()
     assert [entry.partner_id for entry in before.items] == [partner_id]
