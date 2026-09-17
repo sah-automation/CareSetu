@@ -274,7 +274,7 @@ Still no new PRD feature - resolved chassis anchored to `REQ-003` + `REQ-006`, g
 
 #### 2. Deferred / Out-of-Scope Items
 
-- Staff authentication/MFA/email-credential backend (Phase 5; gaps G3/G4) - staff login submits stay inert.
+- Partner phone-OTP login, operator MFA and the partner credential-account backend (Phase 5; gaps G3/G4 - the login method is settled in ADR-0016) - staff login submits stay inert.
 - Public provider directory search API (G2) - homepage renders the graceful empty state.
 - Profile-fields persistence endpoint and server-side gating enforcement (G5).
 - Partner event fan-out to patient surfaces (G6/G7); doctor-initiated consent request event.
@@ -439,7 +439,7 @@ Still no new PRD feature - resolved chassis anchored to `REQ-003` + `REQ-006`, g
 
 - **Target for grilling (`grill-with-docs`):** `AMB-003` verification automation vs. manual split; deactivation semantics on failed re-verification.
 - **Target for `prototype`:** Operator verification queue (approve/reject, flag, priority-by-age) and partner registration form.
-- **Target for `to-spec` & `to-tickets`:** Scope boundary = `register_partner`, `submit_credentials`, `list_verification_queue`, `operator_decision`, role grant/deny on activation events, operator MFA login. No directory search.
+- **Target for `to-spec` & `to-tickets`:** Scope boundary = `register_partner` (with phone confirmation), partner phone-OTP login on `POST /v1/auth/partner/*` (ADR-0016), `submit_credentials`, `list_verification_queue`, `operator_decision`, role grant/deny on activation events, operator MFA login. No directory search.
 
 ---
 
