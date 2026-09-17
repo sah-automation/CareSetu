@@ -47,9 +47,9 @@ PARTNER_SCHEMA = "partner"
 class CredentialValidityPort(Protocol):
     """Surface the credential-validity deep module exposes to sub-facades.
 
-    Captures the 3 SQL predicates and the single close-out transition so
-    sub-facades depend on a typed seam rather than ``Any`` or ``ModuleType``
-    (coding-standards S3).
+    Captures the 3 SQL predicates, the single close-out transition and the
+    single activate transition so sub-facades depend on a typed seam rather
+    than ``Any`` or ``ModuleType`` (coding-standards S3).
     """
 
     def provider_visible(self, column: ColumnElement[Any]) -> ColumnElement[bool]: ...
@@ -60,6 +60,13 @@ class CredentialValidityPort(Protocol):
         connection: AsyncConnection,
         credentials: list[CloseOutCredential],
     ) -> list[int]: ...
+    async def activate_partner(
+        self,
+        connection: AsyncConnection,
+        partner_id: int,
+        *,
+        round: int,
+    ) -> None: ...
 
 
 class DirectoryCachePort(Protocol):

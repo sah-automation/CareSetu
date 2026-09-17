@@ -18,6 +18,13 @@ deep module that owns:
   revocation, credential expiry close-out, credential purge) converge on this
   module so a change to credential-expiry semantics (ADR-0011) is defined once
   and all paths emit an identical outcome.
+- **A single activate transition** (``activate_partner``) - the symmetric
+  counterpart of the close-out (#456): operator approval stamps the current
+  round's ``partner_credentials`` rows verified and upserts/refreshes the
+  partner's ``partner_directory_index`` entry. Both directions of visibility
+  change (activate on approve, deindex on close-out) travel through this
+  module, so the state bookkeeping agrees with the read-side predicates by
+  construction.
 
 ADR-0011 semantics are absorbed unchanged: lazy read-hide (an expired
 credential is never displayed even minutes after the date passes) and the
@@ -34,7 +41,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, literal, or_, select
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from bus.outbox_writer import write_outbox
@@ -264,3 +272,78 @@ async def close_out_credentials(
     await directory_visibility_changed()
 
     return closed
+
+
+# ---------------------------------------------------------------------------
+# Single activate transition (convergent on operator approval)
+# ---------------------------------------------------------------------------
+
+
+async def activate_partner(
+    connection: AsyncConnection,
+    partner_id: int,
+    *,
+    round: int,
+) -> None:
+    """The single activate transition for directory visibility (#456).
+
+    The symmetric counterpart of :func:`close_out_credentials`: operator
+    approval is the ONLY path that makes a partner directory-visible, so it
+    must not depend on caller-specific row choreography. In one transaction
+    it:
+
+    - stamps the current round's ``partner_credentials`` rows ``verified =
+      true`` (round-scoped so a re-approval of a re-verification round never
+      touches the already-approved round's history; revoked rows are left
+      alone - a revoked credential stays invisible regardless), and
+    - upserts/refreshes the partner's ``partner_directory_index`` row from the
+      live profile (practice location, partner type, specialty (currently NULL
+      - no specialty data in ``partner_profiles`` yet), ``is_active = true``),
+      so an existing entry is refreshed, never duplicated - idempotent.
+
+    All writes happen inside the caller's transaction (ADR-0002 §1), matching
+    ``close_out_credentials``. The caller (the operator-gate approve path)
+    still owns the status flip, the verification decision row and the
+    ``partner.activated`` event; this transition owns the credential-verified
+    stamp and the index bookkeeping that the read-side ``provider_visible``
+    predicate and the directory projection depend on.
+    """
+    await connection.execute(
+        partner_credentials.update()
+        .where(
+            partner_credentials.c.profile_id == partner_id,
+            partner_credentials.c.round == round,
+            partner_credentials.c.revoked_at.is_(None),
+        )
+        .values(verified=True, updated_at=func.now())
+    )
+    index_stmt = postgresql_insert(partner_directory_index)
+    await connection.execute(
+        index_stmt.from_select(
+            [
+                partner_directory_index.c.partner_id,
+                partner_directory_index.c.practice_latitude,
+                partner_directory_index.c.practice_longitude,
+                partner_directory_index.c.partner_type,
+                partner_directory_index.c.specialty,
+                partner_directory_index.c.is_active,
+            ],
+            select(
+                partner_profiles.c.id,
+                partner_profiles.c.practice_latitude,
+                partner_profiles.c.practice_longitude,
+                partner_profiles.c.partner_type,
+                literal(None),
+                literal(True),
+            ).where(partner_profiles.c.id == partner_id),
+        ).on_conflict_do_update(
+            index_elements=["partner_id"],
+            set_={
+                "practice_latitude": index_stmt.excluded.practice_latitude,
+                "practice_longitude": index_stmt.excluded.practice_longitude,
+                "partner_type": index_stmt.excluded.partner_type,
+                "is_active": True,
+                "updated_at": func.now(),
+            },
+        )
+    )

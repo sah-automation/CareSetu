@@ -174,7 +174,8 @@ async def _make_visible(database_url: str, partner_id: int) -> None:
         "INSERT INTO partner.partner_directory_index "
         "(partner_id, practice_latitude, practice_longitude, "
         " partner_type, is_active) "
-        "VALUES (:partner_id, :lat, :lon, 'doctor', true)",
+        "VALUES (:partner_id, :lat, :lon, 'doctor', true) "
+        "ON CONFLICT (partner_id) DO NOTHING",
         {
             "partner_id": partner_id,
             "lat": DALTONGANJ_LATITUDE,
