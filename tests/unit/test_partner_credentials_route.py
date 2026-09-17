@@ -16,12 +16,14 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
 from modules.iam.domain.jwt import issue_token
 from modules.partner.domain.credentials import CredentialType
+from modules.partner.domain.exceptions import PartnerSuspendedError
 from modules.partner.facade import (
     CredentialSubmission,
     CredentialSubmissionResult,
@@ -49,16 +51,23 @@ class StubPartnerFacade:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
         self.submission_result: CredentialSubmissionResult = _SUBMISSION_RESULT
+        self.resolved_status: str = "Registered"
 
     async def resolve_partner(self, identity_id: int) -> PartnerView:
         self.calls.append({"method": "resolve_partner", "identity_id": identity_id})
-        return _RESOLVED_PARTNER
+        return PartnerView(
+            partner_id=_PARTNER_ID,
+            partner_type="doctor",
+            status=self.resolved_status,
+            round=0,
+        )
 
     async def submit_credentials(
         self,
         partner_id: int,
         *,
         credentials: list[CredentialSubmission],
+        identity_id: int | None = None,
     ) -> CredentialSubmissionResult:
         self.calls.append(
             {
@@ -129,6 +138,62 @@ def test_submit_credentials_forwards_to_facade() -> None:
             ],
         },
     ]
+
+
+@pytest.mark.parametrize("status", ["Registered", "Under Verification", "Rejected"])
+def test_submit_credentials_reachable_for_pre_activation_states(status: str) -> None:
+    """F014-T06 #466: the route stays reachable for every non-suspended state.
+
+    The lifecycle-state rules themselves live in the facade; at the route seam
+    the submission must not be refused for ``Registered`` / ``Under
+    Verification`` / ``Rejected`` partners - only the iam-side suspension closes
+    the route down.
+    """
+    facade = StubPartnerFacade()
+    facade.resolved_status = status
+    client = _client(facade)
+
+    response = client.post(
+        "/v1/partner/credentials",
+        json=_BODY,
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == _SUBMISSION_RESULT.model_dump(mode="json")
+
+
+def test_submit_credentials_refuses_suspended_partner() -> None:
+    """F014-T06 #466: a suspended identity maps to the ``PARTNER_SUSPENDED`` 403.
+
+    The facade raises :class:`PartnerSuspendedError` before any submission work;
+    the route seam maps it to the shared envelope (api-standards 2).
+    """
+
+    facade = StubPartnerFacade()
+
+    async def refuse_suspended(
+        partner_id: int,
+        *,
+        credentials: list[CredentialSubmission],
+        identity_id: int | None = None,
+    ) -> CredentialSubmissionResult:
+        facade.calls.append({"method": "submit_credentials", "partner_id": partner_id})
+        raise PartnerSuspendedError(7)
+
+    facade.submit_credentials = refuse_suspended
+    client = _client(facade)
+
+    response = client.post(
+        "/v1/partner/credentials",
+        json=_BODY,
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 403
+    body = response.json()
+    assert body["code"] == "PARTNER_SUSPENDED"
+    assert body["trace_id"]
 
 
 # -- RBAC guard ----------------------------------------------------------------

@@ -158,10 +158,16 @@ from modules.partner.domain.exceptions import (
     ConsultationFeeNotAllowedError as ConsultationFeeNotAllowedError,
 )
 from modules.partner.domain.exceptions import (
+    PartnerNotActiveError as PartnerNotActiveError,
+)
+from modules.partner.domain.exceptions import (
     PartnerNotFoundError as PartnerNotFoundError,
 )
 from modules.partner.domain.exceptions import (
     PartnerNotRejectedError as PartnerNotRejectedError,
+)
+from modules.partner.domain.exceptions import (
+    PartnerSuspendedError as PartnerSuspendedError,
 )
 from modules.partner.domain.exceptions import (
     ReSubmissionThrottledError as ReSubmissionThrottledError,
@@ -236,6 +242,15 @@ from modules.partner.shared import (
 # operator queue (NFR-001 headcount, ADR-0008, PHASE-5 T09). Business rule -
 # never enforced via an iam/Redis limiter, which is not this module's seam.
 
+# The iam-side signal for "this partner's whole self-service surface is closed"
+# (F014-T06 #466). Suspension exists only on the iam side - the partner profile
+# has no ``Suspended`` status (``PartnerStatus`` enumerates lifecycle states only),
+# so the gate reads the existing ``partner_role_status`` facade seam and compares
+# against this literal. Deliberately NOT ``iam.domain.verify.IDENTITY_SUSPENDED``:
+# cross-module imports are capped at the facade (coding-standards §6 module
+# isolation).
+_IAM_SUSPENDED = "Suspended"
+
 
 class PartnerFacade:
     """Typed public facade for the partner lifecycle surface."""
@@ -265,6 +280,13 @@ class PartnerFacade:
         # its int->UUID derivation. Optional for testability - detail views without
         # an audit facade default to an empty ``audit_events`` list.
         self._audit_facade = audit_facade
+        # The iam suspension read seam (F014-T06 #466): the self-service gates ask
+        # iam's ``partner_role_status`` - never the partner schema - whether the
+        # identity's partner role grant is ``Suspended``. Optional, same as every
+        # other seam: facades composed without iam (the daily credential-expiry
+        # sweep) never serve the self-service routes, so the gate is a no-op there
+        # (see ``_assert_partner_not_suspended``).
+        self._iam = iam_facade
         # Credential-document cleanup window after permanent rejection (US-27,
         # ticket #263): the rejection path schedules ``cleanup_due_at`` this many
         # days out, and ``purge_expired_credentials`` deletes the documents after
@@ -435,6 +457,23 @@ class PartnerFacade:
         """
         return await self._registration.resolve_partner_id_on_connection(connection, identity_id)
 
+    async def _assert_partner_not_suspended(self, identity_id: int) -> None:
+        """Refuse a self-service action for a suspended partner (F014-T06 #466).
+
+        The suspension signal is the iam-side one read through the existing
+        ``partner_role_status`` facade seam (never by reading the iam schema):
+        ``Suspended`` is not a ``PartnerStatus`` and never appears on the partner
+        profile, so a profile-state check could never see it. A facade composed
+        without the iam seam (e.g. the daily close-out sweep) does not serve the
+        self-service routes, so the check is a no-op; every self-service
+        composition passes the seam (app/main.py).
+        """
+        iam = self._iam
+        if iam is None:
+            return
+        if await iam.partner_role_status(identity_id) == _IAM_SUSPENDED:
+            raise PartnerSuspendedError(identity_id)
+
     async def get_my_status(self, identity_id: int) -> PartnerMeView:
         """Read the authenticated partner's own onboarding status (US-6, P2 #271).
 
@@ -442,7 +481,11 @@ class PartnerFacade:
         their partner profile and returning status/type/round/registration time.
         Delegated to the registration sub-facade (ADR-0006, WI-2 p1a #332);
         raises :class:`PartnerNotFoundError` when the identity holds no profile.
+        Raises :class:`PartnerSuspendedError` first when the identity's partner
+        role grant is suspended (F014-T06 #466) - the self-service surface is
+        contact-support-only for a suspended partner (ADR-0016).
         """
+        await self._assert_partner_not_suspended(identity_id)
         return await self._registration.get_my_status(identity_id)
 
     async def get_my_verification(self, identity_id: int) -> PartnerVerificationStatusView:
@@ -452,7 +495,10 @@ class PartnerFacade:
         their profile and returning the current round's review state.
         Delegated to the credential-intake sub-facade (ADR-0006, WI-2 p2c #338);
         raises :class:`PartnerNotFoundError` when the identity holds no profile.
+        Raises :class:`PartnerSuspendedError` first when the identity's partner
+        role grant is suspended (F014-T06 #466).
         """
+        await self._assert_partner_not_suspended(identity_id)
         return await self._credential_intake.get_my_verification(identity_id)
 
     async def submit_credentials(
@@ -460,6 +506,7 @@ class PartnerFacade:
         partner_id: int,
         *,
         credentials: list[CredentialSubmission],
+        identity_id: int | None = None,
     ) -> CredentialSubmissionResult:
         """Submit professional credentials and run the Step-1 pre-filter (ADR-0008).
 
@@ -469,32 +516,49 @@ class PartnerFacade:
         returns to ``Rejected`` (never queued). A ``[Rejected]`` partner's
         re-submission is throttled (PHASE-5 T09, ADR-0008).
         Delegated to the credential-intake sub-facade (ADR-0006, WI-2 p2c #338).
+        Raised ``identity_id`` (the self-service routes always pass it) is gated
+        against the iam suspension seam first (F014-T06 #466): submission is
+        refused with :class:`PartnerSuspendedError` while the identity's partner
+        role grant is suspended; callers without an authenticated principal
+        (facade-level integration callers) skip the gate.
         """
+        if identity_id is not None:
+            await self._assert_partner_not_suspended(identity_id)
         return await self._credential_intake.submit_credentials(
             partner_id=partner_id,
             credentials=credentials,
         )
 
-    async def get_rejection_reason(self, partner_id: int) -> RejectionReasonView:
+    async def get_rejection_reason(
+        self, partner_id: int, *, identity_id: int | None = None
+    ) -> RejectionReasonView:
         """Read the specific failure reason back to a ``[Rejected]`` partner (PHASE-5 T09).
 
         The partner learns WHY their application failed so they can re-apply with
         corrected credentials (ADR-0008 recovery). Raises
         :class:`PartnerNotRejectedError` when the partner is not currently
         ``[Rejected]``. Delegated to the credential-intake sub-facade
-        (ADR-0006, WI-2 p2c #338).
+        (ADR-0006, WI-2 p2c #338). An authenticated ``identity_id`` (the
+        self-service route always passes it) is gated against the iam suspension
+        seam first (F014-T06 #466).
         """
+        if identity_id is not None:
+            await self._assert_partner_not_suspended(identity_id)
         return await self._credential_intake.get_rejection_reason(partner_id)
 
-    async def appeal(self, partner_id: int) -> PartnerView:
+    async def appeal(self, partner_id: int, *, identity_id: int | None = None) -> PartnerView:
         """File the one-time rejection appeal, re-entering the operator queue (PHASE-5 T09).
 
         A ``[Rejected]`` partner may contest an operator decision once: the appeal
         re-enters Step 2 and consumes the one-time ``appeal_used`` flag - a second
         appeal is rejected with :class:`AppealAlreadyUsedError`. The appeal does
         not advance the re-submission throttle budget. Delegated to the
-        credential-intake sub-facade (ADR-0006, WI-2 p2c #338).
+        credential-intake sub-facade (ADR-0006, WI-2 p2c #338). An authenticated
+        ``identity_id`` (the self-service route always passes it) is gated
+        against the iam suspension seam first (F014-T06 #466).
         """
+        if identity_id is not None:
+            await self._assert_partner_not_suspended(identity_id)
         return await self._credential_intake.appeal(partner_id)
 
     async def operator_decision(
@@ -784,7 +848,13 @@ class PartnerFacade:
         set a fee - a lab or chemist (or any other principal) is refused with
         :class:`ConsultationFeeNotAllowedError` (mapped to a 403); the check
         lives here in the facade, never just the router (coding-standards §4
-        pre-conditions in the domain core).
+        pre-conditions in the domain core). The fee is additionally gated to the
+        ``[Active]`` state (F014-T06 #466): a partner that is not yet active (or
+        no longer, via deactivation) is refused with
+        :class:`PartnerNotActiveError` (mapped to a 403) - a fee only makes
+        sense once the partner is live in the directory. A suspended identity is
+        refused first with :class:`PartnerSuspendedError`, matching every other
+        self-service route (contact-support-only surface, ADR-0016).
 
         ``fee_paise`` is the integer-paise amount the doctor charges, or ``None``
         to clear the fee back to unset (null). No credential gate rides the fee -
@@ -800,12 +870,15 @@ class PartnerFacade:
         This is the same best-effort pattern the operator gate uses on
         activation.
         """
+        await self._assert_partner_not_suspended(identity_id)
         async with self._engine.begin() as connection:
             profile = await _load_profile_by_identity(connection, identity_id)
             if profile is None:
                 raise PartnerNotFoundError(identity_id)
             if profile.partner_type != "doctor":
                 raise ConsultationFeeNotAllowedError()
+            if profile.status != PartnerStatus.ACTIVE.value:
+                raise PartnerNotActiveError(profile.partner_id, profile.status)
             await connection.execute(
                 partner_profiles.update()
                 .where(partner_profiles.c.id == profile.partner_id)

@@ -96,6 +96,42 @@ class ConsultationFeeNotAllowedError(PartnerError):
     """
 
 
+class PartnerSuspendedError(PartnerError):
+    """The self-service surface is cut off: the identity is suspended (F014-T06 #466).
+
+    A suspended partner (iam ``partner`` role grant flipped to ``Suspended`` by
+    ``suspend_partner_role``, ADR-0019) is a contact-support-only surface
+    (ADR-0016): every partner self-service route refuses with this error so the
+    partner cannot keep using half-working pages. The signal is read through the
+    iam facade seam (``IamFacade.partner_role_status``), never by reading the
+    partner schema - ``PartnerStatus`` has no ``Suspended`` value by design, the
+    suspension lives only on the iam side. The route maps this to a 403 with the
+    envelope code ``PARTNER_SUSPENDED``.
+    """
+
+    def __init__(self, identity_id: int) -> None:
+        super().__init__(
+            f"partner identity {identity_id} is suspended; the self-service surface is closed"
+        )
+        self.identity_id = identity_id
+
+
+class PartnerNotActiveError(PartnerError):
+    """The consultation fee is reachable only for an ``[Active]`` partner (F014-T06 #466).
+
+    Raised when a partner that is not yet ``[Active]`` (or no longer, via
+    deactivation) tries to set or clear their consultation fee. ADR-0016 gates
+    the fee route to the active state; the doctor-only rule stays a separate,
+    earlier refusal (``ConsultationFeeNotAllowedError``). The route maps this to
+    a 403 with the envelope code ``PARTNER_NOT_ACTIVE``.
+    """
+
+    def __init__(self, partner_id: int, status: str) -> None:
+        super().__init__(f"partner {partner_id} is {status}; consultation fee requires 'Active'")
+        self.partner_id = partner_id
+        self.status = status
+
+
 class PartnerNotRejectedError(PartnerError):
     """The recovery action requires the partner to be in the ``[Rejected]`` state.
 

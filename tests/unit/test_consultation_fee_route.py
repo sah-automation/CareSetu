@@ -26,7 +26,11 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.main import create_app
 from modules.iam.domain.jwt import issue_token
-from modules.partner.domain.exceptions import ConsultationFeeNotAllowedError
+from modules.partner.domain.exceptions import (
+    ConsultationFeeNotAllowedError,
+    PartnerNotActiveError,
+    PartnerSuspendedError,
+)
 from modules.partner.facade import PartnerView
 
 _SIGNING_KEY = "unit-test-partner-fee-key"
@@ -161,6 +165,66 @@ def test_non_doctor_partner_rejected_with_403_code() -> None:
     assert "doctor partner" in body["message"]
     assert "trace_id" in body
     assert facade.calls == [{"identity_id": 7, "fee_paise": 50000}]
+
+
+# -- Active-state rule (F014-T06 #466) -----------------------------------------
+
+
+def test_not_active_partner_refused_with_403_code() -> None:
+    """A doctor whose profile is not ``[Active]`` cannot set a fee.
+
+    The fee route is gated to the active state; a not-yet-activated (or
+    deactivated) doctor maps to the ``PARTNER_NOT_ACTIVE`` 403 envelope.
+    """
+    facade = StubFeeFacade()
+
+    async def raise_not_active(
+        identity_id: int,
+        *,
+        fee_paise: int | None,
+    ) -> PartnerView:
+        facade.calls.append({"identity_id": identity_id, "fee_paise": fee_paise})
+        raise PartnerNotActiveError(_PARTNER_ID, "Under Verification")
+
+    facade.update_consultation_fee = raise_not_active  # type: ignore[method-assign]
+    client = _client(facade)
+
+    response = client.patch(
+        "/v1/partner/consultation-fee",
+        json={"fee_paise": 50000},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 403
+    body = response.json()
+    assert body["code"] == "PARTNER_NOT_ACTIVE"
+    assert body["details"]["current_status"] == "Under Verification"
+    assert "trace_id" in body
+
+
+def test_suspended_partner_refused_with_403_code() -> None:
+    """A suspended identity is refused before the fee logic runs (F014-T06 #466)."""
+    facade = StubFeeFacade()
+
+    async def raise_suspended(
+        identity_id: int,
+        *,
+        fee_paise: int | None,
+    ) -> PartnerView:
+        facade.calls.append({"identity_id": identity_id, "fee_paise": fee_paise})
+        raise PartnerSuspendedError(identity_id)
+
+    facade.update_consultation_fee = raise_suspended  # type: ignore[method-assign]
+    client = _client(facade)
+
+    response = client.patch(
+        "/v1/partner/consultation-fee",
+        json={"fee_paise": 50000},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "PARTNER_SUSPENDED"
 
 
 # -- RBAC guard ----------------------------------------------------------------

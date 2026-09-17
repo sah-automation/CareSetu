@@ -18,7 +18,12 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from modules.iam.facade import IamFacade
-from modules.partner.domain.exceptions import ConsultationFeeNotAllowedError
+from modules.partner.credential_intake_facade import CredentialIntakeFacade
+from modules.partner.domain.exceptions import (
+    ConsultationFeeNotAllowedError,
+    PartnerNotActiveError,
+    PartnerSuspendedError,
+)
 from modules.partner.facade import PartnerFacade
 from modules.partner.registration_facade import RegistrationFacade
 
@@ -210,3 +215,132 @@ async def test_get_my_status_delegates_to_the_sub_facade() -> None:
     await coordinator.get_my_status(7)
 
     sub_facade.get_my_status.assert_awaited_once_with(7)
+
+
+# -- Self-service state gates (F014-T06 #466) ----------------------------------
+
+
+def _gated_coordinator(iam: AsyncMock) -> PartnerFacade:
+    """Coordinator with every sub-facade mocked, so only the gates run."""
+    coordinator = PartnerFacade(engine=_engine(), iam_facade=iam)
+    coordinator._registration = cast(RegistrationFacade, AsyncMock(spec=RegistrationFacade))
+    coordinator._credential_intake = cast(
+        CredentialIntakeFacade, AsyncMock(spec=CredentialIntakeFacade)
+    )
+    return coordinator
+
+
+def _suspended_iam() -> AsyncMock:
+    iam = AsyncMock(spec=IamFacade)
+    iam.partner_role_status = AsyncMock(return_value="Suspended")
+    return iam
+
+
+@pytest.mark.asyncio
+async def test_get_my_status_suspended_identity_is_refused() -> None:
+    coordinator = _gated_coordinator(_suspended_iam())
+
+    with pytest.raises(PartnerSuspendedError):
+        await coordinator.get_my_status(7)
+
+    coordinator._registration.get_my_status.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_get_my_verification_suspended_identity_is_refused() -> None:
+    coordinator = _gated_coordinator(_suspended_iam())
+
+    with pytest.raises(PartnerSuspendedError):
+        await coordinator.get_my_verification(7)
+
+    coordinator._credential_intake.get_my_verification.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_submit_credentials_suspended_identity_is_refused() -> None:
+    coordinator = _gated_coordinator(_suspended_iam())
+
+    with pytest.raises(PartnerSuspendedError):
+        await coordinator.submit_credentials(42, identity_id=7, credentials=[])
+
+    coordinator._credential_intake.submit_credentials.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_get_rejection_reason_suspended_identity_is_refused() -> None:
+    coordinator = _gated_coordinator(_suspended_iam())
+
+    with pytest.raises(PartnerSuspendedError):
+        await coordinator.get_rejection_reason(42, identity_id=7)
+
+    coordinator._credential_intake.get_rejection_reason.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_appeal_suspended_identity_is_refused() -> None:
+    coordinator = _gated_coordinator(_suspended_iam())
+
+    with pytest.raises(PartnerSuspendedError):
+        await coordinator.appeal(42, identity_id=7)
+
+    coordinator._credential_intake.appeal.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_submit_credentials_without_identity_skips_the_gate() -> None:
+    """Facade-level callers without a principal (integration seeds) pass through."""
+    coordinator = _gated_coordinator(_suspended_iam())
+
+    await coordinator.submit_credentials(42, credentials=[])
+
+    coordinator._credential_intake.submit_credentials.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_self_service_gate_is_noop_without_iam_seam() -> None:
+    coordinator = PartnerFacade(engine=_engine())
+    sub_facade = cast(RegistrationFacade, AsyncMock(spec=RegistrationFacade))
+    coordinator._registration = sub_facade
+
+    await coordinator.get_my_status(7)
+
+    sub_facade.get_my_status.assert_awaited_once_with(7)
+
+
+@pytest.mark.parametrize("grant_status", ["Active", None])
+@pytest.mark.asyncio
+async def test_self_service_gate_allows_non_suspended_grant(grant_status: str | None) -> None:
+    """Only ``Suspended`` closes the surface: active and grantless identities pass."""
+    iam = AsyncMock(spec=IamFacade)
+    iam.partner_role_status = AsyncMock(return_value=grant_status)
+    coordinator = _gated_coordinator(iam)
+
+    await coordinator.get_my_status(7)
+
+    coordinator._registration.get_my_status.assert_awaited_once_with(7)  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_update_consultation_fee_suspended_identity_is_refused() -> None:
+    coordinator = _gated_coordinator(_suspended_iam())
+
+    with pytest.raises(PartnerSuspendedError):
+        await coordinator.update_consultation_fee(7, fee_paise=50000)
+
+
+@pytest.mark.asyncio
+async def test_update_consultation_fee_non_active_doctor_is_refused() -> None:
+    coordinator, _sub = _coordinator()
+    connection = _fee_connection(
+        profile=_ProfileRow(
+            id=99, identity_id=7, partner_type="doctor", status="Under Verification", round=1
+        )
+    )
+    coordinator._engine.begin.return_value.__aenter__ = AsyncMock(return_value=connection)
+
+    with pytest.raises(PartnerNotActiveError):
+        await coordinator.update_consultation_fee(7, fee_paise=50000)
+
+    # The refusal happens before any write: only the identity lookup and the
+    # round read ran - the partner_profiles UPDATE never executed.
+    assert len(_executed(connection)) == 2
