@@ -71,6 +71,9 @@ from modules.iam.otp_facade import (
     PartnerLoginProfileGate as PartnerLoginProfileGate,
 )
 from modules.iam.otp_facade import (
+    PartnerVerifyOtpResult as PartnerVerifyOtpResult,
+)
+from modules.iam.otp_facade import (
     ResendOtpResult as ResendOtpResult,
 )
 from modules.iam.otp_facade import (
@@ -201,6 +204,17 @@ class IamFacade:
         partner profile is refused ``no_account`` - never creating an identity.
         """
         return await self._otp.partner_login(phone, partner_gate)
+
+    async def partner_verify(self, phone: str, otp: str) -> PartnerVerifyOtpResult:
+        """Consume a partner login challenge and mark the phone verified (ADR-0016, F014-T03 #463).
+
+        Delegated to ``OtpFacade``. Silently: no patient role grant, no
+        ``patient.verified`` outbox event, and no identity lifecycle transition
+        - partner phone verification is not a lifecycle event and never touches
+        the ``patient.*`` family (ADR-0016 §Events). The session mint (ticket
+        04, #464) reads the marker this sets.
+        """
+        return await self._otp.partner_verify(phone, otp)
 
     # -- MFA delegation (ADR-0006, T07 ticket #250) ------------------------
 

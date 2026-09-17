@@ -46,6 +46,7 @@ from modules.iam.facade import (
     IamFacade,
     OperatorInvitedResult,
     PartnerLoginOtpResult,
+    PartnerVerifyOtpResult,
     RegisterPatientResult,
     ResendOtpResult,
     SessionResult,
@@ -92,6 +93,18 @@ class PartnerLoginRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     phone: str = Field(min_length=1, description="10-digit Indian mobile number, or with 91 prefix")
+
+
+class PartnerVerifyRequest(BaseModel):
+    """Body of ``POST /v1/auth/partner/verify`` (ADR-0016, F014-T03 #463)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    phone: str = Field(min_length=1, description="10-digit Indian mobile number, or with 91 prefix")
+    otp: str = Field(
+        pattern=r"^[0-9]{6}$",
+        description="The 6-digit code the partner received; only well-formed guesses count",
+    )
 
 
 class IssueSessionRequest(BaseModel):
@@ -297,6 +310,31 @@ async def partner_login(
         return await partner_facade.resolve_partner_id_by_identity(identity_id)
 
     return await run_idempotent(request, lambda: facade.partner_login(body.phone, _partner_profile))
+
+
+@router.post(
+    "/partner/verify",
+    response_model=PartnerVerifyOtpResult,
+    status_code=status.HTTP_200_OK,
+    summary="Verify a partner login OTP code",
+)
+async def partner_verify(
+    request: Request,
+    body: PartnerVerifyRequest,
+) -> PartnerVerifyOtpResult:
+    """Submit the partner's 6-digit code: consume the challenge, mark the phone verified.
+
+    The partner completes login (ADR-0016, F014-T03 #463): a correct code
+    consumes the challenge and marks the identity phone-verified in the same
+    transaction, silently - no patient role grant, no ``patient.verified``
+    event, and no identity lifecycle transition, so logging in as a partner
+    never makes the phone a patient account. Returns the outcome the staff
+    login page renders - ``verified``, ``wrong_code`` with the remaining
+    attempts, ``expired``/``spent`` ("request a new code"), or ``locked`` with
+    the lockout countdown - precisely as on the patient OTP surface.
+    """
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    return await run_idempotent(request, lambda: facade.partner_verify(body.phone, body.otp))
 
 
 @router.post(

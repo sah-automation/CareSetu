@@ -42,6 +42,7 @@ iam_identities = Table(
         server_default=text("0"),
     ),
     Column("lockout_until", DateTime(timezone=True), nullable=True),
+    Column("phone_verified", Boolean, nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     UniqueConstraint("phone_e164", name="uq_iam_identities_phone_e164"),
