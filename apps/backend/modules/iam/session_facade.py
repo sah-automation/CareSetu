@@ -48,6 +48,8 @@ _OPERATOR_ROLE = "operator"
 
 VerifyPartnerExists = Callable[[AsyncConnection, int], Awaitable[None]]
 
+VerifyPartnerProfile = Callable[[AsyncConnection, int], Awaitable[None]]
+
 
 class SessionResult(BaseModel):
     """A session, whether freshly issued or rotated (spec #51 section 2.5, tickets #57, #58).
@@ -393,7 +395,11 @@ class SessionFacade:
             subject_id=claims.subject_id, scope=claims.scope, jti=claims.jti
         )
 
-    async def refresh_session(self, refresh_token: str) -> SessionResult:
+    async def refresh_session(
+        self,
+        refresh_token: str,
+        verify_partner_profile: VerifyPartnerProfile | None = None,
+    ) -> SessionResult:
         """Rotate an opaque refresh token into a fresh session (ticket #58).
 
         The refresh path is fully independent of SMS (NFR-004): it only reads
@@ -416,13 +422,30 @@ class SessionFacade:
         finds the revoked row - a replay signal - and is refused while
         ``patient.auth_failed`` is committed to the outbox in the same
         transaction (audit can tell a stolen-session replay from a garbage
-        token, which matches nothing).  The scope of the fresh JWT is re-derived
-        from the identity's current active role grant, never from the old
-        token.  The identity row is locked ``FOR UPDATE`` (after the session
+        token, which matches nothing).  The scope of the fresh JWT never comes
+        from the old token: a patient/operator scope is re-derived from the
+        identity's current active role grant, a partner scope from the
+        identity's current state (below).  The identity row is locked
+        ``FOR UPDATE`` (after the session
         row) so a concurrent role change cannot race the refresh, and the
         session-row lock serializes two concurrent refreshes of the same token
         so only one rotation wins.  An empty signing key fails closed exactly
         like ``issue_session``.
+
+        Partner-scoped sessions renew differently (F014-T05, #465): a waiting
+        partner holds no ``partner`` role grant until activation (ADR-0010), so
+        requiring an active grant to re-derive the scope ejects them every ~15
+        minutes.  For the ``partner`` scope ``Suspended`` is the only refusal,
+        read as the iam-side suspension signal (#466): the identity being
+        ``Suspended`` OR its ``partner`` role grant being ``Suspended`` (a
+        deactivated partner's grant is flipped by ``suspend_partner_role``).  A
+        missing or ``Active`` grant renews, so every pre-activation state
+        renews, and the partner profile must still exist, re-confirmed at the
+        composition boundary on this lock-held connection through the optional
+        ``verify_partner_profile`` callback (the same pattern the session mint
+        uses, #342) so iam never reads the partner schema.  Patient/operator
+        scopes keep the existing identity-``Active`` plus active-role-grant gate
+        unchanged.
         """
         if not self._access_token_signing_key:
             raise SessionIssuanceError(
@@ -466,17 +489,32 @@ class SessionFacade:
                     raise RefreshTokenRevokedError("the session identity no longer exists")
                 identity_id = identity.identity_id
                 identity_status = identity.status
-                if identity_status != IDENTITY_ACTIVE:
-                    raise RefreshTokenRevokedError(
-                        f"identity {identity_id} is {identity_status}; refusing to refresh"
-                    )
                 scope_name = session_row["scope"]
-                scope = await _resolve_active_role(connection, identity_id, scope_name)
-                if scope is None:
-                    raise RefreshTokenRevokedError(
-                        f"identity {identity_id} has no active {scope_name} role grant; "
-                        "refusing to refresh"
-                    )
+                if scope_name == _PARTNER_ROLE:
+                    if identity_status == IDENTITY_SUSPENDED:
+                        raise RefreshTokenRevokedError(
+                            f"identity {identity_id} is {identity_status}; refusing to refresh"
+                        )
+                    partner_grant_status = await _partner_role_status(connection, identity_id)
+                    if partner_grant_status == IDENTITY_SUSPENDED:
+                        raise RefreshTokenRevokedError(
+                            f"identity {identity_id} has a suspended partner role; "
+                            "refusing to refresh"
+                        )
+                    if verify_partner_profile is not None:
+                        await verify_partner_profile(connection, identity_id)
+                    scope = scope_name
+                else:
+                    if identity_status != IDENTITY_ACTIVE:
+                        raise RefreshTokenRevokedError(
+                            f"identity {identity_id} is {identity_status}; refusing to refresh"
+                        )
+                    scope = await _resolve_active_role(connection, identity_id, scope_name)
+                    if scope is None:
+                        raise RefreshTokenRevokedError(
+                            f"identity {identity_id} has no active {scope_name} role grant; "
+                            "refusing to refresh"
+                        )
 
                 new_jti, new_refresh_token, token = await self._mint_session_row(
                     connection, identity_id, scope, now

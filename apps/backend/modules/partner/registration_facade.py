@@ -235,6 +235,24 @@ class RegistrationFacade:
             return False
         return True
 
+    async def resolve_partner_id_on_connection(
+        self, connection: AsyncConnection, identity_id: int
+    ) -> int | None:
+        """The partner profile id for an iam identity, on a caller connection (T05, #465).
+
+        Connection-bound companion to ``resolve_partner_id_by_identity``: runs
+        ``load_profile_by_identity`` against the caller-provided connection
+        instead of opening its own transaction, so the iam refresh session gate
+        can re-confirm the partner profile at the composition boundary inside its
+        own identity-row-locked transaction (same pattern as the session mint).
+        Returns the profile id when the identity holds one, or ``None`` when it
+        holds no partner profile (a patient-only phone).
+        """
+        profile = await load_profile_by_identity(connection, identity_id)
+        if profile is None:
+            return None
+        return profile.partner_id
+
     async def get_my_status(self, identity_id: int) -> PartnerMeView:
         """Read the authenticated partner's own onboarding status (US-6, P2 #271).
 

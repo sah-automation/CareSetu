@@ -423,6 +423,18 @@ class PartnerFacade:
         """
         return await self._registration.verify_partner_exists(connection, partner_id)
 
+    async def resolve_partner_id_on_connection(
+        self, connection: AsyncConnection, identity_id: int
+    ) -> int | None:
+        """The partner profile id for an iam identity, on a caller connection (T05, #465).
+
+        Connection-bound companion to ``resolve_partner_id_by_identity``,
+        delegated to the registration sub-facade (ADR-0006, WI-2 p1a #332). Used
+        by the iam refresh route to re-confirm the partner profile at the
+        composition boundary on its lock-held transaction connection.
+        """
+        return await self._registration.resolve_partner_id_on_connection(connection, identity_id)
+
     async def get_my_status(self, identity_id: int) -> PartnerMeView:
         """Read the authenticated partner's own onboarding status (US-6, P2 #271).
 

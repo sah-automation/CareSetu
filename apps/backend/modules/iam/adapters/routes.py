@@ -432,9 +432,40 @@ async def refresh_session(
     existing session. A revoked or expired token is refused with the matching
     error envelope. The rotated JWT is also set as an httpOnly cookie for
     Next.js middleware route protection.
+
+    A ``partner``-scoped renewal re-confirms the partner profile still exists
+    at the composition boundary before re-deriving the scope (F014-T05, #465):
+    the route wires the partner facade seam as the same callback pattern the
+    session mint uses, so iam never reads the partner schema. A deleted profile
+    refuses with the refresh envelope (``REFRESH_TOKEN_REVOKED``).
     """
     facade = cast(IamFacade, request.app.state.iam_facade)
-    result = await facade.refresh_session(body.refresh_token)
+    partner_facade = cast("PartnerFacade", request.app.state.partner_facade)
+
+    async def _verify_partner_profile(connection: AsyncConnection, identity_id: int) -> None:
+        """Re-confirm the identity's partner profile still exists at renewal (#465).
+
+        Runs against iam's lock-held transaction connection, mirroring the mint's
+        atomic re-check (#342): resolves the profile for the identity through the
+        partner facade (composition boundary, no cross-schema import, ADR-0003)
+        and confirms it still exists. Absence or deletion refuses the rotation
+        with the refresh envelope so a now-patient-only phone can never renew a
+        partner-scoped session.
+        """
+        partner_id = await partner_facade.resolve_partner_id_on_connection(connection, identity_id)
+        if partner_id is None:
+            raise RefreshTokenRevokedError(
+                f"identity {identity_id} has no partner profile; refusing to refresh"
+            )
+        exists = await partner_facade.verify_partner_exists(connection, partner_id)
+        if not exists:
+            raise RefreshTokenRevokedError(
+                f"partner profile {partner_id} no longer exists at session renewal"
+            )
+
+    result = await facade.refresh_session(
+        body.refresh_token, verify_partner_profile=_verify_partner_profile
+    )
     response = Response(
         content=result.model_dump_json(),
         media_type="application/json",

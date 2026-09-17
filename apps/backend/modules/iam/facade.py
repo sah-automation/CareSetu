@@ -96,6 +96,9 @@ from modules.iam.session_facade import (
     VerifyPartnerExists as VerifyPartnerExists,
 )
 from modules.iam.session_facade import (
+    VerifyPartnerProfile as VerifyPartnerProfile,
+)
+from modules.iam.session_facade import (
     _partner_role_status as _partner_role_status,
 )
 
@@ -289,9 +292,21 @@ class IamFacade:
         """Resolve a valid access JWT to its scope (delegated to ``SessionFacade``)."""
         return await self._sessions.validate_token(token)
 
-    async def refresh_session(self, refresh_token: str) -> SessionResult:
-        """Rotate an opaque refresh token into a fresh session (delegated to ``SessionFacade``)."""
-        return await self._sessions.refresh_session(refresh_token)
+    async def refresh_session(
+        self,
+        refresh_token: str,
+        verify_partner_profile: VerifyPartnerProfile | None = None,
+    ) -> SessionResult:
+        """Rotate an opaque refresh token into a fresh session (delegated to ``SessionFacade``).
+
+        ``verify_partner_profile`` is the F014-T05 (#465) composition-boundary
+        callback the route wires: on a ``partner``-scoped renewal the session
+        facade re-confirms the partner profile still exists on its lock-held
+        connection (delegated unchanged to ``SessionFacade``).
+        """
+        return await self._sessions.refresh_session(
+            refresh_token, verify_partner_profile=verify_partner_profile
+        )
 
     # -- Protected-route reads (PHASE-2.6 T05, #196) -----------------------
 

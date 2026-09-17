@@ -24,6 +24,7 @@ from modules.iam.domain.exceptions import (
     AccessTokenExpiredError,
     AccessTokenMalformedError,
     AccessTokenSignatureError,
+    RefreshTokenRevokedError,
     SessionIssuanceError,
 )
 from modules.iam.domain.jwt import issue_token
@@ -152,7 +153,16 @@ async def test_issue_partner_session_fails_closed_without_verified_partner_statu
 
 
 class _StubConnection:
-    pass
+    """AsyncConnection stand-in whose ``execute`` satisfies the refresh revoke.
+
+    The refresh rotation updates the old session row (``revoked_at``) in the
+    same transaction as the mint; the stub just records nothing and returns,
+    so the revoke statement and anything else ``execute``-shaped is inert under
+    test.
+    """
+
+    async def execute(self, *args: object, **kwargs: object) -> None:
+        return None
 
 
 _STUB_CONNECTION = _StubConnection()
@@ -314,6 +324,326 @@ async def test_issue_partner_session_refuses_a_phone_not_phone_verified() -> Non
         await facade.issue_partner_session(
             "9876543210", partner_id=3, verify_partner_exists=_profile_present
         )
+
+
+def _partner_refresh_session_row(*, scope: str = "partner") -> dict[str, object]:
+    """A live (non-expired, non-revoked) session row for refresh under test."""
+    return {
+        "id": 1,
+        "identity_id": 42,
+        "scope": scope,
+        "revoked_at": None,
+        "refresh_expires_at": _NOW + timedelta(days=30),
+    }
+
+
+class _FakeLockedIdentity:
+    """Identity guard state the refresh test stubs (patched ``_lock_identity_by_id``)."""
+
+    def __init__(self, *, identity_id: int = 42, status: str = "Unverified") -> None:
+        self.identity_id = identity_id
+        self.status = status
+        self.lockout_failed_attempts = 0
+        self.lockout_until = None
+        self.phone_verified = True
+
+
+async def test_refresh_partner_renews_without_an_active_role_grant() -> None:
+    """F014-T05 (#465): a pre-activation partner renews with no partner grant.
+
+    The ``partner`` scope is re-derived without consulting the
+    activation-gated ``partner`` role grant: the renewal gates on the iam-side
+    suspension signal (identity and partner grant both not ``Suspended``) and
+    the composition-boundary re-check confirming the partner profile still
+    exists. The pre-activation lifecycle states ([Registered], [Under
+    Verification], [Rejected]) live in the partner schema iam never reads, so
+    any non-suspended identity with no (or an Active) partner grant renews;
+    this test pins that ``_resolve_active_role`` is never consulted for the
+    partner scope, that the re-check runs on the lock-held connection, and
+    that the mint follows it.
+    """
+
+    seen: list[tuple[int, int]] = []
+    minted_scopes: list[str] = []
+
+    async def _session_row(connection: AsyncConnection, token_hash: str) -> dict[str, object]:
+        return _partner_refresh_session_row()
+
+    async def _profile_present(connection: AsyncConnection, identity_id: int) -> None:
+        seen.append((id(connection), identity_id))
+        assert identity_id == 42
+
+    async def _forbid_resolve(
+        connection: AsyncConnection, identity_id: int, role: str
+    ) -> str | None:
+        raise AssertionError("partner renewal must not read an active role grant")
+
+    async def _fake_mint(
+        connection: AsyncConnection, identity_id: int, scope: str, now: datetime
+    ) -> tuple[str, str, str]:
+        minted_scopes.append(scope)
+        return "jti-refresh-1", "refresh-new-1", "partner.jwt.1"
+
+    facade = _facade()
+    facade._sessions._engine = _StubAsyncEngine()
+    with (
+        patch(
+            "modules.iam.session_facade._session_for_refresh",
+            new=AsyncMock(side_effect=_session_row),
+        ),
+        patch(
+            "modules.iam.session_facade._lock_identity_by_id",
+            new=AsyncMock(return_value=_FakeLockedIdentity()),
+        ),
+        patch(
+            "modules.iam.session_facade._resolve_active_role",
+            new=AsyncMock(side_effect=_forbid_resolve),
+        ),
+        patch(
+            "modules.iam.session_facade._partner_role_status",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "modules.iam.session_facade.SessionFacade._mint_session_row",
+            new=staticmethod(_fake_mint),
+        ),
+    ):
+        result = await facade.refresh_session(
+            "opaque-token", verify_partner_profile=_profile_present
+        )
+
+    assert result.scope == "partner"
+    assert result.identity_id == 42
+    assert result.jwt == "partner.jwt.1"
+    assert len(seen) == 1
+    assert seen[0][1] == 42
+    assert minted_scopes == ["partner"]
+
+
+async def test_refresh_refuses_a_suspended_partner_identity() -> None:
+    """F014-T05 (#465): a Suspended identity's partner-scope refresh is refused.
+
+    ``Suspended`` is the only identity refusal on the partner renewal path;
+    the refusal fires before the profile re-check or the mint can run.
+    """
+
+    async def _session_row(connection: AsyncConnection, token_hash: str) -> dict[str, object]:
+        return _partner_refresh_session_row()
+
+    async def _profile_must_not_run(connection: AsyncConnection, identity_id: int) -> None:
+        raise AssertionError("the profile re-check must not run for a suspended identity")
+
+    async def _fake_mint(*args: object, **kwargs: object) -> tuple[str, str, str]:
+        raise AssertionError("mint must not run for a suspended identity")
+
+    facade = _facade()
+    facade._sessions._engine = _StubAsyncEngine()
+    with (
+        patch(
+            "modules.iam.session_facade._session_for_refresh",
+            new=AsyncMock(side_effect=_session_row),
+        ),
+        patch(
+            "modules.iam.session_facade._lock_identity_by_id",
+            new=AsyncMock(return_value=_FakeLockedIdentity(status="Suspended")),
+        ),
+        patch(
+            "modules.iam.session_facade.SessionFacade._mint_session_row",
+            new=staticmethod(_fake_mint),
+        ),
+        pytest.raises(RefreshTokenRevokedError, match="Suspended"),
+    ):
+        await facade.refresh_session("opaque-token", verify_partner_profile=_profile_must_not_run)
+
+
+async def test_refresh_refuses_a_suspended_partner_role_grant() -> None:
+    """F014-T05 (#465): a deactivated partner's suspended grant refuses renewal.
+
+    ``Suspended`` on the iam side covers the ``partner`` role grant too: an
+    identity that is still ``Active`` but whose grant was flipped by
+    ``suspend_partner_role`` (the ``partner.rejected`` /
+    ``credential.invalidated`` deactivation path) must not renew. The refusal
+    fires before the profile re-check or the mint, and ``_resolve_active_role``
+    is still never consulted for the partner scope.
+    """
+
+    async def _session_row(connection: AsyncConnection, token_hash: str) -> dict[str, object]:
+        return _partner_refresh_session_row()
+
+    async def _forbid_resolve(
+        connection: AsyncConnection, identity_id: int, role: str
+    ) -> str | None:
+        raise AssertionError("partner renewal must not read an active role grant")
+
+    async def _profile_must_not_run(connection: AsyncConnection, identity_id: int) -> None:
+        raise AssertionError("the profile re-check must not run for a suspended grant")
+
+    async def _fake_mint(*args: object, **kwargs: object) -> tuple[str, str, str]:
+        raise AssertionError("mint must not run for a suspended grant")
+
+    facade = _facade()
+    facade._sessions._engine = _StubAsyncEngine()
+    with (
+        patch(
+            "modules.iam.session_facade._session_for_refresh",
+            new=AsyncMock(side_effect=_session_row),
+        ),
+        patch(
+            "modules.iam.session_facade._lock_identity_by_id",
+            new=AsyncMock(return_value=_FakeLockedIdentity(status="Active")),
+        ),
+        patch(
+            "modules.iam.session_facade._partner_role_status",
+            new=AsyncMock(return_value="Suspended"),
+        ),
+        patch(
+            "modules.iam.session_facade._resolve_active_role",
+            new=AsyncMock(side_effect=_forbid_resolve),
+        ),
+        patch(
+            "modules.iam.session_facade.SessionFacade._mint_session_row",
+            new=staticmethod(_fake_mint),
+        ),
+        pytest.raises(RefreshTokenRevokedError, match="suspended partner role"),
+    ):
+        await facade.refresh_session("opaque-token", verify_partner_profile=_profile_must_not_run)
+
+
+async def test_refresh_refuses_when_the_partner_profile_was_deleted() -> None:
+    """F014-T05 (#465): a deleted partner profile refuses the rotation.
+
+    The composition-boundary re-check rides the callback the route wires; when
+    it detects the profile is gone it raises the refresh envelope and the mint
+    must not run. iam itself never reads the partner schema.
+    """
+
+    async def _session_row(connection: AsyncConnection, token_hash: str) -> dict[str, object]:
+        return _partner_refresh_session_row()
+
+    async def _profile_deleted(connection: AsyncConnection, identity_id: int) -> None:
+        raise RefreshTokenRevokedError(
+            f"identity {identity_id} has no partner profile; refusing to refresh"
+        )
+
+    async def _fake_mint(*args: object, **kwargs: object) -> tuple[str, str, str]:
+        raise AssertionError("mint must not run when the partner profile is gone")
+
+    facade = _facade()
+    facade._sessions._engine = _StubAsyncEngine()
+    with (
+        patch(
+            "modules.iam.session_facade._session_for_refresh",
+            new=AsyncMock(side_effect=_session_row),
+        ),
+        patch(
+            "modules.iam.session_facade._lock_identity_by_id",
+            new=AsyncMock(return_value=_FakeLockedIdentity()),
+        ),
+        patch(
+            "modules.iam.session_facade._partner_role_status",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "modules.iam.session_facade.SessionFacade._mint_session_row",
+            new=staticmethod(_fake_mint),
+        ),
+        pytest.raises(RefreshTokenRevokedError, match="no partner profile"),
+    ):
+        await facade.refresh_session("opaque-token", verify_partner_profile=_profile_deleted)
+
+
+@pytest.mark.parametrize("scope", ["patient", "operator"])
+async def test_refresh_non_partner_scope_still_requires_an_active_role_grant(
+    scope: str,
+) -> None:
+    """F014-T05 (#465): patient/operator refresh keeps the role-grant gate.
+
+    Only the ``partner`` renewal is loosened. A patient/operator session whose
+    identity holds no active grant for its scope is still refused with the
+    refresh envelope, and the partner profile re-check is never consulted.
+    """
+
+    async def _session_row(connection: AsyncConnection, token_hash: str) -> dict[str, object]:
+        return _partner_refresh_session_row(scope=scope)
+
+    async def _no_grant(connection: AsyncConnection, identity_id: int, role: str) -> str | None:
+        assert role == scope
+        return None
+
+    async def _profile_must_not_run(connection: AsyncConnection, identity_id: int) -> None:
+        raise AssertionError("the partner re-check must not run for a non-partner scope")
+
+    async def _fake_mint(*args: object, **kwargs: object) -> tuple[str, str, str]:
+        raise AssertionError("mint must not run when the scope has no active grant")
+
+    facade = _facade()
+    facade._sessions._engine = _StubAsyncEngine()
+    with (
+        patch(
+            "modules.iam.session_facade._session_for_refresh",
+            new=AsyncMock(side_effect=_session_row),
+        ),
+        patch(
+            "modules.iam.session_facade._lock_identity_by_id",
+            new=AsyncMock(return_value=_FakeLockedIdentity(status="Active")),
+        ),
+        patch(
+            "modules.iam.session_facade._resolve_active_role",
+            new=AsyncMock(side_effect=_no_grant),
+        ),
+        patch(
+            "modules.iam.session_facade.SessionFacade._mint_session_row",
+            new=staticmethod(_fake_mint),
+        ),
+        pytest.raises(RefreshTokenRevokedError, match=f"{scope} role grant"),
+    ):
+        await facade.refresh_session("opaque-token", verify_partner_profile=_profile_must_not_run)
+
+
+@pytest.mark.parametrize("scope", ["patient", "operator"])
+async def test_refresh_non_partner_scope_still_requires_an_active_identity(
+    scope: str,
+) -> None:
+    """F014-T05 (#465): only the partner path relaxes the identity-status gate.
+
+    A non-Suspended-but-not-Active identity still cannot renew a patient or
+    operator session (that relaxation is partner-only): the refusal fires from
+    the identity gate before any grant lookup or mint.
+    """
+
+    async def _session_row(connection: AsyncConnection, token_hash: str) -> dict[str, object]:
+        return _partner_refresh_session_row(scope=scope)
+
+    async def _resolve_must_not_run(
+        connection: AsyncConnection, identity_id: int, role: str
+    ) -> str | None:
+        raise AssertionError("grant lookup must not run for a non-Active identity")
+
+    async def _fake_mint(*args: object, **kwargs: object) -> tuple[str, str, str]:
+        raise AssertionError("mint must not run for a non-Active non-partner identity")
+
+    facade = _facade()
+    facade._sessions._engine = _StubAsyncEngine()
+    with (
+        patch(
+            "modules.iam.session_facade._session_for_refresh",
+            new=AsyncMock(side_effect=_session_row),
+        ),
+        patch(
+            "modules.iam.session_facade._lock_identity_by_id",
+            new=AsyncMock(return_value=_FakeLockedIdentity(status="Unverified")),
+        ),
+        patch(
+            "modules.iam.session_facade._resolve_active_role",
+            new=AsyncMock(side_effect=_resolve_must_not_run),
+        ),
+        patch(
+            "modules.iam.session_facade.SessionFacade._mint_session_row",
+            new=staticmethod(_fake_mint),
+        ),
+        pytest.raises(RefreshTokenRevokedError, match="Unverified"),
+    ):
+        await facade.refresh_session("opaque-token")
 
 
 async def test_validate_token_p95_stays_under_the_100ms_budget() -> None:
