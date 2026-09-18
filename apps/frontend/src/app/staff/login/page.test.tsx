@@ -52,10 +52,11 @@ describe("StaffLoginPage", () => {
     expect(mockReplace).not.toHaveBeenCalled();
   });
 
-  it("renders the partner form by default - no phone or TOTP fields", () => {
+  it("renders the partner phone-OTP form by default - no email, password, or operator fields", () => {
     render(<StaffLoginPage />);
-    expect(screen.getByTestId("staff-email")).toBeInTheDocument();
-    expect(screen.getByTestId("staff-password")).toBeInTheDocument();
+    expect(screen.getByTestId("partner-phone")).toBeInTheDocument();
+    expect(screen.queryByTestId("staff-email")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("staff-password")).not.toBeInTheDocument();
     expect(screen.queryByTestId("staff-phone")).not.toBeInTheDocument();
     expect(screen.queryByTestId("staff-totp")).not.toBeInTheDocument();
   });
@@ -72,7 +73,8 @@ describe("StaffLoginPage", () => {
   it("falls back to partner mode for an unknown role param", () => {
     searchParamsValue = new URLSearchParams({ role: "doctor" });
     render(<StaffLoginPage />);
-    expect(screen.getByTestId("staff-email")).toBeInTheDocument();
+    expect(screen.getByTestId("partner-phone")).toBeInTheDocument();
+    expect(screen.queryByTestId("staff-email")).not.toBeInTheDocument();
     expect(screen.queryByTestId("staff-phone")).not.toBeInTheDocument();
   });
 

@@ -116,6 +116,34 @@ const en = {
       genericError:
         "Something went wrong, please check your credentials and try again.",
       invalidOperatorCode: "Invalid authentication code. Please try again.",
+      // Partner phone-OTP mode (F014-T07 #467): partner staff sign in with
+      // phone + SMS code, mirroring the patient wizard's interaction copy.
+      getCode: "Get verification code",
+      codeLabel: "Verification code",
+      codeHint: "6-digit code sent by SMS to",
+      codeExpires: "Code expires in",
+      resend: "Resend code",
+      backToEdit: "Edit number",
+      resendIn: (s: number) => `Resend in ${s}s`,
+      attemptsLeft: (n: number) =>
+        `${n} ${n === 1 ? "attempt" : "attempts"} left`,
+      noAttempts: "No attempts left. Request a new code.",
+      wrongCode: (n: number) =>
+        `Wrong code. ${n} ${n === 1 ? "attempt" : "attempts"} left.`,
+      shortCode: "Enter the full 6-digit code.",
+      lockout: (m: number) =>
+        `Too many failed attempts. Verification locked for ${m} min.`,
+      resendEarly: (s: number) => `Cooldown active. Resend in ${s}s.`,
+      expiredOrUsed:
+        "This code has expired or was already used. Request a new one.",
+      latestWins: "A new code was sent. The previous code is no longer valid.",
+      suspendedNotice:
+        "This account is suspended. Contact support for assistance.",
+      noAccount:
+        "No doctor, lab or chemist account was found for this number. Register your practice or business to get started.",
+      networkError: "Could not reach the server. Check your connection.",
+      smsFailed: "We could not send the code. Try again in a moment.",
+      demoOtp: (code: string) => `Demo OTP: ${code}`,
     },
     pending: {
       badge: "Under Verification",
@@ -1266,6 +1294,27 @@ export const STRINGS: Record<Lang, Dictionary> = {
         genericError:
           "कुछ गड़बड़ हुई, कृपया अपनी साख़ीयाँ जाँचें और फिर से कोशिश करें।",
         invalidOperatorCode: "अमान्य प्रमाणीकरण कोड। कृपया फिर से कोशिश करें।",
+        getCode: "वेरिफिकेशन कोड पाएँ",
+        codeLabel: "वेरिफिकेशन कोड",
+        codeHint: "SMS से भेजा गया 6 अंकों का कोड",
+        codeExpires: "कोड समाप्त होने में",
+        resend: "कोड फिर से भेजें",
+        backToEdit: "नंबर बदलें",
+        resendIn: (s) => `${s}s में फिर से भेजें`,
+        attemptsLeft: (n) => `${n} प्रयास शेष`,
+        noAttempts: "कोई प्रयास नहीं बचा। नया कोड माँगें।",
+        wrongCode: (n) => `गलत कोड। ${n} प्रयास शेष।`,
+        shortCode: "पूरा 6 अंकों का कोड दर्ज करें।",
+        lockout: (m) => `बहुत अधिक गलत प्रयास। ${m} मिनट के लिए लॉक किया गया।`,
+        resendEarly: (s) => `कूलडाउन सक्रिय। ${s}s में फिर से भेजें।`,
+        expiredOrUsed: "यह कोड समाप्त या उपयोग हो चुका है। नया कोड माँगें।",
+        latestWins: "नया कोड भेजा गया। पुराना कोड अब मान्य नहीं है।",
+        suspendedNotice: "यह खाता निलंबित है। सहायता के लिए संपर्क करें।",
+        noAccount:
+          "इस नंबर के लिए कोई डॉक्टर, लैब या केमिस्ट खाता नहीं मिला। शुरू करने के लिए अपनी प्रैक्टिस या व्यवसाय रजिस्टर करें।",
+        networkError: "सर्वर से संपर्क नहीं हो सका। अपना कनेक्शन जाँचें।",
+        smsFailed: "कोड भेजा नहीं जा सका। कुछ देर में फिर कोशिश करें।",
+        demoOtp: (code) => `डेमो OTP: ${code}`,
       },
       pending: {
         badge: "जाँच प्रक्रिया में",
