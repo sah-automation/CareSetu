@@ -20,7 +20,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { ProviderType } from "@/lib/directory/links";
 import { ApiError } from "@/lib/api-errors";
-import { AuthApiError, issuePartnerSession } from "@/lib/auth/api";
+import { AuthApiError, type SessionResult } from "@/lib/auth/api";
 import { postLoginTarget } from "@/lib/auth/staff-routing";
 import { saveSession } from "@/lib/auth/session";
 import { STRINGS } from "@/lib/i18n/dictionaries";
@@ -30,6 +30,9 @@ import {
   submitCredentials,
   type CredentialType,
 } from "@/lib/partner/api";
+
+import { formatCountdown } from "../otp/otpState";
+import { usePartnerLoginFlow, type PartnerOtpFlow } from "./partnerLoginState";
 
 import {
   ACCEPT_ATTRIBUTE,
@@ -61,6 +64,11 @@ export interface ProviderRegisterWizardProps {
 }
 
 const STEP_LAST = 4;
+// FEAT-014 T08 (#468): the confirmation step runs AFTER the four-step review
+// submits - register -> confirm phone -> mint session -> waiting screen. It is
+// not part of the stepper; it owns the phone-OTP card built on the shared
+// partner login flow (partnerLoginState.ts).
+const CONFIRM_STEP = 5;
 
 // Stable DOM ids per logical field - kebab-cased for readability, consumed
 // by labels, error paragraphs and the suites.
@@ -699,6 +707,173 @@ function StepReview({
   );
 }
 
+/* Step 5 - phone confirmation (FEAT-014 #468) */
+
+function StepConfirm({
+  partner,
+  t,
+  phone,
+  onBack,
+  onEditPhone,
+}: {
+  partner: PartnerOtpFlow;
+  t: RegisterStrings;
+  /** The E.164 number captured at submit, shown while the flow resolves it. */
+  phone: string | null;
+  onBack: () => void;
+  onEditPhone: () => void;
+}) {
+  const { lang } = useLang();
+  const login = STRINGS[lang].staffAuth.login;
+  const blocked = partner.state.busy || partner.state.challenge === "locked";
+  const displayPhone = phone ?? partner.state.phone;
+
+  return (
+    <section data-testid="pr-step-5" aria-label={t.phoneConfirm.title}>
+      <h1 className="mb-2 text-xl font-bold">{t.phoneConfirm.title}</h1>
+      <p
+        className="mb-4 text-sm text-txt-muted"
+        data-testid="pr-confirm-helper"
+      >
+        {t.phoneConfirm.helper}
+      </p>
+
+      <div className="mb-4 text-center">
+        <p className="text-xs opacity-80" data-testid="pr-confirm-code-expires">
+          {login.codeExpires}
+        </p>
+        <p className="text-lg font-semibold" data-testid="pr-confirm-countdown">
+          {formatCountdown(partner.state.expiresIn)}
+        </p>
+        <p className="text-sm text-on-surface" data-testid="pr-confirm-phone">
+          {login.codeHint} <strong>{displayPhone}</strong>
+        </p>
+      </div>
+
+      <div className="mb-4">
+        <label
+          htmlFor="pr-confirm-otp"
+          className="mb-1 block text-sm font-medium"
+        >
+          {login.codeLabel}
+        </label>
+        <input
+          id="pr-confirm-otp"
+          inputMode="numeric"
+          autoComplete="one-time-code"
+          maxLength={6}
+          value={partner.state.otpDraft}
+          onChange={(event) => partner.setOtpDraft(event.target.value)}
+          disabled={blocked}
+          aria-invalid={partner.state.lastError ? true : undefined}
+          aria-describedby={
+            partner.state.lastError ? "pr-confirm-error" : undefined
+          }
+          className="w-full rounded-md border border-hairline bg-surface px-3 py-2 tracking-[0.5em]"
+          data-testid="pr-confirm-otp"
+        />
+      </div>
+
+      <div className="mb-4 flex items-center gap-3">
+        <button
+          type="button"
+          onClick={partner.resendOtp}
+          disabled={blocked || partner.state.cooldownRemaining > 0}
+          className="rounded-md border border-hairline px-3 py-1.5 text-sm disabled:opacity-50"
+          data-testid="pr-confirm-resend"
+        >
+          {login.resend}
+        </button>
+        <button
+          type="button"
+          onClick={onEditPhone}
+          disabled={partner.state.busy}
+          className="text-sm underline"
+          data-testid="pr-confirm-edit-number"
+        >
+          {login.backToEdit}
+        </button>
+      </div>
+
+      {partner.state.cooldownRemaining > 0 &&
+      partner.state.challenge !== "locked" ? (
+        <p
+          className="mb-2 text-sm text-on-surface"
+          data-testid="pr-confirm-resend-cooldown"
+        >
+          {login.resendIn(partner.state.cooldownRemaining)}
+        </p>
+      ) : null}
+      {partner.state.challenge === "locked" ? (
+        <p
+          className="mb-2 text-sm text-danger"
+          data-testid="pr-confirm-lockout"
+        >
+          {login.lockout(Math.ceil(partner.state.lockoutRemaining / 60))}
+        </p>
+      ) : null}
+      {partner.state.stage === "otp" &&
+      partner.state.challenge === "pending" ? (
+        <p
+          className="mb-2 text-sm text-on-surface"
+          data-testid="pr-confirm-attempts"
+        >
+          {partner.state.attemptsLeft > 0
+            ? login.attemptsLeft(partner.state.attemptsLeft)
+            : login.noAttempts}
+        </p>
+      ) : null}
+      {partner.state.lastError ? (
+        <p
+          role="alert"
+          className="mb-2 text-sm text-danger"
+          data-testid="pr-confirm-error"
+        >
+          {partner.state.lastError}
+        </p>
+      ) : null}
+      {partner.state.lastNotice ? (
+        <p
+          className="mb-2 text-sm text-on-surface"
+          data-testid="pr-confirm-notice"
+        >
+          {partner.state.lastNotice}
+        </p>
+      ) : null}
+      {partner.state.stage === "otp" &&
+      partner.demoOtp !== null &&
+      partner.state.otpSends > 0 ? (
+        <div
+          role="status"
+          data-testid="pr-confirm-demo-banner"
+          className="mb-2 rounded-md border border-hairline bg-surface px-3 py-2 text-sm"
+        >
+          {login.demoOtp(partner.demoOtp)}
+        </div>
+      ) : null}
+
+      <div className="mt-4 flex items-center justify-between">
+        <button
+          type="button"
+          onClick={onBack}
+          data-testid="pr-confirm-back"
+          className="rounded-md border border-hairline px-4 py-2 text-sm"
+        >
+          {t.back}
+        </button>
+        <button
+          type="submit"
+          data-testid="pr-confirm-submit"
+          disabled={blocked}
+          className="rounded-md bg-primary px-4 py-2 text-sm font-semibold text-on-accent disabled:opacity-50"
+        >
+          {partner.state.busy ? t.submitting : t.phoneConfirm.confirmCode}
+        </button>
+      </div>
+    </section>
+  );
+}
+
 /* Root wizard - state, gating and honest submission only. */
 
 export function ProviderRegisterWizard({
@@ -725,6 +900,13 @@ export function ProviderRegisterWizard({
     lng: number;
   } | null>(null);
   const fileRefs = useRef(new Map<UploadSlotId, File>());
+
+  // Phone-confirmation step (FEAT-014 #468): the shared partner OTP flow owns
+  // the challenge lifecycle; the wizard only seeds it with the registered
+  // phone and lands once a session is minted.
+  const partner = usePartnerLoginFlow();
+  const [submittedPhone, setSubmittedPhone] = useState<string | null>(null);
+  const landedRef = useRef(false);
 
   // Re-normalize when the CTA preset changes (e.g. hopping between the
   // Register-as-doctor/lab/chemist links). Identity + credential slices are
@@ -887,6 +1069,19 @@ export function ProviderRegisterWizard({
     event.preventDefault();
     setNotice(null);
     setServerError(null);
+
+    if (step === CONFIRM_STEP) {
+      // Phone-confirmation step: with no pending challenge the confirm action
+      // re-issues the code (e.g. a browse-time send failure); otherwise it
+      // verifies the entered code.
+      if (partner.state.stage !== "otp") {
+        partner.submitPhone(submittedPhone ?? partner.state.phone);
+      } else {
+        partner.submitOtp();
+      }
+      return;
+    }
+
     setAttempted(true);
 
     const fresh = validateStep(step, type, values);
@@ -934,24 +1129,55 @@ export function ProviderRegisterWizard({
         service_area_id: null,
       });
 
-      const session = await issuePartnerSession(phoneE164);
-      saveSession(session, phoneE164);
-
-      const slots = UPLOAD_SLOTS[type];
-      const credentialMap = new Map<CredentialType, string[]>();
-      for (const slotId of slots) {
-        const file = fileRefs.current.get(slotId);
-        if (!file) continue;
-        const credType = slotToCredentialType(slotId, type);
-        const base64 = await fileToBase64(file);
-        const existing = credentialMap.get(credType);
-        if (existing) {
-          existing.push(base64);
-        } else {
-          credentialMap.set(credType, [base64]);
-        }
+      // FEAT-014 T08 (#468): no session is handed out on registration. The
+      // wizard now transitions to the phone-confirmation step and issues the
+      // SMS challenge; the session is minted only after the code verifies,
+      // through the shared partner login flow (partnerLoginState.ts). An
+      // existing partner's phone (duplicate resolution) re-verifies with a
+      // fresh code here - no separate re-registration UI.
+      setSubmittedPhone(phoneE164);
+      setStep(CONFIRM_STEP);
+      partner.submitPhone(phoneE164);
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setServerError({ message: err.message, traceId: err.traceId });
+      } else if (err instanceof AuthApiError) {
+        setServerError({ message: err.message, traceId: err.traceId });
+      } else {
+        console.error("[provider-register] unexpected submit error", err);
+        setServerError({
+          message: t.errorsSubmitUnexpected,
+          traceId: "",
+        });
       }
+    } finally {
+      setSubmitting(false);
+    }
+  }
 
+  // Finalize once the confirm step has minted a partner session: persist it
+  // through the shared save path, submit any uploaded credentials, then land
+  // on the same waiting-screen target as before this step existed.
+  async function finalizeRegistration(session: SessionResult) {
+    const phone = submittedPhone ?? partner.state.phone;
+    saveSession(session, phone);
+
+    const slots = UPLOAD_SLOTS[type];
+    const credentialMap = new Map<CredentialType, string[]>();
+    for (const slotId of slots) {
+      const file = fileRefs.current.get(slotId);
+      if (!file) continue;
+      const credType = slotToCredentialType(slotId, type);
+      const base64 = await fileToBase64(file);
+      const existing = credentialMap.get(credType);
+      if (existing) {
+        existing.push(base64);
+      } else {
+        credentialMap.set(credType, [base64]);
+      }
+    }
+
+    try {
       if (credentialMap.size > 0) {
         await submitCredentials({
           credentials: Array.from(credentialMap.entries()).map(
@@ -974,21 +1200,45 @@ export function ProviderRegisterWizard({
       } else if (err instanceof AuthApiError) {
         setServerError({ message: err.message, traceId: err.traceId });
       } else {
-        console.error("[provider-register] unexpected submit error", err);
+        console.error("[provider-register] unexpected landing error", err);
         setServerError({
           message: t.errorsSubmitUnexpected,
           traceId: "",
         });
       }
-    } finally {
-      setSubmitting(false);
     }
   }
+
+  // Single-fire on mint: a skipped or failed confirmation never reaches this
+  // effect, so no session is saved and the partner home stays unreachable.
+  useEffect(() => {
+    if (!partner.state.session || landedRef.current) {
+      return;
+    }
+    landedRef.current = true;
+    void finalizeRegistration(partner.state.session);
+    // finalize closes over render-stable helpers; firing on mint only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [partner.state.session]);
 
   function goBack() {
     setStep((current) => Math.max(1, current - 1));
     setAttempted(false);
     setErrors(EMPTY_ERRORS);
+    if (step === CONFIRM_STEP) {
+      // Leaving the confirmation step leaves no code pending and mints
+      // nothing; a later re-submit issues a fresh challenge.
+      partner.backToPhone();
+    }
+  }
+
+  // "Edit number" on the confirmation step: the mobile field lives on the
+  // account-basics step, so jump straight there (nothing is saved yet).
+  function editPhone() {
+    setStep(1);
+    setAttempted(false);
+    setErrors(EMPTY_ERRORS);
+    partner.backToPhone();
   }
 
   const actions: WizardActions = {
@@ -1084,32 +1334,45 @@ export function ProviderRegisterWizard({
         {step === 4 ? (
           <StepReview {...sectionProps} toggleDeclaration={toggleDeclaration} />
         ) : null}
+        {step === CONFIRM_STEP ? (
+          <StepConfirm
+            partner={partner}
+            t={t}
+            phone={submittedPhone}
+            onBack={goBack}
+            onEditPhone={editPhone}
+          />
+        ) : null}
 
-        <hr className="my-5 border-hairline-soft" />
+        {step !== CONFIRM_STEP ? (
+          <>
+            <hr className="my-5 border-hairline-soft" />
 
-        <div className="flex items-center justify-between">
-          <button
-            type="button"
-            onClick={goBack}
-            disabled={step === 1}
-            data-testid="pr-back"
-            className="rounded-md border border-hairline px-4 py-2 text-sm disabled:opacity-40"
-          >
-            {t.back}
-          </button>
-          <button
-            type="submit"
-            data-testid={step === STEP_LAST ? "pr-submit" : "pr-next"}
-            disabled={submitting}
-            className="rounded-md bg-primary px-4 py-2 text-sm font-semibold text-on-accent disabled:opacity-50"
-          >
-            {submitting
-              ? t.submitting
-              : step === STEP_LAST
-                ? t.submitApplication
-                : t.continueCta}
-          </button>
-        </div>
+            <div className="flex items-center justify-between">
+              <button
+                type="button"
+                onClick={goBack}
+                disabled={step === 1}
+                data-testid="pr-back"
+                className="rounded-md border border-hairline px-4 py-2 text-sm disabled:opacity-40"
+              >
+                {t.back}
+              </button>
+              <button
+                type="submit"
+                data-testid={step === STEP_LAST ? "pr-submit" : "pr-next"}
+                disabled={submitting}
+                className="rounded-md bg-primary px-4 py-2 text-sm font-semibold text-on-accent disabled:opacity-50"
+              >
+                {submitting
+                  ? t.submitting
+                  : step === STEP_LAST
+                    ? t.submitApplication
+                    : t.continueCta}
+              </button>
+            </div>
+          </>
+        ) : null}
       </form>
     </div>
   );

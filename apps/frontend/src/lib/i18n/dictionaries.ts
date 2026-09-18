@@ -212,6 +212,15 @@ const en = {
       back: "Back",
       continueCta: "Continue",
       submitApplication: "Submit application",
+      // FEAT-014 T08 (#468): phone-confirmation step between review and
+      // landing - the OTP card itself reuses the staffAuth.login copy; only
+      // the step's own heading and submit label live here.
+      phoneConfirm: {
+        title: "Confirm your phone",
+        helper:
+          "We texted a 6-digit code to this number to keep your application tied to a phone you control. Enter the code to finish - your details are saved.",
+        confirmCode: "Confirm code",
+      },
       summaryTitle: (n: number) =>
         `${n} ${
           n === 1 ? "field needs" : "fields need"
@@ -1377,6 +1386,12 @@ export const STRINGS: Record<Lang, Dictionary> = {
         back: "वापस",
         continueCta: "आगे बढ़ें",
         submitApplication: "आवेदन जमा करें",
+        phoneConfirm: {
+          title: "अपना फ़ोन सत्यापित करें",
+          helper:
+            "आपके नियंत्रण वाले फ़ोन से आवेदन जुड़ा रहे, इसके लिए इस नंबर पर 6 अंकों का कोड SMS से भेजा गया है। खत्म करने के लिए कोड दर्ज करें - आपकी जानकारी सहेजी हुई है।",
+          confirmCode: "कोड की पुष्टि करें",
+        },
         summaryTitle: (n) => `जारी रखने से पहले ${n} फ़ील्ड में ध्यान देना है।`,
         accountTitle: "खाते की मूल जानकारी",
         identityTitleDoctor: "प्रोफ़ेशनल पहचान",
