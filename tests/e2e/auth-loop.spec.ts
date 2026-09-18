@@ -32,6 +32,16 @@ import {
 // re-register case resolves against the SAME identity the first test
 // registered. Serial mode keeps them in one worker in order; each test gets
 // its own browser context, so the sessions do not leak between tests.
+//
+// FEAT-014 T11 (#471) extends the loop with the partner register-and-login
+// leg, back-to-back with the patient loop in the same session: a doctor
+// completes the registration wizard, confirms the phone with the on-screen
+// demo code (the same read-back path as the patient wizard - no separate demo
+// plumbing), is signed into the partner surface, and lands on the pending
+// status screen (the state-correct landing for a not-yet-activated partner).
+// A second test then proves the "returns" leg - the fresh browser context
+// signs the same number back in on the staff card with phone + SMS code and
+// lands by state again.
 
 test.describe.configure({ mode: "serial" });
 
@@ -53,9 +63,19 @@ function randomPhone(): string {
 
 const phone = randomPhone();
 
+// FEAT-014 T11 (#471): the doctor number the partner leg registers and then
+// logs back in with. Shared across the two partner tests so the return login
+// resolves to the SAME partner identity the wizard just created.
+const partnerPhone = randomPhone();
+
 // Captured by the first test from /v1/me and asserted by the second: proves
 // the duplicate re-registration resolves to the SAME identity, not a new one.
 let registeredSubjectId: string | null = null;
+
+// FEAT-014 T11 (#471): captured by the partner registration leg from /v1/me
+// and asserted by the return leg, so "their own state-correct screen" really
+// means the SAME partner identity - never a different account on the phone.
+let registeredPartnerSubjectId: string | null = null;
 
 async function startRegistration(page: Page, number: string): Promise<void> {
   await page.goto("/login");
@@ -115,6 +135,148 @@ async function verifyOtp(
   await page.getByLabel("Verification code").fill(code);
   await page.getByRole("button", { name: "Verify & continue" }).click();
   await page.waitForURL("**/patient", { timeout: 15_000 });
+}
+
+// FEAT-014 T11 (#471): fetch the caller's identity with a Bearer JWT. Shared
+// by both partner legs so the session the wizard / staff-card login minted is
+// proven real AND resolves to the same underlying partner.
+async function readMe(
+  request: APIRequestContext,
+  accessJwt: string,
+): Promise<{ subject_id: string; roles: string[] }> {
+  const me = await request.get(`${BACKEND}/v1/me`, {
+    headers: { Authorization: `Bearer ${accessJwt}` },
+  });
+  expect(me.status()).toBe(200);
+  return (await me.json()) as { subject_id: string; roles: string[] };
+}
+
+// FEAT-014 T11 (#471): partner registration leg. Runs the whole provider
+// wizard (/staff/register) for a doctor - account basics, identity, three
+// credential uploads, review & declarations - then submits the application.
+// The wizard's phone-confirmation step (not part of the stepper) is handled
+// by confirmPartnerPhone.
+async function startPartnerRegistration(
+  page: Page,
+  number: string,
+): Promise<void> {
+  await page.goto("/staff/register?type=doctor");
+  await expect(
+    page.getByRole("heading", { name: "Account basics" }),
+  ).toBeVisible({ timeout: 60_000 });
+
+  await page.getByTestId("pr-fullname").fill("Dr. E2E Partner");
+  await page.getByTestId("pr-email").fill(`partner.e2e.${number}@example.com`);
+  await page.getByTestId("pr-password").fill("CareSetu!E2E2026");
+  await page.getByTestId("pr-mobile").fill(number);
+  await page.getByTestId("pr-next").click();
+
+  await expect(
+    page.getByRole("heading", { name: "Professional identity" }),
+  ).toBeVisible({ timeout: 60_000 });
+  await page.getByTestId("pr-degreename").fill("MBBS");
+  await page.getByTestId("pr-council").selectOption("jharkhandSmc");
+  await page.getByTestId("pr-city").fill("Daltonganj");
+  await page.getByTestId("pr-languages").fill("Hindi, English");
+  await page.getByTestId("pr-next").click();
+
+  await expect(
+    page.getByRole("heading", { name: "Credentials upload" }),
+  ).toBeVisible({ timeout: 60_000 });
+  const credentialFile = {
+    name: "credential.jpg",
+    mimeType: "image/jpeg",
+    buffer: Buffer.from("e2e-credential"),
+  };
+  await page
+    .getByTestId("slot-input-councilCert")
+    .setInputFiles(credentialFile);
+  await page.getByTestId("slot-input-degrees").setInputFiles(credentialFile);
+  await page.getByTestId("slot-input-photoId").setInputFiles(credentialFile);
+  await page.getByTestId("pr-next").click();
+
+  await expect(
+    page.getByRole("heading", { name: "Review & declarations" }),
+  ).toBeVisible({ timeout: 60_000 });
+  await page.getByTestId("decl-truth").check();
+  await page.getByTestId("decl-consent").check();
+  await page.getByTestId("decl-terms").check();
+  await page.getByTestId("pr-submit").click();
+}
+
+// FEAT-014 T11 (#471): partner phone-confirmation step. The wizard has already
+// requested the code for the submitted number, so the demo banner drives the
+// entry exactly like the patient wizard - the byte-stable "Demo OTP: NNNNNN"
+// literal, read-back via the same mock-SMS API. A verified code mints the
+// partner session and lands on the pending status screen (state-driven
+// landing for a not-yet-activated doctor).
+async function confirmPartnerPhone(
+  page: Page,
+  request: APIRequestContext,
+  number: string,
+): Promise<void> {
+  await expect(page.getByTestId("pr-step-5")).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByText(/^Demo OTP: \d{6}$/)).toBeVisible({
+    timeout: 30_000,
+  });
+  const code = await readMockOtp(request, number);
+  await page.getByTestId("pr-confirm-otp").fill(code);
+  await page.getByTestId("pr-confirm-submit").click();
+  await page.waitForURL("**/partner/status/pending", { timeout: 60_000 });
+  await expect(
+    page.getByRole("heading", { name: "Your application is being verified" }),
+  ).toBeVisible({ timeout: 60_000 });
+}
+
+// FEAT-014 T11 (#471): partner return-login leg ("returns"). The staff card
+// (/staff/login, partner mode) signs back in with phone + SMS code and lands
+// by state again. The fresh context must carry no leaked session: the wizard's
+// stored JWT is gone, so the sign-in really is from scratch. A login inside
+// the 60s resend cooldown of the registration code is refused with a countdown
+// on the phone step - wait the window out and retry so the same partner still
+// resolves (latest-wins challenge).
+async function partnerLogin(
+  page: Page,
+  request: APIRequestContext,
+  number: string,
+): Promise<void> {
+  await page.goto("/staff/login");
+  await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible({
+    timeout: 60_000,
+  });
+
+  const staleJwt = await page.evaluate(() =>
+    localStorage.getItem("caresetu.access_jwt"),
+  );
+  expect(
+    staleJwt,
+    "a fresh browser context must not carry the registration session",
+  ).toBeNull();
+
+  await page.getByTestId("partner-phone").fill(number);
+  await page.getByTestId("staff-submit").click();
+  await expect(page.getByText(/^Demo OTP: \d{6}$/))
+    .toBeVisible({
+      timeout: 15_000,
+    })
+    .catch(async () => {
+      await expect(page.getByText("Resend in")).toBeVisible({
+        timeout: 15_000,
+      });
+      await page.waitForTimeout(62_000);
+      await page.getByTestId("staff-submit").click();
+      await expect(page.getByText(/^Demo OTP: \d{6}$/)).toBeVisible({
+        timeout: 30_000,
+      });
+    });
+
+  const code = await readMockOtp(request, number);
+  await page.getByTestId("partner-otp").fill(code);
+  await page.getByTestId("staff-submit").click();
+  await page.waitForURL("**/partner/status/pending", { timeout: 60_000 });
+  await expect(
+    page.getByRole("heading", { name: "Your application is being verified" }),
+  ).toBeVisible({ timeout: 60_000 });
 }
 
 // TEST-C2 (#131): accessibility regression guard. Axe scans run against the
@@ -324,4 +486,56 @@ test("deployed-smoke stability: login route path and demo OTP banner copy are by
   await expect(page.getByText(/^Demo OTP: \d{6}$/)).toBeVisible({
     timeout: 15_000,
   });
+});
+
+test("partner: register a doctor through the wizard, confirm the phone with the demo code, and land on the pending status screen", async ({
+  page,
+  request,
+}) => {
+  // FEAT-014 T11 (#471) leg 1: a fresh doctor number completes the provider
+  // wizard, confirms the phone with the demo read-back (identical code-entry
+  // path to the patient wizard), and is signed into the partner surface on
+  // the state-correct self-service screen - the pending status page.
+  await startPartnerRegistration(page, partnerPhone);
+  await confirmPartnerPhone(page, request, partnerPhone);
+  await expect(page).toHaveURL(`${FRONTEND}/partner/status/pending`);
+
+  const accessJwt = await page.evaluate(() =>
+    localStorage.getItem("caresetu.access_jwt"),
+  );
+  expect(
+    accessJwt,
+    "the register-and-confirm flow should store a partner access JWT",
+  ).not.toBeNull();
+  const me = await readMe(request, accessJwt as string);
+  expect(
+    me.roles,
+    "the wizard session must carry the partner role, never just patient",
+  ).toContain("partner");
+  registeredPartnerSubjectId = me.subject_id;
+});
+
+test("partner: close and reopen the browser, sign back in with phone + code, and land by state again", async ({
+  page,
+  request,
+}) => {
+  // FEAT-014 T11 (#471) leg 2 ("returns"): this test's fresh browser context
+  // holds no session (partnerLogin proves the slate is clean), so the
+  // returning partner sign in from scratch on the staff card with phone +
+  // SMS code and lands on the same state-correct pending screen.
+  await partnerLogin(page, request, partnerPhone);
+  await expect(page).toHaveURL(`${FRONTEND}/partner/status/pending`);
+
+  const returnJwt = await page.evaluate(() =>
+    localStorage.getItem("caresetu.access_jwt"),
+  );
+  expect(
+    returnJwt,
+    "the return login should mint a fresh partner session",
+  ).not.toBeNull();
+  const me = await readMe(request, returnJwt as string);
+  expect(
+    me.subject_id,
+    "the returning partner must resolve to the SAME identity the wizard created, never a new account",
+  ).toBe(registeredPartnerSubjectId);
 });
