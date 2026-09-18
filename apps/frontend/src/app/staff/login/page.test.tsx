@@ -168,7 +168,26 @@ describe("StaffLoginPage", () => {
     },
   );
 
-  it("routes an already-signed-in active partner to the partner home", async () => {
+  it.each([
+    ["doctor", "/doctor"],
+    ["lab", "/partner"],
+    ["chemist", "/partner"],
+  ] as const)(
+    "routes an already-signed-in active %s partner to %s",
+    async (partnerType, expected) => {
+      mockFetchPartnerMe.mockResolvedValue({
+        partner_id: 1,
+        partner_type: partnerType,
+        round: 1,
+        status: "Active",
+      });
+      mockSession(["partner"]);
+      render(<StaffLoginPage />);
+      await waitFor(() => expect(mockReplace).toHaveBeenCalledWith(expected));
+    },
+  );
+
+  it("routes an already-signed-in active doctor partner into a doctor deep link", async () => {
     mockFetchPartnerMe.mockResolvedValue({
       partner_id: 1,
       partner_type: "doctor",
@@ -176,8 +195,11 @@ describe("StaffLoginPage", () => {
       status: "Active",
     });
     mockSession(["partner"]);
+    searchParamsValue = new URLSearchParams({ return: "/doctor/cases/42" });
     render(<StaffLoginPage />);
-    await waitFor(() => expect(mockReplace).toHaveBeenCalledWith("/partner"));
+    await waitFor(() =>
+      expect(mockReplace).toHaveBeenCalledWith("/doctor/cases/42"),
+    );
   });
 
   it("routes an already-signed-in active partner to the return deep link (F014-T09b)", async () => {

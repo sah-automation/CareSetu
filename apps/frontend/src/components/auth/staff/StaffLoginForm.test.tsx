@@ -511,8 +511,8 @@ describe("StaffLoginForm - partner code step", () => {
     expect(screen.getByTestId("partner-otp")).toBeDisabled();
   });
 
-  it("verifies the code, mints a partner session, and routes to /partner", async () => {
-    mockPostLoginTarget.mockReturnValue("/partner");
+  it("verifies the code, mints a partner session, and routes via postLoginTarget", async () => {
+    mockPostLoginTarget.mockReturnValue("/doctor");
     vi.mocked(partnerLogin).mockResolvedValue(LOGIN_OK);
     vi.mocked(partnerVerify).mockResolvedValue({
       outcome: "verified",
@@ -550,8 +550,9 @@ describe("StaffLoginForm - partner code step", () => {
         surface: "staff",
         roles: ["partner"],
         partnerState: undefined,
+        partnerType: "doctor",
       });
-      expect(mockLocationReplace).toHaveBeenCalledWith("/partner");
+      expect(mockLocationReplace).toHaveBeenCalledWith("/doctor");
     });
 
     // The patient lifecycle is never touched for a partner sign-in.
@@ -607,14 +608,15 @@ describe("StaffLoginForm - partner code step", () => {
           surface: "staff",
           roles: ["partner"],
           partnerState: state,
+          partnerType: "doctor",
         });
         expect(mockLocationReplace).toHaveBeenCalledWith(expected);
       });
     },
   );
 
-  it("derives no partnerState for an active partner and lands role-based", async () => {
-    mockPostLoginTarget.mockReturnValue("/partner");
+  it("derives no partnerState for an active doctor partner and lands via the doctor role rule", async () => {
+    mockPostLoginTarget.mockReturnValue("/doctor");
     await completePartnerLogin("Active");
 
     await waitFor(() => {
@@ -623,8 +625,9 @@ describe("StaffLoginForm - partner code step", () => {
         surface: "staff",
         roles: ["partner"],
         partnerState: undefined,
+        partnerType: "doctor",
       });
-      expect(mockLocationReplace).toHaveBeenCalledWith("/partner");
+      expect(mockLocationReplace).toHaveBeenCalledWith("/doctor");
     });
   });
 
@@ -638,6 +641,7 @@ describe("StaffLoginForm - partner code step", () => {
           surface: "staff",
           roles: ["partner"],
           partnerState: undefined,
+          partnerType: "doctor",
           returnTarget: "/partner/orders/42",
         }),
       );
@@ -660,6 +664,7 @@ describe("StaffLoginForm - partner code step", () => {
             surface: "staff",
             roles: ["partner"],
             partnerState: state,
+            partnerType: "doctor",
             returnTarget: "/partner/orders/42",
           }),
         );
@@ -670,6 +675,20 @@ describe("StaffLoginForm - partner code step", () => {
 
   it("falls back to role-based routing when the partner status read fails", async () => {
     mockPostLoginTarget.mockReturnValue("/partner");
+    vi.mocked(partnerLogin).mockResolvedValue(LOGIN_OK);
+    vi.mocked(partnerVerify).mockResolvedValue({
+      outcome: "verified",
+      phone_e164: PHONE,
+      identity_id: 7,
+      attempts_left: null,
+      lockout_remaining_seconds: null,
+    });
+    vi.mocked(issuePartnerSession).mockResolvedValue(SESSION);
+    vi.mocked(fetchMe).mockResolvedValue({
+      subject_id: "7",
+      roles: ["partner"],
+      phone: PHONE,
+    });
     mockFetchPartnerMe.mockRejectedValue(
       new ApiError({
         code: "NETWORK_ERROR",
@@ -678,13 +697,19 @@ describe("StaffLoginForm - partner code step", () => {
         details: {},
       }),
     );
-    await completePartnerLogin("Active");
+
+    render(<StaffLoginForm />);
+    typePartnerPhone();
+    fireEvent.click(screen.getByTestId("staff-submit"));
+    await screen.findByTestId("partner-otp");
+    typeCodeAndSubmit();
 
     await waitFor(() => {
       expect(mockPostLoginTarget).toHaveBeenCalledWith({
         surface: "staff",
         roles: ["partner"],
         partnerState: undefined,
+        partnerType: undefined,
       });
       expect(mockLocationReplace).toHaveBeenCalledWith("/partner");
     });
@@ -719,6 +744,7 @@ describe("StaffLoginForm - partner code step", () => {
         surface: "staff",
         roles: ["operator"],
         partnerState: undefined,
+        partnerType: undefined,
       });
     });
   });
@@ -847,6 +873,8 @@ describe("Operator login flow", () => {
       expect(mockPostLoginTarget).toHaveBeenCalledWith({
         surface: "staff",
         roles: ["operator"],
+        partnerState: undefined,
+        partnerType: undefined,
       });
       expect(mockLocationReplace).toHaveBeenCalledWith("/operator/home");
     });

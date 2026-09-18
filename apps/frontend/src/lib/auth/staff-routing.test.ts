@@ -2,7 +2,7 @@
 // pinned as a table of cases. This is the done-verify "routing logic per
 // login surface" suite.
 
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   CHOOSE_ROLE_ROUTE,
@@ -11,10 +11,26 @@ import {
   PATIENT_LOGIN_SURFACE,
   SCOPED_ROLE_PICKER_ROUTE,
   STAFF_LOGIN_SURFACE,
+  fetchPartnerRouteState,
   partnerStatusToState,
   postLoginTarget,
 } from "./staff-routing";
 import { PATIENT_HOME } from "./return-url";
+
+// The landing resolver reads the caller's own /v1/partner/me response (status
+// + partner_type) through fetchPartnerMe; mocking it here pins the
+// fetchPartnerRouteState mapping and its degradation path at this seam.
+const { mockFetchPartnerMe } = vi.hoisted(() => ({
+  mockFetchPartnerMe: vi.fn(),
+}));
+
+vi.mock("@/lib/partner/api", () => ({
+  fetchPartnerMe: (...args: unknown[]) => mockFetchPartnerMe(...args),
+}));
+
+beforeEach(() => {
+  mockFetchPartnerMe.mockReset();
+});
 
 describe("postLoginTarget", () => {
   it("lands the patient surface on the patient home without a return target", () => {
@@ -202,6 +218,174 @@ describe("partner status landing matrix", () => {
         returnTarget: "/operator",
       }),
     ).toBe(PARTNER_PENDING_ROUTE);
+  });
+});
+
+describe("fetchPartnerRouteState", () => {
+  it.each([
+    ["Registered", "doctor", "pending", "doctor"],
+    ["Under Verification", "lab", "pending", "lab"],
+    ["Rejected", "chemist", "rejected", "chemist"],
+    ["Active", "doctor", undefined, "doctor"],
+    ["Active", "lab", undefined, "lab"],
+  ] as const)(
+    "maps /v1/partner/me status %s + partner_type %s to state %s / type %s",
+    async (status, partnerType, state, type) => {
+      mockFetchPartnerMe.mockResolvedValue({
+        partner_id: 1,
+        status,
+        partner_type: partnerType,
+        round: 1,
+      });
+      await expect(fetchPartnerRouteState(["partner"])).resolves.toEqual({
+        partnerState: state,
+        partnerType: type,
+      });
+    },
+  );
+
+  it("degrades to { undefined, undefined } when the partner read fails", async () => {
+    mockFetchPartnerMe.mockRejectedValue(new TypeError("Failed to fetch"));
+    await expect(fetchPartnerRouteState(["partner"])).resolves.toEqual({
+      partnerState: undefined,
+      partnerType: undefined,
+    });
+  });
+
+  it("short-circuits without a read for a non-partner session", async () => {
+    await expect(fetchPartnerRouteState(["operator"])).resolves.toEqual({
+      partnerState: undefined,
+      partnerType: undefined,
+    });
+    expect(mockFetchPartnerMe).not.toHaveBeenCalled();
+  });
+});
+
+describe("doctor partner landing (#475)", () => {
+  it.each([
+    ["doctor", "/doctor"],
+    ["lab", "/partner"],
+    ["chemist", "/partner"],
+  ] as const)("lands an active %s partner on %s", (partnerType, expected) => {
+    expect(
+      postLoginTarget({
+        surface: STAFF_LOGIN_SURFACE,
+        roles: ["partner"],
+        partnerState: undefined,
+        partnerType,
+      }),
+    ).toBe(expected);
+  });
+
+  it("lands an active doctor on /doctor even when the account also holds a patient role", () => {
+    expect(
+      postLoginTarget({
+        surface: STAFF_LOGIN_SURFACE,
+        roles: ["patient", "partner"],
+        partnerType: "doctor",
+      }),
+    ).toBe("/doctor");
+  });
+
+  it("routes a multi-staff-role doctor partner to the scoped picker", () => {
+    expect(
+      postLoginTarget({
+        surface: STAFF_LOGIN_SURFACE,
+        roles: ["partner", "operator"],
+        partnerType: "doctor",
+      }),
+    ).toBe(SCOPED_ROLE_PICKER_ROUTE);
+  });
+
+  it.each([
+    ["pending", PARTNER_PENDING_ROUTE],
+    ["rejected", PARTNER_REJECTED_ROUTE],
+  ] as const)(
+    "keeps the %s status screen ahead of an active-doctor landing",
+    (state, expected) => {
+      expect(
+        postLoginTarget({
+          surface: STAFF_LOGIN_SURFACE,
+          roles: ["partner"],
+          partnerState: state,
+          partnerType: "doctor",
+        }),
+      ).toBe(expected);
+      // The status override also holds for multi-role doctor partners.
+      expect(
+        postLoginTarget({
+          surface: STAFF_LOGIN_SURFACE,
+          roles: ["partner", "operator"],
+          partnerState: state,
+          partnerType: "doctor",
+        }),
+      ).toBe(expected);
+    },
+  );
+
+  it("keeps a pending/rejected doctor on the status screen even when a deep link points into the doctor console", () => {
+    expect(
+      postLoginTarget({
+        surface: STAFF_LOGIN_SURFACE,
+        roles: ["partner"],
+        partnerState: "pending",
+        partnerType: "doctor",
+        returnTarget: "/doctor/cases/42",
+      }),
+    ).toBe(PARTNER_PENDING_ROUTE);
+    expect(
+      postLoginTarget({
+        surface: STAFF_LOGIN_SURFACE,
+        roles: ["partner"],
+        partnerState: "rejected",
+        partnerType: "doctor",
+        returnTarget: "/doctor/cases/42",
+      }),
+    ).toBe(PARTNER_REJECTED_ROUTE);
+  });
+
+  it("honors a deep-link return inside the doctor console for a doctor partner", () => {
+    expect(
+      postLoginTarget({
+        surface: STAFF_LOGIN_SURFACE,
+        roles: ["partner"],
+        partnerType: "doctor",
+        returnTarget: "/doctor/cases/42",
+      }),
+    ).toBe("/doctor/cases/42");
+  });
+
+  it("still honors a deep-link return inside the partner territory for a doctor partner", () => {
+    expect(
+      postLoginTarget({
+        surface: STAFF_LOGIN_SURFACE,
+        roles: ["partner"],
+        partnerType: "doctor",
+        returnTarget: "/partner/orders/42",
+      }),
+    ).toBe("/partner/orders/42");
+  });
+
+  it("ignores a return into another staff group for a doctor partner", () => {
+    expect(
+      postLoginTarget({
+        surface: STAFF_LOGIN_SURFACE,
+        roles: ["partner"],
+        partnerType: "doctor",
+        returnTarget: "/operator/audit",
+      }),
+    ).toBe("/doctor");
+  });
+
+  it("falls back to the role rule when the partner read failed (no type known)", () => {
+    expect(
+      postLoginTarget({
+        surface: STAFF_LOGIN_SURFACE,
+        roles: ["partner"],
+        partnerState: undefined,
+        partnerType: undefined,
+      }),
+    ).toBe("/partner");
   });
 });
 

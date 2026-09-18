@@ -66,15 +66,12 @@ function StaffLoginView() {
 
     const roles = user?.roles ?? [];
     async function land() {
-      const partnerState = roles.includes("partner")
-        ? await fetchPartnerRouteState()
-        : undefined;
       router.replace(
         postLoginTarget({
           surface: STAFF_LOGIN_SURFACE,
           roles,
           returnTarget,
-          partnerState,
+          ...(await fetchPartnerRouteState(roles)),
         }),
       );
     }
