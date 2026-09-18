@@ -19,6 +19,7 @@
 
 import type { FormEvent } from "react";
 import Link from "next/link";
+import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
 import { ConsentedHistory } from "@/components/case/ConsentedHistory";
@@ -122,11 +123,8 @@ function LoadingSkeleton() {
   );
 }
 
-export default function CaseWorkspacePage({
-  params,
-}: {
-  params: { caseId: string };
-}) {
+export default function CaseWorkspacePage() {
+  const params = useParams<{ caseId: string }>();
   const caseId = Number(params.caseId);
   const { lang } = useLang();
   const t = STRINGS[lang].caseWorkspace;

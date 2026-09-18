@@ -41,6 +41,10 @@ import {
 import { fetchPartnerMe, type PartnerMeView } from "@/lib/partner/api";
 import { readConsentedHistory, type RecordTimeline } from "@/lib/record/api";
 
+vi.mock("next/navigation", () => ({
+  useParams: () => ({ caseId: "11" }),
+}));
+
 vi.mock("next/link", () => {
   return {
     default: ({
@@ -199,7 +203,7 @@ afterEach(() => {
 
 describe("CaseWorkspacePage stage + forced review (US-15)", () => {
   it("renders the case stage chip for the pre-summary stage", async () => {
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
     await waitFor(() => screen.getByTestId("case-content"));
 
     expect(screen.getByTestId("stage-chip")).toHaveTextContent(
@@ -209,7 +213,7 @@ describe("CaseWorkspacePage stage + forced review (US-15)", () => {
 
   it("renders the prescription-pending stage chip", async () => {
     getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
     await waitFor(() => screen.getByTestId("case-content"));
 
     expect(screen.getByTestId("stage-chip")).toHaveTextContent(
@@ -219,7 +223,7 @@ describe("CaseWorkspacePage stage + forced review (US-15)", () => {
 
   it("shows the forced-review requirement when the case demands one", async () => {
     getCase.mockResolvedValue(caseItem(11, { forced_review: true }));
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
     await waitFor(() => screen.getByTestId("case-content"));
 
     expect(screen.getByTestId("forced-review-banner")).toHaveTextContent(
@@ -228,7 +232,7 @@ describe("CaseWorkspacePage stage + forced review (US-15)", () => {
   });
 
   it("omits the forced-review banner when review is not required", async () => {
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
     await waitFor(() => screen.getByTestId("case-content"));
 
     expect(
@@ -239,7 +243,7 @@ describe("CaseWorkspacePage stage + forced review (US-15)", () => {
 
 describe("CaseWorkspacePage consented history", () => {
   it("reads the consented history for the case patient", async () => {
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
     await waitFor(() => screen.getByTestId("history-list"));
 
     expect(getHistory).toHaveBeenCalledWith({
@@ -258,7 +262,7 @@ describe("CaseWorkspacePage consented history", () => {
       created_at: "2026-01-01T00:00:00Z",
       entries: [],
     });
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
     await waitFor(() => screen.getByText(t.historyEmpty));
 
     expect(screen.queryByTestId("history-list")).not.toBeInTheDocument();
@@ -270,7 +274,7 @@ describe("CaseWorkspacePage handshake (US-24)", () => {
     doHandshake.mockResolvedValue(
       caseItem(11, { stage: "prescription_pending" }),
     );
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
     await waitFor(() => screen.getByTestId("handshake-action"));
 
     fireEvent.click(screen.getByTestId("handshake-action"));
@@ -288,7 +292,7 @@ describe("CaseWorkspacePage handshake (US-24)", () => {
 
   it("does not offer the handshake on a prescription-pending case", async () => {
     getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
     await waitFor(() => screen.getByTestId("case-content"));
 
     expect(screen.queryByTestId("handshake-action")).not.toBeInTheDocument();
@@ -297,7 +301,7 @@ describe("CaseWorkspacePage handshake (US-24)", () => {
 
   it("shows the closed terminal state without actions", async () => {
     getCase.mockResolvedValue(caseItem(11, { stage: "closed" }));
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
     await waitFor(() => screen.getByTestId("closed-state"));
 
     expect(screen.getByTestId("closed-state")).toHaveTextContent(
@@ -315,7 +319,7 @@ describe("CaseWorkspacePage handshake (US-24)", () => {
         details: {},
       }),
     );
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
     await waitFor(() => screen.getByTestId("handshake-action"));
 
     fireEvent.click(screen.getByTestId("handshake-action"));
@@ -327,7 +331,7 @@ describe("CaseWorkspacePage prescription drafting (US-18/#452)", () => {
   it("reloads the in-progress revision into the editor on a pending case", async () => {
     getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
     getWorkingRx.mockResolvedValue(prescription());
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
 
     await waitFor(() => screen.getByTestId("prescription-editor"));
 
@@ -341,7 +345,7 @@ describe("CaseWorkspacePage prescription drafting (US-18/#452)", () => {
   it("offers the AI-draft request when no working revision exists", async () => {
     getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
     getWorkingRx.mockRejectedValue(noDraftError());
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
 
     await waitFor(() => screen.getByTestId("prescription-empty"));
 
@@ -356,7 +360,7 @@ describe("CaseWorkspacePage prescription drafting (US-18/#452)", () => {
     getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
     getWorkingRx.mockRejectedValue(noDraftError());
     doDraft.mockResolvedValue(prescription());
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
 
     await waitFor(() => screen.getByTestId("request-draft-action"));
     fireEvent.click(screen.getByTestId("request-draft-action"));
@@ -370,7 +374,7 @@ describe("CaseWorkspacePage prescription drafting (US-18/#452)", () => {
     getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
     getWorkingRx.mockResolvedValue(prescription());
     doSaveRevision.mockResolvedValue(prescription());
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
 
     await waitFor(() => screen.getByTestId("prescription-editor"));
     fireEvent.change(screen.getByTestId("rx-item-dose-0"), {
@@ -419,7 +423,7 @@ describe("CaseWorkspacePage prescription drafting (US-18/#452)", () => {
       }),
     );
     doSaveRevision.mockResolvedValue(prescription());
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
 
     await waitFor(() => screen.getByTestId("prescription-editor"));
     fireEvent.click(screen.getByTestId("rx-item-remove-1"));
@@ -444,7 +448,7 @@ describe("CaseWorkspacePage prescription drafting (US-18/#452)", () => {
         details: {},
       }),
     );
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
 
     await waitFor(() => screen.getByTestId("request-draft-action"));
     fireEvent.click(screen.getByTestId("request-draft-action"));
@@ -464,7 +468,7 @@ describe("CaseWorkspacePage prescription drafting (US-18/#452)", () => {
         details: {},
       }),
     );
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
 
     await waitFor(() => screen.getByTestId("request-draft-action"));
     fireEvent.click(screen.getByTestId("request-draft-action"));
@@ -485,7 +489,7 @@ describe("CaseWorkspacePage prescription drafting (US-18/#452)", () => {
         details: {},
       }),
     );
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
 
     await waitFor(() => screen.getByTestId("prescription-editor"));
     fireEvent.click(screen.getByTestId("save-revision-action"));
@@ -507,7 +511,7 @@ describe("CaseWorkspacePage prescription drafting (US-18/#452)", () => {
         details: {},
       }),
     );
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
 
     await waitFor(() => screen.getByTestId("prescription-load-error"));
     expect(screen.getByText(t.workingRxLoadFail)).toBeTruthy();
@@ -522,7 +526,7 @@ describe("CaseWorkspacePage approval, rejection, close (#453, US-19..22)", () =>
   it("blocks approval until the verification declaration is ticked", async () => {
     getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
     getWorkingRx.mockResolvedValue(prescription());
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
 
     await waitFor(() => screen.getByTestId("approve-issue-action"));
     const approve = screen.getByTestId("approve-issue-action");
@@ -541,7 +545,7 @@ describe("CaseWorkspacePage approval, rejection, close (#453, US-19..22)", () =>
       status: "issued",
       issued_at: "2026-09-14T09:30:00Z",
     });
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
 
     await waitFor(() => screen.getByTestId("approve-issue-action"));
     fireEvent.click(screen.getByTestId("verification-declaration"));
@@ -571,7 +575,7 @@ describe("CaseWorkspacePage approval, rejection, close (#453, US-19..22)", () =>
         details: {},
       }),
     );
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
 
     await waitFor(() => screen.getByTestId("approve-issue-action"));
     fireEvent.click(screen.getByTestId("verification-declaration"));
@@ -588,7 +592,7 @@ describe("CaseWorkspacePage approval, rejection, close (#453, US-19..22)", () =>
     getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
     getWorkingRx.mockResolvedValue(prescription());
     doReject.mockResolvedValue({ ...prescription(), status: "rejected" });
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
 
     await waitFor(() => screen.getByTestId("reject-reason"));
     fireEvent.change(screen.getByTestId("reject-reason"), {
@@ -614,7 +618,7 @@ describe("CaseWorkspacePage approval, rejection, close (#453, US-19..22)", () =>
   it("keeps the reject disabled until a reason is typed", async () => {
     getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
     getWorkingRx.mockResolvedValue(prescription());
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
 
     await waitFor(() => screen.getByTestId("reject-action"));
     expect(screen.getByTestId("reject-action")).toBeDisabled();
@@ -639,7 +643,7 @@ describe("CaseWorkspacePage approval, rejection, close (#453, US-19..22)", () =>
         details: {},
       }),
     );
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
 
     await waitFor(() => screen.getByTestId("reject-reason"));
     fireEvent.change(screen.getByTestId("reject-reason"), {
@@ -662,7 +666,7 @@ describe("CaseWorkspacePage approval, rejection, close (#453, US-19..22)", () =>
     doCloseCase.mockResolvedValue(
       caseItem(11, { stage: "closed", close_reason: "no_show" }),
     );
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
 
     await waitFor(() => screen.getByTestId("close-reason-input"));
     fireEvent.change(screen.getByTestId("close-reason-input"), {
@@ -694,7 +698,7 @@ describe("CaseWorkspacePage approval, rejection, close (#453, US-19..22)", () =>
         details: {},
       }),
     );
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
 
     await waitFor(() => screen.getByTestId("close-reason-input"));
     fireEvent.change(screen.getByTestId("close-reason-input"), {
@@ -721,7 +725,7 @@ describe("CaseWorkspacePage failure paths", () => {
         details: {},
       }),
     );
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
     await waitFor(() => screen.getByTestId("error-banner"));
 
     expect(screen.getByText(t.loadFailed)).toBeTruthy();
@@ -736,7 +740,7 @@ describe("CaseWorkspacePage failure paths", () => {
         details: {},
       }),
     );
-    render(<CaseWorkspacePage params={{ caseId: "11" }} />);
+    render(<CaseWorkspacePage />);
     await waitFor(() => screen.getByTestId("error-banner"));
 
     fireEvent.click(screen.getByTestId("error-banner-retry"));
@@ -756,7 +760,7 @@ describe("CaseWorkspacePage bilingual parity (REQ-006)", () => {
         >
           flip-lang
         </button>
-        <CaseWorkspacePage params={{ caseId: "11" }} />
+        <CaseWorkspacePage />
       </>
     );
   }

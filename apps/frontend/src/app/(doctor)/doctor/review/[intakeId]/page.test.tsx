@@ -35,6 +35,10 @@ import {
 import { fetchPartnerMe, type PartnerMeView } from "@/lib/partner/api";
 import { readConsentedHistory, type RecordTimeline } from "@/lib/record/api";
 
+vi.mock("next/navigation", () => ({
+  useParams: () => ({ intakeId: "42" }),
+}));
+
 vi.mock("next/link", () => {
   return {
     default: ({
@@ -198,7 +202,7 @@ afterEach(() => {
 
 describe("ReviewWorkspacePage stage + forced review (US-13)", () => {
   it("renders the case stage chip for the pre-summary stage", async () => {
-    render(<ReviewWorkspacePage params={{ intakeId: "42" }} />);
+    render(<ReviewWorkspacePage />);
     await waitFor(() => screen.getByTestId("workspace-content"));
 
     expect(screen.getByTestId("stage-chip")).toHaveTextContent(
@@ -210,7 +214,7 @@ describe("ReviewWorkspacePage stage + forced review (US-13)", () => {
   });
 
   it("shows the forced-review requirement on a low-confidence pre-summary", async () => {
-    render(<ReviewWorkspacePage params={{ intakeId: "42" }} />);
+    render(<ReviewWorkspacePage />);
     await waitFor(() => screen.getByTestId("workspace-content"));
 
     expect(screen.getByTestId("forced-review-banner")).toHaveTextContent(
@@ -223,7 +227,7 @@ describe("ReviewWorkspacePage stage + forced review (US-13)", () => {
 
   it("does not show the forced-review banner on a high-confidence pre-summary", async () => {
     getPre.mockResolvedValue(preSummary({ low_confidence: false }));
-    render(<ReviewWorkspacePage params={{ intakeId: "42" }} />);
+    render(<ReviewWorkspacePage />);
     await waitFor(() => screen.getByTestId("workspace-content"));
 
     expect(
@@ -234,7 +238,7 @@ describe("ReviewWorkspacePage stage + forced review (US-13)", () => {
 
 describe("ReviewWorkspacePage full pre-summary read (US-14)", () => {
   it("renders the chief complaints, symptoms, duration and confidence", async () => {
-    render(<ReviewWorkspacePage params={{ intakeId: "42" }} />);
+    render(<ReviewWorkspacePage />);
     await waitFor(() => screen.getByTestId("pre-summary"));
 
     expect(screen.getByTestId("pre-summary-complaints")).toHaveTextContent(
@@ -264,7 +268,7 @@ describe("ReviewWorkspacePage full pre-summary read (US-14)", () => {
         },
       }),
     );
-    render(<ReviewWorkspacePage params={{ intakeId: "42" }} />);
+    render(<ReviewWorkspacePage />);
     await waitFor(() => screen.getByTestId("pre-summary"));
 
     expect(screen.getByTestId("pre-summary-duration")).toHaveTextContent(
@@ -273,7 +277,7 @@ describe("ReviewWorkspacePage full pre-summary read (US-14)", () => {
   });
 
   it("renders the draft review state with no attribution", async () => {
-    render(<ReviewWorkspacePage params={{ intakeId: "42" }} />);
+    render(<ReviewWorkspacePage />);
     await waitFor(() => screen.getByTestId("workspace-content"));
 
     expect(screen.getByTestId("pre-summary-review-state")).toHaveTextContent(
@@ -293,7 +297,7 @@ describe("ReviewWorkspacePage full pre-summary read (US-14)", () => {
         reviewed_at: "2026-09-16T09:00:00Z",
       }),
     );
-    render(<ReviewWorkspacePage params={{ intakeId: "42" }} />);
+    render(<ReviewWorkspacePage />);
     await waitFor(() => screen.getByTestId("pre-summary-attribution"));
 
     expect(screen.getByTestId("pre-summary-review-state")).toHaveTextContent(
@@ -308,7 +312,7 @@ describe("ReviewWorkspacePage full pre-summary read (US-14)", () => {
 describe("ReviewWorkspacePage single-action finalize (US-14/#442)", () => {
   it("calls reviewPreSummary and shows the success state with attribution", async () => {
     doReview.mockResolvedValue(reviewResult());
-    render(<ReviewWorkspacePage params={{ intakeId: "42" }} />);
+    render(<ReviewWorkspacePage />);
     await waitFor(() => screen.getByTestId("finalize-action"));
 
     fireEvent.click(screen.getByTestId("finalize-action"));
@@ -333,7 +337,7 @@ describe("ReviewWorkspacePage single-action finalize (US-14/#442)", () => {
         reviewed_at: "2026-09-16T09:00:00Z",
       }),
     );
-    render(<ReviewWorkspacePage params={{ intakeId: "42" }} />);
+    render(<ReviewWorkspacePage />);
     await waitFor(() => screen.getByTestId("workspace-content"));
 
     expect(screen.queryByTestId("finalize-action")).not.toBeInTheDocument();
@@ -348,7 +352,7 @@ describe("ReviewWorkspacePage single-action finalize (US-14/#442)", () => {
         details: {},
       }),
     );
-    render(<ReviewWorkspacePage params={{ intakeId: "42" }} />);
+    render(<ReviewWorkspacePage />);
     await waitFor(() => screen.getByTestId("finalize-action"));
 
     fireEvent.click(screen.getByTestId("finalize-action"));
@@ -359,7 +363,7 @@ describe("ReviewWorkspacePage single-action finalize (US-14/#442)", () => {
 
 describe("ReviewWorkspacePage consented history", () => {
   it("reads the consented history for the matched care case patient", async () => {
-    render(<ReviewWorkspacePage params={{ intakeId: "42" }} />);
+    render(<ReviewWorkspacePage />);
     await waitFor(() => screen.getByTestId("history-list"));
 
     expect(getHistory).toHaveBeenCalledWith({
@@ -380,7 +384,7 @@ describe("ReviewWorkspacePage consented history", () => {
       created_at: "2026-01-01T00:00:00Z",
       entries: [],
     });
-    render(<ReviewWorkspacePage params={{ intakeId: "42" }} />);
+    render(<ReviewWorkspacePage />);
     await waitFor(() => screen.getByText(t.historyEmpty));
 
     expect(screen.queryByTestId("history-list")).not.toBeInTheDocument();
@@ -395,7 +399,7 @@ describe("ReviewWorkspacePage consented history", () => {
         details: {},
       }),
     );
-    render(<ReviewWorkspacePage params={{ intakeId: "42" }} />);
+    render(<ReviewWorkspacePage />);
     await waitFor(() => screen.getByTestId("history-error"));
 
     expect(screen.getByText(t.historyLoadFail)).toBeTruthy();
@@ -408,7 +412,7 @@ describe("ReviewWorkspacePage consented history", () => {
 
 describe("ReviewWorkspacePage handshake (US-24)", () => {
   it("handshake is only offered once the review is final", async () => {
-    render(<ReviewWorkspacePage params={{ intakeId: "42" }} />);
+    render(<ReviewWorkspacePage />);
     await waitFor(() => screen.getByTestId("workspace-content"));
 
     expect(screen.queryByTestId("handshake-action")).not.toBeInTheDocument();
@@ -419,7 +423,7 @@ describe("ReviewWorkspacePage handshake (US-24)", () => {
     doHandshake.mockResolvedValue(
       caseItem(11, { stage: "prescription_pending" }),
     );
-    render(<ReviewWorkspacePage params={{ intakeId: "42" }} />);
+    render(<ReviewWorkspacePage />);
     await waitFor(() => screen.getByTestId("finalize-action"));
 
     fireEvent.click(screen.getByTestId("finalize-action"));
@@ -442,7 +446,7 @@ describe("ReviewWorkspacePage handshake (US-24)", () => {
     getCases.mockResolvedValueOnce([]);
     getCases.mockResolvedValueOnce([caseItem(11)]);
     doReview.mockResolvedValue(reviewResult());
-    render(<ReviewWorkspacePage params={{ intakeId: "42" }} />);
+    render(<ReviewWorkspacePage />);
     await waitFor(() => screen.getByTestId("workspace-content"));
 
     expect(screen.queryByTestId("workspace-handshake")).not.toBeInTheDocument();
@@ -465,7 +469,7 @@ describe("ReviewWorkspacePage handshake (US-24)", () => {
         details: {},
       }),
     );
-    render(<ReviewWorkspacePage params={{ intakeId: "42" }} />);
+    render(<ReviewWorkspacePage />);
     await waitFor(() => screen.getByTestId("finalize-action"));
     fireEvent.click(screen.getByTestId("finalize-action"));
     await waitFor(() => screen.getByTestId("handshake-action"));
@@ -485,7 +489,7 @@ describe("ReviewWorkspacePage failure paths", () => {
         details: {},
       }),
     );
-    render(<ReviewWorkspacePage params={{ intakeId: "42" }} />);
+    render(<ReviewWorkspacePage />);
     await waitFor(() => screen.getByTestId("error-banner"));
 
     expect(screen.getByText(t.loadFailed)).toBeTruthy();
@@ -500,7 +504,7 @@ describe("ReviewWorkspacePage failure paths", () => {
         details: {},
       }),
     );
-    render(<ReviewWorkspacePage params={{ intakeId: "42" }} />);
+    render(<ReviewWorkspacePage />);
     await waitFor(() => screen.getByTestId("error-banner"));
 
     fireEvent.click(screen.getByTestId("error-banner-retry"));
@@ -520,7 +524,7 @@ describe("ReviewWorkspacePage bilingual parity (REQ-006)", () => {
         >
           flip-lang
         </button>
-        <ReviewWorkspacePage params={{ intakeId: "42" }} />
+        <ReviewWorkspacePage />
       </>
     );
   }
