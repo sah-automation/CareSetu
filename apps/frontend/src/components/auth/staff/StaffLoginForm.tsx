@@ -70,8 +70,11 @@ async function completeStaffLogin(
 
 export function StaffLoginForm({
   role = "partner",
+  returnTarget,
 }: {
   role?: StaffLoginRole;
+  /** `?return=` deep-link target, bounded to the staff groups; see staff-routing. */
+  returnTarget?: string | null;
 }) {
   const { lang } = useLang();
   const t = STRINGS[lang].staffAuth.login;
@@ -135,14 +138,22 @@ export function StaffLoginForm({
   // postLoginTarget. Used by the TOTP step and (via the effect above) the
   // partner code step. For a partner session, the partner's own status drives
   // the landing (§4.4): pending / under verification -> waiting screen,
-  // rejected -> rejection screen, active -> normal role routing.
+  // rejected -> rejection screen, active -> normal role routing. When the
+  // visitor arrived via a staff deep link, the sanitized ?return= target is
+  // threaded through so they land back on it (F014-T09b) - partner state still
+  // beats it.
   async function landAfterLogin(session: SessionResult) {
     const me = await completeStaffLogin(session);
     const partnerState = me.roles.includes("partner")
       ? await fetchPartnerRouteState()
       : undefined;
     window.location.replace(
-      postLoginTarget({ surface: "staff", roles: me.roles, partnerState }),
+      postLoginTarget({
+        surface: "staff",
+        roles: me.roles,
+        partnerState,
+        returnTarget,
+      }),
     );
   }
 

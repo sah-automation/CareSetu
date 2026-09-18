@@ -97,7 +97,7 @@ function StaffLoginView() {
 
       <div className="mt-6 rounded-lg border border-hairline bg-surface p-6 shadow-card">
         <h1 className="mb-4 text-xl font-bold">{t.heading}</h1>
-        <StaffLoginForm role={role} />
+        <StaffLoginForm role={role} returnTarget={returnTarget} />
       </div>
 
       <hr className="my-6 border-hairline-soft" />

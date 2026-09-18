@@ -560,7 +560,10 @@ describe("StaffLoginForm - partner code step", () => {
     expect(vi.mocked(verifyOtp)).not.toHaveBeenCalled();
   });
 
-  async function completePartnerLogin(status: PartnerStatus) {
+  async function completePartnerLogin(
+    status: PartnerStatus,
+    returnTarget?: string | null,
+  ) {
     vi.mocked(partnerLogin).mockResolvedValue(LOGIN_OK);
     vi.mocked(partnerVerify).mockResolvedValue({
       outcome: "verified",
@@ -581,7 +584,7 @@ describe("StaffLoginForm - partner code step", () => {
       round: 1,
       status,
     });
-    render(<StaffLoginForm />);
+    render(<StaffLoginForm returnTarget={returnTarget} />);
     typePartnerPhone();
     fireEvent.click(screen.getByTestId("staff-submit"));
     await screen.findByTestId("partner-otp");
@@ -624,6 +627,46 @@ describe("StaffLoginForm - partner code step", () => {
       expect(mockLocationReplace).toHaveBeenCalledWith("/partner");
     });
   });
+
+  it("threads the arrival ?return= target through the landing for an active partner (F014-T09b)", async () => {
+    mockPostLoginTarget.mockReturnValue("/partner/orders/42");
+    await completePartnerLogin("Active", "/partner/orders/42");
+
+    await waitFor(() => {
+      expect(mockPostLoginTarget).toHaveBeenCalledWith(
+        expect.objectContaining({
+          surface: "staff",
+          roles: ["partner"],
+          partnerState: undefined,
+          returnTarget: "/partner/orders/42",
+        }),
+      );
+      expect(mockLocationReplace).toHaveBeenCalledWith("/partner/orders/42");
+    });
+  });
+
+  it.each([
+    ["Under Verification", "pending", "/partner/status/pending"],
+    ["Rejected", "rejected", "/partner/status/rejected"],
+  ] as const)(
+    "passes the return target even when the %s partner state overrides it downstream (F014-T09b)",
+    async (status, state, expected) => {
+      mockPostLoginTarget.mockReturnValue(expected);
+      await completePartnerLogin(status, "/partner/orders/42");
+
+      await waitFor(() => {
+        expect(mockPostLoginTarget).toHaveBeenCalledWith(
+          expect.objectContaining({
+            surface: "staff",
+            roles: ["partner"],
+            partnerState: state,
+            returnTarget: "/partner/orders/42",
+          }),
+        );
+        expect(mockLocationReplace).toHaveBeenCalledWith(expected);
+      });
+    },
+  );
 
   it("falls back to role-based routing when the partner status read fails", async () => {
     mockPostLoginTarget.mockReturnValue("/partner");

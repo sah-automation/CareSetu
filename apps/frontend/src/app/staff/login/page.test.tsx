@@ -180,6 +180,21 @@ describe("StaffLoginPage", () => {
     await waitFor(() => expect(mockReplace).toHaveBeenCalledWith("/partner"));
   });
 
+  it("routes an already-signed-in active partner to the return deep link (F014-T09b)", async () => {
+    mockFetchPartnerMe.mockResolvedValue({
+      partner_id: 1,
+      partner_type: "doctor",
+      round: 1,
+      status: "Active",
+    });
+    mockSession(["partner"]);
+    searchParamsValue = new URLSearchParams({ return: "/partner/orders/42" });
+    render(<StaffLoginPage />);
+    await waitFor(() =>
+      expect(mockReplace).toHaveBeenCalledWith("/partner/orders/42"),
+    );
+  });
+
   it("lets a partner-state override win over a stale return target", async () => {
     mockFetchPartnerMe.mockResolvedValue({
       partner_id: 1,

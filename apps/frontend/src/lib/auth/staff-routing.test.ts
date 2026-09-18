@@ -204,3 +204,53 @@ describe("partner status landing matrix", () => {
     ).toBe(PARTNER_PENDING_ROUTE);
   });
 });
+
+describe("return target + partner state matrix (F014-T09b)", () => {
+  it("honors a deep-link return inside its own territory for an active partner", () => {
+    expect(
+      postLoginTarget({
+        surface: STAFF_LOGIN_SURFACE,
+        roles: ["partner"],
+        partnerState: undefined,
+        returnTarget: "/partner/orders/42",
+      }),
+    ).toBe("/partner/orders/42");
+  });
+
+  it.each([
+    ["pending", PARTNER_PENDING_ROUTE],
+    ["rejected", PARTNER_REJECTED_ROUTE],
+  ] as const)(
+    "routes a %s partner to its status screen even when the return points into the partner territory",
+    (state, expected) => {
+      expect(
+        postLoginTarget({
+          surface: STAFF_LOGIN_SURFACE,
+          roles: ["partner"],
+          partnerState: state,
+          returnTarget: "/partner/orders/42",
+        }),
+      ).toBe(expected);
+    },
+  );
+
+  it("lands an active partner on the partner home for an off-site return after sanitize fallback", () => {
+    expect(
+      postLoginTarget({
+        surface: STAFF_LOGIN_SURFACE,
+        roles: ["partner"],
+        returnTarget: "https://evil.example.test/phish",
+      }),
+    ).toBe("/partner");
+  });
+
+  it("ignores a return pointing into another staff group's territory for a partner", () => {
+    expect(
+      postLoginTarget({
+        surface: STAFF_LOGIN_SURFACE,
+        roles: ["partner"],
+        returnTarget: "/doctor/cases/9",
+      }),
+    ).toBe("/partner");
+  });
+});

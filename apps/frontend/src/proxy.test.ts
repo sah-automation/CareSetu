@@ -10,6 +10,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { config, proxy } from "./proxy";
 import { HINT_COOKIE } from "@/lib/auth/session";
+import { postLoginTarget } from "@/lib/auth/staff-routing";
 
 const COOKIE_NAME = HINT_COOKIE;
 
@@ -112,5 +113,60 @@ describe("proxy - matcher table", () => {
       "/partner/:path*",
       "/operator/:path*",
     ]);
+  });
+});
+
+describe("proxy - deep-link return round trip (F014-T09b)", () => {
+  it.each<[string, string[]]>([
+    ["/partner", ["partner"]],
+    ["/partner/orders/42", ["partner"]],
+    ["/doctor/cases/9", ["doctor"]],
+    ["/operator/audit?tab=consent", ["operator"]],
+  ])(
+    "lands a signed-in %s session back on the original deep link",
+    (path, roles) => {
+      const response = proxy(makeRequest(path));
+      expect(response.status).toBe(307);
+
+      // Take the proxy's redirect and pipe its sanitized return target
+      // straight through the post-login landing - the direct-hit round trip.
+      const returnTarget = new URL(
+        response.headers.get("location") as string,
+      ).searchParams.get("return");
+      const landed = postLoginTarget({
+        surface: "staff",
+        roles,
+        returnTarget,
+      });
+
+      expect(landed).toBe(path);
+    },
+  );
+
+  it("sanitizes the return round trip for a pending partner - status screen wins", () => {
+    const response = proxy(makeRequest("/partner/orders/42"));
+    expect(response.status).toBe(307);
+    const returnTarget = new URL(
+      response.headers.get("location") as string,
+    ).searchParams.get("return");
+
+    const landed = postLoginTarget({
+      surface: "staff",
+      roles: ["partner"],
+      partnerState: "pending",
+      returnTarget,
+    });
+
+    expect(landed).toBe("/partner/status/pending");
+  });
+
+  it("falls back for a manually-crafted off-site return - never opens off-site", () => {
+    const landed = postLoginTarget({
+      surface: "staff",
+      roles: ["partner"],
+      returnTarget: "https://evil.example.test/phish",
+    });
+
+    expect(landed).toBe("/partner");
   });
 });
