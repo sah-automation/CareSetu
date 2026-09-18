@@ -11,6 +11,7 @@ import {
   PATIENT_LOGIN_SURFACE,
   SCOPED_ROLE_PICKER_ROUTE,
   STAFF_LOGIN_SURFACE,
+  partnerStatusToState,
   postLoginTarget,
 } from "./staff-routing";
 import { PATIENT_HOME } from "./return-url";
@@ -140,5 +141,66 @@ describe("postLoginTarget", () => {
         returnTarget: PATIENT_HOME,
       }),
     ).toBe("/operator");
+  });
+});
+
+describe("partnerStatusToState", () => {
+  it.each([
+    ["Registered", "pending"],
+    ["Under Verification", "pending"],
+    ["Rejected", "rejected"],
+  ] as const)(
+    "maps partner status %s to routing state %s",
+    (status, expected) => {
+      expect(partnerStatusToState(status)).toBe(expected);
+    },
+  );
+
+  it("yields no override for an active partner", () => {
+    expect(partnerStatusToState("Active")).toBeUndefined();
+  });
+});
+
+describe("partner status landing matrix", () => {
+  // The full status -> landing contract for §4.4 (F014-T09a): a pending /
+  // under-verification partner sits on the waiting screen, a rejected partner
+  // on the rejection-reason screen, and an active partner lands on the role
+  // home via normal routing.
+  it.each([
+    ["Registered", "pending", PARTNER_PENDING_ROUTE],
+    ["Under Verification", "pending", PARTNER_PENDING_ROUTE],
+    ["Rejected", "rejected", PARTNER_REJECTED_ROUTE],
+  ] as const)(
+    "lands a %s partner on %s via the %s target",
+    (_status, state, expected) => {
+      expect(
+        postLoginTarget({
+          surface: STAFF_LOGIN_SURFACE,
+          roles: ["partner"],
+          partnerState: state,
+        }),
+      ).toBe(expected);
+    },
+  );
+
+  it("lands an active partner on the partner home via normal role routing", () => {
+    expect(
+      postLoginTarget({
+        surface: STAFF_LOGIN_SURFACE,
+        roles: ["partner"],
+        partnerState: partnerStatusToState("Active"),
+      }),
+    ).toBe("/partner");
+  });
+
+  it("holds the partner-state override for multi-role accounts", () => {
+    expect(
+      postLoginTarget({
+        surface: STAFF_LOGIN_SURFACE,
+        roles: ["partner", "operator"],
+        partnerState: "pending",
+        returnTarget: "/operator",
+      }),
+    ).toBe(PARTNER_PENDING_ROUTE);
   });
 });

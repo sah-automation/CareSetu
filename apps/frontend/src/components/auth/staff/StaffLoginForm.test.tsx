@@ -37,6 +37,7 @@ import {
   verifyOtp,
 } from "@/lib/auth/api";
 import { STRINGS } from "@/lib/i18n/dictionaries";
+import type { PartnerStatus } from "@/lib/partner/api";
 
 import { StaffLoginForm } from "./StaffLoginForm";
 
@@ -72,10 +73,21 @@ vi.mock("@/lib/auth/session", () => ({
   saveSession: (...args: unknown[]) => mockSaveSession(...args),
 }));
 
-const mockPostLoginTarget = vi.fn().mockReturnValue("/operator/home");
-vi.mock("@/lib/auth/staff-routing", () => ({
-  postLoginTarget: (...args: unknown[]) => mockPostLoginTarget(...args),
+const { mockFetchPartnerMe } = vi.hoisted(() => ({
+  mockFetchPartnerMe: vi.fn(),
 }));
+vi.mock("@/lib/partner/api", () => ({
+  fetchPartnerMe: (...args: unknown[]) => mockFetchPartnerMe(...args),
+}));
+
+const mockPostLoginTarget = vi.fn().mockReturnValue("/operator/home");
+vi.mock("@/lib/auth/staff-routing", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("@/lib/auth/staff-routing")>();
+  return {
+    ...mod,
+    postLoginTarget: (...args: unknown[]) => mockPostLoginTarget(...args),
+  };
+});
 
 afterEach(() => {
   cleanup();
@@ -96,6 +108,14 @@ beforeEach(() => {
   mockOperatorLogin.mockReset();
   mockSaveSession.mockReset();
   mockPostLoginTarget.mockReset().mockReturnValue("/operator/home");
+  // Default an already-active partner so role-less landing assertions in the
+  // generic flow stay deterministic.
+  mockFetchPartnerMe.mockReset().mockResolvedValue({
+    partner_id: 7,
+    partner_type: "doctor",
+    round: 1,
+    status: "Active",
+  });
 });
 
 const t = STRINGS.en.staffAuth.login;
@@ -507,6 +527,12 @@ describe("StaffLoginForm - partner code step", () => {
       roles: ["partner"],
       phone: PHONE,
     });
+    mockFetchPartnerMe.mockResolvedValue({
+      partner_id: 7,
+      partner_type: "doctor",
+      round: 1,
+      status: "Active",
+    });
 
     render(<StaffLoginForm />);
     typePartnerPhone();
@@ -519,9 +545,11 @@ describe("StaffLoginForm - partner code step", () => {
       expect(vi.mocked(issuePartnerSession)).toHaveBeenCalledWith(PHONE);
       expect(vi.mocked(fetchMe)).toHaveBeenCalledWith(SESSION.jwt);
       expect(mockSaveSession).toHaveBeenCalledWith(SESSION, PHONE);
+      expect(mockFetchPartnerMe).toHaveBeenCalled();
       expect(mockPostLoginTarget).toHaveBeenCalledWith({
         surface: "staff",
         roles: ["partner"],
+        partnerState: undefined,
       });
       expect(mockLocationReplace).toHaveBeenCalledWith("/partner");
     });
@@ -530,6 +558,126 @@ describe("StaffLoginForm - partner code step", () => {
     expect(vi.mocked(issueSession)).not.toHaveBeenCalled();
     expect(vi.mocked(registerPhone)).not.toHaveBeenCalled();
     expect(vi.mocked(verifyOtp)).not.toHaveBeenCalled();
+  });
+
+  async function completePartnerLogin(status: PartnerStatus) {
+    vi.mocked(partnerLogin).mockResolvedValue(LOGIN_OK);
+    vi.mocked(partnerVerify).mockResolvedValue({
+      outcome: "verified",
+      phone_e164: PHONE,
+      identity_id: 7,
+      attempts_left: null,
+      lockout_remaining_seconds: null,
+    });
+    vi.mocked(issuePartnerSession).mockResolvedValue(SESSION);
+    vi.mocked(fetchMe).mockResolvedValue({
+      subject_id: "7",
+      roles: ["partner"],
+      phone: PHONE,
+    });
+    mockFetchPartnerMe.mockResolvedValue({
+      partner_id: 7,
+      partner_type: "doctor",
+      round: 1,
+      status,
+    });
+    render(<StaffLoginForm />);
+    typePartnerPhone();
+    fireEvent.click(screen.getByTestId("staff-submit"));
+    await screen.findByTestId("partner-otp");
+    typeCodeAndSubmit();
+  }
+
+  it.each([
+    ["Registered", "pending", "/partner/status/pending"],
+    ["Under Verification", "pending", "/partner/status/pending"],
+    ["Rejected", "rejected", "/partner/status/rejected"],
+  ] as const)(
+    "lands an already-logged-in %s partner on %s via postLoginTarget",
+    async (status, state, expected) => {
+      mockPostLoginTarget.mockReturnValue(expected);
+      await completePartnerLogin(status);
+
+      await waitFor(() => {
+        expect(mockFetchPartnerMe).toHaveBeenCalled();
+        expect(mockPostLoginTarget).toHaveBeenCalledWith({
+          surface: "staff",
+          roles: ["partner"],
+          partnerState: state,
+        });
+        expect(mockLocationReplace).toHaveBeenCalledWith(expected);
+      });
+    },
+  );
+
+  it("derives no partnerState for an active partner and lands role-based", async () => {
+    mockPostLoginTarget.mockReturnValue("/partner");
+    await completePartnerLogin("Active");
+
+    await waitFor(() => {
+      expect(mockFetchPartnerMe).toHaveBeenCalled();
+      expect(mockPostLoginTarget).toHaveBeenCalledWith({
+        surface: "staff",
+        roles: ["partner"],
+        partnerState: undefined,
+      });
+      expect(mockLocationReplace).toHaveBeenCalledWith("/partner");
+    });
+  });
+
+  it("falls back to role-based routing when the partner status read fails", async () => {
+    mockPostLoginTarget.mockReturnValue("/partner");
+    mockFetchPartnerMe.mockRejectedValue(
+      new ApiError({
+        code: "NETWORK_ERROR",
+        message: "down",
+        trace_id: "tr-partner-me",
+        details: {},
+      }),
+    );
+    await completePartnerLogin("Active");
+
+    await waitFor(() => {
+      expect(mockPostLoginTarget).toHaveBeenCalledWith({
+        surface: "staff",
+        roles: ["partner"],
+        partnerState: undefined,
+      });
+      expect(mockLocationReplace).toHaveBeenCalledWith("/partner");
+    });
+  });
+
+  it("does not read partner status for a non-partner session", async () => {
+    mockPostLoginTarget.mockReturnValue("/operator/home");
+    vi.mocked(partnerLogin).mockResolvedValue(LOGIN_OK);
+    vi.mocked(partnerVerify).mockResolvedValue({
+      outcome: "verified",
+      phone_e164: PHONE,
+      identity_id: 7,
+      attempts_left: null,
+      lockout_remaining_seconds: null,
+    });
+    vi.mocked(issuePartnerSession).mockResolvedValue(SESSION);
+    vi.mocked(fetchMe).mockResolvedValue({
+      subject_id: "7",
+      roles: ["operator"],
+      phone: PHONE,
+    });
+
+    render(<StaffLoginForm />);
+    typePartnerPhone();
+    fireEvent.click(screen.getByTestId("staff-submit"));
+    await screen.findByTestId("partner-otp");
+    typeCodeAndSubmit();
+
+    await waitFor(() => {
+      expect(mockFetchPartnerMe).not.toHaveBeenCalled();
+      expect(mockPostLoginTarget).toHaveBeenCalledWith({
+        surface: "staff",
+        roles: ["operator"],
+        partnerState: undefined,
+      });
+    });
   });
 
   it("shows the envelope notice when the post-login landing fails", async () => {

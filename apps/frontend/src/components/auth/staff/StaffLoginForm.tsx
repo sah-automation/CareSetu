@@ -23,7 +23,10 @@ import { useEffect, useRef, useState } from "react";
 
 import { ApiError } from "@/lib/api-errors";
 import { fetchMe, type SessionResult } from "@/lib/auth/api";
-import { postLoginTarget } from "@/lib/auth/staff-routing";
+import {
+  fetchPartnerRouteState,
+  postLoginTarget,
+} from "@/lib/auth/staff-routing";
 import { saveSession } from "@/lib/auth/session";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
@@ -130,11 +133,16 @@ export function StaffLoginForm({
 
   // Landing after a successful login: persist the session and route through
   // postLoginTarget. Used by the TOTP step and (via the effect above) the
-  // partner code step.
+  // partner code step. For a partner session, the partner's own status drives
+  // the landing (§4.4): pending / under verification -> waiting screen,
+  // rejected -> rejection screen, active -> normal role routing.
   async function landAfterLogin(session: SessionResult) {
     const me = await completeStaffLogin(session);
+    const partnerState = me.roles.includes("partner")
+      ? await fetchPartnerRouteState()
+      : undefined;
     window.location.replace(
-      postLoginTarget({ surface: "staff", roles: me.roles }),
+      postLoginTarget({ surface: "staff", roles: me.roles, partnerState }),
     );
   }
 

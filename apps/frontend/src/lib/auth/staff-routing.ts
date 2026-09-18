@@ -8,6 +8,8 @@
 
 import { sanitizeReturnTarget } from "@/lib/auth/return-url";
 import { isAppRole, ROLE_HOME, type Role } from "@/components/dashboard/types";
+import type { PartnerStatus } from "@/lib/partner/api";
+import { fetchPartnerMe } from "@/lib/partner/api";
 
 // Entry surfaces (blueprint §4.x). The patient surface keeps its Phase 2.5
 // behavior; STAFF_LOGIN_ROUTE is this ticket's page.
@@ -35,6 +37,44 @@ export const PARTNER_REJECTED_ROUTE = "/partner/status/rejected";
 // Partner lifecycle slice the client can act on (§4.4). Absent = active or
 // not a partner - normal routing applies.
 export type PartnerStatusState = "pending" | "rejected";
+
+/**
+ * Map the partner API status vocabulary to the post-login routing state
+ * (`PartnerStatusState`). `Active` yields no override so a live partner lands
+ * by the normal role rule on the partner home.
+ */
+export function partnerStatusToState(
+  status: PartnerStatus,
+): PartnerStatusState | undefined {
+  if (status === "Rejected") {
+    return "rejected";
+  }
+  if (status === "Registered" || status === "Under Verification") {
+    return "pending";
+  }
+  return undefined;
+}
+
+/**
+ * Resolve the caller's partner routing override from their own fetched status.
+ * Shared by every landing seam (fresh-login and already-signed-in) so the
+ * status read + map + degradation path stays in one place. Returns `undefined`
+ * (fall back to role routing) when the status cannot be read; the failure is
+ * logged, never silently swallowed.
+ */
+export async function fetchPartnerRouteState(): Promise<
+  PartnerStatusState | undefined
+> {
+  try {
+    return partnerStatusToState((await fetchPartnerMe()).status);
+  } catch (error) {
+    console.error(
+      "[staff-routing] partner status unreadable; routing by role",
+      error,
+    );
+    return undefined;
+  }
+}
 
 // Staff roles are every app role except patient; derived from ROLE_LABELS'
 // authoritative key set so a new staff role needs no edit here.

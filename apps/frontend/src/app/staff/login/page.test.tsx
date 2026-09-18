@@ -4,7 +4,7 @@
 // scoped picker; no staff role -> stays on the form).
 
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import StaffLoginPage from "./page";
 import { useAuth } from "@/lib/auth/AuthContext";
@@ -22,6 +22,11 @@ vi.mock("@/lib/auth/AuthContext", async (importOriginal) => {
   return { ...mod, useAuth: vi.fn() };
 });
 
+const mockFetchPartnerMe = vi.fn();
+vi.mock("@/lib/partner/api", () => ({
+  fetchPartnerMe: (...args: unknown[]) => mockFetchPartnerMe(...args),
+}));
+
 function mockSession(roles: string[] | null) {
   vi.mocked(useAuth).mockReturnValue({
     user: roles === null ? null : { id: 1, phone: "+911234567890", roles },
@@ -32,6 +37,16 @@ function mockSession(roles: string[] | null) {
     isLoading: false,
   });
 }
+
+beforeEach(() => {
+  // Default an already-active partner so non-state tests route by role alone.
+  mockFetchPartnerMe.mockReset().mockResolvedValue({
+    partner_id: 1,
+    partner_type: "doctor",
+    round: 1,
+    status: "Active",
+  });
+});
 
 afterEach(() => {
   cleanup();
@@ -131,5 +146,66 @@ describe("StaffLoginPage", () => {
     await waitFor(() =>
       expect(mockReplace).toHaveBeenCalledWith("/doctor/cases/9"),
     );
+  });
+
+  it.each([
+    ["Registered", "/partner/status/pending"],
+    ["Under Verification", "/partner/status/pending"],
+    ["Rejected", "/partner/status/rejected"],
+  ] as const)(
+    "routes an already-signed-in %s partner to its status screen",
+    async (status, expected) => {
+      mockFetchPartnerMe.mockResolvedValue({
+        partner_id: 1,
+        partner_type: "doctor",
+        round: 1,
+        status,
+      });
+      mockSession(["partner"]);
+      render(<StaffLoginPage />);
+      await waitFor(() => expect(mockReplace).toHaveBeenCalledWith(expected));
+      expect(mockFetchPartnerMe).toHaveBeenCalled();
+    },
+  );
+
+  it("routes an already-signed-in active partner to the partner home", async () => {
+    mockFetchPartnerMe.mockResolvedValue({
+      partner_id: 1,
+      partner_type: "doctor",
+      round: 1,
+      status: "Active",
+    });
+    mockSession(["partner"]);
+    render(<StaffLoginPage />);
+    await waitFor(() => expect(mockReplace).toHaveBeenCalledWith("/partner"));
+  });
+
+  it("lets a partner-state override win over a stale return target", async () => {
+    mockFetchPartnerMe.mockResolvedValue({
+      partner_id: 1,
+      partner_type: "doctor",
+      round: 1,
+      status: "Rejected",
+    });
+    mockSession(["partner", "operator"]);
+    searchParamsValue = new URLSearchParams({ return: "/operator" });
+    render(<StaffLoginPage />);
+    await waitFor(() =>
+      expect(mockReplace).toHaveBeenCalledWith("/partner/status/rejected"),
+    );
+  });
+
+  it("falls back to role-based routing when the partner status read fails", async () => {
+    mockFetchPartnerMe.mockRejectedValue(new TypeError("Failed to fetch"));
+    mockSession(["partner"]);
+    render(<StaffLoginPage />);
+    await waitFor(() => expect(mockReplace).toHaveBeenCalledWith("/partner"));
+  });
+
+  it("does not read partner status for a non-partner staff session", async () => {
+    mockSession(["doctor"]);
+    render(<StaffLoginPage />);
+    await waitFor(() => expect(mockReplace).toHaveBeenCalledWith("/doctor"));
+    expect(mockFetchPartnerMe).not.toHaveBeenCalled();
   });
 });
