@@ -710,15 +710,16 @@ async def test_rate_limit_keys_buckets_per_client_ip() -> None:
 
 
 async def test_rate_limit_counts_intake_write_surface_only() -> None:
-    """PS-05 AC1: the intake write trio counts toward its own strict per-IP cap.
+    """PS-05 AC1: the intake media-and-row-writing surfaces count toward their own cap.
 
     The widened scope covers exactly the media-and-row-writing surfaces -
-    ``upload-media``, ``submit``, the ``{intake_id}/pick-doctor`` shape (#443),
-    and the ``{intake_id}/re-record`` shape - each counted into the intake
-    surface's own per-IP bucket. Reading an intake back (detail, pre-summary,
-    clip playback) is never counted and never capped.
+    ``upload-media`` (patient), the doctor-scoped ``upload-doctor-media``
+    (#481), ``submit``, the ``{intake_id}/pick-doctor`` shape (#443), and the
+    ``{intake_id}/re-record`` shape - each counted into the intake surface's
+    own per-IP bucket. Reading an intake back (detail, pre-summary, clip
+    playback) is never counted and never capped.
     """
-    middleware = RateLimitMiddleware(app=None, enabled=True, max_requests=4, window_seconds=60)
+    middleware = RateLimitMiddleware(app=None, enabled=True, max_requests=5, window_seconds=60)
 
     async def stub_call_next(request: Request) -> Response:
         return Response(status_code=200)
@@ -726,6 +727,7 @@ async def test_rate_limit_counts_intake_write_surface_only() -> None:
     for path in (
         "/v1/intake/submit",
         "/v1/intake/upload-media",
+        "/v1/intake/upload-doctor-media",
         "/v1/intake/42/pick-doctor",
         "/v1/intake/42/re-record",
     ):

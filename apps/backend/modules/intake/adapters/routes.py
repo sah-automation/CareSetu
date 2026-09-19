@@ -238,6 +238,53 @@ async def upload_media(
 
 
 @router.post(
+    "/upload-doctor-media",
+    response_model=MediaUploadRef,
+    status_code=status.HTTP_200_OK,
+    summary="Upload a doctor voice note or photo for an rx input (doctor only)",
+)
+async def upload_doctor_media(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+    file: UploadFile = File(description="Voice or photo file to upload"),  # noqa: B008
+    audio_duration_ms: Annotated[int | None, Query(ge=MIN_AUDIO_DURATION_MS)] = None,
+    file_size_bytes: Annotated[int | None, Query(ge=0)] = None,
+) -> MediaUploadRef:
+    """Upload a doctor's voice note or photo under the ``rx_input/`` prefix (#481).
+
+    Thin doctor-scoped adapter (PHASE-8.1 T04): the ``require_partner`` gate
+    admits any partner-scoped caller, then the principal is resolved to their
+    partner profile and a non-doctor partner is refused with 403 - the doctor
+    RBAC convention (partner scope + ``partner_type == "doctor"``, matching the
+    review routes). The route reads the uploaded file bytes, wraps them in a
+    ``MediaFile`` (``canonical_media_type`` normalizes voice or photo), and
+    delegates to the facade, which encrypts at rest under the ``rx_input/``
+    prefix and retries on transient failure (NFR-PERF-002). Returns the opaque
+    media ticket for use as ``DoctorInputRequest.media_ref`` on
+    ``POST /v1/care/cases/{case_id}/doctor-input``.
+    """
+    data = await file.read()
+    facade = cast(IntakeFacade, request.app.state.intake_facade)
+    partner = await cast(PartnerFacade, request.app.state.partner_facade).resolve_partner(
+        _resolve_subject_id(account)
+    )
+    if partner.partner_type != "doctor":
+        raise InsufficientScopeError("the doctor role is required for this route")
+    media_file = MediaFile(
+        data=data,
+        filename=file.filename or "recording.webm",
+        media_type=canonical_media_type(file.content_type),
+        audio_duration_ms=audio_duration_ms,
+        file_size_bytes=file_size_bytes or len(data),
+        record_attempt=1,
+    )
+    return await facade.upload_doctor_input_media(
+        doctor_id=partner.partner_id,
+        file=media_file,
+    )
+
+
+@router.post(
     "/{intake_id}/re-record",
     response_model=ReRecordResult,
     status_code=status.HTTP_200_OK,

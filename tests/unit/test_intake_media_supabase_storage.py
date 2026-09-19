@@ -7,6 +7,9 @@ observable contract (#385 testing decisions):
 
 - save posts ONLY ciphertext (nonce + AES-GCM output) with the bucket in the
   path and returns the opaque ``intake/<patient_id>/<uuid>.enc`` key.
+- save honours a caller-supplied ``prefix`` namespace, so doctor rx-input
+  media files under ``rx_input/<doctor_id>/<uuid>.enc`` (PHASE-8.1 T04, #481)
+  in the same encrypted bucket.
 - read of that key round-trips the original plaintext bytes.
 - save non-2xx raises OSError; read 404 raises FileNotFoundError; 5xx raises
   OSError; network errors raise OSError (all retriable by the facade ladder).
@@ -30,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from modules.intake.adapters.media_store import (
     MEDIA_BUCKET,
     PREFIX,
+    RX_INPUT_PREFIX,
     LocalFilesystemIntakeMediaStore,
     SupabaseStorageIntakeMediaStore,
     build_media_store,
@@ -211,7 +215,7 @@ async def test_save_returns_opaque_key_and_posts_only_ciphertext() -> None:
     store = _store(_handler)
     data = b"plaintext-audio-never-leaves-the-app-" * 32
 
-    object_key = await store.save(data=data, patient_id=7)
+    object_key = await store.save(data=data, subject_id=7)
 
     # Key shape: intake/<patient_id>/<hex>.enc
     assert object_key.startswith(f"{PREFIX}/7/")
@@ -237,8 +241,8 @@ async def test_save_objects_are_not_overwritten() -> None:
     store, objects = _memory_store()
     data = b"audio" * 256
 
-    key1 = await store.save(data=data, patient_id=7)
-    key2 = await store.save(data=data, patient_id=7)
+    key1 = await store.save(data=data, subject_id=7)
+    key2 = await store.save(data=data, subject_id=7)
 
     assert key1 != key2
     assert objects[key1] != objects[key2]  # different nonces
@@ -254,10 +258,46 @@ async def test_read_round_trips_decrypted_bytes() -> None:
     store, objects = _memory_store()
     data = bytes(range(256)) * 16
 
-    object_key = await store.save(data=data, patient_id=7)
+    object_key = await store.save(data=data, subject_id=7)
     assert object_key in objects
 
     restored = await store.read(object_key=object_key)
+    assert restored == data
+
+
+# ---------------------------------------------------------------------------
+# save/read: rx_input prefix (doctor rx-input media, #481)
+# ---------------------------------------------------------------------------
+
+
+async def test_save_rx_input_prefix_files_under_the_doctor_namespace() -> None:
+    """A doctor-scoped save files under rx_input/<doctor_id>/<uuid>.enc."""
+    captured: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, request=request)
+
+    store = _store(_handler)
+
+    object_key = await store.save(data=b"doctor-voice-note", subject_id=12, prefix=RX_INPUT_PREFIX)
+
+    assert object_key.startswith(f"{RX_INPUT_PREFIX}/12/")
+    assert object_key.endswith(".enc")
+    assert len(object_key.split("/")) == 3
+    request = captured[0]
+    assert request.url.path == f"/storage/v1/object/{MEDIA_BUCKET}/{object_key}"
+
+
+async def test_rx_input_prefix_round_trips_on_read() -> None:
+    """A rx_input object reads back as its original plaintext."""
+    store, objects = _memory_store()
+    data = b"doctor-photo-bytes-" * 16
+
+    object_key = await store.save(data=data, subject_id=12, prefix=RX_INPUT_PREFIX)
+    restored = await store.read(object_key=object_key)
+
+    assert object_key in objects
     assert restored == data
 
 
@@ -271,7 +311,7 @@ async def test_save_non_2xx_raises_oserror(status: int) -> None:
     store = _store(lambda request: _storage_response(status, request))
 
     with pytest.raises(OSError):
-        await store.save(data=b"x" * 512, patient_id=7)
+        await store.save(data=b"x" * 512, subject_id=7)
 
 
 async def test_save_network_error_raises_oserror() -> None:
@@ -280,7 +320,7 @@ async def test_save_network_error_raises_oserror() -> None:
 
     store = _store(_handler)
     with pytest.raises(OSError):
-        await store.save(data=b"x", patient_id=7)
+        await store.save(data=b"x", subject_id=7)
 
 
 # ---------------------------------------------------------------------------
@@ -329,10 +369,10 @@ async def test_read_network_error_raises_oserror() -> None:
         await store.read(object_key="intake/7/01ab.enc")
 
 
-async def test_read_outside_intake_prefix_raises_oserror() -> None:
-    """Keys outside intake/ are refused even on read - URL injection safety."""
+async def test_read_outside_supported_prefix_raises_oserror() -> None:
+    """Keys outside intake/ and rx_input/ are refused even on read."""
     store = _store(_ok_response)
-    with pytest.raises(OSError, match="object key is outside the intake/ prefix"):
+    with pytest.raises(OSError, match="object key is outside the supported prefixes"):
         await store.read(object_key="partner/7/secret.enc")
 
 

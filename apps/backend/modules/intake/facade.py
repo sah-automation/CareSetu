@@ -37,7 +37,7 @@ from modules.intake.adapters.ai_gateway import (
     DraftRxRequest,
     DraftRxResult,
 )
-from modules.intake.adapters.media_store import IntakeMediaStore
+from modules.intake.adapters.media_store import PREFIX, RX_INPUT_PREFIX, IntakeMediaStore
 from modules.intake.domain.events import (
     intake_captured_envelope,
     intake_retry_requested_envelope,
@@ -264,6 +264,45 @@ class IntakeFacade:
             status=state.status.value,
         )
 
+    async def _save_media(
+        self, *, data: bytes, subject_id: int, prefix: str, subject_label: str
+    ) -> str:
+        """Run one media-store write through the upload-resilience ladder.
+
+        On a transient write failure it backs off and retries up to
+        ``MAX_UPLOAD_ATTEMPTS`` (3) attempts, then raises the typed
+        :class:`MediaTransferError` - a partial capture is never silently lost
+        (NFR-PERF-002, spec #344 US-10). Shared by the patient clip and doctor
+        rx-input media uploads so both ride the same durability contract;
+        ``subject_label`` names the failing actor in the raised message
+        (``patient`` / ``doctor``). Raises
+        :class:`IntakeValidationError` when the media store is not configured.
+        """
+        media_store = self._media_store
+        if media_store is None:
+            raise IntakeValidationError("media store is not configured")
+        object_key: str | None = None
+        last_error: OSError | None = None
+        for attempt in range(1, MAX_UPLOAD_ATTEMPTS + 1):
+            if attempt > 1:
+                await self._sleep(_upload_backoff_delay(attempt))
+            try:
+                object_key = await media_store.save(
+                    data=data,
+                    subject_id=subject_id,
+                    prefix=prefix,
+                )
+                break
+            except OSError as exc:
+                last_error = exc
+
+        if object_key is None:
+            raise MediaTransferError(
+                f"media upload failed after {MAX_UPLOAD_ATTEMPTS} attempts for "
+                f"{subject_label} {subject_id}"
+            ) from last_error
+        return object_key
+
     async def upload_intake_media(
         self,
         *,
@@ -285,29 +324,15 @@ class IntakeFacade:
         ``submit_intake`` (first take) or ``re_record_intake`` (retry), which
         persists the ``intake_media_refs`` row against the intake.
 
-        Raises :class:`MediaTransferError` when every upload attempt fails.
+        Raises :class:`MediaTransferError` when every upload attempt fails or
+        :class:`IntakeValidationError` when the media store is not configured.
         """
-        if self._media_store is None:
-            raise IntakeValidationError("media store is not configured")
-
-        object_key: str | None = None
-        last_error: OSError | None = None
-        for attempt in range(1, MAX_UPLOAD_ATTEMPTS + 1):
-            if attempt > 1:
-                await self._sleep(_upload_backoff_delay(attempt))
-            try:
-                object_key = await self._media_store.save(
-                    data=file.data,
-                    patient_id=patient_id,
-                )
-                break
-            except OSError as exc:
-                last_error = exc
-
-        if object_key is None:
-            raise MediaTransferError(
-                f"media upload failed after {MAX_UPLOAD_ATTEMPTS} attempts for patient {patient_id}"
-            ) from last_error
+        object_key = await self._save_media(
+            data=file.data,
+            subject_id=patient_id,
+            prefix=PREFIX,
+            subject_label="patient",
+        )
 
         return MediaUploadRef(
             object_key=object_key,
@@ -315,6 +340,47 @@ class IntakeFacade:
             audio_duration_ms=file.audio_duration_ms,
             file_size_bytes=file.file_size_bytes,
             record_attempt=file.record_attempt,
+        )
+
+    async def upload_doctor_input_media(
+        self,
+        *,
+        doctor_id: int,
+        file: MediaFile,
+    ) -> MediaUploadRef:
+        """Capture a doctor-scoped voice/photo object under the ``rx_input/`` prefix (#481).
+
+        Mirrors ``upload_intake_media``'s upload-resilience ladder
+        (NFR-PERF-002): the media-store write is retried up to
+        ``MAX_UPLOAD_ATTEMPTS`` (3) times with the same exponential backoff,
+        then raises the typed :class:`MediaTransferError` - a doctor's voice
+        note or photo is never silently lost. The bytes are encrypted at rest
+        under the ``rx_input/`` prefix before they touch disk
+        (security-phii-standards: audio is PHI, and the doctor's rx-ingested
+        media rides the same durable encrypted store, ticket #385).
+
+        Answers an opaque :class:`MediaUploadRef` media ticket recording the
+        object key, type, duration, size, and a record attempt of 1. No
+        database row is written here - the ticket is later attached to a
+        consultation as ``DoctorInputRequest.media_ref``, flowing through the
+        care facade's existing ``care_doctor_inputs`` media-ref path.
+
+        Raises :class:`MediaTransferError` when every upload attempt fails or
+        :class:`IntakeValidationError` when the media store is not configured.
+        """
+        object_key = await self._save_media(
+            data=file.data,
+            subject_id=doctor_id,
+            prefix=RX_INPUT_PREFIX,
+            subject_label="doctor",
+        )
+
+        return MediaUploadRef(
+            object_key=object_key,
+            media_type=file.media_type,
+            audio_duration_ms=file.audio_duration_ms,
+            file_size_bytes=file.file_size_bytes,
+            record_attempt=1,
         )
 
     async def re_record_intake(

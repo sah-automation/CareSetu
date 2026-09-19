@@ -7,7 +7,10 @@ transmitted in the clear. This adapter encrypts each clip with AES-256-GCM (the
 admits, same choice as the partner artifact store) and answers an opaque
 ``intake/``-prefixed object key. Only that ref (plus duration/size metadata) is
 persisted in ``intake_media_refs`` - never the audio bytes and never the
-plaintext.
+plaintext. Doctor-scoped rx-input media (voice notes / photos) is filed the
+same way under the sibling ``rx_input/`` prefix (PHASE-8.1 T04, #481), so one
+encrypted durable store serves both the patient capture and the doctor input
+surfaces.
 
 Two concrete backends sit behind the ``IntakeMediaStore`` port, selected by
 ``INTAKE_MEDIA_BACKEND`` and resolved by the :func:`build_media_store` factory:
@@ -44,8 +47,17 @@ from typing import Final, Protocol
 import httpx
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-#: Object-storage prefix under which every intake media clip is filed.
+#: Object-storage prefix under which every patient intake media clip is filed.
 PREFIX: Final[str] = "intake"
+
+#: Object-storage prefix under which doctor-scoped rx-input media objects
+#: (voice notes / photos) are filed (PHASE-8.1 T04, #481): the doctor's media
+#: rides the same encrypted, durable store with its own namespace, so a
+#: ``DoctorInputRequest.media_ref`` never collides with a patient clip.
+RX_INPUT_PREFIX: Final[str] = "rx_input"
+
+#: The only object-storage prefixes this store admits for write/read.
+_SUPPORTED_PREFIXES: Final[frozenset[str]] = frozenset({PREFIX, RX_INPUT_PREFIX})
 
 #: Private Supabase Storage bucket holding the ciphertext (ticket #385). The
 #: bucket is created private at provisioning - audio is only reachable through
@@ -70,13 +82,24 @@ class IntakeMediaStore(Protocol):
     Both data methods are async and the local filesystem and Supabase backends
     implement them alike.
 
+    ``save`` takes an opaque ``subject_id`` (patient id for intake clips,
+    doctor partner id for rx-input media) plus the ``prefix`` namespace it
+    files under, so one port serves both ``intake/`` and ``rx_input/`` object
+    spaces.
+
     ``close`` releases any resources the store owns (the Supabase backend's
     ``httpx.AsyncClient`` pool; a no-op locally). An app-lifetime store never
     calls it; the pipeline builds one store per voice run and closes it, so a
     per-clip store never leaks a connection pool (ticket #393).
     """
 
-    async def save(self, *, data: bytes, patient_id: int) -> str: ...
+    async def save(
+        self,
+        *,
+        data: bytes,
+        subject_id: int,
+        prefix: str = PREFIX,
+    ) -> str: ...
 
     async def read(self, *, object_key: str) -> bytes: ...
 
@@ -96,19 +119,20 @@ def _decrypt(key: bytes, payload: bytes) -> bytes:
 
 
 def _validate_object_key(object_key: str) -> Path:
-    """Refuse an object key outside the ``intake/`` prefix (3 path parts)."""
+    """Refuse an object key outside the ``intake/`` / ``rx_input/`` prefixes (3 path parts)."""
     rel_path = Path(object_key)
-    if rel_path.parts[0] != PREFIX or len(rel_path.parts) != 3:
-        raise OSError(f"object key is outside the {PREFIX}/ prefix")
+    if len(rel_path.parts) != 3 or rel_path.parts[0] not in _SUPPORTED_PREFIXES:
+        joined = ", ".join(sorted(_SUPPORTED_PREFIXES))
+        raise OSError(f"object key is outside the supported prefixes ({joined})")
     return rel_path
 
 
 class LocalFilesystemIntakeMediaStore:
-    """Encrypts and files intake-audio bytes under ``intake/`` on the local disk.
+    """Encrypts and files intake-media bytes under ``intake/`` / ``rx_input/`` on disk.
 
     The default dev/CI/test backend (``INTAKE_MEDIA_BACKEND=local``): ``root``
-    is the private filesystem root (``var/``-style); clips land at
-    ``<root>/intake/<patient_id>/<uuid>.enc``. The object reference returned is
+    is the private filesystem root (``var/``-style); objects land at
+    ``<root>/<prefix>/<subject_id>/<uuid>.enc``. The object reference returned is
     that relative path under the ``intake/`` prefix, which the facade persists
     in ``intake_media_refs.object_key`` - never the audio bytes themselves.
     Never depends on the network, so local behavior is byte-identical to the
@@ -126,27 +150,34 @@ class LocalFilesystemIntakeMediaStore:
             raise ValueError("IntakeMediaStore requires a 32-byte AES-256 key")
         self._key = key_bytes
 
-    async def save(self, *, data: bytes, patient_id: int) -> str:
-        """Encrypt ``data`` and file it, answering the ``intake/``-prefixed ref.
+    async def save(
+        self,
+        *,
+        data: bytes,
+        subject_id: int,
+        prefix: str = PREFIX,
+    ) -> str:
+        """Encrypt ``data`` and file it, answering the ``<prefix>``-prefixed ref.
 
-        The ref is the clip's object-storage key under the ``intake/`` prefix
-        (e.g. ``intake/42/<uuid>.enc``); the facade stores it in
-        ``intake_media_refs.object_key`` and surfaces it to the doctor on
-        review, never the audio plaintext.
+        The ref is the object-storage key under the ``prefix`` namespace
+        (e.g. ``intake/42/<uuid>.enc`` or ``rx_input/12/<uuid>.enc``); the
+        facade stores it in ``intake_media_refs.object_key`` (patient clip) or
+        the doctor input's ``media_ref`` on ``care_doctor_inputs`` and surfaces
+        it on review, never the media plaintext.
 
         Raises :class:`OSError` on a failed filesystem write - the facade wraps
         this in its upload-resilience retry ladder so a flaky transfer never
         loses the capture silently.
         """
-        return self._write(patient_id, _encrypt(self._key, data))
+        return self._write(prefix, subject_id, _encrypt(self._key, data))
 
-    def _write(self, patient_id: int, payload: bytes) -> str:
-        directory = self._root / PREFIX / str(patient_id)
+    def _write(self, prefix: str, subject_id: int, payload: bytes) -> str:
+        directory = self._root / prefix / str(subject_id)
         directory.mkdir(parents=True, exist_ok=True)
         filename = f"{secrets.token_hex(16)}{_EXT}"
         path = directory / filename
         path.write_bytes(payload)
-        return f"{PREFIX}/{patient_id}/{filename}"
+        return f"{prefix}/{subject_id}/{filename}"
 
     async def read(self, *, object_key: str) -> bytes:
         """Decrypt and return the clip filed under ``object_key``.
@@ -167,7 +198,7 @@ class LocalFilesystemIntakeMediaStore:
 
 
 class SupabaseStorageIntakeMediaStore:
-    """Encrypts intake-audio bytes into a private Supabase Storage bucket.
+    """Encrypts intake-media bytes into a private Supabase Storage bucket.
 
     The durable production backend (ticket #385): a Render free web service's
     disk is ephemeral (wiped on redeploy), so a capture saved only to local
@@ -222,16 +253,22 @@ class SupabaseStorageIntakeMediaStore:
     def _object_url(self, object_key: str) -> str:
         return f"{self._base_url}/{_STORAGE_OBJECT_ENDPOINT}/{self._bucket}/{object_key}"
 
-    async def save(self, *, data: bytes, patient_id: int) -> str:
+    async def save(
+        self,
+        *,
+        data: bytes,
+        subject_id: int,
+        prefix: str = PREFIX,
+    ) -> str:
         """Encrypt ``data`` and POST the ciphertext, answering the opaque ref.
 
-        The same ``intake/<patient_id>/<uuid>.enc`` key form as the local
+        The same ``<prefix>/<subject_id>/<uuid>.enc`` key form as the local
         backend. The request body carries ONLY the nonce + GCM ciphertext - no
-        plaintext audio ever leaves the app. Raises :class:`OSError` when the
+        plaintext media ever leaves the app. Raises :class:`OSError` when the
         upload is not acknowledged 2xx (the facade's retry ladder then wraps it
         into ``MediaTransferError`` unchanged, at most 3 attempts).
         """
-        object_key = f"{PREFIX}/{patient_id}/{secrets.token_hex(16)}{_EXT}"
+        object_key = f"{prefix}/{subject_id}/{secrets.token_hex(16)}{_EXT}"
         try:
             response = await self._client.post(
                 self._object_url(object_key),

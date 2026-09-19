@@ -136,6 +136,8 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         # media, re-record, read intake + pre-summary, save patient edits.
         "/v1/intake/submit",
         "/v1/intake/upload-media",
+        # PHASE-8.1 T04 (#481): the doctor-scoped rx-input voice/photo upload.
+        "/v1/intake/upload-doctor-media",
         "/v1/intake/{intake_id}/re-record",
         "/v1/intake/{intake_id}",
         "/v1/intake/{intake_id}/pre-summary",
