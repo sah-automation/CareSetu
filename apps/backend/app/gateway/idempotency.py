@@ -113,6 +113,8 @@ _T = TypeVar("_T")
 async def run_idempotent(
     request: Request,
     call: Callable[[], Awaitable[_T]],
+    *,
+    namespace: str | None = None,
 ) -> _T:
     """Execute ``call`` once per ``Idempotency-Key`` (api-standards §5).
 
@@ -122,15 +124,22 @@ async def run_idempotent(
     response cannot double-issue an OTP or double-consume a challenge. Only a
     completed call is stored - an expected failure (error envelope) or a 5xx is
     never cached, so a retry re-executes. The key is namespaced by the request
-    path so one client key cannot collide across endpoints. A missing or blank
-    header passes straight through exactly as before - no store read or write.
+    path so one client key cannot collide across endpoints. ``namespace`` adds a
+    second dimension (typically the authenticated subject id) when the stored
+    result is caller-specific - without it, two principals replaying the same
+    key would receive each other's stored response. A missing or blank header
+    passes straight through exactly as before - no store read or write.
     """
     raw_key = request.headers.get("Idempotency-Key")
     if raw_key is None or not raw_key.strip():
         return await call()
     key = raw_key.strip()
     store = cast(IdempotencyStore, request.app.state.idempotency_store)
-    cache_key = f"{request.url.path}:{key}"
+    cache_key = (
+        f"{namespace}:{request.url.path}:{key}"
+        if namespace is not None
+        else f"{request.url.path}:{key}"
+    )
     cached = store.get(cache_key)
     if cached is not None:
         return cast(_T, cached)

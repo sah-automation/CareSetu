@@ -50,6 +50,9 @@ from modules.iam.identity_facade import (
     PartnerCredentialCreatedResult as PartnerCredentialCreatedResult,
 )
 from modules.iam.identity_facade import (
+    PatientProfile as PatientProfile,
+)
+from modules.iam.identity_facade import (
     RegisterPatientResult as RegisterPatientResult,
 )
 from modules.iam.mfa_facade import (
@@ -183,6 +186,38 @@ class IamFacade:
         return await self._identity.create_operator_account(
             phone, invited_by_identity_id=invited_by_identity_id, connection=connection
         )
+
+    async def save_patient_profile(
+        self,
+        identity_id: int,
+        profile: PatientProfile,
+        connection: AsyncConnection | None = None,
+    ) -> PatientProfile:
+        """Idempotently upsert the caller's profile-completion data (#482).
+
+        Delegated to ``IdentityFacade``: one row per identity in
+        ``iam.iam_patient_profiles`` (ON CONFLICT DO UPDATE). ``connection``
+        lets a same-transaction caller share an open transaction (dual-seam
+        discipline); when omitted the seam opens its own. The route passes the
+        authenticated principal's subject id, so one identity can never write
+        another's row.
+        """
+        return await self._identity.save_patient_profile(
+            identity_id, profile, connection=connection
+        )
+
+    async def get_patient_profile(
+        self,
+        identity_id: int,
+        connection: AsyncConnection | None = None,
+    ) -> PatientProfile | None:
+        """The caller's saved profile, or ``None`` when it is not set (#482).
+
+        Delegated to ``IdentityFacade``. Scoped to ``identity_id`` so one
+        identity never reads another's row; ``None`` is the typed "not set"
+        the GET route wraps.
+        """
+        return await self._identity.get_patient_profile(identity_id, connection=connection)
 
     # -- OTP delegation (ADR-0006, ticket #168) ----------------------------
 

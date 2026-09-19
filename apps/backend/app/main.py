@@ -25,7 +25,7 @@ from sqlalchemy.pool import NullPool
 
 from app.config import Settings, get_settings
 from app.gateway.errors import ErrorEnvelope, register_gateway_error_handlers
-from app.gateway.idempotency import IdempotencyStore
+from app.gateway.idempotency import IdempotencyStore, run_idempotent
 from app.gateway.jwt_verify import JWTVerifyMiddleware
 from app.gateway.principal import Principal
 from app.gateway.rate_limit import RateLimitMiddleware
@@ -52,7 +52,7 @@ from modules.health.facade import HealthFacade
 from modules.iam.adapters.routes import register_error_handlers
 from modules.iam.adapters.routes import router as iam_router
 from modules.iam.adapters.sms import MockSmsAdapter, build_sms_adapter
-from modules.iam.facade import IamFacade
+from modules.iam.facade import IamFacade, PatientProfile
 from modules.intake.adapters.media_store import build_media_store
 from modules.intake.adapters.routes import (
     register_error_handlers as register_intake_error_handlers,
@@ -126,6 +126,20 @@ class MeResponse(BaseModel):
     subject_id: str
     roles: list[str]
     phone: str
+
+
+class PatientProfileResponse(BaseModel):
+    """Typed read-back of the protected ``/v1/me/profile`` routes (#482).
+
+    ``set`` discriminates a stored profile (``profile`` populated) from the
+    typed "not set" answer (``profile`` null) the PWA hydrates from before its
+    local-draft fallback (ticket #488). The same shape answers ``GET`` and
+    ``PUT`` so the client handles one contract. ``GET /v1/me`` stays unchanged
+    - the profile gets its own read surface by deliberate D-A decision.
+    """
+
+    set: bool
+    profile: PatientProfile | None = None
 
 
 async def _run_in_process_dispatcher(
@@ -439,6 +453,49 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             roles=list(principal.roles),
             phone=phone,
         )
+
+    @app.get("/v1/me/profile", response_model=PatientProfileResponse)
+    async def me_profile_get(
+        request: Request, principal: Annotated[Principal, Depends(require_authenticated)]
+    ) -> PatientProfileResponse:
+        """Protected read: the caller's saved profile, or the typed "not set".
+
+        The profile gets its own read surface so ``MeResponse`` and the
+        ``/v1/me`` consumers never change (#482, deliberate D-A decision). The
+        row is scoped to the principal's subject id through the identity facade
+        seam - the route never touches the database itself.
+        """
+        facade = cast(IamFacade, request.app.state.iam_facade)
+        profile = await facade.get_patient_profile(int(principal.subject_id))
+        if profile is None:
+            return PatientProfileResponse(set=False, profile=None)
+        return PatientProfileResponse(set=True, profile=profile)
+
+    @app.put("/v1/me/profile", response_model=PatientProfileResponse)
+    async def me_profile_put(
+        request: Request,
+        body: PatientProfile,
+        principal: Annotated[Principal, Depends(require_authenticated)],
+    ) -> PatientProfileResponse:
+        """Protected upsert: persist the caller's profile-completion data.
+
+        Idempotent - the facade upserts one row per identity (ON CONFLICT DO
+        UPDATE), so a repeat PUT converges and a returning patient is asked
+        only once. The body is the profile shape itself (no wrapper), and the
+        ``Idempotency-Key`` contract (api-standards §5) applies like the other
+        mutations: a replayed key with the same value returns the stored
+        result without a second facade call. The key is namespaced to the
+        principal's subject id, so one key can never replay another caller's
+        stored profile across identities. The write is scoped to the
+        principal's subject id.
+        """
+        facade = cast(IamFacade, request.app.state.iam_facade)
+        saved = await run_idempotent(
+            request,
+            lambda: facade.save_patient_profile(int(principal.subject_id), body),
+            namespace=f"identity:{principal.subject_id}",
+        )
+        return PatientProfileResponse(set=True, profile=saved)
 
     @app.get("/v1/auth/dev/otp", response_model=MockOtpResponse)
     async def dev_otp(request: Request, phone: str) -> MockOtpResponse | JSONResponse:

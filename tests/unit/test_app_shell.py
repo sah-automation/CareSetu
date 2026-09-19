@@ -70,6 +70,8 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/auth/refresh",
         "/v1/auth/dev/otp",
         "/v1/me",
+        # PHASE-8.1 T1 (#482): the patient's own profile-completion read/write.
+        "/v1/me/profile",
         # PHASE-3 T2 (#211): the owner-only record surface.
         "/v1/records",
         "/v1/records/{record_id}",

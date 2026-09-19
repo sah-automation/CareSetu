@@ -133,4 +133,28 @@ iam_role_grants = Table(
     CheckConstraint("status IN ('Active', 'Suspended')", name="ck_iam_role_grants_status"),
 )
 
+iam_patient_profiles = Table(
+    "iam_patient_profiles",
+    MODULE_METADATA,
+    Column("id", BigInteger, primary_key=True),
+    Column(
+        "identity_id",
+        BigInteger,
+        ForeignKey("iam_identities.id", name="fk_iam_patient_profiles_identity"),
+        nullable=False,
+    ),
+    Column("name", String(200), nullable=False),
+    Column("age", Integer, nullable=False),
+    Column("gender", String(20), nullable=False),
+    Column("preferred_language", String(20), nullable=False),
+    # Optional, self-reported profile-completion fields (FEAT-008, #482/#488):
+    # photo/area/emergency-contact are nullable and unsettable.
+    Column("area", String(255), nullable=True),
+    Column("emergency_contact", String(32), nullable=True),
+    Column("photo_ref", String(255), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    UniqueConstraint("identity_id", name="uq_iam_patient_profiles_identity"),
+)
+
 iam_outbox = outbox_table("iam_outbox", "iam", MODULE_METADATA)

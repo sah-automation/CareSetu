@@ -11,9 +11,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -36,7 +36,7 @@ from modules.iam.domain.shared import (
     _reissue_otp_challenge,
 )
 from modules.iam.outbox import IAM_OUTBOX_TABLE
-from modules.iam.schema.models import iam_identities
+from modules.iam.schema.models import iam_identities, iam_patient_profiles
 from modules.iam.session_facade import grant_operator_role
 
 _IAM_SCHEMA = "iam"
@@ -92,6 +92,31 @@ class OperatorInvitedResult(BaseModel):
 
     identity_id: int
     phone_e164: str
+
+
+class PatientProfile(BaseModel):
+    """The patient's profile-completion data (PHASE-8.1 T1, #482; FEAT-008).
+
+    One row per identity, persisted in ``iam.iam_patient_profiles`` so a
+    returning patient is asked only once. ``area``, the emergency contact, and
+    the photo reference are optional and unsettable; ``preferred_language``
+    mirrors what the PWA's locale picker chose (en/hi) and persists with the
+    profile but never drives the app locale (ticket #488 keeps its own store).
+    Extra fields are refused (``extra="forbid"``, the iam surface convention)
+    so a client typo cannot silently widen the stored shape. String bounds
+    mirror the ``VARCHAR`` column widths so an over-long value is a 422 at the
+    edge, never a ``DataError`` 500 at the database (api-standards §2).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=200)
+    age: int = Field(gt=0, lt=150)
+    gender: str = Field(min_length=1, max_length=20)
+    preferred_language: str = Field(min_length=1, max_length=20)
+    area: str | None = Field(default=None, max_length=255)
+    emergency_contact: str | None = Field(default=None, max_length=32)
+    photo_ref: str | None = Field(default=None, max_length=255)
 
 
 def _default_clock() -> datetime:
@@ -318,3 +343,88 @@ class IdentityFacade:
                 identity_id = await _run(connection)
 
         return OperatorInvitedResult(identity_id=identity_id, phone_e164=phone_e164)
+
+    async def save_patient_profile(
+        self,
+        identity_id: int,
+        profile: PatientProfile,
+        connection: AsyncConnection | None = None,
+    ) -> PatientProfile:
+        """Idempotently upsert the patient's profile-completion data (#482).
+
+        One row per identity: ``INSERT ... ON CONFLICT (identity_id) DO UPDATE``
+        replaces the whole profile on every save (never SELECT-then-INSERT), so
+        a returning patient is asked only once and a repeat PUT with the same
+        payload converges to the same row. ``connection`` lets a caller share an
+        open transaction - the dual-seam discipline: the write commits
+        atomically with whatever else that transaction carries; when omitted
+        the method opens its own, preserving the standalone seam shape the
+        route and tests exercise. Touches only the ``iam`` schema (ADR-0003).
+        """
+        now = self._clock()
+        columns: dict[str, Any] = {
+            "name": profile.name,
+            "age": profile.age,
+            "gender": profile.gender,
+            "preferred_language": profile.preferred_language,
+            "area": profile.area,
+            "emergency_contact": profile.emergency_contact,
+            "photo_ref": profile.photo_ref,
+        }
+
+        async def _run(connection: AsyncConnection) -> None:
+            await connection.execute(
+                postgresql_insert(iam_patient_profiles)
+                .values(identity_id=identity_id, **columns)
+                .on_conflict_do_update(
+                    index_elements=["identity_id"],
+                    set_={**columns, "updated_at": now},
+                )
+            )
+
+        if connection is not None:
+            await _run(connection)
+        else:
+            async with self._engine.begin() as connection:
+                await _run(connection)
+
+        return profile
+
+    async def get_patient_profile(
+        self,
+        identity_id: int,
+        connection: AsyncConnection | None = None,
+    ) -> PatientProfile | None:
+        """Read the patient's saved profile, or ``None`` when it is not set (#482).
+
+        ``None`` is the typed "not set" the GET route wraps; a returned profile
+        is the last committed save. Scoped to ``identity_id`` - callers (the
+        route) pass the authenticated principal's subject id, so one identity
+        never reads another's row. ``connection`` mirrors ``save_patient_profile``:
+        an in-transaction caller reads the same snapshot it wrote instead of
+        opening a competing transaction. Read-only.
+        """
+
+        async def _read(connection: AsyncConnection) -> PatientProfile | None:
+            result = await connection.execute(
+                select(iam_patient_profiles).where(
+                    iam_patient_profiles.c.identity_id == identity_id
+                )
+            )
+            row = result.mappings().first()
+            if row is None:
+                return None
+            return PatientProfile(
+                name=row["name"],
+                age=row["age"],
+                gender=row["gender"],
+                preferred_language=row["preferred_language"],
+                area=row["area"],
+                emergency_contact=row["emergency_contact"],
+                photo_ref=row["photo_ref"],
+            )
+
+        if connection is not None:
+            return await _read(connection)
+        async with self._engine.begin() as connection:
+            return await _read(connection)
