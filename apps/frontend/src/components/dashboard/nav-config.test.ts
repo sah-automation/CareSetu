@@ -80,6 +80,24 @@ describe("NAV_CONFIG", () => {
       }
     }
   });
+
+  it("keeps patient Find live and dims Inbox/Bookings until their phases (PHASE-8.1 T11, #485)", () => {
+    const patient = Object.fromEntries(
+      NAV_CONFIG.patient.map((item) => [item.key, item]),
+    );
+    // Find Care is live: /patient/find is a real page, never a dead nav.
+    expect(patient.find?.soon).toBeUndefined();
+    expect(patient.find?.href).toBe("/patient/find");
+    // Inbox (Phase 13) and Bookings (Phase 9) are coming-soon - they must
+    // render dimmed + non-interactive, so no patient nav item navigates to a
+    // dead destination.
+    expect(patient.inbox?.soon).toBe(true);
+    expect(patient.bookings?.soon).toBe(true);
+    // Home / Start / Record stay live (root surfaces with real pages).
+    expect(patient.home?.soon).toBeUndefined();
+    expect(patient.start?.soon).toBeUndefined();
+    expect(patient.record?.soon).toBeUndefined();
+  });
 });
 
 describe("splitMobileTabs", () => {
@@ -98,7 +116,8 @@ describe("splitMobileTabs", () => {
     expect(tabs.length + (hasMore ? 1 : 0)).toBe(TABBAR_MAX_DESTINATIONS);
     expect(tabs[TABBAR_CENTER_COLUMN]?.key).toBe("start");
     expect(tabs.filter((item) => item.center)).toHaveLength(1);
-    // Inbox stays reachable inside More, ahead of the Soon destinations.
+    // Inbox stays inside More ahead of the other Soon destinations (it is
+    // Soon itself until Phase 13, but its overflow pin keeps the order).
     expect(overflow.map((item) => item.key)).toEqual([
       "inbox",
       "bookings",

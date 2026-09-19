@@ -85,11 +85,14 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       href: "/patient/record",
       icon: FileText,
     },
+    // PHASE-8.1 T11 (#485): Inbox dimmed until Phase 13 (FEAT-019/MOD-010) -
+    // no page exists, so a live entry would dead-navigate like Find did.
     {
       key: "inbox",
       labelKey: "inbox",
       href: "/patient/inbox",
       icon: Inbox,
+      soon: true,
       mobileOverflow: true,
     },
     {

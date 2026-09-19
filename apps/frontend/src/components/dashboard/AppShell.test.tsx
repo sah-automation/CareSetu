@@ -132,6 +132,18 @@ describe("AppShell light density (patient)", () => {
       "href",
       "/patient/record",
     );
+    // PHASE-8.1 T11 (#485): Inbox is coming-soon until Phase 13, so the
+    // top-nav renders it (and Bookings) as dimmed non-interactive spans -
+    // never a navigation to a dead page.
+    expect(screen.getByTestId("nav-inbox")).toHaveAttribute(
+      "data-soon",
+      "true",
+    );
+    expect(screen.getByTestId("nav-inbox").tagName).toBe("SPAN");
+    expect(screen.getByTestId("nav-bookings")).toHaveAttribute(
+      "data-soon",
+      "true",
+    );
     // The finalized view also carries the language switch in this cluster.
     expect(screen.getByTestId("lang-toggle")).toBeInTheDocument();
   });
@@ -146,6 +158,10 @@ describe("AppShell light density (patient)", () => {
     const bookings = screen.getByTestId("nav-bookings");
     expect(bookings.tagName).toBe("SPAN");
     expect(bookings).toHaveAttribute("aria-disabled", "true");
+
+    const inbox = screen.getByTestId("nav-inbox");
+    expect(inbox.tagName).toBe("SPAN");
+    expect(inbox).toHaveAttribute("aria-disabled", "true");
   });
 
   it("marks the live destination matching the pathname as current", () => {
@@ -213,18 +229,26 @@ describe("AppShell light density (patient)", () => {
     fireEvent.click(screen.getByTestId("more-trigger"));
 
     const sheet = screen.getByTestId("more-sheet");
-    // Inbox folds into More (#210) and stays a live link there.
+    // Inbox folds into More (#210) and joins Bookings as coming-soon (#485):
+    // every overflow destination is a dimmed non-interactive row, so none of
+    // them navigates to a dead page.
     expect(sheet).toHaveTextContent("Inbox");
     expect(sheet).toHaveTextContent("Bookings & Orders");
     expect(sheet).toHaveTextContent("Profile & Settings");
-    expect(screen.getByTestId("more-inbox").tagName).toBe("A");
-    expect(screen.getByTestId("more-bookings")).toHaveAttribute(
-      "aria-disabled",
-      "true",
-    );
-    expect(screen.getAllByTestId("soon-badge").length).toBeGreaterThanOrEqual(
-      2,
-    );
+
+    const overflowKeys = [
+      "more-inbox",
+      "more-bookings",
+      "more-profile-settings",
+    ];
+    for (const testid of overflowKeys) {
+      expect(screen.getByTestId(testid).tagName).toBe("SPAN");
+      expect(screen.getByTestId(testid)).toHaveAttribute(
+        "aria-disabled",
+        "true",
+      );
+    }
+    expect(within(sheet).getAllByTestId("soon-badge")).toHaveLength(3);
   });
 
   it("renders nav labels bilingually through the i18n engine", () => {

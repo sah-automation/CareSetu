@@ -1224,6 +1224,17 @@ const en = {
     retry: "Try again",
     breadcrumb: "Choose doctor",
   },
+
+  // findCare.* surface - PHASE-8.1 T11 (#485): the authed Find Care page at
+  // /patient/find (blueprint §5.3). Reuses the verified directory browse;
+  // the continuation CTA deep-links back into the intake pick step when an
+  // intake is in progress (the intake flow carries ?intake=<id>).
+  findCare: {
+    resumeTitle: "A consultation is in progress",
+    resumeBody:
+      "Your pre-summary is ready. Resume choosing the doctor who will review it.",
+    bookCta: "Book consultation",
+  },
 };
 
 export type Dictionary = typeof en;
@@ -2326,6 +2337,12 @@ export const STRINGS: Record<Lang, Dictionary> = {
       errorBody: "अपना कनेक्शन जाँचें और फिर से प्रयास करें।",
       retry: "फिर से प्रयास करें",
       breadcrumb: "डॉक्टर चुनें",
+    },
+    findCare: {
+      resumeTitle: "एक परामर्श प्रगति पर है",
+      resumeBody:
+        "आपका प्री-सारांश तैयार है। डॉक्टर चुनना फिर से शुरू करें जो इसकी जाँच करेगा।",
+      bookCta: "परामर्श बुक करें",
     },
   },
 };
