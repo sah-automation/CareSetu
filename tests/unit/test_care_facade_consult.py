@@ -130,6 +130,7 @@ def _case_row(
     pre_summary_id: int | None = 5,
     stage: str = "pre_summary",
     forced_review: bool = False,
+    created_at: datetime = NOW,
 ) -> object:
     return SimpleNamespace(
         id=case_id,
@@ -140,7 +141,7 @@ def _case_row(
         forced_review=forced_review,
         closed_at=None,
         close_reason=None,
-        created_at=NOW,
+        created_at=created_at,
         updated_at=NOW,
     )
 
@@ -166,6 +167,15 @@ def _pre_summary_row(
         created_at=NOW,
         updated_at=NOW,
     )
+
+
+def _assigned_partner_row(
+    *,
+    pre_summary_id: int = 5,
+    assigned_partner_id: int | None = 42,
+) -> object:
+    """A row of ``IntakeFacade.assigned_partner_for_pre_summaries`` (ids only)."""
+    return SimpleNamespace(id=pre_summary_id, assigned_partner_id=assigned_partner_id)
 
 
 # ========================================================================
@@ -385,6 +395,34 @@ async def test_get_case_raises_for_foreign_doctor() -> None:
         await facade.get_case(doctor_id=42, case_id=1)
 
 
+@pytest.mark.asyncio
+async def test_get_case_opens_assigned_but_unclaimed_case() -> None:
+    case_conn = _connection([_FakeResult(row=_case_row(doctor_id=None))])
+    intake_conn = _connection(
+        [_FakeResult(rows=[_assigned_partner_row(pre_summary_id=5, assigned_partner_id=42)])]
+    )
+    facade = _care_facade(case_conn, _intake_facade(intake_conn))
+
+    result = await facade.get_case(doctor_id=42, case_id=1)
+
+    assert isinstance(result, CaseDetailView)
+    assert result.case_id == 1
+    assert result.doctor_id is None
+    assert result.stage == "pre_summary"
+
+
+@pytest.mark.asyncio
+async def test_get_case_raises_for_unassigned_unclaimed_case() -> None:
+    case_conn = _connection([_FakeResult(row=_case_row(doctor_id=None))])
+    intake_conn = _connection(
+        [_FakeResult(rows=[_assigned_partner_row(pre_summary_id=5, assigned_partner_id=7)])]
+    )
+    facade = _care_facade(case_conn, _intake_facade(intake_conn))
+
+    with pytest.raises(CareNotFoundError, match="not found for doctor"):
+        await facade.get_case(doctor_id=42, case_id=1)
+
+
 # ========================================================================
 # list_doctor_cases
 # ========================================================================
@@ -396,37 +434,92 @@ async def test_list_doctor_cases_returns_only_open_cases() -> None:
         [
             _FakeResult(
                 rows=[
-                    _case_row(case_id=1, stage="pre_summary"),
-                    _case_row(case_id=2, stage="closed"),
-                    _case_row(case_id=3, stage="prescription_pending"),
+                    _case_row(
+                        case_id=1,
+                        stage="pre_summary",
+                        created_at=datetime(2026, 9, 1, tzinfo=UTC),
+                    ),
+                    _case_row(
+                        case_id=2,
+                        stage="closed",
+                        created_at=datetime(2026, 9, 4, tzinfo=UTC),
+                    ),
+                    _case_row(
+                        case_id=3,
+                        stage="prescription_pending",
+                        created_at=datetime(2026, 9, 3, tzinfo=UTC),
+                    ),
+                ]
+            ),
+            _FakeResult(
+                rows=[
+                    _case_row(
+                        case_id=10,
+                        doctor_id=None,
+                        pre_summary_id=51,
+                        stage="pre_summary",
+                        created_at=datetime(2026, 9, 2, tzinfo=UTC),
+                    ),
+                    _case_row(
+                        case_id=11,
+                        doctor_id=None,
+                        pre_summary_id=52,
+                        stage="closed",
+                        created_at=datetime(2026, 9, 5, tzinfo=UTC),
+                    ),
+                    _case_row(
+                        case_id=12,
+                        doctor_id=None,
+                        pre_summary_id=53,
+                        stage="pre_summary",
+                        created_at=datetime(2026, 9, 6, tzinfo=UTC),
+                    ),
+                ]
+            ),
+        ]
+    )
+    intake_conn = _connection(
+        [
+            _FakeResult(
+                rows=[
+                    _assigned_partner_row(pre_summary_id=51, assigned_partner_id=42),
+                    _assigned_partner_row(pre_summary_id=52, assigned_partner_id=42),
+                    _assigned_partner_row(pre_summary_id=53, assigned_partner_id=7),
                 ]
             )
         ]
     )
-    facade = _care_facade(connection, _intake_facade(_connection([])))
+    facade = _care_facade(connection, _intake_facade(intake_conn))
 
     results = await facade.list_doctor_cases(doctor_id=42)
 
     assert all(isinstance(v, CaseDetailView) for v in results)
     open_ids = [v.case_id for v in results if v.stage != "closed"]
-    assert len(open_ids) == 2
+    assert open_ids == [1, 10, 3]
 
 
 @pytest.mark.asyncio
 async def test_list_doctor_cases_uses_doctor_filter_and_ascending_order() -> None:
-    connection = _connection([_FakeResult(rows=[])])
-    facade = _care_facade(connection, _intake_facade(_connection([])))
+    connection = _connection([_FakeResult(rows=[]), _FakeResult(rows=[])])
+    intake_conn = _connection([])
+    facade = _care_facade(connection, _intake_facade(intake_conn))
 
     await facade.list_doctor_cases(doctor_id=42)
 
     stmts = _statements(connection)
-    select_stmt = stmts[0]
-    compiled_sql = str(select_stmt.compile())
-    compiled_params = dict(select_stmt.compile().params)
+    claimed_stmt = stmts[0]
+    unclaimed_stmt = stmts[1]
 
-    assert 42 in compiled_params.values()
-    assert "closed" in compiled_params.values()
-    assert "ORDER BY" in compiled_sql.upper()
+    claimed_compiled = claimed_stmt.compile()
+    assert 42 in dict(claimed_compiled.params).values()
+    assert "closed" in dict(claimed_compiled.params).values()
+    assert "ORDER BY" in str(claimed_compiled).upper()
+
+    unclaimed_compiled = unclaimed_stmt.compile()
+    assert "IS NULL" in str(unclaimed_compiled).upper()
+    assert "ORDER BY" in str(unclaimed_compiled).upper()
+
+    assert not intake_conn.execute.await_args_list
 
 
 # ========================================================================

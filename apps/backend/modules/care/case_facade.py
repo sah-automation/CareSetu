@@ -12,6 +12,7 @@ and are imported by :mod:`modules.care.rx_facade` - never duplicated.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -68,12 +69,34 @@ def _to_case_detail(row: Row[Any]) -> CaseDetailView:
 # -----------------------------------------------------------------
 
 
+def assigned_doctor_of_resolver(
+    intake_facade: IntakeFacade,
+) -> Callable[[int], Awaitable[int | None]]:
+    """Build the assigned-doctor resolver for an intake facade (#478).
+
+    Returns the bound callable :func:`check_case_ownership` needs to open a
+    born-but-unclaimed case to the doctor the intake assigned it to (pick,
+    #443): given a pre-summary id it resolves to the intake's
+    ``assigned_partner_id`` (or ``None`` when not picked) through the
+    ``IntakeFacade.assigned_partner_for_pre_summaries`` seam. Shared
+    primitive imported by ``rx_facade`` (never duplicated) so the case and
+    prescription read paths agree on the same allowance.
+    """
+
+    async def _resolve(pre_summary_id: int) -> int | None:
+        resolved = await intake_facade.assigned_partner_for_pre_summaries([pre_summary_id])
+        return resolved.get(pre_summary_id)
+
+    return _resolve
+
+
 async def check_case_ownership(
     connection: AsyncConnection,
     *,
     doctor_id: int,
     case_id: int,
     allow_unclaimed: bool = False,
+    assigned_doctor_of: Callable[[int], Awaitable[int | None]] | None = None,
 ) -> Row[Any]:
     """Load a case row and enforce the ownership boundary.
 
@@ -88,6 +111,14 @@ async def check_case_ownership(
     and blocks it for every other operation. After claim, ownership is
     enforced normally.
 
+    ``assigned_doctor_of`` extends legibility to born-but-unclaimed cases
+    without changing claim semantics (PHASE-8.1 fix, #478): when provided
+    and the row is unclaimed (``doctor_id`` NULL) with ``allow_unclaimed``
+    false, the guard resolves the case's pre-summary to its assigned doctor
+    (pick, #443) and allows the read only if that doctor is the caller. The
+    default ``None`` preserves today's behavior for every other caller, so
+    no global ``allow_unclaimed`` flip is needed.
+
     Returns the loaded row so callers can use ``row.patient_id``,
     ``row.stage`` etc. without a second query.
     """
@@ -96,7 +127,15 @@ async def check_case_ownership(
         raise CareNotFoundError(f"case {case_id} not found for doctor {doctor_id}")
     if row.doctor_id is None:
         if not allow_unclaimed:
-            raise CareNotFoundError(f"case {case_id} not found for doctor {doctor_id}")
+            pre_summary_id = row.pre_summary_id
+            if pre_summary_id is None:
+                raise CareNotFoundError(f"case {case_id} not found for doctor {doctor_id}")
+            if assigned_doctor_of is not None:
+                assigned_doctor = await assigned_doctor_of(int(pre_summary_id))
+            else:
+                assigned_doctor = None
+            if assigned_doctor != doctor_id:
+                raise CareNotFoundError(f"case {case_id} not found for doctor {doctor_id}")
     elif int(row.doctor_id) != doctor_id:
         raise CareNotFoundError(f"case {case_id} not found for doctor {doctor_id}")
     return row
@@ -288,12 +327,21 @@ class CaseConsoleFacade:
     ) -> CaseDetailView:
         """Read the doctor's care case detail.
 
-        Doctor-scoped: raises unless the case belongs to ``doctor_id``.
+        Doctor-scoped: raises unless the case belongs to ``doctor_id`` or is a
+        born-but-unclaimed case whose intake assigned it to ``doctor_id``
+        (PHASE-8.1 fix, #478) - the assignee opens the workspace before the
+        consult-complete handshake claims the case. A foreign or unassigned
+        doctor still gets ``CareNotFoundError``.
 
         Raises :class:`CareNotFoundError` when no case exists for the doctor.
         """
         async with self._engine.begin() as connection:
-            row = await check_case_ownership(connection, doctor_id=doctor_id, case_id=case_id)
+            row = await check_case_ownership(
+                connection,
+                doctor_id=doctor_id,
+                case_id=case_id,
+                assigned_doctor_of=assigned_doctor_of_resolver(self._intake_facade),
+            )
 
         return _to_case_detail(row)
 
@@ -304,11 +352,19 @@ class CaseConsoleFacade:
     ) -> list[CaseDetailView]:
         """List the doctor's open care cases, oldest first (non-closed only).
 
-        Returns typed :class:`CaseDetailView` rows - the pending list the
-        doctor works from - ordered by creation time ascending.
+        Merges the doctor's claimed non-closed cases (``doctor_id == doctor``)
+        with born-but-unclaimed non-closed cases (``doctor_id IS NULL``) whose
+        pre-summary the intake assigned to this doctor (pick, #443,
+        PHASE-8.1 fix #478), so an assigned case is reachable before the
+        consult-complete handshake claims it. The merge happens in the facade
+        (no cross-schema join - module isolation rule); the intake assignment
+        resolves through the legal ``IntakeFacade`` seam. Claim semantics are
+        unchanged: ``mark_consult_complete`` stays the single claim path.
+        Closed cases and cases assigned to another doctor never appear; the
+        merged feed keeps the existing ``created_at`` ascending order.
         """
         async with self._engine.begin() as connection:
-            rows = (
+            claimed_rows = (
                 await connection.execute(
                     select(care_cases)
                     .where(
@@ -319,7 +375,35 @@ class CaseConsoleFacade:
                 )
             ).all()
 
-        return [_to_case_detail(row) for row in rows]
+            unclaimed_rows = (
+                await connection.execute(
+                    select(care_cases)
+                    .where(
+                        care_cases.c.doctor_id.is_(None),
+                        care_cases.c.stage != CaseStage.CLOSED.value,
+                    )
+                    .order_by(care_cases.c.created_at.asc())
+                )
+            ).all()
+
+        assigned: dict[int, int | None] = {}
+        if unclaimed_rows:
+            pre_summary_ids = [
+                int(row.pre_summary_id) for row in unclaimed_rows if row.pre_summary_id is not None
+            ]
+            if pre_summary_ids:
+                assigned = await self._intake_facade.assigned_partner_for_pre_summaries(
+                    pre_summary_ids
+                )
+
+        views = [_to_case_detail(row) for row in claimed_rows]
+        views.extend(
+            _to_case_detail(row)
+            for row in unclaimed_rows
+            if row.pre_summary_id is not None and assigned.get(int(row.pre_summary_id)) == doctor_id
+        )
+        views.sort(key=lambda view: view.created_at)
+        return views
 
     async def submit_doctor_input(
         self,

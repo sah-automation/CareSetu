@@ -33,7 +33,7 @@ from modules.care.care_models import (
     RxItemInput,
     RxItemView,
 )
-from modules.care.case_facade import check_case_ownership
+from modules.care.case_facade import assigned_doctor_of_resolver, check_case_ownership
 from modules.care.domain.events import (
     prescription_approved_envelope,
     prescription_draft_created_envelope,
@@ -637,7 +637,10 @@ class PrescriptionFacade:
         """Read an issued e-prescription - the Phase-10 source of truth.
 
         Doctor-scoped: the prescription's owning case must belong to
-        ``doctor_id``; a foreign doctor reads as not found.
+        ``doctor_id``, or be a born-but-unclaimed case the intake assigned to
+        ``doctor_id`` (PHASE-8.1 fix, #478) - so the approved-rx read stays
+        consistent with the case list/detail reads and never leaks an unclaimed
+        case to a foreign doctor. A foreign doctor reads as not found.
 
         Serves ONLY approved-and-issued prescriptions (``status = issued`` AND
         ``issued_at`` set - CONTEXT.md glossary, ``e-prescription``): the
@@ -660,7 +663,12 @@ class PrescriptionFacade:
             if rx_row is None:
                 raise CareNotFoundError(f"approved prescription {rx_id} not found")
 
-            await check_case_ownership(connection, doctor_id=doctor_id, case_id=int(rx_row.case_id))
+            await check_case_ownership(
+                connection,
+                doctor_id=doctor_id,
+                case_id=int(rx_row.case_id),
+                assigned_doctor_of=assigned_doctor_of_resolver(self._intake_facade),
+            )
 
             item_rows = (
                 await connection.execute(
@@ -705,15 +713,23 @@ class PrescriptionFacade:
         or Closed case. A case with no prescription row yet reads as not
         found too.
 
-        Doctor-scoped: raises unless the case belongs to ``doctor_id``; a
-        foreign doctor or unassigned case reads as not found.
+        Doctor-scoped: raises unless the case belongs to ``doctor_id`` or is a
+        born-but-unclaimed case the intake assigned to ``doctor_id``
+        (PHASE-8.1 fix, #478) - the working-rx read resolves through the same
+        assigned-doctor allowance as the case list/detail reads. A foreign
+        doctor or unassigned case reads as not found.
 
         Raises :class:`CareNotFoundError` when the case does not exist for the
         doctor, when it has no prescription row, or when the prescription is
         not an in-progress (draft / doctor_reviewed / rejected) revision.
         """
         async with self._engine.begin() as connection:
-            await check_case_ownership(connection, doctor_id=doctor_id, case_id=case_id)
+            await check_case_ownership(
+                connection,
+                doctor_id=doctor_id,
+                case_id=case_id,
+                assigned_doctor_of=assigned_doctor_of_resolver(self._intake_facade),
+            )
             rx_row = (
                 await connection.execute(
                     select(care_prescriptions)

@@ -20,7 +20,7 @@ local transaction, so a later AI failure never rolls back the intake
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
@@ -685,6 +685,47 @@ class IntakeFacade:
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
+
+    async def assigned_partner_for_pre_summaries(
+        self,
+        pre_summary_ids: Sequence[int],
+    ) -> dict[int, int | None]:
+        """Resolve the assigned partner for intake pre-summaries (ids only, PHI-free).
+
+        The care-module discoverability seam (PHASE-8.1 fix, #478): a born
+        care case carries only the pre-summary id, while the doctor it was
+        assigned to (pick, #443) lives on the intake's
+        ``assigned_partner_id``. This read returns
+        ``{pre_summary_id: assigned_partner_id}`` - ids only, no PHI - so the
+        care facade can decide case visibility against the intake assignment
+        without a cross-schema join (module isolation rule). A pre-summary
+        whose intake has not been picked resolves to ``None``; an id absent
+        from the result simply means no mapping was recorded.
+        """
+        if not pre_summary_ids:
+            return {}
+        async with self._engine.begin() as connection:
+            rows = (
+                await connection.execute(
+                    select(
+                        intake_pre_summaries.c.id,
+                        intake_intakes.c.assigned_partner_id,
+                    )
+                    .select_from(
+                        intake_pre_summaries.join(
+                            intake_intakes,
+                            intake_intakes.c.id == intake_pre_summaries.c.intake_id,
+                        )
+                    )
+                    .where(intake_pre_summaries.c.id.in_(pre_summary_ids))
+                )
+            ).all()
+        return {
+            int(row.id): int(row.assigned_partner_id)
+            if row.assigned_partner_id is not None
+            else None
+            for row in rows
+        }
 
     async def save_patient_pre_summary_edits(
         self,

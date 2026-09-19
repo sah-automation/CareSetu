@@ -266,6 +266,15 @@ def _intake_row(*, intake_id: int = 1, language: str = "en") -> object:
     return SimpleNamespace(id=intake_id, language=language)
 
 
+def _assigned_partner_row(
+    *,
+    pre_summary_id: int = 5,
+    assigned_partner_id: int | None = 42,
+) -> object:
+    """A row of ``IntakeFacade.assigned_partner_for_pre_summaries`` (ids only)."""
+    return SimpleNamespace(id=pre_summary_id, assigned_partner_id=assigned_partner_id)
+
+
 def _timeline(*, entry_types: list[str] | None = None) -> RecordTimeline:
     entries: list[RecordEntryView] = []
     for entry_type in entry_types or []:
@@ -1016,10 +1025,34 @@ async def test_get_approved_prescription_rejects_unclaimed_born_case() -> None:
             _FakeResult(row=_case_row(doctor_id=None)),
         ]
     )
-    facade = _care_facade(care_conn, _intake_facade(_connection([])))
+    intake_conn = _connection(
+        [_FakeResult(rows=[_assigned_partner_row(pre_summary_id=5, assigned_partner_id=7)])]
+    )
+    facade = _care_facade(care_conn, _intake_facade(intake_conn))
 
     with pytest.raises(CareNotFoundError, match="not found for doctor"):
         await facade.get_approved_prescription(rx_id=1, doctor_id=42)
+
+
+@pytest.mark.asyncio
+async def test_get_approved_prescription_opens_assigned_unclaimed_case() -> None:
+    care_conn = _connection(
+        [
+            _FakeResult(row=_rx_row(status="issued", issued_at=NOW)),
+            _FakeResult(row=_case_row(doctor_id=None)),
+            _FakeResult(rows=[_rx_item_row()]),
+        ]
+    )
+    intake_conn = _connection(
+        [_FakeResult(rows=[_assigned_partner_row(pre_summary_id=5, assigned_partner_id=42)])]
+    )
+    facade = _care_facade(care_conn, _intake_facade(intake_conn))
+
+    result = await facade.get_approved_prescription(rx_id=1, doctor_id=42)
+
+    assert isinstance(result, PrescriptionDetailView)
+    assert result.status == "issued"
+    assert len(result.items) == 1
 
 
 # ========================================================================
@@ -1117,7 +1150,31 @@ async def test_get_working_prescription_rejects_unclaimed_born_case() -> None:
             _FakeResult(row=_case_row(doctor_id=None)),
         ]
     )
-    facade = _care_facade(care_conn, _intake_facade(_connection([])))
+    intake_conn = _connection(
+        [_FakeResult(rows=[_assigned_partner_row(pre_summary_id=5, assigned_partner_id=7)])]
+    )
+    facade = _care_facade(care_conn, _intake_facade(intake_conn))
 
     with pytest.raises(CareNotFoundError, match="not found for doctor"):
         await facade.get_working_prescription(case_id=1, doctor_id=42)
+
+
+@pytest.mark.asyncio
+async def test_get_working_prescription_opens_assigned_unclaimed_case() -> None:
+    care_conn = _connection(
+        [
+            _FakeResult(row=_case_row(doctor_id=None)),
+            _FakeResult(row=_rx_row(status="draft")),
+            _FakeResult(rows=[_rx_item_row()]),
+        ]
+    )
+    intake_conn = _connection(
+        [_FakeResult(rows=[_assigned_partner_row(pre_summary_id=5, assigned_partner_id=42)])]
+    )
+    facade = _care_facade(care_conn, _intake_facade(intake_conn))
+
+    result = await facade.get_working_prescription(case_id=1, doctor_id=42)
+
+    assert isinstance(result, PrescriptionDetailView)
+    assert result.status == "draft"
+    assert len(result.items) == 1
