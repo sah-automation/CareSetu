@@ -80,6 +80,43 @@ function toEditorItems(items: RxItemView[]): EditorRxItem[] {
   }));
 }
 
+function snapshotField(value: unknown): unknown {
+  return value === undefined ? null : value;
+}
+
+/** Client mirror of ``modules/care.rx_facade._derive_edited_yn`` (audit-
+    transparent, #494): the number of working items whose name/dose/duration/
+    frequency differ from the immutable AI-draft snapshot, compared
+    positionally like the approval-time audit. Missing snapshot fields are
+    read as null so legacy pre-frequency snapshots stay comparable; a manual
+    prescription (empty snapshot) reads as all items edited. The comparison
+    is symmetric - a snapshot item the doctor deleted counts as edited too,
+    so the tracker reads 0 only when the approval-time audit would derive
+    ``edited_yn = false``. */
+function countEditedRxItems(
+  draftSnapshot: Record<string, unknown>,
+  items: RxItemView[],
+): number {
+  const snapshotItems = Array.isArray(draftSnapshot.rx_items)
+    ? (draftSnapshot.rx_items as Array<Record<string, unknown>>)
+    : [];
+  const length = Math.max(snapshotItems.length, items.length);
+  let edited = 0;
+  for (let idx = 0; idx < length; idx += 1) {
+    const base = snapshotItems[idx];
+    const issued = items[idx];
+    const differs =
+      base == null ||
+      issued == null ||
+      snapshotField(base.name) !== snapshotField(issued.name) ||
+      snapshotField(base.dose) !== snapshotField(issued.dose) ||
+      snapshotField(base.duration) !== snapshotField(issued.duration) ||
+      snapshotField(base.frequency) !== snapshotField(issued.frequency);
+    if (differs) edited += 1;
+  }
+  return edited;
+}
+
 function stageDisplayName(
   stage: CareCaseStage,
   t: Dictionary["doctorConsole"],
@@ -1381,6 +1418,23 @@ export default function CaseWorkspacePage() {
                               <h3 className="text-sm font-semibold text-txt">
                                 {t.decisionHeading}
                               </h3>
+
+                              {/* Edited-items tracker (#494): display-only
+                                  summary counting working items that differ
+                                  from the immutable AI-draft snapshot, so the
+                                  doctor sees what the approval-time audit
+                                  will derive before issuing. */}
+                              <p
+                                className="mt-1 text-xs font-medium text-txt-muted"
+                                data-testid="edited-tracker"
+                              >
+                                {t.editedTracker(
+                                  countEditedRxItems(
+                                    workingRx.draft_snapshot,
+                                    workingRx.items,
+                                  ),
+                                )}
+                              </p>
 
                               <div className="mt-2" data-testid="approval-gate">
                                 <p className="text-xs text-txt-muted">

@@ -1147,6 +1147,8 @@ const en = {
     rxStatusIssued: "Issued",
     rxStatusFulfilled: "Fulfilled",
     decisionHeading: "Doctor decision",
+    editedTracker: (n: number) =>
+      n === 1 ? "1 item edited by you" : `${n} items edited by you`,
     approvalGateTitle: "Review & approve",
     approvalGateHelp:
       "Confirm you reviewed every item against the patient record before issuing.",
@@ -2263,6 +2265,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
       rxStatusIssued: "जारी हुई",
       rxStatusFulfilled: "पूर्ण हुई",
       decisionHeading: "डॉक्टर का निर्णय",
+      editedTracker: (n: number) => `${n} आइटम आपके द्वारा संपादित`,
       approvalGateTitle: "समीक्षा करें और अनुमोदित करें",
       approvalGateHelp:
         "जारी करने से पहले पुष्टि करें कि आपने हर वस्तु मरीज़ के रिकॉर्ड के अनुसार जाँची है।",

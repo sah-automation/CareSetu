@@ -198,6 +198,22 @@ function prescription(
   };
 }
 
+function rxItem(
+  id: number,
+  overrides: Partial<PrescriptionDetailView["items"][number]> = {},
+): PrescriptionDetailView["items"][number] {
+  return {
+    rx_item_id: id,
+    prescription_id: 21,
+    sequence: 1,
+    name: "Paracetamol",
+    dose: "500mg",
+    duration: "3 days",
+    frequency: "3 times daily",
+    ...overrides,
+  };
+}
+
 function noDraftError(): ApiError {
   return new ApiError({
     code: "CARE_NOT_FOUND",
@@ -1041,6 +1057,205 @@ describe("CaseWorkspacePage approval, rejection, close (#453, US-19..22)", () =>
   });
 });
 
+describe("CaseWorkspacePage edited-items tracker (#494)", () => {
+  it("counts items whose name/dose/duration/frequency differ from the snapshot", async () => {
+    getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
+    getWorkingRx.mockResolvedValue(
+      prescription({
+        items: [
+          rxItem(31, {
+            name: "Paracetamol",
+            dose: "650mg",
+            duration: "3 days",
+            frequency: "3 times daily",
+          }),
+          rxItem(32, {
+            sequence: 2,
+            name: "Azithromycin",
+            dose: "500mg",
+            duration: "5 days",
+            frequency: "1 time daily",
+          }),
+        ],
+        draft_snapshot: {
+          rx_items: [
+            {
+              name: "Paracetamol",
+              dose: "500mg",
+              duration: "3 days",
+              frequency: "3 times daily",
+            },
+            {
+              name: "Azithromycin",
+              dose: "500mg",
+              duration: "5 days",
+              frequency: "1 time daily",
+            },
+          ],
+        },
+      }),
+    );
+    render(<CaseWorkspacePage />);
+
+    await waitFor(() => screen.getByTestId("edited-tracker"));
+    expect(screen.getByTestId("edited-tracker")).toHaveTextContent(
+      t.editedTracker(1),
+    );
+  });
+
+  it("reads an unedited AI draft as 0 items edited", async () => {
+    getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
+    getWorkingRx.mockResolvedValue(
+      prescription({
+        items: [
+          rxItem(31, {
+            name: "Paracetamol",
+            dose: "500mg",
+            duration: "3 days",
+            frequency: "3 times daily",
+          }),
+          rxItem(32, {
+            sequence: 2,
+            name: "Azithromycin",
+            dose: "500mg",
+            duration: "5 days",
+            frequency: "1 time daily",
+          }),
+        ],
+        draft_snapshot: {
+          rx_items: [
+            {
+              name: "Paracetamol",
+              dose: "500mg",
+              duration: "3 days",
+              frequency: "3 times daily",
+            },
+            {
+              name: "Azithromycin",
+              dose: "500mg",
+              duration: "5 days",
+              frequency: "1 time daily",
+            },
+          ],
+        },
+      }),
+    );
+    render(<CaseWorkspacePage />);
+
+    await waitFor(() => screen.getByTestId("edited-tracker"));
+    expect(screen.getByTestId("edited-tracker")).toHaveTextContent(
+      t.editedTracker(0),
+    );
+  });
+
+  it("counts a frequency-only edit as edited", async () => {
+    getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
+    getWorkingRx.mockResolvedValue(
+      prescription({
+        items: [
+          rxItem(31, {
+            name: "Paracetamol",
+            dose: "500mg",
+            duration: "3 days",
+            frequency: "2 times daily",
+          }),
+        ],
+        draft_snapshot: {
+          rx_items: [
+            {
+              name: "Paracetamol",
+              dose: "500mg",
+              duration: "3 days",
+              frequency: "3 times daily",
+            },
+          ],
+        },
+      }),
+    );
+    render(<CaseWorkspacePage />);
+
+    await waitFor(() => screen.getByTestId("edited-tracker"));
+    expect(screen.getByTestId("edited-tracker")).toHaveTextContent(
+      t.editedTracker(1),
+    );
+  });
+
+  it("counts a snapshot item the doctor deleted as edited", async () => {
+    getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
+    getWorkingRx.mockResolvedValue(
+      prescription({
+        items: [
+          rxItem(31, {
+            name: "Paracetamol",
+            dose: "500mg",
+            duration: "3 days",
+            frequency: "3 times daily",
+          }),
+        ],
+        draft_snapshot: {
+          rx_items: [
+            {
+              name: "Paracetamol",
+              dose: "500mg",
+              duration: "3 days",
+              frequency: "3 times daily",
+            },
+            {
+              name: "Azithromycin",
+              dose: "500mg",
+              duration: "5 days",
+              frequency: "1 time daily",
+            },
+          ],
+        },
+      }),
+    );
+    render(<CaseWorkspacePage />);
+
+    await waitFor(() => screen.getByTestId("edited-tracker"));
+    expect(screen.getByTestId("edited-tracker")).toHaveTextContent(
+      t.editedTracker(1),
+    );
+  });
+
+  it("reads a manual prescription (empty snapshot) as all items edited", async () => {
+    getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
+    getWorkingRx.mockResolvedValue(
+      prescription({
+        draft_snapshot: { rx_items: [] },
+        items: [
+          rxItem(31, {
+            name: "Paracetamol",
+            dose: "500mg",
+            duration: "3 days",
+            frequency: "3 times daily",
+          }),
+          rxItem(32, {
+            sequence: 2,
+            name: "Azithromycin",
+            dose: "500mg",
+            duration: "5 days",
+            frequency: "1 time daily",
+          }),
+          rxItem(33, {
+            sequence: 3,
+            name: "ORS sachet",
+            dose: null,
+            duration: "Until resolved",
+            frequency: null,
+          }),
+        ],
+      }),
+    );
+    render(<CaseWorkspacePage />);
+
+    await waitFor(() => screen.getByTestId("edited-tracker"));
+    expect(screen.getByTestId("edited-tracker")).toHaveTextContent(
+      t.editedTracker(3),
+    );
+  });
+});
+
 describe("CaseWorkspacePage failure paths", () => {
   it("shows a retryable error banner when the case fails to load", async () => {
     getCase.mockRejectedValue(
@@ -1158,6 +1373,41 @@ describe("CaseWorkspacePage bilingual parity (REQ-006)", () => {
     );
     expect(screen.getByTestId("case-close")).toHaveTextContent(
       hiT.closeWithoutRxHeading,
+    );
+  });
+
+  it("renders the edited-items tracker copy in Hindi", async () => {
+    getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
+    getWorkingRx.mockResolvedValue(
+      prescription({
+        items: [
+          rxItem(31, {
+            name: "Paracetamol",
+            dose: "650mg",
+            duration: "3 days",
+            frequency: "3 times daily",
+          }),
+        ],
+        draft_snapshot: {
+          rx_items: [
+            {
+              name: "Paracetamol",
+              dose: "500mg",
+              duration: "3 days",
+              frequency: "3 times daily",
+            },
+          ],
+        },
+      }),
+    );
+    render(<LangFlipHost />);
+
+    await waitFor(() => screen.getByTestId("edited-tracker"));
+    fireEvent.click(screen.getByText("flip-lang"));
+    await waitFor(() =>
+      expect(screen.getByTestId("edited-tracker")).toHaveTextContent(
+        hiT.editedTracker(1),
+      ),
     );
   });
 });
