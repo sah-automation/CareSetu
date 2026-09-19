@@ -65,7 +65,16 @@ from modules.intake.facade import IntakeFacade
 
 NOW = datetime.now(UTC)
 
-AI_SNAPSHOT = {"rx_items": [{"name": "mock medication", "dose": "1 tablet", "duration": "5 days"}]}
+AI_SNAPSHOT = {
+    "rx_items": [
+        {
+            "name": "mock medication",
+            "dose": "1 tablet",
+            "duration": "5 days",
+            "frequency": "once daily",
+        }
+    ]
+}
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +252,7 @@ def _rx_item_row(
     name: str = "Para-500",
     dose: str | None = "500mg",
     duration: str | None = "3 days",
+    frequency: str | None = None,
 ) -> object:
     return SimpleNamespace(
         id=item_id,
@@ -251,6 +261,7 @@ def _rx_item_row(
         name=name,
         dose=dose,
         duration=duration,
+        frequency=frequency,
     )
 
 
@@ -517,8 +528,10 @@ async def test_create_manual_draft_writes_working_revision_no_snapshot() -> None
         doctor_id=42,
         source="manual",
         items=[
-            RxItemInput(name="Paracetamol", dose="500mg", duration="3 days"),
-            RxItemInput(name="Vitamin D", dose=None, duration=None),
+            RxItemInput(
+                name="Paracetamol", dose="500mg", duration="3 days", frequency="3 times daily"
+            ),
+            RxItemInput(name="Vitamin D", dose=None, duration=None, frequency=None),
         ],
     )
 
@@ -529,13 +542,17 @@ async def test_create_manual_draft_writes_working_revision_no_snapshot() -> None
     assert result.attempt_no == 1
     assert result.draft_snapshot == {}
     assert [item.name for item in result.items] == ["Paracetamol", "Vitamin D"]
+    assert result.items[0].frequency == "3 times daily"
+    assert result.items[1].frequency is None
 
     item_params = _insert_params(_statements(care_conn), care_rx_items.name)
     assert len(item_params) == 2
     assert item_params[0]["sequence"] == 1
     assert item_params[0]["name"] == "Paracetamol"
+    assert item_params[0]["frequency"] == "3 times daily"
     assert item_params[1]["sequence"] == 2
     assert item_params[1]["name"] == "Vitamin D"
+    assert item_params[1]["frequency"] is None
 
     outbox_params = _stmt_params(_statements(care_conn), CARE_OUTBOX_TABLE)
     assert outbox_params is not None
@@ -641,7 +658,9 @@ async def test_save_rx_revision_replaces_working_revision_and_publishes() -> Non
         rx_id=1,
         doctor_id=42,
         rx_items=[
-            RxItemInput(name="Paracetamol", dose="500mg", duration="5 days"),
+            RxItemInput(
+                name="Paracetamol", dose="500mg", duration="5 days", frequency="after food"
+            ),
             RxItemInput(name="Amoxicillin", dose=None, duration=None),
         ],
     )
@@ -650,6 +669,8 @@ async def test_save_rx_revision_replaces_working_revision_and_publishes() -> Non
     assert result.status == "doctor_reviewed"
     assert result.prescription_id == 1
     assert [item.name for item in result.items] == ["Paracetamol", "Amoxicillin"]
+    assert result.items[0].frequency == "after food"
+    assert result.items[1].frequency is None
 
     items = _statements(care_conn)
     delete_params = _stmt_params(items, care_rx_items.name)
@@ -658,7 +679,9 @@ async def test_save_rx_revision_replaces_working_revision_and_publishes() -> Non
     item_params = _insert_params(items, care_rx_items.name)
     assert len(item_params) == 2
     assert item_params[0]["name"] == "Paracetamol"
+    assert item_params[0]["frequency"] == "after food"
     assert item_params[1]["sequence"] == 2
+    assert item_params[1]["frequency"] is None
 
     rx_params = _stmt_params(items, care_prescriptions.name)
     assert rx_params is not None
@@ -809,12 +832,60 @@ async def test_approve_derives_edited_yn_true_when_revision_differs() -> None:
 
 
 @pytest.mark.asyncio
+async def test_approve_derives_edited_yn_true_when_only_frequency_differs() -> None:
+    """A revision that matches the snapshot everywhere except frequency still
+    audits as edited - ``frequency`` sits on both sides of the comparison so
+    an item edited only in frequency is never lost to the audit."""
+    snapshot = {
+        "rx_items": [
+            {
+                "name": "mock medication",
+                "dose": "1 tablet",
+                "duration": "5 days",
+                "frequency": "once daily",
+            }
+        ]
+    }
+    care_conn = _connection(
+        [
+            _FakeResult(
+                row=_rx_row(status="doctor_reviewed", source="ai_draft", draft_snapshot=snapshot)
+            ),
+            _FakeResult(row=_case_row()),
+            _FakeResult(
+                rows=[
+                    _rx_item_row(
+                        name="mock medication",
+                        dose="1 tablet",
+                        duration="5 days",
+                        frequency="twice daily",
+                    )
+                ]
+            ),
+            _FakeResult(),
+            _FakeResult(),
+            _FakeResult(),
+            _FakeResult(),
+        ]
+    )
+    facade = _care_facade(care_conn, _intake_facade(_connection([])))
+
+    await facade.approve_prescription(
+        case_id=1, rx_id=1, doctor_id=42, verification_declaration=True
+    )
+
+    approval_params = _stmt_params(_statements(care_conn), care_rx_approvals.name)
+    assert approval_params is not None
+    assert approval_params["edited_yn"] is True
+
+
+@pytest.mark.asyncio
 async def test_approve_manual_prescription_is_always_edited() -> None:
     care_conn = _connection(
         [
             _FakeResult(row=_rx_row(source="manual", draft_snapshot={})),
             _FakeResult(row=_case_row()),
-            _FakeResult(rows=[_rx_item_row()]),
+            _FakeResult(rows=[_rx_item_row(frequency="after food")]),
             _FakeResult(),
             _FakeResult(),
             _FakeResult(),

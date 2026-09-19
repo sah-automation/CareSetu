@@ -243,11 +243,16 @@ class DraftRxRequest(BaseModel):
 
 
 class RxItem(BaseModel):
-    """One drafted prescription line (name, dose, duration)."""
+    """One drafted prescription line (name, dose, duration, frequency).
+
+    ``frequency`` is optional - a drafting leg may leave it blank and the
+    value stays null through the whole journey.
+    """
 
     name: str
     dose: str
     duration: str
+    frequency: str | None = None
 
 
 class DraftRxResult(BaseModel):

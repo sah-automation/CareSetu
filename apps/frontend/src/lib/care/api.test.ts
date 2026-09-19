@@ -58,6 +58,7 @@ const prescriptionView = {
       name: "Paracetamol",
       dose: "500mg",
       duration: "3 days",
+      frequency: "3 times daily",
     },
   ],
   created_at: "2026-09-10T00:00:00Z",

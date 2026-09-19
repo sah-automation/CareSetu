@@ -83,6 +83,7 @@ def _to_rx_item_view(row: Row[Any]) -> RxItemView:
         name=row.name,
         dose=row.dose,
         duration=row.duration,
+        frequency=row.frequency,
     )
 
 
@@ -91,18 +92,30 @@ def _derive_edited_yn(snapshot: DraftSnapshot, items: list[RxItemView]) -> bool:
 
     ``edited`` tells an auditor whether the approved prescription differs from
     the AI draft (CONTEXT.md glossary, ``edited_yn``): the snapshot's frozen
-    ``rx_items`` (list of ``{name, dose, duration}`` maps) are compared
-    positionally against the doctor's working revision. Never set by hand or
-    from client input - derived here at approval. A manual prescription
-    carries an empty snapshot, so it always reads as edited (there was no AI
-    draft to compare against).
+    ``rx_items`` (list of ``{name, dose, duration, frequency}`` maps) are
+    compared positionally against the doctor's working revision. ``frequency``
+    sits on BOTH sides of the comparison so an item edited only in frequency
+    still reads as edited; ``.get()`` keeps legacy snapshots that predate the
+    field comparable (their missing frequency equals an unset one). Never set
+    by hand or from client input - derived here at approval. A manual
+    prescription carries an empty snapshot, so it always reads as edited
+    (there was no AI draft to compare against).
     """
-    baseline = snapshot.get("rx_items") or []
+    baseline = [
+        {
+            "name": item.get("name"),
+            "dose": item.get("dose"),
+            "duration": item.get("duration"),
+            "frequency": item.get("frequency"),
+        }
+        for item in (snapshot.get("rx_items") or [])
+    ]
     issued = [
         {
             "name": item.name,
             "dose": item.dose,
             "duration": item.duration,
+            "frequency": item.frequency,
         }
         for item in items
     ]
@@ -282,6 +295,7 @@ class PrescriptionFacade:
                     name=items[i].name,
                     dose=items[i].dose,
                     duration=items[i].duration,
+                    frequency=items[i].frequency,
                 )
                 for i in range(len(items))
             ]
@@ -387,6 +401,7 @@ class PrescriptionFacade:
                     name=rx_items[i].name,
                     dose=rx_items[i].dose,
                     duration=rx_items[i].duration,
+                    frequency=rx_items[i].frequency,
                 )
                 for i in range(len(rx_items))
             ]
@@ -902,6 +917,7 @@ class PrescriptionFacade:
                     name=item.name,
                     dose=item.dose,
                     duration=item.duration,
+                    frequency=item.frequency,
                 )
                 .returning(care_rx_items.c.id)
             )

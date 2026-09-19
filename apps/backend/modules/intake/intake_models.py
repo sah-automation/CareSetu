@@ -311,14 +311,16 @@ class RxDraftItem(BaseModel):
 
     Mirrors the AI gateway's ``RxItem`` shape (``ai_gateway.py``) at the
     facade boundary so callers depend on the typed facade surface, never the
-    concrete adapter DTOs. ``dose`` and ``duration`` are optional in the
-    stored revision even though the drafting leg always supplies them:
-    ``save_rx_revision`` accepts a doctor-authored working revision.
+    concrete adapter DTOs. ``dose``, ``duration`` and ``frequency`` are
+    optional in the stored revision even though the drafting leg always
+    supplies ``dose``/``duration``: ``save_rx_revision`` accepts a
+    doctor-authored working revision, and frequency may be left blank.
     """
 
     name: str
     dose: str | None = None
     duration: str | None = None
+    frequency: str | None = None
 
 
 class RxDraftResult(BaseModel):

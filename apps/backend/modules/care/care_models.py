@@ -23,9 +23,10 @@ CARE_SCHEMA = "care"
 
 #: Typed alias for the JSONB prescription draft snapshot payload. The JSONB
 #: column stores arbitrary JSON (the AI drafting leg's frozen baseline, e.g.
-#: ``{"rx_items": [{"name", "dose", "duration"}, ...]}``); ``Any`` values keep
-#: the typed boundary honest about a JSONB artifact (CONTEXT.md glossary,
-#: ``draft snapshot``). ``edited_yn`` derivation reads this frozen shape.
+#: ``{"rx_items": [{"name", "dose", "duration", "frequency"}, ...]}``);
+#: ``Any`` values keep the typed boundary honest about a JSONB artifact
+#: (CONTEXT.md glossary, ``draft snapshot``). ``edited_yn`` derivation reads
+#: this frozen shape.
 DraftSnapshot = dict[str, Any]
 
 
@@ -83,21 +84,24 @@ class RxItemView(BaseModel):
     name: str
     dose: str | None
     duration: str | None
+    frequency: str | None = None
 
 
 class RxItemInput(BaseModel):
     """A medication line a doctor authors or edits in the working revision.
 
     The typed input shape for ``create_rx_draft(source="manual")`` and
-    ``save_rx_revision``: ``name`` is required, ``dose``/``duration`` optional
-    (a doctor may leave a dosage open for the pharmacist). It deliberately
-    carries no ids - the facade assigns ``sequence`` and the row ids when the
-    working revision is persisted to ``care_rx_items``.
+    ``save_rx_revision``: ``name`` is required, ``dose``/``duration``/
+    ``frequency`` optional (a doctor may leave a dosage or frequency open for
+    the pharmacist). It deliberately carries no ids - the facade assigns
+    ``sequence`` and the row ids when the working revision is persisted to
+    ``care_rx_items``.
     """
 
     name: str
     dose: str | None = None
     duration: str | None = None
+    frequency: str | None = None
 
 
 class PrescriptionDetailView(BaseModel):

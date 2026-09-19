@@ -672,7 +672,10 @@ def test_rx_draft_manual_forwards_items() -> None:
 
     response = client.post(
         "/v1/care/cases/42/rx/draft",
-        json={"source": "manual", "items": [{"name": "Paracetamol", "dose": "500mg"}]},
+        json={
+            "source": "manual",
+            "items": [{"name": "Paracetamol", "dose": "500mg", "frequency": "3 times daily"}],
+        },
         headers=_bearer(_token()),
     )
 
@@ -682,6 +685,7 @@ def test_rx_draft_manual_forwards_items() -> None:
     assert items[0].name == "Paracetamol"
     assert items[0].dose == "500mg"
     assert items[0].duration is None
+    assert items[0].frequency == "3 times daily"
 
 
 def test_rx_draft_invalid_source_rejected() -> None:
@@ -723,7 +727,16 @@ def test_revision_returns_prescription_view() -> None:
 
     response = client.post(
         "/v1/care/cases/42/rx/301/revision",
-        json={"rx_items": [{"name": "Paracetamol", "dose": "500mg", "duration": "5 days"}]},
+        json={
+            "rx_items": [
+                {
+                    "name": "Paracetamol",
+                    "dose": "500mg",
+                    "duration": "5 days",
+                    "frequency": "after food",
+                }
+            ]
+        },
         headers=_bearer(_token()),
     )
 
@@ -734,6 +747,7 @@ def test_revision_returns_prescription_view() -> None:
     assert call_kwargs["rx_id"] == 301
     assert call_kwargs["doctor_id"] == 5
     assert call_kwargs["rx_items"][0].name == "Paracetamol"
+    assert call_kwargs["rx_items"][0].frequency == "after food"
 
 
 def test_revision_unknown_field_rejected() -> None:

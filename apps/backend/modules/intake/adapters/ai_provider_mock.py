@@ -113,6 +113,7 @@ class MockAiProvider:
                     name="mock medication",
                     dose="1 tablet",
                     duration="5 days",
+                    frequency="once daily",
                 )
             ],
             confidence=self._confidence,

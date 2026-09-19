@@ -64,13 +64,19 @@ import { useLang } from "@/lib/i18n/LangContext";
 // The editor's row shape: form fields are plain strings (empty = not set),
 // while the API layer speaks nullable dose/duration. One mapping keeps the
 // two representations from drifting apart.
-type EditorRxItem = { name: string; dose: string; duration: string };
+type EditorRxItem = {
+  name: string;
+  dose: string;
+  duration: string;
+  frequency: string;
+};
 
 function toEditorItems(items: RxItemView[]): EditorRxItem[] {
   return items.map((i) => ({
     name: i.name,
     dose: i.dose ?? "",
     duration: i.duration ?? "",
+    frequency: i.frequency ?? "",
   }));
 }
 
@@ -493,6 +499,7 @@ export default function CaseWorkspacePage() {
         name: r.name.trim(),
         dose: r.dose.trim() || null,
         duration: r.duration.trim() || null,
+        frequency: r.frequency.trim() || null,
       }))
       .filter((r) => r.name !== "");
     setSaving(true);
@@ -583,7 +590,7 @@ export default function CaseWorkspacePage() {
 
   function updateRxItem(
     index: number,
-    field: "name" | "dose" | "duration",
+    field: "name" | "dose" | "duration" | "frequency",
     value: string,
   ) {
     setRxItems((prev) =>
@@ -593,7 +600,10 @@ export default function CaseWorkspacePage() {
   }
 
   function addRxItem() {
-    setRxItems((prev) => [...prev, { name: "", dose: "", duration: "" }]);
+    setRxItems((prev) => [
+      ...prev,
+      { name: "", dose: "", duration: "", frequency: "" },
+    ]);
     setSaveSuccess(false);
   }
 
@@ -1174,6 +1184,25 @@ export default function CaseWorkspacePage() {
                                       </label>
                                       <label className="flex-1 min-w-28">
                                         <span className="sr-only">
+                                          {t.rxFrequencyLabel}: {idx + 1}
+                                        </span>
+                                        <input
+                                          type="text"
+                                          value={row.frequency}
+                                          onChange={(e) =>
+                                            updateRxItem(
+                                              idx,
+                                              "frequency",
+                                              e.target.value,
+                                            )
+                                          }
+                                          placeholder={t.rxFrequencyLabel}
+                                          className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                                          data-testid={`rx-item-frequency-${idx}`}
+                                        />
+                                      </label>
+                                      <label className="flex-1 min-w-28">
+                                        <span className="sr-only">
                                           {t.rxDurationLabel}: {idx + 1}
                                         </span>
                                         <input
@@ -1284,6 +1313,9 @@ export default function CaseWorkspacePage() {
                                   >
                                     {item.name}
                                     {item.dose != null ? ` - ${item.dose}` : ""}
+                                    {item.frequency != null
+                                      ? ` - ${item.frequency}`
+                                      : ""}
                                     {item.duration != null
                                       ? ` - ${item.duration}`
                                       : ""}

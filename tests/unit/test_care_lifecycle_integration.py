@@ -69,7 +69,16 @@ from modules.intake.facade import IntakeFacade
 
 NOW = datetime.now(UTC)
 
-AI_SNAPSHOT = {"rx_items": [{"name": "mock medication", "dose": "1 tablet", "duration": "5 days"}]}
+AI_SNAPSHOT = {
+    "rx_items": [
+        {
+            "name": "mock medication",
+            "dose": "1 tablet",
+            "duration": "5 days",
+            "frequency": "once daily",
+        }
+    ]
+}
 
 REVISED_ITEMS = [
     RxItemInput(name="Para-500", dose="500mg", duration="3 days"),
@@ -228,6 +237,7 @@ def _rx_item_row(item_id: int, name: str, *, sequence: int | None = None) -> obj
         name=name,
         dose=dose,
         duration="3 days",
+        frequency=None,
     )
 
 
@@ -651,7 +661,14 @@ class TestEditedYnLifecycle:
 
     @pytest.mark.asyncio
     async def test_unchanged_revision_audits_as_never_edited(self) -> None:
-        unchanged_items = [RxItemInput(name="mock medication", dose="1 tablet", duration="5 days")]
+        unchanged_items = [
+            RxItemInput(
+                name="mock medication",
+                dose="1 tablet",
+                duration="5 days",
+                frequency="once daily",
+            )
+        ]
         unchanged_row = SimpleNamespace(
             id=1,
             prescription_id=1,
@@ -659,6 +676,7 @@ class TestEditedYnLifecycle:
             name="mock medication",
             dose="1 tablet",
             duration="5 days",
+            frequency="once daily",
         )
 
         # Save a revision that matches the AI draft snapshot exactly.
@@ -727,3 +745,116 @@ class TestEditedYnLifecycle:
         )
         approval = _stmt_params(_statements(approve_conn), "care_rx_approvals")
         assert approval["edited_yn"] is True
+
+
+class TestFrequencyRoundTrip:
+    """Frequency survives the whole journey: manual draft -> save -> approve
+    -> issued read (PHASE-8.1 T10a, #493)."""
+
+    @pytest.mark.asyncio
+    async def test_frequency_survives_manual_draft_save_approve_issued_read(self) -> None:
+        draft_conn = _connection(
+            [
+                _FakeResult(row=_case_row(stage="prescription_pending")),
+                _FakeResult(row=None),
+                _FakeResult(scalar=202),
+                _FakeResult(scalar=101),
+                _FakeResult(scalar=102),
+                _FakeResult(),
+            ]
+        )
+        authored = await _rx_facade(draft_conn, _intake_facade(_connection([]))).create_rx_draft(
+            case_id=1,
+            doctor_id=42,
+            source="manual",
+            items=[
+                RxItemInput(
+                    name="Paracetamol", dose="500mg", duration="3 days", frequency="3 times daily"
+                ),
+                RxItemInput(name="Vitamin D", dose=None, duration=None),
+            ],
+        )
+        assert authored.items[0].frequency == "3 times daily"
+        assert authored.items[1].frequency is None
+
+        save_conn = _connection(
+            [
+                _FakeResult(row=_rx_row(source="manual")),
+                _FakeResult(row=_case_row(stage="prescription_pending")),
+                _FakeResult(),
+                _FakeResult(scalar=104),
+                _FakeResult(scalar=105),
+                _FakeResult(),
+                _FakeResult(),
+            ]
+        )
+        reviewed = await _rx_facade(save_conn, _intake_facade(_connection([]))).save_rx_revision(
+            case_id=1,
+            rx_id=1,
+            doctor_id=42,
+            rx_items=[
+                RxItemInput(
+                    name="Paracetamol", dose="500mg", duration="3 days", frequency="twice daily"
+                ),
+                RxItemInput(name="Vitamin D", dose=None, duration=None),
+            ],
+        )
+        assert reviewed.items[0].frequency == "twice daily"
+        assert reviewed.items[1].frequency is None
+
+        saved_rows = [
+            SimpleNamespace(
+                id=104,
+                prescription_id=1,
+                sequence=1,
+                name="Paracetamol",
+                dose="500mg",
+                duration="3 days",
+                frequency="twice daily",
+            ),
+            SimpleNamespace(
+                id=105,
+                prescription_id=1,
+                sequence=2,
+                name="Vitamin D",
+                dose=None,
+                duration=None,
+                frequency=None,
+            ),
+        ]
+        approve_conn = _connection(
+            [
+                _FakeResult(row=_rx_row(status="doctor_reviewed", source="manual")),
+                _FakeResult(row=_case_row(stage="prescription_pending")),
+                _FakeResult(rows=saved_rows),
+                _FakeResult(),
+                _FakeResult(),
+                _FakeResult(),
+                _FakeResult(),
+            ]
+        )
+        issued = await _rx_facade(
+            approve_conn, _intake_facade(_connection([]))
+        ).approve_prescription(case_id=1, rx_id=1, doctor_id=42, verification_declaration=True)
+        assert issued.items[0].frequency == "twice daily"
+        assert issued.items[1].frequency is None
+
+        read_conn = _connection(
+            [
+                _FakeResult(
+                    row=_rx_row(
+                        status="issued",
+                        source="manual",
+                        issued_at=NOW,
+                        attributed_doctor=42,
+                    )
+                ),
+                _FakeResult(row=_case_row()),
+                _FakeResult(rows=saved_rows),
+            ]
+        )
+        artifact = await _rx_facade(
+            read_conn, _intake_facade(_connection([]))
+        ).get_approved_prescription(rx_id=1, doctor_id=42)
+        assert artifact.items[0].frequency == "twice daily"
+        assert artifact.items[1].frequency is None

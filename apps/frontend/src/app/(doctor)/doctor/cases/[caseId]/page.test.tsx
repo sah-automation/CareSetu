@@ -189,6 +189,7 @@ function prescription(
         name: "Paracetamol",
         dose: "500mg",
         duration: "3 days",
+        frequency: "3 times daily",
       },
     ],
     created_at: "2026-09-13T00:00:00Z",
@@ -618,6 +619,9 @@ describe("CaseWorkspacePage prescription drafting (US-18/#452)", () => {
     expect(screen.getByTestId("rx-item-name-0")).toHaveValue("Paracetamol");
     expect(screen.getByTestId("rx-item-dose-0")).toHaveValue("500mg");
     expect(screen.getByTestId("rx-item-duration-0")).toHaveValue("3 days");
+    expect(screen.getByTestId("rx-item-frequency-0")).toHaveValue(
+      "3 times daily",
+    );
   });
 
   it("offers the AI-draft request when no working revision exists", async () => {
@@ -669,8 +673,13 @@ describe("CaseWorkspacePage prescription drafting (US-18/#452)", () => {
     );
     expect(doSaveRevision).toHaveBeenCalledWith(11, 21, {
       rx_items: [
-        { name: "Paracetamol", dose: "650mg", duration: "3 days" },
-        { name: "ORS", dose: null, duration: null },
+        {
+          name: "Paracetamol",
+          dose: "650mg",
+          duration: "3 days",
+          frequency: "3 times daily",
+        },
+        { name: "ORS", dose: null, duration: null, frequency: null },
       ],
     });
     expect(screen.getByText(t.revisionSaved)).toBeTruthy();
@@ -688,6 +697,7 @@ describe("CaseWorkspacePage prescription drafting (US-18/#452)", () => {
             name: "Paracetamol",
             dose: "500mg",
             duration: "3 days",
+            frequency: null,
           },
           {
             rx_item_id: 32,
@@ -696,6 +706,7 @@ describe("CaseWorkspacePage prescription drafting (US-18/#452)", () => {
             name: "ORS",
             dose: null,
             duration: null,
+            frequency: null,
           },
         ],
       }),
@@ -711,7 +722,41 @@ describe("CaseWorkspacePage prescription drafting (US-18/#452)", () => {
       expect(screen.getByTestId("revision-saved")).toBeTruthy(),
     );
     expect(doSaveRevision).toHaveBeenCalledWith(11, 21, {
-      rx_items: [{ name: "Paracetamol", dose: "500mg", duration: "3 days" }],
+      rx_items: [
+        {
+          name: "Paracetamol",
+          dose: "500mg",
+          duration: "3 days",
+          frequency: null,
+        },
+      ],
+    });
+  });
+
+  it("persists an edited frequency when the revision is saved", async () => {
+    getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
+    getWorkingRx.mockResolvedValue(prescription());
+    doSaveRevision.mockResolvedValue(prescription());
+    render(<CaseWorkspacePage />);
+
+    await waitFor(() => screen.getByTestId("prescription-editor"));
+    fireEvent.change(screen.getByTestId("rx-item-frequency-0"), {
+      target: { value: "4 times daily" },
+    });
+    fireEvent.click(screen.getByTestId("save-revision-action"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("revision-saved")).toBeTruthy(),
+    );
+    expect(doSaveRevision).toHaveBeenCalledWith(11, 21, {
+      rx_items: [
+        {
+          name: "Paracetamol",
+          dose: "500mg",
+          duration: "3 days",
+          frequency: "4 times daily",
+        },
+      ],
     });
   });
 
@@ -834,6 +879,9 @@ describe("CaseWorkspacePage approval, rejection, close (#453, US-19..22)", () =>
     expect(screen.getByTestId("rx-status")).toHaveTextContent(t.rxStatusIssued);
     expect(screen.getByTestId("issued-rx-item")).toHaveTextContent(
       "Paracetamol",
+    );
+    expect(screen.getByTestId("issued-rx-item")).toHaveTextContent(
+      "3 times daily",
     );
     expect(screen.getByText(t.issuedHeading)).toBeTruthy();
     expect(screen.getByTestId("issued-attribution")).toHaveTextContent(

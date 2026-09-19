@@ -1367,7 +1367,12 @@ class IntakeFacade:
             doctor_input_ref=doctor_input_ref,
             pre_summary_ref=pre_summary_ref,
             rx_items=[
-                RxDraftItem(name=item.name, dose=item.dose, duration=item.duration)
+                RxDraftItem(
+                    name=item.name,
+                    dose=item.dose,
+                    duration=item.duration,
+                    frequency=item.frequency,
+                )
                 for item in draft_result.rx_items
             ],
             confidence=draft_result.confidence,

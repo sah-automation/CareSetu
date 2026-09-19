@@ -179,6 +179,7 @@ care_rx_items = Table(
     Column("name", String(200), nullable=False),
     Column("dose", String(100), nullable=True),
     Column("duration", String(100), nullable=True),
+    Column("frequency", String(100), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Index("ix_care_rx_items_prescription", "prescription_id"),
 )

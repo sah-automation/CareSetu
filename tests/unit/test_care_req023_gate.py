@@ -49,7 +49,16 @@ from modules.intake.facade import IntakeFacade
 
 NOW = datetime.now(UTC)
 
-AI_SNAPSHOT = {"rx_items": [{"name": "mock medication", "dose": "1 tablet", "duration": "5 days"}]}
+AI_SNAPSHOT = {
+    "rx_items": [
+        {
+            "name": "mock medication",
+            "dose": "1 tablet",
+            "duration": "5 days",
+            "frequency": "once daily",
+        }
+    ]
+}
 
 _ALL_STATUSES: list[PrescriptionStatus] = list(PrescriptionStatus)
 _ALL_ACTIONS: list[PrescriptionAction] = list(PrescriptionAction)
@@ -284,6 +293,7 @@ def _rx_item_row(
     name: str = "Para-500",
     dose: str | None = "500mg",
     duration: str | None = "3 days",
+    frequency: str | None = None,
 ) -> object:
     return SimpleNamespace(
         id=item_id,
@@ -292,6 +302,7 @@ def _rx_item_row(
         name=name,
         dose=dose,
         duration=duration,
+        frequency=frequency,
     )
 
 
@@ -410,7 +421,14 @@ class TestFacadeApprovalGate:
                 ),
                 _FakeResult(row=_case_row()),
                 _FakeResult(
-                    rows=[_rx_item_row(name="mock medication", dose="1 tablet", duration="5 days")]
+                    rows=[
+                        _rx_item_row(
+                            name="mock medication",
+                            dose="1 tablet",
+                            duration="5 days",
+                            frequency="once daily",
+                        )
+                    ]
                 ),
                 _FakeResult(),
                 _FakeResult(),

@@ -56,7 +56,16 @@ from modules.intake.facade import IntakeFacade
 
 NOW = datetime.now(UTC)
 
-AI_SNAPSHOT = {"rx_items": [{"name": "mock medication", "dose": "1 tablet", "duration": "5 days"}]}
+AI_SNAPSHOT = {
+    "rx_items": [
+        {
+            "name": "mock medication",
+            "dose": "1 tablet",
+            "duration": "5 days",
+            "frequency": "once daily",
+        }
+    ]
+}
 
 
 class _FakeResult:
@@ -208,6 +217,7 @@ def _rx_item_row(
     name: str = "mock medication",
     dose: str | None = "1 tablet",
     duration: str | None = "5 days",
+    frequency: str | None = None,
 ) -> object:
     return SimpleNamespace(
         id=sequence,
@@ -216,6 +226,7 @@ def _rx_item_row(
         name=name,
         dose=dose,
         duration=duration,
+        frequency=frequency,
     )
 
 

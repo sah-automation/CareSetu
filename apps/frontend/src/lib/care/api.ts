@@ -44,6 +44,7 @@ export interface RxItemInput {
   name: string;
   dose?: string | null;
   duration?: string | null;
+  frequency?: string | null;
 }
 
 export interface RxItemView {
@@ -53,6 +54,7 @@ export interface RxItemView {
   name: string;
   dose: string | null;
   duration: string | null;
+  frequency: string | null;
 }
 
 export interface PrescriptionDetailView {
@@ -126,7 +128,8 @@ function isRxItemView(value: unknown): value is RxItemView {
     "sequence" in value &&
     "name" in value &&
     "dose" in value &&
-    "duration" in value
+    "duration" in value &&
+    "frequency" in value
   );
 }
 

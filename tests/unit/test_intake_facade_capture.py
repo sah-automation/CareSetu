@@ -611,7 +611,12 @@ async def test_request_rx_draft_delegates_to_ai_gateway() -> None:
     assert result.doctor_input_ref == 101
     assert result.pre_summary_ref == 5
     assert result.rx_items == [
-        RxDraftItem(name="mock medication", dose="1 tablet", duration="5 days")
+        RxDraftItem(
+            name="mock medication",
+            dose="1 tablet",
+            duration="5 days",
+            frequency="once daily",
+        )
     ]
     assert result.confidence >= 0.0
     assert len(gateway.calls) == 1
