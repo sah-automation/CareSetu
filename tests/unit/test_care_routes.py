@@ -173,6 +173,7 @@ _RX_ISSUED_VIEW = PrescriptionDetailView(
     draft_snapshot={},
     issued_at=datetime(2026, 9, 2, 12, 0, tzinfo=UTC),
     attributed_doctor=5,
+    attributed_doctor_name="Shanti Clinic",
     items=[
         RxItemView(
             rx_item_id=1,
@@ -923,6 +924,40 @@ def test_get_approved_prescription_non_doctor_rejected() -> None:
 
     assert response.status_code == 403
     assert response.json()["code"] == "AUTH_INSUFFICIENT_SCOPE"
+
+
+def test_get_approved_prescription_surfaces_attribution_name_on_the_wire() -> None:
+    """The issued read carries the facade-resolved doctor name verbatim (#495, T10c).
+
+    Resolution itself lives in the facade seam (facade-level tests); the route
+    is a thin pass-through and must not touch the partner facade.
+    """
+    facade = StubPrescriptionFacade()
+    facade.rx_issued_view = _RX_ISSUED_VIEW.model_copy(
+        update={"attributed_doctor_name": "Dr. Arora Clinic"}
+    )
+    client = _client(rx_facade=facade)
+    partner: StubPartnerFacade = client.app.state.partner_facade
+
+    response = client.get("/v1/care/prescriptions/301", headers=_bearer(_token()))
+
+    assert response.status_code == 200
+    assert response.json()["attributed_doctor_name"] == "Dr. Arora Clinic"
+    assert partner.resolve_calls == [1]
+
+
+def test_get_approved_prescription_passthrough_null_attribution_name() -> None:
+    """An unresolved attribution flows through as null - never an error."""
+    facade = StubPrescriptionFacade()
+    facade.rx_issued_view = _RX_ISSUED_VIEW.model_copy(
+        update={"attributed_doctor": None, "attributed_doctor_name": None}
+    )
+    client = _client(rx_facade=facade)
+
+    response = client.get("/v1/care/prescriptions/301", headers=_bearer(_token()))
+
+    assert response.status_code == 200
+    assert response.json()["attributed_doctor_name"] is None
 
 
 # ---------------------------------------------------------------------------

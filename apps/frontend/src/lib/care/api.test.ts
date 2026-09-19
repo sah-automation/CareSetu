@@ -50,6 +50,7 @@ const prescriptionView = {
   draft_snapshot: { rx_items: [] },
   issued_at: null,
   attributed_doctor: 7,
+  attributed_doctor_name: null,
   items: [
     {
       rx_item_id: 31,
@@ -287,6 +288,7 @@ describe("approvePrescription", () => {
       ...prescriptionView,
       status: "issued",
       issued_at: "2026-09-10T01:00:00Z",
+      attributed_doctor_name: "Dr. Priya Verma",
     };
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(issuedView));
     vi.stubGlobal("fetch", fetchMock);

@@ -1363,7 +1363,8 @@ export default function CaseWorkspacePage() {
                                 className="mt-2 text-xs text-txt-muted"
                                 data-testid="issued-attribution"
                               >
-                                {t.issuedAttributedTo}
+                                {workingRx.attributed_doctor_name?.trim() ||
+                                  t.issuedAttributedTo}
                               </p>
                             </div>
                           )}

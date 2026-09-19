@@ -170,6 +170,9 @@ from modules.partner.domain.exceptions import (
     PartnerSuspendedError as PartnerSuspendedError,
 )
 from modules.partner.domain.exceptions import (
+    ProviderProfileNotFoundError as ProviderProfileNotFoundError,
+)
+from modules.partner.domain.exceptions import (
     ReSubmissionThrottledError as ReSubmissionThrottledError,
 )
 from modules.partner.domain.state_machine import (

@@ -108,7 +108,8 @@ class PrescriptionDetailView(BaseModel):
     """The read projection returned by get_approved_prescription.
 
     Carries the prescription lifecycle fields, source, draft snapshot,
-    issued timestamp, attributed doctor, and the list of medication items.
+    issued timestamp, the attributed doctor (its partner id plus the
+    resolving display name when readable), and the list of medication items.
     """
 
     prescription_id: int
@@ -119,6 +120,7 @@ class PrescriptionDetailView(BaseModel):
     draft_snapshot: DraftSnapshot
     issued_at: datetime | None
     attributed_doctor: int | None
+    attributed_doctor_name: str | None = None
     items: list[RxItemView]
     created_at: datetime
     updated_at: datetime

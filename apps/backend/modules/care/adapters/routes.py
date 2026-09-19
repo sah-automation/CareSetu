@@ -437,7 +437,9 @@ async def get_approved_prescription(
     (status ``issued`` and ``issued_at`` set); a draft, rejected, or not-yet-
     issued prescription reads as ``CARE_NOT_FOUND`` from the facade. The
     authenticated ``doctor_id`` is forwarded so the facade refuses a foreign
-    doctor's prescription with the not-found envelope.
+    doctor's prescription with the not-found envelope. The issued projection
+    already carries the doctor's display name (``attributed_doctor_name``)
+    resolved by the care facade's partner seam (#495, T10c).
     """
     facade = cast(PrescriptionFacade, request.app.state.prescription_facade)
     doctor_id = await _require_doctor(request, account)

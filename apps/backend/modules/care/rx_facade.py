@@ -19,6 +19,7 @@ performs a raw history read.
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -148,6 +149,13 @@ class PrescriptionFacade:
     consent-gated history read for AI drafting delegates to (NFR-SEC-006,
     fail-closed). ``doctor_id`` is the partner's MOD-001 gateway identity
     (``partner_id``) and is recorded on every write for attribution.
+
+    ``attributed_doctor_name_resolver`` is the module-isolated seam (#495,
+    T10c) that enriches an issued prescription with the issuing doctor's
+    display name: a callable from a partner id to a name (or ``None`` when
+    the attribution cannot resolve - the frontend degrades to the existing
+    "attributed to you" copy). It is wired at the composition root against
+    the partner facade - the care module never imports partner internals.
     """
 
     def __init__(
@@ -156,10 +164,29 @@ class PrescriptionFacade:
         *,
         intake_facade: IntakeFacade,
         health_facade: HealthFacade | None = None,
+        attributed_doctor_name_resolver: Callable[[int], Awaitable[str | None]] | None = None,
     ) -> None:
         self._engine = engine
         self._intake_facade = intake_facade
         self._health_facade = health_facade
+        self._attributed_doctor_name_resolver = attributed_doctor_name_resolver
+
+    async def _with_attributed_name(self, view: PrescriptionDetailView) -> PrescriptionDetailView:
+        """Enrich an issued view with the issuing doctor's display name.
+
+        Resolves ``attributed_doctor`` through the injected partner seam
+        (``None`` resolves to ``None`` - the "attributed to you" fallback) and
+        returns a copy carrying ``attributed_doctor_name``. A missing seam or
+        an unattributed view returns the view unchanged; only the two issued
+        surfaces (approve and the approved read) call this, so in-progress
+        reads never trigger a partner call.
+        """
+        if self._attributed_doctor_name_resolver is None or view.attributed_doctor is None:
+            return view
+        name = await self._attributed_doctor_name_resolver(view.attributed_doctor)
+        if name is None:
+            return view
+        return view.model_copy(update={"attributed_doctor_name": name})
 
     async def create_rx_draft(
         self,
@@ -540,18 +567,20 @@ class PrescriptionFacade:
                 ),
             )
 
-            return PrescriptionDetailView(
-                prescription_id=rx_id,
-                case_id=case_id,
-                status=next_state.status.value,
-                source=rx_row.source,
-                attempt_no=int(rx_row.attempt_no),
-                draft_snapshot=rx_row.draft_snapshot,
-                issued_at=issued_at,
-                attributed_doctor=doctor_id,
-                items=items,
-                created_at=rx_row.created_at,
-                updated_at=issued_at,
+            return await self._with_attributed_name(
+                PrescriptionDetailView(
+                    prescription_id=rx_id,
+                    case_id=case_id,
+                    status=next_state.status.value,
+                    source=rx_row.source,
+                    attempt_no=int(rx_row.attempt_no),
+                    draft_snapshot=rx_row.draft_snapshot,
+                    issued_at=issued_at,
+                    attributed_doctor=doctor_id,
+                    items=items,
+                    created_at=rx_row.created_at,
+                    updated_at=issued_at,
+                )
             )
 
     async def reject_prescription(
@@ -662,6 +691,11 @@ class PrescriptionFacade:
         frozen, attributed artifact with no supersede or void path. A draft,
         rejected, or not-yet-issued prescription reads as not found.
 
+        The issued projection carries the issuing doctor's display name
+        (``attributed_doctor_name``) via the injected partner seam (#495,
+        T10c); an unresolvable attribution degrades to ``None`` so the
+        "attributed to you" copy stands in, never an error.
+
         Raises :class:`CareNotFoundError` when no issued prescription exists
         for ``rx_id`` or the doctor does not own the case.
         """
@@ -693,18 +727,20 @@ class PrescriptionFacade:
                 )
             ).all()
 
-        return PrescriptionDetailView(
-            prescription_id=int(rx_row.id),
-            case_id=int(rx_row.case_id),
-            status=rx_row.status,
-            source=rx_row.source,
-            attempt_no=int(rx_row.attempt_no),
-            draft_snapshot=rx_row.draft_snapshot,
-            issued_at=rx_row.issued_at,
-            attributed_doctor=rx_row.attributed_doctor,
-            items=[_to_rx_item_view(row) for row in item_rows],
-            created_at=rx_row.created_at,
-            updated_at=rx_row.updated_at,
+        return await self._with_attributed_name(
+            PrescriptionDetailView(
+                prescription_id=int(rx_row.id),
+                case_id=int(rx_row.case_id),
+                status=rx_row.status,
+                source=rx_row.source,
+                attempt_no=int(rx_row.attempt_no),
+                draft_snapshot=rx_row.draft_snapshot,
+                issued_at=rx_row.issued_at,
+                attributed_doctor=rx_row.attributed_doctor,
+                items=[_to_rx_item_view(row) for row in item_rows],
+                created_at=rx_row.created_at,
+                updated_at=rx_row.updated_at,
+            )
         )
 
     async def get_working_prescription(

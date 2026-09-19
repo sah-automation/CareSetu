@@ -66,6 +66,7 @@ export interface PrescriptionDetailView {
   draft_snapshot: Record<string, unknown>;
   issued_at: string | null;
   attributed_doctor: number | null;
+  attributed_doctor_name: string | null;
   items: RxItemView[];
   created_at: string;
   updated_at: string;
@@ -147,6 +148,7 @@ function isPrescriptionDetailView(
     "draft_snapshot" in value &&
     "issued_at" in value &&
     "attributed_doctor" in value &&
+    "attributed_doctor_name" in value &&
     "items" in value &&
     Array.isArray((value as PrescriptionDetailView).items) &&
     (value as PrescriptionDetailView).items.every(isRxItemView)

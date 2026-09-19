@@ -181,6 +181,7 @@ function prescription(
     draft_snapshot: { rx_items: [] },
     issued_at: null,
     attributed_doctor: 7,
+    attributed_doctor_name: null,
     items: [
       {
         rx_item_id: 31,
@@ -906,6 +907,27 @@ describe("CaseWorkspacePage approval, rejection, close (#453, US-19..22)", () =>
     expect(screen.getByTestId("issued-at")).toBeTruthy();
   });
 
+  it("renders the issuing doctor's name in place of the attribution copy", async () => {
+    getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
+    getWorkingRx.mockResolvedValue(prescription());
+    doApprove.mockResolvedValue({
+      ...prescription(),
+      status: "issued",
+      issued_at: "2026-09-14T09:30:00Z",
+      attributed_doctor_name: "Dr. Priya Verma",
+    });
+    render(<CaseWorkspacePage />);
+
+    await waitFor(() => screen.getByTestId("approve-issue-action"));
+    fireEvent.click(screen.getByTestId("verification-declaration"));
+    fireEvent.click(screen.getByTestId("approve-issue-action"));
+
+    await waitFor(() => screen.getByTestId("issued-rx"));
+    const attribution = screen.getByTestId("issued-attribution");
+    expect(attribution).toHaveTextContent("Dr. Priya Verma");
+    expect(attribution).not.toHaveTextContent(t.issuedAttributedTo);
+  });
+
   it("surfaces an approval failure without issuing", async () => {
     getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
     getWorkingRx.mockResolvedValue(prescription());
@@ -1373,6 +1395,51 @@ describe("CaseWorkspacePage bilingual parity (REQ-006)", () => {
     );
     expect(screen.getByTestId("case-close")).toHaveTextContent(
       hiT.closeWithoutRxHeading,
+    );
+  });
+
+  it("renders the issuing doctor's name with Hindi parity", async () => {
+    getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
+    getWorkingRx.mockResolvedValue(prescription());
+    doApprove.mockResolvedValue({
+      ...prescription(),
+      status: "issued",
+      issued_at: "2026-09-14T09:30:00Z",
+      attributed_doctor_name: "Dr. Priya Verma",
+    });
+    render(<LangFlipHost />);
+
+    await waitFor(() => screen.getByTestId("approve-issue-action"));
+    fireEvent.click(screen.getByText("flip-lang"));
+    fireEvent.click(screen.getByTestId("verification-declaration"));
+    fireEvent.click(screen.getByTestId("approve-issue-action"));
+
+    await waitFor(() => screen.getByTestId("issued-rx"));
+    expect(screen.getByText(hiT.issuedHeading)).toBeTruthy();
+    const attribution = screen.getByTestId("issued-attribution");
+    expect(attribution).toHaveTextContent("Dr. Priya Verma");
+    expect(attribution).not.toHaveTextContent(hiT.issuedAttributedTo);
+  });
+
+  it("renders the Hindi fallback attribution when the doctor name is missing", async () => {
+    getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
+    getWorkingRx.mockResolvedValue(prescription());
+    doApprove.mockResolvedValue({
+      ...prescription(),
+      status: "issued",
+      issued_at: "2026-09-14T09:30:00Z",
+      attributed_doctor_name: null,
+    });
+    render(<LangFlipHost />);
+
+    await waitFor(() => screen.getByTestId("approve-issue-action"));
+    fireEvent.click(screen.getByText("flip-lang"));
+    fireEvent.click(screen.getByTestId("verification-declaration"));
+    fireEvent.click(screen.getByTestId("approve-issue-action"));
+
+    await waitFor(() => screen.getByTestId("issued-rx"));
+    expect(screen.getByTestId("issued-attribution")).toHaveTextContent(
+      hiT.issuedAttributedTo,
     );
   });
 

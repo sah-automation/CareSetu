@@ -28,6 +28,7 @@ prescription workflow contract (brief acceptance criteria):
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -156,11 +157,13 @@ def _care_facade(
     case_connection: AsyncMock,
     intake_facade: IntakeFacade,
     health_facade: _FakeHealthFacade | None = None,
+    attributed_doctor_name_resolver: Callable[[int], Awaitable[str | None]] | None = None,
 ) -> PrescriptionFacade:
     return PrescriptionFacade(
         engine=_engine(case_connection),
         intake_facade=intake_facade,
         health_facade=health_facade,
+        attributed_doctor_name_resolver=attributed_doctor_name_resolver,
     )
 
 
@@ -773,6 +776,76 @@ async def test_approve_freezes_revision_and_publishes_approved_plus_issued() -> 
 
 
 @pytest.mark.asyncio
+async def test_approve_enriches_issuing_name_via_resolver_seam() -> None:
+    """The approve response carries the name - the frontend renders it (review, #495)."""
+    care_conn = _connection(
+        [
+            _FakeResult(row=_rx_row(source="ai_draft", draft_snapshot=AI_SNAPSHOT)),
+            _FakeResult(row=_case_row()),
+            _FakeResult(rows=[_rx_item_row()]),
+            _FakeResult(),
+            _FakeResult(),
+            _FakeResult(),
+            _FakeResult(),
+        ]
+    )
+    resolved: list[int] = []
+
+    async def _name(partner_id: int) -> str | None:
+        resolved.append(partner_id)
+        return "Dr. Shanti Clinic"
+
+    facade = _care_facade(
+        care_conn,
+        _intake_facade(_connection([])),
+        attributed_doctor_name_resolver=_name,
+    )
+
+    result = await facade.approve_prescription(
+        case_id=1, rx_id=1, doctor_id=42, verification_declaration=True
+    )
+
+    assert isinstance(result, PrescriptionDetailView)
+    assert result.status == "issued"
+    assert result.attributed_doctor == 42
+    assert result.attributed_doctor_name == "Dr. Shanti Clinic"
+    assert resolved == [42]
+
+
+@pytest.mark.asyncio
+async def test_approve_degrades_issuing_name_when_resolver_returns_none() -> None:
+    """An unresolvable attribution on approve degrades to null - never an error."""
+    care_conn = _connection(
+        [
+            _FakeResult(row=_rx_row(source="ai_draft", draft_snapshot=AI_SNAPSHOT)),
+            _FakeResult(row=_case_row()),
+            _FakeResult(rows=[_rx_item_row()]),
+            _FakeResult(),
+            _FakeResult(),
+            _FakeResult(),
+            _FakeResult(),
+        ]
+    )
+
+    async def _no_name(partner_id: int) -> str | None:
+        return None
+
+    facade = _care_facade(
+        care_conn,
+        _intake_facade(_connection([])),
+        attributed_doctor_name_resolver=_no_name,
+    )
+
+    result = await facade.approve_prescription(
+        case_id=1, rx_id=1, doctor_id=42, verification_declaration=True
+    )
+
+    assert isinstance(result, PrescriptionDetailView)
+    assert result.status == "issued"
+    assert result.attributed_doctor_name is None
+
+
+@pytest.mark.asyncio
 async def test_approve_derives_edited_yn_false_when_revision_matches_snapshot() -> None:
     snapshot = {"rx_items": [{"name": "mock medication", "dose": "1 tablet", "duration": "5 days"}]}
     care_conn = _connection(
@@ -1124,6 +1197,107 @@ async def test_get_approved_prescription_opens_assigned_unclaimed_case() -> None
     assert isinstance(result, PrescriptionDetailView)
     assert result.status == "issued"
     assert len(result.items) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_approved_prescription_enriches_name_via_resolver_seam() -> None:
+    """The approved read surfaces the issuing doctor's name via the seam (#495, T10c)."""
+    care_conn = _connection(
+        [
+            _FakeResult(row=_rx_row(status="issued", issued_at=NOW, attributed_doctor=42)),
+            _FakeResult(row=_case_row()),
+            _FakeResult(rows=[_rx_item_row()]),
+        ]
+    )
+    resolved: list[int] = []
+
+    async def _name(partner_id: int) -> str | None:
+        resolved.append(partner_id)
+        return "Dr. Shanti Clinic"
+
+    facade = _care_facade(
+        care_conn,
+        _intake_facade(_connection([])),
+        attributed_doctor_name_resolver=_name,
+    )
+
+    result = await facade.get_approved_prescription(rx_id=1, doctor_id=42)
+
+    assert result.attributed_doctor_name == "Dr. Shanti Clinic"
+    assert resolved == [42]
+
+
+@pytest.mark.asyncio
+async def test_get_approved_prescription_degrades_when_resolver_returns_none() -> None:
+    """An unresolvable attribution degrades to a null name - never an error."""
+    care_conn = _connection(
+        [
+            _FakeResult(row=_rx_row(status="issued", issued_at=NOW, attributed_doctor=42)),
+            _FakeResult(row=_case_row()),
+            _FakeResult(rows=[_rx_item_row()]),
+        ]
+    )
+    resolved: list[int] = []
+
+    async def _no_name(partner_id: int) -> str | None:
+        resolved.append(partner_id)
+        return None
+
+    facade = _care_facade(
+        care_conn,
+        _intake_facade(_connection([])),
+        attributed_doctor_name_resolver=_no_name,
+    )
+
+    result = await facade.get_approved_prescription(rx_id=1, doctor_id=42)
+
+    assert result.attributed_doctor_name is None
+    assert resolved == [42]
+
+
+@pytest.mark.asyncio
+async def test_get_approved_prescription_keeps_name_null_without_seam() -> None:
+    """Without the injected seam the issued view carries no name - no partner call."""
+    care_conn = _connection(
+        [
+            _FakeResult(row=_rx_row(status="issued", issued_at=NOW, attributed_doctor=42)),
+            _FakeResult(row=_case_row()),
+            _FakeResult(rows=[_rx_item_row()]),
+        ]
+    )
+    facade = _care_facade(care_conn, _intake_facade(_connection([])))
+
+    result = await facade.get_approved_prescription(rx_id=1, doctor_id=42)
+
+    assert result.attributed_doctor_name is None
+
+
+@pytest.mark.asyncio
+async def test_get_approved_prescription_skips_resolver_when_unattributed() -> None:
+    """An issued rx without an attributed doctor never invokes the seam."""
+    care_conn = _connection(
+        [
+            _FakeResult(row=_rx_row(status="issued", issued_at=NOW)),
+            _FakeResult(row=_case_row()),
+            _FakeResult(rows=[_rx_item_row()]),
+        ]
+    )
+    resolved: list[int] = []
+
+    async def _boom(partner_id: int) -> str | None:
+        resolved.append(partner_id)
+        raise AssertionError("resolver must not be called for an unattributed rx")
+
+    facade = _care_facade(
+        care_conn,
+        _intake_facade(_connection([])),
+        attributed_doctor_name_resolver=_boom,
+    )
+
+    result = await facade.get_approved_prescription(rx_id=1, doctor_id=42)
+
+    assert result.attributed_doctor_name is None
+    assert resolved == []
 
 
 # ========================================================================

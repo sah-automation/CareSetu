@@ -69,7 +69,7 @@ from modules.partner.directory_cache import (
     close_directory_redis_client,
     init_directory_redis_client,
 )
-from modules.partner.facade import PartnerFacade
+from modules.partner.facade import PartnerFacade, ProviderProfileNotFoundError
 from worker.main import run_worker_until_stopped
 
 logger = logging.getLogger(__name__)
@@ -319,10 +319,43 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         engine=engine,
         intake_facade=app.state.intake_facade,
     )
+
+    # PHASE-8.1 T10c (#495): the issued-rx attribution reads the issuing
+    # doctor's display name through the partner facade's public provider-
+    # profile seam (composition boundary - care never imports partner). The
+    # display name is cosmetic: any attribution failure - an unresolvable
+    # profile (doctor since deactivated, directory index dropped, credential
+    # lapsed) or an unexpected seam error (partner-schema DB down) - degrades
+    # to None so the frontend falls back to the existing "attributed to you"
+    # copy. The issued read and the approve response must never fail because
+    # of the attribution, so the fallback is wholesale and logged (warning,
+    # error-handling-observability §2), never propagated. partner_id only, no
+    # PHI in the log line.
+    async def _resolve_attributed_doctor_name(partner_id: int) -> str | None:
+        try:
+            profile = await cast(PartnerFacade, app.state.partner_facade).get_provider_profile(
+                partner_id
+            )
+        except ProviderProfileNotFoundError:
+            logger.warning(
+                "issued-rx attribution name unresolved for partner %s; falling back to static copy",
+                partner_id,
+            )
+            return None
+        except Exception:
+            logger.warning(
+                "issued-rx attribution partner-profile read failed; "
+                "falling back to static copy for partner %s",
+                partner_id,
+            )
+            return None
+        return profile.practice_name
+
     app.state.prescription_facade = PrescriptionFacade(
         engine=engine,
         intake_facade=app.state.intake_facade,
         health_facade=app.state.health_facade,
+        attributed_doctor_name_resolver=_resolve_attributed_doctor_name,
     )
 
     # MOD-001/MOD-002 independence (WI-3, #336): iam and partner are now
