@@ -117,6 +117,23 @@ describe("PickConsentSheet", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
+  it("states the consultations and prescriptions scopes on the sheet (EN)", async () => {
+    setup();
+
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("consultations");
+    expect(dialog).toHaveTextContent("prescriptions");
+  });
+
+  it("states the consultations and prescriptions scopes on the sheet (HI)", async () => {
+    localStorage.setItem("caresetu.lang", "hi");
+    setup();
+
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("परामर्श");
+    expect(dialog).toHaveTextContent("प्रिस्क्रिप्शन");
+  });
+
   it("keeps the patient in the sheet with the error on a failed Allow", async () => {
     pickDoctor.mockRejectedValue(new Error("boom"));
     const { onPicked } = setup();

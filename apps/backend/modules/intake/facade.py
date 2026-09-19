@@ -95,7 +95,7 @@ from modules.intake.schema.models import (
 )
 
 if TYPE_CHECKING:
-    from modules.consent.facade import ConsentFacade
+    from modules.consent.facade import ConsentFacade, ConsentView
 
 #: Number of attempts (initial + retries) the upload-transfer ladder makes
 #: before it gives up on a flaky capture (NFR-PERF-002, spec #344 US-10).
@@ -1062,12 +1062,17 @@ class IntakeFacade:
 
         Consent-at-pick (MOD-004): the pick IS the consent moment. The chosen
         doctor's partner identity is written to ``intake_intakes``
-        (``assigned_partner_id``) and the standing grant for the
-        (patient, doctor, consultations) triple is recorded in the SAME
-        transaction via ``ConsentFacade.grant_consent_on`` - one atomic write,
-        no second gate. From this moment the pre-summary is assigned to that
-        doctor: doctor-facing reads (``get_intake_media`` here, the review-queue
-        and pre-summary reads #447/#448) are scoped to the assigned partner.
+        (``assigned_partner_id``) and the standing grants for the
+        (patient, doctor, consultations) and (patient, doctor, prescriptions)
+        triples are recorded in the SAME transaction via
+        ``ConsentFacade.grant_consent_on`` - either both grants exist or
+        neither, one atomic write, no second gate (#480). The second scope is
+        the one the AI draft's consent-gated past-prescription read (ticket
+        #487) needs to pass; the response still reports the consultations
+        grant so ``PickDoctorResult`` consumers behave identically. From this
+        moment the pre-summary is assigned to that doctor: doctor-facing reads
+        (``get_intake_media`` here, the review-queue and pre-summary reads
+        #447/#448) are scoped to the assigned partner.
 
         The write is patient-scoped: the intake must belong to ``patient_id`` or
         :class:`IntakeNotFoundError` is raised (404, mirroring the ownership
@@ -1092,7 +1097,11 @@ class IntakeFacade:
 
         counterparty_type: Literal["doctor", "lab", "chemist"] = "doctor"
         counterparty_id = str(partner_id)
-        record_scope = "consultations"
+        # Consent-at-pick grants BOTH record scopes the doctor's drafting work
+        # touches: the consultations record and the prescriptions record (the
+        # AI-draft past-prescription read, #487). Minted on the same open
+        # connection inside the single transaction below - both or neither.
+        record_scopes = ("consultations", "prescriptions")
 
         async with self._engine.begin() as connection:
             row = (
@@ -1121,20 +1130,27 @@ class IntakeFacade:
                     updated_at=func.now(),
                 )
             )
-            consent_view = await self._consent_facade.grant_consent_on(
-                connection,
-                patient_id,
-                counterparty_type,
-                counterparty_id,
-                record_scope,
+            consent_granted: dict[str, ConsentView] = {}
+            for record_scope in record_scopes:
+                consent_granted[record_scope] = await self._consent_facade.grant_consent_on(
+                    connection,
+                    patient_id,
+                    counterparty_type,
+                    counterparty_id,
+                    record_scope,
+                )
+
+        # The grants are only visible once THIS transaction committed; invalidate
+        # the gate cache only now (outside the transaction, post-commit) for
+        # every scope just granted.
+        for record_scope in record_scopes:
+            await self._consent_facade.invalidate_consent_cache(
+                patient_id, counterparty_type, counterparty_id, record_scope
             )
 
-        # The grant is only visible once THIS transaction committed; invalidate
-        # the gate cache only now (outside the transaction, post-commit).
-        await self._consent_facade.invalidate_consent_cache(
-            patient_id, counterparty_type, counterparty_id, record_scope
-        )
-
+        # The response contract is the pick's own scope - the consultations
+        # grant - selected by name so the report never rides on tuple order.
+        consent_view = consent_granted["consultations"]
         return PickDoctorResult(
             intake_id=intake_id,
             assigned_partner_id=partner_id,

@@ -1189,7 +1189,7 @@ const en = {
     allow: "Allow",
     consentTitle: "Sharing your pre-summary",
     consentScope:
-      "This doctor will see your symptoms summary and relevant health history to guide your consultation.",
+      "This doctor will see your symptoms summary and may consult your consultations and prescriptions records while drafting your care.",
     consentValidity: "This access lasts until you revoke it.",
     confirmTitle: "Doctor chosen",
     confirmBody: "Your pre-summary is now visible to this doctor only.",
@@ -2274,7 +2274,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
       allow: "मंज़ूर करें",
       consentTitle: "अपना प्री-सारांश साझा करना",
       consentScope:
-        "यह डॉक्टर आपके लक्षणों का सारांश और संबंधित स्वास्थ्य इतिहास देखेगा ताकि परामर्श में मदद मिले।",
+        "यह डॉक्टर आपके लक्षणों का सारांश देखेगा और आपकी देखभाल का मसौदा बनाते समय आपके परामर्श तथा प्रिस्क्रिप्शन रिकॉर्ड देख सकता है।",
       consentValidity: "यह पहुँच तब तक मान्य है जब तक आप इसे रद्द नहीं करते।",
       confirmTitle: "डॉक्टर चुन लिया गया",
       confirmBody: "अब आपका प्री-सारांश केवल इसी डॉक्टर को दिखेगा।",
