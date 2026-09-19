@@ -565,6 +565,88 @@ class IntakeFacade:
             updated_at=row.updated_at,
         )
 
+    async def get_doctor_intake_detail(
+        self,
+        *,
+        pre_summary_id: int,
+        doctor_id: int,
+    ) -> IntakeDetailView:
+        """Read an intake's transcript and media refs for the assigned doctor (US-14, #484).
+
+        PHASE-8.1 (T09, #484): the doctor's case workspace pre-summary tab
+        needs the ORIGINAL intake transcript text and the intake audio clips,
+        not the structured AI summary. This is the intake-level counterpart of
+        ``get_doctor_pre_summary`` - it keys off ``pre_summary_id`` (the handle
+        the care case carries) and resolves the intake through the same
+        assigned-partner scoping: the intake's health information is served only
+        to the doctor recorded in ``assigned_partner_id``. The scoping predicate
+        lives in the JOIN WHERE (data minimization, security standards §2) - an
+        unassigned doctor partner (or a different doctor) matches no row and
+        gets the same 404 as a non-owner, so the intake's existence is never
+        revealed. The delimiter uses the standard column ``id`` for both tables
+        with an explicit join on the pre-summary's intake link.
+
+        Raises :class:`IntakeNotFoundError` when no pre-summary assigned to
+        ``doctor_id`` matches ``pre_summary_id``.
+        """
+        async with self._engine.begin() as connection:
+            row = (
+                await connection.execute(
+                    select(intake_intakes)
+                    .select_from(
+                        intake_pre_summaries.join(
+                            intake_intakes,
+                            intake_intakes.c.id == intake_pre_summaries.c.intake_id,
+                        )
+                    )
+                    .where(
+                        intake_pre_summaries.c.id == pre_summary_id,
+                        intake_intakes.c.assigned_partner_id == doctor_id,
+                    )
+                )
+            ).first()
+            if row is None:
+                raise IntakeNotFoundError(
+                    f"intake detail not found for pre-summary {pre_summary_id} "
+                    f"assigned to doctor {doctor_id}"
+                )
+
+            media_rows = (
+                await connection.execute(
+                    select(intake_media_refs).where(
+                        intake_media_refs.c.intake_id == row.id,
+                    )
+                )
+            ).all()
+
+        media_refs = [
+            MediaRefView(
+                media_ref_id=int(m.id),
+                media_type=m.media_type,
+                object_key=m.object_key,
+                audio_duration_ms=m.audio_duration_ms,
+                file_size_bytes=m.file_size_bytes,
+                record_attempt=m.record_attempt,
+            )
+            for m in media_rows
+        ]
+
+        return IntakeDetailView(
+            intake_id=int(row.id),
+            patient_id=int(row.patient_id),
+            mode=row.mode,
+            language=row.language,
+            status=row.status,
+            record_attempts=row.record_attempts,
+            text=row.text,
+            transcript=row.transcript,
+            transcript_usability=row.transcript_usability,
+            forced_text=row.forced_text,
+            media_refs=media_refs,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
     async def get_intake_media(
         self,
         *,

@@ -6,7 +6,7 @@
 // asynchronously: submit returns a captured intake, and the pre-summary is
 // read later at the {intake_id}/pre-summary route.
 
-import { guardShape, request } from "@/lib/request";
+import { guardShape, request, requestBlob } from "@/lib/request";
 import { IDEMPOTENCY_KEY_HEADER, idempotencyKey } from "@/lib/idempotency";
 
 export type IntakeMode = "voice" | "text";
@@ -389,6 +389,40 @@ export async function fetchPreSummaryForReview(
     isPreSummaryView,
     "The API returned an unexpected pre-summary shape",
   );
+}
+
+/**
+ * Read an intake's transcript and media refs for the assigned doctor
+ * (PHASE-8.1 T09, #484). Pre-summary-keyed doctor read backing the case
+ * workspace pre-summary tab: the care case carries only the pre-summary id,
+ * the facade resolves the intake and enforces the assigned-doctor scope.
+ */
+export async function fetchIntakeDetailForDoctor(
+  preSummaryId: number,
+): Promise<IntakeDetailView> {
+  const data = await request<unknown>(
+    `/v1/intake/pre-summary/${preSummaryId}/detail`,
+  );
+  return guardShape(
+    data,
+    isIntakeDetailView,
+    "The API returned an unexpected intake detail shape",
+  );
+}
+
+/**
+ * Fetch the intake audio clip bytes (PHASE-8.1 #484). Reuses the existing
+ * GET /v1/intake/{intake_id}/media/{media_ref_id} stream route with doctor
+ * auth (PHASE-7 T13, #357). The stream is not JSON, so it goes through the
+ * shared ``requestBlob`` transport (same auth + error-envelope handling as
+ * ``request<T>``) instead of a JSON parse. Audio is PHI, so the blob is
+ * consumed client-side only and never logged.
+ */
+export async function fetchIntakeMediaBlob(
+  intakeId: number,
+  mediaRefId: number,
+): Promise<Blob> {
+  return requestBlob(`/v1/intake/${intakeId}/media/${mediaRefId}`);
 }
 
 /**

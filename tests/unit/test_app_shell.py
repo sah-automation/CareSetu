@@ -158,6 +158,10 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         # doctor reads the pre-summary content (structured summary, confidence
         # flag, review state) before reviewing it.
         "/v1/intake/{intake_id}/pre-summary/review",
+        # PHASE-8.1 T09 (#484): the doctor-owned intake-detail read keyed by
+        # pre-summary id - resolves the intake and enforces the assigned-doctor
+        # scope for the case workspace transcript + audio surface.
+        "/v1/intake/pre-summary/{pre_summary_id}/detail",
         # PHASE-8.1 T06 (#444): the doctor-owned consultation fee
         # (integer paise; null = not set) - partner-scoped update surface.
         "/v1/partner/consultation-fee",

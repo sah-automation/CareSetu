@@ -1082,6 +1082,15 @@ const en = {
     historyConsentNote: "Only what the patient consented to share.",
     historyEmpty: "No history yet.",
     historyLoadFail: "Could not load patient history.",
+    // PHASE-8.1 #484: case workspace inner tabs + original transcript + audio.
+    tabPreSummary: "Pre-summary",
+    tabHistory: "History",
+    tabPrescription: "Prescription",
+    transcriptHeading: "Original intake",
+    transcriptEmpty: "No transcript available for this intake.",
+    transcriptLoadFail: "Could not load the intake transcript.",
+    audioPlayLabel: "Play recording",
+    audioLoadFail: "Could not load the recording.",
     loadFailed: "Could not load this case workspace.",
     retry: "Try again",
     finalizeAction: "Finalize + attribute review",
@@ -1095,6 +1104,14 @@ const en = {
     handshakeSuccess:
       "Consultation complete - the case is now prescription pending.",
     prescriptionPendingCta: "The prescription editor is ready below.",
+    // PHASE-8.1 #484: prescription tab stage lock - the case must consult
+    // before any prescription. Pre-summary is always finalized on a born case;
+    // the pending item is the consult-complete handshake, and the action jumps
+    // to the pre-summary tab where the handshake form lives.
+    rxLockTitle: "Prescription not yet open",
+    rxLockDone: "Pre-summary finalized",
+    rxLockPending: "Consult marked complete",
+    rxLockAction: "Complete consultation",
     prescriptionHeading: "Prescription",
     prescriptionHelp:
       "Request an AI draft, then edit the items to match your clinical judgment before saving.",
@@ -2171,6 +2188,15 @@ export const STRINGS: Record<Lang, Dictionary> = {
       historyConsentNote: "केवल वही जो मरीज़ ने साझा करने की सहमति दी।",
       historyEmpty: "अभी कोई इतिहास नहीं।",
       historyLoadFail: "मरीज़ का इतिहास लोड नहीं हो सका।",
+      // PHASE-8.1 #484: केस वर्कस्पेस के भीतरी टैब + मूल इंटेक प्रतिलेख + ऑडियो।
+      tabPreSummary: "प्री-सारांश",
+      tabHistory: "इतिहास",
+      tabPrescription: "नुस्ख़ा",
+      transcriptHeading: "मूल इंटेक",
+      transcriptEmpty: "इस इंटेक के लिए कोई प्रतिलेख उपलब्ध नहीं है।",
+      transcriptLoadFail: "इंटेक प्रतिलेख लोड नहीं हो सका।",
+      audioPlayLabel: "रिकॉर्डिंग चलाएँ",
+      audioLoadFail: "रिकॉर्डिंग लोड नहीं हो सकी।",
       loadFailed: "यह केस वर्कस्पेस लोड नहीं हो सका।",
       retry: "फिर कोशिश करें",
       finalizeAction: "अंतिम करें + समीक्षा का श्रेय",
@@ -2183,6 +2209,13 @@ export const STRINGS: Record<Lang, Dictionary> = {
       handshakeFail: "परामर्श पूर्ण नहीं हो सका।",
       handshakeSuccess: "परामर्श पूर्ण - मामला अब नुस्ख़ा-लंबित है।",
       prescriptionPendingCta: "नीचे नुस्ख़ा संपादक तैयार है।",
+      // PHASE-8.1 #484: नुस्ख़ा टैब की अवस्था-लॉक - किसी नुस्ख़े से पहले परामर्श
+      // पूर्ण होना चाहिए। जन्मा मामला हमेशा अंतिम प्री-सारांश रखता है; बाकी
+      // कदम परामर्श-पूर्ण हैंडशेक है, और क्रिया प्री-सारांश टैब पर ले जाती है।
+      rxLockTitle: "नुस्ख़ा अभी खुला नहीं",
+      rxLockDone: "प्री-सारांश अंतिम",
+      rxLockPending: "परामर्श पूर्ण दर्ज",
+      rxLockAction: "परामर्श पूर्ण करें",
       prescriptionHeading: "नुस्ख़ा",
       prescriptionHelp:
         "AI मसौदा माँगें, फिर सहेजने से पहले आइटमों को अपने नैदानिक निर्णय के अनुसार संपादित करें।",

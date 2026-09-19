@@ -17,6 +17,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
@@ -38,6 +39,14 @@ import {
   type CaseDetailView,
   type PrescriptionDetailView,
 } from "@/lib/care/api";
+import {
+  fetchIntakeDetailForDoctor,
+  fetchIntakeMediaBlob,
+  fetchPreSummaryForReview,
+  type IntakeDetailView,
+  type MediaRefView,
+  type PreSummaryView,
+} from "@/lib/intake/api";
 import { fetchPartnerMe, type PartnerMeView } from "@/lib/partner/api";
 import { readConsentedHistory, type RecordTimeline } from "@/lib/record/api";
 
@@ -82,6 +91,16 @@ vi.mock("@/lib/partner/api", async (importOriginal) => {
   return { ...mod, fetchPartnerMe: vi.fn() };
 });
 
+vi.mock("@/lib/intake/api", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("@/lib/intake/api")>();
+  return {
+    ...mod,
+    fetchIntakeDetailForDoctor: vi.fn(),
+    fetchPreSummaryForReview: vi.fn(),
+    fetchIntakeMediaBlob: vi.fn(),
+  };
+});
+
 vi.mock("@/lib/record/api", async (importOriginal) => {
   const mod = await importOriginal<typeof import("@/lib/record/api")>();
   return { ...mod, readConsentedHistory: vi.fn() };
@@ -100,6 +119,9 @@ const doSaveRevision = vi.mocked(saveRxRevision);
 const doApprove = vi.mocked(approvePrescription);
 const doReject = vi.mocked(rejectPrescription);
 const doCloseCase = vi.mocked(closeCaseWithoutRx);
+const getIntakeDetail = vi.mocked(fetchIntakeDetailForDoctor);
+const getPreSummary = vi.mocked(fetchPreSummaryForReview);
+const getMediaBlob = vi.mocked(fetchIntakeMediaBlob);
 
 function caseItem(
   id: number,
@@ -110,7 +132,7 @@ function caseItem(
     case_id: id,
     patient_id: 3,
     doctor_id: 7,
-    pre_summary_id: 5,
+    pre_summary_id: 7,
     stage: (stage ?? "pre_summary") as CareCaseStage,
     forced_review: false,
     closed_at: null,
@@ -184,11 +206,69 @@ function noDraftError(): ApiError {
   });
 }
 
+function mediaRef(overrides: Partial<MediaRefView> = {}): MediaRefView {
+  return {
+    media_ref_id: 302,
+    media_type: "audio/mpeg",
+    object_key: "in/5/302.mp3",
+    audio_duration_ms: 17090,
+    file_size_bytes: 132096,
+    record_attempt: 2,
+    ...overrides,
+  };
+}
+
+function intakeDetail(
+  overrides: Partial<IntakeDetailView> = {},
+): IntakeDetailView {
+  return {
+    intake_id: 5,
+    patient_id: 3,
+    mode: "voice",
+    language: "hi",
+    status: "ready_for_review",
+    record_attempts: 2,
+    text: null,
+    transcript: "मुझे लगातार सिरदर्द रहता है।",
+    transcript_usability: "ok",
+    forced_text: false,
+    media_refs: [],
+    created_at: "2026-09-12T10:00:00Z",
+    updated_at: "2026-09-12T11:00:00Z",
+    ...overrides,
+  };
+}
+
+function preSummary(overrides: Partial<PreSummaryView> = {}): PreSummaryView {
+  return {
+    pre_summary_id: 7,
+    intake_id: 5,
+    structured_fields: {
+      chief_complaints: ["Fever"],
+      symptoms: ["Headache"],
+      duration: "3 days",
+    },
+    structuring_confidence: 0.44,
+    low_confidence: true,
+    review_state: "final",
+    patient_edits: null,
+    doctor_corrections: null,
+    review_attribution: "dr-42",
+    reviewed_by: 7,
+    reviewed_at: "2026-09-12T12:00:00Z",
+    created_at: "2026-09-12T10:00:00Z",
+    updated_at: "2026-09-12T12:00:00Z",
+    ...overrides,
+  };
+}
+
 function resolveLoaded() {
   getCase.mockResolvedValue(caseItem(11));
   getMe.mockResolvedValue(me());
   getHistory.mockResolvedValue(timeline());
   getWorkingRx.mockResolvedValue(prescription());
+  getIntakeDetail.mockResolvedValue(intakeDetail());
+  getPreSummary.mockResolvedValue(preSummary());
 }
 
 beforeEach(() => {
@@ -198,6 +278,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
   __resetLangForTests();
 });
 
@@ -252,7 +333,9 @@ describe("CaseWorkspacePage consented history", () => {
       counterparty_id: 7,
       counterparty_type: "doctor",
     });
-    expect(screen.getByText("Prescription")).toBeTruthy();
+    expect(
+      within(screen.getByTestId("case-history")).getByText("Prescription"),
+    ).toBeTruthy();
   });
 
   it("shows a denial-safe empty state when consent yields no history", async () => {
@@ -266,6 +349,201 @@ describe("CaseWorkspacePage consented history", () => {
     await waitFor(() => screen.getByText(t.historyEmpty));
 
     expect(screen.queryByTestId("history-list")).not.toBeInTheDocument();
+  });
+});
+
+describe("CaseWorkspacePage inner tabs, transcript and audio (US-14, #484)", () => {
+  it("renders the three workspace tabs with the pre-summary panel active", async () => {
+    render(<CaseWorkspacePage />);
+    await waitFor(() => screen.getByTestId("case-content"));
+
+    expect(screen.getByRole("tab", { name: t.tabPreSummary })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByRole("tab", { name: t.tabHistory })).toHaveAttribute(
+      "aria-selected",
+      "false",
+    );
+    expect(
+      screen.getByRole("tab", { name: t.tabPrescription }),
+    ).toHaveAttribute("aria-selected", "false");
+    expect(screen.getByTestId("tab-panel-pre-summary")).not.toHaveAttribute(
+      "hidden",
+    );
+    expect(screen.getByTestId("tab-panel-history")).toHaveAttribute("hidden");
+    expect(screen.getByTestId("tab-panel-prescription")).toHaveAttribute(
+      "hidden",
+    );
+  });
+
+  it("switches tabs on click and via arrow-key rotation", async () => {
+    render(<CaseWorkspacePage />);
+    await waitFor(() => screen.getByTestId("case-content"));
+
+    fireEvent.click(screen.getByRole("tab", { name: t.tabHistory }));
+    expect(screen.getByTestId("tab-panel-history")).not.toHaveAttribute(
+      "hidden",
+    );
+    expect(screen.getByTestId("tab-panel-pre-summary")).toHaveAttribute(
+      "hidden",
+    );
+
+    fireEvent.keyDown(screen.getByRole("tab", { name: t.tabHistory }), {
+      key: "ArrowRight",
+    });
+    expect(
+      screen.getByRole("tab", { name: t.tabPrescription }),
+    ).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("tab-panel-prescription")).not.toHaveAttribute(
+      "hidden",
+    );
+
+    fireEvent.keyDown(screen.getByRole("tab", { name: t.tabPrescription }), {
+      key: "ArrowLeft",
+    });
+    expect(screen.getByRole("tab", { name: t.tabHistory })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+  });
+
+  it("shows the original transcript and the finalized summary on the pre-summary tab", async () => {
+    render(<CaseWorkspacePage />);
+    await waitFor(() => screen.getByTestId("transcript-text"));
+
+    expect(getIntakeDetail).toHaveBeenCalledWith(7);
+    expect(getPreSummary).toHaveBeenCalledWith(5);
+    expect(screen.getByTestId("transcript-text")).toHaveTextContent(
+      "मुझे लगातार सिरदर्द रहता है।",
+    );
+    expect(screen.getByTestId("case-pre-summary")).toHaveTextContent(
+      t.summaryHeading,
+    );
+    expect(screen.getByTestId("case-pre-summary-confidence")).toHaveTextContent(
+      "44%",
+    );
+    expect(
+      screen.getByTestId("case-pre-summary-review-state"),
+    ).toHaveTextContent(t.reviewStateFinal);
+  });
+
+  it("shows the transcript empty state when the intake has no transcript", async () => {
+    getIntakeDetail.mockResolvedValue(
+      intakeDetail({ transcript: null, text: null }),
+    );
+    render(<CaseWorkspacePage />);
+    await waitFor(() => screen.getByTestId("transcript-empty"));
+
+    expect(screen.getByTestId("transcript-empty")).toHaveTextContent(
+      t.transcriptEmpty,
+    );
+    expect(screen.queryByTestId("transcript-text")).not.toBeInTheDocument();
+  });
+
+  it("surfaces an intake-detail load failure distinctly from an empty transcript", async () => {
+    getIntakeDetail.mockRejectedValue(
+      new ApiError({
+        code: "INTAKE_NOT_FOUND",
+        message: "boom",
+        trace_id: "t",
+        details: {},
+      }),
+    );
+    render(<CaseWorkspacePage />);
+    await waitFor(() => screen.getByTestId("transcript-load-error"));
+
+    expect(screen.getByTestId("transcript-load-error")).toHaveTextContent(
+      t.transcriptLoadFail,
+    );
+    expect(screen.queryByTestId("transcript-empty")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("case-content")).toBeInTheDocument();
+  });
+
+  it("plays the latest recording attempt through an object URL", async () => {
+    const originalCreate = URL.createObjectURL;
+    const originalRevoke = URL.revokeObjectURL;
+    const createSpy = vi.fn(() => "blob:mock-audio");
+    const revokeSpy = vi.fn();
+    URL.createObjectURL = createSpy as typeof URL.createObjectURL;
+    URL.revokeObjectURL = revokeSpy as typeof URL.revokeObjectURL;
+    getIntakeDetail.mockResolvedValue(
+      intakeDetail({
+        media_refs: [
+          mediaRef({ record_attempt: 1, audio_duration_ms: 10000 }),
+          mediaRef({ record_attempt: 2, audio_duration_ms: 17090 }),
+        ],
+      }),
+    );
+    getMediaBlob.mockResolvedValue(new Blob(["audio"], { type: "audio/mpeg" }));
+    try {
+      render(<CaseWorkspacePage />);
+
+      await waitFor(() => screen.getByTestId("audio-element"));
+
+      expect(getMediaBlob).toHaveBeenCalledWith(5, 302);
+      expect(createSpy).toHaveBeenCalledWith(expect.any(Blob));
+      expect(screen.getByTestId("audio-playback")).toHaveTextContent(
+        t.audioPlayLabel,
+      );
+      expect(screen.getByTestId("audio-playback")).toHaveTextContent("0:17");
+    } finally {
+      URL.createObjectURL = originalCreate;
+      URL.revokeObjectURL = originalRevoke;
+    }
+  });
+
+  it("surfaces a recording load failure without failing the workspace", async () => {
+    getIntakeDetail.mockResolvedValue(
+      intakeDetail({ media_refs: [mediaRef()] }),
+    );
+    getMediaBlob.mockRejectedValue(
+      new ApiError({
+        code: "MEDIA_TRANSFER_ERROR",
+        message: "boom",
+        trace_id: "t",
+        details: {},
+      }),
+    );
+    render(<CaseWorkspacePage />);
+
+    await waitFor(() => screen.getByTestId("audio-load-error"));
+    expect(screen.getByTestId("audio-load-error")).toHaveTextContent(
+      t.audioLoadFail,
+    );
+    expect(screen.queryByTestId("audio-element")).not.toBeInTheDocument();
+  });
+
+  it("locks the prescription tab on a pre-summary case and jumps to the handshake", async () => {
+    render(<CaseWorkspacePage />);
+    await waitFor(() => screen.getByTestId("prescription-lock"));
+
+    expect(screen.getByTestId("rx-lock-done")).toHaveTextContent(t.rxLockDone);
+    expect(screen.getByTestId("rx-lock-pending")).toHaveTextContent(
+      t.rxLockPending,
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: t.tabPrescription }));
+    expect(screen.getByTestId("tab-panel-prescription")).not.toHaveAttribute(
+      "hidden",
+    );
+
+    fireEvent.click(screen.getByTestId("rx-lock-action"));
+    expect(screen.getByTestId("tab-panel-pre-summary")).not.toHaveAttribute(
+      "hidden",
+    );
+    expect(screen.getByTestId("tab-panel-prescription")).toHaveAttribute(
+      "hidden",
+    );
+    expect(screen.getByTestId("handshake-action")).toBeTruthy();
+  });
+
+  it("does not lock the prescription tab once the consult is complete", async () => {
+    getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
+    render(<CaseWorkspacePage />);
+    await waitFor(() => screen.getByTestId("case-prescription"));
+
+    expect(screen.queryByTestId("prescription-lock")).not.toBeInTheDocument();
   });
 });
 
@@ -779,6 +1057,11 @@ describe("CaseWorkspacePage bilingual parity (REQ-006)", () => {
     expect(screen.getByText(hiT.title)).toBeInTheDocument();
     expect(screen.getByTestId("case-history")).toHaveTextContent(
       hiT.historyHeading,
+    );
+    // PHASE-8.1 #484: the inner tabs + transcript surface flip langs too.
+    expect(screen.getByRole("tab", { name: hiT.tabPreSummary })).toBeTruthy();
+    expect(screen.getByTestId("intake-transcript")).toHaveTextContent(
+      hiT.transcriptHeading,
     );
   });
 

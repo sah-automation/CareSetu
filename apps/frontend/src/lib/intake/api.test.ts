@@ -13,6 +13,8 @@ import {
   fetchPreSummary,
   savePatientEdits,
   fetchReviewQueue,
+  fetchIntakeDetailForDoctor,
+  fetchIntakeMediaBlob,
 } from "./api";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -375,6 +377,128 @@ describe("fetchReviewQueue", () => {
     );
     await expect(fetchReviewQueue()).rejects.toMatchObject({
       code: "INSUFFICIENT_SCOPE",
+    });
+  });
+});
+
+describe("fetchIntakeDetailForDoctor", () => {
+  it("GETs the pre-summary-keyed intake detail for the assigned doctor", async () => {
+    const detail = {
+      intake_id: 42,
+      patient_id: 7,
+      mode: "voice",
+      language: "hi",
+      status: "ready_for_review",
+      record_attempts: 2,
+      text: null,
+      transcript: "मुझे सिरदर्द है।",
+      transcript_usability: "ok",
+      forced_text: false,
+      media_refs: [
+        {
+          media_ref_id: 302,
+          media_type: "audio/mpeg",
+          object_key: "in/42/302.mp3",
+          audio_duration_ms: 17090,
+          file_size_bytes: 132096,
+          record_attempt: 2,
+        },
+      ],
+      created_at: "2026-09-08T10:00:00Z",
+      updated_at: "2026-09-08T11:00:00Z",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(detail));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchIntakeDetailForDoctor(101)).resolves.toEqual(detail);
+    const [url] = fetchMock.mock.calls[0] as [string];
+    expect(url).toBe("http://localhost:8000/v1/intake/pre-summary/101/detail");
+  });
+
+  it("throws ApiError with the envelope code on a 404 (unassigned doctor)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          {
+            code: "INTAKE_NOT_FOUND",
+            message: "intake not found",
+            trace_id: "t",
+            details: {},
+          },
+          404,
+        ),
+      ),
+    );
+    await expect(fetchIntakeDetailForDoctor(999)).rejects.toMatchObject({
+      code: "INTAKE_NOT_FOUND",
+    });
+  });
+
+  it("throws ApiError on a malformed intake detail shape", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ intake_id: 1 })),
+    );
+    await expect(fetchIntakeDetailForDoctor(1)).rejects.toBeInstanceOf(
+      ApiError,
+    );
+  });
+});
+
+describe("fetchIntakeMediaBlob", () => {
+  it("GETs the media stream blob with bearer auth and credentials", async () => {
+    const blob = new Blob(["audio-bytes"], { type: "audio/mpeg" });
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(blob, {
+        status: 200,
+        headers: { "Content-Type": "audio/mpeg" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    localStorage.setItem("caresetu.access_jwt", "test-jwt");
+
+    const result = await fetchIntakeMediaBlob(42, 302);
+    expect(result).toBeInstanceOf(Blob);
+    expect(result.size).toBeGreaterThan(0);
+    expect(result.type).toBe("audio/mpeg");
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://localhost:8000/v1/intake/42/media/302");
+    expect(new Headers(init.headers).get("Authorization")).toBe(
+      "Bearer test-jwt",
+    );
+    expect(init.credentials).toBe("include");
+    localStorage.removeItem("caresetu.access_jwt");
+  });
+
+  it("throws ApiError with the envelope code on a 403", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          {
+            code: "INSUFFICIENT_SCOPE",
+            message: "the doctor role is required for this route",
+            trace_id: "t",
+            details: {},
+          },
+          403,
+        ),
+      ),
+    );
+    await expect(fetchIntakeMediaBlob(42, 302)).rejects.toMatchObject({
+      code: "INSUFFICIENT_SCOPE",
+    });
+  });
+
+  it("throws ApiError with NETWORK_ERROR on a network failure", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(new TypeError("Failed to fetch")),
+    );
+    await expect(fetchIntakeMediaBlob(42, 302)).rejects.toMatchObject({
+      code: "NETWORK_ERROR",
     });
   });
 });

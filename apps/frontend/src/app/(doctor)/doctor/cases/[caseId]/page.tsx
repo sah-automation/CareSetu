@@ -3,8 +3,13 @@
 // PHASE-8.1 T13/T14/T15 (#451/#452/#453): case workspace for the open-cases
 // entry path. The console's "Open cases" deep-links to /doctor/cases/[caseId]
 // (one per active care case). This page shows the case stage, the forced-
-// review requirement (if any), the patient's consented health history, and
-// the consult-complete handshake for pre_summary-stage cases. For
+// review requirement (if any), and splits the workspace into three inner tabs
+// (US-14, #484): Pre-summary - the original intake transcript + recording
+// playback plus the finalized AI summary and the consult-complete handshake
+// for pre_summary-stage cases; History - the patient's consented health
+// history; Prescription - the drafting/approval/close flow, gated by a stage
+// lock that names the pending consult-complete step on pre_summary cases and
+// jumps the doctor back to the handshake on the Pre-summary tab. For
 // prescription-pending cases it hosts prescription drafting (US-18): request
 // an AI draft, edit the rx items, and save the working revision. A hard
 // refresh of a pending case reloads the in-progress revision from the
@@ -17,7 +22,7 @@
 //
 // All copy bilingual en/hi (REQ-006).
 
-import type { FormEvent } from "react";
+import type { FormEvent, KeyboardEvent } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
@@ -28,6 +33,14 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { ApiError } from "@/lib/api-errors";
+import {
+  fetchIntakeDetailForDoctor,
+  fetchIntakeMediaBlob,
+  fetchPreSummaryForReview,
+  type IntakeDetailView,
+  type MediaRefView,
+  type PreSummaryView,
+} from "@/lib/intake/api";
 import {
   approvePrescription,
   closeCaseWithoutRx,
@@ -107,6 +120,124 @@ function formatDateTime(iso: string, lang: "en" | "hi"): string {
   }).format(new Date(iso));
 }
 
+function confidencePercent(value: number | null): string {
+  if (value == null) return "-";
+  return `${Math.round(value * 100)}%`;
+}
+
+function reviewStateDisplayName(
+  state: string,
+  t: Dictionary["caseWorkspace"],
+): string {
+  switch (state) {
+    case "draft":
+      return t.reviewStateDraft;
+    case "reviewed":
+      return t.reviewStateReviewed;
+    case "final":
+      return t.reviewStateFinal;
+    default:
+      return state;
+  }
+}
+
+function formatDurationMs(ms: number | null): string {
+  if (ms == null || ms < 0) return "";
+  const totalSeconds = Math.round(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
+
+// The recording to play is always the most recent record attempt (#484).
+function pickLatestMediaRef(
+  mediaRefs: readonly MediaRefView[],
+): MediaRefView | null {
+  return mediaRefs.length === 0
+    ? null
+    : mediaRefs.reduce((a, b) =>
+        b.record_attempt >= a.record_attempt ? b : a,
+      );
+}
+
+// Workspace inner tabs (US-14, #484). Follows the prototype's tab pattern:
+// role=tablist/tab/tabpanel, aria-selected, roving tabIndex, and arrow-key
+// rotation so the tabs behave like a native tab control (keyboard
+// navigation, screen-reader panel association).
+type WorkspaceTab = "pre_summary" | "history" | "prescription";
+
+const WORKSPACE_TABS: WorkspaceTab[] = [
+  "pre_summary",
+  "history",
+  "prescription",
+];
+
+function WorkspaceTabs({
+  active,
+  onChange,
+  t,
+}: {
+  active: WorkspaceTab;
+  onChange: (tab: WorkspaceTab) => void;
+  t: Dictionary["caseWorkspace"];
+}) {
+  const labels: Record<WorkspaceTab, string> = {
+    pre_summary: t.tabPreSummary,
+    history: t.tabHistory,
+    prescription: t.tabPrescription,
+  };
+
+  function handleKeyDown(
+    e: KeyboardEvent<HTMLButtonElement>,
+    tab: WorkspaceTab,
+  ) {
+    if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+    e.preventDefault();
+    const idx = WORKSPACE_TABS.indexOf(tab);
+    const dir = e.key === "ArrowRight" ? 1 : -1;
+    const next =
+      WORKSPACE_TABS[
+        (idx + dir + WORKSPACE_TABS.length) % WORKSPACE_TABS.length
+      ];
+    onChange(next);
+  }
+
+  return (
+    <div
+      role="tablist"
+      aria-label={t.title}
+      className="flex gap-1 border-b border-hairline"
+      data-testid="workspace-tabs"
+    >
+      {WORKSPACE_TABS.map((tab) => {
+        const selected = active === tab;
+        return (
+          <button
+            key={tab}
+            type="button"
+            role="tab"
+            data-tab={tab}
+            id={`case-tab-${tab}`}
+            aria-controls={`case-tabpanel-${tab}`}
+            aria-selected={selected}
+            tabIndex={selected ? 0 : -1}
+            onClick={() => onChange(tab)}
+            onKeyDown={(e) => handleKeyDown(e, tab)}
+            className={cn(
+              "flex-1 rounded-t-md border-b-2 px-3 py-2 text-sm font-medium transition-colors focus:outline-none focus:ring-1 focus:ring-accent",
+              selected
+                ? "border-accent text-accent-strong"
+                : "border-transparent text-txt-muted hover:text-txt",
+            )}
+          >
+            {labels[tab]}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function LoadingSkeleton() {
   return (
     <div className="space-y-3" data-testid="case-skeleton">
@@ -138,6 +269,24 @@ export default function CaseWorkspacePage() {
 
   const [careCase, setCareCase] = useState<CaseDetailView | null>(null);
   const [doctorMe, setDoctorMe] = useState<PartnerMeView | null>(null);
+
+  // Workspace inner tabs (US-14, #484). A prescription-pending case opens on
+  // the Prescription tab so the doctor lands where the work is; everything
+  // else opens on the Pre-summary tab.
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>("pre_summary");
+
+  // Pre-summary tab content (#484): the original intake transcript + audio
+  // plus the finalized AI summary, all scoped to the assigned doctor.
+  const [intakeDetail, setIntakeDetail] = useState<IntakeDetailView | null>(
+    null,
+  );
+  const [preSummaryForReview, setPreSummaryForReview] =
+    useState<PreSummaryView | null>(null);
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [audioError, setAudioError] = useState(false);
+  // Distinct from audioError: a failed doctor-side intake read is surfaced as
+  // a load failure rather than being painted as "no transcript available".
+  const [intakeDetailLoadFailed, setIntakeDetailLoadFailed] = useState(false);
 
   const [handshaking, setHandshaking] = useState(false);
   const [handshakeError, setHandshakeError] = useState(false);
@@ -197,6 +346,32 @@ export default function CaseWorkspacePage() {
     }
   }, [caseId]);
 
+  // Load the pre-summary tab content (#484): the intake's original transcript
+  // + media refs (doctor-scoped read keyed by the care case's pre-summary id),
+  // then the finalized AI summary for the same intake. Both are best-effort -
+  // a failure leaves the tab's empty/error states rather than failing the
+  // whole workspace (the core care-case load already succeeded).
+  const loadIntakeDetail = useCallback(async (preSummaryId: number) => {
+    setIntakeDetail(null);
+    setIntakeDetailLoadFailed(false);
+    setPreSummaryForReview(null);
+    setAudioUrl(null);
+    setAudioError(false);
+    try {
+      const detail = await fetchIntakeDetailForDoctor(preSummaryId);
+      setIntakeDetail(detail);
+      try {
+        const pre = await fetchPreSummaryForReview(detail.intake_id);
+        setPreSummaryForReview(pre);
+      } catch {
+        setPreSummaryForReview(null);
+      }
+    } catch {
+      setIntakeDetail(null);
+      setIntakeDetailLoadFailed(true);
+    }
+  }, []);
+
   const load = useCallback(() => {
     setLoadStatus("loading");
     setBannerOpen(false);
@@ -207,6 +382,14 @@ export default function CaseWorkspacePage() {
         setCareCase(c);
         setDoctorMe(me);
         setLoadStatus("ready");
+        // Open a born case (pre_summary) on the pre-summary tab; a
+        // prescription-pending case on the prescription tab.
+        setActiveTab(
+          c.stage === "prescription_pending" ? "prescription" : "pre_summary",
+        );
+        if (c.pre_summary_id != null) {
+          void loadIntakeDetail(c.pre_summary_id);
+        }
         if (c.stage === "prescription_pending") {
           void loadWorkingRx();
         }
@@ -216,11 +399,48 @@ export default function CaseWorkspacePage() {
         setLoadStatus("error");
         setBannerOpen(true);
       });
-  }, [caseId, loadWorkingRx]);
+  }, [caseId, loadWorkingRx, loadIntakeDetail]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  // Fetch the intake recording bytes as a blob (the media stream is not JSON
+  // and the audio element cannot carry the Bearer header itself, so the blob
+  // is fetched through authedFetch and presented via an object URL). Always
+  // plays the latest record attempt. The object URL is revoked on teardown or
+  // reload so a stale URL is never left alive after phoning to another intake.
+  useEffect(() => {
+    const detail = intakeDetail;
+    const latest = pickLatestMediaRef(detail?.media_refs ?? []);
+    if (detail == null || latest == null) {
+      setAudioUrl(null);
+      return;
+    }
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    setAudioError(false);
+    void fetchIntakeMediaBlob(detail.intake_id, latest.media_ref_id)
+      .then((blob) => {
+        if (cancelled) return;
+        if (typeof URL.createObjectURL !== "function") {
+          setAudioError(true);
+          return;
+        }
+        objectUrl = URL.createObjectURL(blob);
+        setAudioUrl(objectUrl);
+      })
+      .catch(() => {
+        if (!cancelled) setAudioError(true);
+      });
+    return () => {
+      cancelled = true;
+      if (objectUrl != null && typeof URL.revokeObjectURL === "function") {
+        URL.revokeObjectURL(objectUrl);
+      }
+      setAudioUrl(null);
+    };
+  }, [intakeDetail]);
 
   async function handleHandshake(e: FormEvent) {
     e.preventDefault();
@@ -407,6 +627,19 @@ export default function CaseWorkspacePage() {
     { value: "duplicate", label: t.closeReasons.duplicate },
   ];
 
+  // Pre-summary tab derived values (#484): the transcript text (voice
+  // transcription with forced-text fallback), the latest recording attempt,
+  // and its formatted duration caption.
+  const mediaRefs = intakeDetail?.media_refs ?? [];
+  const latestMedia = pickLatestMediaRef(mediaRefs);
+  const transcriptText = (
+    intakeDetail?.transcript ??
+    intakeDetail?.text ??
+    ""
+  ).trim();
+  const audioDuration =
+    latestMedia != null ? formatDurationMs(latestMedia.audio_duration_ms) : "";
+
   return (
     <>
       <Link
@@ -475,532 +708,816 @@ export default function CaseWorkspacePage() {
             )}
           </section>
 
-          {/* Consented history */}
-          {doctorMe != null && (
+          {/* Workspace inner tabs (US-14, #484): Pre-summary / History /
+              Prescription. The stage stays pinned above the tabs; below them
+              the active tab owns the panel (ARIA tablist pattern). */}
+          <WorkspaceTabs active={activeTab} onChange={setActiveTab} t={t} />
+
+          {/* ---- Pre-summary tab ---- */}
+          <section
+            role="tabpanel"
+            id="case-tabpanel-pre_summary"
+            aria-labelledby="case-tab-pre_summary"
+            hidden={activeTab !== "pre_summary"}
+            className="space-y-6"
+            data-testid="tab-panel-pre-summary"
+          >
+            {/* Original intake transcript + recording playback (#484). The
+                audio stream is not JSON and cannot carry the Bearer header on
+                a bare <audio> element, so the clip is fetched as a blob and
+                played through an object URL - latest record attempt wins. */}
             <section
               className="rounded-lg border border-border bg-bg p-4"
-              data-testid="case-history"
+              data-testid="intake-transcript"
             >
               <h2 className="text-sm font-semibold text-txt">
-                {t.historyHeading}
+                {t.transcriptHeading}
               </h2>
-              <p className="mt-1 text-xs text-txt-muted">
-                {t.historyConsentNote}
-              </p>
-              <div className="mt-3">
-                <ConsentedHistory
-                  patientId={careCase.patient_id}
-                  partnerId={doctorMe.partner_id}
-                />
-              </div>
-            </section>
-          )}
-
-          {/* Handshake action - pre_summary stage only */}
-          {showHandshake && (
-            <section
-              className="rounded-lg border border-hairline bg-bg p-4"
-              data-testid="case-handshake"
-            >
-              <form onSubmit={handleHandshake}>
-                <p className="text-xs text-txt-muted">{t.handshakeHelp}</p>
-                <Button
-                  type="submit"
-                  size="sm"
-                  disabled={handshaking}
-                  loading={handshaking}
-                  className="mt-2"
-                  data-testid="handshake-action"
+              {transcriptText !== "" ? (
+                <p
+                  className="mt-2 text-sm text-txt"
+                  data-testid="transcript-text"
                 >
-                  {t.handshakeAction}
-                </Button>
-                {handshakeError && (
-                  <p className="mt-1 text-sm text-danger" role="alert">
-                    {t.handshakeFail}
-                  </p>
-                )}
-              </form>
-            </section>
-          )}
-
-          {/* Handshake success / prescription-pending state */}
-          {isPrescriptionPending && (
-            <div
-              className="rounded-md bg-success-soft/30 px-3 py-3 text-sm text-success"
-              data-testid="handshake-success"
-            >
-              <p>{t.handshakeSuccess}</p>
-              <p className="mt-1 text-xs text-txt-muted">
-                {t.prescriptionPendingCta}
-              </p>
-            </div>
-          )}
-
-          {/* Prescription drafting (US-18) - pending cases only */}
-          {isPrescriptionPending && careCase != null && (
-            <section
-              className="rounded-lg border border-border bg-bg p-4"
-              data-testid="case-prescription"
-            >
-              <h2 className="text-sm font-semibold text-txt">
-                {t.prescriptionHeading}
-              </h2>
-              <p className="mt-1 text-xs text-txt-muted">
-                {t.prescriptionHelp}
-              </p>
-
-              <div className="mt-3">
-                {rxLoadState === "loading" && (
-                  <div className="space-y-2" data-testid="prescription-loading">
-                    <div className="h-4 w-1/3 rounded bg-muted-soft" />
-                    <div className="h-4 w-1/2 rounded bg-muted-soft" />
-                  </div>
-                )}
-
-                {rxLoadState === "error" && (
-                  <div
-                    className="flex items-center gap-3"
-                    data-testid="prescription-load-error"
-                  >
-                    <p className="text-xs text-txt-muted">
-                      {t.workingRxLoadFail}
+                  {transcriptText}
+                </p>
+              ) : intakeDetailLoadFailed ? (
+                <p
+                  className="mt-2 text-sm text-danger"
+                  role="alert"
+                  data-testid="transcript-load-error"
+                >
+                  {t.transcriptLoadFail}
+                </p>
+              ) : (
+                <p
+                  className="mt-2 text-xs text-txt-muted"
+                  data-testid="transcript-empty"
+                >
+                  {t.transcriptEmpty}
+                </p>
+              )}
+              {latestMedia != null && (
+                <div className="mt-3" data-testid="audio-playback">
+                  <span className="text-xs font-medium text-txt-muted">
+                    {t.audioPlayLabel}
+                    {audioDuration !== "" ? ` \u00b7 ${audioDuration}` : ""}
+                  </span>
+                  {audioUrl != null && (
+                    <audio
+                      controls
+                      src={audioUrl}
+                      className="mt-1 w-full"
+                      data-testid="audio-element"
+                      preload="none"
+                    />
+                  )}
+                  {audioError && (
+                    <p
+                      className="mt-1 text-sm text-danger"
+                      role="alert"
+                      data-testid="audio-load-error"
+                    >
+                      {t.audioLoadFail}
                     </p>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => void loadWorkingRx()}
-                      data-testid="prescription-load-retry"
-                    >
-                      {t.retry}
-                    </Button>
-                  </div>
-                )}
+                  )}
+                </div>
+              )}
+            </section>
 
-                {rxLoadState === "empty" && (
-                  <div data-testid="prescription-empty">
-                    <p className="text-xs text-txt-muted">{t.noDraftYet}</p>
-                    <Button
-                      type="button"
-                      size="sm"
-                      className="mt-2"
-                      disabled={drafting}
-                      loading={drafting}
-                      onClick={() => void handleRequestDraft()}
-                      data-testid="request-draft-action"
-                    >
-                      {drafting ? t.requestingDraft : t.requestDraftAction}
-                    </Button>
-                    {draftError && (
-                      <p
-                        className="mt-2 text-sm text-danger"
-                        role="alert"
-                        data-testid="draft-error"
-                      >
-                        {draftError}
-                      </p>
-                    )}
+            {/* Finalized AI summary for the assigned doctor (#484) - the
+                structured summary the pre-summary stage produced. A born case
+                always carries a final pre-summary, so no finalize action is
+                offered here. */}
+            {preSummaryForReview != null && (
+              <section
+                className="rounded-lg border border-border bg-bg p-4"
+                data-testid="case-pre-summary"
+              >
+                <h2 className="text-sm font-semibold text-txt">
+                  {t.summaryHeading}
+                </h2>
+                <div className="mt-3 space-y-3">
+                  <div data-testid="case-pre-summary-complaints">
+                    <span className="text-xs font-medium text-txt-muted">
+                      {t.chiefComplaintsLabel}
+                    </span>
+                    <ul className="mt-1 list-disc pl-4">
+                      {preSummaryForReview.structured_fields.chief_complaints.map(
+                        (c) => (
+                          <li key={c} className="text-sm text-txt">
+                            {c}
+                          </li>
+                        ),
+                      )}
+                    </ul>
                   </div>
-                )}
-
-                {rxLoadState === "ready" && workingRx != null && (
-                  <div className="mt-3" data-testid="prescription-review">
-                    <div className="flex items-center gap-4">
+                  <div data-testid="case-pre-summary-symptoms">
+                    <span className="text-xs font-medium text-txt-muted">
+                      {t.symptomsLabel}
+                    </span>
+                    <ul className="mt-1 list-disc pl-4">
+                      {preSummaryForReview.structured_fields.symptoms.map(
+                        (s) => (
+                          <li key={s} className="text-sm text-txt">
+                            {s}
+                          </li>
+                        ),
+                      )}
+                    </ul>
+                  </div>
+                  <div data-testid="case-pre-summary-duration">
+                    <span className="text-xs font-medium text-txt-muted">
+                      {t.durationLabel}
+                    </span>
+                    <p className="text-sm text-txt">
+                      {preSummaryForReview.structured_fields.duration ??
+                        t.durationNotSet}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-4">
+                    <div data-testid="case-pre-summary-confidence">
                       <span className="text-xs font-medium text-txt-muted">
-                        {t.sourceLabel}:{" "}
-                        <span className="text-txt" data-testid="rx-source">
-                          {sourceDisplayName(workingRx.source)}
-                        </span>
+                        {t.confidenceLabel}
                       </span>
-                      <span className="text-xs font-medium text-txt-muted">
-                        {t.rxStatusLabel}:{" "}
-                        <span className="text-txt" data-testid="rx-status">
-                          {rxStatusDisplayName(workingRx.status, t)}
-                        </span>
+                      <span className="ml-1 text-sm text-txt">
+                        {" "}
+                        {confidencePercent(
+                          preSummaryForReview.structuring_confidence,
+                        )}
                       </span>
                     </div>
-
-                    {/* Editor - drafting/reviewed states only, rejected rows
-                        are not editable (#452/#453). */}
-                    {isReviewableRx && (
-                      <form
-                        onSubmit={handleSaveRevision}
-                        className="mt-3"
-                        data-testid="prescription-editor"
+                    {preSummaryForReview.low_confidence && (
+                      <span
+                        data-testid="case-pre-summary-low-confidence"
+                        className="inline-flex items-center rounded-full bg-warning-soft px-2 py-0.5 text-xs font-medium text-warning-text"
                       >
-                        <span className="text-xs font-medium text-txt-muted">
-                          {t.rxItemsLabel}
-                        </span>
-                        {rxItems.length === 0 ? (
-                          <p className="mt-1 text-xs text-txt-muted">
-                            {t.rxEmptyItems}
-                          </p>
-                        ) : (
-                          <ul className="mt-2 space-y-2">
-                            {rxItems.map((row, idx) => (
-                              <li
-                                key={idx}
-                                className="flex flex-wrap items-center gap-2"
-                                data-testid="rx-item-row"
-                              >
-                                <label className="flex-1 min-w-40">
-                                  <span className="sr-only">
-                                    {t.rxNameLabel}: {idx + 1}
-                                  </span>
-                                  <input
-                                    type="text"
-                                    value={row.name}
-                                    onChange={(e) =>
-                                      updateRxItem(idx, "name", e.target.value)
-                                    }
-                                    placeholder={t.rxNameLabel}
-                                    className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-                                    data-testid={`rx-item-name-${idx}`}
-                                  />
-                                </label>
-                                <label className="flex-1 min-w-28">
-                                  <span className="sr-only">
-                                    {t.rxDoseLabel}: {idx + 1}
-                                  </span>
-                                  <input
-                                    type="text"
-                                    value={row.dose}
-                                    onChange={(e) =>
-                                      updateRxItem(idx, "dose", e.target.value)
-                                    }
-                                    placeholder={t.rxDoseLabel}
-                                    className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-                                    data-testid={`rx-item-dose-${idx}`}
-                                  />
-                                </label>
-                                <label className="flex-1 min-w-28">
-                                  <span className="sr-only">
-                                    {t.rxDurationLabel}: {idx + 1}
-                                  </span>
-                                  <input
-                                    type="text"
-                                    value={row.duration}
-                                    onChange={(e) =>
-                                      updateRxItem(
-                                        idx,
-                                        "duration",
-                                        e.target.value,
-                                      )
-                                    }
-                                    placeholder={t.rxDurationLabel}
-                                    className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-                                    data-testid={`rx-item-duration-${idx}`}
-                                  />
-                                </label>
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  variant="ghost"
-                                  disabled={rxItems.length <= 1}
-                                  onClick={() => removeRxItem(idx)}
-                                  data-testid={`rx-item-remove-${idx}`}
-                                >
-                                  {t.removeItemAction}
-                                </Button>
-                              </li>
-                            ))}
-                          </ul>
-                        )}
+                        {consoleT.verifyChip}
+                      </span>
+                    )}
+                  </div>
+                  <div data-testid="case-pre-summary-patient-edits">
+                    <span className="text-xs font-medium text-txt-muted">
+                      {t.patientEditsLabel}
+                    </span>
+                    <p className="text-sm text-txt">
+                      {Object.keys(preSummaryForReview.patient_edits ?? {})
+                        .length > 0
+                        ? Object.entries(
+                            preSummaryForReview.patient_edits ?? {},
+                          )
+                            .map(([k, v]) => `${k}: ${v}`)
+                            .join("; ")
+                        : t.patientEditsNone}
+                    </p>
+                  </div>
+                  <div data-testid="case-pre-summary-attribution">
+                    <span className="text-xs font-medium text-txt-muted">
+                      {t.attributionLabel}
+                    </span>
+                    <p className="text-sm text-txt">
+                      {preSummaryForReview.review_attribution != null
+                        ? preSummaryForReview.review_attribution
+                        : t.notReviewedYet}
+                    </p>
+                  </div>
+                  <div data-testid="case-pre-summary-review-state">
+                    <span className="text-xs font-medium text-txt-muted">
+                      {t.reviewStateLabel}
+                    </span>
+                    <span className="ml-1 text-sm text-txt">
+                      {reviewStateDisplayName(
+                        preSummaryForReview.review_state,
+                        t,
+                      )}
+                    </span>
+                    {preSummaryForReview.reviewed_at != null && (
+                      <span className="ml-2 text-xs text-txt-muted">
+                        ({t.reviewedOnLabel}:{" "}
+                        {formatDateTime(preSummaryForReview.reviewed_at, lang)})
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </section>
+            )}
 
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          className="mt-2"
-                          onClick={addRxItem}
-                          data-testid="add-rx-item"
+            {/* Handshake action - pre_summary stage only */}
+            {showHandshake && (
+              <section
+                className="rounded-lg border border-hairline bg-bg p-4"
+                data-testid="case-handshake"
+              >
+                <form onSubmit={handleHandshake}>
+                  <p className="text-xs text-txt-muted">{t.handshakeHelp}</p>
+                  <Button
+                    type="submit"
+                    size="sm"
+                    disabled={handshaking}
+                    loading={handshaking}
+                    className="mt-2"
+                    data-testid="handshake-action"
+                  >
+                    {t.handshakeAction}
+                  </Button>
+                  {handshakeError && (
+                    <p className="mt-1 text-sm text-danger" role="alert">
+                      {t.handshakeFail}
+                    </p>
+                  )}
+                </form>
+              </section>
+            )}
+          </section>
+
+          {/* ---- History tab ---- */}
+          <section
+            role="tabpanel"
+            id="case-tabpanel-history"
+            aria-labelledby="case-tab-history"
+            hidden={activeTab !== "history"}
+            className="space-y-6"
+            data-testid="tab-panel-history"
+          >
+            {doctorMe != null && (
+              <section
+                className="rounded-lg border border-border bg-bg p-4"
+                data-testid="case-history"
+              >
+                <h2 className="text-sm font-semibold text-txt">
+                  {t.historyHeading}
+                </h2>
+                <p className="mt-1 text-xs text-txt-muted">
+                  {t.historyConsentNote}
+                </p>
+                <div className="mt-3">
+                  <ConsentedHistory
+                    patientId={careCase.patient_id}
+                    partnerId={doctorMe.partner_id}
+                  />
+                </div>
+              </section>
+            )}
+          </section>
+
+          {/* ---- Prescription tab ---- */}
+          <section
+            role="tabpanel"
+            id="case-tabpanel-prescription"
+            aria-labelledby="case-tab-prescription"
+            hidden={activeTab !== "prescription"}
+            className="space-y-6"
+            data-testid="tab-panel-prescription"
+          >
+            {isPreSummaryStage && !handshakeDone ? (
+              /* Stage lock (#484): a born case always has a finalized pre-
+                  summary, so the only open step is the consult-complete
+                  handshake. The action jumps the doctor to the Pre-summary
+                  tab where the handshake form lives. */
+              <section
+                className="rounded-lg border border-warning/30 bg-warning-soft/40 p-4"
+                data-testid="prescription-lock"
+              >
+                <h2 className="text-sm font-semibold text-warning-text">
+                  {t.rxLockTitle}
+                </h2>
+                <ul className="mt-2 space-y-1 text-xs text-txt-muted">
+                  <li data-testid="rx-lock-done">
+                    <span aria-hidden="true">{"\u2713"}</span>{" "}
+                    <span>{t.rxLockDone}</span>
+                  </li>
+                  <li data-testid="rx-lock-pending">
+                    <span aria-hidden="true">{"\u2022"}</span>{" "}
+                    <span>{t.rxLockPending}</span>
+                  </li>
+                </ul>
+                <Button
+                  type="button"
+                  size="sm"
+                  className="mt-3"
+                  data-testid="rx-lock-action"
+                  onClick={() => setActiveTab("pre_summary")}
+                >
+                  {t.rxLockAction}
+                </Button>
+              </section>
+            ) : (
+              <>
+                {/* Handshake success / prescription-pending state */}
+                {isPrescriptionPending && (
+                  <div
+                    className="rounded-md bg-success-soft/30 px-3 py-3 text-sm text-success"
+                    data-testid="handshake-success"
+                  >
+                    <p>{t.handshakeSuccess}</p>
+                    <p className="mt-1 text-xs text-txt-muted">
+                      {t.prescriptionPendingCta}
+                    </p>
+                  </div>
+                )}
+
+                {/* Prescription drafting (US-18) - pending cases only */}
+                {isPrescriptionPending && careCase != null && (
+                  <section
+                    className="rounded-lg border border-border bg-bg p-4"
+                    data-testid="case-prescription"
+                  >
+                    <h2 className="text-sm font-semibold text-txt">
+                      {t.prescriptionHeading}
+                    </h2>
+                    <p className="mt-1 text-xs text-txt-muted">
+                      {t.prescriptionHelp}
+                    </p>
+
+                    <div className="mt-3">
+                      {rxLoadState === "loading" && (
+                        <div
+                          className="space-y-2"
+                          data-testid="prescription-loading"
                         >
-                          {t.addItemAction}
-                        </Button>
-
-                        <div className="mt-4 flex items-center gap-3">
-                          <Button
-                            type="submit"
-                            size="sm"
-                            disabled={saving}
-                            loading={saving}
-                            data-testid="save-revision-action"
-                          >
-                            {saving ? t.savingRevision : t.saveRevisionAction}
-                          </Button>
-                          {saveSuccess && (
-                            <p
-                              className="text-sm text-success"
-                              data-testid="revision-saved"
-                            >
-                              {t.revisionSaved}
-                            </p>
-                          )}
-                          {saveError && (
-                            <p
-                              className="text-sm text-danger"
-                              role="alert"
-                              data-testid="revision-save-error"
-                            >
-                              {t.saveRevisionFail}
-                            </p>
-                          )}
+                          <div className="h-4 w-1/3 rounded bg-muted-soft" />
+                          <div className="h-4 w-1/2 rounded bg-muted-soft" />
                         </div>
-                      </form>
-                    )}
+                      )}
 
-                    {/* Issued e-prescription after approval (US-20) - rendered
-                        from the approve response so the doctor sees what the
-                        patient receives. */}
-                    {isIssuedRx && (
-                      <div
-                        className="mt-3 rounded-md border border-hairline bg-surface p-3"
-                        data-testid="issued-rx"
-                      >
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <h3 className="text-sm font-semibold text-success">
-                            {t.issuedHeading}
-                          </h3>
-                          {workingRx.issued_at != null && (
-                            <span
-                              className="text-xs text-txt-muted"
-                              data-testid="issued-at"
-                            >
-                              {t.issuedAtLabel}:{" "}
-                              {formatDateTime(workingRx.issued_at, lang)}
-                            </span>
-                          )}
-                        </div>
-                        <p className="mt-1 text-xs text-txt-muted">
-                          {t.issuedImmutableNote}
-                        </p>
-                        <ul className="mt-2 space-y-1">
-                          {workingRx.items.map((item) => (
-                            <li
-                              key={item.rx_item_id}
-                              className="text-sm text-txt"
-                              data-testid="issued-rx-item"
-                            >
-                              {item.name}
-                              {item.dose != null ? ` - ${item.dose}` : ""}
-                              {item.duration != null
-                                ? ` - ${item.duration}`
-                                : ""}
-                            </li>
-                          ))}
-                        </ul>
-                        <p
-                          className="mt-2 text-xs text-txt-muted"
-                          data-testid="issued-attribution"
+                      {rxLoadState === "error" && (
+                        <div
+                          className="flex items-center gap-3"
+                          data-testid="prescription-load-error"
                         >
-                          {t.issuedAttributedTo}
-                        </p>
-                      </div>
-                    )}
-
-                    {/* Rejected-draft state (US-21): reason recorded for the
-                        patient, case stays open for a re-draft or a close. */}
-                    {isRejectedRx && (
-                      <div
-                        className="mt-3 rounded-md border border-warning/30 bg-warning-soft/40 p-3"
-                        data-testid="rx-rejected"
-                      >
-                        <h3 className="text-sm font-semibold text-warning-text">
-                          {t.rejectedHeading}
-                        </h3>
-                        <p className="mt-1 text-xs text-txt-muted">
-                          {t.rejectedHelp}
-                        </p>
-                        {rejectReason !== "" && (
-                          <p
-                            className="mt-2 text-xs text-txt-muted"
-                            data-testid="recorded-reason"
-                          >
-                            {t.rejectedReasonLabel}: {rejectReason}
-                          </p>
-                        )}
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          className="mt-2"
-                          disabled={drafting}
-                          loading={drafting}
-                          onClick={() => void handleRequestDraft()}
-                          data-testid="reject-redraft-action"
-                        >
-                          {drafting ? t.requestingDraft : t.requestDraftAction}
-                        </Button>
-                      </div>
-                    )}
-
-                    {/* Doctor decision (US-19..21): approve gated on the
-                        verification declaration, plus reject-with-reason. */}
-                    {isReviewableRx && (
-                      <div
-                        className="mt-4 rounded-md border border-hairline bg-surface p-3"
-                        data-testid="review-decision"
-                      >
-                        <h3 className="text-sm font-semibold text-txt">
-                          {t.decisionHeading}
-                        </h3>
-
-                        <div className="mt-2" data-testid="approval-gate">
                           <p className="text-xs text-txt-muted">
-                            {t.approvalGateTitle}. {t.approvalGateHelp}
+                            {t.workingRxLoadFail}
                           </p>
-                          <label className="mt-2 flex items-start gap-2 text-sm text-txt">
-                            <input
-                              type="checkbox"
-                              checked={declaration}
-                              onChange={(e) => setDeclaration(e.target.checked)}
-                              className="mt-0.5 h-4 w-4"
-                              data-testid="verification-declaration"
-                            />
-                            <span>{t.verificationDeclaration}</span>
-                          </label>
-                          {!declaration && (
-                            <p
-                              className="mt-1 text-xs text-txt-muted"
-                              data-testid="approve-blocked-help"
-                            >
-                              {t.approveBlockedHelp}
-                            </p>
-                          )}
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => void loadWorkingRx()}
+                            data-testid="prescription-load-retry"
+                          >
+                            {t.retry}
+                          </Button>
+                        </div>
+                      )}
+
+                      {rxLoadState === "empty" && (
+                        <div data-testid="prescription-empty">
+                          <p className="text-xs text-txt-muted">
+                            {t.noDraftYet}
+                          </p>
                           <Button
                             type="button"
                             size="sm"
                             className="mt-2"
-                            disabled={!declaration}
-                            loading={approving}
-                            onClick={() => void handleApprove()}
-                            data-testid="approve-issue-action"
+                            disabled={drafting}
+                            loading={drafting}
+                            onClick={() => void handleRequestDraft()}
+                            data-testid="request-draft-action"
                           >
-                            {approving
-                              ? t.approvingIssuance
-                              : t.approveIssueAction}
+                            {drafting
+                              ? t.requestingDraft
+                              : t.requestDraftAction}
                           </Button>
-                          {approveError && (
+                          {draftError && (
                             <p
-                              className="mt-1 text-sm text-danger"
+                              className="mt-2 text-sm text-danger"
                               role="alert"
-                              data-testid="approve-error"
+                              data-testid="draft-error"
                             >
-                              {t.approveFail}
+                              {draftError}
                             </p>
                           )}
                         </div>
+                      )}
 
-                        <form onSubmit={handleReject} className="mt-4">
-                          <label
-                            htmlFor="reject-reason"
-                            className="block text-xs font-medium text-txt-muted"
-                          >
-                            {t.rejectReasonLabel}
-                          </label>
-                          <textarea
-                            id="reject-reason"
-                            value={rejectReason}
-                            onChange={(e) => setRejectReason(e.target.value)}
-                            rows={2}
-                            placeholder={t.rejectReasonPlaceholder}
-                            className="mt-1 w-full rounded-md border border-hairline bg-bg px-3 py-2 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-                            data-testid="reject-reason"
-                          />
-                          <Button
-                            type="submit"
-                            size="sm"
-                            variant="outline"
-                            className="mt-2"
-                            disabled={rejecting || rejectReason.trim() === ""}
-                            loading={rejecting}
-                            data-testid="reject-action"
-                          >
-                            {rejecting ? t.rejectingDraft : t.rejectAction}
-                          </Button>
-                          {rejectError && (
-                            <p
-                              className="mt-1 text-sm text-danger"
-                              role="alert"
-                              data-testid="reject-error"
+                      {rxLoadState === "ready" && workingRx != null && (
+                        <div className="mt-3" data-testid="prescription-review">
+                          <div className="flex items-center gap-4">
+                            <span className="text-xs font-medium text-txt-muted">
+                              {t.sourceLabel}:{" "}
+                              <span
+                                className="text-txt"
+                                data-testid="rx-source"
+                              >
+                                {sourceDisplayName(workingRx.source)}
+                              </span>
+                            </span>
+                            <span className="text-xs font-medium text-txt-muted">
+                              {t.rxStatusLabel}:{" "}
+                              <span
+                                className="text-txt"
+                                data-testid="rx-status"
+                              >
+                                {rxStatusDisplayName(workingRx.status, t)}
+                              </span>
+                            </span>
+                          </div>
+
+                          {/* Editor - drafting/reviewed states only, rejected
+                              rows are not editable (#452/#453). */}
+                          {isReviewableRx && (
+                            <form
+                              onSubmit={handleSaveRevision}
+                              className="mt-3"
+                              data-testid="prescription-editor"
                             >
-                              {t.rejectFail}
-                            </p>
+                              <span className="text-xs font-medium text-txt-muted">
+                                {t.rxItemsLabel}
+                              </span>
+                              {rxItems.length === 0 ? (
+                                <p className="mt-1 text-xs text-txt-muted">
+                                  {t.rxEmptyItems}
+                                </p>
+                              ) : (
+                                <ul className="mt-2 space-y-2">
+                                  {rxItems.map((row, idx) => (
+                                    <li
+                                      key={idx}
+                                      className="flex flex-wrap items-center gap-2"
+                                      data-testid="rx-item-row"
+                                    >
+                                      <label className="flex-1 min-w-40">
+                                        <span className="sr-only">
+                                          {t.rxNameLabel}: {idx + 1}
+                                        </span>
+                                        <input
+                                          type="text"
+                                          value={row.name}
+                                          onChange={(e) =>
+                                            updateRxItem(
+                                              idx,
+                                              "name",
+                                              e.target.value,
+                                            )
+                                          }
+                                          placeholder={t.rxNameLabel}
+                                          className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                                          data-testid={`rx-item-name-${idx}`}
+                                        />
+                                      </label>
+                                      <label className="flex-1 min-w-28">
+                                        <span className="sr-only">
+                                          {t.rxDoseLabel}: {idx + 1}
+                                        </span>
+                                        <input
+                                          type="text"
+                                          value={row.dose}
+                                          onChange={(e) =>
+                                            updateRxItem(
+                                              idx,
+                                              "dose",
+                                              e.target.value,
+                                            )
+                                          }
+                                          placeholder={t.rxDoseLabel}
+                                          className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                                          data-testid={`rx-item-dose-${idx}`}
+                                        />
+                                      </label>
+                                      <label className="flex-1 min-w-28">
+                                        <span className="sr-only">
+                                          {t.rxDurationLabel}: {idx + 1}
+                                        </span>
+                                        <input
+                                          type="text"
+                                          value={row.duration}
+                                          onChange={(e) =>
+                                            updateRxItem(
+                                              idx,
+                                              "duration",
+                                              e.target.value,
+                                            )
+                                          }
+                                          placeholder={t.rxDurationLabel}
+                                          className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                                          data-testid={`rx-item-duration-${idx}`}
+                                        />
+                                      </label>
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="ghost"
+                                        disabled={rxItems.length <= 1}
+                                        onClick={() => removeRxItem(idx)}
+                                        data-testid={`rx-item-remove-${idx}`}
+                                      >
+                                        {t.removeItemAction}
+                                      </Button>
+                                    </li>
+                                  ))}
+                                </ul>
+                              )}
+
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                className="mt-2"
+                                onClick={addRxItem}
+                                data-testid="add-rx-item"
+                              >
+                                {t.addItemAction}
+                              </Button>
+
+                              <div className="mt-4 flex items-center gap-3">
+                                <Button
+                                  type="submit"
+                                  size="sm"
+                                  disabled={saving}
+                                  loading={saving}
+                                  data-testid="save-revision-action"
+                                >
+                                  {saving
+                                    ? t.savingRevision
+                                    : t.saveRevisionAction}
+                                </Button>
+                                {saveSuccess && (
+                                  <p
+                                    className="text-sm text-success"
+                                    data-testid="revision-saved"
+                                  >
+                                    {t.revisionSaved}
+                                  </p>
+                                )}
+                                {saveError && (
+                                  <p
+                                    className="text-sm text-danger"
+                                    role="alert"
+                                    data-testid="revision-save-error"
+                                  >
+                                    {t.saveRevisionFail}
+                                  </p>
+                                )}
+                              </div>
+                            </form>
                           )}
-                        </form>
-                      </div>
-                    )}
+
+                          {/* Issued e-prescription after approval (US-20) -
+                              rendered from the approve response so the doctor
+                              sees what the patient receives. */}
+                          {isIssuedRx && (
+                            <div
+                              className="mt-3 rounded-md border border-hairline bg-surface p-3"
+                              data-testid="issued-rx"
+                            >
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <h3 className="text-sm font-semibold text-success">
+                                  {t.issuedHeading}
+                                </h3>
+                                {workingRx.issued_at != null && (
+                                  <span
+                                    className="text-xs text-txt-muted"
+                                    data-testid="issued-at"
+                                  >
+                                    {t.issuedAtLabel}:{" "}
+                                    {formatDateTime(workingRx.issued_at, lang)}
+                                  </span>
+                                )}
+                              </div>
+                              <p className="mt-1 text-xs text-txt-muted">
+                                {t.issuedImmutableNote}
+                              </p>
+                              <ul className="mt-2 space-y-1">
+                                {workingRx.items.map((item) => (
+                                  <li
+                                    key={item.rx_item_id}
+                                    className="text-sm text-txt"
+                                    data-testid="issued-rx-item"
+                                  >
+                                    {item.name}
+                                    {item.dose != null ? ` - ${item.dose}` : ""}
+                                    {item.duration != null
+                                      ? ` - ${item.duration}`
+                                      : ""}
+                                  </li>
+                                ))}
+                              </ul>
+                              <p
+                                className="mt-2 text-xs text-txt-muted"
+                                data-testid="issued-attribution"
+                              >
+                                {t.issuedAttributedTo}
+                              </p>
+                            </div>
+                          )}
+
+                          {/* Rejected-draft state (US-21): reason recorded for
+                              the patient, case stays open for a re-draft or a
+                              close. */}
+                          {isRejectedRx && (
+                            <div
+                              className="mt-3 rounded-md border border-warning/30 bg-warning-soft/40 p-3"
+                              data-testid="rx-rejected"
+                            >
+                              <h3 className="text-sm font-semibold text-warning-text">
+                                {t.rejectedHeading}
+                              </h3>
+                              <p className="mt-1 text-xs text-txt-muted">
+                                {t.rejectedHelp}
+                              </p>
+                              {rejectReason !== "" && (
+                                <p
+                                  className="mt-2 text-xs text-txt-muted"
+                                  data-testid="recorded-reason"
+                                >
+                                  {t.rejectedReasonLabel}: {rejectReason}
+                                </p>
+                              )}
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                className="mt-2"
+                                disabled={drafting}
+                                loading={drafting}
+                                onClick={() => void handleRequestDraft()}
+                                data-testid="reject-redraft-action"
+                              >
+                                {drafting
+                                  ? t.requestingDraft
+                                  : t.requestDraftAction}
+                              </Button>
+                            </div>
+                          )}
+
+                          {/* Doctor decision (US-19..21): approve gated on the
+                              verification declaration, plus reject-with-
+                              reason. */}
+                          {isReviewableRx && (
+                            <div
+                              className="mt-4 rounded-md border border-hairline bg-surface p-3"
+                              data-testid="review-decision"
+                            >
+                              <h3 className="text-sm font-semibold text-txt">
+                                {t.decisionHeading}
+                              </h3>
+
+                              <div className="mt-2" data-testid="approval-gate">
+                                <p className="text-xs text-txt-muted">
+                                  {t.approvalGateTitle}. {t.approvalGateHelp}
+                                </p>
+                                <label className="mt-2 flex items-start gap-2 text-sm text-txt">
+                                  <input
+                                    type="checkbox"
+                                    checked={declaration}
+                                    onChange={(e) =>
+                                      setDeclaration(e.target.checked)
+                                    }
+                                    className="mt-0.5 h-4 w-4"
+                                    data-testid="verification-declaration"
+                                  />
+                                  <span>{t.verificationDeclaration}</span>
+                                </label>
+                                {!declaration && (
+                                  <p
+                                    className="mt-1 text-xs text-txt-muted"
+                                    data-testid="approve-blocked-help"
+                                  >
+                                    {t.approveBlockedHelp}
+                                  </p>
+                                )}
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  className="mt-2"
+                                  disabled={!declaration}
+                                  loading={approving}
+                                  onClick={() => void handleApprove()}
+                                  data-testid="approve-issue-action"
+                                >
+                                  {approving
+                                    ? t.approvingIssuance
+                                    : t.approveIssueAction}
+                                </Button>
+                                {approveError && (
+                                  <p
+                                    className="mt-1 text-sm text-danger"
+                                    role="alert"
+                                    data-testid="approve-error"
+                                  >
+                                    {t.approveFail}
+                                  </p>
+                                )}
+                              </div>
+
+                              <form onSubmit={handleReject} className="mt-4">
+                                <label
+                                  htmlFor="reject-reason"
+                                  className="block text-xs font-medium text-txt-muted"
+                                >
+                                  {t.rejectReasonLabel}
+                                </label>
+                                <textarea
+                                  id="reject-reason"
+                                  value={rejectReason}
+                                  onChange={(e) =>
+                                    setRejectReason(e.target.value)
+                                  }
+                                  rows={2}
+                                  placeholder={t.rejectReasonPlaceholder}
+                                  className="mt-1 w-full rounded-md border border-hairline bg-bg px-3 py-2 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                                  data-testid="reject-reason"
+                                />
+                                <Button
+                                  type="submit"
+                                  size="sm"
+                                  variant="outline"
+                                  className="mt-2"
+                                  disabled={
+                                    rejecting || rejectReason.trim() === ""
+                                  }
+                                  loading={rejecting}
+                                  data-testid="reject-action"
+                                >
+                                  {rejecting
+                                    ? t.rejectingDraft
+                                    : t.rejectAction}
+                                </Button>
+                                {rejectError && (
+                                  <p
+                                    className="mt-1 text-sm text-danger"
+                                    role="alert"
+                                    data-testid="reject-error"
+                                  >
+                                    {t.rejectFail}
+                                  </p>
+                                )}
+                              </form>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </section>
+                )}
+
+                {/* Close-without-prescription (US-22) - pending cases only */}
+                {isPrescriptionPending && careCase != null && (
+                  <section
+                    className="rounded-lg border border-hairline bg-bg p-4"
+                    data-testid="case-close"
+                  >
+                    <h2 className="text-sm font-semibold text-txt">
+                      {t.closeWithoutRxHeading}
+                    </h2>
+                    <p className="mt-1 text-xs text-txt-muted">
+                      {t.closeWithoutRxHelp}
+                    </p>
+                    <form
+                      onSubmit={handleClose}
+                      className="mt-3 flex flex-wrap items-end gap-3"
+                    >
+                      <label className="flex-1 min-w-48">
+                        <span className="sr-only">{t.closeReasonLabel}</span>
+                        <select
+                          value={closeReason}
+                          onChange={(e) =>
+                            setCloseReason(e.target.value as CloseReason | "")
+                          }
+                          className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                          data-testid="close-reason-input"
+                        >
+                          <option value="">{t.closeReasonLabel}</option>
+                          {closeReasons.map(({ value, label }) => (
+                            <option key={value} value={value}>
+                              {label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <Button
+                        type="submit"
+                        size="sm"
+                        variant="destructive"
+                        disabled={closing || closeReason === ""}
+                        loading={closing}
+                        data-testid="close-case-action"
+                      >
+                        {closing ? t.closingCase : t.closeCaseAction}
+                      </Button>
+                      {closeError && (
+                        <p
+                          className="w-full text-sm text-danger"
+                          role="alert"
+                          data-testid="close-error"
+                        >
+                          {t.closeFail}
+                        </p>
+                      )}
+                    </form>
+                  </section>
+                )}
+
+                {/* Closed state */}
+                {currentStage === "closed" && (
+                  <div
+                    className="rounded-md bg-muted-soft px-3 py-3 text-sm text-txt-muted"
+                    data-testid="closed-state"
+                  >
+                    <p>{consoleT.stageClosed}</p>
                   </div>
                 )}
-              </div>
-            </section>
-          )}
-
-          {/* Close-without-prescription (US-22) - pending cases only */}
-          {isPrescriptionPending && careCase != null && (
-            <section
-              className="rounded-lg border border-hairline bg-bg p-4"
-              data-testid="case-close"
-            >
-              <h2 className="text-sm font-semibold text-txt">
-                {t.closeWithoutRxHeading}
-              </h2>
-              <p className="mt-1 text-xs text-txt-muted">
-                {t.closeWithoutRxHelp}
-              </p>
-              <form
-                onSubmit={handleClose}
-                className="mt-3 flex flex-wrap items-end gap-3"
-              >
-                <label className="flex-1 min-w-48">
-                  <span className="sr-only">{t.closeReasonLabel}</span>
-                  <select
-                    value={closeReason}
-                    onChange={(e) =>
-                      setCloseReason(e.target.value as CloseReason | "")
-                    }
-                    className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-                    data-testid="close-reason-input"
-                  >
-                    <option value="">{t.closeReasonLabel}</option>
-                    {closeReasons.map(({ value, label }) => (
-                      <option key={value} value={value}>
-                        {label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <Button
-                  type="submit"
-                  size="sm"
-                  variant="destructive"
-                  disabled={closing || closeReason === ""}
-                  loading={closing}
-                  data-testid="close-case-action"
-                >
-                  {closing ? t.closingCase : t.closeCaseAction}
-                </Button>
-                {closeError && (
-                  <p
-                    className="w-full text-sm text-danger"
-                    role="alert"
-                    data-testid="close-error"
-                  >
-                    {t.closeFail}
-                  </p>
-                )}
-              </form>
-            </section>
-          )}
-
-          {/* Closed state */}
-          {currentStage === "closed" && (
-            <div
-              className="rounded-md bg-muted-soft px-3 py-3 text-sm text-txt-muted"
-              data-testid="closed-state"
-            >
-              <p>{consoleT.stageClosed}</p>
-            </div>
-          )}
+              </>
+            )}
+          </section>
         </div>
       )}
     </>

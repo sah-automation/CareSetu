@@ -378,6 +378,43 @@ async def get_doctor_pre_summary(
 
 
 @router.get(
+    "/pre-summary/{pre_summary_id}/detail",
+    response_model=IntakeDetailView,
+    status_code=status.HTTP_200_OK,
+    summary="Read the intake transcript and media refs for a pre-summary (doctor only)",
+)
+async def get_doctor_intake_detail(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+    pre_summary_id: int,
+) -> IntakeDetailView:
+    """Read an intake's transcript and media refs for the assigned doctor (US-14, #484).
+
+    Thin doctor-scoped adapter (PHASE-8.1 T09): the ``require_partner`` gate
+    admits any partner-scoped caller, then the principal is resolved to their
+    partner profile and a non-doctor partner is refused with 403 - the doctor
+    RBAC convention (partner scope + ``partner_type == "doctor"``, matching
+    the review, queue, and pre-summary routes). The facade resolves the intake
+    through the pre-summary the care case carries and returns the original
+    transcript text and media refs only for an intake the patient assigned to
+    this doctor (#443); an unassigned or other doctor gets the same 404 as a
+    non-owner. Distinct from the patient GET ``/{intake_id}`` - this is the
+    pre-summary-keyed read, and the transcript/audio never leave the owning
+    doctor's workspace (PHI, no logging).
+    """
+    facade = cast(IntakeFacade, request.app.state.intake_facade)
+    partner = await cast(PartnerFacade, request.app.state.partner_facade).resolve_partner(
+        _resolve_subject_id(account)
+    )
+    if partner.partner_type != "doctor":
+        raise InsufficientScopeError("the doctor role is required for this route")
+    return await facade.get_doctor_intake_detail(
+        pre_summary_id=pre_summary_id,
+        doctor_id=partner.partner_id,
+    )
+
+
+@router.get(
     "/{intake_id}",
     response_model=IntakeDetailView,
     status_code=status.HTTP_200_OK,
