@@ -34,10 +34,13 @@ describe("NAV_CONFIG", () => {
     expect(home.soon).toBeUndefined();
   });
 
-  it("marks every non-home staff entry as Soon", () => {
+  it("keeps every non-home staff entry as Soon except the doctor Cases tab", () => {
     for (const role of ["doctor", "partner", "operator"] as const) {
       for (const item of NAV_CONFIG[role].slice(1)) {
-        expect(item.soon, `${role}/${item.key}`).toBe(true);
+        const isLiveDoctorCases = role === "doctor" && item.key === "cases";
+        expect(item.soon, `${role}/${item.key}`).toBe(
+          isLiveDoctorCases ? undefined : true,
+        );
       }
     }
   });

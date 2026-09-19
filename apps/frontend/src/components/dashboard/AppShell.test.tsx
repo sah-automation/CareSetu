@@ -3,12 +3,20 @@
 // render nav-config-driven tabs/top-nav with Soon semantics and bilingual
 // labels; the retired matchMedia mechanics stay gone via source scan.
 
-import { render, screen, fireEvent, cleanup } from "@testing-library/react";
+import {
+  render,
+  screen,
+  fireEvent,
+  cleanup,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { __resetLangForTests } from "@/lib/i18n/LangContext";
+import { listOpenCases, type CaseDetailView } from "@/lib/care/api";
 
 import { AppShell } from "./AppShell";
 import type { Role } from "./types";
@@ -55,6 +63,15 @@ vi.mock("@/lib/auth/AuthContext", () => ({
   }),
 }));
 
+// PHASE-8.1 T8 (#483): the doctor shell's Cases count pill reads the existing
+// open-cases feed; the whole care module is mocked so shell tests stay unit
+// scoped.
+vi.mock("@/lib/care/api", () => ({
+  listOpenCases: vi.fn(),
+}));
+
+const getOpenCases = vi.mocked(listOpenCases);
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -64,6 +81,7 @@ beforeEach(() => {
   localStorage.clear();
   __resetLangForTests();
   mockPathname.mockReturnValue("/patient");
+  getOpenCases.mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -281,6 +299,120 @@ describe.each(["doctor", "partner", "operator"] as const)(
     });
   },
 );
+
+describe("AppShell doctor Cases count pill (PHASE-8.1 T8, #483)", () => {
+  function openCase(id: number) {
+    return {
+      case_id: id,
+      patient_id: 3,
+      doctor_id: 7,
+      pre_summary_id: 5,
+      stage: "prescription_pending",
+      forced_review: false,
+      closed_at: null,
+      close_reason: null,
+      created_at: "2026-09-12T10:00:00Z",
+      updated_at: "2026-09-12T10:00:00Z",
+    } as CaseDetailView;
+  }
+
+  function renderDoctor() {
+    mockPathname.mockReturnValue("/doctor");
+    return render(
+      <AppShell role="doctor">
+        <h1>Workspace</h1>
+      </AppShell>,
+    );
+  }
+
+  it("renders the Cases tab as a live link with the open-cases count pill", async () => {
+    getOpenCases.mockResolvedValue([openCase(11), openCase(12)]);
+    renderDoctor();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("nav-cases")).toHaveAttribute(
+        "href",
+        "/doctor/cases",
+      ),
+    );
+    expect(screen.getByTestId("nav-cases").tagName).toBe("A");
+    expect(
+      within(screen.getByTestId("nav-cases")).getByTestId("count-pill"),
+    ).toHaveTextContent("2");
+    // The phone tab bar carries the same count badge (same config entry).
+    expect(
+      within(screen.getByTestId("tab-cases")).getByTestId("count-pill"),
+    ).toHaveTextContent("2");
+  });
+
+  it("marks the Cases tab current when on /doctor/cases", async () => {
+    mockPathname.mockReturnValue("/doctor/cases");
+    getOpenCases.mockResolvedValue([openCase(11)]);
+    render(
+      <AppShell role="doctor">
+        <h1>Workspace</h1>
+      </AppShell>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("nav-cases")).toHaveAttribute(
+        "aria-current",
+        "page",
+      ),
+    );
+    expect(screen.getByTestId("tab-cases")).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+  });
+
+  it("shows no count pill when there are no open cases", async () => {
+    getOpenCases.mockResolvedValue([]);
+    renderDoctor();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("nav-cases")).toHaveAttribute(
+        "href",
+        "/doctor/cases",
+      ),
+    );
+    expect(screen.queryByTestId("count-pill")).not.toBeInTheDocument();
+  });
+
+  it("shows no count pill when the cases feed fails", async () => {
+    getOpenCases.mockRejectedValue(new Error("boom"));
+    renderDoctor();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("nav-cases")).toHaveAttribute(
+        "href",
+        "/doctor/cases",
+      ),
+    );
+    expect(screen.queryByTestId("count-pill")).not.toBeInTheDocument();
+  });
+
+  it("keeps doctor Patients and Profile coming-soon while Cases is live", async () => {
+    renderDoctor();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("nav-cases")).toHaveAttribute(
+        "href",
+        "/doctor/cases",
+      ),
+    );
+    expect(screen.getByTestId("nav-patients")).toHaveAttribute(
+      "data-soon",
+      "true",
+    );
+    expect(screen.getByTestId("nav-profile")).toHaveAttribute(
+      "data-soon",
+      "true",
+    );
+    expect(screen.getByTestId("nav-patients").tagName).toBe("SPAN");
+    expect(screen.getByTestId("nav-profile").tagName).toBe("SPAN");
+  });
+});
 
 describe("full-shell collapse preference persistence", () => {
   function renderOperator() {

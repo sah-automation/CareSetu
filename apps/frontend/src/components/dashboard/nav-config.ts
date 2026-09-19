@@ -111,12 +111,13 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
   ],
   doctor: [
     { key: "queue", labelKey: "queue", href: "/doctor", icon: ClipboardList },
+    // PHASE-8.1 T8 (#483): Cases un-sooned - the open-cases index at
+    // /doctor/cases is live; patients/profile stay coming-soon.
     {
       key: "cases",
       labelKey: "cases",
       href: "/doctor/cases",
       icon: FolderOpen,
-      soon: true,
     },
     {
       key: "patients",
