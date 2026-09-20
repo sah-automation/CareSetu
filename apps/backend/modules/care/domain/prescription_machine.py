@@ -50,7 +50,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-from modules.care.domain.exceptions import IllegalPrescriptionTransitionError
+from modules.care.domain.exceptions import (
+    CareRxDraftCapReachedError,
+    IllegalPrescriptionTransitionError,
+)
 
 
 class PrescriptionStatus(StrEnum):
@@ -173,7 +176,7 @@ def transition(
                 f"{action.value} is illegal while the prescription is {state.status.value}"
             )
         if not can_create_draft(state.rejected_count):
-            raise IllegalPrescriptionTransitionError(
+            raise CareRxDraftCapReachedError(
                 f"{action.value} is illegal: drafting cap reached "
                 f"({state.rejected_count} rejected drafts; max {MAX_REJECTED_DRAFTS})"
             )

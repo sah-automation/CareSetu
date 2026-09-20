@@ -51,3 +51,51 @@ class IllegalPrescriptionTransitionError(CareError):
     reason, or the drafting cap) named. ``CareError`` subclasses carry the
     ``care`` module's namespace so the facade can map them to typed responses.
     """
+
+
+# ---------------------------------------------------------------------------
+# Prescription-drafting refusals (PHASE-8.1 T5, ticket #487)
+#
+# One distinct type per AI-draft refusal so the route boundary can answer the
+# shared error envelope with a code the frontend maps to a specific message
+# (ticket #490) instead of the generic ``CARE_VALIDATION_ERROR`` catch-all.
+# Each is a ``CareError`` subclass so the module's 500 fallback still covers
+# any future un-mapped addition.
+# ---------------------------------------------------------------------------
+
+
+class CareRxDraftConsentDeniedError(CareError):
+    """The consent-gated history read for AI drafting was refused.
+
+    Raised by the prescription facade when ``HealthFacade.read_consented_history``
+    answers a denial (no live ``prescriptions``/``full_record`` grant for the
+    attending doctor). The denial has already been recorded in the health
+    access-history ledger; the care route maps this to the 403
+    ``CARE_RX_CONSENT_DENIED`` envelope. Fail-closed per NFR-SEC-006.
+    """
+
+
+class CareRxNoDoctorInputError(CareValidationError):
+    """An AI draft was requested before any doctor input was captured.
+
+    The drafting leg needs a voice note / photo / typed addendum to draft from;
+    the care route maps this to the 422 ``CARE_RX_NO_DOCTOR_INPUT`` envelope.
+    """
+
+
+class CareRxDraftCapReachedError(IllegalPrescriptionTransitionError):
+    """The drafting cap blocks a new AI draft (max 2 rejected drafts).
+
+    Raised by the prescription machine's ``CREATE_DRAFT`` branch once 2 drafts
+    have been rejected. The care route maps this to the 422
+    ``CARE_RX_DRAFT_CAP_REACHED`` envelope; manual authoring stays open
+    (CONTEXT.md glossary, ``drafting cap``).
+    """
+
+
+class CareCaseClosedError(CareValidationError):
+    """A prescription write targeted a care case that is already ``Closed``.
+
+    ``Closed`` is terminal: no new draft (AI or manual) may be created. The
+    care route maps this to the 422 ``CARE_CASE_CLOSED`` envelope.
+    """

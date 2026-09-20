@@ -48,7 +48,10 @@ from bus.events import (
 )
 from modules.care.care_models import PrescriptionDetailView, RxItemInput
 from modules.care.domain.exceptions import (
+    CareCaseClosedError,
     CareNotFoundError,
+    CareRxDraftCapReachedError,
+    CareRxNoDoctorInputError,
     CareValidationError,
     IllegalPrescriptionTransitionError,
 )
@@ -470,7 +473,7 @@ async def test_create_ai_draft_blocks_third_draft_when_cap_reached() -> None:
         care_conn, _intake_facade(_connection([])), _FakeHealthFacade(_timeline())
     )
 
-    with pytest.raises(IllegalPrescriptionTransitionError, match="drafting cap"):
+    with pytest.raises(CareRxDraftCapReachedError, match="drafting cap"):
         await facade.create_rx_draft(case_id=1, doctor_id=42, source="ai_draft")
 
 
@@ -503,7 +506,7 @@ async def test_create_ai_draft_rejects_case_without_doctor_input() -> None:
     intake_conn = _connection([])
     facade = _care_facade(care_conn, _intake_facade(intake_conn), _FakeHealthFacade(_timeline()))
 
-    with pytest.raises(CareValidationError, match="no doctor input"):
+    with pytest.raises(CareRxNoDoctorInputError, match="no doctor input"):
         await facade.create_rx_draft(case_id=1, doctor_id=42, source="ai_draft")
 
 
@@ -623,7 +626,7 @@ async def test_create_rx_draft_rejects_closed_case() -> None:
     care_conn = _connection([_FakeResult(row=_case_row(stage="closed"))])
     facade = _care_facade(care_conn, _intake_facade(_connection([])))
 
-    with pytest.raises(CareValidationError, match="closed"):
+    with pytest.raises(CareCaseClosedError, match="closed"):
         await facade.create_rx_draft(case_id=1, doctor_id=42, source="manual")
 
 

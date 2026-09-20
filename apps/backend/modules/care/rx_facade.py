@@ -43,7 +43,10 @@ from modules.care.domain.events import (
     prescription_reviewed_envelope,
 )
 from modules.care.domain.exceptions import (
+    CareCaseClosedError,
     CareNotFoundError,
+    CareRxDraftConsentDeniedError,
+    CareRxNoDoctorInputError,
     CareValidationError,
     IllegalPrescriptionTransitionError,
 )
@@ -63,6 +66,7 @@ from modules.care.schema.models import (
     care_rx_approvals,
     care_rx_items,
 )
+from modules.health.facade import RecordAccessDeniedError
 
 if TYPE_CHECKING:
     from modules.health.facade import HealthFacade, RecordTimeline
@@ -218,16 +222,20 @@ class PrescriptionFacade:
         Publishes ``prescription.draft_created`` in the SAME transaction.
 
         Raises :class:`CareNotFoundError` when the case does not exist for the
-        doctor; :class:`CareValidationError` on a closed case, a manual draft
-        without items, an AI draft with no doctor input or pre-summary;
-        :class:`~modules.care.domain.exceptions.IllegalPrescriptionTransitionError`
+        doctor; :class:`CareCaseClosedError` on a closed case;
+        :class:`CareValidationError` on a manual draft without items or an AI
+        draft with no pre-summary; :class:`CareRxNoDoctorInputError` on an AI
+        draft with no doctor input;
+        :class:`CareRxDraftConsentDeniedError` when the consent-gated history
+        read is refused;
+        :class:`~modules.care.domain.exceptions.CareRxDraftCapReachedError`
         when the drafting cap blocks the AI draft.
         """
         async with self._engine.begin() as connection:
             case_row = await check_case_ownership(connection, doctor_id=doctor_id, case_id=case_id)
 
             if case_row.stage == CaseStage.CLOSED.value:
-                raise CareValidationError(
+                raise CareCaseClosedError(
                     f"create_rx_draft is illegal while the case is {case_row.stage}"
                 )
 
@@ -846,12 +854,22 @@ class PrescriptionFacade:
             raise RuntimeError("HealthFacade not configured for consented rx drafting")
 
         case_id = int(case_row.id)
-        timeline = await self._health_facade.read_consented_history(
-            patient_id=int(case_row.patient_id),
-            scope=RX_DRAFT_HISTORY_SCOPE,
-            counterparty_type="doctor",
-            counterparty_id=doctor_id,
-        )
+        try:
+            timeline = await self._health_facade.read_consented_history(
+                patient_id=int(case_row.patient_id),
+                scope=RX_DRAFT_HISTORY_SCOPE,
+                counterparty_type="doctor",
+                counterparty_id=doctor_id,
+            )
+        except RecordAccessDeniedError as exc:
+            # The consent-gated read is the drafting gate (NFR-SEC-006,
+            # fail-closed). The health facade has already recorded the denial in
+            # the access-history ledger; translate the seam's denial into the
+            # care module's own refusal so the route answers the distinct
+            # ``CARE_RX_CONSENT_DENIED`` code (ticket #487).
+            raise CareRxDraftConsentDeniedError(
+                "prescriptions consent not granted for rx drafting"
+            ) from exc
         history_summary = _assemble_history_summary(timeline)
 
         if case_row.pre_summary_id is None:
@@ -864,7 +882,7 @@ class PrescriptionFacade:
             )
         ).first()
         if input_row is None:
-            raise CareValidationError(f"no doctor input recorded for case {case_id}")
+            raise CareRxNoDoctorInputError(f"no doctor input recorded for case {case_id}")
 
         draft = await self._intake_facade.request_rx_draft(
             doctor_input_ref=int(input_row.id),

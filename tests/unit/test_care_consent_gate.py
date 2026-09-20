@@ -10,7 +10,10 @@ calls ``ConsentFacade.check_consent``):
 - Allowed: the scoped timeline is returned and the consent ``egress`` row is
   recorded (citing consent id/version and the disclosed entry ids).
 - Denied / unconfigured: the read raises and the caller (the AI draft) fails
-  closed - no prescription row, no ``care_outbox`` event, no AI draft.
+  closed - no prescription row, no ``care_outbox`` event, no AI draft. The care
+  facade translates the health seam's ``RecordAccessDeniedError`` into its own
+  ``CareRxDraftConsentDeniedError`` refusal (PHASE-8.1 T5, ticket #487) so the
+  route boundary answers a distinct consent-denied code.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ import pytest
 from sqlalchemy import ClauseElement
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from modules.care.domain.exceptions import CareRxDraftConsentDeniedError
 from modules.care.outbox import CARE_OUTBOX_TABLE
 from modules.care.rx_facade import RX_DRAFT_HISTORY_SCOPE, PrescriptionFacade
 from modules.care.schema.models import care_prescriptions
@@ -342,7 +346,9 @@ class TestAiDraftFailClosed:
         )
         facade = _care_facade(care_conn, _health_facade(health_conn, consent))
 
-        with pytest.raises(RecordAccessDeniedError, match="consent check failed"):
+        with pytest.raises(
+            CareRxDraftConsentDeniedError, match="prescriptions consent not granted"
+        ):
             await facade.create_rx_draft(case_id=1, doctor_id=42, source="ai_draft")
 
         # The drafting leg consulted the consent gate for the patient's

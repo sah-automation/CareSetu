@@ -44,8 +44,12 @@ from modules.care.care_models import (
 )
 from modules.care.case_facade import CaseConsoleFacade
 from modules.care.domain.exceptions import (
+    CareCaseClosedError,
     CareError,
     CareNotFoundError,
+    CareRxDraftCapReachedError,
+    CareRxDraftConsentDeniedError,
+    CareRxNoDoctorInputError,
     CareValidationError,
     IllegalCareTransitionError,
     IllegalPrescriptionTransitionError,
@@ -56,6 +60,12 @@ from modules.partner.facade import PartnerFacade
 logger = logging.getLogger(__name__)
 
 MESSAGE_CARE_VALIDATION_ERROR = "care validation failed; check the request and try again"
+MESSAGE_CARE_RX_CONSENT_DENIED = (
+    "consent for the patient's prescription history is required for AI drafting"
+)
+MESSAGE_CARE_RX_NO_DOCTOR_INPUT = "AI drafting needs doctor input to draft from"
+MESSAGE_CARE_RX_DRAFT_CAP_REACHED = "the AI drafting cap (2 rejected drafts) has been reached"
+MESSAGE_CARE_CASE_CLOSED = "the care case is closed"
 
 router = APIRouter(prefix="/v1/care", tags=["care"])
 
@@ -562,6 +572,46 @@ def register_error_handlers(app: FastAPI) -> None:
             request=request,
         )
 
+    async def _rx_consent_denied(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        return error_response(
+            status.HTTP_403_FORBIDDEN,
+            "CARE_RX_CONSENT_DENIED",
+            MESSAGE_CARE_RX_CONSENT_DENIED,
+            log_tag="care_route",
+            request=request,
+        )
+
+    async def _rx_no_doctor_input(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "CARE_RX_NO_DOCTOR_INPUT",
+            MESSAGE_CARE_RX_NO_DOCTOR_INPUT,
+            log_tag="care_route",
+            request=request,
+        )
+
+    async def _rx_draft_cap_reached(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "CARE_RX_DRAFT_CAP_REACHED",
+            MESSAGE_CARE_RX_DRAFT_CAP_REACHED,
+            log_tag="care_route",
+            request=request,
+        )
+
+    async def _case_closed(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "CARE_CASE_CLOSED",
+            MESSAGE_CARE_CASE_CLOSED,
+            log_tag="care_route",
+            request=request,
+        )
+
     async def _care_error(request: Request, exc: Exception) -> JSONResponse:
         del exc
         return error_response(
@@ -589,6 +639,10 @@ def register_error_handlers(app: FastAPI) -> None:
 
     app.add_exception_handler(CareNotFoundError, _care_not_found)
     app.add_exception_handler(CareValidationError, _care_validation_error)
+    app.add_exception_handler(CareRxDraftConsentDeniedError, _rx_consent_denied)
+    app.add_exception_handler(CareRxNoDoctorInputError, _rx_no_doctor_input)
+    app.add_exception_handler(CareRxDraftCapReachedError, _rx_draft_cap_reached)
+    app.add_exception_handler(CareCaseClosedError, _case_closed)
     app.add_exception_handler(IllegalCareTransitionError, _illegal_care_transition)
     app.add_exception_handler(IllegalPrescriptionTransitionError, _illegal_prescription_transition)
     app.add_exception_handler(CareError, _care_error)

@@ -23,6 +23,9 @@ story (CONTEXT.md glossary: ``revision-freeze approval``, ``drafting cap``,
   authoring stays open.
 - **edited_yn:** an unchanged revision audits as never-edited; an edited one
   audits as edited - both through the real create -> save -> approve chain.
+- **AI-draft refusals:** a denied consent read, a missing doctor input, a
+  closed case and the exhausted drafting cap each answer their own distinct
+  care error type (PHASE-8.1 T5, ticket #487).
 """
 
 from __future__ import annotations
@@ -48,9 +51,12 @@ from modules.care.care_models import RxItemInput
 from modules.care.case_facade import CaseConsoleFacade
 from modules.care.domain.events import CaseClosedPayload, case_closed_envelope
 from modules.care.domain.exceptions import (
+    CareCaseClosedError,
+    CareRxDraftCapReachedError,
+    CareRxDraftConsentDeniedError,
+    CareRxNoDoctorInputError,
     CareValidationError,
     IllegalCareTransitionError,
-    IllegalPrescriptionTransitionError,
 )
 from modules.care.domain.state_machine import (
     PRE_SUMMARY,
@@ -62,7 +68,8 @@ from modules.care.domain.state_machine import (
 )
 from modules.care.outbox import CARE_OUTBOX_TABLE
 from modules.care.rx_facade import PrescriptionFacade
-from modules.care.schema.models import care_cases
+from modules.care.schema.models import care_cases, care_prescriptions
+from modules.health.domain.exceptions import RecordAccessDeniedError
 from modules.health.facade import RecordEntryView, RecordTimeline
 from modules.intake.adapters.ai_provider_mock import MockAiProvider
 from modules.intake.facade import IntakeFacade
@@ -135,6 +142,20 @@ class _FakeHealthFacade:
         settings: Any = None,
     ) -> RecordTimeline:
         return _timeline(entry_types=["rx"])
+
+
+class _DenyingHealthFacade:
+    """A consented-history read that answers a denial, fail-closed (NFR-SEC-006)."""
+
+    async def read_consented_history(
+        self,
+        patient_id: int,
+        scope: str,
+        counterparty_type: str,
+        counterparty_id: int,
+        settings: Any = None,
+    ) -> RecordTimeline:
+        raise RecordAccessDeniedError("consent check failed")
 
 
 def _intake_facade(connection: AsyncMock, gateway: MockAiProvider | None = None) -> IntakeFacade:
@@ -536,8 +557,9 @@ class TestCloseWithoutRx:
     @pytest.mark.asyncio
     async def test_facade_refuses_every_mutating_call_on_a_closed_case(self) -> None:
         """Once the case closes, the whole prescription workflow is refused."""
-        # A new prescription draft on a closed case.
-        with pytest.raises(CareValidationError, match="closed"):
+        # A new prescription draft on a closed case answers the distinct
+        # closed-case refusal (ticket #487).
+        with pytest.raises(CareCaseClosedError, match="closed"):
             await _rx_facade(
                 _connection([_FakeResult(row=_case_row(stage="closed"))]),
                 _intake_facade(_connection([])),
@@ -626,7 +648,7 @@ class TestDraftingCap:
                 _FakeResult(scalar=2),
             ]
         )
-        with pytest.raises(IllegalPrescriptionTransitionError, match="drafting cap"):
+        with pytest.raises(CareRxDraftCapReachedError, match="drafting cap"):
             await _rx_facade(cap_conn, _intake_facade(_connection([]))).create_rx_draft(
                 case_id=1, doctor_id=42, source="ai_draft"
             )
@@ -858,3 +880,46 @@ class TestFrequencyRoundTrip:
         ).get_approved_prescription(rx_id=1, doctor_id=42)
         assert artifact.items[0].frequency == "twice daily"
         assert artifact.items[1].frequency is None
+
+
+class TestAiDraftRefusals:
+    """PHASE-8.1 T5 (#487): every AI-draft refusal surfaces its own distinct
+    care error type at the facade - the route boundary maps each to a code the
+    frontend can translate - and a denied consent draft writes nothing."""
+
+    @pytest.mark.asyncio
+    async def test_consent_denied_refuses_the_draft_with_no_writes(self) -> None:
+        care_conn = _connection(
+            [
+                _FakeResult(row=_case_row(stage="prescription_pending")),
+                _FakeResult(row=None),
+            ]
+        )
+        facade = PrescriptionFacade(
+            engine=_engine(care_conn),
+            intake_facade=_intake_facade(_connection([])),
+            health_facade=_DenyingHealthFacade(),
+        )
+
+        with pytest.raises(CareRxDraftConsentDeniedError, match="consent not granted"):
+            await facade.create_rx_draft(case_id=1, doctor_id=42, source="ai_draft")
+
+        # Fail-closed: no prescription row and no care outbox event escaped.
+        assert _stmt_params(_statements(care_conn), care_prescriptions.name) is None
+        assert _stmt_params(_statements(care_conn), CARE_OUTBOX_TABLE) is None
+
+    @pytest.mark.asyncio
+    async def test_no_doctor_input_refuses_the_draft(self) -> None:
+        care_conn = _connection(
+            [
+                _FakeResult(row=_case_row(stage="prescription_pending")),
+                _FakeResult(row=None),
+                _FakeResult(row=None),
+            ]
+        )
+        facade = _rx_facade(care_conn, _intake_facade(_connection([])))
+
+        with pytest.raises(CareRxNoDoctorInputError, match="no doctor input"):
+            await facade.create_rx_draft(case_id=1, doctor_id=42, source="ai_draft")
+
+        assert _stmt_params(_statements(care_conn), CARE_OUTBOX_TABLE) is None

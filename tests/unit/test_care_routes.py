@@ -18,7 +18,13 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.gateway.idempotency import IdempotencyStore
 from app.main import create_app
-from modules.care.adapters.routes import MESSAGE_CARE_VALIDATION_ERROR
+from modules.care.adapters.routes import (
+    MESSAGE_CARE_CASE_CLOSED,
+    MESSAGE_CARE_RX_CONSENT_DENIED,
+    MESSAGE_CARE_RX_DRAFT_CAP_REACHED,
+    MESSAGE_CARE_RX_NO_DOCTOR_INPUT,
+    MESSAGE_CARE_VALIDATION_ERROR,
+)
 from modules.care.care_models import (
     CaseDetailView,
     DoctorInputResult,
@@ -26,7 +32,12 @@ from modules.care.care_models import (
     RxItemView,
 )
 from modules.care.domain.exceptions import (
+    CareCaseClosedError,
+    CareError,
     CareNotFoundError,
+    CareRxDraftCapReachedError,
+    CareRxDraftConsentDeniedError,
+    CareRxNoDoctorInputError,
     CareValidationError,
     IllegalCareTransitionError,
     IllegalPrescriptionTransitionError,
@@ -704,7 +715,7 @@ def test_rx_draft_invalid_source_rejected() -> None:
 
 def test_rx_draft_drafting_cap_envelope() -> None:
     facade = StubPrescriptionFacade()
-    facade.error = IllegalPrescriptionTransitionError("CREATE_DRAFT is illegal: drafting cap met")
+    facade.error = CareRxDraftCapReachedError("CREATE_DRAFT is illegal: drafting cap met")
     client = _client(rx_facade=facade)
 
     response = client.post(
@@ -714,7 +725,77 @@ def test_rx_draft_drafting_cap_envelope() -> None:
     )
 
     assert response.status_code == 422
-    assert response.json()["code"] == "ILLEGAL_PRESCRIPTION_TRANSITION"
+    assert response.json()["code"] == "CARE_RX_DRAFT_CAP_REACHED"
+    assert response.json()["message"] == MESSAGE_CARE_RX_DRAFT_CAP_REACHED
+
+
+def test_rx_draft_consent_denied_envelope() -> None:
+    facade = StubPrescriptionFacade()
+    facade.error = CareRxDraftConsentDeniedError("prescriptions consent not granted")
+    client = _client(rx_facade=facade)
+
+    response = client.post(
+        "/v1/care/cases/42/rx/draft",
+        json={"source": "ai_draft"},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "CARE_RX_CONSENT_DENIED"
+    assert response.json()["message"] == MESSAGE_CARE_RX_CONSENT_DENIED
+    assert "prescriptions consent not granted" not in response.text
+
+
+def test_rx_draft_no_doctor_input_envelope() -> None:
+    facade = StubPrescriptionFacade()
+    facade.error = CareRxNoDoctorInputError("no doctor input recorded for case 42")
+    client = _client(rx_facade=facade)
+
+    response = client.post(
+        "/v1/care/cases/42/rx/draft",
+        json={"source": "ai_draft"},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "CARE_RX_NO_DOCTOR_INPUT"
+    assert response.json()["message"] == MESSAGE_CARE_RX_NO_DOCTOR_INPUT
+    assert "no doctor input recorded for case 42" not in response.text
+
+
+def test_rx_draft_closed_case_envelope() -> None:
+    facade = StubPrescriptionFacade()
+    facade.error = CareCaseClosedError("create_rx_draft is illegal while the case is closed")
+    client = _client(rx_facade=facade)
+
+    response = client.post(
+        "/v1/care/cases/42/rx/draft",
+        json={"source": "ai_draft"},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "CARE_CASE_CLOSED"
+    assert response.json()["message"] == MESSAGE_CARE_CASE_CLOSED
+    assert "create_rx_draft is illegal" not in response.text
+
+
+def test_rx_draft_unknown_refusal_still_answers_the_500_fallback() -> None:
+    """A care error outside the mapped set never leaks internals - the module's
+    500 fallback answers the envelope, not the raw message (ticket #487)."""
+    facade = StubPrescriptionFacade()
+    facade.error = CareError("a brand-new unmapped refusal type")
+    client = _client(rx_facade=facade)
+
+    response = client.post(
+        "/v1/care/cases/42/rx/draft",
+        json={"source": "ai_draft"},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 500
+    assert response.json()["code"] == "CARE_INTERNAL"
+    assert "a brand-new unmapped refusal type" not in response.text
 
 
 # ---------------------------------------------------------------------------

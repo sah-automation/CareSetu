@@ -26,7 +26,10 @@ from __future__ import annotations
 
 import pytest
 
-from modules.care.domain.exceptions import IllegalPrescriptionTransitionError
+from modules.care.domain.exceptions import (
+    CareRxDraftCapReachedError,
+    IllegalPrescriptionTransitionError,
+)
 from modules.care.domain.prescription_machine import (
     DRAFT,
     MAX_REJECTED_DRAFTS,
@@ -132,7 +135,7 @@ def test_create_draft_from_rejected_moves_to_draft() -> None:
 
 def test_create_draft_blocked_after_two_rejections() -> None:
     state = PrescriptionState(status=PrescriptionStatus.REJECTED, rejected_count=2)
-    with pytest.raises(IllegalPrescriptionTransitionError, match="drafting cap reached"):
+    with pytest.raises(CareRxDraftCapReachedError, match="drafting cap reached"):
         transition(state, PrescriptionAction.CREATE_DRAFT)
 
 
@@ -335,7 +338,7 @@ def test_drafting_cap_allows_first_and_second_draft() -> None:
     assert r2.status is PrescriptionStatus.REJECTED
     assert r2.rejected_count == 2
 
-    with pytest.raises(IllegalPrescriptionTransitionError, match="drafting cap reached"):
+    with pytest.raises(CareRxDraftCapReachedError, match="drafting cap reached"):
         transition(r2, PrescriptionAction.CREATE_DRAFT)
 
 
