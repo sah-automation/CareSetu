@@ -2,25 +2,73 @@
 // Covers the ticket's acceptance criteria: browse actions never gated;
 // intake/booking gated on basics; medicine-delivery checkout gated on
 // area; the gate presents the exact missing step inline.
+//
+// PHASE-8.1 T2 (#488): the ProfileProvider behind the gate is exercised with
+// the profile client mocked - so hydration short-circuits a saved profile's
+// gates and an inline Finish persists through PUT /v1/me/profile with optional
+// fields unsettable (#488 AC 1/2/4).
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ProfileGate, ProfileGateDemo } from "./ProfileGate";
+import { ProfileProvider } from "@/lib/profile/ProfileContext";
+import type { StoredPatientProfile } from "@/lib/profile/api";
 import { loadDraft } from "@/lib/profile/profileState";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { __resetLangForTests } from "@/lib/i18n/LangContext";
 
+const state = vi.hoisted(() => ({
+  getProfile: vi.fn(),
+  saveProfile: vi.fn(),
+  user: { id: 7, phone: "+91 98765 43210", roles: ["patient"] },
+}));
+
+vi.mock("@/lib/profile/api", () => ({
+  getProfile: state.getProfile,
+  saveProfile: state.saveProfile,
+}));
+
+vi.mock("@/lib/auth/AuthContext", () => ({
+  useAuth: () => ({
+    user: state.user,
+    selectedRole: null,
+    switchRole: vi.fn(),
+    logout: vi.fn(),
+    isAuthenticated: true,
+    isLoading: false,
+  }),
+}));
+
 const en = STRINGS.en.profile;
+const savedProfile: StoredPatientProfile = {
+  name: "Asha Devi",
+  age: 30,
+  gender: "female",
+  preferred_language: "en",
+  area: "Bishrampur",
+  emergency_contact: "+91 98765 43210",
+  photo_ref: "me.jpg",
+};
 
 beforeEach(() => {
   window.localStorage.clear();
   __resetLangForTests();
+  state.getProfile.mockReset();
+  state.saveProfile.mockReset();
+  state.getProfile.mockResolvedValue({ set: false, profile: null });
+  state.saveProfile.mockResolvedValue(savedProfile);
 });
 
 afterEach(() => {
   cleanup();
-  vi.restoreAllMocks();
+  vi.clearAllMocks();
 });
 
 function type(testId: string, value: string) {
@@ -29,6 +77,10 @@ function type(testId: string, value: string) {
 
 function select(testId: string, value: string) {
   fireEvent.change(screen.getByTestId(testId), { target: { value } });
+}
+
+function renderGate(ui: React.ReactNode) {
+  return render(<ProfileProvider>{ui}</ProfileProvider>);
 }
 
 interface HostProps {
@@ -45,7 +97,7 @@ function Host({ action }: HostProps) {
 
 describe("ProfileGate", () => {
   it("never gates findCare - renders children directly", () => {
-    render(<Host action="findCare" />);
+    renderGate(<Host action="findCare" />);
     expect(screen.getByTestId("action-btn")).toBeInTheDocument();
     expect(
       screen.queryByTestId("gate-wizard-findCare"),
@@ -58,12 +110,12 @@ describe("ProfileGate", () => {
         <button data-testid="action-btn">Action</button>
       </ProfileGate>
     );
-    render(<HostView />);
+    renderGate(<HostView />);
     expect(screen.getByTestId("action-btn")).toBeInTheDocument();
   });
 
   it("gates intake on basics and opens wizard on step 1", () => {
-    render(<Host action="intake" />);
+    renderGate(<Host action="intake" />);
 
     // Click the trigger button
     fireEvent.click(screen.getByTestId("gate-trigger-intake"));
@@ -74,7 +126,7 @@ describe("ProfileGate", () => {
   });
 
   it("gates booking on basics and opens wizard on step 1", () => {
-    render(<Host action="booking" />);
+    renderGate(<Host action="booking" />);
 
     fireEvent.click(screen.getByTestId("gate-trigger-booking"));
 
@@ -83,7 +135,7 @@ describe("ProfileGate", () => {
   });
 
   it("gates medicineCheckout on area and opens wizard on step 3", () => {
-    render(<Host action="medicineCheckout" />);
+    renderGate(<Host action="medicineCheckout" />);
 
     fireEvent.click(screen.getByTestId("gate-trigger-medicineCheckout"));
 
@@ -94,7 +146,7 @@ describe("ProfileGate", () => {
   });
 
   it("shows gate explanation text", () => {
-    render(<Host action="intake" />);
+    renderGate(<Host action="intake" />);
 
     fireEvent.click(screen.getByTestId("gate-trigger-intake"));
 
@@ -102,15 +154,15 @@ describe("ProfileGate", () => {
   });
 
   it("shows area gate explanation for medicineCheckout", () => {
-    render(<Host action="medicineCheckout" />);
+    renderGate(<Host action="medicineCheckout" />);
 
     fireEvent.click(screen.getByTestId("gate-trigger-medicineCheckout"));
 
     expect(screen.getByText(en.gate.areaExplain)).toBeInTheDocument();
   });
 
-  it("lets user complete basics in inline wizard and closes", () => {
-    render(<Host action="intake" />);
+  it("lets user complete basics in inline wizard and closes", async () => {
+    renderGate(<Host action="intake" />);
 
     fireEvent.click(screen.getByTestId("gate-trigger-intake"));
 
@@ -136,28 +188,90 @@ describe("ProfileGate", () => {
     fireEvent.click(screen.getByTestId("pc-skip"));
     expect(screen.getByRole("heading", { name: en.s3 })).toBeInTheDocument();
 
-    // Finish
+    // Finish persists through the profile client, then the wizard closes
     fireEvent.click(screen.getByTestId("pc-next"));
 
-    // Wizard should close
-    expect(screen.queryByTestId("gate-wizard-intake")).not.toBeInTheDocument();
+    expect(state.saveProfile).toHaveBeenCalledTimes(1);
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("gate-wizard-intake"),
+      ).not.toBeInTheDocument(),
+    );
   });
 
-  it("persists draft to localStorage", () => {
-    render(<Host action="intake" />);
+  it("persists the draft to the identity-scoped local buffer while editing", () => {
+    renderGate(<Host action="intake" />);
 
     fireEvent.click(screen.getByTestId("gate-trigger-intake"));
     type("pc-fullname", "Asha Devi");
     type("pc-age", "30");
     select("pc-gender", "female");
 
-    expect(loadDraft().name).toBe("Asha Devi");
+    expect(loadDraft(7).name).toBe("Asha Devi");
+    // No cross-identity leakage: the legacy global key stays untouched.
+    const draft = loadDraft();
+    expect(draft.name).toBe("");
+  });
+
+  it("persists FINISH through PUT /v1/me/profile with optional fields unsettable", async () => {
+    renderGate(<Host action="intake" />);
+    fireEvent.click(screen.getByTestId("gate-trigger-intake"));
+
+    type("pc-fullname", "Asha Devi");
+    type("pc-age", "30");
+    select("pc-gender", "female");
+    fireEvent.click(screen.getByTestId("pc-next"));
+    fireEvent.click(screen.getByTestId("pc-skip"));
+    type("pc-area", " Bishrampur ");
+    fireEvent.click(screen.getByTestId("pc-next"));
+
+    await waitFor(() =>
+      expect(state.saveProfile).toHaveBeenCalledWith({
+        name: "Asha Devi",
+        age: 30,
+        gender: "female",
+        preferred_language: "en",
+        area: "Bishrampur",
+        emergency_contact: null,
+        photo_ref: null,
+      }),
+    );
+  });
+
+  it("short-circuits the gate when a saved profile hydrates (#488 AC 2)", async () => {
+    state.getProfile.mockResolvedValue({ set: true, profile: savedProfile });
+    renderGate(<Host action="intake" />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("action-btn")).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("gate-trigger-intake")).not.toBeInTheDocument();
+  });
+
+  it("shows the bilingual save error inline when the write fails", async () => {
+    state.saveProfile.mockRejectedValue(new Error("network down"));
+    renderGate(<Host action="intake" />);
+    fireEvent.click(screen.getByTestId("gate-trigger-intake"));
+
+    type("pc-fullname", "Asha Devi");
+    type("pc-age", "30");
+    select("pc-gender", "female");
+    fireEvent.click(screen.getByTestId("pc-next"));
+    fireEvent.click(screen.getByTestId("pc-skip"));
+    fireEvent.click(screen.getByTestId("pc-next"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("profile-save-error")).toBeInTheDocument(),
+    );
+    expect(screen.getByText(en.save.error)).toBeInTheDocument();
+    // The wizard stays open so the patient can retry.
+    expect(screen.getByTestId("gate-wizard-intake")).toBeInTheDocument();
   });
 });
 
 describe("ProfileGateDemo", () => {
   it("renders three demo gates for intake, booking, checkout", () => {
-    render(<ProfileGateDemo />);
+    renderGate(<ProfileGateDemo />);
 
     expect(screen.getByText(en.demo.intake)).toBeInTheDocument();
     expect(screen.getByText(en.demo.booking)).toBeInTheDocument();

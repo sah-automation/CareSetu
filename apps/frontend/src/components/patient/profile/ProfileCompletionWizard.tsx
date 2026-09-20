@@ -13,9 +13,10 @@
 // directly on the exact missing step (§5.9: gating explains itself at the
 // action moment).
 //
-// INTEGRATION POINT (later phase): finishing persists nothing server-side -
-// the draft lives client-side only (lib/profile/profileState, gap G5). Hosts
-// receive onFinish and keep routing/local behavior their own.
+// PHASE-8.1 T2 (#488): Finish persists through the host's profile client
+// (PUT /v1/me/profile) while the draft stays the in-flight buffer. Hosts own
+// routing and the bilingual save-error/state presentation
+// (ProfileSaveStatusNotice); this widget stays controlled.
 
 import { useState, type ReactNode } from "react";
 import { Check } from "lucide-react";
@@ -284,8 +285,8 @@ export function ProfileCompletionWizard({
                 className="mt-1 block w-full text-sm text-txt-sub file:mr-3 file:rounded-md file:border-0 file:bg-secondary file:px-3 file:py-1.5 file:text-sm file:font-medium hover:file:bg-secondary/80"
                 onChange={(e) =>
                   patch({
-                    // Name only this phase - no upload exists yet
-                    // (integration point for the later profile backend).
+                    // File-name intent only - persisted as the profile's
+                    // nullable photo_ref; real upload is a later seam.
                     photoFileName: e.target.files?.[0]?.name ?? "",
                   })
                 }

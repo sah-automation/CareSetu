@@ -5,6 +5,7 @@ import DoctorDashboardPage from "@/app/(doctor)/doctor/page";
 import OperatorDashboardPage from "@/app/(operator)/operator/page";
 import PartnerDashboardPage from "@/app/(partner)/partner/page";
 import PatientDashboardPage from "@/app/(patient)/patient/page";
+import { ProfileProvider } from "@/lib/profile/ProfileContext";
 
 // The operator page (PHASE-5 T5, #284) fetches the verification queue on
 // mount; mock the api seam so the scaffold render is synchronous and no
@@ -36,6 +37,26 @@ vi.mock("@/lib/partner/api", async (importOriginal) => {
   return { ...mod, updateConsultationFee: vi.fn().mockResolvedValue({}) };
 });
 
+// PHASE-8.1 T2 (#488): the patient dashboard reads its draft from the
+// ProfileProvider, which needs a signed-in identity and the profile client;
+// stub both so the scaffold render is synchronous over the same seams.
+
+vi.mock("@/lib/auth/AuthContext", () => ({
+  useAuth: () => ({
+    user: { id: 7, phone: "+91 98765 43210", roles: ["patient"] },
+    selectedRole: null,
+    switchRole: vi.fn(),
+    logout: vi.fn(),
+    isAuthenticated: true,
+    isLoading: false,
+  }),
+}));
+
+vi.mock("@/lib/profile/api", () => ({
+  getProfile: vi.fn().mockResolvedValue({ set: false, profile: null }),
+  saveProfile: vi.fn().mockResolvedValue(null),
+}));
+
 // PHASE-2.6 T07 (#198): the single generic dashboard group split into
 // per-role route groups - each stub page re-homed under its role's group.
 
@@ -47,8 +68,19 @@ describe("per-role route-group scaffold pages", () => {
     ["operator", OperatorDashboardPage, "Verification queue"],
   ] as const)(
     "renders the %s dashboard scaffold page",
-    (_role, Page, heading) => {
-      render(<Page />);
+    (role, Page, heading) => {
+      // The patient dashboard reads its draft from the ProfileProvider
+      // (#488); mount it here so the scaffold render is complete. The other
+      // role pages don't read it and are unaffected.
+      render(
+        role === "patient" ? (
+          <ProfileProvider>
+            <Page />
+          </ProfileProvider>
+        ) : (
+          <Page />
+        ),
+      );
       expect(
         screen.getByRole("heading", { name: heading, level: 1 }),
       ).toBeInTheDocument();

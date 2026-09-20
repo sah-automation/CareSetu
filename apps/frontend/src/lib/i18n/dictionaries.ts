@@ -649,6 +649,14 @@ const en = {
       areaExplain:
         "Medicine delivery needs your area or address - add it here to continue.",
     },
+    // save.* - PHASE-8.1 T2 (#488): Finish persistence state surfaced by the
+    // wizard hosts (complete page + inline gate) while PUT /v1/me/profile runs.
+    save: {
+      saving: "Saving your profile...",
+      saved: "Profile saved",
+      error:
+        "We could not save your profile. Please check your connection and try again.",
+    },
     demo: {
       badge: "Demo care actions",
       title: "Care-action gating",
@@ -1641,6 +1649,12 @@ export const STRINGS: Record<Lang, Dictionary> = {
           "इलाज से जुड़े कामों के लिए नाम वाला रिकॉर्ड (नाम, उम्र, लिंग) ज़रूरी है - जारी रखने के लिए यहाँ जोड़ें।",
         areaExplain:
           "दवाई डिलीवरी के लिए आपका इलाक़ा या पता ज़रूरी है - जारी रखने के लिए यहाँ जोड़ें।",
+      },
+      save: {
+        saving: "आपकी प्रोफ़ाइल सेव हो रही है...",
+        saved: "प्रोफ़ाइल सेव हो गई",
+        error:
+          "आपकी प्रोफ़ाइल सेव नहीं हो सकी। कृपया अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
       },
       demo: {
         badge: "डेमो केयर एक्शन",
