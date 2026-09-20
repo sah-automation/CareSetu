@@ -151,13 +151,13 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 
 #### 1. Data Ownership & Storage Isolation
 
-- **Storage Type:** Relational - PostgreSQL schema `iam`: `iam_identities` (phone_e164 unique, status, lockout_failed_attempts + lockout_until), `iam_otp_challenges` (OTP hashed, single-use, TTL 5 min, 5-attempt budget, cooldown), `iam_sessions` (jti, expiry, scope, refresh_token_hash + refresh_expires_at), `iam_role_grants` (patient/partner/operator), `iam_outbox`.
+- **Storage Type:** Relational - PostgreSQL schema `iam`: `iam_identities` (phone_e164 unique, status, lockout_failed_attempts + lockout_until), `iam_otp_challenges` (OTP hashed, single-use, TTL 5 min, 5-attempt budget, cooldown), `iam_sessions` (jti, expiry, scope, refresh_token_hash + refresh_expires_at), `iam_role_grants` (patient/partner/operator), `iam_patient_profiles` (one row per identity: name, age, gender, preferred_language, area, emergency_contact, nullable photo ref), `iam_outbox`.
 - **Caching Strategy:** Session/scope claims cached in Redis (TTL); OTP resend cooldown & brute-force counters in Redis (fallback to SQL counters if Redis absent).
 - **Data Isolation Rule:** Private `iam` schema; no other module reads `iam` tables. Identity resolution, token validation, and role/scope checks are exported via the IAM facade only.
 
 #### 2. Inbound & Outbound Interfaces
 
-- **Inbound Sync APIs:** `register_patient(phone)`, `verify_otp(phone, otp)`, `resend_otp(phone)`, `issue_session`, `refresh_session`, `validate_token(jwt) → scope`, `resolve_identity(phone)`, `resolve_actor(actor_id)`, `create_credential_account(partner_id, type)`, `set_actor_status(actor_id, active|suspended)`.
+- **Inbound Sync APIs:** `register_patient(phone)`, `verify_otp(phone, otp)`, `resend_otp(phone)`, `issue_session`, `refresh_session`, `validate_token(jwt) → scope`, `resolve_identity(phone)`, `resolve_actor(actor_id)`, `create_credential_account(partner_id, type)`, `set_actor_status(actor_id, active|suspended)`, `save_patient_profile(identity_id, ...)` (idempotent upsert, one row per identity), `get_patient_profile(identity_id)`.
 - **Inbound Events Subscribed:** `partner.activated` (from `MOD-002` → activate partner role), `partner.rejected` (→ revoke/deny role).
 - **Outbound Events Published:** `patient.registered`, `patient.verified`, `patient.auth_failed`, `otp.sent`, `otp.failed`.
 
@@ -708,6 +708,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 | `FEAT-019` (WhatsApp notifications)               | `ACT-001`, `EXT-003` (WhatsApp)         | `MOD-010` (Notify)                            | `notify` - notifications, delivery_logs                                                                               | Aligned                       |
 | `FEAT-020` (audit trail & consent lifecycle)      | `ACT-005`                               | `MOD-011` (Audit) + `MOD-004` (Consent)       | `audit` - audit_events, tamper_attempts; `consent` - consent_events                                                   | Aligned                       |
 | `PHASE-8.1` (doctor console + pick-a-doctor)      | `ACT-001` (patient), `ACT-002` (doctor) | `MOD-002` + `MOD-004` + `MOD-005` + `MOD-006` | `partner` - partner_profiles; `consent` - consents; `intake` - pre_summaries; `care` - care_cases, care_prescriptions | Aligned                       |
+| `PHASE-8.1` (patient profile persistence)         | `ACT-001` (patient)                     | `MOD-001` (IAM)                               | `iam` - patient_profiles                                                                                              | Aligned                       |
 | `NFR-001` (cost floor)                            | all `EXT-001..004`                      | all modules (budget meters)                   | `intake` - ai_jobs; cost telemetry                                                                                    | Aligned                       |
 | `NFR-002` (security & privacy)                    | `ACT-001..005`                          | `MOD-001`, `MOD-003`, `MOD-004`, `MOD-011`    | `iam`, `health`, `consent`, `audit`                                                                                   | Aligned                       |
 | `NFR-003` (performance)                           | -                                       | Gateway + all modules (latency budgets)       | -                                                                                                                     | Aligned                       |

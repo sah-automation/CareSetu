@@ -301,6 +301,8 @@ Vertical stack after greeting block (first name):
 - Detail screens: doctor (credentials summary, clinic info, fee, Book CTA); lab/chemist (services, address/hours, order/upload-prescription CTA).
 - Booking flow: slot/date pick (large grid targets) -> confirm screen that names what record access the booking needs -> consent moment (§5.10) -> confirmation screen with "Track this" deep link into Home Upcoming.
 
+> **Delivered (PHASE-8.1, #485):** `/patient/find` is a real authed directory-browse page under the patient shell, reusing the verified-directory client and provider cards; "Book consultation" deep-links into an in-progress intake's pick step (delivered in this phase) when an intake is in progress. The slot/date booking flow, consent moment, and confirmation screen above describe the future booking surface (Phase 9+); the public, unauthenticated browse remains at `/directory`.
+
 ### 5.4 Start Visit - symptom intake (`/patient/intake`)
 
 - Mode chooser: two oversized buttons, voice default-highlighted ("Boliye / Speak") vs text ("Likhein / Type").
@@ -341,7 +343,7 @@ Full-screen wizard immediately after first OTP login, maximum 3 steps, bilingual
 
 Gating rules:
 
-- OTP identity gates login only. Browsing Find Care and viewing My Record are never gated.
+- OTP identity gates login only. The public directory browse (homepage `/directory`) stays ungated; the delivered authed `/patient/find` page (PHASE-8.1, #485) requires a patient session but never the profile-completion gate. Viewing My Record is never gated.
 - Name + age + gender gate care actions (intake submission, booking) - a named record is required for anything clinical. Missing fields trigger the wizard step inline at first care action, not a hard wall earlier.
 - Area/address gates medicine-delivery checkout only.
 - Skipped items resurface as gentle Home nudge cards and the Profile completion meter - never modal nagging.
@@ -355,7 +357,7 @@ Triggered by any care action requiring record access (booking with intake attach
 3. How long - per-action validity statement.
 4. Two large buttons: "Allow / Anumati dein" and "Not now / Abhi nahi". Deny blocks the action with a plain explanation of what it unblocks - no dark patterns, no re-prompt spam.
 
-Grant writes `consent_granted`; every sheet links to Record > Consent log; revocation lives there and inline on the originating object. Consent is never bundled: each action names its own access (per FEAT-002). Keyboard/focus behavior of this sheet is bound by §9.4.
+Grant writes `consent_granted`; every sheet links to Record > Consent log; revocation lives there and inline on the originating object. Consent is never bundled: each action names its own access (per FEAT-002). The delivered pick-a-doctor moment (PHASE-8.1, #480) is the deliberate exception - the pick sheet names `consultations` and `prescriptions` together and records both standing grants atomically with the assignment so the AI drafting assistant's consent-gated read can pass (#487); every other action still names its own access. Keyboard/focus behavior of this sheet is bound by §9.4.
 
 ---
 
@@ -392,6 +394,7 @@ Header: patient name/age/sex + a four-step case stepper (Pre-Summary -> Consult 
 **b) History tab (consented view)**
 
 - Only record sections the patient consented to share for this case; each section header shows provenance ("Consented 12 Aug, this visit").
+- Empty state is delivered behaviour, not a consent failure (PHASE-8.1 D-E no-change): a consented patient with no history yet shows "No consented history available for this patient". Consent passes `check_consent`; the timeline is legitimately empty until `report.filed`, `prescription.issued`/`prescription.delivered`, or `settlement.recorded` fires. A denied consent renders the error state, never this message.
 - Sections never consented show a "Request access" CTA (fires a consent request; patient gets the §5.10 consent-moment sheet).
 - Mid-case revocation greys the section immediately with a one-line notice - data already viewed stays in the case record, new access stops.
 
@@ -621,7 +624,7 @@ Carried verbatim from the resolutions so downstream phase planning cannot lose t
 | G2  | Public directory search endpoint: unauthenticated read over activated providers only; filters: provider type, specialty, free-text, location; wider-area fallback per FEAT-004 Scenario 2. Public provider-card payload carries verified-safe fields only. Anonymous telemetry `directory_search` / `provider_selected` needs nullable/cohort-tagged actor id.                                                                                                    | #180       |
 | G3  | MOD-001 partner credential accounts (phone-based, phone-OTP login on dedicated `POST /v1/auth/partner/*` routes, OTP-bound session mint, pre-activation renewal - ADR-0016), partner state-machine endpoints (submission with uploads, status query, rejection-reason, resubmission edge, `partner.rejected` notification hook), operator MFA (TOTP) endpoints - all Phase 5 planning territory (the earlier email/password staff-auth assumption is superseded). | #181       |
 | G4  | `Rejected -> Under Verification` resubmission edge is a small PRD state-machine delta to record during Phase 5 planning.                                                                                                                                                                                                                                                                                                                                          | #181       |
-| G5  | Profile-completion gating needs a lightweight profile-fields endpoint (MOD-001 territory, Phase 5 planning note).                                                                                                                                                                                                                                                                                                                                                 | #183       |
+| G5  | Profile-completion gating needs a lightweight profile-fields endpoint (MOD-001 territory, Phase 5 planning note). **[Delivered PHASE-8.1]** - `iam_patient_profiles` + `PUT/GET /v1/me/profile` (#482/#488) supply the read/write surface the gate, nudges, and dashboard hydrate from (see §5.9 and roadmap §2.8a §7).                                                                                                                                           | #183       |
 | G6  | Partner events (FEAT-013) fan-out to the patient decisions-needed surface - event registry addition to trace during Phase 5 planning.                                                                                                                                                                                                                                                                                                                             | #183, #185 |
 | G7  | Doctor-initiated consent request event reaching the patient inbox (§5.10 pattern) - trace in the event registry during Phase 5 planning alongside staff-auth work.                                                                                                                                                                                                                                                                                                | #184       |
 | G8  | Verify/sign needs a review-attribution write endpoint distinct from simple finalize (stores per-group confirmations + editor identity).                                                                                                                                                                                                                                                                                                                           | #184       |

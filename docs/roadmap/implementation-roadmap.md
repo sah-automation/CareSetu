@@ -592,7 +592,7 @@ _Also built here (verified in `PHASE-8`):_ `MOD-005` `request_rx_draft` facade f
 ### 2.8a Phase 8.1: Doctor Console UI & Pick-a-Doctor
 
 - **Phase ID:** `PHASE-8.1-DOCTOR-CONSOLE` (chassis insert; mirrors the `PHASE-2.5`/`PHASE-2.6` insert precedent)
-- **Status:** Planned - issue #438.
+- **Status:** Delivered. Original spec shipped via issue #438 (2026-09-15); the PHASE-8.1-completion delivery (issue #479, tickets #480-#495) landed patient profile persistence, prescription entry end-to-end, the doctor console Cases tab + surface parity, and the patient Find/Inbox nav on top of the #438 seams, with the docs closeout #491 recording the delivered reality.
 - **Phase Strategic Objective:** Complete the patient-to-doctor handoff by delivering the pick-a-doctor step (filtered verified directory, consent-at-pick, atomic `MOD-004` grant) and the doctor console (review queue, case workspace, prescription workflow) on top of the delivered `PHASE-8` backend seams; six small backend deltas close remaining read/write gaps so the full consult loop is reachable from a browser.
 - **Release Readiness Criteria:** Patient picks exactly one doctor from a filtered, verified list (suggested specialty from symptoms, fee displayed or "fee not set"), consent sheet records the pick and the consent grant atomically, pre-summary reads as assigned-partner-scoped thereafter; doctor console shows review queue (low-confidence first) and open care cases, doctor reads full pre-summary content, low-confidence review finalizes in one action, doctor drafts/edits/approves/rejects prescription with verification declaration, doctor sets consultation fee; all new screens bilingual (en/hi).
 
@@ -615,7 +615,7 @@ No new PRD feature - frontend chassis insert delivering the doctor console UI an
 
 #### 3. Data Schema & Entity Delta (Phase Data Model)
 
-- **Databases Introduced/Updated:** none - six additive backend deltas only.
+- **Databases Introduced/Updated:** none under the original #438 spec (six additive backend deltas only); the PHASE-8.1-completion delivery (#479) added `iam_patient_profiles` (profile-completion persistence, MOD-001) and consumed the new `care_doctor_inputs` rows plus the added `care_rx_items.frequency` / `care_prescriptions.attributed_doctor` columns.
 - **Backend deltas:**
   - Patient doctor-pick write: patient-scoped endpoint accepts chosen partner id against an intake, records choice and consent grant atomically, pre-summary reads as assigned-partner-scoped thereafter.
   - Review queue read: doctor-scoped endpoint lists pre-summaries assigned to the calling doctor that await review, low-confidence first.
@@ -643,6 +643,12 @@ No new PRD feature - frontend chassis insert delivering the doctor console UI an
 
 - **Target for `prototype`:** executed as `PROTO-PHASE-8.1` per the insert precedent (gitignored, never committed).
 - **Target for `to-spec` & `to-tickets`:** delivered as tickets #438/#439 and siblings; scope boundary = pick-a-doctor step, doctor console (queue, case workspace, prescription workflow), six backend deltas, bilingual copy. No application code outside the frontend doctor channel and intake client.
+
+#### 7. Delivery Notes - PHASE-8.1-completion (issue #479)
+
+- **Tickets #480-#495 landed on top of the #438 seams.** Consent-at-pick now records `consultations` and `prescriptions` standing grants atomically with the doctor assignment (#480); profile-completion data persists via `iam_patient_profiles` + `PUT/GET /v1/me/profile`, with the gate/nudges/dashboard hydrating from it (#482/#488); doctor voice/photo input reaches the `care_doctor_inputs` seam via the `rx_input` storage prefix (#481/#490); AI-draft gating surfaces distinct error codes (#487); the rx editor gained the frequency column, "N items edited by you" tracker, and issuing-doctor reg-no attribution (#486/#494/#495); review-queue cards show patient name/age, intake snippet, waiting time, and section count (#489); the doctor console Cases tab is live at `/doctor/cases` with workspace parity (inner tabs, original transcript, audio playback - #483/#484); `/patient/find` is a real authed directory-browse page and Inbox/Bookings stay coming-soon (#485).
+- **D-E documented no-change:** the doctor-console history panel's "No consented history available for this patient" empty state is correct behaviour, not a consent failure. Granted scopes pass `check_consent`; the timeline is legitimately empty until `report.filed`, `prescription.issued` / `prescription.delivered`, or `settlement.recorded` fires. A denied consent renders the error state, never this message. Recorded for the UI in `docs/design/ui-blueprint.md` §6.2(b); no code change (see #479 D-E, #483 handoff).
+- **Preserved semantics:** the drafting cap (max two AI drafts), revision-freeze approval, verification declaration, and `edited_yn` derivation are untouched; real-provider `draft_rx` stays out of scope (the mock provider remains the demo path).
 
 ---
 
@@ -913,7 +919,7 @@ No new PRD feature - frontend chassis insert delivering the doctor console UI an
 
 ## 3. End-to-End Traceability Matrix (Phased Delivery)
 
-> **Chassis inserts:** `PHASE-2.5` (#146), `PHASE-2.6` (spec #191), and `PHASE-8.1` (issue #438) are frontend chassis inserts. `PHASE-2.5`/`PHASE-2.6` sit between Phases 2 and 3, delivering cross-cutting `REQ-003`/`REQ-006` frontend surfaces ahead of their feature phases, creating no PRD features and no schema deltas (one additive `MeResponse.phone` field), so they carry no rows below - their scope is governed by `docs/design/ui-blueprint.md` and their specs in §2.2a/§2.2b. `PHASE-8.1` sits between Phases 8 and 9, delivering the doctor console UI and pick-a-doctor step with six additive backend deltas (no schema changes), so its §3 rows reflect the new backend surfaces consumed by the frontend. Statuses reflect delivery through PHASE-8 (2026-09-15): single-phase rows whose phase is shipped read `Delivered`; multi-phase rows read `In progress`.
+> **Chassis inserts:** `PHASE-2.5` (#146), `PHASE-2.6` (spec #191), and `PHASE-8.1` (issue #438) are frontend chassis inserts. `PHASE-2.5`/`PHASE-2.6` sit between Phases 2 and 3, delivering cross-cutting `REQ-003`/`REQ-006` frontend surfaces ahead of their feature phases, creating no PRD features and no schema deltas (one additive `MeResponse.phone` field), so they carry no rows below - their scope is governed by `docs/design/ui-blueprint.md` and their specs in §2.2a/§2.2b. `PHASE-8.1` sits between Phases 8 and 9, delivering the doctor console UI and pick-a-doctor step with six additive backend deltas (no schema changes under #438; the #479 completion added `iam_patient_profiles` and the dual-scope consent-at-pick grant - see §2.8a §7), so its §3 rows reflect the new backend surfaces consumed by the frontend. Statuses reflect delivery through the PHASE-8.1-completion (#479, 2026-09-20): single-phase rows whose phase is shipped read `Delivered`; multi-phase rows read `Delivered` once their final phase is shipped (until then, `In progress`).
 
 ### 3.1 Feature → Module → Phase Traceability
 
@@ -926,8 +932,8 @@ No new PRD feature - frontend chassis insert delivering the doctor console UI an
 | `FEAT-005` (profiles & credentials)               | `MOD-002`                                  | Phase 6        | `partner` - partner_credentials (expiry/revoked)                                              | Credential-expiry deactivation            | Scheduled   |
 | `FEAT-006` (symptom intake)                       | `MOD-005`                                  | Phase 7        | `intake` - intakes, media_refs                                                                | Object storage `intake/`                  | Scheduled   |
 | `FEAT-007` (AI pre-summary)                       | `MOD-005`                                  | Phase 7        | `intake` - pre_summaries, ai_jobs                                                             | LLM adapter + budget meter                | Scheduled   |
-| `FEAT-008` (consult handshake)                    | `MOD-006`                                  | Phase 8 + 8.1  | `care` - cases                                                                                | Doctor channel; pick-a-doctor step        | In progress |
-| `FEAT-009` (e-prescription)                       | `MOD-006`, `MOD-005`                       | Phase 8 + 8.1  | `care` - prescriptions, rx_items, rx_approvals, doctor_inputs                                 | Object storage `rx_input/`; approval gate | In progress |
+| `FEAT-008` (consult handshake)                    | `MOD-006`                                  | Phase 8 + 8.1  | `care` - cases                                                                                | Doctor channel; pick-a-doctor step        | Delivered   |
+| `FEAT-009` (e-prescription)                       | `MOD-006`, `MOD-005`                       | Phase 8 + 8.1  | `care` - prescriptions, rx_items, rx_approvals, doctor_inputs                                 | Object storage `rx_input/`; approval gate | Delivered   |
 | `FEAT-010` (diagnostics booking)                  | `MOD-007`                                  | Phase 9        | `diagnostics` - diagnostic_orders, sample_pickups                                             | Lab channel                               | Scheduled   |
 | `FEAT-011` (report match & filing)                | `MOD-007`                                  | Phase 9        | `diagnostics` - lab_reports, report_uploads, upload_matches                                   | Upload scanning; `reports/` bucket        | Scheduled   |
 | `FEAT-012` (fulfilment routing)                   | `MOD-008`                                  | Phase 10       | `fulfillment` - fulfillment_orders, fulfillment_events                                        | Chemist channel                           | Scheduled   |
@@ -962,19 +968,19 @@ No new PRD feature - frontend chassis insert delivering the doctor console UI an
 
 ### 3.3 Module Primary-Build-Phase Map (every `MOD-xxx` covered)
 
-| Module                          | Primary Build Phase | First Consumed By                  | Traceability Note                                        |
-| :------------------------------ | :------------------ | :--------------------------------- | :------------------------------------------------------- |
-| `MOD-001` (IAM)                 | Phase 2             | all phases (edge scope)            | Facade extended Phase 5 (partner/operator roles)         |
-| `MOD-002` (Partner & Directory) | Phase 5             | Phase 6 (search)                   | Facade extended Phase 8.1 (consultation fee on profile)  |
-| `MOD-003` (LHR)                 | Phase 3             | Phase 4, 12 (access view, metrics) | -                                                        |
-| `MOD-004` (Consent)             | Phase 3             | all sharing phases (7, 8, 9)       | Facade extended Phase 8.1 (consent-at-pick atomic grant) |
-| `MOD-005` (Intake & AI)         | Phase 7             | Phase 8 (rx draft)                 | -                                                        |
-| `MOD-006` (Care & Rx)           | Phase 8             | Phase 10 (routing), 13 (schedules) | Facade extended Phase 8.1 (pick write, queue/read seams) |
-| `MOD-007` (Diagnostics)         | Phase 9             | Phase 11 (order context)           | -                                                        |
-| `MOD-008` (Fulfillment)         | Phase 10            | Phase 13 (status notifications)    | -                                                        |
-| `MOD-009` (Settlement)          | Phase 11            | Phase 14 (audit completeness)      | -                                                        |
-| `MOD-010` (Notifications)       | Phase 13            | -                                  | Consumes Phase 8/12 events                               |
-| `MOD-011` (Audit)               | Phase 4             | all phases (audit.event)           | Engine precedes consumers                                |
+| Module                          | Primary Build Phase | First Consumed By                  | Traceability Note                                                                            |
+| :------------------------------ | :------------------ | :--------------------------------- | :------------------------------------------------------------------------------------------- |
+| `MOD-001` (IAM)                 | Phase 2             | all phases (edge scope)            | Facade extended Phase 5 (partner/operator roles) and Phase 8.1 (patient profile persistence) |
+| `MOD-002` (Partner & Directory) | Phase 5             | Phase 6 (search)                   | Facade extended Phase 8.1 (consultation fee on profile)                                      |
+| `MOD-003` (LHR)                 | Phase 3             | Phase 4, 12 (access view, metrics) | -                                                                                            |
+| `MOD-004` (Consent)             | Phase 3             | all sharing phases (7, 8, 9)       | Facade extended Phase 8.1 (consent-at-pick dual-scope grant)                                 |
+| `MOD-005` (Intake & AI)         | Phase 7             | Phase 8 (rx draft)                 | -                                                                                            |
+| `MOD-006` (Care & Rx)           | Phase 8             | Phase 10 (routing), 13 (schedules) | Facade extended Phase 8.1 (pick write, queue/read seams)                                     |
+| `MOD-007` (Diagnostics)         | Phase 9             | Phase 11 (order context)           | -                                                                                            |
+| `MOD-008` (Fulfillment)         | Phase 10            | Phase 13 (status notifications)    | -                                                                                            |
+| `MOD-009` (Settlement)          | Phase 11            | Phase 14 (audit completeness)      | -                                                                                            |
+| `MOD-010` (Notifications)       | Phase 13            | -                                  | Consumes Phase 8/12 events                                                                   |
+| `MOD-011` (Audit)               | Phase 4             | all phases (audit.event)           | Engine precedes consumers                                                                    |
 
 ---
 

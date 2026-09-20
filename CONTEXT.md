@@ -106,7 +106,7 @@ The closed enum of record areas a consent grant may name - `consultations | pres
 _Avoid_: data category (when meaning a grant's scope), permission level
 
 **standing grant**:
-One live consent authorization for one (patient, counterparty, record scope) triple, effective from grant until revoked or superseded by a re-grant. "Per-action" consent means this per-purpose targeting, never a one-shot token.
+One live consent authorization for one (patient, counterparty, record scope) triple, effective from grant until revoked or superseded by a re-grant. "Per-action" consent means this per-purpose targeting, never a one-shot token. Pick-at-doctor (Phase 8.1) is the deliberate multi-grant moment: it records `consultations` and `prescriptions` standing grants together, atomically in the same transaction as the doctor assignment, so the AI drafting assistant's consent-gated read can pass.
 _Avoid_: per-action token, one-shot consent
 
 **grant lineage**:
