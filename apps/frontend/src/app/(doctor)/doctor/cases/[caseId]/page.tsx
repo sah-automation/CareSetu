@@ -440,6 +440,11 @@ export default function CaseWorkspacePage() {
         setCareCase(c);
         setDoctorMe(me);
         setLoadStatus("ready");
+        // The AI-draft gate hydrates from the server: an input recorded on an
+        // earlier session unlocks the draft button without a re-upload (#492
+        // review fix - the capture surface was re-shown and the lock re-set on
+        // any hard refresh of a PrescriptionPending case).
+        setHasDoctorInput(c.has_doctor_input);
         // Open a born case (pre_summary) on the pre-summary tab; a
         // prescription-pending case on the prescription tab.
         setActiveTab(
@@ -650,7 +655,7 @@ export default function CaseWorkspacePage() {
         filename: "addendum.txt",
       });
       await submitDoctorInput(careCase.case_id, {
-        input_type: "voice",
+        input_type: "text",
         media_ref: mediaRef.object_key,
       });
       setAddendumText("");

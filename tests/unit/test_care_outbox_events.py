@@ -265,7 +265,9 @@ def _single_outbox(connection: AsyncMock) -> Insert:
 class TestCaseConsultCompleteOutbox:
     @pytest.mark.asyncio
     async def test_consult_complete_payload_round_trips_in_one_transaction(self) -> None:
-        case_conn = _connection([_FakeResult(row=_case_row()), _FakeResult(), _FakeResult()])
+        case_conn = _connection(
+            [_FakeResult(row=_case_row()), _FakeResult(), _FakeResult(), _FakeResult(rows=[])]
+        )
         intake_conn = _connection([_FakeResult(row=_pre_summary_row())])
         engine = _engine(case_conn)
         facade = _case_facade(case_conn, _intake_facade(intake_conn), engine=engine)
@@ -293,6 +295,7 @@ class TestCaseClosedOutbox:
                 _FakeResult(row=_case_row(stage="prescription_pending")),
                 _FakeResult(),
                 _FakeResult(),
+                _FakeResult(rows=[]),
             ]
         )
         engine = _engine(case_conn)

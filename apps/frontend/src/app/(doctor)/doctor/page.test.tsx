@@ -96,6 +96,7 @@ function caseItem(
     pre_summary_id: 5,
     stage: (stage ?? "prescription_pending") as CareCaseStage,
     forced_review: false,
+    has_doctor_input: false,
     closed_at: null,
     close_reason: null,
     created_at: "2026-09-12T10:00:00Z",

@@ -35,6 +35,7 @@ const careCaseView = {
   pre_summary_id: 5,
   stage: "prescription_pending",
   forced_review: false,
+  has_doctor_input: false,
   closed_at: null,
   close_reason: null,
   created_at: "2026-09-10T00:00:00Z",

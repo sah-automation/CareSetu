@@ -45,6 +45,7 @@ class CaseDetailView(BaseModel):
     pre_summary_id: int | None
     stage: str
     forced_review: bool = False
+    has_doctor_input: bool = False
     closed_at: datetime | None
     close_reason: str | None
     created_at: datetime

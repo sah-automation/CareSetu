@@ -119,7 +119,9 @@ class DoctorInputRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    input_type: Literal["voice", "photo"] = Field(description="Input kind: voice note or photo")
+    input_type: Literal["voice", "photo", "text"] = Field(
+        description="Input kind: voice note, photo, or typed addendum"
+    )
     media_ref: str = Field(description="Clip ticket of the uploaded voice note or photo")
     sensitive_class: Literal["normal", "sensitive", "restricted"] | None = Field(
         default=None,

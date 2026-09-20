@@ -12,7 +12,7 @@ and are imported by :mod:`modules.care.rx_facade` - never duplicated.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 FINALIZED_PRE_SUMMARY_STATE = "final"
 
 
-def _to_case_detail(row: Row[Any]) -> CaseDetailView:
+def _to_case_detail(row: Row[Any], *, has_doctor_input: bool = False) -> CaseDetailView:
     """Build the typed read projection from a ``care_cases`` row."""
     return CaseDetailView(
         case_id=int(row.id),
@@ -57,11 +57,36 @@ def _to_case_detail(row: Row[Any]) -> CaseDetailView:
         pre_summary_id=int(row.pre_summary_id) if row.pre_summary_id is not None else None,
         stage=row.stage,
         forced_review=bool(row.forced_review),
+        has_doctor_input=has_doctor_input,
         closed_at=row.closed_at,
         close_reason=row.close_reason,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
+
+
+async def _case_ids_with_doctor_input(
+    connection: AsyncConnection, case_ids: Collection[int]
+) -> set[int]:
+    """Return the subset of ``case_ids`` that already carry a doctor input.
+
+    The AI-draft gate mirrors this (the backend refuses a draft with no
+    ``care_doctor_inputs`` row), so the projection exposes it for the
+    workspace to hydrate its lock state after a reload (#492 review fix: the
+    capture surface was re-shown and the draft button re-locked until the
+    doctor re-uploaded an input). One query for any batch size - never a
+    per-case N+1.
+    """
+    if not case_ids:
+        return set()
+    rows = (
+        await connection.execute(
+            select(care_doctor_inputs.c.case_id)
+            .where(care_doctor_inputs.c.case_id.in_(case_ids))
+            .distinct()
+        )
+    ).all()
+    return {int(row.case_id) for row in rows}
 
 
 # -----------------------------------------------------------------
@@ -228,6 +253,8 @@ class CaseConsoleFacade:
                 ),
             )
 
+            has_input = await _case_ids_with_doctor_input(connection, {case_id})
+
             view = CaseDetailView(
                 case_id=case_id,
                 patient_id=int(row.patient_id),
@@ -237,6 +264,7 @@ class CaseConsoleFacade:
                 ),
                 stage=next_state.stage.value,
                 forced_review=bool(row.forced_review),
+                has_doctor_input=case_id in has_input,
                 closed_at=row.closed_at,
                 close_reason=row.close_reason,
                 created_at=row.created_at,
@@ -302,6 +330,8 @@ class CaseConsoleFacade:
                 ),
             )
 
+            has_input = await _case_ids_with_doctor_input(connection, {case_id})
+
             view = CaseDetailView(
                 case_id=case_id,
                 patient_id=int(row.patient_id),
@@ -311,6 +341,7 @@ class CaseConsoleFacade:
                 ),
                 stage=next_state.stage.value,
                 forced_review=bool(row.forced_review),
+                has_doctor_input=case_id in has_input,
                 closed_at=now,
                 close_reason=close_reason,
                 created_at=row.created_at,
@@ -342,8 +373,9 @@ class CaseConsoleFacade:
                 case_id=case_id,
                 assigned_doctor_of=assigned_doctor_of_resolver(self._intake_facade),
             )
+            has_input = await _case_ids_with_doctor_input(connection, {case_id})
 
-        return _to_case_detail(row)
+        return _to_case_detail(row, has_doctor_input=case_id in has_input)
 
     async def list_doctor_cases(
         self,
@@ -386,6 +418,11 @@ class CaseConsoleFacade:
                 )
             ).all()
 
+            declared_ids = {int(row.id) for row in claimed_rows} | {
+                int(row.id) for row in unclaimed_rows if row.pre_summary_id is not None
+            }
+            ids_with_input = await _case_ids_with_doctor_input(connection, declared_ids)
+
         assigned: dict[int, int | None] = {}
         if unclaimed_rows:
             pre_summary_ids = [
@@ -396,9 +433,12 @@ class CaseConsoleFacade:
                     pre_summary_ids
                 )
 
-        views = [_to_case_detail(row) for row in claimed_rows]
+        views = [
+            _to_case_detail(row, has_doctor_input=int(row.id) in ids_with_input)
+            for row in claimed_rows
+        ]
         views.extend(
-            _to_case_detail(row)
+            _to_case_detail(row, has_doctor_input=int(row.id) in ids_with_input)
             for row in unclaimed_rows
             if row.pre_summary_id is not None and assigned.get(int(row.pre_summary_id)) == doctor_id
         )
@@ -410,11 +450,11 @@ class CaseConsoleFacade:
         *,
         doctor_id: int,
         case_id: int,
-        input_type: Literal["voice", "photo"],
+        input_type: Literal["voice", "photo", "text"],
         media_ref: str,
         sensitive_class: Literal["normal", "sensitive", "restricted"] | None = None,
     ) -> DoctorInputResult:
-        """Record a voice note or photo as prescribing input for the case.
+        """Record a voice note, photo, or typed addendum as prescribing input.
 
         Doctor-scoped (api-standards S6, security-phii-standards S3): the case
         must belong to the authenticated ``doctor_id``, so a doctor can never
@@ -422,7 +462,7 @@ class CaseConsoleFacade:
         class are typed to the canonical vocabulary so an invalid value is
         rejected at the boundary, before any write.
 
-        Validates the case state: a voice/photo input attaches only to an open
+        Validates the case state: an input attaches only to an open
         case (``PreSummary`` or ``PrescriptionPending``) - a closed case
         rejects new input.
 

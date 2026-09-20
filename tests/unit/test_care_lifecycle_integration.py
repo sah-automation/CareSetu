@@ -313,7 +313,9 @@ class TestHappyPath:
     @pytest.mark.asyncio
     async def test_full_lifecycle_lands_issued_and_reads_back_the_frozen_revision(self) -> None:
         # Step 1: consult completes, moving the case to PrescriptionPending.
-        consult_conn = _connection([_FakeResult(row=_case_row()), _FakeResult(), _FakeResult()])
+        consult_conn = _connection(
+            [_FakeResult(row=_case_row()), _FakeResult(), _FakeResult(), _FakeResult(rows=[])]
+        )
         consult = await _case_facade(
             consult_conn, _intake_facade(_connection([_FakeResult(row=_pre_summary_row())]))
         ).mark_consult_complete(doctor_id=42, case_id=1)

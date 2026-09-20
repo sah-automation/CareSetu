@@ -223,7 +223,9 @@ async def test_get_finalized_pre_summary_raises_at_every_non_final_state(
 
 @pytest.mark.asyncio
 async def test_mark_consult_complete_transitions_and_publishes() -> None:
-    case_conn = _connection([_FakeResult(row=_case_row()), _FakeResult(), _FakeResult()])
+    case_conn = _connection(
+        [_FakeResult(row=_case_row()), _FakeResult(), _FakeResult(), _FakeResult(rows=[])]
+    )
     intake_conn = _connection([_FakeResult(row=_pre_summary_row())])
     facade = _care_facade(case_conn, _intake_facade(intake_conn))
 
@@ -302,6 +304,7 @@ async def test_mark_consult_complete_claims_unclaimed_born_case() -> None:
             _FakeResult(row=_case_row(doctor_id=None)),
             _FakeResult(),
             _FakeResult(),
+            _FakeResult(rows=[]),
         ]
     )
     intake_conn = _connection([_FakeResult(row=_pre_summary_row())])
@@ -364,7 +367,7 @@ async def test_mark_consult_complete_rejects_reentrant_completion() -> None:
 
 @pytest.mark.asyncio
 async def test_get_case_returns_typed_view() -> None:
-    connection = _connection([_FakeResult(row=_case_row())])
+    connection = _connection([_FakeResult(row=_case_row()), _FakeResult(rows=[])])
     facade = _care_facade(connection, _intake_facade(_connection([])))
 
     result = await facade.get_case(doctor_id=42, case_id=1)
@@ -375,6 +378,7 @@ async def test_get_case_returns_typed_view() -> None:
     assert result.doctor_id == 42
     assert result.pre_summary_id == 5
     assert result.stage == "pre_summary"
+    assert result.has_doctor_input is False
 
 
 @pytest.mark.asyncio
@@ -384,6 +388,18 @@ async def test_get_case_raises_for_unowned_case() -> None:
 
     with pytest.raises(CareNotFoundError, match="not found for doctor"):
         await facade.get_case(doctor_id=42, case_id=1)
+
+
+@pytest.mark.asyncio
+async def test_get_case_hydrates_server_side_doctor_input() -> None:
+    connection = _connection(
+        [_FakeResult(row=_case_row()), _FakeResult(rows=[SimpleNamespace(case_id=1)])]
+    )
+    facade = _care_facade(connection, _intake_facade(_connection([])))
+
+    result = await facade.get_case(doctor_id=42, case_id=1)
+
+    assert result.has_doctor_input is True
 
 
 @pytest.mark.asyncio
@@ -397,7 +413,7 @@ async def test_get_case_raises_for_foreign_doctor() -> None:
 
 @pytest.mark.asyncio
 async def test_get_case_opens_assigned_but_unclaimed_case() -> None:
-    case_conn = _connection([_FakeResult(row=_case_row(doctor_id=None))])
+    case_conn = _connection([_FakeResult(row=_case_row(doctor_id=None)), _FakeResult(rows=[])])
     intake_conn = _connection(
         [_FakeResult(rows=[_assigned_partner_row(pre_summary_id=5, assigned_partner_id=42)])]
     )
@@ -476,6 +492,7 @@ async def test_list_doctor_cases_returns_only_open_cases() -> None:
                     ),
                 ]
             ),
+            _FakeResult(rows=[SimpleNamespace(case_id=3)]),
         ]
     )
     intake_conn = _connection(
@@ -496,11 +513,14 @@ async def test_list_doctor_cases_returns_only_open_cases() -> None:
     assert all(isinstance(v, CaseDetailView) for v in results)
     open_ids = [v.case_id for v in results if v.stage != "closed"]
     assert open_ids == [1, 10, 3]
+    by_id = {v.case_id: v for v in results}
+    assert by_id[3].has_doctor_input is True
+    assert by_id[1].has_doctor_input is False
 
 
 @pytest.mark.asyncio
 async def test_list_doctor_cases_uses_doctor_filter_and_ascending_order() -> None:
-    connection = _connection([_FakeResult(rows=[]), _FakeResult(rows=[])])
+    connection = _connection([_FakeResult(rows=[]), _FakeResult(rows=[]), _FakeResult(rows=[])])
     intake_conn = _connection([])
     facade = _care_facade(connection, _intake_facade(intake_conn))
 
@@ -571,6 +591,28 @@ async def test_submit_doctor_input_records_photo_input() -> None:
 
 
 @pytest.mark.asyncio
+async def test_submit_doctor_input_records_text_input() -> None:
+    connection = _connection([_FakeResult(row=_case_row()), _FakeResult(scalar=12)])
+    facade = _care_facade(connection, _intake_facade(_connection([])))
+
+    result = await facade.submit_doctor_input(
+        doctor_id=42,
+        case_id=1,
+        input_type="text",
+        media_ref="rx_input/addendum-1.txt",
+        sensitive_class="normal",
+    )
+
+    assert result.input_id == 12
+    assert result.input_type == "text"
+    assert result.media_ref == "rx_input/addendum-1.txt"
+
+    insert_params = _stmt_params(_statements(connection), care_doctor_inputs.name)
+    assert insert_params is not None
+    assert insert_params["input_type"] == "text"
+
+
+@pytest.mark.asyncio
 async def test_submit_doctor_input_rejects_when_case_closed() -> None:
     connection = _connection([_FakeResult(row=_case_row(stage="closed"))])
     facade = _care_facade(connection, _intake_facade(_connection([])))
@@ -638,6 +680,7 @@ async def test_close_case_without_rx_transitions_and_publishes() -> None:
             _FakeResult(row=_case_row(stage="prescription_pending")),
             _FakeResult(),
             _FakeResult(),
+            _FakeResult(rows=[]),
         ]
     )
     facade = _care_facade(case_conn, _intake_facade(_connection([])))
@@ -650,6 +693,7 @@ async def test_close_case_without_rx_transitions_and_publishes() -> None:
     assert result.close_reason == "no_show"
     assert result.closed_at is not None
     assert result.doctor_id == 42
+    assert result.has_doctor_input is False
 
     update_params = _stmt_params(_statements(case_conn), care_cases.name)
     assert update_params is not None

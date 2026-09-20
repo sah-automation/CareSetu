@@ -83,7 +83,8 @@ CANONICAL_DECISIONS = frozenset({DECISION_APPROVED, DECISION_REJECTED})
 
 INPUT_TYPE_VOICE = "voice"
 INPUT_TYPE_PHOTO = "photo"
-CANONICAL_INPUT_TYPES = frozenset({INPUT_TYPE_VOICE, INPUT_TYPE_PHOTO})
+INPUT_TYPE_TEXT = "text"
+CANONICAL_INPUT_TYPES = frozenset({INPUT_TYPE_VOICE, INPUT_TYPE_PHOTO, INPUT_TYPE_TEXT})
 
 SENSITIVE_CLASS_NORMAL = "normal"
 SENSITIVE_CLASS_SENSITIVE = "sensitive"
@@ -226,7 +227,7 @@ care_doctor_inputs = Table(
     Column("sensitive_class", String(30), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     CheckConstraint(
-        "input_type IN ('voice', 'photo')",
+        "input_type IN ('voice', 'photo', 'text')",
         name="ck_care_doctor_inputs_input_type",
     ),
     CheckConstraint(

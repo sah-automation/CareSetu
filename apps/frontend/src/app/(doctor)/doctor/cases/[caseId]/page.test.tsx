@@ -143,6 +143,7 @@ function caseItem(
     pre_summary_id: 7,
     stage: (stage ?? "pre_summary") as CareCaseStage,
     forced_review: false,
+    has_doctor_input: false,
     closed_at: null,
     close_reason: null,
     created_at: "2026-09-12T10:00:00Z",
@@ -763,7 +764,7 @@ describe("CaseWorkspacePage prescription drafting (US-18/#452)", () => {
     });
   });
 
-  it("persists a typed addendum and posts the media ticket as voice input", async () => {
+  it("persists a typed addendum as a text input (not a voice note)", async () => {
     getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
     getWorkingRx.mockRejectedValue(noDraftError());
     render(<CaseWorkspacePage />);
@@ -782,9 +783,24 @@ describe("CaseWorkspacePage prescription drafting (US-18/#452)", () => {
       expect.objectContaining({ filename: "addendum.txt" }),
     );
     expect(doSubmitDoctorInput).toHaveBeenCalledWith(11, {
-      input_type: "voice",
+      input_type: "text",
       media_ref: "rx_input/7/opaque.enc",
     });
+  });
+
+  it("hydrates the AI-draft gate from a server-side doctor input on reload", async () => {
+    getCase.mockResolvedValue(
+      caseItem(11, { stage: "prescription_pending", has_doctor_input: true }),
+    );
+    getWorkingRx.mockRejectedValue(noDraftError());
+    render(<CaseWorkspacePage />);
+
+    await waitFor(() => screen.getByTestId("request-draft-action"));
+    expect(screen.getByTestId("rx-input-received")).toBeTruthy();
+    expect(screen.getByTestId("request-draft-action")).toBeEnabled();
+    expect(
+      screen.queryByTestId("request-draft-blocked-help"),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps the AI draft locked and surfaces an error when an attach fails", async () => {

@@ -18,7 +18,7 @@ export type RxStatus =
   | "rejected"
   | "issued"
   | "fulfilled";
-export type DoctorInputType = "voice" | "photo";
+export type DoctorInputType = "voice" | "photo" | "text";
 export type SensitiveClass = "normal" | "sensitive" | "restricted";
 export type CloseReason =
   | "patient_withdrawn"
@@ -34,6 +34,7 @@ export interface CaseDetailView {
   pre_summary_id: number | null;
   stage: CareCaseStage;
   forced_review: boolean;
+  has_doctor_input: boolean;
   closed_at: string | null;
   close_reason: CloseReason | null;
   created_at: string;
@@ -113,6 +114,7 @@ function isCaseDetailView(value: unknown): value is CaseDetailView {
     "pre_summary_id" in value &&
     "stage" in value &&
     "forced_review" in value &&
+    "has_doctor_input" in value &&
     "closed_at" in value &&
     "close_reason" in value &&
     "created_at" in value &&
