@@ -1,5 +1,5 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { render, screen, cleanup } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import DoctorDashboardPage from "@/app/(doctor)/doctor/page";
 import OperatorDashboardPage from "@/app/(operator)/operator/page";
@@ -59,6 +59,12 @@ vi.mock("@/lib/profile/api", () => ({
 
 // PHASE-2.6 T07 (#198): the single generic dashboard group split into
 // per-role route groups - each stub page re-homed under its role's group.
+
+// Vitest runs without `globals`, so @testing-library/react's auto-cleanup is
+// off. Unmount the previous page before the next it() renders, otherwise React
+// 19's scheduler keeps work queued that fires after the jsdom env tears down
+// and surfaces as "window is not defined" unhandled errors.
+afterEach(cleanup);
 
 describe("per-role route-group scaffold pages", () => {
   it.each([
