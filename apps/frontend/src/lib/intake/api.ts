@@ -312,6 +312,47 @@ export async function uploadIntakeMedia(
   );
 }
 
+/**
+ * Upload a doctor's voice note or photo as prescribing input (PHASE-8.1 T06,
+ * #481). Doctor-scoped sibling of `uploadIntakeMedia`: the bytes land under
+ * the `rx_input/` storage prefix (encrypted at rest) and the returned opaque
+ * ticket is used as `DoctorInputRequest.media_ref` on
+ * `POST /v1/care/cases/{case_id}/doctor-input`.
+ */
+export async function uploadDoctorMedia(
+  file: Blob,
+  options: {
+    filename?: string;
+    audioDurationMs?: number;
+    fileSizeBytes?: number;
+  } = {},
+): Promise<MediaUploadRef> {
+  const form = new FormData();
+  const filename =
+    options.filename ?? (file instanceof File ? file.name : "recording.webm");
+  form.append("file", file, filename);
+  const query = new URLSearchParams();
+  if (options.audioDurationMs !== undefined) {
+    query.set("audio_duration_ms", String(options.audioDurationMs));
+  }
+  if (options.fileSizeBytes !== undefined) {
+    query.set("file_size_bytes", String(options.fileSizeBytes));
+  }
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  const data = await request<unknown>(
+    `/v1/intake/upload-doctor-media${suffix}`,
+    {
+      method: "POST",
+      body: form,
+    },
+  );
+  return guardShape(
+    data,
+    isMediaUploadRef,
+    "The API returned an unexpected upload ticket shape",
+  );
+}
+
 /** Attach a fresh recording attempt to a voice intake (capped at 3). */
 export async function reRecordIntake(
   intakeId: number,

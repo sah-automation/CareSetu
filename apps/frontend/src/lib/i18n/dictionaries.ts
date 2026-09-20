@@ -1132,7 +1132,33 @@ const en = {
     draftCapReached:
       "The AI drafting limit for this case has been reached. Edit and save the current draft instead.",
     noDraftYet:
-      "No prescription draft yet. Request an AI draft to get started.",
+      "No prescription draft yet. Add your input below to get started.",
+    // PHASE-8.1 T6 (#490): the empty-state doctor-input capture surface -
+    // voice note / photo / typed addendum ride the doctor media route and
+    // post media_ref to doctor-input; the AI draft gate and manual authoring
+    // live here too. Refusal codes map to specific messages (#487).
+    doctorInputHelp:
+      "Share what informed this prescription - a voice note, a photo, or a short typed addendum.",
+    voiceNoteAction: "Voice note",
+    photoAction: "Photo",
+    addendumLabel: "Typed addendum (optional)",
+    addendumPlaceholder: "e.g. dosage notes or instructions",
+    addendumSubmit: "Attach addendum",
+    inputSubmitting: "Uploading",
+    doctorInputFail: "Could not attach your input. Please try again.",
+    doctorInputReceived: "Input attached - you can now request the AI draft.",
+    requestDraftBlocked:
+      "Attach a voice note, photo, or typed addendum to enable the AI draft.",
+    manualAuthoringAction: "Type prescription yourself",
+    manualAuthoringHelp:
+      "Write the prescription items yourself - no AI needed, and no patient consent required.",
+    draftConsentDenied:
+      "The patient has not granted consent for the AI to consult their records. Type the prescription yourself, or ask the patient to grant access.",
+    draftNoDoctorInput:
+      "Attach a voice note, photo, or typed addendum before requesting the AI draft.",
+    draftCaseClosed: "This case is closed, so no new draft can be requested.",
+    draftCaseNotFound:
+      "This case could not be found. It may be closed or assigned to a different doctor.",
     workingRxLoadFail: "Could not load the in-progress prescription.",
     rxItemsLabel: "Prescription items",
     rxNameLabel: "Medicine",
@@ -2259,7 +2285,33 @@ export const STRINGS: Record<Lang, Dictionary> = {
       draftCapReached:
         "इस मामले के लिए AI मसौदा सीमा पूरी हो गई है। मौजूदा मसौदा संपादित करके सहेजें।",
       noDraftYet:
-        "अभी कोई नुस्ख़ा मसौदा नहीं है। शुरू करने के लिए AI मसौदा माँगें।",
+        "अभी कोई नुस्ख़ा मसौदा नहीं है। शुरू करने के लिए नीचे अपना इनपुट जोड़ें।",
+      // PHASE-8.1 T6 (#490): खाली अवस्था में डॉक्टर-इनपुट कैप्चर सतह -
+      // वॉइस नोट / फोटो / टाइप किया हुआ जोड़ डॉक्टर मीडिया मार्ग से होकर
+      // doctor-input पर media_ref भेजते हैं; AI मसौदा गेट और मैनुअल लेखन भी
+      // यहीं हैं। अस्वीकृति कोड विशेष संदेशों पर मैप होते हैं (#487)।
+      doctorInputHelp:
+        "यह नुस्ख़ा बनाने में मदद के लिए वॉइस नोट, फोटो या छोटा टाइप किया हुआ जोड़ साझा करें।",
+      voiceNoteAction: "वॉइस नोट",
+      photoAction: "फोटो",
+      addendumLabel: "टाइप किया हुआ जोड़ (वैकल्पिक)",
+      addendumPlaceholder: "जैसे - खुराक नोट या निर्देश",
+      addendumSubmit: "जोड़ संलग्न करें",
+      inputSubmitting: "अपलोड हो रहा है",
+      doctorInputFail: "आपका इनपुट संलग्न नहीं हो सका। फिर कोशिश करें।",
+      doctorInputReceived: "इनपुट संलग्न - अब आप AI मसौदा माँग सकते हैं।",
+      requestDraftBlocked:
+        "AI मसौदा सक्षम करने के लिए वॉइस नोट, फोटो या टाइप किया हुआ जोड़ संलग्न करें।",
+      manualAuthoringAction: "खुद नुस्ख़ा लिखें",
+      manualAuthoringHelp:
+        "नुस्ख़ा आइटम खुद लिखें - AI की ज़रूरत नहीं और मरीज़ की सहमति भी ज़रूरी नहीं।",
+      draftConsentDenied:
+        "मरीज़ ने AI को अपने रिकॉर्ड देखने की सहमति नहीं दी। खुद नुस्ख़ा लिखें, या मरीज़ से सहमति दिलवाएँ।",
+      draftNoDoctorInput:
+        "AI मसौदा माँगने से पहले वॉइस नोट, फोटो या टाइप किया हुआ जोड़ संलग्न करें।",
+      draftCaseClosed: "यह मामला बंद है, इसलिए नया मसौदा नहीं माँगा जा सकता।",
+      draftCaseNotFound:
+        "यह मामला नहीं मिल सका। यह बंद हो सकता है या किसी और डॉक्टर को सौंपा गया हो।",
       workingRxLoadFail: "चालू नुस्ख़ा लोड नहीं हो सका।",
       rxItemsLabel: "नुस्ख़े की वस्तुएँ",
       rxNameLabel: "दवा",

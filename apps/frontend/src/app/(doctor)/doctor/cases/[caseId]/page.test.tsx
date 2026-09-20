@@ -35,16 +35,20 @@ import {
   markConsultComplete,
   rejectPrescription,
   saveRxRevision,
+  submitDoctorInput,
   type CareCaseStage,
   type CaseDetailView,
+  type DoctorInputResult,
   type PrescriptionDetailView,
 } from "@/lib/care/api";
 import {
   fetchIntakeDetailForDoctor,
   fetchIntakeMediaBlob,
   fetchPreSummaryForReview,
+  uploadDoctorMedia,
   type IntakeDetailView,
   type MediaRefView,
+  type MediaUploadRef,
   type PreSummaryView,
 } from "@/lib/intake/api";
 import { fetchPartnerMe, type PartnerMeView } from "@/lib/partner/api";
@@ -80,6 +84,7 @@ vi.mock("@/lib/care/api", async (importOriginal) => {
     fetchWorkingPrescription: vi.fn(),
     createRxDraft: vi.fn(),
     saveRxRevision: vi.fn(),
+    submitDoctorInput: vi.fn(),
     approvePrescription: vi.fn(),
     rejectPrescription: vi.fn(),
     closeCaseWithoutRx: vi.fn(),
@@ -98,6 +103,7 @@ vi.mock("@/lib/intake/api", async (importOriginal) => {
     fetchIntakeDetailForDoctor: vi.fn(),
     fetchPreSummaryForReview: vi.fn(),
     fetchIntakeMediaBlob: vi.fn(),
+    uploadDoctorMedia: vi.fn(),
   };
 });
 
@@ -116,6 +122,8 @@ const getHistory = vi.mocked(readConsentedHistory);
 const getWorkingRx = vi.mocked(fetchWorkingPrescription);
 const doDraft = vi.mocked(createRxDraft);
 const doSaveRevision = vi.mocked(saveRxRevision);
+const doSubmitDoctorInput = vi.mocked(submitDoctorInput);
+const doUploadDoctorMedia = vi.mocked(uploadDoctorMedia);
 const doApprove = vi.mocked(approvePrescription);
 const doReject = vi.mocked(rejectPrescription);
 const doCloseCase = vi.mocked(closeCaseWithoutRx);
@@ -236,6 +244,30 @@ function mediaRef(overrides: Partial<MediaRefView> = {}): MediaRefView {
   };
 }
 
+function uploadTicket(overrides: Partial<MediaUploadRef> = {}): MediaUploadRef {
+  return {
+    object_key: "rx_input/7/opaque.enc",
+    media_type: "audio/mpeg",
+    audio_duration_ms: null,
+    file_size_bytes: 4000,
+    record_attempt: 1,
+    ...overrides,
+  };
+}
+
+function doctorInput(
+  overrides: Partial<DoctorInputResult> = {},
+): DoctorInputResult {
+  return {
+    input_id: 41,
+    case_id: 11,
+    input_type: "voice",
+    media_ref: "rx_input/7/opaque.enc",
+    sensitive_class: null,
+    ...overrides,
+  };
+}
+
 function intakeDetail(
   overrides: Partial<IntakeDetailView> = {},
 ): IntakeDetailView {
@@ -291,6 +323,8 @@ function resolveLoaded() {
 
 beforeEach(() => {
   resolveLoaded();
+  doUploadDoctorMedia.mockResolvedValue(uploadTicket());
+  doSubmitDoctorInput.mockResolvedValue(doctorInput());
 });
 
 afterEach(() => {
@@ -299,6 +333,13 @@ afterEach(() => {
   vi.unstubAllGlobals();
   __resetLangForTests();
 });
+
+function attachFileToTestId(testid: string, fileName: string, mime: string) {
+  const input = screen.getByTestId(testid) as HTMLInputElement;
+  fireEvent.change(input, {
+    target: { files: [new File(["clip"], fileName, { type: mime })] },
+  });
+}
 
 describe("CaseWorkspacePage stage + forced review (US-15)", () => {
   it("renders the case stage chip for the pre-summary stage", async () => {
@@ -641,7 +682,7 @@ describe("CaseWorkspacePage prescription drafting (US-18/#452)", () => {
     );
   });
 
-  it("offers the AI-draft request when no working revision exists", async () => {
+  it("offers the doctor-input capture and gates the AI-draft path", async () => {
     getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
     getWorkingRx.mockRejectedValue(noDraftError());
     render(<CaseWorkspacePage />);
@@ -649,24 +690,178 @@ describe("CaseWorkspacePage prescription drafting (US-18/#452)", () => {
     await waitFor(() => screen.getByTestId("prescription-empty"));
 
     expect(screen.getByText(t.noDraftYet)).toBeTruthy();
-    expect(screen.getByTestId("request-draft-action")).toHaveTextContent(
-      t.requestDraftAction,
+    // PHASE-8.1 T6 (#490): voice/photo/addendum capture is always available.
+    expect(screen.getByTestId("rx-input-capture")).toBeInTheDocument();
+    expect(screen.getByTestId("rx-input-voice")).toBeInTheDocument();
+    expect(screen.getByTestId("rx-input-photo")).toBeInTheDocument();
+    expect(screen.getByTestId("rx-input-addendum")).toBeInTheDocument();
+    expect(screen.queryByTestId("rx-input-received")).not.toBeInTheDocument();
+    // The AI draft stays locked until a doctor input has been attached.
+    expect(screen.getByTestId("request-draft-action")).toBeDisabled();
+    expect(screen.getByTestId("request-draft-blocked-help")).toHaveTextContent(
+      t.requestDraftBlocked,
+    );
+    expect(screen.getByTestId("manual-authoring-action")).toHaveTextContent(
+      t.manualAuthoringAction,
     );
     expect(screen.queryByTestId("prescription-editor")).not.toBeInTheDocument();
   });
 
-  it("requests an AI draft and loads its items into the editor", async () => {
+  it("attaches a voice note via the doctor media route and unlocks the AI draft", async () => {
     getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
     getWorkingRx.mockRejectedValue(noDraftError());
     doDraft.mockResolvedValue(prescription());
     render(<CaseWorkspacePage />);
 
-    await waitFor(() => screen.getByTestId("request-draft-action"));
-    fireEvent.click(screen.getByTestId("request-draft-action"));
+    await waitFor(() => screen.getByTestId("rx-input-voice"));
+    attachFileToTestId("rx-input-voice", "note.webm", "audio/webm");
 
+    await waitFor(() =>
+      expect(screen.getByTestId("rx-input-received")).toBeTruthy(),
+    );
+    expect(screen.getByText(t.doctorInputReceived)).toBeTruthy();
+    expect(doUploadDoctorMedia).toHaveBeenCalledWith(
+      expect.any(File),
+      expect.objectContaining({ filename: "note.webm" }),
+    );
+    expect(doSubmitDoctorInput).toHaveBeenCalledWith(11, {
+      input_type: "voice",
+      media_ref: "rx_input/7/opaque.enc",
+    });
+    expect(screen.getByTestId("request-draft-action")).toBeEnabled();
+    expect(
+      screen.queryByTestId("request-draft-blocked-help"),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("request-draft-action"));
     await waitFor(() => screen.getByTestId("prescription-editor"));
     expect(doDraft).toHaveBeenCalledWith(11, { source: "ai_draft" });
     expect(screen.getByTestId("rx-item-name-0")).toHaveValue("Paracetamol");
+  });
+
+  it("attaches a photo and posts its media ticket to doctor-input", async () => {
+    getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
+    getWorkingRx.mockRejectedValue(noDraftError());
+    render(<CaseWorkspacePage />);
+
+    await waitFor(() => screen.getByTestId("rx-input-photo"));
+    attachFileToTestId("rx-input-photo", "scan.jpg", "image/jpeg");
+
+    await waitFor(() =>
+      expect(screen.getByTestId("rx-input-received")).toBeTruthy(),
+    );
+    expect(doUploadDoctorMedia).toHaveBeenCalledWith(
+      expect.any(File),
+      expect.objectContaining({
+        filename: "scan.jpg",
+        fileSizeBytes: expect.any(Number),
+      }),
+    );
+    expect(doSubmitDoctorInput).toHaveBeenCalledWith(11, {
+      input_type: "photo",
+      media_ref: "rx_input/7/opaque.enc",
+    });
+  });
+
+  it("persists a typed addendum and posts the media ticket as voice input", async () => {
+    getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
+    getWorkingRx.mockRejectedValue(noDraftError());
+    render(<CaseWorkspacePage />);
+
+    await waitFor(() => screen.getByTestId("rx-input-addendum"));
+    fireEvent.change(screen.getByTestId("rx-input-addendum"), {
+      target: { value: "Amoxicillin 500 mg thrice daily" },
+    });
+    fireEvent.click(screen.getByTestId("rx-input-addendum-submit"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("rx-input-received")).toBeTruthy(),
+    );
+    expect(doUploadDoctorMedia).toHaveBeenCalledWith(
+      expect.any(Blob),
+      expect.objectContaining({ filename: "addendum.txt" }),
+    );
+    expect(doSubmitDoctorInput).toHaveBeenCalledWith(11, {
+      input_type: "voice",
+      media_ref: "rx_input/7/opaque.enc",
+    });
+  });
+
+  it("keeps the AI draft locked and surfaces an error when an attach fails", async () => {
+    getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
+    getWorkingRx.mockRejectedValue(noDraftError());
+    doUploadDoctorMedia.mockRejectedValue(
+      new ApiError({
+        code: "NETWORK_ERROR",
+        message: "offline",
+        trace_id: "t",
+        details: {},
+      }),
+    );
+    render(<CaseWorkspacePage />);
+
+    await waitFor(() => screen.getByTestId("rx-input-voice"));
+    attachFileToTestId("rx-input-voice", "note.webm", "audio/webm");
+
+    await waitFor(() =>
+      expect(screen.getByTestId("rx-input-error")).toBeTruthy(),
+    );
+    expect(screen.getByText(t.doctorInputFail)).toBeTruthy();
+    expect(doSubmitDoctorInput).not.toHaveBeenCalled();
+    expect(screen.getByTestId("request-draft-action")).toBeDisabled();
+  });
+
+  it("keeps the submit button disabled until the addendum has text", async () => {
+    getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
+    getWorkingRx.mockRejectedValue(noDraftError());
+    render(<CaseWorkspacePage />);
+
+    await waitFor(() => screen.getByTestId("rx-input-addendum-submit"));
+    expect(screen.getByTestId("rx-input-addendum-submit")).toBeDisabled();
+    fireEvent.change(screen.getByTestId("rx-input-addendum"), {
+      target: { value: "   " },
+    });
+    expect(screen.getByTestId("rx-input-addendum-submit")).toBeDisabled();
+    fireEvent.change(screen.getByTestId("rx-input-addendum"), {
+      target: { value: "ORS sachet" },
+    });
+    expect(screen.getByTestId("rx-input-addendum-submit")).toBeEnabled();
+  });
+
+  it("opens the manual editor with a fresh empty row and saves a manual draft", async () => {
+    getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
+    getWorkingRx.mockRejectedValue(noDraftError());
+    doDraft.mockResolvedValue(prescription({ source: "manual" }));
+    render(<CaseWorkspacePage />);
+
+    await waitFor(() => screen.getByTestId("prescription-empty"));
+    fireEvent.click(screen.getByTestId("manual-authoring-action"));
+
+    // The editor renders without any working revision or doctor input.
+    await waitFor(() => screen.getByTestId("prescription-editor"));
+    expect(screen.getByTestId("rx-item-name-0")).toHaveValue("");
+    expect(doSubmitDoctorInput).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByTestId("rx-item-name-0"), {
+      target: { value: "Amoxicillin" },
+    });
+    fireEvent.click(screen.getByTestId("save-revision-action"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("revision-saved")).toBeTruthy(),
+    );
+    expect(doDraft).toHaveBeenCalledWith(11, {
+      source: "manual",
+      items: [
+        {
+          name: "Amoxicillin",
+          dose: null,
+          duration: null,
+          frequency: null,
+        },
+      ],
+    });
+    expect(screen.getByTestId("rx-source")).toHaveTextContent(t.sourceManual);
   });
 
   it("persists edited and added items when the revision is saved", async () => {
@@ -790,7 +985,11 @@ describe("CaseWorkspacePage prescription drafting (US-18/#452)", () => {
     );
     render(<CaseWorkspacePage />);
 
-    await waitFor(() => screen.getByTestId("request-draft-action"));
+    await waitFor(() => screen.getByTestId("rx-input-voice"));
+    attachFileToTestId("rx-input-voice", "note.webm", "audio/webm");
+    await waitFor(() =>
+      expect(screen.getByTestId("rx-input-received")).toBeTruthy(),
+    );
     fireEvent.click(screen.getByTestId("request-draft-action"));
 
     await waitFor(() => expect(screen.getByTestId("draft-error")).toBeTruthy());
@@ -810,13 +1009,56 @@ describe("CaseWorkspacePage prescription drafting (US-18/#452)", () => {
     );
     render(<CaseWorkspacePage />);
 
-    await waitFor(() => screen.getByTestId("request-draft-action"));
+    await waitFor(() => screen.getByTestId("rx-input-voice"));
+    attachFileToTestId("rx-input-voice", "note.webm", "audio/webm");
+    await waitFor(() =>
+      expect(screen.getByTestId("rx-input-received")).toBeTruthy(),
+    );
     fireEvent.click(screen.getByTestId("request-draft-action"));
 
     await waitFor(() =>
       expect(screen.getByText(t.requestDraftFail)).toBeTruthy(),
     );
   });
+
+  describe.each([
+    ["CARE_RX_CONSENT_DENIED", "draftConsentDenied"],
+    ["CARE_RX_NO_DOCTOR_INPUT", "draftNoDoctorInput"],
+    ["CARE_RX_DRAFT_CAP_REACHED", "draftCapReached"],
+    ["CARE_CASE_CLOSED", "draftCaseClosed"],
+    ["CARE_NOT_FOUND", "draftCaseNotFound"],
+  ] as const)(
+    "draft refusal code %s maps to an in-language message (#490)",
+    (code, key) => {
+      it(`surfaces the ${key} message`, async () => {
+        getCase.mockResolvedValue(
+          caseItem(11, { stage: "prescription_pending" }),
+        );
+        getWorkingRx.mockRejectedValue(noDraftError());
+        doDraft.mockRejectedValue(
+          new ApiError({
+            code,
+            message: "refused",
+            trace_id: "t",
+            details: {},
+          }),
+        );
+        render(<CaseWorkspacePage />);
+
+        await waitFor(() => screen.getByTestId("rx-input-voice"));
+        attachFileToTestId("rx-input-voice", "note.webm", "audio/webm");
+        await waitFor(() =>
+          expect(screen.getByTestId("rx-input-received")).toBeTruthy(),
+        );
+        fireEvent.click(screen.getByTestId("request-draft-action"));
+
+        await waitFor(() =>
+          expect(screen.getByTestId("draft-error")).toBeTruthy(),
+        );
+        expect(screen.getByTestId("draft-error")).toHaveTextContent(t[key]);
+      });
+    },
+  );
 
   it("surfaces a save failure without clearing the draft", async () => {
     getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
@@ -1371,6 +1613,30 @@ describe("CaseWorkspacePage bilingual parity (REQ-006)", () => {
     );
     expect(screen.getByTestId("save-revision-action")).toHaveTextContent(
       hiT.saveRevisionAction,
+    );
+  });
+
+  it("renders the doctor-input capture copy in Hindi", async () => {
+    getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
+    getWorkingRx.mockRejectedValue(noDraftError());
+    render(<LangFlipHost />);
+
+    await waitFor(() => screen.getByTestId("prescription-empty"));
+    fireEvent.click(screen.getByText("flip-lang"));
+    await waitFor(() =>
+      expect(screen.getByTestId("rx-input-capture")).toHaveTextContent(
+        hiT.doctorInputHelp,
+      ),
+    );
+
+    expect(screen.getByTestId("request-draft-blocked-help")).toHaveTextContent(
+      hiT.requestDraftBlocked,
+    );
+    expect(screen.getByTestId("manual-authoring-action")).toHaveTextContent(
+      hiT.manualAuthoringAction,
+    );
+    expect(screen.getByTestId("rx-input-addendum-submit")).toHaveTextContent(
+      hiT.addendumSubmit,
     );
   });
 

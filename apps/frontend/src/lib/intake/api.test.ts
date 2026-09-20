@@ -8,6 +8,7 @@ import { ApiError } from "@/lib/api-errors";
 import {
   submitIntake,
   uploadIntakeMedia,
+  uploadDoctorMedia,
   reRecordIntake,
   fetchIntake,
   fetchPreSummary,
@@ -170,6 +171,48 @@ describe("uploadIntakeMedia", () => {
       vi.fn().mockRejectedValue(new TypeError("Failed to fetch")),
     );
     await expect(uploadIntakeMedia(new Blob())).rejects.toMatchObject({
+      code: "NETWORK_ERROR",
+    });
+  });
+});
+
+describe("uploadDoctorMedia", () => {
+  it("sends FormData to the doctor media route and resolves the clip ticket", async () => {
+    const ticket = {
+      object_key: "rx_input/7/opaque.enc",
+      media_type: "audio/mpeg",
+      audio_duration_ms: null,
+      file_size_bytes: 4000,
+      record_attempt: 1,
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(ticket));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const blob = new Blob(["note"], { type: "audio/mpeg" });
+    await expect(
+      uploadDoctorMedia(blob, {
+        filename: "voice-note.mp3",
+        audioDurationMs: 4200,
+        fileSizeBytes: 4000,
+      }),
+    ).resolves.toEqual(ticket);
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(
+      "http://localhost:8000/v1/intake/upload-doctor-media?audio_duration_ms=4200&file_size_bytes=4000",
+    );
+    expect(init.method).toBe("POST");
+    expect(init.body).toBeInstanceOf(FormData);
+    expect(init.credentials).toBe("include");
+    expect(url).not.toContain("/v1/intake/upload-media");
+  });
+
+  it("throws ApiError with NETWORK_ERROR on a network failure", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(new TypeError("Failed to fetch")),
+    );
+    await expect(uploadDoctorMedia(new Blob())).rejects.toMatchObject({
       code: "NETWORK_ERROR",
     });
   });
