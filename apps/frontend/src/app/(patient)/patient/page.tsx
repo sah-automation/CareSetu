@@ -1,12 +1,12 @@
 "use client";
 
 // PHASE-2.6 T13 (#204): patient dashboard with profile nudges and
-// completion meter (blueprint §5.9). Nudge cards surface skipped profile
-// items as gentle Home reminders; the meter reflects draft completeness.
-// Also includes the ProfileGateDemo showing the §5.9 gating matrix in
-// action for care actions (intake, booking, medicine-delivery checkout).
-
-import { useEffect, useState } from "react";
+// completion meter (blueprint §5.9). PHASE-8.1 T2 (#488): the draft here
+// comes from the patient ProfileProvider - hydrated from GET /v1/me/profile
+// with the identity-scoped local draft as fallback - so nudge cards and the
+// meter reflect what was actually completed server-side, on any device. Also
+// includes the ProfileGateDemo showing the §5.9 gating matrix in action for
+// care actions (intake, booking, medicine-delivery checkout).
 
 import { PageHeader } from "@/components/layout/PageHeader";
 import { LabBookingConsentDemo } from "@/components/patient/LabBookingConsentDemo";
@@ -15,20 +15,10 @@ import {
   ProfileNudgeCards,
 } from "@/components/patient/profile/ProfileNudges";
 import { ProfileGateDemo } from "@/components/patient/profile/ProfileGate";
-import {
-  initialDraft,
-  loadDraft,
-  type ProfileDraft,
-} from "@/lib/profile/profileState";
+import { useProfile } from "@/lib/profile/ProfileContext";
 
 export default function PatientDashboardPage() {
-  // Start at the empty draft and adopt the stored one after mount
-  // (hydration-safe, mirrors AppShell's storage convention).
-  const [draft, setDraft] = useState<ProfileDraft>(initialDraft);
-
-  useEffect(() => {
-    setDraft(loadDraft());
-  }, []);
+  const { draft } = useProfile();
 
   return (
     <>

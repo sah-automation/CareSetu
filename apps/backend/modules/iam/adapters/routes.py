@@ -45,6 +45,8 @@ from modules.iam.facade import (
     EnrollMfaResult,
     IamFacade,
     OperatorInvitedResult,
+    PartnerLoginOtpResult,
+    PartnerVerifyOtpResult,
     RegisterPatientResult,
     ResendOtpResult,
     SessionResult,
@@ -83,6 +85,26 @@ class ResendOtpRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     phone: str = Field(min_length=1, description="10-digit Indian mobile number, or with 91 prefix")
+
+
+class PartnerLoginRequest(BaseModel):
+    """Body of ``POST /v1/auth/partner/login`` (ADR-0016, F014-T02 #462)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    phone: str = Field(min_length=1, description="10-digit Indian mobile number, or with 91 prefix")
+
+
+class PartnerVerifyRequest(BaseModel):
+    """Body of ``POST /v1/auth/partner/verify`` (ADR-0016, F014-T03 #463)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    phone: str = Field(min_length=1, description="10-digit Indian mobile number, or with 91 prefix")
+    otp: str = Field(
+        pattern=r"^[0-9]{6}$",
+        description="The 6-digit code the partner received; only well-formed guesses count",
+    )
 
 
 class IssueSessionRequest(BaseModel):
@@ -255,6 +277,67 @@ async def issue_session(
 
 
 @router.post(
+    "/partner/login",
+    response_model=PartnerLoginOtpResult,
+    status_code=status.HTTP_200_OK,
+    summary="Begin partner phone-OTP login",
+)
+async def partner_login(
+    request: Request,
+    body: PartnerLoginRequest,
+) -> PartnerLoginOtpResult:
+    """Start a returning partner's phone-OTP login (ADR-0016, F014-T02 #462).
+
+    Issues a fresh OTP challenge ONLY for a phone that already has a partner
+    profile (doctor/lab/chemist). A phone with no partner account - including a
+    patient-only phone - is refused with the ``no_account`` outcome pointing to
+    registration: no identity is ever created and no SMS is sent. Cooldown /
+    brute-force lockout / suspended refusals behave exactly as on the patient
+    OTP surface (``cooldown``/``locked`` with countdown/``suspended``).
+
+    The partner-profile gate is resolved at the composition boundary (WI-3,
+    #336): the route wires the partner facade's non-throwing
+    ``resolve_partner_id_by_identity`` seam into the iam facade as a port, then
+    hands it to ``partner_login`` - iam itself never reaches into the partner
+    module (no cross-schema import, ADR-0003). The challenge issuance reuses
+    the shared OTP machine unchanged and registers no new event name
+    (ADR-0016 §Events): only ``otp.sent``.
+    """
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    partner_facade = cast("PartnerFacade", request.app.state.partner_facade)
+
+    async def _partner_profile(identity_id: int) -> int | None:
+        return await partner_facade.resolve_partner_id_by_identity(identity_id)
+
+    return await run_idempotent(request, lambda: facade.partner_login(body.phone, _partner_profile))
+
+
+@router.post(
+    "/partner/verify",
+    response_model=PartnerVerifyOtpResult,
+    status_code=status.HTTP_200_OK,
+    summary="Verify a partner login OTP code",
+)
+async def partner_verify(
+    request: Request,
+    body: PartnerVerifyRequest,
+) -> PartnerVerifyOtpResult:
+    """Submit the partner's 6-digit code: consume the challenge, mark the phone verified.
+
+    The partner completes login (ADR-0016, F014-T03 #463): a correct code
+    consumes the challenge and marks the identity phone-verified in the same
+    transaction, silently - no patient role grant, no ``patient.verified``
+    event, and no identity lifecycle transition, so logging in as a partner
+    never makes the phone a patient account. Returns the outcome the staff
+    login page renders - ``verified``, ``wrong_code`` with the remaining
+    attempts, ``expired``/``spent`` ("request a new code"), or ``locked`` with
+    the lockout countdown - precisely as on the patient OTP surface.
+    """
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    return await run_idempotent(request, lambda: facade.partner_verify(body.phone, body.otp))
+
+
+@router.post(
     "/partner/session",
     response_model=SessionResult,
     status_code=status.HTTP_200_OK,
@@ -271,9 +354,10 @@ async def issue_partner_session(
     ``[Unverified]`` with no role grant (ADR-0010), so the standard
     ``POST /v1/auth/session`` (patient-only) always refuses 409
     ``SESSION_REFUSED``. This endpoint instead gates on the existence of a
-    partner profile for the phone and mints a ``partner``-scoped JWT
-    (self-service surface only). Identity-state refusals (unknown phone, no
-    partner profile) stay 409 ``SESSION_REFUSED``.
+    partner profile and a phone-verified identity for the phone (F014-T04,
+    #464) and mints a ``partner``-scoped JWT (self-service surface only).
+    Identity-state refusals (unknown phone, no partner profile, identity not
+    phone-verified) stay 409 ``SESSION_REFUSED``.
 
     The partner-profile gate is verified here at the composition boundary (WI-3,
     #336): the route resolves the identity for the phone through the iam facade,
@@ -281,8 +365,10 @@ async def issue_partner_session(
     ``resolve_partner_id_by_identity`` seam - no cross-schema import), then hands
     the already-verified ``partner_id`` to the mint. iam itself never reaches
     into the partner module, so the two facades construct independently with no
-    post-construction glue. The ``require_partner`` RBAC dependency on the
-    partner self-service routes keeps enforcing the minted scope downstream.
+    post-construction glue. The ``phone_verified`` gate is enforced inside the
+    mint under the identity row lock (the marker read atomically, #464), and the
+    ``require_partner`` RBAC dependency on the partner self-service routes keeps
+    enforcing the minted scope downstream.
     """
     facade = cast(IamFacade, request.app.state.iam_facade)
     partner_facade = cast("PartnerFacade", request.app.state.partner_facade)
@@ -346,9 +432,40 @@ async def refresh_session(
     existing session. A revoked or expired token is refused with the matching
     error envelope. The rotated JWT is also set as an httpOnly cookie for
     Next.js middleware route protection.
+
+    A ``partner``-scoped renewal re-confirms the partner profile still exists
+    at the composition boundary before re-deriving the scope (F014-T05, #465):
+    the route wires the partner facade seam as the same callback pattern the
+    session mint uses, so iam never reads the partner schema. A deleted profile
+    refuses with the refresh envelope (``REFRESH_TOKEN_REVOKED``).
     """
     facade = cast(IamFacade, request.app.state.iam_facade)
-    result = await facade.refresh_session(body.refresh_token)
+    partner_facade = cast("PartnerFacade", request.app.state.partner_facade)
+
+    async def _verify_partner_profile(connection: AsyncConnection, identity_id: int) -> None:
+        """Re-confirm the identity's partner profile still exists at renewal (#465).
+
+        Runs against iam's lock-held transaction connection, mirroring the mint's
+        atomic re-check (#342): resolves the profile for the identity through the
+        partner facade (composition boundary, no cross-schema import, ADR-0003)
+        and confirms it still exists. Absence or deletion refuses the rotation
+        with the refresh envelope so a now-patient-only phone can never renew a
+        partner-scoped session.
+        """
+        partner_id = await partner_facade.resolve_partner_id_on_connection(connection, identity_id)
+        if partner_id is None:
+            raise RefreshTokenRevokedError(
+                f"identity {identity_id} has no partner profile; refusing to refresh"
+            )
+        exists = await partner_facade.verify_partner_exists(connection, partner_id)
+        if not exists:
+            raise RefreshTokenRevokedError(
+                f"partner profile {partner_id} no longer exists at session renewal"
+            )
+
+    result = await facade.refresh_session(
+        body.refresh_token, verify_partner_profile=_verify_partner_profile
+    )
     response = Response(
         content=result.model_dump_json(),
         media_type="application/json",

@@ -1,6 +1,12 @@
 // PHASE-2.6 T10 (#201): validation + stable-code error mapping for the staff
 // login form (done-verify suite). The mapper is the seam Phase 5's real
-// envelopes will flow through; here the codes are synthetic AuthApiErrors.
+// envelopes will flow through.
+//
+// PHASE-5 T7 (#467): partner staff sign-in is phone + SMS-code (ADR-0016), so
+// validateStaffLogin no longer guards partner email/password fields - the
+// partner flow hook (partnerLoginState.ts) owns phone/code correctness for
+// that mode. The validator now guards the operator TOTP branch only, and the
+// AuthApiError mapper covers the partner flow's transport-level throws.
 
 import { describe, expect, it } from "vitest";
 
@@ -9,7 +15,7 @@ import { AuthApiError } from "@/lib/auth/api";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 
 import {
-  staffLoginErrorCopy,
+  partnerLoginErrorCopy,
   staffOperatorErrorCopy,
   validateStaffLogin,
 } from "./staffLoginState";
@@ -18,53 +24,21 @@ const t = STRINGS.en.staffAuth.login;
 
 describe("validateStaffLogin", () => {
   describe("partner mode", () => {
-    it("accepts a well-formed email with any non-empty password", () => {
+    it("does not validate fields client-side - the OTP flow owns phone/code correctness", () => {
       expect(
         validateStaffLogin(
-          { phone: "", email: "dr.sharma@example.com", password: "x" },
+          { phone: "123", email: "", password: "", code: "1" },
           "partner",
         ),
       ).toEqual({});
     });
 
-    it.each([
-      ["missing @", "not-an-email"],
-      ["missing domain", "user@"],
-      ["whitespace-only", "   "],
-      ["empty", ""],
-    ])("rejects %s as an email", (_label, email) => {
-      const errors = validateStaffLogin(
-        { phone: "", email, password: "secret" },
-        "partner",
-      );
-      expect(errors.email).toBe("emailInvalid");
-    });
-
-    it("requires a non-empty password", () => {
-      const errors = validateStaffLogin(
-        { phone: "", email: "a@b.co", password: "" },
-        "partner",
-      );
-      expect(errors.password).toBe("passwordRequired");
-    });
-
-    it("reports both fields at once so the summary can count them", () => {
+    it("never reports email or password errors after the email/password removal (#467)", () => {
       const errors = validateStaffLogin(
         { phone: "", email: "", password: "" },
         "partner",
       );
-      expect(Object.keys(errors)).toHaveLength(2);
-    });
-
-    it("ignores a filled phone - the mode is pinned, never typed", () => {
-      const errors = validateStaffLogin(
-        { phone: "9876543210", email: "", password: "" },
-        "partner",
-      );
-      expect(errors.email).toBe("emailInvalid");
-      expect(errors.password).toBe("passwordRequired");
-      expect(errors.phone).toBeUndefined();
-      expect(errors.code).toBeUndefined();
+      expect(Object.keys(errors)).toHaveLength(0);
     });
   });
 
@@ -84,7 +58,7 @@ describe("validateStaffLogin", () => {
       ["with spaces", "987 654 3210"],
     ])("rejects %s as a phone number", (_label, phone) => {
       const errors = validateStaffLogin(
-        { phone, email: "", password: "secret", code: "123456" },
+        { phone, email: "", password: "", code: "123456" },
         "operator",
       );
       expect(errors.phone).toBe("phoneInvalid");
@@ -112,24 +86,13 @@ describe("validateStaffLogin", () => {
     });
 
     it("does not require email or password", () => {
-      const errors = validateStaffLogin(
-        { phone: "9876543210", email: "", password: "", code: "123456" },
-        "operator",
-      );
-      expect(errors.password).toBeUndefined();
-      expect(errors.email).toBeUndefined();
+      expect(
+        validateStaffLogin(
+          { phone: "9876543210", email: "", password: "", code: "123456" },
+          "operator",
+        ),
+      ).toEqual({});
     });
-  });
-
-  it("defaults to partner mode when no role is passed", () => {
-    const errors = validateStaffLogin({
-      phone: "9876543210",
-      email: "",
-      password: "",
-      code: "123456",
-    });
-    expect(errors.email).toBe("emailInvalid");
-    expect(errors.phone).toBeUndefined();
   });
 });
 
@@ -142,44 +105,40 @@ function envelopeError(code: string): AuthApiError {
   });
 }
 
-describe("staffLoginErrorCopy", () => {
-  it("keys INVALID_CREDENTIALS onto the calm invalid-credentials copy", () => {
-    expect(staffLoginErrorCopy(envelopeError("INVALID_CREDENTIALS"), t)).toBe(
-      t.invalidCredentials,
+describe("partnerLoginErrorCopy", () => {
+  it("keys PHONE_INVALID onto the phone validation copy", () => {
+    expect(partnerLoginErrorCopy(envelopeError("PHONE_INVALID"), t)).toBe(
+      t.phoneInvalid,
     );
   });
 
-  it("keys ACCOUNT_LOCKED onto the lockout copy naming the window and reset path", () => {
-    const copy = staffLoginErrorCopy(envelopeError("ACCOUNT_LOCKED"), t);
-    expect(copy).toBe(t.accountLocked);
-    expect(copy).toMatch(/15 minutes/);
+  it("keys VALIDATION_ERROR onto the phone validation copy without leaking the envelope message", () => {
+    const copy = partnerLoginErrorCopy(envelopeError("VALIDATION_ERROR"), t);
+    expect(copy).toBe(t.phoneInvalid);
+    expect(copy).not.toBe("envelope message");
   });
 
-  it("keys SESSION_REFUSED onto the invalid-credentials copy", () => {
-    expect(staffLoginErrorCopy(envelopeError("SESSION_REFUSED"), t)).toBe(
-      t.invalidCredentials,
+  it("keys SMS_DELIVERY_FAILED onto the SMS failure copy", () => {
+    expect(partnerLoginErrorCopy(envelopeError("SMS_DELIVERY_FAILED"), t)).toBe(
+      t.smsFailed,
     );
   });
 
-  it("maps VALIDATION_ERROR to calm operational copy, never the envelope message", () => {
-    // Whole-envelope validation failures cannot be attributed to one field
-    // until Phase 5 ships details[] mapping, so they get credential-focused copy.
-    const copy = staffLoginErrorCopy(envelopeError("VALIDATION_ERROR"), t);
-    expect(copy).toBe(t.invalidCredentials);
-    expect(copy).not.toBe(t.emailInvalid);
+  it("keys NETWORK_ERROR onto the network copy", () => {
+    expect(partnerLoginErrorCopy(envelopeError("NETWORK_ERROR"), t)).toBe(
+      t.networkError,
+    );
   });
 
-  it("falls back to credential-focused copy for unknown codes without leaking the raw code", () => {
-    const copy = staffLoginErrorCopy(envelopeError("IAM_SOMETHING_NEW"), t);
-    expect(copy).toBe(t.invalidCredentials);
+  it("falls back to network copy for unknown codes without leaking the raw code", () => {
+    const copy = partnerLoginErrorCopy(envelopeError("IAM_SOMETHING_NEW"), t);
+    expect(copy).toBe(t.networkError);
     expect(copy).not.toMatch(/IAM_SOMETHING_NEW/);
   });
 
-  it("treats non-envelope throws as credential-focused operational errors", () => {
-    expect(staffLoginErrorCopy(new Error("boom"), t)).toBe(
-      t.invalidCredentials,
-    );
-    expect(staffLoginErrorCopy(undefined, t)).toBe(t.invalidCredentials);
+  it("treats non-envelope throws as network errors", () => {
+    expect(partnerLoginErrorCopy(new Error("boom"), t)).toBe(t.networkError);
+    expect(partnerLoginErrorCopy(undefined, t)).toBe(t.networkError);
   });
 });
 

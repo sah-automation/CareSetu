@@ -38,6 +38,24 @@ vi.mock("@/lib/auth/api", async (importOriginal) => {
   };
 });
 
+// #496: the wizard invokes the session-resume seam right after persisting a
+// new session, so identity resolves in-flow without a reload.
+const state = vi.hoisted(() => ({
+  resumeSession: vi.fn(),
+}));
+
+vi.mock("@/lib/auth/AuthContext", () => ({
+  useAuth: () => ({
+    user: null,
+    selectedRole: null,
+    switchRole: vi.fn(),
+    logout: vi.fn(),
+    isAuthenticated: false,
+    isLoading: false,
+    resumeSession: state.resumeSession,
+  }),
+}));
+
 const mockReplace = vi.fn();
 const stableRouter = { replace: mockReplace };
 
@@ -126,6 +144,9 @@ beforeEach(() => {
   vi.mocked(issueSession).mockReset();
   vi.mocked(fetchDemoOtp).mockReset();
   mockReplace.mockReset();
+  state.resumeSession.mockReset();
+  // Default: the seam settles immediately (the app awaits it before routing).
+  state.resumeSession.mockResolvedValue(undefined);
 });
 
 describe("PatientAuthWizard - phone step", () => {
@@ -509,6 +530,35 @@ describe("PatientAuthWizard - success and session", () => {
     const stored = JSON.parse(localStorage.getItem("caresetu.session") ?? "{}");
     expect(stored.jwt).toBe("header.payload.signature");
     expect(stored.refresh_token).toBe("opaque-refresh-token");
+  });
+
+  it("awaits the session-resume seam before routing to the return target (#496)", async () => {
+    await startOtpFlow();
+    vi.mocked(verifyOtp).mockResolvedValue(verifiedResult());
+    vi.mocked(issueSession).mockResolvedValue(SESSION);
+
+    // The seam must settle BEFORE the post-login route mounts, so the patient
+    // surface never renders identity-less (and never remounts mid-flow).
+    let release: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    state.resumeSession.mockReturnValue(gate);
+    mockReplace.mockClear();
+
+    typeOtp();
+    fireEvent.click(verifyButton());
+
+    await vi.waitFor(() => expect(state.resumeSession).toHaveBeenCalled());
+    expect(
+      mockReplace,
+      "must not route before the seam settles",
+    ).not.toHaveBeenCalled();
+
+    release!();
+    await vi.waitFor(() =>
+      expect(mockReplace).toHaveBeenCalledWith("/patient"),
+    );
   });
 
   it("a stored session triggers a redirect to /patient without showing the form", async () => {

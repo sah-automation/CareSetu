@@ -51,6 +51,7 @@ from modules.partner.operator_gate_facade import OperatorGateFacade
 from modules.partner.outbox import PARTNER_OUTBOX_TABLE
 from modules.partner.schema.models import (
     partner_credentials,
+    partner_directory_index,
     partner_verifications,
 )
 
@@ -190,6 +191,8 @@ async def test_operator_approve_records_decision_and_emits_activated() -> None:
             _FakeResult(scalar=1),  # max(round) = 1
             _FakeResult(),  # profile update
             _FakeResult(),  # verification update
+            _FakeResult(),  # credential verified stamp (activation seam #456)
+            _FakeResult(),  # directory-index upsert (activation seam #456)
             _FakeResult(),  # partner.activated outbox insert
         ]
     )
@@ -223,6 +226,8 @@ async def test_operator_approve_flushes_the_directory_cache_seam() -> None:
             _FakeResult(),
             _FakeResult(),
             _FakeResult(),
+            _FakeResult(),
+            _FakeResult(),
         ]
     )
     facade = _facade(connection, directory_cache=cache)
@@ -230,6 +235,42 @@ async def test_operator_approve_flushes_the_directory_cache_seam() -> None:
     await facade.operator_decision(3, decision_by=77, approve=True)
 
     cache.directory_visibility_changed.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_operator_approve_stamps_round_credentials_and_upserts_directory_index() -> None:
+    """#456: approval feeds the directory. The operator-gate defers the verified
+    stamp + index upsert to the credential-validity single activate transition
+    (never local SQL), so an approved doctor's round is verified-keyed and the
+    index row upserted in the same transaction."""
+    connection = _connection(
+        [
+            _FakeResult(first=_profile_row()),  # load profile
+            _FakeResult(scalar=1),  # max(round) = 1
+            _FakeResult(),  # profile update
+            _FakeResult(),  # verification update
+            _FakeResult(),  # credential verified stamp
+            _FakeResult(),  # directory-index upsert
+            _FakeResult(),  # partner.activated outbox insert
+        ]
+    )
+    facade = _facade(connection)
+
+    await facade.operator_decision(3, decision_by=77, approve=True)
+
+    credential_write = next(
+        write
+        for write in _writes(connection)
+        if isinstance(write, Update) and write.table.name == partner_credentials.name
+    )
+    assert _bound_value(credential_write._values["verified"]) is True
+    index_write = next(
+        write
+        for write in _writes(connection)
+        if isinstance(write, Insert) and write.table.name == partner_directory_index.name
+    )
+    assert index_write.table.name == partner_directory_index.name
+    assert index_write.select is not None
 
 
 @pytest.mark.asyncio

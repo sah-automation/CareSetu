@@ -161,14 +161,14 @@ Tab-bar items and sidebar items come from **one nav-config source per role** (ty
 
 ### 2.8 Phase 2.5 shell verdicts (keep / kill / migrate)
 
-| Component                  | Verdict                   | Notes                                                                                                                                                                                                                                                        |
-| :------------------------- | :------------------------ | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Sidebar.tsx`              | Migrate                   | Pattern survives for full-shell roles; NAV_CONFIG becomes the shared typed schema (§2.7) driving sidebar and mobile tab variants; gains a `doctor` config; matchMedia auto-collapse replaced by CSS-driven responsive layout plus persisted user preference. |
-| `Topbar.tsx`               | Migrate                   | Survives as shared top bar; left side gains a page-title/breadcrumb slot; right side consolidates into the account menu (§2.6).                                                                                                                              |
-| `types.ts`                 | Migrate                   | `Role` union gains `"doctor"`; width/margin constants survive until the CSS-driven rework lands; `roleLabel` survives.                                                                                                                                       |
-| `(dashboard)/layout.tsx`   | Migrate                   | Single generic dashboard group splits into per-role route groups each wrapped by the shared `<AppShell role=...>`; AuthProvider moves up so public pages can also read session state (header Login vs Dashboard button per §3.2).                            |
-| `choose-role/page.tsx`     | Keep (interim), then kill | Stays the staff entry until Phase 5 MOD-001 staff auth exists (§4.6); its single-role direct-redirect logic lives on inside post-auth routing; the card-picker pattern reappears only for accounts holding multiple staff roles.                             |
-| Icon-rail collapse <1024px | Kill                      | Replaced by bottom tab bar on mobile (§2.4).                                                                                                                                                                                                                 |
+| Component                  | Verdict                   | Notes                                                                                                                                                                                                                                                                |
+| :------------------------- | :------------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Sidebar.tsx`              | Migrate                   | Pattern survives for full-shell roles; NAV_CONFIG becomes the shared typed schema (§2.7) driving sidebar and mobile tab variants; gains a `doctor` config; matchMedia auto-collapse replaced by CSS-driven responsive layout plus persisted user preference.         |
+| `Topbar.tsx`               | Migrate                   | Survives as shared top bar; left side gains a page-title/breadcrumb slot; right side consolidates into the account menu (§2.6).                                                                                                                                      |
+| `types.ts`                 | Migrate                   | `Role` union gains `"doctor"`; width/margin constants survive until the CSS-driven rework lands; `roleLabel` survives.                                                                                                                                               |
+| `(dashboard)/layout.tsx`   | Migrate                   | Single generic dashboard group splits into per-role route groups each wrapped by the shared `<AppShell role=...>`; AuthProvider moves up so public pages can also read session state (header Login vs Dashboard button per §3.2).                                    |
+| `choose-role/page.tsx`     | Keep (interim), then kill | Stays the interim professional entry until Phase 5 delivers the partner phone-OTP login (§4.6; ADR-0016); its single-role direct-redirect logic lives on inside post-auth routing; the card-picker pattern reappears only for accounts holding multiple staff roles. |
+| Icon-rail collapse <1024px | Kill                      | Replaced by bottom tab bar on mobile (§2.4).                                                                                                                                                                                                                         |
 
 ---
 
@@ -234,20 +234,21 @@ Header Login opens the existing PatientAuthWizard (phone OTP, Phase 2.5). Settle
 
 ### 4.2 Staff login page (target state)
 
-One professional login page at `/staff/login` serving doctor, lab, chemist, and operator. No role picker on the page - the role is derived server-side from the authenticated account, never user-chosen (avoids role-enumeration phishing).
+One professional login page at `/staff/login` serving doctor, lab, and chemist partners. No role picker on the page - the role is derived server-side from the authenticated account, never user-chosen (avoids role-enumeration phishing). The operator entry is not shown here: it is reachable only via its explicit parameter or the internal-team footer link.
 
-Composition: centered card on a quiet professional backdrop - email field, password field (show/hide toggle), "Forgot password" link, sign-in button, inline error envelope (invalid credentials, locked account), divider, then a "New to CareSetu?" provider-registration block with type-preset CTAs (Doctor / Lab / Chemist) matching the §3.1 providers band.
+Composition: centered card on a quiet professional backdrop - phone field, then the SMS one-time-code step (reusing the patient OTP wizard's interaction pattern, including the demo read-back banner), sign-in button, inline error envelope (no partner account - with a pointer to provider registration, invalid code, cooldown, locked phone, suspended account), divider, then a "New to CareSetu?" provider-registration block with type-preset CTAs (Doctor / Lab / Chemist) matching the §3.1 providers band.
 
-Credential scheme per role: email + password for all staff roles. No OTP for staff. MFA is designed-in now as a conditional post-password step slot that renders only when the account has MFA enrolled; operator enrollment becomes mandatory when Phase 5 lands it. MFA implementation is out of scope until Phase 5.
+Credential scheme: partner login is phone + SMS one-time code on dedicated `POST /v1/auth/partner/*` routes (ADR-0016) - no email, no password, no authenticator app. Operator login stays phone + authenticator-app TOTP behind the hidden entry.
 
 ### 4.3 Provider registration wizard (FEAT-014 open registration / gated activation)
 
-Shared four-step skeleton for all provider types, type preset carried from the CTA:
+Shared five-step skeleton for all provider types, type preset carried from the CTA:
 
-1. **Account basics** - full name, email, password (strength-checked), optional mobile for alerts.
-2. **Professional / business identity** - doctor: name as per degree, state medical council, city, languages spoken; partner: business name, address, service area, owner contact.
-3. **Credentials upload** - doctor: council registration number, degree certificates, government photo ID; lab: business registration, accreditations (optional); chemist: drug license, shop license, owner KYC. Upload constraints follow the security standard's file discipline.
-4. **Review & declarations** - summary of entries, truthfulness declaration, consent to credential verification, T&C acceptance, submit.
+1. **Account basics** - full name, phone (normalized server-side to E.164; the phone both identifies the partner and receives all notifications - the partner model has no email field, ADR-0009).
+2. **Phone confirmation** - an SMS one-time code to the step-1 phone proves ownership before the credential account is minted (ADR-0010); same OTP interaction pattern as patient login, so the partner can log back in with phone + OTP from any state.
+3. **Professional / business identity** - doctor: name as per degree, state medical council, city, languages spoken; partner: business name, address, service area, owner contact.
+4. **Credentials upload** - doctor: council registration number, degree certificates, government photo ID; lab: business registration, accreditations (optional); chemist: drug license, shop license, owner KYC. Upload constraints follow the security standard's file discipline.
+5. **Review & declarations** - summary of entries, truthfulness declaration, consent to credential verification, T&C acceptance, submit.
 
 Submit creates the partner in `[Registered]`; automated checks (AMB-003 baseline) move it to `[Under Verification]`.
 
@@ -259,13 +260,13 @@ Submit creates the partner in `[Registered]`; automated checks (AMB-003 baseline
 
 ### 4.5 Post-login routing rules
 
-- Route by the login surface used: patient wizard -> patient app home; staff login -> the account's staff-role home (`/doctor`, `/partner`, `/operator`).
+- Route by the login surface used: patient wizard -> patient app home; partner login -> the account's state-driven landing (waiting/rejected partners land on the matching §4.4 status screens, `[Active]` on `/partner`); operator entry -> the operator console. Direct URL hits on `/partner` by a not-yet-active partner land on the matching §4.4 screen.
 - Multi-role accounts keep all roles in `user.roles`; landing follows the surface used, and the Topbar switchRole remains the crossover mechanism. A scoped role picker appears only for accounts holding multiple staff roles.
 - Fits ADR-0005 unchanged: dual httpOnly-cookie + localStorage JWT storage, middleware checks cookie presence only, role routing stays client-side in `AuthContext`.
 
 ### 4.6 Fate of /choose-role
 
-Stays as the interim staff entry until Phase 5 MOD-001 staff auth exists, then is deleted.
+Stays as the interim professional entry until Phase 5 delivers the partner phone-OTP login (§4.2, ADR-0016), after which partners sign in on `/staff/login` and `/choose-role` is deleted.
 
 ---
 
@@ -299,6 +300,8 @@ Vertical stack after greeting block (first name):
 - Result cards: photo, name, specialty, languages spoken, fee, area; verified badge from activation state.
 - Detail screens: doctor (credentials summary, clinic info, fee, Book CTA); lab/chemist (services, address/hours, order/upload-prescription CTA).
 - Booking flow: slot/date pick (large grid targets) -> confirm screen that names what record access the booking needs -> consent moment (§5.10) -> confirmation screen with "Track this" deep link into Home Upcoming.
+
+> **Delivered (PHASE-8.1, #485):** `/patient/find` is a real authed directory-browse page under the patient shell, reusing the verified-directory client and provider cards; "Book consultation" deep-links into an in-progress intake's pick step (delivered in this phase) when an intake is in progress. The slot/date booking flow, consent moment, and confirmation screen above describe the future booking surface (Phase 9+); the public, unauthenticated browse remains at `/directory`.
 
 ### 5.4 Start Visit - symptom intake (`/patient/intake`)
 
@@ -340,7 +343,7 @@ Full-screen wizard immediately after first OTP login, maximum 3 steps, bilingual
 
 Gating rules:
 
-- OTP identity gates login only. Browsing Find Care and viewing My Record are never gated.
+- OTP identity gates login only. The public directory browse (homepage `/directory`) stays ungated; the delivered authed `/patient/find` page (PHASE-8.1, #485) requires a patient session but never the profile-completion gate. Viewing My Record is never gated.
 - Name + age + gender gate care actions (intake submission, booking) - a named record is required for anything clinical. Missing fields trigger the wizard step inline at first care action, not a hard wall earlier.
 - Area/address gates medicine-delivery checkout only.
 - Skipped items resurface as gentle Home nudge cards and the Profile completion meter - never modal nagging.
@@ -354,11 +357,13 @@ Triggered by any care action requiring record access (booking with intake attach
 3. How long - per-action validity statement.
 4. Two large buttons: "Allow / Anumati dein" and "Not now / Abhi nahi". Deny blocks the action with a plain explanation of what it unblocks - no dark patterns, no re-prompt spam.
 
-Grant writes `consent_granted`; every sheet links to Record > Consent log; revocation lives there and inline on the originating object. Consent is never bundled: each action names its own access (per FEAT-002). Keyboard/focus behavior of this sheet is bound by §9.4.
+Grant writes `consent_granted`; every sheet links to Record > Consent log; revocation lives there and inline on the originating object. Consent is never bundled: each action names its own access (per FEAT-002). The delivered pick-a-doctor moment (PHASE-8.1, #480) is the deliberate exception - the pick sheet names `consultations` and `prescriptions` together and records both standing grants atomically with the assignment so the AI drafting assistant's consent-gated read can pass (#487); every other action still names its own access. Keyboard/focus behavior of this sheet is bound by §9.4.
 
 ---
 
-## 6. Doctor channel (full shell)
+## 6. Doctor channel (full shell, delivered by PHASE-8.1)
+
+> **Delivered:** PHASE-8.1 (#438, 2026-09-15) shipped this surface - the doctor console UI (review queue with low-confidence-first sort, case workspace, prescription flow) plus the patient pick-a-doctor step that routes a finalized case to exactly one doctor with consent-at-pick. It is no longer future Phase 14 work. Within the delivered console, the Patients and Profile areas render as "coming soon" placeholders - the consultation-fee setting ships in this phase, while the full consent-history directory and remaining profile tooling land later.
 
 Fixed inputs: §2 shell conventions and Persona-002 (time-constrained local physician, prefers voice-note/photo input): queue-first landing, few-tap flows. Canonical vocabulary from `CONTEXT.md` throughout: pre-summary, structuring confidence vs the 0.70 threshold, low_confidence flag, forced doctor review.
 
@@ -389,6 +394,7 @@ Header: patient name/age/sex + a four-step case stepper (Pre-Summary -> Consult 
 **b) History tab (consented view)**
 
 - Only record sections the patient consented to share for this case; each section header shows provenance ("Consented 12 Aug, this visit").
+- Empty state is delivered behaviour, not a consent failure (PHASE-8.1 D-E no-change): a consented patient with no history yet shows "No consented history available for this patient". Consent passes `check_consent`; the timeline is legitimately empty until `report.filed`, `prescription.issued`/`prescription.delivered`, or `settlement.recorded` fires. A denied consent renders the error state, never this message.
 - Sections never consented show a "Request access" CTA (fires a consent request; patient gets the §5.10 consent-moment sheet).
 - Mid-case revocation greys the section immediately with a one-line notice - data already viewed stays in the case record, new access stops.
 
@@ -612,19 +618,19 @@ The API envelope is `{code, message, trace_id, details}` (api-standards §2); us
 
 Carried verbatim from the resolutions so downstream phase planning cannot lose them. None are designs; all are notes for requirements/backend efforts.
 
-| #   | Item                                                                                                                                                                                                                                                                                                                                                                                 | Source     |
-| :-- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :--------- |
-| G1  | Disease-specific browsing/care programs are a future feature gap; homepage copy must not promise disease-based programs.                                                                                                                                                                                                                                                             | #180       |
-| G2  | Public directory search endpoint: unauthenticated read over activated providers only; filters: provider type, specialty, free-text, location; wider-area fallback per FEAT-004 Scenario 2. Public provider-card payload carries verified-safe fields only. Anonymous telemetry `directory_search` / `provider_selected` needs nullable/cohort-tagged actor id.                       | #180       |
-| G3  | MOD-001 staff identity records (email+password credential type, hashing per security standard, forgot/reset-password, email ownership check), session issuance extension, partner state-machine endpoints (submission with uploads, status query, rejection-reason, resubmission edge, `partner.rejected` notification hook), MFA (TOTP) endpoints - all Phase 5 planning territory. | #181       |
-| G4  | `Rejected -> Under Verification` resubmission edge is a small PRD state-machine delta to record during Phase 5 planning.                                                                                                                                                                                                                                                             | #181       |
-| G5  | Profile-completion gating needs a lightweight profile-fields endpoint (MOD-001 territory, Phase 5 planning note).                                                                                                                                                                                                                                                                    | #183       |
-| G6  | Partner events (FEAT-013) fan-out to the patient decisions-needed surface - event registry addition to trace during Phase 5 planning.                                                                                                                                                                                                                                                | #183, #185 |
-| G7  | Doctor-initiated consent request event reaching the patient inbox (§5.10 pattern) - trace in the event registry during Phase 5 planning alongside staff-auth work.                                                                                                                                                                                                                   | #184       |
-| G8  | Verify/sign needs a review-attribution write endpoint distinct from simple finalize (stores per-group confirmations + editor identity).                                                                                                                                                                                                                                              | #184       |
-| G9  | Dispute-feature PRD gap: moderation needs a backing FEAT (dispute lifecycle model) before the Disputes area can ship.                                                                                                                                                                                                                                                                | #186       |
-| G10 | Verification detail depends on FEAT-014 credentials-upload artifacts being retrievable by operators - API-surface note for phase planning.                                                                                                                                                                                                                                           | #186       |
-| G11 | `<html lang>` hardcoded `"en"` in the current shell - flagged for PHASE-2.6 fix (§9.2).                                                                                                                                                                                                                                                                                              | #188       |
+| #   | Item                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Source     |
+| :-- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :--------- |
+| G1  | Disease-specific browsing/care programs are a future feature gap; homepage copy must not promise disease-based programs.                                                                                                                                                                                                                                                                                                                                          | #180       |
+| G2  | Public directory search endpoint: unauthenticated read over activated providers only; filters: provider type, specialty, free-text, location; wider-area fallback per FEAT-004 Scenario 2. Public provider-card payload carries verified-safe fields only. Anonymous telemetry `directory_search` / `provider_selected` needs nullable/cohort-tagged actor id.                                                                                                    | #180       |
+| G3  | MOD-001 partner credential accounts (phone-based, phone-OTP login on dedicated `POST /v1/auth/partner/*` routes, OTP-bound session mint, pre-activation renewal - ADR-0016), partner state-machine endpoints (submission with uploads, status query, rejection-reason, resubmission edge, `partner.rejected` notification hook), operator MFA (TOTP) endpoints - all Phase 5 planning territory (the earlier email/password staff-auth assumption is superseded). | #181       |
+| G4  | `Rejected -> Under Verification` resubmission edge is a small PRD state-machine delta to record during Phase 5 planning.                                                                                                                                                                                                                                                                                                                                          | #181       |
+| G5  | Profile-completion gating needs a lightweight profile-fields endpoint (MOD-001 territory, Phase 5 planning note). **[Delivered PHASE-8.1]** - `iam_patient_profiles` + `PUT/GET /v1/me/profile` (#482/#488) supply the read/write surface the gate, nudges, and dashboard hydrate from (see §5.9 and roadmap §2.8a §7).                                                                                                                                           | #183       |
+| G6  | Partner events (FEAT-013) fan-out to the patient decisions-needed surface - event registry addition to trace during Phase 5 planning.                                                                                                                                                                                                                                                                                                                             | #183, #185 |
+| G7  | Doctor-initiated consent request event reaching the patient inbox (§5.10 pattern) - trace in the event registry during Phase 5 planning alongside staff-auth work.                                                                                                                                                                                                                                                                                                | #184       |
+| G8  | Verify/sign needs a review-attribution write endpoint distinct from simple finalize (stores per-group confirmations + editor identity).                                                                                                                                                                                                                                                                                                                           | #184       |
+| G9  | Dispute-feature PRD gap: moderation needs a backing FEAT (dispute lifecycle model) before the Disputes area can ship.                                                                                                                                                                                                                                                                                                                                             | #186       |
+| G10 | Verification detail depends on FEAT-014 credentials-upload artifacts being retrievable by operators - API-surface note for phase planning.                                                                                                                                                                                                                                                                                                                        | #186       |
+| G11 | `<html lang>` hardcoded `"en"` in the current shell - flagged for PHASE-2.6 fix (§9.2).                                                                                                                                                                                                                                                                                                                                                                           | #188       |
 
 Event-name spelling note: this blueprint carries event spellings verbatim from the resolution comments (`consult_marked_complete`, `prescription_approved`, `sample_collected`, `report_matched`, `consent_granted`, ...), which use snake_case. The canonical registry in `docs/architecture/internal-modules.md` §4.2 uses dot-notation; when these events are registered (G6/G7 and Phase 5 planning), reconcile to the registry spelling - the blueprint invents no new names and defers to §4.2 as the source of truth.
 
@@ -661,7 +667,7 @@ Turn the Phase 2.5 skeleton into the resolved public face and shared app chassis
   - Typed STRINGS dictionary generalization from the OTP wizard (§9.2) + `<html lang>` locale-tracking fix (G11).
 - **W1 Homepage composition:** implement §3.1 sections 1-10 replacing `apps/frontend/src/app/page.tsx`; live doctor cards against the public endpoint when it exists with the graceful empty state before supply; server-rendered, lazy below-fold data for NFR-003.
 - **W2 Shell rework:** execute the §2.8 verdicts - shared `<AppShell role=...>`, per-role route groups, nav-config schema (§2.7), bottom tab bar + More sheet replacing the killed icon-rail, PageHeader block + breadcrumb components (§2.5), account menu consolidation (§2.6), AuthProvider hoist.
-- **W3 Split-auth pages:** `/staff/login` composition with the conditional MFA slot rendered only when enrolled (inert until Phase 5); four-step provider registration wizard skeleton (§4.3); pending/rejected state screens (§4.4) reachable post-login; post-login routing rules (§4.5). Staff authentication itself stays Phase 5 (G3) - pages render against the existing session model and mark integration points; `/choose-role` remains the working interim entry (§4.6).
+- **W3 Split-auth pages:** `/staff/login` composition in the partner phone-OTP mode (§4.2), with the operator entry hidden behind its explicit parameter or the internal-team footer link; five-step provider registration wizard skeleton (§4.3); pending/rejected state screens (§4.4) reachable post-login; post-login routing rules (§4.5). Partner phone-OTP login itself stays Phase 5 (G3; ADR-0016) - pages render against the existing session model and mark integration points; `/choose-role` remains the working interim entry (§4.6).
 - **W4 Profile-completion skeleton:** first-login wizard (§5.9) with gating rules, profile completion meter, nudge cards; consent-moment bottom-sheet pattern component built once (§5.10) for reuse by later phases.
 
 ### 12.3 Suggested sequencing
@@ -670,7 +676,7 @@ W0 first (everything consumes tokens/fonts/dictionaries), then W2 (shell unblock
 
 ### 12.4 Explicitly deferred by this sketch
 
-- Backend staff auth/MFA (Phase 5, G3/G4) - pages only in PHASE-2.6.
+- Backend partner phone-OTP login / operator MFA (Phase 5, G3/G4; ADR-0016) - pages only in PHASE-2.6.
 - Detailed per-phase UI specs for the doctor/partner/operator channels - downstream efforts cut from this blueprint per the map.
 - Final logo/artwork production files (§1.4 direction only).
 - Disputes backing feature (G9), offline-first/PWA, dark mode, CSV export from Audit.

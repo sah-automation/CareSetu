@@ -8,10 +8,14 @@
 // never a redirect-to-wizard dead-end. The gating explains itself
 // exactly when relevant.
 //
-// INTEGRATION POINT (later phase): real intake/booking/checkout flows
-// replace the demo buttons here; the gate seam stays the same.
+// PHASE-8.1 T2 (#488): the gate hydrates from the saved server profile
+// (ProfileProvider) - a saved profile short-circuits every gate so a
+// returning patient is never asked again - and the inline wizard's Finish
+// persists through the profile client. The demo trigger buttons stand in
+// for the real intake/booking/checkout flows that arrive in their build
+// phases; the gate seam stays the same.
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { AlertCircle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -19,15 +23,13 @@ import type { ProfileStrings } from "@/lib/i18n/dictionaries";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { ProfileCompletionWizard } from "./ProfileCompletionWizard";
+import { ProfileSaveStatusNotice } from "./SaveStatusNotice";
 import {
   evaluateGate,
-  initialDraft,
-  loadDraft,
-  saveDraft,
   type PatientAction,
-  type ProfileDraft,
   type ProfileGate as GateKind,
 } from "@/lib/profile/profileState";
+import { useProfile } from "@/lib/profile/ProfileContext";
 
 interface ProfileGateProps {
   /** The care action being attempted. */
@@ -39,25 +41,24 @@ interface ProfileGateProps {
 export function ProfileGate({ action, children }: ProfileGateProps) {
   const { lang } = useLang();
   const t: ProfileStrings = STRINGS[lang].profile;
-  // Start at the empty draft and adopt the stored one after mount
-  // (hydration-safe, mirrors AppShell's storage convention).
-  const [draft, setDraft] = useState<ProfileDraft>(initialDraft);
-  useEffect(() => {
-    setDraft(loadDraft());
-  }, []);
+  const { draft, savedProfile, saveStatus, updateDraft, finishProfile } =
+    useProfile();
   // Which gate opened the inline wizard, if any - doubles as the open flag.
   // Captured once at trigger time: completing a field mid-editing must never
   // re-label or yank away the open wizard. It stays up until Finish, and the
   // next render re-evaluates against the updated draft.
   const [openGate, setOpenGate] = useState<GateKind | null>(null);
 
-  const handleDraftChange = (next: ProfileDraft) => {
-    setDraft(next);
-    saveDraft(next);
-  };
+  // A saved profile short-circuits every gate (#488 AC 2): the wizard was
+  // finished server-side, so the gating matrix never asks again.
+  if (savedProfile !== null) {
+    return <>{children}</>;
+  }
 
   const handleFinish = () => {
-    setOpenGate(null);
+    void finishProfile().then((ok) => {
+      if (ok) setOpenGate(null);
+    });
   };
 
   const handleTrigger = () => {
@@ -77,9 +78,10 @@ export function ProfileGate({ action, children }: ProfileGateProps) {
             <AlertCircle className="h-4 w-4 text-warm" />
             <p>{gateExplain}</p>
           </div>
+          <ProfileSaveStatusNotice saveStatus={saveStatus} />
           <ProfileCompletionWizard
             draft={draft}
-            onDraftChange={handleDraftChange}
+            onDraftChange={updateDraft}
             onFinish={handleFinish}
             initialStep={openGate === "basics" ? 1 : 3}
           />

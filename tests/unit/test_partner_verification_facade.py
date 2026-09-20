@@ -148,6 +148,8 @@ async def test_operator_approve_records_decision_and_emits_activated() -> None:
             _FakeResult(scalar=1),  # max(round) = 1
             _FakeResult(),  # profile update
             _FakeResult(),  # verification update
+            _FakeResult(),  # credential verified stamp (activation seam #456)
+            _FakeResult(),  # directory-index upsert (activation seam #456)
             _FakeResult(),  # partner.activated outbox insert
         ]
     )

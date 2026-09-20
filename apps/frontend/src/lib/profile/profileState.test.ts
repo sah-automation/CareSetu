@@ -8,6 +8,8 @@ import {
   areaComplete,
   basicsComplete,
   dismissNudge,
+  draftStorageKey,
+  draftToProfilePayload,
   evaluateGate,
   initialDraft,
   isNudgeDismissed,
@@ -15,9 +17,12 @@ import {
   missingNudgeGroups,
   profileCompleteness,
   saveDraft,
+  seedDraftFromServer,
+  serverProfileToDraft,
   step1Errors,
   type ProfileDraft,
 } from "./profileState";
+import type { StoredPatientProfile } from "./api";
 
 function draftWith(partial: Partial<ProfileDraft>): ProfileDraft {
   return { ...initialDraft(), ...partial };
@@ -173,6 +178,112 @@ describe("gating matrix (blueprint §5.9)", () => {
   });
 });
 
+describe("identity-scoped draft persistence (#488 AC 5)", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+  });
+
+  it("suffixes the storage key with the identity id, keeping the legacy key for none", () => {
+    expect(draftStorageKey()).toBe("caresetu.profile.draft");
+    expect(draftStorageKey(7)).toBe("caresetu.profile.draft.7");
+  });
+
+  it("round-trips a draft per identity without leaking across identities", () => {
+    const draft = draftWith({ name: "Asha Devi" });
+    saveDraft(draft, 7);
+    expect(loadDraft(7).name).toBe("Asha Devi");
+    // A different identity on the same browser never shares the draft view.
+    expect(loadDraft(8)).toEqual(initialDraft());
+    expect(loadDraft()).toEqual(initialDraft());
+  });
+
+  it("falls back to the initial draft when that identity has nothing stored", () => {
+    expect(loadDraft(42)).toEqual(initialDraft());
+  });
+});
+
+describe("saved-profile mapping (#488)", () => {
+  const saved = serverProfile({
+    name: "Asha Devi",
+    age: 30,
+    gender: "female",
+    preferred_language: "hi",
+    area: "Bishrampur",
+    emergency_contact: "+91 98765 43210",
+    photo_ref: "me.jpg",
+  });
+
+  it("maps a saved profile back to a display draft", () => {
+    const draft = serverProfileToDraft(saved);
+    expect(draft).toEqual({
+      name: "Asha Devi",
+      age: "30",
+      gender: "female",
+      language: "hi",
+      trackBp: false,
+      trackSugar: false,
+      photoFileName: "me.jpg",
+      area: "Bishrampur",
+      emergencyContact: "+91 98765 43210",
+    });
+  });
+
+  it("treats null optional fields as unset and normalizes the language", () => {
+    const draft = serverProfileToDraft(
+      serverProfile({ area: null, emergency_contact: null, photo_ref: null }),
+    );
+    expect(draft.area).toBe("");
+    expect(draft.emergencyContact).toBe("");
+    expect(draft.photoFileName).toBe("");
+    expect(draft.language).toBe("en");
+  });
+
+  it("keeps buffer-only fields when seeding from a saved profile", () => {
+    const buffer = draftWith({ trackBp: true });
+    const seeded = seedDraftFromServer(saved, buffer);
+    expect(seeded.trackBp).toBe(true);
+    expect(seeded.trackSugar).toBe(false);
+    // Persisted fields always come from the server, never the stale buffer.
+    expect(seeded.area).toBe("Bishrampur");
+    expect(seeded.name).toBe("Asha Devi");
+  });
+
+  it("coerces an unknown stored gender to unset rather than fabricating one", () => {
+    expect(
+      serverProfileToDraft(serverProfile({ gender: "unknown" })).gender,
+    ).toBe("");
+  });
+
+  it("builds the PUT payload with optional fields unsettable as null (#488 AC 4)", () => {
+    const payload = draftToProfilePayload(
+      draftWith({
+        name: "  Asha Devi  ",
+        age: "30",
+        gender: "male",
+        language: "hi",
+        area: " Bishrampur ",
+        emergencyContact: "",
+        photoFileName: "",
+      }),
+    );
+    expect(payload).toEqual({
+      name: "Asha Devi",
+      age: 30,
+      gender: "male",
+      preferred_language: "hi",
+      area: "Bishrampur",
+      emergency_contact: null,
+      photo_ref: null,
+    });
+  });
+
+  it("refuses to build a payload from incomplete basics", () => {
+    expect(() => draftToProfilePayload(initialDraft())).toThrow(
+      "profile payload requires complete basics",
+    );
+  });
+});
+
 describe("nudge groups (skipped items resurface on Home)", () => {
   it("reports every group while the draft is empty", () => {
     expect(missingNudgeGroups(initialDraft())).toEqual([
@@ -251,6 +362,21 @@ describe("localStorage persistence", () => {
 });
 
 // Helpers pinned below the suites so the file reads tests-first.
+
+function serverProfile(
+  overrides: Partial<StoredPatientProfile> = {},
+): StoredPatientProfile {
+  return {
+    name: "Asha Devi",
+    age: 30,
+    gender: "female",
+    preferred_language: "en",
+    area: null,
+    emergency_contact: null,
+    photo_ref: null,
+    ...overrides,
+  };
+}
 
 function fullDraft(): string {
   return JSON.stringify(

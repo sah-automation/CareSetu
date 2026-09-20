@@ -83,6 +83,7 @@ async def clean_partner(database_url: str, migration: None) -> AsyncIterator[Non
                 text(
                     "TRUNCATE TABLE partner.partner_verifications, "
                     "partner.partner_credentials, partner.partner_profiles, "
+                    "partner.partner_directory_index, "
                     "partner.partner_outbox, partner.partner_service_areas, "
                     "iam.iam_role_grants, iam.iam_sessions, "
                     "iam.iam_otp_challenges, iam.iam_outbox, "
@@ -178,12 +179,49 @@ async def test_approval_activates_partner_emits_activated_and_grants_role(
     outbox = await _query(database_url, "SELECT event_type, status FROM partner.partner_outbox")
     assert [row["event_type"] for row in outbox].count("partner.activated") == 1
 
+    # The activation seam (#456): approval stamps the round's credentials
+    # verified AND upserts the directory-index row, so the doctor is
+    # directory-visible through the real operator-approve path - no hand-built
+    # SQL fixture row made them visible.
+    credentials = await _query(database_url, "SELECT verified FROM partner.partner_credentials")
+    assert credentials == [{"verified": True}]
+    index_row = await _query(
+        database_url,
+        "SELECT partner_id, partner_type, is_active FROM partner.partner_directory_index",
+    )
+    assert index_row == [{"partner_id": partner_id, "partner_type": "doctor", "is_active": True}]
+    search = await partner.search_directory(partner_type="doctor")
+    assert [entry.partner_id for entry in search.items] == [partner_id]
+
     # The T03 chain: the partner.activated event grants the partner role (the
     # iam consumer observes it through the event chain, test_iam_partner_role_chain).
     await _dispatch_to_iam(
         _registry(), partner_activated_envelope(partner_id, identity_id, _OPERATOR_ID)
     )
     assert await iam.partner_role_status(identity_id) == "Active"
+
+
+@pytest.mark.asyncio
+async def test_approval_is_idempotent_single_index_row_and_single_verified_round(
+    database_url: str, clean_partner: Any, tmp_path: Path
+) -> None:
+    """AC (#456): re-approving an Active partner never duplicates the directory
+    entry nor corrupts the verified round - the activation seam is idempotent."""
+    _iam, partner = _facade(database_url, tmp_path)
+    partner_id = await _register_and_queue(partner)
+
+    await partner.operator_decision(partner_id, decision_by=_OPERATOR_ID, approve=True)
+    await partner.operator_decision(partner_id, decision_by=_OPERATOR_ID, approve=True)
+
+    index_rows = await _query(
+        database_url,
+        "SELECT partner_id FROM partner.partner_directory_index",
+    )
+    assert index_rows == [{"partner_id": partner_id}]
+    credentials = await _query(database_url, "SELECT verified FROM partner.partner_credentials")
+    assert credentials == [{"verified": True}]
+    search = await partner.search_directory(partner_type="doctor")
+    assert [entry.partner_id for entry in search.items] == [partner_id]
 
 
 @pytest.mark.asyncio

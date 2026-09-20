@@ -88,10 +88,22 @@ const chipClass = (active: boolean) =>
 
 export function DirectoryBrowser({
   presetType,
+  baseRoute,
+  cardGridClassName,
 }: {
   /** T05b: pin the partner type on a variant route (/doctors, /labs,
    * /chemists). The URL's `type` param is ignored while set. */
   presetType?: ProviderType;
+  /** PHASE-8.1 T11 (#485): when embedded under an authed shell (the patient
+   * /patient/find page), filter commits stay on that route instead of the
+   * public /directory so the patient never leaves the shell. Defaults to the
+   * public DIRECTORY_ROUTE - existing callers are unchanged. */
+  baseRoute?: string;
+  /** PHASE-8.1 T11 (#485): card-grid density override for shell-embedded
+   * browse (the patient column is ~760px wide, so lg:grid-cols-4 is too
+   * cramped). Defaults to the public full-width grid - existing callers are
+   * unchanged. */
+  cardGridClassName?: string;
 }) {
   const { lang } = useLang();
   const t = STRINGS[lang].directory;
@@ -161,7 +173,7 @@ export function DirectoryBrowser({
     const qs = params.toString();
     const base = presetType
       ? DIRECTORY_VARIANT_ROUTES[presetType]
-      : DIRECTORY_ROUTE;
+      : baseRoute ?? DIRECTORY_ROUTE;
     router.replace(qs ? `${base}?${qs}` : base);
   }
 
@@ -200,6 +212,10 @@ export function DirectoryBrowser({
   const showSpecialtyChips =
     committedType === null || committedType === "doctor";
   const heading = typeKey === "$all" ? t.heading.all : t.heading[typeKey];
+  // Shell-embedded browse (patient /patient/find) overrides the density; the
+  // public /directory surface keeps the wider full-width grid.
+  const gridClass =
+    cardGridClassName ?? "grid gap-4 sm:grid-cols-2 lg:grid-cols-4";
 
   return (
     <main className="mx-auto w-full max-w-6xl px-4 pb-14 pt-6">
@@ -316,7 +332,7 @@ export function DirectoryBrowser({
         {status === "loading" && view === null ? (
           <div
             data-testid="directory-loading"
-            className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4"
+            className={gridClass}
             role="status"
           >
             <span className="sr-only">{t.loading}</span>
@@ -373,7 +389,7 @@ export function DirectoryBrowser({
             <p className="text-sm text-txt-muted">
               {t.resultsCount(view.items.length)}
             </p>
-            <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <div className={`mt-4 ${gridClass}`}>
               {view.items.map((entry) => (
                 <DirectoryCard
                   key={entry.partner_id}

@@ -522,6 +522,7 @@ async def _run_structuring_pipeline(
             forced_text=structing.forced_text,
             input_tokens=structure_result.input_tokens,
             output_tokens=structure_result.output_tokens,
+            patient_id=row.patient_id,
         )
     finally:
         await gate_engine.dispose()
@@ -736,6 +737,7 @@ async def _finalize_pipeline(
     forced_text: bool,
     input_tokens: int,
     output_tokens: int,
+    patient_id: int,
 ) -> None:
     """Persist the completed structure job + Draft pre_summary, then publish.
 
@@ -791,6 +793,7 @@ async def _finalize_pipeline(
         pre_summary_ready_envelope(
             intake_id=intake_id,
             pre_summary_id=pre_summary_id,
+            patient_id=patient_id,
         ),
     )
     if low_conf:

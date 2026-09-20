@@ -85,11 +85,14 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       href: "/patient/record",
       icon: FileText,
     },
+    // PHASE-8.1 T11 (#485): Inbox dimmed until Phase 13 (FEAT-019/MOD-010) -
+    // no page exists, so a live entry would dead-navigate like Find did.
     {
       key: "inbox",
       labelKey: "inbox",
       href: "/patient/inbox",
       icon: Inbox,
+      soon: true,
       mobileOverflow: true,
     },
     {
@@ -111,12 +114,13 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
   ],
   doctor: [
     { key: "queue", labelKey: "queue", href: "/doctor", icon: ClipboardList },
+    // PHASE-8.1 T8 (#483): Cases un-sooned - the open-cases index at
+    // /doctor/cases is live; patients/profile stay coming-soon.
     {
       key: "cases",
       labelKey: "cases",
       href: "/doctor/cases",
       icon: FolderOpen,
-      soon: true,
     },
     {
       key: "patients",

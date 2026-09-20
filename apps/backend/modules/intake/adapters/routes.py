@@ -29,6 +29,7 @@ from app.gateway.errors import (
     InsufficientScopeError,
     error_response,
 )
+from app.gateway.idempotency import run_idempotent
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_authenticated, require_partner, require_patient
 from app.gateway.trace import resolve_trace_id
@@ -48,9 +49,11 @@ from modules.intake.intake_models import (
     MediaFile,
     MediaUploadRef,
     PatientEditsResult,
+    PickDoctorResult,
     PreSummaryReviewResult,
     PreSummaryView,
     ReRecordResult,
+    ReviewQueueItem,
     canonical_media_type,
 )
 from modules.partner.facade import PartnerFacade
@@ -150,6 +153,22 @@ class PreSummaryReviewRequest(BaseModel):
     )
 
 
+class PickDoctorRequest(BaseModel):
+    """Body of ``POST /v1/intake/{intake_id}/pick-doctor``: the consent pick.
+
+    ``partner_id`` is the chosen doctor's partner identity from the verified
+    directory the pick screen renders. The pick IS the consent moment (#443):
+    the choice and the standing grant are recorded in one atomic transaction,
+    no second gate.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    partner_id: int = Field(
+        description="The chosen doctor's partner identity on the intake",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -219,6 +238,53 @@ async def upload_media(
 
 
 @router.post(
+    "/upload-doctor-media",
+    response_model=MediaUploadRef,
+    status_code=status.HTTP_200_OK,
+    summary="Upload a doctor voice note or photo for an rx input (doctor only)",
+)
+async def upload_doctor_media(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+    file: UploadFile = File(description="Voice or photo file to upload"),  # noqa: B008
+    audio_duration_ms: Annotated[int | None, Query(ge=MIN_AUDIO_DURATION_MS)] = None,
+    file_size_bytes: Annotated[int | None, Query(ge=0)] = None,
+) -> MediaUploadRef:
+    """Upload a doctor's voice note or photo under the ``rx_input/`` prefix (#481).
+
+    Thin doctor-scoped adapter (PHASE-8.1 T04): the ``require_partner`` gate
+    admits any partner-scoped caller, then the principal is resolved to their
+    partner profile and a non-doctor partner is refused with 403 - the doctor
+    RBAC convention (partner scope + ``partner_type == "doctor"``, matching the
+    review routes). The route reads the uploaded file bytes, wraps them in a
+    ``MediaFile`` (``canonical_media_type`` normalizes voice or photo), and
+    delegates to the facade, which encrypts at rest under the ``rx_input/``
+    prefix and retries on transient failure (NFR-PERF-002). Returns the opaque
+    media ticket for use as ``DoctorInputRequest.media_ref`` on
+    ``POST /v1/care/cases/{case_id}/doctor-input``.
+    """
+    data = await file.read()
+    facade = cast(IntakeFacade, request.app.state.intake_facade)
+    partner = await cast(PartnerFacade, request.app.state.partner_facade).resolve_partner(
+        _resolve_subject_id(account)
+    )
+    if partner.partner_type != "doctor":
+        raise InsufficientScopeError("the doctor role is required for this route")
+    media_file = MediaFile(
+        data=data,
+        filename=file.filename or "recording.webm",
+        media_type=canonical_media_type(file.content_type),
+        audio_duration_ms=audio_duration_ms,
+        file_size_bytes=file_size_bytes or len(data),
+        record_attempt=1,
+    )
+    return await facade.upload_doctor_input_media(
+        doctor_id=partner.partner_id,
+        file=media_file,
+    )
+
+
+@router.post(
     "/{intake_id}/re-record",
     response_model=ReRecordResult,
     status_code=status.HTTP_200_OK,
@@ -241,6 +307,110 @@ async def re_record_intake(
         intake_id=intake_id,
         patient_id=_resolve_subject_id(_account),
         media_ref=body.media_ref,
+    )
+
+
+@router.get(
+    "/review-queue",
+    response_model=list[ReviewQueueItem],
+    status_code=status.HTTP_200_OK,
+    summary="List pre-summaries awaiting the calling doctor's review (doctor only)",
+)
+async def list_review_queue(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+) -> list[ReviewQueueItem]:
+    """List the doctor's assigned pre-summaries awaiting review (US-11/12, #447).
+
+    Thin doctor-scoped adapter (PHASE-8.1 T07): the ``require_partner`` gate
+    admits any partner-scoped caller, then the principal is resolved to their
+    partner profile and a non-doctor partner is refused with 403 - the doctor
+    RBAC convention (partner scope + ``partner_type == "doctor"``, matching
+    the review route). The facade returns only pre-summaries on intakes the
+    patient assigned to this doctor (#443) that still await review,
+    low-confidence first and each carrying the confidence flag. Open care
+    cases continue to come from the existing doctor-scoped case list; the
+    console merges the two lists client-side (backend delta 2, #438).
+    """
+    facade = cast(IntakeFacade, request.app.state.intake_facade)
+    partner = await cast(PartnerFacade, request.app.state.partner_facade).resolve_partner(
+        _resolve_subject_id(account)
+    )
+    if partner.partner_type != "doctor":
+        raise InsufficientScopeError("the doctor role is required for this route")
+    return await facade.list_review_queue(doctor_id=partner.partner_id)
+
+
+@router.get(
+    "/{intake_id}/pre-summary/review",
+    response_model=PreSummaryView,
+    status_code=status.HTTP_200_OK,
+    summary="Read the full pre-summary content for review (doctor only)",
+)
+async def get_doctor_pre_summary(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+    intake_id: int,
+) -> PreSummaryView:
+    """Read the full pre-summary content for the assigned doctor (US-13, #448, FEAT-008).
+
+    Thin doctor-scoped adapter (PHASE-8.1 T08): the ``require_partner`` gate
+    admits any partner-scoped caller, then the principal is resolved to their
+    partner profile and a non-doctor partner is refused with 403 - the doctor
+    RBAC convention (partner scope + ``partner_type == "doctor"``, matching
+    the review and queue routes). The facade returns the full pre-summary
+    content (structured summary, symptoms, confidence flag, review state) only
+    for an intake the patient assigned to this doctor (#443); an unassigned or
+    other doctor gets the same 404 as a non-owner. A distinct surface from the
+    patient GET ``/{intake_id}/pre-summary`` - the patient's read is unchanged
+    and the care-case view keeps returning only the pre-summary id.
+    """
+    facade = cast(IntakeFacade, request.app.state.intake_facade)
+    partner = await cast(PartnerFacade, request.app.state.partner_facade).resolve_partner(
+        _resolve_subject_id(account)
+    )
+    if partner.partner_type != "doctor":
+        raise InsufficientScopeError("the doctor role is required for this route")
+    return await facade.get_doctor_pre_summary(
+        intake_id=intake_id,
+        doctor_id=partner.partner_id,
+    )
+
+
+@router.get(
+    "/pre-summary/{pre_summary_id}/detail",
+    response_model=IntakeDetailView,
+    status_code=status.HTTP_200_OK,
+    summary="Read the intake transcript and media refs for a pre-summary (doctor only)",
+)
+async def get_doctor_intake_detail(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+    pre_summary_id: int,
+) -> IntakeDetailView:
+    """Read an intake's transcript and media refs for the assigned doctor (US-14, #484).
+
+    Thin doctor-scoped adapter (PHASE-8.1 T09): the ``require_partner`` gate
+    admits any partner-scoped caller, then the principal is resolved to their
+    partner profile and a non-doctor partner is refused with 403 - the doctor
+    RBAC convention (partner scope + ``partner_type == "doctor"``, matching
+    the review, queue, and pre-summary routes). The facade resolves the intake
+    through the pre-summary the care case carries and returns the original
+    transcript text and media refs only for an intake the patient assigned to
+    this doctor (#443); an unassigned or other doctor gets the same 404 as a
+    non-owner. Distinct from the patient GET ``/{intake_id}`` - this is the
+    pre-summary-keyed read, and the transcript/audio never leave the owning
+    doctor's workspace (PHI, no logging).
+    """
+    facade = cast(IntakeFacade, request.app.state.intake_facade)
+    partner = await cast(PartnerFacade, request.app.state.partner_facade).resolve_partner(
+        _resolve_subject_id(account)
+    )
+    if partner.partner_type != "doctor":
+        raise InsufficientScopeError("the doctor role is required for this route")
+    return await facade.get_doctor_intake_detail(
+        pre_summary_id=pre_summary_id,
+        doctor_id=partner.partner_id,
     )
 
 
@@ -348,6 +518,40 @@ async def review_pre_summary(
         intake_id=intake_id,
         doctor_id=partner.partner_id,
         corrections=body.corrections,
+    )
+
+
+@router.post(
+    "/{intake_id}/pick-doctor",
+    response_model=PickDoctorResult,
+    status_code=status.HTTP_200_OK,
+    summary="Record the patient's pick-a-doctor and consent atomically (patient only)",
+)
+async def pick_doctor(
+    request: Request,
+    account: Annotated[Principal, Depends(require_patient)],
+    intake_id: int,
+    body: PickDoctorRequest,
+) -> PickDoctorResult:
+    """Record the patient's chosen doctor and the consent grant (US-5/US-6, #443).
+
+    Thin patient-scoped adapter (PHASE-8.1 T05): the ``require_patient`` gate
+    rejects unauthenticated (401) and non-patient scopes (403) at the edge. The
+    facade commits the intake's ``assigned_partner_id`` and the standing grant
+    (consent-at-pick, MOD-004) in ONE transaction - there is no second consent
+    gate. The route is idempotent (api-standards S5): a client retry replayed
+    with the same ``Idempotency-Key`` answers the stored result without
+    re-executing, and a retry without the header (a second pick) is refused by
+    the facade's exactly-one-doctor rule.
+    """
+    facade = cast(IntakeFacade, request.app.state.intake_facade)
+    return await run_idempotent(
+        request,
+        lambda: facade.pick_doctor(
+            intake_id=intake_id,
+            patient_id=_resolve_subject_id(account),
+            partner_id=body.partner_id,
+        ),
     )
 
 

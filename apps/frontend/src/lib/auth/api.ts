@@ -43,6 +43,31 @@ export interface SessionResult {
   refresh_token: string;
 }
 
+// Partner phone-OTP login (ADR-0016, F014-T02 #462): the staff login page's
+// partner mode. The phone step calls /v1/auth/partner/login; outcome shapes
+// mirror the patient surface plus the partner-only ``no_account`` refusal.
+export interface PartnerLoginResult {
+  outcome: "sent" | "no_account" | "cooldown" | "locked" | "suspended";
+  phone_e164: string;
+  challenge_id: number | null;
+  expires_in_seconds: number | null;
+  cooldown_remaining_seconds: number | null;
+  attempts_left: number | null;
+  lockout_remaining_seconds: number | null;
+}
+
+// Partner phone-OTP verify (F014-T03 #463): consuming the challenge marks the
+// identity phone-verified silently - no patient role, no patient event. The
+// code step of the staff login page renders these outcomes exactly as on the
+// patient surface.
+export interface PartnerVerifyResult {
+  outcome: "verified" | "wrong_code" | "expired" | "spent" | "locked";
+  phone_e164: string;
+  identity_id: number | null;
+  attempts_left: number | null;
+  lockout_remaining_seconds: number | null;
+}
+
 export interface MeResult {
   subject_id: string;
   roles: string[];
@@ -134,6 +159,17 @@ export function issueSession(phone: string): Promise<SessionResult> {
 
 export function issuePartnerSession(phone: string): Promise<SessionResult> {
   return post<SessionResult>("/v1/auth/partner/session", { phone });
+}
+
+export function partnerLogin(phone: string): Promise<PartnerLoginResult> {
+  return post<PartnerLoginResult>("/v1/auth/partner/login", { phone });
+}
+
+export function partnerVerify(
+  phone: string,
+  otp: string,
+): Promise<PartnerVerifyResult> {
+  return post<PartnerVerifyResult>("/v1/auth/partner/verify", { phone, otp });
 }
 
 export async function fetchMe(jwt: string): Promise<MeResult> {

@@ -40,6 +40,10 @@ ALEMBIC_INI = REPO_ROOT / "apps" / "backend" / "alembic.ini"
 #: partners exist in when the backfill runs.
 PARENT_REVISION = "2c9f3a7b5d41"
 
+#: The revision just before the v8.6 active-backfill (#458) - the schema state
+#: the missed-population partners exist in when the backfill upgrade runs.
+ACTIVE_BACKFILL_PARENT_REVISION = "b38d0e62f4a7"
+
 
 def _alembic_config(database_url: str) -> Config:
     config = Config(str(ALEMBIC_INI))
@@ -214,3 +218,254 @@ def test_backfill_is_idempotent(
     assert count_before == count_after
 
     command.downgrade(_alembic_config(database_url), PARENT_REVISION)
+
+
+# ---------------------------------------------------------------------------
+# v8.6 active backfill (#458) - the runtime activation seam's semantics applied
+# to the population the v6_0 one-shot backfill missed.
+# ---------------------------------------------------------------------------
+
+
+def _seed_active_backfill_population(database_url: str) -> None:
+    """Seed the pre-backfill states the v8.6 migration must discriminate (at v8.5)."""
+
+    async def seed() -> None:
+        await _exec(
+            database_url,
+            "TRUNCATE TABLE partner.partner_verifications, "
+            "partner.partner_credentials, partner.partner_profiles, "
+            "partner.partner_directory_index, partner.partner_outbox CASCADE",
+        )
+        await _exec(
+            database_url,
+            "INSERT INTO partner.partner_profiles "
+            "(id, identity_id, partner_type, status, practice_address, "
+            " practice_latitude, practice_longitude) VALUES "
+            # 11: Active doctor, approved round-1 credential UNVERIFIED ->
+            #     the missed population (approval predates the seam).
+            "(11, 111, 'doctor', 'Active', 'Addr 11', 24.060, 84.080), "
+            # 12: Active lab, round-1 already verified but NO index row.
+            "(12, 112, 'lab', 'Active', 'Addr 12', 24.061, 84.081), "
+            # 13: Active doctor mid-grace: round-1 approved, round-2 QUEUED ->
+            #     round-2 credential must NOT be sealed.
+            "(13, 113, 'doctor', 'Active', 'Addr 13', 24.062, 84.082), "
+            # 14: Active doctor, approved round-1 credential EXPIRED -> hidden.
+            "(14, 114, 'doctor', 'Active', 'Addr 14', 24.063, 84.083), "
+            # 15: Active doctor, approved round-1 credential REVOKED -> hidden.
+            "(15, 115, 'doctor', 'Active', 'Addr 15', 24.064, 84.084), "
+            # 16: Under Verification partner, queued round, unverified -> untouched.
+            "(16, 116, 'doctor', 'Under Verification', 'Addr 16', 24.065, 84.085), "
+            # 18: Active doctor, verified + valid, with a STALE index row
+            #     (old location, is_active = false) -> refreshed, not duplicated.
+            "(18, 118, 'doctor', 'Active', 'Addr 18', 24.068, 84.088)",
+        )
+        await _exec(
+            database_url,
+            "INSERT INTO partner.partner_verifications "
+            "(profile_id, round, status, decision) VALUES "
+            "(11, 1, 'approved', 'approved'), "
+            "(12, 1, 'approved', 'approved'), "
+            "(13, 1, 'approved', 'approved'), "
+            "(13, 2, 'queued', NULL), "
+            "(14, 1, 'approved', 'approved'), "
+            "(15, 1, 'approved', 'approved'), "
+            "(16, 1, 'queued', NULL), "
+            "(18, 1, 'approved', 'approved')",
+        )
+        await _exec(
+            database_url,
+            "INSERT INTO partner.partner_credentials "
+            "(profile_id, round, credential_type, verified, expires_at, revoked_at) VALUES "
+            "(11, 1, 'medical_registration', false, now() + interval '30 days', NULL), "
+            "(12, 1, 'lab_license', true, now() + interval '30 days', NULL), "
+            "(13, 1, 'medical_registration', true, now() + interval '30 days', NULL), "
+            "(13, 2, 'medical_registration', false, now() + interval '30 days', NULL), "
+            "(14, 1, 'medical_registration', true, now() - interval '1 day', NULL), "
+            "(15, 1, 'medical_registration', true, now() + interval '30 days', now()), "
+            "(16, 1, 'medical_registration', false, now() + interval '30 days', NULL), "
+            "(18, 1, 'medical_registration', true, now() + interval '30 days', NULL)",
+        )
+        await _exec(
+            database_url,
+            "INSERT INTO partner.partner_directory_index "
+            "(partner_id, practice_latitude, practice_longitude, partner_type, is_active) "
+            "VALUES (18, 9.000000, 9.000000, 'doctor', false)",
+        )
+
+    asyncio.run(seed())
+
+
+def test_active_backfill_seals_approved_rounds_and_indexes_eligible_partners(
+    database_url: str, reachable_db: None, migration_state: None
+) -> None:
+    """FEAT-004 (#458): the v8.6 backfill stamps only approved rounds and upserts
+    the index with the runtime seam's exact conditions.
+
+    Approval is the only path to ``Active`` (no auto-approve), so every
+    ``[Active]`` partner carries an approved verification round and gets the
+    seam's index upsert - even one whose approved credential has since expired
+    or been revoked: the read-side ``provider_visible`` predicate (#457)
+    hides such a partner on every read, exactly as it would hide a partner the
+    live seam indexed at approval (ADR-0011 lazy read-hide).
+    """
+    # Start from the pre-backfill revision (v8.5) so the backfill upgrade runs.
+    command.upgrade(_alembic_config(database_url), ACTIVE_BACKFILL_PARENT_REVISION)
+    _seed_active_backfill_population(database_url)
+
+    # Upgrade to head: v8.6 stamps approved-round credentials and upserts the
+    # directory index with the runtime seam's semantics (#458).
+    command.upgrade(_alembic_config(database_url), "head")
+
+    rows = asyncio.run(
+        _run(
+            database_url,
+            "SELECT profile_id, round, verified FROM partner.partner_credentials "
+            "ORDER BY profile_id, round",
+        )
+    )
+
+    # Only credentials in an APPROVED round of an [Active] partner are sealed;
+    # the grace round (13/2), the queued Under-Verification round (16/1) and
+    # revoked rows are never stamped verified.
+    assert rows == [
+        {"profile_id": 11, "round": 1, "verified": True},
+        {"profile_id": 12, "round": 1, "verified": True},
+        {"profile_id": 13, "round": 1, "verified": True},
+        {"profile_id": 13, "round": 2, "verified": False},
+        {"profile_id": 14, "round": 1, "verified": True},
+        {"profile_id": 15, "round": 1, "verified": True},
+        {"profile_id": 16, "round": 1, "verified": False},
+        {"profile_id": 18, "round": 1, "verified": True},
+    ]
+
+    indexed = asyncio.run(
+        _run(
+            database_url,
+            "SELECT partner_id FROM partner.partner_directory_index ORDER BY partner_id",
+        )
+    )
+
+    # Every [Active] partner with an approved verification round gets the seam's
+    # upsert (11, 12, 13, 14, 15, 18); the only partner left out is the
+    # Under-Verification partner (16) who holds no approved round. The expired
+    # (14) and revoked (15) rows stay provider-invisible on the read side.
+    assert [row["partner_id"] for row in indexed] == [11, 12, 13, 14, 15, 18]
+
+    refreshed = asyncio.run(
+        _run(
+            database_url,
+            "SELECT partner_id, is_active, practice_latitude, practice_longitude "
+            "FROM partner.partner_directory_index WHERE partner_id = 18",
+        )
+    )
+
+    # The existing row was refreshed, never duplicated (ON CONFLICT DO UPDATE).
+    assert refreshed == [
+        {
+            "partner_id": 18,
+            "is_active": True,
+            "practice_latitude": Decimal("24.068000"),
+            "practice_longitude": Decimal("84.088000"),
+        },
+    ]
+
+    command.downgrade(_alembic_config(database_url), ACTIVE_BACKFILL_PARENT_REVISION)
+
+
+def test_active_backfill_is_idempotent(
+    database_url: str, reachable_db: None, migration_state: None
+) -> None:
+    """FEAT-004 (#458): re-running the backfill against a consistent DB is a no-op.
+
+    No verified-state drifts back and no index row is added or removed - the
+    stamp is guarded by ``verified = false`` and the upsert converges on the
+    same rows.
+    """
+    command.upgrade(_alembic_config(database_url), ACTIVE_BACKFILL_PARENT_REVISION)
+    _seed_active_backfill_population(database_url)
+    command.upgrade(_alembic_config(database_url), "head")
+
+    count_before = asyncio.run(
+        _run(database_url, "SELECT count(*) AS n FROM partner.partner_directory_index")
+    )[0]["n"]
+    checked_before = asyncio.run(
+        _run(
+            database_url,
+            "SELECT count(*) AS n FROM partner.partner_credentials "
+            "WHERE verified = false AND revoked_at IS NULL",
+        )
+    )[0]["n"]
+
+    # Re-running the migration's exact statements against a consistent DB is a
+    # no-op: no verified-state drifts back and no index row is added.
+    asyncio.run(
+        _exec(
+            database_url,
+            """
+            UPDATE partner.partner_credentials AS c
+            SET verified = true,
+                updated_at = now()
+            WHERE c.verified = false
+              AND c.revoked_at IS NULL
+              AND EXISTS (
+                    SELECT 1
+                    FROM partner.partner_profiles AS p
+                    WHERE p.id = c.profile_id
+                      AND p.status = 'Active'
+              )
+              AND EXISTS (
+                    SELECT 1
+                    FROM partner.partner_verifications AS v
+                    WHERE v.profile_id = c.profile_id
+                      AND v.round = c.round
+                      AND v.status = 'approved'
+              )
+            """,
+        )
+    )
+    asyncio.run(
+        _exec(
+            database_url,
+            """
+            INSERT INTO partner.partner_directory_index
+                (partner_id, practice_latitude, practice_longitude, partner_type,
+                 specialty, is_active)
+            SELECT
+                p.id,
+                p.practice_latitude,
+                p.practice_longitude,
+                p.partner_type,
+                NULL,
+                true
+            FROM partner.partner_profiles AS p
+            WHERE p.status = 'Active'
+              AND EXISTS (
+                    SELECT 1
+                    FROM partner.partner_verifications AS v
+                    WHERE v.profile_id = p.id
+                      AND v.status = 'approved'
+              )
+            ON CONFLICT (partner_id) DO UPDATE SET
+                practice_latitude = EXCLUDED.practice_latitude,
+                practice_longitude = EXCLUDED.practice_longitude,
+                partner_type = EXCLUDED.partner_type,
+                is_active = true,
+                updated_at = now()
+            """,
+        )
+    )
+
+    count_after = asyncio.run(
+        _run(database_url, "SELECT count(*) AS n FROM partner.partner_directory_index")
+    )[0]["n"]
+    checked_after = asyncio.run(
+        _run(
+            database_url,
+            "SELECT count(*) AS n FROM partner.partner_credentials "
+            "WHERE verified = false AND revoked_at IS NULL",
+        )
+    )[0]["n"]
+    assert count_before == count_after
+    assert checked_before == checked_after
+
+    command.downgrade(_alembic_config(database_url), ACTIVE_BACKFILL_PARENT_REVISION)

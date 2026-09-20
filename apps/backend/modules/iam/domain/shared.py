@@ -46,15 +46,18 @@ class IdentityGuardState:
     """The identity row's guard columns, read under the ``FOR UPDATE`` row lock.
 
     ``status`` drives the Suspended/Active guards, ``lockout_until`` the
-    brute-force lockout check, and ``lockout_failed_attempts`` seeds the
-    streak evaluation for the next rejection. Every row-lock call site reads
-    these four columns through this one typed object.
+    brute-force lockout check, ``lockout_failed_attempts`` seeds the
+    streak evaluation for the next rejection, and ``phone_verified`` is the
+    F014 marker the partner-session mint reads atomically under the same lock
+    (#464). Every row-lock call site reads these five columns through this one
+    typed object.
     """
 
     identity_id: int
     status: str
     lockout_failed_attempts: int
     lockout_until: datetime | None
+    phone_verified: bool
 
 
 async def _lock_identity_row(
@@ -74,6 +77,7 @@ async def _lock_identity_row(
                     iam_identities.c.status,
                     iam_identities.c.lockout_failed_attempts,
                     iam_identities.c.lockout_until,
+                    iam_identities.c.phone_verified,
                 )
                 .where(predicate)
                 .with_for_update()
@@ -89,6 +93,7 @@ async def _lock_identity_row(
         status=row["status"],
         lockout_failed_attempts=row["lockout_failed_attempts"],
         lockout_until=row["lockout_until"],
+        phone_verified=bool(row["phone_verified"]),
     )
 
 

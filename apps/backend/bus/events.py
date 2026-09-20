@@ -24,6 +24,19 @@ EVENT_REPORT_FILED = "report.filed"
 # MOD-006 (care) - prescription lifecycle.
 EVENT_PRESCRIPTION_ISSUED = "prescription.issued"
 EVENT_PRESCRIPTION_DELIVERED = "prescription.delivered"
+# MOD-006 (care) - care-case and prescription lifecycle (PHASE-8 T02, #418).
+# internal-modules.md §4.2 registry. ``case.consult_complete`` is the audited
+# consult-complete milestone on the PreSummary -> PrescriptionPending
+# handshake; ``case.closed`` is the doctor's deliberate terminal close. The
+# prescription events are published by the care facade around drafting, review,
+# approval, and rejection (approved/rejected/issued are regulated acts; draft
+# and reviewed are operational).
+EVENT_CASE_CONSULT_COMPLETE = "case.consult_complete"
+EVENT_CASE_CLOSED = "case.closed"
+EVENT_PRESCRIPTION_DRAFT_CREATED = "prescription.draft_created"
+EVENT_PRESCRIPTION_REVIEWED = "prescription.reviewed"
+EVENT_PRESCRIPTION_APPROVED = "prescription.approved"
+EVENT_PRESCRIPTION_REJECTED = "prescription.rejected"
 # MOD-009 (settlement) - settlement recorded.
 EVENT_SETTLEMENT_RECORDED = "settlement.recorded"
 # The generic audit carrier every module publishes into its OWN outbox in the
@@ -123,8 +136,9 @@ REGULATED_ACT_TYPES: frozenset[str] = frozenset(
         EVENT_CONSENT_REVOKED,
         EVENT_RECORD_ACCESSED,
         EVENT_RECORD_DENIED,
-        "prescription.approved",
-        "prescription.rejected",
+        EVENT_PRESCRIPTION_APPROVED,
+        EVENT_PRESCRIPTION_REJECTED,
+        EVENT_PRESCRIPTION_ISSUED,
         "prescription.routed",
         EVENT_REPORT_FILED,
         "report.rejected_mismatch",

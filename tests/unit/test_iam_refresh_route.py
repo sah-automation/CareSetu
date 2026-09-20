@@ -38,11 +38,17 @@ class StubRefreshFacade:
 
     def __init__(self) -> None:
         self.called_with: list[str] = []
+        self.profile_checks: list[object] = []
         self.result: SessionResult | None = _RESULT
         self.error: Exception | None = None
 
-    async def refresh_session(self, refresh_token: str) -> SessionResult:
+    async def refresh_session(
+        self,
+        refresh_token: str,
+        verify_partner_profile: object | None = None,
+    ) -> SessionResult:
         self.called_with.append(refresh_token)
+        self.profile_checks.append(verify_partner_profile)
         if self.error is not None:
             raise self.error
         if self.result is None:
@@ -72,6 +78,23 @@ def test_refresh_returns_rotated_session_and_forwards_token() -> None:
     assert response.status_code == 200
     assert response.json() == _RESULT.model_dump(mode="json")
     assert facade.called_with == ["old-opaque-token"]
+
+
+def test_refresh_wires_the_partner_profile_recheck_callback() -> None:
+    """F014-T05 (#465): the route hands a callable re-check to the facade.
+
+    The composed callback re-confirms partner-profile existence at the
+    composition boundary on refresh; the session facade invokes it only for a
+    ``partner``-scoped renewal, so wiring it for every refresh is safe.
+    """
+    facade = StubRefreshFacade()
+    client = _client_with(facade)
+
+    response = client.post("/v1/auth/refresh", json={"refresh_token": "old-opaque-token"})
+
+    assert response.status_code == 200
+    assert len(facade.profile_checks) == 1
+    assert callable(facade.profile_checks[0])
 
 
 def test_refresh_sets_jwt_cookie() -> None:

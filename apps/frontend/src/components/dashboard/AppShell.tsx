@@ -13,12 +13,15 @@
 // localStorage key per spec decision 6. Adoption follows mount so server and
 // first client render agree on expanded (same hydration guard as LangContext).
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 
-import { sidebarStorageKey } from "./nav-config";
+import { listOpenCases } from "@/lib/care/api";
+
+import { NAV_CONFIG, sidebarStorageKey } from "./nav-config";
 import { BottomTabs } from "./BottomTabs";
 import { Sidebar } from "./Sidebar";
 import { Topbar } from "./Topbar";
+import type { NavItemDef } from "./nav-config";
 import type { Role } from "./types";
 
 export function AppShell({
@@ -65,6 +68,22 @@ function FullShellBody({
 }) {
   const [collapsed, setCollapsed] = useState(false);
 
+  // PHASE-8.1 T8 (#483): the doctor Cases tab carries a live count pill fed
+  // from the existing open-cases read (listOpenCases) - one fetch per full
+  // shell, shared by the sidebar and phone tab bar. Failures are silent: the
+  // pill is a bonus, never a navigational blocker.
+  const openCasesCount = useOpenCasesCount(role);
+  const navItems = useMemo(() => {
+    if (role !== "doctor" || openCasesCount === undefined) {
+      return undefined;
+    }
+    return NAV_CONFIG[role].map((item: NavItemDef) =>
+      item.key === "cases" && !item.soon
+        ? { ...item, count: openCasesCount }
+        : item,
+    );
+  }, [role, openCasesCount]);
+
   // Adopt this role's stored preference after mount (hydration-safe), then
   // mirror every change back into storage under the role's own key.
   useEffect(() => {
@@ -84,12 +103,38 @@ function FullShellBody({
         role={role}
         collapsed={collapsed}
         onToggleCollapse={() => setCollapsed((value) => !value)}
+        items={navItems}
       />
       <div className="flex min-w-0 flex-1 flex-col">
         <Topbar density="full" role={role} />
         <main className="flex-1 p-6 pb-28 lg:pb-8">{children}</main>
       </div>
-      <BottomTabs role={role} />
+      <BottomTabs role={role} items={navItems} />
     </div>
   );
+}
+
+function useOpenCasesCount(role: Role): number | undefined {
+  const [count, setCount] = useState<number | undefined>(undefined);
+
+  useEffect(() => {
+    if (role !== "doctor") return;
+    let cancelled = false;
+    listOpenCases()
+      .then((items) => {
+        // Pill carries the actionable count only - zero or a feed failure
+        // degrades to no pill, never a "0" badge.
+        if (!cancelled && items.length > 0) setCount(items.length);
+      })
+      .catch((err: unknown) => {
+        // Degrade to no pill - nav chrome is a bonus, never a blocker.
+        // Still surfaced so a silent feed failure stays visible.
+        console.warn("[shell] open-cases count failed to load:", err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [role]);
+
+  return count;
 }

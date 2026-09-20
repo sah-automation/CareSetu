@@ -285,7 +285,7 @@ describe("PreSummaryReviewPage clean variant (FEAT-007 happy path)", () => {
     expect(screen.getByTestId("done-line")).toHaveTextContent(t.doneClean);
     expect(screen.getByTestId("btn-book")).toHaveAttribute(
       "href",
-      "/doctors?intake=42",
+      "/patient/intake/42/pick",
     );
     expect(screen.getByTestId("book-sub")).toHaveTextContent(t.bookSub);
   });
@@ -332,7 +332,7 @@ describe("PreSummaryReviewPage low-confidence variant (FEAT-007 scenario 2)", ()
     expect(screen.getByTestId("book-sub")).toHaveTextContent(t.bookSubLow);
     expect(screen.getByTestId("btn-book")).toHaveAttribute(
       "href",
-      "/doctors?intake=42",
+      "/patient/intake/42/pick",
     );
   });
 });

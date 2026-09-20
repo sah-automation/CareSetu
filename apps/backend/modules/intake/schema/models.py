@@ -68,6 +68,11 @@ intake_intakes = Table(
     # Forced-text flag: when voice fails too many times, patient is
     # switched to text input (FEAT-006 re-record rule)
     Column("forced_text", Boolean, nullable=False, server_default=text("false")),
+    # PHASE-8.1: the doctor the patient picked for this intake (#443).
+    # Set atomically with the consent grant in pick_doctor; once set, only
+    # this doctor may read the pre-summary. Null until the patient picks.
+    # No cross-schema FK - identity ids are gateway principals (ADR-0003).
+    Column("assigned_partner_id", BigInteger, nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     CheckConstraint(

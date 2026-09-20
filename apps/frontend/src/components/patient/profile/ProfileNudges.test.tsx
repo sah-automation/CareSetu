@@ -23,6 +23,15 @@ import {
   __resetNudgeDismissalsForTests,
 } from "@/lib/profile/profileState";
 
+// #496: the completion CTA is a client-side Link; jsdom has no app-router
+// context for the real component, so render it as a plain anchor (href
+// carried through, which the CTA assertions below rely on).
+vi.mock("next/link", () => ({
+  default: ({ href, ...props }: { href: string }) => (
+    <a href={href} {...props} />
+  ),
+}));
+
 const en = STRINGS.en.profile;
 const hi = STRINGS.hi.profile;
 

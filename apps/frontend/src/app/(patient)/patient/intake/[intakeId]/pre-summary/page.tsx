@@ -871,7 +871,9 @@ export default function PreSummaryReviewPage() {
               </span>
             </p>
             <Button asChild size="lg" className="w-full" data-testid="btn-book">
-              <Link href={`/doctors?intake=${intakeId}`}>{t.bookTitle}</Link>
+              <Link href={`/patient/intake/${intakeId}/pick`}>
+                {t.bookTitle}
+              </Link>
             </Button>
             <p className="mb-0 text-sm text-txt-muted" data-testid="book-sub">
               {lowConfidence ? t.bookSubLow : t.bookSub}

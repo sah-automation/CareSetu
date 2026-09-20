@@ -8,7 +8,7 @@ types, and imports lockout/challenge helpers from ``domain/shared.py``.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Literal
 
@@ -86,6 +86,62 @@ class ResendOtpResult(BaseModel):
     challenge_id: int | None = None
     expires_in_seconds: int | None = None
     cooldown_remaining_seconds: int | None = None
+    attempts_left: int | None = None
+    lockout_remaining_seconds: int | None = None
+
+
+PartnerLoginProfileGate = Callable[[int], Awaitable[int | None]]
+"""Port: ``(identity_id) -> partner profile id or None`` (ADR-0016).
+
+Given an iam identity id, resolve the matching partner profile id, or ``None``
+when the identity holds no partner profile (a patient-only phone). The route
+wires this to the partner facade's non-throwing ``resolve_partner_id_by_identity``
+seam, so iam never imports or queries the partner schema (ADR-0003) - the seam
+is read at the module boundary exactly like ``OtpSender``/``VerifyPartnerExists``.
+"""
+
+
+class PartnerLoginOtpResult(BaseModel):
+    """Outcome of starting a partner phone-OTP login (ADR-0016, F014-T02 #462).
+
+    ``sent``: a phone with a partner profile got a fresh challenge through the
+    shared OTP machine - latest-wins invalidation, resend cooldown, 5-attempt
+    budget, 5-minute TTL, hashed at rest, never logged, and only the existing
+    ``otp.sent`` event (no new event name). ``no_account``: the phone had no
+    partner profile (identity absent or present as a patient-only phone) - the
+    caller is pointed to registration, and NO identity was created and NO SMS
+    was sent. ``cooldown``/``locked``/``suspended`` are refused exactly as on
+    the patient OTP surface, with the matching countdown.
+    """
+
+    outcome: Literal["sent", "no_account", "cooldown", "locked", "suspended"]
+    phone_e164: str
+    challenge_id: int | None = None
+    expires_in_seconds: int | None = None
+    cooldown_remaining_seconds: int | None = None
+    attempts_left: int | None = None
+    lockout_remaining_seconds: int | None = None
+
+
+class PartnerVerifyOtpResult(BaseModel):
+    """Outcome of submitting the partner's 6-digit code (ADR-0016, F014-T03 #463).
+
+    ``verified``: the challenge was consumed and the identity marked
+    ``phone_verified`` in the same transaction - silently, with no patient
+    role grant, no ``patient.verified`` event, and no identity lifecycle
+    transition (partner phone verification is not a lifecycle event, ADR-0016
+    §Events). ``wrong_code``: the budget was decremented and ``attempts_left``
+    is the remaining budget. ``expired``/``spent``: the challenge is unusable
+    and the caller is told to request a new code. ``locked``: the brute-force
+    lockout is active (either just triggered by this attempt or already
+    running) and ``lockout_remaining_seconds`` is how long it lasts. The
+    refusals render exactly as on the patient OTP surface, including the
+    SMS-cost accounting that feeds only the lockout counter (ADR-0004).
+    """
+
+    outcome: Literal["verified", "wrong_code", "expired", "spent", "locked"]
+    phone_e164: str
+    identity_id: int | None = None
     attempts_left: int | None = None
     lockout_remaining_seconds: int | None = None
 
@@ -300,6 +356,187 @@ class OtpFacade:
             attempts_left=MAX_ATTEMPTS,
         )
 
+    async def partner_login(
+        self, phone: str, partner_gate: PartnerLoginProfileGate
+    ) -> PartnerLoginOtpResult:
+        """Start a returning partner's phone-OTP login (ADR-0016, F014-T02 #462).
+
+        The dedicated partner login issues a fresh challenge ONLY for a phone
+        that already has a partner profile. The partner-profile gate is the
+        injected ``partner_gate`` port (identity id -> partner profile id or
+        None), wired at the route to the partner facade's
+        ``resolve_partner_id_by_identity`` seam so iam never reaches into the
+        partner module (ADR-0003). A phone with no identity - or an identity
+        with no partner profile, including a patient-only phone - is refused
+        ``no_account`` WITHOUT creating an identity row and WITHOUT dispatching
+        an SMS; the caller is pointed to registration (register as a
+        doctor/lab/chemist).
+
+        The issuance itself reuses the shared OTP machine exactly as the
+        patient resend path: the identity row is locked ``FOR UPDATE``,
+        ``evaluate_resend`` honors Suspended / brute-force lockout / resend
+        cooldown with the same precedence, a pass invalidates the pending
+        challenge (latest-wins) and issues a fresh hashed one, ``otp.sent``
+        lands in the iam outbox in the same transaction, and the EXT-001
+        delivery is dispatched as a background task afterwards (PHASE-2 REM
+        T4, #86) - the request never blocks on the provider. No new event name
+        is introduced (ADR-0016 §Events): only ``otp.sent``.
+        """
+        phone_e164 = normalize_phone(phone)
+        now = self._clock()
+
+        async with self._engine.begin() as connection:
+            locked = await self._lock_identity(connection, phone_e164)
+            if locked is None:
+                return PartnerLoginOtpResult(outcome="no_account", phone_e164=phone_e164)
+            if await partner_gate(locked.identity_id) is None:
+                return PartnerLoginOtpResult(outcome="no_account", phone_e164=phone_e164)
+
+            reissue = await _reissue_otp_challenge(
+                connection,
+                identity_id=locked.identity_id,
+                phone_e164=phone_e164,
+                identity_status=locked.status,
+                lockout_until=locked.lockout_until,
+                now=now,
+            )
+
+        if reissue.outcome != "sent":
+            return PartnerLoginOtpResult(
+                outcome=reissue.outcome,
+                phone_e164=phone_e164,
+                cooldown_remaining_seconds=reissue.cooldown_remaining_seconds,
+                lockout_remaining_seconds=reissue.lockout_remaining_seconds,
+            )
+
+        challenge_id, otp = reissue.sent_challenge()
+        await self._otp_sender(phone_e164, otp)
+
+        return PartnerLoginOtpResult(
+            outcome="sent",
+            phone_e164=phone_e164,
+            challenge_id=challenge_id,
+            expires_in_seconds=OTP_TTL_SECONDS,
+            cooldown_remaining_seconds=RESEND_COOLDOWN_SECONDS,
+            attempts_left=MAX_ATTEMPTS,
+        )
+
+    async def partner_verify(self, phone: str, otp: str) -> PartnerVerifyOtpResult:
+        """Verify a submitted 6-digit partner login code (ADR-0016, F014-T03 #463).
+
+        The partner completes login: a correct code consumes the challenge
+        (single-use) and sets the identity's ``phone_verified`` marker in the
+        SAME transaction, so a later session mint (ticket 04, #464) binds the
+        partner session to a phone the partner demonstrably controls. The
+        marker write is deliberately SILENT per ADR-0016: no patient role
+        grant, no ``patient.verified`` outbox event, and no identity lifecycle
+        transition - logging in as a partner never makes the phone a patient
+        account, and an identity's lifecycle status is untouched.
+
+        Wrong guesses decrement the 5-attempt budget without killing the code;
+        at 0 the challenge is spent. Expired, spent, or already-used challenges
+        reject with a "request a new code" outcome. The brute-force lockout
+        (spec #51 section 2.4) is enforced exactly as on the patient surface: a
+        locked phone refuses outright without touching the challenge or the
+        counter, and every SMS-cost failure (``wrong_code``/``spent``/``expired``/
+        ``replay``) feeds the identity's ``lockout_failed_attempts`` streak via
+        ``evaluate_failure`` (ADR-0004 decision 4); ``no_challenge``,
+        ``suspended``, and ``locked`` rejections are no-counter - matching
+        ``verify_otp``. Unlike ``verify_otp``, no rejection writes a
+        ``patient.*`` outbox event: partner phone verification is silent.
+
+        The identity row is locked ``FOR UPDATE`` so concurrent verifications
+        for one phone serialize: the challenge is consumed exactly once and the
+        failure counter cannot race.
+        """
+        phone_e164 = normalize_phone(phone)
+        now = self._clock()
+
+        async with self._engine.begin() as connection:
+            locked = await self._lock_identity(connection, phone_e164)
+            if locked is None:
+                return self._partner_verify_reject(phone_e164, None, no_challenge_decision())
+            identity_id = locked.identity_id
+            identity_status = locked.status
+            lockout_failed_attempts = locked.lockout_failed_attempts
+            lockout_until = locked.lockout_until
+
+            if identity_status == IDENTITY_SUSPENDED:
+                return self._partner_verify_reject(phone_e164, identity_id, suspended_decision())
+
+            lockout_left = lockout_remaining_seconds(lockout_until, now)
+            if lockout_left is not None:
+                return self._partner_verify_reject(
+                    phone_e164,
+                    identity_id,
+                    locked_decision(),
+                    lockout_remaining_seconds=lockout_left,
+                )
+
+            challenge = (
+                (
+                    await connection.execute(
+                        select(
+                            iam_otp_challenges.c.id,
+                            iam_otp_challenges.c.otp_hash,
+                            iam_otp_challenges.c.status,
+                            iam_otp_challenges.c.attempts,
+                            iam_otp_challenges.c.expires_at,
+                        )
+                        .where(iam_otp_challenges.c.identity_id == identity_id)
+                        .order_by(iam_otp_challenges.c.id.desc())
+                        .limit(1)
+                    )
+                )
+                .mappings()
+                .first()
+            )
+
+            if challenge is None:
+                return self._partner_verify_reject(phone_e164, identity_id, no_challenge_decision())
+
+            decision = evaluate_attempt(
+                status=challenge["status"],
+                attempts=challenge["attempts"],
+                expires_at=challenge["expires_at"],
+                now=now,
+                guess=otp,
+                stored_hash=challenge["otp_hash"],
+            )
+
+            if decision.outcome == "verified":
+                await connection.execute(
+                    iam_otp_challenges.update()
+                    .where(iam_otp_challenges.c.id == challenge["id"])
+                    .values(status=CHALLENGE_VERIFIED, verified_at=now)
+                )
+                await connection.execute(
+                    iam_identities.update()
+                    .where(iam_identities.c.id == identity_id)
+                    .values(
+                        phone_verified=True,
+                        lockout_failed_attempts=0,
+                        lockout_until=None,
+                        updated_at=now,
+                    )
+                )
+                return PartnerVerifyOtpResult(
+                    outcome="verified", phone_e164=phone_e164, identity_id=identity_id
+                )
+
+            return await self._record_partner_failed_attempt(
+                connection,
+                identity_id=identity_id,
+                phone_e164=phone_e164,
+                challenge_id=challenge["id"],
+                status=challenge["status"],
+                attempts=challenge["attempts"],
+                decision=decision,
+                lockout_failed_attempts=lockout_failed_attempts,
+                lockout_until=lockout_until,
+                now=now,
+            )
+
     @staticmethod
     async def _lock_identity(
         connection: AsyncConnection, phone_e164: str
@@ -472,6 +709,89 @@ class OtpFacade:
                 lockout_remaining_seconds=lockout_remaining_seconds(lockout.lockout_until, now),
             )
         return VerifyOtpResult(
+            outcome=decision.outcome,
+            phone_e164=phone_e164,
+            identity_id=identity_id,
+            attempts_left=decision.attempts_left,
+        )
+
+    @staticmethod
+    def _partner_verify_reject(
+        phone_e164: str,
+        identity_id: int | None,
+        decision: AttemptDecision,
+        *,
+        lockout_remaining_seconds: int | None = None,
+    ) -> PartnerVerifyOtpResult:
+        """Reject a partner verification without any outbox write.
+
+        The partner-surface counterpart of ``_reject``: the challenge machine's
+        decision names the outcome for the staff login page, but no
+        ``patient.auth_failed`` row is written - partner phone verification is
+        silent and must not touch the ``patient.*`` family (ADR-0016 §Events).
+        Only the lockout rejection carries ``lockout_remaining_seconds``, for
+        its countdown. These are the SMS-cost rule's no-counter rejections
+        (ADR-0004 decision 4), exactly as on the patient surface.
+        """
+        return PartnerVerifyOtpResult(
+            outcome=decision.outcome,
+            phone_e164=phone_e164,
+            identity_id=identity_id,
+            lockout_remaining_seconds=lockout_remaining_seconds,
+        )
+
+    @staticmethod
+    async def _record_partner_failed_attempt(
+        connection: AsyncConnection,
+        *,
+        identity_id: int,
+        phone_e164: str,
+        challenge_id: int,
+        status: str,
+        attempts: int,
+        decision: AttemptDecision,
+        lockout_failed_attempts: int,
+        lockout_until: datetime | None,
+        now: datetime,
+    ) -> PartnerVerifyOtpResult:
+        """Record a partner verify rejection against a sent-for challenge.
+
+        The partner-surface counterpart of ``_record_failed_attempt`` with the
+        same SMS-cost rule (ADR-0004 decision 4): only attempts against a
+        challenge an SMS was actually sent for - ``wrong_code``, ``spent``,
+        ``expired``, ``replay`` - count toward the lockout streak, because only
+        they incurred an SMS cost; ``no_challenge``, ``suspended``, and
+        ``locked`` rejections never call it. The chain is the challenge
+        write-back plus the ``evaluate_failure`` counter update - but, unlike
+        the patient path, no ``patient.auth_failed`` / ``otp.failed`` outbox
+        row is written: partner phone verification is silent and never touches
+        the ``patient.*`` family (ADR-0016 §Events).
+        """
+        await OtpFacade._record_failure(
+            connection,
+            challenge_id=challenge_id,
+            status=status,
+            attempts=attempts,
+            decision=decision,
+        )
+        lockout = evaluate_failure(lockout_failed_attempts, now, lockout_until)
+        await connection.execute(
+            iam_identities.update()
+            .where(iam_identities.c.id == identity_id)
+            .values(
+                lockout_failed_attempts=lockout.counter,
+                lockout_until=lockout.lockout_until,
+            )
+        )
+        if lockout.locked:
+            return PartnerVerifyOtpResult(
+                outcome="locked",
+                phone_e164=phone_e164,
+                identity_id=identity_id,
+                attempts_left=decision.attempts_left,
+                lockout_remaining_seconds=lockout_remaining_seconds(lockout.lockout_until, now),
+            )
+        return PartnerVerifyOtpResult(
             outcome=decision.outcome,
             phone_e164=phone_e164,
             identity_id=identity_id,

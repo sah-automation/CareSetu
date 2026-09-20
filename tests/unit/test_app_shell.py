@@ -70,6 +70,8 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/auth/refresh",
         "/v1/auth/dev/otp",
         "/v1/me",
+        # PHASE-8.1 T1 (#482): the patient's own profile-completion read/write.
+        "/v1/me/profile",
         # PHASE-3 T2 (#211): the owner-only record surface.
         "/v1/records",
         "/v1/records/{record_id}",
@@ -117,6 +119,12 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/auth/operator/mfa/enroll",
         # T05 (#298): partner-scoped session issuance for registered partners.
         "/v1/auth/partner/session",
+        # F014 T02 (#462): partner OTP login - sends a challenge only when the
+        # phone resolves to a registered partner profile.
+        "/v1/auth/partner/login",
+        # F014 T03 (#463): partner OTP verify - silent, consumes the challenge
+        # and writes the phone-verified marker.
+        "/v1/auth/partner/verify",
         # PHASE-6 T02a (#313): the public provider directory search (FEAT-004) -
         # open surface, patients browse without logging in.
         "/v1/directory/search",
@@ -130,6 +138,8 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         # media, re-record, read intake + pre-summary, save patient edits.
         "/v1/intake/submit",
         "/v1/intake/upload-media",
+        # PHASE-8.1 T04 (#481): the doctor-scoped rx-input voice/photo upload.
+        "/v1/intake/upload-doctor-media",
         "/v1/intake/{intake_id}/re-record",
         "/v1/intake/{intake_id}",
         "/v1/intake/{intake_id}/pre-summary",
@@ -139,6 +149,36 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         # PHASE-7 T13/T17 (#373): the audio playback route - owning patient or
         # doctor partner streams the decrypted clip.
         "/v1/intake/{intake_id}/media/{media_ref_id}",
+        # PHASE-8.1 T05 (#443): the patient pick-a-doctor + consent write.
+        "/v1/intake/{intake_id}/pick-doctor",
+        # PHASE-8.1 T07 (#447): the doctor review-queue read - assigned
+        # pre-summaries awaiting review, low-confidence first.
+        "/v1/intake/review-queue",
+        # PHASE-8.1 T08 (#448): the doctor full pre-summary read - the assigned
+        # doctor reads the pre-summary content (structured summary, confidence
+        # flag, review state) before reviewing it.
+        "/v1/intake/{intake_id}/pre-summary/review",
+        # PHASE-8.1 T09 (#484): the doctor-owned intake-detail read keyed by
+        # pre-summary id - resolves the intake and enforces the assigned-doctor
+        # scope for the case workspace transcript + audio surface.
+        "/v1/intake/pre-summary/{pre_summary_id}/detail",
+        # PHASE-8.1 T06 (#444): the doctor-owned consultation fee
+        # (integer paise; null = not set) - partner-scoped update surface.
+        "/v1/partner/consultation-fee",
+        # PHASE-8 T06 (#422): the doctor care surface - consult-complete,
+        # open-case list/detail, doctor input, rx draft/revision/approve/
+        # reject, and the approved e-prescription read.
+        "/v1/care/cases",
+        "/v1/care/cases/{case_id}",
+        "/v1/care/cases/{case_id}/consult-complete",
+        "/v1/care/cases/{case_id}/doctor-input",
+        "/v1/care/cases/{case_id}/rx/draft",
+        "/v1/care/cases/{case_id}/rx/{rx_id}/revision",
+        "/v1/care/cases/{case_id}/rx/{rx_id}/approve",
+        "/v1/care/cases/{case_id}/rx/{rx_id}/reject",
+        "/v1/care/cases/{case_id}/rx/current",
+        "/v1/care/cases/{case_id}/close",
+        "/v1/care/prescriptions/{rx_id}",
     }
 
 

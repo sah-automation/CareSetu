@@ -90,11 +90,14 @@ class PreSummaryReadyPayload(BaseModel):
 
     MOD-006 attaches the summary to the case and MOD-010 sends the in-app
     notification. ``pre_summary_id`` names the finalized row; the structured
-    clinical fields themselves stay in the intake schema.
+    clinical fields themselves stay in the intake schema. ``patient_id``
+    carries the owning patient identity so MOD-006 can birth the care case
+    without an extra cross-schema lookup (PHASE-8 T2, #428).
     """
 
     intake_id: int
     pre_summary_id: int
+    patient_id: int
 
 
 class PreSummaryLowConfidencePayload(BaseModel):
@@ -197,14 +200,16 @@ def intake_retry_requested_envelope(
 
 
 def pre_summary_ready_envelope(
-    *, intake_id: int, pre_summary_id: int
+    *, intake_id: int, pre_summary_id: int, patient_id: int
 ) -> Envelope[PreSummaryReadyPayload]:
     """Build the ``pre_summary.ready`` envelope for the intake outbox."""
     return Envelope[PreSummaryReadyPayload](
         event_id=uuid4(),
         event_type=EVENT_PRE_SUMMARY_READY,
         producer=PRODUCER_MODULE,
-        payload=PreSummaryReadyPayload(intake_id=intake_id, pre_summary_id=pre_summary_id),
+        payload=PreSummaryReadyPayload(
+            intake_id=intake_id, pre_summary_id=pre_summary_id, patient_id=patient_id
+        ),
     )
 
 

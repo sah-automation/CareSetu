@@ -45,6 +45,7 @@ Thumbs.db
 
 # Runtime local storage (media store scratch, local artifacts)
 /apps/backend/var/
+/var/
 
 # Phase 0 raw audio dump (external source; committed corpus lives in phase0/corpus/)
 /audio/

@@ -351,6 +351,16 @@ async def test_happy_path_writes_draft_pre_summary_and_publishes_ready_and_compl
     assert outbox_types.count(EVENT_PRE_SUMMARY_READY) == 1
     assert outbox_types.count(EVENT_AI_JOB_COMPLETED) == 1
 
+    # The ready payload carries the owning patient identity so care can birth
+    # the case without a cross-schema lookup (PHASE-8 T2, #428).
+    ready_rows = [
+        r
+        for r in connection.executed
+        if r.kind == "outbox" and r.params["event_type"] == EVENT_PRE_SUMMARY_READY
+    ]
+    assert ready_rows[0].params["payload"]["patient_id"] == 42
+    assert ready_rows[0].params["payload"]["intake_id"] == 1
+
     # Intake moved Captured -> Structuring -> Ready for Review.
     intake_statuses = [r.params["status"] for r in connection.executed if r.kind == "status_update"]
     assert intake_statuses == ["structuring", "ready_for_review"]

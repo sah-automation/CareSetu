@@ -25,7 +25,7 @@ from sqlalchemy.pool import NullPool
 
 from app.config import Settings, get_settings
 from app.gateway.errors import ErrorEnvelope, register_gateway_error_handlers
-from app.gateway.idempotency import IdempotencyStore
+from app.gateway.idempotency import IdempotencyStore, run_idempotent
 from app.gateway.jwt_verify import JWTVerifyMiddleware
 from app.gateway.principal import Principal
 from app.gateway.rate_limit import RateLimitMiddleware
@@ -34,6 +34,12 @@ from app.gateway.security_headers import SecurityHeadersMiddleware
 from app.gateway.trace import TraceMiddleware, resolve_trace_id
 from modules.audit.adapters.routes import router as audit_router
 from modules.audit.facade import AuditFacade
+from modules.care.adapters.routes import (
+    register_error_handlers as register_care_error_handlers,
+)
+from modules.care.adapters.routes import router as care_router
+from modules.care.case_facade import CaseConsoleFacade
+from modules.care.rx_facade import PrescriptionFacade
 from modules.consent.adapters.routes import (
     register_error_handlers as register_consent_error_handlers,
 )
@@ -46,7 +52,7 @@ from modules.health.facade import HealthFacade
 from modules.iam.adapters.routes import register_error_handlers
 from modules.iam.adapters.routes import router as iam_router
 from modules.iam.adapters.sms import MockSmsAdapter, build_sms_adapter
-from modules.iam.facade import IamFacade
+from modules.iam.facade import IamFacade, PatientProfile
 from modules.intake.adapters.media_store import build_media_store
 from modules.intake.adapters.routes import (
     register_error_handlers as register_intake_error_handlers,
@@ -63,7 +69,7 @@ from modules.partner.directory_cache import (
     close_directory_redis_client,
     init_directory_redis_client,
 )
-from modules.partner.facade import PartnerFacade
+from modules.partner.facade import PartnerFacade, ProviderProfileNotFoundError
 from worker.main import run_worker_until_stopped
 
 logger = logging.getLogger(__name__)
@@ -120,6 +126,20 @@ class MeResponse(BaseModel):
     subject_id: str
     roles: list[str]
     phone: str
+
+
+class PatientProfileResponse(BaseModel):
+    """Typed read-back of the protected ``/v1/me/profile`` routes (#482).
+
+    ``set`` discriminates a stored profile (``profile`` populated) from the
+    typed "not set" answer (``profile`` null) the PWA hydrates from before its
+    local-draft fallback (ticket #488). The same shape answers ``GET`` and
+    ``PUT`` so the client handles one contract. ``GET /v1/me`` stays unchanged
+    - the profile gets its own read surface by deliberate D-A decision.
+    """
+
+    set: bool
+    profile: PatientProfile | None = None
 
 
 async def _run_in_process_dispatcher(
@@ -281,7 +301,67 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         supabase_url=resolved_settings.supabase_url,
         supabase_service_role_key=resolved_settings.supabase_service_role_key,
     )
-    app.state.intake_facade = IntakeFacade(engine=engine, media_store=intake_media_store)
+    app.state.intake_facade = IntakeFacade(
+        engine=engine,
+        media_store=intake_media_store,
+        # PHASE-8.1 (#443): the pick-a-doctor write grants its consent in the
+        # SAME transaction as the doctor assignment (consent-at-pick, MOD-004)
+        # via ``ConsentFacade.grant_consent_on``.
+        consent_facade=app.state.consent_facade,
+        # PHASE-8.1 (#489): the review-queue read resolves the card's patient
+        # name/age through the iam seam (composition boundary, no cross-schema
+        # read) - the same settled facade the profile routes use, so a missing
+        # profile degrades to the card fallback, never a crash.
+        iam_facade=app.state.iam_facade,
+    )
+    # MOD-006 (PHASE-8 T06, #422): the two care facades share the settled
+    # engine and the settled intake/health facades - the consult-complete
+    # handshake gates on ``get_finalized_pre_summary`` (intake) and AI drafting
+    # draws the consent-gated history via the health facade (fail-closed,
+    # NFR-SEC-006). Stored on state so the doctor routes read one resolved
+    # instance per state machine and unit tests stub them.
+    app.state.care_console_facade = CaseConsoleFacade(
+        engine=engine,
+        intake_facade=app.state.intake_facade,
+    )
+
+    # PHASE-8.1 T10c (#495): the issued-rx attribution reads the issuing
+    # doctor's display name through the partner facade's public provider-
+    # profile seam (composition boundary - care never imports partner). The
+    # display name is cosmetic: any attribution failure - an unresolvable
+    # profile (doctor since deactivated, directory index dropped, credential
+    # lapsed) or an unexpected seam error (partner-schema DB down) - degrades
+    # to None so the frontend falls back to the existing "attributed to you"
+    # copy. The issued read and the approve response must never fail because
+    # of the attribution, so the fallback is wholesale and logged (warning,
+    # error-handling-observability §2), never propagated. partner_id only, no
+    # PHI in the log line.
+    async def _resolve_attributed_doctor_name(partner_id: int) -> str | None:
+        try:
+            profile = await cast(PartnerFacade, app.state.partner_facade).get_provider_profile(
+                partner_id
+            )
+        except ProviderProfileNotFoundError:
+            logger.warning(
+                "issued-rx attribution name unresolved for partner %s; falling back to static copy",
+                partner_id,
+            )
+            return None
+        except Exception:
+            logger.warning(
+                "issued-rx attribution partner-profile read failed; "
+                "falling back to static copy for partner %s",
+                partner_id,
+            )
+            return None
+        return profile.practice_name
+
+    app.state.prescription_facade = PrescriptionFacade(
+        engine=engine,
+        intake_facade=app.state.intake_facade,
+        health_facade=app.state.health_facade,
+        attributed_doctor_name_resolver=_resolve_attributed_doctor_name,
+    )
 
     # MOD-001/MOD-002 independence (WI-3, #336): iam and partner are now
     # constructed independently with zero post-construction glue. The
@@ -360,12 +440,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(partner_router)
     app.include_router(directory_router)
     app.include_router(intake_router)
+    app.include_router(care_router)
     register_error_handlers(app)
     register_gateway_error_handlers(app)
     register_health_error_handlers(app)
     register_consent_error_handlers(app)
     register_partner_error_handlers(app)
     register_intake_error_handlers(app)
+    register_care_error_handlers(app)
 
     # Catch-all for any unhandled exception that escapes the module-level
     # handlers above (e.g. SQLAlchemy OperationalError from a DB connection
@@ -409,6 +491,49 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             roles=list(principal.roles),
             phone=phone,
         )
+
+    @app.get("/v1/me/profile", response_model=PatientProfileResponse)
+    async def me_profile_get(
+        request: Request, principal: Annotated[Principal, Depends(require_authenticated)]
+    ) -> PatientProfileResponse:
+        """Protected read: the caller's saved profile, or the typed "not set".
+
+        The profile gets its own read surface so ``MeResponse`` and the
+        ``/v1/me`` consumers never change (#482, deliberate D-A decision). The
+        row is scoped to the principal's subject id through the identity facade
+        seam - the route never touches the database itself.
+        """
+        facade = cast(IamFacade, request.app.state.iam_facade)
+        profile = await facade.get_patient_profile(int(principal.subject_id))
+        if profile is None:
+            return PatientProfileResponse(set=False, profile=None)
+        return PatientProfileResponse(set=True, profile=profile)
+
+    @app.put("/v1/me/profile", response_model=PatientProfileResponse)
+    async def me_profile_put(
+        request: Request,
+        body: PatientProfile,
+        principal: Annotated[Principal, Depends(require_authenticated)],
+    ) -> PatientProfileResponse:
+        """Protected upsert: persist the caller's profile-completion data.
+
+        Idempotent - the facade upserts one row per identity (ON CONFLICT DO
+        UPDATE), so a repeat PUT converges and a returning patient is asked
+        only once. The body is the profile shape itself (no wrapper), and the
+        ``Idempotency-Key`` contract (api-standards §5) applies like the other
+        mutations: a replayed key with the same value returns the stored
+        result without a second facade call. The key is namespaced to the
+        principal's subject id, so one key can never replay another caller's
+        stored profile across identities. The write is scoped to the
+        principal's subject id.
+        """
+        facade = cast(IamFacade, request.app.state.iam_facade)
+        saved = await run_idempotent(
+            request,
+            lambda: facade.save_patient_profile(int(principal.subject_id), body),
+            namespace=f"identity:{principal.subject_id}",
+        )
+        return PatientProfileResponse(set=True, profile=saved)
 
     @app.get("/v1/auth/dev/otp", response_model=MockOtpResponse)
     async def dev_otp(request: Request, phone: str) -> MockOtpResponse | JSONResponse:

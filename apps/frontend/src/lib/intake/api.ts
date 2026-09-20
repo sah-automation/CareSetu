@@ -6,7 +6,8 @@
 // asynchronously: submit returns a captured intake, and the pre-summary is
 // read later at the {intake_id}/pre-summary route.
 
-import { guardShape, request } from "@/lib/request";
+import { guardShape, request, requestBlob } from "@/lib/request";
+import { IDEMPOTENCY_KEY_HEADER, idempotencyKey } from "@/lib/idempotency";
 
 export type IntakeMode = "voice" | "text";
 export type IntakeLanguage = "hi" | "en";
@@ -95,6 +96,36 @@ export interface PatientEditsResult {
 }
 
 export type ClinicalEdits = Record<string, string | string[]>;
+
+/** One pre-summary awaiting the assigned doctor's review (PHASE-8.1 T07, #447). */
+export interface ReviewQueueItem {
+  pre_summary_id: number;
+  intake_id: number;
+  structuring_confidence: number | null;
+  low_confidence: boolean;
+  review_state: string;
+  /** Patient name/age from the identity profile for the assigned intake (#489); null when the profile is not set. */
+  patient_name: string | null;
+  patient_age: number | null;
+  /** Short excerpt of the intake's structured content, for the queue card (#489). */
+  snippet: string | null;
+  /** Number of populated structured sections on the card (#489). */
+  section_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Outcome of the doctor's attributed one-action review-and-finalize (#442). */
+export interface PreSummaryReviewResult {
+  intake_id: number;
+  pre_summary_id: number;
+  review_state: string;
+  reviewed_copy: ClinicalEdits;
+  changed_fields: string[];
+  review_attribution: string;
+  reviewed_by: number;
+  reviewed_at: string;
+}
 
 export interface SubmitIntakeRequest {
   mode: IntakeMode;
@@ -192,6 +223,43 @@ function isPatientEditsResult(value: unknown): value is PatientEditsResult {
   );
 }
 
+function isReviewQueueItem(value: unknown): value is ReviewQueueItem {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "pre_summary_id" in value &&
+    "intake_id" in value &&
+    "structuring_confidence" in value &&
+    "low_confidence" in value &&
+    "review_state" in value &&
+    "patient_name" in value &&
+    "patient_age" in value &&
+    "snippet" in value &&
+    "section_count" in value &&
+    typeof (value as ReviewQueueItem).section_count === "number" &&
+    "created_at" in value &&
+    "updated_at" in value
+  );
+}
+
+function isPreSummaryReviewResult(
+  value: unknown,
+): value is PreSummaryReviewResult {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "intake_id" in value &&
+    "pre_summary_id" in value &&
+    "review_state" in value &&
+    "reviewed_copy" in value &&
+    "changed_fields" in value &&
+    Array.isArray((value as PreSummaryReviewResult).changed_fields) &&
+    "review_attribution" in value &&
+    "reviewed_by" in value &&
+    "reviewed_at" in value
+  );
+}
+
 /** Capture a symptom intake (text or voice). Emits intake.captured. */
 export async function submitIntake(
   req: SubmitIntakeRequest,
@@ -237,6 +305,47 @@ export async function uploadIntakeMedia(
     method: "POST",
     body: form,
   });
+  return guardShape(
+    data,
+    isMediaUploadRef,
+    "The API returned an unexpected upload ticket shape",
+  );
+}
+
+/**
+ * Upload a doctor's voice note or photo as prescribing input (PHASE-8.1 T06,
+ * #481). Doctor-scoped sibling of `uploadIntakeMedia`: the bytes land under
+ * the `rx_input/` storage prefix (encrypted at rest) and the returned opaque
+ * ticket is used as `DoctorInputRequest.media_ref` on
+ * `POST /v1/care/cases/{case_id}/doctor-input`.
+ */
+export async function uploadDoctorMedia(
+  file: Blob,
+  options: {
+    filename?: string;
+    audioDurationMs?: number;
+    fileSizeBytes?: number;
+  } = {},
+): Promise<MediaUploadRef> {
+  const form = new FormData();
+  const filename =
+    options.filename ?? (file instanceof File ? file.name : "recording.webm");
+  form.append("file", file, filename);
+  const query = new URLSearchParams();
+  if (options.audioDurationMs !== undefined) {
+    query.set("audio_duration_ms", String(options.audioDurationMs));
+  }
+  if (options.fileSizeBytes !== undefined) {
+    query.set("file_size_bytes", String(options.fileSizeBytes));
+  }
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  const data = await request<unknown>(
+    `/v1/intake/upload-doctor-media${suffix}`,
+    {
+      method: "POST",
+      body: form,
+    },
+  );
   return guardShape(
     data,
     isMediaUploadRef,
@@ -297,5 +406,104 @@ export async function savePatientEdits(
     data,
     isPatientEditsResult,
     "The API returned an unexpected patient-edits result shape",
+  );
+}
+
+/**
+ * List pre-summaries assigned to the calling doctor that await review,
+ * low-confidence first (PHASE-8.1 T07, #447). Each item carries the
+ * confidence flag so the console can surface the items that most need
+ * the doctor's attention (US-11/12).
+ */
+export async function fetchReviewQueue(): Promise<ReviewQueueItem[]> {
+  const data = await request<unknown>("/v1/intake/review-queue");
+  return guardShape(
+    data,
+    (value): value is ReviewQueueItem[] =>
+      Array.isArray(value) && value.every(isReviewQueueItem),
+    "The API returned an unexpected review-queue shape",
+  );
+}
+
+/**
+ * Read the full pre-summary content for the assigned doctor's review
+ * (PHASE-8.1 T08, #448). Distinct doctor-scoped read from the patient GET
+ * pre-summary: returns the structured summary, symptoms, confidence flag,
+ * and review state for the doctor to whom the intake is assigned.
+ */
+export async function fetchPreSummaryForReview(
+  intakeId: number,
+): Promise<PreSummaryView> {
+  const data = await request<unknown>(
+    `/v1/intake/${intakeId}/pre-summary/review`,
+  );
+  return guardShape(
+    data,
+    isPreSummaryView,
+    "The API returned an unexpected pre-summary shape",
+  );
+}
+
+/**
+ * Read an intake's transcript and media refs for the assigned doctor
+ * (PHASE-8.1 T09, #484). Pre-summary-keyed doctor read backing the case
+ * workspace pre-summary tab: the care case carries only the pre-summary id,
+ * the facade resolves the intake and enforces the assigned-doctor scope.
+ */
+export async function fetchIntakeDetailForDoctor(
+  preSummaryId: number,
+): Promise<IntakeDetailView> {
+  const data = await request<unknown>(
+    `/v1/intake/pre-summary/${preSummaryId}/detail`,
+  );
+  return guardShape(
+    data,
+    isIntakeDetailView,
+    "The API returned an unexpected intake detail shape",
+  );
+}
+
+/**
+ * Fetch the intake audio clip bytes (PHASE-8.1 #484). Reuses the existing
+ * GET /v1/intake/{intake_id}/media/{media_ref_id} stream route with doctor
+ * auth (PHASE-7 T13, #357). The stream is not JSON, so it goes through the
+ * shared ``requestBlob`` transport (same auth + error-envelope handling as
+ * ``request<T>``) instead of a JSON parse. Audio is PHI, so the blob is
+ * consumed client-side only and never logged.
+ */
+export async function fetchIntakeMediaBlob(
+  intakeId: number,
+  mediaRefId: number,
+): Promise<Blob> {
+  return requestBlob(`/v1/intake/${intakeId}/media/${mediaRefId}`);
+}
+
+/**
+ * Perform the single attributed doctor review-and-finalize (PHASE-8.1 T04,
+ * #442). One action both attributes the review and moves the pre-summary to
+ * the terminal ``final`` state for BOTH confidence classes - a low-confidence
+ * summary can only reach ``final`` this way. Omitted or empty ``corrections``
+ * is a review with no edits.
+ */
+export async function reviewPreSummary(
+  intakeId: number,
+  corrections?: Record<string, unknown> | null,
+  retryKey?: string,
+): Promise<PreSummaryReviewResult> {
+  const body =
+    corrections === undefined || corrections === null ? {} : { corrections };
+  const key = idempotencyKey(retryKey);
+  const data = await request<unknown>(`/v1/intake/${intakeId}/review`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      [IDEMPOTENCY_KEY_HEADER]: key,
+    },
+    body: JSON.stringify(body),
+  });
+  return guardShape(
+    data,
+    isPreSummaryReviewResult,
+    "The API returned an unexpected review result shape",
   );
 }

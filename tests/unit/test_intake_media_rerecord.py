@@ -1,6 +1,7 @@
 """PHASE-7 T08: intake media upload + re-record facade (ticket #352, spec #344).
 
-Drives ``upload_intake_media`` and ``re_record_intake`` at the facade-with-fakes
+Drives ``upload_intake_media`` / ``re_record_intake`` and the doctor-scoped
+``upload_doctor_input_media`` (PHASE-8.1 T04, #481) at the facade-with-fakes
 seam - the real IntakeFacade with a fake engine, a fake media store, and an
 injected fake backoff sleep. Pins the durable, self-correcting capture contract:
 
@@ -9,6 +10,10 @@ injected fake backoff sleep. Pins the durable, self-correcting capture contract:
   partial capture is never lost silently; on success it returns a
   ``MediaUploadRef`` recording duration/size/attempt under the ``intake/``
   object prefix.
+- ``upload_doctor_input_media`` rides the same ladder and returns the same
+  ticket shape, but files under the ``rx_input/`` prefix with the caller's
+  doctor id - the media-origin namespace a ``DoctorInputRequest.media_ref``
+  points at.
 - ``re_record_intake`` attaches a fresh recording attempt, increments the
   server-side attempt count and hard-stops at 3 (never trusting the client),
   emits ``intake.retry_requested`` between attempts, and routes to forced text
@@ -72,19 +77,21 @@ class _FakeMediaStore:
     def __init__(self, *, n_failures: int = 0, stored_data: bytes = b"\xff" * 16) -> None:
         self.n_failures = n_failures
         self.save_calls: int = 0
-        self.captured_patient_ids: list[int] = []
+        self.captured_subject_ids: list[int] = []
+        self.captured_prefixes: list[str] = []
         self.captured_data: list[bytes] = []
         self.read_calls: int = 0
         self.read_object_keys: list[str] = []
         self.stored_data = stored_data
 
-    async def save(self, *, data: bytes, patient_id: int) -> str:
+    async def save(self, *, data: bytes, subject_id: int, prefix: str = "intake") -> str:
         self.save_calls += 1
-        self.captured_patient_ids.append(patient_id)
+        self.captured_subject_ids.append(subject_id)
+        self.captured_prefixes.append(prefix)
         self.captured_data.append(data)
         if self.save_calls <= self.n_failures:
             raise OSError("disk full")
-        return f"intake/{patient_id}/clip-{self.save_calls}.enc"
+        return f"{prefix}/{subject_id}/clip-{self.save_calls}.enc"
 
     async def read(self, *, object_key: str) -> bytes:
         self.read_calls += 1
@@ -133,11 +140,12 @@ def _file(
     duration_ms: int = 90_000,
     size: int = 1_024_000,
     record_attempt: int = 1,
+    media_type: str = "audio",
 ) -> MediaFile:
     return MediaFile(
         data=b"\x00" * 512,
         filename="recording.webm",
-        media_type="audio",
+        media_type=media_type,
         audio_duration_ms=duration_ms,
         file_size_bytes=size,
         record_attempt=record_attempt,
@@ -163,6 +171,7 @@ def _intake_row(
     status: str = "re_record",
     record_attempts: int = 1,
     forced_text: bool = False,
+    assigned_partner_id: int | None = None,
 ) -> object:
     return SimpleNamespace(
         id=intake_id,
@@ -175,6 +184,7 @@ def _intake_row(
         transcript=None,
         transcript_usability=None,
         forced_text=forced_text,
+        assigned_partner_id=assigned_partner_id,
         created_at=NOW,
         updated_at=NOW,
     )
@@ -243,7 +253,8 @@ async def test_upload_returns_a_media_ref_recording_metadata_under_intake_prefix
     assert ref.audio_duration_ms == 90_000
     assert ref.file_size_bytes == 1_024_000
     assert ref.record_attempt == 1
-    assert store.captured_patient_ids == [7]
+    assert store.captured_subject_ids == [7]
+    assert store.captured_prefixes == ["intake"]
     assert store.captured_data == [b"\x00" * 512]
 
 
@@ -267,6 +278,85 @@ async def test_upload_requires_a_configured_media_store() -> None:
 
     with pytest.raises(IntakeValidationError, match="media store is not configured"):
         await facade.upload_intake_media(patient_id=7, file=_file())
+
+
+# ---------------------------------------------------------------------------
+# upload_doctor_input_media - rx_input prefix (#481)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_doctor_upload_files_under_rx_input_with_the_doctor_id() -> None:
+    """The doctor's media lands in ``rx_input/`` and records the doctor id."""
+    store = _FakeMediaStore()
+    facade = _facade(_connection([]), store=store)
+
+    ref = await facade.upload_doctor_input_media(
+        doctor_id=12,
+        file=_file(duration_ms=90_000, size=1_024_000),
+    )
+
+    assert isinstance(ref, MediaUploadRef)
+    assert ref.object_key == "rx_input/12/clip-1.enc"
+    assert ref.object_key.startswith("rx_input/12/")
+    assert ref.media_type == "audio"
+    assert ref.audio_duration_ms == 90_000
+    assert ref.file_size_bytes == 1_024_000
+    assert ref.record_attempt == 1
+    assert store.captured_subject_ids == [12]
+    assert store.captured_prefixes == ["rx_input"]
+    assert store.captured_data == [b"\x00" * 512]
+
+
+@pytest.mark.asyncio
+async def test_doctor_upload_passes_a_photo_through_unchanged() -> None:
+    """A photo object keeps its canonical media type under the rx_input prefix."""
+    store = _FakeMediaStore()
+    facade = _facade(_connection([]), store=store)
+
+    ref = await facade.upload_doctor_input_media(
+        doctor_id=12,
+        file=_file(media_type="photo"),
+    )
+
+    assert ref.media_type == "photo"
+    assert store.captured_prefixes == ["rx_input"]
+
+
+@pytest.mark.asyncio
+async def test_doctor_upload_rides_the_same_retry_ladder() -> None:
+    """A flaky doctor media transfer heals within the ladder, not dropped."""
+    store = _FakeMediaStore(n_failures=1)
+    sleep = _FakeSleep()
+    facade = _facade(_connection([]), store=store, sleep=sleep)
+
+    ref = await facade.upload_doctor_input_media(doctor_id=12, file=_file())
+
+    assert store.save_calls == 2
+    assert len(sleep.waits) == 1
+    assert ref.object_key == "rx_input/12/clip-2.enc"
+
+
+@pytest.mark.asyncio
+async def test_doctor_upload_exhausted_ladder_raises_typed_error() -> None:
+    """A persistently failing doctor media transfer answers MediaTransferError."""
+    store = _FakeMediaStore(n_failures=999)
+    sleep = _FakeSleep()
+    facade = _facade(_connection([]), store=store, sleep=sleep)
+
+    with pytest.raises(MediaTransferError, match="failed after 3 attempts"):
+        await facade.upload_doctor_input_media(doctor_id=12, file=_file())
+
+    assert store.save_calls == 3
+    assert sleep.waits == [0.5, 1.0]
+
+
+@pytest.mark.asyncio
+async def test_doctor_upload_requires_a_configured_media_store() -> None:
+    facade = _facade(_connection([]))
+
+    with pytest.raises(IntakeValidationError, match="media store is not configured"):
+        await facade.upload_doctor_input_media(doctor_id=12, file=_file())
 
 
 # ---------------------------------------------------------------------------
@@ -554,11 +644,20 @@ async def test_get_intake_media_returns_decrypted_bytes_to_the_owning_patient() 
 
 @pytest.mark.asyncio
 async def test_get_intake_media_serves_a_doctor_partner_without_ownership_match() -> None:
-    """A doctor partner streams any intake's clip - no ownership check (route gates RBAC)."""
+    """The assigned doctor partner streams the intake's clip - no ownership match.
+
+    PHASE-8.1 (#443): the doctor branch checks the intake's
+    ``assigned_partner_id`` (the patient's pick), NOT patient ownership, so a
+    row whose patient id differs from the doctor caller is still served to the
+    assigned doctor.
+    """
     store = _FakeMediaStore(stored_data=b"doctor-audio")
     # Doctor path selects the intake WITHOUT the patient-id predicate, so a row
-    # whose patient id differs from the caller is still served.
-    connection = _connection(_playback_patient_results(intake_row=_intake_row(patient_id=42)))
+    # whose patient id differs from the caller is still served when the caller
+    # is the assigned partner (partner id 909).
+    connection = _connection(
+        _playback_patient_results(intake_row=_intake_row(patient_id=42, assigned_partner_id=909))
+    )
     facade = _facade(connection, store=store)
 
     data = await facade.get_intake_media(
@@ -569,6 +668,37 @@ async def test_get_intake_media_serves_a_doctor_partner_without_ownership_match(
     )
 
     assert data == b"doctor-audio"
+
+
+@pytest.mark.asyncio
+async def test_get_intake_media_refuses_an_unassigned_doctor() -> None:
+    """A doctor who was NOT the patient's pick is refused (404), never streamed.
+
+    PHASE-8.1 (#443): after a pick the intake's audio is PHI served only to
+    the assigned doctor. The doctor SELECT runs with ``assigned_partner_id = :caller_id``
+    in the WHERE clause (data minimization) - an unassigned doctor (or one
+    reading before any pick - ``assigned_partner_id`` NULL) matches no row and
+    gets the same ``IntakeNotFoundError`` as a non-owner, so the intake's
+    existence is never revealed.
+    """
+    store = _FakeMediaStore(stored_data=b"doctor-audio")
+    connection = _connection(
+        [
+            _FakeResult(row=None),  # no row matched the scoping predicate
+            _FakeResult(row=_media_row()),
+        ]
+    )
+    facade = _facade(connection, store=store)
+
+    with pytest.raises(IntakeNotFoundError, match="not found for caller 777"):
+        await facade.get_intake_media(
+            intake_id=1,
+            media_ref_id=11,
+            caller_id=777,
+            caller_role="doctor",
+        )
+
+    assert store.read_object_keys == []
 
 
 @pytest.mark.asyncio

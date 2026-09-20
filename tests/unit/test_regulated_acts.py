@@ -27,6 +27,7 @@ _REGULATED: tuple[str, ...] = (
     # Prescriptions
     "prescription.approved",
     "prescription.rejected",
+    "prescription.issued",
     "prescription.routed",
     # Diagnostics
     "report.filed",
@@ -69,6 +70,9 @@ _OPERATIONAL: tuple[str, ...] = (
     "pre_summary.low_confidence",
     "ai_job.failed",
     "case.consult_complete",
+    "case.closed",
+    "prescription.draft_created",
+    "prescription.reviewed",
 )
 
 
@@ -89,7 +93,6 @@ def test_operational_event_types_return_false(event_type: str) -> None:
         "unknown.type",
         "audit.event",
         "audit.tamper_detected",
-        "prescription.issued",
         "prescription.delivered",
         "diagnostic.order_booked",
         "report.uploaded",

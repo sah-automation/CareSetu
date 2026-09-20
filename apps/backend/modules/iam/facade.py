@@ -50,6 +50,9 @@ from modules.iam.identity_facade import (
     PartnerCredentialCreatedResult as PartnerCredentialCreatedResult,
 )
 from modules.iam.identity_facade import (
+    PatientProfile as PatientProfile,
+)
+from modules.iam.identity_facade import (
     RegisterPatientResult as RegisterPatientResult,
 )
 from modules.iam.mfa_facade import (
@@ -63,6 +66,15 @@ from modules.iam.mfa_facade import (
 )
 from modules.iam.otp_facade import (
     OtpFacade as OtpFacade,
+)
+from modules.iam.otp_facade import (
+    PartnerLoginOtpResult as PartnerLoginOtpResult,
+)
+from modules.iam.otp_facade import (
+    PartnerLoginProfileGate as PartnerLoginProfileGate,
+)
+from modules.iam.otp_facade import (
+    PartnerVerifyOtpResult as PartnerVerifyOtpResult,
 )
 from modules.iam.otp_facade import (
     ResendOtpResult as ResendOtpResult,
@@ -85,6 +97,9 @@ from modules.iam.session_facade import (
 )
 from modules.iam.session_facade import (
     VerifyPartnerExists as VerifyPartnerExists,
+)
+from modules.iam.session_facade import (
+    VerifyPartnerProfile as VerifyPartnerProfile,
 )
 from modules.iam.session_facade import (
     _partner_role_status as _partner_role_status,
@@ -172,6 +187,38 @@ class IamFacade:
             phone, invited_by_identity_id=invited_by_identity_id, connection=connection
         )
 
+    async def save_patient_profile(
+        self,
+        identity_id: int,
+        profile: PatientProfile,
+        connection: AsyncConnection | None = None,
+    ) -> PatientProfile:
+        """Idempotently upsert the caller's profile-completion data (#482).
+
+        Delegated to ``IdentityFacade``: one row per identity in
+        ``iam.iam_patient_profiles`` (ON CONFLICT DO UPDATE). ``connection``
+        lets a same-transaction caller share an open transaction (dual-seam
+        discipline); when omitted the seam opens its own. The route passes the
+        authenticated principal's subject id, so one identity can never write
+        another's row.
+        """
+        return await self._identity.save_patient_profile(
+            identity_id, profile, connection=connection
+        )
+
+    async def get_patient_profile(
+        self,
+        identity_id: int,
+        connection: AsyncConnection | None = None,
+    ) -> PatientProfile | None:
+        """The caller's saved profile, or ``None`` when it is not set (#482).
+
+        Delegated to ``IdentityFacade``. Scoped to ``identity_id`` so one
+        identity never reads another's row; ``None`` is the typed "not set"
+        the GET route wraps.
+        """
+        return await self._identity.get_patient_profile(identity_id, connection=connection)
+
     # -- OTP delegation (ADR-0006, ticket #168) ----------------------------
 
     async def verify_otp(self, phone: str, otp: str) -> VerifyOtpResult:
@@ -181,6 +228,31 @@ class IamFacade:
     async def resend_otp(self, phone: str) -> ResendOtpResult:
         """Request a fresh code: latest-wins over the pending challenge."""
         return await self._otp.resend_otp(phone)
+
+    async def partner_login(
+        self, phone: str, partner_gate: PartnerLoginProfileGate
+    ) -> PartnerLoginOtpResult:
+        """Start a partner phone-OTP login (ADR-0016, F014-T02 #462).
+
+        Delegated to ``OtpFacade``. ``partner_gate`` resolves the partner
+        profile id for the caller's identity (or None) at the module boundary;
+        the calling route wires the partner facade's non-throwing
+        ``resolve_partner_id_by_identity`` seam into the port so iam never
+        imports or queries the partner schema (ADR-0003). A phone with no
+        partner profile is refused ``no_account`` - never creating an identity.
+        """
+        return await self._otp.partner_login(phone, partner_gate)
+
+    async def partner_verify(self, phone: str, otp: str) -> PartnerVerifyOtpResult:
+        """Consume a partner login challenge and mark the phone verified (ADR-0016, F014-T03 #463).
+
+        Delegated to ``OtpFacade``. Silently: no patient role grant, no
+        ``patient.verified`` outbox event, and no identity lifecycle transition
+        - partner phone verification is not a lifecycle event and never touches
+        the ``patient.*`` family (ADR-0016 §Events). The session mint (ticket
+        04, #464) reads the marker this sets.
+        """
+        return await self._otp.partner_verify(phone, otp)
 
     # -- MFA delegation (ADR-0006, T07 ticket #250) ------------------------
 
@@ -239,7 +311,9 @@ class IamFacade:
         route (WI-3, #336), which passes the already-verified ``partner_id`` in.
         An optional ``verify_partner_exists`` callback re-confirms the profile
         still exists atomically under the identity row lock before the mint
-        (#342).
+        (#342). F014-T04 (#464) additionally refuses a phone whose identity is
+        not ``phone_verified`` - a brand-new registrant who skipped the phone
+        OTP step is refused 409 ``SESSION_REFUSED`` until they verify.
         """
         return await self._sessions.issue_partner_session(
             phone, partner_id, verify_partner_exists=verify_partner_exists
@@ -253,9 +327,21 @@ class IamFacade:
         """Resolve a valid access JWT to its scope (delegated to ``SessionFacade``)."""
         return await self._sessions.validate_token(token)
 
-    async def refresh_session(self, refresh_token: str) -> SessionResult:
-        """Rotate an opaque refresh token into a fresh session (delegated to ``SessionFacade``)."""
-        return await self._sessions.refresh_session(refresh_token)
+    async def refresh_session(
+        self,
+        refresh_token: str,
+        verify_partner_profile: VerifyPartnerProfile | None = None,
+    ) -> SessionResult:
+        """Rotate an opaque refresh token into a fresh session (delegated to ``SessionFacade``).
+
+        ``verify_partner_profile`` is the F014-T05 (#465) composition-boundary
+        callback the route wires: on a ``partner``-scoped renewal the session
+        facade re-confirms the partner profile still exists on its lock-held
+        connection (delegated unchanged to ``SessionFacade``).
+        """
+        return await self._sessions.refresh_session(
+            refresh_token, verify_partner_profile=verify_partner_profile
+        )
 
     # -- Protected-route reads (PHASE-2.6 T05, #196) -----------------------
 

@@ -20,7 +20,11 @@ The sub-facade owns the manual activation gate:
 When an operator decision rejects an ``[Active]`` partner, the sub-facade routes
 the close-out through the credential-validity deep module's single close-out
 transition (WI-1, #331) - the deindex + ``credential.invalidated`` + cache-flush
-choreography is owned there, never re-implemented here.
+choreography is owned there, never re-implemented here. Approving a partner
+routes the activation through that same deep module's single activate
+transition (#456) - the round's credentials are stamped verified and the
+directory-index row is upserted there, so the approved partner becomes
+directory-visible in the same transaction as the decision.
 
 It takes the engine, the credential-validity deep module, and the directory-
 cache seam in its constructor and owns its result models (``PartnerQueueItem``,
@@ -226,6 +230,19 @@ class OperatorGateFacade:
                 )
             )
             if approve:
+                # The activation seam (#456): approval is the ONLY path that
+                # makes a partner directory-visible, so it routes through the
+                # credential-validity deep module's single activate transition
+                # - the round's credentials are stamped verified and the
+                # directory-index row upserted here, in the same transaction as
+                # the status flip/decision/event (ADR-0002 §1), mirroring how
+                # the reject of an ``[Active]`` partner routes close-out
+                # (WI-1, #331): never local choreography.
+                await self._credential_validity.activate_partner(
+                    connection,
+                    partner_id,
+                    round=next_state.round,
+                )
                 await write_outbox(
                     connection,
                     PARTNER_SCHEMA,

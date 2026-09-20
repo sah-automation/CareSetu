@@ -25,6 +25,7 @@ from modules.iam.domain.jwt import issue_token
 from modules.partner.domain.exceptions import (
     AppealAlreadyUsedError,
     PartnerNotRejectedError,
+    PartnerSuspendedError,
 )
 from modules.partner.facade import PartnerView, RejectionReasonView
 
@@ -52,11 +53,13 @@ class StubPartnerFacade:
             partner_id=_PARTNER_ID, partner_type="doctor", status="Rejected", round=2
         )
 
-    async def get_rejection_reason(self, partner_id: int) -> RejectionReasonView:
+    async def get_rejection_reason(
+        self, partner_id: int, *, identity_id: int | None = None
+    ) -> RejectionReasonView:
         self.calls.append({"method": "get_rejection_reason", "partner_id": partner_id})
         return self.rejection
 
-    async def appeal(self, partner_id: int) -> PartnerView:
+    async def appeal(self, partner_id: int, *, identity_id: int | None = None) -> PartnerView:
         self.calls.append({"method": "appeal", "partner_id": partner_id})
         return self.appeal_result
 
@@ -110,12 +113,37 @@ def test_partner_files_one_time_appeal() -> None:
     ]
 
 
+def test_suspended_partner_reason_answers_403_partner_suspended() -> None:
+    """F014-T06 #466: the reason route stays reachable only while not suspended.
+
+    A suspended identity maps to the ``PARTNER_SUSPENDED`` 403 envelope before
+    the recovery logic runs; ``PARTNER_NOT_REJECTED`` stays the non-state error.
+    """
+    facade = StubPartnerFacade()
+
+    async def raise_suspended(
+        partner_id: int, *, identity_id: int | None = None
+    ) -> RejectionReasonView:
+        facade.calls.append({"method": "get_rejection_reason", "partner_id": partner_id})
+        raise PartnerSuspendedError(7)
+
+    facade.get_rejection_reason = raise_suspended  # type: ignore[method-assign]
+    client = _client(facade)
+
+    response = client.get("/v1/partner/rejection-reason", headers=_bearer(_token()))
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "PARTNER_SUSPENDED"
+
+
 def test_non_rejected_partner_reason_answers_422_not_rejected() -> None:
     facade = StubPartnerFacade()
     client = _client(facade)
 
     # Stub the facade to raise for a non-rejected partner.
-    async def raise_not_rejected(partner_id: int) -> RejectionReasonView:
+    async def raise_not_rejected(
+        partner_id: int, *, identity_id: int | None = None
+    ) -> RejectionReasonView:
         facade.calls.append({"method": "get_rejection_reason", "partner_id": partner_id})
         raise PartnerNotRejectedError(partner_id, "Active")
 
@@ -129,7 +157,7 @@ def test_non_rejected_partner_reason_answers_422_not_rejected() -> None:
 def test_second_appeal_answers_422_already_used() -> None:
     facade = StubPartnerFacade()
 
-    async def raise_used(partner_id: int) -> PartnerView:
+    async def raise_used(partner_id: int, *, identity_id: int | None = None) -> PartnerView:
         facade.calls.append({"method": "appeal", "partner_id": partner_id})
         raise AppealAlreadyUsedError()
 
@@ -140,6 +168,23 @@ def test_second_appeal_answers_422_already_used() -> None:
 
     assert response.status_code == 422
     assert response.json()["code"] == "APPEAL_ALREADY_USED"
+
+
+def test_suspended_partner_appeal_answers_403_partner_suspended() -> None:
+    """F014-T06 #466: the appeal route stays reachable only while not suspended."""
+    facade = StubPartnerFacade()
+
+    async def raise_suspended(partner_id: int, *, identity_id: int | None = None) -> PartnerView:
+        facade.calls.append({"method": "appeal", "partner_id": partner_id})
+        raise PartnerSuspendedError(7)
+
+    facade.appeal = raise_suspended  # type: ignore[method-assign]
+    client = _client(facade)
+
+    response = client.post("/v1/partner/appeal", headers=_bearer(_token()))
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "PARTNER_SUSPENDED"
 
 
 def test_recovery_routes_require_partner_scope() -> None:

@@ -100,10 +100,13 @@ def test_single_valid_credential_no_expiry_is_eligible() -> None:
 # --- Single invalid credential cases ---
 
 
-def test_unverified_credential_is_invalid() -> None:
+def test_unverified_credential_alone_is_not_eligible() -> None:
+    """A pending re-verification row (verified=False) is not part of the
+    approved-round credential set: it establishes neither eligibility nor an
+    invalidation (grace window, #457, FEAT-004)."""
     result = evaluate_eligibility([_unverified_credential()], now=_NOW)
 
-    assert result == EligibilityDecision(has_any=True, has_invalid=True)
+    assert result == EligibilityDecision(has_any=False, has_invalid=False)
 
 
 def test_expired_credential_is_invalid() -> None:
@@ -144,13 +147,17 @@ def test_credential_expiring_exactly_now_is_invalid() -> None:
 # --- Multiple credential mixes ---
 
 
-def test_one_valid_one_unverified_yields_invalid() -> None:
+def test_one_valid_one_unverified_stays_eligible() -> None:
+    """AC1 (re-submission-then-search, #457, FEAT-004): an approved round's valid
+    credential keeps the partner eligible while a pending new-round row
+    (verified=False) waits for an operator decision - the pair must not
+    de-list the partner."""
     result = evaluate_eligibility(
         [_valid_credential(credential_id=1), _unverified_credential(credential_id=2)],
         now=_NOW,
     )
 
-    assert result == EligibilityDecision(has_any=True, has_invalid=True)
+    assert result == EligibilityDecision(has_any=True, has_invalid=False)
 
 
 def test_one_valid_one_expired_yields_invalid() -> None:
@@ -190,6 +197,17 @@ def test_all_invalid_yields_invalid() -> None:
     )
 
     assert result == EligibilityDecision(has_any=True, has_invalid=True)
+
+
+def test_only_unverified_yields_no_eligibility() -> None:
+    """Several pending re-verification rows still form no approved-round set
+    (grace window, #457, FEAT-004)."""
+    result = evaluate_eligibility(
+        [_unverified_credential(1), _unverified_credential(2), _unverified_credential(3)],
+        now=_NOW,
+    )
+
+    assert result == EligibilityDecision(has_any=False, has_invalid=False)
 
 
 # --- ADR-0011 lazy read-hide: expired before sweep is already invalid ---

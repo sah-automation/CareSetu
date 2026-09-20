@@ -16,7 +16,7 @@ and the ``iam`` schema is migrated up for the module and down again afterwards.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -26,7 +26,7 @@ import pytest_asyncio
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from modules.iam.adapters.sms import MockSmsAdapter, SmsAdapter, SmsSendRequest, SmsSendResult
@@ -40,6 +40,7 @@ from modules.iam.domain.exceptions import (
 from modules.iam.domain.jwt import verify_token
 from modules.iam.domain.refresh import hash_refresh_token
 from modules.iam.facade import IamFacade
+from modules.partner.facade import PartnerFacade
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_INI = REPO_ROOT / "apps" / "backend" / "alembic.ini"
@@ -124,6 +125,18 @@ def _facade(
         access_token_signing_key=_KEY,
         refresh_token_ttl_seconds=refresh_token_ttl_seconds,
     )
+
+
+def _partner_facades(database_url: str, clock: MutableClock) -> tuple[IamFacade, PartnerFacade]:
+    """Iam + partner facades sharing one engine, for the composition-boundary tests."""
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    facade = IamFacade(
+        engine=engine,
+        sms_adapter=MockSmsAdapter(),
+        clock=clock,
+        access_token_signing_key=_KEY,
+    )
+    return facade, PartnerFacade(engine=engine, iam_facade=facade)
 
 
 async def _flush(facade: IamFacade) -> None:
@@ -520,3 +533,250 @@ async def test_operator_session_rotates_to_operator_scope(
     assert refreshed.identity_id == identity_id
     claims = verify_token(refreshed.jwt, _KEY, _T0 + timedelta(minutes=10))
     assert claims.scope == "operator"
+
+
+# --- F014-T05 (#465): partner-scoped renewal in every pre-activation state ---
+
+
+@pytest_asyncio.fixture
+async def clean_partner(database_url: str) -> None:
+    """Empty the partner tables the partner-refresh tests seed, per test."""
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "TRUNCATE TABLE partner.partner_verifications, "
+                    "partner.partner_credentials, partner.partner_profiles, "
+                    "partner.partner_outbox, partner.partner_directory_index, "
+                    "partner.partner_service_areas CASCADE"
+                )
+            )
+    finally:
+        await engine.dispose()
+
+
+def _partner_recheck(
+    partner_facade: PartnerFacade,
+) -> Callable[[AsyncConnection, int], Awaitable[None]]:
+    """Route-equivalent composition-boundary re-check (WI-3, #336 wiring).
+
+    Mirrors what ``POST /v1/auth/refresh`` wires for a partner-scoped renewal:
+    resolve the profile for the identity on iam's lock-held connection and
+    raise the refresh envelope when it is missing or gone.
+    """
+
+    async def _verify_profile(connection: AsyncConnection, identity_id: int) -> None:
+        partner_id = await partner_facade.resolve_partner_id_on_connection(connection, identity_id)
+        if partner_id is None:
+            raise RefreshTokenRevokedError(
+                f"identity {identity_id} has no partner profile; refusing to refresh"
+            )
+        exists = await partner_facade.verify_partner_exists(connection, partner_id)
+        if not exists:
+            raise RefreshTokenRevokedError(
+                f"partner profile {partner_id} no longer exists at session renewal"
+            )
+
+    return _verify_profile
+
+
+async def _seed_partner_refresh(
+    database_url: str,
+    *,
+    identity_status: str,
+    partner_status: str | None,
+    partner_grant_status: str | None = None,
+    scope: str = "partner",
+    phone: str = _PHONE,
+) -> tuple[int, int | None, str]:
+    """Seed an identity, an optional partner profile, and a live partner-session row."""
+    refresh_token = f"{phone}-refresh-token"
+    token_hash = hash_refresh_token(refresh_token)
+    engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            identity_id = int(
+                (
+                    await connection.execute(
+                        text(
+                            "INSERT INTO iam.iam_identities (phone_e164, status, phone_verified) "
+                            "VALUES (:phone, :status, TRUE) RETURNING id"
+                        ),
+                        {"phone": phone, "status": identity_status},
+                    )
+                ).scalar_one()
+            )
+            if partner_grant_status is not None:
+                await connection.execute(
+                    text(
+                        "INSERT INTO iam.iam_role_grants (identity_id, role, status) "
+                        "VALUES (:identity_id, 'partner', :status)"
+                    ),
+                    {"identity_id": identity_id, "status": partner_grant_status},
+                )
+            partner_id: int | None = None
+            if partner_status is not None:
+                partner_id = int(
+                    (
+                        await connection.execute(
+                            text(
+                                "INSERT INTO partner.partner_profiles "
+                                "(identity_id, partner_type, status, practice_name, "
+                                " practice_address, practice_latitude, practice_longitude) "
+                                "VALUES (:identity_id, 'doctor', :status, 'Test Clinic', "
+                                " 'integration test address', :latitude, :longitude) "
+                                "RETURNING id"
+                            ),
+                            {
+                                "identity_id": identity_id,
+                                "status": partner_status,
+                                "latitude": 24.0402,
+                                "longitude": 87.3309,
+                            },
+                        )
+                    ).scalar_one()
+                )
+            await connection.execute(
+                text(
+                    "INSERT INTO iam.iam_sessions "
+                    "(jti, identity_id, scope, expires_at, "
+                    "refresh_token_hash, refresh_expires_at) "
+                    "VALUES (:jti, :identity_id, :scope, :expires_at, "
+                    ":token_hash, :refresh_expires_at)"
+                ),
+                {
+                    "jti": f"{phone}-jti",
+                    "identity_id": identity_id,
+                    "scope": scope,
+                    "expires_at": _T0 + timedelta(minutes=15),
+                    "token_hash": token_hash,
+                    "refresh_expires_at": _T0 + timedelta(days=30),
+                },
+            )
+    finally:
+        await engine.dispose()
+    return identity_id, partner_id, refresh_token
+
+
+@pytest.mark.parametrize("partner_status", ["Registered", "Under Verification", "Rejected"])
+async def test_partner_scoped_session_renews_in_every_pre_activation_state(
+    database_url: str, clean_iam: Any, clean_partner: None, partner_status: str
+) -> None:
+    """F014-T05 (#465): a waiting partner's refresh token renews, no role grant.
+
+    A partner at any point before activation - [Registered], [Under
+    Verification], or [Rejected] - holds no ``partner`` role grant, yet their
+    session must not eject after ~15 minutes. The renewal re-derives the
+    partner scope from the session row (not the grant), re-confirms the
+    profile exists at the composition boundary on the locked connection, and
+    rotates the token in the same transaction.
+    """
+    clock = MutableClock(_T0)
+    facade, partner = _partner_facades(database_url, clock)
+    identity_id, partner_id, refresh_token = await _seed_partner_refresh(
+        database_url,
+        identity_status="Unverified",
+        partner_status=partner_status,
+    )
+    assert partner_id is not None
+
+    clock.set(_T0 + timedelta(minutes=10))
+    refreshed = await facade.refresh_session(
+        refresh_token, verify_partner_profile=_partner_recheck(partner)
+    )
+
+    assert refreshed.scope == "partner"
+    assert refreshed.identity_id == identity_id
+    assert refreshed.refresh_token != refresh_token
+    claims = verify_token(refreshed.jwt, _KEY, _T0 + timedelta(minutes=10))
+    assert claims.scope == "partner"
+    rows = await _query(
+        database_url,
+        "SELECT jti, revoked_at, scope FROM iam.iam_sessions ORDER BY id",
+    )
+    assert len(rows) == 2
+    assert rows[0]["jti"] == f"{_PHONE}-jti"
+    assert rows[0]["revoked_at"] == _T0 + timedelta(minutes=10)
+
+
+async def test_suspended_partner_identity_refuses_partner_refresh(
+    database_url: str, clean_iam: Any, clean_partner: None
+) -> None:
+    """F014-T05 (#465): Suspended is the only identity refusal on partner renewal."""
+    clock = MutableClock(_T0)
+    facade, partner = _partner_facades(database_url, clock)
+    _, partner_id, refresh_token = await _seed_partner_refresh(
+        database_url,
+        identity_status="Suspended",
+        partner_status="Registered",
+    )
+    assert partner_id is not None
+
+    clock.set(_T0 + timedelta(minutes=10))
+    with pytest.raises(RefreshTokenRevokedError, match="Suspended"):
+        await facade.refresh_session(
+            refresh_token, verify_partner_profile=_partner_recheck(partner)
+        )
+
+
+async def test_suspended_partner_role_grant_refuses_partner_refresh(
+    database_url: str, clean_iam: Any, clean_partner: None
+) -> None:
+    """F014-T05 (#465, #466): a deactivated partner's suspended grant refuses renewal.
+
+    Suspension is the iam-side signal: an identity that is still ``Active`` but
+    whose ``partner`` role grant was flipped to ``Suspended`` by
+    ``suspend_partner_role`` (the ``credential.invalidated`` deactivation path)
+    must not renew its partner session.
+    """
+    clock = MutableClock(_T0)
+    facade, partner = _partner_facades(database_url, clock)
+    _, partner_id, refresh_token = await _seed_partner_refresh(
+        database_url,
+        identity_status="Active",
+        partner_status="Registered",
+        partner_grant_status="Suspended",
+    )
+    assert partner_id is not None
+
+    clock.set(_T0 + timedelta(minutes=10))
+    with pytest.raises(RefreshTokenRevokedError, match="suspended partner role"):
+        await facade.refresh_session(
+            refresh_token, verify_partner_profile=_partner_recheck(partner)
+        )
+
+
+async def test_deleted_partner_profile_refuses_partner_refresh(
+    database_url: str, clean_iam: Any, clean_partner: None
+) -> None:
+    """F014-T05 (#465): a deleted profile refuses the renewal at the boundary.
+
+    The profile existed when the session was minted but is gone by renewal;
+    the composition-boundary re-check detects this on iam's locked connection
+    and refuses with the refresh envelope before any mint.
+    """
+    clock = MutableClock(_T0)
+    facade, partner = _partner_facades(database_url, clock)
+    _, partner_id, refresh_token = await _seed_partner_refresh(
+        database_url,
+        identity_status="Unverified",
+        partner_status="Registered",
+    )
+    assert partner_id is not None
+
+    engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("DELETE FROM partner.partner_profiles WHERE id = :partner_id"),
+                {"partner_id": partner_id},
+            )
+    finally:
+        await engine.dispose()
+
+    clock.set(_T0 + timedelta(minutes=10))
+    with pytest.raises(RefreshTokenRevokedError, match="no partner profile"):
+        await facade.refresh_session(
+            refresh_token, verify_partner_profile=_partner_recheck(partner)
+        )

@@ -9,13 +9,19 @@
 //   - Name + age + gender gate care actions (intake submission, booking).
 //   - Area/address gates medicine-delivery checkout only.
 //
-// INTEGRATION POINT (later phase): the draft lives client-side only -
-// localStorage here, a server-side profile write (gap G5) later. Nothing in
-// this module may pretend persistence beyond the device exists. The language
-// field records profile-language intent per spec #191 D1: asked explicitly
-// in wizard step 1, defaulting to "en" until set.
+// PHASE-8.1 T2 (#488): the draft is the in-flight edit buffer on top of the
+// patient's server-side profile (PUT/GET /v1/me/profile, #482). It is stored
+// locally per identity so two identities on one browser never share a draft
+// view; hydration (ProfileProvider) answers saved-profile state before this
+// buffer is ever consulted. The language field records profile-language
+// intent per spec #191 D1: asked explicitly in wizard step 1, defaulting to
+// "en" until set.
 
 import type { Lang } from "@/lib/i18n/dictionaries";
+
+// Imported as a type only - the client's functions stay behind the
+// ProfileProvider so pure state logic never issues HTTP itself.
+import type { StoredPatientProfile } from "@/lib/profile/api";
 
 const DRAFT_STORAGE_KEY = "caresetu.profile.draft";
 
@@ -35,7 +41,7 @@ export interface ProfileDraft {
   trackBp: boolean;
   trackSugar: boolean;
   // Step 3 - skippable photo/area/emergency contact.
-  /** File name only this phase - no upload exists yet (integration point). */
+  /** File-name intent only - stored server-side as the nullable photo_ref. */
   photoFileName: string;
   area: string;
   emergencyContact: string;
@@ -208,14 +214,31 @@ export function __resetNudgeDismissalsForTests(): void {
 }
 
 // --- Persistence ------------------------------------------------------------
+// The local draft stays the in-flight edit buffer even while the saved profile
+// lives server-side (#488 AC 1). The storage key is scoped per identity so a
+// logout + login as another patient never surfaces the previous identity's
+// draft (#488 AC 5): `caresetu.profile.draft.<identityId>`. When no identity
+// is resolved the legacy global key is used - patient surfaces only reach the
+// buffer while a patient session is active, so the suffix is present in
+// practice.
 
-export function saveDraft(draft: ProfileDraft): void {
-  window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(draft));
+/** The identity-scoped localStorage key for a draft. */
+export function draftStorageKey(identityId?: number): string {
+  return identityId === undefined || identityId === null
+    ? DRAFT_STORAGE_KEY
+    : `${DRAFT_STORAGE_KEY}.${identityId}`;
 }
 
-/** Stored draft when readable; a fresh initial draft otherwise. */
-export function loadDraft(): ProfileDraft {
-  const raw = window.localStorage.getItem(DRAFT_STORAGE_KEY);
+export function saveDraft(draft: ProfileDraft, identityId?: number): void {
+  window.localStorage.setItem(
+    draftStorageKey(identityId),
+    JSON.stringify(draft),
+  );
+}
+
+/** Stored draft for the identity when readable; a fresh initial draft otherwise. */
+export function loadDraft(identityId?: number): ProfileDraft {
+  const raw = window.localStorage.getItem(draftStorageKey(identityId));
   if (!raw) return initialDraft();
   try {
     const parsed = JSON.parse(raw) as Partial<ProfileDraft> | null;
@@ -227,4 +250,77 @@ export function loadDraft(): ProfileDraft {
     console.warn("[profile-draft] stored draft unreadable, starting fresh");
     return initialDraft();
   }
+}
+
+// --- Saved-profile mapping --------------------------------------------------
+// The stored profile reflects exactly what the patient chose (#488 AC 4).
+// Mapping is lossy by design: the two chronic-interest toggles and the photo
+// file name are buffer-only today (the server model keeps photo_ref, not a
+// file name), so `seedDraftFromServer` carries those buffer-only fields over
+// when a saved profile hydrates the editable buffer.
+
+const VALID_GENDERS: readonly GenderId[] = ["female", "male", "other"];
+
+function serverGender(gender: string): "" | GenderId {
+  return VALID_GENDERS.includes(gender as GenderId) ? (gender as GenderId) : "";
+}
+
+/** Map a saved server profile back into the draft shape for display. */
+export function serverProfileToDraft(
+  profile: StoredPatientProfile,
+): ProfileDraft {
+  return {
+    name: profile.name,
+    age: String(profile.age),
+    gender: serverGender(profile.gender),
+    language: profile.preferred_language === "hi" ? "hi" : "en",
+    trackBp: false,
+    trackSugar: false,
+    photoFileName: profile.photo_ref ?? "",
+    area: profile.area ?? "",
+    emergencyContact: profile.emergency_contact ?? "",
+  };
+}
+
+/**
+ * Seed the editable buffer from a saved profile. Persisted fields always come
+ * from the server - a saved profile must win over any stale local copy - while
+ * the fields the server does not model yet (the tracking toggles) carry over
+ * from the previous buffer.
+ */
+export function seedDraftFromServer(
+  profile: StoredPatientProfile,
+  buffer: ProfileDraft,
+): ProfileDraft {
+  return {
+    ...serverProfileToDraft(profile),
+    trackBp: buffer.trackBp,
+    trackSugar: buffer.trackSugar,
+  };
+}
+
+/**
+ * Build the PUT body from a draft. Optional items (area, emergency contact,
+ * photo) are unsettable: an empty choice becomes null so the stored profile
+ * reflects exactly what the patient chose (#488 AC 4). Callers gate on
+ * `basicsComplete` first; a stray call with incomplete basics throws.
+ */
+export function draftToProfilePayload(
+  draft: ProfileDraft,
+): StoredPatientProfile {
+  const age = parseAge(draft.age);
+  if (age === null || !hasText(draft.name) || draft.gender === "") {
+    throw new Error("profile payload requires complete basics");
+  }
+  const emptyToNull = (value: string): string | null =>
+    value.trim() === "" ? null : value.trim();
+  return {
+    name: draft.name.trim(),
+    age,
+    gender: draft.gender,
+    preferred_language: draft.language,
+    area: emptyToNull(draft.area),
+    emergency_contact: emptyToNull(draft.emergencyContact),
+    photo_ref: emptyToNull(draft.photoFileName),
+  };
 }

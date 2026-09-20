@@ -499,8 +499,10 @@ def test_real_api_ts_passes_against_real_openapi() -> None:
     interfaces, endpoints = parse_api(API_FILE.read_text(encoding="utf-8"))
     spec = load_openapi(None)
 
-    # Six auth endpoints plus the protected GET /v1/me session read
-    # mirrored by the contract gate since PHASE-2.6 T05 (#196).  The
-    # partner/session endpoint was added by T05 (#298).
-    assert len(endpoints) == 7
+    # Seven auth endpoints (verify, register, resend, session,
+    # partner/session, partner/login, partner/verify), the protected
+    # GET /v1/me session read mirrored since PHASE-2.6 T05 (#196), and
+    # the dev-only OTP reader.  Partner surface added by F014 T02/T03
+    # (#462/#463) and T05 (#298).
+    assert len(endpoints) == 9
     assert check_contract(interfaces, endpoints, spec) == []

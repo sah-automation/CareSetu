@@ -7,18 +7,15 @@ import { API_BASE_URL, authedFetch } from "@/lib/api-base";
 import { ApiError, parseErrorEnvelope } from "@/lib/api-errors";
 
 /**
- * Fetch wrapper that injects `Authorization: Bearer <jwt>` and handles
- * network errors, non-ok responses, and JSON parsing. Returns the parsed
- * JSON payload as type `T`.
- *
- * Throws `ApiError` with:
- * - `NETWORK_ERROR` when the fetch itself fails (no HTTP response)
- * - The error envelope code when the response is non-ok
+ * Shared authed round-trip: injects `Authorization: Bearer <jwt>`, then maps
+ * network failures to `NETWORK_ERROR` and non-ok responses to the backend
+ * error envelope. `request<T>` JSON-parses the body; `requestBlob` returns it
+ * as a `Blob` for non-JSON streams (audio, files) - one transport for both.
  */
-export async function request<T>(
+async function authedResponse(
   path: string,
   options?: RequestInit,
-): Promise<T> {
+): Promise<Response> {
   let response: Response;
   try {
     response = await authedFetch(`${API_BASE_URL}${path}`, options);
@@ -35,7 +32,34 @@ export async function request<T>(
     throw new ApiError(await parseErrorEnvelope(response));
   }
 
-  return (await response.json()) as T;
+  return response;
+}
+
+/**
+ * Fetch wrapper that injects `Authorization: Bearer <jwt>` and handles
+ * network errors, non-ok responses, and JSON parsing. Returns the parsed
+ * JSON payload as type `T`.
+ *
+ * Throws `ApiError` with:
+ * - `NETWORK_ERROR` when the fetch itself fails (no HTTP response)
+ * - The error envelope code when the response is non-ok
+ */
+export async function request<T>(
+  path: string,
+  options?: RequestInit,
+): Promise<T> {
+  return (await authedResponse(path, options)).json() as T;
+}
+
+/**
+ * Fetch wrapper for non-JSON responses: same auth + error handling as
+ * `request<T>`, but returns the raw body as a `Blob` (audio streams, files).
+ */
+export async function requestBlob(
+  path: string,
+  options?: RequestInit,
+): Promise<Blob> {
+  return (await authedResponse(path, options)).blob();
 }
 
 /**

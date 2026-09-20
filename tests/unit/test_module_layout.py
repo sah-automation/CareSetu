@@ -6,6 +6,10 @@ hexagonal layout from coding-standards §2 (``domain/``, ``adapters/``,
 ``schema/``, ``facade.py``, ``outbox.py``). Also guards the table namespace
 prefix rule (every table starts with ``<module>_``, e.g. ``consent_consents``)
 that the T6a boundary checker (#26) will enforce over the real module tree.
+
+``care`` is the documented exception to the single ``facade.py``: its facade
+split along the two state machines (coding-standards §2, T6b #434) lives in
+``case_facade.py`` + ``rx_facade.py``.
 """
 
 import importlib
@@ -31,6 +35,22 @@ EXPECTED_FILES = (
     "schema/__init__.py",
     "schema/models.py",
 )
+CARE_FACADE_FILES = (
+    "case_facade.py",
+    "rx_facade.py",
+    "outbox.py",
+    "domain/__init__.py",
+    "domain/exceptions.py",
+    "schema/__init__.py",
+    "schema/models.py",
+)
+
+
+def _hexagonal_files(module_name: str) -> tuple[str, ...]:
+    """Expected top-level files for a module; ``care`` uses the split facades."""
+    if module_name == "care":
+        return CARE_FACADE_FILES
+    return EXPECTED_FILES
 
 
 def test_spec_drift_from_bootstrap_raises() -> None:
@@ -41,11 +61,11 @@ def test_spec_drift_from_bootstrap_raises() -> None:
         _build_module_specs(drifted, _MODULE_SPEC_TUPLES)
 
 
-def _assert_hexagonal_layout(root: Path) -> None:
+def _assert_hexagonal_layout(root: Path, expected_files: tuple[str, ...] = EXPECTED_FILES) -> None:
     """Assert ``root`` carries the full hexagonal layout from coding-standards §2."""
     for directory in EXPECTED_DIRS:
         assert (root / directory).is_dir(), f"{root.name}: missing {directory}/"
-    for relative in EXPECTED_FILES:
+    for relative in expected_files:
         assert (root / relative).is_file(), f"{root.name}: missing {relative}"
 
 
@@ -73,7 +93,7 @@ def test_generator_emits_hexagonal_layout(tmp_path: Path) -> None:
 def test_all_modules_scaffolded() -> None:
     for name in MODULE_SCHEMAS:
         assert name in MODULE_SPECS, f"{name} missing from generator registry"
-        _assert_hexagonal_layout(MODULES_PACKAGE / name)
+        _assert_hexagonal_layout(MODULES_PACKAGE / name, _hexagonal_files(name))
 
 
 def test_table_namespace_prefixes() -> None:

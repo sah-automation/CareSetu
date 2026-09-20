@@ -21,10 +21,13 @@ skips when unreachable):
 - Not-yet-expired and unverified (undecided operator-gate round) credentials are
   not candidates.
 
-The expiry field is injected as raw SQL exactly like ``test_directory_search.py``
-injects the index row / verified flag: the review-acceptance expiry writer lives
-in the Phase-6 verification wiring (not this ticket's scope). The sweep itself
-goes through the real facade.
+Friends are constructed through the real Phase-5 activation seam (#456) - the
+operator-approval path stamps the round's credentials ``verified`` and upserts
+the ``partner_directory_index`` row in the same transaction, so a test partner
+becomes directory-visible exactly like a real doctor (no hand-built SQL rows,
+#459). The only injected field is the recorded ``expires_at`` date - the
+review-acceptance expiry writer lives in the Phase-6 verification wiring (not
+this ticket's scope). The sweep itself goes through the real facade.
 
 Requires the native PostgreSQL; the suite skips cleanly when unreachable.
 """
@@ -139,7 +142,14 @@ def _facade(database_url: str, tmp_path: Path) -> tuple[IamFacade, PartnerFacade
 
 
 async def _approve_active_partner(partner: PartnerFacade, phone: str) -> int:
-    """Run the real Phase-5 flow to a visible ``[Active]`` partner."""
+    """Run the real Phase-5 activation seam to a directory-visible ``[Active]`` partner.
+
+    Operator approval is the ONLY path to ``Active`` (no auto-approve): the
+    decision stamps the round's credentials ``verified`` and upserts the
+    ``partner_directory_index`` row in the same transaction (#456), so the
+    returned partner is visible to the directory exactly like a real doctor -
+    no fixture hand-builds the index row or the verified flag (#459).
+    """
     registered = await partner.register(
         phone=phone,
         partner_type="doctor",
@@ -161,29 +171,8 @@ async def _approve_active_partner(partner: PartnerFacade, phone: str) -> int:
     return partner_id
 
 
-async def _make_visible(database_url: str, partner_id: int) -> None:
-    """Inject the index row + verified flag the Phase-6 writer seams still own."""
-    await _execute(
-        database_url,
-        "INSERT INTO partner.partner_directory_index "
-        "(partner_id, practice_latitude, practice_longitude, "
-        " partner_type, is_active) "
-        "VALUES (:partner_id, :lat, :lon, 'doctor', true)",
-        {
-            "partner_id": partner_id,
-            "lat": DALTONGANJ_LATITUDE,
-            "lon": DALTONGANJ_LONGITUDE,
-        },
-    )
-    await _execute(
-        database_url,
-        "UPDATE partner.partner_credentials SET verified = true WHERE profile_id = :partner_id",
-        {"partner_id": partner_id},
-    )
-
-
 async def _expire_credentials(database_url: str, partner_id: int) -> int:
-    """Stamp ``expires_at`` in the past on the partner's credentials (raw SQL seam)."""
+    """Stamp ``expires_at`` in the past on the partner's credentials (data-field seam)."""
     await _execute(
         database_url,
         "UPDATE partner.partner_credentials SET expires_at = :expires "
@@ -222,7 +211,6 @@ async def test_sweep_closes_out_expired_credential_deindexes_and_emits_once(
     """
     _, partner = _facade(database_url, tmp_path)
     partner_id = await _approve_active_partner(partner, "9876543201")
-    await _make_visible(database_url, partner_id)
     credential_id = await _expire_credentials(database_url, partner_id)
 
     closed = await partner.close_out_expired_credentials()
@@ -258,7 +246,6 @@ async def test_sweep_is_idempotent_on_replay(
     """
     _, partner = _facade(database_url, tmp_path)
     partner_id = await _approve_active_partner(partner, "9876543202")
-    await _make_visible(database_url, partner_id)
     await _expire_credentials(database_url, partner_id)
 
     assert await partner.close_out_expired_credentials() != []
@@ -279,7 +266,6 @@ async def test_expired_partner_hidden_on_reads_before_the_sweep_runs(
     """
     _, partner = _facade(database_url, tmp_path)
     partner_id = await _approve_active_partner(partner, "9876543203")
-    await _make_visible(database_url, partner_id)
 
     assert [entry.partner_id for entry in (await partner.search_directory()).items] == [partner_id]
     await partner.get_provider_profile(partner_id)  # reachable while valid
@@ -397,8 +383,7 @@ async def test_sweep_leaves_unexpired_active_partner_untouched(
 ) -> None:
     """#316: a valid credential is never a candidate - no-op pass, no event."""
     _, partner = _facade(database_url, tmp_path)
-    partner_id = await _approve_active_partner(partner, "9876543207")
-    await _make_visible(database_url, partner_id)
+    await _approve_active_partner(partner, "9876543207")
 
     assert await partner.close_out_expired_credentials() == []
     assert await _invalidated_events(database_url) == []
@@ -421,7 +406,6 @@ async def test_sweep_runs_on_a_facade_composed_without_iam(
     """
     _, setup_partner = _facade(database_url, tmp_path)
     partner_id = await _approve_active_partner(setup_partner, "9876543208")
-    await _make_visible(database_url, partner_id)
     credential_id = await _expire_credentials(database_url, partner_id)
 
     engine = create_async_engine(database_url, poolclass=NullPool)

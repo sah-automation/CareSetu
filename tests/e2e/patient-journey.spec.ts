@@ -105,6 +105,23 @@ async function getAuthInfo(
   return { subjectId: body.subject_id, jwt: accessJwt! };
 }
 
+// #496: on every hard navigation into a patient-shell page, AuthContext's
+// validate() re-resolves identity asynchronously, changing the ProfileProvider
+// key ("anon" → identity) and remounting the patient subtree. Interacting
+// before that remount completes races against the unmount (visible as
+// "element is not stable" then "detached from the DOM" on any open sheet).
+// Guard every hard goto that precedes stateful UI with a wait for the account
+// menu's phone digits - the earliest visual signal that identity settled.
+async function waitForIdentityResolved(
+  page: Page,
+  number: string,
+): Promise<void> {
+  const digits = number.slice(-2);
+  await expect(page.getByTestId("account-menu")).toContainText(digits, {
+    timeout: 15_000,
+  });
+}
+
 // ---- Seed helpers ----
 
 async function seedRecordEntries(
@@ -162,6 +179,7 @@ test("patient journey: record -> filter -> grant sheet -> receipt -> revoke -> r
 
   // 3. Navigate to My Record and verify timeline entries render
   await page.goto("/patient/record");
+  await waitForIdentityResolved(page, phone);
   await expect(page.getByTestId("record-timeline")).toBeVisible({
     timeout: 30_000,
   });
@@ -207,6 +225,7 @@ test("patient journey: record -> filter -> grant sheet -> receipt -> revoke -> r
 
   // 6. Open the grant sheet via the consent-demo-trigger on the patient page
   await page.goto("/patient");
+  await waitForIdentityResolved(page, phone);
   await expect(
     page.getByRole("heading", { name: "Welcome, Patient" }),
   ).toBeVisible();

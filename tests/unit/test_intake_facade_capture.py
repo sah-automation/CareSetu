@@ -19,7 +19,9 @@ facade-with-fakes seam:
 - ``get_intake`` / ``get_pre_summary`` return the agreed DTO shapes:
   status from the state machine, honesty (``low_confidence``) fields
   present (accepted criterion 3).
-- ``request_rx_draft`` exists as a declared contract stub (accepted
+- ``request_rx_draft`` is the live Phase 8 drafting seam (PHASE-8 T05,
+  #421): it resolves the intake language, delegates to the AI gateway
+  ``draft_rx`` leg, and returns the typed ``RxDraftResult`` (accepted
   criterion 4). Capture durability is structural - the row + outbox event
   commit in one local transaction, so a later AI failure never rolls
   back the intake (accepted criterion 5).
@@ -35,6 +37,8 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.sql.dml import Insert
 
+from modules.intake.adapters.ai_gateway import DraftRxRequest
+from modules.intake.adapters.ai_provider_mock import MockAiProvider
 from modules.intake.domain.events import (
     EVENT_INTAKE_CAPTURED,
     EVENT_INTAKE_STARTED,
@@ -50,6 +54,7 @@ from modules.intake.intake_models import (
     IntakeDetailView,
     MediaUploadRef,
     PreSummaryView,
+    RxDraftItem,
     StructuredFields,
 )
 from modules.intake.schema.models import (
@@ -587,11 +592,60 @@ async def test_get_pre_summary_none_when_no_pre_summary_refs_exist() -> None:
 
 
 @pytest.mark.asyncio
-async def test_request_rx_draft_is_a_contract_stub() -> None:
-    facade = _facade(_connection([]))
+async def test_request_rx_draft_delegates_to_ai_gateway() -> None:
+    connection = _connection(
+        [
+            _FakeResult(row=_pre_summary_row(pre_summary_id=5, intake_id=1)),
+            _FakeResult(row=_intake_row(intake_id=1, patient_id=7)),
+        ]
+    )
+    gateway = MockAiProvider(confidence_level="clean")
+    facade = IntakeFacade(engine=_engine(connection), ai_gateway=gateway)
 
-    with pytest.raises(NotImplementedError, match="contract stub"):
-        await facade.request_rx_draft(
-            doctor_input_ref=1,
-            pre_summary_ref=2,
+    result = await facade.request_rx_draft(
+        doctor_input_ref=101,
+        pre_summary_ref=5,
+        history_summary="case notes for context",
+    )
+
+    assert result.doctor_input_ref == 101
+    assert result.pre_summary_ref == 5
+    assert result.rx_items == [
+        RxDraftItem(
+            name="mock medication",
+            dose="1 tablet",
+            duration="5 days",
+            frequency="once daily",
         )
+    ]
+    assert result.confidence >= 0.0
+    assert len(gateway.calls) == 1
+    request = gateway.calls[0]
+    assert isinstance(request, DraftRxRequest)
+    assert request.doctor_input_ref == "101"
+    assert request.pre_summary_ref == "5"
+    assert request.patient_history_summary == "case notes for context"
+    assert request.context.language == "en"
+
+
+@pytest.mark.asyncio
+async def test_request_rx_draft_defaults_language_to_en_when_intake_missing() -> None:
+    connection = _connection(
+        [_FakeResult(row=_pre_summary_row(pre_summary_id=5, intake_id=1)), _FakeResult(row=None)]
+    )
+    gateway = MockAiProvider(confidence_level="clean")
+    facade = IntakeFacade(engine=_engine(connection), ai_gateway=gateway)
+
+    result = await facade.request_rx_draft(doctor_input_ref=101, pre_summary_ref=5)
+
+    assert result.rx_items[0].name == "mock medication"
+    assert gateway.calls[0].context.language == "en"
+
+
+@pytest.mark.asyncio
+async def test_request_rx_draft_raises_when_pre_summary_missing() -> None:
+    connection = _connection([_FakeResult(row=None)])
+    facade = _facade(connection)
+
+    with pytest.raises(IntakeNotFoundError, match="pre-summary 5 not found"):
+        await facade.request_rx_draft(doctor_input_ref=101, pre_summary_ref=5)

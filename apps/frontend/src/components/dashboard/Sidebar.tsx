@@ -13,16 +13,25 @@ import { cn } from "@/lib/utils";
 
 import { NAV_CONFIG } from "./nav-config";
 import { NavItemLink } from "./NavItemLink";
+import type { NavItemDef } from "./nav-config";
 import type { Role } from "./types";
 
 interface SidebarProps {
   role: Role;
   collapsed: boolean;
   onToggleCollapse: () => void;
+  // Render-time nav override: the AppShell attaches the open-cases count to
+  // the doctor Cases item here (#483). Defaults to the static NAV_CONFIG.
+  items?: NavItemDef[];
 }
 
-export function Sidebar({ role, collapsed, onToggleCollapse }: SidebarProps) {
-  const items = NAV_CONFIG[role];
+export function Sidebar({
+  role,
+  collapsed,
+  onToggleCollapse,
+  items,
+}: SidebarProps) {
+  const navItems = items ?? NAV_CONFIG[role];
 
   return (
     <aside
@@ -42,7 +51,7 @@ export function Sidebar({ role, collapsed, onToggleCollapse }: SidebarProps) {
       </div>
 
       <nav className="flex-1 p-2" data-testid="sidebar-nav">
-        {items.map((item) => (
+        {navItems.map((item) => (
           <NavItemLink
             key={item.key}
             item={item}

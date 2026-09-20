@@ -20,6 +20,7 @@ import { useAuth } from "@/lib/auth/AuthContext";
 import {
   CHOOSE_ROLE_ROUTE,
   STAFF_LOGIN_SURFACE,
+  fetchPartnerRouteState,
   isStaffRole,
   postLoginTarget,
 } from "@/lib/auth/staff-routing";
@@ -53,19 +54,28 @@ function StaffLoginView() {
     searchParams.get("role") === "operator" ? "operator" : "partner";
 
   // A visitor who already holds a staff session lands by the same §4.5
-  // routing matrix the sign-in itself will use - never on this form.
+  // routing matrix the sign-in itself will use - never on this form. A
+  // partner's own status overrides the role rule (§4.4) exactly like the
+  // fresh-login path: pending / under verification -> waiting screen,
+  // rejected -> rejection screen.
   const staffRoles = (user?.roles ?? []).filter(isStaffRole);
   useEffect(() => {
     if (isLoading || !isAuthenticated || staffRoles.length === 0) {
       return;
     }
-    router.replace(
-      postLoginTarget({
-        surface: STAFF_LOGIN_SURFACE,
-        roles: user?.roles,
-        returnTarget,
-      }),
-    );
+
+    const roles = user?.roles ?? [];
+    async function land() {
+      router.replace(
+        postLoginTarget({
+          surface: STAFF_LOGIN_SURFACE,
+          roles,
+          returnTarget,
+          ...(await fetchPartnerRouteState(roles)),
+        }),
+      );
+    }
+    void land();
   }, [
     isLoading,
     isAuthenticated,
@@ -84,7 +94,7 @@ function StaffLoginView() {
 
       <div className="mt-6 rounded-lg border border-hairline bg-surface p-6 shadow-card">
         <h1 className="mb-4 text-xl font-bold">{t.heading}</h1>
-        <StaffLoginForm role={role} />
+        <StaffLoginForm role={role} returnTarget={returnTarget} />
       </div>
 
       <hr className="my-6 border-hairline-soft" />

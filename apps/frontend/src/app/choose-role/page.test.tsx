@@ -34,7 +34,7 @@ function mockMeResponse(roles: string[]) {
   return vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
     new Response(
       JSON.stringify({
-        identity_id: 42,
+        subject_id: "42",
         phone: "+911234567890",
         roles,
       }),
@@ -89,9 +89,12 @@ describe("ChooseRolePage", () => {
 
   it("redirects to /login when /v1/me fails", async () => {
     setStoredSession(VALID_SESSION);
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      new Response("", { status: 401 }),
-    );
+    // Both legs of validation are mocked so the outcome never depends on
+    // whatever is listening on localhost:8000 (a live dev backend resolves
+    // this refresh slowly, which used to blow the waitFor budget).
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("", { status: 401 }))
+      .mockResolvedValueOnce(new Response("", { status: 401 }));
 
     renderPage();
 
@@ -102,9 +105,9 @@ describe("ChooseRolePage", () => {
 
   it("redirects to /login on network error", async () => {
     setStoredSession(VALID_SESSION);
-    vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(
-      new TypeError("Failed to fetch"),
-    );
+    vi.spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce(new Response("", { status: 401 }));
 
     renderPage();
 

@@ -19,7 +19,8 @@ const VALID_SESSION: StoredSession = {
 };
 
 const ME_RESPONSE = {
-  identity_id: 42,
+  // /v1/me models the principal as a numeric-string subject_id (#196).
+  subject_id: "42",
   phone: "+911234567890",
   roles: ["patient", "partner"],
 };
@@ -47,6 +48,9 @@ function TestConsumer() {
       <span data-testid="selected-role">{auth.selectedRole ?? "none"}</span>
       <button onClick={() => auth.switchRole("partner")}>switch</button>
       <button onClick={auth.logout}>logout</button>
+      <button data-testid="resume" onClick={() => void auth.resumeSession()}>
+        resume
+      </button>
     </div>
   );
 }
@@ -264,6 +268,121 @@ describe("AuthProvider", () => {
     await waitFor(() => {
       expect(screen.getByTestId("selected-role").textContent).toBe("partner");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #496 session-resume seam
+//
+// The seam resolves a session persisted AFTER the provider mounted - exactly
+// the OTP-login shape where the mount-only validate() saw no session. It reuses
+// the /v1/me (+ refresh retry) resolution path and applies identity/roles
+// in-flow, and is best-effort: failures never force-logout a fresh session.
+// ---------------------------------------------------------------------------
+
+describe("AuthProvider resumeSession seam (#496)", () => {
+  it("resolves a session persisted after mount and applies identity/roles", async () => {
+    renderWithAuth();
+    await waitFor(() => {
+      expect(screen.getByTestId("is-loading").textContent).toBe("false");
+    });
+
+    // The OTP flow saves the session into the already-mounted provider.
+    setStoredSession(VALID_SESSION);
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(JSON.stringify(ME_RESPONSE), { status: 200 }),
+    );
+
+    await waitFor(() => {
+      screen.getByTestId("resume").click();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("is-authenticated").textContent).toBe("true");
+    });
+    expect(screen.getByTestId("user-id").textContent).toBe("42");
+    expect(screen.getByTestId("user-phone").textContent).toBe("+911234567890");
+    expect(screen.getByTestId("roles").textContent).toBe("patient,partner");
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "http://localhost:8000/v1/me",
+      { headers: { Authorization: "Bearer test-jwt-token" } },
+    );
+    expect(mockReplace).not.toHaveBeenCalled();
+  });
+
+  it("is a no-op when no session is stored (never fetches)", async () => {
+    renderWithAuth();
+    await waitFor(() => {
+      expect(screen.getByTestId("is-loading").textContent).toBe("false");
+    });
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+    await waitFor(() => {
+      screen.getByTestId("resume").click();
+    });
+
+    await waitFor(() => {
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+    expect(screen.getByTestId("is-authenticated").textContent).toBe("false");
+  });
+
+  it("retries through refresh when the initial /v1/me fails", async () => {
+    renderWithAuth();
+    await waitFor(() => {
+      expect(screen.getByTestId("is-loading").textContent).toBe("false");
+    });
+
+    setStoredSession(VALID_SESSION);
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    fetchSpy.mockResolvedValueOnce(new Response("", { status: 401 }));
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify(REFRESH_RESPONSE), { status: 200 }),
+    );
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify(ME_RESPONSE), { status: 200 }),
+    );
+
+    await waitFor(() => {
+      screen.getByTestId("resume").click();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("is-authenticated").textContent).toBe("true");
+    });
+    expect(fetchSpy.mock.calls[1][0]).toBe(
+      "http://localhost:8000/v1/auth/refresh",
+    );
+    expect(localStorage.getItem("caresetu.access_jwt")).toBe("refreshed-jwt");
+  });
+
+  it("leaves state untouched and never force-logs-out on resolution failure", async () => {
+    renderWithAuth();
+    await waitFor(() => {
+      expect(screen.getByTestId("is-loading").textContent).toBe("false");
+    });
+
+    setStoredSession(VALID_SESSION);
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    fetchSpy.mockResolvedValueOnce(new Response("", { status: 401 }));
+    fetchSpy.mockResolvedValueOnce(new Response("", { status: 401 }));
+
+    await waitFor(() => {
+      screen.getByTestId("resume").click();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("is-authenticated").textContent).toBe("false");
+    });
+    expect(screen.getByTestId("user-id").textContent).toBe("null");
+    // A just-minted session is never cleared or redirected off on a transient miss.
+    expect(mockReplace).not.toHaveBeenCalled();
+    expect(localStorage.getItem("caresetu.session")).not.toBeNull();
   });
 });
 

@@ -12,9 +12,11 @@ and the same best-effort directory-cache flush.
 Mirrors ``test_partner_credential_cleanup.py`` (alembic head + native
 PostgreSQL, skips when unreachable). Each test drives ONE path end to end and
 asserts the same shape against the same helpers, so the four paths are compared
-side by side. The index row and the ``verified`` flag seam are injected as raw
-SQL exactly like ``test_directory_search.py`` does; the close-outs themselves go
-through the real facade.
+side by side. Each partner reaches ``[Active]`` through the real register →
+submit → operator-approve flow (the activation seam, #456), which stamps the
+approved round's credentials verified and upserts the ``partner_directory_index``
+row - no fixture hand-writes those rows; the close-outs themselves go through
+the real facade.
 
 Requires the native PostgreSQL; the suite skips cleanly when unreachable.
 """
@@ -167,27 +169,6 @@ async def _approve_active_partner(partner: PartnerFacade, phone: str) -> int:
     return partner_id
 
 
-async def _make_visible(database_url: str, partner_id: int) -> None:
-    """Inject the index row + verified flag the Phase-6 writer seams still own."""
-    await _execute(
-        database_url,
-        "INSERT INTO partner.partner_directory_index "
-        "(partner_id, practice_latitude, practice_longitude, "
-        " partner_type, is_active) "
-        "VALUES (:partner_id, :lat, :lon, 'doctor', true)",
-        {
-            "partner_id": partner_id,
-            "lat": DALTONGANJ_LATITUDE,
-            "lon": DALTONGANJ_LONGITUDE,
-        },
-    )
-    await _execute(
-        database_url,
-        "UPDATE partner.partner_credentials SET verified = true WHERE profile_id = :partner_id",
-        {"partner_id": partner_id},
-    )
-
-
 async def _credential_id(database_url: str, partner_id: int) -> dict[str, Any]:
     return (
         await _query(
@@ -245,7 +226,6 @@ async def test_path1_operator_reject_of_active_partner_emits_indistinguishable_e
     """Path 1 (#331): rejecting an ``[Active]`` partner routes through close-out."""
     _, partner = _facade(database_url, tmp_path)
     partner_id = await _approve_active_partner(partner, "9876543301")
-    await _make_visible(database_url, partner_id)
     credential = await _credential_id(database_url, partner_id)
 
     await partner.operator_decision(
@@ -270,7 +250,6 @@ async def test_path2_revocation_emits_indistinguishable_event(
     """Path 2 (#331): ``invalidate_credential`` routes through the same close-out."""
     _, partner = _facade(database_url, tmp_path)
     partner_id = await _approve_active_partner(partner, "9876543302")
-    await _make_visible(database_url, partner_id)
     credential = await _credential_id(database_url, partner_id)
 
     await partner.invalidate_credential(partner_id, revoked_by=uuid4())
@@ -293,7 +272,6 @@ async def test_path3_expiry_sweep_emits_indistinguishable_event(
     """Path 3 (#331): the daily expiry sweep routes through the same close-out."""
     _, partner = _facade(database_url, tmp_path)
     partner_id = await _approve_active_partner(partner, "9876543303")
-    await _make_visible(database_url, partner_id)
     await _execute(
         database_url,
         "UPDATE partner.partner_credentials SET expires_at = :expires "
@@ -452,17 +430,14 @@ async def test_all_four_paths_produce_identical_payload_shape(
 
     # 1. Operator reject of an Active partner (deactivation path).
     p1 = await _approve_active_partner(partner, "9876543311")
-    await _make_visible(database_url, p1)
     await partner.operator_decision(p1, decision_by=_OPERATOR_ID, approve=False, reason="bad docs")
 
     # 2. Revocation.
     p2 = await _approve_active_partner(partner, "9876543312")
-    await _make_visible(database_url, p2)
     await partner.invalidate_credential(p2, revoked_by=uuid4())
 
     # 3. Expiry sweep.
     p3 = await _approve_active_partner(partner, "9876543313")
-    await _make_visible(database_url, p3)
     await _execute(
         database_url,
         "UPDATE partner.partner_credentials SET expires_at = :expires "

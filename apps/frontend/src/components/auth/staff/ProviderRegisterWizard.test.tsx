@@ -4,6 +4,7 @@
 // progression, upload-discipline checks, and real submission to the backend.
 
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -15,10 +16,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProviderRegisterWizard } from "./ProviderRegisterWizard";
 import { COUNCIL_OPTION_IDS } from "./providerRegisterState";
 import { STRINGS } from "@/lib/i18n/dictionaries";
-import { __resetLangForTests } from "@/lib/i18n/LangContext";
+import { __resetLangForTests, useLang } from "@/lib/i18n/LangContext";
 
 import { registerPartner, submitCredentials } from "@/lib/partner/api";
-import { issuePartnerSession } from "@/lib/auth/api";
+import {
+  fetchDemoOtp,
+  issuePartnerSession,
+  partnerLogin,
+  partnerVerify,
+  type PartnerLoginResult,
+  type PartnerVerifyResult,
+} from "@/lib/auth/api";
 import { saveSession } from "@/lib/auth/session";
 import { postLoginTarget } from "@/lib/auth/staff-routing";
 
@@ -47,6 +55,9 @@ vi.mock("@/lib/auth/api", () => ({
     expires_in_seconds: 3600,
     refresh_token: "test-refresh",
   }),
+  partnerLogin: vi.fn(),
+  partnerVerify: vi.fn(),
+  fetchDemoOtp: vi.fn(),
   AuthApiError: class MockAuthApiError extends Error {
     readonly code: string;
     readonly details: Record<string, unknown>;
@@ -75,6 +86,7 @@ vi.mock("@/lib/auth/staff-routing", () => ({
 }));
 
 const t = STRINGS.en.staffAuth.register;
+const loginT = STRINGS.en.staffAuth.login;
 const STRONG = "correct-horse-battery1!";
 
 const mockRegisterPartner = vi.mocked(registerPartner);
@@ -82,6 +94,28 @@ const mockSubmitCredentials = vi.mocked(submitCredentials);
 const mockIssuePartnerSession = vi.mocked(issuePartnerSession);
 const mockSaveSession = vi.mocked(saveSession);
 const mockPostLoginTarget = vi.mocked(postLoginTarget);
+const mockPartnerLogin = vi.mocked(partnerLogin);
+const mockPartnerVerify = vi.mocked(partnerVerify);
+const mockFetchDemoOtp = vi.mocked(fetchDemoOtp);
+
+// The confirmation step's phone-OTP flow (partnerLoginState.ts) default
+// transcripts: challenge issued -> code verified -> session minted.
+const CONFIRM_LOGIN_OK: PartnerLoginResult = {
+  outcome: "sent",
+  phone_e164: "+919876543210",
+  challenge_id: 1,
+  expires_in_seconds: 300,
+  cooldown_remaining_seconds: 60,
+  attempts_left: 5,
+  lockout_remaining_seconds: null,
+};
+const CONFIRM_VERIFY_OK: PartnerVerifyResult = {
+  outcome: "verified",
+  phone_e164: "+919876543210",
+  identity_id: 1,
+  attempts_left: 5,
+  lockout_remaining_seconds: null,
+};
 
 function mockGeolocation(
   handler: (
@@ -96,6 +130,21 @@ function mockGeolocation(
       getCurrentPosition: vi.fn().mockImplementation(handler),
     },
   });
+}
+
+// Flip the app locale through the shared language store, exactly like the
+// other bilingual suites (ProfileNudges, ProviderProfile).
+function LangFlip() {
+  const { lang, setLang } = useLang();
+  return (
+    <button
+      type="button"
+      data-testid="lang-flip"
+      onClick={() => setLang(lang === "en" ? "hi" : "en")}
+    >
+      flip
+    </button>
+  );
 }
 
 beforeEach(() => {
@@ -121,12 +170,19 @@ beforeEach(() => {
       },
     });
   });
+
+  // Give the confirmation step's OTP flow its default happy transcript;
+  // per-test overrides (wrong code, refusals) win via mockResolvedValueOnce.
+  mockPartnerLogin.mockReset().mockResolvedValue(CONFIRM_LOGIN_OK);
+  mockPartnerVerify.mockReset().mockResolvedValue(CONFIRM_VERIFY_OK);
+  mockFetchDemoOtp.mockReset().mockResolvedValue(null);
 });
 
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   __resetLangForTests();
   mockPostLoginTarget.mockClear();
 });
@@ -211,6 +267,47 @@ function walkToStep(
     fireEvent.click(screen.getByTestId("pr-next"));
   }
   return screen.getByTestId(`pr-step-${Math.min(step, 4)}`);
+}
+
+// Walk the doctor wizard through review, tick every declaration, submit the
+// application, and land on the phone-confirmation step (F014-T08 #468). The
+// submit click is wrapped in act: registration resolves on a microtask and
+// React 18 batches the step transition, so the flush makes it deterministic.
+async function submitToConfirm(
+  mobileOverride?: string,
+  renderOverride?: () => void,
+) {
+  if (renderOverride) {
+    renderOverride();
+  } else {
+    walkToStep(1, "doctor");
+  }
+  fillStep1();
+  if (mobileOverride) {
+    type("pr-mobile", mobileOverride);
+  }
+  fireEvent.click(screen.getByTestId("pr-next"));
+  fillDoctorStep2();
+  fireEvent.click(screen.getByTestId("pr-next"));
+  attachDoctorFiles();
+  fireEvent.click(screen.getByTestId("pr-next"));
+  fireEvent.click(screen.getByTestId("decl-truth"));
+  fireEvent.click(screen.getByTestId("decl-consent"));
+  fireEvent.click(screen.getByTestId("decl-terms"));
+  await act(async () => {
+    fireEvent.click(screen.getByTestId("pr-submit"));
+  });
+  await screen.findByTestId("pr-step-5");
+}
+
+// Enter the SMS code on the confirmation step and click Confirm code. The
+// click is wrapped in act: minting happens in a promise continuation (the
+// shared partner flow), so the async flush is needed for a deterministic DOM.
+async function confirmWithCode(digits = "123456") {
+  type("pr-confirm-otp", digits);
+  await act(async () => {
+    fireEvent.click(screen.getByTestId("pr-confirm-submit"));
+  });
 }
 
 describe("four-step skeleton (blueprint §4.3)", () => {
@@ -472,7 +569,7 @@ describe("review & declarations with submission", () => {
     expect(error).toHaveTextContent("Trace: abc123");
   });
 
-  it("surfaces an AuthApiError's real backend message and trace id on failure", async () => {
+  it("surfaces a session-mint refusal on the confirmation step without saving", async () => {
     const { AuthApiError: MockAuthApiError } = await import("@/lib/auth/api");
     mockIssuePartnerSession.mockRejectedValueOnce(
       new MockAuthApiError({
@@ -483,33 +580,25 @@ describe("review & declarations with submission", () => {
       }),
     );
 
-    walkToStep(4, "doctor");
-    fireEvent.click(screen.getByTestId("decl-truth"));
-    fireEvent.click(screen.getByTestId("decl-consent"));
-    fireEvent.click(screen.getByTestId("decl-terms"));
-    fireEvent.click(screen.getByTestId("pr-submit"));
+    await submitToConfirm();
+    await confirmWithCode();
 
-    const error = await screen.findByTestId("pr-server-error");
-    expect(error).toHaveTextContent(
-      "identity 1 is Unverified, not Active; verify the OTP first",
+    // The code verified but the mint was refused: the refusal surfaces as
+    // calm partner-login copy on the confirmation step, nothing is saved,
+    // and the wizard never routes onward.
+    expect(await screen.findByTestId("pr-confirm-error")).toHaveTextContent(
+      loginT.networkError,
     );
-    expect(error).toHaveTextContent("Trace: trace-session-refused");
+    expect(mockIssuePartnerSession).toHaveBeenCalledWith("+919876543210");
+    expect(mockSaveSession).not.toHaveBeenCalled();
+    expect(mockPostLoginTarget).not.toHaveBeenCalled();
   });
 
-  it("calls registerPartner then issuePartnerSession then saveSession on successful submit", async () => {
-    walkToStep(4, "doctor");
-    fireEvent.click(screen.getByTestId("decl-truth"));
-    fireEvent.click(screen.getByTestId("decl-consent"));
-    fireEvent.click(screen.getByTestId("decl-terms"));
-    fireEvent.click(screen.getByTestId("pr-submit"));
+  it("registers, confirms the phone, then mints and saves the partner session", async () => {
+    await submitToConfirm();
 
-    await vi.waitFor(
-      () => {
-        expect(mockIssuePartnerSession).toHaveBeenCalledOnce();
-      },
-      { timeout: 5000 },
-    );
-
+    // Registration alone never mints: the confirmation step issues the SMS
+    // challenge and shows the code card with the verified number.
     expect(mockRegisterPartner).toHaveBeenCalledOnce();
     expect(mockRegisterPartner).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -519,18 +608,35 @@ describe("review & declarations with submission", () => {
         practice_longitude: 83.99,
       }),
     );
+    expect(mockPartnerLogin).toHaveBeenCalledWith("+919876543210");
+    expect(mockIssuePartnerSession).not.toHaveBeenCalled();
+    expect(screen.getByTestId("pr-confirm-phone")).toHaveTextContent(
+      "+919876543210",
+    );
+
+    confirmWithCode();
+    await vi.waitFor(
+      () => {
+        expect(mockIssuePartnerSession).toHaveBeenCalledOnce();
+      },
+      { timeout: 5000 },
+    );
+
+    expect(mockPartnerVerify).toHaveBeenCalledOnce();
+    expect(mockPartnerVerify).toHaveBeenCalledWith("+919876543210", "123456");
     expect(mockSubmitCredentials).toHaveBeenCalledOnce();
-    expect(mockIssuePartnerSession).toHaveBeenCalledWith("+919876543210");
     expect(mockSaveSession).toHaveBeenCalledOnce();
     expect(mockSaveSession).toHaveBeenCalledWith(
       expect.objectContaining({ jwt: "test-jwt" }),
       "+919876543210",
     );
 
+    const verifyOrder = mockPartnerVerify.mock.invocationCallOrder[0];
     const sessionOrder = mockIssuePartnerSession.mock.invocationCallOrder[0];
     const saveOrder = mockSaveSession.mock.invocationCallOrder[0];
     const submitOrder = mockSubmitCredentials.mock.invocationCallOrder[0];
-    expect(sessionOrder).toBeLessThan(submitOrder);
+    expect(verifyOrder).toBeLessThan(sessionOrder);
+    expect(sessionOrder).toBeLessThan(saveOrder);
     expect(saveOrder).toBeLessThan(submitOrder);
     expect(mockPostLoginTarget).toHaveBeenCalledWith({
       surface: "staff",
@@ -540,23 +646,10 @@ describe("review & declarations with submission", () => {
   });
 
   it("passes through a 12-digit international-format phone unchanged", async () => {
-    render(<ProviderRegisterWizard presetType="doctor" />);
-    type("pr-fullname", "Dr. Asha Kumar");
-    type("pr-email", "asha@example.com");
-    type("pr-password", STRONG);
     // 12-digit 91-prefixed form - the wizard must not double-prefix it.
-    type("pr-mobile", "919876543210");
-    fireEvent.click(screen.getByTestId("pr-next"));
-    fillDoctorStep2();
-    fireEvent.click(screen.getByTestId("pr-next"));
-    attachDoctorFiles();
-    fireEvent.click(screen.getByTestId("pr-next"));
-
-    fireEvent.click(screen.getByTestId("decl-truth"));
-    fireEvent.click(screen.getByTestId("decl-consent"));
-    fireEvent.click(screen.getByTestId("decl-terms"));
-    fireEvent.click(screen.getByTestId("pr-submit"));
-
+    await submitToConfirm("919876543210");
+    expect(mockPartnerLogin).toHaveBeenCalledWith("+919876543210");
+    await confirmWithCode();
     await vi.waitFor(
       () => {
         expect(mockIssuePartnerSession).toHaveBeenCalledOnce();
@@ -574,12 +667,8 @@ describe("review & declarations with submission", () => {
     // useEffect resolves to the env-configured fallback (Daltonganj).
     mockGeolocation((_success, error) => error({ code: 1, message: "denied" }));
 
-    walkToStep(4, "doctor");
-    fireEvent.click(screen.getByTestId("decl-truth"));
-    fireEvent.click(screen.getByTestId("decl-consent"));
-    fireEvent.click(screen.getByTestId("decl-terms"));
-    fireEvent.click(screen.getByTestId("pr-submit"));
-
+    await submitToConfirm();
+    await confirmWithCode();
     await vi.waitFor(
       () => {
         expect(mockIssuePartnerSession).toHaveBeenCalledOnce();
@@ -593,5 +682,212 @@ describe("review & declarations with submission", () => {
         practice_longitude: 84.07,
       }),
     );
+  });
+});
+
+describe("phone-confirmation step (F014-T08 #468)", () => {
+  it("renders the confirmation card with phone, countdown and code input", async () => {
+    await submitToConfirm();
+    const step = screen.getByTestId("pr-step-5");
+    expect(step).toHaveTextContent(t.phoneConfirm.title);
+    expect(screen.getByTestId("pr-confirm-phone")).toHaveTextContent(
+      "+919876543210",
+    );
+    expect(screen.getByTestId("pr-confirm-otp")).toBeInTheDocument();
+    expect(screen.getByTestId("pr-confirm-countdown")).toHaveTextContent(
+      /[0-9]/,
+    );
+    // No generic wizard footer on the confirmation step.
+    expect(screen.queryByTestId("pr-submit")).not.toBeInTheDocument();
+  });
+
+  it("never mints when confirmation is skipped (back to review)", async () => {
+    await submitToConfirm();
+    fireEvent.click(screen.getByTestId("pr-confirm-back"));
+    expect(screen.getByTestId("pr-step-4")).toBeInTheDocument();
+    expect(mockIssuePartnerSession).not.toHaveBeenCalled();
+    expect(mockSaveSession).not.toHaveBeenCalled();
+    expect(mockPostLoginTarget).not.toHaveBeenCalled();
+  });
+
+  it("shows the demo OTP read-back banner on the confirmation step", async () => {
+    vi.stubEnv("NEXT_PUBLIC_DEMO_MODE", "true");
+    mockFetchDemoOtp.mockResolvedValueOnce("424242");
+
+    await submitToConfirm();
+
+    expect(
+      await screen.findByTestId("pr-confirm-demo-banner"),
+    ).toHaveTextContent(loginT.demoOtp("424242"));
+  });
+
+  it("renders the wrong-code refusal and never mints", async () => {
+    mockPartnerVerify.mockResolvedValueOnce({
+      outcome: "wrong_code",
+      phone_e164: "+919876543210",
+      identity_id: null,
+      attempts_left: 4,
+      lockout_remaining_seconds: null,
+    });
+
+    await submitToConfirm();
+    await confirmWithCode("000000");
+
+    expect(await screen.findByTestId("pr-confirm-error")).toHaveTextContent(
+      loginT.wrongCode(4),
+    );
+    expect(mockIssuePartnerSession).not.toHaveBeenCalled();
+    expect(mockSaveSession).not.toHaveBeenCalled();
+    expect(screen.getByTestId("pr-step-5")).toBeInTheDocument();
+  });
+
+  it("renders the cooldown refusal copy on the confirmation step", async () => {
+    mockPartnerLogin.mockResolvedValueOnce({
+      outcome: "cooldown",
+      phone_e164: "+919876543210",
+      challenge_id: null,
+      expires_in_seconds: null,
+      cooldown_remaining_seconds: 45,
+      attempts_left: null,
+      lockout_remaining_seconds: null,
+    });
+
+    await submitToConfirm();
+
+    expect(
+      await screen.findByTestId("pr-confirm-resend-cooldown"),
+    ).toHaveTextContent(loginT.resendIn(45));
+    expect(mockIssuePartnerSession).not.toHaveBeenCalled();
+  });
+
+  it("renders the lockout refusal copy on the confirmation step", async () => {
+    mockPartnerLogin.mockResolvedValueOnce({
+      outcome: "locked",
+      phone_e164: "+919876543210",
+      challenge_id: null,
+      expires_in_seconds: null,
+      cooldown_remaining_seconds: null,
+      attempts_left: null,
+      lockout_remaining_seconds: 900,
+    });
+
+    await submitToConfirm();
+
+    expect(await screen.findByTestId("pr-confirm-lockout")).toHaveTextContent(
+      loginT.lockout(15),
+    );
+    expect(mockIssuePartnerSession).not.toHaveBeenCalled();
+  });
+
+  it("renders the suspended refusal copy on the confirmation step", async () => {
+    mockPartnerLogin.mockResolvedValueOnce({
+      outcome: "suspended",
+      phone_e164: "+919876543210",
+      challenge_id: null,
+      expires_in_seconds: null,
+      cooldown_remaining_seconds: null,
+      attempts_left: null,
+      lockout_remaining_seconds: null,
+    });
+
+    await submitToConfirm();
+
+    expect(await screen.findByTestId("pr-confirm-error")).toHaveTextContent(
+      loginT.suspendedNotice,
+    );
+    expect(mockIssuePartnerSession).not.toHaveBeenCalled();
+  });
+
+  it("re-verifies an existing partner's phone with a fresh code (duplicate resolution)", async () => {
+    mockRegisterPartner.mockResolvedValueOnce({
+      partner_id: 1,
+      identity_id: 1,
+      partner_type: "doctor",
+      status: "Registered",
+      round: 2,
+      created: false,
+    });
+
+    await submitToConfirm();
+    expect(mockPartnerLogin).toHaveBeenCalledWith("+919876543210");
+    expect(mockRegisterPartner.mock.calls[0][0]).toMatchObject({
+      phone: "+919876543210",
+      partner_type: "doctor",
+    });
+
+    await confirmWithCode();
+    await vi.waitFor(
+      () => {
+        expect(mockIssuePartnerSession).toHaveBeenCalledOnce();
+      },
+      { timeout: 5000 },
+    );
+    expect(mockPartnerVerify).toHaveBeenCalledWith("+919876543210", "123456");
+  });
+
+  it("re-issues the code when the confirm action finds no pending challenge", async () => {
+    // First challenge issue lands in cooldown, so the flow never reaches the
+    // otp stage; the confirm submit then re-issues and gets a real code.
+    mockPartnerLogin.mockResolvedValueOnce({
+      outcome: "cooldown",
+      phone_e164: "+919876543210",
+      challenge_id: null,
+      expires_in_seconds: null,
+      cooldown_remaining_seconds: 45,
+      attempts_left: null,
+      lockout_remaining_seconds: null,
+    });
+
+    await submitToConfirm();
+    await screen.findByTestId("pr-confirm-resend-cooldown");
+    expect(mockPartnerLogin).toHaveBeenCalledTimes(1);
+    expect(mockIssuePartnerSession).not.toHaveBeenCalled();
+
+    mockPartnerLogin.mockResolvedValueOnce(CONFIRM_LOGIN_OK);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("pr-confirm-submit"));
+    });
+
+    expect(await screen.findByTestId("pr-confirm-attempts")).toHaveTextContent(
+      loginT.attemptsLeft(5),
+    );
+    expect(mockPartnerLogin).toHaveBeenCalledTimes(2);
+    expect(mockPartnerLogin).toHaveBeenLastCalledWith("+919876543210");
+  });
+
+  it("renders the suspended refusal copy in Hindi when the locale is hi", async () => {
+    const hiLoginT = STRINGS.hi.staffAuth.login;
+    mockPartnerLogin.mockResolvedValueOnce({
+      outcome: "suspended",
+      phone_e164: "+919876543210",
+      challenge_id: null,
+      expires_in_seconds: null,
+      cooldown_remaining_seconds: null,
+      attempts_left: null,
+      lockout_remaining_seconds: null,
+    });
+
+    // The refusal string is captured into state by the OTP reducer when the
+    // phone challenge resolves, so the locale must already be Hindi before
+    // the walk reaches the confirmation step.
+    const flipToHindi = () => {
+      render(
+        <>
+          <ProviderRegisterWizard presetType="doctor" />
+          <LangFlip />
+        </>,
+      );
+      act(() => {
+        fireEvent.click(screen.getByTestId("lang-flip"));
+      });
+    };
+
+    await submitToConfirm(undefined, flipToHindi);
+
+    // The refusal copy renders in Hindi, not the English fallback.
+    expect(await screen.findByTestId("pr-confirm-error")).toHaveTextContent(
+      hiLoginT.suspendedNotice,
+    );
+    expect(screen.queryByText(loginT.suspendedNotice)).not.toBeInTheDocument();
   });
 });

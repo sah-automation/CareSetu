@@ -4,8 +4,13 @@ The only legal cross-module import target for the ``intake`` module
 (coding-standards S2, ADR-0003). Thin coordinator that validates intake
 submissions, commits the intake row + outbox event in one transaction
 (ADR-0002 S1), and provides read projections for intake and pre-summary
-data. ``request_rx_draft`` is declared as a contract stub only (verified
-in Phase 8).
+data. ``request_rx_draft`` is the Phase 8 rx-drafting seam (PHASE-8 T05,
+#421): it produces a structured rx draft from the doctor input through the
+intake AI gateway port and returns it as a typed result. The caller
+(``PrescriptionFacade.create_rx_draft``) supplies the consent-gated history
+context
+via ``history_summary`` (NFR-SEC-006); this facade never performs a raw
+history read.
 
 Capture durability is structural: the row + outbox event commit in one
 local transaction, so a later AI failure never rolls back the intake
@@ -15,16 +20,25 @@ local transaction, so a later AI failure never rolls back the intake
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+import logging
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from cryptography.exceptions import InvalidTag
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.config import get_settings
 from bus.outbox_writer import write_outbox
-from modules.intake.adapters.media_store import IntakeMediaStore
+from modules.intake.adapters import build_ai_gateway
+from modules.intake.adapters.ai_gateway import (
+    AiEgressContext,
+    AiGateway,
+    DraftRxRequest,
+    DraftRxResult,
+)
+from modules.intake.adapters.media_store import PREFIX, RX_INPUT_PREFIX, IntakeMediaStore
 from modules.intake.domain.events import (
     intake_captured_envelope,
     intake_retry_requested_envelope,
@@ -65,9 +79,13 @@ from modules.intake.intake_models import (
     MediaRefView,
     MediaUploadRef,
     PatientEditsResult,
+    PickDoctorResult,
     PreSummaryReviewResult,
     PreSummaryView,
     ReRecordResult,
+    ReviewQueueItem,
+    RxDraftItem,
+    RxDraftResult,
     StructuredFields,
 )
 from modules.intake.outbox import INTAKE_OUTBOX_TABLE
@@ -76,6 +94,12 @@ from modules.intake.schema.models import (
     intake_media_refs,
     intake_pre_summaries,
 )
+
+logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from modules.consent.facade import ConsentFacade, ConsentView
+    from modules.iam.facade import IamFacade
 
 #: Number of attempts (initial + retries) the upload-transfer ladder makes
 #: before it gives up on a flaky capture (NFR-PERF-002, spec #344 US-10).
@@ -114,6 +138,47 @@ def _validate_audio_duration(media_ref: MediaUploadRef) -> None:
         )
 
 
+#: Cap for the introspect snippet on the review-queue card (#489) so a long
+#: chief-complaint list never floods the triage view.
+REVIEW_QUEUE_SNIPPET_MAX_CHARS: int = 120
+
+
+def _review_queue_snippet(structured_fields: dict[str, object] | None) -> str | None:
+    """A short introspect excerpt from the intake's structured content (#489).
+
+    Prefers the chief complaints, then symptoms, then the duration - the
+    gut of what the patient said - joined and truncated to the card width.
+    ``None`` when nothing structured exists, so the console falls back to
+    readable copy instead of rendering an empty string.
+    """
+    raw = structured_fields if isinstance(structured_fields, dict) else {}
+    fields = StructuredFields.model_validate(raw)
+    parts = [*fields.chief_complaints, *fields.symptoms]
+    if fields.duration:
+        parts.append(fields.duration)
+    text = ", ".join(part.strip() for part in parts if part and part.strip())
+    text = text[:REVIEW_QUEUE_SNIPPET_MAX_CHARS].strip()
+    return text or None
+
+
+def _review_queue_section_count(structured_fields: dict[str, object] | None) -> int:
+    """The number of populated structured sections on the card (#489).
+
+    Counts the typed sections (chief complaints, symptoms, duration) that
+    carry content - the "3 sections" pill the doctor console renders next to
+    the confidence/waiting meta, so triage weight is visible at a glance.
+    """
+    raw = structured_fields if isinstance(structured_fields, dict) else {}
+    fields = StructuredFields.model_validate(raw)
+    return sum(
+        (
+            bool(fields.chief_complaints),
+            bool(fields.symptoms),
+            bool(fields.duration and fields.duration.strip()),
+        )
+    )
+
+
 class IntakeFacade:
     """Typed public facade for intake capture and read projections.
 
@@ -127,11 +192,17 @@ class IntakeFacade:
         engine: AsyncEngine,
         *,
         media_store: IntakeMediaStore | None = None,
+        ai_gateway: AiGateway | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        consent_facade: ConsentFacade | None = None,
+        iam_facade: IamFacade | None = None,
     ) -> None:
         self._engine = engine
         self._media_store = media_store
+        self._ai_gateway = ai_gateway
         self._sleep = sleep
+        self._consent_facade = consent_facade
+        self._iam_facade = iam_facade
 
     async def submit_intake(
         self,
@@ -240,6 +311,45 @@ class IntakeFacade:
             status=state.status.value,
         )
 
+    async def _save_media(
+        self, *, data: bytes, subject_id: int, prefix: str, subject_label: str
+    ) -> str:
+        """Run one media-store write through the upload-resilience ladder.
+
+        On a transient write failure it backs off and retries up to
+        ``MAX_UPLOAD_ATTEMPTS`` (3) attempts, then raises the typed
+        :class:`MediaTransferError` - a partial capture is never silently lost
+        (NFR-PERF-002, spec #344 US-10). Shared by the patient clip and doctor
+        rx-input media uploads so both ride the same durability contract;
+        ``subject_label`` names the failing actor in the raised message
+        (``patient`` / ``doctor``). Raises
+        :class:`IntakeValidationError` when the media store is not configured.
+        """
+        media_store = self._media_store
+        if media_store is None:
+            raise IntakeValidationError("media store is not configured")
+        object_key: str | None = None
+        last_error: OSError | None = None
+        for attempt in range(1, MAX_UPLOAD_ATTEMPTS + 1):
+            if attempt > 1:
+                await self._sleep(_upload_backoff_delay(attempt))
+            try:
+                object_key = await media_store.save(
+                    data=data,
+                    subject_id=subject_id,
+                    prefix=prefix,
+                )
+                break
+            except OSError as exc:
+                last_error = exc
+
+        if object_key is None:
+            raise MediaTransferError(
+                f"media upload failed after {MAX_UPLOAD_ATTEMPTS} attempts for "
+                f"{subject_label} {subject_id}"
+            ) from last_error
+        return object_key
+
     async def upload_intake_media(
         self,
         *,
@@ -261,29 +371,15 @@ class IntakeFacade:
         ``submit_intake`` (first take) or ``re_record_intake`` (retry), which
         persists the ``intake_media_refs`` row against the intake.
 
-        Raises :class:`MediaTransferError` when every upload attempt fails.
+        Raises :class:`MediaTransferError` when every upload attempt fails or
+        :class:`IntakeValidationError` when the media store is not configured.
         """
-        if self._media_store is None:
-            raise IntakeValidationError("media store is not configured")
-
-        object_key: str | None = None
-        last_error: OSError | None = None
-        for attempt in range(1, MAX_UPLOAD_ATTEMPTS + 1):
-            if attempt > 1:
-                await self._sleep(_upload_backoff_delay(attempt))
-            try:
-                object_key = await self._media_store.save(
-                    data=file.data,
-                    patient_id=patient_id,
-                )
-                break
-            except OSError as exc:
-                last_error = exc
-
-        if object_key is None:
-            raise MediaTransferError(
-                f"media upload failed after {MAX_UPLOAD_ATTEMPTS} attempts for patient {patient_id}"
-            ) from last_error
+        object_key = await self._save_media(
+            data=file.data,
+            subject_id=patient_id,
+            prefix=PREFIX,
+            subject_label="patient",
+        )
 
         return MediaUploadRef(
             object_key=object_key,
@@ -291,6 +387,47 @@ class IntakeFacade:
             audio_duration_ms=file.audio_duration_ms,
             file_size_bytes=file.file_size_bytes,
             record_attempt=file.record_attempt,
+        )
+
+    async def upload_doctor_input_media(
+        self,
+        *,
+        doctor_id: int,
+        file: MediaFile,
+    ) -> MediaUploadRef:
+        """Capture a doctor-scoped voice/photo object under the ``rx_input/`` prefix (#481).
+
+        Mirrors ``upload_intake_media``'s upload-resilience ladder
+        (NFR-PERF-002): the media-store write is retried up to
+        ``MAX_UPLOAD_ATTEMPTS`` (3) times with the same exponential backoff,
+        then raises the typed :class:`MediaTransferError` - a doctor's voice
+        note or photo is never silently lost. The bytes are encrypted at rest
+        under the ``rx_input/`` prefix before they touch disk
+        (security-phii-standards: audio is PHI, and the doctor's rx-ingested
+        media rides the same durable encrypted store, ticket #385).
+
+        Answers an opaque :class:`MediaUploadRef` media ticket recording the
+        object key, type, duration, size, and a record attempt of 1. No
+        database row is written here - the ticket is later attached to a
+        consultation as ``DoctorInputRequest.media_ref``, flowing through the
+        care facade's existing ``care_doctor_inputs`` media-ref path.
+
+        Raises :class:`MediaTransferError` when every upload attempt fails or
+        :class:`IntakeValidationError` when the media store is not configured.
+        """
+        object_key = await self._save_media(
+            data=file.data,
+            subject_id=doctor_id,
+            prefix=RX_INPUT_PREFIX,
+            subject_label="doctor",
+        )
+
+        return MediaUploadRef(
+            object_key=object_key,
+            media_type=file.media_type,
+            audio_duration_ms=file.audio_duration_ms,
+            file_size_bytes=file.file_size_bytes,
+            record_attempt=1,
         )
 
     async def re_record_intake(
@@ -475,6 +612,88 @@ class IntakeFacade:
             updated_at=row.updated_at,
         )
 
+    async def get_doctor_intake_detail(
+        self,
+        *,
+        pre_summary_id: int,
+        doctor_id: int,
+    ) -> IntakeDetailView:
+        """Read an intake's transcript and media refs for the assigned doctor (US-14, #484).
+
+        PHASE-8.1 (T09, #484): the doctor's case workspace pre-summary tab
+        needs the ORIGINAL intake transcript text and the intake audio clips,
+        not the structured AI summary. This is the intake-level counterpart of
+        ``get_doctor_pre_summary`` - it keys off ``pre_summary_id`` (the handle
+        the care case carries) and resolves the intake through the same
+        assigned-partner scoping: the intake's health information is served only
+        to the doctor recorded in ``assigned_partner_id``. The scoping predicate
+        lives in the JOIN WHERE (data minimization, security standards §2) - an
+        unassigned doctor partner (or a different doctor) matches no row and
+        gets the same 404 as a non-owner, so the intake's existence is never
+        revealed. The delimiter uses the standard column ``id`` for both tables
+        with an explicit join on the pre-summary's intake link.
+
+        Raises :class:`IntakeNotFoundError` when no pre-summary assigned to
+        ``doctor_id`` matches ``pre_summary_id``.
+        """
+        async with self._engine.begin() as connection:
+            row = (
+                await connection.execute(
+                    select(intake_intakes)
+                    .select_from(
+                        intake_pre_summaries.join(
+                            intake_intakes,
+                            intake_intakes.c.id == intake_pre_summaries.c.intake_id,
+                        )
+                    )
+                    .where(
+                        intake_pre_summaries.c.id == pre_summary_id,
+                        intake_intakes.c.assigned_partner_id == doctor_id,
+                    )
+                )
+            ).first()
+            if row is None:
+                raise IntakeNotFoundError(
+                    f"intake detail not found for pre-summary {pre_summary_id} "
+                    f"assigned to doctor {doctor_id}"
+                )
+
+            media_rows = (
+                await connection.execute(
+                    select(intake_media_refs).where(
+                        intake_media_refs.c.intake_id == row.id,
+                    )
+                )
+            ).all()
+
+        media_refs = [
+            MediaRefView(
+                media_ref_id=int(m.id),
+                media_type=m.media_type,
+                object_key=m.object_key,
+                audio_duration_ms=m.audio_duration_ms,
+                file_size_bytes=m.file_size_bytes,
+                record_attempt=m.record_attempt,
+            )
+            for m in media_rows
+        ]
+
+        return IntakeDetailView(
+            intake_id=int(row.id),
+            patient_id=int(row.patient_id),
+            mode=row.mode,
+            language=row.language,
+            status=row.status,
+            record_attempts=row.record_attempts,
+            text=row.text,
+            transcript=row.transcript,
+            transcript_usability=row.transcript_usability,
+            forced_text=row.forced_text,
+            media_refs=media_refs,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
     async def get_intake_media(
         self,
         *,
@@ -490,11 +709,15 @@ class IntakeFacade:
         matching the intake's patient) or to a doctor partner
         (``caller_role == "doctor"``; the route seam has already verified the
         partner is an active doctor via ``require_partner`` +
-        ``partner_type == "doctor"``). Audio is PHI, so the returned bytes are
-        never logged.
+        ``partner_type == "doctor"``). PHASE-8.1 (#443) scopes doctor reads to
+        the patient's pick: only the doctor recorded in ``assigned_partner_id``
+        is served - an unassigned doctor (or one reading before any pick) gets
+        the same 404 as a non-owner so the intake's existence is never
+        revealed. Audio is PHI, so the returned bytes are never logged.
 
         The intake must exist and the ``media_ref_id`` must belong to it.
-        Raises :class:`IntakeNotFoundError` when either lookup misses;
+        Raises :class:`IntakeNotFoundError` when either lookup misses or the
+        doctor caller is not the assigned doctor;
         :class:`IntakeValidationError` when the store is not configured;
         :class:`MediaTransferError` when the clip cannot be read/decrypted.
         """
@@ -512,9 +735,19 @@ class IntakeFacade:
                     )
                 ).first()
             else:
+                # PHASE-8.1 assigned-partner scoping (#443): after the patient
+                # picks a doctor, the intake's health information is served only
+                # to that doctor. The scoping predicate is in the WHERE clause
+                # (data minimization, security standards §2) - an unassigned
+                # doctor partner (or one reading before any pick, or a
+                # different doctor) matches no row and gets the same 404 as a
+                # non-owner, so the intake's existence is never revealed.
                 intake_row = (
                     await connection.execute(
-                        select(intake_intakes).where(intake_intakes.c.id == intake_id)
+                        select(intake_intakes).where(
+                            intake_intakes.c.id == intake_id,
+                            intake_intakes.c.assigned_partner_id == caller_id,
+                        )
                     )
                 ).first()
             if intake_row is None:
@@ -595,6 +828,100 @@ class IntakeFacade:
             updated_at=row.updated_at,
         )
 
+    async def get_finalized_pre_summary(
+        self,
+        *,
+        pre_summary_id: int,
+    ) -> PreSummaryView:
+        """Return the pre-summary ONLY when it is in the terminal ``final`` state.
+
+        The MOD-006 consult-handshake gate (CONTEXT.md glossary, ``finalized
+        pre-summary``): the sole acceptable input to
+        ``mark_consult_complete``. Queries ``intake_pre_summaries`` and
+        returns a :class:`PreSummaryView` only when ``review_state == final``
+        - a working copy (draft/reviewed) is never served, so a
+        prescription-stage case can never arise from an unreviewed summary
+        (FEAT-008 edge case).
+
+        Raises :class:`IntakeNotFoundError` when no pre-summary row exists for
+        the id; :class:`IntakeValidationError` when the summary exists but is
+        not yet ``final``.
+        """
+        async with self._engine.begin() as connection:
+            row = (
+                await connection.execute(
+                    select(intake_pre_summaries).where(
+                        intake_pre_summaries.c.id == pre_summary_id,
+                    )
+                )
+            ).first()
+            if row is None:
+                raise IntakeNotFoundError(f"pre-summary {pre_summary_id} not found")
+
+            if row.review_state != PreSummaryStatus.FINAL.value:
+                raise IntakeValidationError(
+                    f"pre-summary {pre_summary_id} is not finalized "
+                    f"(review_state={row.review_state}); the consult handshake "
+                    "requires a final-state summary"
+                )
+
+        return PreSummaryView(
+            pre_summary_id=int(row.id),
+            intake_id=int(row.intake_id),
+            structured_fields=StructuredFields.model_validate(row.structured_fields or {}),
+            structuring_confidence=row.structuring_confidence,
+            low_confidence=row.low_confidence,
+            review_state=row.review_state,
+            patient_edits=dict(row.patient_edits) if row.patient_edits else None,
+            doctor_corrections=dict(row.doctor_corrections) if row.doctor_corrections else None,
+            review_attribution=row.review_attribution,
+            reviewed_by=int(row.reviewed_by) if row.reviewed_by is not None else None,
+            reviewed_at=row.reviewed_at,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+    async def assigned_partner_for_pre_summaries(
+        self,
+        pre_summary_ids: Sequence[int],
+    ) -> dict[int, int | None]:
+        """Resolve the assigned partner for intake pre-summaries (ids only, PHI-free).
+
+        The care-module discoverability seam (PHASE-8.1 fix, #478): a born
+        care case carries only the pre-summary id, while the doctor it was
+        assigned to (pick, #443) lives on the intake's
+        ``assigned_partner_id``. This read returns
+        ``{pre_summary_id: assigned_partner_id}`` - ids only, no PHI - so the
+        care facade can decide case visibility against the intake assignment
+        without a cross-schema join (module isolation rule). A pre-summary
+        whose intake has not been picked resolves to ``None``; an id absent
+        from the result simply means no mapping was recorded.
+        """
+        if not pre_summary_ids:
+            return {}
+        async with self._engine.begin() as connection:
+            rows = (
+                await connection.execute(
+                    select(
+                        intake_pre_summaries.c.id,
+                        intake_intakes.c.assigned_partner_id,
+                    )
+                    .select_from(
+                        intake_pre_summaries.join(
+                            intake_intakes,
+                            intake_intakes.c.id == intake_pre_summaries.c.intake_id,
+                        )
+                    )
+                    .where(intake_pre_summaries.c.id.in_(pre_summary_ids))
+                )
+            ).all()
+        return {
+            int(row.id): int(row.assigned_partner_id)
+            if row.assigned_partner_id is not None
+            else None
+            for row in rows
+        }
+
     async def save_patient_pre_summary_edits(
         self,
         *,
@@ -655,6 +982,176 @@ class IntakeFacade:
             patient_edits=merged_edits,
         )
 
+    async def list_review_queue(
+        self,
+        *,
+        doctor_id: int,
+    ) -> list[ReviewQueueItem]:
+        """List the doctor's assigned pre-summaries still awaiting review (US-11/12).
+
+        The doctor review-queue read (PHASE-8.1 T07, #447): every pre-summary
+        on an intake the patient assigned to ``doctor_id`` (pick, #443) that
+        is still in the ``draft`` review state - awaiting the doctor's review.
+        Ordered low-confidence first (US-12, the AMB-006 honesty priority:
+        the summaries that most need the doctor's attention surface before the
+        clean ones), then newest-created first within each confidence class so
+        a waiting list never reorders under concurrent review activity. Each
+        item carries the ``low_confidence`` flag (the AMB-006 cue).
+
+        PHASE-8.1 T07 (#489) enrichment: each item is triage-ready before it
+        leaves the seam - ``patient_name``/``patient_age`` resolve from the
+        patient's identity profile (iam facade), ``snippet`` is a short
+        excerpt of the structured content, ``section_count`` is how many
+        structured sections are populated, both derived from the stored
+        ``structured_fields`` (never a new AI call). Missing profiles degrade
+        gracefully to ``None``/0 - the console falls back to readable copy -
+        and a missing ``iam_facade`` (unit seams) yields the same fallback,
+        never a crash.
+
+        ``doctor_id`` is the partner identity of the calling doctor (RBAC
+        enforced at the route seam). The scoping predicate lives in the JOIN
+        WHERE (data minimization, security standards §2): an unassigned doctor
+        matches no rows, so an intake assigned to a different doctor is never
+        revealed. Open care cases continue to come from the existing
+        doctor-scoped case list; this endpoint returns only the review queue
+        and the console merges the two lists client-side.
+        """
+        async with self._engine.begin() as connection:
+            rows = (
+                await connection.execute(
+                    select(
+                        intake_pre_summaries.c.id,
+                        intake_pre_summaries.c.intake_id,
+                        intake_pre_summaries.c.structuring_confidence,
+                        intake_pre_summaries.c.low_confidence,
+                        intake_pre_summaries.c.review_state,
+                        intake_pre_summaries.c.structured_fields,
+                        intake_pre_summaries.c.created_at,
+                        intake_pre_summaries.c.updated_at,
+                        intake_intakes.c.patient_id,
+                    )
+                    .select_from(
+                        intake_pre_summaries.join(
+                            intake_intakes,
+                            intake_intakes.c.id == intake_pre_summaries.c.intake_id,
+                        )
+                    )
+                    .where(
+                        intake_intakes.c.assigned_partner_id == doctor_id,
+                        intake_pre_summaries.c.review_state == PreSummaryStatus.DRAFT.value,
+                    )
+                    .order_by(
+                        case((intake_pre_summaries.c.low_confidence.is_(True), 0), else_=1),
+                        intake_pre_summaries.c.created_at.desc(),
+                    )
+                )
+            ).all()
+
+        patient_ids = {int(row.patient_id) for row in rows}
+        profiles = {}
+        if self._iam_facade is not None:
+            try:
+                for patient_id in patient_ids:
+                    profiles[patient_id] = await self._iam_facade.get_patient_profile(patient_id)
+            except Exception:
+                # Cosmetic card enrichment (doctor console, #489): a failed
+                # profile resolution (seam broken, schema DB down) must never
+                # take the whole review queue down - degrade wholesale to the
+                # anonymous cards, logged as a warning (error-handling-
+                # observability §2), no patient ids or PHI in the log line.
+                logger.warning(
+                    "review-queue profile resolution failed; degrading to anonymous cards",
+                    exc_info=True,
+                )
+                profiles = {}
+
+        items: list[ReviewQueueItem] = []
+        for row in rows:
+            profile = profiles.get(int(row.patient_id))
+            items.append(
+                ReviewQueueItem(
+                    pre_summary_id=int(row.id),
+                    intake_id=int(row.intake_id),
+                    structuring_confidence=row.structuring_confidence,
+                    low_confidence=row.low_confidence,
+                    review_state=row.review_state,
+                    patient_name=profile.name if profile is not None else None,
+                    patient_age=profile.age if profile is not None else None,
+                    snippet=_review_queue_snippet(row.structured_fields),
+                    section_count=_review_queue_section_count(row.structured_fields),
+                    created_at=row.created_at,
+                    updated_at=row.updated_at,
+                )
+            )
+        return items
+
+    async def get_doctor_pre_summary(
+        self,
+        *,
+        intake_id: int,
+        doctor_id: int,
+    ) -> PreSummaryView:
+        """Read the full pre-summary content for the assigned doctor (US-13, #448, FEAT-008).
+
+        The doctor full pre-summary read (PHASE-8.1 T08): the first
+        doctor-scoped read to return the pre-summary's CONTENT - the structured
+        summary (``structured_fields``: symptoms, duration, severity, history,
+        medications, allergies), the structuring confidence, the
+        ``low_confidence`` honesty flag (AMB-006), and the review state - so
+        the doctor's review is informed by the patient's own words and the AI
+        summary. Today every other pre-summary read is patient-only and the
+        care-case view returns only the pre-summary id, so this is a genuinely
+        new surface required by any review flow (backend delta 3, #438).
+
+        Assigned-partner scoping (#443), matching ``get_intake_media``: the
+        intake's health information is served only to the doctor recorded in
+        ``assigned_partner_id``. The scoping predicate lives in the JOIN WHERE
+        (data minimization, security standards §2) - an unassigned doctor
+        partner (or one reading before any pick, or a different doctor) matches
+        no row and gets the same 404 as a non-owner, so the intake's existence
+        is never revealed. The read returns any review state (draft/reviewed/
+        final) - it carries state, it does not gate on it.
+
+        Raises :class:`IntakeNotFoundError` when no intake assigned to
+        ``doctor_id`` has a pre-summary for the given ``intake_id``.
+        """
+        async with self._engine.begin() as connection:
+            row = (
+                await connection.execute(
+                    select(intake_pre_summaries)
+                    .select_from(
+                        intake_pre_summaries.join(
+                            intake_intakes,
+                            intake_intakes.c.id == intake_pre_summaries.c.intake_id,
+                        )
+                    )
+                    .where(
+                        intake_pre_summaries.c.intake_id == intake_id,
+                        intake_intakes.c.assigned_partner_id == doctor_id,
+                    )
+                )
+            ).first()
+            if row is None:
+                raise IntakeNotFoundError(
+                    f"pre-summary not found for intake {intake_id} assigned to doctor {doctor_id}"
+                )
+
+        return PreSummaryView(
+            pre_summary_id=int(row.id),
+            intake_id=int(row.intake_id),
+            structured_fields=StructuredFields.model_validate(row.structured_fields or {}),
+            structuring_confidence=row.structuring_confidence,
+            low_confidence=row.low_confidence,
+            review_state=row.review_state,
+            patient_edits=dict(row.patient_edits) if row.patient_edits else None,
+            doctor_corrections=dict(row.doctor_corrections) if row.doctor_corrections else None,
+            review_attribution=row.review_attribution,
+            reviewed_by=int(row.reviewed_by) if row.reviewed_by is not None else None,
+            reviewed_at=row.reviewed_at,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
     async def mark_pre_summary_reviewed(
         self,
         *,
@@ -674,10 +1171,15 @@ class IntakeFacade:
         The transition the machine applies depends on confidence (the
         AMB-006 0.70 threshold, structurally enforced here):
 
-        - **low_confidence** (below 0.70 or missing): the hard gate - the
-          pre-summary can ONLY reach ``Reviewed`` through this attributed
-          review action (``PreSummaryAction.REVIEW``). It never reaches
-          ``Final`` unreviewed.
+        - **low_confidence** (below 0.70 or missing): the one-action finalize
+          (PHASE-8.1, #442) - this attributed review action reviews AND
+          finalizes the pre-summary (``PreSummaryAction.REVIEW``,
+          ``Draft -> Final``), so no low-confidence case is left stuck at
+          ``Reviewed``. The machine structurally blocks every other route to
+          ``Final`` for a low-confidence pre-summary, keeping the attribution
+          gate a real doctor action. A row already at ``reviewed`` (a legacy
+          dead-end) is finalized by the same review action through the
+          ``Reviewed -> Final`` edge.
         - **high_confidence**: the clean path - a single attributed review
           action reviews AND finalizes it (``PreSummaryAction.FINALIZE``,
           ``Draft -> Final``), user story 23.
@@ -714,7 +1216,15 @@ class IntakeFacade:
                 structuring_confidence=row.structuring_confidence,
             )
             low_conf = is_low_confidence(row.structuring_confidence)
-            action = PreSummaryAction.REVIEW if low_conf else PreSummaryAction.FINALIZE
+            # PHASE-8.1 one-action finalize (#442): the attributed review of a
+            # low-confidence pre-summary lands Final in this SAME action - via
+            # the low-confidence Review edge while DRAFT, or via the always-legal
+            # Reviewed -> Finalize edge for a row already stuck at 'reviewed'.
+            # High-confidence rows keep the single-action Finalize clean path.
+            if low_conf and current.status is PreSummaryStatus.DRAFT:
+                action = PreSummaryAction.REVIEW
+            else:
+                action = PreSummaryAction.FINALIZE
             next_state = pre_summary_transition(current, action)
 
             original = dict(row.structured_fields or {})
@@ -737,14 +1247,20 @@ class IntakeFacade:
             )
 
             # Every state change writes its outbox event in the SAME transaction
-            # (ADR-0002 S1). A review that REACHES ``Final`` (high-confidence
-            # single action) publishes ``pre_summary.ready`` so MOD-006 attaches
-            # the summary to the case and MOD-010 notifies the patient. The
-            # low-confidence gate to ``Reviewed`` publishes nothing: there is no
-            # "reviewed" event in the registry, the pre-summary is not yet ready
-            # for downstream use, and ``pre_summary.low_confidence`` (needs
-            # review) would be factually wrong once reviewed.
+            # (ADR-0002 S1). Every attributed review is now a single-action
+            # finalize (the high-confidence clean path and the low-confidence
+            # one-action finalize, #442), so reaching ``Final`` publishes
+            # ``pre_summary.ready`` and MOD-006 attaches the summary to the case
+            # while MOD-010 notifies the patient - no low-confidence case is ever
+            # left stuck at ``reviewed``. The machine-driven guard below stays.
             if next_state.status is PreSummaryStatus.FINAL:
+                patient_id = (
+                    await connection.execute(
+                        select(intake_intakes.c.patient_id).where(
+                            intake_intakes.c.id == intake_id,
+                        )
+                    )
+                ).scalar_one()
                 await write_outbox(
                     connection,
                     INTAKE_SCHEMA,
@@ -752,6 +1268,7 @@ class IntakeFacade:
                     pre_summary_ready_envelope(
                         intake_id=intake_id,
                         pre_summary_id=int(row.id),
+                        patient_id=int(patient_id),
                     ),
                 )
 
@@ -766,19 +1283,181 @@ class IntakeFacade:
             reviewed_at=reviewed_at,
         )
 
+    async def pick_doctor(
+        self,
+        *,
+        intake_id: int,
+        patient_id: int,
+        partner_id: int,
+    ) -> PickDoctorResult:
+        """Record the patient's pick-a-doctor and its consent in ONE write (#443).
+
+        Consent-at-pick (MOD-004): the pick IS the consent moment. The chosen
+        doctor's partner identity is written to ``intake_intakes``
+        (``assigned_partner_id``) and the standing grants for the
+        (patient, doctor, consultations) and (patient, doctor, prescriptions)
+        triples are recorded in the SAME transaction via
+        ``ConsentFacade.grant_consent_on`` - either both grants exist or
+        neither, one atomic write, no second gate (#480). The second scope is
+        the one the AI draft's consent-gated past-prescription read (ticket
+        #487) needs to pass; the response still reports the consultations
+        grant so ``PickDoctorResult`` consumers behave identically. From this
+        moment the pre-summary is assigned to that doctor: doctor-facing reads
+        (``get_intake_media`` here, the review-queue and pre-summary reads
+        #447/#448) are scoped to the assigned partner.
+
+        The write is patient-scoped: the intake must belong to ``patient_id`` or
+        :class:`IntakeNotFoundError` is raised (404, mirroring the ownership
+        reads). Exactly one doctor is ever picked: an intake already assigned
+        (``assigned_partner_id`` set, to any doctor) refuses the pick with
+        :class:`IllegalIntakeTransitionError` - a client retry of the same pick
+        is safe via the idempotency header at the route seam (api-standards S5),
+        never by re-picking.
+
+        The consent cache is invalidated after the commit (the grant only became
+        visible when this transaction committed), so a later ``check_consent``
+        never answers from a stale decision.
+
+        Raises :class:`IntakeNotFoundError` when the intake is not the caller's;
+        :class:`IllegalIntakeTransitionError` when a doctor is already assigned;
+        :class:`IntakeValidationError` when ``partner_id`` is missing.
+        """
+        if not partner_id:
+            raise IntakeValidationError("a doctor must be chosen to pick")
+        if self._consent_facade is None:
+            raise IntakeValidationError("consent facade is not configured")
+
+        counterparty_type: Literal["doctor", "lab", "chemist"] = "doctor"
+        counterparty_id = str(partner_id)
+        # Consent-at-pick grants BOTH record scopes the doctor's drafting work
+        # touches: the consultations record and the prescriptions record (the
+        # AI-draft past-prescription read, #487). Minted on the same open
+        # connection inside the single transaction below - both or neither.
+        record_scopes = ("consultations", "prescriptions")
+
+        async with self._engine.begin() as connection:
+            row = (
+                await connection.execute(
+                    select(
+                        intake_intakes.c.id,
+                        intake_intakes.c.patient_id,
+                        intake_intakes.c.assigned_partner_id,
+                    )
+                    .where(intake_intakes.c.id == intake_id)
+                    .with_for_update()
+                )
+            ).first()
+            if row is None or row.patient_id != patient_id:
+                raise IntakeNotFoundError(f"intake {intake_id} not found for patient {patient_id}")
+            if row.assigned_partner_id is not None:
+                raise IllegalIntakeTransitionError(
+                    f"a doctor is already assigned to intake {intake_id}"
+                )
+
+            await connection.execute(
+                intake_intakes.update()
+                .where(intake_intakes.c.id == intake_id)
+                .values(
+                    assigned_partner_id=partner_id,
+                    updated_at=func.now(),
+                )
+            )
+            consent_granted: dict[str, ConsentView] = {}
+            for record_scope in record_scopes:
+                consent_granted[record_scope] = await self._consent_facade.grant_consent_on(
+                    connection,
+                    patient_id,
+                    counterparty_type,
+                    counterparty_id,
+                    record_scope,
+                )
+
+        # The grants are only visible once THIS transaction committed; invalidate
+        # the gate cache only now (outside the transaction, post-commit) for
+        # every scope just granted.
+        for record_scope in record_scopes:
+            await self._consent_facade.invalidate_consent_cache(
+                patient_id, counterparty_type, counterparty_id, record_scope
+            )
+
+        # The response contract is the pick's own scope - the consultations
+        # grant - selected by name so the report never rides on tuple order.
+        consent_view = consent_granted["consultations"]
+        return PickDoctorResult(
+            intake_id=intake_id,
+            assigned_partner_id=partner_id,
+            consent_id=consent_view.consent_id,
+            consent_lineage_ref=consent_view.lineage_ref,
+            consent_version=consent_view.version,
+        )
+
     async def request_rx_draft(
         self,
         *,
         doctor_input_ref: int,
         pre_summary_ref: int,
         history_summary: str | None = None,
-    ) -> None:
-        """Contract stub for rx-draft generation (Phase 8 makes it live).
+    ) -> RxDraftResult:
+        """Produce a structured rx draft from the doctor input (PHASE-8 T05).
 
-        Declared here so the facade surface matches the spec API
-        (spec #344). The actual implementation lands in Phase 8 when the
-        AI pipeline and doctor-approval flow are wired.
+        Delegates to the AI gateway ``draft_rx`` leg (the Phase 7 providers
+        - mock/fallback/openai-compatible) and returns a typed result with the
+        draft ``rx_items`` and the provider confidence. The caller
+        (``PrescriptionFacade.create_rx_draft``) supplies the consent-gated
+        history
+        context via ``history_summary`` (NFR-SEC-006) - this facade never
+        performs a raw history read.
+
+        Resolves the declared language from the intake record associated with
+        ``pre_summary_ref`` so the AI gateway's ``AiEgressContext`` carries
+        only the intake context (NFR-SEC-006 egress boundary). Raises
+        :class:`~modules.intake.domain.exceptions.IntakeNotFoundError` when no
+        pre-summary or intake exists for the given references.
         """
-        raise NotImplementedError(
-            "request_rx_draft is a contract stub; implementation lands in Phase 8"
+        gateway = self._ai_gateway
+        if gateway is None:
+            gateway = build_ai_gateway(get_settings())
+
+        async with self._engine.begin() as connection:
+            ps_row = (
+                await connection.execute(
+                    select(intake_pre_summaries).where(
+                        intake_pre_summaries.c.id == pre_summary_ref,
+                    )
+                )
+            ).first()
+            if ps_row is None:
+                raise IntakeNotFoundError(f"pre-summary {pre_summary_ref} not found for rx-draft")
+
+            intake_row = (
+                await connection.execute(
+                    select(intake_intakes).where(
+                        intake_intakes.c.id == ps_row.intake_id,
+                    )
+                )
+            ).first()
+            language: str = intake_row.language if intake_row is not None else "en"
+
+        draft_result: DraftRxResult = await gateway.draft_rx(
+            DraftRxRequest(
+                doctor_input_ref=str(doctor_input_ref),
+                pre_summary_ref=str(pre_summary_ref),
+                patient_history_summary=history_summary or "",
+                context=AiEgressContext(language=language),
+            )
+        )
+
+        return RxDraftResult(
+            doctor_input_ref=doctor_input_ref,
+            pre_summary_ref=pre_summary_ref,
+            rx_items=[
+                RxDraftItem(
+                    name=item.name,
+                    dose=item.dose,
+                    duration=item.duration,
+                    frequency=item.frequency,
+                )
+                for item in draft_result.rx_items
+            ],
+            confidence=draft_result.confidence,
         )

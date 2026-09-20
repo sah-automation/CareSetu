@@ -35,8 +35,10 @@ from app.config import Settings
 from bus.outbox_writer import write_outbox
 from modules.health.domain.events import record_accessed_envelope, record_denied_envelope
 from modules.health.domain.exceptions import (
-    RecordAccessDeniedError,
-    RecordNotFoundError,
+    RecordAccessDeniedError as RecordAccessDeniedError,
+)
+from modules.health.domain.exceptions import (
+    RecordNotFoundError as RecordNotFoundError,
 )
 from modules.health.outbox import HEALTH_OUTBOX_TABLE
 from modules.health.schema.models import (

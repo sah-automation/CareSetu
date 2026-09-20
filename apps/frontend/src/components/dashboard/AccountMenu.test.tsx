@@ -33,14 +33,14 @@ const VALID_SESSION: StoredSession = {
 };
 
 const ME_RESPONSE_SINGLE_ROLE = {
-  identity_id: 42,
+  subject_id: "42",
   phone: "+911234567890",
   roles: ["patient"],
 };
 
 // A stale session payload predating T05's additive phone field.
 const ME_RESPONSE_NO_PHONE = {
-  identity_id: 42,
+  subject_id: "42",
   roles: ["patient"],
 };
 

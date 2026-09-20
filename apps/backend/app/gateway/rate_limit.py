@@ -1,9 +1,10 @@
 """``rate_limit`` gateway middleware (PHASE-2 T8, ticket #59; REM T8, #78; PS-05, #403).
 
 Enforces the strictest limit on the OTP/auth and intake surfaces
-(``NFR-SEC-004``, api-standards §6): the auth endpoints and the patient
-intake's media-and-row-writing endpoints are the abuse targets, so only their
-paths are counted and capped. The intake GET reads (detail, pre-summary, clip
+(``NFR-SEC-004``, api-standards §6): the auth endpoints and the intake
+media-and-row-writing endpoints (patient clips and the doctor's rx-input
+media, #481) are the abuse targets, so only their paths are counted and
+capped. The intake GET reads (detail, pre-summary, clip
 playback) stay outside the cap - re-fetching a status is not the threat the
 tier exists for. Each surface keeps its own strict tier - the intake tier has
 its own settings defaulting to the auth tier values (PS-05, #403) - so a burst
@@ -33,14 +34,19 @@ from app.gateway.errors import (
 )
 
 _DEFAULT_AUTH_PATH_PREFIX = "/v1/auth/"
-# Intake write surface (PS-05, #403): the media-and-row-writing trio that
-# uploads and persists on the strict tier. ``upload-media`` and ``submit`` are
-# exact paths; ``re-record`` is a per-intake dynamic route, matched by the
-# ``/v1/intake/`` prefix plus the ``/re-record`` suffix so the GET read shapes
+# Intake write surface (PS-05, #403): the media-and-row-writing shapes that
+# upload and persist on the strict tier. ``upload-media`` (patient),
+# ``upload-doctor-media`` (#481) and ``submit`` are exact paths; ``pick-doctor``
+# and ``re-record`` are per-intake dynamic routes, matched by the
+# ``/v1/intake/`` prefix plus their path suffix so the GET read shapes
 # (``/{intake_id}``, ``/pre-summary``, ``/media/{id}``) never match.
+# ``pick-doctor`` counts because the pick IS a row write plus a consent
+# grant (PHASE-8.1 T05, #443) - the same abuse target as the media trio.
 _DEFAULT_INTAKE_PATH_PREFIX = "/v1/intake/"
 _INTAKE_UPLOAD_MEDIA_PATH = f"{_DEFAULT_INTAKE_PATH_PREFIX}upload-media"
+_INTAKE_UPLOAD_DOCTOR_MEDIA_PATH = f"{_DEFAULT_INTAKE_PATH_PREFIX}upload-doctor-media"
 _INTAKE_SUBMIT_PATH = f"{_DEFAULT_INTAKE_PATH_PREFIX}submit"
+_INTAKE_PICK_DOCTOR_PATH_SUFFIX = "/pick-doctor"
 _INTAKE_RE_RECORD_PATH_SUFFIX = "/re-record"
 # Upper bound on tracked buckets: once exceeded, stale windows are pruned and,
 # if the dict is still over the cap, the oldest live buckets are evicted so an
@@ -122,17 +128,25 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         """The strict-tier surface ``path`` belongs to, if any.
 
         The auth surface is prefix-matched (``/v1/auth/*``). The intake surface
-        is the write trio - ``upload-media``, ``submit``, and the per-intake
-        ``re-record`` shape - so the patient's read routes (intake detail,
-        pre-summary, clip playback) are never counted: abusing the
-        payer-facing writes is the threat, re-fetching a status or a clip is
-        not (PS-05, #403).
+        is the media-and-row-writing trio - ``upload-media`` (patient), the
+        doctor-scoped ``upload-doctor-media`` (#481), ``submit``, and the
+        per-intake ``pick-doctor`` / ``re-record`` shapes - so the patient's
+        read routes (intake detail, pre-summary, clip playback) are never
+        counted: abusing the payer-facing writes is the threat, re-fetching a
+        status or a clip is not (PS-05, #403).
         """
         if path.startswith(self.auth_path_prefix):
             return _SURFACE_AUTH
-        if path in (_INTAKE_UPLOAD_MEDIA_PATH, _INTAKE_SUBMIT_PATH) or (
+        if path in (
+            _INTAKE_UPLOAD_MEDIA_PATH,
+            _INTAKE_UPLOAD_DOCTOR_MEDIA_PATH,
+            _INTAKE_SUBMIT_PATH,
+        ) or (
             path.startswith(_DEFAULT_INTAKE_PATH_PREFIX)
-            and path.endswith(_INTAKE_RE_RECORD_PATH_SUFFIX)
+            and (
+                path.endswith(_INTAKE_PICK_DOCTOR_PATH_SUFFIX)
+                or path.endswith(_INTAKE_RE_RECORD_PATH_SUFFIX)
+            )
         ):
             return _SURFACE_INTAKE
         return None

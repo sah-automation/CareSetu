@@ -23,7 +23,7 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.main import create_app
 from modules.iam.domain.jwt import issue_token
-from modules.partner.domain.exceptions import PartnerNotFoundError
+from modules.partner.domain.exceptions import PartnerNotFoundError, PartnerSuspendedError
 from modules.partner.facade import (
     PartnerMeView,
     PartnerVerificationStatusView,
@@ -276,6 +276,44 @@ def test_status_routes_sit_behind_the_gateway_stack() -> None:
 
 
 # -- Unknown identity ----------------------------------------------------------
+
+
+def test_me_suspended_identity_maps_to_403_partner_suspended() -> None:
+    """F014-T06 #466: a suspended identity is refused on the status read.
+
+    The self-service surface is contact-support-only once the iam partner role
+    grant is ``Suspended`` (the gates key off the iam seam, never the profile).
+    """
+    facade = StubPartnerFacade("Active")
+
+    async def raise_suspended(identity_id: int) -> PartnerMeView:
+        facade.calls.append({"method": "get_my_status", "identity_id": identity_id})
+        raise PartnerSuspendedError(identity_id)
+
+    facade.get_my_status = raise_suspended  # type: ignore[method-assign]
+    client = _client(facade)
+
+    response = client.get("/v1/partner/me", headers=_bearer(_token()))
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "PARTNER_SUSPENDED"
+
+
+def test_me_verification_suspended_identity_maps_to_403_partner_suspended() -> None:
+    """F014-T06 #466: a suspended identity is refused on the verification read."""
+    facade = StubPartnerFacade("Active")
+
+    async def raise_suspended(identity_id: int) -> PartnerVerificationStatusView:
+        facade.calls.append({"method": "get_my_verification", "identity_id": identity_id})
+        raise PartnerSuspendedError(identity_id)
+
+    facade.get_my_verification = raise_suspended  # type: ignore[method-assign]
+    client = _client(facade)
+
+    response = client.get("/v1/partner/me/verification", headers=_bearer(_token()))
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "PARTNER_SUSPENDED"
 
 
 def test_status_routes_unknown_identity_maps_to_internal() -> None:

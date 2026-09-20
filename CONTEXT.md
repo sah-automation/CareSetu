@@ -4,18 +4,18 @@
 
 ## Doc inventory
 
-| File                                     | Purpose                                                                                                                                               | Read when                                                                                                                   | ~Tokens  |
-| :--------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------- | :------- |
-| `CONTEXT.md` (this file)                 | Navigation guide - what to read/skip                                                                                                                  | Always (first)                                                                                                              | ~0.5K    |
-| `docs/prd/project-prd.md`                | WHAT we build: epics, features (`FEAT-xxx`), NFRs, risks                                                                                              | Every build; the §4.x section for the features in scope                                                                     | ~13K     |
-| `docs/architecture/system-context.md`    | External actors (`ACT-xxx`) + third-party integrations (`EXT-001..004`)                                                                               | When touching integrations, actors, or boundary rules                                                                       | ~6K      |
-| `docs/architecture/internal-modules.md`  | HOW modules work: per-module specs (`MOD-001..011`), sync matrix §4.1, event registry §4.2, traceability §5                                           | Every build; specs for the modules you touch                                                                                | ~14K     |
-| `docs/roadmap/implementation-roadmap.md` | IN WHAT ORDER we build: per-phase specs (`PHASE-0..14` plus delivered chassis inserts `PHASE-2.5`/`PHASE-2.6` in §2.2a/§2.2b), phased traceability §3 | Every build; the section for the current phase                                                                              | ~17K     |
-| `docs/adr/*`                             | Resolved decisions (ADR-0001: confidence split; ADR-0005: dual JWT storage; **ADR-0007: split-origin deploy + session-transport invariants**)         | When a decision or `AMB`/`CFL`/`GAP` baseline is in scope; ADR-0007 before ANY auth/session/CORS/middleware/deploy-env work | ~1K each |
-| `docs/design/ui-blueprint.md`            | Top-level UI design for all five surfaces: navigation model, design system, per-surface IA, cross-cutting patterns                                    | Any UI/frontend build; the surface sections you touch                                                                       | ~10K     |
-| `docs/research/ui-component-library.md`  | Component-library evidence and migration notes behind the blueprint's §1.1 recommendation                                                             | When adopting UI components or touching bundle budget                                                                       | ~2K      |
-| `docs/standards/*`                       | Top-level rules per area (coding, api, integrations, errors, security, AI)                                                                            | The relevant standard before working in its area                                                                            | ~2K each |
-| `docs/agents/briefs/*`                   | Per-ticket **context packs** (read-list, do-not-read, baseline/done-verify) - the contract for implementing a ticket                                  | The ticket's own brief, before anything else                                                                                | ~2K each |
+| File                                     | Purpose                                                                                                                                                                                       | Read when                                                                                                                   | ~Tokens  |
+| :--------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------- | :------- |
+| `CONTEXT.md` (this file)                 | Navigation guide - what to read/skip                                                                                                                                                          | Always (first)                                                                                                              | ~0.5K    |
+| `docs/prd/project-prd.md`                | WHAT we build: epics, features (`FEAT-xxx`), NFRs, risks                                                                                                                                      | Every build; the §4.x section for the features in scope                                                                     | ~13K     |
+| `docs/architecture/system-context.md`    | External actors (`ACT-xxx`) + third-party integrations (`EXT-001..004`)                                                                                                                       | When touching integrations, actors, or boundary rules                                                                       | ~6K      |
+| `docs/architecture/internal-modules.md`  | HOW modules work: per-module specs (`MOD-001..011`), sync matrix §4.1, event registry §4.2, traceability §5                                                                                   | Every build; specs for the modules you touch                                                                                | ~14K     |
+| `docs/roadmap/implementation-roadmap.md` | IN WHAT ORDER we build: per-phase specs (`PHASE-0..14` plus delivered chassis inserts `PHASE-2.5`/`PHASE-2.6` in §2.2a/§2.2b), phased traceability §3                                         | Every build; the section for the current phase                                                                              | ~17K     |
+| `docs/adr/*`                             | Resolved decisions (ADR-0001: confidence split; ADR-0005: dual JWT storage; **ADR-0007: split-origin deploy + session-transport invariants**; **ADR-0016: partner login method - phone-OTP**) | When a decision or `AMB`/`CFL`/`GAP` baseline is in scope; ADR-0007 before ANY auth/session/CORS/middleware/deploy-env work | ~1K each |
+| `docs/design/ui-blueprint.md`            | Top-level UI design for all five surfaces: navigation model, design system, per-surface IA, cross-cutting patterns                                                                            | Any UI/frontend build; the surface sections you touch                                                                       | ~10K     |
+| `docs/research/ui-component-library.md`  | Component-library evidence and migration notes behind the blueprint's §1.1 recommendation                                                                                                     | When adopting UI components or touching bundle budget                                                                       | ~2K      |
+| `docs/standards/*`                       | Top-level rules per area (coding, api, integrations, errors, security, AI)                                                                                                                    | The relevant standard before working in its area                                                                            | ~2K each |
+| `docs/agents/briefs/*`                   | Per-ticket **context packs** (read-list, do-not-read, baseline/done-verify) - the contract for implementing a ticket                                                                          | The ticket's own brief, before anything else                                                                                | ~2K each |
 
 ## Build-session protocol
 
@@ -106,7 +106,7 @@ The closed enum of record areas a consent grant may name - `consultations | pres
 _Avoid_: data category (when meaning a grant's scope), permission level
 
 **standing grant**:
-One live consent authorization for one (patient, counterparty, record scope) triple, effective from grant until revoked or superseded by a re-grant. "Per-action" consent means this per-purpose targeting, never a one-shot token.
+One live consent authorization for one (patient, counterparty, record scope) triple, effective from grant until revoked or superseded by a re-grant. "Per-action" consent means this per-purpose targeting, never a one-shot token. Pick-at-doctor (Phase 8.1) is the deliberate multi-grant moment: it records `consultations` and `prescriptions` standing grants together, atomically in the same transaction as the doctor assignment, so the AI drafting assistant's consent-gated read can pass.
 _Avoid_: per-action token, one-shot consent
 
 **grant lineage**:
@@ -155,6 +155,22 @@ _Avoid_: suspension grace, review buffer
 The rate-limited path for a `[Rejected]` partner: re-submit corrected credentials (a new verification round) or file a one-time appeal that re-enters the operator queue. Guarded to prevent queue spam (max 3 re-submissions before cooldown).
 _Avoid_: re-registration (that is a fresh partner identity), complaint
 
+**credential account**:
+The `MOD-001` login record a partner gets at registration - created synchronously through the `MOD-002 → MOD-001` facade seam (`create_credential_account`, ADR-0010) in the same transaction as the partner profile, one per partner identity, bound to the normalized phone. Distinct from the partner profile (the `partner` schema row) and from the role grant (async, activation-gated); it is what a returning partner logs into.
+_Avoid_: partner account (when meaning the `iam` row - say credential account), login profile
+
+**partner login**:
+Phone + SMS one-time code, served on dedicated `POST /v1/auth/partner/*` routes (ADR-0016) so a partner login can never mint a patient session, grant the patient role, or emit a `patient.*` event. Works in every lifecycle state except `Suspended`; the demo code read-back matches the patient wizard. Supersedes the blueprint's earlier "email + password for all staff roles / No OTP for staff".
+_Avoid_: staff login (that phrase bundles partner and operator login together), email/password login
+
+**pre-activation restriction**:
+The rule that no unactivated partner reaches patient-facing pages. It is enforced by which routes the partner self-service surface exposes per state (status, rejection reason, and appeal reachable in every state except suspended; credential submission gated; consultation fee only when active; suspended is a contact-support-only surface) - never by a separate, reduced kind of login.
+_Avoid_: restricted login kind, limited-scope login (there is one partner login for every state)
+
+**operator login**:
+Phone + authenticator-app (TOTP), MFA-bound, for the trusted operator group only; the operator entry stays hidden from the partner-facing login page and is untouched by partner login. The platform distinguishes phone-OTP (patient and partner) from operator-TOTP (operators).
+_Avoid_: staff login (when meaning a shared partner+operator entry), password login
+
 **operator**:
 A member of the trusted closed group that runs the verification queue; bootstrapped at deploy and grown by operator-invites-operator, never self-registering, and MFA-bound at login.
 _Avoid_: admin, moderator (when meaning the operator console role)
@@ -200,6 +216,60 @@ _Avoid_: suspension
 **wider-area fallback**:
 The `FEAT-004` no-results shape: when no directory entry matches the patient's filters within the Daltonganj peri-urban scope, relax only the location constraint (keep type and specialty filters), show nearest-first, and label the results "outside your area". The patient is never silently served results that dropped a filter.
 _Avoid_: fuzzy match, relaxed filters
+
+### Consultation orchestration & e-prescription (Phase 8)
+
+**care case**:
+The per-visit work record in `MOD-006` (the `care` schema), born the moment its pre-summary is finalized, one per visit, carrying the patient, the attending doctor, and the prescription lineage.
+_Avoid_: case (bare), visit record (the visit is the off-platform consult that precedes the case), consultation (that is the off-platform event)
+
+**case stage**:
+The closed enum dwell state of a care case: `PreSummary → PrescriptionPending → Closed`. `ConsultComplete` is not a stage - it is the milestone on the `PreSummary → PrescriptionPending` transition. A rejected draft never changes the case stage; `Closed` comes only from the doctor's deliberate close-without-prescription.
+_Avoid_: case status (the column is `stage`, and status implies free transitions), lifecycle phase
+
+**consult complete milestone**:
+The audited marker recorded on the `PreSummary → PrescriptionPending` transition when the doctor closes the off-platform consult on-platform in one action - a milestone on the transition, never a dwell state. It fires `case.consult_complete` and the patient's single notification, then the case enters prescription pending.
+_Avoid_: consult complete state, consult-closed flag
+
+**finalized pre-summary**:
+The Phase-7 pre-summary in its terminal `final` state - the only summary the handshake gate `get_finalized_pre_summary` ever returns. `mark_consult_complete` is blocked while none exists, so a prescription-stage case can never arise from an unreviewed summary.
+_Avoid_: completed summary, reviewed summary (that is the intermediate `reviewed` state, not the gate's `final` state)
+
+**e-prescription**:
+The issued, immutable prescription a doctor approves and the patient's record stores: the frozen approved revision, timestamped and attributed to the issuing doctor, with no supersede or void path - corrections require a fresh visit. `get_approved_prescription` serves only these.
+_Avoid_: digital prescription, electronic prescription, Rx (in model language; fine in UI copy)
+
+**prescription source**:
+The closed enum on a prescription recording where its revision came from: `ai_draft` (from the drafting assistant's immutable draft snapshot) or `manual` (the doctor authored `rx_items` directly). Keeps the audit trail honest about AI involvement.
+_Avoid_: origin, provenance
+
+**draft snapshot**:
+The immutable AI-draft artifact captured when `request_rx_draft` produces a draft - the frozen baseline against which `edited_yn` is derived on approval. Editing never touches it; the working revision (the current `Draft`/`DoctorReviewed` row and its `rx_items`) is the only thing that changes.
+_Avoid_: AI output, stored draft
+
+**drafting cap**:
+The guard that a new AI draft is only generated while the care case has fewer than 2 rejected drafts - so at most two AI drafts per care case (`MAX_REJECTED_DRAFTS = 2`, `can_create_draft(rejected_count) = rejected_count < 2`); a rejected draft never auto-closes the case. The cap limits only AI draft generation; manual authoring, edit-and-approve, and close-without-prescription stay open regardless, so an AI outage never strands a patient's visit.
+_Avoid_: retry limit, draft budget
+
+**revision-freeze approval**:
+The core issuance guarantee: approval saves and freezes exactly the doctor's working revision (the current `Draft`/`DoctorReviewed` row and its `rx_items`), sets `issued_at` and `attributed_doctor`, and derives `edited_yn` against the immutable draft snapshot. If the revision save fails the approval is blocked - the raw AI draft is never approvable, so a lost edit can never mean a wrong prescription issued.
+_Avoid_: one-click approve, approve-draft
+
+**verification declaration**:
+The mandatory double-check: `approve_prescription` accepts only a `verification_declaration = true`, stored on `care_rx_approvals` with `declared_at`. A declaration-less approval is rejected, so no prescription is issued without the doctor's recorded, double-checked review.
+_Avoid_: consent, agree-checkbox
+
+**edited_yn**:
+The derived flag on an approval computed by comparing the frozen revision against the immutable draft snapshot - `edited` tells an auditor whether the issued prescription differs from the AI draft. Never set by hand or from client input.
+_Avoid_: modified flag, changed flag
+
+**doctor input**:
+A voice note or photo the doctor submits as prescribing input for the AI drafting assistant, stored as a sensitive-class object in the `rx_input/` storage prefix. Any use of the patient's record history to shape an AI draft goes through consent-gated reads (`check_consent`), fail-closed.
+_Avoid_: media upload, attachment
+
+**close-without-prescription**:
+The doctor's deliberate terminal action that moves a care case to `Closed` with no prescription - recorded with a close reason and leaving the pending list. A rejected draft never auto-closes the case; only this explicit action closes a visit when no medicine is needed.
+_Avoid_: close case, end-visit-without-prescription
 
 ### Event bus & module seams
 

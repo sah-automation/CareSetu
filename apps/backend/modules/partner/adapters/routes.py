@@ -33,11 +33,14 @@ from modules.partner.domain.credentials import CredentialType, Specialty
 from modules.partner.domain.events import PartnerType
 from modules.partner.domain.exceptions import (
     AppealAlreadyUsedError,
+    ConsultationFeeNotAllowedError,
     IllegalPartnerTransitionError,
     InvalidQueueSortError,
     InvalidQueueStatusError,
     PartnerError,
+    PartnerNotActiveError,
     PartnerNotRejectedError,
+    PartnerSuspendedError,
     ProviderProfileNotFoundError,
     RejectionReasonRequiredError,
     ReSubmissionThrottledError,
@@ -290,7 +293,9 @@ async def open_credential_submission(
     acts only on their own identity - the authenticated principal's ``subject_id``
     is resolved to the partner profile, so no cross-partner submission.
     Idempotent (api-standards 5): a duplicate ``Idempotency-Key`` replays the
-    stored result without re-executing the facade call.
+    stored result without re-executing the facade call. The authenticated
+    principal is also passed to the facade so the suspension gate closes the
+    route for a suspended identity (F014-T06 #466, 403 ``PARTNER_SUSPENDED``).
     """
     facade = cast(PartnerFacade, request.app.state.partner_facade)
 
@@ -305,6 +310,7 @@ async def open_credential_submission(
         ]
         return await facade.submit_credentials(
             partner.partner_id,
+            identity_id=int(account.subject_id),
             credentials=credentials,
         )
 
@@ -327,11 +333,15 @@ async def rejection_reason(
     partner principal to their profile and reads back the latest rejection
     reason so they can re-apply with corrected credentials. The facade raises
     :class:`PartnerNotRejectedError` for any non-``[Rejected]`` partner, which
-    the module error handler maps to a 422.
+    the module error handler maps to a 422, and :class:`PartnerSuspendedError`
+    for a suspended identity (403 ``PARTNER_SUSPENDED``, F014-T06 #466).
     """
     facade = cast(PartnerFacade, request.app.state.partner_facade)
     partner = await facade.resolve_partner(int(account.subject_id))
-    return await facade.get_rejection_reason(partner.partner_id)
+    return await facade.get_rejection_reason(
+        partner.partner_id,
+        identity_id=int(account.subject_id),
+    )
 
 
 @router.get(
@@ -350,6 +360,8 @@ async def partner_me(
     to their profile and returns status/type/round/registration time so they can
     check where they stand pre-activation. Only the caller's own record is
     returned - no cross-partner or patient-facing data (restricted scope).
+    A suspended identity is refused with a 403 ``PARTNER_SUSPENDED``
+    (F014-T06 #466): the self-service surface is contact-support-only then.
     """
     facade = cast(PartnerFacade, request.app.state.partner_facade)
     return await facade.get_my_status(int(account.subject_id))
@@ -371,7 +383,8 @@ async def partner_me_verification(
     to their profile and returning the current verification round's review
     state (under review, or approved/rejected with the decision). Only the
     caller's own record is returned - the operator's artifact refs and audit
-    chain stay out of the partner scope (restricted scope).
+    chain stay out of the partner scope (restricted scope). A suspended identity
+    is refused with a 403 ``PARTNER_SUSPENDED`` (F014-T06 #466).
     """
     facade = cast(PartnerFacade, request.app.state.partner_facade)
     return await facade.get_my_verification(int(account.subject_id))
@@ -392,7 +405,8 @@ async def partner_appeal(
     A thin partner-scoped adapter (PHASE-5 T09): resolves the partner principal
     and files the appeal, which re-enters the operator queue (Step 2) and emits
     ``partner.verification_started``. The ``appeal_used`` flag is consumed on
-    first use; a second appeal maps to an ``APPEAL_ALREADY_USED`` 422.
+    first use; a second appeal maps to an ``APPEAL_ALREADY_USED`` 422, and a
+    suspended identity is refused with a 403 ``PARTNER_SUSPENDED`` (F014-T06 #466).
     Idempotent (api-standards 5): a duplicate ``Idempotency-Key`` replays the
     stored result without re-executing the facade call.
     """
@@ -400,7 +414,7 @@ async def partner_appeal(
 
     async def _call() -> PartnerView:
         partner = await facade.resolve_partner(int(account.subject_id))
-        return await facade.appeal(partner.partner_id)
+        return await facade.appeal(partner.partner_id, identity_id=int(account.subject_id))
 
     return await run_idempotent(request, _call)
 
@@ -545,6 +559,61 @@ async def grace_window_lapse(
     return await facade.grace_lapse(int(partner_id))
 
 
+class ConsultationFeeRequest(BaseModel):
+    """Body of ``PATCH /v1/partner/consultation-fee`` (PHASE-8.1 T06, #444).
+
+    ``fee_paise`` is the doctor's consultation fee in integer paise
+    (api-standards §3), REQUIRED but nullable: a non-null value sets the fee,
+    ``null`` clears it back to unset. The fee is NOT PHI and needs no credential
+    gate - an unset fee never blocks a pick (the client renders "fee not set").
+    The doctor-only rule (a lab/chemist partner may not set a fee) is enforced
+    in the facade, not this adapter.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    fee_paise: int | None = Field(
+        ge=0,
+        description="Consultation fee in integer paise; null clears it back to unset",
+    )
+
+
+@router.patch(
+    "/consultation-fee",
+    response_model=PartnerView,
+    status_code=status.HTTP_200_OK,
+    summary="Set or clear the doctor's own consultation fee (partner only, doctor only)",
+)
+async def update_consultation_fee(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+    body: ConsultationFeeRequest,
+) -> PartnerView:
+    """A doctor sets (or clears) their own consultation fee (PHASE-8.1, #444).
+
+    A thin partner-scoped adapter: resolves the authenticated partner principal
+    to their own profile and writes the nullable fee. The facade refuses any
+    non-doctor partner with :class:`ConsultationFeeNotAllowedError` (mapped to
+    the 403 ``CONSULTATION_FEE_NOT_ALLOWED`` envelope) - a lab or chemist cannot
+    carry a consultation fee - and any not-yet-``[Active]`` (or deactivated)
+    doctor with :class:`PartnerNotActiveError` (mapped to the 403
+    ``PARTNER_NOT_ACTIVE`` envelope, F014-T06 #466); a suspended identity is
+    refused first with ``PARTNER_SUSPENDED``. Only the caller's own record is
+    touched - no cross-partner mutation (restricted scope). Idempotent
+    (api-standards 5): a duplicate ``Idempotency-Key`` replays the stored result
+    without re-executing the facade call.
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+
+    async def _call() -> PartnerView:
+        return await facade.update_consultation_fee(
+            int(account.subject_id),
+            fee_paise=body.fee_paise,
+        )
+
+    return await run_idempotent(request, _call)
+
+
 def _decode_artifact(b64: str) -> bytes:
     """Decode a base64 artifact, rejecting malformed input (never stored raw)."""
     try:
@@ -665,6 +734,41 @@ def register_error_handlers(app: FastAPI) -> None:
             request=request,
         )
 
+    async def _consultation_fee_not_allowed(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        return error_response(
+            status.HTTP_403_FORBIDDEN,
+            "CONSULTATION_FEE_NOT_ALLOWED",
+            "only a doctor partner can set a consultation fee",
+            log_tag="partner_fee",
+            request=request,
+        )
+
+    async def _partner_not_active(request: Request, exc: Exception) -> JSONResponse:
+        partner_not_active = cast(PartnerNotActiveError, exc)
+        return error_response(
+            status.HTTP_403_FORBIDDEN,
+            "PARTNER_NOT_ACTIVE",
+            "consultation fee is only available to an active partner",
+            log_tag="partner_fee",
+            request=request,
+            details={
+                "partner_id": partner_not_active.partner_id,
+                "current_status": partner_not_active.status,
+            },
+        )
+
+    async def _partner_suspended(request: Request, exc: Exception) -> JSONResponse:
+        partner_suspended = cast(PartnerSuspendedError, exc)
+        return error_response(
+            status.HTTP_403_FORBIDDEN,
+            "PARTNER_SUSPENDED",
+            "this partner's access is suspended; contact support",
+            log_tag="partner_suspended",
+            request=request,
+            details={"identity_id": partner_suspended.identity_id},
+        )
+
     async def _provider_profile_not_found(request: Request, exc: Exception) -> JSONResponse:
         del exc
         return error_response(
@@ -683,5 +787,8 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(AppealAlreadyUsedError, _appeal_already_used)
     app.add_exception_handler(ReSubmissionThrottledError, _re_submission_throttled)
     app.add_exception_handler(IllegalPartnerTransitionError, _illegal_transition)
+    app.add_exception_handler(ConsultationFeeNotAllowedError, _consultation_fee_not_allowed)
+    app.add_exception_handler(PartnerNotActiveError, _partner_not_active)
+    app.add_exception_handler(PartnerSuspendedError, _partner_suspended)
     app.add_exception_handler(ProviderProfileNotFoundError, _provider_profile_not_found)
     app.add_exception_handler(PartnerError, _partner_failed)

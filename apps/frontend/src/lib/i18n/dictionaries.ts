@@ -116,6 +116,34 @@ const en = {
       genericError:
         "Something went wrong, please check your credentials and try again.",
       invalidOperatorCode: "Invalid authentication code. Please try again.",
+      // Partner phone-OTP mode (F014-T07 #467): partner staff sign in with
+      // phone + SMS code, mirroring the patient wizard's interaction copy.
+      getCode: "Get verification code",
+      codeLabel: "Verification code",
+      codeHint: "6-digit code sent by SMS to",
+      codeExpires: "Code expires in",
+      resend: "Resend code",
+      backToEdit: "Edit number",
+      resendIn: (s: number) => `Resend in ${s}s`,
+      attemptsLeft: (n: number) =>
+        `${n} ${n === 1 ? "attempt" : "attempts"} left`,
+      noAttempts: "No attempts left. Request a new code.",
+      wrongCode: (n: number) =>
+        `Wrong code. ${n} ${n === 1 ? "attempt" : "attempts"} left.`,
+      shortCode: "Enter the full 6-digit code.",
+      lockout: (m: number) =>
+        `Too many failed attempts. Verification locked for ${m} min.`,
+      resendEarly: (s: number) => `Cooldown active. Resend in ${s}s.`,
+      expiredOrUsed:
+        "This code has expired or was already used. Request a new one.",
+      latestWins: "A new code was sent. The previous code is no longer valid.",
+      suspendedNotice:
+        "This account is suspended. Contact support for assistance.",
+      noAccount:
+        "No doctor, lab or chemist account was found for this number. Register your practice or business to get started.",
+      networkError: "Could not reach the server. Check your connection.",
+      smsFailed: "We could not send the code. Try again in a moment.",
+      demoOtp: (code: string) => `Demo OTP: ${code}`,
     },
     pending: {
       badge: "Under Verification",
@@ -184,6 +212,15 @@ const en = {
       back: "Back",
       continueCta: "Continue",
       submitApplication: "Submit application",
+      // FEAT-014 T08 (#468): phone-confirmation step between review and
+      // landing - the OTP card itself reuses the staffAuth.login copy; only
+      // the step's own heading and submit label live here.
+      phoneConfirm: {
+        title: "Confirm your phone",
+        helper:
+          "We texted a 6-digit code to this number to keep your application tied to a phone you control. Enter the code to finish - your details are saved.",
+        confirmCode: "Confirm code",
+      },
       summaryTitle: (n: number) =>
         `${n} ${
           n === 1 ? "field needs" : "fields need"
@@ -612,6 +649,14 @@ const en = {
       areaExplain:
         "Medicine delivery needs your area or address - add it here to continue.",
     },
+    // save.* - PHASE-8.1 T2 (#488): Finish persistence state surfaced by the
+    // wizard hosts (complete page + inline gate) while PUT /v1/me/profile runs.
+    save: {
+      saving: "Saving your profile...",
+      saved: "Profile saved",
+      error:
+        "We could not save your profile. Please check your connection and try again.",
+    },
     demo: {
       badge: "Demo care actions",
       title: "Care-action gating",
@@ -969,6 +1014,267 @@ const en = {
       loadFailedBody: "Check your connection and try again.",
     },
   },
+
+  // doctorConsole.* surface - PHASE-8.1 T12 (#450): the doctor console
+  // landing page. Two stacked sections: review queue (low-confidence first,
+  // oldest-first within each group) and open care cases, plus the fee editor,
+  // coming-soon patients/profile, and a retry path on load failure. All copy
+  // bilingual en/hi (REQ-006).
+  doctorConsole: {
+    title: "Doctor console",
+    consoleDescription: "Your review queue and open cases",
+    queueHeading: "Review queue",
+    queueEmpty: "No pre-summaries waiting for review",
+    patientFallback: "Patient",
+    patientAge: (age: number) => `${age} yrs`,
+    sectionsCount: (n: number) => `${n} ${n === 1 ? "section" : "sections"}`,
+    queueItemMeta: (id: number) => `Intake #${id}`,
+    caseItemMeta: (id: number) => `Case #${id}`,
+    verifyChip: "Verify",
+    confidenceLabel: "Confidence",
+    waitingFor: (time: string) => `Waiting ${time}`,
+    reviewAction: "Review",
+    casesHeading: "Open cases",
+    casesEmpty: "No open care cases",
+    casesIndexTitle: "My cases",
+    casesIndexDescription: "Your open care cases",
+    stagePreSummary: "Pre-summary",
+    stagePrescriptionPending: "Prescription pending",
+    stageClosed: "Closed",
+    openCaseAction: "Open",
+    feeEditorHeading: "Consultation fee",
+    feeEditorHelp:
+      "Set the fee patients see when choosing you. Leave blank until set.",
+    feeFieldLabel: "Fee (\u20B9)",
+    feeFieldPlaceholder: "e.g. 400",
+    saveFee: "Save fee",
+    clearFee: "Clear fee",
+    feeSaved: "Fee saved.",
+    feeSaveFailed: "Could not save the fee.",
+    patientsComingSoon: "Patients - coming soon",
+    profileComingSoon: "Profile - coming soon",
+    comingSoonBody: "This area opens in a later update.",
+    loadFailed: "Could not load the console.",
+    retry: "Try again",
+  },
+
+  // caseWorkspace.* surface - PHASE-8.1 T13/T14 (#451/#452): the case
+  // workspace. Serves both the review-entry (queue -> review/[intakeId]) and
+  // the case-entry (open cases -> cases/[caseId]) routes: case stage chip, the
+  // forced-review requirement, the full pre-summary content, the patient's
+  // consented health history, the single-action attributed review+finalize,
+  // and the consult-complete handshake into prescription-pending (US-13/14/16/
+  // 17/24). Prescription drafting (US-18/#452) covers the AI-draft request,
+  // the editable rx-item rows, save-revision, and reload of the in-progress
+  // working revision; approval/rejection/close are built by #453.
+  caseWorkspace: {
+    title: "Case workspace",
+    backToConsole: "Back to console",
+    stageLabel: "Stage",
+    forcedReviewChip: "Review required",
+    forcedReviewDetail:
+      "This pre-summary has low confidence and needs your review before any prescription.",
+    summaryHeading: "Pre-summary to review",
+    confidenceLabel: "Confidence",
+    chiefComplaintsLabel: "Chief complaints",
+    symptomsLabel: "Symptoms",
+    durationLabel: "Duration",
+    durationNotSet: "Not captured",
+    patientEditsLabel: "Patient edits",
+    patientEditsNone: "No patient edits",
+    reviewStateLabel: "Review state",
+    reviewStateDraft: "Awaiting your review",
+    reviewStateReviewed: "Reviewed",
+    reviewStateFinal: "Finalized",
+    attributionLabel: "Attributed to",
+    reviewedOnLabel: "Reviewed on",
+    notReviewedYet: "Not yet attributed",
+    historyHeading: "Patient history",
+    historyConsentNote: "Only what the patient consented to share.",
+    historyEmpty: "No history yet.",
+    historyLoadFail: "Could not load patient history.",
+    // PHASE-8.1 #484: case workspace inner tabs + original transcript + audio.
+    tabPreSummary: "Pre-summary",
+    tabHistory: "History",
+    tabPrescription: "Prescription",
+    transcriptHeading: "Original intake",
+    transcriptEmpty: "No transcript available for this intake.",
+    transcriptLoadFail: "Could not load the intake transcript.",
+    audioPlayLabel: "Play recording",
+    audioLoadFail: "Could not load the recording.",
+    loadFailed: "Could not load this case workspace.",
+    retry: "Try again",
+    finalizeAction: "Finalize + attribute review",
+    finalizeHelp:
+      "One action records your review and finalizes the pre-summary.",
+    finalizeSuccess: "Pre-summary finalized and attributed to you.",
+    finalizeFail: "Could not finalize this pre-summary.",
+    handshakeAction: "Complete consultation",
+    handshakeHelp: "Moves the case to prescription pending.",
+    handshakeFail: "Could not complete the consultation.",
+    handshakeSuccess:
+      "Consultation complete - the case is now prescription pending.",
+    prescriptionPendingCta: "The prescription editor is ready below.",
+    // PHASE-8.1 #484: prescription tab stage lock - the case must consult
+    // before any prescription. Pre-summary is always finalized on a born case;
+    // the pending item is the consult-complete handshake, and the action jumps
+    // to the pre-summary tab where the handshake form lives.
+    rxLockTitle: "Prescription not yet open",
+    rxLockDone: "Pre-summary finalized",
+    rxLockPending: "Consult marked complete",
+    rxLockAction: "Complete consultation",
+    prescriptionHeading: "Prescription",
+    prescriptionHelp:
+      "Request an AI draft, then edit the items to match your clinical judgment before saving.",
+    requestDraftAction: "Request AI draft",
+    requestingDraft: "Requesting",
+    requestDraftFail: "Could not generate the AI draft.",
+    draftCapReached:
+      "The AI drafting limit for this case has been reached. Edit and save the current draft instead.",
+    noDraftYet:
+      "No prescription draft yet. Add your input below to get started.",
+    // PHASE-8.1 T6 (#490): the empty-state doctor-input capture surface -
+    // voice note / photo / typed addendum ride the doctor media route and
+    // post media_ref to doctor-input; the AI draft gate and manual authoring
+    // live here too. Refusal codes map to specific messages (#487).
+    doctorInputHelp:
+      "Share what informed this prescription - a voice note, a photo, or a short typed addendum.",
+    voiceNoteAction: "Voice note",
+    photoAction: "Photo",
+    addendumLabel: "Typed addendum (optional)",
+    addendumPlaceholder: "e.g. dosage notes or instructions",
+    addendumSubmit: "Attach addendum",
+    inputSubmitting: "Uploading",
+    doctorInputFail: "Could not attach your input. Please try again.",
+    doctorInputReceived: "Input attached - you can now request the AI draft.",
+    requestDraftBlocked:
+      "Attach a voice note, photo, or typed addendum to enable the AI draft.",
+    manualAuthoringAction: "Type prescription yourself",
+    manualAuthoringHelp:
+      "Write the prescription items yourself - no AI needed, and no patient consent required.",
+    draftConsentDenied:
+      "The patient has not granted consent for the AI to consult their records. Type the prescription yourself, or ask the patient to grant access.",
+    draftNoDoctorInput:
+      "Attach a voice note, photo, or typed addendum before requesting the AI draft.",
+    draftCaseClosed: "This case is closed, so no new draft can be requested.",
+    draftCaseNotFound:
+      "This case could not be found. It may be closed or assigned to a different doctor.",
+    workingRxLoadFail: "Could not load the in-progress prescription.",
+    rxItemsLabel: "Prescription items",
+    rxNameLabel: "Medicine",
+    rxDoseLabel: "Dose",
+    rxDurationLabel: "Duration",
+    rxFrequencyLabel: "Frequency",
+    rxEmptyItems: "No items yet. Add the first one below.",
+    addItemAction: "Add item",
+    removeItemAction: "Remove",
+    saveRevisionAction: "Save revision",
+    savingRevision: "Saving",
+    revisionSaved: "Revision saved.",
+    saveRevisionFail: "Could not save this revision.",
+    sourceLabel: "Source",
+    sourceAiDraft: "AI draft",
+    sourceManual: "Manual",
+    // Approval/rejection/close (#453, US-19..22): the review decision on the
+    // prescription plus close-without-prescription for the case.
+    rxStatusLabel: "Prescription status",
+    rxStatusDraft: "Draft",
+    rxStatusReviewed: "Reviewed",
+    rxStatusRejected: "Rejected",
+    rxStatusIssued: "Issued",
+    rxStatusFulfilled: "Fulfilled",
+    decisionHeading: "Doctor decision",
+    editedTracker: (n: number) =>
+      n === 1 ? "1 item edited by you" : `${n} items edited by you`,
+    approvalGateTitle: "Review & approve",
+    approvalGateHelp:
+      "Confirm you reviewed every item against the patient record before issuing.",
+    verificationDeclaration:
+      "I have reviewed this prescription (Maine check kar liya)",
+    approveIssueAction: "Approve & issue",
+    approvingIssuance: "Approving",
+    approveBlockedHelp:
+      "Tick the verification declaration to approve and issue the prescription.",
+    approveFail: "Could not approve and issue this prescription.",
+    issuedHeading: "Prescription issued",
+    issuedImmutableNote:
+      "The issued prescription is final and cannot be changed.",
+    issuedAtLabel: "Issued on",
+    issuedAttributedTo: "Attributed to you",
+    rejectAction: "Reject draft",
+    rejectingDraft: "Rejecting",
+    rejectReasonLabel: "Reason for the patient",
+    rejectReasonPlaceholder:
+      "Explain in plain language why this draft was not approved, so the patient understands.",
+    rejectFail: "Could not reject the draft.",
+    rejectedHeading: "Draft rejected",
+    rejectedHelp:
+      "The reason is recorded for the patient. The case stays open - you can request a new draft or close without prescribing.",
+    rejectedReasonLabel: "Recorded reason",
+    closeWithoutRxHeading: "Close without prescription",
+    closeWithoutRxHelp:
+      "Use when no medicine is needed. The case moves to Closed and leaves your pending list.",
+    closeReasonLabel: "Close reason",
+    closeCaseAction: "Close case",
+    closingCase: "Closing",
+    closeFail: "Could not close the case.",
+    closeReasons: {
+      patientWithdrawn: "Patient withdrew",
+      doctorRejected: "Doctor declined treatment",
+      noShow: "Patient did not show up",
+      duplicate: "Duplicate visit",
+    },
+  },
+
+  // pick.* surface - PHASE-8.1 T11 (#449): the patient pick-a-doctor step
+  // (suggested specialty, verified doctor cards, consent sheet, confirmation).
+  // Suggested specialty is a start-here filter, not blocking choice (US-2/US-3).
+  pick: {
+    title: "Choose your doctor",
+    subtitle: "Pick the doctor who will review your pre-summary",
+    suggestedSpecialtyLabel: "Suggested for you",
+    suggestionNote: "You can choose any verified doctor",
+    bookCta: "Book with this doctor",
+    viewProfile: "View verified profile",
+    feeNotSet: "Fee not set",
+    feeLabel: "Consultation fee",
+    credentialsVerified: "Credentials verified",
+    noDoctorsTitle: "No doctors found",
+    noDoctorsBody:
+      "There are no verified doctors available for this specialty right now.",
+    lowConfidenceHint:
+      "Your pre-summary needs review. You can edit your symptoms before choosing a doctor.",
+    editSymptoms: "Edit symptoms",
+    allow: "Allow",
+    consentTitle: "Sharing your pre-summary",
+    consentScope:
+      "This doctor will see your symptoms summary and may consult your consultations and prescriptions records while drafting your care.",
+    consentValidity: "This access lasts until you revoke it.",
+    confirmTitle: "Doctor chosen",
+    confirmBody: "Your pre-summary is now visible to this doctor only.",
+    whatHappensNext: "What happens next",
+    whatHappensNextItems:
+      "The doctor reviews your pre-summary. If needed, they will contact you for a consultation. You can track the status from your intake page.",
+    loading: "Finding verified doctors…",
+    recordingChoice: "Recording your choice…",
+    genericError: "Something went wrong. Please try again.",
+    viewIntakeStatus: "View intake status",
+    errorTitle: "We couldn't load the doctor list",
+    errorBody: "Check your connection and try again.",
+    retry: "Try again",
+    breadcrumb: "Choose doctor",
+  },
+
+  // findCare.* surface - PHASE-8.1 T11 (#485): the authed Find Care page at
+  // /patient/find (blueprint §5.3). Reuses the verified directory browse;
+  // the continuation CTA deep-links back into the intake pick step when an
+  // intake is in progress (the intake flow carries ?intake=<id>).
+  findCare: {
+    resumeTitle: "A consultation is in progress",
+    resumeBody:
+      "Your pre-summary is ready. Resume choosing the doctor who will review it.",
+    bookCta: "Book consultation",
+  },
 };
 
 export type Dictionary = typeof en;
@@ -1067,6 +1373,27 @@ export const STRINGS: Record<Lang, Dictionary> = {
         genericError:
           "कुछ गड़बड़ हुई, कृपया अपनी साख़ीयाँ जाँचें और फिर से कोशिश करें।",
         invalidOperatorCode: "अमान्य प्रमाणीकरण कोड। कृपया फिर से कोशिश करें।",
+        getCode: "वेरिफिकेशन कोड पाएँ",
+        codeLabel: "वेरिफिकेशन कोड",
+        codeHint: "SMS से भेजा गया 6 अंकों का कोड",
+        codeExpires: "कोड समाप्त होने में",
+        resend: "कोड फिर से भेजें",
+        backToEdit: "नंबर बदलें",
+        resendIn: (s) => `${s}s में फिर से भेजें`,
+        attemptsLeft: (n) => `${n} प्रयास शेष`,
+        noAttempts: "कोई प्रयास नहीं बचा। नया कोड माँगें।",
+        wrongCode: (n) => `गलत कोड। ${n} प्रयास शेष।`,
+        shortCode: "पूरा 6 अंकों का कोड दर्ज करें।",
+        lockout: (m) => `बहुत अधिक गलत प्रयास। ${m} मिनट के लिए लॉक किया गया।`,
+        resendEarly: (s) => `कूलडाउन सक्रिय। ${s}s में फिर से भेजें।`,
+        expiredOrUsed: "यह कोड समाप्त या उपयोग हो चुका है। नया कोड माँगें।",
+        latestWins: "नया कोड भेजा गया। पुराना कोड अब मान्य नहीं है।",
+        suspendedNotice: "यह खाता निलंबित है। सहायता के लिए संपर्क करें।",
+        noAccount:
+          "इस नंबर के लिए कोई डॉक्टर, लैब या केमिस्ट खाता नहीं मिला। शुरू करने के लिए अपनी प्रैक्टिस या व्यवसाय रजिस्टर करें।",
+        networkError: "सर्वर से संपर्क नहीं हो सका। अपना कनेक्शन जाँचें।",
+        smsFailed: "कोड भेजा नहीं जा सका। कुछ देर में फिर कोशिश करें।",
+        demoOtp: (code) => `डेमो OTP: ${code}`,
       },
       pending: {
         badge: "जाँच प्रक्रिया में",
@@ -1129,6 +1456,12 @@ export const STRINGS: Record<Lang, Dictionary> = {
         back: "वापस",
         continueCta: "आगे बढ़ें",
         submitApplication: "आवेदन जमा करें",
+        phoneConfirm: {
+          title: "अपना फ़ोन सत्यापित करें",
+          helper:
+            "आपके नियंत्रण वाले फ़ोन से आवेदन जुड़ा रहे, इसके लिए इस नंबर पर 6 अंकों का कोड SMS से भेजा गया है। खत्म करने के लिए कोड दर्ज करें - आपकी जानकारी सहेजी हुई है।",
+          confirmCode: "कोड की पुष्टि करें",
+        },
         summaryTitle: (n) => `जारी रखने से पहले ${n} फ़ील्ड में ध्यान देना है।`,
         accountTitle: "खाते की मूल जानकारी",
         identityTitleDoctor: "प्रोफ़ेशनल पहचान",
@@ -1345,6 +1678,12 @@ export const STRINGS: Record<Lang, Dictionary> = {
           "इलाज से जुड़े कामों के लिए नाम वाला रिकॉर्ड (नाम, उम्र, लिंग) ज़रूरी है - जारी रखने के लिए यहाँ जोड़ें।",
         areaExplain:
           "दवाई डिलीवरी के लिए आपका इलाक़ा या पता ज़रूरी है - जारी रखने के लिए यहाँ जोड़ें।",
+      },
+      save: {
+        saving: "आपकी प्रोफ़ाइल सेव हो रही है...",
+        saved: "प्रोफ़ाइल सेव हो गई",
+        error:
+          "आपकी प्रोफ़ाइल सेव नहीं हो सकी। कृपया अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
       },
       demo: {
         badge: "डेमो केयर एक्शन",
@@ -1833,6 +2172,254 @@ export const STRINGS: Record<Lang, Dictionary> = {
         loadFailedTitle: "हम आपकी स्थिति लोड नहीं कर पाए",
         loadFailedBody: "कनेक्शन जाँचकर फिर कोशिश करें।",
       },
+    },
+
+    // doctorConsole.* सतह - PHASE-8.1 T12 (#450): डॉक्टर कंसोल लैंडिंग पेज।
+    // दो सेक्शन: समीक्षा कतार (कम विश्वास पहले, पुराने पहले) और खुले केयर केस,
+    // साथ ही शुल्क संपादक, आने वाले मरीज़/प्रोफ़ाइल, और लोड विफलता पर पुनः प्रयास।
+    // सभी कॉपी द्विभाषी en/hi (REQ-006)।
+    doctorConsole: {
+      title: "डॉक्टर कंसोल",
+      consoleDescription: "आपकी समीक्षा कतार और खुले मामले",
+      queueHeading: "समीक्षा कतार",
+      queueEmpty: "समीक्षा के लिए कोई प्री-सारांश नहीं",
+      patientFallback: "मरीज़",
+      patientAge: (age: number) => `${age} वर्ष`,
+      sectionsCount: (n: number) => `${n} अनुभाग`,
+      queueItemMeta: (id: number) => `इनटेक #${id}`,
+      caseItemMeta: (id: number) => `केस #${id}`,
+      verifyChip: "जाँचें",
+      confidenceLabel: "विश्वास",
+      waitingFor: (time: string) => `${time} से प्रतीक्षा`,
+      reviewAction: "समीक्षा करें",
+      casesHeading: "खुले मामले",
+      casesEmpty: "कोई खुला केयर केस नहीं",
+      casesIndexTitle: "मेरे मामले",
+      casesIndexDescription: "आपके खुले केयर मामले",
+      stagePreSummary: "प्री-सारांश",
+      stagePrescriptionPending: "नुस्ख़ा लंबित",
+      stageClosed: "बंद",
+      openCaseAction: "खोलें",
+      feeEditorHeading: "परामर्श शुल्क",
+      feeEditorHelp:
+        "वह शुल्क सेट करें जो मरीज़ आपको चुनने पर देखें। सेट न होने तक खाली रहेगा।",
+      feeFieldLabel: "शुल्क (\u20B9)",
+      feeFieldPlaceholder: "जैसे 400",
+      saveFee: "शुल्क सहेजें",
+      clearFee: "शुल्क हटाएँ",
+      feeSaved: "शुल्क सहेजा गया।",
+      feeSaveFailed: "शुल्क सहेजा नहीं जा सका।",
+      patientsComingSoon: "मरीज़ - जल्द आ रहा है",
+      profileComingSoon: "प्रोफ़ाइल - जल्द आ रहा है",
+      comingSoonBody: "यह क्षेत्र बाद के अपडेट में खुलेगा।",
+      loadFailed: "कंसोल लोड नहीं हो सका।",
+      retry: "फिर से कोशिश करें",
+    },
+
+    // caseWorkspace.* सतह - PHASE-8.1 T13/T14 (#451/#452): केस वर्कस्पेस।
+    // दोनों प्रवेश मार्ग (कतार -> review/[intakeId] और खुले मामले -> cases/[caseId]):
+    // केस स्टेज चिप, अनिवार्य समीक्षा आवश्यकता, पूरा प्री-सारांश, मरीज़ का सहमति-प्राप्त
+    // स्वास्थ्य इतिहास, एक-क्रिया में समीक्षा+अंतिमकरण, और नुस्ख़ा-लंबित की ओर हैंडशेक।
+    // नुस्ख़ा मसौदा (US-18/#452): AI मसौदा अनुरोध, संपादन योग्य rx-आइटम पंक्तियाँ,
+    // रिवीज़न सहेजना, और चालू वर्किंग रिवीज़न को पुनः लोड करना। अनुमोदन/अस्वीकृति #453 में।
+    caseWorkspace: {
+      title: "केस वर्कस्पेस",
+      backToConsole: "कंसोल पर वापस",
+      stageLabel: "अवस्था",
+      forcedReviewChip: "समीक्षा ज़रूरी",
+      forcedReviewDetail:
+        "इस प्री-सारांश का विश्वास कम है और किसी नुस्ख़े से पहले आपकी समीक्षा ज़रूरी है।",
+      summaryHeading: "समीक्षा के लिए प्री-सारांश",
+      confidenceLabel: "विश्वास",
+      chiefComplaintsLabel: "मुख्य शिकायतें",
+      symptomsLabel: "लक्षण",
+      durationLabel: "अवधि",
+      durationNotSet: "दर्ज नहीं",
+      patientEditsLabel: "मरीज़ के संपादन",
+      patientEditsNone: "कोई मरीज़ संपादन नहीं",
+      reviewStateLabel: "समीक्षा स्थिति",
+      reviewStateDraft: "आपकी समीक्षा की प्रतीक्षा",
+      reviewStateReviewed: "समीक्षित",
+      reviewStateFinal: "अंतिम",
+      attributionLabel: "श्रेय",
+      reviewedOnLabel: "समीक्षा तिथि",
+      notReviewedYet: "अभी श्रेय नहीं",
+      historyHeading: "मरीज़ का इतिहास",
+      historyConsentNote: "केवल वही जो मरीज़ ने साझा करने की सहमति दी।",
+      historyEmpty: "अभी कोई इतिहास नहीं।",
+      historyLoadFail: "मरीज़ का इतिहास लोड नहीं हो सका।",
+      // PHASE-8.1 #484: केस वर्कस्पेस के भीतरी टैब + मूल इंटेक प्रतिलेख + ऑडियो।
+      tabPreSummary: "प्री-सारांश",
+      tabHistory: "इतिहास",
+      tabPrescription: "नुस्ख़ा",
+      transcriptHeading: "मूल इंटेक",
+      transcriptEmpty: "इस इंटेक के लिए कोई प्रतिलेख उपलब्ध नहीं है।",
+      transcriptLoadFail: "इंटेक प्रतिलेख लोड नहीं हो सका।",
+      audioPlayLabel: "रिकॉर्डिंग चलाएँ",
+      audioLoadFail: "रिकॉर्डिंग लोड नहीं हो सकी।",
+      loadFailed: "यह केस वर्कस्पेस लोड नहीं हो सका।",
+      retry: "फिर कोशिश करें",
+      finalizeAction: "अंतिम करें + समीक्षा का श्रेय",
+      finalizeHelp:
+        "एक क्रिया से आपकी समीक्षा दर्ज होती है और प्री-सारांश अंतिम हो जाता है।",
+      finalizeSuccess: "प्री-सारांश अंतिम हुआ और आपको श्रेय मिला।",
+      finalizeFail: "यह प्री-सारांश अंतिम नहीं हो सका।",
+      handshakeAction: "परामर्श पूर्ण करें",
+      handshakeHelp: "मामले को नुस्ख़ा-लंबित अवस्था में ले जाता है।",
+      handshakeFail: "परामर्श पूर्ण नहीं हो सका।",
+      handshakeSuccess: "परामर्श पूर्ण - मामला अब नुस्ख़ा-लंबित है।",
+      prescriptionPendingCta: "नीचे नुस्ख़ा संपादक तैयार है।",
+      // PHASE-8.1 #484: नुस्ख़ा टैब की अवस्था-लॉक - किसी नुस्ख़े से पहले परामर्श
+      // पूर्ण होना चाहिए। जन्मा मामला हमेशा अंतिम प्री-सारांश रखता है; बाकी
+      // कदम परामर्श-पूर्ण हैंडशेक है, और क्रिया प्री-सारांश टैब पर ले जाती है।
+      rxLockTitle: "नुस्ख़ा अभी खुला नहीं",
+      rxLockDone: "प्री-सारांश अंतिम",
+      rxLockPending: "परामर्श पूर्ण दर्ज",
+      rxLockAction: "परामर्श पूर्ण करें",
+      prescriptionHeading: "नुस्ख़ा",
+      prescriptionHelp:
+        "AI मसौदा माँगें, फिर सहेजने से पहले आइटमों को अपने नैदानिक निर्णय के अनुसार संपादित करें।",
+      requestDraftAction: "AI मसौदा माँगें",
+      requestingDraft: "माँग रहा है",
+      requestDraftFail: "AI मसौदा बनाया नहीं जा सका।",
+      draftCapReached:
+        "इस मामले के लिए AI मसौदा सीमा पूरी हो गई है। मौजूदा मसौदा संपादित करके सहेजें।",
+      noDraftYet:
+        "अभी कोई नुस्ख़ा मसौदा नहीं है। शुरू करने के लिए नीचे अपना इनपुट जोड़ें।",
+      // PHASE-8.1 T6 (#490): खाली अवस्था में डॉक्टर-इनपुट कैप्चर सतह -
+      // वॉइस नोट / फोटो / टाइप किया हुआ जोड़ डॉक्टर मीडिया मार्ग से होकर
+      // doctor-input पर media_ref भेजते हैं; AI मसौदा गेट और मैनुअल लेखन भी
+      // यहीं हैं। अस्वीकृति कोड विशेष संदेशों पर मैप होते हैं (#487)।
+      doctorInputHelp:
+        "यह नुस्ख़ा बनाने में मदद के लिए वॉइस नोट, फोटो या छोटा टाइप किया हुआ जोड़ साझा करें।",
+      voiceNoteAction: "वॉइस नोट",
+      photoAction: "फोटो",
+      addendumLabel: "टाइप किया हुआ जोड़ (वैकल्पिक)",
+      addendumPlaceholder: "जैसे - खुराक नोट या निर्देश",
+      addendumSubmit: "जोड़ संलग्न करें",
+      inputSubmitting: "अपलोड हो रहा है",
+      doctorInputFail: "आपका इनपुट संलग्न नहीं हो सका। फिर कोशिश करें।",
+      doctorInputReceived: "इनपुट संलग्न - अब आप AI मसौदा माँग सकते हैं।",
+      requestDraftBlocked:
+        "AI मसौदा सक्षम करने के लिए वॉइस नोट, फोटो या टाइप किया हुआ जोड़ संलग्न करें।",
+      manualAuthoringAction: "खुद नुस्ख़ा लिखें",
+      manualAuthoringHelp:
+        "नुस्ख़ा आइटम खुद लिखें - AI की ज़रूरत नहीं और मरीज़ की सहमति भी ज़रूरी नहीं।",
+      draftConsentDenied:
+        "मरीज़ ने AI को अपने रिकॉर्ड देखने की सहमति नहीं दी। खुद नुस्ख़ा लिखें, या मरीज़ से सहमति दिलवाएँ।",
+      draftNoDoctorInput:
+        "AI मसौदा माँगने से पहले वॉइस नोट, फोटो या टाइप किया हुआ जोड़ संलग्न करें।",
+      draftCaseClosed: "यह मामला बंद है, इसलिए नया मसौदा नहीं माँगा जा सकता।",
+      draftCaseNotFound:
+        "यह मामला नहीं मिल सका। यह बंद हो सकता है या किसी और डॉक्टर को सौंपा गया हो।",
+      workingRxLoadFail: "चालू नुस्ख़ा लोड नहीं हो सका।",
+      rxItemsLabel: "नुस्ख़े की वस्तुएँ",
+      rxNameLabel: "दवा",
+      rxDoseLabel: "मात्रा",
+      rxDurationLabel: "अवधि",
+      rxFrequencyLabel: "आवृत्ति",
+      rxEmptyItems: "अभी कोई वस्तु नहीं। नीचे पहली वस्तु जोड़ें।",
+      addItemAction: "वस्तु जोड़ें",
+      removeItemAction: "हटाएँ",
+      saveRevisionAction: "रिवीज़न सहेजें",
+      savingRevision: "सहेज रहा है",
+      revisionSaved: "रिवीज़न सहेजा गया।",
+      saveRevisionFail: "यह रिवीज़न सहेजा नहीं जा सका।",
+      sourceLabel: "स्रोत",
+      sourceAiDraft: "AI मसौदा",
+      sourceManual: "मैनुअल",
+      // अनुमोदन/अस्वीकृति/बंद करना (#453, US-19..22): नुस्ख़े पर डॉक्टर का निर्णय
+      // और बिना नुस्ख़े के मामला बंद करना।
+      rxStatusLabel: "नुस्ख़े की स्थिति",
+      rxStatusDraft: "मसौदा",
+      rxStatusReviewed: "समीक्षित",
+      rxStatusRejected: "अस्वीकृत",
+      rxStatusIssued: "जारी हुई",
+      rxStatusFulfilled: "पूर्ण हुई",
+      decisionHeading: "डॉक्टर का निर्णय",
+      editedTracker: (n: number) => `${n} आइटम आपके द्वारा संपादित`,
+      approvalGateTitle: "समीक्षा करें और अनुमोदित करें",
+      approvalGateHelp:
+        "जारी करने से पहले पुष्टि करें कि आपने हर वस्तु मरीज़ के रिकॉर्ड के अनुसार जाँची है।",
+      verificationDeclaration:
+        "मैंने यह नुस्ख़ा जाँच लिया है (Maine check kar liya)",
+      approveIssueAction: "अनुमोदित करें और जारी करें",
+      approvingIssuance: "अनुमोदित हो रहा है",
+      approveBlockedHelp:
+        "नुस्ख़ा अनुमोदित और जारी करने के लिए सत्यापन घोषणा पर टिक करें।",
+      approveFail: "यह नुस्ख़ा अनुमोदित और जारी नहीं हो सका।",
+      issuedHeading: "नुस्ख़ा जारी हुआ",
+      issuedImmutableNote: "जारी नुस्ख़ा अंतिम है और बदला नहीं जा सकता।",
+      issuedAtLabel: "जारी हुआ",
+      issuedAttributedTo: "आपको श्रेय",
+      rejectAction: "मसौदा अस्वीकार करें",
+      rejectingDraft: "अस्वीकार हो रहा है",
+      rejectReasonLabel: "मरीज़ के लिए कारण",
+      rejectReasonPlaceholder:
+        "सरल भाषा में बताएँ कि यह मसौदा क्यों अनुमोदित नहीं हुआ, ताकि मरीज़ समझ सके।",
+      rejectFail: "मसौदा अस्वीकार नहीं हो सका।",
+      rejectedHeading: "मसौदा अस्वीकृत",
+      rejectedHelp:
+        "कारण मरीज़ के लिए दर्ज है। मामला खुला रहता है - आप नया मसौदा माँग सकते हैं या बिना नुस्ख़े के बंद कर सकते हैं।",
+      rejectedReasonLabel: "दर्ज कारण",
+      closeWithoutRxHeading: "बिना नुस्ख़े के बंद करें",
+      closeWithoutRxHelp:
+        "जब कोई दवा ज़रूरी न हो तब उपयोग करें। मामला बंद होकर आपकी लंबित सूची से हट जाता है।",
+      closeReasonLabel: "बंद करने का कारण",
+      closeCaseAction: "मामला बंद करें",
+      closingCase: "बंद हो रहा है",
+      closeFail: "मामला बंद नहीं हो सका।",
+      closeReasons: {
+        patientWithdrawn: "मरीज़ ने वापसी ली",
+        doctorRejected: "डॉक्टर ने उपचार अस्वीकार किया",
+        noShow: "मरीज़ उपस्थित नहीं हुए",
+        duplicate: "डुप्लीकेट मुलाक़ात",
+      },
+    },
+
+    // pick.* सतह - PHASE-8.1 T11 (#449): मरीज़ का डॉक्टर-चुनाव चरण
+    // (सुझाया गया विशेषज्ञता, सत्यापित डॉक्टर कार्ड, सहमति शीट, पुष्टि)।
+    // सुझाव शुरू-यहाँ से फ़िल्टर है, पूरे चुनाव में बाधा नहीं (US-2/US-3)।
+    pick: {
+      title: "अपना डॉक्टर चुनें",
+      subtitle: "अपना डॉक्टर चुनें जो आपके प्री-सारांश की जाँच करेगा",
+      suggestedSpecialtyLabel: "आपके लिए सुझाव",
+      suggestionNote: "आप कोई भी सत्यापित डॉक्टर चुन सकते हैं",
+      bookCta: "इस डॉक्टर के साथ बुक करें",
+      viewProfile: "सत्यापित प्रोफ़ाइल देखें",
+      feeNotSet: "फ़ीस निर्धारित नहीं",
+      feeLabel: "परामर्श शुल्क",
+      credentialsVerified: "प्रमाणपत्र सत्यापित",
+      noDoctorsTitle: "कोई डॉक्टर नहीं मिला",
+      noDoctorsBody:
+        "अभी इस विशेषज्ञता में कोई सत्यापित डॉक्टर उपलब्ध नहीं है।",
+      lowConfidenceHint:
+        "आपके प्री-सारांश की समीक्षा ज़रूरी है। डॉक्टर चुनने से पहले अपने लक्षण बदल सकते हैं।",
+      editSymptoms: "लक्षण बदलें",
+      allow: "मंज़ूर करें",
+      consentTitle: "अपना प्री-सारांश साझा करना",
+      consentScope:
+        "यह डॉक्टर आपके लक्षणों का सारांश देखेगा और आपकी देखभाल का मसौदा बनाते समय आपके परामर्श तथा प्रिस्क्रिप्शन रिकॉर्ड देख सकता है।",
+      consentValidity: "यह पहुँच तब तक मान्य है जब तक आप इसे रद्द नहीं करते।",
+      confirmTitle: "डॉक्टर चुन लिया गया",
+      confirmBody: "अब आपका प्री-सारांश केवल इसी डॉक्टर को दिखेगा।",
+      whatHappensNext: "आगे क्या होगा",
+      whatHappensNextItems:
+        "डॉक्टर आपके प्री-सारांश की समीक्षा करेंगे। ज़रूरत पड़ने पर वे परामर्श के लिए संपर्क करेंगे। आप अपनी इनटेक स्थिति से ट्रैक कर सकते हैं।",
+      loading: "सत्यापित डॉक्टर खोजे जा रहे हैं…",
+      recordingChoice: "आपका चुनाव दर्ज किया जा रहा है…",
+      genericError: "कुछ गलत हुआ। फिर से प्रयास करें।",
+      viewIntakeStatus: "इनटेक स्थिति देखें",
+      errorTitle: "डॉक्टर सूची लोड नहीं हो सकी",
+      errorBody: "अपना कनेक्शन जाँचें और फिर से प्रयास करें।",
+      retry: "फिर से प्रयास करें",
+      breadcrumb: "डॉक्टर चुनें",
+    },
+    findCare: {
+      resumeTitle: "एक परामर्श प्रगति पर है",
+      resumeBody:
+        "आपका प्री-सारांश तैयार है। डॉक्टर चुनना फिर से शुरू करें जो इसकी जाँच करेगा।",
+      bookCta: "परामर्श बुक करें",
     },
   },
 };

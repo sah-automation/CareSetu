@@ -48,6 +48,8 @@ _OPERATOR_ROLE = "operator"
 
 VerifyPartnerExists = Callable[[AsyncConnection, int], Awaitable[None]]
 
+VerifyPartnerProfile = Callable[[AsyncConnection, int], Awaitable[None]]
+
 
 class SessionResult(BaseModel):
     """A session, whether freshly issued or rotated (spec #51 section 2.5, tickets #57, #58).
@@ -308,21 +310,31 @@ class SessionFacade:
 
         Unlike ``issue_session`` this does NOT require identity ``Active`` or an
         active patient role grant - a fresh registrant is ``[Unverified]`` with
-        no role grant (ADR-0010). The gate is partner-profile existence, which is
-        verified UPSTREAM by the calling route (WI-3, #336): the route resolves
-        the identity through :meth:`resolve_identity_id_by_phone`, asks the
-        partner facade for the profile, and passes the already-verified
-        ``partner_id`` into this method. iam no longer reaches into the partner
-        module - a patient-only phone (identity exists but no partner profile) is
-        refused 409 ``SESSION_REFUSED`` by the route before this method runs.
+        no role grant (ADR-0010). The gate is partner-profile existence plus a
+        phone-verified identity (F014-T04, #464): the phone must have completed
+        a phone-code verification (ticket 03 sets the ``phone_verified`` marker,
+        also set by the patient verification path) so knowing a partner's number
+        is never enough to become them. The profile-existence gate is verified
+        UPSTREAM by the calling route (WI-3, #336): the route resolves the
+        identity through :meth:`resolve_identity_id_by_phone`, asks the partner
+        facade for the profile, and passes the already-verified ``partner_id``
+        into this method. iam no longer reaches into the partner module - a
+        patient-only phone (identity exists but no partner profile) is refused
+        409 ``SESSION_REFUSED`` by the route before this method runs. The
+        phone-verified gate is enforced HERE, read atomically from the locked
+        identity row as described below.
 
         The upstream check is an early-rejection fast path only. Because the
         profile could be deleted between that check and this mint, the caller may
         pass an optional ``verify_partner_exists`` callback that re-confirms the
         profile still exists (or raises ``SessionIssuanceError``) against this
         method's open connection, atomically under the identity row lock, before
-        the JWT is minted (#342). Leaving it ``None`` keeps the pre-WI-3-F4
-        behavior of trusting the upstream partner_id.
+        the JWT is minted (#342). The phone-verified gate is enforced in the
+        same locked transaction: the marker is read from the locked identity row
+        and an unverified phone is refused 409 ``SESSION_REFUSED``, so the marker
+        can never change between the route pre-check and the mint. Leaving the
+        callback ``None`` keeps the pre-WI-3-F4 behavior of trusting the
+        upstream partner_id, though the phone-verified gate always applies.
         """
         from modules.iam.domain.phone import normalize_phone
 
@@ -345,6 +357,12 @@ class SessionFacade:
                     "register the phone before issuing a session"
                 )
             identity_id = locked.identity_id
+
+            if not locked.phone_verified:
+                raise SessionIssuanceError(
+                    f"identity {identity_id} is not phone-verified; "
+                    "verify the phone before issuing a partner session"
+                )
 
             if verify_partner_exists is not None:
                 await verify_partner_exists(connection, partner_id)
@@ -377,7 +395,11 @@ class SessionFacade:
             subject_id=claims.subject_id, scope=claims.scope, jti=claims.jti
         )
 
-    async def refresh_session(self, refresh_token: str) -> SessionResult:
+    async def refresh_session(
+        self,
+        refresh_token: str,
+        verify_partner_profile: VerifyPartnerProfile | None = None,
+    ) -> SessionResult:
         """Rotate an opaque refresh token into a fresh session (ticket #58).
 
         The refresh path is fully independent of SMS (NFR-004): it only reads
@@ -400,13 +422,30 @@ class SessionFacade:
         finds the revoked row - a replay signal - and is refused while
         ``patient.auth_failed`` is committed to the outbox in the same
         transaction (audit can tell a stolen-session replay from a garbage
-        token, which matches nothing).  The scope of the fresh JWT is re-derived
-        from the identity's current active role grant, never from the old
-        token.  The identity row is locked ``FOR UPDATE`` (after the session
+        token, which matches nothing).  The scope of the fresh JWT never comes
+        from the old token: a patient/operator scope is re-derived from the
+        identity's current active role grant, a partner scope from the
+        identity's current state (below).  The identity row is locked
+        ``FOR UPDATE`` (after the session
         row) so a concurrent role change cannot race the refresh, and the
         session-row lock serializes two concurrent refreshes of the same token
         so only one rotation wins.  An empty signing key fails closed exactly
         like ``issue_session``.
+
+        Partner-scoped sessions renew differently (F014-T05, #465): a waiting
+        partner holds no ``partner`` role grant until activation (ADR-0010), so
+        requiring an active grant to re-derive the scope ejects them every ~15
+        minutes.  For the ``partner`` scope ``Suspended`` is the only refusal,
+        read as the iam-side suspension signal (#466): the identity being
+        ``Suspended`` OR its ``partner`` role grant being ``Suspended`` (a
+        deactivated partner's grant is flipped by ``suspend_partner_role``).  A
+        missing or ``Active`` grant renews, so every pre-activation state
+        renews, and the partner profile must still exist, re-confirmed at the
+        composition boundary on this lock-held connection through the optional
+        ``verify_partner_profile`` callback (the same pattern the session mint
+        uses, #342) so iam never reads the partner schema.  Patient/operator
+        scopes keep the existing identity-``Active`` plus active-role-grant gate
+        unchanged.
         """
         if not self._access_token_signing_key:
             raise SessionIssuanceError(
@@ -450,17 +489,32 @@ class SessionFacade:
                     raise RefreshTokenRevokedError("the session identity no longer exists")
                 identity_id = identity.identity_id
                 identity_status = identity.status
-                if identity_status != IDENTITY_ACTIVE:
-                    raise RefreshTokenRevokedError(
-                        f"identity {identity_id} is {identity_status}; refusing to refresh"
-                    )
                 scope_name = session_row["scope"]
-                scope = await _resolve_active_role(connection, identity_id, scope_name)
-                if scope is None:
-                    raise RefreshTokenRevokedError(
-                        f"identity {identity_id} has no active {scope_name} role grant; "
-                        "refusing to refresh"
-                    )
+                if scope_name == _PARTNER_ROLE:
+                    if identity_status == IDENTITY_SUSPENDED:
+                        raise RefreshTokenRevokedError(
+                            f"identity {identity_id} is {identity_status}; refusing to refresh"
+                        )
+                    partner_grant_status = await _partner_role_status(connection, identity_id)
+                    if partner_grant_status == IDENTITY_SUSPENDED:
+                        raise RefreshTokenRevokedError(
+                            f"identity {identity_id} has a suspended partner role; "
+                            "refusing to refresh"
+                        )
+                    if verify_partner_profile is not None:
+                        await verify_partner_profile(connection, identity_id)
+                    scope = scope_name
+                else:
+                    if identity_status != IDENTITY_ACTIVE:
+                        raise RefreshTokenRevokedError(
+                            f"identity {identity_id} is {identity_status}; refusing to refresh"
+                        )
+                    scope = await _resolve_active_role(connection, identity_id, scope_name)
+                    if scope is None:
+                        raise RefreshTokenRevokedError(
+                            f"identity {identity_id} has no active {scope_name} role grant; "
+                            "refusing to refresh"
+                        )
 
                 new_jti, new_refresh_token, token = await self._mint_session_row(
                     connection, identity_id, scope, now

@@ -12,13 +12,14 @@ class DirectoryEntry(BaseModel):
     credentials: display name (``practice_name``), partner type, specialty
     (doctors only), the partner's ``area`` (its recorded service area, with the
     Daltonganj fallback when none is recorded - the same optionality and
-    derivation the provider profile uses), and the derived ``verified``
+    derivation the provider profile uses), the derived ``verified``
     indicator plus its great-circle ``distance_km`` from the caller's geo
-    point. The tick is always True for a returned row - search visibility and
-    the tick share one derivation, so a separate visibility flag could never
-    drift (ADR-0011 "tick gone = card gone"). Named ``practice_name`` to stay
-    on the partner schema vocabulary; patient-facing clients may render it as
-    the provider's name.
+    point, and the nullable ``consultation_fee`` (integer paise, null until
+    the doctor sets one). The tick is always True for a returned row - search
+    visibility and the tick share one derivation, so a separate visibility flag
+    could never drift (ADR-0011 "tick gone = card gone"). Named
+    ``practice_name`` to stay on the partner schema vocabulary; patient-facing
+    clients may render it as the provider's name.
     """
 
     partner_id: int
@@ -28,6 +29,7 @@ class DirectoryEntry(BaseModel):
     area: str | None
     distance_km: float
     verified: bool
+    consultation_fee: int | None = None
 
 
 class DirectorySearchView(BaseModel):
@@ -69,10 +71,12 @@ class ProviderProfileView(BaseModel):
     ``directory_index`` entry and valid (verified, unexpired, unrevoked)
     credentials: display name (``practice_name``), partner type, specialty
     (doctors only), the partner's service area, the derived ``verified``
-    indicator and per-credential type + status labels. ``verified`` is always
-    True for a reachable profile because reachability uses the same derivation
-    as search visibility - it can never drift from the card tick (ADR-0011
-    "tick gone = card gone"). Never exposed: artifact refs, emails, phones, PHI.
+    indicator, per-credential type + status labels, and the nullable
+    ``consultation_fee`` (integer paise, null until the doctor sets one).
+    ``verified`` is always True for a reachable profile because reachability
+    uses the same derivation as search visibility - it can never drift from the
+    card tick (ADR-0011 "tick gone = card gone"). Never exposed: artifact
+    refs, emails, phones, PHI.
     """
 
     partner_id: int
@@ -82,3 +86,4 @@ class ProviderProfileView(BaseModel):
     area: str | None
     verified: bool
     credentials: list[ProviderCredential]
+    consultation_fee: int | None = None

@@ -102,6 +102,7 @@ def test_search_answers_typed_view_with_items() -> None:
                 area=DEFAULT_SERVICE_AREA_NAME,
                 distance_km=1.2,
                 verified=True,
+                consultation_fee=50000,
             )
         ],
         fell_back=True,
@@ -121,11 +122,38 @@ def test_search_answers_typed_view_with_items() -> None:
                 "area": DEFAULT_SERVICE_AREA_NAME,
                 "distance_km": 1.2,
                 "verified": True,
+                "consultation_fee": 50000,
             }
         ],
         "fell_back": True,
     }
     assert facade.called_with[0]["partner_type"] == "doctor"
+
+
+def test_search_serializes_unset_fee_as_null() -> None:
+    """An unset consultation fee stays null in the search payload - never a 0."""
+    facade = StubDirectoryFacade()
+    facade.view = DirectorySearchView(
+        items=[
+            DirectoryEntry(
+                partner_id=12,
+                practice_name="Raj Clinic",
+                partner_type="doctor",
+                specialty="Pediatrician",
+                area=DEFAULT_SERVICE_AREA_NAME,
+                distance_km=3.0,
+                verified=True,
+            )
+        ],
+        fell_back=False,
+    )
+    client = _client_with(facade)
+
+    response = client.get("/v1/directory/search", params={"partner_type": "doctor"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["items"][0]["consultation_fee"] is None
 
 
 def test_search_disallowed_fields_never_serialized() -> None:

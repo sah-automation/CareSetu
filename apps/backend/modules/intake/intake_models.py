@@ -218,6 +218,44 @@ class PreSummaryView(BaseModel):
         return float(value) if value is not None else None
 
 
+class ReviewQueueItem(BaseModel):
+    """One pre-summary awaiting the assigned doctor's review (PHASE-8.1 T07, #447).
+
+    The doctor review-queue read (backend delta 2, #438): an assigned
+    pre-summary still in ``draft`` - awaiting review - surfaced low-confidence
+    first and carrying its confidence flag, so the doctor console queue can
+    prioritize the summaries that most need attention (US-11/12).
+    ``pre_summary_id`` + ``intake_id`` are the keys the console uses to open
+    the review workspace; ``low_confidence`` is the AMB-006 honesty cue.
+
+    PHASE-8.1 T07 (#489): the triage-ready enrichment. ``patient_name`` and
+    ``patient_age`` resolve from the patient's identity profile for the
+    assigned intake (#482) - ``None`` when the profile is not set, so the
+    console falls back to readable copy instead of crashing. ``snippet`` is a
+    short excerpt of the intake's structured content and ``section_count`` the
+    number of populated structured sections - both derived from the stored
+    structured fields, never a new AI call. Doctor-assigned-scoped like the
+    whole read; these are exactly the card's fields and nothing more.
+    """
+
+    pre_summary_id: int
+    intake_id: int
+    structuring_confidence: Decimal | float | None
+    low_confidence: bool
+    review_state: str
+    patient_name: str | None = None
+    patient_age: int | None = None
+    snippet: str | None = None
+    section_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+    @field_serializer("structuring_confidence")
+    def _serialize_confidence(self, value: Decimal | float | None) -> float | None:
+        """Emit the confidence as a JSON number, never a Decimal-backed string."""
+        return float(value) if value is not None else None
+
+
 class PatientEditsResult(BaseModel):
     """The result of ``save_patient_pre_summary_edits`` (PHASE-7 T09, #353).
 
@@ -236,10 +274,11 @@ class PatientEditsResult(BaseModel):
 class PreSummaryReviewResult(BaseModel):
     """The outcome of ``mark_pre_summary_reviewed`` (PHASE-7 T09, #353).
 
-    The doctor review-and-edit. ``review_state`` is ``reviewed`` when the
-    pre-summary is low-confidence (the hard gate into Reviewed) or ``final``
-    when a high-confidence pre-summary is reviewed-and-finalized by the single
-    attributed review action (user story 23).
+    The doctor review-and-edit. ``review_state`` is ``final`` - the single
+    attributed review action is always a one-action finalize for BOTH confidence
+    classes (high-confidence clean path, user story 23; low-confidence one-action
+    finalize, #442). A low-confidence summary can only reach ``final`` this way:
+    the machine blocks auto-finalize and any patient-only path.
 
     ``reviewed_copy`` is the authoritative summary that wins over the AI
     extraction: the original ``structured_fields`` with every doctor
@@ -259,3 +298,55 @@ class PreSummaryReviewResult(BaseModel):
     review_attribution: str
     reviewed_by: int
     reviewed_at: datetime
+
+
+class PickDoctorResult(BaseModel):
+    """The outcome of ``pick_doctor`` (PHASE-8.1 T05, #443).
+
+    ``intake_id`` names the intake the choice was recorded against and
+    ``assigned_partner_id`` the chosen doctor's partner identity - locked from
+    this moment (a second pick is refused, so exactly one doctor ever serves an
+    intake). ``consent_id`` / ``consent_lineage_ref`` / ``consent_version``
+    identify the standing grant recorded in the SAME transaction as the pick
+    (consent-at-pick, MOD-004): the doctor's access to the patient's
+    consultations record rests on this grant lineage.
+    """
+
+    intake_id: int
+    assigned_partner_id: int
+    consent_id: int
+    consent_lineage_ref: str
+    consent_version: int
+
+
+class RxDraftItem(BaseModel):
+    """One drafted prescription line returned by the rx-drafting leg.
+
+    Mirrors the AI gateway's ``RxItem`` shape (``ai_gateway.py``) at the
+    facade boundary so callers depend on the typed facade surface, never the
+    concrete adapter DTOs. ``dose``, ``duration`` and ``frequency`` are
+    optional in the stored revision even though the drafting leg always
+    supplies ``dose``/``duration``: ``save_rx_revision`` accepts a
+    doctor-authored working revision, and frequency may be left blank.
+    """
+
+    name: str
+    dose: str | None = None
+    duration: str | None = None
+    frequency: str | None = None
+
+
+class RxDraftResult(BaseModel):
+    """The typed outcome of ``IntakeFacade.request_rx_draft`` (PHASE-8 T05).
+
+    Carries the drafting-leg result: the AI-drafted ``rx_items`` plus the
+    provider confidence. ``doctor_input_ref`` / ``pre_summary_ref`` echo the
+    drafting inputs so a caller (``PrescriptionFacade.create_rx_draft``) can
+    store the
+    immutable draft snapshot without re-reading the gateway result.
+    """
+
+    doctor_input_ref: int
+    pre_summary_ref: int
+    rx_items: list[RxDraftItem]
+    confidence: float

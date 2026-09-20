@@ -6,7 +6,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { fetchDemoOtp, fetchMe } from "./api";
+import { fetchDemoOtp, fetchMe, partnerLogin, partnerVerify } from "./api";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -116,5 +116,108 @@ describe("fetchMe", () => {
     await expect(fetchMe("expired-jwt")).rejects.toThrow(
       "GET /v1/me returned 401",
     );
+  });
+});
+
+describe("partnerLogin", () => {
+  it("POSTs the phone to /v1/auth/partner/login and resolves the result", async () => {
+    const body = {
+      outcome: "sent",
+      phone_e164: "+919876543210",
+      challenge_id: 21,
+      expires_in_seconds: 300,
+      cooldown_remaining_seconds: 60,
+      attempts_left: 5,
+      lockout_remaining_seconds: null,
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(body));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(partnerLogin("+919876543210")).resolves.toEqual(body);
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://localhost:8000/v1/auth/partner/login");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({
+      phone: "+919876543210",
+    });
+  });
+
+  it("surfaces a non-ok response as an AuthApiError with the envelope code", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          {
+            code: "PHONE_INVALID",
+            message: "bad phone",
+            trace_id: "t1",
+            details: {},
+          },
+          422,
+        ),
+      ),
+    );
+
+    await expect(partnerLogin("+919876543210")).rejects.toMatchObject({
+      code: "PHONE_INVALID",
+    });
+  });
+
+  it("wraps transport failures as a NETWORK_ERROR AuthApiError", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(new TypeError("Failed to fetch")),
+    );
+
+    await expect(partnerLogin("+919876543210")).rejects.toMatchObject({
+      code: "NETWORK_ERROR",
+    });
+  });
+});
+
+describe("partnerVerify", () => {
+  it("POSTs phone and otp to /v1/auth/partner/verify and resolves the result", async () => {
+    const body = {
+      outcome: "verified",
+      phone_e164: "+919876543210",
+      identity_id: 7,
+      attempts_left: null,
+      lockout_remaining_seconds: null,
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(body));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(partnerVerify("+919876543210", "123456")).resolves.toEqual(
+      body,
+    );
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://localhost:8000/v1/auth/partner/verify");
+    expect(JSON.parse(String(init.body))).toEqual({
+      phone: "+919876543210",
+      otp: "123456",
+    });
+  });
+
+  it("surfaces a non-ok response as an AuthApiError with the envelope code", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          {
+            code: "CODE_EXPIRED",
+            message: "expired",
+            trace_id: "t2",
+            details: {},
+          },
+          410,
+        ),
+      ),
+    );
+
+    await expect(
+      partnerVerify("+919876543210", "123456"),
+    ).rejects.toMatchObject({ code: "CODE_EXPIRED" });
   });
 });

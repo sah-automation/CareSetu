@@ -23,15 +23,25 @@ import { useLang } from "@/lib/i18n/LangContext";
 import { cn } from "@/lib/utils";
 
 import { NAV_CONFIG, splitMobileTabs } from "./nav-config";
-import { SoonBadge } from "./NavItemLink";
+import { CountPill, SoonBadge } from "./NavItemLink";
 import type { NavItemDef } from "./nav-config";
 import type { Role } from "./types";
 
-export function BottomTabs({ role }: { role: Role }) {
+export function BottomTabs({
+  role,
+  items,
+}: {
+  role: Role;
+  // Render-time nav override: the AppShell attaches the open-cases count to
+  // the doctor Cases item here (#483), which the tab column and More sheet
+  // render as a badge. Defaults to the static NAV_CONFIG.
+  items?: NavItemDef[];
+}) {
   const pathname = usePathname();
   const { lang } = useLang();
   const [moreOpen, setMoreOpen] = useState(false);
-  const { tabs, overflow, hasMore } = splitMobileTabs(NAV_CONFIG[role]);
+  const config = items ?? NAV_CONFIG[role];
+  const { tabs, overflow, hasMore } = splitMobileTabs(config);
   const strings = STRINGS[lang].nav;
 
   return (
@@ -144,7 +154,17 @@ function TabColumn({
         active ? "text-accent-strong font-semibold" : "text-txt-muted",
       )}
     >
-      <Icon size={22} />
+      <span className="relative">
+        <Icon size={22} />
+        {typeof item.count === "number" && (
+          <span
+            data-testid="count-pill"
+            className="absolute -top-1.5 -right-2 rounded-full bg-accent px-1 text-[10px] leading-4 font-bold text-on-accent"
+          >
+            {item.count}
+          </span>
+        )}
+      </span>
       <span>{label}</span>
     </Link>
   );
@@ -180,6 +200,7 @@ function OverflowRow({ item, label }: { item: NavItemDef; label: string }) {
     >
       <Icon size={20} className="shrink-0" />
       <span className="flex-1">{label}</span>
+      {typeof item.count === "number" && <CountPill count={item.count} />}
     </Link>
   );
 }
