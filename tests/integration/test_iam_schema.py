@@ -6,7 +6,9 @@ data foundation - ``iam_identities``, ``iam_otp_challenges``, ``iam_sessions``,
 (ADR-0003), and ``v4.1__iam_roles_mfa`` (#244) which adds ``iam_operator_mfa``
 for operator MFA enrollment. The test asserts these tables exist and that the
 duplicate arbiter ``phone_e164`` is unique with the FEAT-001 status check on
-top. Leaves the database at ``base`` so sibling tests run from a clean slate;
+top. ``v8.8__iam_patient_profiles`` (#482) adds the patient profile table
+Phase 8.1 builds the profile-completion flow on. Leaves the database at ``base``
+so sibling tests run from a clean slate;
 skips cleanly when the native PostgreSQL is unreachable, like the rest of the
 integration suite.
 """
@@ -30,6 +32,7 @@ IAM_TABLES = {
     "iam_role_grants",
     "iam_outbox",
     "iam_operator_mfa",
+    "iam_patient_profiles",
     "consumed_events",
 }
 

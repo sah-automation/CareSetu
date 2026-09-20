@@ -314,7 +314,7 @@ async def test_closed_loop_voice_intake_books_transcribe_and_structure_jobs(
         store = LocalFilesystemIntakeMediaStore(root=tmp_path, key_bytes=_MEDIA_KEY_BYTES)
         audio_key = await store.save(
             data=b"fake-pcm-audio-bytes-for-closed-loop",
-            patient_id=patient_id,
+            subject_id=patient_id,
         )
         await store.close()
 

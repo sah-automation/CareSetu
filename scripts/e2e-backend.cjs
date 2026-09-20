@@ -34,9 +34,20 @@ const BOOTSTRAP_OPERATOR_PHONE = "+919000000002";
 
 function backendRun(moduleName, moduleArgs) {
   if (isCI) {
+    // Mirror the local branch's `python -m <module>` spelling (deploy.yml seeds
+    // the demo data the same way): a bare `uv run scripts.seed_demo` would make
+    // uv spawn `scripts.seed_demo` as an executable and die with ENOENT.
     return {
       command: "uv",
-      args: ["run", "--directory", "apps/backend", moduleName, ...moduleArgs],
+      args: [
+        "run",
+        "--directory",
+        "apps/backend",
+        "python",
+        "-m",
+        moduleName,
+        ...moduleArgs,
+      ],
       cwd: ROOT,
     };
   }
