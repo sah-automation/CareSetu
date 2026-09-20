@@ -19,7 +19,13 @@ import type { StoredPatientProfile } from "@/lib/profile/api";
 import { __resetLangForTests } from "@/lib/i18n/LangContext";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 
-const state = vi.hoisted(() => ({
+const state = vi.hoisted<{
+  getProfile: ReturnType<typeof vi.fn>;
+  saveProfile: ReturnType<typeof vi.fn>;
+  push: ReturnType<typeof vi.fn>;
+  refresh: ReturnType<typeof vi.fn>;
+  user: { id: number; phone: string; roles: string[] } | null;
+}>(() => ({
   getProfile: vi.fn(),
   saveProfile: vi.fn(),
   push: vi.fn(),
@@ -152,6 +158,34 @@ describe("profile complete page (#488)", () => {
       expect(screen.getByTestId("profile-save-error")).toBeInTheDocument(),
     );
     expect(screen.getByText(STRINGS.en.profile.save.error)).toBeInTheDocument();
+    expect(state.push).not.toHaveBeenCalled();
+  });
+
+  // #496 Seam 1: the same host+provider composition that exhibited the silent
+  // dead click after a fresh OTP login. With no resolved identity, Finish must
+  // surface the visible save error and never silently no-op or route.
+  it("surfaces the visible save error, never silent, when the identity is unresolved (#496)", async () => {
+    state.user = null;
+    render(
+      <ProfileProvider>
+        <ProfileCompletionPage />
+      </ProfileProvider>,
+    );
+
+    // The patient still fills required basics; Finish must refuse visibly
+    // because the identity is not resolved, not because the draft is bad.
+    type("pc-fullname", "Asha Devi");
+    type("pc-age", "30");
+    select("pc-gender", "female");
+    fireEvent.click(screen.getByTestId("pc-next"));
+    fireEvent.click(screen.getByTestId("pc-skip"));
+    fireEvent.click(screen.getByTestId("pc-next"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("profile-save-error")).toBeInTheDocument(),
+    );
+    expect(screen.getByText(STRINGS.en.profile.save.error)).toBeInTheDocument();
+    expect(state.saveProfile).not.toHaveBeenCalled();
     expect(state.push).not.toHaveBeenCalled();
   });
 });

@@ -20,7 +20,11 @@ import { initialDraft, saveDraft } from "./profileState";
 import { ProfileGate } from "@/components/patient/profile/ProfileGate";
 import { __resetLangForTests } from "@/lib/i18n/LangContext";
 
-const state = vi.hoisted(() => ({
+const state = vi.hoisted<{
+  getProfile: ReturnType<typeof vi.fn>;
+  saveProfile: ReturnType<typeof vi.fn>;
+  user: { id: number; phone: string; roles: string[] } | null;
+}>(() => ({
   getProfile: vi.fn(),
   saveProfile: vi.fn(),
   user: { id: 7, phone: "+91 98765 43210", roles: ["patient"] },
@@ -161,7 +165,7 @@ describe("ProfileProvider hydration (#488 AC 2)", () => {
   });
 
   it("falls back to the identity-scoped local draft when GET answers not-set", async () => {
-    saveDraft({ ...initialDraft(), name: "Local Name" }, state.user.id);
+    saveDraft({ ...initialDraft(), name: "Local Name" }, state.user!.id);
     state.getProfile.mockResolvedValue({ set: false, profile: null });
     await renderProvider(
       <div>
@@ -179,7 +183,7 @@ describe("ProfileProvider hydration (#488 AC 2)", () => {
   });
 
   it("falls back to the local draft when hydration itself fails", async () => {
-    saveDraft({ ...initialDraft(), name: "Offline Name" }, state.user.id);
+    saveDraft({ ...initialDraft(), name: "Offline Name" }, state.user!.id);
     state.getProfile.mockRejectedValue(new Error("network down"));
     await renderProvider(
       <div>
@@ -237,6 +241,86 @@ describe("ProfileProvider persist on Finish (#488 AC 1/4)", () => {
       expect(screen.getByTestId("probe-status").textContent).toBe("error"),
     );
     expect(screen.getByTestId("probe-saved").textContent).toBe("false");
+  });
+});
+
+describe("ProfileProvider never-silent Finish (#496)", () => {
+  // The pass conditions are the externally-visible outcomes the surfaces
+  // render from: saveStatus drives the bilingual save-error notice, and the
+  // write is either attempted or not.
+
+  it("surfaces an error, never silence, when identity is unresolved", async () => {
+    state.user = null;
+    state.getProfile.mockResolvedValue({ set: false, profile: null });
+    // Identity undefined skips hydration, so render without the hydrated gate.
+    render(
+      <ProfileProvider>
+        <Probe />
+      </ProfileProvider>,
+    );
+
+    fireEvent.click(screen.getByTestId("probe-set-draft"));
+    fireEvent.click(screen.getByTestId("probe-finish"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("probe-status").textContent).toBe("error"),
+    );
+    expect(state.saveProfile).not.toHaveBeenCalled();
+    expect(screen.getByTestId("probe-saved").textContent).toBe("false");
+  });
+
+  it("surfaces an error, never silence, when required basics are incomplete", async () => {
+    state.getProfile.mockResolvedValue({ set: false, profile: null });
+    await renderProvider(
+      <div>
+        <Probe />
+      </div>,
+    );
+
+    // Finish straight from an empty draft (incomplete basics).
+    fireEvent.click(screen.getByTestId("probe-finish"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("probe-status").textContent).toBe("error"),
+    );
+    expect(state.saveProfile).not.toHaveBeenCalled();
+  });
+
+  it("recovers from a refused finish in the same session without reloading", async () => {
+    state.getProfile.mockResolvedValue({ set: false, profile: null });
+    state.saveProfile.mockResolvedValue(savedProfile);
+    await renderProvider(
+      <div>
+        <Probe />
+      </div>,
+    );
+
+    // Refusal: incomplete basics -> explicit error.
+    fireEvent.click(screen.getByTestId("probe-finish"));
+    await waitFor(() =>
+      expect(screen.getByTestId("probe-status").textContent).toBe("error"),
+    );
+    expect(state.saveProfile).not.toHaveBeenCalled();
+
+    // The patient fixes what was missing (no reload, same provider instance)
+    // and retries - the very next Finish persists.
+    fireEvent.click(screen.getByTestId("probe-set-draft"));
+    fireEvent.click(screen.getByTestId("probe-finish"));
+
+    await waitFor(() =>
+      expect(state.saveProfile).toHaveBeenCalledWith({
+        name: "Asha Devi",
+        age: 30,
+        gender: "female",
+        preferred_language: "en",
+        area: null,
+        emergency_contact: null,
+        photo_ref: null,
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("probe-status").textContent).toBe("saved"),
+    );
   });
 });
 

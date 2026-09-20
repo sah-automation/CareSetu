@@ -11,6 +11,9 @@
 // switching identities on one browser remounts the provider state atomically
 // and no render can ever show a previous identity's profile or draft
 // (#488 AC 5).
+// #496: Finish is never silent. Identity-absent and incomplete-basics paths
+// write `saveStatus` before resolving false, so the host's bilingual
+// save-error notice always surfaces a blocked or failed save.
 
 import {
   createContext,
@@ -54,8 +57,10 @@ export interface ProfileContextValue {
   updateDraft: (next: ProfileDraft) => void;
   /**
    * Persist the buffer through PUT /v1/me/profile and adopt the saved profile.
-   * Resolves true on success (consumers may then route/close); false when the
-   * buffer has incomplete basics or the save failed (surfaces show `saveStatus`).
+   * The never-silent-save invariant (#496): this resolves true on success
+   * (consumers may then route/close) and false on every other path - identity
+   * not yet resolved, incomplete basics, or a failed write - with `saveStatus`
+   * written first so the host's bilingual save-error notice is always shown.
    */
   finishProfile: () => Promise<boolean>;
 }
@@ -148,11 +153,19 @@ function ProfileProviderInner({
   );
 
   const finishProfile = useCallback(async (): Promise<boolean> => {
-    if (identityId === undefined) return false;
+    // Never-silent-save invariant (#496): every blocked path writes the save
+    // status before resolving false so Finish can never be a silent no-op.
+    if (identityId === undefined) {
+      setSaveStatus("error");
+      return false;
+    }
     // The draft this render agreed on; surfaces block Finish until basics
     // validate, but guard anyway so a stray call cannot emit a 422 against
-    // the profile surface.
-    if (!basicsComplete(draft)) return false;
+    // the profile surface. (Regressions on this branch were the dead click.)
+    if (!basicsComplete(draft)) {
+      setSaveStatus("error");
+      return false;
+    }
     setSaveStatus("saving");
     try {
       const saved = await saveProfile(draftToProfilePayload(draft));

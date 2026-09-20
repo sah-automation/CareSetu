@@ -35,6 +35,7 @@ function mockSession(roles: string[] | null) {
     logout: vi.fn(),
     isAuthenticated: roles !== null,
     isLoading: false,
+    resumeSession: vi.fn(),
   });
 }
 

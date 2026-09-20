@@ -35,6 +35,7 @@ vi.mocked(useAuth).mockReturnValue({
   logout: vi.fn(),
   isAuthenticated: false,
   isLoading: false,
+  resumeSession: vi.fn(),
 });
 
 afterEach(() => {
@@ -49,6 +50,7 @@ afterEach(() => {
     logout: vi.fn(),
     isAuthenticated: false,
     isLoading: false,
+    resumeSession: vi.fn(),
   });
 });
 
@@ -76,6 +78,7 @@ describe("LoginPage - return param handling", () => {
       logout: vi.fn(),
       isAuthenticated: true,
       isLoading: false,
+      resumeSession: vi.fn(),
     });
     searchParamsValue = new URLSearchParams({ return: "/patient/record" });
 

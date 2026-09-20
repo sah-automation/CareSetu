@@ -38,13 +38,13 @@ const VALID_SESSION: StoredSession = {
 };
 
 const ME_RESPONSE_MULTI_ROLE = {
-  identity_id: 42,
+  subject_id: "42",
   phone: "+911234567890",
   roles: ["patient", "partner"],
 };
 
 const ME_RESPONSE_SINGLE_ROLE = {
-  identity_id: 42,
+  subject_id: "42",
   phone: "+911234567890",
   roles: ["patient"],
 };
@@ -279,7 +279,7 @@ describe("Topbar account cluster", () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       new Response(
         JSON.stringify({
-          identity_id: 42,
+          subject_id: "42",
           phone: "+911234567890",
           roles: ["operator"],
         }),

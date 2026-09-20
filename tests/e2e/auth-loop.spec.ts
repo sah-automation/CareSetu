@@ -358,6 +358,83 @@ test("re-registering the same number resolves to the existing identity and logs 
   ).toBe(registeredSubjectId);
 });
 
+test("a fresh login resolves identity in-flow so profile Finish works without a reload (#496)", async ({
+  page,
+  request,
+}) => {
+  // #496 Seam 2: this is the regression the ticket shipped to kill - a brand
+  // new patient signs in through the OTP wizard and can complete the profile
+  // on the very first click of Finish, with no reload anywhere in between.
+  // The pre-fix behavior "worked" only because a full reload re-ran session
+  // validation; this test proves the seam resolves identity in-flow instead.
+  const freshPhone = randomPhone();
+
+  await startRegistration(page, freshPhone);
+  await verifyOtp(page, request, freshPhone);
+  await page.waitForURL("**/patient");
+
+  // No-reload invariant: exactly one full page navigation has ever happened
+  // (the initial /login goto). Every later move - OTP redirect, the account
+  // menu, the nudge CTA, the completion round-trip - must be client-side.
+  const navigations = await page.evaluate(
+    () => performance.getEntriesByType("navigation").length,
+  );
+  expect(
+    navigations,
+    "the fresh-login chain must reach /patient with a single page navigation",
+  ).toBe(1);
+
+  // The seam resolved identity from the stored session: the dashboard renders
+  // the masked phone (the avatar's last two digits) instead of the anonymous
+  // placeholder.
+  await expect(page.getByTestId("account-menu")).toContainText(
+    freshPhone.slice(-2),
+  );
+
+  // Reach the completion wizard through the nudge CTA - a client-side Link, so
+  // this leg must not add a navigation entry either. (One CTA renders per
+  // incomplete profile item, so target the first.)
+  await page.getByTestId("pc-complete-cta").first().click();
+  await page.waitForURL("**/patient/profile/complete");
+  expect(
+    await page.evaluate(
+      () => performance.getEntriesByType("navigation").length,
+    ),
+    "the nudge CTA must navigate client-side, never via a full page load",
+  ).toBe(1);
+
+  // Fill the required basics and Finish on the very first attempt.
+  await page.getByTestId("pc-fullname").fill("E2E Asha");
+  await page.getByTestId("pc-age").fill("30");
+  await page.getByTestId("pc-gender").selectOption("female");
+  await page.getByTestId("pc-next").click();
+  await expect(
+    page.getByTestId("profile-save-error"),
+    "basics complete and identity resolved - Finish must not surface a save error",
+  ).toHaveCount(0);
+  await page.getByTestId("pc-skip").click();
+  await page.getByTestId("pc-next").click();
+
+  // The save succeeded: the wizard redirected home and the profile persisted.
+  await page.waitForURL("**/patient");
+  const accessJwt = await page.evaluate(() =>
+    localStorage.getItem("caresetu.access_jwt"),
+  );
+  expect(accessJwt).not.toBeNull();
+  const profile = await request.get(`${BACKEND}/v1/me/profile`, {
+    headers: { Authorization: `Bearer ${accessJwt}` },
+  });
+  expect(profile.status()).toBe(200);
+  const body = (await profile.json()) as {
+    set: boolean;
+    profile: { name: string };
+  };
+  expect(body.set, "the completed profile must persist on the server").toBe(
+    true,
+  );
+  expect(body.profile.name).toBe("E2E Asha");
+});
+
 test("an unauthenticated attempt at the protected surface is denied", async ({
   page,
   request,

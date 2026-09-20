@@ -10,9 +10,13 @@
 // fallback), so a returning patient's Home reflects what was completed on any
 // device. Dismissals stay client-only - they die with the page session, and a
 // later visit resurfaces the gentle reminder.
+//
+// #496: the "Complete profile" CTA is a client-side Link so a fresh OTP login
+// can reach the completion wizard without a reload.
 
 import { useState } from "react";
 import { X } from "lucide-react";
+import Link from "next/link";
 
 import type { ProfileStrings } from "@/lib/i18n/dictionaries";
 import { STRINGS } from "@/lib/i18n/dictionaries";
@@ -117,13 +121,13 @@ export function ProfileNudgeCards({
                 <X className="h-4 w-4" />
               </button>
             </div>
-            <a
+            <Link
               href={onCompleteHref}
               data-testid="pc-complete-cta"
               className="text-sm font-medium text-accent-strong underline-offset-2 hover:underline self-start"
             >
               {t.nudges.completeCta}
-            </a>
+            </Link>
           </div>
         );
       })}

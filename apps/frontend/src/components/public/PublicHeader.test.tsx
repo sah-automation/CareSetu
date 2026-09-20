@@ -47,7 +47,7 @@ function setStoredSession(session: StoredSession) {
 
 function meResponse(roles: string[]) {
   return new Response(
-    JSON.stringify({ identity_id: 42, phone: "+911234567890", roles }),
+    JSON.stringify({ subject_id: "42", phone: "+911234567890", roles }),
     { status: 200 },
   );
 }

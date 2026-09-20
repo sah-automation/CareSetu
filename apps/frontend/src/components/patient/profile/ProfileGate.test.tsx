@@ -267,6 +267,31 @@ describe("ProfileGate", () => {
     // The wizard stays open so the patient can retry.
     expect(screen.getByTestId("gate-wizard-intake")).toBeInTheDocument();
   });
+
+  // #496 Seam 1: the medicine-delivery gate opens the wizard directly on step
+  // 3, so Finish is reachable with incomplete basics - the second silent-return
+  // branch. It must refuse with the visible save error, never silently.
+  it("surfaces the visible save error when Finish runs with incomplete basics (#496)", async () => {
+    renderGate(<Host action="medicineCheckout" />);
+    fireEvent.click(screen.getByTestId("gate-trigger-medicineCheckout"));
+
+    // Opens directly on the area step; the patient can hit Finish untouched.
+    expect(
+      screen.getByTestId("gate-wizard-medicineCheckout"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: en.s3 })).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("pc-next"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("profile-save-error")).toBeInTheDocument(),
+    );
+    expect(screen.getByText(en.save.error)).toBeInTheDocument();
+    expect(state.saveProfile).not.toHaveBeenCalled();
+    // The wizard stays open so the patient can fix what is missing.
+    expect(
+      screen.getByTestId("gate-wizard-medicineCheckout"),
+    ).toBeInTheDocument();
+  });
 });
 
 describe("ProfileGateDemo", () => {

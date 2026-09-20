@@ -22,6 +22,7 @@ import {
   IconShield,
 } from "@/components/auth/icons";
 import { fetchDemoOtp } from "@/lib/auth/api";
+import { useAuth } from "@/lib/auth/AuthContext";
 import { useLang } from "@/lib/i18n/LangContext";
 import type { OtpFlow } from "./otpState";
 import { formatCountdown, OTP_TTL_SECONDS, useOtpFlow } from "./otpState";
@@ -265,6 +266,9 @@ export function PatientAuthWizard({
   // toggles it through LangContext instead of wizard-local state.
   const { lang, setLang } = useLang();
   const router = useRouter();
+  // #496: the session-resume seam resolves the freshly-persisted login session
+  // in-flow, so the post-login surface hydrates without a reload.
+  const { resumeSession } = useAuth();
   const demoMode = process.env.NEXT_PUBLIC_DEMO_MODE === "true";
   const [demoOtp, setDemoOtp] = useState<string | null>(null);
 
@@ -303,12 +307,23 @@ export function PatientAuthWizard({
   ]);
 
   // Redirect to the return target after successful login (Done step "Go to
-  // CareSetu home" also routes there directly)
+  // CareSetu home" also routes there directly). Await the session-resume seam
+  // so identity/roles land in state BEFORE the post-login route mounts: if the
+  // patient surface mounted identity-less, the Provider remount that applies
+  // identity would reset an in-progress completion wizard and wipe its draft.
+  // A reload is never needed (#496). Best-effort by design - a resolution
+  // failure still navigates, and the never-silent Finish palette covers it.
   useEffect(() => {
     if (flow.state.stage === "done" && flow.state.session) {
-      router.replace(returnTo);
+      let cancelled = false;
+      void resumeSession().then(() => {
+        if (!cancelled) router.replace(returnTo);
+      });
+      return () => {
+        cancelled = true;
+      };
     }
-  }, [flow.state.stage, flow.state.session, returnTo, router]);
+  }, [flow.state.stage, flow.state.session, returnTo, router, resumeSession]);
 
   if (!flow.state.hydrated) {
     return null;

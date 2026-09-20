@@ -43,7 +43,10 @@ const PROVIDER_TYPES: ProviderType[] = ["doctor", "lab", "chemist"];
 
 type TypeKey = "typeDoctor" | "typeLab" | "typeChemist";
 type SpecialtyKey =
-  "generalPhysician" | "pediatrician" | "gynecologist" | "dentist";
+  | "generalPhysician"
+  | "pediatrician"
+  | "gynecologist"
+  | "dentist";
 
 const SPECIALTY_LABEL_KEY: Record<string, SpecialtyKey> = {
   "General Physician": "generalPhysician",
@@ -170,7 +173,7 @@ export function DirectoryBrowser({
     const qs = params.toString();
     const base = presetType
       ? DIRECTORY_VARIANT_ROUTES[presetType]
-      : (baseRoute ?? DIRECTORY_ROUTE);
+      : baseRoute ?? DIRECTORY_ROUTE;
     router.replace(qs ? `${base}?${qs}` : base);
   }
 
@@ -394,8 +397,8 @@ export function DirectoryBrowser({
                   typeLabel={t[TYPE_LABEL_KEY[entry.partner_type]]}
                   specialtyLabel={
                     entry.specialty
-                      ? (t.specialties[SPECIALTY_LABEL_KEY[entry.specialty]] ??
-                        entry.specialty)
+                      ? t.specialties[SPECIALTY_LABEL_KEY[entry.specialty]] ??
+                        entry.specialty
                       : null
                   }
                   verifiedLabel={t.verified}

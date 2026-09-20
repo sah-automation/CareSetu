@@ -6,8 +6,19 @@
 // validates against GET /v1/me, auto-refreshes expired JWTs, and redirects
 // to /login when the session is invalid. (PHASE-2.5 T3 #151; hoisted to
 // root in PHASE-2.6 T01, #192)
+//
+// #496: mount-only validation left a fresh OTP login with no identity until a
+// reload. The resumeSession seam below re-resolves the stored session's
+// identity in-flow right after the OTP wizard persists it, so the post-login
+// patient surface hydrates without a reload.
 
-import { createContext, useContext, useEffect, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+} from "react";
 import { useRouter } from "next/navigation";
 import {
   readSession,
@@ -34,6 +45,14 @@ export interface AuthContextValue {
   logout: () => void;
   isAuthenticated: boolean;
   isLoading: boolean;
+  /**
+   * Session-resume seam (#496): re-run /v1/me with the stored session and
+   * apply the resolved identity/roles to state in-flow. The patient OTP
+   * wizard calls this immediately after persisting a freshly-minted session
+   * so the post-login surface hydrates without the reload the mount-only
+   * validate() used to require.
+   */
+  resumeSession: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -47,7 +66,8 @@ export function useAuth(): AuthContextValue {
 }
 
 interface MeResponse {
-  identity_id: number;
+  /** The principal identity the token is scoped to (a numeric string, #196). */
+  subject_id: string;
   phone: string;
   roles: string[];
 }
@@ -67,7 +87,7 @@ function applyMe(
   setSelectedRole: (r: string) => void,
 ) {
   setUser({
-    id: me.identity_id,
+    id: Number(me.subject_id),
     phone: me.phone,
     roles: me.roles,
   });
@@ -183,6 +203,51 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     saveSelectedRole(role);
   }
 
+  // Session-resume seam (#496): resolves identity in-flow after the OTP flow
+  // persists a fresh login session. Deliberately reuses the same /v1/me (+
+  // refresh retry) resolution path as mount validation instead of decoding the
+  // stored JWT client-side, so identity and roles are sourced the same way
+  // across reloads and fresh logins. Best-effort: a resolution failure leaves
+  // state untouched and never force-logs-out a session the user just minted -
+  // the patient profile Finish invariant surfaces the unresolved window.
+  const resumeSession = useCallback(async (): Promise<void> => {
+    const session: StoredSession | null = readSession();
+    if (!session) return;
+
+    try {
+      const me = await fetchMe(session.jwt);
+      applyMe(me, setUser, setSelectedRole);
+    } catch (err) {
+      console.error(
+        "[AuthContext] resume /v1/me failed, attempting refresh:",
+        err,
+      );
+
+      try {
+        const refreshed = await fetchRefresh(session.refresh_token);
+
+        // Update localStorage with the rotated tokens, matching the mount
+        // validation path exactly.
+        const updated: StoredSession = {
+          ...session,
+          jwt: refreshed.jwt,
+          refresh_token: refreshed.refresh_token,
+        };
+        localStorage.setItem("caresetu.session", JSON.stringify(updated));
+        localStorage.setItem("caresetu.access_jwt", refreshed.jwt);
+        localStorage.setItem("caresetu.refresh_token", refreshed.refresh_token);
+
+        const me = await fetchMe(refreshed.jwt);
+        applyMe(me, setUser, setSelectedRole);
+      } catch (refreshErr) {
+        console.error(
+          "[AuthContext] resume resolution failed; identity stays unresolved:",
+          refreshErr,
+        );
+      }
+    }
+  }, []);
+
   function logout() {
     clearSession();
     clearSelectedRole();
@@ -201,6 +266,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         logout,
         isAuthenticated: user !== null,
         isLoading,
+        resumeSession,
       }}
     >
       {children}
