@@ -227,6 +227,15 @@ class ReviewQueueItem(BaseModel):
     prioritize the summaries that most need attention (US-11/12).
     ``pre_summary_id`` + ``intake_id`` are the keys the console uses to open
     the review workspace; ``low_confidence`` is the AMB-006 honesty cue.
+
+    PHASE-8.1 T07 (#489): the triage-ready enrichment. ``patient_name`` and
+    ``patient_age`` resolve from the patient's identity profile for the
+    assigned intake (#482) - ``None`` when the profile is not set, so the
+    console falls back to readable copy instead of crashing. ``snippet`` is a
+    short excerpt of the intake's structured content and ``section_count`` the
+    number of populated structured sections - both derived from the stored
+    structured fields, never a new AI call. Doctor-assigned-scoped like the
+    whole read; these are exactly the card's fields and nothing more.
     """
 
     pre_summary_id: int
@@ -234,6 +243,10 @@ class ReviewQueueItem(BaseModel):
     structuring_confidence: Decimal | float | None
     low_confidence: bool
     review_state: str
+    patient_name: str | None = None
+    patient_age: int | None = None
+    snippet: str | None = None
+    section_count: int = 0
     created_at: datetime
     updated_at: datetime
 

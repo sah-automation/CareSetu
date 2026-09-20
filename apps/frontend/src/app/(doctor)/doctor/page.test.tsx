@@ -74,6 +74,10 @@ function queueItem(overrides: Partial<ReviewQueueItem> = {}): ReviewQueueItem {
     structuring_confidence: 0.54,
     low_confidence: true,
     review_state: "draft",
+    patient_name: "Ravi Kumar",
+    patient_age: 32,
+    snippet: "Fever for three days, cough",
+    section_count: 2,
     created_at: "2026-09-10T10:00:00Z",
     updated_at: "2026-09-10T10:00:00Z",
     ...overrides,
@@ -121,6 +125,7 @@ describe("DoctorDashboardPage review queue", () => {
       queueItem({
         pre_summary_id: 1,
         intake_id: 1,
+        patient_name: "Asha",
         structuring_confidence: 0.91,
         low_confidence: false,
         created_at: "2026-09-10T09:00:00Z",
@@ -128,6 +133,7 @@ describe("DoctorDashboardPage review queue", () => {
       queueItem({
         pre_summary_id: 2,
         intake_id: 2,
+        patient_name: "Ravi",
         structuring_confidence: 0.44,
         low_confidence: true,
         created_at: "2026-09-10T11:00:00Z",
@@ -138,8 +144,57 @@ describe("DoctorDashboardPage review queue", () => {
     await waitFor(() => screen.getByTestId("queue-list"));
 
     const titles = screen.getAllByTestId("queue-item-title");
-    expect(titles[0]).toHaveTextContent("Intake #2");
-    expect(titles[1]).toHaveTextContent("Intake #1");
+    expect(titles[0]).toHaveTextContent("Ravi");
+    expect(titles[1]).toHaveTextContent("Asha");
+  });
+
+  it("renders the triage-ready card: patient name/age, snippet, and section pill (#489)", async () => {
+    getQueue.mockResolvedValue([queueItem()]);
+    render(<DoctorDashboardPage />);
+
+    await waitFor(() => screen.getByTestId("queue-item"));
+
+    expect(screen.getByTestId("queue-item-title")).toHaveTextContent(
+      "Ravi Kumar",
+    );
+    expect(screen.getByTestId("queue-item-age")).toHaveTextContent(
+      t.patientAge(32),
+    );
+    expect(screen.getByTestId("queue-item-snippet")).toHaveTextContent(
+      "Fever for three days, cough",
+    );
+    expect(screen.getByTestId("queue-item-sections")).toHaveTextContent(
+      t.sectionsCount(2),
+    );
+    expect(screen.getByTestId("queue-item-intake")).toHaveTextContent(
+      t.queueItemMeta(42),
+    );
+    expect(screen.getByTestId("queue-item-waiting")).toHaveTextContent(
+      t.waitingFor(""),
+    );
+  });
+
+  it("falls back to the patient label when the profile is missing (#489)", async () => {
+    getQueue.mockResolvedValue([
+      queueItem({
+        patient_name: null,
+        patient_age: null,
+        snippet: null,
+        section_count: 0,
+      }),
+    ]);
+    render(<DoctorDashboardPage />);
+
+    await waitFor(() => screen.getByTestId("queue-item"));
+
+    expect(screen.getByTestId("queue-item-title")).toHaveTextContent(
+      t.patientFallback,
+    );
+    expect(screen.queryByTestId("queue-item-age")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("queue-item-snippet")).not.toBeInTheDocument();
+    expect(screen.getByTestId("queue-item-sections")).toHaveTextContent(
+      t.sectionsCount(0),
+    );
   });
 
   it("shows the amber Verify chip and confidence flag on low-confidence items", async () => {
@@ -377,7 +432,7 @@ describe("DoctorDashboardPage bilingual parity (REQ-006)", () => {
   }
 
   it("renders the console copy in Hindi when the locale flips", async () => {
-    getQueue.mockResolvedValue([queueItem()]);
+    getQueue.mockResolvedValue([queueItem({ patient_name: null })]);
     getCases.mockResolvedValue([caseItem(11)]);
     render(<LangFlipHost />);
     await waitFor(() => screen.getByTestId("queue-item"));
@@ -385,8 +440,11 @@ describe("DoctorDashboardPage bilingual parity (REQ-006)", () => {
     fireEvent.click(screen.getByText("flip-lang"));
     await waitFor(() =>
       expect(screen.getByTestId("queue-item-title")).toHaveTextContent(
-        hiT.queueItemMeta(42),
+        hiT.patientFallback,
       ),
+    );
+    expect(screen.getByTestId("queue-item-intake")).toHaveTextContent(
+      hiT.queueItemMeta(42),
     );
     expect(screen.getByText(hiT.title)).toBeInTheDocument();
     expect(screen.getByTestId("coming-soon-patients")).toHaveTextContent(

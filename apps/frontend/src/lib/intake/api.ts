@@ -104,6 +104,13 @@ export interface ReviewQueueItem {
   structuring_confidence: number | null;
   low_confidence: boolean;
   review_state: string;
+  /** Patient name/age from the identity profile for the assigned intake (#489); null when the profile is not set. */
+  patient_name: string | null;
+  patient_age: number | null;
+  /** Short excerpt of the intake's structured content, for the queue card (#489). */
+  snippet: string | null;
+  /** Number of populated structured sections on the card (#489). */
+  section_count: number;
   created_at: string;
   updated_at: string;
 }
@@ -225,6 +232,11 @@ function isReviewQueueItem(value: unknown): value is ReviewQueueItem {
     "structuring_confidence" in value &&
     "low_confidence" in value &&
     "review_state" in value &&
+    "patient_name" in value &&
+    "patient_age" in value &&
+    "snippet" in value &&
+    "section_count" in value &&
+    typeof (value as ReviewQueueItem).section_count === "number" &&
     "created_at" in value &&
     "updated_at" in value
   );

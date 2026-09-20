@@ -337,6 +337,10 @@ describe("fetchReviewQueue", () => {
     structuring_confidence: 0.54,
     low_confidence: true,
     review_state: "draft",
+    patient_name: "Ravi Kumar",
+    patient_age: 32,
+    snippet: "Fever for three days, cough",
+    section_count: 2,
     created_at: "2026-09-10T00:00:00Z",
     updated_at: "2026-09-10T00:00:00Z",
   };

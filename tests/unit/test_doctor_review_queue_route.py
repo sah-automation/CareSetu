@@ -36,6 +36,10 @@ _QUEUE_ITEM_1 = ReviewQueueItem(
     structuring_confidence=0.55,
     low_confidence=True,
     review_state="draft",
+    patient_name="Ravi Kumar",
+    patient_age=32,
+    snippet="Fever for three days, cough",
+    section_count=2,
     created_at=datetime(2026, 9, 15, 10, 0, tzinfo=UTC),
     updated_at=datetime(2026, 9, 15, 10, 0, tzinfo=UTC),
 )
@@ -46,6 +50,10 @@ _QUEUE_ITEM_2 = ReviewQueueItem(
     structuring_confidence=0.82,
     low_confidence=False,
     review_state="draft",
+    patient_name=None,
+    patient_age=None,
+    snippet=None,
+    section_count=0,
     created_at=datetime(2026, 9, 14, 8, 0, tzinfo=UTC),
     updated_at=datetime(2026, 9, 14, 8, 0, tzinfo=UTC),
 )
@@ -123,8 +131,16 @@ def test_review_queue_returns_assigned_awaiting_review_with_confidence_flags() -
     assert body[0]["pre_summary_id"] == _QUEUE_ITEM_1.pre_summary_id
     assert body[0]["low_confidence"] is True
     assert body[0]["structuring_confidence"] == 0.55
+    assert body[0]["patient_name"] == "Ravi Kumar"
+    assert body[0]["patient_age"] == 32
+    assert body[0]["snippet"] == "Fever for three days, cough"
+    assert body[0]["section_count"] == 2
     assert body[1]["low_confidence"] is False
     assert body[1]["structuring_confidence"] == 0.82
+    assert body[1]["patient_name"] is None
+    assert body[1]["patient_age"] is None
+    assert body[1]["snippet"] is None
+    assert body[1]["section_count"] == 0
 
 
 def test_review_queue_empty_list_when_no_items() -> None:

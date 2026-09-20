@@ -20,6 +20,7 @@ local transaction, so a later AI failure never rolls back the intake
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
@@ -94,8 +95,11 @@ from modules.intake.schema.models import (
     intake_pre_summaries,
 )
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from modules.consent.facade import ConsentFacade, ConsentView
+    from modules.iam.facade import IamFacade
 
 #: Number of attempts (initial + retries) the upload-transfer ladder makes
 #: before it gives up on a flaky capture (NFR-PERF-002, spec #344 US-10).
@@ -134,6 +138,47 @@ def _validate_audio_duration(media_ref: MediaUploadRef) -> None:
         )
 
 
+#: Cap for the introspect snippet on the review-queue card (#489) so a long
+#: chief-complaint list never floods the triage view.
+REVIEW_QUEUE_SNIPPET_MAX_CHARS: int = 120
+
+
+def _review_queue_snippet(structured_fields: dict[str, object] | None) -> str | None:
+    """A short introspect excerpt from the intake's structured content (#489).
+
+    Prefers the chief complaints, then symptoms, then the duration - the
+    gut of what the patient said - joined and truncated to the card width.
+    ``None`` when nothing structured exists, so the console falls back to
+    readable copy instead of rendering an empty string.
+    """
+    raw = structured_fields if isinstance(structured_fields, dict) else {}
+    fields = StructuredFields.model_validate(raw)
+    parts = [*fields.chief_complaints, *fields.symptoms]
+    if fields.duration:
+        parts.append(fields.duration)
+    text = ", ".join(part.strip() for part in parts if part and part.strip())
+    text = text[:REVIEW_QUEUE_SNIPPET_MAX_CHARS].strip()
+    return text or None
+
+
+def _review_queue_section_count(structured_fields: dict[str, object] | None) -> int:
+    """The number of populated structured sections on the card (#489).
+
+    Counts the typed sections (chief complaints, symptoms, duration) that
+    carry content - the "3 sections" pill the doctor console renders next to
+    the confidence/waiting meta, so triage weight is visible at a glance.
+    """
+    raw = structured_fields if isinstance(structured_fields, dict) else {}
+    fields = StructuredFields.model_validate(raw)
+    return sum(
+        (
+            bool(fields.chief_complaints),
+            bool(fields.symptoms),
+            bool(fields.duration and fields.duration.strip()),
+        )
+    )
+
+
 class IntakeFacade:
     """Typed public facade for intake capture and read projections.
 
@@ -150,12 +195,14 @@ class IntakeFacade:
         ai_gateway: AiGateway | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         consent_facade: ConsentFacade | None = None,
+        iam_facade: IamFacade | None = None,
     ) -> None:
         self._engine = engine
         self._media_store = media_store
         self._ai_gateway = ai_gateway
         self._sleep = sleep
         self._consent_facade = consent_facade
+        self._iam_facade = iam_facade
 
     async def submit_intake(
         self,
@@ -951,6 +998,16 @@ class IntakeFacade:
         a waiting list never reorders under concurrent review activity. Each
         item carries the ``low_confidence`` flag (the AMB-006 cue).
 
+        PHASE-8.1 T07 (#489) enrichment: each item is triage-ready before it
+        leaves the seam - ``patient_name``/``patient_age`` resolve from the
+        patient's identity profile (iam facade), ``snippet`` is a short
+        excerpt of the structured content, ``section_count`` is how many
+        structured sections are populated, both derived from the stored
+        ``structured_fields`` (never a new AI call). Missing profiles degrade
+        gracefully to ``None``/0 - the console falls back to readable copy -
+        and a missing ``iam_facade`` (unit seams) yields the same fallback,
+        never a crash.
+
         ``doctor_id`` is the partner identity of the calling doctor (RBAC
         enforced at the route seam). The scoping predicate lives in the JOIN
         WHERE (data minimization, security standards §2): an unassigned doctor
@@ -968,8 +1025,10 @@ class IntakeFacade:
                         intake_pre_summaries.c.structuring_confidence,
                         intake_pre_summaries.c.low_confidence,
                         intake_pre_summaries.c.review_state,
+                        intake_pre_summaries.c.structured_fields,
                         intake_pre_summaries.c.created_at,
                         intake_pre_summaries.c.updated_at,
+                        intake_intakes.c.patient_id,
                     )
                     .select_from(
                         intake_pre_summaries.join(
@@ -988,18 +1047,43 @@ class IntakeFacade:
                 )
             ).all()
 
-        return [
-            ReviewQueueItem(
-                pre_summary_id=int(row.id),
-                intake_id=int(row.intake_id),
-                structuring_confidence=row.structuring_confidence,
-                low_confidence=row.low_confidence,
-                review_state=row.review_state,
-                created_at=row.created_at,
-                updated_at=row.updated_at,
+        patient_ids = {int(row.patient_id) for row in rows}
+        profiles = {}
+        if self._iam_facade is not None:
+            try:
+                for patient_id in patient_ids:
+                    profiles[patient_id] = await self._iam_facade.get_patient_profile(patient_id)
+            except Exception:
+                # Cosmetic card enrichment (doctor console, #489): a failed
+                # profile resolution (seam broken, schema DB down) must never
+                # take the whole review queue down - degrade wholesale to the
+                # anonymous cards, logged as a warning (error-handling-
+                # observability §2), no patient ids or PHI in the log line.
+                logger.warning(
+                    "review-queue profile resolution failed; degrading to anonymous cards",
+                    exc_info=True,
+                )
+                profiles = {}
+
+        items: list[ReviewQueueItem] = []
+        for row in rows:
+            profile = profiles.get(int(row.patient_id))
+            items.append(
+                ReviewQueueItem(
+                    pre_summary_id=int(row.id),
+                    intake_id=int(row.intake_id),
+                    structuring_confidence=row.structuring_confidence,
+                    low_confidence=row.low_confidence,
+                    review_state=row.review_state,
+                    patient_name=profile.name if profile is not None else None,
+                    patient_age=profile.age if profile is not None else None,
+                    snippet=_review_queue_snippet(row.structured_fields),
+                    section_count=_review_queue_section_count(row.structured_fields),
+                    created_at=row.created_at,
+                    updated_at=row.updated_at,
+                )
             )
-            for row in rows
-        ]
+        return items
 
     async def get_doctor_pre_summary(
         self,

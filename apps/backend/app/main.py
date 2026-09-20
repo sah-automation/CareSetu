@@ -308,6 +308,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # SAME transaction as the doctor assignment (consent-at-pick, MOD-004)
         # via ``ConsentFacade.grant_consent_on``.
         consent_facade=app.state.consent_facade,
+        # PHASE-8.1 (#489): the review-queue read resolves the card's patient
+        # name/age through the iam seam (composition boundary, no cross-schema
+        # read) - the same settled facade the profile routes use, so a missing
+        # profile degrades to the card fallback, never a crash.
+        iam_facade=app.state.iam_facade,
     )
     # MOD-006 (PHASE-8 T06, #422): the two care facades share the settled
     # engine and the settled intake/health facades - the consult-complete

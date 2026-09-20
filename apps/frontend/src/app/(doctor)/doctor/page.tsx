@@ -207,14 +207,22 @@ export default function DoctorDashboardPage() {
                 data-testid="queue-item"
                 className="flex items-center justify-between gap-3 rounded-lg border border-hairline bg-surface p-4"
               >
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
+                <div className="min-w-0 flex-1 space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
                     <span
                       className="text-sm font-medium text-txt"
                       data-testid="queue-item-title"
                     >
-                      {t.queueItemMeta(item.intake_id)}
+                      {item.patient_name ?? t.patientFallback}
                     </span>
+                    {item.patient_age != null && (
+                      <span
+                        className="text-xs text-txt-muted"
+                        data-testid="queue-item-age"
+                      >
+                        {t.patientAge(item.patient_age)}
+                      </span>
+                    )}
                     {item.low_confidence && (
                       <span
                         data-testid="queue-item-verify"
@@ -223,8 +231,25 @@ export default function DoctorDashboardPage() {
                         {t.verifyChip}
                       </span>
                     )}
+                    <span
+                      data-testid="queue-item-sections"
+                      className="inline-flex items-center rounded-full bg-accent-soft px-2 py-0.5 text-xs font-medium text-accent-strong"
+                    >
+                      {t.sectionsCount(item.section_count)}
+                    </span>
                   </div>
-                  <div className="mt-1 flex items-center gap-3 text-xs text-txt-muted">
+                  {item.snippet != null && item.snippet.length > 0 && (
+                    <p
+                      data-testid="queue-item-snippet"
+                      className="line-clamp-2 text-xs text-txt-muted"
+                    >
+                      {item.snippet}
+                    </p>
+                  )}
+                  <div className="flex flex-wrap items-center gap-3 text-xs text-txt-muted">
+                    <span data-testid="queue-item-intake">
+                      {t.queueItemMeta(item.intake_id)}
+                    </span>
                     <span data-testid="queue-item-confidence">
                       {t.confidenceLabel}:{" "}
                       {confidenceDisplay(item.structuring_confidence, t)}

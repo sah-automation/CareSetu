@@ -21,6 +21,7 @@ import pytest
 from sqlalchemy import ClauseElement
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from modules.iam.facade import PatientProfile
 from modules.intake.facade import IntakeFacade
 from modules.intake.intake_models import ReviewQueueItem
 
@@ -71,14 +72,40 @@ def _engine(connection: AsyncMock) -> AsyncMock:
     return engine
 
 
-def _facade(connection: AsyncMock) -> IntakeFacade:
-    return IntakeFacade(engine=_engine(connection))
+def _facade(connection: AsyncMock, iam_facade: object | None = None) -> IntakeFacade:
+    return IntakeFacade(engine=_engine(connection), iam_facade=iam_facade)
+
+
+class _StubIamFacade:
+    """Minimal iam facade stand-in: per-identity profile or None (missing)."""
+
+    def __init__(self, profiles: dict[int, PatientProfile | None]) -> None:
+        self._profiles = profiles
+        self.reads: list[int] = []
+
+    async def get_patient_profile(self, identity_id: int) -> PatientProfile | None:
+        self.reads.append(identity_id)
+        return self._profiles.get(identity_id)
+
+
+def _profile(name: str = "Ravi Kumar", age: int = 32) -> PatientProfile:
+    return PatientProfile(
+        name=name,
+        age=age,
+        gender="male",
+        preferred_language="en",
+        area=None,
+        emergency_contact=None,
+        photo_ref=None,
+    )
 
 
 def _queue_row(
     *,
     ps_id: int = 1,
     intake_id: int = 10,
+    patient_id: int = 30,
+    structured_fields: dict | None = None,
     structuring_confidence: float | None = 0.80,
     low_confidence: bool = False,
     review_state: str = "draft",
@@ -88,6 +115,8 @@ def _queue_row(
     return SimpleNamespace(
         id=ps_id,
         intake_id=intake_id,
+        patient_id=patient_id,
+        structured_fields=structured_fields,
         structuring_confidence=structuring_confidence,
         low_confidence=low_confidence,
         review_state=review_state,
@@ -113,8 +142,26 @@ def _statements(connection: AsyncMock) -> list[ClauseElement]:
 @pytest.mark.asyncio
 async def test_list_review_queue_returns_review_queue_items() -> None:
     rows = [
-        _queue_row(ps_id=2, intake_id=20, low_confidence=True, structuring_confidence=0.55),
-        _queue_row(ps_id=1, intake_id=10, low_confidence=False, structuring_confidence=0.82),
+        _queue_row(
+            ps_id=2,
+            intake_id=20,
+            patient_id=30,
+            low_confidence=True,
+            structuring_confidence=0.55,
+            structured_fields={
+                "chief_complaints": ["Fever"],
+                "symptoms": ["Cough"],
+                "duration": "3 days",
+            },
+        ),
+        _queue_row(
+            ps_id=1,
+            intake_id=10,
+            patient_id=31,
+            low_confidence=False,
+            structuring_confidence=0.82,
+            structured_fields={},
+        ),
     ]
     connection = _connection([_FakeResult(rows=rows)])
     facade = _facade(connection)
@@ -127,9 +174,65 @@ async def test_list_review_queue_returns_review_queue_items() -> None:
     assert results[0].intake_id == 20
     assert results[0].low_confidence is True
     assert results[0].structuring_confidence == 0.55
+    assert results[0].snippet == "Fever, Cough, 3 days"
+    assert results[0].section_count == 3
     assert results[1].pre_summary_id == 1
     assert results[1].low_confidence is False
     assert results[1].structuring_confidence == 0.82
+    assert results[1].snippet is None
+    assert results[1].section_count == 0
+
+
+@pytest.mark.asyncio
+async def test_list_review_queue_resolves_patient_profiles_via_iam_seam() -> None:
+    rows = [
+        _queue_row(ps_id=2, intake_id=20, patient_id=30),
+        _queue_row(ps_id=1, intake_id=10, patient_id=31),
+        _queue_row(ps_id=3, intake_id=30, patient_id=30),
+    ]
+    connection = _connection([_FakeResult(rows=rows)])
+    iam = _StubIamFacade({30: _profile()})
+    facade = _facade(connection, iam_facade=iam)
+
+    results = await facade.list_review_queue(doctor_id=42)
+
+    assert [r.patient_name for r in results] == [
+        "Ravi Kumar",
+        None,
+        "Ravi Kumar",
+    ]
+    assert [r.patient_age for r in results] == [32, None, 32]
+    # One profile read per unique patient, never a per-row N+1 surprise.
+    assert sorted(iam.reads) == [30, 31]
+
+
+@pytest.mark.asyncio
+async def test_list_review_queue_without_iam_facade_degrades_gracefully() -> None:
+    connection = _connection([_FakeResult(rows=[_queue_row(patient_id=30)])])
+    facade = _facade(connection)
+
+    results = await facade.list_review_queue(doctor_id=42)
+
+    assert results[0].patient_name is None
+    assert results[0].patient_age is None
+
+
+@pytest.mark.asyncio
+async def test_list_review_queue_degrades_when_profile_resolution_fails() -> None:
+    rows = [_queue_row(patient_id=30)]
+    connection = _connection([_FakeResult(rows=rows)])
+
+    class _RaisingIamFacade:
+        async def get_patient_profile(self, identity_id: int) -> PatientProfile | None:
+            raise RuntimeError("iam seam down")
+
+    facade = _facade(connection, iam_facade=_RaisingIamFacade())
+
+    results = await facade.list_review_queue(doctor_id=42)
+
+    assert len(results) == 1
+    assert results[0].patient_name is None
+    assert results[0].patient_age is None
 
 
 @pytest.mark.asyncio
