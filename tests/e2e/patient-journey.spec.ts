@@ -1,10 +1,10 @@
 // PHASE-3 T11 (#220): patient-journey end-to-end spec.
 //
 // The whole phase proven as one patient journey in the browser, riding the
-// live backend: open My Record, filter the timeline, walk the grant sheet to
-// a visible receipt, revoke with the inline confirm, then observe the revoked
-// receipts and the egress slice - with bilingual EN/HI toggle spot-checks
-// along the way.
+// live backend: open My Record, filter the timeline, seed a standing consent
+// through the real consent API, revoke with the inline confirm, then observe
+// the revoked receipts and the egress slice - with bilingual EN/HI toggle
+// spot-checks along the way.
 //
 // Timeline entries are seeded by emitting synthetic outbox rows through the
 // dispatcher in test setup (no producer exists yet by design). This is the
@@ -151,9 +151,30 @@ async function seedEgressData(
   return (await response.json()) as { egress_id: number };
 }
 
+// #499: the patient home no longer hosts the consent demo (the PROTO-2.7 shell
+// demotes demo scaffolding), so a standing consent is seeded through the real
+// consent API. The consent-log journey below still exercises the receipts,
+// revoke and egress it always did; the interactive grant sheet is unit-covered
+// (ConsentSheet.test.tsx) and returns to e2e via the real home consent moment
+// when it lands.
+async function seedConsentGrant(
+  request: APIRequestContext,
+  jwt: string,
+): Promise<void> {
+  const response = await request.post(`${BACKEND}/v1/consents`, {
+    headers: { Authorization: `Bearer ${jwt}` },
+    data: {
+      counterparty_type: "lab",
+      counterparty_id: "e2e-journey-consent",
+      record_scope: "prescriptions",
+    },
+  });
+  expect(response.status(), "POST /v1/consents should succeed").toBe(201);
+}
+
 // ---- Tests ----
 
-test("patient journey: record -> filter -> grant sheet -> receipt -> revoke -> revoked receipts + egress slice", async ({
+test("patient journey: record -> filter -> seed consent -> revoke -> revoked receipts + egress slice", async ({
   page,
   request,
 }) => {
@@ -161,9 +182,7 @@ test("patient journey: record -> filter -> grant sheet -> receipt -> revoke -> r
   await startRegistration(page, phone);
   await verifyOtp(page, request, phone);
   await page.waitForURL("**/patient");
-  await expect(
-    page.getByRole("heading", { name: "Welcome, Patient" }),
-  ).toBeVisible();
+  await expect(page.getByTestId("patient-home-greeting")).toBeVisible();
 
   // Capture the subject ID and JWT for API seeding calls.
   const { subjectId, jwt } = await getAuthInfo(request, page);
@@ -223,57 +242,38 @@ test("patient journey: record -> filter -> grant sheet -> receipt -> revoke -> r
     timeout: 5_000,
   });
 
-  // 6. Open the grant sheet via the consent-demo-trigger on the patient page
-  await page.goto("/patient");
-  await waitForIdentityResolved(page, phone);
-  await expect(
-    page.getByRole("heading", { name: "Welcome, Patient" }),
-  ).toBeVisible();
-  await page.getByTestId("consent-demo-trigger").click();
-  await expect(page.getByTestId("consent-title")).toBeVisible();
+  // 6. Seed a standing consent through the real consent API (#499: the home's
+  //    demo grant sheet is gone).
+  await seedConsentGrant(request, jwt);
 
-  // 7. Grant consent through the UI and verify the receipt
-  await page.getByTestId("consent-allow").click();
-  // The receipt should appear after the grant API call succeeds
-  await expect(page.getByTestId("consent-receipt-title")).toBeVisible({
-    timeout: 10_000,
-  });
-  await expect(page.getByTestId("consent-receipt-line1")).toBeVisible();
-  await expect(page.getByTestId("consent-receipt-line2")).toBeVisible();
-  await expect(page.getByTestId("consent-receipt-line3")).toBeVisible();
-
-  // Close the receipt sheet
-  await page.keyboard.press("Escape");
-  await page.waitForTimeout(500);
-
-  // 9. Seed egress data so the egress slice renders on the consent log
+  // 7. Seed egress data so the egress slice renders on the consent log
   await seedEgressData(request, jwt);
 
-  // 10. Navigate to consent log
+  // 8. Navigate to consent log
   await page.goto("/patient/record/consent-log");
   await expect(page.getByTestId("history-section")).toBeVisible({
     timeout: 30_000,
   });
 
-  // 11. Verify the granted consent appears in history
+  // 9. Verify the granted consent appears in history
   const consentCards = page.locator('[data-testid^="consent-"]').filter({
     hasNot: page.locator('[data-testid="consent-log-loading"]'),
   });
   const grantedCard = consentCards.first();
   await expect(grantedCard).toBeVisible();
 
-  // 12. Verify the egress slice renders
+  // 10. Verify the egress slice renders
   await expect(page.getByTestId("egress-section")).toBeVisible();
   await expect(page.getByTestId("egress-table")).toBeVisible();
 
-  // 13. Expand the receipt timeline on the granted consent
+  // 11. Expand the receipt timeline on the granted consent
   const receiptDetails = page.locator('[data-testid^="receipt-"]').first();
   await expect(receiptDetails).toBeVisible();
   await receiptDetails.locator("summary").click();
   // The receipt should show at least "Granted" event
   await expect(receiptDetails.getByText(/Granted|granted/)).toBeVisible();
 
-  // 14. Revoke the consent with the inline confirm
+  // 12. Revoke the consent with the inline confirm
   const revokeBtn = page.locator('[data-testid^="revoke-"]').first();
   await expect(revokeBtn).toBeVisible();
   await revokeBtn.click();
@@ -284,22 +284,22 @@ test("patient journey: record -> filter -> grant sheet -> receipt -> revoke -> r
   // The toast should appear confirming revocation
   await expect(page.getByTestId("toast")).toBeVisible({ timeout: 10_000 });
 
-  // 15. Verify the consent is now revoked in the history
+  // 13. Verify the consent is now revoked in the history
   await expect(page.getByTestId("history-section")).toBeVisible();
   const revokedCard = page.locator('[data-testid^="consent-"]').filter({
     has: page.getByText("Revoked"),
   });
   await expect(revokedCard).toBeVisible();
 
-  // 16. Verify the stop-forward copy appears on the revoked consent
+  // 14. Verify the stop-forward copy appears on the revoked consent
   const stopForward = page.locator('[data-testid^="stop-forward-"]').first();
   await expect(stopForward).toBeVisible();
 
-  // 17. Verify the egress slice is still visible post-revocation
+  // 15. Verify the egress slice is still visible post-revocation
   await expect(page.getByTestId("egress-section")).toBeVisible();
   await expect(page.getByTestId("egress-table")).toBeVisible();
 
-  // 18. Bilingual spot-check on consent log screen
+  // 16. Bilingual spot-check on consent log screen
   await langToggle.getByRole("button", { name: "हिं" }).click();
   await expect(page.getByRole("heading", { name: "अनुमति लॉग" })).toBeVisible({
     timeout: 5_000,

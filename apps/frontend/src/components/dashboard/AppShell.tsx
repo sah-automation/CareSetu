@@ -41,7 +41,9 @@ export function AppShell({
         data-testid="app-shell"
       >
         <Topbar density="light" role={role} />
-        <main className="mx-auto w-full max-w-[760px] flex-1 px-4 pt-6 pb-28 lg:pb-10">
+        {/* PHASE-2.7 T1 (#499): widened from 760px so the home feed can hold
+            its 300px rail beside the cards at >=1024px (PROTO-2.7 binding). */}
+        <main className="mx-auto w-full max-w-[1040px] flex-1 px-4 pt-6 pb-28 lg:pb-10">
           {children}
         </main>
         <BottomTabs role={role} />

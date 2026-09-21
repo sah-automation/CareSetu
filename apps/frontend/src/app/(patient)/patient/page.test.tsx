@@ -1,17 +1,22 @@
-// PHASE-8.1 T2 (#488): patient dashboard hydration. A returning patient whose
-// profile was completed on another device sees their saved profile reflected in
-// the meter and nudge cards - a fresh empty browser would show the whole
-// reminder stack, so a single tracking reminder proves the server hydrate won
-// over an empty local buffer (#488 AC 1/2).
+// PHASE-2.7 T1 (#499): the reworked patient home shell (PROTO-2.7 binding).
+// A returning patient lands on a full-width greeting strip that names the saved
+// first name in the current language, with a generic fallback when no name is
+// saved, above the responsive feed. The profile completion meter, nudge stack
+// and demo scaffolds no longer render on the home.
 
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import PatientDashboardPage from "./page";
 import { ProfileProvider } from "@/lib/profile/ProfileContext";
 import type { StoredPatientProfile } from "@/lib/profile/api";
-import { initialDraft, saveDraft } from "@/lib/profile/profileState";
-import { __resetLangForTests } from "@/lib/i18n/LangContext";
+import { __resetLangForTests, useLang } from "@/lib/i18n/LangContext";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 
 const state = vi.hoisted(() => ({
@@ -46,6 +51,34 @@ const completeProfile: StoredPatientProfile = {
   photo_ref: "me.jpg",
 };
 
+function langFlip() {
+  // Provider-less suites subscribe to the shared module store directly; this
+  // button is the one-mutation-path way to flip locale mid-test.
+  const { lang, setLang } = useLang();
+  return (
+    <button type="button" onClick={() => setLang(lang === "en" ? "hi" : "en")}>
+      flip-lang
+    </button>
+  );
+}
+
+function renderHome() {
+  return render(
+    <ProfileProvider>
+      <LangFlipHost />
+    </ProfileProvider>,
+  );
+}
+
+function LangFlipHost() {
+  return (
+    <>
+      {langFlip()}
+      <PatientDashboardPage />
+    </>
+  );
+}
+
 beforeEach(() => {
   window.localStorage.clear();
   __resetLangForTests();
@@ -59,58 +92,57 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("patient dashboard profile hydration (#488)", () => {
-  it("reflects the saved server profile across the meter and nudge cards", async () => {
+describe("patient home shell (#499)", () => {
+  it("greets the saved first name in the current language", async () => {
     state.getProfile.mockResolvedValue({ set: true, profile: completeProfile });
-    render(
-      <ProfileProvider>
-        <PatientDashboardPage />
-      </ProfileProvider>,
+    renderHome();
+
+    const greeting = await screen.findByTestId("patient-home-greeting");
+    await waitFor(() =>
+      expect(greeting).toHaveTextContent(
+        STRINGS.en.patientHome.welcome("Asha"),
+      ),
     );
 
-    // The full server profile means only the tracking reminder remains - a
-    // fresh empty browser would show the whole missing-group stack.
+    fireEvent.click(screen.getByRole("button", { name: "flip-lang" }));
     await waitFor(() =>
-      expect(screen.getAllByTestId("pc-nudge-card")).toHaveLength(1),
+      expect(greeting).toHaveTextContent(
+        STRINGS.hi.patientHome.welcome("Asha"),
+      ),
     );
-    expect(
-      screen.getByText(STRINGS.en.profile.nudges.trackingTitle),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByText(STRINGS.en.profile.nudges.areaTitle),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByText(STRINGS.en.profile.nudges.basicsTitle),
-    ).not.toBeInTheDocument();
-    // Meter carries the saved completeness, not an empty draft's.
-    expect(screen.getByTestId("pc-meter-label")).not.toHaveTextContent("0%");
   });
 
-  it("a fully filled local draft (same device) surfaces no nudge reminders", async () => {
+  it("falls back to the generic greeting when no name is saved", async () => {
     state.getProfile.mockResolvedValue({ set: false, profile: null });
-    saveDraft(
-      {
-        ...initialDraft(),
-        name: "Asha Devi",
-        age: "30",
-        gender: "female",
-        language: "en",
-        area: "Bishrampur",
-        emergencyContact: "+91 98765 43210",
-        photoFileName: "me.jpg",
-        trackBp: true,
-        trackSugar: true,
-      },
-      state.user.id,
-    );
-    render(
-      <ProfileProvider>
-        <PatientDashboardPage />
-      </ProfileProvider>,
-    );
+    renderHome();
 
+    const greeting = await screen.findByTestId("patient-home-greeting");
     await waitFor(() =>
-      expect(screen.queryByTestId("pc-nudge-stack")).not.toBeInTheDocument(),
+      expect(greeting).toHaveTextContent(STRINGS.en.patientHome.welcomeGuest),
     );
+    expect(greeting).not.toHaveTextContent(
+      STRINGS.en.patientHome.welcome("Asha"),
+    );
+  });
+
+  it("no longer composes the meter, nudge stack or demo scaffolds", async () => {
+    state.getProfile.mockResolvedValue({ set: true, profile: completeProfile });
+    renderHome();
+
+    await screen.findByTestId("patient-home-greeting");
+    expect(screen.queryByTestId("pc-meter-label")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("pc-nudge-stack")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("profile-gate-demo")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("consent-demo-card")).not.toBeInTheDocument();
+  });
+
+  it("renders the greeting strip above the feed with an empty rail", async () => {
+    renderHome();
+
+    const greeting = await screen.findByTestId("patient-home-greeting");
+    expect(screen.getByTestId("patient-home-rail")).toBeInTheDocument();
+    expect(
+      greeting.compareDocumentPosition(screen.getByTestId("patient-home-rail")),
+    ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
 });

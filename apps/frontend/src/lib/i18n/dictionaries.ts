@@ -460,6 +460,17 @@ const en = {
     },
   },
 
+  // patientHome.* surface - PHASE-2.7 T1 (#499), the reworked patient home
+  // (PROTO-2.7 binding: a full-width greeting strip above a responsive
+  // two-column feed). The greeting is i18n-driven: the saved first name is
+  // interpolated when one exists, the generic greeting stands in when none is
+  // saved. Feed-card copy lands with the sibling PROTO-2.7 tickets.
+  patientHome: {
+    welcome: (firstName: string) => `Namaste, ${firstName}`,
+    welcomeGuest: "Namaste",
+    greetSub: "Good to see you. What would you like to do today?",
+  },
+
   // directory.* surface - PHASE-6 T05a (#317), the public /directory browse
   // page (blueprint §3.1 row 2 look, PROTO-PHASE-6 finalized views are the
   // visual binding). Copy rules baked in: the location indicator is the fixed
@@ -1282,6 +1293,7 @@ export type AuthStrings = Dictionary["auth"];
 export type StaffAuthStrings = Dictionary["staffAuth"];
 export type ProfileStrings = Dictionary["profile"];
 export type DoctorStrings = Dictionary["doctor"];
+export type PatientHomeStrings = Dictionary["patientHome"];
 
 export const STRINGS: Record<Lang, Dictionary> = {
   en,
@@ -1815,6 +1827,14 @@ export const STRINGS: Record<Lang, Dictionary> = {
         meta: "\u00a9 CareSetu - डालटनगंज और आसपास के इलाक़ों में",
         operatorConsole: "ऑपरेटर कंसोल",
       },
+    },
+
+    // patientHome.* surface - PHASE-2.7 T1 (#499). See the en block for the
+    // greeting rules; parity is compile-checked via Dictionary.
+    patientHome: {
+      welcome: (firstName: string) => `नमस्ते, ${firstName}`,
+      welcomeGuest: "नमस्ते",
+      greetSub: "आपको देखकर अच्छा लगा। आज आप क्या करना चाहेंगे?",
     },
 
     directory: {

@@ -301,9 +301,7 @@ test("register a new number, read the mock OTP, verify, and reach the protected 
   await startRegistration(page, phone);
   await verifyOtp(page, request, phone);
   await page.waitForURL("**/patient");
-  await expect(
-    page.getByRole("heading", { name: "Welcome, Patient" }),
-  ).toBeVisible();
+  await expect(page.getByTestId("patient-home-greeting")).toBeVisible();
 
   const accessJwt = await page.evaluate(() =>
     localStorage.getItem("caresetu.access_jwt"),
@@ -322,9 +320,7 @@ test("register a new number, read the mock OTP, verify, and reach the protected 
   registeredSubjectId = meBody.subject_id;
 
   await page.reload();
-  await expect(
-    page.getByRole("heading", { name: "Welcome, Patient" }),
-  ).toBeVisible();
+  await expect(page.getByTestId("patient-home-greeting")).toBeVisible();
 });
 
 test("re-registering the same number resolves to the existing identity and logs in", async ({
@@ -339,9 +335,7 @@ test("re-registering the same number resolves to the existing identity and logs 
   ).toBeVisible();
   await verifyOtp(page, request, phone);
   await page.waitForURL("**/patient");
-  await expect(
-    page.getByRole("heading", { name: "Welcome, Patient" }),
-  ).toBeVisible();
+  await expect(page.getByTestId("patient-home-greeting")).toBeVisible();
 
   const accessJwt = await page.evaluate(() =>
     localStorage.getItem("caresetu.access_jwt"),
@@ -374,8 +368,8 @@ test("a fresh login resolves identity in-flow so profile Finish works without a 
   await page.waitForURL("**/patient");
 
   // No-reload invariant: exactly one full page navigation has ever happened
-  // (the initial /login goto). Every later move - OTP redirect, the account
-  // menu, the nudge CTA, the completion round-trip - must be client-side.
+  // (the initial /login goto). The OTP redirect and the account menu must be
+  // client-side.
   const navigations = await page.evaluate(
     () => performance.getEntriesByType("navigation").length,
   );
@@ -391,17 +385,15 @@ test("a fresh login resolves identity in-flow so profile Finish works without a 
     freshPhone.slice(-2),
   );
 
-  // Reach the completion wizard through the nudge CTA - a client-side Link, so
-  // this leg must not add a navigation entry either. (One CTA renders per
-  // incomplete profile item, so target the first.)
-  await page.getByTestId("pc-complete-cta").first().click();
-  await page.waitForURL("**/patient/profile/complete");
-  expect(
-    await page.evaluate(
-      () => performance.getEntriesByType("navigation").length,
-    ),
-    "the nudge CTA must navigate client-side, never via a full page load",
-  ).toBe(1);
+  // Reach the completion wizard directly. #499 removed the home's nudge stack
+  // (PROTO-2.7 demotes profile completion to a slim banner, ticket #500), so
+  // there is no in-page CTA to click here; the wizard itself is unchanged.
+  // The hard goto re-resolves identity (see the identity-remount guard note),
+  // so wait for the account menu to settle before touching the form.
+  await page.goto("/patient/profile/complete");
+  await expect(page.getByTestId("account-menu")).toContainText(
+    freshPhone.slice(-2),
+  );
 
   // Fill the required basics and Finish on the very first attempt.
   await page.getByTestId("pc-fullname").fill("E2E Asha");
@@ -489,18 +481,16 @@ test("an unauthenticated attempt at the protected surface is denied", async ({
       url.searchParams.get("src") === "deep-link",
     { timeout: 60_000 },
   );
-  await expect(
-    page.getByRole("heading", { name: "Welcome, Patient" }),
-  ).toBeVisible();
+  await expect(page.getByTestId("patient-home-greeting")).toBeVisible();
 });
 
-test("the homepage, consent sheet, auth wizard and patient page pass the axe accessibility scan", async ({
+test("the homepage, consent overlay, auth wizard and patient page pass the axe accessibility scan", async ({
   page,
   request,
 }) => {
   // TEST-C2 (#131) + PHASE-2.6 T14 (#205, spec #191 decision 15): assert zero
   // axe violations on the resolved homepage, each wizard stage, the open
-  // consent sheet, and the signed-in surface.
+  // consent overlay, and the signed-in surface.
   await page.goto("/");
   await expect(
     page.getByRole("heading", {
@@ -524,23 +514,39 @@ test("the homepage, consent sheet, auth wizard and patient page pass the axe acc
 
   await verifyOtp(page, request, axePhone);
 
-  await expect(
-    page.getByRole("heading", { name: "Welcome, Patient" }),
-  ).toBeVisible();
+  await expect(page.getByTestId("patient-home-greeting")).toBeVisible();
   await expectNoAxeViolations(page, "signed-in patient page");
 
-  // The consent sheet (T12 #203) scans while OPEN - the Radix overlay traps
-  // focus and aria-hides the page behind it, so this is the state a
-  // screen-reader user actually experiences at a consent moment.
-  await page.getByTestId("consent-demo-trigger").click();
-  await expect(page.getByTestId("consent-title")).toBeVisible();
-  await expectNoAxeViolations(page, "open consent sheet");
+  // The consent overlay scans while OPEN - the Radix sheet traps focus and
+  // aria-hides the page behind it, so this is the state a screen-reader user
+  // experiences at a consent moment. #499 removed the home's demo grant sheet,
+  // so seed a standing consent through the real consent API and scan the open
+  // revoke sheet on the consent log - the same focus-trapped overlay anatomy.
+  const consentJwt = await page.evaluate(() =>
+    localStorage.getItem("caresetu.access_jwt"),
+  );
+  expect(consentJwt).not.toBeNull();
+  const grant = await request.post(`${BACKEND}/v1/consents`, {
+    headers: { Authorization: `Bearer ${consentJwt}` },
+    data: {
+      counterparty_type: "lab",
+      counterparty_id: "e2e-axe-consent",
+      record_scope: "prescriptions",
+    },
+  });
+  expect(grant.status()).toBe(201);
+
+  await page.goto("/patient/record/consent-log");
+  await expect(page.getByTestId("history-section")).toBeVisible({
+    timeout: 30_000,
+  });
+  await page.locator('[data-testid^="revoke-"]').first().click();
+  await expect(page.getByTestId("revoke-sheet")).toBeVisible();
+  await expectNoAxeViolations(page, "open revoke sheet");
   await page.keyboard.press("Escape");
 
   await page.reload();
-  await expect(
-    page.getByRole("heading", { name: "Welcome, Patient" }),
-  ).toBeVisible();
+  await expect(page.getByTestId("patient-home-greeting")).toBeVisible();
   await expectNoAxeViolations(page, "signed-in patient page after reload");
 });
 

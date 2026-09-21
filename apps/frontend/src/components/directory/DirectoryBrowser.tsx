@@ -100,9 +100,9 @@ export function DirectoryBrowser({
    * public DIRECTORY_ROUTE - existing callers are unchanged. */
   baseRoute?: string;
   /** PHASE-8.1 T11 (#485): card-grid density override for shell-embedded
-   * browse (the patient column is ~760px wide, so lg:grid-cols-4 is too
-   * cramped). Defaults to the public full-width grid - existing callers are
-   * unchanged. */
+   * browse (the embedded column is narrower than the public full-width
+   * browse, so the default lg:grid-cols-4 is too cramped). Defaults to the
+   * public full-width grid - existing callers are unchanged. */
   cardGridClassName?: string;
 }) {
   const { lang } = useLang();
