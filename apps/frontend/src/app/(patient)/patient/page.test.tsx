@@ -3,6 +3,11 @@
 // first name in the current language, with a generic fallback when no name is
 // saved, above the responsive feed. The profile completion meter, nudge stack
 // and demo scaffolds no longer render on the home.
+//
+// #500: the slim one-line profile-completeness banner joins the same composed
+// seam under the greeting strip - present when name/age/gender are missing and
+// not dismissed, absent when basics are complete or the per-device dismissal
+// flag is set.
 
 import {
   cleanup,
@@ -144,5 +149,68 @@ describe("patient home shell (#499)", () => {
     expect(
       greeting.compareDocumentPosition(screen.getByTestId("patient-home-rail")),
     ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+});
+
+describe("profile completeness banner (#500)", () => {
+  it("renders when basics are incomplete and not dismissed", async () => {
+    state.getProfile.mockResolvedValue({ set: false, profile: null });
+    renderHome();
+
+    const banner = await screen.findByTestId("pc-banner");
+    expect(banner).toHaveTextContent(STRINGS.en.patientHome.banner);
+    expect(banner).toHaveTextContent(STRINGS.en.patientHome.bannerCta);
+    expect(
+      screen.getByRole("button", {
+        name: STRINGS.en.patientHome.bannerDismiss,
+      }),
+    ).toBeInTheDocument();
+    // The slim banner is a separate element from the (removed) nudge stack.
+    expect(screen.queryByTestId("pc-nudge-stack")).not.toBeInTheDocument();
+  });
+
+  it("renders nothing when basics are complete (testid absent, not hidden)", async () => {
+    state.getProfile.mockResolvedValue({ set: true, profile: completeProfile });
+    renderHome();
+
+    await screen.findByTestId("patient-home-greeting");
+    await waitFor(() =>
+      expect(screen.queryByTestId("pc-banner")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("dismisses per device and stays gone on a later visit", async () => {
+    state.getProfile.mockResolvedValue({ set: false, profile: null });
+    renderHome();
+    await screen.findByTestId("pc-banner");
+
+    fireEvent.click(screen.getByTestId("pc-banner-dismiss"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("pc-banner")).not.toBeInTheDocument(),
+    );
+    expect(
+      window.localStorage.getItem("caresetu.profileBanner.dismissed"),
+    ).toBe("1");
+
+    // A fresh render (later visit) still honors the durable dismissal.
+    cleanup();
+    renderHome();
+    await screen.findByTestId("patient-home-greeting");
+    await waitFor(() =>
+      expect(screen.queryByTestId("pc-banner")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("serves the banner copy in hi from the same patientHome surface", async () => {
+    state.getProfile.mockResolvedValue({ set: false, profile: null });
+    renderHome();
+    await screen.findByTestId("pc-banner");
+
+    fireEvent.click(screen.getByRole("button", { name: "flip-lang" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("pc-banner")).toHaveTextContent(
+        STRINGS.hi.patientHome.banner,
+      ),
+    );
   });
 });

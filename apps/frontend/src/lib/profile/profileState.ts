@@ -213,6 +213,28 @@ export function __resetNudgeDismissalsForTests(): void {
   dismissedNudges.clear();
 }
 
+// --- Profile-banner dismissal memory ---------------------------------------
+// The slim one-line Home banner ("add your name, age & gender", #500). Unlike
+// the session-scoped nudge cards, dismissing it persists per device: once gone
+// it stays gone on later visits, so the flag is durable in localStorage. The
+// key stays identity-agnostic - a single browser flag mirroring the nudge key
+// scheme, not a per-identity preference.
+
+const PROFILE_BANNER_DISMISSED_KEY = "caresetu.profileBanner.dismissed";
+
+export function isProfileBannerDismissed(): boolean {
+  return window.localStorage.getItem(PROFILE_BANNER_DISMISSED_KEY) === "1";
+}
+
+export function dismissProfileBanner(): void {
+  window.localStorage.setItem(PROFILE_BANNER_DISMISSED_KEY, "1");
+}
+
+// Test isolation only: clears the durable flag between suites.
+export function __resetProfileBannerDismissalForTests(): void {
+  window.localStorage.removeItem(PROFILE_BANNER_DISMISSED_KEY);
+}
+
 // --- Persistence ------------------------------------------------------------
 // The local draft stays the in-flight edit buffer even while the saved profile
 // lives server-side (#488 AC 1). The storage key is scoped per identity so a

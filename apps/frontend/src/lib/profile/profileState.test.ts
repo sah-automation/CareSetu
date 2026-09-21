@@ -5,14 +5,17 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import {
   __resetNudgeDismissalsForTests,
+  __resetProfileBannerDismissalForTests,
   areaComplete,
   basicsComplete,
   dismissNudge,
+  dismissProfileBanner,
   draftStorageKey,
   draftToProfilePayload,
   evaluateGate,
   initialDraft,
   isNudgeDismissed,
+  isProfileBannerDismissed,
   loadDraft,
   missingNudgeGroups,
   profileCompleteness,
@@ -337,6 +340,32 @@ describe("nudge dismissal memory (session-scoped, never permanent)", () => {
     // No localStorage write: dismissal is deliberately not durable - a later
     // visit gets its gentle reminder again.
     expect(window.localStorage.getItem("caresetu.profile.draft")).toBeNull();
+  });
+});
+
+describe("profile banner dismissal memory (#500, durable per device)", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    __resetProfileBannerDismissalForTests();
+  });
+
+  it("starts undismissed", () => {
+    expect(isProfileBannerDismissed()).toBe(false);
+  });
+
+  it("persists the dismissal to localStorage (per-device, unlike nudges)", () => {
+    dismissProfileBanner();
+    expect(isProfileBannerDismissed()).toBe(true);
+    expect(
+      window.localStorage.getItem("caresetu.profileBanner.dismissed"),
+    ).toBe("1");
+  });
+
+  it("a later page load still sees the durable dismissal", () => {
+    // localStorage is the only state carried across page loads - the in-module
+    // set dies with the page, exactly like the session-scoped nudge store.
+    window.localStorage.setItem("caresetu.profileBanner.dismissed", "1");
+    expect(isProfileBannerDismissed()).toBe(true);
   });
 });
 

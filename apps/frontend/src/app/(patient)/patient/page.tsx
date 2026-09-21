@@ -13,10 +13,15 @@
 // ProfileGate keeps gating the care-action moments (blueprint §5.9). The feed
 // cards land in the sibling PROTO-2.7 tickets (#500+); this ticket ships the
 // shell, so both columns render empty.
+//
+// #500: the slim dismissible profile-completeness banner sits under the
+// greeting strip - a one-line nudge when name/age/gender are missing, gone
+// when complete or dismissed (per-device persistence).
 
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { useProfile } from "@/lib/profile/ProfileContext";
+import { ProfileCompletenessBanner } from "@/components/patient/profile/ProfileCompletenessBanner";
 
 export default function PatientDashboardPage() {
   const { draft } = useProfile();
@@ -27,13 +32,20 @@ export default function PatientDashboardPage() {
 
   return (
     <>
-      {/* Greeting strip: full width, no rail beside it. */}
-      <section className="mb-6" data-testid="patient-home-greeting">
-        <h1 className="text-xl font-semibold text-txt">
-          {firstName ? t.welcome(firstName) : t.welcomeGuest}
-        </h1>
-        <p className="mt-1 text-sm text-txt-muted">{t.greetSub}</p>
-      </section>
+      {/* Top strip: full width, no rail beside it. */}
+      <div className="mb-6 space-y-4">
+        {/* Greeting strip */}
+        <section data-testid="patient-home-greeting">
+          <h1 className="text-xl font-semibold text-txt">
+            {firstName ? t.welcome(firstName) : t.welcomeGuest}
+          </h1>
+          <p className="mt-1 text-sm text-txt-muted">{t.greetSub}</p>
+        </section>
+
+        {/* Slim dismissible profile banner (#500): only while name/age/gender
+            are missing and not dismissed per device; never a blocking gate. */}
+        <ProfileCompletenessBanner />
+      </div>
 
       {/* Feed: main cards column + 300px sticky rail on desktop; single
           column, same reading order, on mobile. */}

@@ -465,10 +465,17 @@ const en = {
   // two-column feed). The greeting is i18n-driven: the saved first name is
   // interpolated when one exists, the generic greeting stands in when none is
   // saved. Feed-card copy lands with the sibling PROTO-2.7 tickets.
+  //
+  // #500: the slim one-line profile banner lives here too (PROTO-2.7
+  // `profile.banner` copy, re-keyed to the home surface) - a dismissible
+  // nudge, never a blocking gate, gone entirely once name/age/gender exist.
   patientHome: {
     welcome: (firstName: string) => `Namaste, ${firstName}`,
     welcomeGuest: "Namaste",
     greetSub: "Good to see you. What would you like to do today?",
+    banner: "Add your name, age & gender to start a visit",
+    bannerCta: "Complete profile",
+    bannerDismiss: "Dismiss profile reminder",
   },
 
   // directory.* surface - PHASE-6 T05a (#317), the public /directory browse
@@ -1830,11 +1837,16 @@ export const STRINGS: Record<Lang, Dictionary> = {
     },
 
     // patientHome.* surface - PHASE-2.7 T1 (#499). See the en block for the
-    // greeting rules; parity is compile-checked via Dictionary.
+    // greeting rules; parity is compile-checked via Dictionary. #500 adds the
+    // profile-banner copy (marked banner/bannerCta/bannerDismiss) to this same
+    // surface.
     patientHome: {
       welcome: (firstName: string) => `नमस्ते, ${firstName}`,
       welcomeGuest: "नमस्ते",
       greetSub: "आपको देखकर अच्छा लगा। आज आप क्या करना चाहेंगे?",
+      banner: "विज़िट शुरू करने के लिए अपना नाम, उम्र और लिंग जोड़ें",
+      bannerCta: "प्रोफ़ाइल पूरी करें",
+      bannerDismiss: "प्रोफ़ाइल अनुस्मारक बंद करें",
     },
 
     directory: {
