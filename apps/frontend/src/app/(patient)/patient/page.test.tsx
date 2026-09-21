@@ -240,7 +240,7 @@ describe("patient home shell (#499)", () => {
     expect(screen.queryByTestId("consent-demo-card")).not.toBeInTheDocument();
   });
 
-  it("renders the greeting strip above the feed with an empty rail", async () => {
+  it("renders the greeting strip above the feed with the sticky rail", async () => {
     renderHome();
 
     const greeting = await screen.findByTestId("patient-home-greeting");
@@ -1096,6 +1096,173 @@ describe("recent activity card (#506)", () => {
     );
     expect(screen.getByTestId("recent-entry-1")).toHaveTextContent(
       STRINGS.hi.record.badge.consultation,
+    );
+  });
+});
+
+describe("health snapshot rail (#507)", () => {
+  function entry(
+    id: number,
+    entry_type: RecordEntryView["entry_type"],
+    occurred_at: string,
+    payload: Record<string, unknown> = {},
+  ): RecordEntryView {
+    return {
+      entry_id: id,
+      entry_type,
+      payload,
+      occurred_at,
+      created_at: occurred_at,
+    };
+  }
+
+  function seedTimeline(entries: RecordEntryView[]) {
+    recordApi.fetchOwnRecord.mockResolvedValue({
+      record_id: 1,
+      patient_id: 7,
+      created_at: "2026-09-21T10:00:00.000Z",
+      entries,
+    });
+  }
+
+  it("mounts inside the sticky right rail", async () => {
+    renderHome();
+
+    const rail = await screen.findByTestId("patient-home-rail");
+    expect(within(rail).getByTestId("health-snapshot")).toBeInTheDocument();
+    // AC3: the rail keeps its #499 desktop sticky shell (>=1024px) - the
+    // card fills it instead of replacing it.
+    expect(rail.className).toContain("lg:sticky");
+  });
+
+  it("derives the newest metric and latest report from the timeline", async () => {
+    // Deliberately shuffled - the card must sort before picking each slot.
+    seedTimeline([
+      entry(1, "consultation", "2026-09-20T08:00:00.000Z"),
+      entry(2, "metric", "2026-02-01T08:00:00.000Z"),
+      entry(3, "metric", "2026-09-19T08:00:00.000Z"),
+      entry(4, "lab_report", "2026-09-16T08:00:00.000Z", {
+        filename: "Older CBC report",
+        order_id: 301,
+      }),
+      entry(5, "lab_report", "2026-09-17T08:00:00.000Z", {
+        filename: "Full body checkup",
+        order_id: 302,
+      }),
+    ]);
+    renderHome();
+
+    // Newest metric wins (Sep beat Feb) and is dated from its real log time.
+    const metric = await screen.findByTestId("health-metric");
+    expect(metric).toHaveTextContent(STRINGS.en.health.metricLabel);
+    expect(metric).toHaveTextContent(/Sept 2026/);
+    expect(metric).not.toHaveTextContent(/Feb 2026/);
+
+    // Newest lab report wins its slot, title from the filed filename.
+    const report = await screen.findByTestId("health-report");
+    expect(report).toHaveTextContent("Full body checkup");
+    expect(report).not.toHaveTextContent("Older CBC report");
+    expect(
+      screen.queryByTestId("health-metric-teaser"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("health-report-teaser"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("never renders a fabricated metric value (demo BP stays out)", async () => {
+    seedTimeline([
+      entry(1, "metric", "2026-09-19T08:00:00.000Z"),
+      entry(2, "lab_report", "2026-09-17T08:00:00.000Z", {
+        filename: "Full body checkup",
+      }),
+    ]);
+    renderHome();
+
+    await screen.findByTestId("health-metric");
+    // The binding's demo exemplar (128/84 mmHg) is data we do not have - the
+    // honest card derives the date only, never a body of numbers.
+    expect(screen.queryByText(/128\/84/)).not.toBeInTheDocument();
+  });
+
+  it("renders honest Soon teasers when neither slot has data", async () => {
+    seedTimeline([]);
+    renderHome();
+
+    const teaser = await screen.findByTestId("health-metric-teaser");
+    expect(teaser).toHaveTextContent(STRINGS.en.health.teaser);
+    expect(teaser).toHaveTextContent(STRINGS.en.health.teaserBody);
+    expect(teaser).toHaveTextContent(STRINGS.en.health.soon);
+    expect(screen.getByTestId("health-report-teaser")).toHaveTextContent(
+      STRINGS.en.health.reportSoon,
+    );
+    expect(screen.queryByTestId("health-metric")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("health-report")).not.toBeInTheDocument();
+  });
+
+  it("teasers each missing slot independently (metric only)", async () => {
+    seedTimeline([
+      entry(1, "metric", "2026-09-19T08:00:00.000Z"),
+      entry(2, "consultation", "2026-09-20T08:00:00.000Z"),
+    ]);
+    renderHome();
+
+    await screen.findByTestId("health-metric");
+    expect(screen.getByTestId("health-report-teaser")).toHaveTextContent(
+      STRINGS.en.health.reportSoon,
+    );
+    expect(screen.queryByTestId("health-report")).not.toBeInTheDocument();
+  });
+
+  it("teasers each missing slot independently (report only)", async () => {
+    seedTimeline([
+      entry(1, "lab_report", "2026-09-17T08:00:00.000Z", {
+        filename: "Full body checkup",
+      }),
+    ]);
+    renderHome();
+
+    await screen.findByTestId("health-report");
+    expect(screen.getByTestId("health-metric-teaser")).toHaveTextContent(
+      STRINGS.en.health.teaser,
+    );
+    expect(screen.queryByTestId("health-metric")).not.toBeInTheDocument();
+  });
+
+  it("stays absent when the record fetch fails (never a fake Soon state)", async () => {
+    recordApi.fetchOwnRecord.mockRejectedValue(new Error("network down"));
+    renderHome();
+
+    await screen.findByTestId("services-grid");
+    await waitFor(() =>
+      expect(screen.queryByTestId("health-snapshot")).not.toBeInTheDocument(),
+    );
+    // A failed read must not pass itself off as "no data yet".
+    expect(
+      screen.queryByTestId("health-metric-teaser"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("health-report-teaser"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("serves the card copy in hi from the health surface", async () => {
+    seedTimeline([]);
+    renderHome();
+    await screen.findByTestId("health-metric-teaser");
+
+    fireEvent.click(screen.getByRole("button", { name: "flip-lang" }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: STRINGS.hi.health.title }),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("health-metric-teaser")).toHaveTextContent(
+      STRINGS.hi.health.teaser,
+    );
+    expect(screen.getByTestId("health-report-teaser")).toHaveTextContent(
+      STRINGS.hi.health.reportSoon,
     );
   });
 });

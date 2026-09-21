@@ -576,6 +576,26 @@ const en = {
       "After your first consult, completed visits, reports and logs show up here. Find a doctor below to get started.",
   },
 
+  // health.* surface - #507, the home "Health snapshot" right-rail card
+  // (PROTO-2.7 binding, shell-light.html `health.*`). Honest by construction:
+  // the last logged metric and latest report are derived from the record
+  // timeline when they exist; when either is absent the card says Soon instead
+  // of inventing values. The binding's demo-only KPI copy (bpValue, bpWhen,
+  // report1 etc.) is deliberately never shipped - only derived facts render
+  // numbers and dates here.
+  health: {
+    title: "Health snapshot",
+    metricLabel: "Last logged metric",
+    trackSoon: "Health tracking",
+    teaser: "Track your blood pressure & sugar",
+    teaserBody:
+      "Daily logging and trends arrive with Health tracking. Your data stays under your consent control.",
+    reportsTitle: "Reports",
+    reportSoon: "Lab reports appear here once available",
+    soon: "Soon",
+    loading: "Loading your health snapshot...",
+  },
+
   // directory.* surface - PHASE-6 T05a (#317), the public /directory browse
   // page (blueprint §3.1 row 2 look, PROTO-PHASE-6 finalized views are the
   // visual binding). Copy rules baked in: the location indicator is the fixed
@@ -1404,6 +1424,7 @@ export type RecStrings = Dictionary["rec"];
 export type ServicesStrings = Dictionary["services"];
 export type ActionsStrings = Dictionary["actions"];
 export type RecentStrings = Dictionary["recent"];
+export type HealthStrings = Dictionary["health"];
 
 export const STRINGS: Record<Lang, Dictionary> = {
   en,
@@ -2020,6 +2041,21 @@ export const STRINGS: Record<Lang, Dictionary> = {
       empty: "आपकी गतिविधि यहाँ दिखाई देगी",
       emptyBody:
         "पहली विज़िट के बाद पूरी हुई विज़िट, रिपोर्ट और लॉग यहाँ दिखेंगे। शुरू करने के लिए नीचे डॉक्टर खोजें।",
+    },
+
+    // health.* surface - #507. See the en block; parity compile-checked via
+    // Dictionary (`health.*` keys must exist in both locales).
+    health: {
+      title: "स्वास्थ्य झलक",
+      metricLabel: "आख़िरी दर्ज मेट्रिक",
+      trackSoon: "स्वास्थ्य ट्रैकिंग",
+      teaser: "अपना BP और शुगर ट्रैक करें",
+      teaserBody:
+        "रोज़ की एंट्री और रुझान हेल्थ ट्रैकिंग के साथ आते हैं। आपका डेटा आपकी सहमति के नियंत्रण में रहता है।",
+      reportsTitle: "रिपोर्ट्स",
+      reportSoon: "लैब रिपोर्ट उपलब्ध होने पर यहाँ दिखेंगी",
+      soon: "जल्द",
+      loading: "आपका स्वास्थ्य स्नैपशॉट लोड हो रहा है...",
     },
 
     directory: {

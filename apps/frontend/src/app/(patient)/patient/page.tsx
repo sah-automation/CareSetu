@@ -39,6 +39,12 @@
 // #506: the "Recent activity" card previews the top few record-timeline events
 // (consultations, prescriptions, lab results, metric logs) through the shared
 // My Record describe/format helper, with View all opening the full timeline.
+//
+// #507: the "Health snapshot" card fills the sticky right rail - the newest
+// metric and newest lab report derived from the record timeline when they
+// exist, honest Soon teasers (P12 metrics, P9 reports) when either is absent.
+// The rail keeps its 300px / >=1024px sticky shell from #499; it just gains
+// its content here.
 
 import { useState } from "react";
 
@@ -48,6 +54,7 @@ import { useProfile } from "@/lib/profile/ProfileContext";
 import { LocationChip } from "@/components/patient/location/LocationChip";
 import { ProfileCompletenessBanner } from "@/components/patient/profile/ProfileCompletenessBanner";
 import { ActionRequiredCard } from "@/components/patient/home/ActionRequiredCard";
+import { HealthSnapshotCard } from "@/components/patient/home/HealthSnapshotCard";
 import { RecommendedRail } from "@/components/patient/home/RecommendedRail";
 import { RecentActivityCard } from "@/components/patient/home/RecentActivityCard";
 import { SearchCard } from "@/components/patient/home/SearchCard";
@@ -105,7 +112,11 @@ export default function PatientDashboardPage() {
         <aside
           className="min-w-0 lg:sticky lg:top-[4.5rem]"
           data-testid="patient-home-rail"
-        />
+        >
+          {/* #507: the sticky health snapshot - last metric + latest report
+              derived from the record timeline, Soon teasers when absent. */}
+          <HealthSnapshotCard />
+        </aside>
       </div>
     </>
   );
