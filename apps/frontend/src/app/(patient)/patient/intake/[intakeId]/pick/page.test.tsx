@@ -168,10 +168,15 @@ describe("PickDoctorPage suggested specialty", () => {
     render(<PickDoctorPage />);
     await waitFor(() => screen.getByTestId("suggested-label"));
 
-    expect(search).toHaveBeenLastCalledWith({
-      partnerType: "doctor",
-      specialty: "Pediatrician",
-    });
+    // The directory fetch is an effect after the suggestion commits, so
+    // poll for the filtered search rather than asserting on the first render
+    // (a bare assertion here flaked under full-suite load).
+    await waitFor(() =>
+      expect(search).toHaveBeenLastCalledWith({
+        partnerType: "doctor",
+        specialty: "Pediatrician",
+      }),
+    );
     expect(screen.getByTestId("suggested-label")).toHaveTextContent(
       t.suggestedSpecialtyLabel,
     );

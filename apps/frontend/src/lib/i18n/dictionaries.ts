@@ -525,6 +525,7 @@ const en = {
     loading: "Finding care near you...",
     emptyTitle: "No verified providers nearby yet",
     emptyBody: "As providers in Daltonganj get verified, they appear here.",
+    providerFallback: "CareSetu provider",
   },
 
   // services.* surface - #504, the fixed 4-tile services grid (PROTO-2.7
@@ -2007,6 +2008,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
       loading: "आपके आस-पास देखभाल ढूँढी जा रही है...",
       emptyTitle: "आस-पास अभी कोई सत्यापित प्रोवाइडर नहीं",
       emptyBody: "डालटनगंज के प्रोवाइडर सत्यापित होते ही वे यहाँ दिखेंगे।",
+      providerFallback: "CareSetu प्रोवाइडर",
     },
 
     // services.* surface - #504. See the en block; parity compile-checked via

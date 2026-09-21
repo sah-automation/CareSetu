@@ -49,7 +49,7 @@ const SPECIALTY_LABEL_KEY: Record<string, SpecialtyKey> = {
 
 /** Two-letter initials for the avatar circle, "?" when the name is empty. */
 function initials(name: string): string {
-  const parts = name.trim().split(/\s+/);
+  const parts = name.trim().split(/\s+/).filter(Boolean);
   if (parts.length === 0) return "?";
   if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
   return (parts[0][0] + parts[1][0]).toUpperCase();
@@ -61,6 +61,7 @@ interface RailCardProps {
   specialtyLabel: string | null;
   verifiedLabel: string;
   distanceLabel: string;
+  fallbackName: string;
 }
 
 function RailCard({
@@ -69,13 +70,18 @@ function RailCard({
   specialtyLabel,
   verifiedLabel,
   distanceLabel,
+  fallbackName,
 }: RailCardProps) {
   // Defensive second gate on the one shared derivation, matching DirectoryCard:
   // a row the backend marks unverified must not surface a card ("tick gone =
   // card gone" - the API never sends one, but the card drops it anyway).
   if (!entry.verified) return null;
 
-  const name = entry.practice_name ?? "CareSetu provider";
+  // An empty practice name must not render a blank card: `||` (not `??`)
+  // catches the whitespace-empty case too and the fallback is the home surface's
+  // i18n name (never an English literal - US-22). `initials` then always sees a
+  // real name unless the fallback itself is empty, where it degrades to "?".
+  const name = entry.practice_name || fallbackName;
   const meta = [entry.specialty && specialtyLabel, typeLabel, entry.area]
     .filter(Boolean)
     .join(" \u00b7 ");
@@ -210,6 +216,7 @@ export function RecommendedRail({ scope }: RecommendedRailProps) {
                 entry.distance_km,
                 t.directory.distanceKm,
               )}
+              fallbackName={t.rec.providerFallback}
             />
           ))}
         </div>

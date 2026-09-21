@@ -684,6 +684,19 @@ describe("recommended near-you rail (#503)", () => {
     }
   });
 
+  it("renders the i18n fallback name when a verified provider has no practice name", async () => {
+    searchDirectory.mockResolvedValue({
+      fell_back: false,
+      items: [doctor(1, "", 1.1)],
+    });
+    renderHome();
+
+    const card = await screen.findByTestId("rec-card");
+    // Empty practice_name must fall back to the en surface value (`||`, not
+    // `??`), so the name cell and avatar initials never render blank.
+    expect(card).toHaveTextContent(STRINGS.en.rec.providerFallback);
+  });
+
   it("renders a friendly empty state when no verified supply exists", async () => {
     searchDirectory.mockResolvedValue({ fell_back: false, items: [] });
     renderHome();

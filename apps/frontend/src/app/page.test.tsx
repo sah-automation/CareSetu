@@ -18,6 +18,18 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/",
 }));
 
+// The featured section resolves its empty state from the real directory
+// search API (see FeaturedDoctors). That live HTTP call makes this suite's
+// timings depend on the machine's loopback behaviour, so the integration
+// point is stubbed to the deterministic no-supply view - same house pattern
+// as the pick page suite.
+const mockSearchDirectory = vi.hoisted(() => ({ searchDirectory: vi.fn() }));
+vi.mock("@/lib/directory/search", async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import("@/lib/directory/search")>();
+  return { ...original, searchDirectory: mockSearchDirectory.searchDirectory };
+});
+
 function renderHomepage() {
   return render(
     <AuthProvider>
@@ -30,6 +42,10 @@ beforeEach(() => {
   vi.restoreAllMocks();
   localStorage.clear();
   mockReplace.mockReset();
+  mockSearchDirectory.searchDirectory.mockResolvedValue({
+    items: [],
+    fell_back: false,
+  });
   __resetLangForTests();
   document.documentElement.lang = "en";
 });

@@ -67,7 +67,11 @@ export function SearchCard({ scope, onScopeChange }: SearchCardProps) {
     `min-h-11 flex-1 rounded-full text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring sm:flex-none ${
       active
         ? "bg-surface font-semibold text-txt-strong shadow-sm"
-        : "text-txt-muted"
+        : // txt-muted (slate-500) on the pill-group hairline-soft background
+          // measured 4.23:1 - below the 4.5 WCAG AA floor the axe gate enforces.
+          // txt-sub (slate-700) clears it and matches the house inactive-chip
+          // pattern (pick page specialty chips).
+          "text-txt-sub"
     }`;
 
   return (
