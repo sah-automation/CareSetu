@@ -75,6 +75,16 @@ export function useProfile(): ProfileContextValue {
   return ctx;
 }
 
+/**
+ * Like `useProfile`, but returns null instead of throwing when there is no
+ * provider. Used by chrome shared across roles (the light top bar's location
+ * chip) so it can render its beachhead fallback even where the patient profile
+ * context is not mounted (full density, component tests).
+ */
+export function useOptionalProfile(): ProfileContextValue | null {
+  return useContext(ProfileContext);
+}
+
 export function ProfileProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth();
   // Keying the stateful subtree by identity makes an identity switch remount

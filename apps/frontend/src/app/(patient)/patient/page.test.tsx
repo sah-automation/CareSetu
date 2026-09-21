@@ -214,3 +214,95 @@ describe("profile completeness banner (#500)", () => {
     );
   });
 });
+
+describe("location chip + picker (#501)", () => {
+  it("shows the persisted profile area on the feed chip", async () => {
+    state.getProfile.mockResolvedValue({ set: true, profile: completeProfile });
+    renderHome();
+
+    const chip = await screen.findByTestId("location-chip-feed");
+    await waitFor(() => expect(chip).toHaveTextContent("Bishrampur"));
+  });
+
+  it("falls back to Daltonganj when no area is persisted", async () => {
+    state.getProfile.mockResolvedValue({ set: false, profile: null });
+    renderHome();
+
+    const chip = await screen.findByTestId("location-chip-feed");
+    expect(chip).toHaveTextContent(STRINGS.en.loc.cities.Daltonganj);
+  });
+
+  it("opens the sheet listing the single city with the coming-soon note", async () => {
+    renderHome();
+    fireEvent.click(await screen.findByTestId("location-chip-feed"));
+
+    const sheet = await screen.findByTestId("location-sheet");
+    expect(sheet).toHaveTextContent(STRINGS.en.loc.cities.Daltonganj);
+    expect(sheet).toHaveTextContent(STRINGS.en.loc.citySub);
+    expect(sheet).toHaveTextContent(STRINGS.en.loc.more);
+  });
+
+  it("applying Daltonganj persists the area and updates the chip", async () => {
+    state.getProfile.mockResolvedValue({ set: true, profile: completeProfile });
+    renderHome();
+    await waitFor(() =>
+      expect(screen.getByTestId("location-chip-feed")).toHaveTextContent(
+        "Bishrampur",
+      ),
+    );
+
+    fireEvent.click(screen.getByTestId("location-chip-feed"));
+    fireEvent.click(await screen.findByTestId("location-apply"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("location-chip-feed")).toHaveTextContent(
+        STRINGS.en.loc.cities.Daltonganj,
+      ),
+    );
+    // The choice flows through the profile draft persistence, not a side seam.
+    const stored = JSON.parse(
+      window.localStorage.getItem("caresetu.profile.draft.7") ?? "{}",
+    );
+    expect(stored.area).toBe("Daltonganj");
+  });
+
+  it("serves the chip fallback and sheet copy in hi", async () => {
+    state.getProfile.mockResolvedValue({ set: false, profile: null });
+    renderHome();
+    const chip = await screen.findByTestId("location-chip-feed");
+    expect(chip).toHaveTextContent(STRINGS.en.loc.cities.Daltonganj);
+
+    fireEvent.click(screen.getByRole("button", { name: "flip-lang" }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("location-chip-feed")).toHaveTextContent(
+        STRINGS.hi.loc.cities.Daltonganj,
+      ),
+    );
+    fireEvent.click(screen.getByTestId("location-chip-feed"));
+    const sheet = await screen.findByTestId("location-sheet");
+    expect(sheet).toHaveTextContent(STRINGS.hi.loc.cities.Daltonganj);
+    expect(sheet).toHaveTextContent(STRINGS.hi.loc.more);
+  });
+
+  it("localizes a persisted known area on the chip in hi", async () => {
+    state.getProfile.mockResolvedValue({
+      set: true,
+      profile: { ...completeProfile, area: "Daltonganj" },
+    });
+    renderHome();
+    await waitFor(() =>
+      expect(screen.getByTestId("location-chip-feed")).toHaveTextContent(
+        STRINGS.en.loc.cities.Daltonganj,
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "flip-lang" }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("location-chip-feed")).toHaveTextContent(
+        STRINGS.hi.loc.cities.Daltonganj,
+      ),
+    );
+  });
+});

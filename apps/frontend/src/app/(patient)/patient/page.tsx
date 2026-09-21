@@ -21,6 +21,7 @@
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { useProfile } from "@/lib/profile/ProfileContext";
+import { LocationChip } from "@/components/patient/location/LocationChip";
 import { ProfileCompletenessBanner } from "@/components/patient/profile/ProfileCompletenessBanner";
 
 export default function PatientDashboardPage() {
@@ -41,6 +42,10 @@ export default function PatientDashboardPage() {
           </h1>
           <p className="mt-1 text-sm text-txt-muted">{t.greetSub}</p>
         </section>
+
+        {/* Location chip (#501): at the top of the mobile feed; the desktop
+            chip mounts in the light top bar instead (Topbar). */}
+        <LocationChip placement="feed" className="inline-flex lg:hidden" />
 
         {/* Slim dismissible profile banner (#500): only while name/age/gender
             are missing and not dismissed per device; never a blocking gate. */}

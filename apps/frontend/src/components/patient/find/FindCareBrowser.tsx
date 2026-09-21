@@ -20,6 +20,8 @@ import { DirectoryBrowser } from "@/components/directory/DirectoryBrowser";
 import { Button } from "@/components/ui/button";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
+import { useOptionalProfile } from "@/lib/profile/ProfileContext";
+import { serviceAreaLabel } from "@/lib/location/serviceArea";
 
 const FIND_ROUTE = "/patient/find";
 
@@ -41,6 +43,14 @@ export function FindCareBrowser() {
   const t = STRINGS[lang].findCare;
   const searchParams = useSearchParams();
   const intakeId = parseIntakeId(searchParams.get(INTAKE_QUERY_PARAM));
+  // #501: the persisted service area is Find Care's default location filter
+  // (REQ-008 single-service-area). The directory has one city today, so this
+  // is a display default - the result set is unchanged.
+  const profile = useOptionalProfile();
+  const locationLabel = serviceAreaLabel(
+    profile?.draft.area,
+    STRINGS[lang].loc.cities,
+  );
 
   return (
     <>
@@ -61,6 +71,7 @@ export function FindCareBrowser() {
       <DirectoryBrowser
         baseRoute={FIND_ROUTE}
         cardGridClassName="grid gap-4 sm:grid-cols-2"
+        locationLabel={locationLabel}
       />
     </>
   );

@@ -13,6 +13,7 @@ import { NAV_CONFIG, TABBAR_MAX_DESTINATIONS } from "./nav-config";
 import type { NavItemDef } from "./nav-config";
 import { AccountMenu } from "./AccountMenu";
 import { LangToggle } from "./LangToggle";
+import { LocationChip } from "@/components/patient/location/LocationChip";
 import { NavItemLink } from "./NavItemLink";
 import type { Role } from "./types";
 
@@ -61,6 +62,11 @@ export function Topbar({ density, role }: TopbarProps) {
           density === "full" ? "" : "ms-auto"
         }`}
       >
+        {/* #501: the location chip lives in the light top bar on desktop and
+            hands off to the feed chip below lg (PROTO-2.7 binding). */}
+        {density === "light" && (
+          <LocationChip placement="topbar" className="hidden lg:inline-flex" />
+        )}
         {density === "light" && <LangToggle />}
         <AccountMenu />
       </div>

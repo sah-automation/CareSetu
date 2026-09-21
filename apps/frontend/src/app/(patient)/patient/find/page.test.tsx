@@ -25,6 +25,7 @@ const state = vi.hoisted(() => ({
   params: new URLSearchParams(),
   searchDirectory: vi.fn(),
   mockReplace: vi.fn(),
+  profileArea: null as string | null,
 }));
 
 vi.mock("next/navigation", () => ({
@@ -55,6 +56,14 @@ vi.mock("@/lib/directory/search", async (importOriginal) => {
     await importOriginal<typeof import("@/lib/directory/search")>();
   return { ...original, searchDirectory: state.searchDirectory };
 });
+
+// #501: Find Care reads the persisted service area through the optional
+// profile hook; the mock lets each test choose the persisted area without
+// standing up the whole auth + profile hydration stack.
+vi.mock("@/lib/profile/ProfileContext", () => ({
+  useOptionalProfile: () =>
+    state.profileArea === null ? null : { draft: { area: state.profileArea } },
+}));
 
 const t = STRINGS.en.findCare;
 const search = vi.mocked(state.searchDirectory);
@@ -90,6 +99,7 @@ async function renderPage() {
 beforeEach(() => {
   __resetLangForTests();
   state.params = new URLSearchParams();
+  state.profileArea = null;
   state.searchDirectory.mockReset();
   state.mockReplace.mockReset();
   state.searchDirectory.mockResolvedValue({
@@ -172,6 +182,28 @@ describe("FindCareBrowser booking deep link", () => {
     await waitFor(() => screen.getByTestId("directory-cards"));
 
     expect(screen.queryByTestId("find-care-book")).not.toBeInTheDocument();
+  });
+});
+
+describe("FindCareBrowser default location (#501)", () => {
+  it("uses the persisted service area as the default location indicator", async () => {
+    state.profileArea = "Bishrampur";
+    await renderPage();
+    await waitFor(() => screen.getByTestId("directory-cards"));
+
+    expect(screen.getByTestId("directory-location")).toHaveTextContent(
+      "Bishrampur",
+    );
+  });
+
+  it("falls back to the beachhead when no area is persisted", async () => {
+    state.profileArea = null;
+    await renderPage();
+    await waitFor(() => screen.getByTestId("directory-cards"));
+
+    expect(screen.getByTestId("directory-location")).toHaveTextContent(
+      "Daltonganj",
+    );
   });
 });
 

@@ -492,6 +492,28 @@ describe("DirectoryBrowser empty, error and fallback states", () => {
   });
 });
 
+describe("DirectoryBrowser location indicator (#501)", () => {
+  it("defaults to the launch beachhead", () => {
+    searchDirectory.mockReturnValue(new Promise(() => {}));
+
+    render(<DirectoryBrowser />);
+
+    expect(screen.getByTestId("directory-location")).toHaveTextContent(
+      "Daltonganj",
+    );
+  });
+
+  it("shows the caller's persisted service area as the default location", () => {
+    searchDirectory.mockReturnValue(new Promise(() => {}));
+
+    render(<DirectoryBrowser locationLabel="Bishrampur" />);
+
+    expect(screen.getByTestId("directory-location")).toHaveTextContent(
+      "Bishrampur",
+    );
+  });
+});
+
 describe("DirectoryBrowser partner.selected emission (T6)", () => {
   it("fires the anonymous pick once per card tap in the browse surface", async () => {
     searchDirectory.mockResolvedValueOnce(

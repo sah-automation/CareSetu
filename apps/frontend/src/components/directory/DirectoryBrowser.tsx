@@ -90,6 +90,7 @@ export function DirectoryBrowser({
   presetType,
   baseRoute,
   cardGridClassName,
+  locationLabel,
 }: {
   /** T05b: pin the partner type on a variant route (/doctors, /labs,
    * /chemists). The URL's `type` param is ignored while set. */
@@ -104,6 +105,11 @@ export function DirectoryBrowser({
    * browse, so the default lg:grid-cols-4 is too cramped). Defaults to the
    * public full-width grid - existing callers are unchanged. */
   cardGridClassName?: string;
+  /** #501: the location indicator's label. Find Care passes the patient's
+   * persisted service area so it reads as the default area filter (REQ-008
+   * single-service-area; with one city the result set is unchanged). Defaults
+   * to the launch beachhead - the public browse is unchanged. */
+  locationLabel?: string;
 }) {
   const { lang } = useLang();
   const t = STRINGS[lang].directory;
@@ -309,7 +315,10 @@ export function DirectoryBrowser({
           </>
         )}
 
-        <span className="ml-auto inline-flex items-center gap-1.5 text-sm text-txt-muted">
+        <span
+          data-testid="directory-location"
+          className="ml-auto inline-flex items-center gap-1.5 text-sm text-txt-muted"
+        >
           <svg
             width="14"
             height="14"
@@ -324,7 +333,7 @@ export function DirectoryBrowser({
             <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z" />
             <circle cx="12" cy="10" r="3" />
           </svg>
-          {t.locationDaltonganj}
+          {locationLabel ?? t.locationDaltonganj}
         </span>
       </div>
 

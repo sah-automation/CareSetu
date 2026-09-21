@@ -478,6 +478,25 @@ const en = {
     bannerDismiss: "Dismiss profile reminder",
   },
 
+  // loc.* surface - #501, the patient location chip and its single-city picker
+  // sheet (PROTO-2.7 binding, shell-light.html #location-sheet). The picker
+  // lists only the launch beachhead today, explicitly marked single-city with a
+  // coming-soon note for future cities; choosing it persists the area through
+  // the profile draft/save flow (REQ-008 single-service-area). `cities` is keyed
+  // by the service-area enum id (lib/location/serviceArea) so the enum stays the
+  // single source of truth and each id carries its localized label.
+  loc: {
+    aria: "Change my location",
+    title: "My location",
+    desc: "Used to find care near you and saved to your profile. Find Care and medicine checkout respect it.",
+    cities: {
+      Daltonganj: "Daltonganj",
+    },
+    citySub: "Daltonganj + peri-urban",
+    more: "More cities coming soon",
+    apply: "Apply location",
+  },
+
   // directory.* surface - PHASE-6 T05a (#317), the public /directory browse
   // page (blueprint §3.1 row 2 look, PROTO-PHASE-6 finalized views are the
   // visual binding). Copy rules baked in: the location indicator is the fixed
@@ -1847,6 +1866,19 @@ export const STRINGS: Record<Lang, Dictionary> = {
       banner: "विज़िट शुरू करने के लिए अपना नाम, उम्र और लिंग जोड़ें",
       bannerCta: "प्रोफ़ाइल पूरी करें",
       bannerDismiss: "प्रोफ़ाइल अनुस्मारक बंद करें",
+    },
+
+    // loc.* surface - #501. See the en block for the single-city picker rules.
+    loc: {
+      aria: "मेरा स्थान बदलें",
+      title: "मेरा स्थान",
+      desc: "पास की सेवाएं खोजने और आपकी प्रोफ़ाइल में सहेजने के लिए उपयोग होता है। खोजें और दवाई चेकआउट इसे मानते हैं।",
+      cities: {
+        Daltonganj: "डालटनगंज",
+      },
+      citySub: "डालटनगंज और आस-पास",
+      more: "और शहर जल्द आ रहे हैं",
+      apply: "स्थान लागू करें",
     },
 
     directory: {

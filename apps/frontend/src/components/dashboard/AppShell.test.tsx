@@ -102,6 +102,10 @@ describe("AppShell light density (patient)", () => {
       "light",
     );
     expect(screen.getByTestId("topnav")).toBeInTheDocument();
+    // #501: the location chip mounts inside the desktop light top bar.
+    expect(
+      within(screen.getByTestId("topbar")).getByTestId("location-chip-topbar"),
+    ).toBeInTheDocument();
     expect(screen.getByTestId("app-shell")).toHaveAttribute(
       "data-density",
       "light",
