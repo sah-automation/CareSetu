@@ -513,6 +513,20 @@ const en = {
     seeAll: "See all",
   },
 
+  // rec.* surface - #503, the "Recommended near you" rail (PROTO-2.7 binding,
+  // shell-light.html `.rec`). A sibling of the home search card: fetches the
+  // active scope's verified directory entries so patients can jump straight to
+  // verified care near them. Card-internal labels (Verified, distance,
+  // specialty/type words) reuse the directory.* card language - this surface
+  // only owns the rail's own heading and states.
+  rec: {
+    title: "Recommended near you",
+    aria: "Recommended care near you",
+    loading: "Finding care near you...",
+    emptyTitle: "No verified providers nearby yet",
+    emptyBody: "As providers in Daltonganj get verified, they appear here.",
+  },
+
   // directory.* surface - PHASE-6 T05a (#317), the public /directory browse
   // page (blueprint §3.1 row 2 look, PROTO-PHASE-6 finalized views are the
   // visual binding). Copy rules baked in: the location indicator is the fixed
@@ -1337,6 +1351,7 @@ export type ProfileStrings = Dictionary["profile"];
 export type DoctorStrings = Dictionary["doctor"];
 export type PatientHomeStrings = Dictionary["patientHome"];
 export type SearchStrings = Dictionary["search"];
+export type RecStrings = Dictionary["rec"];
 
 export const STRINGS: Record<Lang, Dictionary> = {
   en,
@@ -1909,6 +1924,16 @@ export const STRINGS: Record<Lang, Dictionary> = {
       aria: "अपने आसपास देखभाल खोजें",
       go: "खोजें",
       seeAll: "सभी देखें",
+    },
+
+    // rec.* surface - #503. See the en block; parity compile-checked via
+    // Dictionary (`rec.*` keys must exist in both locales).
+    rec: {
+      title: "आपके आस-पास सुझाया गया",
+      aria: "आपके आस-पास सुझाई गई देखभाल",
+      loading: "आपके आस-पास देखभाल ढूँढी जा रही है...",
+      emptyTitle: "आस-पास अभी कोई सत्यापित प्रोवाइडर नहीं",
+      emptyBody: "डालटनगंज के प्रोवाइडर सत्यापित होते ही वे यहाँ दिखेंगे।",
     },
 
     directory: {

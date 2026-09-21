@@ -23,6 +23,7 @@ import { ProfileProvider } from "@/lib/profile/ProfileContext";
 import type { StoredPatientProfile } from "@/lib/profile/api";
 import { __resetLangForTests, useLang } from "@/lib/i18n/LangContext";
 import { STRINGS } from "@/lib/i18n/dictionaries";
+import type { DirectoryEntry } from "@/lib/directory/search";
 
 const state = vi.hoisted(() => ({
   getProfile: vi.fn(),
@@ -30,6 +31,11 @@ const state = vi.hoisted(() => ({
   push: vi.fn(),
   user: { id: 7, phone: "+91 98765 43210", roles: ["patient"] },
 }));
+
+// #503: the Recommended rail fetches the active scope's directory data through
+// this client - the composed seam feeds raw entries (including an unverified
+// row) so the rail's verified-only, distance-sorted projection is asserted.
+const searchDirectory = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/profile/api", () => ({
   getProfile: state.getProfile,
@@ -46,6 +52,12 @@ vi.mock("@/lib/auth/AuthContext", () => ({
     isLoading: false,
   }),
 }));
+
+vi.mock("@/lib/directory/search", async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import("@/lib/directory/search")>();
+  return { ...original, searchDirectory };
+});
 
 // #502: the search card routes through fresh navigation - the router push is
 // the seam the scoped-destination assertions check.
@@ -114,6 +126,8 @@ beforeEach(() => {
   state.getProfile.mockReset();
   state.saveProfile.mockReset();
   state.push.mockReset();
+  searchDirectory.mockReset();
+  searchDirectory.mockResolvedValue({ fell_back: false, items: [] });
   state.getProfile.mockResolvedValue({ set: false, profile: null });
 });
 
@@ -490,6 +504,164 @@ describe("home search card (#502)", () => {
     expect(screen.getByTestId("search-see-all")).toHaveAttribute(
       "href",
       "/patient/find?type=doctor",
+    );
+  });
+});
+
+describe("recommended near-you rail (#503)", () => {
+  function doctor(
+    id: number,
+    name: string,
+    distanceKm: number,
+    overrides: Partial<DirectoryEntry> = {},
+  ): DirectoryEntry {
+    return {
+      partner_id: id,
+      practice_name: name,
+      partner_type: "doctor",
+      specialty: "General Physician",
+      area: "Medininagar Rd",
+      distance_km: distanceKm,
+      verified: true,
+      consultation_fee: null,
+      ...overrides,
+    };
+  }
+
+  function lab(id: number, name: string, distanceKm: number): DirectoryEntry {
+    return {
+      partner_id: id,
+      practice_name: name,
+      partner_type: "lab",
+      specialty: null,
+      area: null,
+      distance_km: distanceKm,
+      verified: true,
+      consultation_fee: null,
+    };
+  }
+
+  it("fetches the active scope and shows only verified providers, distance-sorted", async () => {
+    searchDirectory.mockResolvedValue({
+      fell_back: false,
+      items: [
+        doctor(2, "Dr. Far Clinic", 3.2),
+        doctor(3, "Dr. Hidden Row", 0, { verified: false }),
+        doctor(1, "Dr. Near Clinic", 1.1),
+      ],
+    });
+    renderHome();
+
+    const cards = await screen.findAllByTestId("rec-card");
+    expect(searchDirectory).toHaveBeenCalledWith({ partnerType: "doctor" });
+    // The unverified row never renders a card ("tick gone = card gone").
+    expect(cards).toHaveLength(2);
+    // Distance-sorted ascending, near before far.
+    expect(cards[0]).toHaveTextContent("Dr. Near Clinic");
+    expect(cards[0]).toHaveTextContent("1.1 km");
+    expect(cards[1]).toHaveTextContent("Dr. Far Clinic");
+    expect(cards[1]).toHaveTextContent("3.2 km");
+    expect(screen.queryByText("Dr. Hidden Row")).not.toBeInTheDocument();
+    expect(screen.getAllByText(STRINGS.en.directory.verified)).toHaveLength(2);
+    // Metadata joins the shared card language (specialty · type · area).
+    expect(cards[1]).toHaveTextContent(
+      "General Physician · Doctors · Medininagar Rd",
+    );
+    // Cards keep the destination scoped to each provider profile.
+    expect(cards[0]).toHaveAttribute("href", "/providers/1");
+  });
+
+  it("switching scope swaps the rail panel and the scoped destinations together", async () => {
+    searchDirectory.mockImplementation(async ({ partnerType }) => ({
+      fell_back: false,
+      items:
+        partnerType === "lab"
+          ? [lab(11, "Sahyog Path Lab", 0.8)]
+          : [doctor(1, "Dr. Near Clinic", 1.1)],
+    }));
+    renderHome();
+    expect(await screen.findByText("Dr. Near Clinic")).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: STRINGS.en.search.lab }),
+    );
+
+    // Rail panel swapped for the active scope...
+    await waitFor(() =>
+      expect(screen.getByText("Sahyog Path Lab")).toBeInTheDocument(),
+    );
+    expect(screen.queryByText("Dr. Near Clinic")).not.toBeInTheDocument();
+    expect(searchDirectory).toHaveBeenLastCalledWith({ partnerType: "lab" });
+    expect(
+      screen.getByRole("link", { name: /Sahyog Path Lab/ }),
+    ).toHaveAttribute("href", "/providers/11");
+    // ...and the Search / See-all destination from #502 swapped on the same state.
+    expect(screen.getByTestId("search-see-all")).toHaveAttribute(
+      "href",
+      "/patient/find?type=lab",
+    );
+  });
+
+  it("renders a horizontal snap-scroll row on a phone and a 3-up grid at >=720px", async () => {
+    searchDirectory.mockResolvedValue({
+      fell_back: false,
+      items: [
+        doctor(1, "Dr. A", 1.1),
+        doctor(2, "Dr. B", 2.2),
+        doctor(3, "Dr. C", 3.3),
+      ],
+    });
+    renderHome();
+
+    const scroll = await screen.findByTestId("rec-scroll");
+    expect(scroll.className).toContain("snap-x");
+    expect(scroll.className).toContain("snap-mandatory");
+    expect(scroll.className).toContain("overflow-x-auto");
+    expect(scroll.className).toContain("min-[720px]:grid");
+    expect(scroll.className).toContain("min-[720px]:grid-cols-3");
+    for (const card of screen.getAllByTestId("rec-card")) {
+      expect(card.className).toContain("snap-start");
+    }
+  });
+
+  it("renders a friendly empty state when no verified supply exists", async () => {
+    searchDirectory.mockResolvedValue({ fell_back: false, items: [] });
+    renderHome();
+
+    const empty = await screen.findByTestId("empty-state");
+    expect(screen.getByTestId("empty-state-title")).toHaveTextContent(
+      STRINGS.en.rec.emptyTitle,
+    );
+    expect(empty).toHaveTextContent(STRINGS.en.rec.emptyBody);
+    expect(screen.queryByTestId("rec-scroll")).not.toBeInTheDocument();
+  });
+
+  it("degrades a failed fetch to the honest empty state", async () => {
+    searchDirectory.mockRejectedValue(new Error("network down"));
+    renderHome();
+
+    expect(await screen.findByTestId("empty-state")).toBeInTheDocument();
+    expect(screen.queryByTestId("rec-scroll")).not.toBeInTheDocument();
+  });
+
+  it("serves the rail copy in hi from the same rec surface", async () => {
+    searchDirectory.mockResolvedValue({
+      fell_back: false,
+      items: [doctor(1, "Dr. Near Clinic", 1.1)],
+    });
+    renderHome();
+    await screen.findByTestId("rec-card");
+
+    fireEvent.click(screen.getByRole("button", { name: "flip-lang" }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: STRINGS.hi.rec.title }),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.getByText(STRINGS.hi.directory.verified)).toBeInTheDocument();
+    expect(screen.getByTestId("rec-card")).toHaveTextContent(
+      STRINGS.hi.directory.distanceKm("1.1"),
     );
   });
 });

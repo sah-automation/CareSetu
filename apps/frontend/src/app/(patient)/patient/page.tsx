@@ -21,6 +21,11 @@
 // #502: the search card (scope pills + search bar) opens the feed under the
 // greeting strip. Its scope is display-driven state lifted here, so the
 // sibling Recommended rail (#503) reads and writes the exact same source.
+//
+// #503: the Recommended rail joins the feed under the search card on that same
+// scope source - it refetches real directory data per active scope, so
+// switching a pill swaps the rail panel and the Search / See-all destinations
+// together.
 
 import { useState } from "react";
 
@@ -29,6 +34,7 @@ import { useLang } from "@/lib/i18n/LangContext";
 import { useProfile } from "@/lib/profile/ProfileContext";
 import { LocationChip } from "@/components/patient/location/LocationChip";
 import { ProfileCompletenessBanner } from "@/components/patient/profile/ProfileCompletenessBanner";
+import { RecommendedRail } from "@/components/patient/home/RecommendedRail";
 import { SearchCard } from "@/components/patient/home/SearchCard";
 import type { ProviderType } from "@/lib/directory/links";
 
@@ -68,6 +74,9 @@ export default function PatientDashboardPage() {
       <div className="grid grid-cols-[minmax(0,1fr)] items-start gap-5 lg:grid-cols-[minmax(0,1fr)_300px] lg:gap-6">
         <div className="min-w-0 space-y-6">
           <SearchCard scope={searchScope} onScopeChange={setSearchScope} />
+          {/* #503: reads and swaps on the exact same scope the card owns, so the
+              rail panel and the Search / See-all destinations change together. */}
+          <RecommendedRail scope={searchScope} />
         </div>
         <aside
           className="min-w-0 lg:sticky lg:top-[4.5rem]"
