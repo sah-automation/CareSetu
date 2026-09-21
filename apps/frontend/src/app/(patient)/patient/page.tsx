@@ -26,6 +26,11 @@
 // scope source - it refetches real directory data per active scope, so
 // switching a pill swaps the rail panel and the Search / See-all destinations
 // together.
+//
+// #504: the fixed 4-tile services grid sits under the rail - Consult a doctor,
+// Book a lab test, Start visit (accent) and Order medicine (Soon, never
+// navigates). Its consult/lab tiles reuse the same scoped Find Care routes,
+// Start visit points at the live intake start.
 
 import { useState } from "react";
 
@@ -36,6 +41,7 @@ import { LocationChip } from "@/components/patient/location/LocationChip";
 import { ProfileCompletenessBanner } from "@/components/patient/profile/ProfileCompletenessBanner";
 import { RecommendedRail } from "@/components/patient/home/RecommendedRail";
 import { SearchCard } from "@/components/patient/home/SearchCard";
+import { ServicesGrid } from "@/components/patient/home/ServicesGrid";
 import type { ProviderType } from "@/lib/directory/links";
 
 export default function PatientDashboardPage() {
@@ -77,6 +83,8 @@ export default function PatientDashboardPage() {
           {/* #503: reads and swaps on the exact same scope the card owns, so the
               rail panel and the Search / See-all destinations change together. */}
           <RecommendedRail scope={searchScope} />
+          {/* #504: fixed 4-tile services grid - one-tap actions off the home. */}
+          <ServicesGrid />
         </div>
         <aside
           className="min-w-0 lg:sticky lg:top-[4.5rem]"

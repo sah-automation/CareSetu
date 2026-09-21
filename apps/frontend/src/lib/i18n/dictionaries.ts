@@ -527,6 +527,23 @@ const en = {
     emptyBody: "As providers in Daltonganj get verified, they appear here.",
   },
 
+  // services.* surface - #504, the fixed 4-tile services grid (PROTO-2.7
+  // binding, shell-light.html `.services-grid`): Consult a doctor, Book a lab
+  // test, Start visit (the accent tile) and Order medicine - in that fixed
+  // order. Order medicine renders marked Soon and never navigates (`soon`);
+  // the other three tiles are one-tap actions. The consult and lab tiles reuse
+  // the scoped Find Care destinations the home search card (#502) owns; Start
+  // visit points at the live intake start (the center accent of the patient
+  // tab bar).
+  services: {
+    title: "Services",
+    doctor: "Consult a doctor",
+    lab: "Book a lab test",
+    chemist: "Order medicine",
+    start: "Start visit",
+    soon: "Soon",
+  },
+
   // directory.* surface - PHASE-6 T05a (#317), the public /directory browse
   // page (blueprint §3.1 row 2 look, PROTO-PHASE-6 finalized views are the
   // visual binding). Copy rules baked in: the location indicator is the fixed
@@ -1352,6 +1369,7 @@ export type DoctorStrings = Dictionary["doctor"];
 export type PatientHomeStrings = Dictionary["patientHome"];
 export type SearchStrings = Dictionary["search"];
 export type RecStrings = Dictionary["rec"];
+export type ServicesStrings = Dictionary["services"];
 
 export const STRINGS: Record<Lang, Dictionary> = {
   en,
@@ -1934,6 +1952,17 @@ export const STRINGS: Record<Lang, Dictionary> = {
       loading: "आपके आस-पास देखभाल ढूँढी जा रही है...",
       emptyTitle: "आस-पास अभी कोई सत्यापित प्रोवाइडर नहीं",
       emptyBody: "डालटनगंज के प्रोवाइडर सत्यापित होते ही वे यहाँ दिखेंगे।",
+    },
+
+    // services.* surface - #504. See the en block; parity compile-checked via
+    // Dictionary (`services.*` keys must exist in both locales).
+    services: {
+      title: "सेवाएं",
+      doctor: "डॉक्टर से परामर्श लें",
+      lab: "लैब टेस्ट बुक करें",
+      chemist: "दवाई मंगवाएं",
+      start: "विज़िट शुरू करें",
+      soon: "जल्द",
     },
 
     directory: {

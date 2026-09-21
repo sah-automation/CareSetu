@@ -37,6 +37,11 @@ import { ROLE_HOME } from "./types";
 
 export type NavIcon = ComponentType<{ size?: number; className?: string }>;
 
+// The live start-visit route for the patient bar's center accent (#197). The
+// home services grid's Start visit tile (#504) sources the same constant, so
+// the tab bar and the home surface can never point at different routes.
+export const PATIENT_START_VISIT_ROUTE = "/patient/intake";
+
 // Labels resolve through the i18n engine: the key must exist in BOTH locale
 // dictionaries (compile-time via Dictionary typing, runtime via the bilingual
 // parity test).
@@ -75,7 +80,7 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
     {
       key: "start",
       labelKey: "start",
-      href: "/patient/intake",
+      href: PATIENT_START_VISIT_ROUTE,
       icon: Mic,
       center: true,
     },

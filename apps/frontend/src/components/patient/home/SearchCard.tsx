@@ -27,13 +27,16 @@ import { useLang } from "@/lib/i18n/LangContext";
 import type { ProviderType } from "@/lib/directory/links";
 
 /** Patient-shell Find Care route; the scope pills commit their `?type` here
- * (FindCareBrowser embeds DirectoryBrowser on this route). */
-const FIND_CARE_ROUTE = "/patient/find";
+ * (FindCareBrowser embeds DirectoryBrowser on this route). Exported so the
+ * sibling services grid (#504) shares one route vocabulary with this card. */
+export const FIND_CARE_ROUTE = "/patient/find";
 
 /** The three supply-side classes the pills segment over, in tab order. */
 const SCOPES: ProviderType[] = ["doctor", "lab", "chemist"];
 
-function findCareHref(scope: ProviderType, query = ""): string {
+/** Scoped Find Care destination shared by the search card (#502) and the
+ * services grid (#504): `/patient/find?type=<scope>[&q=<query>]`. */
+export function findCareHref(scope: ProviderType, query = ""): string {
   const params = new URLSearchParams({ type: scope });
   const q = query.trim();
   if (q) params.set("q", q);

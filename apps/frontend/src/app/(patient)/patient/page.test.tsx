@@ -665,3 +665,86 @@ describe("recommended near-you rail (#503)", () => {
     );
   });
 });
+
+describe("services grid (#504)", () => {
+  const tiles = () => screen.getAllByTestId("svc-tile");
+  const tile = (key: string) =>
+    tiles().find((el) => el.getAttribute("data-svc-key") === key)!;
+
+  it("renders the four tiles in the fixed binding order with the right labels", async () => {
+    renderHome();
+    await screen.findByTestId("services-grid");
+
+    const order = tiles().map((el) => el.getAttribute("data-svc-key"));
+    expect(order).toEqual(["doctor", "lab", "chemist", "start"]);
+
+    expect(tile("doctor")).toHaveTextContent(STRINGS.en.services.doctor);
+    expect(tile("lab")).toHaveTextContent(STRINGS.en.services.lab);
+    expect(tile("chemist")).toHaveTextContent(STRINGS.en.services.chemist);
+    expect(tile("start")).toHaveTextContent(STRINGS.en.services.start);
+    expect(tile("chemist")).toHaveTextContent(STRINGS.en.services.soon);
+  });
+
+  it("points consult and lab at the scoped Find Care routes and start at intake", async () => {
+    renderHome();
+    await screen.findByTestId("services-grid");
+
+    expect(
+      screen.getByRole("link", { name: STRINGS.en.services.doctor }),
+    ).toHaveAttribute("href", "/patient/find?type=doctor");
+    expect(
+      screen.getByRole("link", { name: STRINGS.en.services.lab }),
+    ).toHaveAttribute("href", "/patient/find?type=lab");
+    expect(
+      screen.getByRole("link", { name: STRINGS.en.services.start }),
+    ).toHaveAttribute("href", "/patient/intake");
+  });
+
+  it("renders Order medicine marked Soon as a non-navigating tile", async () => {
+    renderHome();
+    await screen.findByTestId("services-grid");
+
+    const chemist = tile("chemist");
+    expect(chemist).toHaveAttribute("data-svc-soon", "true");
+    expect(chemist).toHaveAttribute("aria-disabled", "true");
+    // Not a link and never navigates: the tile is a dimmed span with no href.
+    expect(
+      screen.queryByRole("link", { name: STRINGS.en.services.chemist }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders Start visit as the accent tile", async () => {
+    renderHome();
+    await screen.findByTestId("services-grid");
+
+    const start = tile("start");
+    expect(start.className).toContain("bg-accent");
+    expect(start.className).toContain("border-accent");
+    // Accent is visually distinct from the plain surface tiles.
+    expect(tile("doctor").className).not.toContain("bg-accent");
+  });
+
+  it("matches the binding's 2-up phone and 4-across >=720px grid", async () => {
+    renderHome();
+    await screen.findByTestId("services-grid");
+
+    const grid = screen.getByTestId("services-grid-tiles");
+    expect(grid.className).toContain("grid-cols-2");
+    expect(grid.className).toContain("min-[720px]:grid-cols-4");
+  });
+
+  it("serves the grid copy in hi from the same services surface", async () => {
+    renderHome();
+    await screen.findByTestId("services-grid");
+
+    fireEvent.click(screen.getByRole("button", { name: "flip-lang" }));
+
+    await waitFor(() =>
+      expect(tile("doctor")).toHaveTextContent(STRINGS.hi.services.doctor),
+    );
+    expect(tile("lab")).toHaveTextContent(STRINGS.hi.services.lab);
+    expect(tile("chemist")).toHaveTextContent(STRINGS.hi.services.chemist);
+    expect(tile("start")).toHaveTextContent(STRINGS.hi.services.start);
+    expect(tile("chemist")).toHaveTextContent(STRINGS.hi.services.soon);
+  });
+});
