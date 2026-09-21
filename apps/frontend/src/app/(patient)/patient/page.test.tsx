@@ -24,6 +24,7 @@ import type { StoredPatientProfile } from "@/lib/profile/api";
 import { __resetLangForTests, useLang } from "@/lib/i18n/LangContext";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import type { DirectoryEntry } from "@/lib/directory/search";
+import type { ConsentView } from "@/lib/consent/api";
 
 const state = vi.hoisted(() => ({
   getProfile: vi.fn(),
@@ -36,6 +37,15 @@ const state = vi.hoisted(() => ({
 // this client - the composed seam feeds raw entries (including an unverified
 // row) so the rail's verified-only, distance-sorted projection is asserted.
 const searchDirectory = vi.hoisted(() => vi.fn());
+
+// #505: the Action-required card reads the consent log and answers pending
+// requests through these three calls. Defaulted to an empty log so the card is
+// absent unless a test seeds a pending ("requested") consent.
+const consentApi = vi.hoisted(() => ({
+  fetchConsentLog: vi.fn(),
+  grantRequestedConsent: vi.fn(),
+  declineConsent: vi.fn(),
+}));
 
 vi.mock("@/lib/profile/api", () => ({
   getProfile: state.getProfile,
@@ -57,6 +67,16 @@ vi.mock("@/lib/directory/search", async (importOriginal) => {
   const original =
     await importOriginal<typeof import("@/lib/directory/search")>();
   return { ...original, searchDirectory };
+});
+
+vi.mock("@/lib/consent/api", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/lib/consent/api")>();
+  return {
+    ...original,
+    fetchConsentLog: consentApi.fetchConsentLog,
+    grantRequestedConsent: consentApi.grantRequestedConsent,
+    declineConsent: consentApi.declineConsent,
+  };
 });
 
 // #502: the search card routes through fresh navigation - the router push is
@@ -128,6 +148,10 @@ beforeEach(() => {
   state.push.mockReset();
   searchDirectory.mockReset();
   searchDirectory.mockResolvedValue({ fell_back: false, items: [] });
+  consentApi.fetchConsentLog.mockReset();
+  consentApi.fetchConsentLog.mockResolvedValue({ items: [] });
+  consentApi.grantRequestedConsent.mockReset();
+  consentApi.declineConsent.mockReset();
   state.getProfile.mockResolvedValue({ set: false, profile: null });
 });
 
@@ -746,5 +770,153 @@ describe("services grid (#504)", () => {
     expect(tile("chemist")).toHaveTextContent(STRINGS.hi.services.chemist);
     expect(tile("start")).toHaveTextContent(STRINGS.hi.services.start);
     expect(tile("chemist")).toHaveTextContent(STRINGS.hi.services.soon);
+  });
+});
+
+describe("action required card (#505)", () => {
+  function consentView(overrides: Partial<ConsentView> = {}): ConsentView {
+    return {
+      consent_id: 1,
+      lineage_ref: "C-2026-001",
+      patient_id: 7,
+      counterparty_type: "doctor",
+      counterparty_id: "dr-77",
+      record_scope: "consultations",
+      status: "requested",
+      version: 0,
+      created_at: "2026-09-21T10:00:00.000Z",
+      updated_at: "2026-09-21T10:00:00.000Z",
+      events: [],
+      ...overrides,
+    };
+  }
+
+  it("renders nothing when the consent log is empty (testid absent, not hidden)", async () => {
+    consentApi.fetchConsentLog.mockResolvedValue({ items: [] });
+    renderHome();
+
+    await screen.findByTestId("services-grid");
+    await waitFor(() => expect(consentApi.fetchConsentLog).toHaveBeenCalled());
+    expect(screen.queryByTestId("action-required")).not.toBeInTheDocument();
+  });
+
+  it("renders nothing when only answered consents exist", async () => {
+    consentApi.fetchConsentLog.mockResolvedValue({
+      items: [
+        consentView({ consent_id: 1, status: "granted" }),
+        consentView({ consent_id: 2, status: "revoked" }),
+        consentView({ consent_id: 3, status: "declined" }),
+      ],
+    });
+    renderHome();
+
+    await screen.findByTestId("services-grid");
+    await waitFor(() => expect(consentApi.fetchConsentLog).toHaveBeenCalled());
+    expect(screen.queryByTestId("action-required")).not.toBeInTheDocument();
+  });
+
+  it("lists pending requests with the count badge and Allow / Not now", async () => {
+    consentApi.fetchConsentLog.mockResolvedValue({
+      items: [
+        consentView({
+          consent_id: 1,
+          counterparty_id: "dr-77",
+          record_scope: "consultations",
+        }),
+        consentView({
+          consent_id: 2,
+          counterparty_id: "lab-9",
+          record_scope: "lab_results",
+        }),
+        consentView({ consent_id: 3, status: "granted" }),
+      ],
+    });
+    renderHome();
+
+    const card = await screen.findByTestId("action-required");
+    expect(card).toHaveTextContent(STRINGS.en.actions.title);
+    expect(screen.getByTestId("action-required-count")).toHaveTextContent("2");
+
+    const items = screen.getAllByTestId("action-required-item");
+    expect(items).toHaveLength(2);
+    expect(items[0]).toHaveTextContent(
+      STRINGS.en.actions.consentRequest("dr-77", "consultations"),
+    );
+    expect(items[1]).toHaveTextContent(
+      STRINGS.en.actions.consentRequest("lab-9", "lab_results"),
+    );
+    expect(screen.getAllByTestId("action-allow")).toHaveLength(2);
+    expect(screen.getAllByTestId("action-deny")).toHaveLength(2);
+  });
+
+  it("allows a pending request and drops the answered row from the card", async () => {
+    consentApi.fetchConsentLog.mockResolvedValue({
+      items: [consentView({ consent_id: 42 })],
+    });
+    consentApi.grantRequestedConsent.mockResolvedValue(
+      consentView({ consent_id: 42, status: "granted", version: 1 }),
+    );
+    renderHome();
+
+    await screen.findByTestId("action-required");
+    fireEvent.click(screen.getByTestId("action-allow"));
+
+    await waitFor(() =>
+      expect(consentApi.grantRequestedConsent).toHaveBeenCalledWith(42),
+    );
+    await waitFor(() =>
+      expect(screen.queryByTestId("action-required")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("declines a pending request and drops the answered row from the card", async () => {
+    consentApi.fetchConsentLog.mockResolvedValue({
+      items: [consentView({ consent_id: 42 })],
+    });
+    consentApi.declineConsent.mockResolvedValue(
+      consentView({ consent_id: 42, status: "declined" }),
+    );
+    renderHome();
+
+    await screen.findByTestId("action-required");
+    fireEvent.click(screen.getByTestId("action-deny"));
+
+    await waitFor(() =>
+      expect(consentApi.declineConsent).toHaveBeenCalledWith(42),
+    );
+    await waitFor(() =>
+      expect(screen.queryByTestId("action-required")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("serves the card copy in hi from the actions surface", async () => {
+    consentApi.fetchConsentLog.mockResolvedValue({
+      items: [
+        consentView({
+          consent_id: 42,
+          counterparty_id: "dr-77",
+          record_scope: "consultations",
+        }),
+      ],
+    });
+    renderHome();
+
+    await screen.findByTestId("action-required");
+    fireEvent.click(screen.getByRole("button", { name: "flip-lang" }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("action-required")).toHaveTextContent(
+        STRINGS.hi.actions.title,
+      ),
+    );
+    expect(screen.getByTestId("action-required")).toHaveTextContent(
+      STRINGS.hi.actions.consentRequest("dr-77", "consultations"),
+    );
+    expect(screen.getByTestId("action-allow")).toHaveTextContent(
+      STRINGS.hi.actions.allow,
+    );
+    expect(screen.getByTestId("action-deny")).toHaveTextContent(
+      STRINGS.hi.actions.deny,
+    );
   });
 });

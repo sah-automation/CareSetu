@@ -31,6 +31,10 @@
 // Book a lab test, Start visit (accent) and Order medicine (Soon, never
 // navigates). Its consult/lab tiles reuse the same scoped Find Care routes,
 // Start visit points at the live intake start.
+//
+// #505: the "Action required" card closes the feed - pending consent requests
+// listed with Allow / Not now wired to the existing grant-requested / decline
+// flows. It is absent entirely when nothing is pending (no empty card).
 
 import { useState } from "react";
 
@@ -39,6 +43,7 @@ import { useLang } from "@/lib/i18n/LangContext";
 import { useProfile } from "@/lib/profile/ProfileContext";
 import { LocationChip } from "@/components/patient/location/LocationChip";
 import { ProfileCompletenessBanner } from "@/components/patient/profile/ProfileCompletenessBanner";
+import { ActionRequiredCard } from "@/components/patient/home/ActionRequiredCard";
 import { RecommendedRail } from "@/components/patient/home/RecommendedRail";
 import { SearchCard } from "@/components/patient/home/SearchCard";
 import { ServicesGrid } from "@/components/patient/home/ServicesGrid";
@@ -85,6 +90,9 @@ export default function PatientDashboardPage() {
           <RecommendedRail scope={searchScope} />
           {/* #504: fixed 4-tile services grid - one-tap actions off the home. */}
           <ServicesGrid />
+          {/* #505: "Action required" - pending consent requests answered in
+              place; the card is absent entirely when nothing is pending. */}
+          <ActionRequiredCard />
         </div>
         <aside
           className="min-w-0 lg:sticky lg:top-[4.5rem]"

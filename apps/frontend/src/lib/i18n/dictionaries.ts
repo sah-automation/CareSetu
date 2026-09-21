@@ -544,6 +544,23 @@ const en = {
     soon: "Soon",
   },
 
+  // actions.* surface - #505, the home "Action required" card (PROTO-2.7
+  // binding, shell-light.html `actions.*`). Hidden entirely when nothing is
+  // pending. Today the only source is pending patient-consent requests
+  // (consent log filtered to status "requested"): each row names the requester
+  // and scope, and Allow / Not now answer it through the existing grant-
+  // requested and decline flows. Rx substitute/refund and booking
+  // confirmations are future sources and are deliberately not stubbed.
+  actions: {
+    title: "Action required",
+    consentBadge: "Consent",
+    consentRequest: (name: string, scope: string) =>
+      `${name} requested access to your ${scope}.`,
+    allow: "Allow",
+    deny: "Not now",
+    actionFailed: "Couldn't update. Please try again.",
+  },
+
   // directory.* surface - PHASE-6 T05a (#317), the public /directory browse
   // page (blueprint §3.1 row 2 look, PROTO-PHASE-6 finalized views are the
   // visual binding). Copy rules baked in: the location indicator is the fixed
@@ -1370,6 +1387,7 @@ export type PatientHomeStrings = Dictionary["patientHome"];
 export type SearchStrings = Dictionary["search"];
 export type RecStrings = Dictionary["rec"];
 export type ServicesStrings = Dictionary["services"];
+export type ActionsStrings = Dictionary["actions"];
 
 export const STRINGS: Record<Lang, Dictionary> = {
   en,
@@ -1963,6 +1981,18 @@ export const STRINGS: Record<Lang, Dictionary> = {
       chemist: "दवाई मंगवाएं",
       start: "विज़िट शुरू करें",
       soon: "जल्द",
+    },
+
+    // actions.* surface - #505. See the en block; parity compile-checked via
+    // Dictionary (`actions.*` keys must exist in both locales).
+    actions: {
+      title: "कार्रवाई आवश्यक",
+      consentBadge: "सहमति",
+      consentRequest: (name: string, scope: string) =>
+        `${name} ने आपके ${scope} तक पहुँच का अनुरोध किया।`,
+      allow: "अनुमति दें",
+      deny: "अभी नहीं",
+      actionFailed: "अपडेट नहीं हो सका। फिर कोशिश करें।",
     },
 
     directory: {

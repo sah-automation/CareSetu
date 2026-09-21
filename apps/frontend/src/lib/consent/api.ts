@@ -1,8 +1,14 @@
 // PHASE-3 T8/T9 (#217/#218): consent-surface HTTP client for the patient PWA.
 // Thin fetch wrapper over the backend's GET /v1/consents, POST
-// /v1/consents/{id}/revoke, and GET /v1/consents/egress-log endpoints;
+// /v1/consents/{id}/grant, POST /v1/consents/{id}/revoke, POST
+// /v1/consents/{id}/decline, and GET /v1/consents/egress-log endpoints;
 // response shapes mirror modules/consent/facade.py's Pydantic models exactly.
 // Session cookie auth follows the same pattern as record/api.ts (ADR-0005).
+//
+// #505: grant-requested and decline are the two ways a patient answers a
+// pending "requested" consent (the home Action-required card's Allow / Not
+// now). They are distinct from grantConsent (a patient-initiated fresh grant)
+// and revokeConsent (which is illegal on a still-requested lineage).
 
 import { guardShape, request } from "@/lib/request";
 
@@ -106,6 +112,30 @@ export async function fetchConsentLog(): Promise<ConsentLog> {
     data,
     isConsentLog,
     "The API returned an unexpected consent log shape",
+  );
+}
+
+export async function grantRequestedConsent(
+  consentId: number,
+): Promise<ConsentView> {
+  const data = await request<unknown>(`/v1/consents/${consentId}/grant`, {
+    method: "POST",
+  });
+  return guardShape(
+    data,
+    isConsentView,
+    "The API returned an unexpected consent view shape",
+  );
+}
+
+export async function declineConsent(consentId: number): Promise<ConsentView> {
+  const data = await request<unknown>(`/v1/consents/${consentId}/decline`, {
+    method: "POST",
+  });
+  return guardShape(
+    data,
+    isConsentView,
+    "The API returned an unexpected consent view shape",
   );
 }
 
