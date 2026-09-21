@@ -57,6 +57,24 @@ vi.mock("@/lib/profile/api", () => ({
   saveProfile: vi.fn().mockResolvedValue(null),
 }));
 
+// #502: the patient home search card routes through fresh navigation; stub
+// the router/link seams so the scaffold render is synchronous.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn() }),
+}));
+
+vi.mock("next/link", () => {
+  return {
+    default: ({
+      href,
+      children,
+    }: {
+      href: string;
+      children: React.ReactNode;
+    }) => <a href={href}>{children}</a>,
+  };
+});
+
 // PHASE-2.6 T07 (#198): the single generic dashboard group split into
 // per-role route groups - each stub page re-homed under its role's group.
 

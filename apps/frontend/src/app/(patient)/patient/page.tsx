@@ -17,17 +17,28 @@
 // #500: the slim dismissible profile-completeness banner sits under the
 // greeting strip - a one-line nudge when name/age/gender are missing, gone
 // when complete or dismissed (per-device persistence).
+//
+// #502: the search card (scope pills + search bar) opens the feed under the
+// greeting strip. Its scope is display-driven state lifted here, so the
+// sibling Recommended rail (#503) reads and writes the exact same source.
+
+import { useState } from "react";
 
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { useProfile } from "@/lib/profile/ProfileContext";
 import { LocationChip } from "@/components/patient/location/LocationChip";
 import { ProfileCompletenessBanner } from "@/components/patient/profile/ProfileCompletenessBanner";
+import { SearchCard } from "@/components/patient/home/SearchCard";
+import type { ProviderType } from "@/lib/directory/links";
 
 export default function PatientDashboardPage() {
   const { draft } = useProfile();
   const { lang } = useLang();
   const t = STRINGS[lang].patientHome;
+  // #502: the home search scope is display-driven and shared with the Search /
+  // See-all destinations here and the Recommended rail (#503) - one source.
+  const [searchScope, setSearchScope] = useState<ProviderType>("doctor");
 
   const firstName = draft.name.trim().split(/\s+/)[0];
 
@@ -55,7 +66,9 @@ export default function PatientDashboardPage() {
       {/* Feed: main cards column + 300px sticky rail on desktop; single
           column, same reading order, on mobile. */}
       <div className="grid grid-cols-[minmax(0,1fr)] items-start gap-5 lg:grid-cols-[minmax(0,1fr)_300px] lg:gap-6">
-        <div className="min-w-0 space-y-6" />
+        <div className="min-w-0 space-y-6">
+          <SearchCard scope={searchScope} onScopeChange={setSearchScope} />
+        </div>
         <aside
           className="min-w-0 lg:sticky lg:top-[4.5rem]"
           data-testid="patient-home-rail"

@@ -27,6 +27,7 @@ import { STRINGS } from "@/lib/i18n/dictionaries";
 const state = vi.hoisted(() => ({
   getProfile: vi.fn(),
   saveProfile: vi.fn(),
+  push: vi.fn(),
   user: { id: 7, phone: "+91 98765 43210", roles: ["patient"] },
 }));
 
@@ -45,6 +46,29 @@ vi.mock("@/lib/auth/AuthContext", () => ({
     isLoading: false,
   }),
 }));
+
+// #502: the search card routes through fresh navigation - the router push is
+// the seam the scoped-destination assertions check.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: state.push }),
+}));
+
+vi.mock("next/link", () => {
+  return {
+    default: ({
+      href,
+      children,
+      ...rest
+    }: {
+      href: string;
+      children: React.ReactNode;
+    }) => (
+      <a href={href} {...rest}>
+        {children}
+      </a>
+    ),
+  };
+});
 
 const completeProfile: StoredPatientProfile = {
   name: "Asha Devi",
@@ -89,6 +113,7 @@ beforeEach(() => {
   __resetLangForTests();
   state.getProfile.mockReset();
   state.saveProfile.mockReset();
+  state.push.mockReset();
   state.getProfile.mockResolvedValue({ set: false, profile: null });
 });
 
@@ -303,6 +328,168 @@ describe("location chip + picker (#501)", () => {
       expect(screen.getByTestId("location-chip-feed")).toHaveTextContent(
         STRINGS.hi.loc.cities.Daltonganj,
       ),
+    );
+  });
+});
+
+describe("home search card (#502)", () => {
+  const scopePills = () => screen.getAllByTestId("search-scope-pill");
+
+  it("renders the Doctor/Lab/Chemist pills with Doctor active by default", async () => {
+    renderHome();
+    await screen.findByTestId("home-search-card");
+
+    expect(scopePills()).toHaveLength(3);
+    const [doctor, lab, chemist] = scopePills();
+    expect(doctor).toHaveTextContent(STRINGS.en.search.doctor);
+    expect(lab).toHaveTextContent(STRINGS.en.search.lab);
+    expect(chemist).toHaveTextContent(STRINGS.en.search.chemist);
+    expect(doctor).toHaveAttribute("data-active", "true");
+    expect(doctor).toHaveAttribute("aria-pressed", "true");
+    expect(lab).toHaveAttribute("data-active", "false");
+    // The default scope carries into the See-all destination.
+    expect(screen.getByTestId("search-see-all")).toHaveAttribute(
+      "href",
+      "/patient/find?type=doctor",
+    );
+  });
+
+  it("switching scope updates the active pill and the See-all destination", async () => {
+    renderHome();
+    await screen.findByTestId("home-search-card");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: STRINGS.en.search.lab }),
+    );
+    const [doctor, lab, chemist] = scopePills();
+    expect(doctor).toHaveAttribute("data-active", "false");
+    expect(lab).toHaveAttribute("data-active", "true");
+    expect(lab).toHaveAttribute("aria-pressed", "true");
+    expect(chemist).toHaveAttribute("data-active", "false");
+    expect(screen.getByTestId("search-see-all")).toHaveAttribute(
+      "href",
+      "/patient/find?type=lab",
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: STRINGS.en.search.chemist }),
+    );
+    expect(screen.getByTestId("search-see-all")).toHaveAttribute(
+      "href",
+      "/patient/find?type=chemist",
+    );
+  });
+
+  it("Enter on a query routes to Find Care scoped to the active pill", async () => {
+    renderHome();
+    await screen.findByTestId("home-search-card");
+
+    fireEvent.change(screen.getByRole("searchbox"), {
+      target: { value: "  heart care  " },
+    });
+    fireEvent.submit(screen.getByRole("search"));
+
+    // The query is trimmed and carried as ?q; the scope as ?type.
+    expect(state.push).toHaveBeenCalledWith(
+      "/patient/find?type=doctor&q=heart+care",
+    );
+  });
+
+  it("the Search button routes with the active scope", async () => {
+    renderHome();
+    await screen.findByTestId("home-search-card");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: STRINGS.en.search.lab }),
+    );
+    fireEvent.change(screen.getByRole("searchbox"), {
+      target: { value: "thyroid profile" },
+    });
+    fireEvent.click(screen.getByTestId("search-go"));
+
+    expect(state.push).toHaveBeenCalledWith(
+      "/patient/find?type=lab&q=thyroid+profile",
+    );
+  });
+
+  it("searching with no query still routes to scoped Find Care", async () => {
+    renderHome();
+    await screen.findByTestId("home-search-card");
+
+    fireEvent.submit(screen.getByRole("search"));
+
+    expect(state.push).toHaveBeenCalledWith("/patient/find?type=doctor");
+  });
+
+  it("keeps 48px touch targets and full width on a phone", async () => {
+    renderHome();
+    await screen.findByTestId("home-search-card");
+
+    const input = screen.getByRole("searchbox");
+    const button = screen.getByTestId("search-go");
+    // The input and Search button meet the 48px phone touch target (ticket);
+    // every scope pill keeps the blueprint >=44px floor.
+    expect(input.className).toContain("min-h-12");
+    expect(input.className).toContain("w-full");
+    expect(button.className).toContain("min-h-12");
+    for (const pill of scopePills()) {
+      expect(pill.className).toContain("min-h-11");
+    }
+  });
+
+  it("a long query never widens the page at 320px (min-w-0 guards)", async () => {
+    renderHome();
+    await screen.findByTestId("home-search-card");
+
+    fireEvent.change(screen.getByRole("searchbox"), {
+      target: { value: "x".repeat(200) },
+    });
+
+    // The input and its flex wrapper both carry the min-width:0 guard (the
+    // prototype `.search-card .search-bar` regression rule), so an intrinsic
+    // query width can never push past the flex basis and overflow the page.
+    const input = screen.getByRole("searchbox");
+    expect(input).toHaveValue("x".repeat(200));
+    expect(input.className).toContain("min-w-0");
+    expect(input.parentElement).not.toBeNull();
+    expect(input.parentElement!.className).toContain("min-w-0");
+    expect(input.parentElement!.className).toContain("flex-1");
+    // Proof from the 320px floor rather than the test viewport.
+    document.documentElement.style.width = "320px";
+    expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(320);
+    document.documentElement.style.width = "";
+  });
+
+  it("serves the search card copy in hi from the same search surface", async () => {
+    renderHome();
+    await screen.findByTestId("home-search-card");
+
+    fireEvent.click(screen.getByRole("button", { name: "flip-lang" }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: STRINGS.hi.search.doctor }),
+      ).toHaveAttribute("data-active", "true"),
+    );
+    expect(
+      screen.getByRole("button", { name: STRINGS.hi.search.lab }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: STRINGS.hi.search.chemist }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("searchbox")).toHaveAttribute(
+      "placeholder",
+      STRINGS.hi.search.placeholder,
+    );
+    expect(screen.getByTestId("search-go")).toHaveTextContent(
+      STRINGS.hi.search.go,
+    );
+    expect(screen.getByTestId("search-see-all")).toHaveTextContent(
+      STRINGS.hi.search.seeAll,
+    );
+    expect(screen.getByTestId("search-see-all")).toHaveAttribute(
+      "href",
+      "/patient/find?type=doctor",
     );
   });
 });

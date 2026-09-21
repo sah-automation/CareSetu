@@ -497,6 +497,22 @@ const en = {
     apply: "Apply location",
   },
 
+  // search.* surface - #502, the home search card (PROTO-2.7 binding,
+  // shell-light.html `.search-card`): the Doctor / Lab / Chemist scope pills
+  // reuse the provider-type tri-state as display-driven scope, and the search
+  // bar routes to scoped Find Care (`/patient/find?type=...&q=...`). The
+  // directory is the single filter source - this card never searches itself.
+  search: {
+    scopeAria: "Search scope",
+    doctor: "Doctor",
+    lab: "Lab",
+    chemist: "Chemist",
+    placeholder: "Search care near you",
+    aria: "Search care near you",
+    go: "Search",
+    seeAll: "See all",
+  },
+
   // directory.* surface - PHASE-6 T05a (#317), the public /directory browse
   // page (blueprint §3.1 row 2 look, PROTO-PHASE-6 finalized views are the
   // visual binding). Copy rules baked in: the location indicator is the fixed
@@ -1320,6 +1336,7 @@ export type StaffAuthStrings = Dictionary["staffAuth"];
 export type ProfileStrings = Dictionary["profile"];
 export type DoctorStrings = Dictionary["doctor"];
 export type PatientHomeStrings = Dictionary["patientHome"];
+export type SearchStrings = Dictionary["search"];
 
 export const STRINGS: Record<Lang, Dictionary> = {
   en,
@@ -1879,6 +1896,19 @@ export const STRINGS: Record<Lang, Dictionary> = {
       citySub: "डालटनगंज और आस-पास",
       more: "और शहर जल्द आ रहे हैं",
       apply: "स्थान लागू करें",
+    },
+
+    // search.* surface - #502. See the en block; parity compile-checked via
+    // Dictionary (`search.*` keys must exist in both locales).
+    search: {
+      scopeAria: "खोज का दायरा",
+      doctor: "डॉक्टर",
+      lab: "लैब",
+      chemist: "केमिस्ट",
+      placeholder: "अपने आसपास देखभाल खोजें",
+      aria: "अपने आसपास देखभाल खोजें",
+      go: "खोजें",
+      seeAll: "सभी देखें",
     },
 
     directory: {
