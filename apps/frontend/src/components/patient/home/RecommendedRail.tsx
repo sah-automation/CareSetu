@@ -1,17 +1,20 @@
 "use client";
 
 // #503: the "Recommended near you" rail (PROTO-2.7 binding, shell-light.html
-// `.rec`), a sibling of the home search card (#502) that reads the same
-// display-driven scope and refetches from real directory data per active
-// Doctor / Lab / Chemist scope. The panel therefore shows only operator-
-// verified providers within the Daltonganj service area, distance-sorted
-// ascending. On a phone it is a horizontal snap-scroll row; at >=720px (the
-// prototype's tablet breakpoint) a 3-up grid. A friendly empty state covers
-// no-results; a failed fetch degrades to that same honest state with the
-// failure logged (third-party-integration standard) so it stays
-// distinct from true emptiness. The scoped "See all" CTA is not re-created
-// here: #502's search card already owns it (the Search / See-all destination
-// the brief says to swap together), so the rail only owns the title + panel.
+// `.rec`), which reads the same display-driven scope as the home search card
+// (#502) and refetches from real directory data per active Doctor / Lab /
+// Chemist scope. The panel therefore shows only operator-verified providers
+// within the Daltonganj service area, distance-sorted ascending. On a phone it
+// is a horizontal snap-scroll row; at >=720px (the prototype's tablet
+// breakpoint) a 3-up grid. A friendly empty state covers no-results; a failed
+// fetch degrades to that same honest state with the failure logged
+// (third-party-integration standard) so it stays distinct from true emptiness.
+// #509: the rail mounts INSIDE the search card as its child (the page composes
+// it, since #502 now takes a children slot), so the scope pills + search bar +
+// rail read as one designed card. The scoped "See all" CTA lives in the rail's
+// header row, next to the title, keeping its `search-see-all` test id and
+// `findCareHref(scope)` href - so the rail panel and the Search / See-all
+// destinations still swap together on the shared scope state.
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
@@ -20,6 +23,7 @@ import { formatDistanceKm } from "@/components/directory/DirectoryCard";
 import { EmptyState } from "@/components/layout/EmptyState";
 import type { ProviderType } from "@/lib/directory/links";
 import { providerProfileHref } from "@/lib/directory/links";
+import { findCareHref } from "@/components/patient/home/SearchCard";
 import { fetchRecommended } from "@/lib/directory/recommended";
 import type { DirectoryEntry } from "@/lib/directory/search";
 import { STRINGS } from "@/lib/i18n/dictionaries";
@@ -172,9 +176,21 @@ export function RecommendedRail({ scope }: RecommendedRailProps) {
     <section
       data-testid="rec-rail"
       aria-label={t.rec.aria}
-      className="border-t border-hairline-soft pt-3.5"
+      className="mt-4 border-t border-hairline-soft pt-3.5"
     >
-      <h2 className="text-[0.95rem] font-semibold text-txt">{t.rec.title}</h2>
+      {/* #509: the rail header is the binding's `.rec-head` row - the title and
+          the scope-scoped See-all together, so switching a pill swaps the
+          rail panel and the Search / See-all destinations on the same state. */}
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="text-[0.95rem] font-semibold text-txt">{t.rec.title}</h2>
+        <Link
+          href={findCareHref(scope)}
+          data-testid="search-see-all"
+          className="inline-flex min-h-11 items-center text-sm font-medium text-accent-strong hover:underline"
+        >
+          {t.search.seeAll}
+        </Link>
+      </div>
 
       {entries === null ? (
         <div

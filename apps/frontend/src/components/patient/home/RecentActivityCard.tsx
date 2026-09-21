@@ -24,6 +24,7 @@ import { fetchOwnRecord, type RecordEntryView } from "@/lib/record/api";
 import {
   BADGE_TONE,
   describeEntry,
+  formatOccurredAt,
   sortTimelineDesc,
 } from "@/lib/record/timelineView";
 import { cn } from "@/lib/utils";
@@ -106,18 +107,32 @@ export function RecentActivityCard() {
           <EmptyState title={t.empty} body={t.emptyBody} />
         </div>
       ) : (
-        <ul className="mt-3 space-y-2" data-testid="recent-list">
+        // #509: rows are the binding's flat divider list-tiles - emoji+label
+        // badge left, description middle, real date right. The occurred-at is
+        // omitted from describeEntry's subtitle so the date renders exactly
+        // once, in the right-hand "when" column. Rows stay non-navigating.
+        <ul className="mt-2" data-testid="recent-list">
           {visible.map((entry) => {
-            const card = describeEntry(entry, recordT, lang);
+            const card = describeEntry(entry, recordT, lang, {
+              omitOccurredAt: true,
+            });
             return (
               <li key={entry.entry_id}>
                 <div
                   data-testid={`recent-entry-${entry.entry_id}`}
-                  className="flex min-h-11 min-w-0 items-center gap-2.5 rounded-lg border border-hairline px-3 py-2"
+                  className="flex min-h-11 min-w-0 items-center gap-3.5 border-b border-hairline-soft py-2 last:border-b-0"
                 >
-                  <span aria-hidden="true" className="shrink-0">
-                    {card.icon}
-                  </span>
+                  {card.badge && (
+                    <span
+                      className={cn(
+                        "inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium",
+                        BADGE_TONE[card.badge.tone],
+                      )}
+                    >
+                      <span aria-hidden="true">{card.icon}</span>
+                      <span>{card.badge.label}</span>
+                    </span>
+                  )}
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm font-medium text-txt">
                       {card.title}
@@ -128,16 +143,9 @@ export function RecentActivityCard() {
                       </span>
                     )}
                   </span>
-                  {card.badge && (
-                    <span
-                      className={cn(
-                        "shrink-0 rounded-full px-2 py-0.5 text-xs font-medium",
-                        BADGE_TONE[card.badge.tone],
-                      )}
-                    >
-                      {card.badge.label}
-                    </span>
-                  )}
+                  <span className="shrink-0 text-xs text-txt-sub">
+                    {formatOccurredAt(entry.occurred_at, lang)}
+                  </span>
                 </div>
               </li>
             );

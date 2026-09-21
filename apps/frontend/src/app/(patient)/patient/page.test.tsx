@@ -511,6 +511,22 @@ describe("home search card (#502)", () => {
     }
   });
 
+  it("uses the distinct placeholder copy, not the aria label (#509)", async () => {
+    renderHome();
+    await screen.findByTestId("home-search-card");
+
+    // #509 re-keyed the placeholder away from the aria stash: the field hints
+    // at what can be searched while the sr-only label announces the purpose.
+    const box = screen.getByRole("searchbox");
+    expect(STRINGS.en.search.placeholder).not.toBe(STRINGS.en.search.aria);
+    expect(box).toHaveAttribute("placeholder", STRINGS.en.search.placeholder);
+    expect(box).not.toHaveAttribute("placeholder", STRINGS.en.search.aria);
+    // The labeled control still resolves to the field through the aria copy.
+    expect(screen.getByLabelText(STRINGS.en.search.aria)).toBe(box);
+    // And the hi placeholder is its own translated copy, parity-paired.
+    expect(STRINGS.hi.search.placeholder).not.toBe(STRINGS.hi.search.aria);
+  });
+
   it("a long query never widens the page at 320px (min-w-0 guards)", async () => {
     renderHome();
     await screen.findByTestId("home-search-card");
@@ -631,6 +647,35 @@ describe("recommended near-you rail (#503)", () => {
     expect(cards[0]).toHaveAttribute("href", "/providers/1");
   });
 
+  it("shows only the three nearest verified providers (binding .rec-panel)", async () => {
+    searchDirectory.mockResolvedValue({
+      fell_back: false,
+      items: [
+        doctor(1, "Dr. Nearest", 0.5),
+        doctor(2, "Dr. Second", 1.1),
+        doctor(3, "Dr. Third", 2.0),
+        doctor(4, "Dr. Fourth", 3.1),
+        doctor(5, "Dr. Fifth", 4.0),
+      ],
+    });
+    renderHome();
+
+    // The binding's ".rec-panel" holds exactly three cards on the mobile
+    // snap-scroll row and the >=720px 3-up grid; anything further defers to
+    // the scope-scoped See-all in the rail header.
+    const cards = await screen.findAllByTestId("rec-card");
+    expect(cards).toHaveLength(3);
+    expect(cards[0]).toHaveTextContent("Dr. Nearest");
+    expect(cards[1]).toHaveTextContent("Dr. Second");
+    expect(cards[2]).toHaveTextContent("Dr. Third");
+    expect(screen.queryByText("Dr. Fourth")).not.toBeInTheDocument();
+    expect(screen.queryByText("Dr. Fifth")).not.toBeInTheDocument();
+    expect(screen.getByTestId("search-see-all")).toHaveAttribute(
+      "href",
+      "/patient/find?type=doctor",
+    );
+  });
+
   it("switching scope swaps the rail panel and the scoped destinations together", async () => {
     searchDirectory.mockImplementation(async ({ partnerType }) => ({
       fell_back: false,
@@ -662,7 +707,42 @@ describe("recommended near-you rail (#503)", () => {
     );
   });
 
-  it("renders a horizontal snap-scroll row on a phone and a 3-up grid at >=720px", async () => {
+  it("composes INSIDE the search card with the See-all in its header row (#509)", async () => {
+    searchDirectory.mockImplementation(async ({ partnerType }) => ({
+      fell_back: false,
+      items:
+        partnerType === "lab"
+          ? [lab(11, "Sahyog Path Lab", 0.8)]
+          : [doctor(1, "Dr. Near Clinic", 1.1)],
+    }));
+    renderHome();
+
+    // The rail mounts inside the search card - one designed unit - and its
+    // header row carries the scope-scoped See-all next to the title.
+    const card = await screen.findByTestId("home-search-card");
+    const rail = within(card).getByTestId("rec-rail");
+    expect(rail).toBeInTheDocument();
+    // The title and the See-all share the rail's own header row.
+    expect(
+      within(card).getByRole("heading", { name: STRINGS.en.rec.title }),
+    ).toBeInTheDocument();
+    expect(within(rail).getByTestId("search-see-all")).toHaveAttribute(
+      "href",
+      "/patient/find?type=doctor",
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: STRINGS.en.search.lab }),
+    );
+    await waitFor(() =>
+      expect(within(rail).getByTestId("search-see-all")).toHaveAttribute(
+        "href",
+        "/patient/find?type=lab",
+      ),
+    );
+  });
+
+  it("renders a horizontal snap-scroll row on a phone at >=720px", async () => {
     searchDirectory.mockResolvedValue({
       fell_back: false,
       items: [

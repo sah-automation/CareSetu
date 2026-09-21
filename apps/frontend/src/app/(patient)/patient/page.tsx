@@ -77,10 +77,12 @@ export default function PatientDashboardPage() {
       <div className="mb-6 space-y-4">
         {/* Greeting strip */}
         <section data-testid="patient-home-greeting">
-          <h1 className="text-xl font-semibold text-txt">
+          {/* #509: greeting scaled to the binding's hero weight (1.75rem/700);
+              the sub-line drops to the binding's .875rem sub-color. */}
+          <h1 className="text-[1.75rem] font-bold text-txt">
             {firstName ? t.welcome(firstName) : t.welcomeGuest}
           </h1>
-          <p className="mt-1 text-sm text-txt-muted">{t.greetSub}</p>
+          <p className="mt-1 text-sm text-txt-sub">{t.greetSub}</p>
         </section>
 
         {/* Location chip (#501): at the top of the mobile feed; the desktop
@@ -96,10 +98,12 @@ export default function PatientDashboardPage() {
           column, same reading order, on mobile. */}
       <div className="grid grid-cols-[minmax(0,1fr)] items-start gap-5 lg:grid-cols-[minmax(0,1fr)_300px] lg:gap-6">
         <div className="min-w-0 space-y-6">
-          <SearchCard scope={searchScope} onScopeChange={setSearchScope} />
-          {/* #503: reads and swaps on the exact same scope the card owns, so the
-              rail panel and the Search / See-all destinations change together. */}
-          <RecommendedRail scope={searchScope} />
+          {/* #509: the rail composes INSIDE the search card as its child - the
+              three surfaces (scope pills + search bar + Recommended rail) read
+              as one unit, and the rail's header owns the scoped See-all. */}
+          <SearchCard scope={searchScope} onScopeChange={setSearchScope}>
+            <RecommendedRail scope={searchScope} />
+          </SearchCard>
           {/* #504: fixed 4-tile services grid - one-tap actions off the home. */}
           <ServicesGrid />
           {/* #505: "Action required" - pending consent requests answered in

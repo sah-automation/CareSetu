@@ -11,6 +11,11 @@
 // it (decline). Both reconcile from the server-returned view so the card drops
 // the answered row. Rx substitute/refund and booking confirmations are future
 // sources and are deliberately not stubbed here.
+//
+// #509: rows are the same flat divider list-tiles as Recent activity (badge
+// left, requester/scope text right) with the Allow / Not now pair on their own
+// row below - the binding's `.list-tile` + `row` anatomy. Warm 4px left edge,
+// title and count badge unchanged.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -107,51 +112,54 @@ export function ActionRequiredCard() {
         </span>
       </div>
 
-      <div className="space-y-3">
+      <ul className="mt-1">
         {pending.map((consent) => (
-          <div
-            key={consent.consent_id}
-            data-testid="action-required-item"
-            data-consent-id={consent.consent_id}
-            className="space-y-2 border-t border-hairline-soft pt-3 first:border-t-0 first:pt-0"
-          >
-            <p className="flex flex-wrap items-center gap-2 text-sm text-txt-sub">
-              <span className="rounded-full bg-accent-soft px-2 py-0.5 text-xs font-medium text-accent-strong">
-                {t.consentBadge}
-              </span>
-              <span>
-                {t.consentRequest(
-                  counterpartyLabel(
-                    consent.counterparty_type,
-                    consent.counterparty_id,
-                  ),
-                  consent.record_scope,
-                )}
-              </span>
-            </p>
-            <div className="flex gap-2">
-              <Button
-                size="sm"
-                data-testid="action-allow"
-                loading={busyId === consent.consent_id}
-                disabled={busyId !== null}
-                onClick={() => answer(consent, "allow")}
-              >
-                {t.allow}
-              </Button>
-              <Button
-                size="sm"
-                variant="secondary"
-                data-testid="action-deny"
-                disabled={busyId !== null}
-                onClick={() => answer(consent, "deny")}
-              >
-                {t.deny}
-              </Button>
+          <li key={consent.consent_id}>
+            <div
+              data-testid="action-required-item"
+              data-consent-id={consent.consent_id}
+              className="border-t border-hairline-soft pt-2.5 first:border-t-0 first:pt-0"
+            >
+              {/* #509: binding `.list-tile` anatomy - badge pill left, the
+                  requester/scope text filling the row, then the actions. */}
+              <div className="flex min-h-11 min-w-0 items-center gap-3.5">
+                <span className="shrink-0 rounded-full bg-accent-soft px-2 py-0.5 text-xs font-medium text-accent-strong">
+                  {t.consentBadge}
+                </span>
+                <span className="min-w-0 flex-1 text-sm text-txt-sub">
+                  {t.consentRequest(
+                    counterpartyLabel(
+                      consent.counterparty_type,
+                      consent.counterparty_id,
+                    ),
+                    consent.record_scope,
+                  )}
+                </span>
+              </div>
+              <div className="flex gap-2 pb-2.5">
+                <Button
+                  size="sm"
+                  data-testid="action-allow"
+                  loading={busyId === consent.consent_id}
+                  disabled={busyId !== null}
+                  onClick={() => answer(consent, "allow")}
+                >
+                  {t.allow}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  data-testid="action-deny"
+                  disabled={busyId !== null}
+                  onClick={() => answer(consent, "deny")}
+                >
+                  {t.deny}
+                </Button>
+              </div>
             </div>
-          </div>
+          </li>
         ))}
-      </div>
+      </ul>
 
       {failed && (
         <p className="mt-2 text-sm text-danger" role="alert">

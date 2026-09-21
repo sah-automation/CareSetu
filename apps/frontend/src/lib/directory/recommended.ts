@@ -14,6 +14,11 @@
 import { searchDirectory, type DirectoryEntry } from "./search";
 import type { ProviderType } from "./links";
 
+/** The rail always shows the three nearest verified providers - the binding's
+ * `.rec-panel` holds exactly three cards on both its mobile snap-scroll row and
+ * the >=720px 3-up grid, so more supply than that is served via "See all". */
+export const RECOMMENDED_MAX = 3;
+
 /** Fetch the verified, distance-sorted recommendations for one scope. An empty
  * array means no verified supply exists for that provider type in the area. */
 export async function fetchRecommended(
@@ -22,5 +27,6 @@ export async function fetchRecommended(
   const view = await searchDirectory({ partnerType });
   return view.items
     .filter((entry) => entry.verified)
-    .sort((a, b) => a.distance_km - b.distance_km);
+    .sort((a, b) => a.distance_km - b.distance_km)
+    .slice(0, RECOMMENDED_MAX);
 }

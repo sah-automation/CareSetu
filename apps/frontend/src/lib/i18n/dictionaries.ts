@@ -507,7 +507,10 @@ const en = {
     doctor: "Doctor",
     lab: "Lab",
     chemist: "Chemist",
-    placeholder: "Search care near you",
+    // #509: distinct from `aria` - the placeholder hints at what can be
+    // searched ("Doctor, lab, test or medicine") while the label announces the
+    // screen's search purpose ("Search care near you"). Both kept EN/HI.
+    placeholder: "Doctor, lab, test or medicine",
     aria: "Search care near you",
     go: "Search",
     seeAll: "See all",
@@ -1994,7 +1997,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
       doctor: "डॉक्टर",
       lab: "लैब",
       chemist: "केमिस्ट",
-      placeholder: "अपने आसपास देखभाल खोजें",
+      placeholder: "डॉक्टर, लैब, टेस्ट या दवा",
       aria: "अपने आसपास देखभाल खोजें",
       go: "खोजें",
       seeAll: "सभी देखें",

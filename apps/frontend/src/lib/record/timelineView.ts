@@ -115,28 +115,34 @@ export function describeEntry(
   entry: RecordEntryView,
   t: EntryCardStrings,
   lang: "en" | "hi",
+  options: { omitOccurredAt?: boolean } = {},
 ): EntryCard {
+  // #509: the home's Recent activity preview renders the real date once, in
+  // its own right-hand "when" column, so the subtitle job loses the
+  // occurred-at there. The record timeline keeps the folded date by default -
+  // existing call sites are unchanged unless they opt in.
+  const { omitOccurredAt = false } = options;
   const date = formatOccurredAt(entry.occurred_at, lang);
   const parts: string[] = [];
 
   switch (entry.entry_type) {
     case "consultation":
-      parts.push(date);
+      if (!omitOccurredAt) parts.push(date);
       return {
         icon: "\u{1FA7A}",
         title: t.badge.consultation,
-        subtitle: parts.join(" \u00b7 "),
+        subtitle: parts.join(" \u00b7 ") || null,
         badge: { label: t.badge.consultation, tone: "warm" },
       };
     case "prescription": {
       const prescriptionId = payloadNumber(entry, "prescription_id");
       if (prescriptionId !== null) parts.push(`Rx #${prescriptionId}`);
-      parts.push(date);
+      if (!omitOccurredAt) parts.push(date);
       const delivered = payloadString(entry, "status") === "delivered";
       return {
         icon: "\u{1F48A}",
         title: t.badge.prescription,
-        subtitle: parts.join(" \u00b7 "),
+        subtitle: parts.join(" \u00b7 ") || null,
         badge: delivered
           ? { label: t.badge.delivered, tone: "success" }
           : { label: t.badge.issued, tone: "warm" },
@@ -145,20 +151,20 @@ export function describeEntry(
     case "lab_report": {
       const orderId = payloadNumber(entry, "order_id");
       if (orderId !== null) parts.push(`${t.filedFromBooking} #${orderId}`);
-      parts.push(date);
+      if (!omitOccurredAt) parts.push(date);
       return {
         icon: "\u{1F9EA}",
         title: payloadString(entry, "filename") ?? t.badge.labReport,
-        subtitle: parts.join(" \u00b7 "),
+        subtitle: parts.join(" \u00b7 ") || null,
         badge: { label: t.badge.labReport, tone: "accent" },
       };
     }
     case "metric":
-      parts.push(date);
+      if (!omitOccurredAt) parts.push(date);
       return {
         icon: "\u{1F4C8}",
         title: t.badge.metric,
-        subtitle: parts.join(" \u00b7 "),
+        subtitle: parts.join(" \u00b7 ") || null,
         badge: { label: t.badge.metric, tone: "muted" },
       };
     case "settlement": {
@@ -167,11 +173,11 @@ export function describeEntry(
         parts.push(`\u20b9${(amountPaise / 100).toFixed(2)}`);
       const orderRef = payloadString(entry, "order_ref");
       if (orderRef !== null) parts.push(`#${orderRef}`);
-      parts.push(date);
+      if (!omitOccurredAt) parts.push(date);
       return {
         icon: "\u{1F4B3}",
         title: t.badge.settlement,
-        subtitle: parts.join(" \u00b7 "),
+        subtitle: parts.join(" \u00b7 ") || null,
         badge: { label: t.badge.settlement, tone: "muted" },
       };
     }

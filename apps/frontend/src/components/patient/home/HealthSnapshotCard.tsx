@@ -35,7 +35,7 @@ function ReportTile({ entry }: { entry: RecordEntryView }) {
   return (
     <div
       data-testid="health-report"
-      className="flex min-w-0 items-center gap-2.5 rounded-lg border border-hairline px-3 py-2"
+      className="flex min-w-0 items-center gap-2.5 border-b border-hairline-soft pb-2.5"
     >
       <span aria-hidden="true" className="shrink-0">
         {card.icon}
@@ -43,7 +43,7 @@ function ReportTile({ entry }: { entry: RecordEntryView }) {
       <span className="min-w-0 flex-1 truncate text-sm font-medium text-txt">
         {card.title}
       </span>
-      <span className="shrink-0 text-xs text-txt-muted">
+      <span className="shrink-0 text-xs text-txt-sub">
         {formatOccurredAt(entry.occurred_at, lang)}
       </span>
     </div>
@@ -115,23 +115,24 @@ export function HealthSnapshotCard() {
           ))}
         </div>
       ) : (
-        <div className="mt-2 space-y-2">
+        <div className="mt-2 space-y-2.5">
           {metric ? (
-            <div
-              data-testid="health-metric"
-              className="rounded-lg border border-hairline px-3 py-2"
-            >
+            // #509: the binding's label/row/date posture for the metric slot -
+            // a filter-sheet-label then a row with the real log date and the
+            // "Health tracking" soon badge. Never a fabricated headline KPI
+            // (the binding's 128/84 is demo data) and no dead-end logging CTA.
+            <div data-testid="health-metric" className="space-y-1.5">
+              <span className="block text-[0.8125rem] font-semibold uppercase tracking-[0.03em] text-txt-sub">
+                {t.metricLabel}
+              </span>
               <div className="flex items-center justify-between gap-2">
-                <span className="text-xs font-medium text-txt-muted">
-                  {t.metricLabel}
+                <span className="text-sm text-txt-muted">
+                  {formatOccurredAt(metric.occurred_at, lang)}
                 </span>
                 <span className="rounded-full border border-dashed border-hairline bg-hairline-soft px-2 py-0.5 text-[0.6875rem] font-medium tracking-wide text-txt-muted uppercase">
                   {t.trackSoon}
                 </span>
               </div>
-              <p className="mt-0.5 text-sm font-semibold text-txt">
-                {formatOccurredAt(metric.occurred_at, lang)}
-              </p>
             </div>
           ) : (
             <div
@@ -149,10 +150,10 @@ export function HealthSnapshotCard() {
           )}
 
           <div
-            className="space-y-2 border-t border-hairline pt-2"
+            className="border-t border-hairline pt-2"
             data-testid="health-reports"
           >
-            <span className="text-xs font-medium text-txt-muted">
+            <span className="mb-2 block text-[0.8125rem] font-semibold uppercase tracking-[0.03em] text-txt-sub">
               {t.reportsTitle}
             </span>
             {report ? (

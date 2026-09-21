@@ -17,8 +17,7 @@
 // query can never widen the page at 320px (base.css `.search-card .search-bar`
 // regression rule, ui-blueprint §5.2).
 
-import { type FormEvent } from "react";
-import Link from "next/link";
+import { type FormEvent, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
@@ -48,9 +47,18 @@ export interface SearchCardProps {
    * and writes the same source. */
   scope: ProviderType;
   onScopeChange: (scope: ProviderType) => void;
+  /** #509: the page composes the "Recommended near you" rail (#503) as a child
+   * so the scope pills + search bar + rail read as one designed card (the
+   * binding's `.search-card`). The rail owns its own header row, including the
+   * scoped See-all link. */
+  children?: ReactNode;
 }
 
-export function SearchCard({ scope, onScopeChange }: SearchCardProps) {
+export function SearchCard({
+  scope,
+  onScopeChange,
+  children,
+}: SearchCardProps) {
   const { lang } = useLang();
   const t = STRINGS[lang].search;
   const router = useRouter();
@@ -64,13 +72,16 @@ export function SearchCard({ scope, onScopeChange }: SearchCardProps) {
   }
 
   const activeClass = (active: boolean) =>
-    `min-h-11 flex-1 rounded-full text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring sm:flex-none ${
+    `min-h-11 flex-1 rounded-full px-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring sm:flex-none sm:px-5 ${
       active
-        ? "bg-surface font-semibold text-txt-strong shadow-sm"
+        ? "bg-surface font-semibold text-txt-strong shadow-[0_1px_3px_rgba(2,6,23,0.12)]"
         : // txt-muted (slate-500) on the pill-group hairline-soft background
           // measured 4.23:1 - below the 4.5 WCAG AA floor the axe gate enforces.
           // txt-sub (slate-700) clears it and matches the house inactive-chip
-          // pattern (pick page specialty chips).
+          // pattern (pick page specialty chips). The active pill pops on the
+          // white surface with the binding's `.search-scope` shadow. Padding
+          // tracks the binding (.search-scope button): .75rem on a stretched
+          // mobile pill, 1.25rem once the desktop group goes inline-flex.
           "text-txt-sub"
     }`;
 
@@ -81,11 +92,15 @@ export function SearchCard({ scope, onScopeChange }: SearchCardProps) {
     >
       {/* Scope pills: segmented control wiring pill + destinations together.
           House pattern is a pressed-button group (DirectoryBrowser type
-          chips), not tab semantics - no panels to switch, so no tablist. */}
+          chips), not tab semantics - no panels to switch, so no tablist. The
+          group is a flush hairline-soft rail (.search-scope) - borderless, so
+          the active pill pops on the white surface (#509). On desktop the
+          group turns inline-flex and shrink-wraps its pills (binding
+          `width:auto`), so the rail background never spans the full card. */}
       <div
         role="group"
         aria-label={t.scopeAria}
-        className="flex w-full gap-1 rounded-full border border-hairline bg-hairline-soft p-1 sm:w-auto"
+        className="flex w-full gap-1 rounded-full bg-hairline-soft p-1 sm:w-auto sm:inline-flex"
       >
         {SCOPES.map((item) => {
           const active = item === scope;
@@ -112,17 +127,36 @@ export function SearchCard({ scope, onScopeChange }: SearchCardProps) {
       >
         {/* The `min-w-0 flex-1` wrapper is the long-query overflow guard: an
             intrinsic-width search value cannot push past the flex basis and
-            widen the page at 320px (base.css `.search-bar .input-group`). */}
-        <div className="min-w-0 flex-1">
+            widen the page at 320px (base.css `.search-bar .input-group`). The
+            input group is the binding's prefixed anatomy - a non-interactive
+            search icon on the left, then the field, on the house radius. */}
+        <div className="flex w-full min-w-0 sm:flex-1">
           <label className="sr-only" htmlFor="home-search-input">
             {t.aria}
           </label>
+          <span
+            aria-hidden="true"
+            className="flex shrink-0 items-center rounded-l-md border border-r-0 border-hairline bg-hairline-soft px-3 text-txt-sub"
+          >
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+            >
+              <circle cx="11" cy="11" r="7" />
+              <path d="m20 20-3.5-3.5" />
+            </svg>
+          </span>
           <input
             id="home-search-input"
             name="q"
             type="search"
             placeholder={t.placeholder}
-            className="min-h-12 w-full min-w-0 rounded-md border border-hairline bg-surface px-3 text-sm text-txt placeholder:text-txt-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            className="min-h-12 w-full min-w-0 flex-1 rounded-r-md border border-hairline bg-surface px-3 text-sm text-txt placeholder:text-txt-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           />
         </div>
         <Button
@@ -134,15 +168,10 @@ export function SearchCard({ scope, onScopeChange }: SearchCardProps) {
         </Button>
       </form>
 
-      <div className="mt-3 flex justify-end border-t border-hairline-soft pt-3">
-        <Link
-          href={findCareHref(scope)}
-          data-testid="search-see-all"
-          className="inline-flex min-h-11 items-center text-sm font-medium text-accent-strong hover:underline"
-        >
-          {t.seeAll}
-        </Link>
-      </div>
+      {/* #509: the scoped See-all link moved into the Recommended rail's header
+          row (rendered by the page as this card's child), so the rail header
+          and the search card read as one designed unit. */}
+      {children}
     </section>
   );
 }

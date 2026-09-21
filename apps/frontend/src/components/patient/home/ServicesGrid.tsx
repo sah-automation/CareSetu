@@ -86,30 +86,35 @@ export function ServicesGrid() {
               <span aria-hidden="true" className={iconClass}>
                 <tile.icon size={22} strokeWidth={1.8} />
               </span>
+              {/* #509: the Soon badge sits inline on the title row (binding
+                  `.svc-title`), not on its own stacked line under it. */}
               <span
-                className={`text-[0.9375rem] font-semibold leading-snug ${
+                className={`flex items-center gap-1.5 text-[0.9375rem] font-semibold leading-snug ${
                   tile.accent ? "text-on-accent" : "text-txt"
                 }`}
               >
                 {label}
+                {tile.soon ? (
+                  <span className="rounded-full border border-dashed border-hairline bg-hairline-soft px-2 py-0.5 text-[0.6875rem] font-medium tracking-wide text-txt-muted uppercase">
+                    {t.soon}
+                  </span>
+                ) : null}
               </span>
-              {tile.soon ? (
-                <span className="rounded-full border border-dashed border-hairline bg-hairline-soft px-2 py-0.5 text-[0.6875rem] font-medium tracking-wide text-txt-muted uppercase">
-                  {t.soon}
-                </span>
-              ) : null}
             </>
           );
 
           // The Soon tile is a dimmed span - present in the grid but never a
-          // link, so it structurally cannot navigate. The others are links.
+          // link, so it structurally cannot navigate. The others are links, and
+          // only they gain the binding's hover lift + active press motion
+          // (`a.svc-tile:hover/active`); the non-navigating Soon tile stays
+          // static at 55% opacity.
           return tile.href ? (
             <Link
               key={tile.key}
               href={tile.href}
               data-testid="svc-tile"
               data-svc-key={tile.key}
-              className={`${tileClass} transition-shadow hover:shadow-pop`}
+              className={`${tileClass} transition-[box-shadow,transform] hover:shadow-pop hover:-translate-y-px active:scale-[0.97] active:opacity-90`}
             >
               {body}
             </Link>
