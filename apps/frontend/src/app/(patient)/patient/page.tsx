@@ -35,6 +35,10 @@
 // #505: the "Action required" card closes the feed - pending consent requests
 // listed with Allow / Not now wired to the existing grant-requested / decline
 // flows. It is absent entirely when nothing is pending (no empty card).
+//
+// #506: the "Recent activity" card previews the top few record-timeline events
+// (consultations, prescriptions, lab results, metric logs) through the shared
+// My Record describe/format helper, with View all opening the full timeline.
 
 import { useState } from "react";
 
@@ -45,6 +49,7 @@ import { LocationChip } from "@/components/patient/location/LocationChip";
 import { ProfileCompletenessBanner } from "@/components/patient/profile/ProfileCompletenessBanner";
 import { ActionRequiredCard } from "@/components/patient/home/ActionRequiredCard";
 import { RecommendedRail } from "@/components/patient/home/RecommendedRail";
+import { RecentActivityCard } from "@/components/patient/home/RecentActivityCard";
 import { SearchCard } from "@/components/patient/home/SearchCard";
 import { ServicesGrid } from "@/components/patient/home/ServicesGrid";
 import type { ProviderType } from "@/lib/directory/links";
@@ -93,6 +98,9 @@ export default function PatientDashboardPage() {
           {/* #505: "Action required" - pending consent requests answered in
               place; the card is absent entirely when nothing is pending. */}
           <ActionRequiredCard />
+          {/* #506: "Recent activity" - the top record-timeline events through
+              the My Record describe helper, View all to the full timeline. */}
+          <RecentActivityCard />
         </div>
         <aside
           className="min-w-0 lg:sticky lg:top-[4.5rem]"

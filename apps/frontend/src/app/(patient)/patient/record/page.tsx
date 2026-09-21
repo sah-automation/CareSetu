@@ -37,13 +37,13 @@ import {
   type RecordTimeline,
 } from "@/lib/record/api";
 import {
+  BADGE_TONE,
   MORE_OVERFLOW_FILTERS,
   RECORD_FILTERS,
   applyRecordFilter,
   describeEntry,
   formatOccurredAt,
   sortTimelineDesc,
-  type BadgeTone,
   type RecordFilter,
 } from "@/lib/record/timelineView";
 
@@ -52,13 +52,6 @@ const CHIP_BASE =
 const CHIP_ACTIVE = "border-accent bg-accent text-on-accent";
 const CHIP_IDLE =
   "border-hairline bg-surface text-txt-sub shadow-sm hover:border-accent-border hover:bg-accent-soft hover:text-accent-strong";
-
-const BADGE_TONE: Record<BadgeTone, string> = {
-  success: "bg-success-soft text-success-text",
-  accent: "bg-accent-soft text-accent-strong",
-  warm: "bg-warm-soft text-txt-sub",
-  muted: "bg-hairline-soft text-txt-muted",
-};
 
 // Filter values are API snake_case; dictionary filter keys are camelCase.
 const FILTER_LABEL_KEY = {

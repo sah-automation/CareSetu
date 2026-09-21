@@ -56,6 +56,17 @@ export function applyRecordFilter(
 
 export type BadgeTone = "success" | "accent" | "warm" | "muted";
 
+// Tailwind chip classes per BadgeTone - the single tone map shared by every
+// surface that renders a timeline entry badge (My Record timeline, the recent
+// activity card on the home). One source so a tone retune never drifts between
+// the preview and the timeline it previews.
+export const BADGE_TONE: Record<BadgeTone, string> = {
+  success: "bg-success-soft text-success-text",
+  accent: "bg-accent-soft text-accent-strong",
+  warm: "bg-warm-soft text-txt-sub",
+  muted: "bg-hairline-soft text-txt-muted",
+};
+
 export interface EntryBadge {
   label: string;
   tone: BadgeTone;

@@ -42,6 +42,11 @@ export type NavIcon = ComponentType<{ size?: number; className?: string }>;
 // the tab bar and the home surface can never point at different routes.
 export const PATIENT_START_VISIT_ROUTE = "/patient/intake";
 
+// The live My Record route. The recent-activity card's View all (#506) sources
+// the same constant, so the home preview and the tab-bar destination can never
+// point at different routes.
+export const PATIENT_RECORD_ROUTE = "/patient/record";
+
 // Labels resolve through the i18n engine: the key must exist in BOTH locale
 // dictionaries (compile-time via Dictionary typing, runtime via the bilingual
 // parity test).
@@ -87,7 +92,7 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
     {
       key: "record",
       labelKey: "record",
-      href: "/patient/record",
+      href: PATIENT_RECORD_ROUTE,
       icon: FileText,
     },
     // PHASE-8.1 T11 (#485): Inbox dimmed until Phase 13 (FEAT-019/MOD-010) -

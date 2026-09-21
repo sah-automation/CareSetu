@@ -561,6 +561,21 @@ const en = {
     actionFailed: "Couldn't update. Please try again.",
   },
 
+  // recent.* surface - #506, the home "Recent activity" card (PROTO-2.7
+  // binding, shell-light.html `recent.*`). Shows the top few record-timeline
+  // events (consultations, prescriptions, lab results, metric logs) rendered
+  // through the shared My Record describe/format helper, so the card only owns
+  // its heading, the View all destination copy and the fresh-record empty
+  // state. Per-type badge labels are reused from record.badge, never re-keyed.
+  recent: {
+    title: "Recent activity",
+    all: "View all",
+    loading: "Loading your recent activity...",
+    empty: "Your activity will appear here",
+    emptyBody:
+      "After your first consult, completed visits, reports and logs show up here. Find a doctor below to get started.",
+  },
+
   // directory.* surface - PHASE-6 T05a (#317), the public /directory browse
   // page (blueprint §3.1 row 2 look, PROTO-PHASE-6 finalized views are the
   // visual binding). Copy rules baked in: the location indicator is the fixed
@@ -1388,6 +1403,7 @@ export type SearchStrings = Dictionary["search"];
 export type RecStrings = Dictionary["rec"];
 export type ServicesStrings = Dictionary["services"];
 export type ActionsStrings = Dictionary["actions"];
+export type RecentStrings = Dictionary["recent"];
 
 export const STRINGS: Record<Lang, Dictionary> = {
   en,
@@ -1993,6 +2009,17 @@ export const STRINGS: Record<Lang, Dictionary> = {
       allow: "अनुमति दें",
       deny: "अभी नहीं",
       actionFailed: "अपडेट नहीं हो सका। फिर कोशिश करें।",
+    },
+
+    // recent.* surface - #506. See the en block; parity compile-checked via
+    // Dictionary (`recent.*` keys must exist in both locales).
+    recent: {
+      title: "हाल की गतिविधि",
+      all: "सभी देखें",
+      loading: "आपकी हाल की गतिविधि लोड हो रही है...",
+      empty: "आपकी गतिविधि यहाँ दिखाई देगी",
+      emptyBody:
+        "पहली विज़िट के बाद पूरी हुई विज़िट, रिपोर्ट और लॉग यहाँ दिखेंगे। शुरू करने के लिए नीचे डॉक्टर खोजें।",
     },
 
     directory: {

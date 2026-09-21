@@ -15,6 +15,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -25,6 +26,8 @@ import { __resetLangForTests, useLang } from "@/lib/i18n/LangContext";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import type { DirectoryEntry } from "@/lib/directory/search";
 import type { ConsentView } from "@/lib/consent/api";
+import type { RecordEntryView } from "@/lib/record/api";
+import { RECENT_ACTIVITY_MAX } from "@/components/patient/home/RecentActivityCard";
 
 const state = vi.hoisted(() => ({
   getProfile: vi.fn(),
@@ -45,6 +48,21 @@ const consentApi = vi.hoisted(() => ({
   fetchConsentLog: vi.fn(),
   grantRequestedConsent: vi.fn(),
   declineConsent: vi.fn(),
+}));
+
+// #506: the Recent-activity card is fed by the own-record timeline read only -
+// its rows are the top existing timeline events. Defaulted to an empty record
+// so the friendly empty state renders and no earlier test has to seed it.
+const recordApi = vi.hoisted(() => ({
+  fetchOwnRecord: vi.fn(),
+}));
+
+// #506 "never mixed in" gate: the audit read has a spy here so the home suite
+// can assert recent activity never touches it (the card imports only the
+// record timeline client, but the regression guard makes that structural fact
+// verifiable at the composed seam).
+const auditApi = vi.hoisted(() => ({
+  fetchAccessHistory: vi.fn(),
 }));
 
 vi.mock("@/lib/profile/api", () => ({
@@ -77,6 +95,16 @@ vi.mock("@/lib/consent/api", async (importOriginal) => {
     grantRequestedConsent: consentApi.grantRequestedConsent,
     declineConsent: consentApi.declineConsent,
   };
+});
+
+vi.mock("@/lib/record/api", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/lib/record/api")>();
+  return { ...original, fetchOwnRecord: recordApi.fetchOwnRecord };
+});
+
+vi.mock("@/lib/audit/api", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/lib/audit/api")>();
+  return { ...original, fetchAccessHistory: auditApi.fetchAccessHistory };
 });
 
 // #502: the search card routes through fresh navigation - the router push is
@@ -152,6 +180,14 @@ beforeEach(() => {
   consentApi.fetchConsentLog.mockResolvedValue({ items: [] });
   consentApi.grantRequestedConsent.mockReset();
   consentApi.declineConsent.mockReset();
+  recordApi.fetchOwnRecord.mockReset();
+  recordApi.fetchOwnRecord.mockResolvedValue({
+    record_id: 1,
+    patient_id: 7,
+    created_at: "2026-09-21T10:00:00.000Z",
+    entries: [],
+  });
+  auditApi.fetchAccessHistory.mockReset();
   state.getProfile.mockResolvedValue({ set: false, profile: null });
 });
 
@@ -652,11 +688,18 @@ describe("recommended near-you rail (#503)", () => {
     searchDirectory.mockResolvedValue({ fell_back: false, items: [] });
     renderHome();
 
-    const empty = await screen.findByTestId("empty-state");
-    expect(screen.getByTestId("empty-state-title")).toHaveTextContent(
-      STRINGS.en.rec.emptyTitle,
+    // Scoped to the rail: the recent-activity card (#506) shares the generic
+    // empty-state testid for its own empty record, so the rail's must be
+    // asserted inside its own section.
+    const rail = await screen.findByTestId("rec-rail");
+    await waitFor(() =>
+      expect(within(rail).queryByTestId("empty-state-title")).toHaveTextContent(
+        STRINGS.en.rec.emptyTitle,
+      ),
     );
-    expect(empty).toHaveTextContent(STRINGS.en.rec.emptyBody);
+    expect(within(rail).getByTestId("empty-state")).toHaveTextContent(
+      STRINGS.en.rec.emptyBody,
+    );
     expect(screen.queryByTestId("rec-scroll")).not.toBeInTheDocument();
   });
 
@@ -664,7 +707,10 @@ describe("recommended near-you rail (#503)", () => {
     searchDirectory.mockRejectedValue(new Error("network down"));
     renderHome();
 
-    expect(await screen.findByTestId("empty-state")).toBeInTheDocument();
+    const rail = await screen.findByTestId("rec-rail");
+    await waitFor(() =>
+      expect(within(rail).queryByTestId("empty-state")).not.toBeNull(),
+    );
     expect(screen.queryByTestId("rec-scroll")).not.toBeInTheDocument();
   });
 
@@ -917,6 +963,139 @@ describe("action required card (#505)", () => {
     );
     expect(screen.getByTestId("action-deny")).toHaveTextContent(
       STRINGS.hi.actions.deny,
+    );
+  });
+});
+
+describe("recent activity card (#506)", () => {
+  function entry(
+    id: number,
+    entry_type: RecordEntryView["entry_type"],
+    occurred_at: string,
+    payload: Record<string, unknown> = {},
+  ): RecordEntryView {
+    return {
+      entry_id: id,
+      entry_type,
+      payload,
+      occurred_at,
+      created_at: occurred_at,
+    };
+  }
+
+  function seedTimeline(entries: RecordEntryView[]) {
+    recordApi.fetchOwnRecord.mockResolvedValue({
+      record_id: 1,
+      patient_id: 7,
+      created_at: "2026-09-21T10:00:00.000Z",
+      entries,
+    });
+  }
+
+  it("previews the top 3 timeline events sorted reverse-chronologically", async () => {
+    // Deliberately shuffled - the card must sort before slicing.
+    seedTimeline([
+      entry(1, "consultation", "2026-09-20T08:00:00.000Z"),
+      entry(2, "prescription", "2026-09-21T08:00:00.000Z", {
+        prescription_id: 12,
+        status: "issued",
+      }),
+      entry(3, "lab_report", "2026-09-19T08:00:00.000Z", {
+        filename: "CBC report 19 Sep",
+        order_id: 301,
+      }),
+      entry(4, "metric", "2026-09-18T08:00:00.000Z"),
+    ]);
+    renderHome();
+
+    const rows = await screen.findAllByTestId(/recent-entry-/);
+    expect(rows).toHaveLength(RECENT_ACTIVITY_MAX);
+    // Reverse-chron by clinical time: 21st prescription, then 20th consult,
+    // then 19th lab; the 18th metric row falls off the preview cap.
+    expect(rows[0]).toHaveTextContent(STRINGS.en.record.badge.prescription);
+    expect(rows[1]).toHaveTextContent(STRINGS.en.record.badge.consultation);
+    expect(rows[2]).toHaveTextContent("CBC report 19 Sep");
+    expect(rows[2]).toHaveTextContent(STRINGS.en.record.badge.labReport);
+    expect(screen.queryByTestId("recent-entry-4")).not.toBeInTheDocument();
+  });
+
+  it("renders each row through the My Record describe helper copy", async () => {
+    seedTimeline([
+      entry(2, "prescription", "2026-09-21T08:00:00.000Z", {
+        prescription_id: 12,
+        status: "issued",
+      }),
+    ]);
+    renderHome();
+
+    const row = await screen.findByTestId("recent-entry-2");
+    // Same vocabulary as the timeline: payload-driven title/subtitle and the
+    // record.badge labels, never invented per-type copy.
+    expect(row).toHaveTextContent(STRINGS.en.record.badge.prescription);
+    expect(row).toHaveTextContent(/Rx #12/);
+    expect(row).toHaveTextContent(/2026/);
+  });
+
+  it("never mixes access-history reads into recent activity", async () => {
+    seedTimeline([entry(1, "consultation", "2026-09-21T08:00:00.000Z")]);
+    renderHome();
+
+    await screen.findByTestId("recent-entry-1");
+    // The audit read is a separate data source - the card must never trigger it.
+    expect(auditApi.fetchAccessHistory).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("access-history")).not.toBeInTheDocument();
+  });
+
+  it("renders the friendly empty state for a record with no activity yet", async () => {
+    seedTimeline([]);
+    renderHome();
+
+    const empty = await screen.findByTestId("recent-empty");
+    expect(empty).toHaveTextContent(STRINGS.en.recent.empty);
+    expect(empty).toHaveTextContent(STRINGS.en.recent.emptyBody);
+    expect(screen.queryByTestId("recent-list")).not.toBeInTheDocument();
+  });
+
+  it("stays absent when the record fetch fails (never a fake-empty state)", async () => {
+    recordApi.fetchOwnRecord.mockRejectedValue(new Error("network down"));
+    renderHome();
+
+    await screen.findByTestId("services-grid");
+    await waitFor(() =>
+      expect(screen.queryByTestId("recent-activity")).not.toBeInTheDocument(),
+    );
+    // A failed read must not pass itself off as "no activity yet".
+    expect(screen.queryByTestId("recent-empty")).not.toBeInTheDocument();
+  });
+
+  it("View all navigates to My Record in the patient nav", async () => {
+    renderHome();
+    await screen.findByTestId("recent-activity");
+
+    // Same live route the tab-bar nav config pins the record item to.
+    expect(screen.getByTestId("recent-view-all")).toHaveAttribute(
+      "href",
+      "/patient/record",
+    );
+  });
+
+  it("serves the card copy in hi from the recent surface", async () => {
+    seedTimeline([entry(1, "consultation", "2026-09-21T08:00:00.000Z")]);
+    renderHome();
+    await screen.findByTestId("recent-entry-1");
+
+    fireEvent.click(screen.getByRole("button", { name: "flip-lang" }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: STRINGS.hi.recent.title }),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("recent-view-all")).toHaveTextContent(
+      STRINGS.hi.recent.all,
+    );
+    expect(screen.getByTestId("recent-entry-1")).toHaveTextContent(
+      STRINGS.hi.record.badge.consultation,
     );
   });
 });
