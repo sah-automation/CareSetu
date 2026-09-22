@@ -105,14 +105,19 @@ def register_handlers(registry: HandlerRegistry) -> None:
 
         async def _impl(connection: AsyncConnection, payload: PrescriptionIssuedPayload) -> None:
             record_id = await _ensure_record_shell(connection, payload.patient_id)
+            entry_payload: dict[str, object] = {
+                "prescription_id": payload.prescription_id,
+                "status": "issued",
+            }
+            if payload.items:
+                entry_payload["items"] = [item.model_dump() for item in payload.items]
+            if payload.attributed_doctor_name is not None:
+                entry_payload["attributed_doctor_name"] = payload.attributed_doctor_name
             await connection.execute(
                 insert(health_record_entries).values(
                     record_id=record_id,
                     entry_type="prescription",
-                    payload={
-                        "prescription_id": payload.prescription_id,
-                        "status": "issued",
-                    },
+                    payload=entry_payload,
                     occurred_at=datetime.fromisoformat(payload.occurred_at.replace("Z", "+00:00")),
                 )
             )

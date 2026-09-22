@@ -50,16 +50,39 @@ class ReportFiledPayload(BaseModel):
     occurred_at: str  # ISO 8601 datetime string
 
 
+class PrescriptionIssuedItem(BaseModel):
+    """Subscriber mirror of one ``prescription.issued`` medicine line.
+
+    The trimmed ``{name, dose, frequency, duration}`` display shape care froze
+    at issue time (D1, #513): ``name`` is required, the dosage lines stay
+    nullable because a doctor may leave a line open for the pharmacist.
+    Declared locally so the health module never imports the producer's model
+    (ADR-0003). Deliberately omits the internal row ids - this is the
+    immutable snapshot the patient-facing record renders, not a relational
+    mirror.
+    """
+
+    name: str
+    dose: str | None = None
+    frequency: str | None = None
+    duration: str | None = None
+
+
 class PrescriptionIssuedPayload(BaseModel):
     """Subscriber mirror of ``prescription.issued``: a prescription issued to the patient.
 
     Fields to create a record entry: prescription id, patient identity, and
-    the clinical time of issuance.
+    the clinical time of issuance. ``items`` and ``attributed_doctor_name``
+    mirror the enriched snapshot care publishes in #513 - optional so a legacy
+    (pre-enrichment) envelope still validates and stores the lean entry
+    instead of stranding the delivery.
     """
 
     prescription_id: int
     patient_id: int
     occurred_at: str  # ISO 8601 datetime string
+    items: list[PrescriptionIssuedItem] = Field(default_factory=list)
+    attributed_doctor_name: str | None = None
 
 
 class PrescriptionDeliveredPayload(BaseModel):

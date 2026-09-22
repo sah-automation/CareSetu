@@ -260,7 +260,7 @@ def test_health_then_care_composition_registers_issued_exactly_once() -> None:
     assert registry.payload_model_for(EVENT_PRESCRIPTION_ISSUED) is PrescriptionIssuedPayload
 
 
-def test_health_consumer_mirror_accepts_cares_produced_payload() -> None:
+def test_health_consumer_mirror_accepts_cares_produced_enriched_payload() -> None:
     produced = prescription_issued_envelope(
         case_id=1,
         prescription_id=9,
@@ -268,18 +268,23 @@ def test_health_consumer_mirror_accepts_cares_produced_payload() -> None:
         doctor_id=2,
         occurred_at=_OCCURRED_AT,
         items=_ISSUED_ITEMS,
+        attributed_doctor_name="Dr. Priya Sharma",
     )
     raw = produced.payload.model_dump(mode="json")
-    # The consumer mirror requires prescription_id, patient_id, occurred_at and
-    # drops everything else on validate - the producer-only case_id/doctor_id
-    # and the new issued-snapshot fields (items, attributed_doctor_name) are
-    # additive to the tolerant mirror, so the dispatch-time re-validation that
-    # previously failed every real issuance (missing occurred_at) still passes
-    # against the care-produced payload.
+    # The consumer mirror requires prescription_id, patient_id, occurred_at;
+    # the producer-only ids (case_id, doctor_id) drop on validate while the
+    # issued-snapshot fields (items, attributed_doctor_name) are retained as
+    # optional, so the dispatch-time re-validation still passes against the
+    # enriched care-produced payload and the handler can copy the snapshot
+    # into the record entry.
     view = HealthPrescriptionIssuedPayload.model_validate(raw)
     assert view.prescription_id == 9
     assert view.patient_id == 7
     assert view.occurred_at == _OCCURRED_AT
+    assert [item.model_dump() for item in view.items] == [
+        item.model_dump() for item in _ISSUED_ITEMS
+    ]
+    assert view.attributed_doctor_name == "Dr. Priya Sharma"
 
 
 def test_cares_registered_issued_model_tolerates_legacy_rows_without_items() -> None:
