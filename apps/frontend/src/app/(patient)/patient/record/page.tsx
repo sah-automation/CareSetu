@@ -713,7 +713,6 @@ function renderAccessSection({
   const loadingId = isMobile ? "access-loading" : "access-loading-rail";
   const entryPrefix = isMobile ? "access-entry-" : "access-entry-rail-";
   const keyPrefix = isMobile ? "entry" : "rail";
-  const moreHintId = isMobile ? "access-more-hint" : "access-more-hint-rail";
   const consentLinkId = isMobile
     ? "access-consent-log-link"
     : "access-consent-log-link-rail";
@@ -798,68 +797,61 @@ function renderAccessSection({
               </p>
             </div>
           ) : (
-            <>
-              <ul className="space-y-2" data-testid={listId}>
-                {accessHistory
-                  .slice(0, ACCESS_MOST_RECENT_COUNT)
-                  .map((entry, index) => {
-                    const identity = entry.actor_type || `ID ${entry.actor_id}`;
-                    const scope = entry.scope
-                      ? `, ${t.accessHistory.scopePrefix}${entry.scope}`
-                      : "";
-                    return (
-                      <li
-                        key={`${keyPrefix}-${entry.actor_id}-${entry.accessed_at}-${index}`}
-                        data-testid={`${entryPrefix}${index}`}
-                      >
-                        <div>
-                          <span className="flex items-start gap-2">
-                            <strong className="text-[0.9375rem] text-txt">
-                              {identity}
-                            </strong>
-                            {entry.denied && (
-                              <span className="ml-auto shrink-0 rounded-full bg-danger-soft px-2 py-0.5 text-xs font-medium text-danger">
-                                {t.accessHistory.deniedLabel}
-                              </span>
-                            )}
-                          </span>
-                          <p className="mt-0.5 text-[0.8125rem] text-txt-muted">
-                            {formatOccurredAt(entry.accessed_at, lang)}
-                            {scope}
+            <ul className="space-y-2" data-testid={listId}>
+              {accessHistory
+                .slice(0, ACCESS_MOST_RECENT_COUNT)
+                .map((entry, index) => {
+                  const identity = entry.actor_type || `ID ${entry.actor_id}`;
+                  const scope = entry.scope
+                    ? `, ${t.accessHistory.scopePrefix}${entry.scope}`
+                    : "";
+                  return (
+                    <li
+                      key={`${keyPrefix}-${entry.actor_id}-${entry.accessed_at}-${index}`}
+                      data-testid={`${entryPrefix}${index}`}
+                    >
+                      <div>
+                        <span className="flex items-start gap-2">
+                          <strong className="text-[0.9375rem] text-txt">
+                            {identity}
+                          </strong>
+                          {entry.denied && (
+                            <span className="ml-auto shrink-0 rounded-full bg-danger-soft px-2 py-0.5 text-xs font-medium text-danger">
+                              {t.accessHistory.deniedLabel}
+                            </span>
+                          )}
+                        </span>
+                        <p className="mt-0.5 text-[0.8125rem] text-txt-muted">
+                          {formatOccurredAt(entry.accessed_at, lang)}
+                          {scope}
+                        </p>
+                        {entry.denied && entry.denial_reason ? (
+                          <p className="mt-0.5 text-xs text-txt-muted">
+                            {t.accessHistory.deniedReasonPrefix}
+                            {entry.denial_reason}
                           </p>
-                          {entry.denied && entry.denial_reason ? (
-                            <p className="mt-0.5 text-xs text-txt-muted">
-                              {t.accessHistory.deniedReasonPrefix}
-                              {entry.denial_reason}
-                            </p>
-                          ) : null}
-                        </div>
-                      </li>
-                    );
-                  })}
-              </ul>
-              <footer className="mt-3 flex items-center justify-between gap-2">
-                {accessHistory.length > ACCESS_MOST_RECENT_COUNT && (
-                  <p
-                    data-testid={moreHintId}
-                    className="text-xs font-medium text-txt-muted"
-                  >
-                    {t.accessHistory.latestFiveHint}
-                  </p>
-                )}
-                <Link
-                  href="/patient/record/consent-log"
-                  data-testid={consentLinkId}
-                  className="ml-auto inline-flex items-center gap-1 text-xs font-medium tracking-wide text-accent-strong hover:underline"
-                >
-                  {t.openConsentLog}
-                  <ChevronRight size={14} aria-hidden="true" />
-                </Link>
-              </footer>
-            </>
+                        ) : null}
+                      </div>
+                    </li>
+                  );
+                })}
+            </ul>
           )}
         </div>
       </details>
+
+      {/* "Open consent log" is a permanent entry point at the bottom of the
+          section, visible without expanding the audit (prototype posture). */}
+      <footer className="mt-3">
+        <Link
+          href="/patient/record/consent-log"
+          data-testid={consentLinkId}
+          className="inline-flex items-center gap-1 text-xs font-medium tracking-wide text-accent-strong hover:underline"
+        >
+          {t.openConsentLog}
+          <ChevronRight size={14} aria-hidden="true" />
+        </Link>
+      </footer>
     </section>
   );
 }

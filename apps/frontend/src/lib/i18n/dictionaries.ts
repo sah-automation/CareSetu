@@ -894,8 +894,6 @@ const en = {
       scopePrefix: "Consent scope: ",
       deniedLabel: "Denied",
       deniedReasonPrefix: "Reason: ",
-      latestFiveHint:
-        "Showing the 5 most recent - the full audit lives in your consent log.",
     },
     detail: {
       loadError: "Could not load this entry.",
@@ -2209,8 +2207,6 @@ export const STRINGS: Record<Lang, Dictionary> = {
         scopePrefix: "अनुमति का दायरा: ",
         deniedLabel: "अस्वीकृत",
         deniedReasonPrefix: "कारण: ",
-        latestFiveHint:
-          "5 सबसे हाल के एक्सेस दिख रहे हैं - पूरा ऑडिट आपके अनुमति लॉग में है।",
       },
       detail: {
         loadError: "यह एंट्री लोड नहीं हो सकी।",

@@ -232,7 +232,9 @@ describe("RecordPage (inside the patient light shell)", () => {
     expect(health).toHaveLength(2);
     // The access-history Soon placeholder was replaced by real data (#283).
     expect(screen.queryByTestId("placeholder-access")).not.toBeInTheDocument();
-  });
+    // The full patient shell + both zone fetches is heavier than a bare page
+    // render; give it headroom so parallel-suite load can't flake the default.
+  }, 15_000);
 
   it("renders API entries newest-first regardless of payload order", async () => {
     render(<RecordPage />);
@@ -687,14 +689,11 @@ describe("RecordPage PROTO-3.1 zones", () => {
     const mobile = screen.getByTestId("record-privacy-mobile");
     await within(mobile).findByTestId("health-snapshot");
     expect(within(mobile).getByTestId("access-history")).toBeInTheDocument();
-    // The consent-log entry point now lives inside the who-accessed section.
-    expect(
-      within(mobile).getByTestId("access-consent-log-link"),
-    ).toHaveAttribute("href", "/patient/record/consent-log");
-    // Only two access rows exist -> no "see the latest 5" hint.
-    expect(
-      within(mobile).queryByTestId("access-more-hint"),
-    ).not.toBeInTheDocument();
+    // The consent-log entry point sits outside the accordion's <details>, so it
+    // is visible in the default (closed) state (prototype posture).
+    const mobileLink = within(mobile).getByTestId("access-consent-log-link");
+    expect(mobileLink).toHaveAttribute("href", "/patient/record/consent-log");
+    expect(mobile.querySelector("details")).not.toContainElement(mobileLink);
   });
 
   it("mirrors the summary, health snapshot and who-accessed list in the rail", async () => {
@@ -705,12 +704,9 @@ describe("RecordPage PROTO-3.1 zones", () => {
     const rail = screen.getByTestId("record-rail");
     expect(within(rail).getByTestId("record-rail-summary")).toBeInTheDocument();
     await within(rail).findByTestId("health-snapshot");
-    expect(
-      within(rail).getByTestId("access-consent-log-link-rail"),
-    ).toHaveAttribute("href", "/patient/record/consent-log");
-    expect(
-      within(rail).queryByTestId("access-more-hint-rail"),
-    ).not.toBeInTheDocument();
+    const railLink = within(rail).getByTestId("access-consent-log-link-rail");
+    expect(railLink).toHaveAttribute("href", "/patient/record/consent-log");
+    expect(rail.querySelector("details")).not.toContainElement(railLink);
     // The rail carries its own access list testid set (same data, newest first).
     expect(
       within(rail).getByTestId("access-history-rail-list"),
@@ -720,7 +716,7 @@ describe("RecordPage PROTO-3.1 zones", () => {
     );
   });
 
-  it("renders only the latest five rows with a hint and the full-count badge", async () => {
+  it("renders only the latest five rows with the full-count badge", async () => {
     const many = Array.from({ length: 7 }, (_, i) =>
       accessEntry({
         actor_id: i + 10,
@@ -735,12 +731,11 @@ describe("RecordPage PROTO-3.1 zones", () => {
     const mobile = screen.getByTestId("record-privacy-mobile");
     const list = within(mobile).getByTestId("access-history-list");
     expect(list.querySelectorAll("li")).toHaveLength(5);
-    expect(mobile.querySelectorAll("[data-testid='access-more-hint']")) //
-      .toHaveLength(1);
-    expect(within(mobile).getByTestId("access-more-hint")) //
-      .toHaveTextContent("Showing the 5 most recent");
     // The badge reports the full audit count, not the five rendered rows.
     expect(within(mobile).getByTestId("access-history")).toHaveTextContent("7");
+    // The consent-log entry point stays visible in the collapsed state.
+    const mobileLink = within(mobile).getByTestId("access-consent-log-link");
+    expect(mobile.querySelector("details")).not.toContainElement(mobileLink);
   });
 
   it("summarizes payload counts in the at-a-glance rail card", async () => {
