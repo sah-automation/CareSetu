@@ -837,10 +837,29 @@ const en = {
   // (blueprint §5.5, binding prototype record.html). Filter naming follows
   // the ratified review outcome: "Consultations" everywhere incl. Hindi
   // परामर्श - consultation wording, never physical-visit.
+  // PROTO-3.1 (#511): heading and snapshot/rail copy for the two-zone
+  // redesign; month names come from Intl, never from these dictionaries.
   record: {
-    title: "My Record",
+    title: "My Health Record",
     description:
       "Your health story in one place - consultations, prescriptions, lab results and daily metrics.",
+    summaryLabel: "At a glance",
+    today: "Today",
+    yesterday: "Yesterday",
+    snapshot: {
+      all: "Everything",
+    },
+    snapshotIssued: (count: number) => `${count} issued`,
+    snapshotFlagged: (count: number) => `${count} flagged`,
+    outOfRange: {
+      above: "above usual range",
+      below: "below usual range",
+      footnote: (count: number) =>
+        `${count} values outside your usual range - open the report for details.`,
+    },
+    accessAccordionHint:
+      "Expand to see the latest 5 accesses - the full audit lives in your consent log.",
+    openConsentLog: "Open consent log",
     filterGroupLabel: "Filter record entries",
     moreMenuLabel: "More filters",
     filter: {
@@ -875,10 +894,8 @@ const en = {
       scopePrefix: "Consent scope: ",
       deniedLabel: "Denied",
       deniedReasonPrefix: "Reason: ",
-    },
-    placeholder: {
-      healthTitle: "Health tracking",
-      healthBody: "BP/sugar trends and follow-up plans arrive with Phase 12.",
+      latestFiveHint:
+        "Showing the 5 most recent - the full audit lives in your consent log.",
     },
     detail: {
       loadError: "Could not load this entry.",
@@ -2138,9 +2155,26 @@ export const STRINGS: Record<Lang, Dictionary> = {
     },
 
     record: {
-      title: "मेरा रिकॉर्ड",
+      title: "मेरा हेल्थ रिकॉर्ड",
       description:
         "आपकी सेहत की पूरी कहानी एक जगह - परामर्श, प्रिस्क्रिप्शन, लैब रिपोर्ट और रोज़ की मेट्रिक्स।",
+      summaryLabel: "एक नज़र में",
+      today: "आज",
+      yesterday: "कल",
+      snapshot: {
+        all: "सब कुछ",
+      },
+      snapshotIssued: (count: number) => `${count} जारी`,
+      snapshotFlagged: (count: number) => `${count} ध्यान देने वाला`,
+      outOfRange: {
+        above: "आम रेंज से ऊपर",
+        below: "आम रेंज से नीचे",
+        footnote: (count: number) =>
+          `${count} मान आपकी आम रेंज से बाहर - विवरण के लिए रिपोर्ट खोलें।`,
+      },
+      accessAccordionHint:
+        "नवीनतम 5 एक्सेस देखने के लिए विस्तार करें - पूरा ऑडिट आपके अनुमति लॉग में है।",
+      openConsentLog: "अनुमति लॉग खोलें",
       filterGroupLabel: "रिकॉर्ड एंट्री फ़िल्टर करें",
       moreMenuLabel: "और फ़िल्टर",
       filter: {
@@ -2175,10 +2209,8 @@ export const STRINGS: Record<Lang, Dictionary> = {
         scopePrefix: "अनुमति का दायरा: ",
         deniedLabel: "अस्वीकृत",
         deniedReasonPrefix: "कारण: ",
-      },
-      placeholder: {
-        healthTitle: "हेल्थ ट्रैकिंग",
-        healthBody: "BP/शुगर ट्रेंड और फॉलो-अप प्लान फेज़ 12 में आएंगे।",
+        latestFiveHint:
+          "5 सबसे हाल के एक्सेस दिख रहे हैं - पूरा ऑडिट आपके अनुमति लॉग में है।",
       },
       detail: {
         loadError: "यह एंट्री लोड नहीं हो सकी।",

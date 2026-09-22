@@ -299,6 +299,11 @@ describe("EntryDetailPage source and consent", () => {
     expect(within(sourceCard).getByText(/C-2026-011/)).toBeInTheDocument();
     expect(within(sourceCard).getByText(/v1/)).toBeInTheDocument();
     expect(screen.getByTestId("consent-log-link")).toBeInTheDocument();
+    // The consent-log route lives under the record section (#511 drive-by).
+    expect(screen.getByTestId("consent-log-link")).toHaveAttribute(
+      "href",
+      "/patient/record/consent-log",
+    );
   });
 
   it("omits consent section silently when no egress trail exists", async () => {

@@ -243,7 +243,7 @@ export default function EntryDetailPage() {
                   )}
                 </p>
                 <Link
-                  href="/patient/consent-log"
+                  href="/patient/record/consent-log"
                   className="mt-1 text-sm font-medium text-accent-strong hover:underline"
                   data-testid="consent-log-link"
                 >

@@ -9,6 +9,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import {
   afterEach,
@@ -204,6 +205,12 @@ async function waitForTimeline() {
   await screen.findByTestId("record-timeline");
 }
 
+function openMoreMenu() {
+  const trigger = screen.getByTestId("filter-more-btn");
+  fireEvent.pointerDown(trigger);
+  fireEvent.click(trigger);
+}
+
 describe("RecordPage (inside the patient light shell)", () => {
   it("mounts within the patient AppShell with header and filters", async () => {
     render(
@@ -214,15 +221,15 @@ describe("RecordPage (inside the patient light shell)", () => {
     await waitForTimeline();
 
     expect(screen.getByTestId("app-shell")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "My Record" })) //
+    expect(screen.getByRole("heading", { name: "My Health Record" })) //
       .toBeInTheDocument();
     expect(
       screen.getByRole("group", { name: "Filter record entries" }),
     ).toBeInTheDocument();
-    // The health-tracking placeholder stays Soon (Phase 12).
-    const health = screen.getByTestId("placeholder-health");
-    expect(health).toHaveAttribute("aria-disabled", "true");
-    expect(health.querySelector('[data-testid="soon-badge"]')).not.toBeNull();
+    // The health-tracking snapshot is now a live card (#511), rendered once
+    // per responsive zone (jsdom ignores the lg visibility classes).
+    const health = await screen.findAllByTestId("health-snapshot");
+    expect(health).toHaveLength(2);
     // The access-history Soon placeholder was replaced by real data (#283).
     expect(screen.queryByTestId("placeholder-access")).not.toBeInTheDocument();
   });
@@ -277,7 +284,12 @@ describe("RecordPage (inside the patient light shell)", () => {
     await waitForTimeline();
 
     expect(screen.queryByTestId("error-banner")).not.toBeInTheDocument();
-    expect(mockFetchOwnRecord).toHaveBeenCalledTimes(3);
+    // RecordPage fetched 3x; the two health-snapshot cards (one per zone) mount
+    // on the first ready render and fetch once each = 5 total. The cards render
+    // in the same commit as the timeline, so wait on them before counting - a
+    // bare assertion could race the card effects' first fetch.
+    await screen.findAllByTestId("health-snapshot");
+    await waitFor(() => expect(mockFetchOwnRecord).toHaveBeenCalledTimes(5));
   });
 
   it("lets Dismiss close the error banner without refetching", async () => {
@@ -355,7 +367,9 @@ describe("RecordPage type filters", () => {
     render(<RecordPage />);
     await waitForTimeline();
 
-    fireEvent.click(screen.getByTestId("filter-chip-metric"));
+    // Metrics is never a chip - it lives in the More menu at every width.
+    openMoreMenu();
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Metrics" }));
     expect(screen.getByTestId("empty-state")).toBeInTheDocument();
     expect(screen.queryByTestId("record-timeline")) //
       .not.toBeInTheDocument();
@@ -381,7 +395,7 @@ describe("RecordPage bilingual EN/HI (REQ-006)", () => {
 
     fireEvent.click(screen.getByText("flip-lang"));
 
-    expect(screen.getByRole("heading", { name: "मेरा रिकॉर्ड" })) //
+    expect(screen.getByRole("heading", { name: "मेरा हेल्थ रिकॉर्ड" })) //
       .toBeInTheDocument();
     expect(screen.getByTestId("filter-chip-consultation")) //
       .toHaveTextContent(STRINGS.hi.record.filter.consultation);
@@ -441,9 +455,11 @@ describe("RecordPage access history", () => {
     resolveAccessWith([]);
     render(<RecordPage />);
 
-    expect(await screen.findByTestId("empty-state")).toHaveTextContent(
-      STRINGS.en.record.accessHistory.emptyTitle,
-    );
+    // Growing inline empty copy inside the accordion (both zones carry it).
+    const mobileCard = await screen.findByTestId("access-history");
+    expect(
+      within(mobileCard).getByText(STRINGS.en.record.accessHistory.emptyTitle),
+    ).toBeInTheDocument();
     expect(screen.queryByTestId("access-history-list")).not.toBeInTheDocument();
   });
 
@@ -466,5 +482,275 @@ describe("RecordPage access history", () => {
     await screen.findByTestId("access-history-list");
     expect(mockFetchAccessHistory).toHaveBeenCalledTimes(2);
     expect(screen.queryByTestId("error-banner")).not.toBeInTheDocument();
+  });
+});
+
+describe("RecordPage PROTO-3.1 snapshot strip", () => {
+  it("never flashes counts while the record is still loading", async () => {
+    mockFetchOwnRecord.mockReturnValue(new Promise(() => {}));
+    render(<RecordPage />);
+
+    expect(screen.queryByTestId("snapshot-strip")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("snapshot-strip-desktop"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("derives counts from the payload and shows honest zero micro-labels", async () => {
+    render(<RecordPage />);
+    await waitForTimeline();
+
+    const strip = screen.getByTestId("snapshot-strip");
+    expect(within(strip).getByTestId("snapshot-all")).toHaveTextContent("5");
+    expect(within(strip).getByTestId("snapshot-prescription")) //
+      .toHaveTextContent("2");
+    // One of two rx entries is still issued -> the tile carries `1 issued`.
+    expect(screen.getByTestId("snapshot-issued")).toHaveTextContent("1 issued");
+    // No out-of-range rows in the payload: no flagged micro-label at all.
+    expect(screen.queryByTestId("snapshot-flagged")).not.toBeInTheDocument();
+  });
+
+  it("doubles as a jump-filter: it scopes the feed and mirrors aria-pressed", async () => {
+    render(<RecordPage />);
+    await waitForTimeline();
+
+    expect(screen.getByTestId("snapshot-consultation")).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    fireEvent.click(screen.getByTestId("snapshot-consultation"));
+    expect(screen.getByTestId("snapshot-consultation")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByTestId("filter-chip-consultation")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    const visible = screen
+      .getByTestId("record-timeline")
+      .querySelectorAll("li");
+    expect([...visible].map((li) => li.getAttribute("data-testid"))).toEqual([
+      "entry-28",
+    ]);
+  });
+
+  it("mirrors the same counts as static read-only tiles on desktop", async () => {
+    render(<RecordPage />);
+    await waitForTimeline();
+
+    const desktop = screen.getByTestId("snapshot-strip-desktop");
+    // The desktop copy is informational only - never a second set of controls.
+    expect(desktop.querySelectorAll("button")).toHaveLength(0);
+    expect(within(desktop).getByText("5")).toBeInTheDocument();
+    expect(within(desktop).getByText("Prescriptions")).toBeInTheDocument();
+    // One rx entry is still issued -> the prescription tile carries it; other
+    // tiles never claim anything about delivery.
+    expect(within(desktop).getByText("1 issued")).toBeInTheDocument();
+  });
+
+  it("renders a truthful `0 issued` micro-label, and never on other tiles", async () => {
+    resolveWith({
+      ...TIMELINE,
+      entries: [
+        entry({
+          entry_type: "prescription",
+          payload: { prescription_id: 9, status: "delivered" },
+          occurred_at: "2026-08-22T08:00:00Z",
+        }),
+        entry({
+          entry_type: "consultation",
+          payload: {},
+          occurred_at: "2026-08-21T10:30:00Z",
+        }),
+        entry({
+          entry_type: "lab_report",
+          payload: { order_id: 1042 },
+          occurred_at: "2026-08-21T14:30:00Z",
+        }),
+      ],
+    });
+    render(<RecordPage />);
+    await waitForTimeline();
+
+    expect(
+      within(screen.getByTestId("snapshot-prescription")).getByTestId(
+        "snapshot-issued",
+      ),
+    ).toHaveTextContent("0 issued");
+    expect(
+      within(screen.getByTestId("snapshot-consultation")).queryByText(/issued/),
+    ).toBeNull();
+    expect(
+      within(screen.getByTestId("snapshot-lab_report")).queryByText(/issued/),
+    ).toBeNull();
+    expect(
+      within(screen.getByTestId("snapshot-strip-desktop")).getByText(
+        "0 issued",
+      ),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("RecordPage PROTO-3.1 filter chip vocabulary", () => {
+  it("never renders Metrics as a chip - it lives in More at every width", async () => {
+    render(<RecordPage />);
+    await waitForTimeline();
+
+    expect(screen.queryByTestId("filter-chip-metric")).not.toBeInTheDocument();
+    openMoreMenu();
+    expect(
+      screen.getByRole("menuitemradio", { name: "Metrics" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitemradio", { name: "Lab results" }),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("RecordPage PROTO-3.1 timeline date grouping", () => {
+  it("labels month buckets with a localized heading and count", async () => {
+    render(<RecordPage />);
+    await waitForTimeline();
+
+    expect(screen.getByTestId("group-2026-08")).toBeInTheDocument();
+    expect(screen.getByTestId("group-count-2026-08")).toHaveTextContent("5");
+  });
+
+  it("links every entry card to its detail page", async () => {
+    render(<RecordPage />);
+    await waitForTimeline();
+
+    expect(screen.getByTestId("entry-link-24")).toHaveAttribute(
+      "href",
+      "/patient/record/24",
+    );
+    expect(screen.getByTestId("entry-link-26")).toHaveAttribute(
+      "href",
+      "/patient/record/26",
+    );
+  });
+});
+
+describe("RecordPage PROTO-3.1 out-of-range lab flags", () => {
+  const FLAGGED_TIMELINE: RecordTimeline = {
+    ...TIMELINE,
+    entries: [
+      entry({
+        entry_id: 26,
+        entry_type: "lab_report",
+        payload: {
+          order_id: 1042,
+          filename: "cbc-panel.pdf",
+          results: [
+            { test: "Hb", value: "8.2", status: "below_range" },
+            { test: "WBC", value: "12.1", status: "above_range" },
+          ],
+        },
+        occurred_at: "2026-08-21T14:30:00Z",
+      }),
+    ],
+  };
+
+  it("renders per-row amber badges and the flagged micro-label", async () => {
+    resolveWith(FLAGGED_TIMELINE);
+    render(<RecordPage />);
+    await waitForTimeline();
+
+    expect(screen.getByTestId("lab-flag-26-0")).toHaveTextContent(
+      "Hb 8.2 · below usual range",
+    );
+    expect(screen.getByTestId("lab-flag-26-1")).toHaveTextContent(
+      "WBC 12.1 · above usual range",
+    );
+    expect(screen.getByTestId("snapshot-flagged")).toHaveTextContent(
+      "1 flagged",
+    );
+  });
+
+  it("summarizes flagged rows in the desktop rail footnote", async () => {
+    resolveWith(FLAGGED_TIMELINE);
+    render(<RecordPage />);
+    await waitForTimeline();
+
+    const rail = screen.getByTestId("record-rail");
+    expect(within(rail).getByTestId("record-rail-flag-footnote")) //
+      .toHaveTextContent("2 values outside your usual range");
+  });
+});
+
+describe("RecordPage PROTO-3.1 zones", () => {
+  it("stacks the health snapshot and who-accessed cards under the mobile feed", async () => {
+    render(<RecordPage />);
+    await screen.findByTestId("access-history-list");
+
+    const mobile = screen.getByTestId("record-privacy-mobile");
+    await within(mobile).findByTestId("health-snapshot");
+    expect(within(mobile).getByTestId("access-history")).toBeInTheDocument();
+    // The consent-log entry point now lives inside the who-accessed section.
+    expect(
+      within(mobile).getByTestId("access-consent-log-link"),
+    ).toHaveAttribute("href", "/patient/record/consent-log");
+    // Only two access rows exist -> no "see the latest 5" hint.
+    expect(
+      within(mobile).queryByTestId("access-more-hint"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("mirrors the summary, health snapshot and who-accessed list in the rail", async () => {
+    render(<RecordPage />);
+    await waitForTimeline();
+    await screen.findByTestId("access-history-rail-list");
+
+    const rail = screen.getByTestId("record-rail");
+    expect(within(rail).getByTestId("record-rail-summary")).toBeInTheDocument();
+    await within(rail).findByTestId("health-snapshot");
+    expect(
+      within(rail).getByTestId("access-consent-log-link-rail"),
+    ).toHaveAttribute("href", "/patient/record/consent-log");
+    expect(
+      within(rail).queryByTestId("access-more-hint-rail"),
+    ).not.toBeInTheDocument();
+    // The rail carries its own access list testid set (same data, newest first).
+    expect(
+      within(rail).getByTestId("access-history-rail-list"),
+    ).toBeInTheDocument();
+    expect(within(rail).getByTestId("access-entry-rail-0")).toHaveTextContent(
+      "doctor",
+    );
+  });
+
+  it("renders only the latest five rows with a hint and the full-count badge", async () => {
+    const many = Array.from({ length: 7 }, (_, i) =>
+      accessEntry({
+        actor_id: i + 10,
+        actor_type: "doctor",
+        accessed_at: `2026-08-${String(i + 1).padStart(2, "0")}T09:00:00Z`,
+      }),
+    );
+    resolveAccessWith(many);
+    render(<RecordPage />);
+    await screen.findByTestId("access-history-list");
+
+    const mobile = screen.getByTestId("record-privacy-mobile");
+    const list = within(mobile).getByTestId("access-history-list");
+    expect(list.querySelectorAll("li")).toHaveLength(5);
+    expect(mobile.querySelectorAll("[data-testid='access-more-hint']")) //
+      .toHaveLength(1);
+    expect(within(mobile).getByTestId("access-more-hint")) //
+      .toHaveTextContent("Showing the 5 most recent");
+    // The badge reports the full audit count, not the five rendered rows.
+    expect(within(mobile).getByTestId("access-history")).toHaveTextContent("7");
+  });
+
+  it("summarizes payload counts in the at-a-glance rail card", async () => {
+    render(<RecordPage />);
+    await waitForTimeline();
+
+    const summary = screen.getByTestId("record-rail-summary");
+    expect(within(summary).getByText("Consultations")).toBeInTheDocument();
+    // One entry per consultation/lab/metric; two prescriptions.
+    expect(within(summary).getAllByText("1")).toHaveLength(3);
+    expect(within(summary).getByText("2")).toBeInTheDocument();
   });
 });
