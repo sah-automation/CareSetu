@@ -47,6 +47,10 @@ from bus.events import (
     EVENT_PRESCRIPTION_REVIEWED,
 )
 from modules.care.care_models import PrescriptionDetailView, RxItemInput
+from modules.care.domain.events import (
+    PrescriptionIssuedItem,
+    PrescriptionIssuedPayload,
+)
 from modules.care.domain.exceptions import (
     CareCaseClosedError,
     CareNotFoundError,
@@ -774,13 +778,30 @@ async def test_approve_freezes_revision_and_publishes_approved_plus_issued() -> 
     assert approval_params["declared_at"] is not None
     assert approval_params["approved_at"] is not None
 
-    events = [p["event_type"] for p in _insert_params(items, CARE_OUTBOX_TABLE)]
+    outbox = _insert_params(items, CARE_OUTBOX_TABLE)
+    events = [p["event_type"] for p in outbox]
     assert events == [EVENT_PRESCRIPTION_APPROVED, EVENT_PRESCRIPTION_ISSUED]
+
+    # The issued envelope freezes the approved medicine lines (trimmed to the
+    # {name, dose, frequency, duration} display shape - no internal ids) and
+    # carries the resolver-resolved name, None when the seam is absent.
+    issued = PrescriptionIssuedPayload.model_validate(outbox[1]["payload"])
+    assert issued.items == [
+        PrescriptionIssuedItem(name="Para-500", dose="500mg", duration="3 days")
+    ]
+    assert issued.attributed_doctor_name is None
 
 
 @pytest.mark.asyncio
 async def test_approve_enriches_issuing_name_via_resolver_seam() -> None:
-    """The approve response carries the name - the frontend renders it (review, #495)."""
+    """The resolved name rides BOTH the response view and the issued envelope."""
+
+    def _issued_envelope(
+        care_conn: AsyncMock,
+    ) -> PrescriptionIssuedPayload:
+        outbox = _insert_params(_statements(care_conn), CARE_OUTBOX_TABLE)
+        return PrescriptionIssuedPayload.model_validate(outbox[1]["payload"])
+
     care_conn = _connection(
         [
             _FakeResult(row=_rx_row(source="ai_draft", draft_snapshot=AI_SNAPSHOT)),
@@ -813,6 +834,10 @@ async def test_approve_enriches_issuing_name_via_resolver_seam() -> None:
     assert result.attributed_doctor == 42
     assert result.attributed_doctor_name == "Dr. Shanti Clinic"
     assert resolved == [42]
+    # The doctor name is resolved ONCE and reused for the envelope, not only
+    # the response view (D1, #513): the record entry inherits the same name.
+    issued = _issued_envelope(care_conn)
+    assert issued.attributed_doctor_name == "Dr. Shanti Clinic"
 
 
 @pytest.mark.asyncio
@@ -846,6 +871,54 @@ async def test_approve_degrades_issuing_name_when_resolver_returns_none() -> Non
     assert isinstance(result, PrescriptionDetailView)
     assert result.status == "issued"
     assert result.attributed_doctor_name is None
+    outbox = _insert_params(_statements(care_conn), CARE_OUTBOX_TABLE)
+    issued = PrescriptionIssuedPayload.model_validate(outbox[1]["payload"])
+    assert issued.attributed_doctor_name is None
+
+
+@pytest.mark.asyncio
+async def test_approve_failing_resolver_degrades_envelope_and_still_approves(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A throwing resolver must not block approval: the issued envelope name is
+    None and the approval still lands (no new failure path, #513)."""
+    care_conn = _connection(
+        [
+            _FakeResult(row=_rx_row(source="ai_draft", draft_snapshot=AI_SNAPSHOT)),
+            _FakeResult(row=_case_row()),
+            _FakeResult(rows=[_rx_item_row()]),
+            _FakeResult(),
+            _FakeResult(),
+            _FakeResult(),
+            _FakeResult(),
+        ]
+    )
+
+    async def _boom(partner_id: int) -> str | None:
+        raise RuntimeError(f"partner profile read failed for {partner_id}")
+
+    facade = _care_facade(
+        care_conn,
+        _intake_facade(_connection([])),
+        attributed_doctor_name_resolver=_boom,
+    )
+
+    result = await facade.approve_prescription(
+        case_id=1, rx_id=1, doctor_id=42, verification_declaration=True
+    )
+
+    assert isinstance(result, PrescriptionDetailView)
+    assert result.status == "issued"
+    assert result.attributed_doctor_name is None
+    outbox = _insert_params(_statements(care_conn), CARE_OUTBOX_TABLE)
+    assert [p["event_type"] for p in outbox] == [
+        EVENT_PRESCRIPTION_APPROVED,
+        EVENT_PRESCRIPTION_ISSUED,
+    ]
+    issued = PrescriptionIssuedPayload.model_validate(outbox[1]["payload"])
+    assert issued.attributed_doctor_name is None
+    # Not silent: the degradation is surfaced as a warning (observability §2).
+    assert "attribution name resolution failed for partner 42" in caplog.text
 
 
 @pytest.mark.asyncio

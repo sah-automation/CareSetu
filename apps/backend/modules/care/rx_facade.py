@@ -19,6 +19,7 @@ performs a raw history read.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
@@ -36,6 +37,7 @@ from modules.care.care_models import (
 )
 from modules.care.case_facade import assigned_doctor_of_resolver, check_case_ownership
 from modules.care.domain.events import (
+    PrescriptionIssuedItem,
     prescription_approved_envelope,
     prescription_draft_created_envelope,
     prescription_issued_envelope,
@@ -78,6 +80,8 @@ if TYPE_CHECKING:
 #: ``HealthFacade.read_consented_history`` (fail-closed).
 RX_DRAFT_HISTORY_SCOPE = "prescriptions"
 
+logger = logging.getLogger("modules.care.rx_facade")
+
 
 def _to_rx_item_view(row: Row[Any]) -> RxItemView:
     """Build the typed line-item projection from a ``care_rx_items`` row."""
@@ -89,6 +93,22 @@ def _to_rx_item_view(row: Row[Any]) -> RxItemView:
         dose=row.dose,
         duration=row.duration,
         frequency=row.frequency,
+    )
+
+
+def _to_issued_rx_item(item: RxItemView) -> PrescriptionIssuedItem:
+    """Trim a working item into the frozen ``prescription.issued`` snapshot.
+
+    The issued snapshot carries only the display shape ``{name, dose,
+    frequency, duration}`` - the internal row ids and ``sequence`` stay behind
+    (the patient-facing record renders the snapshot, not a relational mirror;
+    D1, #513).
+    """
+    return PrescriptionIssuedItem(
+        name=item.name,
+        dose=item.dose,
+        frequency=item.frequency,
+        duration=item.duration,
     )
 
 
@@ -175,6 +195,27 @@ class PrescriptionFacade:
         self._health_facade = health_facade
         self._attributed_doctor_name_resolver = attributed_doctor_name_resolver
 
+    async def _resolve_issued_doctor_name(self, partner_id: int | None) -> str | None:
+        """Resolve the issuer's display name through the injected partner seam.
+
+        A missing seam, an unattributed prescription, an unresolvable partner,
+        or a failing seam all resolve to ``None`` - the "attributed to you"
+        fallback - never an error. The approve envelope AND the response view
+        must survive a cosmetic attribution miss (the composition-root seam
+        already logs and degrades, so this is defense-in-depth; #495, #513).
+        """
+        if self._attributed_doctor_name_resolver is None or partner_id is None:
+            return None
+        try:
+            return await self._attributed_doctor_name_resolver(partner_id)
+        except Exception:
+            logger.warning(
+                "issued-rx attribution name resolution failed for partner %s; "
+                "falling back to None (partner id only, no PHI)",
+                partner_id,
+            )
+            return None
+
     async def _with_attributed_name(self, view: PrescriptionDetailView) -> PrescriptionDetailView:
         """Enrich an issued view with the issuing doctor's display name.
 
@@ -185,9 +226,7 @@ class PrescriptionFacade:
         surfaces (approve and the approved read) call this, so in-progress
         reads never trigger a partner call.
         """
-        if self._attributed_doctor_name_resolver is None or view.attributed_doctor is None:
-            return view
-        name = await self._attributed_doctor_name_resolver(view.attributed_doctor)
+        name = await self._resolve_issued_doctor_name(view.attributed_doctor)
         if name is None:
             return view
         return view.model_copy(update={"attributed_doctor_name": name})
@@ -477,7 +516,12 @@ class PrescriptionFacade:
         exists - the raw AI draft is never approvable.
 
         Publishes ``prescription.approved`` and ``prescription.issued`` in the
-        SAME transaction.
+        SAME transaction. The ``prescription.issued`` envelope carries the
+        frozen issued snapshot (D1, #513): the trimmed medicine line items
+        exactly as approved, plus the issuing doctor's display name resolved
+        through the injected partner seam (resolved once and reused for both
+        the envelope and the response view - ``None`` on a missing seam or
+        unresolvable partner, never an error).
 
         The approval-gate seam (``_check_approval_declaration``) is the one
         replaceable CFL-002 compliance seam (ADR-0014/0015); the machine's
@@ -526,6 +570,7 @@ class PrescriptionFacade:
                 )
             items = [_to_rx_item_view(row) for row in item_rows]
             edited_yn = _derive_edited_yn(rx_row.draft_snapshot, items)
+            issued_doctor_name = await self._resolve_issued_doctor_name(doctor_id)
 
             issued_at = datetime.now(UTC)
             await connection.execute(
@@ -572,23 +617,24 @@ class PrescriptionFacade:
                     patient_id=int(case_row.patient_id),
                     doctor_id=doctor_id,
                     occurred_at=issued_at.isoformat(),
+                    items=[_to_issued_rx_item(item) for item in items],
+                    attributed_doctor_name=issued_doctor_name,
                 ),
             )
 
-            return await self._with_attributed_name(
-                PrescriptionDetailView(
-                    prescription_id=rx_id,
-                    case_id=case_id,
-                    status=next_state.status.value,
-                    source=rx_row.source,
-                    attempt_no=int(rx_row.attempt_no),
-                    draft_snapshot=rx_row.draft_snapshot,
-                    issued_at=issued_at,
-                    attributed_doctor=doctor_id,
-                    items=items,
-                    created_at=rx_row.created_at,
-                    updated_at=issued_at,
-                )
+            return PrescriptionDetailView(
+                prescription_id=rx_id,
+                case_id=case_id,
+                status=next_state.status.value,
+                source=rx_row.source,
+                attempt_no=int(rx_row.attempt_no),
+                draft_snapshot=rx_row.draft_snapshot,
+                issued_at=issued_at,
+                attributed_doctor=doctor_id,
+                attributed_doctor_name=issued_doctor_name,
+                items=items,
+                created_at=rx_row.created_at,
+                updated_at=issued_at,
             )
 
     async def reject_prescription(

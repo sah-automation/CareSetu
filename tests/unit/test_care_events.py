@@ -5,7 +5,10 @@ Pins the code-side mirror of the ``MOD-006`` rows of the §4.2 registry: care
 publishes ``case.consult_complete``, ``case.closed``,
 ``prescription.draft_created``, ``prescription.reviewed``,
 ``prescription.approved``, ``prescription.rejected`` and
-``prescription.issued`` (all typed, no-PHI: ids and lifecycle facts only), and
+``prescription.issued`` (all typed, no-PHI: ids and lifecycle facts only - with
+one deliberate exception: ``prescription.issued`` also carries the frozen
+issued snapshot, the medicine items and the attributed doctor's display name,
+so the patient-facing record entry becomes self-contained, D1 #513), and
 subscribes to ``pre_summary.ready`` (births the care case),
 ``pre_summary.low_confidence`` (sets ``forced_review`` on the matching case)
 and ``report.filed`` (ledgered telemetry seam). care owns every producer payload
@@ -55,6 +58,7 @@ from modules.care.adapters import (
     report_filed_count,
 )
 from modules.care.domain.events import (
+    PrescriptionIssuedItem,
     PrescriptionIssuedPayload,
     case_closed_envelope,
     case_consult_complete_envelope,
@@ -74,6 +78,12 @@ from modules.intake.domain.events import (
 )
 
 _OCCURRED_AT = "2026-09-15T10:00:00+00:00"
+
+#: One frozen issued medicine line, the trimmed ``{name, dose, frequency,
+#: duration}`` display shape the approve facade sends on ``prescription.issued``.
+_ISSUED_ITEMS = [
+    PrescriptionIssuedItem(name="Para-500", dose="500mg", frequency=None, duration="3 days")
+]
 
 _ALL_PRODUCED_EVENT_TYPES = (
     EVENT_CASE_CONSULT_COMPLETE,
@@ -121,7 +131,14 @@ def test_every_care_event_type_is_registered_in_bus_events() -> None:
     assert EVENT_REPORT_FILED == "report.filed"
 
 
-def test_produced_payloads_carry_no_phi_and_only_orchestration_facts() -> None:
+def test_produced_payloads_carry_only_their_registry_contract_fields() -> None:
+    # Every produced payload pins its exact registry field set (pessimistic:
+    # a field added to one event type must be declared here). The prescription
+    # lifecycle events are no-PHI ids and lifecycle facts; ``prescription.issued``
+    # is the ONE deliberate exception (D1, #513) - it additionally carries the
+    # frozen issued snapshot: ``items`` (medicine lines, name required, rest
+    # nullable) and ``attributed_doctor_name`` (``str | None``, so the dump
+    # includes it even when the attribution could not be resolved).
     assert set(
         case_consult_complete_envelope(
             case_id=1, patient_id=7, doctor_id=2, pre_summary_id=5
@@ -177,8 +194,17 @@ def test_produced_payloads_carry_no_phi_and_only_orchestration_facts() -> None:
             patient_id=7,
             doctor_id=2,
             occurred_at=_OCCURRED_AT,
+            items=_ISSUED_ITEMS,
         ).payload.model_dump()
-    ) == {"case_id", "prescription_id", "patient_id", "doctor_id", "occurred_at"}
+    ) == {
+        "case_id",
+        "prescription_id",
+        "patient_id",
+        "doctor_id",
+        "occurred_at",
+        "items",
+        "attributed_doctor_name",
+    }
 
 
 def _capture_produced_envelopes() -> list[Envelope[BaseModel]]:
@@ -206,6 +232,7 @@ def _capture_produced_envelopes() -> list[Envelope[BaseModel]]:
             patient_id=7,
             doctor_id=2,
             occurred_at=_OCCURRED_AT,
+            items=_ISSUED_ITEMS,
         ),
     ]
 
@@ -240,16 +267,32 @@ def test_health_consumer_mirror_accepts_cares_produced_payload() -> None:
         patient_id=7,
         doctor_id=2,
         occurred_at=_OCCURRED_AT,
+        items=_ISSUED_ITEMS,
     )
     raw = produced.payload.model_dump(mode="json")
     # The consumer mirror requires prescription_id, patient_id, occurred_at and
-    # drops producer-only case_id/doctor_id on validate - the dispatch-time
-    # re-validation that previously failed every real issuance (missing
-    # occurred_at) now passes against the care-produced payload.
+    # drops everything else on validate - the producer-only case_id/doctor_id
+    # and the new issued-snapshot fields (items, attributed_doctor_name) are
+    # additive to the tolerant mirror, so the dispatch-time re-validation that
+    # previously failed every real issuance (missing occurred_at) still passes
+    # against the care-produced payload.
     view = HealthPrescriptionIssuedPayload.model_validate(raw)
     assert view.prescription_id == 9
     assert view.patient_id == 7
     assert view.occurred_at == _OCCURRED_AT
+
+
+def test_cares_registered_issued_model_tolerates_legacy_rows_without_items() -> None:
+    # A pre-enrichment ``prescription.issued`` row (no items/name) replayed
+    # through the poll loop is re-validated against care's registered model
+    # in ``envelope_from_row``. It must validate as an empty snapshot so an
+    # in-flight legacy row still delivers and old entries degrade to the lean
+    # card rather than being stranded (parent #512 US13).
+    legacy = PrescriptionIssuedPayload(
+        case_id=1, prescription_id=9, patient_id=7, doctor_id=2, occurred_at=_OCCURRED_AT
+    )
+    assert legacy.items == []
+    assert legacy.attributed_doctor_name is None
 
 
 def test_register_handlers_registers_the_inbound_subscriptions() -> None:

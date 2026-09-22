@@ -40,7 +40,7 @@ from bus.dispatcher import DispatcherConfig, discover_outbox_tables, run_poll_lo
 from bus.envelope import Envelope
 from bus.outbox_ddl import materialize_consumed_events, materialize_outbox
 from bus.outbox_writer import write_outbox
-from modules.care.domain.events import PrescriptionIssuedPayload
+from modules.care.domain.events import PrescriptionIssuedItem, PrescriptionIssuedPayload
 from modules.consent.domain.events import consent_granted_envelope, consent_revoked_envelope
 from modules.health.domain.events import (
     PatientRegisteredPayload,
@@ -181,6 +181,7 @@ def _prescription_issued_envelope(
             patient_id=patient_id,
             doctor_id=10,
             occurred_at=datetime.now(UTC).isoformat(),
+            items=[PrescriptionIssuedItem(name="Amlodipine", dose="5 mg", duration="30 tablets")],
         ),
     )
 

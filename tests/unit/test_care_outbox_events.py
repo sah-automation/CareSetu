@@ -13,9 +13,11 @@ typed Pydantic payload model (coding-standards §3, MOD-006 §4.2 event names):
 - ``approve_prescription`` publishes ``approved`` then ``issued`` - both in
   one transaction, in order.
 - Every stored payload round-trips through ``model_validate`` against its typed
-  model; the payload models themselves are PHI-free by construction (only ids
-  and lifecycle facts: patient/doctor/case ids, ``edited_yn``, ``source``,
-  ``attempt_no``, ``reason``).
+  model; the payload models carry no-PHI ids and lifecycle facts (patient/
+  doctor/case ids, ``edited_yn``, ``source``, ``attempt_no``, ``reason``) with
+  one deliberate exception: ``prescription.issued`` also freezes the issued
+  snapshot - the medicine line items and the attributed doctor's display name
+  (D1, #513).
 """
 
 from __future__ import annotations
@@ -45,6 +47,7 @@ from modules.care.domain.events import (
     CaseConsultCompletePayload,
     PrescriptionApprovedPayload,
     PrescriptionDraftCreatedPayload,
+    PrescriptionIssuedItem,
     PrescriptionIssuedPayload,
     PrescriptionRejectedPayload,
     PrescriptionReviewedPayload,
@@ -467,6 +470,13 @@ class TestApprovedAndIssuedOutbox:
         assert issued.prescription_id == 1
         assert issued.patient_id == 7
         assert issued.doctor_id == 42
+        # The issued envelope freezes the approved medicine lines (trimmed to
+        # the {name, dose, frequency, duration} display shape, no internal
+        # ids) and the resolver-resolved doctor name (None here - no resolver).
+        assert issued.items == [
+            PrescriptionIssuedItem(name="Edited-Drug", dose="200mg", duration="7 days")
+        ]
+        assert issued.attributed_doctor_name is None
         # Both events ride the same single transaction.
         engine.begin.assert_called_once()
 
