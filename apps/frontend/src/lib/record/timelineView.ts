@@ -224,6 +224,52 @@ export function issuedPrescriptionCount(entries: RecordEntryView[]): number {
   return issued;
 }
 
+// #515: the enriched `prescription.issued` snapshot that #514 ships in the
+// record entry payload. Parsed in the `entryFlagRows` defensive style: each
+// row must be an object with a non-empty string `name`; `dose`/`frequency`/
+// `duration` are nullable strings when present. Pre-enrichment payloads that
+// carry no `items` array - or only malformed rows - degrade to an empty list,
+// so the card keeps today's lean form rather than fabricating fields.
+function nullableText(
+  row: Record<string, unknown>,
+  key: string,
+): string | null {
+  const value = row[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+export function prescriptionItems(entry: RecordEntryView): PrescriptionItem[] {
+  if (entry.entry_type !== "prescription") return [];
+  const raw = entry.payload.items;
+  if (!Array.isArray(raw)) return [];
+  const items: PrescriptionItem[] = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) continue;
+    const row = item as Record<string, unknown>;
+    if (typeof row.name !== "string" || row.name.length === 0) continue;
+    items.push({
+      name: row.name,
+      dose: nullableText(row, "dose"),
+      frequency: nullableText(row, "frequency"),
+      duration: nullableText(row, "duration"),
+    });
+  }
+  return items;
+}
+
+// #515: the attributed doctor's display name from the enriched payload; null
+// when absent, so the card falls back to neutral attribution copy.
+export function attributedDoctorName(entry: RecordEntryView): string | null {
+  return payloadString(entry, "attributed_doctor_name");
+}
+
+// #515: the chemist store name, present only on fulfilled entries once MOD-008
+// production exists. Render-if-present: null today (the key is reserved in the
+// contract) until a payload actually carries a value.
+export function chemistName(entry: RecordEntryView): string | null {
+  return payloadString(entry, "chemist_name");
+}
+
 export type BadgeTone = "success" | "accent" | "warm" | "muted";
 
 // Tailwind chip classes per BadgeTone - the single tone map shared by every
@@ -283,9 +329,20 @@ export interface EntryCardStrings {
     metric: string;
     settlement: string;
     issued: string;
+    active: string;
     delivered: string;
   };
   filedFromBooking: string;
+  issuedBy: (doctor: string) => string;
+  issuedByNeutral: string;
+  moreItems: (count: number) => string;
+}
+
+export interface PrescriptionItem {
+  name: string;
+  dose: string | null;
+  frequency: string | null;
+  duration: string | null;
 }
 
 export interface EntryCard {
@@ -339,16 +396,47 @@ export function describeEntry(
       };
     case "prescription": {
       const prescriptionId = payloadNumber(entry, "prescription_id");
+      const delivered = isDeliveredPrescription(entry);
+      // The issued badge reads Active with the success tone; Delivered keeps
+      // the success tone (both #515), so the two branches below never drift.
+      const badge: EntryBadge = delivered
+        ? { label: t.badge.delivered, tone: "success" }
+        : { label: t.badge.active, tone: "success" };
+      const icon = "\u{1F48A}";
+      const items = prescriptionItems(entry);
+      // #515 enriched payload: the medicine name leads as the title and the
+      // subtitle carries the dose line, `issued by <doctor>` attribution, the
+      // chemist when the payload names one, and a "+N more" tally for
+      // multi-item prescriptions. Pre-enrichment payloads without `items`
+      // keep the lean `Rx #<id> · date` form - cards render only what the
+      // payload documents.
+      if (items.length > 0) {
+        const first = items[0];
+        const doseParts: string[] = [];
+        if (first.dose !== null) doseParts.push(first.dose);
+        if (first.frequency !== null) doseParts.push(first.frequency);
+        if (first.duration !== null) doseParts.push(first.duration);
+        if (doseParts.length > 0) parts.push(doseParts.join(" \u00b7 "));
+        const doctor = attributedDoctorName(entry);
+        parts.push(doctor !== null ? t.issuedBy(doctor) : t.issuedByNeutral);
+        if (!omitOccurredAt) parts.push(date);
+        const chemist = chemistName(entry);
+        if (chemist !== null) parts.push(chemist);
+        if (items.length > 1) parts.push(t.moreItems(items.length - 1));
+        return {
+          icon,
+          title: first.name,
+          subtitle: parts.join(" \u00b7 ") || null,
+          badge,
+        };
+      }
       if (prescriptionId !== null) parts.push(`Rx #${prescriptionId}`);
       if (!omitOccurredAt) parts.push(date);
-      const delivered = isDeliveredPrescription(entry);
       return {
-        icon: "\u{1F48A}",
+        icon,
         title: t.badge.prescription,
         subtitle: parts.join(" \u00b7 ") || null,
-        badge: delivered
-          ? { label: t.badge.delivered, tone: "success" }
-          : { label: t.badge.issued, tone: "warm" },
+        badge,
       };
     }
     case "lab_report": {

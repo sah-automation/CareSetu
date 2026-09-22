@@ -753,3 +753,108 @@ describe("RecordPage PROTO-3.1 zones", () => {
     expect(within(summary).getByText("2")).toBeInTheDocument();
   });
 });
+
+describe("RecordPage PROTO-3.1 professional prescription cards (#515)", () => {
+  function resolveRx(payload: Record<string, unknown>) {
+    resolveWith({
+      ...TIMELINE,
+      entries: [
+        entry({
+          entry_id: 50,
+          entry_type: "prescription",
+          payload,
+          occurred_at: "2026-08-19T09:00:00Z",
+        }),
+        entry({
+          entry_id: 49,
+          entry_type: "consultation",
+          payload: {},
+          occurred_at: "2026-08-18T10:00:00Z",
+        }),
+      ],
+    });
+  }
+
+  it("renders an enriched issued prescription with medicine title, dose, doctor and Active pill", async () => {
+    resolveRx({
+      prescription_id: 12,
+      status: "issued",
+      items: [
+        {
+          name: "Amlodipine",
+          dose: "5 mg",
+          frequency: "once daily",
+          duration: "30 tablets",
+        },
+      ],
+      attributed_doctor_name: "Dr. A. Kumar",
+    });
+    render(<RecordPage />);
+    await waitForTimeline();
+
+    const card = screen.getByTestId("entry-50");
+    expect(card).toHaveTextContent("Amlodipine");
+    expect(card).toHaveTextContent("5 mg · once daily · 30 tablets");
+    expect(card).toHaveTextContent("issued by Dr. A. Kumar");
+    expect(card).toHaveTextContent(STRINGS.en.record.badge.active);
+  });
+
+  it("renders the chemist line on a delivered enriched prescription", async () => {
+    resolveRx({
+      prescription_id: 9,
+      status: "delivered",
+      items: [{ name: "Amlodipine", dose: "5 mg" }],
+      attributed_doctor_name: "Dr. A. Kumar",
+      chemist_name: "Ramesh Medical Store",
+    });
+    render(<RecordPage />);
+    await waitForTimeline();
+
+    const card = screen.getByTestId("entry-50");
+    expect(card).toHaveTextContent("Ramesh Medical Store");
+    expect(card).toHaveTextContent(STRINGS.en.record.badge.delivered);
+  });
+
+  it("shows a +N more indicator on a multi-item prescription", async () => {
+    resolveRx({
+      prescription_id: 12,
+      status: "issued",
+      items: [
+        { name: "Amlodipine", dose: "5 mg", frequency: "once daily" },
+        { name: "Atorvastatin", dose: "10 mg", frequency: "at night" },
+      ],
+      attributed_doctor_name: "Dr. A. Kumar",
+    });
+    render(<RecordPage />);
+    await waitForTimeline();
+
+    expect(screen.getByTestId("entry-50")).toHaveTextContent(
+      STRINGS.en.record.moreItems(1),
+    );
+  });
+
+  it("falls back to neutral attribution copy when no doctor name is present", async () => {
+    resolveRx({
+      prescription_id: 12,
+      status: "issued",
+      items: [{ name: "Amlodipine", dose: "5 mg", frequency: "once daily" }],
+      attributed_doctor_name: null,
+    });
+    render(<RecordPage />);
+    await waitForTimeline();
+
+    const card = screen.getByTestId("entry-50");
+    expect(card).toHaveTextContent("Amlodipine");
+    expect(card).toHaveTextContent(STRINGS.en.record.issuedByNeutral);
+    expect(card).not.toHaveTextContent(/issued by Dr/);
+  });
+
+  it("keeps the lean Rx form for a legacy prescription without items", async () => {
+    render(<RecordPage />);
+    await waitForTimeline();
+
+    const card = screen.getByTestId("entry-30");
+    expect(card).toHaveTextContent("Prescription");
+    expect(card).toHaveTextContent("Rx #12 · 19 Aug 2026");
+  });
+});

@@ -877,9 +877,18 @@ const en = {
       metric: "Metric",
       settlement: "Settlement",
       issued: "Issued",
+      active: "Active",
       delivered: "Delivered",
     },
     filedFromBooking: "filed from booking",
+    // #515: professional prescription card lines - the attribution reads
+    // "issued by <doctor>" when the payload names one and falls back to
+    // neutral copy when `attributed_doctor_name` is null, so the card never
+    // invents a doctor.
+    issuedBy: (doctor: string) => `issued by ${doctor}`,
+    issuedByNeutral: "issued by your care team",
+    prescribedBy: "Prescribed by",
+    moreItems: (count: number) => `+${count} more`,
     empty: {
       title: "No entries yet",
       body: "Your consultations, prescriptions, lab results and metrics appear here as your care happens.",
@@ -2190,9 +2199,14 @@ export const STRINGS: Record<Lang, Dictionary> = {
         metric: "मेट्रिक",
         settlement: "सेटलमेंट",
         issued: "जारी हुई",
+        active: "सक्रिय",
         delivered: "पहुँच गई",
       },
       filedFromBooking: "बुकिंग से दर्ज",
+      issuedBy: (doctor: string) => `${doctor} द्वारा जारी`,
+      issuedByNeutral: "आपकी देखभाल टीम द्वारा जारी",
+      prescribedBy: "डॉक्टर द्वारा लिखा गया",
+      moreItems: (count: number) => `+${count} और`,
       empty: {
         title: "अभी कोई एंट्री नहीं",
         body: "आपके परामर्श, प्रिस्क्रिप्शन, लैब रिपोर्ट और मेट्रिक्स यहाँ दिखेंगे जैसे-जैसे आपकी देखभाल होगी।",
