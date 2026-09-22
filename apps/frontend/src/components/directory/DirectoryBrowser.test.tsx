@@ -492,8 +492,8 @@ describe("DirectoryBrowser empty, error and fallback states", () => {
   });
 });
 
-describe("DirectoryBrowser location indicator (#501)", () => {
-  it("defaults to the launch beachhead", () => {
+describe("DirectoryBrowser location indicator (#501/#510)", () => {
+  it("keeps the static beachhead line on the public browse (no baseRoute)", () => {
     searchDirectory.mockReturnValue(new Promise(() => {}));
 
     render(<DirectoryBrowser />);
@@ -503,14 +503,12 @@ describe("DirectoryBrowser location indicator (#501)", () => {
     );
   });
 
-  it("shows the caller's persisted service area as the default location", () => {
+  it("omits the static location line when embedded under a shell", () => {
     searchDirectory.mockReturnValue(new Promise(() => {}));
 
-    render(<DirectoryBrowser locationLabel="Bishrampur" />);
+    render(<DirectoryBrowser baseRoute="/patient/find" />);
 
-    expect(screen.getByTestId("directory-location")).toHaveTextContent(
-      "Bishrampur",
-    );
+    expect(screen.queryByTestId("directory-location")).not.toBeInTheDocument();
   });
 });
 

@@ -1,9 +1,13 @@
-"use client";
-
 // PHASE-8.1 T11 (#485): the authed Find Care browse page (blueprint §5.3)
 // under the patient shell. The verified-directory surface is the shared
 // DirectoryBrowser reused as-is, with two seams: filter commits stay on
 // /patient/find (baseRoute) and the card grid fits the patient column width.
+// The location selector is owned per viewport (PROTO-2.7/#510): desktop shows
+// the shell top-bar chip (hidden lg:inline-flex in the Topbar), and the mobile
+// feed chip mounts here as the page's first content element (above the intake
+// continuation banner, mb-4, hidden at lg) - exactly one interactive selector
+// per viewport on Find Care, same as Home. The chip reads the persisted profile
+// draft area, so no separate location seam exists on the directory embed.
 // Above the browse, when the intake flow has an in-progress intake it carries
 // ?intake=<id> onto this page (per §5.4 "Find Care booking flow carrying the
 // intake id"), and a continuation CTA deep-links back into that intake's pick
@@ -17,11 +21,10 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 
 import { DirectoryBrowser } from "@/components/directory/DirectoryBrowser";
+import { LocationChip } from "@/components/patient/location/LocationChip";
 import { Button } from "@/components/ui/button";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
-import { useOptionalProfile } from "@/lib/profile/ProfileContext";
-import { serviceAreaLabel } from "@/lib/location/serviceArea";
 
 const FIND_ROUTE = "/patient/find";
 
@@ -43,17 +46,16 @@ export function FindCareBrowser() {
   const t = STRINGS[lang].findCare;
   const searchParams = useSearchParams();
   const intakeId = parseIntakeId(searchParams.get(INTAKE_QUERY_PARAM));
-  // #501: the persisted service area is Find Care's default location filter
-  // (REQ-008 single-service-area). The directory has one city today, so this
-  // is a display default - the result set is unchanged.
-  const profile = useOptionalProfile();
-  const locationLabel = serviceAreaLabel(
-    profile?.draft.area,
-    STRINGS[lang].loc.cities,
-  );
 
   return (
     <>
+      {/* Mobile feed location chip (#510): the page's first content element,
+          above the continuation banner, mirroring the Home feed chip (PROTO-2.7
+          placement "feed", hidden at lg - the shell top-bar chip covers desktop
+          on this same page). The chip reads the persisted profile draft area,
+          so no static location line exists on the embedded directory. */}
+      <LocationChip placement="feed" className="mb-4 inline-flex lg:hidden" />
+
       {intakeId !== null && (
         <section data-testid="resume-consult" className="mb-4 px-1">
           <div className="flex flex-col gap-3 rounded-lg border border-accent-border bg-accent-soft px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
@@ -71,7 +73,6 @@ export function FindCareBrowser() {
       <DirectoryBrowser
         baseRoute={FIND_ROUTE}
         cardGridClassName="grid gap-4 sm:grid-cols-2"
-        locationLabel={locationLabel}
       />
     </>
   );

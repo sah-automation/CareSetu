@@ -185,25 +185,38 @@ describe("FindCareBrowser booking deep link", () => {
   });
 });
 
-describe("FindCareBrowser default location (#501)", () => {
-  it("uses the persisted service area as the default location indicator", async () => {
+describe("FindCareBrowser location selector (#510)", () => {
+  it("shows the persisted service area on the feed chip", async () => {
     state.profileArea = "Bishrampur";
     await renderPage();
-    await waitFor(() => screen.getByTestId("directory-cards"));
 
-    expect(screen.getByTestId("directory-location")).toHaveTextContent(
-      "Bishrampur",
-    );
+    const chip = await screen.findByTestId("location-chip-feed");
+    expect(chip).toHaveTextContent("Bishrampur");
   });
 
   it("falls back to the beachhead when no area is persisted", async () => {
     state.profileArea = null;
     await renderPage();
+
+    const chip = await screen.findByTestId("location-chip-feed");
+    expect(chip).toHaveTextContent(STRINGS.en.loc.cities.Daltonganj);
+  });
+
+  it("opens the single-city picker sheet with the coming-soon note", async () => {
+    await renderPage();
+    fireEvent.click(await screen.findByTestId("location-chip-feed"));
+
+    const sheet = await screen.findByTestId("location-sheet");
+    expect(sheet).toHaveTextContent(STRINGS.en.loc.cities.Daltonganj);
+    expect(sheet).toHaveTextContent(STRINGS.en.loc.citySub);
+    expect(sheet).toHaveTextContent(STRINGS.en.loc.more);
+  });
+
+  it("omits the static directory-location line - the shell owns it", async () => {
+    await renderPage();
     await waitFor(() => screen.getByTestId("directory-cards"));
 
-    expect(screen.getByTestId("directory-location")).toHaveTextContent(
-      "Daltonganj",
-    );
+    expect(screen.queryByTestId("directory-location")).not.toBeInTheDocument();
   });
 });
 
