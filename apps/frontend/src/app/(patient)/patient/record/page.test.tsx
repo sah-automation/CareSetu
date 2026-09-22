@@ -369,7 +369,8 @@ describe("RecordPage type filters", () => {
     render(<RecordPage />);
     await waitForTimeline();
 
-    // Metrics is never a chip - it lives in the More menu at every width.
+    // Metrics is a chip at 720px+; this exercises the mobile menu path down
+    // to the empty state.
     openMoreMenu();
     fireEvent.click(screen.getByRole("menuitemradio", { name: "Metrics" }));
     expect(screen.getByTestId("empty-state")).toBeInTheDocument();
@@ -595,11 +596,14 @@ describe("RecordPage PROTO-3.1 snapshot strip", () => {
 });
 
 describe("RecordPage PROTO-3.1 filter chip vocabulary", () => {
-  it("never renders Metrics as a chip - it lives in More at every width", async () => {
+  it("renders Metrics as a 720px+ chip and in the mobile More menu", async () => {
     render(<RecordPage />);
     await waitForTimeline();
 
-    expect(screen.queryByTestId("filter-chip-metric")).not.toBeInTheDocument();
+    expect(screen.getByTestId("filter-chip-metric")).toBeInTheDocument();
+    // jsdom applies no media queries, so the desktop chip and the mobile
+    // More copy coexist - the chip is the >=720px surface, the menu the
+    // <720px one.
     openMoreMenu();
     expect(
       screen.getByRole("menuitemradio", { name: "Metrics" }),

@@ -179,13 +179,15 @@ function snapshotStripRow({
   );
 }
 
-// Single-line chip row: All | Consultations | Prescriptions always, Lab at
-// 720px+. Metrics is never a chip - it lives in the More menu at every width.
+// Single-line chip row: All | Consultations | Prescriptions always; Lab
+// results and Metrics render as chips at 720px+ and fold into the More menu
+// below 720px, so the desktop row never strands a control in a one-item menu.
 const CHIP_ROW: readonly RecordFilter[] = [
   "all",
   "consultation",
   "prescription",
   "lab_report",
+  "metric",
 ];
 
 type LoadStatus = "loading" | "ready" | "error";
@@ -412,11 +414,12 @@ export default function RecordPage() {
                   </button>
                 );
               })}
-              {/* More dropdown at all widths: Lab folds in below 720px (the
-                  chip hides), Metrics lives here only - never a chip. */}
+              {/* More dropdown below 720px only: Lab results and Metrics are
+                  chips at 720px+, so the desktop row already holds every
+                  filter directly and More has no hidden filter left to show. */}
               <span
                 data-testid="filter-more-wrap"
-                className="flex min-w-0 max-[720px]:flex-1"
+                className="hidden min-w-0 max-[720px]:flex max-[720px]:flex-1"
               >
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
@@ -442,13 +445,7 @@ export default function RecordPage() {
                       }
                     >
                       {MORE_OVERFLOW_FILTERS.map((key) => (
-                        <DropdownMenuRadioItem
-                          key={key}
-                          value={key}
-                          className={cn(
-                            key === "lab_report" && "hidden max-[720px]:block",
-                          )}
-                        >
+                        <DropdownMenuRadioItem key={key} value={key}>
                           {t.filter[FILTER_LABEL_KEY[key]]}
                         </DropdownMenuRadioItem>
                       ))}
