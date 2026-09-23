@@ -379,10 +379,11 @@ test("a fresh login resolves identity in-flow so profile Finish works without a 
   ).toBe(1);
 
   // The seam resolved identity from the stored session: the dashboard renders
-  // the masked phone (the avatar's last two digits) instead of the anonymous
-  // placeholder.
-  await expect(page.getByTestId("account-menu")).toContainText(
-    freshPhone.slice(-2),
+  // the avatar trigger flagged as resolved (the patient trigger no longer
+  // shows the last two digits anywhere, #521). The flag carries no phone.
+  await expect(page.getByTestId("account-menu")).toHaveAttribute(
+    "data-session-resolved",
+    "true",
   );
 
   // Reach the completion wizard directly. #499 removed the home's nudge stack
@@ -391,8 +392,9 @@ test("a fresh login resolves identity in-flow so profile Finish works without a 
   // The hard goto re-resolves identity (see the identity-remount guard note),
   // so wait for the account menu to settle before touching the form.
   await page.goto("/patient/profile/complete");
-  await expect(page.getByTestId("account-menu")).toContainText(
-    freshPhone.slice(-2),
+  await expect(page.getByTestId("account-menu")).toHaveAttribute(
+    "data-session-resolved",
+    "true",
   );
 
   // Fill the required basics and Finish on the very first attempt.

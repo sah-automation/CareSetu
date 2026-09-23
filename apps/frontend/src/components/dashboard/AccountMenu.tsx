@@ -4,8 +4,17 @@
 // - phone, role badge, switch-role, and logout consolidated into one dropdown
 // behind an avatar-icon trigger, matching the finalized PROTO-PHASE-2.6
 // views. Extracted from the pre-T06 Topbar.
+// #521: role-aware trigger - the patient branch renders the shared Avatar
+// (photo_ref -> name initial -> person icon) with no name label beside it;
+// staff roles (doctor/partner/operator) keep the phone-digit trigger and
+// dropdown verbatim because their names/photos are not in the session
+// payload. The full phone stays hidden until the menu opens. data-session-
+// resolved carries only a resolved/pending flag for e2e settle guards (avatar
+// text is no longer a digit signal) - never the phone itself, so the closed
+// trigger leaks nothing.
 
 import { useAuth } from "@/lib/auth/AuthContext";
+import { useOptionalProfile } from "@/lib/profile/ProfileContext";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -14,6 +23,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Avatar } from "@/components/ui/avatar";
 
 import { isAppRole, resolveRole, roleLabel } from "./types";
 
@@ -29,7 +39,9 @@ function identityLine(user: { phone?: string; id: number } | null): string {
 
 export function AccountMenu() {
   const { user, selectedRole, switchRole, logout } = useAuth();
+  const profile = useOptionalProfile();
   const currentRole = resolveRole(selectedRole);
+  const isPatient = currentRole === "patient";
   const otherRoles = (user?.roles ?? [])
     .filter(isAppRole)
     .filter((role) => role !== currentRole);
@@ -41,9 +53,18 @@ export function AccountMenu() {
           type="button"
           aria-label="Account menu"
           data-testid="account-menu"
+          data-session-resolved={user ? "true" : "false"}
           className="flex h-9 w-9 items-center justify-center rounded-full bg-accent-soft text-sm font-semibold text-accent-strong hover:bg-accent-border"
         >
-          {(user?.phone || "?").slice(-2)}
+          {isPatient ? (
+            <Avatar
+              photoRef={profile?.savedProfile?.photo_ref}
+              name={profile?.savedProfile?.name}
+              className="h-full w-full text-inherit"
+            />
+          ) : (
+            (user?.phone || "?").slice(-2)
+          )}
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-52">

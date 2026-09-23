@@ -1,6 +1,9 @@
 // PHASE-2.6 T08 (#199): dedicated accessibility suite for the §2.6 account
 // menu - trigger semantics, keyboard open/close with focus return, menu-item
 // roles, the stale-session phone-missing degrade, and both shell densities.
+// #521: patient avatar trigger (precedence chain, Devanagari initial, phone
+// hidden until open) and the staff-role regression pinning the old phone-
+// digit trigger/dropdown verbatim.
 
 import {
   render,
@@ -22,6 +25,20 @@ import {
 import { AccountMenu } from "./AccountMenu";
 import { AuthProvider } from "@/lib/auth/AuthContext";
 import type { StoredSession } from "@/lib/auth/session";
+import { ProfileProvider } from "@/lib/profile/ProfileContext";
+import type { StoredPatientProfile } from "@/lib/profile/api";
+
+// Profile client mocked at the module boundary (ProfileContext.test prior
+// art) so the patient trigger can hydrate a saved name/photo without HTTP.
+const profileApi = vi.hoisted(() => ({
+  getProfile: vi.fn(),
+  saveProfile: vi.fn(),
+}));
+
+vi.mock("@/lib/profile/api", () => ({
+  getProfile: profileApi.getProfile,
+  saveProfile: profileApi.saveProfile,
+}));
 
 const VALID_SESSION: StoredSession = {
   jwt: "test-jwt-token",
@@ -38,10 +55,37 @@ const ME_RESPONSE_SINGLE_ROLE = {
   roles: ["patient"],
 };
 
+// #521 staff regression: a doctor session keeps the phone-digit trigger.
+const ME_RESPONSE_DOCTOR = {
+  subject_id: "42",
+  phone: "+911234567890",
+  roles: ["doctor"],
+};
+
 // A stale session payload predating T05's additive phone field.
 const ME_RESPONSE_NO_PHONE = {
   subject_id: "42",
   roles: ["patient"],
+};
+
+const NAMED_PROFILE: StoredPatientProfile = {
+  name: "Asha Devi",
+  age: 30,
+  gender: "female",
+  preferred_language: "en",
+  area: null,
+  emergency_contact: null,
+  photo_ref: null,
+};
+
+const DEVANAGARI_PROFILE: StoredPatientProfile = {
+  ...NAMED_PROFILE,
+  name: "अंकिता शर्मा",
+};
+
+const PHOTO_PROFILE: StoredPatientProfile = {
+  ...NAMED_PROFILE,
+  photo_ref: "https://cdn.example.test/me.jpg",
 };
 
 function setStoredSession(session: StoredSession) {
@@ -56,6 +100,52 @@ function renderAccountMenu() {
       <AccountMenu />
     </AuthProvider>,
   );
+}
+
+function mockMeResponse(payload: unknown) {
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+    new Response(JSON.stringify(payload), { status: 200 }),
+  );
+}
+
+// #521: the patient trigger reads name/photo through the shared profile
+// seam. When `profile` is given, wrap in the real ProfileProvider so
+// hydration ordering is exercised (name/photo arrive async).
+async function renderClosedTrigger(
+  mePayload: unknown,
+  profile?: StoredPatientProfile | null,
+) {
+  setStoredSession(VALID_SESSION);
+  const app = (
+    <AuthProvider>
+      {profile !== undefined ? (
+        <ProfileProvider>
+          <AccountMenu />
+        </ProfileProvider>
+      ) : (
+        <AccountMenu />
+      )}
+    </AuthProvider>
+  );
+  if (profile !== undefined) {
+    profileApi.getProfile.mockResolvedValue({
+      set: profile !== null,
+      profile,
+    });
+  }
+  mockMeResponse(mePayload);
+  render(app);
+  const trigger = await waitFor(() =>
+    expect(screen.getByTestId("account-menu")).toBeInTheDocument(),
+  ).then(() => screen.getByTestId("account-menu"));
+  if (profile !== undefined) {
+    await waitFor(() => expect(profileApi.getProfile).toHaveBeenCalled());
+  }
+  return trigger;
+}
+
+function renderPatientWithProfile(profile: StoredPatientProfile | null) {
+  return renderClosedTrigger(ME_RESPONSE_SINGLE_ROLE, profile);
 }
 
 async function openViaKeyboard() {
@@ -97,6 +187,9 @@ beforeEach(() => {
   vi.restoreAllMocks();
   localStorage.clear();
   mockReplace.mockReset();
+  // restoreAllMocks clears the hoisted module-mock implementations too;
+  // re-seed the default "no saved profile" answer every test starts from.
+  profileApi.getProfile.mockResolvedValue({ set: false, profile: null });
 });
 
 afterEach(() => {
@@ -161,6 +254,89 @@ describe("AccountMenu accessibility", () => {
     expect(screen.getByText("+911234567890")).toBeInTheDocument();
     expect(screen.getByTestId("account-menu-role-badge")).toHaveTextContent(
       "Patient",
+    );
+    expect(
+      screen.getByRole("menuitem", { name: "Logout" }),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("AccountMenu patient avatar trigger (#521)", () => {
+  it("falls back to the person icon when no profile is saved", async () => {
+    const trigger = await renderClosedTrigger(ME_RESPONSE_SINGLE_ROLE);
+
+    // No digit text and no name: just the icon branch of the chain.
+    expect(trigger).toHaveTextContent("");
+    expect(trigger.querySelector("svg")).not.toBeNull();
+    expect(trigger.querySelector("img")).toBeNull();
+    await waitFor(() =>
+      expect(trigger).toHaveAttribute("data-session-resolved", "true"),
+    );
+  });
+
+  it("shows the first letter of the saved name, no icon", async () => {
+    const trigger = await renderPatientWithProfile(NAMED_PROFILE);
+
+    await waitFor(() => expect(trigger).toHaveTextContent("A"));
+    expect(trigger.querySelector("svg")).toBeNull();
+    expect(trigger.querySelector("img")).toBeNull();
+  });
+
+  it("renders a Devanagari initial intact", async () => {
+    const trigger = await renderPatientWithProfile(DEVANAGARI_PROFILE);
+
+    await waitFor(() => expect(trigger).toHaveTextContent("अ"));
+  });
+
+  it("photo_ref wins over the name initial once it resolves", async () => {
+    const trigger = await renderClosedTrigger(
+      ME_RESPONSE_SINGLE_ROLE,
+      PHOTO_PROFILE,
+    );
+
+    const img = await waitFor(() => trigger.querySelector("img")).then(
+      (el) => el!,
+    );
+    expect(img.getAttribute("src")).toBe("https://cdn.example.test/me.jpg");
+    expect(trigger).not.toHaveTextContent("A");
+  });
+
+  it("a bare photo file name stays dormant (no URL seam): letter wins", async () => {
+    const trigger = await renderClosedTrigger(ME_RESPONSE_SINGLE_ROLE, {
+      ...NAMED_PROFILE,
+      photo_ref: "me.jpg",
+    });
+
+    await waitFor(() => expect(trigger).toHaveTextContent("A"));
+    expect(trigger.querySelector("img")).toBeNull();
+  });
+
+  it("keeps the name off the trigger and the phone hidden until the menu opens", async () => {
+    const trigger = await renderPatientWithProfile(NAMED_PROFILE);
+
+    // No name label beside the circle; no full phone while closed.
+    expect(trigger).not.toHaveTextContent("Asha");
+    expect(screen.queryByText("Asha Devi")).toBeNull();
+    expect(screen.queryByText("+911234567890")).toBeNull();
+
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    await waitFor(() => expect(screen.getByRole("menu")).toBeInTheDocument());
+
+    expect(screen.getByText("+911234567890")).toBeInTheDocument();
+  });
+
+  it("staff role keeps the phone-digit trigger and dropdown verbatim", async () => {
+    const trigger = await renderClosedTrigger(ME_RESPONSE_DOCTOR);
+
+    expect(trigger).toHaveTextContent("90");
+    expect(trigger.querySelector("svg")).toBeNull();
+    expect(trigger.querySelector("img")).toBeNull();
+
+    await openViaKeyboard();
+
+    expect(screen.getByText("+911234567890")).toBeInTheDocument();
+    expect(screen.getByTestId("account-menu-role-badge")).toHaveTextContent(
+      "Doctor",
     );
     expect(
       screen.getByRole("menuitem", { name: "Logout" }),

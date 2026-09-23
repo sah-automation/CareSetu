@@ -111,15 +111,16 @@ async function getAuthInfo(
 // before that remount completes races against the unmount (visible as
 // "element is not stable" then "detached from the DOM" on any open sheet).
 // Guard every hard goto that precedes stateful UI with a wait for the account
-// menu's phone digits - the earliest visual signal that identity settled.
-async function waitForIdentityResolved(
-  page: Page,
-  number: string,
-): Promise<void> {
-  const digits = number.slice(-2);
-  await expect(page.getByTestId("account-menu")).toContainText(digits, {
-    timeout: 15_000,
-  });
+// menu's resolved identity - the earliest visual signal that identity settled.
+// #521: the patient trigger is now an avatar with no visible digits, so the
+// signal is the trigger's data-session-resolved flag (set only once /v1/me
+// resolves) instead of trigger text - and it carries no phone data.
+async function waitForIdentityResolved(page: Page): Promise<void> {
+  await expect(page.getByTestId("account-menu")).toHaveAttribute(
+    "data-session-resolved",
+    "true",
+    { timeout: 15_000 },
+  );
 }
 
 // ---- Seed helpers ----
@@ -198,7 +199,7 @@ test("patient journey: record -> filter -> seed consent -> revoke -> revoked rec
 
   // 3. Navigate to My Record and verify timeline entries render
   await page.goto("/patient/record");
-  await waitForIdentityResolved(page, phone);
+  await waitForIdentityResolved(page);
   await expect(page.getByTestId("record-timeline")).toBeVisible({
     timeout: 30_000,
   });
