@@ -105,12 +105,13 @@ describe("Profile & Settings page (#522/#523)", () => {
     expect(screen.getByTestId("ps-lang")).toHaveValue("en");
     expect(screen.getByTestId("ps-area")).toHaveValue("Bishrampur");
     expect(screen.getByTestId("ps-ec")).toHaveValue("+91 98765 43210");
-    // name + age + gender + photo + area + emergency = 6/7 filled.
+    // name + age + gender + area + emergency = 5/5 on the page-scoped meter
+    // (photo and chronic-interest tracking are not collectable here, #527).
     expect(screen.getByTestId("pc-meter")).toHaveAttribute(
       "aria-valuenow",
-      "86",
+      "100",
     );
-    expect(screen.getByTestId("ps-meter-label")).toHaveTextContent("86%");
+    expect(screen.getByTestId("ps-meter-label")).toHaveTextContent("100%");
     expect(screen.queryByTestId("ps-save-blocked")).not.toBeInTheDocument();
   });
 

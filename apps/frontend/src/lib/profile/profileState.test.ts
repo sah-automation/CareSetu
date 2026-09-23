@@ -116,6 +116,32 @@ describe("completion meter", () => {
     expect(profileCompleteness(full)).toBe(100);
   });
 
+  it("keeps the profile-settings scope free of the wizard-only dimensions (#527)", () => {
+    // Photo upload and the chronic-interest toggles are not collectable on
+    // Profile & Settings, so a fully edited page must read 100% there even
+    // when photoFileName and the tracking flags are absent - while the
+    // full-draft meter (wizard/Home) still counts them as missing.
+    const fullPage = draftWith({
+      name: "Asha Devi",
+      age: "30",
+      gender: "other",
+      area: "Bishrampur",
+      emergencyContact: "+91 98765 43210",
+    });
+    expect(profileCompleteness(fullPage, "profile-settings")).toBe(100);
+    expect(profileCompleteness(fullPage)).toBeLessThan(100);
+
+    // The page scope still moves monotonically: an empty draft reads 0 and a
+    // partially filled one sits strictly between.
+    expect(profileCompleteness(initialDraft(), "profile-settings")).toBe(0);
+    const partial = profileCompleteness(
+      draftWith({ name: "Asha", age: "30", gender: "male" }),
+      "profile-settings",
+    );
+    expect(partial).toBeGreaterThan(0);
+    expect(partial).toBeLessThan(100);
+  });
+
   it("counts valid fields only and moves monotonically toward 100%", () => {
     const one = profileCompleteness(draftWith({ name: "Asha" }));
     expect(one).toBeGreaterThan(0);

@@ -58,13 +58,20 @@ import { accountIdentity } from "./BottomTabs";
 // Stale sessions can carry a user whose JSON predates the T05 additive
 // phone field (absent or empty at runtime despite the non-optional type);
 // the staff label row degrades to the subject id rather than crashing
-// (#199 handoff). Same convention accountIdentity applies for the patient.
+// (#199 handoff). Only the mask-free full-phone branch differs from the
+// patient convention - the "Subject #id" format itself is single-sourced in
+// accountIdentity, so the fallback never forks it.
 function identityLine(user: { phone?: string; id: number } | null): string {
   if (!user) {
     return "";
   }
-  return user.phone || `Subject #${user.id}`;
+  return user.phone || accountIdentity(null, user);
 }
+
+// #527: every patient dropdown row is a >=44px tap target (spec #520 story
+// 30). Shared so a future patient row cannot silently drop the contract; the
+// staff branch deliberately never uses it (staff stays verbatim).
+const patientMenuItemClass = "min-h-11";
 
 // The "Complete your profile" CTA shows only while the saved profile is absent
 // or fails the care-action basics gate (name + age + gender, spec #520). The
@@ -93,6 +100,7 @@ export function AccountMenu() {
       key={role}
       onSelect={() => switchRole(role)}
       data-testid={`switch-to-${role}`}
+      className={isPatient ? patientMenuItemClass : undefined}
     >
       {menuStrings.switchRole(roleLabel(role))}
     </DropdownMenuItem>
@@ -105,7 +113,10 @@ export function AccountMenu() {
     <DropdownMenuItem
       onSelect={() => logout()}
       data-testid="logout-button"
-      className="text-danger focus:bg-danger-soft focus:text-danger"
+      className={cn(
+        patientMenuItemClass,
+        "text-danger focus:bg-danger-soft focus:text-danger",
+      )}
     >
       {strings.logOut}
     </DropdownMenuItem>
@@ -133,16 +144,22 @@ export function AccountMenu() {
           // place on phones - the More sheet - so the top-right circle is
           // hidden below `lg` (the pure-CSS bottom-tab breakpoint). Staff
           // roles keep the phone-digit trigger at every width.
+          // #527: the patient branch grows the pointer target to 44px (spec
+          // #520 story 30) while the avatar disc itself stays 36px - the disc
+          // styling lives on the Avatar so the visible circle is unchanged and
+          // staff keeps its verbatim 36px disc.
           className={cn(
-            "h-9 w-9 items-center justify-center rounded-full bg-accent-soft text-sm font-semibold text-accent-strong hover:bg-accent-border",
-            isPatient ? "hidden lg:inline-flex" : "flex",
+            "items-center justify-center rounded-full",
+            isPatient
+              ? "hidden h-11 w-11 lg:inline-flex"
+              : "flex h-9 w-9 bg-accent-soft text-sm font-semibold text-accent-strong hover:bg-accent-border",
           )}
         >
           {isPatient ? (
             <Avatar
               photoRef={saved?.photo_ref}
               name={saved?.name}
-              className="h-full w-full text-inherit"
+              className="h-9 w-9 bg-accent-soft text-sm font-semibold text-accent-strong hover:bg-accent-border"
             />
           ) : (
             (user?.phone || "?").slice(-2)
@@ -176,6 +193,7 @@ export function AccountMenu() {
             <DropdownMenuItem
               asChild
               data-testid="account-menu-profile-settings"
+              className={patientMenuItemClass}
             >
               <Link href="/patient/profile">{strings.profileSettings}</Link>
             </DropdownMenuItem>
@@ -183,6 +201,7 @@ export function AccountMenu() {
               <DropdownMenuItem
                 asChild
                 data-testid="account-menu-complete-profile"
+                className={patientMenuItemClass}
               >
                 <Link href="/patient/profile">
                   {menuStrings.completeProfile}

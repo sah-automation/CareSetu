@@ -10,7 +10,21 @@
 // unit test re-enforces it mechanically at runtime (a key missing from
 // either locale fails the suite).
 
-export type Lang = "en" | "hi";
+/**
+ * The locales the app ships, with their native (language-internal) display
+ * names. A native name never translates with the surrounding locale, so these
+ * live here on the i18n config surface (coding-standards §9.1/§9.2 - a locale
+ * change is a single edit, not a source sweep) rather than as scattered JSX
+ * option literals or in the per-locale dictionaries. Every language picker
+ * renders from this list, and Lang is derived from it so the code set exists
+ * once.
+ */
+export const SUPPORTED_LOCALES = [
+  { code: "hi", nativeName: "हिंदी" },
+  { code: "en", nativeName: "English" },
+] as const;
+
+export type Lang = (typeof SUPPORTED_LOCALES)[number]["code"];
 
 const en = {
   // auth.* surface - the patient OTP wizard's copy, moved verbatim from

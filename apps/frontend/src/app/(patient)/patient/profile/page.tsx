@@ -16,6 +16,7 @@ import { ProfileSaveStatusNotice } from "@/components/patient/profile/SaveStatus
 import { Button } from "@/components/ui/button";
 import {
   STRINGS,
+  SUPPORTED_LOCALES,
   type Lang,
   type ProfileStrings,
 } from "@/lib/i18n/dictionaries";
@@ -47,7 +48,12 @@ export default function ProfileSettingsPage() {
   };
 
   const errors = step1Errors(draft);
-  const pct = profileCompleteness(draft);
+  // Page-scoped meter: counts only the fields this page can edit (basics +
+  // area + emergency). Photo upload and the wizard's chronic-interest toggles
+  // are not collectable here, so the full-draft meter would leave a fully
+  // edited profile permanently under 100% with nothing left to fill on this
+  // surface (spec #520 story 22). The wizard/Home meters keep the full scope.
+  const pct = profileCompleteness(draft, "profile-settings");
 
   const handleSave = () => {
     if (!basicsComplete(draft)) {
@@ -69,8 +75,9 @@ export default function ProfileSettingsPage() {
         data-testid="profile-settings"
         className="rounded-lg border border-hairline bg-surface p-5 shadow-card"
       >
-        {/* Completion meter: reflects draft completeness, same primitive the
-            wizard and Home nudges use. */}
+        {/* Completion meter: reflects only the fields this page edits, so
+            "what is left to fill" is always fillable in place (#520 story
+            22); the wizard/Home meters keep the full-draft scope. */}
         <div className="flex items-center gap-3">
           <MeterBar pct={pct} label={t.meterLabel} />
           <span
@@ -194,9 +201,13 @@ export default function ProfileSettingsPage() {
               }}
             >
               {/* Native names by convention: a language's name does not
-                  translate with the surrounding locale. */}
-              <option value="hi">हिंदी</option>
-              <option value="en">English</option>
+                  translate with the surrounding locale; the list itself is
+                  the single i18n source (SUPPORTED_LOCALES). */}
+              {SUPPORTED_LOCALES.map((locale) => (
+                <option key={locale.code} value={locale.code}>
+                  {locale.nativeName}
+                </option>
+              ))}
             </select>
           </div>
         </div>

@@ -136,9 +136,35 @@ function completenessItems(draft: ProfileDraft): boolean[] {
   ];
 }
 
+// The items Profile & Settings can actually collect (spec #520): basics +
+// area + emergency. Photo upload is a later seam (out of scope) and the
+// chronic-interest tracking toggles are the wizard's skippable step, so a
+// page that counted them would cap a fully-edited profile below 100% with no
+// way to close the gap - "what is left to fill" must always be fillable here.
+function profileSettingsItems(draft: ProfileDraft): boolean[] {
+  return [
+    hasText(draft.name),
+    parseAge(draft.age) !== null,
+    draft.gender !== "",
+    areaComplete(draft),
+    emergencyPresent(draft),
+  ];
+}
+
+/**
+ * Which dimension set a meter measures. Defaults to "all" (the wizard/Home
+ * meters); Profile & Settings passes "profile-settings" so its meter never
+ * counts the two dimensions that page cannot collect.
+ */
+export type CompletenessScope = "all" | "profile-settings";
+
 /** Draft completeness as a whole percentage, 0-100. */
-export function profileCompleteness(draft: ProfileDraft): number {
-  const items = completenessItems(draft);
+export function profileCompleteness(
+  draft: ProfileDraft,
+  scope: CompletenessScope = "all",
+): number {
+  const items =
+    scope === "all" ? completenessItems(draft) : profileSettingsItems(draft);
   const filled = items.filter(Boolean).length;
   return Math.round((100 * filled) / items.length);
 }
