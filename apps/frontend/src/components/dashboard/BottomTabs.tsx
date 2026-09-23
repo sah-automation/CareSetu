@@ -166,8 +166,10 @@ function maskedPhone(phone: string): string {
 }
 
 // Export for unit tests: the mask format is an explicit acceptance criterion
-// of #525 and this pure helper is the single source of it.
-export { maskedPhone };
+// of #525 and this pure helper is the single source of it. accountIdentity is
+// the shared name->masked->Subject:#id resolution the desktop dropdown reuses
+// (#526) - one implementation of the stale-session degrade (#199).
+export { maskedPhone, accountIdentity };
 
 function AccountCard({
   name,

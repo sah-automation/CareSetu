@@ -830,9 +830,9 @@ const en = {
     bookings: "Bookings & Orders",
     profileSettings: "Profile & Settings",
     more: "More",
-    // #525: the mobile More sheet's red sign-out row (patient account
-    // surface). Spell "Log out" as two words per spec #520 vocabulary - the
-    // desktop dropdown's "Logout" copy is #526 territory.
+    // #525/#526: the account cluster's sign-out row in both the mobile More
+    // sheet and the desktop dropdown. Spell "Log out" as two words per spec
+    // #520 vocabulary.
     logOut: "Log out",
     queue: "Queue",
     cases: "Cases",
@@ -844,6 +844,17 @@ const en = {
     verifications: "Verifications",
     disputes: "Disputes",
     audit: "Audit",
+  },
+
+  // accountMenu.* surface - #526: chrome copy for the desktop account
+  // dropdown. Model note (spec #520): "account menu" is UI chrome terminology
+  // only, not a domain entity; these keys are display chrome, never shared
+  // with the nav-config surface (which indexes `nav.*` and carries one entry
+  // per NavItemDef.labelKey - no functions allowed there).
+  accountMenu: {
+    trigger: "Account menu",
+    completeProfile: "Complete your profile",
+    switchRole: (roleLabel: string) => `Switch to ${roleLabel}`,
   },
 
   // record.* surface - PHASE-3 T7 (#216): the My Record timeline screen
@@ -1908,6 +1919,11 @@ export const STRINGS: Record<Lang, Dictionary> = {
       verifications: "सत्यापन",
       disputes: "विवाद",
       audit: "ऑडिट",
+    },
+    accountMenu: {
+      trigger: "अकाउंट मेन्यू",
+      completeProfile: "अपनी प्रोफ़ाइल पूरी करें",
+      switchRole: (roleLabel: string) => `${roleLabel} पर स्विच करें`,
     },
     home: {
       nav: {
