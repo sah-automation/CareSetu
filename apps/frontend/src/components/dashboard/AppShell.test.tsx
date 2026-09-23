@@ -222,7 +222,7 @@ describe("AppShell light density (patient)", () => {
     );
   });
 
-  it("moves overflow destinations into the More sheet with Soon badges", () => {
+  it("moves overflow destinations into the More sheet - Profile & Settings live, rest Soon", () => {
     render(
       <AppShell role="patient">
         <h1>Patient home</h1>
@@ -233,26 +233,43 @@ describe("AppShell light density (patient)", () => {
     fireEvent.click(screen.getByTestId("more-trigger"));
 
     const sheet = screen.getByTestId("more-sheet");
-    // Inbox folds into More (#210) and joins Bookings as coming-soon (#485):
-    // every overflow destination is a dimmed non-interactive row, so none of
-    // them navigates to a dead page.
     expect(sheet).toHaveTextContent("Inbox");
     expect(sheet).toHaveTextContent("Bookings & Orders");
     expect(sheet).toHaveTextContent("Profile & Settings");
 
-    const overflowKeys = [
-      "more-inbox",
-      "more-bookings",
-      "more-profile-settings",
-    ];
-    for (const testid of overflowKeys) {
+    // Inbox and Bookings stay coming-soon (#485): dimmed non-interactive
+    // spans, so neither navigates to a dead page.
+    for (const testid of ["more-inbox", "more-bookings"]) {
       expect(screen.getByTestId(testid).tagName).toBe("SPAN");
       expect(screen.getByTestId(testid)).toHaveAttribute(
         "aria-disabled",
         "true",
       );
     }
-    expect(within(sheet).getAllByTestId("soon-badge")).toHaveLength(3);
+    // #524: Profile & Settings is a live, tappable row pointing at the real
+    // route - no Soon badge, no aria-disabled.
+    const profile = screen.getByTestId("more-profile-settings");
+    expect(profile.tagName).toBe("A");
+    expect(profile).toHaveAttribute("href", "/patient/profile");
+    expect(profile).not.toHaveAttribute("aria-disabled");
+    expect(within(sheet).getAllByTestId("soon-badge")).toHaveLength(2);
+  });
+
+  it("closes the More sheet when a live overflow row navigates (#524)", async () => {
+    render(
+      <AppShell role="patient">
+        <h1>Patient home</h1>
+      </AppShell>,
+    );
+
+    fireEvent.click(screen.getByTestId("more-trigger"));
+    expect(screen.getByTestId("more-sheet")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("more-profile-settings"));
+
+    await waitFor(() =>
+      expect(screen.queryByTestId("more-sheet")).not.toBeInTheDocument(),
+    );
   });
 
   it("renders nav labels bilingually through the i18n engine", () => {

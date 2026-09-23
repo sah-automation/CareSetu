@@ -81,13 +81,20 @@ describe("NAV_CONFIG", () => {
     }
   });
 
-  it("keeps patient Find live and dims Inbox/Bookings until their phases (PHASE-8.1 T11, #485)", () => {
+  it("keeps patient Find live, un-soons Profile & Settings, dims Inbox/Bookings until their phases (PHASE-8.1 T11, #485)", () => {
     const patient = Object.fromEntries(
       NAV_CONFIG.patient.map((item) => [item.key, item]),
     );
     // Find Care is live: /patient/find is a real page, never a dead nav.
     expect(patient.find?.soon).toBeUndefined();
     expect(patient.find?.href).toBe("/patient/find");
+    // #524: Profile & Settings un-sooned - /patient/profile is a real route
+    // (#522/#523). mobileOverflow pins it to the mobile More sheet; its spot
+    // beyond the top-nav's first-five window (after Inbox and Bookings) keeps
+    // it out of the desktop top bar, so it stays account-cluster-only there.
+    expect(patient["profile-settings"]?.soon).toBeUndefined();
+    expect(patient["profile-settings"]?.href).toBe("/patient/profile");
+    expect(patient["profile-settings"]?.mobileOverflow).toBe(true);
     // Inbox (Phase 13) and Bookings (Phase 9) are coming-soon - they must
     // render dimmed + non-interactive, so no patient nav item navigates to a
     // dead destination.
@@ -116,13 +123,20 @@ describe("splitMobileTabs", () => {
     expect(tabs.length + (hasMore ? 1 : 0)).toBe(TABBAR_MAX_DESTINATIONS);
     expect(tabs[TABBAR_CENTER_COLUMN]?.key).toBe("start");
     expect(tabs.filter((item) => item.center)).toHaveLength(1);
-    // Inbox stays inside More ahead of the other Soon destinations (it is
-    // Soon itself until Phase 13, but its overflow pin keeps the order).
+    // The More tab is permanent for the patient role (#524): the pinned
+    // overflow below means hasMore never collapses to a four-column bar.
+    expect(hasMore).toBe(true);
+    // Inbox stays inside More ahead of the other destinations (it is Soon
+    // until Phase 13, but its overflow pin keeps the order). Profile &
+    // Settings is now the live overflow entry (#524).
     expect(overflow.map((item) => item.key)).toEqual([
       "inbox",
       "bookings",
       "profile-settings",
     ]);
+    expect(
+      overflow.find((item) => item.key === "profile-settings")?.soon,
+    ).toBeUndefined();
     // PHASE-3 T7 (#216): the record screen un-sooned its nav slot - Record is
     // now a live destination on every surface via this one config entry.
     expect(

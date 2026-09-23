@@ -94,6 +94,7 @@ export function BottomTabs({
                 key={item.key}
                 item={item}
                 label={strings[item.labelKey]}
+                onNavigate={() => setMoreOpen(false)}
               />
             ))}
           </div>
@@ -170,7 +171,18 @@ function TabColumn({
   );
 }
 
-function OverflowRow({ item, label }: { item: NavItemDef; label: string }) {
+function OverflowRow({
+  item,
+  label,
+  onNavigate,
+}: {
+  item: NavItemDef;
+  label: string;
+  // Fires when a live row navigates so the sheet closes on the way out
+  // (#524): the Radix dialog is state-driven and would otherwise stay open
+  // over the destination page.
+  onNavigate: () => void;
+}) {
   const Icon = item.icon;
   const className =
     "flex min-h-12 w-full items-center gap-3 rounded px-2 py-2 text-sm font-medium";
@@ -192,6 +204,7 @@ function OverflowRow({ item, label }: { item: NavItemDef; label: string }) {
   return (
     <Link
       href={item.href}
+      onClick={onNavigate}
       className={cn(
         className,
         "text-txt-sub hover:bg-accent-soft hover:text-txt",

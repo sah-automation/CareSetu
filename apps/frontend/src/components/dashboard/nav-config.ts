@@ -113,12 +113,16 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       soon: true,
       mobileOverflow: true,
     },
+    // #524: Profile & Settings un-sooned - /patient/profile is a real route
+    // (#522/#523). mobileOverflow pins it to the mobile More sheet. On
+    // desktop it sits past the top-nav's first-five window (after Inbox and
+    // Bookings), so it stays reachable only via the account cluster - never
+    // a top-nav row.
     {
       key: "profile-settings",
       labelKey: "profileSettings",
       href: "/patient/profile",
       icon: Settings,
-      soon: true,
       mobileOverflow: true,
     },
   ],
