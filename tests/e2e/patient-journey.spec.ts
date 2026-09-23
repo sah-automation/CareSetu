@@ -34,8 +34,6 @@ function randomPhone(): string {
   )}`;
 }
 
-const phone = randomPhone();
-
 async function startRegistration(page: Page, number: string): Promise<void> {
   await page.goto("/login");
   await expect(
@@ -179,6 +177,10 @@ test("patient journey: record -> filter -> seed consent -> revoke -> revoked rec
   page,
   request,
 }) => {
+  // The phone is scoped to the test body so a CI retry re-runs the whole
+  // journey on a fresh identity, never re-seeding an already-populated record.
+  const phone = randomPhone();
+
   // 1. Register and authenticate
   await startRegistration(page, phone);
   await verifyOtp(page, request, phone);
@@ -211,8 +213,11 @@ test("patient journey: record -> filter -> seed consent -> revoke -> revoked rec
     "aria-pressed",
     "true",
   );
-  // After filtering to prescriptions, only prescription entries should be visible
-  const visibleEntries = page.locator('[data-testid^="entry-"]');
+  // After filtering to prescriptions, only prescription entries should be
+  // visible. Scope to the entry TILE li: the tile's read-more link also carries
+  // a `entry-link-{id}` testid (#511), so a bare `entry-` prefix match would
+  // double-count every entry.
+  const visibleEntries = page.locator('li[data-testid^="entry-"]');
   await expect(visibleEntries).toHaveCount(1);
   // The visible entry should be the prescription (not the lab_report)
   const prescriptionEntryId =

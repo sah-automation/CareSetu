@@ -539,6 +539,15 @@ test("the homepage, consent overlay, auth wizard and patient page pass the axe a
   expect(grant.status()).toBe(201);
 
   await page.goto("/patient/record/consent-log");
+  // #496 hard-goto guard (same as patient-journey's waitForIdentityResolved):
+  // the patient subtree remounts asynchronously once AuthContext re-resolves
+  // identity, and touching the revoke targets before that remount finishes
+  // races against the unmount. Wait for the trigger's data-session-resolved
+  // flag before interacting.
+  await expect(page.getByTestId("account-menu")).toHaveAttribute(
+    "data-session-resolved",
+    "true",
+  );
   await expect(page.getByTestId("history-section")).toBeVisible({
     timeout: 30_000,
   });
@@ -547,6 +556,15 @@ test("the homepage, consent overlay, auth wizard and patient page pass the axe a
   await expectNoAxeViolations(page, "open revoke sheet");
   await page.keyboard.press("Escape");
 
+  // The consent moment leaves us on the consent log, which has no greeting
+  // strip; the pre-#499 reload here landed on the home's consent sheet. Return
+  // to the signed-in home first, then reload, so the session-persistence check
+  // still means "the patient surface renders after a full reload".
+  await page.goto("/patient");
+  await expect(page.getByTestId("account-menu")).toHaveAttribute(
+    "data-session-resolved",
+    "true",
+  );
   await page.reload();
   await expect(page.getByTestId("patient-home-greeting")).toBeVisible();
   await expectNoAxeViolations(page, "signed-in patient page after reload");
