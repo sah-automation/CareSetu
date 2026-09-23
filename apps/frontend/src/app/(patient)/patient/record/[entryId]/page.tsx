@@ -5,8 +5,11 @@
 // came from (filer identity + filed-at timestamp), who has seen it (egress
 // trail from real consent data), and - when disclosed - the consent lineage
 // + version that authorized the disclosure. Lab-result entries render as a
-// plain value table with block-level horizontal scroll on phones. All copy
-// is fully bilingual EN/HI via the record.detail dictionary surface.
+// plain value table with block-level horizontal scroll on phones, and
+// prescription entries render a medicine-item block (#517) - one line per
+// item (name · dose · frequency · duration), the prescribing doctor, and the
+// Rx reference; payloads without `items` skip the block. All copy is fully
+// bilingual EN/HI via the record.detail dictionary surface.
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
@@ -23,7 +26,12 @@ import {
   RecordApiError,
   type RecordEntryView,
 } from "@/lib/record/api";
-import { describeEntry, formatOccurredAt } from "@/lib/record/timelineView";
+import {
+  attributedDoctorName,
+  describeEntry,
+  formatOccurredAt,
+  prescriptionItems,
+} from "@/lib/record/timelineView";
 import { fetchEgressLog, type EgressLogEntry } from "@/lib/consent/api";
 
 type LoadStatus = "loading" | "ready" | "error" | "not-found";
@@ -117,6 +125,21 @@ export default function EntryDetailPage() {
 
   const labResults = useMemo(
     () => (entry ? payloadResults(entry) : null),
+    [entry],
+  );
+
+  const medicineItems = useMemo(
+    () => (entry ? prescriptionItems(entry) : []),
+    [entry],
+  );
+
+  const attributedDoctor = useMemo(
+    () => (entry ? attributedDoctorName(entry) : null),
+    [entry],
+  );
+
+  const prescriptionId = useMemo(
+    () => (entry ? payloadNumber(entry, "prescription_id") : null),
     [entry],
   );
 
@@ -310,6 +333,43 @@ export default function EntryDetailPage() {
                 </table>
               </div>
               <p className="mt-2 text-xs text-txt-muted">{td.resultsNote}</p>
+            </section>
+          )}
+
+          {entry.entry_type === "prescription" && medicineItems.length > 0 && (
+            <section
+              className="mt-3 rounded-lg border border-hairline bg-surface p-4 shadow-card"
+              data-testid="entry-medicine-block"
+            >
+              <ul className="space-y-1.5" data-testid="medicine-items">
+                {medicineItems.map((item, idx) => (
+                  <li
+                    key={idx}
+                    className="text-sm text-txt"
+                    data-testid={`medicine-item-${idx}`}
+                  >
+                    {[item.name, item.dose, item.frequency, item.duration]
+                      .filter((part): part is string => part !== null)
+                      .join(" \u00b7 ")}
+                  </li>
+                ))}
+              </ul>
+              <p
+                className="mt-2 text-sm text-txt-muted"
+                data-testid="medicine-attribution"
+              >
+                {attributedDoctor !== null
+                  ? `${t.prescribedBy} ${attributedDoctor}`
+                  : t.issuedByNeutral}
+              </p>
+              {prescriptionId !== null && (
+                <p
+                  className="text-sm text-txt-muted"
+                  data-testid="medicine-rx-ref"
+                >
+                  Rx #{prescriptionId}
+                </p>
+              )}
             </section>
           )}
 
