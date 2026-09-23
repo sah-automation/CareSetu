@@ -1103,12 +1103,28 @@ describe("recent activity card (#506)", () => {
 
     const rows = await screen.findAllByTestId(/recent-entry-/);
     expect(rows).toHaveLength(RECENT_ACTIVITY_MAX);
-    // Reverse-chron by clinical time: 21st prescription, then 20th consult,
-    // then 19th lab; the 18th metric row falls off the preview cap.
-    expect(rows[0]).toHaveTextContent(STRINGS.en.record.badge.prescription);
-    expect(rows[1]).toHaveTextContent(STRINGS.en.record.badge.consultation);
+    // Reverse-chron by clinical time: 21st prescription (id 2), then 20th
+    // consult (id 1), then 19th lab (id 3); the 18th metric row falls off the
+    // preview cap. #516: each row carries a per-type pill - icon + type label
+    // on the type tint, never the timeline's status pill.
+    const prescriptionPill = screen.getByTestId("recent-type-2");
+    expect(prescriptionPill).toHaveTextContent(
+      STRINGS.en.record.badge.prescription,
+    );
+    expect(prescriptionPill).toHaveTextContent("\u{1F48A}");
+    expect(prescriptionPill).toHaveClass("bg-success-soft");
+    expect(rows[0]).not.toHaveTextContent(STRINGS.en.record.badge.active);
+
+    const consultationPill = screen.getByTestId("recent-type-1");
+    expect(consultationPill).toHaveTextContent(
+      STRINGS.en.record.badge.consultation,
+    );
+    expect(consultationPill).toHaveClass("bg-warm-soft");
+
     expect(rows[2]).toHaveTextContent("CBC report 19 Sep");
-    expect(rows[2]).toHaveTextContent(STRINGS.en.record.badge.labReport);
+    const labPill = screen.getByTestId("recent-type-3");
+    expect(labPill).toHaveTextContent(STRINGS.en.record.badge.labReport);
+    expect(labPill).toHaveClass("bg-accent-soft");
     expect(screen.queryByTestId("recent-entry-4")).not.toBeInTheDocument();
   });
 
@@ -1117,15 +1133,31 @@ describe("recent activity card (#506)", () => {
       entry(2, "prescription", "2026-09-21T08:00:00.000Z", {
         prescription_id: 12,
         status: "issued",
+        items: [
+          {
+            name: "Amlodipine",
+            dose: "5 mg",
+            frequency: "once daily",
+            duration: "30 tablets",
+          },
+        ],
+        attributed_doctor_name: "Dr. A. Kumar",
       }),
     ]);
     renderHome();
 
     const row = await screen.findByTestId("recent-entry-2");
-    // Same vocabulary as the timeline: payload-driven title/subtitle and the
-    // record.badge labels, never invented per-type copy.
-    expect(row).toHaveTextContent(STRINGS.en.record.badge.prescription);
-    expect(row).toHaveTextContent(/Rx #12/);
+    // #516: professional prescription copy from the shared describe output -
+    // medicine-name title, dose line, issued-by attribution - plus the
+    // per-type pill in place of the timeline's status pill.
+    expect(row).toHaveTextContent("Amlodipine");
+    expect(row).toHaveTextContent("5 mg · once daily · 30 tablets");
+    expect(row).toHaveTextContent(STRINGS.en.record.issuedBy("Dr. A. Kumar"));
+    const pill = screen.getByTestId("recent-type-2");
+    expect(pill).toHaveTextContent(STRINGS.en.record.badge.prescription);
+    expect(pill).toHaveTextContent("\u{1F48A}");
+    expect(pill).toHaveClass("bg-success-soft");
+    expect(pill).not.toHaveTextContent(STRINGS.en.record.badge.active);
     expect(row).toHaveTextContent(/2026/);
   });
 
@@ -1173,9 +1205,16 @@ describe("recent activity card (#506)", () => {
   });
 
   it("serves the card copy in hi from the recent surface", async () => {
-    seedTimeline([entry(1, "consultation", "2026-09-21T08:00:00.000Z")]);
+    seedTimeline([
+      entry(2, "prescription", "2026-09-21T08:00:00.000Z", {
+        prescription_id: 12,
+        status: "issued",
+        items: [{ name: "Amlodipine", dose: "5 mg", frequency: "once daily" }],
+        attributed_doctor_name: "Dr. A. Kumar",
+      }),
+    ]);
     renderHome();
-    await screen.findByTestId("recent-entry-1");
+    await screen.findByTestId("recent-entry-2");
 
     fireEvent.click(screen.getByRole("button", { name: "flip-lang" }));
 
@@ -1187,9 +1226,14 @@ describe("recent activity card (#506)", () => {
     expect(screen.getByTestId("recent-view-all")).toHaveTextContent(
       STRINGS.hi.recent.all,
     );
-    expect(screen.getByTestId("recent-entry-1")).toHaveTextContent(
-      STRINGS.hi.record.badge.consultation,
-    );
+    const row = screen.getByTestId("recent-entry-2");
+    // #516: the hi surface carries the same professional anatomy - the pill
+    // labels the type and the prescription copy localizes the issued-by line.
+    expect(row).toHaveTextContent("Amlodipine");
+    expect(row).toHaveTextContent(STRINGS.hi.record.issuedBy("Dr. A. Kumar"));
+    const pill = screen.getByTestId("recent-type-2");
+    expect(pill).toHaveTextContent(STRINGS.hi.record.badge.prescription);
+    expect(pill).toHaveClass("bg-success-soft");
   });
 });
 

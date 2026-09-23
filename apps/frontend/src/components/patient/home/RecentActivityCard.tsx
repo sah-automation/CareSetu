@@ -20,9 +20,13 @@ import { PATIENT_RECORD_ROUTE } from "@/components/dashboard/nav-config";
 import { EmptyState } from "@/components/layout/EmptyState";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
-import { fetchOwnRecord, type RecordEntryView } from "@/lib/record/api";
 import {
-  BADGE_TONE,
+  fetchOwnRecord,
+  type RecordEntryType,
+  type RecordEntryView,
+} from "@/lib/record/api";
+import {
+  ENTRY_TONE,
   describeEntry,
   formatOccurredAt,
   sortTimelineDesc,
@@ -32,6 +36,24 @@ import { cn } from "@/lib/utils";
 // The card is a preview, never the full timeline: the top few events after the
 // timeline's reverse-chronological sort, with View all for the rest.
 export const RECENT_ACTIVITY_MAX = 3;
+
+// #516: the row pill is per-entry-type (PROTO-2.7) - icon plus the type label
+// from the shared record.badge dictionary, tinted via the per-type tone map the
+// timeline already uses. The status badge (Active/Delivered) is timeline-only.
+type TypeBadgeKey =
+  | "consultation"
+  | "prescription"
+  | "labReport"
+  | "metric"
+  | "settlement";
+
+const TYPE_BADGE_KEY: Record<RecordEntryType, TypeBadgeKey> = {
+  consultation: "consultation",
+  prescription: "prescription",
+  lab_report: "labReport",
+  metric: "metric",
+  settlement: "settlement",
+};
 
 export function RecentActivityCard() {
   const { lang } = useLang();
@@ -107,10 +129,11 @@ export function RecentActivityCard() {
           <EmptyState title={t.empty} body={t.emptyBody} />
         </div>
       ) : (
-        // #509: rows are the binding's flat divider list-tiles - emoji+label
-        // badge left, description middle, real date right. The occurred-at is
-        // omitted from describeEntry's subtitle so the date renders exactly
-        // once, in the right-hand "when" column. Rows stay non-navigating.
+        // #509/#516: rows are the binding's flat divider list-tiles - per-type
+        // icon+label pill left, professional description middle, real date
+        // right. The occurred-at is omitted from describeEntry's subtitle so
+        // the date renders exactly once, in the right-hand "when" column. Rows
+        // stay non-navigating.
         <ul className="mt-2" data-testid="recent-list">
           {visible.map((entry) => {
             const card = describeEntry(entry, recordT, lang, {
@@ -122,17 +145,18 @@ export function RecentActivityCard() {
                   data-testid={`recent-entry-${entry.entry_id}`}
                   className="flex min-h-11 min-w-0 items-center gap-3.5 border-b border-hairline-soft py-2 last:border-b-0"
                 >
-                  {card.badge && (
-                    <span
-                      className={cn(
-                        "inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium",
-                        BADGE_TONE[card.badge.tone],
-                      )}
-                    >
-                      <span aria-hidden="true">{card.icon}</span>
-                      <span>{card.badge.label}</span>
+                  <span
+                    data-testid={`recent-type-${entry.entry_id}`}
+                    className={cn(
+                      "inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium",
+                      ENTRY_TONE[entry.entry_type].chip,
+                    )}
+                  >
+                    <span aria-hidden="true">{card.icon}</span>
+                    <span>
+                      {recordT.badge[TYPE_BADGE_KEY[entry.entry_type]]}
                     </span>
-                  )}
+                  </span>
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm font-medium text-txt">
                       {card.title}
