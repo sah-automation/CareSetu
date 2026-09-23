@@ -17,8 +17,12 @@ import { join } from "node:path";
 
 import { __resetLangForTests } from "@/lib/i18n/LangContext";
 import { listOpenCases, type CaseDetailView } from "@/lib/care/api";
+import * as axe from "axe-core";
 
 import { AppShell } from "./AppShell";
+import { maskedPhone } from "./BottomTabs";
+import { ProfileProvider } from "@/lib/profile/ProfileContext";
+import type { StoredPatientProfile } from "@/lib/profile/api";
 import type { Role } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -63,6 +67,19 @@ vi.mock("@/lib/auth/AuthContext", () => ({
   }),
 }));
 
+// #525: the patient account card reads the saved name/photo through the
+// profile seam; mocked at the module boundary like the ProfileContext suites
+// so the named-card branch can hydrate without HTTP.
+const profileApi = vi.hoisted(() => ({
+  getProfile: vi.fn(),
+  saveProfile: vi.fn(),
+}));
+
+vi.mock("@/lib/profile/api", () => ({
+  getProfile: profileApi.getProfile,
+  saveProfile: profileApi.saveProfile,
+}));
+
 // PHASE-8.1 T8 (#483): the doctor shell's Cases count pill reads the existing
 // open-cases feed; the whole care module is mocked so shell tests stay unit
 // scoped.
@@ -82,6 +99,10 @@ beforeEach(() => {
   __resetLangForTests();
   mockPathname.mockReturnValue("/patient");
   getOpenCases.mockResolvedValue([]);
+  // #525: default the profile read to "absent" so the masked-phone fallback
+  // is the steady state; the named-profile branch re-seeds it per test.
+  profileApi.getProfile.mockReset();
+  profileApi.getProfile.mockResolvedValue({ set: false, profile: null });
 });
 
 afterEach(() => {
@@ -283,6 +304,151 @@ describe("AppShell light density (patient)", () => {
     expect(screen.getByTestId("tab-home")).toHaveTextContent("होम");
     expect(screen.getByTestId("tab-start")).toHaveTextContent("शुरू करें");
     expect(screen.getByTestId("nav-home")).toHaveTextContent("होम");
+  });
+});
+
+describe("AppShell patient mobile account surface (#525)", () => {
+  function renderPatient() {
+    return render(
+      <AppShell role="patient">
+        <h1>Patient home</h1>
+      </AppShell>,
+    );
+  }
+
+  function openMore() {
+    fireEvent.click(screen.getByTestId("more-trigger"));
+    return screen.getByTestId("more-sheet");
+  }
+
+  it("puts the account card above the overflow rows in the More sheet", () => {
+    renderPatient();
+    const sheet = openMore();
+
+    const card = within(sheet).getByTestId("more-account-card");
+    const rows = Array.from(sheet.querySelectorAll('[data-testid^="more-"]'));
+    expect(rows[0]).toBe(card);
+    // The #524 overflow destinations still follow unchanged.
+    expect(screen.getByTestId("more-inbox")).toBeInTheDocument();
+    expect(screen.getByTestId("more-profile-settings")).toBeInTheDocument();
+  });
+
+  it("falls back to the masked phone and shows the full E.164 plus Profile & Settings", async () => {
+    renderPatient();
+    openMore();
+
+    expect(screen.getByTestId("more-account-identity")).toHaveTextContent(
+      "+91 XXXXXX7890",
+    );
+    expect(screen.getByTestId("more-account-card")).toHaveTextContent(
+      "+911234567890",
+    );
+    expect(screen.getByTestId("more-account-card")).toHaveTextContent(
+      "Profile & Settings",
+    );
+    // No saved profile yet, so the shared Avatar degrades to the person icon.
+    expect(
+      screen.getByTestId("more-account-card").querySelector("svg"),
+    ).not.toBeNull();
+  });
+
+  it("shows the saved name and its initial once profile hydration lands", async () => {
+    const named: StoredPatientProfile = {
+      name: "Asha Rao",
+      age: 34,
+      gender: "female",
+      preferred_language: "en",
+      area: null,
+      emergency_contact: null,
+      photo_ref: null,
+    };
+    profileApi.getProfile.mockResolvedValue({ set: true, profile: named });
+
+    render(
+      <ProfileProvider>
+        <AppShell role="patient">
+          <h1>Patient home</h1>
+        </AppShell>
+      </ProfileProvider>,
+    );
+    await waitFor(() => expect(profileApi.getProfile).toHaveBeenCalled());
+    openMore();
+
+    expect(screen.getByTestId("more-account-identity")).toHaveTextContent(
+      "Asha Rao",
+    );
+    // The shared Avatar's name-initial fallback ("A") for the unnamed photo.
+    expect(screen.getByTestId("more-account-card")).toHaveTextContent("A");
+  });
+
+  it("closes the More sheet when the account card navigates", async () => {
+    renderPatient();
+    openMore();
+
+    expect(screen.getByTestId("more-account-card")).toHaveAttribute(
+      "href",
+      "/patient/profile",
+    );
+    fireEvent.click(screen.getByTestId("more-account-card"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("more-sheet")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("renders a red Log out row that ends the session and closes the sheet", async () => {
+    logout.mockClear();
+    renderPatient();
+    openMore();
+
+    const logoutRow = screen.getByTestId("more-logout");
+    expect(logoutRow).toHaveTextContent("Log out");
+    expect(logoutRow.className).toContain("text-danger");
+
+    fireEvent.click(logoutRow);
+
+    expect(logout).toHaveBeenCalledTimes(1);
+    await waitFor(() =>
+      expect(screen.queryByTestId("more-sheet")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("keeps the open More sheet axe-clean (labels, landmarks, contrast)", async () => {
+    renderPatient();
+    const sheet = openMore();
+
+    const { violations } = await axe.run(sheet);
+    expect(violations).toEqual([]);
+  });
+
+  it("keeps staff bubbles free of the mobile account entirely", () => {
+    mockPathname.mockReturnValue("/doctor");
+    render(
+      <AppShell role="doctor">
+        <h1>Workspace</h1>
+      </AppShell>,
+    );
+
+    // Doctor nav fits four columns (queue/cases/patients/profile), so the
+    // staff bottom bar has no More trigger - and no account/logout rows to
+    // hide behind it. The patient-only account surface cannot leak here.
+    expect(screen.queryByTestId("more-trigger")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("more-account-card")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("more-logout")).not.toBeInTheDocument();
+  });
+});
+
+describe("maskedPhone (#525)", () => {
+  it("masks an E.164 number to the spec format +91 XXXXXX1234", () => {
+    expect(maskedPhone("+911234567890")).toBe("+91 XXXXXX7890");
+  });
+
+  it("strips formatting noise before masking", () => {
+    expect(maskedPhone("+91 12345 67890")).toBe("+91 XXXXXX7890");
+  });
+
+  it("renders values too short to be E.164 verbatim", () => {
+    expect(maskedPhone("+91123")).toBe("+91123");
+    expect(maskedPhone("")).toBe("");
   });
 });
 

@@ -344,6 +344,25 @@ describe("AccountMenu patient avatar trigger (#521)", () => {
   });
 });
 
+describe("AccountMenu mobile placement (#525)", () => {
+  it("hides the patient trigger below lg so the phone account lives only in the More sheet", async () => {
+    const trigger = await renderClosedTrigger(ME_RESPONSE_SINGLE_ROLE);
+
+    expect(trigger.className).toContain("hidden");
+    expect(trigger.className).toContain("lg:inline-flex");
+    // The shared Avatar still resolves to the patient person icon.
+    expect(trigger.querySelector("svg")).not.toBeNull();
+  });
+
+  it("keeps the staff phone-digit trigger fully visible at every width", async () => {
+    const trigger = await renderClosedTrigger(ME_RESPONSE_DOCTOR);
+
+    expect(trigger).toHaveTextContent("90");
+    expect(trigger.className).toContain("flex");
+    expect(trigger.className).not.toContain("hidden");
+  });
+});
+
 describe("AccountMenu stale sessions", () => {
   it("degrades to subject-id-only when /me carries no phone field", async () => {
     setStoredSession(VALID_SESSION);

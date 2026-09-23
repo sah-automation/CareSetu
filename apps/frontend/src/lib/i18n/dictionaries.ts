@@ -830,6 +830,10 @@ const en = {
     bookings: "Bookings & Orders",
     profileSettings: "Profile & Settings",
     more: "More",
+    // #525: the mobile More sheet's red sign-out row (patient account
+    // surface). Spell "Log out" as two words per spec #520 vocabulary - the
+    // desktop dropdown's "Logout" copy is #526 territory.
+    logOut: "Log out",
     queue: "Queue",
     cases: "Cases",
     patients: "Patients",
@@ -1893,6 +1897,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
       bookings: "बुकिंग और ऑर्डर",
       profileSettings: "प्रोफ़ाइल और सेटिंग",
       more: "और",
+      logOut: "लॉग आउट",
       queue: "कतार",
       cases: "केस",
       patients: "मरीज़",

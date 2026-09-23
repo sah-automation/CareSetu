@@ -12,6 +12,8 @@
 // resolved carries only a resolved/pending flag for e2e settle guards (avatar
 // text is no longer a digit signal) - never the phone itself, so the closed
 // trigger leaks nothing.
+// #525: on phones the patient trigger is hidden below `lg` (account lives in
+// the More sheet); staff visibility is unchanged.
 
 import { useAuth } from "@/lib/auth/AuthContext";
 import { useOptionalProfile } from "@/lib/profile/ProfileContext";
@@ -24,6 +26,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Avatar } from "@/components/ui/avatar";
+import { cn } from "@/lib/utils";
 
 import { isAppRole, resolveRole, roleLabel } from "./types";
 
@@ -54,7 +57,14 @@ export function AccountMenu() {
           aria-label="Account menu"
           data-testid="account-menu"
           data-session-resolved={user ? "true" : "false"}
-          className="flex h-9 w-9 items-center justify-center rounded-full bg-accent-soft text-sm font-semibold text-accent-strong hover:bg-accent-border"
+          // #525 mobile placement: the patient account lives in exactly one
+          // place on phones - the More sheet - so the top-right circle is
+          // hidden below `lg` (the pure-CSS bottom-tab breakpoint). Staff
+          // roles keep the phone-digit trigger at every width.
+          className={cn(
+            "h-9 w-9 items-center justify-center rounded-full bg-accent-soft text-sm font-semibold text-accent-strong hover:bg-accent-border",
+            isPatient ? "hidden lg:inline-flex" : "flex",
+          )}
         >
           {isPatient ? (
             <Avatar
