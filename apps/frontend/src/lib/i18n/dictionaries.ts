@@ -797,6 +797,15 @@ const en = {
       error:
         "We could not save your profile. Please check your connection and try again.",
     },
+    // settings.* - Profile & Settings page (#522): the patient account surface
+    // for editing identity basics, gated on a complete name/age/gender.
+    settings: {
+      title: "Profile & Settings",
+      sub: "Your name, age, and gender help us keep your care records correct.",
+      basics: "Personal details",
+      save: "Save changes",
+      blocked: "Enter your name, age, and gender to save your profile.",
+    },
     demo: {
       badge: "Demo care actions",
       title: "Care-action gating",
@@ -1855,6 +1864,13 @@ export const STRINGS: Record<Lang, Dictionary> = {
         saved: "प्रोफ़ाइल सेव हो गई",
         error:
           "आपकी प्रोफ़ाइल सेव नहीं हो सकी। कृपया अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      },
+      settings: {
+        title: "प्रोफ़ाइल और सेटिंग",
+        sub: "आपका नाम, उम्र और लिंग हमें आपके इलाज के रिकॉर्ड सही रखने में मदद करते हैं।",
+        basics: "व्यक्तिगत विवरण",
+        save: "परिवर्तन सेव करें",
+        blocked: "अपना नाम, उम्र और लिंग दर्ज करें ताकि प्रोफ़ाइल सेव हो सके।",
       },
       demo: {
         badge: "डेमो केयर एक्शन",
