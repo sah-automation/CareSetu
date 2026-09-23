@@ -237,13 +237,13 @@ test("patient journey: record -> filter -> seed consent -> revoke -> revoked rec
   // Click the Hindi button to switch locale
   await langToggle.getByRole("button", { name: "हिं" }).click();
   // The record heading should switch to Hindi
-  await expect(page.getByRole("heading", { name: "मेरा रिकॉर्ड" })).toBeVisible(
-    { timeout: 5_000 },
-  );
+  await expect(
+    page.getByRole("heading", { name: "मेरा हेल्थ रिकॉर्ड" }),
+  ).toBeVisible({ timeout: 5_000 });
   // Toggle back to English
   await langToggle.getByRole("button", { name: "EN" }).click();
   await expect(
-    page.getByRole("heading", { name: "My Record", exact: true }),
+    page.getByRole("heading", { name: "My Health Record", exact: true }),
   ).toBeVisible({
     timeout: 5_000,
   });
