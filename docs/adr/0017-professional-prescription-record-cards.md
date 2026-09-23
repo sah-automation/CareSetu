@@ -36,11 +36,13 @@ The patient timeline `prescription` entry carries the decision-rich shape:
       "duration": "30 tablets"
     }
   ],
-  "attributed_doctor_name": "Dr. A. Kumar", // null -> "issued by you"-style neutral copy
+  "attributed_doctor_name": "Dr. A. Kumar", // absent -> neutral copy ("issued by your care team")
   "fulfillment_order_id": null, // present only on "delivered" entries
   "chemist_name": null // RESERVED for Phase 10 `order.delivered` (MOD-008)
 }
 ```
+
+`items` and `attributed_doctor_name` are stored **only when the event carried them** - the health consumer copies them through when present and drops them when empty/absent, so a legacy (pre-enrichment) envelope still stores the lean `{prescription_id, status}` shape (honest degradation, REQ-033 / parent #512 US13). The frontend parses both shapes defensively.
 
 `chemist_name` is render-if-present: the frontend shows a chemist line only when the payload carries one, which it cannot today because MOD-008 fulfilment does not exist yet. The contract doc reserves the key so Phase 10's `order.delivered` handler fills it in; no premature MOD-008 work.
 

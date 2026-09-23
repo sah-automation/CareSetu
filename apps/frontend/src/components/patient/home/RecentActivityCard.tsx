@@ -20,13 +20,10 @@ import { PATIENT_RECORD_ROUTE } from "@/components/dashboard/nav-config";
 import { EmptyState } from "@/components/layout/EmptyState";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
-import {
-  fetchOwnRecord,
-  type RecordEntryType,
-  type RecordEntryView,
-} from "@/lib/record/api";
+import { fetchOwnRecord, type RecordEntryView } from "@/lib/record/api";
 import {
   ENTRY_TONE,
+  TYPE_BADGE_KEY,
   describeEntry,
   formatOccurredAt,
   sortTimelineDesc,
@@ -40,20 +37,7 @@ export const RECENT_ACTIVITY_MAX = 3;
 // #516: the row pill is per-entry-type (PROTO-2.7) - icon plus the type label
 // from the shared record.badge dictionary, tinted via the per-type tone map the
 // timeline already uses. The status badge (Active/Delivered) is timeline-only.
-type TypeBadgeKey =
-  | "consultation"
-  | "prescription"
-  | "labReport"
-  | "metric"
-  | "settlement";
-
-const TYPE_BADGE_KEY: Record<RecordEntryType, TypeBadgeKey> = {
-  consultation: "consultation",
-  prescription: "prescription",
-  lab_report: "labReport",
-  metric: "metric",
-  settlement: "settlement",
-};
+// The type->label map itself lives beside ENTRY_TONE in the view-model seam.
 
 export function RecentActivityCard() {
   const { lang } = useLang();

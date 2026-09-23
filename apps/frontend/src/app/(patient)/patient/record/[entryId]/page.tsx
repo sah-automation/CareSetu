@@ -30,6 +30,7 @@ import {
   attributedDoctorName,
   describeEntry,
   formatOccurredAt,
+  joinMedicineLine,
   prescriptionItems,
 } from "@/lib/record/timelineView";
 import { fetchEgressLog, type EgressLogEntry } from "@/lib/consent/api";
@@ -348,9 +349,12 @@ export default function EntryDetailPage() {
                     className="text-sm text-txt"
                     data-testid={`medicine-item-${idx}`}
                   >
-                    {[item.name, item.dose, item.frequency, item.duration]
-                      .filter((part): part is string => part !== null)
-                      .join(" \u00b7 ")}
+                    {joinMedicineLine([
+                      item.name,
+                      item.dose,
+                      item.frequency,
+                      item.duration,
+                    ])}
                   </li>
                 ))}
               </ul>

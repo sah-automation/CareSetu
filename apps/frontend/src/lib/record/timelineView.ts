@@ -238,6 +238,15 @@ function nullableText(
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+// #515/#517: the shared " · " join for one medicine line - the card's dose
+// line (dose · frequency · duration) and the entry-detail item lines (name ·
+// dose · frequency · duration) both render through it, so the separator can
+// never drift between the timeline card and the detail page.
+export function joinMedicineLine(parts: Array<string | null>): string | null {
+  const present = parts.filter((part): part is string => part !== null);
+  return present.length > 0 ? present.join(" \u00b7 ") : null;
+}
+
 export function prescriptionItems(entry: RecordEntryView): PrescriptionItem[] {
   if (entry.entry_type !== "prescription") return [];
   const raw = entry.payload.items;
@@ -316,6 +325,24 @@ export const ENTRY_TONE: Record<RecordEntryType, EntryTone> = {
   },
 };
 
+// #516: the per-type pill label key - one per entry type, drawn from the shared
+// `record.badge` dictionary (no re-keying). Kept beside ENTRY_TONE so a new
+// entry type is wired exactly once, in the view-model seam.
+export type TypeBadgeKey =
+  | "consultation"
+  | "prescription"
+  | "labReport"
+  | "metric"
+  | "settlement";
+
+export const TYPE_BADGE_KEY: Record<RecordEntryType, TypeBadgeKey> = {
+  consultation: "consultation",
+  prescription: "prescription",
+  lab_report: "labReport",
+  metric: "metric",
+  settlement: "settlement",
+};
+
 export interface EntryBadge {
   label: string;
   tone: BadgeTone;
@@ -335,6 +362,7 @@ export interface EntryCardStrings {
   filedFromBooking: string;
   issuedBy: (doctor: string) => string;
   issuedByNeutral: string;
+  prescribedBy: string;
   moreItems: (count: number) => string;
 }
 
@@ -412,11 +440,12 @@ export function describeEntry(
       // payload documents.
       if (items.length > 0) {
         const first = items[0];
-        const doseParts: string[] = [];
-        if (first.dose !== null) doseParts.push(first.dose);
-        if (first.frequency !== null) doseParts.push(first.frequency);
-        if (first.duration !== null) doseParts.push(first.duration);
-        if (doseParts.length > 0) parts.push(doseParts.join(" \u00b7 "));
+        const doseLine = joinMedicineLine([
+          first.dose,
+          first.frequency,
+          first.duration,
+        ]);
+        if (doseLine !== null) parts.push(doseLine);
         const doctor = attributedDoctorName(entry);
         parts.push(doctor !== null ? t.issuedBy(doctor) : t.issuedByNeutral);
         if (!omitOccurredAt) parts.push(date);

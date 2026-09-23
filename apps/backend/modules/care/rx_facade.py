@@ -80,7 +80,7 @@ if TYPE_CHECKING:
 #: ``HealthFacade.read_consented_history`` (fail-closed).
 RX_DRAFT_HISTORY_SCOPE = "prescriptions"
 
-logger = logging.getLogger("modules.care.rx_facade")
+logger = logging.getLogger(__name__)
 
 
 def _to_rx_item_view(row: Row[Any]) -> RxItemView:
