@@ -993,6 +993,69 @@ def test_settings_local_backend_needs_no_supabase_env(
     assert settings.intake_media_backend == "local"
 
 
+# ---------------------------------------------------------------------------
+# profile-media config (profiles batch #529, ADR-0020, ticket #532)
+# ---------------------------------------------------------------------------
+
+
+def test_settings_profile_media_backend_defaults_to_local() -> None:
+    settings = Settings()
+
+    assert settings.profile_media_backend == "local"
+    assert settings.profile_media_root == "var/profile-media"
+    assert settings.profile_media_key == ""
+
+
+def test_settings_profile_media_backend_reads_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PROFILE_MEDIA_BACKEND", "supabase")
+    monkeypatch.setenv("PROFILE_MEDIA_ROOT", "var/uploaded-photos")
+    monkeypatch.setenv("PROFILE_MEDIA_KEY", "cGFzc3dvcmQ=")
+    monkeypatch.setenv("SUPABASE_URL", "https://abc.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "sb-test-key")
+
+    settings = get_settings()
+
+    assert settings.profile_media_backend == "supabase"
+    assert settings.profile_media_root == "var/uploaded-photos"
+    assert settings.profile_media_key == "cGFzc3dvcmQ="
+    assert settings.supabase_url == "https://abc.supabase.co"
+    assert settings.supabase_service_role_key == "sb-test-key"
+
+
+def test_settings_profile_media_supabase_requires_url_and_service_role_key() -> None:
+    with pytest.raises(ValueError, match="SUPABASE_URL"):
+        Settings(profile_media_backend="supabase")
+    with pytest.raises(ValueError, match="SUPABASE_SERVICE_ROLE_KEY"):
+        Settings(
+            profile_media_backend="supabase",
+            supabase_url="https://abc.supabase.co",
+        )
+
+
+def test_settings_rejects_unknown_profile_media_backend() -> None:
+    with pytest.raises(ValueError, match="unsupported profile_media_backend"):
+        Settings(profile_media_backend="s3")
+
+
+def test_settings_profile_media_supabase_needs_url_env_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INTAKE_MEDIA_BACKEND", "local")
+    monkeypatch.setenv("PROFILE_MEDIA_BACKEND", "supabase")
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+
+    with pytest.raises(ValueError, match="SUPABASE_URL"):
+        get_settings()
+
+
+def test_settings_profile_media_local_backend_needs_no_supabase_env() -> None:
+    settings = Settings(profile_media_backend="local")
+
+    assert settings.profile_media_backend == "local"
+
+
 def _env_example_text() -> str:
     return _ENV_EXAMPLE.read_text(encoding="utf-8")
 
@@ -1013,6 +1076,15 @@ def test_env_example_documents_intake_media_supabase_switch() -> None:
     assert "INTAKE_MEDIA_BACKEND=" in text
     assert "SUPABASE_URL=" in text
     assert "SUPABASE_SERVICE_ROLE_KEY=" in text
+
+
+def test_env_example_documents_profile_media_supabase_switch() -> None:
+    text = _env_example_text()
+    # The profile-media backend switch (ADR-0020, #532) must be documented with
+    # both backends and the three env vars so the config is discoverable at boot.
+    assert "PROFILE_MEDIA_BACKEND=" in text
+    assert "PROFILE_MEDIA_ROOT=" in text
+    assert "PROFILE_MEDIA_KEY=" in text
 
 
 def test_env_example_redis_directory_ttl_comments_the_default() -> None:

@@ -70,6 +70,7 @@ from modules.partner.directory_cache import (
     init_directory_redis_client,
 )
 from modules.partner.facade import PartnerFacade, ProviderProfileNotFoundError
+from modules.profile_media.adapters.media_store import build_profile_media_store
 from worker.main import run_worker_until_stopped
 
 logger = logging.getLogger(__name__)
@@ -314,6 +315,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # profile degrades to the card fallback, never a crash.
         iam_facade=app.state.iam_facade,
     )
+    # Profile photos (#529, ADR-0020, #532): the private ``profile-media``
+    # object-storage surface holds patient/doctor profile photos, encrypted at
+    # rest (AES-256-GCM) and written with the service-role key only - never a
+    # public bucket. The store is built at the composition root and exposed on
+    # state so the profile surfaces (patient ``/v1/me/*`` and doctor private
+    # profile) inject it; only the object key, never a blob URL, is persisted on
+    # the owning profile. The key comes from the environment (never committed),
+    # dev/test without a key derives an ephemeral one, and the concrete backend
+    # is selected by ``PROFILE_MEDIA_BACKEND``: local disk (default) or a
+    # private Supabase Storage bucket (production, same SUPABASE_URL /
+    # SUPABASE_SERVICE_ROLE_KEY pair as the intake store).
+    profile_media_store = build_profile_media_store(
+        root=resolved_settings.profile_media_root,
+        b64_key=resolved_settings.profile_media_key,
+        backend=resolved_settings.profile_media_backend,
+        supabase_url=resolved_settings.supabase_url,
+        supabase_service_role_key=resolved_settings.supabase_service_role_key,
+    )
+    app.state.profile_media_store = profile_media_store
     # MOD-006 (PHASE-8 T06, #422): the two care facades share the settled
     # engine and the settled intake/health facades - the consult-complete
     # handshake gates on ``get_finalized_pre_summary`` (intake) and AI drafting
