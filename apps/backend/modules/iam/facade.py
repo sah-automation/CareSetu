@@ -53,6 +53,9 @@ from modules.iam.identity_facade import (
     PatientProfile as PatientProfile,
 )
 from modules.iam.identity_facade import (
+    PhotoContent as PhotoContent,
+)
+from modules.iam.identity_facade import (
     RegisterPatientResult as RegisterPatientResult,
 )
 from modules.iam.mfa_facade import (
@@ -104,6 +107,7 @@ from modules.iam.session_facade import (
 from modules.iam.session_facade import (
     _partner_role_status as _partner_role_status,
 )
+from modules.profile_media.facade import ProfileMediaStore as ProfileMediaStore
 
 _IAM_SCHEMA = "iam"
 
@@ -125,6 +129,7 @@ class IamFacade:
         access_token_ttl_seconds: int = 900,
         refresh_token_ttl_seconds: int = 2_592_000,
         mfa_secret_key: str = "",
+        media_store: ProfileMediaStore | None = None,
     ) -> None:
         self._engine = engine
         self.delivery_queue = SmsDeliveryQueue(
@@ -141,7 +146,12 @@ class IamFacade:
 
         self._otp_sender: OtpSender = _otp_sender
         self._clock = clock
-        self._identity = IdentityFacade(engine, self._otp_sender, clock)
+        self._identity = IdentityFacade(
+            engine,
+            self._otp_sender,
+            clock,
+            media_store=media_store,
+        )
         self._otp = OtpFacade(engine, clock, self._otp_sender)
         self._mfa = MfaFacade(engine, clock, mfa_secret_key=mfa_secret_key)
         self._sessions = SessionFacade(
@@ -218,6 +228,45 @@ class IamFacade:
         the GET route wraps.
         """
         return await self._identity.get_patient_profile(identity_id, connection=connection)
+
+    # -- Profile photo delegation (US-20, ticket #533) ---------------------
+
+    async def save_patient_photo(
+        self,
+        *,
+        identity_id: int,
+        data: bytes,
+        media_type: str | None,
+    ) -> PatientProfile:
+        """Upload or replace the caller's profile photo (JPEG/PNG/WebP, <= 5MB).
+
+        Delegated to ``IdentityFacade``: validates the photo contract, writes
+        the bytes into the private ``profile-media`` store (patient prefix),
+        and persists only the opaque object key on the profile row. Scoped to
+        the authenticated ``identity_id`` so one identity never overwrites
+        another's photo.
+        """
+        return await self._identity.save_patient_photo(
+            identity_id=identity_id, data=data, media_type=media_type
+        )
+
+    async def get_patient_photo(self, *, identity_id: int) -> PhotoContent | None:
+        """Stream the caller's stored profile photo, or ``None`` when unset.
+
+        Delegated to ``IdentityFacade``. Never a public URL - the decrypted
+        bytes stream through the backend for the session owner only; a doctor's
+        read of a patient photo is later consent-gated work (#540).
+        """
+        return await self._identity.get_patient_photo(identity_id=identity_id)
+
+    async def delete_patient_photo(self, *, identity_id: int) -> PatientProfile:
+        """Remove the caller's profile photo: clear the stored key and object.
+
+        Delegated to ``IdentityFacade``. Idempotent - a profile with no photo
+        returns unchanged; the cleared key is persisted first, then the
+        ciphertext is deleted so a removed photo is not orphaned.
+        """
+        return await self._identity.delete_patient_photo(identity_id=identity_id)
 
     # -- OTP delegation (ADR-0006, ticket #168) ----------------------------
 

@@ -9,18 +9,26 @@ lockout/challenge helpers from ``domain/shared.py``.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import asyncio
+import contextlib
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from bus.outbox_writer import write_outbox
 from modules.iam.domain import events
-from modules.iam.domain.exceptions import IamError
+from modules.iam.domain.exceptions import (
+    IamError,
+    PatientProfileNotSetError,
+    ProfilePhotoTransferError,
+    ProfilePhotoValidationError,
+)
 from modules.iam.domain.otp import (
     MAX_ATTEMPTS,
     OTP_TTL_SECONDS,
@@ -38,6 +46,7 @@ from modules.iam.domain.shared import (
 from modules.iam.outbox import IAM_OUTBOX_TABLE
 from modules.iam.schema.models import iam_identities, iam_patient_profiles
 from modules.iam.session_facade import grant_operator_role
+from modules.profile_media.facade import PATIENT_PREFIX, ProfileMediaStore
 
 _IAM_SCHEMA = "iam"
 
@@ -119,6 +128,83 @@ class PatientProfile(BaseModel):
     photo_ref: str | None = Field(default=None, max_length=255)
 
 
+#: JPG/PNG/WebP are the only profile-photo content types admitted (US-20).
+MEDIA_TYPE_JPEG: Final[str] = "image/jpeg"
+MEDIA_TYPE_PNG: Final[str] = "image/png"
+MEDIA_TYPE_WEBP: Final[str] = "image/webp"
+ALLOWED_PHOTO_MEDIA_TYPES: Final[frozenset[str]] = frozenset(
+    {MEDIA_TYPE_JPEG, MEDIA_TYPE_PNG, MEDIA_TYPE_WEBP}
+)
+
+#: Profile-photo size ceiling (US-20): any photo over 5MB is refused.
+MAX_PROFILE_PHOTO_BYTES: Final[int] = 5 * 1024 * 1024
+
+#: Attempts (initial + retries) the profile-photo write ladder makes before it
+#: gives up on a flaky store (NFR-PERF-002, mirroring the intake upload ladder).
+MAX_PROFILE_PHOTO_ATTEMPTS: Final[int] = 3
+
+
+def _profile_photo_backoff_delay(attempt: int) -> float:
+    """Exponential backoff (seconds) before retry ``attempt`` (loop count, 2+).
+
+    Retry ordinal ``r = attempt - 1`` scales ``base * 2**(r-1)``, so the two
+    retries after the first failure back off 0.5s then 1.0s.
+    """
+    return 0.5 * (2.0 ** (attempt - 2))
+
+
+def validate_profile_photo(media_type: str | None, data: bytes) -> None:
+    """Enforce the profile-photo contract (US-20): JPEG/PNG/WebP only, <= 5MB.
+
+    The canonical type is derived from the upload's content type (the
+    ``; charset=``-style suffix is stripped and the value lowercased); GIF and
+    every other type are refused, and the byte size must fit the 5MB ceiling.
+    A violation raises :class:`ProfilePhotoValidationError` with a human-safe
+    message for the 422 envelope.
+    """
+    mime = (media_type or "").split(";", 1)[0].strip().lower()
+    if mime not in ALLOWED_PHOTO_MEDIA_TYPES:
+        raise ProfilePhotoValidationError(
+            "profile photo must be JPEG, PNG, or WebP (GIF is not supported)"
+        )
+    if len(data) > MAX_PROFILE_PHOTO_BYTES:
+        raise ProfilePhotoValidationError("profile photo must be 5MB or smaller")
+
+
+def _sniff_image_media_type(data: bytes) -> str:
+    """Answer the stored photo's media type from its magic bytes.
+
+    The stored bytes were accepted under their declared JPEG/PNG/WebP type, so
+    a well-formed photo sniffs to one of the three admitted types; the
+    octet-stream fallback catches a declared type whose bytes did not actually
+    match its content (uploads validate the declared type only), so the streamed
+    read still answers an honest ``Content-Type`` instead of a mismatched one.
+    Kept here so the read needs no stored metadata next to the opaque object
+    key (ADR-0020 D2: refs only in SQL).
+    """
+    if data.startswith(b"\xff\xd8\xff"):
+        return MEDIA_TYPE_JPEG
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return MEDIA_TYPE_PNG
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return MEDIA_TYPE_WEBP
+    return "application/octet-stream"
+
+
+@dataclass(frozen=True)
+class PhotoContent:
+    """Decrypted profile-photo bytes plus their sniffed media type (US-20).
+
+    The streamed read answer: the route renders ``data`` with ``media_type``
+    as the ``Content-Type``. Never a public URL - the photo lives in the
+    private ``profile-media`` store and is only ever streamed through the
+    backend for the session owner.
+    """
+
+    data: bytes
+    media_type: str
+
+
 def _default_clock() -> datetime:
     return datetime.now(UTC)
 
@@ -131,10 +217,18 @@ class IdentityFacade:
         engine: AsyncEngine,
         otp_sender: OtpSender,
         clock: Callable[[], datetime] = _default_clock,
+        *,
+        media_store: ProfileMediaStore | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._engine = engine
         self._otp_sender = otp_sender
         self._clock = clock
+        # US-20 (#533): the private profile-media store backs the patient's
+        # profile photo. Injected at the composition root; None is the
+        # unconfigured state the photo methods refuse loudly.
+        self._media_store = media_store
+        self._sleep = sleep
 
     async def register_patient(self, phone: str) -> RegisterPatientResult:
         """Begin-or-resume: create the identity on first use, else resolve it.
@@ -428,3 +522,161 @@ class IdentityFacade:
             return await _read(connection)
         async with self._engine.begin() as connection:
             return await _read(connection)
+
+    async def save_patient_photo(
+        self,
+        *,
+        identity_id: int,
+        data: bytes,
+        media_type: str | None,
+    ) -> PatientProfile:
+        """Upload or replace the caller's profile photo (US-20, ticket #533).
+
+        Enforces the photo contract (JPEG/PNG/WebP only, <= 5MB, GIF refused),
+        writes the bytes to the private ``profile-media`` store under the
+        ``patient/`` prefix, and persists only the returned opaque object key
+        on the caller's ``iam_patient_profiles`` row (ADR-0020 D2: refs only
+        in SQL, never the bytes and never a public URL). An existing photo is
+        replaced: the old object is deleted so it is not orphaned. The photo is
+        bound to ``identity_id`` - the route passes the authenticated subject
+        id, so one identity can never overwrite another's photo.
+
+        The store write rides an upload-retry ladder (NFR-PERF-002, mirroring
+        the intake upload): transient :class:`OSError` is retried up to
+        ``MAX_PROFILE_PHOTO_ATTEMPTS`` before giving up. The validation step
+        runs before any store or database work, so a bad upload never files
+        anything.
+
+        Returns the updated profile (its ``photo_ref`` now names the new key).
+
+        Raises :class:`ProfilePhotoValidationError` on a content-type/size
+        violation, :class:`PatientProfileNotSetError` when there is no profile
+        row to carry the key yet, and :class:`ProfilePhotoTransferError` when
+        every store-write attempt fails.
+        """
+        if self._media_store is None:
+            raise IamError("profile media store is not configured")
+        validate_profile_photo(media_type, data)
+        profile = await self.get_patient_profile(identity_id)
+        if profile is None:
+            raise PatientProfileNotSetError(
+                "set the patient profile before uploading a profile photo"
+            )
+        new_key = await self._store_photo(data, identity_id)
+        try:
+            await self._set_patient_photo_ref(identity_id, new_key)
+        except Exception:
+            # The reference never landed: drop the freshly filed object so the
+            # store is not orphaned (the profile still points at the old photo).
+            with contextlib.suppress(Exception):
+                await self._media_store.delete(object_key=new_key)
+            raise
+        if profile.photo_ref is not None and profile.photo_ref != new_key:
+            # Replace: the superseded object is deleted best-effort - the
+            # profile already references the new key, so a leftover ciphertext
+            # here is a logged-invisible orphan, never a broken reference.
+            with contextlib.suppress(Exception):
+                await self._media_store.delete(object_key=profile.photo_ref)
+        profile.photo_ref = new_key
+        return profile
+
+    async def get_patient_photo(self, *, identity_id: int) -> PhotoContent | None:
+        """Stream the caller's stored profile photo, or ``None`` when unset.
+
+        Reads the profile row's ``photo_ref`` and decrypts the object through
+        the store - never a public URL. ``None`` is the typed "no photo" answer
+        (no profile row, no key, or a dangling key whose object is gone), which
+        the GET route turns into a 404 for the session owner. Scoped to
+        ``identity_id``: only the owning patient reaches the bytes here; a
+        doctor's read of a patient photo is later consent-gated work (#540).
+        """
+        if self._media_store is None:
+            raise IamError("profile media store is not configured")
+        profile = await self.get_patient_profile(identity_id)
+        if profile is None or profile.photo_ref is None:
+            return None
+        try:
+            data = await self._media_store.read(object_key=profile.photo_ref)
+        except FileNotFoundError:
+            # A dangling key (object deleted out-of-band) means "no photo"
+            # rather than a 500 - the owner simply has nothing to preview.
+            return None
+        return PhotoContent(data=data, media_type=_sniff_image_media_type(data))
+
+    async def delete_patient_photo(self, *, identity_id: int) -> PatientProfile:
+        """Remove the caller's profile photo: clear the key and delete the object.
+
+        Clears ``photo_ref`` on the ``iam_patient_profiles`` row first - the
+        contract is "removal clears the stored key" (US-20) - then deletes the
+        ciphertext best-effort so a removed photo is not orphaned. Idempotent:
+        a profile with no photo returns unchanged. Scoped to ``identity_id``.
+
+        Raises :class:`PatientProfileNotSetError` when the caller has no
+        profile row (nothing to carry the cleared key).
+        """
+        if self._media_store is None:
+            raise IamError("profile media store is not configured")
+        profile = await self.get_patient_profile(identity_id)
+        if profile is None:
+            raise PatientProfileNotSetError(
+                "set the patient profile before removing a profile photo"
+            )
+        if profile.photo_ref is None:
+            return profile
+        old_key = profile.photo_ref
+        await self._set_patient_photo_ref(identity_id, None)
+        with contextlib.suppress(Exception):
+            await self._media_store.delete(object_key=old_key)
+        profile.photo_ref = None
+        return profile
+
+    async def _store_photo(self, data: bytes, identity_id: int) -> str:
+        """Run one profile-photo write through the upload-resilience ladder.
+
+        On a transient failure it backs off and retries up to
+        ``MAX_PROFILE_PHOTO_ATTEMPTS`` (3) attempts, then raises
+        :class:`ProfilePhotoTransferError` - a failed upload never silently
+        leaves the profile photo absent (NFR-PERF-002).
+        """
+        media_store = self._media_store
+        if media_store is None:
+            raise IamError("profile media store is not configured")
+        object_key: str | None = None
+        last_error: OSError | None = None
+        for attempt in range(1, MAX_PROFILE_PHOTO_ATTEMPTS + 1):
+            if attempt > 1:
+                await self._sleep(_profile_photo_backoff_delay(attempt))
+            try:
+                object_key = await media_store.save(
+                    data=data,
+                    subject_id=identity_id,
+                    prefix=PATIENT_PREFIX,
+                )
+                break
+            except OSError as exc:
+                last_error = exc
+        if object_key is None:
+            raise ProfilePhotoTransferError(
+                f"profile photo upload failed after {MAX_PROFILE_PHOTO_ATTEMPTS} "
+                f"attempts for patient {identity_id}"
+            ) from last_error
+        return object_key
+
+    async def _set_patient_photo_ref(self, identity_id: int, photo_ref: str | None) -> None:
+        """Persist ``photo_ref`` on the caller's profile row (or refuse).
+
+        A targeted single-column update (never a whole-row upsert, so the
+        photo surface works without re-writing the profile's other fields).
+        Raises :class:`PatientProfileNotSetError` when no row matches - the
+        profile must exist before a photo key can live on it.
+        """
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                update(iam_patient_profiles)
+                .where(iam_patient_profiles.c.identity_id == identity_id)
+                .values(photo_ref=photo_ref, updated_at=self._clock())
+            )
+        if result.rowcount == 0:
+            raise PatientProfileNotSetError(
+                "set the patient profile before changing the profile photo"
+            )

@@ -35,6 +35,9 @@ from modules.iam.domain.exceptions import (
     InvalidOperatorCodeError,
     InvalidPhoneError,
     OperatorMfaError,
+    PatientProfileNotSetError,
+    ProfilePhotoTransferError,
+    ProfilePhotoValidationError,
     RefreshTokenExpiredError,
     RefreshTokenRevokedError,
     RefreshTokenUnknownError,
@@ -686,6 +689,33 @@ def register_error_handlers(app: FastAPI) -> None:
             details=details,
         )
 
+    async def _profile_photo_invalid(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "PROFILE_PHOTO_INVALID",
+            str(exc),
+            log_tag="iam_rejection",
+            request=request,
+        )
+
+    async def _profile_not_set(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_409_CONFLICT,
+            "PROFILE_NOT_SET",
+            str(exc),
+            log_tag="iam_rejection",
+            request=request,
+        )
+
+    async def _photo_transfer_failed(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_502_BAD_GATEWAY,
+            "PROFILE_PHOTO_TRANSFER_FAILED",
+            str(exc),
+            log_tag="iam_rejection",
+            request=request,
+        )
+
     app.add_exception_handler(InvalidPhoneError, _invalid_phone)
     app.add_exception_handler(SmsDeliveryError, _sms_failed)
     app.add_exception_handler(SessionIssuanceError, _session_refused)
@@ -694,5 +724,8 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(RefreshTokenUnknownError, _refresh_token_unknown)
     app.add_exception_handler(RefreshTokenExpiredError, _refresh_token_expired)
     app.add_exception_handler(RefreshTokenRevokedError, _refresh_token_revoked)
+    app.add_exception_handler(ProfilePhotoValidationError, _profile_photo_invalid)
+    app.add_exception_handler(PatientProfileNotSetError, _profile_not_set)
+    app.add_exception_handler(ProfilePhotoTransferError, _photo_transfer_failed)
     app.add_exception_handler(IamError, _iam_failed)
     app.add_exception_handler(RequestValidationError, _validation_failed)
