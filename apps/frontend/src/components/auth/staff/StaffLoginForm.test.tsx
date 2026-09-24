@@ -73,6 +73,32 @@ vi.mock("@/lib/auth/session", () => ({
   saveSession: (...args: unknown[]) => mockSaveSession(...args),
 }));
 
+// #537: the active-partner done screen resumes the saved session in-flow
+// (same no-reload seam as the patient wizard, #496) before routing with the
+// framework router.
+const authState = vi.hoisted(() => ({
+  resumeSession: vi.fn(),
+}));
+
+vi.mock("@/lib/auth/AuthContext", () => ({
+  useAuth: () => ({
+    user: null,
+    selectedRole: null,
+    switchRole: vi.fn(),
+    logout: vi.fn(),
+    isAuthenticated: false,
+    isLoading: false,
+    resumeSession: authState.resumeSession,
+  }),
+}));
+
+const mockRouterReplace = vi.fn();
+const stableRouter = { replace: mockRouterReplace };
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => stableRouter,
+}));
+
 const { mockFetchPartnerMe } = vi.hoisted(() => ({
   mockFetchPartnerMe: vi.fn(),
 }));
@@ -107,6 +133,11 @@ beforeEach(() => {
   vi.mocked(partnerVerify).mockReset();
   mockOperatorLogin.mockReset();
   mockSaveSession.mockReset();
+  mockLocationReplace.mockClear();
+  mockRouterReplace.mockClear();
+  authState.resumeSession.mockReset();
+  // Default: the seam settles immediately (the app awaits it before routing).
+  authState.resumeSession.mockResolvedValue(undefined);
   mockPostLoginTarget.mockReset().mockReturnValue("/operator/home");
   // Default an already-active partner so role-less landing assertions in the
   // generic flow stay deterministic.
@@ -552,7 +583,26 @@ describe("StaffLoginForm - partner code step", () => {
         partnerState: undefined,
         partnerType: "doctor",
       });
-      expect(mockLocationReplace).toHaveBeenCalledWith("/doctor");
+      // #537 AC-1/AC-3: an ACTIVE doctor lands on the shared done screen and
+      // moves with the framework router - never a hard page reload.
+      expect(mockLocationReplace).not.toHaveBeenCalled();
+      expect(screen.getByRole("heading", { name: "Identity verified" }));
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "Opening your dashboard",
+      );
+      expect(
+        screen.getByRole("button", { name: "Go to Dashboard" }),
+      ).toBeInTheDocument();
+    });
+
+    // AC-1 CTA: "Go to Dashboard" routes to the resolved target directly.
+    fireEvent.click(screen.getByRole("button", { name: "Go to Dashboard" }));
+    await waitFor(() => {
+      expect(mockRouterReplace).toHaveBeenCalledWith("/doctor");
+    });
+
+    await waitFor(() => {
+      expect(authState.resumeSession).toHaveBeenCalled();
     });
 
     // The patient lifecycle is never touched for a partner sign-in.
@@ -627,7 +677,18 @@ describe("StaffLoginForm - partner code step", () => {
         partnerState: undefined,
         partnerType: "doctor",
       });
-      expect(mockLocationReplace).toHaveBeenCalledWith("/doctor");
+      // #537 AC-1/AC-3: an ACTIVE doctor lands on the shared done screen and
+      // moves with the framework router - never a hard page reload.
+      expect(mockLocationReplace).not.toHaveBeenCalled();
+      expect(screen.getByRole("heading", { name: "Identity verified" }));
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "Opening your dashboard",
+      );
+    });
+
+    await waitFor(() => {
+      expect(authState.resumeSession).toHaveBeenCalled();
+      expect(mockRouterReplace).toHaveBeenCalledWith("/doctor");
     });
   });
 
@@ -645,7 +706,14 @@ describe("StaffLoginForm - partner code step", () => {
           returnTarget: "/partner/orders/42",
         }),
       );
-      expect(mockLocationReplace).toHaveBeenCalledWith("/partner/orders/42");
+      // #537: the active path routes with the framework router, not a hard
+      // reload, so mockLocationReplace must stay untouched.
+      expect(mockLocationReplace).not.toHaveBeenCalled();
+    });
+
+    await waitFor(() => {
+      expect(authState.resumeSession).toHaveBeenCalled();
+      expect(mockRouterReplace).toHaveBeenCalledWith("/partner/orders/42");
     });
   });
 

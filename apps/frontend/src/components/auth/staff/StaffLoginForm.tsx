@@ -20,6 +20,7 @@
 // "operator" via ?role=operator) - fields never swap while the user types.
 
 import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 
 import { ApiError } from "@/lib/api-errors";
 import { fetchMe, type SessionResult } from "@/lib/auth/api";
@@ -27,11 +28,13 @@ import {
   fetchPartnerRouteState,
   postLoginTarget,
 } from "@/lib/auth/staff-routing";
+import { useAuth } from "@/lib/auth/AuthContext";
 import { saveSession } from "@/lib/auth/session";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { operatorLogin } from "@/lib/operator/api";
 
+import { DoneScreen } from "../DoneScreen";
 import { formatCountdown } from "../otp/otpState";
 import { usePartnerLoginFlow } from "./partnerLoginState";
 import {
@@ -81,6 +84,8 @@ export function StaffLoginForm({
 
   const isOperatorMode = role === "operator";
   const partner = usePartnerLoginFlow();
+  const router = useRouter();
+  const { resumeSession } = useAuth();
 
   const [phone, setPhone] = useState("");
   const [totpCode, setTotpCode] = useState("");
@@ -95,25 +100,45 @@ export function StaffLoginForm({
   const [attemptedSubmit, setAttemptedSubmit] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [partnerPhone, setPartnerPhone] = useState("");
+  // #537: the resolved post-login destination for an Active partner landing
+  // after verify. Null until the partner landing has resolved; non-null only
+  // for Active landers (pending/rejected never reach the done screen).
+  const [landingTarget, setLandingTarget] = useState<string | null>(null);
 
   const phoneRef = useRef<HTMLInputElement>(null);
   const totpRef = useRef<HTMLInputElement>(null);
 
-  // Partner landing: once the OTP flow has minted a partner session, persist
-  // and route through the same save path as the operator flow. A failed
-  // landing surfaces the envelope notice on the (now inert) code card instead
-  // of stranding the caller silently.
+  // Partner landing: once the OTP flow has minted a partner session, resolve
+  // the post-login destination and branch (#537). A failed landing surfaces
+  // the envelope notice on the (now inert) code card instead of stranding the
+  // caller silently.
   useEffect(() => {
     if (!partner.state.session) {
       return;
     }
-    void landAfterLogin(partner.state.session).catch((error: unknown) =>
+    void landPartnerAfterLogin(partner.state.session).catch((error: unknown) =>
       setNotice(envelopeNotice(error)),
     );
-    // Single-fire on mint - landAfterLogin closes over the render-stable
-    // helpers that land a signed-in caller exactly once.
+    // Single-fire on mint - landPartnerAfterLogin closes over the
+    // render-stable helpers that land a signed-in caller exactly once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [partner.state.session]);
+
+  // #537: an ACTIVE partner who just verified lands on the shared done screen
+  // first; once the post-login destination is known, resume the saved session
+  // in-flow (same no-reload seam as the patient flow, #496) and navigate with
+  // the framework router - never a hard page reload on the active path (AC-3).
+  useEffect(() => {
+    if (partner.state.stage === "done" && landingTarget !== null) {
+      let cancelled = false;
+      void resumeSession().then(() => {
+        if (!cancelled) router.replace(landingTarget);
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+  }, [partner.state.stage, landingTarget, router, resumeSession]);
 
   function errorFor(field: FieldName): FieldErrors[FieldName] | undefined {
     return fieldErrors[field];
@@ -152,6 +177,33 @@ export function StaffLoginForm({
         ...(await fetchPartnerRouteState(me.roles)),
       }),
     );
+  }
+
+  // #537: variant for the partner plan only. Resolves the routing output first
+  // (same matrix; postLoginTarget is mocked in tests) but DEPENDS on it for
+  // the branch, so it is split from the operator path that keeps the hard
+  // reload (out of scope). An ACTIVE DOCTOR partner (partnerState undefined,
+  // doctor type) hands the resolved target to the done screen and navigates
+  // via the framework router once the session resumes (AC-1); any other
+  // landing - pending, rejected, non-doctor or unreadable status - keeps the
+  // immediate status/role route below and never sees the done screen (AC-2).
+  async function landPartnerAfterLogin(session: SessionResult) {
+    const me = await completeStaffLogin(session);
+    const routeState = await fetchPartnerRouteState(me.roles);
+    const target = postLoginTarget({
+      surface: "staff",
+      roles: me.roles,
+      returnTarget,
+      ...routeState,
+    });
+    if (
+      routeState.partnerType !== "doctor" ||
+      routeState.partnerState !== undefined
+    ) {
+      window.location.replace(target);
+      return;
+    }
+    setLandingTarget(target);
   }
 
   // Map any thrown value onto calm dictionary copy, reusing the operator
@@ -383,7 +435,20 @@ export function StaffLoginForm({
             </div>
           </>
         )
-      ) : partner.state.stage === "done" ? null : (
+      ) : partner.state.stage === "done" ? (
+        landingTarget !== null ? (
+          // #537: ACTIVE lander done screen. The destination resolved before
+          // this renders; "Go to Dashboard" routes there directly with the
+          // framework router too.
+          <DoneScreen
+            title={t.verifiedTitle}
+            body={t.verifiedBody}
+            openingLabel={STRINGS[lang].doneScreen.openingDashboard}
+            goToDashboardLabel={STRINGS[lang].doneScreen.goToDashboard}
+            onGoToDashboard={() => router.replace(landingTarget)}
+          />
+        ) : null
+      ) : (
         <>
           {/* Partner phone step: collect the number, request the SMS code. */}
           {partner.state.stage === "phone" ? (

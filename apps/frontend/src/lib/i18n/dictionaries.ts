@@ -170,6 +170,8 @@ const en = {
       networkError: "Could not reach the server. Check your connection.",
       smsFailed: "We could not send the code. Try again in a moment.",
       demoOtp: (code: string) => `Demo OTP: ${code}`,
+      verifiedTitle: "Identity verified",
+      verifiedBody: "Your practice is verified and your console is ready.",
     },
     pending: {
       badge: "Under Verification",
@@ -1620,6 +1622,8 @@ export const STRINGS: Record<Lang, Dictionary> = {
         networkError: "सर्वर से संपर्क नहीं हो सका। अपना कनेक्शन जाँचें।",
         smsFailed: "कोड भेजा नहीं जा सका। कुछ देर में फिर कोशिश करें।",
         demoOtp: (code) => `डेमो OTP: ${code}`,
+        verifiedTitle: "पहचान सत्यापित",
+        verifiedBody: "आपकी प्रैक्टिस सत्यापित है और आपका कंसोल तैयार है।",
       },
       pending: {
         badge: "जाँच प्रक्रिया में",
