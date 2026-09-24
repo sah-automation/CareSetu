@@ -190,6 +190,11 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         # PHASE-8.2 T01 (#539): the doctor console Patients list - derived
         # Current/Past buckets over live grants + care cases (ADR-0019).
         "/v1/doctor/patients",
+        # PHASE-8.2 T02 (#540): the consent-gated patient detail read and
+        # its gated photo stream - contact/consultation/health-background
+        # sections locked under the wrong grant (ADR-0019).
+        "/v1/doctor/patients/{patient_id}",
+        "/v1/doctor/patients/{patient_id}/photo",
     }
 
 

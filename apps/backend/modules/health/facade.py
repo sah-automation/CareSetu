@@ -21,10 +21,11 @@ append-only egress audit row (see inline ADR in ``read_consented_history``).
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 # Type-only import to avoid circular dependency at runtime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func, select
@@ -81,6 +82,10 @@ _DOCTOR_PATIENTS_LIST_SCOPE = "doctor_patients_list"
 # The consent counterparty type the first acknowledged health-background save
 # targets for auto-grant (#534) - matches the consent vocabulary.
 _COUNTERPARTY_TYPE_DOCTOR: Literal["doctor", "lab", "chemist"] = "doctor"
+
+# Result payload type of a consent-gated record read (the spine in
+# ``_consent_gated_read``); keeps the shared helper sound under --strict.
+_T = TypeVar("_T")
 
 
 class HealthBackground(BaseModel):
@@ -332,6 +337,45 @@ async def _load_timeline(
     )
 
 
+async def _load_health_background(
+    connection: AsyncConnection, patient_id: int
+) -> HealthBackgroundView:
+    """Read the patient's snapshot on the caller's connection, or "not set".
+
+    Owner-read (``get_health_background``) and consent-gated doctor-read
+    (``read_consented_health_background``) paths share this; running inside
+    the caller's connection keeps each read single-transaction and testable
+    without a database.
+    """
+    row = (
+        await connection.execute(
+            select(
+                health_background_snapshots.c.blood_group,
+                health_background_snapshots.c.conditions,
+                health_background_snapshots.c.allergies,
+                health_background_snapshots.c.medications,
+                health_background_snapshots.c.immunizations,
+                health_background_snapshots.c.family_history,
+                health_background_snapshots.c.acknowledged_at,
+            ).where(health_background_snapshots.c.identity_id == patient_id)
+        )
+    ).first()
+    if row is None:
+        return HealthBackgroundView(set=False, acknowledged=False, background=None)
+    return HealthBackgroundView(
+        set=True,
+        acknowledged=row.acknowledged_at is not None,
+        background=HealthBackground(
+            blood_group=row.blood_group,
+            conditions=list(row.conditions),
+            allergies=list(row.allergies),
+            medications=list(row.medications),
+            immunizations=list(row.immunizations),
+            family_history=list(row.family_history),
+        ),
+    )
+
+
 async def query_access_history(connection: AsyncConnection, patient_id: int) -> AccessHistoryView:
     """Read every access-history row for a patient's record, newest first.
 
@@ -498,16 +542,24 @@ class HealthFacade:
         async with self._engine.begin() as connection:
             return await query_access_history(connection, patient_id)
 
-    async def log_doctor_patient_view(self, *, patient_id: int, doctor_id: int) -> None:
-        """Ledger a doctor seeing one patient's row in the console Patients list (ADR-0019).
+    async def log_doctor_patient_view(
+        self,
+        *,
+        patient_id: int,
+        doctor_id: int,
+        scope: str = _DOCTOR_PATIENTS_LIST_SCOPE,
+    ) -> None:
+        """Ledger a doctor seeing one patient in the console Patients list (ADR-0019).
 
         MOD-012 owns no ledger or outbox, so the doctor console delegates its
         "every read attempt" bookkeeping here: the record shell is resolved
         (lazily ensured) and an allowed doctor access lands in BOTH the
         access-history ledger and the outbox ``record.accessed`` envelope in
-        the same transaction. The scope marker names the list surface, not a
-        record entry - revoking the underlying consent does not rewind the
-        historical "viewed where" signal.
+        the same transaction. The scope marker names the console surface, not
+        a record entry - revoking the underlying consent does not rewind the
+        historical "viewed where" signal. The detail read (#540) passes its
+        own surface marker to ``scope`` for the contact/photo block, which is
+        gated on any live grant rather than one record scope.
         """
         async with self._engine.begin() as connection:
             record_id = await _ensure_record_shell(connection, patient_id)
@@ -517,7 +569,7 @@ class HealthFacade:
                 doctor_id,
                 "allowed",
                 actor_type=_ACTOR_TYPE_DOCTOR,
-                scope=_DOCTOR_PATIENTS_LIST_SCOPE,
+                scope=scope,
             )
 
     async def _discover_live_relationship_doctors(self, patient_id: int) -> set[int]:
@@ -556,33 +608,7 @@ class HealthFacade:
         later consent check on a doctor-facing surface (#540), never here.
         """
         async with self._engine.begin() as connection:
-            row = (
-                await connection.execute(
-                    select(
-                        health_background_snapshots.c.blood_group,
-                        health_background_snapshots.c.conditions,
-                        health_background_snapshots.c.allergies,
-                        health_background_snapshots.c.medications,
-                        health_background_snapshots.c.immunizations,
-                        health_background_snapshots.c.family_history,
-                        health_background_snapshots.c.acknowledged_at,
-                    ).where(health_background_snapshots.c.identity_id == patient_id)
-                )
-            ).first()
-            if row is None:
-                return HealthBackgroundView(set=False, acknowledged=False, background=None)
-            return HealthBackgroundView(
-                set=True,
-                acknowledged=row.acknowledged_at is not None,
-                background=HealthBackground(
-                    blood_group=row.blood_group,
-                    conditions=list(row.conditions),
-                    allergies=list(row.allergies),
-                    medications=list(row.medications),
-                    immunizations=list(row.immunizations),
-                    family_history=list(row.family_history),
-                ),
-            )
+            return await _load_health_background(connection, patient_id)
 
     async def save_health_background(
         self,
@@ -778,27 +804,36 @@ class HealthFacade:
             entry_types = [r.entry_type for r in rows]
             return entry_ids, entry_types
 
-    async def read_consented_history(
+    async def _consent_gated_read(
         self,
+        *,
         patient_id: int,
-        scope: str,
         counterparty_type: str,
         counterparty_id: int,
-        settings: Settings | None = None,
-    ) -> RecordTimeline:
-        """Partner read gated by consent; writes to both ledgers on success.
+        scope: str,
+        settings: Settings | None,
+        loader: Callable[[AsyncConnection, int], Awaitable[_T]],
+        disclosed_entry_ids: Callable[[_T], list[int]],
+    ) -> _T:
+        """Shared two-ledger spine for consent-gated partner record reads.
 
-        The consent gate is checked via MOD-004's ``check_consent``. If allowed,
-        the scoped entries are returned and exactly ONE row is written to EACH
-        ledger: health_record_access_history (outcome=allowed) and
-        consent_egress_log (citing consent_id, version, lineage_ref, and disclosed entry_ids).
-        If denied, only the access history ledger receives a row (outcome=denied).
-        Owner reads bypass this gate entirely - use ``get_own_record``.
+        The consent gate is checked via MOD-004's ``check_consent`` for the
+        given record ``scope``. If allowed, the payload is loaded and exactly
+        ONE row is written to EACH ledger: ``health_record_access_history``
+        (outcome=allowed) and ``consent_egress_log`` (citing consent_id,
+        version, and the entry IDs the loader surfaced). If denied, only the
+        access-history ledger receives a row (outcome=denied) and
+        ``RecordAccessDeniedError`` is raised after the transaction commits -
+        the caller renders the section locked, never an error (ADR-0019).
+        The EGRESS write is delegated to ``ConsentFacade`` in its own
+        transaction (FIX-7, #227): the health transaction commits above, then
+        the consent facade opens a separate one for the audit row.  Two-phase
+        commit is rejected as disproportionate for an append-only ledger whose
+        absence is detectable (coding-standards S2).
         """
         if self._consent_facade is None:
             raise RuntimeError("ConsentFacade not configured on HealthFacade")
 
-        # Check consent via MOD-004
         decision = await self._consent_facade.check_consent(
             patient_id=patient_id,
             counterparty_type=counterparty_type,  # type: ignore[arg-type]
@@ -807,14 +842,13 @@ class HealthFacade:
             settings=settings,
         )
 
-        # Ensure record shell exists
+        # Ensure record shell exists so access-history rows attach to the
+        # patient's record.
         denied = not decision.allowed
         async with self._engine.begin() as connection:
             record_id = await _ensure_record_shell(connection, patient_id)
 
             if denied:
-                # Denied read: log access history + denied event, then raise
-                # AFTER the transaction commits (cf. get_record_as_owner pattern).
                 await _log_access(
                     connection,
                     record_id,
@@ -825,7 +859,6 @@ class HealthFacade:
                     denial_reason="consent check failed",
                 )
             else:
-                # Allowed read: load entries and log access history + event
                 await _log_access(
                     connection,
                     record_id,
@@ -834,17 +867,11 @@ class HealthFacade:
                     actor_type=counterparty_type,
                     scope=scope,
                 )
-                timeline = await _load_timeline(connection, record_id, patient_id)
+                result = await loader(connection, record_id)
 
         if denied:
             raise RecordAccessDeniedError("consent check failed")
 
-        # ADR: Egress write is in its own consent-transaction (FIX-7, #227).
-        # Health transaction commits above; consent facade opens a
-        # separate transaction for the egress audit row.  Two-phase
-        # commit is rejected as disproportionate for an append-only
-        # ledger whose absence is detectable (coding-standards S2).
-        disclosed_entry_ids = [entry.entry_id for entry in timeline.entries]
         consent_version = decision.version if decision.version is not None else 0
         await self._consent_facade.record_egress_disclosure(
             patient_id=patient_id,
@@ -853,7 +880,57 @@ class HealthFacade:
             counterparty_type=counterparty_type,
             counterparty_id=str(counterparty_id),
             record_scope=scope,
-            disclosed_entry_ids=disclosed_entry_ids,
+            disclosed_entry_ids=disclosed_entry_ids(result),
         )
 
-        return timeline
+        return result
+
+    async def read_consented_history(
+        self,
+        patient_id: int,
+        scope: str,
+        counterparty_type: str,
+        counterparty_id: int,
+        settings: Settings | None = None,
+    ) -> RecordTimeline:
+        """Partner read gated by consent; writes to both ledgers on success.
+
+        Delegates to the shared two-ledger spine (``_consent_gated_read``):
+        allowed reads surface the scoped entries and egress-cite their IDs;
+        denied reads fail closed. Owner reads bypass this gate entirely - use
+        ``get_own_record``.
+        """
+        return await self._consent_gated_read(
+            patient_id=patient_id,
+            counterparty_type=counterparty_type,
+            counterparty_id=counterparty_id,
+            scope=scope,
+            settings=settings,
+            loader=lambda connection, record_id: _load_timeline(connection, record_id, patient_id),
+            disclosed_entry_ids=lambda timeline: [entry.entry_id for entry in timeline.entries],
+        )
+
+    async def read_consented_health_background(
+        self,
+        patient_id: int,
+        counterparty_type: str,
+        counterparty_id: int,
+        settings: Settings | None = None,
+    ) -> HealthBackgroundView:
+        """Partner read of the health-background snapshot gated by consent (#540).
+
+        Uses the same fail-closed, two-ledger spine as ``read_consented_history``
+        with the ``health_background`` scope (which ``full_record`` subsumes).
+        The snapshot is not entry-keyed, so ``disclosed_entry_ids`` stays
+        empty. Owner reads bypass this gate entirely - use
+        ``get_health_background``.
+        """
+        return await self._consent_gated_read(
+            patient_id=patient_id,
+            counterparty_type=counterparty_type,
+            counterparty_id=counterparty_id,
+            scope=_HEALTH_BACKGROUND_SCOPE,
+            settings=settings,
+            loader=lambda connection, _record_id: _load_health_background(connection, patient_id),
+            disclosed_entry_ids=lambda _background: [],
+        )

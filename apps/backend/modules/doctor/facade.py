@@ -11,14 +11,23 @@ the composition root (``app/main.py``).
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, TypeVar
 
-from modules.doctor.doctor_models import DoctorPatientRow, PatientsListView
+from modules.doctor.doctor_models import (
+    CaseWorkspaceLink,
+    ContactSection,
+    DoctorPatientDetailView,
+    DoctorPatientRow,
+    PatientsListView,
+)
+from modules.health.facade import RecordAccessDeniedError as RecordAccessDeniedError
+from modules.iam.facade import PhotoContent
 
 if TYPE_CHECKING:
     from modules.care.facade import CaseConsoleFacade, CaseDetailView
-    from modules.consent.facade import ConsentFacade
-    from modules.health.facade import HealthFacade
+    from modules.consent.facade import ConsentFacade, CounterpartyGrantView
+    from modules.health.facade import HealthBackgroundView, HealthFacade, RecordTimeline
     from modules.iam.facade import IamFacade, PatientProfile
 
 logger = logging.getLogger(__name__)
@@ -36,6 +45,21 @@ _BUCKET_PAST = "past"
 # and nothing but closed cases is "past" (ADR-0019). Any other stage keeps
 # the relationship current.
 _CASE_STAGE_CLOSED = "closed"
+
+# The consent scopes the detail surface gates its sections on (the consent
+# vocabulary; ``full_record`` subsumes every specific scope when gated).
+_RECORD_SCOPE_FULL = "full_record"
+_CONSENT_SCOPE_CONSULTATIONS = "consultations"
+
+# The access-history marker for the detail's contact/photo block (MOD-012,
+# ADR-0019, #540). The block is gated on ANY live grant - it maps to no single
+# record scope - so the ledger marker names the surface instead, mirroring the
+# list marker the health facade owns for its own surface.
+_DETAIL_SCOPE_MARKER = "doctor_patient_detail"
+
+# Payload type of a consented record read funnelled through
+# ``_consent_read_or_none``; keeps the fail-closed helper sound under --strict.
+_T = TypeVar("_T")
 
 
 def _bucket_for(has_live_grant: bool, patient_cases: list[CaseDetailView]) -> str:
@@ -187,3 +211,219 @@ class DoctorConsoleFacade:
             )
             profiles = {}
         return profiles
+
+    async def get_doctor_patient_detail(
+        self, *, doctor_id: int, patient_id: int
+    ) -> DoctorPatientDetailView:
+        """Section-gated detail read of one patient (US-15..18, ADR-0019, #540).
+
+        Composition order matches the Patients list derivation (live grants
+        + assigned care cases), then gates each block on the patient's live
+        grants:
+        - ``contact`` under ANY live grant, enriched degrade-safe from the iam
+          profile and access-logged (the detail surface marker) plus
+          egress-disclosed against the most permissive live grant (prefer
+          ``full_record``, else the earliest consent id);
+        - ``consultation_history`` only under the ``consultations`` scope via
+          ``read_consented_history``, whose own two-ledger discipline applies;
+          a denial is caught and the section answers ``None`` (locked - the
+          denied row is already in the ledger).
+        - ``health_background`` only under ``health_background`` via
+          ``read_consented_health_background``, same fail-closed shape.
+        - ``case_workspace`` is the doctor's own most recently updated case
+          for the patient - present whenever one exists, never consent-gated.
+        A patient with no live grant at all answers every section locked and
+        the workspace, leaking nothing sensitive.
+        """
+        grants = await self._consent_facade.list_counterparty_grants(
+            counterparty_type=_COUNTERPARTY_TYPE_DOCTOR,
+            counterparty_id=str(doctor_id),
+        )
+        own_grants = [grant for grant in grants if grant.patient_id == patient_id]
+        has_live_grant = bool(own_grants)
+
+        cases = await self._care_facade.list_doctor_all_cases(doctor_id=doctor_id)
+        patient_cases = [case for case in cases if case.patient_id == patient_id]
+        latest_case = max(patient_cases, key=lambda case: case.updated_at, default=None)
+
+        contact = None
+        if has_live_grant:
+            profile = await self._resolve_patient_profile(patient_id)
+            contact = ContactSection(
+                name=profile.name if profile is not None else None,
+                age=profile.age if profile is not None else None,
+                gender=profile.gender if profile is not None else None,
+                area=profile.area if profile is not None else None,
+                emergency_contact=profile.emergency_contact if profile is not None else None,
+                photo_ref=profile.photo_ref if profile is not None else None,
+            )
+            await self._health_facade.log_doctor_patient_view(
+                patient_id=patient_id,
+                doctor_id=doctor_id,
+                scope=_DETAIL_SCOPE_MARKER,
+            )
+            await self._disclose_against_grant(own_grants, patient_id, doctor_id)
+
+        consultation_history = await self._read_granted_consultation_history(patient_id, doctor_id)
+        health_background = await self._read_granted_health_background(patient_id, doctor_id)
+
+        return DoctorPatientDetailView(
+            patient_id=patient_id,
+            bucket=_bucket_for(has_live_grant, patient_cases),
+            granted_scopes=list(dict.fromkeys(grant.record_scope for grant in own_grants)),
+            latest_case_stage=latest_case.stage if latest_case is not None else None,
+            case_workspace=(
+                CaseWorkspaceLink(case_id=latest_case.case_id, stage=latest_case.stage)
+                if latest_case is not None
+                else None
+            ),
+            contact=contact,
+            consultation_history=consultation_history,
+            health_background=health_background,
+        )
+
+    async def get_doctor_patient_photo(
+        self, *, doctor_id: int, patient_id: int
+    ) -> PhotoContent | None:
+        """The consent-gated photo stream read for one doctor-patient pair (US-16, #540).
+
+        Fail-closed: without a live grant the read raises the same
+        ``RecordAccessDeniedError`` the consented record read raises (the
+        app-global health handler answers 403) and not a byte is returned.
+        With a live grant the fetch is access-logged (the detail surface
+        marker) and egress-disclosed against the most permissive live grant,
+        then the stored photo is returned when one exists - ``None`` means
+        "no photo on file" (the route answers 404), never a denial. A denial
+        at the grant gate is a boundary refusal: no byte is read and no ledger
+        row is written (it is the RBAC-analogous 403 the health handler
+        answers), unlike the consented record reads which self-ledger.
+        """
+        grants = await self._consent_facade.list_counterparty_grants(
+            counterparty_type=_COUNTERPARTY_TYPE_DOCTOR,
+            counterparty_id=str(doctor_id),
+        )
+        own_grants = [grant for grant in grants if grant.patient_id == patient_id]
+        if not own_grants:
+            raise RecordAccessDeniedError("no live consent grant for this patient")
+
+        photo = await self._iam_facade.get_patient_photo(identity_id=patient_id)
+        if photo is None:
+            return None
+
+        await self._health_facade.log_doctor_patient_view(
+            patient_id=patient_id,
+            doctor_id=doctor_id,
+            scope=_DETAIL_SCOPE_MARKER,
+        )
+        await self._disclose_against_grant(own_grants, patient_id, doctor_id)
+        return photo
+
+    async def _resolve_patient_profile(self, patient_id: int) -> PatientProfile | None:
+        """Resolve one patient's profile, degrade-safe (review-queue convention #489).
+
+        A failed profile must not fail the detail's contact block - the block
+        degrades to empty fields with a warning logged, carrying no patient id
+        or PHI in the log line (error-handling-observability §2).
+        """
+        try:
+            return await self._iam_facade.get_patient_profile(patient_id)
+        except Exception:
+            logger.warning(
+                "doctor-console profile resolution failed; degrading to empty contact",
+                exc_info=True,
+            )
+            return None
+
+    def _authorizing_grant(self, grants: list[CounterpartyGrantView]) -> CounterpartyGrantView:
+        """The live grant the contact/photo disclosure is cited against.
+
+        ``full_record`` is the most permissive standing scope (it subsumes
+        every specific scope), so the disclosure prefers it; otherwise the
+        earliest live grant (lowest consent id - the reverse lookup already
+        returns rows ordered by patient then id) is the deterministic
+        authorizing one the section is disclosed under.
+        """
+        return next(
+            (grant for grant in grants if grant.record_scope == _RECORD_SCOPE_FULL),
+            min(grants, key=lambda grant: grant.consent_id),
+        )
+
+    async def _disclose_against_grant(
+        self,
+        grants: list[CounterpartyGrantView],
+        patient_id: int,
+        doctor_id: int,
+    ) -> None:
+        """Egress-disclose the contact/photo block against the authorizing grant.
+
+        The block is not entry-keyed, so ``disclosed_entry_ids`` stays empty;
+        the egress row still pins patient + consent id + version + scope to
+        the consent module's own transaction (FIX-7, ADR-0003).
+        """
+        grant = self._authorizing_grant(grants)
+        await self._consent_facade.record_egress_disclosure(
+            patient_id=patient_id,
+            consent_id=grant.consent_id,
+            version=grant.version,
+            counterparty_type=_COUNTERPARTY_TYPE_DOCTOR,
+            counterparty_id=str(doctor_id),
+            record_scope=grant.record_scope,
+            disclosed_entry_ids=[],
+        )
+
+    async def _read_granted_consultation_history(
+        self, patient_id: int, doctor_id: int
+    ) -> RecordTimeline | None:
+        """Read the consultation-history block, fail-closed to a locked section.
+
+        ``read_consented_history`` already writes its own ledger rows for the
+        allowed and the denied attempt; a denial becomes a ``None`` section
+        (the client renders "not shared") instead of propagating an error.
+        """
+        return await self._consent_read_or_none(
+            patient_id=patient_id,
+            doctor_id=doctor_id,
+            reader=lambda: self._health_facade.read_consented_history(
+                patient_id=patient_id,
+                scope=_CONSENT_SCOPE_CONSULTATIONS,
+                counterparty_type=_COUNTERPARTY_TYPE_DOCTOR,
+                counterparty_id=doctor_id,
+            ),
+        )
+
+    async def _read_granted_health_background(
+        self, patient_id: int, doctor_id: int
+    ) -> HealthBackgroundView | None:
+        """Read the health-background block, fail-closed to a locked section.
+
+        Same two-ledger and raise-after-commit discipline as
+        ``read_consented_history``; a denial answers ``None`` (locked), never
+        an error (ADR-0019, US-16).
+        """
+        return await self._consent_read_or_none(
+            patient_id=patient_id,
+            doctor_id=doctor_id,
+            reader=lambda: self._health_facade.read_consented_health_background(
+                patient_id=patient_id,
+                counterparty_type=_COUNTERPARTY_TYPE_DOCTOR,
+                counterparty_id=doctor_id,
+            ),
+        )
+
+    async def _consent_read_or_none(
+        self,
+        *,
+        patient_id: int,
+        doctor_id: int,
+        reader: Callable[[], Awaitable[_T]],
+    ) -> _T | None:
+        """Run a consented record read, converting a denial into ``None``.
+
+        The health facade already ledgers both outcomes; the detail surface
+        maps the fail-closed ``RecordAccessDeniedError`` to a locked ``None``
+        section rather than surfacing an error (ADR-0019, US-16).
+        """
+        try:
+            return await reader()
+        except RecordAccessDeniedError:
+            return None
