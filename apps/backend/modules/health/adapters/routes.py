@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, cast
 
-from fastapi import APIRouter, Depends, FastAPI, Request, status
+from fastapi import APIRouter, Depends, FastAPI, Query, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -31,6 +31,9 @@ from modules.health.domain.exceptions import (
 )
 from modules.health.facade import (
     HealthBackground,
+    HealthBackgroundMetric,
+    HealthBackgroundMetricEntry,
+    HealthBackgroundMetricList,
     HealthBackgroundView,
     HealthFacade,
     RecordTimeline,
@@ -189,6 +192,72 @@ async def save_health_background(
         namespace=f"identity:{principal.subject_id}",
     )
     return saved
+
+
+#: Bounded pagination for the metrics series (api-standards §4: default 25,
+#: max 100) - mirrors the audit-ledger read shape.
+_DEFAULT_PER_PAGE = 25
+_MAX_PER_PAGE = 100
+
+
+@router.get(
+    "/v1/me/health-background/metrics",
+    response_model=HealthBackgroundMetricList,
+    status_code=status.HTTP_200_OK,
+    summary="List the caller's height/weight series, newest-first",
+)
+async def read_health_background_metrics(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_patient)],
+    page: Annotated[int, Query(ge=1)] = 1,
+    per_page: Annotated[int, Query(ge=1, le=_MAX_PER_PAGE)] = _DEFAULT_PER_PAGE,
+) -> HealthBackgroundMetricList:
+    """Read one bounded page of the caller's height/weight series (#535).
+
+    Owner-only resolution from the token's subject id (never client input):
+    a patient's own series is always returned, newest-first, one page at a
+    time; a patient who has not appended a measurement answers an empty page.
+    This surface serves the owning patient only (the ``require_patient`` gate
+    plus identity-scoping in the facade); a doctor read of the series is
+    consent-gated on a separate doctor-facing surface and never reaches it.
+    """
+    facade = cast(HealthFacade, request.app.state.health_facade)
+    return await facade.list_health_background_metrics(
+        int(principal.subject_id),
+        page=page,
+        per_page=per_page,
+    )
+
+
+@router.post(
+    "/v1/me/health-background/metrics",
+    response_model=HealthBackgroundMetricEntry,
+    status_code=status.HTTP_201_CREATED,
+    summary="Append a height/weight measurement to the caller's series",
+)
+async def append_health_background_metric(
+    request: Request,
+    payload: HealthBackgroundMetric,
+    principal: Annotated[Principal, Depends(require_patient)],
+) -> HealthBackgroundMetricEntry:
+    """Append one timestamped height/weight row to the caller's series (#535).
+
+    The measurement is keyed to the session subject (never client input) and
+    the row id is server-minted - a client-supplied id is refused at the
+    typed boundary (``extra="forbid"``), so the patient never chooses a series
+    identity. The mutation honours the ``Idempotency-Key`` replay contract
+    (api-standards §5) like the other ``/v1/me`` mutations, namespaced to the
+    principal's subject id.
+    """
+    facade = cast(HealthFacade, request.app.state.health_facade)
+    return await run_idempotent(
+        request,
+        lambda: facade.append_health_background_metric(
+            int(principal.subject_id),
+            payload,
+        ),
+        namespace=f"identity:{principal.subject_id}",
+    )
 
 
 def register_error_handlers(app: FastAPI) -> None:

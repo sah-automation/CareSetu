@@ -24,9 +24,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 # Type-only import to avoid circular dependency at runtime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -45,6 +45,7 @@ from modules.health.domain.exceptions import (
 )
 from modules.health.outbox import HEALTH_OUTBOX_TABLE
 from modules.health.schema.models import (
+    health_background_metrics,
     health_background_snapshots,
     health_patient_records,
     health_record_access_history,
@@ -106,6 +107,52 @@ class HealthBackgroundView(BaseModel):
     set: bool
     acknowledged: bool
     background: HealthBackground | None = None
+
+
+class HealthBackgroundMetric(BaseModel):
+    """One timestamped height/weight measurement the patient appends (#535, US-23).
+
+    Height in cm and weight in kg, each with a plausible range matching the
+    column CHECKs; at least one of the two must be present. ``recorded_at`` is
+    the patient-authored measurement timestamp - the trend anchor the series
+    orders on - and is required. The row id is never client-supplied: extra
+    fields (``extra="forbid"``) and server-minted ids keep the client from
+    choosing its own identity for a series row.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    height_cm: float | None = Field(default=None, ge=30, le=250)
+    weight_kg: float | None = Field(default=None, ge=1, le=500)
+    recorded_at: datetime
+
+    @model_validator(mode="after")
+    def _require_at_least_one_value(self) -> HealthBackgroundMetric:
+        if self.height_cm is None and self.weight_kg is None:
+            raise ValueError("at least one of height_cm or weight_kg is required")
+        return self
+
+
+class HealthBackgroundMetricEntry(BaseModel):
+    """One stored measurement on the series, newest-first in the list order."""
+
+    entry_id: int
+    height_cm: float | None
+    weight_kg: float | None
+    recorded_at: datetime
+
+
+class HealthBackgroundMetricList(BaseModel):
+    """One page of the height/weight series, newest-first (api-standards §4).
+
+    ``items`` is the bounded page ordered by ``(recorded_at, id)`` descending;
+    ``total`` is the full series length so the caller can page through the rest
+    (offset pagination is the natural precedent in this module tree - the audit
+    ledger read). A patient with no measurements answers an empty page.
+    """
+
+    items: list[HealthBackgroundMetricEntry]
+    total: int
 
 
 class RecordEntryView(BaseModel):
@@ -322,6 +369,21 @@ async def query_access_history(connection: AsyncConnection, patient_id: int) -> 
             )
             for row in rows
         ]
+    )
+
+
+def _metric_entry_from_row(row: Any) -> HealthBackgroundMetricEntry:
+    """Concretize one ``health_background_metrics`` row as the typed entry.
+
+    Height/weight arrive as ``Decimal`` from the ``Numeric`` columns; they are
+    emitted as JSON numbers, never Decimal-backed strings (Pydantic v2
+    serializes Decimal to string by default - see the intake confidence note).
+    """
+    return HealthBackgroundMetricEntry(
+        entry_id=int(row.id),
+        height_cm=float(row.height_cm) if row.height_cm is not None else None,
+        weight_kg=float(row.weight_kg) if row.weight_kg is not None else None,
+        recorded_at=row.recorded_at,
     )
 
 
@@ -585,6 +647,85 @@ class HealthFacade:
                 _HEALTH_BACKGROUND_SCOPE,
             )
         return HealthBackgroundView(set=True, acknowledged=True, background=background)
+
+    async def append_health_background_metric(
+        self,
+        patient_id: int,
+        metric: HealthBackgroundMetric,
+    ) -> HealthBackgroundMetricEntry:
+        """Append one timestamped height/weight row to the patient's series.
+
+        Owner-only authoring resolved from the session subject (never client
+        input): the row is keyed to ``patient_id`` and its id is minted by the
+        table - the request model carries no id field, so a client never picks
+        a series identity. Append-only in v1: no UPDATE/DELETE on this surface
+        (the trend view extends naturally over this time series instead). The
+        writer returns the stored entry with its server id in one round trip.
+        """
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                health_background_metrics.insert()
+                .values(
+                    identity_id=patient_id,
+                    height_cm=metric.height_cm,
+                    weight_kg=metric.weight_kg,
+                    recorded_at=metric.recorded_at,
+                )
+                .returning(
+                    health_background_metrics.c.id,
+                    health_background_metrics.c.height_cm,
+                    health_background_metrics.c.weight_kg,
+                    health_background_metrics.c.recorded_at,
+                )
+            )
+            row = result.one()
+            return _metric_entry_from_row(row)
+
+    async def list_health_background_metrics(
+        self,
+        patient_id: int,
+        *,
+        page: int = 1,
+        per_page: int = 25,
+    ) -> HealthBackgroundMetricList:
+        """Read one page of the patient's height/weight series, newest-first.
+
+        Scoped to the session patient's identity (the caller's rows only,
+        resolved from the token subject - this surface is owner-only). Ordered
+        by ``(recorded_at, id)`` descending so ties resolve deterministically;
+        ``total`` counts the full series while ``items`` returns at most
+        ``per_page`` rows (api-standards §4). A patient with no measurements
+        answers an empty page, never an error.
+        """
+        async with self._engine.begin() as connection:
+            scoped = health_background_metrics.c.identity_id == patient_id
+            total = (
+                await connection.scalar(
+                    select(func.count()).select_from(health_background_metrics).where(scoped)
+                )
+                or 0
+            )
+            rows = (
+                await connection.execute(
+                    select(
+                        health_background_metrics.c.id,
+                        health_background_metrics.c.height_cm,
+                        health_background_metrics.c.weight_kg,
+                        health_background_metrics.c.recorded_at,
+                    )
+                    .where(scoped)
+                    .order_by(
+                        health_background_metrics.c.recorded_at.desc(),
+                        health_background_metrics.c.id.desc(),
+                    )
+                    .offset((page - 1) * per_page)
+                    .limit(per_page)
+                )
+            ).all()
+            return HealthBackgroundMetricList(
+                items=[_metric_entry_from_row(row) for row in rows],
+                total=int(total),
+            )
 
     async def seed_record_entries(self, patient_id: int) -> tuple[list[int], list[str]]:
         """Return entry IDs and types for a patient's record (test-only seed helper).

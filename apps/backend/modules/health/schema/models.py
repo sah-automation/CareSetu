@@ -24,6 +24,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     MetaData,
+    Numeric,
     String,
     Table,
     Text,
@@ -132,6 +133,43 @@ health_background_snapshots = Table(
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     UniqueConstraint("identity_id", name="uq_health_background_snapshots_identity"),
+)
+
+# The height/weight time series the patient appends next to the snapshot (#535, US-23).
+# One row per measurement, keyed to the patient identity (like the snapshot, never a
+# cross-schema FK); append-only on this surface - no UPDATE/DELETE in v1, so a trend view
+# can extend naturally. ``recorded_at`` is the patient-authored measurement timestamp (the
+# trend anchor); the series read orders newest-first on ``(recorded_at, id)``. The range
+# CHECKs mirror the API-boundary validation so a non-API writer cannot store an absurd
+# value; at least one of the two values must be present (an empty row carries nothing).
+health_background_metrics = Table(
+    "health_background_metrics",
+    MODULE_METADATA,
+    Column("id", BigInteger, primary_key=True),
+    # Patient identity id - no cross-schema FK (ADR-0003).
+    Column("identity_id", BigInteger, nullable=False),
+    Column("height_cm", Numeric(5, 1), nullable=True),
+    Column("weight_kg", Numeric(5, 2), nullable=True),
+    Column("recorded_at", DateTime(timezone=True), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    CheckConstraint(
+        "height_cm IS NULL OR (height_cm >= 30 AND height_cm <= 250)",
+        name="ck_health_background_metrics_height_cm",
+    ),
+    CheckConstraint(
+        "weight_kg IS NULL OR (weight_kg >= 1 AND weight_kg <= 500)",
+        name="ck_health_background_metrics_weight_kg",
+    ),
+    CheckConstraint(
+        "height_cm IS NOT NULL OR weight_kg IS NOT NULL",
+        name="ck_health_background_metrics_has_value",
+    ),
+    Index(
+        "ix_health_background_metrics_series",
+        "identity_id",
+        text("recorded_at DESC"),
+        text("id DESC"),
+    ),
 )
 
 

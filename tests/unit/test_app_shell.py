@@ -77,6 +77,9 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         # US-21/US-22 (#534): the patient's health-background snapshot read/write
         # with the one-time first-save acknowledgement.
         "/v1/me/health-background",
+        # US-23 (#535): the height/weight time series the patient appends next
+        # to the snapshot - append (POST) and newest-first paged list (GET).
+        "/v1/me/health-background/metrics",
         # PHASE-3 T2 (#211): the owner-only record surface.
         "/v1/records",
         "/v1/records/{record_id}",
