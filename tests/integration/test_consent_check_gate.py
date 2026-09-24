@@ -236,7 +236,13 @@ async def test_full_record_subsumes_specific_scopes_end_to_end(
         await facade.grant_consent(_PATIENT, "doctor", "dr-full", "full_record")
 
         # Check specific scopes - all should be allowed
-        for scope in ["consultations", "prescriptions", "lab_results", "metrics"]:
+        for scope in [
+            "consultations",
+            "prescriptions",
+            "lab_results",
+            "metrics",
+            "health_background",
+        ]:
             decision = await facade.check_consent(_PATIENT, "doctor", "dr-full", scope, settings)
             assert decision.allowed is True, f"full_record should subsume {scope}"
             assert decision.effective_scope == "full_record"
@@ -278,6 +284,67 @@ async def test_specific_scope_does_not_subsume_full_record(
         assert decision.effective_scope == "consultations"
     finally:
         await close_redis_client()
+
+
+@pytest.mark.asyncio
+async def test_health_background_scope_grant_subsume_and_revoke_end_to_end(
+    database_url: str, clean_tables: None
+) -> None:
+    """AC (#531 US-35): health_background is independent, full_record-subsumed, revocable."""
+    facade = _facade(database_url)
+    settings = None  # SQL fallback: exercises the gate independent of Redis
+
+    # No grant yet -> fail-closed
+    decision = await facade.check_consent(
+        _PATIENT, "doctor", "dr-hb", "health_background", settings
+    )
+    assert decision.allowed is False
+
+    # Live health_background grant -> allowed (exact match)
+    await facade.grant_consent(_PATIENT, "doctor", "dr-hb", "health_background")
+    decision = await facade.check_consent(
+        _PATIENT, "doctor", "dr-hb", "health_background", settings
+    )
+    assert decision.allowed is True
+    assert decision.effective_scope == "health_background"
+    assert decision.version == 1
+
+    # health_background does not grant full_record or a different specific scope
+    decision = await facade.check_consent(_PATIENT, "doctor", "dr-hb", "full_record", settings)
+    assert decision.allowed is False
+    decision = await facade.check_consent(_PATIENT, "doctor", "dr-hb", "metrics", settings)
+    assert decision.allowed is False
+
+    # Revoke the health_background grant -> denied again
+    log = await facade.list_consents(_PATIENT)
+    hb_id = next(
+        item.consent_id
+        for item in log.items
+        if item.record_scope == "health_background" and item.status == "granted"
+    )
+    revoked = await facade.revoke_consent(_PATIENT, hb_id)
+    assert (revoked.status, revoked.version) == ("revoked", 1)
+    decision = await facade.check_consent(
+        _PATIENT, "doctor", "dr-hb", "health_background", settings
+    )
+    assert decision.allowed is False
+
+
+@pytest.mark.asyncio
+async def test_full_record_subsumes_health_background_end_to_end(
+    database_url: str, clean_tables: None
+) -> None:
+    """AC (#531): a live full_record grant satisfies a health_background request."""
+    facade = _facade(database_url)
+    settings = None
+
+    await facade.grant_consent(_PATIENT, "doctor", "dr-hbfull", "full_record")
+
+    decision = await facade.check_consent(
+        _PATIENT, "doctor", "dr-hbfull", "health_background", settings
+    )
+    assert decision.allowed is True
+    assert decision.effective_scope == "full_record"
 
 
 @pytest.mark.asyncio

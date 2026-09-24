@@ -43,6 +43,26 @@ class TestScopeSubsumption:
             assert _scope_subsumes(requested="full_record", granted=specific) is False
 
 
+class TestHealthBackgroundScope:
+    """#531 US-35: health_background is independent but full_record-subsumed.
+
+    The parametrized matrix above already widens with RECORD_SCOPES; these
+    named tests pin the scope's contract explicitly so its intent is visible.
+    """
+
+    def test_exact_health_background_grant_allows_the_scope(self) -> None:
+        assert _scope_subsumes(requested="health_background", granted="health_background") is True
+
+    def test_full_record_grant_subsumes_health_background(self) -> None:
+        assert _scope_subsumes(requested="health_background", granted="full_record") is True
+
+    def test_health_background_grant_does_not_cover_other_specific_scopes(self) -> None:
+        assert _scope_subsumes(requested="consultations", granted="health_background") is False
+
+    def test_health_background_grant_does_not_cover_full_record(self) -> None:
+        assert _scope_subsumes(requested="full_record", granted="health_background") is False
+
+
 class TestCheckConsentDecision:
     """Test the ConsentDecision model contract."""
 

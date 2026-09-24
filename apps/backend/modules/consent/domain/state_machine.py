@@ -34,6 +34,7 @@ RECORD_SCOPES: tuple[str, ...] = (
     "prescriptions",
     "lab_results",
     "metrics",
+    "health_background",
     "full_record",
 )
 

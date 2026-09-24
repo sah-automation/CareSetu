@@ -64,7 +64,7 @@ consent_consents = Table(
     ),
     CheckConstraint(
         "record_scope IN ('consultations', 'prescriptions', 'lab_results', 'metrics', "
-        "'full_record')",
+        "'health_background', 'full_record')",
         name="ck_consent_consents_record_scope",
     ),
     CheckConstraint(
@@ -128,7 +128,7 @@ consent_egress_log = Table(
     ),
     CheckConstraint(
         "record_scope IN ('consultations', 'prescriptions', 'lab_results', 'metrics', "
-        "'full_record')",
+        "'health_background', 'full_record')",
         name="ck_consent_egress_log_record_scope",
     ),
     Index("ix_consent_egress_log_patient", "patient_id", text("disclosed_at DESC")),
