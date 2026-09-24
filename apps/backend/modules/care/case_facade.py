@@ -445,6 +445,65 @@ class CaseConsoleFacade:
         views.sort(key=lambda view: view.created_at)
         return views
 
+    async def list_doctor_all_cases(
+        self,
+        *,
+        doctor_id: int,
+    ) -> list[CaseDetailView]:
+        """List every case this doctor is (or was) assigned to, newest activity first.
+
+        Like ``list_doctor_cases`` but without the non-closed filter - closed
+        cases return too, so the doctor console can bucket each patient as
+        current/past (ADR-0019). The same claimed/unclaimed merge applies, so a
+        closed born-but-unclaimed case stays reachable when the intake
+        assignment points at this doctor. Within each group ``updated_at``
+        descends, so the doctor facade can take the most recent stage per
+        patient from a single feed.
+        """
+        async with self._engine.begin() as connection:
+            claimed_rows = (
+                await connection.execute(
+                    select(care_cases)
+                    .where(care_cases.c.doctor_id == doctor_id)
+                    .order_by(care_cases.c.updated_at.desc())
+                )
+            ).all()
+
+            unclaimed_rows = (
+                await connection.execute(
+                    select(care_cases)
+                    .where(care_cases.c.doctor_id.is_(None))
+                    .order_by(care_cases.c.updated_at.desc())
+                )
+            ).all()
+
+            declared_ids = {int(row.id) for row in claimed_rows} | {
+                int(row.id) for row in unclaimed_rows if row.pre_summary_id is not None
+            }
+            ids_with_input = await _case_ids_with_doctor_input(connection, declared_ids)
+
+        assigned: dict[int, int | None] = {}
+        if unclaimed_rows:
+            pre_summary_ids = [
+                int(row.pre_summary_id) for row in unclaimed_rows if row.pre_summary_id is not None
+            ]
+            if pre_summary_ids:
+                assigned = await self._intake_facade.assigned_partner_for_pre_summaries(
+                    pre_summary_ids
+                )
+
+        views = [
+            _to_case_detail(row, has_doctor_input=int(row.id) in ids_with_input)
+            for row in claimed_rows
+        ]
+        views.extend(
+            _to_case_detail(row, has_doctor_input=int(row.id) in ids_with_input)
+            for row in unclaimed_rows
+            if row.pre_summary_id is not None and assigned.get(int(row.pre_summary_id)) == doctor_id
+        )
+        views.sort(key=lambda view: view.updated_at, reverse=True)
+        return views
+
     async def list_open_case_doctor_ids(self, *, patient_id: int) -> set[int]:
         """Doctor ids assigned to the patient's open cases (#534).
 

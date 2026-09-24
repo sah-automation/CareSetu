@@ -46,6 +46,8 @@ from modules.consent.adapters.routes import (
 from modules.consent.adapters.routes import router as consent_router
 from modules.consent.facade import ConsentFacade
 from modules.consent.redis_cache import close_redis_client, init_redis_client
+from modules.doctor.adapters.routes import router as doctor_router
+from modules.doctor.facade import DoctorConsoleFacade
 from modules.health.adapters.routes import register_error_handlers as register_health_error_handlers
 from modules.health.adapters.routes import router as health_router
 from modules.health.facade import HealthFacade
@@ -322,6 +324,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         consent_facade=app.state.consent_facade,
         care_facade=app.state.care_console_facade,
     )
+    # MOD-012 (PHASE-8.2 T01, #539): the doctor console facade owns no schema
+    # or outbox - it composes the settled consent/care/iam/health facades into
+    # the derived Patients list (ADR-0019). Stored on state so the doctor
+    # routes read one resolved instance and route tests stub it wholesale.
+    app.state.doctor_console_facade = DoctorConsoleFacade(
+        consent_facade=app.state.consent_facade,
+        care_facade=app.state.care_console_facade,
+        iam_facade=app.state.iam_facade,
+        health_facade=app.state.health_facade,
+    )
     # MOD-011 (PHASE-4 T6, #240): the audit facade shares the settled engine
     # for the operator query surface - stored on state so routes read one
     # resolved object and unit tests stub it. The health facade (MOD-003) is
@@ -472,6 +484,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(directory_router)
     app.include_router(intake_router)
     app.include_router(care_router)
+    app.include_router(doctor_router)
     register_error_handlers(app)
     register_gateway_error_handlers(app)
     register_health_error_handlers(app)

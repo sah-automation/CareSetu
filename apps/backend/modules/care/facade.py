@@ -10,6 +10,7 @@ move freely behind it.
 
 from __future__ import annotations
 
+from modules.care.care_models import CaseDetailView as CaseDetailView
 from modules.care.case_facade import CaseConsoleFacade
 
-__all__ = ["CaseConsoleFacade"]
+__all__ = ["CaseConsoleFacade", "CaseDetailView"]

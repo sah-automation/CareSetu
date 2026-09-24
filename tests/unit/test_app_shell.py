@@ -187,6 +187,9 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/care/cases/{case_id}/rx/current",
         "/v1/care/cases/{case_id}/close",
         "/v1/care/prescriptions/{rx_id}",
+        # PHASE-8.2 T01 (#539): the doctor console Patients list - derived
+        # Current/Past buckets over live grants + care cases (ADR-0019).
+        "/v1/doctor/patients",
     }
 
 

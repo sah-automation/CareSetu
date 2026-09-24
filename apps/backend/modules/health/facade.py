@@ -69,6 +69,15 @@ _HEALTH_BACKGROUND_SCOPE = "health_background"
 
 _ACTOR_TYPE_PATIENT = "patient"
 
+_ACTOR_TYPE_DOCTOR: Literal["doctor", "lab", "chemist"] = "doctor"
+
+# The access-history scope marker for the doctor-console Patients list
+# (MOD-012, ADR-0019). A list row has no single record entry or consent
+# scope - the ledger's scope column is deliberately caller-supplied, so this
+# marker keeps the "doctor saw this patient's list row" signal distinct from
+# any record-entry disclosure, without pretending a consent scope was read.
+_DOCTOR_PATIENTS_LIST_SCOPE = "doctor_patients_list"
+
 # The consent counterparty type the first acknowledged health-background save
 # targets for auto-grant (#534) - matches the consent vocabulary.
 _COUNTERPARTY_TYPE_DOCTOR: Literal["doctor", "lab", "chemist"] = "doctor"
@@ -488,6 +497,28 @@ class HealthFacade:
         """
         async with self._engine.begin() as connection:
             return await query_access_history(connection, patient_id)
+
+    async def log_doctor_patient_view(self, *, patient_id: int, doctor_id: int) -> None:
+        """Ledger a doctor seeing one patient's row in the console Patients list (ADR-0019).
+
+        MOD-012 owns no ledger or outbox, so the doctor console delegates its
+        "every read attempt" bookkeeping here: the record shell is resolved
+        (lazily ensured) and an allowed doctor access lands in BOTH the
+        access-history ledger and the outbox ``record.accessed`` envelope in
+        the same transaction. The scope marker names the list surface, not a
+        record entry - revoking the underlying consent does not rewind the
+        historical "viewed where" signal.
+        """
+        async with self._engine.begin() as connection:
+            record_id = await _ensure_record_shell(connection, patient_id)
+            await _log_access(
+                connection,
+                record_id,
+                doctor_id,
+                "allowed",
+                actor_type=_ACTOR_TYPE_DOCTOR,
+                scope=_DOCTOR_PATIENTS_LIST_SCOPE,
+            )
 
     async def _discover_live_relationship_doctors(self, patient_id: int) -> set[int]:
         """Return every doctor the patient currently has a live relationship with.

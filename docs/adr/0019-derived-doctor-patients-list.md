@@ -24,6 +24,10 @@ A patient with neither a live grant nor a care case disappears from the list ent
 
 Row display (patient name, age, photo) and per-patient detail (contact, last case status, consent scopes) resolve through the doctor console seam's seamless reads over `MOD-004` (grant lineage + `check_consent`), `MOD-006` (care cases), and `MOD-001` (identity profile enrichment) - the same profile seam the review queue uses today. No module reads another module's tables; the derived list touches only facades.
 
+### D3 - Every served row is access-logged
+
+Each row actually returned to the doctor is recorded through the `MOD-003` access-history ledger (plus its `record.accessed` outbox envelope) in one transaction per row, using the caller-supplied scope marker `doctor_patients_list` (MOD-012 logs no scope of its own - the marker names the list surface, not a record entry, so revoking the underlying consent never rewinds the historical "viewed where" signal). Only rows in the returned page are logged: a read with no matches reveals nothing and logs nothing. Pagination (api-standards §4) bounds the ledger writes per request at the page size.
+
 ## Consequences
 
 - One source of truth: the consent lineage is the access authority, and the list can never show someone the doctor may not read.

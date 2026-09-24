@@ -10,7 +10,9 @@ all future access (durable-before-inactive: the terminal write commits
 before anything treats the grant as inactive), ``decline_consent`` closes a
 request without creating any grant, and ``list_consents`` answers the
 patient's log - pending asks first, every revoked grant still listed with
-its expandable version history.
+its expandable version history. ``list_counterparty_grants`` is the
+reverse lookup the doctor console seam derives the Patients list from
+(ADR-0019): live grants keyed by counterparty instead of patient.
 
 Every mutating action appends its ``consent_events`` ledger row and writes
 its bus envelopes (``consent.requested/granted/revoked`` plus the generic
@@ -129,6 +131,20 @@ class ConsentLog(BaseModel):
     """The patient's consent log: pending requests first, then recent activity."""
 
     items: list[ConsentView]
+
+
+class CounterpartyGrantView(BaseModel):
+    """One live grant seen from the counterparty side (doctor console, ADR-0019).
+
+    The reverse of ``ConsentView``: consents that currently grant a given
+    counterparty read access to a patient's record, thinned to just the fields
+    the Patients list derivation consumes (granted scope + version).
+    """
+
+    consent_id: int
+    patient_id: int
+    record_scope: str
+    version: int
 
 
 class EgressLogEntry(BaseModel):
@@ -647,9 +663,45 @@ class ConsentFacade:
                 ]
             )
 
+    async def list_counterparty_grants(
+        self, *, counterparty_type: str, counterparty_id: str
+    ) -> list[CounterpartyGrantView]:
+        """Answer the live (granted) consents held by one counterparty across patients.
+
+        The reverse lookup underlying ADR-0019: every patient whose record this
+        counterparty can currently read, thinned to the grant facts the
+        Patients list derivation needs. Pending/revoked/declined lineages are
+        excluded - only a standing grant keeps a patient "Current".
+        """
+        async with self._engine.begin() as connection:
+            rows = (
+                await connection.execute(
+                    select(
+                        consent_consents.c.id,
+                        consent_consents.c.patient_id,
+                        consent_consents.c.record_scope,
+                        consent_consents.c.version,
+                    )
+                    .where(
+                        consent_consents.c.counterparty_type == counterparty_type,
+                        consent_consents.c.counterparty_id == counterparty_id,
+                        consent_consents.c.status == ConsentStatus.GRANTED.value,
+                    )
+                    .order_by(consent_consents.c.patient_id, consent_consents.c.id)
+                )
+            ).all()
+            return [
+                CounterpartyGrantView(
+                    consent_id=int(row.id),
+                    patient_id=int(row.patient_id),
+                    record_scope=str(row.record_scope),
+                    version=int(row.version),
+                )
+                for row in rows
+            ]
+
     async def list_egress_log(self, patient_id: int) -> EgressLog:
         """Answer the patient's egress log: every consent-gated disclosure from their record.
-
         Returns all rows from ``consent_egress_log`` for this patient, newest
         disclosure first. Each row cites the consent lineage (consent_id,
         lineage_ref, version), the counterparty (type + id), the scope that
