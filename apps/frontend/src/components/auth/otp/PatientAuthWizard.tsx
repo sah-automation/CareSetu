@@ -15,15 +15,15 @@ import { useRouter } from "next/navigation";
 
 import {
   IconCheck,
-  IconDirectory,
   IconHeart,
-  IconLock,
   IconPhone,
   IconShield,
 } from "@/components/auth/icons";
+import { DoneScreen } from "@/components/auth/DoneScreen";
 import { fetchDemoOtp } from "@/lib/auth/api";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { useLang } from "@/lib/i18n/LangContext";
+import { STRINGS, type DoneScreenStrings } from "@/lib/i18n/dictionaries";
 import type { OtpFlow } from "./otpState";
 import { formatCountdown, OTP_TTL_SECONDS, useOtpFlow } from "./otpState";
 import {
@@ -221,36 +221,25 @@ function OtpStep({ flow }: { flow: OtpFlow }) {
   );
 }
 
-function DoneStep({ flow, returnTo }: { flow: OtpFlow; returnTo: string }) {
+function DoneStep({
+  flow,
+  returnTo,
+  doneScreenT,
+}: {
+  flow: OtpFlow;
+  returnTo: string;
+  doneScreenT: DoneScreenStrings;
+}) {
   const { t } = flow;
   const router = useRouter();
   return (
-    <section className={stylesB.section}>
-      <div className={stylesB.center}>
-        <span className={stylesB.successIcon}>
-          <IconCheck size={40} />
-        </span>
-      </div>
-      <h1 className={stylesB.title}>{t.verifiedTitle}</h1>
-      <p className={stylesB.sub}>{t.verifiedBody}</p>
-      <ul className={stylesB.props}>
-        <li>
-          <span className={stylesB.propIcon}>
-            <IconDirectory size={16} />
-          </span>
-          {t.valueProps[1]}
-        </li>
-        <li>
-          <span className={stylesB.propIcon}>
-            <IconLock size={16} />
-          </span>
-          {t.valueProps[2]}
-        </li>
-      </ul>
-      <PrimaryButton onClick={() => router.replace(returnTo)}>
-        {t.goHome}
-      </PrimaryButton>
-    </section>
+    <DoneScreen
+      title={t.verifiedTitle}
+      body={t.verifiedBody}
+      openingLabel={doneScreenT.openingDashboard}
+      goToDashboardLabel={doneScreenT.goToDashboard}
+      onGoToDashboard={() => router.replace(returnTo)}
+    />
   );
 }
 
@@ -306,13 +295,14 @@ export function PatientAuthWizard({
     router,
   ]);
 
-  // Redirect to the return target after successful login (Done step "Go to
-  // CareSetu home" also routes there directly). Await the session-resume seam
-  // so identity/roles land in state BEFORE the post-login route mounts: if the
-  // patient surface mounted identity-less, the Provider remount that applies
-  // identity would reset an in-progress completion wizard and wipe its draft.
-  // A reload is never needed (#496). Best-effort by design - a resolution
-  // failure still navigates, and the never-silent Finish palette covers it.
+  // Redirect to the return target after successful login (the done screen's
+  // "Go to Dashboard" button also routes there directly). Await the
+  // session-resume seam so identity/roles land in state BEFORE the post-login
+  // route mounts: if the patient surface mounted identity-less, the Provider
+  // remount that applies identity would reset an in-progress completion wizard
+  // and wipe its draft. A reload is never needed (#496). Best-effort by design
+  // - a resolution failure still navigates, and the never-silent Finish
+  // palette covers it.
   useEffect(() => {
     if (flow.state.stage === "done" && flow.state.session) {
       let cancelled = false;
@@ -350,7 +340,11 @@ export function PatientAuthWizard({
           {flow.state.stage === "phone" && <PhoneStep flow={flow} />}
           {flow.state.stage === "otp" && <OtpStep flow={flow} />}
           {flow.state.stage === "done" && (
-            <DoneStep flow={flow} returnTo={returnTo} />
+            <DoneStep
+              flow={flow}
+              returnTo={returnTo}
+              doneScreenT={STRINGS[lang].doneScreen}
+            />
           )}
         </div>
       </main>

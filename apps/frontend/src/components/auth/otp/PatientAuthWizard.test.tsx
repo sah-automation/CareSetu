@@ -520,9 +520,7 @@ describe("PatientAuthWizard - success and session", () => {
     fireEvent.click(verifyButton());
 
     expect(await screen.findByText("Identity verified")).toBeInTheDocument();
-    fireEvent.click(
-      screen.getByRole("button", { name: "Go to CareSetu home" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Go to Dashboard" }));
 
     expect(issueSession).toHaveBeenCalledWith(PHONE);
     expect(mockReplace).toHaveBeenCalledWith("/patient");
@@ -530,6 +528,33 @@ describe("PatientAuthWizard - success and session", () => {
     const stored = JSON.parse(localStorage.getItem("caresetu.session") ?? "{}");
     expect(stored.jwt).toBe("header.payload.signature");
     expect(stored.refresh_token).toBe("opaque-refresh-token");
+  });
+
+  it("shows the shared done screen while the seam is still in flight (#536)", async () => {
+    await startOtpFlow();
+    vi.mocked(verifyOtp).mockResolvedValue(verifiedResult());
+    vi.mocked(issueSession).mockResolvedValue(SESSION);
+
+    // Keep the session-resume seam unresolved so the done screen must render
+    // the shown verified state on its own - the blank-flash regression guard.
+    // The AC asks for a rendered component test of the shown state, not a
+    // redirect race.
+    state.resumeSession.mockReturnValue(new Promise<void>(() => {}));
+    mockReplace.mockClear();
+
+    typeOtp();
+    fireEvent.click(verifyButton());
+
+    expect(await screen.findByText("Identity verified")).toBeInTheDocument();
+    expect(
+      screen.getByText("Your number is verified and your session is ready."),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Opening your dashboard/)).toBeInTheDocument();
+
+    // The CTA is always available: it navigates immediately to the return
+    // target even though the auto-redirect seam never resolves.
+    fireEvent.click(screen.getByRole("button", { name: "Go to Dashboard" }));
+    expect(mockReplace).toHaveBeenCalledWith("/patient");
   });
 
   it("awaits the session-resume seam before routing to the return target (#496)", async () => {
@@ -600,9 +625,7 @@ describe("PatientAuthWizard - success and session", () => {
       typeOtp();
       fireEvent.click(verifyButton());
       expect(await screen.findByText("Identity verified")).toBeInTheDocument();
-      fireEvent.click(
-        screen.getByRole("button", { name: "Go to CareSetu home" }),
-      );
+      fireEvent.click(screen.getByRole("button", { name: "Go to Dashboard" }));
       expect(mockReplace).toHaveBeenCalledWith(returnTo);
     }
 

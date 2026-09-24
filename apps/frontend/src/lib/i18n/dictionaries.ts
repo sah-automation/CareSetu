@@ -83,6 +83,18 @@ const en = {
     signOut: "Sign out",
   },
 
+  // doneScreen.* surface - #536: the shared verified-login handoff screen
+  // rendered after a successful OTP verify (patient flow #536; the doctor
+  // flow #537 consumes the same component). The `openingDashboard` label
+  // rides a soft animated-dots indicator: there is deliberately no fixed
+  // numeric countdown, because the session-resume -> redirect window varies
+  // with server/network latency - an honest indeterminate cue, never fake
+  // digits. `goToDashboard` is the always-available immediate-navigation CTA.
+  doneScreen: {
+    openingDashboard: "Opening your dashboard",
+    goToDashboard: "Go to Dashboard",
+  },
+
   // staffAuth.* surface - PHASE-2.6 T10 (#201): the split-auth staff entry
   // (/staff/login), partner status screens, and the scoped staff-role picker.
   // Pages only this phase: submits name Phase 5 honestly, never fake success.
@@ -1481,6 +1493,7 @@ const en = {
 
 export type Dictionary = typeof en;
 export type AuthStrings = Dictionary["auth"];
+export type DoneScreenStrings = Dictionary["doneScreen"];
 export type StaffAuthStrings = Dictionary["staffAuth"];
 export type ProfileStrings = Dictionary["profile"];
 export type DoctorStrings = Dictionary["doctor"];
@@ -1540,6 +1553,10 @@ export const STRINGS: Record<Lang, Dictionary> = {
       sessionBody: "आपकी पहचान सत्यापित है और स्वास्थ्य यात्रा तैयार है।",
       signedInAs: (phone) => `${phone} से साइन इन`,
       signOut: "साइन आउट",
+    },
+    doneScreen: {
+      openingDashboard: "आपका डैशबोर्ड खुल रहा है",
+      goToDashboard: "डैशबोर्ड पर जाएँ",
     },
     staffAuth: {
       login: {
