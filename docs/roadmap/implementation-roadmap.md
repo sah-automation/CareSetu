@@ -650,6 +650,12 @@ No new PRD feature - frontend chassis insert delivering the doctor console UI an
 - **D-E documented no-change:** the doctor-console history panel's "No consented history available for this patient" empty state is correct behaviour, not a consent failure. Granted scopes pass `check_consent`; the timeline is legitimately empty until `report.filed`, `prescription.issued` / `prescription.delivered`, or `settlement.recorded` fires. A denied consent renders the error state, never this message. Recorded for the UI in `docs/design/ui-blueprint.md` §6.2(b); no code change (see #479 D-E, #483 handoff).
 - **Preserved semantics:** the drafting cap (max two AI drafts), revision-freeze approval, verification declaration, and `edited_yn` derivation are untouched; real-provider `draft_rx` stays out of scope (the mock provider remains the demo path).
 
+#### 8. Delivery Notes - doctor-console/profiles batch (issue #529)
+
+- **Module/feature surface.** The production-grade doctor-console + expanded-profiles batch (#529, tickets #530-#551) is in delivery (2026-09-24). It is a maintenance-grade pass over delivered surfaces, not a new build phase, and touches: `MOD-001` (patient profile photo key + the patient-authored health background snapshot and height/weight series via `/v1/me/*`), `MOD-002` (private partner profile projection on the single partner record), `MOD-004` (the new `health_background` consent scope with first-save auto-grant, ADR-0018), `MOD-006` (care cases consumed by the Patients derivation), a storage adapter for the private `profile-media` bucket (`patient/`, `doctor/` prefixes, ADR-0020), and the greenfield facade-only console seam `MOD-012` (`modules/doctor`) - the derived doctor Patients list and section-gated patient detail reads (ADR-0019).
+- **Frontend surface.** Both login done screens (countdown + fallback button), doctor chrome (avatar, live Patients/Profile nav, redesigned collapsed sidebar with logout), patient profile three-zone rebuild, doctor profile + fee editor, and the professional doctor UI rebuild of landing/cases/workspace/review. All new copy is bilingual (en/hi) via the typed dictionary; desktop + mobile verified per screen.
+- **Vocabulary/decisions are settled here:** the batch glossary terms (`care loop`, `health background`, `doctor patients list`, extended `record scope`) and ADRs 0018-0020 live in `CONTEXT.md` and `docs/adr/` (issue #530); later batch tickets reference them.
+
 ---
 
 ### 2.9 Phase 9: Diagnostics Booking & Report Match/Filing
@@ -919,7 +925,7 @@ No new PRD feature - frontend chassis insert delivering the doctor console UI an
 
 ## 3. End-to-End Traceability Matrix (Phased Delivery)
 
-> **Chassis inserts:** `PHASE-2.5` (#146), `PHASE-2.6` (spec #191), and `PHASE-8.1` (issue #438) are frontend chassis inserts. `PHASE-2.5`/`PHASE-2.6` sit between Phases 2 and 3, delivering cross-cutting `REQ-003`/`REQ-006` frontend surfaces ahead of their feature phases, creating no PRD features and no schema deltas (one additive `MeResponse.phone` field), so they carry no rows below - their scope is governed by `docs/design/ui-blueprint.md` and their specs in §2.2a/§2.2b. `PHASE-8.1` sits between Phases 8 and 9, delivering the doctor console UI and pick-a-doctor step with six additive backend deltas (no schema changes under #438; the #479 completion added `iam_patient_profiles` and the dual-scope consent-at-pick grant - see §2.8a §7), so its §3 rows reflect the new backend surfaces consumed by the frontend. Statuses reflect delivery through the PHASE-8.1-completion (#479, 2026-09-20): single-phase rows whose phase is shipped read `Delivered`; multi-phase rows read `Delivered` once their final phase is shipped (until then, `In progress`).
+> **Chassis inserts:** `PHASE-2.5` (#146), `PHASE-2.6` (spec #191), and `PHASE-8.1` (issue #438) are frontend chassis inserts. `PHASE-2.5`/`PHASE-2.6` sit between Phases 2 and 3, delivering cross-cutting `REQ-003`/`REQ-006` frontend surfaces ahead of their feature phases, creating no PRD features and no schema deltas (one additive `MeResponse.phone` field), so they carry no rows below - their scope is governed by `docs/design/ui-blueprint.md` and their specs in §2.2a/§2.2b. `PHASE-8.1` sits between Phases 8 and 9, delivering the doctor console UI and pick-a-doctor step with six additive backend deltas (no schema changes under #438; the #479 completion added `iam_patient_profiles` and the dual-scope consent-at-pick grant - see §2.8a §7), so its §3 rows reflect the new backend surfaces consumed by the frontend. Statuses reflect delivery through the PHASE-8.1-completion (#479, 2026-09-20): single-phase rows whose phase is shipped read `Delivered`; multi-phase rows read `Delivered` once their final phase is shipped (until then, `In progress`). The doctor-console/profiles batch (#529) is a maintenance-grade pass over delivered surfaces - it adds the facade-only `MOD-012` and API/storage extensions with no PRD feature rows below; see §2.8a §8 for its module/feature surface.
 
 ### 3.1 Feature → Module → Phase Traceability
 
@@ -954,17 +960,17 @@ No new PRD feature - frontend chassis insert delivering the doctor console UI an
 
 ### 3.2 External Interface / Actor → Phase Traceability
 
-| External Interface / Actor ID | Phase Assigned                                                                                                                     | Primary Module       | Verification Hook                          |
-| :---------------------------- | :--------------------------------------------------------------------------------------------------------------------------------- | :------------------- | :----------------------------------------- |
-| `ACT-001` (Patient)           | Phase 2 (PWA shell) + 2.5/2.6 (shell/public-face chassis) + 8.1 (pick-a-doctor) → increments through 3, 4, 6, 7, 9, 10, 11, 12, 13 | `MOD-001` + channel  | Feature E2Es per owning phase              |
-| `ACT-002` (Doctor)            | Phase 8 (backend) + Phase 8.1 (console UI)                                                                                         | `MOD-006`            | Rx approval-gate E2E                       |
-| `ACT-003` (Lab)               | Phase 9                                                                                                                            | `MOD-007`            | Match-before-file E2E                      |
-| `ACT-004` (Chemist)           | Phase 10                                                                                                                           | `MOD-008`            | Fulfilment state E2E                       |
-| `ACT-005` (Operator)          | Phase 5 (console) + Phase 4 (audit views)                                                                                          | `MOD-002`, `MOD-011` | Verification queue + audit query E2Es      |
-| `EXT-001` (SMS/OTP)           | Phase 2                                                                                                                            | `MOD-001`            | Mocked-SMS auth E2E                        |
-| `EXT-002` (LLM/AI)            | Phase 0 (spike) + Phase 7                                                                                                          | `MOD-005`            | Mocked-LLM pipeline + budget tests         |
-| `EXT-003` (WhatsApp)          | Phase 13                                                                                                                           | `MOD-010`            | Signed-callback + notifications-only tests |
-| `EXT-004` (UPI GW)            | Phase 11                                                                                                                           | `MOD-009`            | Webhook replay/idempotency tests           |
+| External Interface / Actor ID | Phase Assigned                                                                                                                     | Primary Module        | Verification Hook                                |
+| :---------------------------- | :--------------------------------------------------------------------------------------------------------------------------------- | :-------------------- | :----------------------------------------------- |
+| `ACT-001` (Patient)           | Phase 2 (PWA shell) + 2.5/2.6 (shell/public-face chassis) + 8.1 (pick-a-doctor) → increments through 3, 4, 6, 7, 9, 10, 11, 12, 13 | `MOD-001` + channel   | Feature E2Es per owning phase                    |
+| `ACT-002` (Doctor)            | Phase 8 (backend) + Phase 8.1 (console UI) + batch #529 (Patients list, profile, console chrome)                                   | `MOD-006` + `MOD-012` | Rx approval-gate E2E; Patients-list sector gates |
+| `ACT-003` (Lab)               | Phase 9                                                                                                                            | `MOD-007`             | Match-before-file E2E                            |
+| `ACT-004` (Chemist)           | Phase 10                                                                                                                           | `MOD-008`             | Fulfilment state E2E                             |
+| `ACT-005` (Operator)          | Phase 5 (console) + Phase 4 (audit views)                                                                                          | `MOD-002`, `MOD-011`  | Verification queue + audit query E2Es            |
+| `EXT-001` (SMS/OTP)           | Phase 2                                                                                                                            | `MOD-001`             | Mocked-SMS auth E2E                              |
+| `EXT-002` (LLM/AI)            | Phase 0 (spike) + Phase 7                                                                                                          | `MOD-005`             | Mocked-LLM pipeline + budget tests               |
+| `EXT-003` (WhatsApp)          | Phase 13                                                                                                                           | `MOD-010`             | Signed-callback + notifications-only tests       |
+| `EXT-004` (UPI GW)            | Phase 11                                                                                                                           | `MOD-009`             | Webhook replay/idempotency tests                 |
 
 ### 3.3 Module Primary-Build-Phase Map (every `MOD-xxx` covered)
 
@@ -981,6 +987,7 @@ No new PRD feature - frontend chassis insert delivering the doctor console UI an
 | `MOD-009` (Settlement)          | Phase 11            | Phase 14 (audit completeness)      | -                                                                                            |
 | `MOD-010` (Notifications)       | Phase 13            | -                                  | Consumes Phase 8/12 events                                                                   |
 | `MOD-011` (Audit)               | Phase 4             | all phases (audit.event)           | Engine precedes consumers                                                                    |
+| `MOD-012` (Doctor Console)      | batch #529 (seam)   | doctor channel (Patients, detail)  | Facade-only composition seam; no schema, no events (ADR-0019)                                |
 
 ---
 

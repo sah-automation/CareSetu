@@ -9,7 +9,7 @@
 | `CONTEXT.md` (this file)                 | Navigation guide - what to read/skip                                                                                                                                                          | Always (first)                                                                                                              | ~0.5K    |
 | `docs/prd/project-prd.md`                | WHAT we build: epics, features (`FEAT-xxx`), NFRs, risks                                                                                                                                      | Every build; the §4.x section for the features in scope                                                                     | ~13K     |
 | `docs/architecture/system-context.md`    | External actors (`ACT-xxx`) + third-party integrations (`EXT-001..004`)                                                                                                                       | When touching integrations, actors, or boundary rules                                                                       | ~6K      |
-| `docs/architecture/internal-modules.md`  | HOW modules work: per-module specs (`MOD-001..011`), sync matrix §4.1, event registry §4.2, traceability §5                                                                                   | Every build; specs for the modules you touch                                                                                | ~14K     |
+| `docs/architecture/internal-modules.md`  | HOW modules work: per-module specs (`MOD-001..011` plus the facade-only `MOD-012` doctor console seam), sync matrix §4.1, event registry §4.2, traceability §5                                | Every build; specs for the modules you touch                                                                                | ~14K     |
 | `docs/roadmap/implementation-roadmap.md` | IN WHAT ORDER we build: per-phase specs (`PHASE-0..14` plus delivered chassis inserts `PHASE-2.5`/`PHASE-2.6` in §2.2a/§2.2b), phased traceability §3                                         | Every build; the section for the current phase                                                                              | ~17K     |
 | `docs/adr/*`                             | Resolved decisions (ADR-0001: confidence split; ADR-0005: dual JWT storage; **ADR-0007: split-origin deploy + session-transport invariants**; **ADR-0016: partner login method - phone-OTP**) | When a decision or `AMB`/`CFL`/`GAP` baseline is in scope; ADR-0007 before ANY auth/session/CORS/middleware/deploy-env work | ~1K each |
 | `docs/design/ui-blueprint.md`            | Top-level UI design for all five surfaces: navigation model, design system, per-surface IA, cross-cutting patterns                                                                            | Any UI/frontend build; the surface sections you touch                                                                       | ~10K     |
@@ -102,8 +102,12 @@ _Avoid_: mobile number (when meaning the stored canonical form), client-supplied
 ### Record & consent
 
 **record scope**:
-The closed enum of record areas a consent grant may name - `consultations | prescriptions | lab_results | metrics | full_record`; `check_consent` matches on (counterparty, scope). Never per-entry, never free-form.
+The closed enum of record areas a consent grant may name - `consultations | prescriptions | lab_results | metrics | health_background | full_record`; `check_consent` matches on (counterparty, scope). Never per-entry, never free-form.
 _Avoid_: data category (when meaning a grant's scope), permission level
+
+**health background**:
+The patient-authored snapshot of their own health - blood group, conditions, allergies, medications, immunizations, and family history - plus height/weight entries kept as a timestamped time series. Owned separately from care-generated record entries; surfaced to a doctor only through a `health_background` consent check, fail-closed on denial with the same access-history and egress-disclosure discipline as any consented record read.
+_Avoid_: health record (that is the `MOD-003` care-generated timeline), patient history (when meaning the stored snapshot)
 
 **standing grant**:
 One live consent authorization for one (patient, counterparty, record scope) triple, effective from grant until revoked or superseded by a re-grant. "Per-action" consent means this per-purpose targeting, never a one-shot token. Pick-at-doctor (Phase 8.1) is the deliberate multi-grant moment: it records `consultations` and `prescriptions` standing grants together, atomically in the same transaction as the doctor assignment, so the AI drafting assistant's consent-gated read can pass.
@@ -270,6 +274,16 @@ _Avoid_: media upload, attachment
 **close-without-prescription**:
 The doctor's deliberate terminal action that moves a care case to `Closed` with no prescription - recorded with a close reason and leaving the pending list. A rejected draft never auto-closes the case; only this explicit action closes a visit when no medicine is needed.
 _Avoid_: close case, end-visit-without-prescription
+
+### Doctor console & care loops (doctor-console/profiles batch)
+
+**care loop**:
+The continuous patient-doctor relationship where a patient returns to the same doctor across visits; the doctor Patients list is the care-loop anchor - a patient stays listed while any live standing grant remains or a care case is open, and drops from Current only once both the last grant is revoked and no open care case remains.
+_Avoid_: patient-doctor bond, follow-up relationship
+
+**doctor patients list**:
+The derived, consent-gated Current/Past patient list for a doctor - Current = live standing grant (any record scope) or an open care case; Past = closed care cases only with no live grant. Never stored; recomputed from the standing-grant lineage and care cases on every read, with no patient-relationship table.
+_Avoid_: patient registry, my patients (that is UI copy)
 
 ### Event bus & module seams
 
