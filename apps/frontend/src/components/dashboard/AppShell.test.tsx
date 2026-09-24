@@ -603,7 +603,7 @@ describe("AppShell doctor Cases count pill (PHASE-8.1 T8, #483)", () => {
     expect(screen.queryByTestId("count-pill")).not.toBeInTheDocument();
   });
 
-  it("keeps doctor Patients and Profile coming-soon while Cases is live", async () => {
+  it("links doctor Patients live while Profile stays coming-soon (#541)", async () => {
     renderDoctor();
 
     await waitFor(() =>
@@ -612,16 +612,34 @@ describe("AppShell doctor Cases count pill (PHASE-8.1 T8, #483)", () => {
         "/doctor/cases",
       ),
     );
+    // #541: Patients un-sooned - /doctor/patients is a real page, so the
+    // nav entry renders as a live link on every surface (sidebar + tab bar).
     expect(screen.getByTestId("nav-patients")).toHaveAttribute(
-      "data-soon",
-      "true",
+      "href",
+      "/doctor/patients",
     );
+    expect(screen.getByTestId("nav-patients").tagName).toBe("A");
+    expect(screen.getByTestId("nav-patients")).not.toHaveAttribute("data-soon");
+    // The same config entry drives the phone tab bar (#541): Patients now
+    // renders as a live bottom tab, without regressing the other doctor tabs.
+    expect(screen.getByTestId("tab-patients")).toHaveAttribute(
+      "href",
+      "/doctor/patients",
+    );
+    expect(screen.getByTestId("tab-patients").tagName).toBe("A");
+    expect(screen.getByTestId("tab-patients")).not.toHaveAttribute("data-soon");
+    // Profile stays coming-soon until #543, so it must render dimmed and
+    // non-interactive - never a writable dead link.
     expect(screen.getByTestId("nav-profile")).toHaveAttribute(
       "data-soon",
       "true",
     );
-    expect(screen.getByTestId("nav-patients").tagName).toBe("SPAN");
     expect(screen.getByTestId("nav-profile").tagName).toBe("SPAN");
+    expect(screen.getByTestId("tab-profile")).toHaveAttribute(
+      "data-soon",
+      "true",
+    );
+    expect(screen.getByTestId("tab-profile").tagName).toBe("SPAN");
   });
 });
 

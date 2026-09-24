@@ -1281,6 +1281,64 @@ const en = {
     retry: "Try again",
   },
 
+  // doctorPatients.* surface - PHASE-8.1 (#541): the doctor console Patients
+  // page (US-11..US-19). Groups Current/Past rows from the derived list API,
+  // with name search, granted-scope badges and the latest case stage; the
+  // per-patient detail view surfaces contact/photo/consultation-history/
+  // health-background sections, where an ungranted section renders a calm
+  // locked "not shared" state - never an error. Stage chips reuse
+  // doctorConsole.stage*; entry-type labels reuse record.badge*. All copy
+  // bilingual en/hi (REQ-006).
+  doctorPatients: {
+    title: "My patients",
+    description: "Patients currently sharing records with you, and past ones",
+    searchPlaceholder: "Search by name",
+    currentHeading: "Current",
+    pastHeading: "Past",
+    patientsEmpty: "No patients yet",
+    currentEmpty: "No current patients",
+    pastEmpty: "No past patients",
+    noResultsTitle: "No patients found",
+    noResultsBody: "No patient name matches your search.",
+    noCaseStage: "No open case",
+    openPatientAction: "Open",
+    loadFailed: "Could not load your patients.",
+    retry: "Try again",
+    backToPatients: "Back to patients",
+    loadFailedDetail: "Could not load this patient.",
+    notSharedTitle: "Not shared",
+    notSharedBody: "The patient has not shared this section with you.",
+    contactHeading: "Contact",
+    ageLabel: "Age",
+    genderLabel: "Gender",
+    areaLabel: "Area",
+    emergencyContactLabel: "Emergency contact",
+    notRecorded: "Not recorded",
+    consultationHistoryHeading: "Consultation history",
+    consultationHistoryEmpty: "No consultations yet.",
+    healthBackgroundHeading: "Health background",
+    healthBackgroundEmpty: "No health background shared yet.",
+    caseWorkspaceHeading: "Case workspace",
+    openCaseAction: "Open case",
+    noPhoto: "No photo",
+    photoAlt: (name: string) => `${name}'s photo`,
+    bloodGroupLabel: "Blood group",
+    conditionsLabel: "Conditions",
+    allergiesLabel: "Allergies",
+    medicationsLabel: "Medications",
+    immunizationsLabel: "Immunizations",
+    familyHistoryLabel: "Family history",
+    noneRecorded: "None recorded",
+    scopeBadge: {
+      consultations: "Consultations",
+      prescriptions: "Prescriptions",
+      lab_results: "Lab results",
+      metrics: "Metrics",
+      health_background: "Health background",
+      full_record: "Full record",
+    },
+  },
+
   // caseWorkspace.* surface - PHASE-8.1 T13/T14 (#451/#452): the case
   // workspace. Serves both the review-entry (queue -> review/[intakeId]) and
   // the case-entry (open cases -> cases/[caseId]) routes: case stage chip, the
@@ -2585,6 +2643,63 @@ export const STRINGS: Record<Lang, Dictionary> = {
       comingSoonBody: "यह क्षेत्र बाद के अपडेट में खुलेगा।",
       loadFailed: "कंसोल लोड नहीं हो सका।",
       retry: "फिर से कोशिश करें",
+    },
+
+    // doctorPatients.* सतह - PHASE-8.1 (#541): डॉक्टर कंसोल का मरीज़ पेज
+    // (US-11..US-19)। व्युत्पन्न सूची API से वर्तमान/पूर्व समूह, नाम खोज,
+    // अनुमत-क्षेत्र बैज और नवीनतम केस अवस्था; प्रति-मरीज़ विवरण दृश्य में
+    // संपर्क/फोटो/परामर्श-इतिहास/स्वास्थ्य-पृष्ठभूमि अनुभाग, जहाँ बिना अनुमति
+    // वाला अनुभाग शांत "साझा नहीं" अवस्था दिखाता है - कभी त्रुटि नहीं। अवस्था
+    // चिप doctorConsole.stage* और प्रविष्टि-प्रकार लेबल record.badge* से लिए
+    // गए हैं। सभी कॉपी द्विभाषी en/hi (REQ-006)।
+    doctorPatients: {
+      title: "मेरे मरीज़",
+      description: "वर्तमान में रिकॉर्ड साझा करने वाले और पूर्व के मरीज़",
+      searchPlaceholder: "नाम से खोजें",
+      currentHeading: "वर्तमान",
+      pastHeading: "पूर्व",
+      patientsEmpty: "अभी कोई मरीज़ नहीं",
+      currentEmpty: "कोई वर्तमान मरीज़ नहीं",
+      pastEmpty: "कोई पूर्व मरीज़ नहीं",
+      noResultsTitle: "कोई मरीज़ नहीं मिला",
+      noResultsBody: "आपकी खोज से मेल खाता कोई मरीज़ नाम नहीं है।",
+      noCaseStage: "कोई खुला मामला नहीं",
+      openPatientAction: "खोलें",
+      loadFailed: "आपके मरीज़ लोड नहीं हो सके।",
+      retry: "फिर से कोशिश करें",
+      backToPatients: "मरीज़ों पर वापस",
+      loadFailedDetail: "यह मरीज़ लोड नहीं हो सका।",
+      notSharedTitle: "साझा नहीं",
+      notSharedBody: "मरीज़ ने यह अनुभाग आपसे साझा नहीं किया है।",
+      contactHeading: "संपर्क",
+      ageLabel: "आयु",
+      genderLabel: "लिंग",
+      areaLabel: "क्षेत्र",
+      emergencyContactLabel: "आपातकालीन संपर्क",
+      notRecorded: "दर्ज नहीं",
+      consultationHistoryHeading: "परामर्श इतिहास",
+      consultationHistoryEmpty: "अभी कोई परामर्श नहीं।",
+      healthBackgroundHeading: "स्वास्थ्य पृष्ठभूमि",
+      healthBackgroundEmpty: "अभी कोई स्वास्थ्य पृष्ठभूमि साझा नहीं।",
+      caseWorkspaceHeading: "केस वर्कस्पेस",
+      openCaseAction: "मामला खोलें",
+      noPhoto: "कोई फोटो नहीं",
+      photoAlt: (name: string) => `${name} की फोटो`,
+      bloodGroupLabel: "रक्त समूह",
+      conditionsLabel: "बीमारियाँ",
+      allergiesLabel: "एलर्जी",
+      medicationsLabel: "दवाइयाँ",
+      immunizationsLabel: "टीके",
+      familyHistoryLabel: "पारिवारिक इतिहास",
+      noneRecorded: "कोई दर्ज नहीं",
+      scopeBadge: {
+        consultations: "परामर्श",
+        prescriptions: "नुस्ख़े",
+        lab_results: "प्रयोगशाला परिणाम",
+        metrics: "माप",
+        health_background: "स्वास्थ्य पृष्ठभूमि",
+        full_record: "पूरा रिकॉर्ड",
+      },
     },
 
     // caseWorkspace.* सतह - PHASE-8.1 T13/T14 (#451/#452): केस वर्कस्पेस।

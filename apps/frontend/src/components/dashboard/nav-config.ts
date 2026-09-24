@@ -162,12 +162,14 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       icon: FolderOpen,
       group: "work",
     },
+    // #541: Patients un-sooned - /doctor/patients is a live destination
+    // (list + gated detail read the derived doctor patients API, #539/#540);
+    // only profile stays coming-soon until #543.
     {
       key: "patients",
       labelKey: "patients",
       href: "/doctor/patients",
       icon: Users,
-      soon: true,
       group: "work",
     },
     {
