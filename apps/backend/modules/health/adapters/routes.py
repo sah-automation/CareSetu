@@ -20,14 +20,21 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.gateway.errors import error_response
+from app.gateway.idempotency import run_idempotent
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_partner, require_patient
 from modules.health.domain.exceptions import (
+    HealthBackgroundAcknowledgmentRequiredError,
     HealthError,
     RecordAccessDeniedError,
     RecordNotFoundError,
 )
-from modules.health.facade import HealthFacade, RecordTimeline
+from modules.health.facade import (
+    HealthBackground,
+    HealthBackgroundView,
+    HealthFacade,
+    RecordTimeline,
+)
 
 router = APIRouter(tags=["record"])
 
@@ -116,6 +123,74 @@ async def read_consented_record(
     )
 
 
+class HealthBackgroundSaveRequest(BaseModel):
+    """Input of the patient's health-background save (#534).
+
+    The snapshot fields plus the one-time ``acknowledge_phi`` flag: the first
+    save must carry the explicit acknowledgment that the snapshot becomes
+    visible to the patient's verified doctors (ADR-0018) - a first save
+    without it is rejected; later edits never re-prompt.
+    """
+
+    acknowledge_phi: bool
+    background: HealthBackground
+
+
+@router.get(
+    "/v1/me/health-background",
+    response_model=HealthBackgroundView,
+    status_code=status.HTTP_200_OK,
+    summary="Read the caller's health background snapshot",
+)
+async def read_health_background(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_patient)],
+) -> HealthBackgroundView:
+    """Owner read resolved from the session subject - zero setup.
+
+    The snapshot is addressed by the token's subject id (never client input):
+    a patient who has not saved one yet answers the typed "not recorded" view.
+    This surface serves the owning patient only (the ``require_patient`` gate
+    plus owner-scoping in the facade); a doctor read is consent-gated on a
+    separate doctor-facing surface in later work and never reaches this route.
+    """
+    facade = cast(HealthFacade, request.app.state.health_facade)
+    return await facade.get_health_background(int(principal.subject_id))
+
+
+@router.put(
+    "/v1/me/health-background",
+    response_model=HealthBackgroundView,
+    status_code=status.HTTP_200_OK,
+    summary="Save or update the caller's health background snapshot",
+)
+async def save_health_background(
+    request: Request,
+    payload: HealthBackgroundSaveRequest,
+    principal: Annotated[Principal, Depends(require_patient)],
+) -> HealthBackgroundView:
+    """Persist the caller's health-background snapshot idempotently (#534).
+
+    The first save requires ``acknowledge_phi`` and, on that acknowledged save,
+    records the ``health_background`` consent grant to every doctor the patient
+    has a live relationship with - atomically with the snapshot write. Later
+    edits converge on the one row and never re-prompt. The mutation honours the
+    ``Idempotency-Key`` replay contract (api-standards §5) like the other
+    ``/v1/me`` mutations, namespaced to the principal's subject id.
+    """
+    facade = cast(HealthFacade, request.app.state.health_facade)
+    saved = await run_idempotent(
+        request,
+        lambda: facade.save_health_background(
+            int(principal.subject_id),
+            payload.background,
+            acknowledge_phi=payload.acknowledge_phi,
+        ),
+        namespace=f"identity:{principal.subject_id}",
+    )
+    return saved
+
+
 def register_error_handlers(app: FastAPI) -> None:
     """Attach the MOD-003 error envelope to every expected health failure."""
 
@@ -137,6 +212,17 @@ def register_error_handlers(app: FastAPI) -> None:
             request=request,
         )
 
+    async def _acknowledgment_required(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "HEALTH_BACKGROUND_ACK_REQUIRED",
+            "the first health-background save must acknowledge that the snapshot "
+            "becomes visible to your doctors",
+            log_tag="health_rejection",
+            request=request,
+        )
+
     async def _health_failed(request: Request, exc: Exception) -> JSONResponse:
         del exc
         return error_response(
@@ -149,4 +235,5 @@ def register_error_handlers(app: FastAPI) -> None:
 
     app.add_exception_handler(RecordNotFoundError, _record_not_found)
     app.add_exception_handler(RecordAccessDeniedError, _access_denied)
+    app.add_exception_handler(HealthBackgroundAcknowledgmentRequiredError, _acknowledgment_required)
     app.add_exception_handler(HealthError, _health_failed)

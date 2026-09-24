@@ -271,44 +271,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # engine and app-state pattern - routes read one resolved object and unit
     # tests stub it on state.
     app.state.consent_facade = ConsentFacade(engine=engine)
-    # MOD-003 (PHASE-3 T2, #211): the record facade shares the one settled
-    # engine - no connection opens at boot - and is stored like the iam
-    # instance so routes read one resolved object and unit tests can stub it.
-    # Pass consent_facade for PHASE-3 T5 (#214) gated reads.
-    app.state.health_facade = HealthFacade(engine=engine, consent_facade=app.state.consent_facade)
-    # MOD-011 (PHASE-4 T6, #240): the audit facade shares the settled engine
-    # for the operator query surface - stored on state so routes read one
-    # resolved object and unit tests stub it. The health facade (MOD-003) is
-    # passed for T7's patient access-history delegation: the ledger lives in
-    # the health schema, so the audit facade calls through the facade seam
-    # instead of reading across schemas (module isolation rule).
-    app.state.audit_facade = AuditFacade(engine=engine, health_facade=app.state.health_facade)
-    # MOD-002 (PHASE-5 T05, #249): the partner facade shares the settled engine
-    # and, for open registration (ADR-0010), the settled iam facade - the sync
-    # ``create_credential_account`` seam is called in-sequence at registration
-    # so a login-capable account exists before the partner can authenticate.
-    # Stored on state so the registration route reads one resolved instance and
-    # unit tests stub it.
-    # MOD-002 (PHASE-5 T06, #251): credential documents are AES-encrypted into
-    # the ``partner/`` object-storage prefix before a Step-1 pass enters the
-    # queue. The store's key/root come from the environment (fail-closed when a
-    # key is supplied but malformed); dev/test without a key derives an ephemeral
-    # one so the encrypted write path still runs.
-    partner_artifact_store = build_artifact_store(
-        root=resolved_settings.partner_artifact_root,
-        b64_key=resolved_settings.partner_artifact_key,
-    )
-    app.state.partner_facade = PartnerFacade(
-        engine=engine,
-        iam_facade=facade,
-        artifact_store=partner_artifact_store,
-        audit_facade=app.state.audit_facade,
-        re_submission_max=resolved_settings.partner_re_submission_max,
-        re_submission_cooldown_days=resolved_settings.partner_re_submission_cooldown_days,
-        credential_cleanup_days=resolved_settings.partner_credential_cleanup_days,
-        directory_ttl_seconds=resolved_settings.redis_directory_ttl_seconds,
-        directory_max_results=resolved_settings.directory_max_results,
-    )
     # MOD-005 (PHASE-7 T12, #356): the intake facade shares the settled engine
     # and is stored on state so the patient intake routes read one resolved
     # instance and unit tests can stub it. MOD-006 (PHASE-7 T08, #373; #385):
@@ -347,6 +309,51 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.care_console_facade = CaseConsoleFacade(
         engine=engine,
         intake_facade=app.state.intake_facade,
+    )
+    # MOD-003 (PHASE-3 T2, #211): the record facade shares the one settled
+    # engine - no connection opens at boot - and is stored like the iam
+    # instance so routes read one resolved object and unit tests can stub it.
+    # Pass consent_facade for PHASE-3 T5 (#214) gated reads, and scope the
+    # health-background first-save auto-grant's live-doctor discovery through
+    # the care facade's open-case seam (#534, ADR-0018) - both facades are
+    # built above so the health facade can close over the settled instances.
+    app.state.health_facade = HealthFacade(
+        engine=engine,
+        consent_facade=app.state.consent_facade,
+        care_facade=app.state.care_console_facade,
+    )
+    # MOD-011 (PHASE-4 T6, #240): the audit facade shares the settled engine
+    # for the operator query surface - stored on state so routes read one
+    # resolved object and unit tests stub it. The health facade (MOD-003) is
+    # passed for T7's patient access-history delegation: the ledger lives in
+    # the health schema, so the audit facade calls through the facade seam
+    # instead of reading across schemas (module isolation rule).
+    app.state.audit_facade = AuditFacade(engine=engine, health_facade=app.state.health_facade)
+    # MOD-002 (PHASE-5 T05, #249): the partner facade shares the settled engine
+    # and, for open registration (ADR-0010), the settled iam facade - the sync
+    # ``create_credential_account`` seam is called in-sequence at registration
+    # so a login-capable account exists before the partner can authenticate.
+    # Stored on state so the registration route reads one resolved instance and
+    # unit tests stub it.
+    # MOD-002 (PHASE-5 T06, #251): credential documents are AES-encrypted into
+    # the ``partner/`` object-storage prefix before a Step-1 pass enters the
+    # queue. The store's key/root come from the environment (fail-closed when a
+    # key is supplied but malformed); dev/test without a key derives an ephemeral
+    # one so the encrypted write path still runs.
+    partner_artifact_store = build_artifact_store(
+        root=resolved_settings.partner_artifact_root,
+        b64_key=resolved_settings.partner_artifact_key,
+    )
+    app.state.partner_facade = PartnerFacade(
+        engine=engine,
+        iam_facade=facade,
+        artifact_store=partner_artifact_store,
+        audit_facade=app.state.audit_facade,
+        re_submission_max=resolved_settings.partner_re_submission_max,
+        re_submission_cooldown_days=resolved_settings.partner_re_submission_cooldown_days,
+        credential_cleanup_days=resolved_settings.partner_credential_cleanup_days,
+        directory_ttl_seconds=resolved_settings.redis_directory_ttl_seconds,
+        directory_max_results=resolved_settings.directory_max_results,
     )
 
     # PHASE-8.1 T10c (#495): the issued-rx attribution reads the issuing

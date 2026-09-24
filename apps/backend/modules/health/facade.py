@@ -24,16 +24,19 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 # Type-only import to avoid circular dependency at runtime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel
-from sqlalchemy import select
+from pydantic import BaseModel, Field
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app.config import Settings
 from bus.outbox_writer import write_outbox
 from modules.health.domain.events import record_accessed_envelope, record_denied_envelope
+from modules.health.domain.exceptions import (
+    HealthBackgroundAcknowledgmentRequiredError as HealthBackgroundAcknowledgmentRequiredError,
+)
 from modules.health.domain.exceptions import (
     RecordAccessDeniedError as RecordAccessDeniedError,
 )
@@ -42,12 +45,14 @@ from modules.health.domain.exceptions import (
 )
 from modules.health.outbox import HEALTH_OUTBOX_TABLE
 from modules.health.schema.models import (
+    health_background_snapshots,
     health_patient_records,
     health_record_access_history,
     health_record_entries,
 )
 
 if TYPE_CHECKING:
+    from modules.care.facade import CaseConsoleFacade
     from modules.consent.facade import ConsentFacade
 
 HEALTH_SCHEMA = "health"
@@ -56,7 +61,51 @@ HEALTH_SCHEMA = "health"
 # the consent ``RecordScope`` vocabulary ("full_record").
 _OWNER_SCOPE = "full_record"
 
+# The consent record scope the acknowledged first health-background save auto-
+# grants to live-relationship doctors (ADR-0018, #534). Matches the consent
+# vocabulary ("health_background"); ``full_record`` subsumes it when gated.
+_HEALTH_BACKGROUND_SCOPE = "health_background"
+
 _ACTOR_TYPE_PATIENT = "patient"
+
+# The consent counterparty type the first acknowledged health-background save
+# targets for auto-grant (#534) - matches the consent vocabulary.
+_COUNTERPARTY_TYPE_DOCTOR: Literal["doctor", "lab", "chemist"] = "doctor"
+
+
+class HealthBackground(BaseModel):
+    """The patient-authored health-background snapshot (#534, US-21/US-22).
+
+    Blood group as a single value plus the free-form list areas - conditions,
+    allergies, current medications, immunizations, family history - each an
+    ordered list of the patient's own entries. The wire contract of the
+    ``/v1/me/health-background`` GET/PUT surface; height/weight time series
+    live in a separate ticket.
+    """
+
+    blood_group: str | None = Field(default=None, max_length=16)
+    conditions: list[str] = Field(default_factory=list)
+    allergies: list[str] = Field(default_factory=list)
+    medications: list[str] = Field(default_factory=list)
+    immunizations: list[str] = Field(default_factory=list)
+    family_history: list[str] = Field(default_factory=list)
+
+
+class HealthBackgroundView(BaseModel):
+    """Typed read-back of the health-background snapshot surface (#534).
+
+    ``set`` discriminates a stored snapshot (``background`` populated) from
+    the typed "not recorded" answer the PWA hydrates from before its local
+    draft - the same discriminator shape as the profile read (#533). ``acknowledged``
+    tells the client whether the one-time first-save confirmation has already
+    been given, so it only prompts before that first acknowledged save (later
+    edits never re-prompt). The same shape answers GET and PUT so the client
+    handles one contract.
+    """
+
+    set: bool
+    acknowledged: bool
+    background: HealthBackground | None = None
 
 
 class RecordEntryView(BaseModel):
@@ -279,9 +328,15 @@ async def query_access_history(connection: AsyncConnection, patient_id: int) -> 
 class HealthFacade:
     """Typed public facade for the health module's record surface."""
 
-    def __init__(self, engine: AsyncEngine, consent_facade: ConsentFacade | None = None) -> None:
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        consent_facade: ConsentFacade | None = None,
+        care_facade: CaseConsoleFacade | None = None,
+    ) -> None:
         self._engine = engine
         self._consent_facade = consent_facade
+        self._care_facade = care_facade
 
     async def create_record(self, patient_id: int) -> int:
         """Create the patient's record shell; a no-op returning the existing id.
@@ -371,6 +426,165 @@ class HealthFacade:
         """
         async with self._engine.begin() as connection:
             return await query_access_history(connection, patient_id)
+
+    async def _discover_live_relationship_doctors(self, patient_id: int) -> set[int]:
+        """Return every doctor the patient currently has a live relationship with.
+
+        A doctor is live-relationship when EITHER they hold a live standing
+        consent grant of any scope from this patient (MOD-004, any ``granted``
+        ``doctor`` lineage) OR they are the assigned doctor on one of the
+        patient's open care cases (MOD-006, ``stage != closed``). Both reads go
+        through their module facades - never across schemas (ADR-0003) - and
+        the union is deduplicated by doctor id. This is the set the first
+        acknowledged health-background save auto-grants to (ADR-0018).
+        """
+        if self._consent_facade is None:
+            raise RuntimeError("ConsentFacade not configured on HealthFacade")
+        if self._care_facade is None:
+            raise RuntimeError("CareFacade not configured on HealthFacade")
+        consent_log = await self._consent_facade.list_consents(patient_id)
+        granted_doctor_ids = {
+            int(item.counterparty_id)
+            for item in consent_log.items
+            if item.counterparty_type == _COUNTERPARTY_TYPE_DOCTOR and item.status == "granted"
+        }
+        open_case_doctor_ids = await self._care_facade.list_open_case_doctor_ids(
+            patient_id=patient_id
+        )
+        return granted_doctor_ids | open_case_doctor_ids
+
+    async def get_health_background(self, patient_id: int) -> HealthBackgroundView:
+        """Owner read of the patient's health-background snapshot, or "not set".
+
+        Resolves the snapshot by the patient identity (never client input);
+        a patient who has not saved one yet answers the typed "not recorded"
+        view (zero-setup, mirroring the profile read goal of #482). This
+        surface only serves the owning patient - a doctor read is gated by a
+        later consent check on a doctor-facing surface (#540), never here.
+        """
+        async with self._engine.begin() as connection:
+            row = (
+                await connection.execute(
+                    select(
+                        health_background_snapshots.c.blood_group,
+                        health_background_snapshots.c.conditions,
+                        health_background_snapshots.c.allergies,
+                        health_background_snapshots.c.medications,
+                        health_background_snapshots.c.immunizations,
+                        health_background_snapshots.c.family_history,
+                        health_background_snapshots.c.acknowledged_at,
+                    ).where(health_background_snapshots.c.identity_id == patient_id)
+                )
+            ).first()
+            if row is None:
+                return HealthBackgroundView(set=False, acknowledged=False, background=None)
+            return HealthBackgroundView(
+                set=True,
+                acknowledged=row.acknowledged_at is not None,
+                background=HealthBackground(
+                    blood_group=row.blood_group,
+                    conditions=list(row.conditions),
+                    allergies=list(row.allergies),
+                    medications=list(row.medications),
+                    immunizations=list(row.immunizations),
+                    family_history=list(row.family_history),
+                ),
+            )
+
+    async def save_health_background(
+        self,
+        patient_id: int,
+        background: HealthBackground,
+        *,
+        acknowledge_phi: bool,
+    ) -> HealthBackgroundView:
+        """Persist the patient's health-background snapshot (#534, US-21/US-22).
+
+        The snapshot is patient-owned health-schema data keyed to the patient
+        identity - never a care-generated record entry. The FIRST save must
+        carry the explicit ``acknowledge_phi`` acknowledgment that the snapshot
+        becomes visible to the patient's verified-relationship doctors; a first
+        save without it is refused before anything is persisted. On that
+        acknowledged first save a standing ``health_background`` consent grant
+        is recorded to every live-relationship doctor (a live grant of any
+        scope, or an open care case), atomically with the snapshot write in ONE
+        transaction and durably committed. Later edits idempotently converge on
+        the single row (INSERT ... ON CONFLICT DO UPDATE, mirroring the profile
+        upsert of #482) and never re-prompt or re-grant.
+        """
+        if self._consent_facade is None:
+            raise RuntimeError("ConsentFacade not configured on HealthFacade")
+        if self._care_facade is None:
+            raise RuntimeError("CareFacade not configured on HealthFacade")
+
+        granted_doctor_ids: set[int] = set()
+        is_first_save = False
+        async with self._engine.begin() as connection:
+            existing = (
+                await connection.execute(
+                    select(health_background_snapshots.c.acknowledged_at).where(
+                        health_background_snapshots.c.identity_id == patient_id
+                    )
+                )
+            ).first()
+            is_first_save = existing is None
+            if is_first_save and not acknowledge_phi:
+                raise HealthBackgroundAcknowledgmentRequiredError(
+                    "the first health-background save must acknowledge that the "
+                    "snapshot becomes visible to your doctors"
+                )
+            if is_first_save:
+                granted_doctor_ids = await self._discover_live_relationship_doctors(patient_id)
+
+            values: dict[str, object] = {
+                "identity_id": patient_id,
+                "blood_group": background.blood_group,
+                "conditions": background.conditions,
+                "allergies": background.allergies,
+                "medications": background.medications,
+                "immunizations": background.immunizations,
+                "family_history": background.family_history,
+            }
+            if is_first_save:
+                values["acknowledged_at"] = datetime.now(UTC)
+            upsert = (
+                postgresql_insert(health_background_snapshots)
+                .values(**values)
+                .on_conflict_do_update(
+                    index_elements=["identity_id"],
+                    set_={
+                        "blood_group": background.blood_group,
+                        "conditions": background.conditions,
+                        "allergies": background.allergies,
+                        "medications": background.medications,
+                        "immunizations": background.immunizations,
+                        "family_history": background.family_history,
+                        # ``acknowledged_at`` is never overwritten: it records
+                        # the one-time first-save confirmation.
+                        "updated_at": func.now(),
+                    },
+                )
+            )
+            await connection.execute(upsert)
+            for doctor_id in sorted(granted_doctor_ids):
+                await self._consent_facade.grant_consent_on(
+                    connection,
+                    patient_id,
+                    _COUNTERPARTY_TYPE_DOCTOR,
+                    str(doctor_id),
+                    _HEALTH_BACKGROUND_SCOPE,
+                )
+
+        # Cache invalidation lands only after the commit is visible (same
+        # discipline as the intake pick-doctor write, #443).
+        for doctor_id in sorted(granted_doctor_ids):
+            await self._consent_facade.invalidate_consent_cache(
+                patient_id,
+                _COUNTERPARTY_TYPE_DOCTOR,
+                str(doctor_id),
+                _HEALTH_BACKGROUND_SCOPE,
+            )
+        return HealthBackgroundView(set=True, acknowledged=True, background=background)
 
     async def seed_record_entries(self, patient_id: int) -> tuple[list[int], list[str]]:
         """Return entry IDs and types for a patient's record (test-only seed helper).

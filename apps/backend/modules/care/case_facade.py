@@ -445,6 +445,55 @@ class CaseConsoleFacade:
         views.sort(key=lambda view: view.created_at)
         return views
 
+    async def list_open_case_doctor_ids(self, *, patient_id: int) -> set[int]:
+        """Doctor ids assigned to the patient's open cases (#534).
+
+        Returns the deduplicated assigned-doctor set for the patient's non-closed
+        cases (``stage != closed``): the claimed cases' ``doctor_id`` plus, for
+        born-but-unclaimed cases (``doctor_id IS NULL``), the doctor their
+        pre-summary is assigned to via the intake seam - the same reachability
+        ``list_doctor_cases`` serves, inverted to ask by patient. Open-case
+        assignment is one half of the "live relationship" a health-background
+        grant auto-targets on the first acknowledged save (ADR-0018); the other
+        half, live standing consent grants, the consent module discovers.
+        """
+        async with self._engine.begin() as connection:
+            claimed_rows = (
+                await connection.execute(
+                    select(care_cases.c.doctor_id).where(
+                        care_cases.c.patient_id == patient_id,
+                        care_cases.c.stage != CaseStage.CLOSED.value,
+                        care_cases.c.doctor_id.is_not(None),
+                    )
+                )
+            ).all()
+            unclaimed_rows = (
+                await connection.execute(
+                    select(care_cases.c.id, care_cases.c.pre_summary_id).where(
+                        care_cases.c.patient_id == patient_id,
+                        care_cases.c.stage != CaseStage.CLOSED.value,
+                        care_cases.c.doctor_id.is_(None),
+                    )
+                )
+            ).all()
+
+        doctor_ids = {int(row.doctor_id) for row in claimed_rows}
+        if unclaimed_rows:
+            pre_summary_ids = [
+                int(row.pre_summary_id) for row in unclaimed_rows if row.pre_summary_id is not None
+            ]
+            if pre_summary_ids:
+                assigned = await self._intake_facade.assigned_partner_for_pre_summaries(
+                    pre_summary_ids
+                )
+                for row in unclaimed_rows:
+                    if row.pre_summary_id is None:
+                        continue
+                    assigned_doctor = assigned.get(int(row.pre_summary_id))
+                    if assigned_doctor is not None:
+                        doctor_ids.add(int(assigned_doctor))
+        return doctor_ids
+
     async def submit_doctor_input(
         self,
         *,

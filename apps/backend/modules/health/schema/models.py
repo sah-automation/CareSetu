@@ -107,4 +107,32 @@ health_record_access_history = Table(
     Index("ix_health_record_access_history_record", "record_id", text("accessed_at DESC")),
 )
 
+# The patient-authored health background snapshot (#534, US-21/US-22, ADR-0018).
+# One row per patient identity, distinct from care-generated ``health_record_entries``:
+# the patient fills it once and edits it, and the first acknowledged save records a
+# ``health_background`` consent grant to every live-relationship doctor. ``acknowledged_at``
+# is set exactly once, on that first flagged save; later edits never touch it. The list
+# fields are JSONB arrays (empty by default) so the snapshot contract can evolve additively
+# without a migration per new field. Height/weight time series are a separate table (ticket
+# outside this one's scope).
+health_background_snapshots = Table(
+    "health_background_snapshots",
+    MODULE_METADATA,
+    Column("id", BigInteger, primary_key=True),
+    # Patient identity id - no cross-schema FK (ADR-0003); the unique index is
+    # the upsert arbiter that makes repeat saves converge on the one row.
+    Column("identity_id", BigInteger, nullable=False),
+    Column("acknowledged_at", DateTime(timezone=True), nullable=True),
+    Column("blood_group", String(16), nullable=True),
+    Column("conditions", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("allergies", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("medications", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("immunizations", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("family_history", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    UniqueConstraint("identity_id", name="uq_health_background_snapshots_identity"),
+)
+
+
 health_outbox = outbox_table("health_outbox", "health", MODULE_METADATA)
