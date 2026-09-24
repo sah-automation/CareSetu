@@ -6,12 +6,15 @@
 // views. Extracted from the pre-T06 Topbar.
 // #521: role-aware trigger - the patient branch renders the shared Avatar
 // (photo_ref -> name initial -> person icon) with no name label beside it;
-// staff roles (doctor/partner/operator) keep the phone-digit trigger and
-// dropdown verbatim because their names/photos are not in the session
-// payload. The full phone stays hidden until the menu opens. data-session-
-// resolved carries only a resolved/pending flag for e2e settle guards (avatar
-// text is no longer a digit signal) - never the phone itself, so the closed
-// trigger leaks nothing.
+// staff roles keep the phone-digit trigger and dropdown verbatim because
+// their names/photos are not in the session payload. The full phone stays
+// hidden until the menu opens. data-session-resolved carries only a
+// resolved/pending flag for e2e settle guards (avatar text is no longer a
+// digit signal) - never the phone itself, so the closed trigger leaks
+// nothing.
+// #538: the doctor branch gains an account avatar entry point - the same
+// Avatar primitive, person-icon fallback until the doctor profile seam lands
+// (#542/#543). Partner/operator keep the phone-digit trigger unchanged.
 // #525: on phones the patient trigger is hidden below `lg` (account lives in
 // the More sheet); staff visibility is unchanged.
 // #526: the patient dropdown becomes a real account menu - an identity header
@@ -88,8 +91,13 @@ export function AccountMenu() {
   const { lang } = useLang();
   const strings = STRINGS[lang].nav;
   const menuStrings = STRINGS[lang].accountMenu;
+  // #538: the patient and doctor branches share the 36px disc styling; only
+  // the doctor entry drops the name/photo so it falls back to the person icon.
+  const avatarClassName =
+    "h-9 w-9 bg-accent-soft text-sm font-semibold text-accent-strong hover:bg-accent-border";
   const currentRole = resolveRole(selectedRole);
   const isPatient = currentRole === "patient";
+  const isDoctor = currentRole === "doctor";
   const saved = profile?.savedProfile;
   const otherRoles = (user?.roles ?? [])
     .filter(isAppRole)
@@ -159,8 +167,12 @@ export function AccountMenu() {
             <Avatar
               photoRef={saved?.photo_ref}
               name={saved?.name}
-              className="h-9 w-9 bg-accent-soft text-sm font-semibold text-accent-strong hover:bg-accent-border"
+              className={avatarClassName}
             />
+          ) : isDoctor ? (
+            // #538: the doctor account avatar entry - person-icon fallback
+            // until the doctor profile seam resolves photo/name (#542/#543).
+            <Avatar className={avatarClassName} />
           ) : (
             (user?.phone || "?").slice(-2)
           )}

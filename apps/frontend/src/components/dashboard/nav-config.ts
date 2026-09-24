@@ -50,7 +50,19 @@ export const PATIENT_RECORD_ROUTE = "/patient/record";
 // Labels resolve through the i18n engine: the key must exist in BOTH locale
 // dictionaries (compile-time via Dictionary typing, runtime via the bilingual
 // parity test).
-export type NavLabelKey = keyof Dictionary["nav"];
+// Only the string-valued nav dictionary keys are label lookups; `sections`
+// holds the section-group headings (#538) and is not a NavItemDef label.
+export type NavLabelKey = {
+  [K in keyof Dictionary["nav"]]: Dictionary["nav"][K] extends string
+    ? K
+    : never;
+}[keyof Dictionary["nav"]];
+
+// #538: the redesigned full-shell sidebar groups its destinations under
+// labeled sections (nav.sections.*). Each item declares one via `group`;
+// only the full-shell sidebar consumes the grouping metadata - the top-nav
+// and mobile tab bar ignore it and keep their config order.
+export type NavSectionKey = keyof Dictionary["nav"]["sections"];
 
 // Reserved partner_type filter (§7.1): the partner console is one shell
 // type-filtered by account attribute; entries may declare which types see them.
@@ -76,6 +88,10 @@ export interface NavItemDef {
   // item shows a count pill (prototype's count-pill convention).
   count?: number;
   partnerTypes?: PartnerType[];
+  // #538: sidebar section-group membership (nav.sections.*). Optional additive
+  // metadata for the redesigned full-shell sidebar only; the mobile bars and
+  // top-nav ignore it.
+  group?: NavSectionKey;
 }
 
 export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
@@ -127,7 +143,16 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
     },
   ],
   doctor: [
-    { key: "queue", labelKey: "queue", href: "/doctor", icon: ClipboardList },
+    // #538: the redesigned sidebar groups the doctor console's practice
+    // areas under Work, with Profile alone under Account; Logout is chrome in
+    // the sidebar's lower group, never a nav destination.
+    {
+      key: "queue",
+      labelKey: "queue",
+      href: "/doctor",
+      icon: ClipboardList,
+      group: "work",
+    },
     // PHASE-8.1 T8 (#483): Cases un-sooned - the open-cases index at
     // /doctor/cases is live; patients/profile stay coming-soon.
     {
@@ -135,6 +160,7 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       labelKey: "cases",
       href: "/doctor/cases",
       icon: FolderOpen,
+      group: "work",
     },
     {
       key: "patients",
@@ -142,6 +168,7 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       href: "/doctor/patients",
       icon: Users,
       soon: true,
+      group: "work",
     },
     {
       key: "profile",
@@ -149,6 +176,7 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       href: "/doctor/profile",
       icon: User,
       soon: true,
+      group: "account",
     },
   ],
   partner: [
@@ -158,6 +186,7 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       href: ROLE_HOME.partner,
       icon: Package,
       partnerTypes: ["lab", "chemist"],
+      group: "work",
     },
     {
       key: "history",
@@ -166,6 +195,7 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       icon: History,
       soon: true,
       partnerTypes: ["lab", "chemist"],
+      group: "work",
     },
     {
       key: "settlements",
@@ -173,6 +203,7 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       href: "/partner/settlements",
       icon: Wallet,
       soon: true,
+      group: "account",
     },
     {
       key: "profile",
@@ -180,16 +211,24 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       href: "/partner/profile",
       icon: User,
       soon: true,
+      group: "account",
     },
   ],
   operator: [
-    { key: "home", labelKey: "home", href: ROLE_HOME.operator, icon: Home },
+    {
+      key: "home",
+      labelKey: "home",
+      href: ROLE_HOME.operator,
+      icon: Home,
+      group: "work",
+    },
     {
       key: "verifications",
       labelKey: "verifications",
       href: "/operator/verifications",
       icon: BadgeCheck,
       soon: true,
+      group: "work",
     },
     {
       key: "disputes",
@@ -197,6 +236,7 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       href: "/operator/disputes",
       icon: Scale,
       soon: true,
+      group: "work",
     },
     {
       key: "audit",
@@ -204,6 +244,7 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       href: "/operator/audit",
       icon: ScrollText,
       soon: true,
+      group: "work",
     },
   ],
 };
@@ -258,4 +299,28 @@ export function splitMobileTabs(items: NavItemDef[]): MobileTabSplit {
 // namespaced so each full-density role remembers its own sidebar choice.
 export function sidebarStorageKey(role: Role): string {
   return `caresetu.sidebar.${role}`;
+}
+
+// #538: order full-shell nav items into the redesigned sidebar's labeled
+// section groups. Group order follows NAV_CONFIG order (which lists Work
+// entries ahead of Account for every full role), ungrouped items render last
+// without a header. Only the sidebar consumes this: the mobile bars and
+// top-nav keep their flat config order.
+export interface SidebarSection {
+  labelKey: NavSectionKey | null;
+  items: NavItemDef[];
+}
+
+export function sidebarSections(items: NavItemDef[]): SidebarSection[] {
+  const grouped = new Map<NavSectionKey | null, NavItemDef[]>();
+  const order: (NavSectionKey | null)[] = [];
+  for (const item of items) {
+    const group = item.group ?? null;
+    if (!grouped.has(group)) {
+      grouped.set(group, []);
+      order.push(group);
+    }
+    grouped.get(group)!.push(item);
+  }
+  return order.map((key) => ({ labelKey: key, items: grouped.get(key)! }));
 }

@@ -6,14 +6,34 @@
 // over; the retired JS viewport-collapse / icon-rail mechanics are gone. The
 // only collapse control is the user's own toggle, persisted per role by the
 // AppShell (spec decision 6).
+//
+// #538: doctor-chrome redesign of the full-shell sidebar. Sections: nav items
+// group under labeled sections (nav.sections.*, driven by NavItemDef.group);
+// the active item carries a left accent indicator; the collapsed icon rail
+// shows hover label flyouts (with the open-cases count pill on the Cases
+// flyout) rendered as a viewport-fixed tooltip so the aside's overflow never
+// clips them; the collapse toggle is icon-only; Logout lives in the lower
+// group. These are additions to the shared chrome - the light patient shell
+// never renders a sidebar, and the mobile bottom-tab bars are untouched.
 
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { useRef, useState } from "react";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+import { ChevronLeft, ChevronRight, LogOut } from "lucide-react";
 
+import { useAuth } from "@/lib/auth/AuthContext";
+import { STRINGS } from "@/lib/i18n/dictionaries";
+import { useLang } from "@/lib/i18n/LangContext";
 import { cn } from "@/lib/utils";
 
-import { NAV_CONFIG } from "./nav-config";
-import { NavItemLink } from "./NavItemLink";
-import type { NavItemDef } from "./nav-config";
+import { NAV_CONFIG, sidebarSections } from "./nav-config";
+import {
+  ActiveIndicator,
+  CountPill,
+  NavItemLink,
+  SoonBadge,
+} from "./NavItemLink";
+import type { NavItemDef, SidebarSection } from "./nav-config";
 import type { Role } from "./types";
 
 interface SidebarProps {
@@ -32,6 +52,10 @@ export function Sidebar({
   items,
 }: SidebarProps) {
   const navItems = items ?? NAV_CONFIG[role];
+  const sections = sidebarSections(navItems);
+  const { logout } = useAuth();
+  const { lang } = useLang();
+  const strings = STRINGS[lang].nav;
 
   return (
     <aside
@@ -50,33 +74,187 @@ export function Sidebar({
         )}
       </div>
 
-      <nav className="flex-1 p-2" data-testid="sidebar-nav">
-        {navItems.map((item) => (
-          <NavItemLink
-            key={item.key}
-            item={item}
-            variant="sidebar"
-            hideLabel={collapsed}
+      <nav className="flex-1 space-y-4 p-2" data-testid="sidebar-nav">
+        {sections.map((section) => (
+          <SidebarSectionGroup
+            key={section.labelKey ?? "ungrouped"}
+            section={section}
+            collapsed={collapsed}
           />
         ))}
       </nav>
 
       <div className="shrink-0 border-t border-hairline-soft p-2">
-        <button
-          type="button"
-          onClick={onToggleCollapse}
-          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          data-testid="sidebar-toggle"
-          className="flex min-h-11 w-full items-center gap-3 rounded px-3 text-sm font-medium text-txt-sub hover:bg-accent-soft hover:text-txt"
-        >
-          {collapsed ? (
-            <ChevronRight size={20} className="shrink-0" />
-          ) : (
-            <ChevronLeft size={20} className="shrink-0" />
-          )}
-          {!collapsed && <span>Collapse sidebar</span>}
-        </button>
+        <div className="space-y-1">
+          <button
+            type="button"
+            onClick={logout}
+            aria-label={strings.logOut}
+            data-testid="sidebar-logout"
+            className={cn(
+              "flex min-h-11 w-full items-center gap-3 rounded px-3 text-sm font-medium text-txt-sub hover:bg-danger-soft hover:text-danger",
+              collapsed && "justify-center px-0",
+            )}
+          >
+            <LogOut size={20} className="shrink-0" />
+            {!collapsed && (
+              <span className="min-w-0 truncate">{strings.logOut}</span>
+            )}
+          </button>
+          <button
+            type="button"
+            onClick={onToggleCollapse}
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            data-testid="sidebar-toggle"
+            className={cn(
+              "flex min-h-11 w-full items-center justify-center rounded px-3 text-sm font-medium text-txt-sub hover:bg-accent-soft hover:text-txt",
+            )}
+          >
+            {collapsed ? (
+              <ChevronRight size={20} className="shrink-0" />
+            ) : (
+              <ChevronLeft size={20} className="shrink-0" />
+            )}
+          </button>
+        </div>
       </div>
     </aside>
+  );
+}
+
+function SidebarSectionGroup({
+  section,
+  collapsed,
+}: {
+  section: SidebarSection;
+  collapsed: boolean;
+}) {
+  const { lang } = useLang();
+  const label = section.labelKey
+    ? STRINGS[lang].nav.sections[section.labelKey]
+    : null;
+
+  return (
+    <div className="space-y-1">
+      {!collapsed && label && (
+        <p className="px-3 pt-2 text-[11px] font-semibold tracking-wide text-txt-muted uppercase">
+          {label}
+        </p>
+      )}
+      {section.items.map((item) =>
+        collapsed ? (
+          <CollapsedNavItem key={item.key} item={item} />
+        ) : (
+          <NavItemLink key={item.key} item={item} variant="sidebar" />
+        ),
+      )}
+    </div>
+  );
+}
+
+// #538: collapsed icon-only state. The label (plus Soon badge and count pill)
+// only enters the DOM while the item is hovered - the old rail never leaked
+// labels into the collapsed tree. The flyout is `position: fixed` so the
+// aside's `overflow-y-auto` cannot clip it; the sidebar is `sticky top-0`, so
+// the captured rect stays valid while the page scrolls. The mouse (and focus)
+// handlers live on the item root (onMouseEnter/onMouseLeave are non-bubbling),
+// with the anchor-level hover only driving the fixed flyout placement.
+function CollapsedNavItem({ item }: { item: NavItemDef }) {
+  const pathname = usePathname();
+  const { lang } = useLang();
+  const [flyoutOpen, setFlyoutOpen] = useState(false);
+  const [flyoutTop, setFlyoutTop] = useState(0);
+  const anchorRef = useRef<HTMLSpanElement>(null);
+
+  const label = STRINGS[lang].nav[item.labelKey];
+  const Icon = item.icon;
+  const active = !item.soon && pathname === item.href;
+
+  function openFlyout() {
+    const rect = anchorRef.current?.getBoundingClientRect();
+    if (rect) {
+      setFlyoutTop(rect.top + rect.height / 2);
+    }
+    setFlyoutOpen(true);
+  }
+
+  const handlers = {
+    onMouseEnter: openFlyout,
+    onMouseLeave: () => setFlyoutOpen(false),
+    // Keyboard users hit the icon rail with Tab: mirror the hover state so
+    // the label flyout is reachable without a pointer.
+    onFocus: openFlyout,
+    onBlur: () => setFlyoutOpen(false),
+  };
+
+  const anchor = (
+    <span
+      ref={anchorRef}
+      className={cn(
+        "relative flex h-11 w-11 shrink-0 items-center justify-center rounded",
+        active
+          ? "bg-accent-soft text-accent-strong"
+          : "text-txt-sub hover:bg-accent-soft hover:text-txt",
+      )}
+    >
+      {active && <ActiveIndicator />}
+      <Icon size={20} className="shrink-0" />
+    </span>
+  );
+
+  const flyout = (
+    <div
+      role="tooltip"
+      style={{ top: flyoutTop }}
+      className="fixed left-16 z-50 flex -translate-y-1/2 items-center gap-2 rounded-md border border-hairline bg-surface px-3 py-2 text-sm whitespace-nowrap text-txt shadow-card"
+      data-testid="sidebar-flyout"
+    >
+      <span
+        className={cn(
+          "min-w-0 truncate",
+          active && "font-semibold text-accent-strong",
+        )}
+      >
+        {label}
+      </span>
+      {item.soon && <SoonBadge />}
+      {typeof item.count === "number" && !item.soon && (
+        <CountPill count={item.count} />
+      )}
+    </div>
+  );
+
+  const body = (
+    <div className="relative flex w-11 items-center justify-center">
+      {anchor}
+      {flyoutOpen && flyout}
+    </div>
+  );
+
+  if (item.soon) {
+    return (
+      <span
+        aria-disabled="true"
+        className="block cursor-not-allowed opacity-60"
+        data-soon="true"
+        data-testid={`nav-${item.key}`}
+        {...handlers}
+      >
+        {body}
+      </span>
+    );
+  }
+
+  return (
+    <Link
+      href={item.href}
+      aria-current={active ? "page" : undefined}
+      data-active={active || undefined}
+      data-testid={`nav-${item.key}`}
+      className="block w-11"
+      {...handlers}
+    >
+      {body}
+    </Link>
   );
 }

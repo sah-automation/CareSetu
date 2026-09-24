@@ -65,11 +65,19 @@ const ME_RESPONSE_SINGLE_ROLE = {
   roles: ["patient"],
 };
 
-// #521 staff regression: a doctor session keeps the phone-digit trigger.
+// #521 staff regression: a doctor session keeps the generic account avatar
+// entry since #538 (person-icon fallback until the doctor profile seam).
 const ME_RESPONSE_DOCTOR = {
   subject_id: "42",
   phone: "+911234567890",
   roles: ["doctor"],
+};
+
+// #538: partner/operator staff sessions keep the phone-digit trigger verbatim.
+const ME_RESPONSE_PARTNER = {
+  subject_id: "42",
+  phone: "+911234567890",
+  roles: ["partner"],
 };
 
 // A stale session payload predating T05's additive phone field.
@@ -359,7 +367,7 @@ describe("AccountMenu patient avatar trigger (#521)", () => {
     expect(trigger.querySelector("img")).toBeNull();
   });
 
-  it("keeps the name off the trigger and the phone hidden until the menu opens", async () => {
+  it("patient branch keeps the name off the trigger and the phone hidden until the menu opens", async () => {
     const trigger = await renderPatientWithProfile(NAMED_PROFILE);
 
     // No name label beside the circle; no full phone while closed.
@@ -373,8 +381,29 @@ describe("AccountMenu patient avatar trigger (#521)", () => {
     expect(screen.getByText("+911234567890")).toBeInTheDocument();
   });
 
-  it("staff role keeps the phone-digit trigger and dropdown verbatim", async () => {
+  it("#538 shows the doctor a person-icon account avatar instead of phone digits", async () => {
     const trigger = await renderClosedTrigger(ME_RESPONSE_DOCTOR);
+
+    // The generic person icon entry point - no digit text, no saved photo
+    // until the doctor profile seam lands (#542/#543).
+    expect(trigger).not.toHaveTextContent("90");
+    expect(trigger.querySelector("svg")).not.toBeNull();
+    expect(trigger.querySelector("img")).toBeNull();
+
+    // The dropdown behind the avatar still carries the full phone, role badge
+    // and dictionary-driven Log out.
+    await openViaKeyboard();
+    expect(screen.getByText("+911234567890")).toBeInTheDocument();
+    expect(screen.getByTestId("account-menu-role-badge")).toHaveTextContent(
+      "Doctor",
+    );
+    expect(
+      screen.getByRole("menuitem", { name: "Log out" }),
+    ).toBeInTheDocument();
+  });
+
+  it("non-doctor staff keeps the phone-digit trigger and dropdown verbatim", async () => {
+    const trigger = await renderClosedTrigger(ME_RESPONSE_PARTNER);
 
     expect(trigger).toHaveTextContent("90");
     expect(trigger.querySelector("svg")).toBeNull();
@@ -384,7 +413,7 @@ describe("AccountMenu patient avatar trigger (#521)", () => {
 
     expect(screen.getByText("+911234567890")).toBeInTheDocument();
     expect(screen.getByTestId("account-menu-role-badge")).toHaveTextContent(
-      "Doctor",
+      "Partner",
     );
     expect(
       screen.getByRole("menuitem", { name: "Log out" }),
@@ -402,8 +431,8 @@ describe("AccountMenu mobile placement (#525)", () => {
     expect(trigger.querySelector("svg")).not.toBeNull();
   });
 
-  it("keeps the staff phone-digit trigger fully visible at every width", async () => {
-    const trigger = await renderClosedTrigger(ME_RESPONSE_DOCTOR);
+  it("keeps the non-doctor staff phone-digit trigger fully visible at every width", async () => {
+    const trigger = await renderClosedTrigger(ME_RESPONSE_PARTNER);
 
     expect(trigger).toHaveTextContent("90");
     expect(trigger.className).toContain("flex");

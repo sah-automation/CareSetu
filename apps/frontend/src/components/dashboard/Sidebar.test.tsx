@@ -1,8 +1,15 @@
 // PHASE-2.6 T06 (#197): unit suite for the full-shell desktop sidebar -
 // CSS-driven responsiveness, collapsed icon-only columns, Soon semantics.
 
-import { render, screen, fireEvent, cleanup } from "@testing-library/react";
+import {
+  render,
+  screen,
+  fireEvent,
+  cleanup,
+  within,
+} from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { FolderOpen, Home } from "lucide-react";
 
 import { Sidebar } from "./Sidebar";
 import type { Role } from "./types";
@@ -35,6 +42,15 @@ vi.mock("next/link", () => ({
   },
 }));
 
+// #538: the redesigned sidebar drops Logout into its lower group, so the
+// component reads the shared logout seam at the module boundary like the
+// AppShell suite does.
+const mockLogout = vi.fn();
+
+vi.mock("@/lib/auth/AuthContext", () => ({
+  useAuth: () => ({ logout: mockLogout }),
+}));
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -42,6 +58,7 @@ vi.mock("next/link", () => ({
 beforeEach(() => {
   vi.restoreAllMocks();
   mockPathname.mockReturnValue("/patient");
+  mockLogout.mockClear();
 });
 
 afterEach(() => {
@@ -142,5 +159,119 @@ describe("Sidebar", () => {
     const disputes = screen.getByTestId("nav-disputes");
     expect(disputes.tagName).toBe("SPAN");
     expect(disputes).toHaveAttribute("aria-disabled", "true");
+  });
+});
+
+// #538: the doctor-chrome sidebar redesign - labeled section groups, the
+// collapsed hover flyouts (with the open-cases count), the icon-only collapse
+// toggle, and Logout in the lower group. These are shared-chrome additions:
+// the patient sidebar (a test-only surface) stays flat and label-free.
+describe("Sidebar #538 redesigned chrome", () => {
+  it("groups the full-shell nav into labeled sections", () => {
+    mockPathname.mockReturnValue("/doctor");
+    render(
+      <Sidebar role="doctor" collapsed={false} onToggleCollapse={vi.fn()} />,
+    );
+
+    expect(screen.getByText("Work")).toBeInTheDocument();
+    expect(screen.getByText("Account")).toBeInTheDocument();
+    const workSection = screen.getByText("Work").parentElement;
+    expect(workSection).not.toBeNull();
+    expect(
+      within(workSection as HTMLElement).getByTestId("nav-queue"),
+    ).toBeInTheDocument();
+    expect(
+      within(workSection as HTMLElement).getByTestId("nav-cases"),
+    ).toBeInTheDocument();
+    const accountSection = screen.getByText("Account").parentElement;
+    expect(
+      within(accountSection as HTMLElement).getByTestId("nav-profile"),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the patient sidebar flat, without section labels", () => {
+    render(
+      <Sidebar role="patient" collapsed={false} onToggleCollapse={vi.fn()} />,
+    );
+
+    expect(screen.queryByText("Work")).not.toBeInTheDocument();
+    expect(screen.queryByText("Account")).not.toBeInTheDocument();
+  });
+
+  it("keeps the collapsed rail icon-only - no labels, section headers, or toggle text leak", () => {
+    mockPathname.mockReturnValue("/doctor");
+    render(
+      <Sidebar role="doctor" collapsed={true} onToggleCollapse={vi.fn()} />,
+    );
+
+    expect(screen.queryByText("Cases")).not.toBeInTheDocument();
+    // #538 redesign: even the Work/Account section headers hide collapsed.
+    expect(screen.queryByText("Work")).not.toBeInTheDocument();
+    expect(screen.queryByText("Account")).not.toBeInTheDocument();
+    expect(screen.queryByText("Collapse sidebar")).not.toBeInTheDocument();
+    expect(screen.getByTestId("sidebar-toggle")).toHaveAttribute(
+      "aria-label",
+      "Expand sidebar",
+    );
+  });
+
+  it("shows the label flyout with the open-cases count when a collapsed item is hovered", () => {
+    mockPathname.mockReturnValue("/doctor");
+    render(
+      <Sidebar
+        role="doctor"
+        collapsed={true}
+        onToggleCollapse={vi.fn()}
+        items={[
+          {
+            key: "queue",
+            labelKey: "queue",
+            href: "/doctor",
+            icon: Home,
+            group: "work",
+          },
+          {
+            key: "cases",
+            labelKey: "cases",
+            href: "/doctor/cases",
+            icon: FolderOpen,
+            count: 3,
+            group: "work",
+          },
+        ]}
+      />,
+    );
+
+    fireEvent.mouseEnter(screen.getByTestId("nav-cases"));
+
+    const flyout = screen.getByTestId("sidebar-flyout");
+    expect(flyout).toHaveTextContent("Cases");
+    expect(within(flyout).getByTestId("count-pill")).toHaveTextContent("3");
+
+    fireEvent.mouseLeave(screen.getByTestId("nav-cases"));
+    expect(screen.queryByTestId("sidebar-flyout")).not.toBeInTheDocument();
+  });
+
+  it("renders Logout in the lower group and ends the session on click", () => {
+    mockPathname.mockReturnValue("/doctor");
+    render(
+      <Sidebar role="doctor" collapsed={false} onToggleCollapse={vi.fn()} />,
+    );
+
+    const logout = screen.getByTestId("sidebar-logout");
+    expect(logout).toHaveTextContent("Log out");
+    fireEvent.click(logout);
+    expect(mockLogout).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders the lower-group Logout as icon-only when collapsed", () => {
+    mockPathname.mockReturnValue("/doctor");
+    render(
+      <Sidebar role="doctor" collapsed={true} onToggleCollapse={vi.fn()} />,
+    );
+
+    const logout = screen.getByTestId("sidebar-logout");
+    expect(logout).not.toHaveTextContent("Log out");
+    expect(logout).toHaveAttribute("aria-label", "Log out");
   });
 });

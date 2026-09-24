@@ -872,6 +872,13 @@ const en = {
     verifications: "Verifications",
     disputes: "Disputes",
     audit: "Audit",
+    // #538: section-group labels for the redesigned full-shell sidebar. Nav
+    // items declare a group via NavItemDef.group; the sidebar composes ordered
+    // labeled groups from these keys.
+    sections: {
+      work: "Work",
+      account: "Account",
+    },
   },
 
   // accountMenu.* surface - #526: chrome copy for the desktop account
@@ -1954,6 +1961,10 @@ export const STRINGS: Record<Lang, Dictionary> = {
       verifications: "सत्यापन",
       disputes: "विवाद",
       audit: "ऑडिट",
+      sections: {
+        work: "कार्य",
+        account: "खाता",
+      },
     },
     accountMenu: {
       trigger: "अकाउंट मेन्यू",
