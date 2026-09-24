@@ -40,7 +40,7 @@ from bus.dispatcher import DispatcherConfig, discover_outbox_tables, run_poll_lo
 from bus.envelope import Envelope
 from bus.outbox_ddl import materialize_consumed_events, materialize_outbox
 from bus.outbox_writer import write_outbox
-from modules.care.domain.events import PrescriptionIssuedPayload
+from modules.care.domain.events import PrescriptionIssuedItem, PrescriptionIssuedPayload
 from modules.consent.domain.events import consent_granted_envelope, consent_revoked_envelope
 from modules.health.domain.events import (
     PatientRegisteredPayload,
@@ -164,12 +164,39 @@ def _report_filed_envelope(
 def _prescription_issued_envelope(
     patient_id: int, event_id: uuid.UUID | None = None
 ) -> Envelope[PrescriptionIssuedPayload]:
-    """Producer-shaped ``prescription.issued`` envelope (care owns the registry contract).
+    """Producer-shaped enriched ``prescription.issued`` envelope (care owns the registry contract).
 
     Mirrors what care's ``prescription_issued_envelope`` writes into
-    ``care_outbox`` - the dispatcher re-validates this row payload against
-    care's registered payload model before fan-out, and health's consumer
-    mirror accepts it.
+    ``care_outbox`` after #513: the frozen issued snapshot (``items`` +
+    ``attributed_doctor_name``) travels beside the lean ids. The dispatcher
+    re-validates this row payload against care's registered payload model
+    before fan-out, and health's consumer mirror accepts it.
+    """
+    return Envelope[PrescriptionIssuedPayload](
+        event_id=event_id or uuid4(),
+        event_type="prescription.issued",
+        producer="care",
+        payload=PrescriptionIssuedPayload(
+            case_id=100,
+            prescription_id=2001,
+            patient_id=patient_id,
+            doctor_id=10,
+            occurred_at=datetime.now(UTC).isoformat(),
+            items=[PrescriptionIssuedItem(name="Amlodipine", dose="5 mg", duration="30 tablets")],
+            attributed_doctor_name="Dr. Priya Sharma",
+        ),
+    )
+
+
+def _legacy_prescription_issued_envelope(
+    patient_id: int, event_id: uuid.UUID | None = None
+) -> Envelope[PrescriptionIssuedPayload]:
+    """Legacy (pre-#513) ``prescription.issued`` envelope without the snapshot fields.
+
+    A pre-enrichment row carries only the lean ids - care's registered model
+    re-validates it as an empty snapshot, and health's tolerant mirror must
+    store the lean ``{prescription_id, status}`` entry rather than reject the
+    delivery.
     """
     return Envelope[PrescriptionIssuedPayload](
         event_id=event_id or uuid4(),
@@ -369,6 +396,48 @@ async def test_prescription_issued_creates_prescription_entry(
         assert entries[0]["entry_type"] == "prescription"
         assert entries[0]["payload"]["prescription_id"] == 2001
         assert entries[0]["payload"]["status"] == "issued"
+        assert entries[0]["payload"]["items"] == [
+            {"name": "Amlodipine", "dose": "5 mg", "frequency": None, "duration": "30 tablets"}
+        ]
+        assert entries[0]["payload"]["attributed_doctor_name"] == "Dr. Priya Sharma"
+
+    await _run_test_with_throwaway_outboxes(database_url, _test)
+
+
+@pytest.mark.asyncio
+async def test_legacy_prescription_issued_stores_lean_payload(
+    database_url: str, clean_tables: None
+) -> None:
+    """AC: a legacy (pre-enrichment) prescription.issued stores the lean payload only.
+
+    Tolerant mirror: an envelope without the #513 snapshot fields still delivers
+    and records just ``{prescription_id, status}`` (parent #512 US13).
+    """
+
+    async def _test(db_url: str) -> None:
+        record_id = await _ensure_record_shell(db_url, _PATIENT)
+
+        env = _legacy_prescription_issued_envelope(_PATIENT)
+        await _publish(db_url, THROWAWAY_PRESCRIPTION_ISSUED_OUTBOX, env)
+        await _run_dispatcher_until(
+            db_url,
+            (
+                "SELECT COUNT(*) FROM health.consumed_events "
+                "WHERE event_type = 'prescription.issued'"
+            ),
+            expected=1,
+        )
+
+        entries = await _query(
+            db_url,
+            (
+                "SELECT entry_type, payload FROM health.health_record_entries "
+                f"WHERE record_id = {record_id}"
+            ),
+        )
+        assert len(entries) == 1
+        assert entries[0]["entry_type"] == "prescription"
+        assert entries[0]["payload"] == {"prescription_id": 2001, "status": "issued"}
 
     await _run_test_with_throwaway_outboxes(database_url, _test)
 

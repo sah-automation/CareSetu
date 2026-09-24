@@ -1,6 +1,8 @@
 // PHASE-3 T8 (#217): Entry detail screen suite - source attribution,
-// consent lineage citation, lab-results table, egress trail presence/
-// absence, not-found, error/retry lifecycle, and bilingual EN/HI parity.
+// consent lineage citation, lab-results table, prescription medicine block
+// (#517: item lines + doctor attribution + Rx ref, legacy absence), egress
+// trail presence/absence, not-found, error/retry lifecycle, and bilingual
+// EN/HI parity.
 
 import {
   cleanup,
@@ -299,6 +301,11 @@ describe("EntryDetailPage source and consent", () => {
     expect(within(sourceCard).getByText(/C-2026-011/)).toBeInTheDocument();
     expect(within(sourceCard).getByText(/v1/)).toBeInTheDocument();
     expect(screen.getByTestId("consent-log-link")).toBeInTheDocument();
+    // The consent-log route lives under the record section (#511 drive-by).
+    expect(screen.getByTestId("consent-log-link")).toHaveAttribute(
+      "href",
+      "/patient/record/consent-log",
+    );
   });
 
   it("omits consent section silently when no egress trail exists", async () => {
@@ -386,6 +393,119 @@ describe("EntryDetailPage lab results table", () => {
     );
 
     expect(screen.queryByTestId("entry-results-table")).not.toBeInTheDocument();
+  });
+});
+
+describe("EntryDetailPage prescription medicine block", () => {
+  const PRESCRIPTION_ENTRY = entry({
+    entry_id: 30,
+    entry_type: "prescription",
+    payload: {
+      prescription_id: 41,
+      status: "issued",
+      items: [
+        {
+          name: "Amlodipine",
+          dose: "5 mg",
+          frequency: "once daily",
+          duration: "30 days",
+        },
+        {
+          name: "Metformin",
+          dose: "500 mg",
+          frequency: "twice daily",
+        },
+      ],
+      attributed_doctor_name: "Dr. A. Kumar",
+    },
+    occurred_at: "2026-08-18T11:00:00Z",
+  });
+
+  const LEGACY_PRESCRIPTION_ENTRY = entry({
+    entry_id: 31,
+    entry_type: "prescription",
+    payload: { prescription_id: 9, status: "issued" },
+    occurred_at: "2026-08-17T11:00:00Z",
+  });
+
+  async function renderEntry(recordEntry: RecordEntryView) {
+    mockUseParams.mockReturnValue({ entryId: String(recordEntry.entry_id) });
+    resolveWith({ ...TIMELINE, entries: [recordEntry] }, EMPTY_EGRESS);
+    render(<EntryDetailPage />);
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("entry-detail-loading"),
+      ).not.toBeInTheDocument(),
+    );
+  }
+
+  it("lists every medicine item with doctor attribution and Rx reference", async () => {
+    await renderEntry(PRESCRIPTION_ENTRY);
+
+    expect(screen.getByTestId("entry-medicine-block")).toBeInTheDocument();
+    expect(screen.getByTestId("medicine-item-0").textContent).toBe(
+      "Amlodipine \u00b7 5 mg \u00b7 once daily \u00b7 30 days",
+    );
+    expect(screen.getByTestId("medicine-item-1").textContent).toBe(
+      "Metformin \u00b7 500 mg \u00b7 twice daily",
+    );
+    expect(screen.queryByTestId("medicine-item-2")).not.toBeInTheDocument();
+    expect(screen.getByTestId("medicine-attribution").textContent).toBe(
+      `${STRINGS.en.record.prescribedBy} Dr. A. Kumar`,
+    );
+    expect(screen.getByTestId("medicine-rx-ref").textContent).toBe("Rx #41");
+  });
+
+  it("falls back to neutral attribution when the payload names no doctor", async () => {
+    await renderEntry(
+      entry({
+        ...PRESCRIPTION_ENTRY,
+        entry_id: 32,
+        payload: {
+          ...PRESCRIPTION_ENTRY.payload,
+          attributed_doctor_name: null,
+        },
+      }),
+    );
+
+    expect(screen.getByTestId("entry-medicine-block")).toBeInTheDocument();
+    expect(screen.getByTestId("medicine-attribution").textContent).toBe(
+      STRINGS.en.record.issuedByNeutral,
+    );
+  });
+
+  it("skips the whole block for a legacy payload without items", async () => {
+    await renderEntry(LEGACY_PRESCRIPTION_ENTRY);
+
+    expect(
+      screen.queryByTestId("entry-medicine-block"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByTestId("medicine-attribution")).toBeNull();
+    expect(screen.queryByTestId("medicine-rx-ref")).toBeNull();
+    expect(screen.queryByText(/Rx #/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Dr\. A\. Kumar/)).not.toBeInTheDocument();
+  });
+
+  it("renders the medical block copy in Hindi after a language flip", async () => {
+    mockUseParams.mockReturnValue({ entryId: "30" });
+    resolveWith({ ...TIMELINE, entries: [PRESCRIPTION_ENTRY] }, EMPTY_EGRESS);
+    render(<LangFlipHost />);
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("entry-detail-loading"),
+      ).not.toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByText("flip-lang"));
+
+    expect(screen.getByTestId("entry-medicine-block")).toBeInTheDocument();
+    expect(screen.getByTestId("medicine-item-0").textContent).toBe(
+      "Amlodipine \u00b7 5 mg \u00b7 once daily \u00b7 30 days",
+    );
+    expect(screen.getByTestId("medicine-attribution").textContent).toBe(
+      `${STRINGS.hi.record.prescribedBy} Dr. A. Kumar`,
+    );
+    expect(screen.getByTestId("medicine-rx-ref").textContent).toBe("Rx #41");
   });
 });
 

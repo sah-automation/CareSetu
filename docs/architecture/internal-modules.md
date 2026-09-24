@@ -676,6 +676,8 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 
 > Partner phone verification in partner login (FEAT-014, ADR-0016) is silent and registers no new event name: the dedicated `POST /v1/auth/partner/*` routes reuse `otp.sent` for issuance and define nothing new - there is deliberately no `partner.verified`.
 
+> `prescription.issued` carries the frozen issued snapshot (ADR-0017): `items` (array of `{name, dose, frequency, duration}`, each nullable except `name`) and `attributed_doctor_name` (`str | None` - the `e-prescription`'s attributed doctor display name, resolved at issue time via the care module's partner seam, `None` when the resolver is missing or the partner unresolvable). MOD-003's tolerant consumer mirror copies both verbatim into the record entry payload when present, so the patient timeline is self-contained; a pre-enrichment envelope still stores the lean `{prescription_id, status}` and degrades honestly. `chemist_name` is a reserved render-if-present key for Phase 10 `order.delivered` (MOD-008) - MOD-003 never writes it today.
+
 > **PHASE-8.1 seams publish no new events.** The six backend deltas (patient pick, review-queue read, pre-summary read, low-confidence one-action finalize, working-prescription read, consultation fee) are all sync facade seams or internal state-machine transitions; they do not add rows to the async event registry.
 
 ---

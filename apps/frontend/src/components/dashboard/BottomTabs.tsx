@@ -10,7 +10,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { MoreHorizontal } from "lucide-react";
+import { ChevronRight, LogOut, MoreHorizontal } from "lucide-react";
 
 import {
   Sheet,
@@ -18,6 +18,9 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
+import { Avatar } from "@/components/ui/avatar";
+import { useAuth } from "@/lib/auth/AuthContext";
+import { useOptionalProfile } from "@/lib/profile/ProfileContext";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { cn } from "@/lib/utils";
@@ -43,6 +46,16 @@ export function BottomTabs({
   const config = items ?? NAV_CONFIG[role];
   const { tabs, overflow, hasMore } = splitMobileTabs(config);
   const strings = STRINGS[lang].nav;
+
+  // #525 mobile account surface: for the patient role the More sheet opens
+  // with an account card (avatar, name or masked phone, full E.164 phone)
+  // that navigates to Profile & Settings, plus a red Log out row. Staff
+  // shells keep their overflow rows unchanged - and since the ProfileProvider
+  // only mounts under the patient group, useOptionalProfile() is null there
+  // anyway.
+  const { user, logout } = useAuth();
+  const profile = useOptionalProfile();
+  const isPatient = role === "patient";
 
   return (
     <>
@@ -89,17 +102,140 @@ export function BottomTabs({
             <SheetTitle>{strings.more}</SheetTitle>
           </SheetHeader>
           <div className="mt-2 flex flex-col">
+            {isPatient && (
+              <AccountCard
+                name={profile?.savedProfile?.name}
+                photoRef={profile?.savedProfile?.photo_ref}
+                identity={accountIdentity(profile?.savedProfile?.name, user)}
+                fullPhone={user?.phone}
+                profileSettingsLabel={strings.profileSettings}
+                onNavigate={() => setMoreOpen(false)}
+              />
+            )}
             {overflow.map((item) => (
               <OverflowRow
                 key={item.key}
                 item={item}
                 label={strings[item.labelKey]}
+                onNavigate={() => setMoreOpen(false)}
               />
             ))}
+            {isPatient && (
+              <LogoutRow
+                label={strings.logOut}
+                onLogout={() => {
+                  setMoreOpen(false);
+                  logout();
+                }}
+              />
+            )}
           </div>
         </SheetContent>
       </Sheet>
     </>
+  );
+}
+
+// #525: the mobile account card top of the More sheet. Shares the stale-
+// session degrade with the desktop menu: a missing phone falls back to
+// "Subject #id" rather than crashing (#199 convention).
+function accountIdentity(
+  savedName: string | null | undefined,
+  user: { phone?: string; id: number } | null,
+): string {
+  const trimmedName = savedName?.trim();
+  if (trimmedName) return trimmedName;
+  if (user?.phone) return maskedPhone(user.phone);
+  return user ? `Subject #${user.id}` : "";
+}
+
+// Display-only mask per spec #520: "+91 XXXXXX1234" - the country prefix
+// (E.164, CONTEXT pins +91) plus the last four digits survive, everything
+// else is X. Values too short to be an E.164 number render verbatim instead
+// of letting local digits masquerade as a country code.
+const MASK = "XXXXXX";
+const E164_COUNTRY_DIGITS = 2;
+const VISIBLE_SUFFIX_DIGITS = 4;
+
+function maskedPhone(phone: string): string {
+  const digits = phone.replace(/\D/g, "");
+  if (digits.length < 10) return phone;
+  return `+${digits.slice(0, E164_COUNTRY_DIGITS)} ${MASK}${digits.slice(
+    -VISIBLE_SUFFIX_DIGITS,
+  )}`;
+}
+
+// Export for unit tests: the mask format is an explicit acceptance criterion
+// of #525 and this pure helper is the single source of it. accountIdentity is
+// the shared name->masked->Subject:#id resolution the desktop dropdown reuses
+// (#526) - one implementation of the stale-session degrade (#199).
+export { maskedPhone, accountIdentity };
+
+function AccountCard({
+  name,
+  photoRef,
+  identity,
+  fullPhone,
+  profileSettingsLabel,
+  onNavigate,
+}: {
+  name?: string | null;
+  photoRef?: string | null;
+  identity: string;
+  fullPhone?: string;
+  profileSettingsLabel: string;
+  onNavigate: () => void;
+}) {
+  return (
+    <Link
+      href="/patient/profile"
+      onClick={onNavigate}
+      data-testid="more-account-card"
+      className="flex min-h-12 items-center gap-3 rounded-lg px-2 py-2 transition-colors hover:bg-accent-soft focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+    >
+      <Avatar
+        photoRef={photoRef}
+        name={name}
+        className="h-11 w-11 shrink-0 bg-accent-soft text-base font-semibold text-accent-strong"
+      />
+      <span className="min-w-0 flex-1">
+        <span
+          className="block truncate text-sm font-semibold text-txt"
+          data-testid="more-account-identity"
+        >
+          {identity}
+        </span>
+        {fullPhone && (
+          <span className="block truncate text-xs text-txt-muted">
+            {fullPhone}
+          </span>
+        )}
+      </span>
+      <span className="flex shrink-0 items-center gap-0.5 text-xs font-medium text-accent">
+        {profileSettingsLabel}
+        <ChevronRight size={16} aria-hidden="true" />
+      </span>
+    </Link>
+  );
+}
+
+function LogoutRow({
+  label,
+  onLogout,
+}: {
+  label: string;
+  onLogout: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onLogout}
+      data-testid="more-logout"
+      className="flex min-h-12 items-center gap-3 rounded-lg px-2 py-2 text-sm font-medium text-danger transition-colors hover:bg-danger-soft focus:outline-none focus-visible:ring-2 focus-visible:ring-danger"
+    >
+      <LogOut size={20} aria-hidden="true" className="shrink-0" />
+      <span className="flex-1 text-left">{label}</span>
+    </button>
   );
 }
 
@@ -170,7 +306,18 @@ function TabColumn({
   );
 }
 
-function OverflowRow({ item, label }: { item: NavItemDef; label: string }) {
+function OverflowRow({
+  item,
+  label,
+  onNavigate,
+}: {
+  item: NavItemDef;
+  label: string;
+  // Fires when a live row navigates so the sheet closes on the way out
+  // (#524): the Radix dialog is state-driven and would otherwise stay open
+  // over the destination page.
+  onNavigate: () => void;
+}) {
   const Icon = item.icon;
   const className =
     "flex min-h-12 w-full items-center gap-3 rounded px-2 py-2 text-sm font-medium";
@@ -192,6 +339,7 @@ function OverflowRow({ item, label }: { item: NavItemDef; label: string }) {
   return (
     <Link
       href={item.href}
+      onClick={onNavigate}
       className={cn(
         className,
         "text-txt-sub hover:bg-accent-soft hover:text-txt",

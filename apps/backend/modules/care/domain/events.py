@@ -6,9 +6,12 @@ models (coding-standards §3) and carry only orchestration/audit facts - ids and
 lifecycle facts - never PHI. The clinical content (pre-summary fields,
 prescription items) lives in the ``care`` / ``intake`` schemas and is read by
 the consuming facade; only identifiers travel on the bus (security-phii-
-standards no-PHI). Every builder answers an :class:`~bus.envelope.Envelope` the
-care facade writes into ``care.care_outbox`` in the SAME transaction as the
-state change (ADR-0002 §1).
+standards no-PHI). One deliberate exception (D1, #512/#513): ``prescription.
+issued`` carries the frozen issued snapshot - the medicine line items and the
+attributed doctor's display name - so the patient-facing record entry becomes a
+self-contained, immutable snapshot of what was issued and by whom. Every
+builder answers an :class:`~bus.envelope.Envelope` the care facade writes into
+``care.care_outbox`` in the SAME transaction as the state change (ADR-0002 §1).
 
 The prescription event payloads (draft_created, reviewed, approved, rejected,
 issued) land alongside the case lifecycle events here (PHASE-8 T03, #419).
@@ -19,7 +22,7 @@ from __future__ import annotations
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from bus.envelope import Envelope
 from bus.events import (
@@ -176,6 +179,24 @@ class PrescriptionRejectedPayload(BaseModel):
     reason: str
 
 
+class PrescriptionIssuedItem(BaseModel):
+    """One medicine line frozen into the ``prescription.issued`` snapshot.
+
+    The trimmed issued form of an approved ``care_rx_items`` working item: the
+    ``{name, dose, frequency, duration}`` display shape the doctor approved at
+    issue time. ``name`` is required; ``dose``/``frequency``/``duration`` stay
+    nullable because a doctor may leave a dosage line open for the pharmacist
+    (``RxItemInput`` semantics). Deliberately omits the internal row ids and
+    ``sequence`` - this is the immutable snapshot the patient-facing record
+    renders, not a relational mirror.
+    """
+
+    name: str
+    dose: str | None = None
+    frequency: str | None = None
+    duration: str | None = None
+
+
 class PrescriptionIssuedPayload(BaseModel):
     """Subject of ``prescription.issued``: the approved revision was issued.
 
@@ -185,7 +206,14 @@ class PrescriptionIssuedPayload(BaseModel):
     attributed to the doctor, with no supersede or void path. ``occurred_at``
     is the clinical time of issuance (ISO 8601), carried so consumers like
     MOD-003's record timeline can timestamp the entry without re-deriving it.
-    Regulated act.
+    ``items`` freeze the issued medicine lines (D1, #513) and
+    ``attributed_doctor_name`` the issuing doctor's display name - ``None``
+    when the module-isolated partner seam is absent or the partner is
+    unresolvable, so approval never fails on a cosmetic attribution.
+    ``items`` defaults to an empty snapshot so a pre-enrichment issued row
+    (published before D1 landed) still re-validates against this registered
+    model when replayed - consumers degrade to the lean entry rather than
+    stranding the event (parent #512 US13). Regulated act.
     """
 
     case_id: int
@@ -193,6 +221,8 @@ class PrescriptionIssuedPayload(BaseModel):
     patient_id: int
     doctor_id: int
     occurred_at: str  # ISO 8601 datetime string
+    items: list[PrescriptionIssuedItem] = Field(default_factory=list)
+    attributed_doctor_name: str | None = None
 
 
 def prescription_draft_created_envelope(
@@ -290,8 +320,17 @@ def prescription_issued_envelope(
     patient_id: int,
     doctor_id: int,
     occurred_at: str,
+    items: list[PrescriptionIssuedItem],
+    attributed_doctor_name: str | None = None,
 ) -> Envelope[PrescriptionIssuedPayload]:
-    """Build the ``prescription.issued`` envelope for the ``care`` outbox."""
+    """Build the ``prescription.issued`` envelope for the ``care`` outbox.
+
+    ``items`` are the medicine lines frozen at issue time (trimmed from the
+    working revision's ``RxItemView`` shape - only the display fields travel,
+    never the internal row ids); ``attributed_doctor_name`` is the issuer's
+    display name resolved through the injected partner seam, ``None`` on a
+    missing seam or an unresolvable attribution.
+    """
     return Envelope[PrescriptionIssuedPayload](
         event_id=uuid4(),
         event_type=EVENT_PRESCRIPTION_ISSUED,
@@ -302,5 +341,7 @@ def prescription_issued_envelope(
             patient_id=patient_id,
             doctor_id=doctor_id,
             occurred_at=occurred_at,
+            items=items,
+            attributed_doctor_name=attributed_doctor_name,
         ),
     )

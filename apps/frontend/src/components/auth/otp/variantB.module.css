@@ -184,6 +184,12 @@
   height: 5rem;
 }
 
+.ring svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
 .ringTime {
   position: absolute;
   inset: 0;

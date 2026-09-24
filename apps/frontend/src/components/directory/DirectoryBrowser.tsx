@@ -96,13 +96,19 @@ export function DirectoryBrowser({
   presetType?: ProviderType;
   /** PHASE-8.1 T11 (#485): when embedded under an authed shell (the patient
    * /patient/find page), filter commits stay on that route instead of the
-   * public /directory so the patient never leaves the shell. Defaults to the
-   * public DIRECTORY_ROUTE - existing callers are unchanged. */
+   * public /directory so the patient never leaves the shell. It is also the
+   * embed seam (#510): the documented embedding caller is the ONLY one that
+   * passes `baseRoute`, so its presence means "the shell owns the location
+   * control" - the static location line below the search button is suppressed
+   * here (the shell's LocationChip is the single per-viewport selector; the
+   * shell reads the same persisted draft area, so no redundant line exists).
+   * The public /directory browse passes no baseRoute and keeps the beachhead
+   * line as its only location context - existing callers are unchanged. */
   baseRoute?: string;
   /** PHASE-8.1 T11 (#485): card-grid density override for shell-embedded
-   * browse (the patient column is ~760px wide, so lg:grid-cols-4 is too
-   * cramped). Defaults to the public full-width grid - existing callers are
-   * unchanged. */
+   * browse (the embedded column is narrower than the public full-width
+   * browse, so the default lg:grid-cols-4 is too cramped). Defaults to the
+   * public full-width grid - existing callers are unchanged. */
   cardGridClassName?: string;
 }) {
   const { lang } = useLang();
@@ -309,23 +315,34 @@ export function DirectoryBrowser({
           </>
         )}
 
-        <span className="ml-auto inline-flex items-center gap-1.5 text-sm text-txt-muted">
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden="true"
+        {/* #510: the static location line only exists on the public browse,
+            where no shell provides a location selector (the beachhead is the
+            only location context). When embedded under the shell (baseRoute
+            set) the shell's LocationChip owns the selector and reads the same
+            persisted draft area, so rendering this duplicate line would show
+            the patient area twice on one viewport - omitted. */}
+        {baseRoute === undefined && (
+          <span
+            data-testid="directory-location"
+            className="ml-auto inline-flex items-center gap-1.5 text-sm text-txt-muted"
           >
-            <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z" />
-            <circle cx="12" cy="10" r="3" />
-          </svg>
-          {t.locationDaltonganj}
-        </span>
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z" />
+              <circle cx="12" cy="10" r="3" />
+            </svg>
+            {t.locationDaltonganj}
+          </span>
+        )}
       </div>
 
       <section aria-live="polite" className="mt-5">

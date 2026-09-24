@@ -276,7 +276,7 @@ Fixed inputs: §2 shell conventions and Persona-001 (moderate digital literacy, 
 
 ### 5.1 Bottom tabs
 
-`Home | Find Care | Start Visit | My Record | More` - ratified five-column mobile bar (PHASE-3 T1 #210): Inbox folds into the More sheet; the desktop top-nav keeps Inbox first-class.
+`Home | Find Care | Start Visit | My Record | More` - ratified five-column mobile bar (PHASE-3 T1 #210): Inbox folds into the More sheet; the desktop top-nav keeps Inbox first-class. Home is the reworked dashboard in §5.2 (PHASE-2.7).
 
 - **Start Visit** is the center tab: accent-colored circular button with a mic icon, label "Shuru karein / Start". The intake loop is the product core and gets a permanent big target.
 - **My Record** absorbs chronic metric tracking (FEAT-018's tracking view) - metrics are record entries by definition.
@@ -285,14 +285,15 @@ Fixed inputs: §2 shell conventions and Persona-001 (moderate digital literacy, 
 
 ### 5.2 Home (`/patient`)
 
-Vertical stack after greeting block (first name):
+Full-width greeting strip (greeting in the current language, a dismissible profile-completion banner while name/age/gender are missing, location chip), then a responsive feed:
 
-- **Decisions needed** strip (FEAT-013 partner-flow choices): out-of-stock substitute approve/refund, delivery-failure reschedule. Actionable inline; badge count mirrors into Inbox.
-- **Due today** card (chronic-enrolled patients only): "Aaj ki BP entry / Log today's BP" - one tap opens the log form, pre-filled date.
-- **Upcoming** card: next booking + active order status chips; tap to tracking screen.
-- **Recent activity**: last intake/pre-summary status chip ("Doctor review pending"), recent record entries.
+- **Desktop (>=1024px):** two-column grid - main cards column + a 300px sticky right rail (sticky below the top bar). Below 1024px it stacks to a single column in the same reading order; children keep `min-width:0` so intrinsic widths never cause page-level horizontal overflow (320-1440px).
+- **Main column:** search card (Doctor/Lab/Chemist scope selector + full-width search field; "Recommended near you" rail - horizontal snap-scroll on mobile, 3-up on desktop); 4-tile services grid (Consult a doctor / Book a lab test / Order medicine [Soon] / Start visit [accent]); **Action required** (consent requests today; prescription + booking items in later phases; hidden when empty); **Recent activity** (3-4 record-timeline events, never access-history reads; friendly empty state).
+- **Rail:** **Health snapshot** (last metric + report when present, Soon teasers otherwise).
 - Large **Start visit** CTA duplicates the center tab for discoverability.
 - Empty states use illustration + single action, no jargon.
+
+> **Delivered (PHASE-2.7, #499):** the shell - the greeting strip and the responsive two-column feed (sticky right rail). The feed cards above land in the sibling PHASE-2.7 tickets (#500+). The profile-completion meter and nudge stack left the Home; completion is demoted to the slim dismissible banner (§5.9) with the full meter + editing on Profile & Settings (§5.8).
 
 ### 5.3 Find Care (`/patient/find`)
 
@@ -346,7 +347,7 @@ Gating rules:
 - OTP identity gates login only. The public directory browse (homepage `/directory`) stays ungated; the delivered authed `/patient/find` page (PHASE-8.1, #485) requires a patient session but never the profile-completion gate. Viewing My Record is never gated.
 - Name + age + gender gate care actions (intake submission, booking) - a named record is required for anything clinical. Missing fields trigger the wizard step inline at first care action, not a hard wall earlier.
 - Area/address gates medicine-delivery checkout only.
-- Skipped items resurface as gentle Home nudge cards and the Profile completion meter - never modal nagging.
+- Skipped items resurface as a slim, dismissible profile-completion banner on the Home (§5.2) and the full completion meter + editing on Profile & Settings (§5.8) - never modal nagging, and never a meter on the Home itself.
 
 ### 5.10 Consent-moment UX pattern (designed once, reused everywhere)
 

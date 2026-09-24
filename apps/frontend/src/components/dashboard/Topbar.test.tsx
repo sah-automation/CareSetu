@@ -23,6 +23,7 @@ import { Topbar } from "./Topbar";
 import type { Role } from "./types";
 import { AuthProvider } from "@/lib/auth/AuthContext";
 import type { StoredSession } from "@/lib/auth/session";
+import { __resetLangForTests } from "@/lib/i18n/LangContext";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -101,6 +102,7 @@ vi.mock("next/navigation", () => ({
 beforeEach(() => {
   vi.restoreAllMocks();
   localStorage.clear();
+  __resetLangForTests();
   mockReplace.mockReset();
 });
 
@@ -299,7 +301,7 @@ describe("Topbar account cluster", () => {
       "Operator",
     );
     expect(
-      screen.getByRole("menuitem", { name: "Logout" }),
+      screen.getByRole("menuitem", { name: "Log out" }),
     ).toBeInTheDocument();
   });
 });

@@ -600,10 +600,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         from bus.dispatch import dispatch
         from bus.envelope import Envelope
         from bus.outbox_writer import write_outbox
-        from modules.health.domain.events import (
-            PrescriptionIssuedPayload,
-            ReportFiledPayload,
+        from modules.care.domain.events import (
+            PrescriptionIssuedPayload as CarePrescriptionIssuedPayload,
         )
+        from modules.health.domain.events import ReportFiledPayload
         from modules.health.outbox import HEALTH_OUTBOX_TABLE
         from worker.main import build_registry
 
@@ -628,14 +628,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 occurred_at=now.isoformat(),
             ),
         )
-        rx_envelope = Envelope[PrescriptionIssuedPayload](
+        # RX envelope is typed to the REGISTERED care producer model (the
+        # registry maps prescription.issued to modules.care.domain.events): the
+        # background dispatcher revalidates the outbox row against that model,
+        # so a health-mirror-shaped payload would fail validation every poll and
+        # strand the row. The health mirror tolerates the extra case_id and
+        # doctor_id fields (pydantic ignores unknown keys), and its lean
+        # consumer leniently renders the entry either way.
+        rx_envelope = Envelope[CarePrescriptionIssuedPayload](
             event_id=uuid4(),
             event_type="prescription.issued",
             occurred_at=now,
             producer="test.seed",
-            payload=PrescriptionIssuedPayload(
+            payload=CarePrescriptionIssuedPayload(
+                case_id=9002,
                 prescription_id=8001,
                 patient_id=patient_id,
+                doctor_id=5555,
                 occurred_at=now.isoformat(),
             ),
         )

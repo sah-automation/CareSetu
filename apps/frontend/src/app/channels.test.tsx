@@ -57,6 +57,34 @@ vi.mock("@/lib/profile/api", () => ({
   saveProfile: vi.fn().mockResolvedValue(null),
 }));
 
+// #502: the patient home search card routes through fresh navigation; stub
+// the router/link seams so the scaffold render is synchronous.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn() }),
+}));
+
+vi.mock("next/link", () => {
+  return {
+    default: ({
+      href,
+      children,
+    }: {
+      href: string;
+      children: React.ReactNode;
+    }) => <a href={href}>{children}</a>,
+  };
+});
+
+// #503: the patient home Recommended rail fetches the active scope's directory
+// data on mount; stub the client seam so the scaffold render is synchronous.
+vi.mock("@/lib/directory/search", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("@/lib/directory/search")>();
+  return {
+    ...mod,
+    searchDirectory: vi.fn().mockResolvedValue({ fell_back: false, items: [] }),
+  };
+});
+
 // PHASE-2.6 T07 (#198): the single generic dashboard group split into
 // per-role route groups - each stub page re-homed under its role's group.
 
@@ -67,14 +95,18 @@ vi.mock("@/lib/profile/api", () => ({
 afterEach(cleanup);
 
 describe("per-role route-group scaffold pages", () => {
+  // PHASE-2.7 T1 (#499): the patient home greeting is now i18n-driven and
+  // name-personalized, so its scaffold heading is pinned by a stable testid
+  // instead of the removed "Welcome, Patient" literal. Other roles keep their
+  // fixed h1 copy.
   it.each([
-    ["patient", PatientDashboardPage, "Welcome, Patient"],
-    ["doctor", DoctorDashboardPage, "Doctor console"],
-    ["partner", PartnerDashboardPage, "Welcome, Partner"],
-    ["operator", OperatorDashboardPage, "Verification queue"],
+    ["patient", PatientDashboardPage, "testid", "patient-home-greeting"],
+    ["doctor", DoctorDashboardPage, "heading", "Doctor console"],
+    ["partner", PartnerDashboardPage, "heading", "Welcome, Partner"],
+    ["operator", OperatorDashboardPage, "heading", "Verification queue"],
   ] as const)(
     "renders the %s dashboard scaffold page",
-    (role, Page, heading) => {
+    (role, Page, kind, target) => {
       // The patient dashboard reads its draft from the ProfileProvider
       // (#488); mount it here so the scaffold render is complete. The other
       // role pages don't read it and are unaffected.
@@ -87,9 +119,11 @@ describe("per-role route-group scaffold pages", () => {
           <Page />
         ),
       );
-      expect(
-        screen.getByRole("heading", { name: heading, level: 1 }),
-      ).toBeInTheDocument();
+      const found =
+        kind === "testid"
+          ? screen.getByTestId(target)
+          : screen.getByRole("heading", { name: target, level: 1 });
+      expect(found).toBeInTheDocument();
     },
   );
 });

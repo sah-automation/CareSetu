@@ -10,7 +10,21 @@
 // unit test re-enforces it mechanically at runtime (a key missing from
 // either locale fails the suite).
 
-export type Lang = "en" | "hi";
+/**
+ * The locales the app ships, with their native (language-internal) display
+ * names. A native name never translates with the surrounding locale, so these
+ * live here on the i18n config surface (coding-standards §9.1/§9.2 - a locale
+ * change is a single edit, not a source sweep) rather than as scattered JSX
+ * option literals or in the per-locale dictionaries. Every language picker
+ * renders from this list, and Lang is derived from it so the code set exists
+ * once.
+ */
+export const SUPPORTED_LOCALES = [
+  { code: "hi", nativeName: "हिंदी" },
+  { code: "en", nativeName: "English" },
+] as const;
+
+export type Lang = (typeof SUPPORTED_LOCALES)[number]["code"];
 
 const en = {
   // auth.* surface - the patient OTP wizard's copy, moved verbatim from
@@ -460,6 +474,146 @@ const en = {
     },
   },
 
+  // patientHome.* surface - PHASE-2.7 T1 (#499), the reworked patient home
+  // (PROTO-2.7 binding: a full-width greeting strip above a responsive
+  // two-column feed). The greeting is i18n-driven: the saved first name is
+  // interpolated when one exists, the generic greeting stands in when none is
+  // saved. Feed-card copy lands with the sibling PROTO-2.7 tickets.
+  //
+  // #500: the slim one-line profile banner lives here too (PROTO-2.7
+  // `profile.banner` copy, re-keyed to the home surface) - a dismissible
+  // nudge, never a blocking gate, gone entirely once name/age/gender exist.
+  patientHome: {
+    welcome: (firstName: string) => `Namaste, ${firstName}`,
+    welcomeGuest: "Namaste",
+    greetSub: "Good to see you. What would you like to do today?",
+    banner: "Add your name, age & gender to start a visit",
+    bannerCta: "Complete profile",
+    bannerDismiss: "Dismiss profile reminder",
+  },
+
+  // loc.* surface - #501, the patient location chip and its single-city picker
+  // sheet (PROTO-2.7 binding, shell-light.html #location-sheet). The picker
+  // lists only the launch beachhead today, explicitly marked single-city with a
+  // coming-soon note for future cities; choosing it persists the area through
+  // the profile draft/save flow (REQ-008 single-service-area). `cities` is keyed
+  // by the service-area enum id (lib/location/serviceArea) so the enum stays the
+  // single source of truth and each id carries its localized label.
+  loc: {
+    aria: "Change my location",
+    title: "My location",
+    desc: "Used to find care near you and saved to your profile. Find Care and medicine checkout respect it.",
+    cities: {
+      Daltonganj: "Daltonganj",
+    },
+    citySub: "Daltonganj + peri-urban",
+    more: "More cities coming soon",
+    apply: "Apply location",
+  },
+
+  // search.* surface - #502, the home search card (PROTO-2.7 binding,
+  // shell-light.html `.search-card`): the Doctor / Lab / Chemist scope pills
+  // reuse the provider-type tri-state as display-driven scope, and the search
+  // bar routes to scoped Find Care (`/patient/find?type=...&q=...`). The
+  // directory is the single filter source - this card never searches itself.
+  search: {
+    scopeAria: "Search scope",
+    doctor: "Doctor",
+    lab: "Lab",
+    chemist: "Chemist",
+    // #509: distinct from `aria` - the placeholder hints at what can be
+    // searched ("Doctor, lab, test or medicine") while the label announces the
+    // screen's search purpose ("Search care near you"). Both kept EN/HI.
+    placeholder: "Doctor, lab, test or medicine",
+    aria: "Search care near you",
+    go: "Search",
+    seeAll: "See all",
+  },
+
+  // rec.* surface - #503, the "Recommended near you" rail (PROTO-2.7 binding,
+  // shell-light.html `.rec`). A sibling of the home search card: fetches the
+  // active scope's verified directory entries so patients can jump straight to
+  // verified care near them. Card-internal labels (Verified, distance,
+  // specialty/type words) reuse the directory.* card language - this surface
+  // only owns the rail's own heading and states.
+  rec: {
+    title: "Recommended near you",
+    aria: "Recommended care near you",
+    loading: "Finding care near you...",
+    emptyTitle: "No verified providers nearby yet",
+    emptyBody: "As providers in Daltonganj get verified, they appear here.",
+    providerFallback: "CareSetu provider",
+  },
+
+  // services.* surface - #504, the fixed 4-tile services grid (PROTO-2.7
+  // binding, shell-light.html `.services-grid`): Consult a doctor, Book a lab
+  // test, Start visit (the accent tile) and Order medicine - in that fixed
+  // order. Order medicine renders marked Soon and never navigates (`soon`);
+  // the other three tiles are one-tap actions. The consult and lab tiles reuse
+  // the scoped Find Care destinations the home search card (#502) owns; Start
+  // visit points at the live intake start (the center accent of the patient
+  // tab bar).
+  services: {
+    title: "Services",
+    doctor: "Consult a doctor",
+    lab: "Book a lab test",
+    chemist: "Order medicine",
+    start: "Start visit",
+    soon: "Soon",
+  },
+
+  // actions.* surface - #505, the home "Action required" card (PROTO-2.7
+  // binding, shell-light.html `actions.*`). Hidden entirely when nothing is
+  // pending. Today the only source is pending patient-consent requests
+  // (consent log filtered to status "requested"): each row names the requester
+  // and scope, and Allow / Not now answer it through the existing grant-
+  // requested and decline flows. Rx substitute/refund and booking
+  // confirmations are future sources and are deliberately not stubbed.
+  actions: {
+    title: "Action required",
+    consentBadge: "Consent",
+    consentRequest: (name: string, scope: string) =>
+      `${name} requested access to your ${scope}.`,
+    allow: "Allow",
+    deny: "Not now",
+    actionFailed: "Couldn't update. Please try again.",
+  },
+
+  // recent.* surface - #506, the home "Recent activity" card (PROTO-2.7
+  // binding, shell-light.html `recent.*`). Shows the top few record-timeline
+  // events (consultations, prescriptions, lab results, metric logs) rendered
+  // through the shared My Record describe/format helper, so the card only owns
+  // its heading, the View all destination copy and the fresh-record empty
+  // state. Per-type badge labels are reused from record.badge, never re-keyed.
+  recent: {
+    title: "Recent activity",
+    all: "View all",
+    loading: "Loading your recent activity...",
+    empty: "Your activity will appear here",
+    emptyBody:
+      "After your first consult, completed visits, reports and logs show up here. Find a doctor below to get started.",
+  },
+
+  // health.* surface - #507, the home "Health snapshot" right-rail card
+  // (PROTO-2.7 binding, shell-light.html `health.*`). Honest by construction:
+  // the last logged metric and latest report are derived from the record
+  // timeline when they exist; when either is absent the card says Soon instead
+  // of inventing values. The binding's demo-only KPI copy (bpValue, bpWhen,
+  // report1 etc.) is deliberately never shipped - only derived facts render
+  // numbers and dates here.
+  health: {
+    title: "Health snapshot",
+    metricLabel: "Last logged metric",
+    trackSoon: "Health tracking",
+    teaser: "Track your blood pressure & sugar",
+    teaserBody:
+      "Daily logging and trends arrive with Health tracking. Your data stays under your consent control.",
+    reportsTitle: "Reports",
+    reportSoon: "Lab reports appear here once available",
+    soon: "Soon",
+    loading: "Loading your health snapshot...",
+  },
+
   // directory.* surface - PHASE-6 T05a (#317), the public /directory browse
   // page (blueprint §3.1 row 2 look, PROTO-PHASE-6 finalized views are the
   // visual binding). Copy rules baked in: the location indicator is the fixed
@@ -657,6 +811,15 @@ const en = {
       error:
         "We could not save your profile. Please check your connection and try again.",
     },
+    // settings.* - Profile & Settings page (#522): the patient account surface
+    // for editing identity basics, gated on a complete name/age/gender.
+    settings: {
+      title: "Profile & Settings",
+      sub: "Your name, age, and gender help us keep your care records correct.",
+      basics: "Personal details",
+      save: "Save changes",
+      blocked: "Enter your name, age, and gender to save your profile.",
+    },
     demo: {
       badge: "Demo care actions",
       title: "Care-action gating",
@@ -681,6 +844,10 @@ const en = {
     bookings: "Bookings & Orders",
     profileSettings: "Profile & Settings",
     more: "More",
+    // #525/#526: the account cluster's sign-out row in both the mobile More
+    // sheet and the desktop dropdown. Spell "Log out" as two words per spec
+    // #520 vocabulary.
+    logOut: "Log out",
     queue: "Queue",
     cases: "Cases",
     patients: "Patients",
@@ -693,14 +860,44 @@ const en = {
     audit: "Audit",
   },
 
+  // accountMenu.* surface - #526: chrome copy for the desktop account
+  // dropdown. Model note (spec #520): "account menu" is UI chrome terminology
+  // only, not a domain entity; these keys are display chrome, never shared
+  // with the nav-config surface (which indexes `nav.*` and carries one entry
+  // per NavItemDef.labelKey - no functions allowed there).
+  accountMenu: {
+    trigger: "Account menu",
+    completeProfile: "Complete your profile",
+    switchRole: (roleLabel: string) => `Switch to ${roleLabel}`,
+  },
+
   // record.* surface - PHASE-3 T7 (#216): the My Record timeline screen
   // (blueprint §5.5, binding prototype record.html). Filter naming follows
   // the ratified review outcome: "Consultations" everywhere incl. Hindi
   // परामर्श - consultation wording, never physical-visit.
+  // PROTO-3.1 (#511): heading and snapshot/rail copy for the two-zone
+  // redesign; month names come from Intl, never from these dictionaries.
   record: {
-    title: "My Record",
+    title: "My Health Record",
     description:
       "Your health story in one place - consultations, prescriptions, lab results and daily metrics.",
+    summaryLabel: "At a glance",
+    today: "Today",
+    yesterday: "Yesterday",
+    snapshot: {
+      all: "Everything",
+    },
+    snapshotIssued: (count: number) => `${count} issued`,
+    snapshotFlagged: (count: number) => `${count} flagged`,
+    outOfRange: {
+      above: "above usual range",
+      below: "below usual range",
+      footnote: (count: number) =>
+        `${count} values outside your usual range - open the report for details.`,
+    },
+    accessAccordionHint:
+      "Expand to see the latest 5 accesses - the full audit lives in your consent log.",
+    openConsentLog: "Open consent log",
     filterGroupLabel: "Filter record entries",
     moreMenuLabel: "More filters",
     filter: {
@@ -718,9 +915,18 @@ const en = {
       metric: "Metric",
       settlement: "Settlement",
       issued: "Issued",
+      active: "Active",
       delivered: "Delivered",
     },
     filedFromBooking: "filed from booking",
+    // #515: professional prescription card lines - the attribution reads
+    // "issued by <doctor>" when the payload names one and falls back to
+    // neutral copy when `attributed_doctor_name` is null, so the card never
+    // invents a doctor.
+    issuedBy: (doctor: string) => `issued by ${doctor}`,
+    issuedByNeutral: "issued by your care team",
+    prescribedBy: "Prescribed by",
+    moreItems: (count: number) => `+${count} more`,
     empty: {
       title: "No entries yet",
       body: "Your consultations, prescriptions, lab results and metrics appear here as your care happens.",
@@ -735,10 +941,6 @@ const en = {
       scopePrefix: "Consent scope: ",
       deniedLabel: "Denied",
       deniedReasonPrefix: "Reason: ",
-    },
-    placeholder: {
-      healthTitle: "Health tracking",
-      healthBody: "BP/sugar trends and follow-up plans arrive with Phase 12.",
     },
     detail: {
       loadError: "Could not load this entry.",
@@ -1282,6 +1484,13 @@ export type AuthStrings = Dictionary["auth"];
 export type StaffAuthStrings = Dictionary["staffAuth"];
 export type ProfileStrings = Dictionary["profile"];
 export type DoctorStrings = Dictionary["doctor"];
+export type PatientHomeStrings = Dictionary["patientHome"];
+export type SearchStrings = Dictionary["search"];
+export type RecStrings = Dictionary["rec"];
+export type ServicesStrings = Dictionary["services"];
+export type ActionsStrings = Dictionary["actions"];
+export type RecentStrings = Dictionary["recent"];
+export type HealthStrings = Dictionary["health"];
 
 export const STRINGS: Record<Lang, Dictionary> = {
   en,
@@ -1685,6 +1894,13 @@ export const STRINGS: Record<Lang, Dictionary> = {
         error:
           "आपकी प्रोफ़ाइल सेव नहीं हो सकी। कृपया अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
       },
+      settings: {
+        title: "प्रोफ़ाइल और सेटिंग",
+        sub: "आपका नाम, उम्र और लिंग हमें आपके इलाज के रिकॉर्ड सही रखने में मदद करते हैं।",
+        basics: "व्यक्तिगत विवरण",
+        save: "परिवर्तन सेव करें",
+        blocked: "अपना नाम, उम्र और लिंग दर्ज करें ताकि प्रोफ़ाइल सेव हो सके।",
+      },
       demo: {
         badge: "डेमो केयर एक्शन",
         title: "केयर-एक्शन गेटिंग",
@@ -1706,6 +1922,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
       bookings: "बुकिंग और ऑर्डर",
       profileSettings: "प्रोफ़ाइल और सेटिंग",
       more: "और",
+      logOut: "लॉग आउट",
       queue: "कतार",
       cases: "केस",
       patients: "मरीज़",
@@ -1716,6 +1933,11 @@ export const STRINGS: Record<Lang, Dictionary> = {
       verifications: "सत्यापन",
       disputes: "विवाद",
       audit: "ऑडिट",
+    },
+    accountMenu: {
+      trigger: "अकाउंट मेन्यू",
+      completeProfile: "अपनी प्रोफ़ाइल पूरी करें",
+      switchRole: (roleLabel: string) => `${roleLabel} पर स्विच करें`,
     },
     home: {
       nav: {
@@ -1817,6 +2039,105 @@ export const STRINGS: Record<Lang, Dictionary> = {
       },
     },
 
+    // patientHome.* surface - PHASE-2.7 T1 (#499). See the en block for the
+    // greeting rules; parity is compile-checked via Dictionary. #500 adds the
+    // profile-banner copy (marked banner/bannerCta/bannerDismiss) to this same
+    // surface.
+    patientHome: {
+      welcome: (firstName: string) => `नमस्ते, ${firstName}`,
+      welcomeGuest: "नमस्ते",
+      greetSub: "आपको देखकर अच्छा लगा। आज आप क्या करना चाहेंगे?",
+      banner: "विज़िट शुरू करने के लिए अपना नाम, उम्र और लिंग जोड़ें",
+      bannerCta: "प्रोफ़ाइल पूरी करें",
+      bannerDismiss: "प्रोफ़ाइल अनुस्मारक बंद करें",
+    },
+
+    // loc.* surface - #501. See the en block for the single-city picker rules.
+    loc: {
+      aria: "मेरा स्थान बदलें",
+      title: "मेरा स्थान",
+      desc: "पास की सेवाएं खोजने और आपकी प्रोफ़ाइल में सहेजने के लिए उपयोग होता है। खोजें और दवाई चेकआउट इसे मानते हैं।",
+      cities: {
+        Daltonganj: "डालटनगंज",
+      },
+      citySub: "डालटनगंज और आस-पास",
+      more: "और शहर जल्द आ रहे हैं",
+      apply: "स्थान लागू करें",
+    },
+
+    // search.* surface - #502. See the en block; parity compile-checked via
+    // Dictionary (`search.*` keys must exist in both locales).
+    search: {
+      scopeAria: "खोज का दायरा",
+      doctor: "डॉक्टर",
+      lab: "लैब",
+      chemist: "केमिस्ट",
+      placeholder: "डॉक्टर, लैब, टेस्ट या दवा",
+      aria: "अपने आसपास देखभाल खोजें",
+      go: "खोजें",
+      seeAll: "सभी देखें",
+    },
+
+    // rec.* surface - #503. See the en block; parity compile-checked via
+    // Dictionary (`rec.*` keys must exist in both locales).
+    rec: {
+      title: "आपके आस-पास सुझाया गया",
+      aria: "आपके आस-पास सुझाई गई देखभाल",
+      loading: "आपके आस-पास देखभाल ढूँढी जा रही है...",
+      emptyTitle: "आस-पास अभी कोई सत्यापित प्रोवाइडर नहीं",
+      emptyBody: "डालटनगंज के प्रोवाइडर सत्यापित होते ही वे यहाँ दिखेंगे।",
+      providerFallback: "CareSetu प्रोवाइडर",
+    },
+
+    // services.* surface - #504. See the en block; parity compile-checked via
+    // Dictionary (`services.*` keys must exist in both locales).
+    services: {
+      title: "सेवाएं",
+      doctor: "डॉक्टर से परामर्श लें",
+      lab: "लैब टेस्ट बुक करें",
+      chemist: "दवाई मंगवाएं",
+      start: "विज़िट शुरू करें",
+      soon: "जल्द",
+    },
+
+    // actions.* surface - #505. See the en block; parity compile-checked via
+    // Dictionary (`actions.*` keys must exist in both locales).
+    actions: {
+      title: "कार्रवाई आवश्यक",
+      consentBadge: "सहमति",
+      consentRequest: (name: string, scope: string) =>
+        `${name} ने आपके ${scope} तक पहुँच का अनुरोध किया।`,
+      allow: "अनुमति दें",
+      deny: "अभी नहीं",
+      actionFailed: "अपडेट नहीं हो सका। फिर कोशिश करें।",
+    },
+
+    // recent.* surface - #506. See the en block; parity compile-checked via
+    // Dictionary (`recent.*` keys must exist in both locales).
+    recent: {
+      title: "हाल की गतिविधि",
+      all: "सभी देखें",
+      loading: "आपकी हाल की गतिविधि लोड हो रही है...",
+      empty: "आपकी गतिविधि यहाँ दिखाई देगी",
+      emptyBody:
+        "पहली विज़िट के बाद पूरी हुई विज़िट, रिपोर्ट और लॉग यहाँ दिखेंगे। शुरू करने के लिए नीचे डॉक्टर खोजें।",
+    },
+
+    // health.* surface - #507. See the en block; parity compile-checked via
+    // Dictionary (`health.*` keys must exist in both locales).
+    health: {
+      title: "स्वास्थ्य झलक",
+      metricLabel: "आख़िरी दर्ज मेट्रिक",
+      trackSoon: "स्वास्थ्य ट्रैकिंग",
+      teaser: "अपना BP और शुगर ट्रैक करें",
+      teaserBody:
+        "रोज़ की एंट्री और रुझान हेल्थ ट्रैकिंग के साथ आते हैं। आपका डेटा आपकी सहमति के नियंत्रण में रहता है।",
+      reportsTitle: "रिपोर्ट्स",
+      reportSoon: "लैब रिपोर्ट उपलब्ध होने पर यहाँ दिखेंगी",
+      soon: "जल्द",
+      loading: "आपका स्वास्थ्य स्नैपशॉट लोड हो रहा है...",
+    },
+
     directory: {
       heading: {
         all: "अपने आसपास जाँची-परखी देखभाल खोजें",
@@ -1892,9 +2213,26 @@ export const STRINGS: Record<Lang, Dictionary> = {
     },
 
     record: {
-      title: "मेरा रिकॉर्ड",
+      title: "मेरा हेल्थ रिकॉर्ड",
       description:
         "आपकी सेहत की पूरी कहानी एक जगह - परामर्श, प्रिस्क्रिप्शन, लैब रिपोर्ट और रोज़ की मेट्रिक्स।",
+      summaryLabel: "एक नज़र में",
+      today: "आज",
+      yesterday: "कल",
+      snapshot: {
+        all: "सब कुछ",
+      },
+      snapshotIssued: (count: number) => `${count} जारी`,
+      snapshotFlagged: (count: number) => `${count} ध्यान देने वाला`,
+      outOfRange: {
+        above: "आम रेंज से ऊपर",
+        below: "आम रेंज से नीचे",
+        footnote: (count: number) =>
+          `${count} मान आपकी आम रेंज से बाहर - विवरण के लिए रिपोर्ट खोलें।`,
+      },
+      accessAccordionHint:
+        "नवीनतम 5 एक्सेस देखने के लिए विस्तार करें - पूरा ऑडिट आपके अनुमति लॉग में है।",
+      openConsentLog: "अनुमति लॉग खोलें",
       filterGroupLabel: "रिकॉर्ड एंट्री फ़िल्टर करें",
       moreMenuLabel: "और फ़िल्टर",
       filter: {
@@ -1912,9 +2250,14 @@ export const STRINGS: Record<Lang, Dictionary> = {
         metric: "मेट्रिक",
         settlement: "सेटलमेंट",
         issued: "जारी हुई",
+        active: "सक्रिय",
         delivered: "पहुँच गई",
       },
       filedFromBooking: "बुकिंग से दर्ज",
+      issuedBy: (doctor: string) => `${doctor} द्वारा जारी`,
+      issuedByNeutral: "आपकी देखभाल टीम द्वारा जारी",
+      prescribedBy: "डॉक्टर द्वारा लिखा गया",
+      moreItems: (count: number) => `+${count} और`,
       empty: {
         title: "अभी कोई एंट्री नहीं",
         body: "आपके परामर्श, प्रिस्क्रिप्शन, लैब रिपोर्ट और मेट्रिक्स यहाँ दिखेंगे जैसे-जैसे आपकी देखभाल होगी।",
@@ -1929,10 +2272,6 @@ export const STRINGS: Record<Lang, Dictionary> = {
         scopePrefix: "अनुमति का दायरा: ",
         deniedLabel: "अस्वीकृत",
         deniedReasonPrefix: "कारण: ",
-      },
-      placeholder: {
-        healthTitle: "हेल्थ ट्रैकिंग",
-        healthBody: "BP/शुगर ट्रेंड और फॉलो-अप प्लान फेज़ 12 में आएंगे।",
       },
       detail: {
         loadError: "यह एंट्री लोड नहीं हो सकी।",

@@ -5,14 +5,17 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import {
   __resetNudgeDismissalsForTests,
+  __resetProfileBannerDismissalForTests,
   areaComplete,
   basicsComplete,
   dismissNudge,
+  dismissProfileBanner,
   draftStorageKey,
   draftToProfilePayload,
   evaluateGate,
   initialDraft,
   isNudgeDismissed,
+  isProfileBannerDismissed,
   loadDraft,
   missingNudgeGroups,
   profileCompleteness,
@@ -111,6 +114,32 @@ describe("completion meter", () => {
       emergencyContact: "+91 98765 43210",
     });
     expect(profileCompleteness(full)).toBe(100);
+  });
+
+  it("keeps the profile-settings scope free of the wizard-only dimensions (#527)", () => {
+    // Photo upload and the chronic-interest toggles are not collectable on
+    // Profile & Settings, so a fully edited page must read 100% there even
+    // when photoFileName and the tracking flags are absent - while the
+    // full-draft meter (wizard/Home) still counts them as missing.
+    const fullPage = draftWith({
+      name: "Asha Devi",
+      age: "30",
+      gender: "other",
+      area: "Bishrampur",
+      emergencyContact: "+91 98765 43210",
+    });
+    expect(profileCompleteness(fullPage, "profile-settings")).toBe(100);
+    expect(profileCompleteness(fullPage)).toBeLessThan(100);
+
+    // The page scope still moves monotonically: an empty draft reads 0 and a
+    // partially filled one sits strictly between.
+    expect(profileCompleteness(initialDraft(), "profile-settings")).toBe(0);
+    const partial = profileCompleteness(
+      draftWith({ name: "Asha", age: "30", gender: "male" }),
+      "profile-settings",
+    );
+    expect(partial).toBeGreaterThan(0);
+    expect(partial).toBeLessThan(100);
   });
 
   it("counts valid fields only and moves monotonically toward 100%", () => {
@@ -337,6 +366,32 @@ describe("nudge dismissal memory (session-scoped, never permanent)", () => {
     // No localStorage write: dismissal is deliberately not durable - a later
     // visit gets its gentle reminder again.
     expect(window.localStorage.getItem("caresetu.profile.draft")).toBeNull();
+  });
+});
+
+describe("profile banner dismissal memory (#500, durable per device)", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    __resetProfileBannerDismissalForTests();
+  });
+
+  it("starts undismissed", () => {
+    expect(isProfileBannerDismissed()).toBe(false);
+  });
+
+  it("persists the dismissal to localStorage (per-device, unlike nudges)", () => {
+    dismissProfileBanner();
+    expect(isProfileBannerDismissed()).toBe(true);
+    expect(
+      window.localStorage.getItem("caresetu.profileBanner.dismissed"),
+    ).toBe("1");
+  });
+
+  it("a later page load still sees the durable dismissal", () => {
+    // localStorage is the only state carried across page loads - the in-module
+    // set dies with the page, exactly like the session-scoped nudge store.
+    window.localStorage.setItem("caresetu.profileBanner.dismissed", "1");
+    expect(isProfileBannerDismissed()).toBe(true);
   });
 });
 

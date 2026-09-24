@@ -23,7 +23,7 @@ import { Check } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import type { Lang, ProfileStrings } from "@/lib/i18n/dictionaries";
-import { STRINGS } from "@/lib/i18n/dictionaries";
+import { STRINGS, SUPPORTED_LOCALES } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { MeterBar } from "./MeterBar";
 import {
@@ -241,9 +241,13 @@ export function ProfileCompletionWizard({
                 }}
               >
                 {/* Native names by convention: a language's name does not
-                    translate with the surrounding locale. */}
-                <option value="hi">हिंदी</option>
-                <option value="en">English</option>
+                    translate with the surrounding locale; the list itself is
+                    the single i18n source (SUPPORTED_LOCALES). */}
+                {SUPPORTED_LOCALES.map((locale) => (
+                  <option key={locale.code} value={locale.code}>
+                    {locale.nativeName}
+                  </option>
+                ))}
               </select>
             </div>
           </div>

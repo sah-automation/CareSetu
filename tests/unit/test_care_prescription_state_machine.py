@@ -523,6 +523,7 @@ from bus.events import (  # noqa: E402
 from modules.care.domain.events import (  # noqa: E402
     PrescriptionApprovedPayload,
     PrescriptionDraftCreatedPayload,
+    PrescriptionIssuedItem,
     PrescriptionIssuedPayload,
     PrescriptionRejectedPayload,
     PrescriptionReviewedPayload,
@@ -585,10 +586,15 @@ def test_prescription_event_envelopes_build_typed_payloads() -> None:
         patient_id=100,
         doctor_id=42,
         occurred_at="2026-09-15T10:00:00+00:00",
+        items=[PrescriptionIssuedItem(name="Para-500", dose="500mg", duration="3 days")],
     )
     assert isinstance(issued.payload, PrescriptionIssuedPayload)
     assert issued.event_type == EVENT_PRESCRIPTION_ISSUED
     assert issued.payload.prescription_id == 10
+    assert issued.payload.items == [
+        PrescriptionIssuedItem(name="Para-500", dose="500mg", duration="3 days")
+    ]
+    assert issued.payload.attributed_doctor_name is None
 
 
 def test_prescription_draft_created_source_is_closed_vocabulary() -> None:

@@ -25,6 +25,7 @@ const state = vi.hoisted(() => ({
   params: new URLSearchParams(),
   searchDirectory: vi.fn(),
   mockReplace: vi.fn(),
+  profileArea: null as string | null,
 }));
 
 vi.mock("next/navigation", () => ({
@@ -55,6 +56,14 @@ vi.mock("@/lib/directory/search", async (importOriginal) => {
     await importOriginal<typeof import("@/lib/directory/search")>();
   return { ...original, searchDirectory: state.searchDirectory };
 });
+
+// #501: Find Care reads the persisted service area through the optional
+// profile hook; the mock lets each test choose the persisted area without
+// standing up the whole auth + profile hydration stack.
+vi.mock("@/lib/profile/ProfileContext", () => ({
+  useOptionalProfile: () =>
+    state.profileArea === null ? null : { draft: { area: state.profileArea } },
+}));
 
 const t = STRINGS.en.findCare;
 const search = vi.mocked(state.searchDirectory);
@@ -90,6 +99,7 @@ async function renderPage() {
 beforeEach(() => {
   __resetLangForTests();
   state.params = new URLSearchParams();
+  state.profileArea = null;
   state.searchDirectory.mockReset();
   state.mockReplace.mockReset();
   state.searchDirectory.mockResolvedValue({
@@ -172,6 +182,41 @@ describe("FindCareBrowser booking deep link", () => {
     await waitFor(() => screen.getByTestId("directory-cards"));
 
     expect(screen.queryByTestId("find-care-book")).not.toBeInTheDocument();
+  });
+});
+
+describe("FindCareBrowser location selector (#510)", () => {
+  it("shows the persisted service area on the feed chip", async () => {
+    state.profileArea = "Bishrampur";
+    await renderPage();
+
+    const chip = await screen.findByTestId("location-chip-feed");
+    expect(chip).toHaveTextContent("Bishrampur");
+  });
+
+  it("falls back to the beachhead when no area is persisted", async () => {
+    state.profileArea = null;
+    await renderPage();
+
+    const chip = await screen.findByTestId("location-chip-feed");
+    expect(chip).toHaveTextContent(STRINGS.en.loc.cities.Daltonganj);
+  });
+
+  it("opens the single-city picker sheet with the coming-soon note", async () => {
+    await renderPage();
+    fireEvent.click(await screen.findByTestId("location-chip-feed"));
+
+    const sheet = await screen.findByTestId("location-sheet");
+    expect(sheet).toHaveTextContent(STRINGS.en.loc.cities.Daltonganj);
+    expect(sheet).toHaveTextContent(STRINGS.en.loc.citySub);
+    expect(sheet).toHaveTextContent(STRINGS.en.loc.more);
+  });
+
+  it("omits the static directory-location line - the shell owns it", async () => {
+    await renderPage();
+    await waitFor(() => screen.getByTestId("directory-cards"));
+
+    expect(screen.queryByTestId("directory-location")).not.toBeInTheDocument();
   });
 });
 

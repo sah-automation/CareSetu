@@ -37,6 +37,16 @@ import { ROLE_HOME } from "./types";
 
 export type NavIcon = ComponentType<{ size?: number; className?: string }>;
 
+// The live start-visit route for the patient bar's center accent (#197). The
+// home services grid's Start visit tile (#504) sources the same constant, so
+// the tab bar and the home surface can never point at different routes.
+export const PATIENT_START_VISIT_ROUTE = "/patient/intake";
+
+// The live My Record route. The recent-activity card's View all (#506) sources
+// the same constant, so the home preview and the tab-bar destination can never
+// point at different routes.
+export const PATIENT_RECORD_ROUTE = "/patient/record";
+
 // Labels resolve through the i18n engine: the key must exist in BOTH locale
 // dictionaries (compile-time via Dictionary typing, runtime via the bilingual
 // parity test).
@@ -75,14 +85,14 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
     {
       key: "start",
       labelKey: "start",
-      href: "/patient/intake",
+      href: PATIENT_START_VISIT_ROUTE,
       icon: Mic,
       center: true,
     },
     {
       key: "record",
       labelKey: "record",
-      href: "/patient/record",
+      href: PATIENT_RECORD_ROUTE,
       icon: FileText,
     },
     // PHASE-8.1 T11 (#485): Inbox dimmed until Phase 13 (FEAT-019/MOD-010) -
@@ -103,12 +113,16 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       soon: true,
       mobileOverflow: true,
     },
+    // #524: Profile & Settings un-sooned - /patient/profile is a real route
+    // (#522/#523). mobileOverflow pins it to the mobile More sheet. On
+    // desktop it sits past the top-nav's first-five window (after Inbox and
+    // Bookings), so it stays reachable only via the account cluster - never
+    // a top-nav row.
     {
       key: "profile-settings",
       labelKey: "profileSettings",
       href: "/patient/profile",
       icon: Settings,
-      soon: true,
       mobileOverflow: true,
     },
   ],
