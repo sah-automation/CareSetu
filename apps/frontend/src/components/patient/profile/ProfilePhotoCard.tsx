@@ -37,6 +37,9 @@ export interface ProfilePhotoCardProps {
   onPhotoRefChange: (ref: string | null) => void;
 }
 
+/** The backend's answer when the ref has no media behind it. */
+const PHOTO_NOT_FOUND_CODE = "PROFILE_PHOTO_NOT_FOUND";
+
 export function ProfilePhotoCard({
   photoRef,
   name,
@@ -52,16 +55,25 @@ export function ProfilePhotoCard({
   // with the same key; an upload cannot be (there is no stored file to re-send),
   // so its key is minted per pick instead of reused.
   const removeAttemptKey = useRef<string | null>(null);
-  const hasPhoto = photoRef != null;
+  // A ref is a claim, the bytes are the fact. The profile row can hold a ref
+  // with no media behind it: the completion wizard persists a bare file name as
+  // a placeholder until a real upload lands (#548 review). Trusting the ref
+  // alone would then offer "Remove" for a photo that was never stored, so the
+  // fetch decides - but only a definite "not found" downgrades, never a
+  // transport blip, which must not make a stored photo look absent.
+  const [mediaAbsent, setMediaAbsent] = useState(false);
+  const hasPhoto = photoRef != null && !mediaAbsent;
 
   useEffect(() => {
     if (photoRef == null) {
       setPhotoUrl(null);
+      setMediaAbsent(false);
       return;
     }
     let cancelled = false;
     let objectUrl: string | null = null;
     setPhotoUrl(null);
+    setMediaAbsent(false);
     void fetchPatientPhoto()
       .then((blob) => {
         if (cancelled) return;
@@ -69,9 +81,12 @@ export function ProfilePhotoCard({
         objectUrl = URL.createObjectURL(blob);
         setPhotoUrl(objectUrl);
       })
-      .catch(() => {
+      .catch((err: unknown) => {
         if (cancelled) return;
         setPhotoUrl(null);
+        if (err instanceof ApiError && err.code === PHOTO_NOT_FOUND_CODE) {
+          setMediaAbsent(true);
+        }
       });
     return () => {
       cancelled = true;
@@ -99,15 +114,16 @@ export function ProfilePhotoCard({
   async function removePhoto() {
     setBusy(true);
     setFailure(null);
+    // Mint the key before the call, not in the catch: a key stored only on
+    // failure would be a *different* key from the one the request carried, so
+    // the retry would look like a fresh removal instead of the same attempt.
+    removeAttemptKey.current ??= idempotencyKey();
     try {
-      const updated = await deletePatientPhoto(
-        removeAttemptKey.current ?? idempotencyKey(),
-      );
+      const updated = await deletePatientPhoto(removeAttemptKey.current);
       removeAttemptKey.current = null;
       onPhotoRefChange(updated.photo_ref);
     } catch (err) {
       // Keep the key so a retry is deduplicated against the same attempt.
-      removeAttemptKey.current ??= idempotencyKey();
       setFailure({
         traceId: err instanceof ApiError ? err.traceId : undefined,
       });
@@ -134,6 +150,11 @@ export function ProfilePhotoCard({
             type="file"
             accept="image/jpeg,image/png,image/webp"
             className="sr-only"
+            // The button below owns the affordance; keeping the input out of
+            // the tab order means "Upload photo" is not announced twice. The
+            // label stays because a file input with no accessible name is its
+            // own axe violation.
+            tabIndex={-1}
             data-testid="ps-photo-input"
             aria-label={hasPhoto ? t.photoReplace : t.photoUpload}
             onChange={(event) => {

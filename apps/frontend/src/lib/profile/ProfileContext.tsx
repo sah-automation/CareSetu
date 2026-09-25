@@ -204,13 +204,14 @@ function ProfileProviderInner({
       setSavedProfile((current) =>
         current === null ? current : { ...current, photo_ref: ref },
       );
-      setDraft((current) => {
-        const next = { ...current, photoFileName: ref ?? "" };
-        saveDraft(next, identityId);
-        return next;
-      });
+      // Persist outside the updater, like updateDraft above: an updater is a
+      // pure function of state and StrictMode invokes it twice, so a write
+      // inside it would land twice.
+      const next = { ...draft, photoFileName: ref ?? "" };
+      setDraft(next);
+      saveDraft(next, identityId);
     },
-    [identityId],
+    [draft, identityId],
   );
 
   const value = useMemo(

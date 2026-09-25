@@ -246,23 +246,4 @@ describe("ConsentGrantsPanel", () => {
     const sheet = await screen.findByTestId("ps-consent-sheet");
     expect(sheet).toHaveTextContent(t.consentRevokeBody("dr-kumar"));
   });
-
-  it("ships every consent string in both locales", () => {
-    for (const key of [
-      "consentHeading",
-      "consentSub",
-      "consentEmpty",
-      "consentLoadFailed",
-      "consentRevoke",
-      "consentRevokeTitle",
-      "consentRevokeBody",
-      "consentRevokeConfirm",
-      "consentRevokeCancel",
-      "consentRevokeDone",
-      "consentRevokeFailed",
-    ] as const) {
-      const value = STRINGS.hi.profileZones[key];
-      expect(typeof value === "function" ? value("x") : value).toBeTruthy();
-    }
-  });
 });

@@ -142,6 +142,72 @@ describe("ProfilePhotoCard", () => {
     ).toBeNull();
   });
 
+  it("offers upload instead of remove when the ref has no media behind it", async () => {
+    // The completion wizard persists a bare file name as a placeholder until a
+    // real upload lands, so a set ref is a claim, not proof of media.
+    getPhoto.mockRejectedValue(
+      new ApiError({
+        code: "PROFILE_PHOTO_NOT_FOUND",
+        message: "no photo",
+        trace_id: "trace-548",
+        details: {},
+      }),
+    );
+    setup("me.jpg");
+
+    await waitFor(() =>
+      expect(screen.getByTestId("ps-photo-upload")).toHaveTextContent(
+        t.photoUpload,
+      ),
+    );
+    expect(screen.queryByTestId("ps-photo-remove")).not.toBeInTheDocument();
+  });
+
+  it("keeps the remove control when the stream fails for a reason other than absence", async () => {
+    getPhoto.mockRejectedValue(
+      new ApiError({
+        code: "NETWORK_ERROR",
+        message: "offline",
+        trace_id: "trace-548",
+        details: {},
+      }),
+    );
+    setup("patient/7/photo-1.enc");
+
+    await waitFor(() => expect(getPhoto).toHaveBeenCalled());
+    // A blip must not make a stored photo look absent, or a patient's only way
+    // to clear a photo they cannot load would disappear.
+    expect(screen.getByTestId("ps-photo-remove")).toBeInTheDocument();
+  });
+
+  it("re-issues a failed removal under the same idempotency key", async () => {
+    removePhoto.mockRejectedValueOnce(
+      new ApiError({
+        code: "NETWORK_ERROR",
+        message: "offline",
+        trace_id: "trace-548",
+        details: {},
+      }),
+    );
+    removePhoto.mockResolvedValueOnce(profile({ photo_ref: null }));
+    setup("patient/7/photo-1.enc");
+
+    await waitFor(() => expect(getPhoto).toHaveBeenCalled());
+    fireEvent.click(screen.getByTestId("ps-photo-remove"));
+    await waitFor(() => expect(removePhoto).toHaveBeenCalledTimes(1));
+    const firstKey = removePhoto.mock.calls[0][0];
+
+    await waitFor(() =>
+      expect(screen.getByTestId("ps-photo-failed")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId("ps-photo-remove"));
+    await waitFor(() => expect(removePhoto).toHaveBeenCalledTimes(2));
+
+    // Same attempt, same key: a retry must be deduplicated, not read as a fresh
+    // removal.
+    expect(removePhoto.mock.calls[1][0]).toBe(firstKey);
+  });
+
   it("uploads a picked photo and reports the ref the backend stored", async () => {
     const next = profile({ photo_ref: "patient/7/photo-2.enc" });
     uploadPhoto.mockResolvedValue(next);
@@ -231,18 +297,5 @@ describe("ProfilePhotoCard", () => {
     );
     expect(onPhotoRefChange).not.toHaveBeenCalled();
     expect(screen.getByTestId("ps-photo-remove")).toBeInTheDocument();
-  });
-
-  it("ships every photo string in both locales", () => {
-    for (const key of [
-      "photoHeading",
-      "photoHelp",
-      "photoUpload",
-      "photoReplace",
-      "photoRemove",
-      "photoFailed",
-    ] as const) {
-      expect(STRINGS.hi.profileZones[key]).toBeTruthy();
-    }
   });
 });

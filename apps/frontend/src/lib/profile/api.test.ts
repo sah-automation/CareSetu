@@ -12,6 +12,7 @@ import { IDEMPOTENCY_KEY_HEADER } from "@/lib/idempotency";
 import {
   deletePatientPhoto,
   fetchPatientPhoto,
+  saveProfile,
   uploadPatientPhoto,
   type StoredPatientProfile,
 } from "./api";
@@ -172,5 +173,30 @@ describe("deletePatientPhoto", () => {
     expect(new Headers(init.headers).get(IDEMPOTENCY_KEY_HEADER)).toBe(
       "retry-2",
     );
+  });
+});
+
+describe("saveProfile (AC: the identity save keeps its idempotency)", () => {
+  it("carries an Idempotency-Key, and the caller's key across a retry", async () => {
+    // A fresh Response per call: a body can only be read once.
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(() => jsonResponse({ set: true, profile }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await saveProfile(profile);
+    await saveProfile(profile, "retry-3");
+
+    const first = new Headers(
+      (fetchMock.mock.calls[0] as [string, RequestInit])[1].headers,
+    ).get(IDEMPOTENCY_KEY_HEADER);
+    const second = new Headers(
+      (fetchMock.mock.calls[1] as [string, RequestInit])[1].headers,
+    ).get(IDEMPOTENCY_KEY_HEADER);
+    // A fresh key per attempt, but the retry's key is the one the caller chose,
+    // so re-issuing the save is deduplicated rather than written twice.
+    expect(first).toEqual(expect.any(String));
+    expect(first).not.toBe("");
+    expect(second).toBe("retry-3");
   });
 });

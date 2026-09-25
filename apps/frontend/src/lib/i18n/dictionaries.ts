@@ -867,7 +867,7 @@ const en = {
     photoFailed: "We could not update your photo. Please try again.",
     healthHeading: "Health background",
     healthPending:
-      "Your health background summary is being prepared and will appear here once it is ready.",
+      "You have not added a health background yet. Your allergies, conditions and current medicines will be listed here.",
     settingsHeading: "Settings",
     notificationsHeading: "Notifications",
     notificationsHelp:
@@ -911,6 +911,11 @@ const en = {
       health_background: "Health background",
       full_record: "Full record",
     },
+    // Shown when the backend returns a scope this build has no label for. The
+    // patient must never read a raw snake_case token as though it were a name,
+    // and the revoke control stays available regardless: an unlabelled scope is
+    // still access they hold and can give back.
+    consentScopeOther: "Other parts of your record",
   },
 
   // nav.* surface - the typed nav-config labels (PHASE-2.6 T06, #197).
@@ -2191,7 +2196,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
       photoFailed: "आपकी फ़ोटो अपडेट नहीं हो सकी। कृपया फिर से कोशिश करें।",
       healthHeading: "स्वास्थ्य पृष्ठभूमि",
       healthPending:
-        "आपकी स्वास्थ्य पृष्ठभूमि का सार तैयार किया जा रहा है और तैयार होते ही यहाँ दिखेगा।",
+        "आपने अभी तक स्वास्थ्य पृष्ठभूमि नहीं जोड़ी है। आपकी एलर्जी, बीमारियाँ और वर्तमान दवाइयाँ यहाँ दिखाई देंगी।",
       settingsHeading: "सेटिंग",
       notificationsHeading: "नोटिफ़िकेशन",
       notificationsHelp:
@@ -2236,6 +2241,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
         health_background: "स्वास्थ्य पृष्ठभूमि",
         full_record: "पूरा रिकॉर्ड",
       },
+      consentScopeOther: "आपके रिकॉर्ड के अन्य हिस्से",
     },
 
     nav: {

@@ -14,7 +14,7 @@
 // patient) and a failure keeps both the grant and the sheet, so a retry is one
 // tap rather than a re-read of the list.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   Sheet,
@@ -25,6 +25,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
+import { ApiError } from "@/lib/api-errors";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import {
@@ -37,25 +38,35 @@ import {
   counterpartyLabel,
 } from "@/lib/consent/consentView";
 
+/** Mirrors the consent-log screen so the same success reads the same way. */
+const TOAST_MS = 3500;
+
 export function ConsentGrantsPanel() {
   const { lang } = useLang();
   const t = STRINGS[lang].profileZones;
   const [grants, setGrants] = useState<ConsentView[] | null>(null);
-  const [loadFailed, setLoadFailed] = useState(false);
+  const [loadFailure, setLoadFailure] = useState<{ traceId?: string } | null>(
+    null,
+  );
   const [target, setTarget] = useState<ConsentView | null>(null);
   const [revoking, setRevoking] = useState(false);
-  const [revokeFailed, setRevokeFailed] = useState(false);
+  const [revokeFailure, setRevokeFailure] = useState<{
+    traceId?: string;
+  } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = useCallback(async () => {
-    setLoadFailed(false);
+    setLoadFailure(null);
     try {
       const log = await fetchConsentLog();
       setGrants(log.items.filter((item) => item.status === "granted"));
-    } catch {
+    } catch (err) {
       // Keep whatever list is already on screen: a transient failure must not
       // erase grants the patient is reading.
-      setLoadFailed(true);
+      setLoadFailure({
+        traceId: err instanceof ApiError ? err.traceId : undefined,
+      });
     }
   }, []);
 
@@ -63,10 +74,23 @@ export function ConsentGrantsPanel() {
     void load();
   }, [load]);
 
+  useEffect(
+    () => () => {
+      if (toastTimer.current !== null) clearTimeout(toastTimer.current);
+    },
+    [],
+  );
+
+  function flash(message: string) {
+    setToast(message);
+    if (toastTimer.current !== null) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), TOAST_MS);
+  }
+
   async function confirmRevoke() {
     if (target === null) return;
     setRevoking(true);
-    setRevokeFailed(false);
+    setRevokeFailure(null);
     try {
       await revokeConsent(target.consent_id);
       const id = target.consent_id;
@@ -76,10 +100,12 @@ export function ConsentGrantsPanel() {
           : current.filter((item) => item.consent_id !== id),
       );
       setTarget(null);
-      setToast(t.consentRevokeDone);
-    } catch {
+      flash(t.consentRevokeDone);
+    } catch (err) {
       // Sheet stays open with the grant intact so the tap can be retried.
-      setRevokeFailed(true);
+      setRevokeFailure({
+        traceId: err instanceof ApiError ? err.traceId : undefined,
+      });
     } finally {
       setRevoking(false);
     }
@@ -95,7 +121,7 @@ export function ConsentGrantsPanel() {
       <p className="text-sm font-medium text-txt">{t.consentHeading}</p>
       <p className="mt-0.5 text-xs text-txt-muted">{t.consentSub}</p>
 
-      {grants === null && !loadFailed && (
+      {grants === null && !loadFailure && (
         <p
           className="mt-3 text-sm text-txt-muted"
           data-testid="ps-consent-loading"
@@ -104,13 +130,20 @@ export function ConsentGrantsPanel() {
         </p>
       )}
 
-      {loadFailed && (
+      {loadFailure !== null && (
         <div
           role="alert"
           data-testid="ps-consent-failed"
           className="mt-3 flex flex-wrap items-center gap-3 rounded-md border border-danger-border bg-danger-soft px-3 py-2 text-sm text-danger"
         >
-          <span>{t.consentLoadFailed}</span>
+          <span>
+            {t.consentLoadFailed}
+            {loadFailure.traceId && (
+              <span className="ml-1 font-mono text-xs">
+                ({loadFailure.traceId})
+              </span>
+            )}
+          </span>
           <button
             type="button"
             onClick={() => void load()}
@@ -122,7 +155,7 @@ export function ConsentGrantsPanel() {
         </div>
       )}
 
-      {grants !== null && grants.length === 0 && !loadFailed && (
+      {grants !== null && grants.length === 0 && loadFailure === null && (
         <p
           className="mt-3 text-sm text-txt-muted"
           data-testid="ps-consent-empty"
@@ -137,8 +170,8 @@ export function ConsentGrantsPanel() {
             grant.counterparty_type,
             grant.counterparty_id,
           );
-          const labels = t.scopeLabels as Record<string, string>;
-          const scope = labels[grant.record_scope] ?? grant.record_scope;
+          const labels = t.scopeLabels as Record<string, string | undefined>;
+          const scope = labels[grant.record_scope] ?? t.consentScopeOther;
           return (
             <li
               key={grant.consent_id}
@@ -168,9 +201,13 @@ export function ConsentGrantsPanel() {
                 type="button"
                 size="sm"
                 variant="ghost"
+                // The visible label is the same on every row, so name the row in
+                // the accessible name: N identical "Revoke access" buttons are
+                // indistinguishable to anyone navigating by control.
+                aria-label={`${t.consentRevoke} - ${name}`}
                 data-testid={`ps-consent-revoke-${grant.consent_id}`}
                 onClick={() => {
-                  setRevokeFailed(false);
+                  setRevokeFailure(null);
                   setTarget(grant);
                 }}
               >
@@ -194,13 +231,18 @@ export function ConsentGrantsPanel() {
               {t.consentRevokeBody(targetName)}
             </SheetDescription>
           </SheetHeader>
-          {revokeFailed && (
+          {revokeFailure !== null && (
             <p
               role="alert"
               data-testid="ps-consent-revoke-failed"
               className="mt-3 rounded-md border border-danger-border bg-danger-soft px-3 py-2 text-sm text-danger"
             >
               {t.consentRevokeFailed}
+              {revokeFailure.traceId && (
+                <span className="ml-1 font-mono text-xs">
+                  ({revokeFailure.traceId})
+                </span>
+              )}
             </p>
           )}
           <SheetFooter className="mt-4 flex-row gap-2">
