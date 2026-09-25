@@ -291,7 +291,7 @@ function CaseStepper({
                   ? "bg-accent-soft border-accent text-accent-strong"
                   : status === "active"
                     ? "bg-accent border-accent text-on-accent"
-                    : "bg-surface border-hairline-strong text-txt-muted",
+                    : "bg-surface border-hairline text-txt-muted",
               )}
               data-testid={`step-dot-${step}`}
             >
@@ -430,9 +430,9 @@ function LoadingSkeleton() {
           key={i}
           className="rounded-lg border border-hairline bg-surface p-4 animate-pulse"
         >
-          <div className="h-5 w-1/3 rounded bg-hairline-soft/60" />
-          <div className="mt-3 h-4 w-1/2 rounded bg-hairline-soft/60" />
-          <div className="mt-2 h-3 w-1/4 rounded bg-hairline-soft/60" />
+          <div className="h-5 w-1/3 rounded bg-hairline-soft" />
+          <div className="mt-3 h-4 w-1/2 rounded bg-hairline-soft" />
+          <div className="mt-2 h-3 w-1/4 rounded bg-hairline-soft" />
         </div>
       ))}
     </div>
@@ -1008,10 +1008,10 @@ export default function CaseWorkspacePage() {
                 className={cn(
                   "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium",
                   currentStage === "pre_summary"
-                    ? "bg-warning-soft text-warning-text"
+                    ? "bg-warn-soft text-warn-text"
                     : currentStage === "prescription_pending"
                       ? "bg-accent-soft text-accent-strong"
-                      : "bg-muted-soft text-txt-muted",
+                      : "bg-hairline-soft text-txt-muted",
                 )}
               >
                 {stageDisplayName(currentStage, consoleT)}
@@ -1020,12 +1020,12 @@ export default function CaseWorkspacePage() {
 
             {careCase.forced_review && (
               <div
-                className="mt-3 rounded-md border border-warning/30 bg-warning-soft/40 px-3 py-2.5"
+                className="mt-3 rounded-md border border-hairline bg-warn-soft px-3 py-2.5"
                 data-testid="forced-review-banner"
               >
                 <div className="flex items-start gap-2">
                   <svg
-                    className="shrink-0 mt-0.5 text-warning-text"
+                    className="shrink-0 mt-0.5 text-warn-text"
                     width="16"
                     height="16"
                     viewBox="0 0 24 24"
@@ -1040,7 +1040,7 @@ export default function CaseWorkspacePage() {
                     <path d="M12 8v4M12 16h.01" />
                   </svg>
                   <div className="min-w-0 flex-1">
-                    <span className="inline-flex items-center gap-1 text-xs font-semibold text-warning-text">
+                    <span className="inline-flex items-center gap-1 text-xs font-semibold text-warn-text">
                       {t.forcedReviewChip}
                     </span>
                     <p className="mt-1 text-xs text-txt-muted">
@@ -1071,7 +1071,7 @@ export default function CaseWorkspacePage() {
                 a bare <audio> element, so the clip is fetched as a blob and
                 played through an object URL - latest record attempt wins. */}
             <section
-              className="rounded-lg border border-border bg-bg p-4"
+              className="rounded-lg border border-hairline bg-surface p-4"
               data-testid="intake-transcript"
             >
               <h2 className="text-sm font-semibold text-txt">
@@ -1134,7 +1134,7 @@ export default function CaseWorkspacePage() {
                 offered here. */}
             {preSummaryForReview != null && (
               <section
-                className="rounded-lg border border-border bg-bg p-4"
+                className="rounded-lg border border-hairline bg-surface p-4"
                 data-testid="case-pre-summary"
               >
                 <h2 className="text-sm font-semibold text-txt">
@@ -1234,7 +1234,7 @@ export default function CaseWorkspacePage() {
                     {preSummaryForReview.low_confidence && (
                       <span
                         data-testid="case-pre-summary-low-confidence"
-                        className="inline-flex items-center rounded-full bg-warning-soft px-2 py-0.5 text-xs font-medium text-warning-text"
+                        className="inline-flex items-center rounded-full bg-warn-soft px-2 py-0.5 text-xs font-medium text-warn-text"
                       >
                         {consoleT.verifyChip}
                       </span>
@@ -1360,7 +1360,7 @@ export default function CaseWorkspacePage() {
           >
             {doctorMe != null && (
               <section
-                className="rounded-lg border border-border bg-bg p-4"
+                className="rounded-lg border border-hairline bg-surface p-4"
                 data-testid="case-history"
               >
                 <h2 className="text-sm font-semibold text-txt">
@@ -1394,7 +1394,7 @@ export default function CaseWorkspacePage() {
                   consult-complete handshake. The lock names exactly what is
                   missing with one-tap jump to the relevant tab/action. */
               <section
-                className="rounded-lg border border-dashed border-hairline-strong bg-surface p-6 text-center"
+                className="rounded-lg border border-dashed border-hairline bg-surface p-6 text-center"
                 data-testid="prescription-lock"
               >
                 <div
@@ -1425,9 +1425,7 @@ export default function CaseWorkspacePage() {
                   <div
                     className={cn(
                       "flex items-center gap-3 rounded-lg border p-3 bg-surface",
-                      handshakeDone
-                        ? "border-success-border"
-                        : "border-hairline",
+                      handshakeDone ? "border-success" : "border-hairline",
                     )}
                     data-testid="rx-lock-presummary"
                   >
@@ -1459,9 +1457,7 @@ export default function CaseWorkspacePage() {
                   <div
                     className={cn(
                       "flex items-center gap-3 rounded-lg border p-3 bg-surface",
-                      handshakeDone
-                        ? "border-success-border"
-                        : "border-hairline",
+                      handshakeDone ? "border-success" : "border-hairline",
                     )}
                     data-testid="rx-lock-handshake"
                   >
@@ -1496,7 +1492,7 @@ export default function CaseWorkspacePage() {
                 {/* Handshake success / prescription-pending state */}
                 {isPrescriptionPending && (
                   <div
-                    className="rounded-md bg-success-soft/30 px-3 py-3 text-sm text-success"
+                    className="rounded-md bg-success-soft px-3 py-3 text-sm text-success-text"
                     data-testid="handshake-success"
                   >
                     <p>{t.handshakeSuccess}</p>
@@ -1525,8 +1521,8 @@ export default function CaseWorkspacePage() {
                           className="space-y-2"
                           data-testid="prescription-loading"
                         >
-                          <div className="h-4 w-1/3 rounded bg-hairline-soft/60 animate-pulse" />
-                          <div className="h-4 w-1/2 rounded bg-hairline-soft/60 animate-pulse" />
+                          <div className="h-4 w-1/3 rounded bg-hairline-soft animate-pulse" />
+                          <div className="h-4 w-1/2 rounded bg-hairline-soft animate-pulse" />
                         </div>
                       )}
 
@@ -1971,10 +1967,10 @@ export default function CaseWorkspacePage() {
                               close. */}
                             {isRejectedRx && (
                               <div
-                                className="mt-3 rounded-md border border-warning/30 bg-warning-soft/40 p-3"
+                                className="mt-3 rounded-md border border-hairline bg-warn-soft p-3"
                                 data-testid="rx-rejected"
                               >
-                                <h3 className="text-sm font-semibold text-warning-text">
+                                <h3 className="text-sm font-semibold text-warn-text">
                                   {t.rejectedHeading}
                                 </h3>
                                 <p className="mt-1 text-xs text-txt-muted">
@@ -2138,7 +2134,7 @@ export default function CaseWorkspacePage() {
                                     }
                                     rows={2}
                                     placeholder={t.rejectReasonPlaceholder}
-                                    className="mt-1 w-full rounded-md border border-hairline bg-bg px-3 py-2 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                                    className="mt-1 w-full rounded-md border border-hairline bg-surface px-3 py-2 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
                                     data-testid="reject-reason"
                                   />
                                   <Button
@@ -2234,7 +2230,7 @@ export default function CaseWorkspacePage() {
                 {/* Closed state */}
                 {currentStage === "closed" && (
                   <div
-                    className="rounded-md bg-muted-soft px-3 py-3 text-sm text-txt-muted"
+                    className="rounded-md bg-hairline-soft px-3 py-3 text-sm text-txt-muted"
                     data-testid="closed-state"
                   >
                     <p>{consoleT.stageClosed}</p>

@@ -362,6 +362,140 @@ describe("ReviewWorkspacePage single-action finalize (US-14/#442)", () => {
   });
 });
 
+describe("ReviewWorkspacePage presentation (#547)", () => {
+  it("renders the review action as its own titled card", async () => {
+    render(<ReviewWorkspacePage />);
+    await waitFor(() => screen.getByTestId("workspace-review-action"));
+
+    expect(screen.getByTestId("workspace-review-action")).toHaveTextContent(
+      t.reviewActionHeading,
+    );
+    expect(screen.getByTestId("workspace-review-action")).toHaveTextContent(
+      t.finalizeHelp,
+    );
+    expect(screen.getByTestId("finalize-action")).toBeInTheDocument();
+  });
+
+  it("drops the review action card once the summary is final", async () => {
+    getPre.mockResolvedValue(
+      preSummary({ review_state: "final", reviewed_by: 7 }),
+    );
+    render(<ReviewWorkspacePage />);
+    await waitFor(() => screen.getByTestId("workspace-content"));
+
+    expect(
+      screen.queryByTestId("workspace-review-action"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the review state as a status chip", async () => {
+    render(<ReviewWorkspacePage />);
+    await waitFor(() => screen.getByTestId("review-state-chip"));
+
+    expect(screen.getByTestId("review-state-chip")).toHaveTextContent(
+      t.reviewStateDraft,
+    );
+  });
+
+  it("marks a not-captured duration and empty lists with a muted placeholder", async () => {
+    getPre.mockResolvedValue(
+      preSummary({
+        low_confidence: false,
+        structured_fields: {
+          chief_complaints: [],
+          symptoms: [],
+          duration: null,
+        },
+      }),
+    );
+    render(<ReviewWorkspacePage />);
+    await waitFor(() => screen.getByTestId("pre-summary"));
+
+    expect(screen.getByTestId("pre-summary-complaints")).toHaveTextContent(
+      t.durationNotSet,
+    );
+    expect(screen.getByTestId("pre-summary-symptoms")).toHaveTextContent(
+      t.durationNotSet,
+    );
+    expect(screen.getByTestId("pre-summary-duration")).toHaveTextContent(
+      t.durationNotSet,
+    );
+  });
+
+  it("shows a calm case-pending empty state when no care case is matched yet", async () => {
+    getCases.mockResolvedValue([]);
+    render(<ReviewWorkspacePage />);
+    await waitFor(() => screen.getByTestId("workspace-case-pending"));
+
+    expect(screen.getByTestId("workspace-case-pending")).toHaveTextContent(
+      t.casePendingTitle,
+    );
+    expect(screen.queryByTestId("workspace-history")).not.toBeInTheDocument();
+  });
+
+  it("keeps the case-not-showing note when the post-finalize re-poll exhausts", async () => {
+    // The re-poll gives up after its retries. The pre-summary is final but no
+    // care case ever matched, so the note must stay honest rather than claim
+    // the case is still waiting to be created.
+    getCases.mockResolvedValue([]);
+    doReview.mockResolvedValue(reviewResult());
+    render(<ReviewWorkspacePage />);
+    await waitFor(() => screen.getByTestId("workspace-case-pending"));
+
+    fireEvent.click(screen.getByTestId("finalize-action"));
+
+    // The re-poll burns its full retry budget (~1.6s) before the action reports
+    // success, so the wait needs a longer ceiling than the default.
+    await waitFor(() => screen.getByTestId("finalize-success"), {
+      timeout: 5000,
+    });
+    expect(screen.getByTestId("workspace-case-pending")).toHaveTextContent(
+      t.casePendingTitle,
+    );
+    expect(screen.queryByTestId("workspace-handshake")).not.toBeInTheDocument();
+  });
+
+  it("marks a closed case with the neutral stage chip", async () => {
+    getPre.mockResolvedValue(preSummary({ low_confidence: false }));
+    getCases.mockResolvedValue([caseItem(11, { stage: "closed" })]);
+    render(<ReviewWorkspacePage />);
+    await waitFor(() => screen.getByTestId("workspace-content"));
+
+    expect(screen.getByTestId("stage-chip")).toHaveTextContent(
+      consoleT.stageClosed,
+    );
+  });
+
+  it("titles the handshake card with the consultation heading", async () => {
+    doReview.mockResolvedValue(reviewResult());
+    render(<ReviewWorkspacePage />);
+    await waitFor(() => screen.getByTestId("finalize-action"));
+
+    fireEvent.click(screen.getByTestId("finalize-action"));
+    await waitFor(() => screen.getByTestId("workspace-handshake"));
+
+    expect(screen.getByTestId("workspace-handshake")).toHaveTextContent(
+      t.handshakeHeading,
+    );
+  });
+
+  it("clears the case-pending empty state once the case is born", async () => {
+    getCases.mockResolvedValueOnce([]);
+    doReview.mockResolvedValue(reviewResult());
+    render(<ReviewWorkspacePage />);
+    await waitFor(() => screen.getByTestId("workspace-case-pending"));
+
+    fireEvent.click(screen.getByTestId("finalize-action"));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("workspace-case-pending"),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("workspace-history")).toBeInTheDocument();
+  });
+});
+
 describe("ReviewWorkspacePage consented history", () => {
   it("reads the consented history for the matched care case patient", async () => {
     render(<ReviewWorkspacePage />);
@@ -547,6 +681,28 @@ describe("ReviewWorkspacePage bilingual parity (REQ-006)", () => {
     );
     expect(screen.getByTestId("pre-summary")).toHaveTextContent(
       hiT.summaryHeading,
+    );
+    expect(screen.getByTestId("workspace-review-action")).toHaveTextContent(
+      hiT.reviewActionHeading,
+    );
+    expect(screen.getByTestId("review-state-chip")).toHaveTextContent(
+      hiT.reviewStateDraft,
+    );
+  });
+
+  it("renders the case-pending empty state copy in Hindi", async () => {
+    getCases.mockResolvedValue([]);
+    render(<LangFlipHost />);
+    await waitFor(() => screen.getByTestId("workspace-case-pending"));
+
+    fireEvent.click(screen.getByText("flip-lang"));
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-case-pending")).toHaveTextContent(
+        hiT.casePendingTitle,
+      ),
+    );
+    expect(screen.getByTestId("workspace-case-pending")).toHaveTextContent(
+      hiT.casePendingBody,
     );
   });
 });

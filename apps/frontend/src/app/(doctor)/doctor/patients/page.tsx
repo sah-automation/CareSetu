@@ -111,7 +111,7 @@ function PatientRow({ row, t, consoleT }: PatientRowProps) {
               row.latest_case_stage == null
                 ? "bg-surface text-txt-muted"
                 : row.latest_case_stage === "pre_summary"
-                  ? "bg-warning-soft text-warning-text"
+                  ? "bg-warn-soft text-warn-text"
                   : "bg-accent-soft text-accent-strong",
             )}
           >

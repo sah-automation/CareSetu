@@ -1471,6 +1471,17 @@ const en = {
     audioLoadFail: "Could not load the recording.",
     loadFailed: "Could not load this case workspace.",
     retry: "Try again",
+    // PHASE-8.1 #547: the review route's restyled surface - its own titled
+    // review-action card, and the calm case-not-showing empty state. The copy
+    // states only what is observable (no care case in the open list) rather
+    // than asserting a cause: a queue-originated review has no case until the
+    // outbox consumer births it, and the post-finalize re-poll can still come
+    // back empty, so "not created yet" would be wrong in the second case.
+    reviewActionHeading: "Your review",
+    handshakeHeading: "Consultation",
+    casePendingTitle: "Care case not showing",
+    casePendingBody:
+      "This pre-summary has no care case in your open cases yet. The case is created when the pre-summary is finalized.",
     finalizeAction: "Finalize + attribute review",
     finalizeHelp:
       "One action records your review and finalizes the pre-summary.",
@@ -2929,6 +2940,16 @@ export const STRINGS: Record<Lang, Dictionary> = {
       audioLoadFail: "रिकॉर्डिंग लोड नहीं हो सकी।",
       loadFailed: "यह केस वर्कस्पेस लोड नहीं हो सका।",
       retry: "फिर कोशिश करें",
+      // PHASE-8.1 #547: समीक्षा मार्ग का री-स्टाइल सतह - अपना शीर्षक वाला
+      // समीक्षा-एक्शन कार्ड, और शांत "केस नहीं दिख रहा" खाली अवस्था। यह
+      // प्रतिलेख केवल अवलोकन बताता है (खुली सूची में कोई केयर केस नहीं), कारण
+      // का दावा नहीं: कतार से शुरू समीक्षा में आउटबॉक्स कंज़्यूमर के केस बनाने
+      // तक केस नहीं होता, और अंतिम करने के बाद की दोबारा पढ़ी भी खाली आ सकती है।
+      reviewActionHeading: "आपकी समीक्षा",
+      handshakeHeading: "परामर्श",
+      casePendingTitle: "केयर केस नहीं दिख रहा",
+      casePendingBody:
+        "इस प्री-सारांश का कोई केयर केस अभी आपके खुले मामलों में नहीं है। प्री-सारांश अंतिम होने पर केस बनता है।",
       finalizeAction: "अंतिम करें + समीक्षा का श्रेय",
       finalizeHelp:
         "एक क्रिया से आपकी समीक्षा दर्ज होती है और प्री-सारांश अंतिम हो जाता है।",

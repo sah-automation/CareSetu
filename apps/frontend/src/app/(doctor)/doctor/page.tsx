@@ -340,7 +340,7 @@ function ReviewQueueCard({
                     {item.low_confidence && (
                       <span
                         data-testid="queue-item-verify"
-                        className="inline-flex items-center rounded-full bg-warning-soft px-2 py-0.5 text-xs font-medium text-warning-text"
+                        className="inline-flex items-center rounded-full bg-warn-soft px-2 py-0.5 text-xs font-medium text-warn-text"
                       >
                         {t.verifyChip}
                       </span>
@@ -448,7 +448,7 @@ function OpenCasesCard({
                       className={cn(
                         "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
                         c.stage === "pre_summary"
-                          ? "bg-warning-soft text-warning-text"
+                          ? "bg-warn-soft text-warn-text"
                           : "bg-accent-soft text-accent-strong",
                       )}
                     >

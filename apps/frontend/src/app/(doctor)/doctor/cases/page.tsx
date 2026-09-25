@@ -48,7 +48,7 @@ function stageLabel(
 function stageChipClass(stage: CareCaseStage): string {
   switch (stage) {
     case "pre_summary":
-      return "bg-warning-soft text-warning-text";
+      return "bg-warn-soft text-warn-text";
     case "prescription_pending":
       return "bg-accent-soft text-accent-strong";
     case "closed":
@@ -65,13 +65,13 @@ function LoadingSkeleton() {
       className="rounded-lg border border-hairline bg-surface p-4"
     >
       <div className="mb-1 flex items-center justify-between gap-2">
-        <div className="h-6 w-32 animate-pulse rounded bg-hairline-soft/60" />
+        <div className="h-6 w-32 animate-pulse rounded bg-hairline-soft" />
       </div>
       <div className="space-y-2.5">
         {Array.from({ length: 3 }).map((_, i) => (
           <div
             key={i}
-            className="h-14 animate-pulse rounded-lg bg-hairline-soft/60"
+            className="h-14 animate-pulse rounded-lg bg-hairline-soft"
           />
         ))}
       </div>

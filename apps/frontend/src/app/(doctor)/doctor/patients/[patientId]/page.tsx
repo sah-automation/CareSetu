@@ -330,7 +330,7 @@ function CaseWorkspaceBlock({
         className={cn(
           "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
           link.stage === "pre_summary"
-            ? "bg-warning-soft text-warning-text"
+            ? "bg-warn-soft text-warn-text"
             : "bg-accent-soft text-accent-strong",
         )}
       >
