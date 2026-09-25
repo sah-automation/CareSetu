@@ -5,6 +5,7 @@ and gateway (#29) next. Plain frozen dataclass over ``os.environ`` - no extra
 dependency beyond the declared stack (cost floor ``NFR-001``).
 """
 
+import math
 import os
 from dataclasses import dataclass
 
@@ -78,6 +79,13 @@ DEFAULT_PROFILE_MEDIA_ROOT = "var/profile-media"
 # survive Render's ephemeral disk and a leaked key is never a leak. Default
 # ``local`` keeps dev/CI/tests unchanged - nothing depends on the network.
 DEFAULT_PROFILE_MEDIA_BACKEND = "local"
+DEFAULT_PROFILE_MEDIA_MAX_ATTEMPTS = 3
+DEFAULT_PROFILE_MEDIA_BACKOFF_SECONDS = 0.5
+DEFAULT_PROFILE_MEDIA_JITTER_FRACTION = 0.25
+DEFAULT_PROFILE_MEDIA_CIRCUIT_BREAKER_THRESHOLD = 5
+DEFAULT_PROFILE_MEDIA_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 30.0
+DEFAULT_PROFILE_MEDIA_TIMEOUT_SECONDS = 30.0
+DEFAULT_PROFILE_MEDIA_MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 # Rejected-partner re-submission throttle (PHASE-5 T09, #253): the max
 # re-submission rounds a rejected partner may open before the operator queue is
 # protected, and the cooldown (days) after which the budget refreshes. Queue
@@ -236,6 +244,15 @@ class Settings:
     profile_media_root: str = DEFAULT_PROFILE_MEDIA_ROOT
     profile_media_key: str = ""
     profile_media_backend: str = DEFAULT_PROFILE_MEDIA_BACKEND
+    profile_media_max_attempts: int = DEFAULT_PROFILE_MEDIA_MAX_ATTEMPTS
+    profile_media_backoff_seconds: float = DEFAULT_PROFILE_MEDIA_BACKOFF_SECONDS
+    profile_media_jitter_fraction: float = DEFAULT_PROFILE_MEDIA_JITTER_FRACTION
+    profile_media_circuit_breaker_threshold: int = DEFAULT_PROFILE_MEDIA_CIRCUIT_BREAKER_THRESHOLD
+    profile_media_circuit_breaker_cooldown_seconds: float = (
+        DEFAULT_PROFILE_MEDIA_CIRCUIT_BREAKER_COOLDOWN_SECONDS
+    )
+    profile_media_timeout_seconds: float = DEFAULT_PROFILE_MEDIA_TIMEOUT_SECONDS
+    profile_media_max_upload_bytes: int = DEFAULT_PROFILE_MEDIA_MAX_UPLOAD_BYTES
     # Rejected-partner re-submission throttle (PHASE-5 T09, #253): environment
     # driven like the SMS/WhatsApp knobs (coding-standards §9.1). ``max`` is the
     # re-submission budget before cooldown; ``cooldown_days`` the cooldown length.
@@ -469,6 +486,37 @@ class Settings:
                 f"unsupported profile_media_backend {self.profile_media_backend!r}; "
                 "expected 'local' or 'supabase'"
             )
+        if self.profile_media_max_attempts <= 0:
+            raise ValueError("profile_media_max_attempts must be positive")
+        if (
+            not math.isfinite(self.profile_media_backoff_seconds)
+            or self.profile_media_backoff_seconds <= 0
+        ):
+            raise ValueError("profile_media_backoff_seconds must be finite and positive")
+        if (
+            not math.isfinite(self.profile_media_jitter_fraction)
+            or not 0 <= self.profile_media_jitter_fraction < 1
+        ):
+            raise ValueError(
+                "profile_media_jitter_fraction must be finite and between "
+                "0 inclusive and 1 exclusive"
+            )
+        if self.profile_media_circuit_breaker_threshold <= 0:
+            raise ValueError("profile_media_circuit_breaker_threshold must be positive")
+        if (
+            not math.isfinite(self.profile_media_circuit_breaker_cooldown_seconds)
+            or self.profile_media_circuit_breaker_cooldown_seconds <= 0
+        ):
+            raise ValueError(
+                "profile_media_circuit_breaker_cooldown_seconds must be finite and positive"
+            )
+        if (
+            not math.isfinite(self.profile_media_timeout_seconds)
+            or self.profile_media_timeout_seconds <= 0
+        ):
+            raise ValueError("profile_media_timeout_seconds must be finite and positive")
+        if self.profile_media_max_upload_bytes <= 0:
+            raise ValueError("profile_media_max_upload_bytes must be positive")
         if profile_backend == "supabase":
             if not self.supabase_url.strip():
                 raise ValueError(
@@ -616,6 +664,29 @@ def get_settings() -> Settings:
         profile_media_key=os.environ.get("PROFILE_MEDIA_KEY", ""),
         profile_media_backend=os.environ.get(
             "PROFILE_MEDIA_BACKEND", DEFAULT_PROFILE_MEDIA_BACKEND
+        ),
+        profile_media_max_attempts=_env_int(
+            "PROFILE_MEDIA_MAX_ATTEMPTS", DEFAULT_PROFILE_MEDIA_MAX_ATTEMPTS
+        ),
+        profile_media_backoff_seconds=_env_float(
+            "PROFILE_MEDIA_BACKOFF_SECONDS", DEFAULT_PROFILE_MEDIA_BACKOFF_SECONDS
+        ),
+        profile_media_jitter_fraction=_env_float(
+            "PROFILE_MEDIA_JITTER_FRACTION", DEFAULT_PROFILE_MEDIA_JITTER_FRACTION
+        ),
+        profile_media_circuit_breaker_threshold=_env_int(
+            "PROFILE_MEDIA_CIRCUIT_BREAKER_THRESHOLD",
+            DEFAULT_PROFILE_MEDIA_CIRCUIT_BREAKER_THRESHOLD,
+        ),
+        profile_media_circuit_breaker_cooldown_seconds=_env_float(
+            "PROFILE_MEDIA_CIRCUIT_BREAKER_COOLDOWN_SECONDS",
+            DEFAULT_PROFILE_MEDIA_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+        ),
+        profile_media_timeout_seconds=_env_float(
+            "PROFILE_MEDIA_TIMEOUT_SECONDS", DEFAULT_PROFILE_MEDIA_TIMEOUT_SECONDS
+        ),
+        profile_media_max_upload_bytes=_env_int(
+            "PROFILE_MEDIA_MAX_UPLOAD_BYTES", DEFAULT_PROFILE_MEDIA_MAX_UPLOAD_BYTES
         ),
         partner_re_submission_max=_env_int(
             "PARTNER_RE_SUBMISSION_MAX", DEFAULT_PARTNER_RE_SUBMISSION_MAX

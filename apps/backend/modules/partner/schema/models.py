@@ -25,6 +25,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     MetaData,
     Numeric,
     String,
@@ -85,6 +86,17 @@ partner_profiles = Table(
         BigInteger,
         nullable=True,
     ),
+    Column("photo_ref", String(255), nullable=True),
+    Column("experience_years", Integer, nullable=True),
+    Column("languages", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("about", Text, nullable=True),
+    Column("availability", Text, nullable=True),
+    Column(
+        "notification_preferences",
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+    ),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     UniqueConstraint("identity_id", name="uq_partner_profiles_identity"),
     CheckConstraint(
@@ -106,6 +118,10 @@ partner_profiles = Table(
     CheckConstraint(
         "consultation_fee_paise IS NULL OR consultation_fee_paise >= 0",
         name="ck_partner_profiles_consultation_fee",
+    ),
+    CheckConstraint(
+        "experience_years IS NULL OR experience_years BETWEEN 0 AND 100",
+        name="ck_partner_profiles_experience_years",
     ),
 )
 

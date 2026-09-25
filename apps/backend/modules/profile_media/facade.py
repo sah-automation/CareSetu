@@ -15,13 +15,17 @@ it does for intake media.
 from modules.profile_media.adapters.media_store import (
     DOCTOR_PREFIX,
     PATIENT_PREFIX,
+    ProfileMediaRetryPolicy,
     ProfileMediaStore,
+    ProfileMediaStoreError,
     build_profile_media_store,
 )
 
 __all__ = [
     "DOCTOR_PREFIX",
     "PATIENT_PREFIX",
+    "ProfileMediaRetryPolicy",
     "ProfileMediaStore",
+    "ProfileMediaStoreError",
     "build_profile_media_store",
 ]

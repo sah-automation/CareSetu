@@ -195,6 +195,8 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         # sections locked under the wrong grant (ADR-0019).
         "/v1/doctor/patients/{patient_id}",
         "/v1/doctor/patients/{patient_id}/photo",
+        "/v1/doctor/profile",
+        "/v1/doctor/profile/photo",
     }
 
 

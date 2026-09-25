@@ -132,6 +132,35 @@ class PartnerNotActiveError(PartnerError):
         self.status = status
 
 
+class DoctorProfileNotAllowedError(PartnerError):
+    def __init__(self, partner_id: int, partner_type: str, status: str) -> None:
+        super().__init__(
+            f"partner {partner_id} is {partner_type} in {status}; "
+            "the private doctor profile requires an active doctor"
+        )
+        self.partner_id = partner_id
+        self.partner_type = partner_type
+        self.status = status
+
+
+class DoctorProfilePhotoNotFoundError(PartnerError):
+    def __init__(self, partner_id: int) -> None:
+        super().__init__(f"doctor {partner_id} has no profile photo")
+        self.partner_id = partner_id
+
+
+class DoctorProfilePhotoValidationError(PartnerError):
+    pass
+
+
+class DoctorProfilePhotoTransferError(PartnerError):
+    pass
+
+
+class DoctorProfilePhotoStoreUnavailableError(PartnerError):
+    pass
+
+
 class PartnerNotRejectedError(PartnerError):
     """The recovery action requires the partner to be in the ``[Rejected]`` state.
 

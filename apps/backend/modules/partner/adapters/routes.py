@@ -25,7 +25,7 @@ from fastapi import APIRouter, Depends, FastAPI, Query, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.gateway.errors import error_response
+from app.gateway.errors import emit_access_denial, error_response
 from app.gateway.idempotency import run_idempotent
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_operator, require_partner
@@ -34,6 +34,11 @@ from modules.partner.domain.events import PartnerType
 from modules.partner.domain.exceptions import (
     AppealAlreadyUsedError,
     ConsultationFeeNotAllowedError,
+    DoctorProfileNotAllowedError,
+    DoctorProfilePhotoNotFoundError,
+    DoctorProfilePhotoStoreUnavailableError,
+    DoctorProfilePhotoTransferError,
+    DoctorProfilePhotoValidationError,
     IllegalPartnerTransitionError,
     InvalidQueueSortError,
     InvalidQueueStatusError,
@@ -769,6 +774,68 @@ def register_error_handlers(app: FastAPI) -> None:
             details={"identity_id": partner_suspended.identity_id},
         )
 
+    async def _doctor_profile_not_allowed(request: Request, exc: Exception) -> JSONResponse:
+        await emit_access_denial(request)
+        denied = cast(DoctorProfileNotAllowedError, exc)
+        return error_response(
+            status.HTTP_403_FORBIDDEN,
+            "DOCTOR_PROFILE_NOT_ALLOWED",
+            "the private doctor profile requires an active doctor",
+            log_tag="doctor_profile",
+            request=request,
+            details={
+                "partner_id": denied.partner_id,
+                "partner_type": denied.partner_type,
+                "current_status": denied.status,
+            },
+        )
+
+    async def _doctor_profile_photo_not_found(request: Request, exc: Exception) -> JSONResponse:
+        missing = cast(DoctorProfilePhotoNotFoundError, exc)
+        return error_response(
+            status.HTTP_404_NOT_FOUND,
+            "DOCTOR_PROFILE_PHOTO_NOT_FOUND",
+            "no profile photo exists for this doctor",
+            log_tag="doctor_profile_photo",
+            request=request,
+            details={"partner_id": missing.partner_id},
+        )
+
+    async def _doctor_profile_photo_invalid(request: Request, exc: Exception) -> JSONResponse:
+        invalid = cast(DoctorProfilePhotoValidationError, exc)
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "DOCTOR_PROFILE_PHOTO_INVALID",
+            "profile photo must be JPEG, PNG, or WebP and within the configured size limit",
+            log_tag="doctor_profile_photo",
+            request=request,
+            details={"errors": [{"path": "file", "reason": str(invalid)}]},
+        )
+
+    async def _doctor_profile_photo_transfer_failed(
+        request: Request, exc: Exception
+    ) -> JSONResponse:
+        del exc
+        return error_response(
+            status.HTTP_502_BAD_GATEWAY,
+            "DOCTOR_PROFILE_PHOTO_TRANSFER_FAILED",
+            "profile photo storage is temporarily unavailable",
+            log_tag="doctor_profile_photo",
+            request=request,
+        )
+
+    async def _doctor_profile_photo_store_unavailable(
+        request: Request, exc: Exception
+    ) -> JSONResponse:
+        del exc
+        return error_response(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "DOCTOR_PROFILE_PHOTO_STORE_UNAVAILABLE",
+            "profile photo storage is unavailable",
+            log_tag="doctor_profile_photo",
+            request=request,
+        )
+
     async def _provider_profile_not_found(request: Request, exc: Exception) -> JSONResponse:
         del exc
         return error_response(
@@ -790,5 +857,15 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(ConsultationFeeNotAllowedError, _consultation_fee_not_allowed)
     app.add_exception_handler(PartnerNotActiveError, _partner_not_active)
     app.add_exception_handler(PartnerSuspendedError, _partner_suspended)
+    app.add_exception_handler(DoctorProfileNotAllowedError, _doctor_profile_not_allowed)
+    app.add_exception_handler(DoctorProfilePhotoNotFoundError, _doctor_profile_photo_not_found)
+    app.add_exception_handler(DoctorProfilePhotoValidationError, _doctor_profile_photo_invalid)
+    app.add_exception_handler(
+        DoctorProfilePhotoTransferError, _doctor_profile_photo_transfer_failed
+    )
+    app.add_exception_handler(
+        DoctorProfilePhotoStoreUnavailableError,
+        _doctor_profile_photo_store_unavailable,
+    )
     app.add_exception_handler(ProviderProfileNotFoundError, _provider_profile_not_found)
     app.add_exception_handler(PartnerError, _partner_failed)

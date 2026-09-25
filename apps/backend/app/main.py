@@ -74,6 +74,7 @@ from modules.partner.directory_cache import (
 )
 from modules.partner.facade import PartnerFacade, ProviderProfileNotFoundError
 from modules.profile_media.adapters.media_store import build_profile_media_store
+from modules.profile_media.facade import ProfileMediaRetryPolicy
 from worker.main import run_worker_until_stopped
 
 logger = logging.getLogger(__name__)
@@ -257,8 +258,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         backend=resolved_settings.profile_media_backend,
         supabase_url=resolved_settings.supabase_url,
         supabase_service_role_key=resolved_settings.supabase_service_role_key,
+        retry_policy=ProfileMediaRetryPolicy(
+            max_attempts=resolved_settings.profile_media_max_attempts,
+            backoff_seconds=resolved_settings.profile_media_backoff_seconds,
+            jitter_fraction=resolved_settings.profile_media_jitter_fraction,
+            circuit_breaker_threshold=(resolved_settings.profile_media_circuit_breaker_threshold),
+            circuit_breaker_cooldown_seconds=(
+                resolved_settings.profile_media_circuit_breaker_cooldown_seconds
+            ),
+        ),
+        timeout_seconds=resolved_settings.profile_media_timeout_seconds,
     )
     app.state.profile_media_store = profile_media_store
+    app.state.profile_media_max_upload_bytes = resolved_settings.profile_media_max_upload_bytes
     facade = IamFacade(
         engine=engine,
         sms_adapter=sms_adapter,
@@ -361,6 +373,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         iam_facade=facade,
         artifact_store=partner_artifact_store,
         audit_facade=app.state.audit_facade,
+        profile_media_store=profile_media_store,
+        doctor_profile_photo_max_bytes=resolved_settings.profile_media_max_upload_bytes,
         re_submission_max=resolved_settings.partner_re_submission_max,
         re_submission_cooldown_days=resolved_settings.partner_re_submission_cooldown_days,
         credential_cleanup_days=resolved_settings.partner_credential_cleanup_days,

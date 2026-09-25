@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -38,7 +39,10 @@ from modules.profile_media.adapters.media_store import (
     MEDIA_BUCKET,
     PATIENT_PREFIX,
     LocalFilesystemProfileMediaStore,
+    ProfileMediaRetryPolicy,
     ProfileMediaStore,
+    ProfileMediaStoreError,
+    ResilientProfileMediaStore,
     SupabaseStorageProfileMediaStore,
     build_profile_media_store,
 )
@@ -48,6 +52,22 @@ from modules.profile_media.facade import (
 
 _FAKE_URL = "https://abc.supabase.co"
 _FAKE_ROLE_KEY = "test-service-role-key"
+
+
+def _retry_policy(
+    *,
+    max_attempts: int = 2,
+    backoff_seconds: float = 0.25,
+    circuit_breaker_threshold: int = 2,
+    circuit_breaker_cooldown_seconds: float = 10.0,
+) -> ProfileMediaRetryPolicy:
+    return ProfileMediaRetryPolicy(
+        max_attempts=max_attempts,
+        backoff_seconds=backoff_seconds,
+        jitter_fraction=0.0,
+        circuit_breaker_threshold=circuit_breaker_threshold,
+        circuit_breaker_cooldown_seconds=circuit_breaker_cooldown_seconds,
+    )
 
 
 def _storage_response(status_code: int, request: httpx.Request) -> httpx.Response:
@@ -70,6 +90,7 @@ def _store(
         service_role_key=_FAKE_ROLE_KEY,
         client=client,
         key_bytes=key_bytes,
+        timeout_seconds=30.0,
     )
 
 
@@ -248,8 +269,11 @@ async def test_delete_of_unknown_object_raises_file_not_found() -> None:
 async def test_save_non_2xx_raises_oserror(status: int) -> None:
     store = _store(lambda request: _storage_response(status, request))
 
-    with pytest.raises(OSError):
+    with pytest.raises(ProfileMediaStoreError) as raised:
         await store.save(data=b"x" * 512, subject_id=7)
+
+    assert raised.value.retryable is (status >= 500)
+    assert raised.value.status_code == status
 
 
 async def test_save_network_error_raises_oserror() -> None:
@@ -257,8 +281,10 @@ async def test_save_network_error_raises_oserror() -> None:
         raise httpx.ConnectError("connection refused")
 
     store = _store(_handler)
-    with pytest.raises(OSError):
+    with pytest.raises(ProfileMediaStoreError) as raised:
         await store.save(data=b"x", subject_id=7)
+
+    assert raised.value.retryable is True
 
 
 # ---------------------------------------------------------------------------
@@ -276,8 +302,11 @@ async def test_read_missing_object_raises_file_not_found() -> None:
 async def test_read_5xx_raises_oserror() -> None:
     store = _store(lambda request: _storage_response(503, request))
 
-    with pytest.raises(OSError):
+    with pytest.raises(ProfileMediaStoreError) as raised:
         await store.read(object_key="patient/7/01ab.enc")
+
+    assert raised.value.retryable is True
+    assert raised.value.status_code == 503
 
 
 async def test_read_network_error_raises_oserror() -> None:
@@ -285,8 +314,10 @@ async def test_read_network_error_raises_oserror() -> None:
         raise httpx.ConnectError("connection refused")
 
     store = _store(_handler)
-    with pytest.raises(OSError):
+    with pytest.raises(ProfileMediaStoreError) as raised:
         await store.read(object_key="patient/7/01ab.enc")
+
+    assert raised.value.retryable is True
 
 
 async def test_read_outside_supported_prefix_raises_oserror() -> None:
@@ -317,6 +348,105 @@ async def test_read_tampered_ciphertext_raises_invalid_tag() -> None:
 
     with pytest.raises(InvalidTag):
         await store.read(object_key="patient/7/01ab.enc")
+
+
+async def test_resilient_store_retries_transient_upload_at_the_same_object_key() -> None:
+    requests: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        status = 503 if len(requests) == 1 else 200
+        return httpx.Response(status, request=request)
+
+    sleep = AsyncMock()
+    store = ResilientProfileMediaStore(
+        _store(_handler),
+        _retry_policy(max_attempts=3),
+        sleep=sleep,
+        monotonic_clock=lambda: 0.0,
+        random_value=lambda: 0.0,
+    )
+
+    object_key = await store.save(data=b"photo", subject_id=12, prefix=DOCTOR_PREFIX)
+
+    assert len(requests) == 2
+    assert requests[0].url.path == requests[1].url.path
+    assert object_key in requests[0].url.path
+    assert sleep.await_args.args[0] == 0.25
+
+
+async def test_resilient_store_does_not_retry_non_transient_upload() -> None:
+    requests: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(401, request=request)
+
+    sleep = AsyncMock()
+    store = ResilientProfileMediaStore(
+        _store(_handler),
+        _retry_policy(),
+        sleep=sleep,
+        monotonic_clock=lambda: 0.0,
+        random_value=lambda: 0.0,
+    )
+
+    with pytest.raises(ProfileMediaStoreError) as raised:
+        await store.save(data=b"photo", subject_id=12, prefix=DOCTOR_PREFIX)
+
+    assert raised.value.retryable is False
+    assert raised.value.retries_exhausted is False
+    assert len(requests) == 1
+    sleep.assert_not_awaited()
+
+
+async def test_resilient_store_applies_retry_and_circuit_to_read() -> None:
+    requests: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(503, request=request)
+
+    store = ResilientProfileMediaStore(
+        _store(_handler),
+        _retry_policy(circuit_breaker_threshold=1),
+        sleep=AsyncMock(),
+        monotonic_clock=lambda: 0.0,
+        random_value=lambda: 0.0,
+    )
+
+    with pytest.raises(ProfileMediaStoreError) as exhausted:
+        await store.read(object_key="doctor/12/photo.enc")
+    with pytest.raises(ProfileMediaStoreError) as opened:
+        await store.read(object_key="doctor/12/photo.enc")
+
+    assert exhausted.value.retries_exhausted is True
+    assert opened.value.circuit_open is True
+    assert len(requests) == 2
+
+
+async def test_resilient_store_applies_retry_and_circuit_to_delete() -> None:
+    requests: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(503, request=request)
+
+    store = ResilientProfileMediaStore(
+        _store(_handler),
+        _retry_policy(circuit_breaker_threshold=1),
+        sleep=AsyncMock(),
+        monotonic_clock=lambda: 0.0,
+        random_value=lambda: 0.0,
+    )
+
+    with pytest.raises(ProfileMediaStoreError):
+        await store.delete(object_key="doctor/12/photo.enc")
+    with pytest.raises(ProfileMediaStoreError) as opened:
+        await store.delete(object_key="doctor/12/photo.enc")
+
+    assert opened.value.circuit_open is True
+    assert len(requests) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +543,7 @@ def test_facade_seam_exposes_the_port_factory_and_prefixes(tmp_path: Path) -> No
     assert isinstance(store, LocalFilesystemProfileMediaStore)
     assert "PATIENT_PREFIX" in dir(profile_media_facade)
     assert "DOCTOR_PREFIX" in dir(profile_media_facade)
+    assert "ProfileMediaStoreError" in dir(profile_media_facade)
 
 
 def test_build_default_backend_is_local() -> None:
@@ -434,9 +565,11 @@ def test_build_supabase_returns_remote_store() -> None:
         backend="supabase",
         supabase_url="https://abc.supabase.co",
         supabase_service_role_key="sb-test",
+        retry_policy=_retry_policy(),
+        timeout_seconds=30.0,
     )
 
-    assert isinstance(store, SupabaseStorageProfileMediaStore)
+    assert isinstance(store, ResilientProfileMediaStore)
 
 
 def test_build_supabase_missing_creds_fails_fast() -> None:

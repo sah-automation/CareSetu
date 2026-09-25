@@ -15,18 +15,24 @@ from __future__ import annotations
 import logging
 from typing import Annotated, cast
 
-from fastapi import APIRouter, Depends, Query, Request, Response, status
+from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile, status
 
 from app.gateway.errors import (
     AuthenticationRequiredError,
     InsufficientScopeError,
     error_response,
 )
+from app.gateway.idempotency import run_idempotent
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_partner
 from modules.doctor.doctor_models import DoctorPatientDetailView, PatientsListView
 from modules.doctor.facade import DoctorConsoleFacade
-from modules.partner.facade import PartnerFacade
+from modules.partner.facade import (
+    DoctorProfilePhotoView,
+    DoctorProfileUpdate,
+    DoctorProfileView,
+    PartnerFacade,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +71,105 @@ async def _require_doctor(request: Request, account: Principal) -> int:
     if partner.status != "Active":
         raise InsufficientScopeError("an active partner profile is required for this route")
     return partner.partner_id
+
+
+@router.get(
+    "/profile",
+    response_model=DoctorProfileView,
+    status_code=status.HTTP_200_OK,
+    summary="Read the calling active doctor's private profile",
+)
+async def get_doctor_profile(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+) -> DoctorProfileView:
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    doctor_id = await _require_doctor(request, account)
+    return await facade.get_doctor_profile(doctor_id)
+
+
+@router.put(
+    "/profile",
+    response_model=DoctorProfileView,
+    status_code=status.HTTP_200_OK,
+    summary="Update the calling active doctor's private profile",
+)
+async def update_doctor_profile(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+    body: DoctorProfileUpdate,
+) -> DoctorProfileView:
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    doctor_id = await _require_doctor(request, account)
+
+    async def _call() -> DoctorProfileView:
+        return await facade.update_doctor_profile(doctor_id, body)
+
+    return await run_idempotent(request, _call, namespace=f"doctor:{doctor_id}")
+
+
+@router.put(
+    "/profile/photo",
+    response_model=DoctorProfilePhotoView,
+    status_code=status.HTTP_200_OK,
+    summary="Upload or replace the calling active doctor's private profile photo",
+)
+async def update_doctor_profile_photo(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+    file: Annotated[UploadFile, File()],
+) -> DoctorProfilePhotoView:
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    doctor_id = await _require_doctor(request, account)
+    max_upload_bytes = cast(int, request.app.state.profile_media_max_upload_bytes)
+    data = await file.read(max_upload_bytes + 1)
+
+    async def _call() -> DoctorProfilePhotoView:
+        return await facade.update_doctor_photo(
+            doctor_id,
+            media_type=file.content_type,
+            data=data,
+        )
+
+    return await run_idempotent(request, _call, namespace=f"doctor:{doctor_id}")
+
+
+@router.get(
+    "/profile/photo",
+    response_class=Response,
+    summary="Stream the calling active doctor's private profile photo",
+)
+async def get_doctor_profile_photo(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+) -> Response:
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    doctor_id = await _require_doctor(request, account)
+    photo = await facade.get_doctor_photo(doctor_id)
+    return Response(
+        content=photo.data,
+        media_type=photo.media_type,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.delete(
+    "/profile/photo",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Remove the calling active doctor's private profile photo",
+)
+async def delete_doctor_profile_photo(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+) -> Response:
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    doctor_id = await _require_doctor(request, account)
+
+    async def _call() -> Response:
+        await facade.delete_doctor_photo(doctor_id)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    return await run_idempotent(request, _call, namespace=f"doctor:{doctor_id}")
 
 
 @router.get(

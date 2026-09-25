@@ -89,7 +89,7 @@ def error_response(
     return JSONResponse(status_code=status_code, content=envelope, headers=headers)
 
 
-async def _emit_access_denial(request: Request) -> None:
+async def emit_access_denial(request: Request) -> None:
     """Publish ``patient.auth_failed`` (reason ``access_denied``) for an authenticated 403.
 
     PHASE-2 REM T7 (#87): an access denial on a protected route becomes
@@ -136,7 +136,7 @@ def register_gateway_error_handlers(app: FastAPI) -> None:
         )
 
     async def _insufficient_scope(request: Request, exc: Exception) -> JSONResponse:
-        await _emit_access_denial(request)
+        await emit_access_denial(request)
         return error_response(
             status.HTTP_403_FORBIDDEN,
             CODE_AUTH_INSUFFICIENT_SCOPE,

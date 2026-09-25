@@ -1004,6 +1004,13 @@ def test_settings_profile_media_backend_defaults_to_local() -> None:
     assert settings.profile_media_backend == "local"
     assert settings.profile_media_root == "var/profile-media"
     assert settings.profile_media_key == ""
+    assert settings.profile_media_max_attempts == 3
+    assert settings.profile_media_backoff_seconds == 0.5
+    assert settings.profile_media_jitter_fraction == 0.25
+    assert settings.profile_media_circuit_breaker_threshold == 5
+    assert settings.profile_media_circuit_breaker_cooldown_seconds == 30.0
+    assert settings.profile_media_timeout_seconds == 30.0
+    assert settings.profile_media_max_upload_bytes == 5 * 1024 * 1024
 
 
 def test_settings_profile_media_backend_reads_from_environment(
@@ -1012,6 +1019,13 @@ def test_settings_profile_media_backend_reads_from_environment(
     monkeypatch.setenv("PROFILE_MEDIA_BACKEND", "supabase")
     monkeypatch.setenv("PROFILE_MEDIA_ROOT", "var/uploaded-photos")
     monkeypatch.setenv("PROFILE_MEDIA_KEY", "cGFzc3dvcmQ=")
+    monkeypatch.setenv("PROFILE_MEDIA_MAX_ATTEMPTS", "4")
+    monkeypatch.setenv("PROFILE_MEDIA_BACKOFF_SECONDS", "0.75")
+    monkeypatch.setenv("PROFILE_MEDIA_JITTER_FRACTION", "0.4")
+    monkeypatch.setenv("PROFILE_MEDIA_CIRCUIT_BREAKER_THRESHOLD", "6")
+    monkeypatch.setenv("PROFILE_MEDIA_CIRCUIT_BREAKER_COOLDOWN_SECONDS", "45.5")
+    monkeypatch.setenv("PROFILE_MEDIA_TIMEOUT_SECONDS", "12.5")
+    monkeypatch.setenv("PROFILE_MEDIA_MAX_UPLOAD_BYTES", "4194304")
     monkeypatch.setenv("SUPABASE_URL", "https://abc.supabase.co")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "sb-test-key")
 
@@ -1020,6 +1034,13 @@ def test_settings_profile_media_backend_reads_from_environment(
     assert settings.profile_media_backend == "supabase"
     assert settings.profile_media_root == "var/uploaded-photos"
     assert settings.profile_media_key == "cGFzc3dvcmQ="
+    assert settings.profile_media_max_attempts == 4
+    assert settings.profile_media_backoff_seconds == 0.75
+    assert settings.profile_media_jitter_fraction == 0.4
+    assert settings.profile_media_circuit_breaker_threshold == 6
+    assert settings.profile_media_circuit_breaker_cooldown_seconds == 45.5
+    assert settings.profile_media_timeout_seconds == 12.5
+    assert settings.profile_media_max_upload_bytes == 4194304
     assert settings.supabase_url == "https://abc.supabase.co"
     assert settings.supabase_service_role_key == "sb-test-key"
 
@@ -1056,6 +1077,66 @@ def test_settings_profile_media_local_backend_needs_no_supabase_env() -> None:
     assert settings.profile_media_backend == "local"
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("profile_media_max_attempts", 0, "profile_media_max_attempts must be positive"),
+        (
+            "profile_media_backoff_seconds",
+            0.0,
+            "profile_media_backoff_seconds must be finite and positive",
+        ),
+        (
+            "profile_media_backoff_seconds",
+            float("nan"),
+            "profile_media_backoff_seconds must be finite and positive",
+        ),
+        (
+            "profile_media_jitter_fraction",
+            1.0,
+            "profile_media_jitter_fraction must be finite and between 0 inclusive and 1 exclusive",
+        ),
+        (
+            "profile_media_circuit_breaker_threshold",
+            0,
+            "profile_media_circuit_breaker_threshold must be positive",
+        ),
+        (
+            "profile_media_circuit_breaker_cooldown_seconds",
+            0.0,
+            "profile_media_circuit_breaker_cooldown_seconds must be finite and positive",
+        ),
+        (
+            "profile_media_circuit_breaker_cooldown_seconds",
+            float("inf"),
+            "profile_media_circuit_breaker_cooldown_seconds must be finite and positive",
+        ),
+        (
+            "profile_media_timeout_seconds",
+            0.0,
+            "profile_media_timeout_seconds must be finite and positive",
+        ),
+        (
+            "profile_media_timeout_seconds",
+            float("nan"),
+            "profile_media_timeout_seconds must be finite and positive",
+        ),
+        (
+            "profile_media_max_upload_bytes",
+            0,
+            "profile_media_max_upload_bytes must be positive",
+        ),
+    ],
+)
+def test_settings_rejects_invalid_profile_media_retry_policy(
+    field: str,
+    value: float,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        Settings(**{field: value})
+
+
 def _env_example_text() -> str:
     return _ENV_EXAMPLE.read_text(encoding="utf-8")
 
@@ -1085,6 +1166,13 @@ def test_env_example_documents_profile_media_supabase_switch() -> None:
     assert "PROFILE_MEDIA_BACKEND=" in text
     assert "PROFILE_MEDIA_ROOT=" in text
     assert "PROFILE_MEDIA_KEY=" in text
+    assert "PROFILE_MEDIA_MAX_ATTEMPTS=" in text
+    assert "PROFILE_MEDIA_BACKOFF_SECONDS=" in text
+    assert "PROFILE_MEDIA_JITTER_FRACTION=" in text
+    assert "PROFILE_MEDIA_CIRCUIT_BREAKER_THRESHOLD=" in text
+    assert "PROFILE_MEDIA_CIRCUIT_BREAKER_COOLDOWN_SECONDS=" in text
+    assert "PROFILE_MEDIA_TIMEOUT_SECONDS=" in text
+    assert "PROFILE_MEDIA_MAX_UPLOAD_BYTES=" in text
 
 
 def test_env_example_redis_directory_ttl_comments_the_default() -> None:

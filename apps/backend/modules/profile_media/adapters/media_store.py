@@ -41,12 +41,20 @@ write path is exercised (same convention as the intake media store).
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import logging
+import math
+import random
 import secrets
+import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Protocol
+from typing import Final, Protocol, TypeVar
 
 import httpx
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 #: Object-storage prefix under which every patient profile photo is filed.
@@ -67,11 +75,213 @@ _EXT = ".enc"
 
 _STORAGE_OBJECT_ENDPOINT = "storage/v1/object"
 
-#: Explicit outbound-call ceiling for the Storage REST API (third-party-
-#: integration-standards: timeout always set explicitly, no unbounded waits).
-#: Mirrors the intake-media store's 30s cap - a hung upload must fail into the
-#: caller's retry ladder, never block the request forever.
-_STORAGE_TIMEOUT: Final[httpx.Timeout] = httpx.Timeout(30.0)
+logger = logging.getLogger(__name__)
+
+_ResultT = TypeVar("_ResultT")
+
+
+def _retryable_http_status(status_code: int) -> bool:
+    return status_code in {408, 429} or status_code >= 500
+
+
+class ProfileMediaStoreError(OSError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool,
+        status_code: int | None = None,
+        retries_exhausted: bool = False,
+        circuit_open: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        self.status_code = status_code
+        self.retries_exhausted = retries_exhausted
+        self.circuit_open = circuit_open
+
+
+@dataclass(frozen=True)
+class ProfileMediaRetryPolicy:
+    max_attempts: int
+    backoff_seconds: float
+    jitter_fraction: float
+    circuit_breaker_threshold: int
+    circuit_breaker_cooldown_seconds: float
+
+    def __post_init__(self) -> None:
+        if self.max_attempts <= 0:
+            raise ValueError("max_attempts must be positive")
+        if not math.isfinite(self.backoff_seconds) or self.backoff_seconds <= 0:
+            raise ValueError("backoff_seconds must be finite and positive")
+        if not math.isfinite(self.jitter_fraction) or not 0 <= self.jitter_fraction < 1:
+            raise ValueError("jitter_fraction must be finite and in [0, 1)")
+        if self.circuit_breaker_threshold <= 0:
+            raise ValueError("circuit_breaker_threshold must be positive")
+        if (
+            not math.isfinite(self.circuit_breaker_cooldown_seconds)
+            or self.circuit_breaker_cooldown_seconds <= 0
+        ):
+            raise ValueError("circuit_breaker_cooldown_seconds must be finite and positive")
+
+
+class _ProfileMediaCircuit:
+    def __init__(
+        self,
+        policy: ProfileMediaRetryPolicy,
+        monotonic_clock: Callable[[], float],
+    ) -> None:
+        self._policy = policy
+        self._monotonic_clock = monotonic_clock
+        self._state = "closed"
+        self._consecutive_failures = 0
+        self._opened_at = 0.0
+        self._probe_in_flight = False
+
+    def allow_request(self) -> bool:
+        if self._state == "open":
+            if self._monotonic_clock() - self._opened_at < (
+                self._policy.circuit_breaker_cooldown_seconds
+            ):
+                return False
+            self._state = "half_open"
+        if self._state == "half_open":
+            if self._probe_in_flight:
+                return False
+            self._probe_in_flight = True
+        return True
+
+    def record_success(self) -> None:
+        if self._state == "half_open":
+            logger.info("profile media circuit recovered")
+        self._state = "closed"
+        self._consecutive_failures = 0
+        self._opened_at = 0.0
+        self._probe_in_flight = False
+
+    def record_failure(self) -> None:
+        self._probe_in_flight = False
+        if self._state == "half_open":
+            self._state = "open"
+            self._opened_at = self._monotonic_clock()
+            logger.warning("profile media circuit reopened")
+            return
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self._policy.circuit_breaker_threshold:
+            self._state = "open"
+            self._opened_at = self._monotonic_clock()
+            logger.warning(
+                "profile media circuit opened failures=%d",
+                self._consecutive_failures,
+            )
+
+
+class ResilientProfileMediaStore:
+    def __init__(
+        self,
+        backend: ProfileMediaStore,
+        policy: ProfileMediaRetryPolicy,
+        *,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        monotonic_clock: Callable[[], float] = time.monotonic,
+        random_value: Callable[[], float] = random.random,
+    ) -> None:
+        self._backend = backend
+        self._policy = policy
+        self._sleep = sleep
+        self._random_value = random_value
+        self._circuit = _ProfileMediaCircuit(policy, monotonic_clock)
+
+    async def _run(
+        self,
+        operation: str,
+        call: Callable[[], Awaitable[_ResultT]],
+    ) -> _ResultT:
+        if not self._circuit.allow_request():
+            logger.warning("profile media circuit open operation=%s", operation)
+            raise ProfileMediaStoreError(
+                "profile media store circuit is open",
+                retryable=False,
+                circuit_open=True,
+            )
+        for attempt in range(1, self._policy.max_attempts + 1):
+            if attempt > 1:
+                exponential = self._policy.backoff_seconds * float(2 ** (attempt - 2))
+                delay = exponential * (1.0 + self._policy.jitter_fraction * self._random_value())
+                await self._sleep(delay)
+            try:
+                result = await call()
+            except ProfileMediaStoreError as exc:
+                if not exc.retryable:
+                    logger.warning(
+                        "profile media operation rejected operation=%s "
+                        "status_code=%s error_type=%s",
+                        operation,
+                        exc.status_code,
+                        type(exc).__name__,
+                    )
+                    self._circuit.record_success()
+                    raise
+                if attempt >= self._policy.max_attempts:
+                    exc.retries_exhausted = True
+                    self._circuit.record_failure()
+                    logger.warning(
+                        "profile media retry exhausted operation=%s attempts=%d",
+                        operation,
+                        attempt,
+                    )
+                    raise
+                logger.warning(
+                    "profile media retry operation=%s attempt=%d error_type=%s",
+                    operation,
+                    attempt,
+                    type(exc).__name__,
+                )
+            except (FileNotFoundError, InvalidTag):
+                self._circuit.record_success()
+                raise
+            else:
+                self._circuit.record_success()
+                return result
+        raise ProfileMediaStoreError(
+            "profile media operation exhausted unexpectedly",
+            retryable=False,
+        )
+
+    async def save(
+        self,
+        *,
+        data: bytes,
+        subject_id: int,
+        prefix: str = PATIENT_PREFIX,
+        object_key: str | None = None,
+    ) -> str:
+        object_key = _resolve_save_object_key(
+            object_key,
+            prefix=prefix,
+            subject_id=subject_id,
+        )
+        return await self._run(
+            "save",
+            lambda: self._backend.save(
+                data=data,
+                subject_id=subject_id,
+                prefix=prefix,
+                object_key=object_key,
+            ),
+        )
+
+    async def read(self, *, object_key: str) -> bytes:
+        return await self._run("read", lambda: self._backend.read(object_key=object_key))
+
+    async def delete(self, *, object_key: str) -> None:
+        try:
+            await self._run("delete", lambda: self._backend.delete(object_key=object_key))
+        except FileNotFoundError:
+            return
+
+    async def close(self) -> None:
+        await self._backend.close()
 
 
 class ProfileMediaStore(Protocol):
@@ -97,6 +307,7 @@ class ProfileMediaStore(Protocol):
         data: bytes,
         subject_id: int,
         prefix: str = PATIENT_PREFIX,
+        object_key: str | None = None,
     ) -> str: ...
 
     async def read(self, *, object_key: str) -> bytes: ...
@@ -132,12 +343,40 @@ def _validate_prefix(prefix: str) -> None:
 
     The object key layout is fixed by ADR-0020 D1 (``patient/<user-id>/...``,
     ``doctor/<user-id>/...``), so a write is refused before it files anything
-    under a prefix this store would then refuse to read back - including a
+    under a prefix that would then refuse to read back - including a
     ``../``-style prefix that could walk outside the local ``root``.
     """
     if prefix not in _SUPPORTED_PREFIXES:
         joined = ", ".join(sorted(_SUPPORTED_PREFIXES))
         raise OSError(f"prefix is outside the supported prefixes ({joined})")
+
+
+def _build_profile_media_object_key(prefix: str, subject_id: int) -> str:
+    _validate_prefix(prefix)
+    return f"{prefix}/{subject_id}/{secrets.token_hex(16)}{_EXT}"
+
+
+def _validate_save_object_key(
+    object_key: str,
+    *,
+    prefix: str,
+    subject_id: int,
+) -> None:
+    path = _validate_object_key(object_key)
+    if path.parts[0] != prefix or path.parts[1] != str(subject_id):
+        raise OSError("object key does not match the requested profile")
+
+
+def _resolve_save_object_key(
+    object_key: str | None,
+    *,
+    prefix: str,
+    subject_id: int,
+) -> str:
+    if object_key is None:
+        return _build_profile_media_object_key(prefix, subject_id)
+    _validate_save_object_key(object_key, prefix=prefix, subject_id=subject_id)
+    return object_key
 
 
 class LocalFilesystemProfileMediaStore:
@@ -168,6 +407,7 @@ class LocalFilesystemProfileMediaStore:
         data: bytes,
         subject_id: int,
         prefix: str = PATIENT_PREFIX,
+        object_key: str | None = None,
     ) -> str:
         """Encrypt ``data`` and file it, answering the ``<prefix>``-prefixed key.
 
@@ -180,16 +420,15 @@ class LocalFilesystemProfileMediaStore:
         this in its upload-retry ladder so a flaky transfer never loses the
         photo silently.
         """
-        _validate_prefix(prefix)
-        return self._write(prefix, subject_id, _encrypt(self._key, data))
-
-    def _write(self, prefix: str, subject_id: int, payload: bytes) -> str:
-        directory = self._root / prefix / str(subject_id)
-        directory.mkdir(parents=True, exist_ok=True)
-        filename = f"{secrets.token_hex(16)}{_EXT}"
-        path = directory / filename
-        path.write_bytes(payload)
-        return f"{prefix}/{subject_id}/{filename}"
+        object_key = _resolve_save_object_key(
+            object_key,
+            prefix=prefix,
+            subject_id=subject_id,
+        )
+        path = self._root / object_key
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(_encrypt(self._key, data))
+        return object_key
 
     async def read(self, *, object_key: str) -> bytes:
         """Decrypt and return the photo filed under ``object_key``.
@@ -254,6 +493,7 @@ class SupabaseStorageProfileMediaStore:
         service_role_key: str,
         bucket: str = MEDIA_BUCKET,
         key_bytes: bytes | None = None,
+        timeout_seconds: float,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._base_url = supabase_url.rstrip("/")
@@ -266,9 +506,11 @@ class SupabaseStorageProfileMediaStore:
             key_bytes = secrets.token_bytes(32)
         if len(key_bytes) != 32:
             raise ValueError("SupabaseStorageProfileMediaStore requires a 32-byte AES-256 key")
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be finite and positive")
         self._key = key_bytes
         self._owns_client = client is None
-        self._client = client or httpx.AsyncClient(timeout=_STORAGE_TIMEOUT)
+        self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds))
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._service_role_key}"}
@@ -282,6 +524,7 @@ class SupabaseStorageProfileMediaStore:
         data: bytes,
         subject_id: int,
         prefix: str = PATIENT_PREFIX,
+        object_key: str | None = None,
     ) -> str:
         """Encrypt ``data`` and POST the ciphertext, answering the opaque key.
 
@@ -291,8 +534,11 @@ class SupabaseStorageProfileMediaStore:
         upload is not acknowledged 2xx (the caller's retry ladder then wraps it
         as an upload failure).
         """
-        _validate_prefix(prefix)
-        object_key = f"{prefix}/{subject_id}/{secrets.token_hex(16)}{_EXT}"
+        object_key = _resolve_save_object_key(
+            object_key,
+            prefix=prefix,
+            subject_id=subject_id,
+        )
         try:
             response = await self._client.post(
                 self._object_url(object_key),
@@ -300,12 +546,16 @@ class SupabaseStorageProfileMediaStore:
                 headers=self._headers(),
             )
         except httpx.HTTPError as exc:
-            raise OSError(
-                f"failed to reach Supabase Storage uploading object {object_key}"
+            raise ProfileMediaStoreError(
+                "profile media provider upload failed",
+                retryable=True,
             ) from exc
         if not response.is_success:
-            raise OSError(
-                f"Supabase Storage refused object {object_key} with HTTP {response.status_code}"
+            status_code = response.status_code
+            raise ProfileMediaStoreError(
+                "profile media provider rejected upload",
+                retryable=_retryable_http_status(status_code),
+                status_code=status_code,
             )
         return object_key
 
@@ -325,12 +575,18 @@ class SupabaseStorageProfileMediaStore:
                 headers=self._headers(),
             )
         except httpx.HTTPError as exc:
-            raise OSError(f"failed to reach Supabase Storage reading object {object_key}") from exc
+            raise ProfileMediaStoreError(
+                "profile media provider read failed",
+                retryable=True,
+            ) from exc
         if response.status_code == 404:
-            raise FileNotFoundError(f"object {object_key} not found in Supabase Storage")
+            raise FileNotFoundError("profile media object was not found")
         if not response.is_success:
-            raise OSError(
-                f"Supabase Storage refused object {object_key} with HTTP {response.status_code}"
+            status_code = response.status_code
+            raise ProfileMediaStoreError(
+                "profile media provider rejected read",
+                retryable=_retryable_http_status(status_code),
+                status_code=status_code,
             )
         return _decrypt(self._key, response.content)
 
@@ -350,12 +606,18 @@ class SupabaseStorageProfileMediaStore:
                 headers=self._headers(),
             )
         except httpx.HTTPError as exc:
-            raise OSError(f"failed to reach Supabase Storage deleting object {object_key}") from exc
+            raise ProfileMediaStoreError(
+                "profile media provider delete failed",
+                retryable=True,
+            ) from exc
         if response.status_code == 404:
-            raise FileNotFoundError(f"object {object_key} not found in Supabase Storage")
+            raise FileNotFoundError("profile media object was not found")
         if not response.is_success:
-            raise OSError(
-                f"Supabase Storage refused object {object_key} with HTTP {response.status_code}"
+            status_code = response.status_code
+            raise ProfileMediaStoreError(
+                "profile media provider rejected delete",
+                retryable=_retryable_http_status(status_code),
+                status_code=status_code,
             )
         return None
 
@@ -384,6 +646,8 @@ def build_profile_media_store(
     backend: str = "local",
     supabase_url: str = "",
     supabase_service_role_key: str = "",
+    retry_policy: ProfileMediaRetryPolicy | None = None,
+    timeout_seconds: float | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> ProfileMediaStore:
     """Build the store from config: local filesystem or private Supabase bucket.
@@ -408,10 +672,16 @@ def build_profile_media_store(
                 "profile_media_backend='supabase' requires both SUPABASE_URL and "
                 "SUPABASE_SERVICE_ROLE_KEY"
             )
-        return SupabaseStorageProfileMediaStore(
+        if retry_policy is None:
+            raise ValueError("Supabase profile media requires a retry policy")
+        if timeout_seconds is None:
+            raise ValueError("Supabase profile media requires a timeout")
+        remote_store = SupabaseStorageProfileMediaStore(
             supabase_url=supabase_url,
             service_role_key=supabase_service_role_key,
             key_bytes=key_bytes,
+            timeout_seconds=timeout_seconds,
             client=client,
         )
+        return ResilientProfileMediaStore(remote_store, retry_policy)
     return LocalFilesystemProfileMediaStore(root=root, key_bytes=key_bytes)
