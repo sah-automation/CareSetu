@@ -1459,6 +1459,11 @@ const en = {
     tabPreSummary: "Pre-summary",
     tabHistory: "History",
     tabPrescription: "Prescription",
+    // Case stepper step labels (FEAT-008, PROTO-8)
+    consultCompleteStep: "Consult complete",
+    rxPendingStep: "Rx pending",
+    issuedStep: "Issued",
+    caseProgressLabel: "Case progress",
     transcriptHeading: "Original intake",
     transcriptEmpty: "No transcript available for this intake.",
     transcriptLoadFail: "Could not load the intake transcript.",
@@ -1482,6 +1487,12 @@ const en = {
     // the pending item is the consult-complete handshake, and the action jumps
     // to the pre-summary tab where the handshake form lives.
     rxLockTitle: "Prescription not yet open",
+    rxLockSubtitle:
+      "To unlock the prescription, both of these must be complete:",
+    rxLockPreSummary: "Pre-summary finalized",
+    rxLockHandshake: "Consult marked complete",
+    rxLockGoToSummary: "Go to summary",
+    rxLockMarkComplete: "Mark complete",
     rxLockDone: "Pre-summary finalized",
     rxLockPending: "Consult marked complete",
     rxLockAction: "Complete consultation",
@@ -1548,15 +1559,22 @@ const en = {
     decisionHeading: "Doctor decision",
     editedTracker: (n: number) =>
       n === 1 ? "1 item edited by you" : `${n} items edited by you`,
+    // Step 1: Review & approve
     approvalGateTitle: "Review & approve",
     approvalGateHelp:
       "Confirm you reviewed every item against the patient record before issuing.",
     verificationDeclaration:
       "I have reviewed this prescription (Maine check kar liya)",
+    // Step 2: Confirm issue details
+    confirmIssueTitle: "Confirm issue details",
+    confirmIssueHelp:
+      "By confirming, this prescription will be issued to the patient and cannot be changed.",
+    confirmIssueDeclaration:
+      "I confirm this prescription is correct and ready to issue to the patient.",
     approveIssueAction: "Approve & issue",
     approvingIssuance: "Approving",
     approveBlockedHelp:
-      "Tick the verification declaration to approve and issue the prescription.",
+      "Complete both confirmations to approve and issue the prescription.",
     approveFail: "Could not approve and issue this prescription.",
     issuedHeading: "Prescription issued",
     issuedImmutableNote:
@@ -2899,6 +2917,11 @@ export const STRINGS: Record<Lang, Dictionary> = {
       tabPreSummary: "प्री-सारांश",
       tabHistory: "इतिहास",
       tabPrescription: "नुस्ख़ा",
+      // केस स्टेपर चरण लेबल (FEAT-008, PROTO-8)
+      consultCompleteStep: "परामर्श पूर्ण",
+      rxPendingStep: "नुस्ख़ा लंबित",
+      issuedStep: "जारी",
+      caseProgressLabel: "केस प्रगति",
       transcriptHeading: "मूल इंटेक",
       transcriptEmpty: "इस इंटेक के लिए कोई प्रतिलेख उपलब्ध नहीं है।",
       transcriptLoadFail: "इंटेक प्रतिलेख लोड नहीं हो सका।",
@@ -2920,6 +2943,11 @@ export const STRINGS: Record<Lang, Dictionary> = {
       // पूर्ण होना चाहिए। जन्मा मामला हमेशा अंतिम प्री-सारांश रखता है; बाकी
       // कदम परामर्श-पूर्ण हैंडशेक है, और क्रिया प्री-सारांश टैब पर ले जाती है।
       rxLockTitle: "नुस्ख़ा अभी खुला नहीं",
+      rxLockSubtitle: "नुस्ख़ा खोलने के लिए ये दोनों पूरे होने चाहिए:",
+      rxLockPreSummary: "प्री-सारांश अंतिम",
+      rxLockHandshake: "परामर्श पूर्ण दर्ज",
+      rxLockGoToSummary: "सारांश पर जाएँ",
+      rxLockMarkComplete: "पूर्ण दर्ज करें",
       rxLockDone: "प्री-सारांश अंतिम",
       rxLockPending: "परामर्श पूर्ण दर्ज",
       rxLockAction: "परामर्श पूर्ण करें",
@@ -2985,15 +3013,22 @@ export const STRINGS: Record<Lang, Dictionary> = {
       rxStatusFulfilled: "पूर्ण हुई",
       decisionHeading: "डॉक्टर का निर्णय",
       editedTracker: (n: number) => `${n} आइटम आपके द्वारा संपादित`,
+      // Step 1: Review & approve
       approvalGateTitle: "समीक्षा करें और अनुमोदित करें",
       approvalGateHelp:
         "जारी करने से पहले पुष्टि करें कि आपने हर वस्तु मरीज़ के रिकॉर्ड के अनुसार जाँची है।",
       verificationDeclaration:
         "मैंने यह नुस्ख़ा जाँच लिया है (Maine check kar liya)",
+      // Step 2: Confirm issue details
+      confirmIssueTitle: "जारी करने का विवरण पुष्टि करें",
+      confirmIssueHelp:
+        "पुष्टि करने पर, यह नुस्ख़ा मरीज़ को जारी होगा और बदला नहीं जा सकेगा।",
+      confirmIssueDeclaration:
+        "मैं पुष्टि करता हूँ कि यह नुस्ख़ा सही है और मरीज़ को जारी करने के लिए तैयार है।",
       approveIssueAction: "अनुमोदित करें और जारी करें",
       approvingIssuance: "अनुमोदित हो रहा है",
       approveBlockedHelp:
-        "नुस्ख़ा अनुमोदित और जारी करने के लिए सत्यापन घोषणा पर टिक करें।",
+        "नुस्ख़ा अनुमोदित और जारी करने के लिए दोनों पुष्टियाँ पूरी करें।",
       approveFail: "यह नुस्ख़ा अनुमोदित और जारी नहीं हो सका।",
       issuedHeading: "नुस्ख़ा जारी हुआ",
       issuedImmutableNote: "जारी नुस्ख़ा अंतिम है और बदला नहीं जा सकता।",

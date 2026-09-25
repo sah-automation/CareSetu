@@ -206,10 +206,148 @@ function pickLatestMediaRef(
       );
 }
 
-// Workspace inner tabs (US-14, #484). Follows the prototype's tab pattern:
-// role=tablist/tab/tabpanel, aria-selected, roving tabIndex, and arrow-key
-// rotation so the tabs behave like a native tab control (keyboard
-// navigation, screen-reader panel association).
+// Four-step case stepper (FEAT-008, PROTO-8 binding): Pre-Summary ->
+// Consult Complete -> Rx Pending -> Issued. Visual-only progress tracker
+// mirroring the prototype's .case-stepper; the active step is highlighted
+// and completed steps show a check.
+type CaseStep = "pre_summary" | "consult_complete" | "rx_pending" | "issued";
+
+const CASE_STEPS: CaseStep[] = [
+  "pre_summary",
+  "consult_complete",
+  "rx_pending",
+  "issued",
+];
+
+function CaseStepper({
+  currentStage,
+  handshakeDone,
+  t,
+}: {
+  currentStage: CareCaseStage;
+  handshakeDone: boolean;
+  t: Dictionary["caseWorkspace"];
+}) {
+  const stepStatus: Record<CaseStep, "pending" | "active" | "done"> = {
+    pre_summary:
+      currentStage === "pre_summary"
+        ? "active"
+        : currentStage === "prescription_pending" ||
+            currentStage === "closed" ||
+            handshakeDone
+          ? "done"
+          : "pending",
+    consult_complete:
+      currentStage === "pre_summary"
+        ? "pending"
+        : currentStage === "prescription_pending" ||
+            currentStage === "closed" ||
+            handshakeDone
+          ? "done"
+          : handshakeDone
+            ? "active"
+            : "pending",
+    rx_pending:
+      currentStage === "prescription_pending"
+        ? "active"
+        : currentStage === "closed"
+          ? "done"
+          : "pending",
+    issued: currentStage === "closed" ? "done" : "pending",
+  };
+
+  const stepLabels: Record<CaseStep, string> = {
+    pre_summary: t.tabPreSummary,
+    consult_complete: t.consultCompleteStep,
+    rx_pending: t.rxPendingStep,
+    issued: t.issuedStep,
+  };
+
+  return (
+    <div
+      className="grid grid-cols-4 gap-1 mx-2 mb-4"
+      data-testid="case-stepper"
+      role="list"
+      aria-label={t.caseProgressLabel}
+    >
+      {CASE_STEPS.map((step, idx) => {
+        const status = stepStatus[step];
+        const isLast = idx === CASE_STEPS.length - 1;
+        return (
+          <div
+            key={step}
+            className={cn(
+              "flex flex-col items-center gap-1.5 relative",
+              status === "active" && "text-accent-strong",
+              status === "done" && "text-accent-strong",
+            )}
+            role="listitem"
+            aria-current={status === "active" ? "step" : undefined}
+          >
+            <span
+              className={cn(
+                "flex h-8 w-8 items-center justify-center rounded-full text-xs font-bold border-2 transition-colors",
+                status === "done"
+                  ? "bg-accent-soft border-accent text-accent-strong"
+                  : status === "active"
+                    ? "bg-accent border-accent text-on-accent"
+                    : "bg-surface border-hairline-strong text-txt-muted",
+              )}
+              data-testid={`step-dot-${step}`}
+            >
+              {status === "done" ? (
+                <svg
+                  width="10"
+                  height="10"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="3"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M20 6 9 17l-5-5" />
+                </svg>
+              ) : (
+                idx + 1
+              )}
+            </span>
+            <span
+              className={cn(
+                "text-[0.6875rem] font-semibold text-center leading-snug px-1",
+                status === "active"
+                  ? "text-accent-strong"
+                  : status === "done"
+                    ? "text-accent-strong"
+                    : "text-txt-muted",
+              )}
+              data-testid={`step-label-${step}`}
+            >
+              {stepLabels[step]}
+            </span>
+            {!isLast && (
+              <span
+                className={cn(
+                  "absolute top-[9px] left-1/2 w-full h-0.5 -z-10",
+                  status === "done" ? "bg-accent" : "bg-hairline",
+                )}
+                aria-hidden="true"
+              />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Workspace inner tabs (US-14, #484). Follows the patient shell's tab
+// pattern (PROTO-2.7 binding, shell-light.html `.tabs`): a clean underline
+// indicator on the active tab, no hairline under the whole group. Role
+// semantics remain: role=tablist/tab/tabpanel, aria-selected, roving
+// tabIndex, and arrow-key rotation so the tabs behave like a native tab
+// control (keyboard navigation, screen-reader panel association).
 type WorkspaceTab = "pre_summary" | "history" | "prescription";
 
 const WORKSPACE_TABS: WorkspaceTab[] = [
@@ -252,7 +390,7 @@ function WorkspaceTabs({
     <div
       role="tablist"
       aria-label={t.title}
-      className="flex gap-1 border-b border-hairline"
+      className="flex gap-6 border-b border-hairline pb-px"
       data-testid="workspace-tabs"
     >
       {WORKSPACE_TABS.map((tab) => {
@@ -270,10 +408,10 @@ function WorkspaceTabs({
             onClick={() => onChange(tab)}
             onKeyDown={(e) => handleKeyDown(e, tab)}
             className={cn(
-              "flex-1 rounded-t-md border-b-2 px-3 py-2 text-sm font-medium transition-colors focus:outline-none focus:ring-1 focus:ring-accent",
-              selected
-                ? "border-accent text-accent-strong"
-                : "border-transparent text-txt-muted hover:text-txt",
+              "relative py-3 text-sm font-medium transition-colors focus:outline-none focus:ring-1 focus:ring-accent focus:ring-offset-2 rounded-sm",
+              selected ? "text-accent-strong" : "text-txt-muted hover:text-txt",
+              selected &&
+                "after:absolute after:bottom-[-1px] after:left-0 after:right-0 after:h-0.5 after:bg-accent",
             )}
           >
             {labels[tab]}
@@ -286,14 +424,15 @@ function WorkspaceTabs({
 
 function LoadingSkeleton() {
   return (
-    <div className="space-y-3" data-testid="case-skeleton">
-      {Array.from({ length: 2 }).map((_, i) => (
+    <div className="space-y-4" data-testid="case-skeleton">
+      {Array.from({ length: 3 }).map((_, i) => (
         <div
           key={i}
-          className="rounded-lg border border-hairline bg-surface p-4"
+          className="rounded-lg border border-hairline bg-surface p-4 animate-pulse"
         >
-          <div className="h-4 w-1/2 rounded bg-muted-soft" />
-          <div className="mt-2 h-3 w-1/4 rounded bg-muted-soft" />
+          <div className="h-5 w-1/3 rounded bg-hairline-soft/60" />
+          <div className="mt-3 h-4 w-1/2 rounded bg-hairline-soft/60" />
+          <div className="mt-2 h-3 w-1/4 rounded bg-hairline-soft/60" />
         </div>
       ))}
     </div>
@@ -365,11 +504,12 @@ export default function CaseWorkspacePage() {
   const [manualMode, setManualMode] = useState(false);
 
   // Issuance + closure state (US-19..22, #453). The approve request is only
-  // ever sent once the doctor ticks the verification declaration; rejection
+  // ever sent once the doctor ticks both verification declarations; rejection
   // carries a plain-language reason; close-without-prescription ends the case.
   const [approving, setApproving] = useState(false);
   const [approveError, setApproveError] = useState(false);
   const [declaration, setDeclaration] = useState(false);
+  const [confirmIssue, setConfirmIssue] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [rejectError, setRejectError] = useState(false);
   const [rejectReason, setRejectReason] = useState("");
@@ -379,6 +519,7 @@ export default function CaseWorkspacePage() {
 
   function resetDecisionState() {
     setDeclaration(false);
+    setConfirmIssue(false);
     setRejectReason("");
   }
 
@@ -829,6 +970,14 @@ export default function CaseWorkspacePage() {
         description={careCase ? consoleT.caseItemMeta(caseId) : undefined}
       />
 
+      {isReady && (
+        <CaseStepper
+          currentStage={currentStage}
+          handshakeDone={handshakeDone}
+          t={t}
+        />
+      )}
+
       {loadStatus === "error" && bannerOpen && (
         <ErrorBanner
           message={t.loadFailed}
@@ -844,7 +993,7 @@ export default function CaseWorkspacePage() {
         <div className="space-y-6" data-testid="case-content">
           {/* Stage + forced-review requirement */}
           <section
-            className="rounded-lg border border-hairline bg-bg p-4"
+            className="rounded-lg border border-hairline bg-surface p-4"
             data-testid="case-stage"
           >
             <div className="flex items-center gap-3">
@@ -857,10 +1006,12 @@ export default function CaseWorkspacePage() {
               <span
                 data-testid="stage-chip"
                 className={cn(
-                  "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
+                  "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium",
                   currentStage === "pre_summary"
                     ? "bg-warning-soft text-warning-text"
-                    : "bg-accent-soft text-accent-strong",
+                    : currentStage === "prescription_pending"
+                      ? "bg-accent-soft text-accent-strong"
+                      : "bg-muted-soft text-txt-muted",
                 )}
               >
                 {stageDisplayName(currentStage, consoleT)}
@@ -869,15 +1020,34 @@ export default function CaseWorkspacePage() {
 
             {careCase.forced_review && (
               <div
-                className="mt-3 rounded-md border border-warning/30 bg-warning-soft/40 px-3 py-2"
+                className="mt-3 rounded-md border border-warning/30 bg-warning-soft/40 px-3 py-2.5"
                 data-testid="forced-review-banner"
               >
-                <span className="inline-flex items-center gap-1 text-xs font-semibold text-warning-text">
-                  {t.forcedReviewChip}
-                </span>
-                <p className="mt-1 text-xs text-txt-muted">
-                  {t.forcedReviewDetail}
-                </p>
+                <div className="flex items-start gap-2">
+                  <svg
+                    className="shrink-0 mt-0.5 text-warning-text"
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <circle cx="12" cy="12" r="10" />
+                    <path d="M12 8v4M12 16h.01" />
+                  </svg>
+                  <div className="min-w-0 flex-1">
+                    <span className="inline-flex items-center gap-1 text-xs font-semibold text-warning-text">
+                      {t.forcedReviewChip}
+                    </span>
+                    <p className="mt-1 text-xs text-txt-muted">
+                      {t.forcedReviewDetail}
+                    </p>
+                  </div>
+                </div>
               </div>
             )}
           </section>
@@ -971,43 +1141,84 @@ export default function CaseWorkspacePage() {
                   {t.summaryHeading}
                 </h2>
                 <div className="mt-3 space-y-3">
-                  <div data-testid="case-pre-summary-complaints">
-                    <span className="text-xs font-medium text-txt-muted">
+                  {/* Chief complaints - field group */}
+                  <div
+                    className="border-t border-hairline"
+                    data-testid="case-pre-summary-complaints"
+                  >
+                    <div className="pt-3 pb-1.5 px-1 font-semibold text-xs text-txt-muted uppercase tracking-wider flex items-center gap-2">
                       {t.chiefComplaintsLabel}
-                    </span>
-                    <ul className="mt-1 list-disc pl-4">
-                      {preSummaryForReview.structured_fields.chief_complaints.map(
-                        (c) => (
-                          <li key={c} className="text-sm text-txt">
-                            {c}
-                          </li>
-                        ),
-                      )}
-                    </ul>
+                    </div>
+                    {preSummaryForReview.structured_fields.chief_complaints
+                      .length > 0 ? (
+                      <ul className="space-y-1.5">
+                        {preSummaryForReview.structured_fields.chief_complaints.map(
+                          (c, idx) => (
+                            <li
+                              key={idx}
+                              className="grid grid-cols-[140px_1fr] gap-3 text-sm"
+                            >
+                              <span className="text-txt-muted">#{idx + 1}</span>
+                              <span className="font-medium text-txt">{c}</span>
+                            </li>
+                          ),
+                        )}
+                      </ul>
+                    ) : (
+                      <p className="text-sm text-txt-muted mt-1">
+                        {t.durationNotSet}
+                      </p>
+                    )}
                   </div>
-                  <div data-testid="case-pre-summary-symptoms">
-                    <span className="text-xs font-medium text-txt-muted">
+
+                  {/* Symptoms - field group */}
+                  <div
+                    className="border-t border-hairline"
+                    data-testid="case-pre-summary-symptoms"
+                  >
+                    <div className="pt-3 pb-1.5 px-1 font-semibold text-xs text-txt-muted uppercase tracking-wider flex items-center gap-2">
                       {t.symptomsLabel}
-                    </span>
-                    <ul className="mt-1 list-disc pl-4">
-                      {preSummaryForReview.structured_fields.symptoms.map(
-                        (s) => (
-                          <li key={s} className="text-sm text-txt">
-                            {s}
-                          </li>
-                        ),
-                      )}
-                    </ul>
+                    </div>
+                    {preSummaryForReview.structured_fields.symptoms.length >
+                    0 ? (
+                      <ul className="space-y-1.5">
+                        {preSummaryForReview.structured_fields.symptoms.map(
+                          (s, idx) => (
+                            <li
+                              key={idx}
+                              className="grid grid-cols-[140px_1fr] gap-3 text-sm"
+                            >
+                              <span className="text-txt-muted">#{idx + 1}</span>
+                              <span className="font-medium text-txt">{s}</span>
+                            </li>
+                          ),
+                        )}
+                      </ul>
+                    ) : (
+                      <p className="text-sm text-txt-muted mt-1">
+                        {t.durationNotSet}
+                      </p>
+                    )}
                   </div>
-                  <div data-testid="case-pre-summary-duration">
-                    <span className="text-xs font-medium text-txt-muted">
+
+                  {/* Duration - field group */}
+                  <div
+                    className="border-t border-hairline"
+                    data-testid="case-pre-summary-duration"
+                  >
+                    <div className="pt-3 pb-1.5 px-1 font-semibold text-xs text-txt-muted uppercase tracking-wider flex items-center gap-2">
                       {t.durationLabel}
-                    </span>
-                    <p className="text-sm text-txt">
-                      {preSummaryForReview.structured_fields.duration ??
-                        t.durationNotSet}
-                    </p>
+                    </div>
+                    <div className="grid grid-cols-[140px_1fr] gap-3 text-sm">
+                      <span className="text-txt-muted">{t.durationLabel}</span>
+                      <span className="font-medium text-txt">
+                        {preSummaryForReview.structured_fields.duration ??
+                          t.durationNotSet}
+                      </span>
+                    </div>
                   </div>
+
+                  {/* Confidence + review state - inline */}
                   <div className="flex items-center gap-4">
                     <div data-testid="case-pre-summary-confidence">
                       <span className="text-xs font-medium text-txt-muted">
@@ -1029,47 +1240,82 @@ export default function CaseWorkspacePage() {
                       </span>
                     )}
                   </div>
-                  <div data-testid="case-pre-summary-patient-edits">
-                    <span className="text-xs font-medium text-txt-muted">
+
+                  {/* Patient edits - field group */}
+                  <div
+                    className="border-t border-hairline"
+                    data-testid="case-pre-summary-patient-edits"
+                  >
+                    <div className="pt-3 pb-1.5 px-1 font-semibold text-xs text-txt-muted uppercase tracking-wider flex items-center gap-2">
                       {t.patientEditsLabel}
-                    </span>
-                    <p className="text-sm text-txt">
-                      {Object.keys(preSummaryForReview.patient_edits ?? {})
-                        .length > 0
-                        ? Object.entries(
-                            preSummaryForReview.patient_edits ?? {},
-                          )
-                            .map(([k, v]) => `${k}: ${v}`)
-                            .join("; ")
-                        : t.patientEditsNone}
-                    </p>
-                  </div>
-                  <div data-testid="case-pre-summary-attribution">
-                    <span className="text-xs font-medium text-txt-muted">
-                      {t.attributionLabel}
-                    </span>
-                    <p className="text-sm text-txt">
-                      {preSummaryForReview.review_attribution != null
-                        ? preSummaryForReview.review_attribution
-                        : t.notReviewedYet}
-                    </p>
-                  </div>
-                  <div data-testid="case-pre-summary-review-state">
-                    <span className="text-xs font-medium text-txt-muted">
-                      {t.reviewStateLabel}
-                    </span>
-                    <span className="ml-1 text-sm text-txt">
-                      {reviewStateDisplayName(
-                        preSummaryForReview.review_state,
-                        t,
-                      )}
-                    </span>
-                    {preSummaryForReview.reviewed_at != null && (
-                      <span className="ml-2 text-xs text-txt-muted">
-                        ({t.reviewedOnLabel}:{" "}
-                        {formatDateTime(preSummaryForReview.reviewed_at, lang)})
+                    </div>
+                    <div className="grid grid-cols-[140px_1fr] gap-3 text-sm">
+                      <span className="text-txt-muted">
+                        {t.patientEditsLabel}
                       </span>
-                    )}
+                      <span className="font-medium text-txt">
+                        {Object.keys(preSummaryForReview.patient_edits ?? {})
+                          .length > 0
+                          ? Object.entries(
+                              preSummaryForReview.patient_edits ?? {},
+                            )
+                              .map(([k, v]) => `${k}: ${v}`)
+                              .join("; ")
+                          : t.patientEditsNone}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Attribution - field group */}
+                  <div
+                    className="border-t border-hairline"
+                    data-testid="case-pre-summary-attribution"
+                  >
+                    <div className="pt-3 pb-1.5 px-1 font-semibold text-xs text-txt-muted uppercase tracking-wider flex items-center gap-2">
+                      {t.attributionLabel}
+                    </div>
+                    <div className="grid grid-cols-[140px_1fr] gap-3 text-sm">
+                      <span className="text-txt-muted">
+                        {t.attributionLabel}
+                      </span>
+                      <span className="font-medium text-txt">
+                        {preSummaryForReview.review_attribution != null
+                          ? preSummaryForReview.review_attribution
+                          : t.notReviewedYet}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Review state - field group */}
+                  <div
+                    className="border-t border-hairline"
+                    data-testid="case-pre-summary-review-state"
+                  >
+                    <div className="pt-3 pb-1.5 px-1 font-semibold text-xs text-txt-muted uppercase tracking-wider flex items-center gap-2">
+                      {t.reviewStateLabel}
+                    </div>
+                    <div className="grid grid-cols-[140px_1fr] gap-3 text-sm">
+                      <span className="text-txt-muted">
+                        {t.reviewStateLabel}
+                      </span>
+                      <span className="font-medium text-txt">
+                        {reviewStateDisplayName(
+                          preSummaryForReview.review_state,
+                          t,
+                        )}
+                        {preSummaryForReview.reviewed_at != null && (
+                          <>
+                            {" "}
+                            ({t.reviewedOnLabel}:{" "}
+                            {formatDateTime(
+                              preSummaryForReview.reviewed_at,
+                              lang,
+                            )}
+                            )
+                          </>
+                        )}
+                      </span>
+                    </div>
                   </div>
                 </div>
               </section>
@@ -1078,7 +1324,7 @@ export default function CaseWorkspacePage() {
             {/* Handshake action - pre_summary stage only */}
             {showHandshake && (
               <section
-                className="rounded-lg border border-hairline bg-bg p-4"
+                className="rounded-lg border border-hairline bg-surface p-4"
                 data-testid="case-handshake"
               >
                 <form onSubmit={handleHandshake}>
@@ -1094,7 +1340,7 @@ export default function CaseWorkspacePage() {
                     {t.handshakeAction}
                   </Button>
                   {handshakeError && (
-                    <p className="mt-1 text-sm text-danger" role="alert">
+                    <p className="mt-2 text-sm text-danger" role="alert">
                       {t.handshakeFail}
                     </p>
                   )}
@@ -1143,36 +1389,107 @@ export default function CaseWorkspacePage() {
             data-testid="tab-panel-prescription"
           >
             {isPreSummaryStage && !handshakeDone ? (
-              /* Stage lock (#484): a born case always has a finalized pre-
-                  summary, so the only open step is the consult-complete
-                  handshake. The action jumps the doctor to the Pre-summary
-                  tab where the handshake form lives. */
+              /* Stage lock (#484, PROTO-8 binding): a born case always has a
+                  finalized pre-summary, so the only open step is the
+                  consult-complete handshake. The lock names exactly what is
+                  missing with one-tap jump to the relevant tab/action. */
               <section
-                className="rounded-lg border border-warning/30 bg-warning-soft/40 p-4"
+                className="rounded-lg border border-dashed border-hairline-strong bg-surface p-6 text-center"
                 data-testid="prescription-lock"
               >
-                <h2 className="text-sm font-semibold text-warning-text">
+                <div
+                  className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-hairline-soft text-txt-muted"
+                  aria-hidden="true"
+                >
+                  <svg
+                    width="24"
+                    height="24"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                  >
+                    <rect x="4" y="11" width="16" height="10" rx="2" />
+                    <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+                  </svg>
+                </div>
+                <h2 className="text-sm font-semibold text-txt">
                   {t.rxLockTitle}
                 </h2>
-                <ul className="mt-2 space-y-1 text-xs text-txt-muted">
-                  <li data-testid="rx-lock-done">
-                    <span aria-hidden="true">{"\u2713"}</span>{" "}
-                    <span>{t.rxLockDone}</span>
-                  </li>
-                  <li data-testid="rx-lock-pending">
-                    <span aria-hidden="true">{"\u2022"}</span>{" "}
-                    <span>{t.rxLockPending}</span>
-                  </li>
-                </ul>
-                <Button
-                  type="button"
-                  size="sm"
-                  className="mt-3"
-                  data-testid="rx-lock-action"
-                  onClick={() => setActiveTab("pre_summary")}
-                >
-                  {t.rxLockAction}
-                </Button>
+                <p className="mt-1 text-xs text-txt-muted max-w-[34em] mx-auto">
+                  {t.rxLockSubtitle}
+                </p>
+                <div className="mt-4 max-w-[30em] mx-auto space-y-2 text-left">
+                  {/* Pre-summary finalized */}
+                  <div
+                    className={cn(
+                      "flex items-center gap-3 rounded-lg border p-3 bg-surface",
+                      handshakeDone
+                        ? "border-success-border"
+                        : "border-hairline",
+                    )}
+                    data-testid="rx-lock-presummary"
+                  >
+                    <span className="flex-1 text-sm text-txt-sub">
+                      {t.rxLockPreSummary}
+                    </span>
+                    {!handshakeDone && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="shrink-0"
+                        onClick={() => setActiveTab("pre_summary")}
+                        data-testid="rx-lock-presummary-action"
+                      >
+                        {t.rxLockGoToSummary}
+                      </Button>
+                    )}
+                    {handshakeDone && (
+                      <span
+                        className="shrink-0 text-sm font-semibold text-success"
+                        aria-hidden="true"
+                      >
+                        {"\u2713"}
+                      </span>
+                    )}
+                  </div>
+                  {/* Consult marked complete */}
+                  <div
+                    className={cn(
+                      "flex items-center gap-3 rounded-lg border p-3 bg-surface",
+                      handshakeDone
+                        ? "border-success-border"
+                        : "border-hairline",
+                    )}
+                    data-testid="rx-lock-handshake"
+                  >
+                    <span className="flex-1 text-sm text-txt-sub">
+                      {t.rxLockHandshake}
+                    </span>
+                    {!handshakeDone && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="shrink-0"
+                        onClick={() => setActiveTab("pre_summary")}
+                        data-testid="rx-lock-handshake-action"
+                      >
+                        {t.rxLockMarkComplete}
+                      </Button>
+                    )}
+                    {handshakeDone && (
+                      <span
+                        className="shrink-0 text-sm font-semibold text-success"
+                        aria-hidden="true"
+                      >
+                        {"\u2713"}
+                      </span>
+                    )}
+                  </div>
+                </div>
               </section>
             ) : (
               <>
@@ -1192,7 +1509,7 @@ export default function CaseWorkspacePage() {
                 {/* Prescription drafting (US-18) - pending cases only */}
                 {isPrescriptionPending && careCase != null && (
                   <section
-                    className="rounded-lg border border-border bg-bg p-4"
+                    className="rounded-lg border border-hairline bg-surface p-4"
                     data-testid="case-prescription"
                   >
                     <h2 className="text-sm font-semibold text-txt">
@@ -1208,8 +1525,8 @@ export default function CaseWorkspacePage() {
                           className="space-y-2"
                           data-testid="prescription-loading"
                         >
-                          <div className="h-4 w-1/3 rounded bg-muted-soft" />
-                          <div className="h-4 w-1/2 rounded bg-muted-soft" />
+                          <div className="h-4 w-1/3 rounded bg-hairline-soft/60 animate-pulse" />
+                          <div className="h-4 w-1/2 rounded bg-hairline-soft/60 animate-pulse" />
                         </div>
                       )}
 
@@ -1315,7 +1632,7 @@ export default function CaseWorkspacePage() {
                                     setAddendumText(e.target.value)
                                   }
                                   placeholder={t.addendumPlaceholder}
-                                  className="w-full rounded-md border border-hairline bg-bg px-3 py-2 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                                  className="w-full rounded-md border border-hairline bg-surface px-3 py-2 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
                                   data-testid="rx-input-addendum"
                                 />
                               </label>
@@ -1718,37 +2035,75 @@ export default function CaseWorkspacePage() {
                                 </p>
 
                                 <div
-                                  className="mt-2"
+                                  className="mt-2 space-y-4"
                                   data-testid="approval-gate"
                                 >
-                                  <p className="text-xs text-txt-muted">
-                                    {t.approvalGateTitle}. {t.approvalGateHelp}
-                                  </p>
-                                  <label className="mt-2 flex items-start gap-2 text-sm text-txt">
-                                    <input
-                                      type="checkbox"
-                                      checked={declaration}
-                                      onChange={(e) =>
-                                        setDeclaration(e.target.checked)
-                                      }
-                                      className="mt-0.5 h-4 w-4"
-                                      data-testid="verification-declaration"
-                                    />
-                                    <span>{t.verificationDeclaration}</span>
-                                  </label>
+                                  {/* Step 1: Review & approve */}
+                                  <div
+                                    className="rounded-lg border border-hairline bg-surface p-4"
+                                    data-testid="confirm-step-1"
+                                  >
+                                    <h4 className="text-sm font-semibold text-txt">
+                                      {t.approvalGateTitle}
+                                    </h4>
+                                    <p className="mt-1 text-xs text-txt-muted">
+                                      {t.approvalGateHelp}
+                                    </p>
+                                    <label className="mt-3 flex items-start gap-2 text-sm text-txt cursor-pointer">
+                                      <input
+                                        type="checkbox"
+                                        checked={declaration}
+                                        onChange={(e) =>
+                                          setDeclaration(e.target.checked)
+                                        }
+                                        className="mt-0.5 h-4 w-4"
+                                        data-testid="verification-declaration"
+                                      />
+                                      <span>{t.verificationDeclaration}</span>
+                                    </label>
+                                  </div>
+
+                                  {/* Step 2: Confirm issue details - shown only after step 1 */}
+                                  {declaration && (
+                                    <div
+                                      className="rounded-lg border border-hairline bg-surface p-4"
+                                      data-testid="confirm-step-2"
+                                    >
+                                      <h4 className="text-sm font-semibold text-txt">
+                                        {t.confirmIssueTitle}
+                                      </h4>
+                                      <p className="mt-1 text-xs text-txt-muted">
+                                        {t.confirmIssueHelp}
+                                      </p>
+                                      <label className="mt-3 flex items-start gap-2 text-sm text-txt cursor-pointer">
+                                        <input
+                                          type="checkbox"
+                                          checked={confirmIssue}
+                                          onChange={(e) =>
+                                            setConfirmIssue(e.target.checked)
+                                          }
+                                          className="mt-0.5 h-4 w-4"
+                                          data-testid="confirm-issue-declaration"
+                                        />
+                                        <span>{t.confirmIssueDeclaration}</span>
+                                      </label>
+                                    </div>
+                                  )}
+
                                   {!declaration && (
                                     <p
-                                      className="mt-1 text-xs text-txt-muted"
+                                      className="text-xs text-txt-muted"
                                       data-testid="approve-blocked-help"
                                     >
                                       {t.approveBlockedHelp}
                                     </p>
                                   )}
+
                                   <Button
                                     type="button"
                                     size="sm"
-                                    className="mt-2"
-                                    disabled={!declaration}
+                                    className="w-full"
+                                    disabled={!declaration || !confirmIssue}
                                     loading={approving}
                                     onClick={() => void handleApprove()}
                                     data-testid="approve-issue-action"
@@ -1822,7 +2177,7 @@ export default function CaseWorkspacePage() {
                 {/* Close-without-prescription (US-22) - pending cases only */}
                 {isPrescriptionPending && careCase != null && (
                   <section
-                    className="rounded-lg border border-hairline bg-bg p-4"
+                    className="rounded-lg border border-hairline bg-surface p-4"
                     data-testid="case-close"
                   >
                     <h2 className="text-sm font-semibold text-txt">
