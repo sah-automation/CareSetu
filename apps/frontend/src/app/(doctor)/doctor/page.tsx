@@ -2,21 +2,21 @@
 
 // PHASE-8.1 T12 (#450): doctor console landing page - replaces the Phase 5
 // placeholder with the review queue (low-confidence first, oldest within each
-// group, US-11/12), open care cases (US-15), the consultation fee editor
-// (US-25), and coming-soon patients/profile tabs (US-26). The review queue
-// items link into the case workspace (review/[intakeId], cases/[caseId]);
-// those pages are built by #451-#453. All copy bilingual en/hi (REQ-006).
+// group, US-11/12) and open care cases (US-15). The review queue items link
+// into the case workspace (review/[intakeId], cases/[caseId]); those pages are
+// built by #451-#453. All copy bilingual en/hi (REQ-006).
+//
+// #543: the consultation-fee editor moved to the Profile page, which is where
+// a doctor edits their own record; this landing keeps the coming-soon tabs
+// until #544 replaces them with real entry cards.
 
-import type { FormEvent } from "react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { EmptyState } from "@/components/layout/EmptyState";
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
 import { PageHeader } from "@/components/layout/PageHeader";
-import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { formatFeePaise } from "@/components/pick/DoctorPickCard";
 import { cn } from "@/lib/utils";
 import { ApiError } from "@/lib/api-errors";
 import { fetchReviewQueue, type ReviewQueueItem } from "@/lib/intake/api";
@@ -25,7 +25,6 @@ import {
   type CaseDetailView,
   type CareCaseStage,
 } from "@/lib/care/api";
-import { updateConsultationFee } from "@/lib/partner/api";
 import { STRINGS, type Dictionary } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 
@@ -106,13 +105,6 @@ export default function DoctorDashboardPage() {
   const [errorTraceId, setErrorTraceId] = useState<string | undefined>();
   const [bannerOpen, setBannerOpen] = useState(false);
 
-  // Fee editor state
-  const [feeInput, setFeeInput] = useState("");
-  const [feeCurrentPaise, setFeeCurrentPaise] = useState<number | null>(null);
-  const [feeSaving, setFeeSaving] = useState(false);
-  const [feeSaved, setFeeSaved] = useState(false);
-  const [feeError, setFeeError] = useState(false);
-
   const load = useCallback(() => {
     setLoadStatus("loading");
     setBannerOpen(false);
@@ -134,43 +126,6 @@ export default function DoctorDashboardPage() {
   }, [load]);
 
   const sortedQueue = useMemo(() => sortQueue(queue), [queue]);
-
-  // ---- fee handlers ----
-
-  async function handleSaveFee(e: FormEvent) {
-    e.preventDefault();
-    setFeeSaving(true);
-    setFeeSaved(false);
-    setFeeError(false);
-    try {
-      const rupees = Number(feeInput);
-      if (!Number.isFinite(rupees) || rupees < 0) throw new Error("invalid");
-      const paise = Math.round(rupees * 100);
-      await updateConsultationFee(paise);
-      setFeeCurrentPaise(paise);
-      setFeeSaved(true);
-    } catch {
-      setFeeError(true);
-    } finally {
-      setFeeSaving(false);
-    }
-  }
-
-  async function handleClearFee() {
-    setFeeSaving(true);
-    setFeeSaved(false);
-    setFeeError(false);
-    try {
-      await updateConsultationFee(null);
-      setFeeCurrentPaise(null);
-      setFeeInput("");
-      setFeeSaved(true);
-    } catch {
-      setFeeError(true);
-    } finally {
-      setFeeSaving(false);
-    }
-  }
 
   // ---- render ----
 
@@ -319,76 +274,6 @@ export default function DoctorDashboardPage() {
               </li>
             ))}
           </ul>
-        )}
-      </section>
-
-      {/* Consultation fee editor */}
-      <section
-        className="mt-6 rounded-lg border border-border bg-bg p-4"
-        data-testid="fee-editor"
-      >
-        <h2 className="text-sm font-semibold text-txt">{t.feeEditorHeading}</h2>
-        <p className="mt-1 text-sm text-txt-muted">{t.feeEditorHelp}</p>
-
-        {feeCurrentPaise !== null && (
-          <p className="mt-2 text-sm text-txt" data-testid="fee-current">
-            {formatFeePaise(feeCurrentPaise)}
-          </p>
-        )}
-
-        <form className="mt-3 flex items-end gap-2" onSubmit={handleSaveFee}>
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-medium text-txt-muted">
-              {t.feeFieldLabel}
-            </span>
-            <input
-              type="number"
-              inputMode="decimal"
-              min="0"
-              step="1"
-              value={feeInput}
-              onChange={(e) => setFeeInput(e.target.value)}
-              placeholder={t.feeFieldPlaceholder}
-              className="h-9 rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-              data-testid="fee-input"
-            />
-          </label>
-          <Button
-            type="submit"
-            size="sm"
-            disabled={feeSaving || feeInput === ""}
-            loading={feeSaving}
-            data-testid="fee-save"
-          >
-            {t.saveFee}
-          </Button>
-          {feeCurrentPaise !== null && (
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              disabled={feeSaving}
-              onClick={handleClearFee}
-              data-testid="fee-clear"
-            >
-              {t.clearFee}
-            </Button>
-          )}
-        </form>
-
-        {feeSaved && (
-          <p className="mt-2 text-sm text-success" data-testid="fee-message">
-            {t.feeSaved}
-          </p>
-        )}
-        {feeError && (
-          <p
-            className="mt-2 text-sm text-danger"
-            data-testid="fee-message"
-            role="alert"
-          >
-            {t.feeSaveFailed}
-          </p>
         )}
       </section>
 

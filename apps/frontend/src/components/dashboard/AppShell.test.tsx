@@ -501,6 +501,14 @@ describe.each(["doctor", "partner", "operator"] as const)(
       const soonItems = screen
         .getAllByTestId(/^nav-/)
         .filter((el) => el.getAttribute("data-soon") === "true");
+      // #543: the doctor console carries no coming-soon row any more - queue,
+      // cases, patients and profile all have live pages - so the dimmed-row
+      // contract now only applies to the roles that still have one.
+      if (role === "doctor") {
+        expect(soonItems).toHaveLength(0);
+        expect(screen.queryAllByTestId("soon-badge")).toHaveLength(0);
+        return;
+      }
       expect(soonItems.length).toBeGreaterThan(0);
       for (const item of soonItems) {
         expect(item).toHaveAttribute("aria-disabled", "true");
@@ -603,7 +611,7 @@ describe("AppShell doctor Cases count pill (PHASE-8.1 T8, #483)", () => {
     expect(screen.queryByTestId("count-pill")).not.toBeInTheDocument();
   });
 
-  it("links doctor Patients live while Profile stays coming-soon (#541)", async () => {
+  it("links doctor Patients and Profile live (#541, #543)", async () => {
     renderDoctor();
 
     await waitFor(() =>
@@ -628,18 +636,21 @@ describe("AppShell doctor Cases count pill (PHASE-8.1 T8, #483)", () => {
     );
     expect(screen.getByTestId("tab-patients").tagName).toBe("A");
     expect(screen.getByTestId("tab-patients")).not.toHaveAttribute("data-soon");
-    // Profile stays coming-soon until #543, so it must render dimmed and
-    // non-interactive - never a writable dead link.
+    // #543: Profile un-sooned - /doctor/profile is the live private profile
+    // projection plus the fee editor, so it links on the sidebar and the
+    // phone tab bar like the other real doctor destinations.
     expect(screen.getByTestId("nav-profile")).toHaveAttribute(
-      "data-soon",
-      "true",
+      "href",
+      "/doctor/profile",
     );
-    expect(screen.getByTestId("nav-profile").tagName).toBe("SPAN");
+    expect(screen.getByTestId("nav-profile").tagName).toBe("A");
+    expect(screen.getByTestId("nav-profile")).not.toHaveAttribute("data-soon");
     expect(screen.getByTestId("tab-profile")).toHaveAttribute(
-      "data-soon",
-      "true",
+      "href",
+      "/doctor/profile",
     );
-    expect(screen.getByTestId("tab-profile").tagName).toBe("SPAN");
+    expect(screen.getByTestId("tab-profile").tagName).toBe("A");
+    expect(screen.getByTestId("tab-profile")).not.toHaveAttribute("data-soon");
   });
 });
 

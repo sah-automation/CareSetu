@@ -163,8 +163,7 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       group: "work",
     },
     // #541: Patients un-sooned - /doctor/patients is a live destination
-    // (list + gated detail read the derived doctor patients API, #539/#540);
-    // only profile stays coming-soon until #543.
+    // (list + gated detail read the derived doctor patients API, #539/#540).
     {
       key: "patients",
       labelKey: "patients",
@@ -172,12 +171,14 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       icon: Users,
       group: "work",
     },
+    // #543: Profile un-sooned - /doctor/profile is the live private
+    // projection (#542) plus the consultation-fee editor, so the entry is a
+    // real link on the sidebar and the phone tab bar.
     {
       key: "profile",
       labelKey: "profile",
       href: "/doctor/profile",
       icon: User,
-      soon: true,
       group: "account",
     },
   ],

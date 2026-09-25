@@ -384,8 +384,8 @@ describe("AccountMenu patient avatar trigger (#521)", () => {
   it("#538 shows the doctor a person-icon account avatar instead of phone digits", async () => {
     const trigger = await renderClosedTrigger(ME_RESPONSE_DOCTOR);
 
-    // The generic person icon entry point - no digit text, no saved photo
-    // until the doctor profile seam lands (#542/#543).
+    // The generic person icon entry point - no digit text, and no saved photo
+    // on the chrome disc (the doctor photo lives on the Profile page, #543).
     expect(trigger).not.toHaveTextContent("90");
     expect(trigger.querySelector("svg")).not.toBeNull();
     expect(trigger.querySelector("img")).toBeNull();
@@ -400,6 +400,22 @@ describe("AccountMenu patient avatar trigger (#521)", () => {
     expect(
       screen.getByRole("menuitem", { name: "Log out" }),
     ).toBeInTheDocument();
+  });
+
+  it("#543 opens the doctor Profile page from the avatar dropdown", async () => {
+    await renderClosedTrigger(ME_RESPONSE_DOCTOR);
+    await openViaKeyboard();
+
+    const profileItem = screen.getByTestId("account-menu-doctor-profile");
+    expect(profileItem).toHaveAttribute("href", "/doctor/profile");
+    expect(profileItem).toHaveTextContent("Profile");
+  });
+
+  it("#543 keeps the Profile row off non-doctor staff menus", async () => {
+    await renderClosedTrigger(ME_RESPONSE_PARTNER);
+    await openViaKeyboard();
+
+    expect(screen.queryByTestId("account-menu-doctor-profile")).toBeNull();
   });
 
   it("non-doctor staff keeps the phone-digit trigger and dropdown verbatim", async () => {

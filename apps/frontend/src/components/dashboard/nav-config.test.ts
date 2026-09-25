@@ -35,12 +35,16 @@ describe("NAV_CONFIG", () => {
     expect(home.soon).toBeUndefined();
   });
 
-  it("keeps every non-home staff entry as Soon except the doctor Cases and Patients tabs", () => {
+  it("keeps every non-home staff entry as Soon except the doctor Cases, Patients and Profile tabs", () => {
     for (const role of ["doctor", "partner", "operator"] as const) {
       for (const item of NAV_CONFIG[role].slice(1)) {
+        // #543: Profile joins Cases/Patients as a live doctor tab - each one
+        // has a real route behind it, so none may stay dimmed.
         const isLiveDoctorTab =
           role === "doctor" &&
-          (item.key === "cases" || item.key === "patients");
+          (item.key === "cases" ||
+            item.key === "patients" ||
+            item.key === "profile");
         expect(item.soon, `${role}/${item.key}`).toBe(
           isLiveDoctorTab ? undefined : true,
         );

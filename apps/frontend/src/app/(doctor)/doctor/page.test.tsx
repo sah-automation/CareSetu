@@ -3,8 +3,9 @@
 // confidence flag, US-11/12), the open care-cases section with stage chips
 // (US-15), the deep links into the workspace routes (review/[intakeId],
 // cases/[caseId]) that #451-#453 fill, the coming-soon patients/profile tabs
-// (US-26), the consultation-fee editor (blank until set, save + clear, US-25),
-// load failure with retry, and bilingual EN/HI parity (REQ-006).
+// (US-26, replaced by #544), load failure with retry, and bilingual EN/HI
+// parity (REQ-006). The consultation-fee editor that used to live here moved
+// to the Profile page in #543 and is covered by its own suite.
 
 import {
   cleanup,
@@ -27,7 +28,6 @@ import {
   type CareCaseStage,
   type CaseDetailView,
 } from "@/lib/care/api";
-import { updateConsultationFee } from "@/lib/partner/api";
 
 vi.mock("next/link", () => {
   return {
@@ -56,16 +56,10 @@ vi.mock("@/lib/care/api", async (importOriginal) => {
   return { ...mod, listOpenCases: vi.fn() };
 });
 
-vi.mock("@/lib/partner/api", async (importOriginal) => {
-  const mod = await importOriginal<typeof import("@/lib/partner/api")>();
-  return { ...mod, updateConsultationFee: vi.fn() };
-});
-
 const t = STRINGS.en.doctorConsole;
 const hiT = STRINGS.hi.doctorConsole;
 const getQueue = vi.mocked(fetchReviewQueue);
 const getCases = vi.mocked(listOpenCases);
-const setFee = vi.mocked(updateConsultationFee);
 
 function queueItem(overrides: Partial<ReviewQueueItem> = {}): ReviewQueueItem {
   return {
@@ -281,80 +275,6 @@ describe("DoctorDashboardPage open cases", () => {
     expect(
       within(screen.getByTestId("open-cases")).getByText(t.casesEmpty),
     ).toBeTruthy();
-  });
-});
-
-describe("DoctorDashboardPage fee editor (US-25)", () => {
-  it("starts blank until the doctor sets a fee", () => {
-    render(<DoctorDashboardPage />);
-    const input = screen.getByTestId("fee-input") as HTMLInputElement;
-    expect(input.value).toBe("");
-    expect(screen.queryByTestId("fee-current")).not.toBeInTheDocument();
-  });
-
-  it("saves the fee in paise and shows the saved value", async () => {
-    setFee.mockResolvedValue({
-      partner_id: 7,
-      status: "Active",
-      round: 0,
-    });
-    render(<DoctorDashboardPage />);
-
-    const input = screen.getByTestId("fee-input");
-    fireEvent.change(input, { target: { value: "400" } });
-    fireEvent.click(screen.getByTestId("fee-save"));
-
-    await waitFor(() =>
-      expect(screen.getByTestId("fee-message")).toHaveTextContent(t.feeSaved),
-    );
-    expect(setFee).toHaveBeenCalledWith(40000);
-    expect(screen.getByTestId("fee-current")).toHaveTextContent("\u20B9400");
-  });
-
-  it("clears the fee back to unset", async () => {
-    setFee.mockResolvedValue({
-      partner_id: 7,
-      status: "Active",
-      round: 0,
-    });
-    render(<DoctorDashboardPage />);
-
-    const input = screen.getByTestId("fee-input");
-    fireEvent.change(input, { target: { value: "400" } });
-    fireEvent.click(screen.getByTestId("fee-save"));
-    await waitFor(() => screen.getByTestId("fee-current"));
-
-    fireEvent.click(screen.getByTestId("fee-clear"));
-    await waitFor(() =>
-      expect(screen.getByTestId("fee-message")).toHaveTextContent(t.feeSaved),
-    );
-    expect(setFee).toHaveBeenCalledWith(null);
-    expect(screen.queryByTestId("fee-current")).not.toBeInTheDocument();
-    expect((screen.getByTestId("fee-input") as HTMLInputElement).value).toBe(
-      "",
-    );
-  });
-
-  it("surfaces the save-failed message on a backend error", async () => {
-    setFee.mockRejectedValue(
-      new ApiError({
-        code: "INTERNAL_ERROR",
-        message: "boom",
-        trace_id: "t",
-        details: {},
-      }),
-    );
-    render(<DoctorDashboardPage />);
-
-    const input = screen.getByTestId("fee-input");
-    fireEvent.change(input, { target: { value: "400" } });
-    fireEvent.click(screen.getByTestId("fee-save"));
-
-    await waitFor(() =>
-      expect(screen.getByTestId("fee-message")).toHaveTextContent(
-        t.feeSaveFailed,
-      ),
-    );
   });
 });
 

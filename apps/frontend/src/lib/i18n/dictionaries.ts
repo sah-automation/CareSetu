@@ -1240,9 +1240,10 @@ const en = {
 
   // doctorConsole.* surface - PHASE-8.1 T12 (#450): the doctor console
   // landing page. Two stacked sections: review queue (low-confidence first,
-  // oldest-first within each group) and open care cases, plus the fee editor,
-  // coming-soon patients/profile, and a retry path on load failure. All copy
-  // bilingual en/hi (REQ-006).
+  // oldest-first within each group) and open care cases, plus coming-soon
+  // patients/profile, and a retry path on load failure. The consultation-fee
+  // editor moved to the Profile page in #543. All copy bilingual en/hi
+  // (REQ-006).
   doctorConsole: {
     title: "Doctor console",
     consoleDescription: "Your review queue and open cases",
@@ -1265,20 +1266,92 @@ const en = {
     stagePrescriptionPending: "Prescription pending",
     stageClosed: "Closed",
     openCaseAction: "Open",
-    feeEditorHeading: "Consultation fee",
-    feeEditorHelp:
-      "Set the fee patients see when choosing you. Leave blank until set.",
-    feeFieldLabel: "Fee (\u20B9)",
-    feeFieldPlaceholder: "e.g. 400",
-    saveFee: "Save fee",
-    clearFee: "Clear fee",
-    feeSaved: "Fee saved.",
-    feeSaveFailed: "Could not save the fee.",
     patientsComingSoon: "Patients - coming soon",
     profileComingSoon: "Profile - coming soon",
     comingSoonBody: "This area opens in a later update.",
     loadFailed: "Could not load the console.",
     retry: "Try again",
+  },
+
+  // doctorProfile.* surface - PHASE-8.1 (#543): the doctor console Profile
+  // page, the live destination behind the un-sooned Profile nav entry. Renders
+  // and edits the private projection from #542 - photo upload/preview/remove,
+  // practice details, experience, languages, about, availability, credential
+  // status, notification toggles - and hosts the consultation-fee editor that
+  // moved here off the landing (its save still runs the unchanged PATCH route).
+  // The public directory entry stays a read-only preview link. All copy
+  // bilingual en/hi (REQ-006).
+  doctorProfile: {
+    title: "My profile",
+    description: "Your practice details, photo and consultation fee",
+    loadFailed: "Could not load your profile.",
+    photoHeading: "Profile photo",
+    photoHelp: "JPG, PNG or WebP. Your photo stays private to this page.",
+    photoUpload: "Upload photo",
+    photoReplace: "Replace photo",
+    photoRemove: "Remove photo",
+    photoFailed: "Could not update your photo.",
+    identityHeading: "Practice",
+    practiceNameLabel: "Practice name",
+    specialtyLabel: "Specialty",
+    areaLabel: "Area",
+    verified: "Verified",
+    notVerified: "Not verified",
+    credentialsHeading: "Credentials",
+    credentialsEmpty: "No credentials on file",
+    credentialExpires: (date: string) => `Valid until ${date}`,
+    credentialStatus: {
+      pending: "Pending review",
+      verified: "Verified",
+      expired: "Expired",
+      revoked: "Revoked",
+      reverification_failed: "Re-verification failed",
+    },
+    // The two credential kinds a doctor partner may hold; any other literal the
+    // API sends falls back to its own text rather than going unlabelled.
+    credentialType: {
+      medical_registration: "Medical registration",
+      qualification_certificate: "Qualification certificate",
+    },
+    detailsHeading: "Details",
+    experienceLabel: "Years of experience",
+    languagesLabel: "Languages",
+    languagesHelp: "Separate with commas",
+    languagesPlaceholder: "Hindi, English",
+    aboutLabel: "About",
+    aboutPlaceholder: "Tell patients about your practice",
+    availabilityLabel: "Availability",
+    availabilityPlaceholder: "e.g. Mon-Sat, 9am-1pm",
+    addressLabel: "Practice address",
+    latitudeLabel: "Latitude",
+    longitudeLabel: "Longitude",
+    coordinatesHelp: "Your practice location, used for the directory entry.",
+    notificationsHeading: "Notifications",
+    notificationLabels: {
+      new_consultations: "New consultations",
+      record_shared: "Records shared with you",
+      pre_summary_ready: "Pre-summaries ready to review",
+      case_updates: "Case updates",
+      credential_status: "Credential status changes",
+    },
+    save: "Save changes",
+    saved: "Profile saved.",
+    saveFailed: "Could not save your profile.",
+    invalidFields: "Check the highlighted fields and try again.",
+    publicPreviewHeading: "Public profile",
+    publicPreviewHelp:
+      "This is how patients see you in the directory. It is read-only here.",
+    publicPreviewAction: "View public profile",
+    feeHeading: "Consultation fee",
+    feeHelp:
+      "Set the fee patients see when choosing you. Leave blank until set.",
+    feeFieldLabel: "Fee (\u20B9)",
+    feeFieldPlaceholder: "e.g. 400",
+    saveFee: "Save fee",
+    clearFee: "Clear fee",
+    feeInvalid: "Enter a fee of 0 or more.",
+    feeSaved: "Fee saved.",
+    feeSaveFailed: "Could not save the fee.",
   },
 
   // doctorPatients.* surface - PHASE-8.1 (#541): the doctor console Patients
@@ -2605,7 +2678,8 @@ export const STRINGS: Record<Lang, Dictionary> = {
 
     // doctorConsole.* सतह - PHASE-8.1 T12 (#450): डॉक्टर कंसोल लैंडिंग पेज।
     // दो सेक्शन: समीक्षा कतार (कम विश्वास पहले, पुराने पहले) और खुले केयर केस,
-    // साथ ही शुल्क संपादक, आने वाले मरीज़/प्रोफ़ाइल, और लोड विफलता पर पुनः प्रयास।
+    // साथ ही आने वाले मरीज़/प्रोफ़ाइल, और लोड विफलता पर पुनः प्रयास।
+    // परामर्श शुल्क संपादक #543 में प्रोफ़ाइल पेज पर चला गया।
     // सभी कॉपी द्विभाषी en/hi (REQ-006)।
     doctorConsole: {
       title: "डॉक्टर कंसोल",
@@ -2629,20 +2703,91 @@ export const STRINGS: Record<Lang, Dictionary> = {
       stagePrescriptionPending: "नुस्ख़ा लंबित",
       stageClosed: "बंद",
       openCaseAction: "खोलें",
-      feeEditorHeading: "परामर्श शुल्क",
-      feeEditorHelp:
-        "वह शुल्क सेट करें जो मरीज़ आपको चुनने पर देखें। सेट न होने तक खाली रहेगा।",
-      feeFieldLabel: "शुल्क (\u20B9)",
-      feeFieldPlaceholder: "जैसे 400",
-      saveFee: "शुल्क सहेजें",
-      clearFee: "शुल्क हटाएँ",
-      feeSaved: "शुल्क सहेजा गया।",
-      feeSaveFailed: "शुल्क सहेजा नहीं जा सका।",
       patientsComingSoon: "मरीज़ - जल्द आ रहा है",
       profileComingSoon: "प्रोफ़ाइल - जल्द आ रहा है",
       comingSoonBody: "यह क्षेत्र बाद के अपडेट में खुलेगा।",
       loadFailed: "कंसोल लोड नहीं हो सका।",
       retry: "फिर से कोशिश करें",
+    },
+
+    // doctorProfile.* सतह - PHASE-8.1 (#543): डॉक्टर कंसोल का प्रोफ़ाइल
+    // पेज, अन-सून किए गए Profile नेव प्रविष्टि के पीछे का जीवंत पृष्ठ।
+    // #542 का निजी प्रोजेक्शन दिखाता और बदलता है - फोटो अपलोड/प्रीव्यू/
+    // हटाना, प्रैक्टिस विवरण, अनुभव, भाषाएँ, परिचय, उपलब्धता, प्रमाण
+    // स्थिति, सूचना टॉगल - और लैंडिंग से यहाँ आया परामर्श शुल्क संपादक
+    // (सेव अब भी अपरिवर्तित PATCH रूट से होता है)। सार्वजनिक डायरेक्टरी
+    // प्रविष्टि केवल-पढ़ने का पूर्वावलोकन लिंक रहती है। सभी कॉपी द्विभाषी
+    // en/hi (REQ-006)।
+    doctorProfile: {
+      title: "मेरी प्रोफ़ाइल",
+      description: "आपकी प्रैक्टिस की जानकारी, फोटो और परामर्श शुल्क",
+      loadFailed: "आपकी प्रोफ़ाइल लोड नहीं हो सकी।",
+      photoHeading: "प्रोफ़ाइल फोटो",
+      photoHelp: "JPG, PNG या WebP। आपकी फोटो इसी पेज पर निजी रहती है।",
+      photoUpload: "फोटो अपलोड करें",
+      photoReplace: "फोटो बदलें",
+      photoRemove: "फोटो हटाएँ",
+      photoFailed: "आपकी फोटो अपडेट नहीं हो सकी।",
+      identityHeading: "प्रैक्टिस",
+      practiceNameLabel: "प्रैक्टिस का नाम",
+      specialtyLabel: "विशेषज्ञता",
+      areaLabel: "क्षेत्र",
+      verified: "सत्यापित",
+      notVerified: "सत्यापित नहीं",
+      credentialsHeading: "प्रमाण",
+      credentialsEmpty: "कोई प्रमाण दर्ज नहीं",
+      credentialExpires: (date: string) => `${date} तक वैध`,
+      credentialStatus: {
+        pending: "समीक्षा बाकी",
+        verified: "सत्यापित",
+        expired: "मान्यता समाप्त",
+        revoked: "निरस्त",
+        reverification_failed: "पुनः सत्यापन विफल",
+      },
+      credentialType: {
+        medical_registration: "चिकित्सा पंजीकरण",
+        qualification_certificate: "योग्यता प्रमाणपत्र",
+      },
+      detailsHeading: "विवरण",
+      experienceLabel: "अनुभव के वर्ष",
+      languagesLabel: "भाषाएँ",
+      languagesHelp: "कॉमा से अलग करके लिखें",
+      languagesPlaceholder: "हिंदी, अंग्रेज़ी",
+      aboutLabel: "आपके बारे में",
+      aboutPlaceholder: "मरीज़ों को अपनी प्रैक्टिस के बारे में बताएँ",
+      availabilityLabel: "उपलब्धता",
+      availabilityPlaceholder: "जैसे सोम-शनि, सुबह 9 से दोपहर 1",
+      addressLabel: "प्रैक्टिस का पता",
+      latitudeLabel: "अक्षांश",
+      longitudeLabel: "देशांतर",
+      coordinatesHelp:
+        "प्रैक्टिस का स्थान, डायरेक्टरी प्रविष्टि के लिए उपयोग होता है।",
+      notificationsHeading: "सूचनाएँ",
+      notificationLabels: {
+        new_consultations: "नई परामर्श",
+        record_shared: "आपके साथ साझा किए गए रिकॉर्ड",
+        pre_summary_ready: "समीक्षा के लिए तैयार प्री-सारांश",
+        case_updates: "केस अपडेट",
+        credential_status: "प्रमाण स्थिति में बदलाव",
+      },
+      save: "बदलाव सहेजें",
+      saved: "प्रोफ़ाइल सहेजी गई।",
+      saveFailed: "आपकी प्रोफ़ाइल सहेजी नहीं जा सकी।",
+      invalidFields: "चिह्नित फ़ील्ड जाँचें और फिर कोशिश करें।",
+      publicPreviewHeading: "सार्वजनिक प्रोफ़ाइल",
+      publicPreviewHelp:
+        "मरीज़ आपको डायरेक्टरी में इसी तरह देखते हैं। यहाँ यह केवल-पढ़ने के लिए है।",
+      publicPreviewAction: "सार्वजनिक प्रोफ़ाइल देखें",
+      feeHeading: "परामर्श शुल्क",
+      feeHelp:
+        "वह शुल्क सेट करें जो मरीज़ आपको चुनने पर देखें। सेट न होने तक खाली रहेगा।",
+      feeFieldLabel: "शुल्क (\u20B9)",
+      feeFieldPlaceholder: "जैसे 400",
+      saveFee: "शुल्क सहेजें",
+      clearFee: "शुल्क हटाएँ",
+      feeInvalid: "0 या उससे अधिक शुल्क दर्ज करें।",
+      feeSaved: "शुल्क सहेजा गया।",
+      feeSaveFailed: "शुल्क सहेजा नहीं जा सका।",
     },
 
     // doctorPatients.* सतह - PHASE-8.1 (#541): डॉक्टर कंसोल का मरीज़ पेज

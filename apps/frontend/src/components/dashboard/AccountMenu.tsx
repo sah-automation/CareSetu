@@ -170,8 +170,10 @@ export function AccountMenu() {
               className={avatarClassName}
             />
           ) : isDoctor ? (
-            // #538: the doctor account avatar entry - person-icon fallback
-            // until the doctor profile seam resolves photo/name (#542/#543).
+            // #538: the doctor account avatar entry - person-icon fallback.
+            // #543: the doctor's own Profile page now owns their photo and
+            // name; the chrome disc keeps the icon until a later pass
+            // hydrates it from that projection.
             <Avatar className={avatarClassName} />
           ) : (
             (user?.phone || "?").slice(-2)
@@ -230,6 +232,16 @@ export function AccountMenu() {
               <span className="text-sm text-txt">{identityLine(user)}</span>
               {roleBadge}
             </DropdownMenuLabel>
+            {/* #543: the doctor's own Profile page is the entry point this
+                avatar opens into; the label reuses the nav dictionary word. */}
+            {isDoctor && (
+              <DropdownMenuItem
+                asChild
+                data-testid="account-menu-doctor-profile"
+              >
+                <Link href="/doctor/profile">{strings.profile}</Link>
+              </DropdownMenuItem>
+            )}
             {roleSwitchItems}
             {otherRoles.length > 0 && <DropdownMenuSeparator />}
             <DropdownMenuItem
