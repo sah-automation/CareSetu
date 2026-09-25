@@ -2,10 +2,14 @@
 // queue (ranked low-confidence first with the amber Verify chip and a
 // confidence flag, US-11/12), the open care-cases section with stage chips
 // (US-15), the deep links into the workspace routes (review/[intakeId],
-// cases/[caseId]) that #451-#453 fill, the coming-soon patients/profile tabs
-// (US-26, replaced by #544), load failure with retry, and bilingual EN/HI
-// parity (REQ-006). The consultation-fee editor that used to live here moved
-// to the Profile page in #543 and is covered by its own suite.
+// cases/[caseId]) that #451-#453 fill, load failure with retry, and bilingual
+// EN/HI parity (REQ-006). The consultation-fee editor that used to live here
+// moved to the Profile page in #543 and is covered by its own suite.
+//
+// #544: the coming-soon Patients/Profile tabs are replaced by real entry cards
+// that deep-link to the live pages, a compact consultation-fee summary card
+// reads the private profile and links into the moved editor, and the whole
+// landing adopts the patient shell's card/chip/responsive language.
 
 import {
   cleanup,
@@ -28,6 +32,7 @@ import {
   type CareCaseStage,
   type CaseDetailView,
 } from "@/lib/care/api";
+import { fetchDoctorProfile, type DoctorProfileView } from "@/lib/doctor/api";
 
 vi.mock("next/link", () => {
   return {
@@ -56,10 +61,16 @@ vi.mock("@/lib/care/api", async (importOriginal) => {
   return { ...mod, listOpenCases: vi.fn() };
 });
 
+vi.mock("@/lib/doctor/api", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("@/lib/doctor/api")>();
+  return { ...mod, fetchDoctorProfile: vi.fn() };
+});
+
 const t = STRINGS.en.doctorConsole;
 const hiT = STRINGS.hi.doctorConsole;
 const getQueue = vi.mocked(fetchReviewQueue);
 const getCases = vi.mocked(listOpenCases);
+const getProfile = vi.mocked(fetchDoctorProfile);
 
 function queueItem(overrides: Partial<ReviewQueueItem> = {}): ReviewQueueItem {
   return {
@@ -99,9 +110,34 @@ function caseItem(
   };
 }
 
+function doctorProfile(
+  overrides: Partial<DoctorProfileView> = {},
+): DoctorProfileView {
+  return {
+    partner_id: 7,
+    photo_ref: null,
+    practice_name: "Kumar Clinic",
+    specialty: "General physician",
+    verified: true,
+    practice_address: "12 MG Road",
+    practice_latitude: 12.9716,
+    practice_longitude: 77.5946,
+    area: "Indiranagar",
+    languages: ["English", "Kannada"],
+    experience_years: 9,
+    about: null,
+    consultation_fee: 50000,
+    availability: null,
+    credentials: [],
+    notification_preferences: {},
+    ...overrides,
+  };
+}
+
 function resolveLoaded() {
   getQueue.mockResolvedValue([]);
   getCases.mockResolvedValue([]);
+  getProfile.mockResolvedValue(doctorProfile());
 }
 
 beforeEach(() => {
@@ -278,25 +314,186 @@ describe("DoctorDashboardPage open cases", () => {
   });
 });
 
-describe("DoctorDashboardPage coming-soon tabs (US-26)", () => {
-  it("renders Patients and Profile as coming-soon, not broken links", async () => {
+describe("DoctorDashboardPage entry cards (#544)", () => {
+  it("deep-links the Patients card to the live patients page", async () => {
     render(<DoctorDashboardPage />);
-    await waitFor(() => screen.getByTestId("coming-soon-patients"));
+    await waitFor(() => screen.getByTestId("entry-patients"));
 
-    expect(screen.getByTestId("coming-soon-patients")).toHaveTextContent(
-      t.patientsComingSoon,
+    const card = screen.getByTestId("entry-patients");
+    expect(card).toHaveAttribute("href", "/doctor/patients");
+    expect(card).toHaveTextContent(STRINGS.en.nav.patients);
+    expect(card).toHaveTextContent(t.patientsEntryBody);
+    // A real destination: not the coming-soon aria-disabled placeholder.
+    expect(card).not.toHaveAttribute("aria-disabled");
+  });
+
+  it("deep-links the Profile card to the live profile page", async () => {
+    render(<DoctorDashboardPage />);
+    await waitFor(() => screen.getByTestId("entry-profile"));
+
+    const card = screen.getByTestId("entry-profile");
+    expect(card).toHaveAttribute("href", "/doctor/profile");
+    expect(card).toHaveTextContent(STRINGS.en.nav.profile);
+    expect(card).toHaveTextContent(t.profileEntryBody);
+    expect(card).not.toHaveAttribute("aria-disabled");
+  });
+
+  it("drops the coming-soon placeholders entirely (US-26)", async () => {
+    render(<DoctorDashboardPage />);
+    await waitFor(() => screen.getByTestId("entry-patients"));
+
+    expect(
+      screen.queryByTestId("coming-soon-patients"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByTestId("coming-soon-profile")).not.toBeInTheDocument();
+  });
+
+  it("lays the two cards out 2-up on a phone, like the patient services grid", async () => {
+    render(<DoctorDashboardPage />);
+    await waitFor(() => screen.getByTestId("entry-patients"));
+
+    const grid = screen.getByTestId("entry-cards");
+    expect(grid.className).toContain("grid-cols-2");
+    expect(grid.className).toContain("gap-3");
+  });
+});
+
+describe("DoctorDashboardPage consultation-fee summary (#544)", () => {
+  it("shows the current fee and links into the moved editor on the profile", async () => {
+    getProfile.mockResolvedValue(doctorProfile({ consultation_fee: 50000 }));
+    render(<DoctorDashboardPage />);
+
+    await waitFor(() => screen.getByTestId("fee-summary-value"));
+
+    expect(screen.getByTestId("fee-summary-value")).toHaveTextContent("₹500");
+    expect(screen.getByTestId("fee-summary-edit")).toHaveAttribute(
+      "href",
+      "/doctor/profile#fee-editor",
     );
-    expect(screen.getByTestId("coming-soon-profile")).toHaveTextContent(
-      t.profileComingSoon,
+    expect(screen.getByTestId("fee-summary")).toHaveTextContent(t.feeHeading);
+  });
+
+  it("skeletons the fee while the private profile read is in flight", () => {
+    render(<DoctorDashboardPage />);
+    expect(screen.getByTestId("fee-summary-skeleton")).toBeInTheDocument();
+  });
+
+  it("says the fee is not set rather than showing a zero amount", async () => {
+    getProfile.mockResolvedValue(doctorProfile({ consultation_fee: null }));
+    render(<DoctorDashboardPage />);
+
+    await waitFor(() => screen.getByTestId("fee-summary-value"));
+
+    expect(screen.getByTestId("fee-summary-value")).toHaveTextContent(
+      t.feeUnset,
     );
-    expect(screen.getByTestId("coming-soon-patients")).toHaveAttribute(
-      "aria-disabled",
-      "true",
+    expect(screen.getByTestId("fee-summary")).toHaveTextContent(t.feeUnsetHelp);
+  });
+
+  it("keeps a failed fee read off the console: the queue and cases still load", async () => {
+    getProfile.mockRejectedValue(
+      new ApiError({
+        code: "INTERNAL_ERROR",
+        message: "boom",
+        trace_id: "trace-fee-01",
+        details: {},
+      }),
     );
-    expect(screen.getByTestId("coming-soon-profile")).toHaveAttribute(
-      "aria-disabled",
-      "true",
+    getQueue.mockResolvedValue([queueItem()]);
+    getCases.mockResolvedValue([caseItem(11)]);
+    render(<DoctorDashboardPage />);
+
+    await waitFor(() => screen.getByTestId("fee-summary-error"));
+    // The console itself is healthy: the failure is scoped to the fee card.
+    expect(screen.getByTestId("queue-item")).toBeInTheDocument();
+    expect(screen.getByTestId("case-item")).toBeInTheDocument();
+    expect(screen.queryByTestId("error-banner")).not.toBeInTheDocument();
+    expect(screen.getByTestId("fee-summary-error")).toHaveTextContent(
+      t.feeLoadFailed,
     );
+  });
+
+  it("retries just the fee read from the card", async () => {
+    getProfile.mockRejectedValueOnce(new Error("offline"));
+    render(<DoctorDashboardPage />);
+    await waitFor(() => screen.getByTestId("fee-summary-error"));
+
+    getProfile.mockResolvedValue(doctorProfile({ consultation_fee: 300 }));
+    fireEvent.click(screen.getByTestId("fee-summary-retry"));
+
+    await waitFor(() => screen.getByTestId("fee-summary-value"));
+    expect(screen.getByTestId("fee-summary-value")).toHaveTextContent("₹3");
+    expect(getProfile).toHaveBeenCalledTimes(2);
+    // The retry is scoped: the console feeds are not refetched with it.
+    expect(getQueue).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("DoctorDashboardPage patient-shell restyle (#544)", () => {
+  it("renders the queue and cases sections as surface cards, not bare headings", async () => {
+    getQueue.mockResolvedValue([queueItem()]);
+    getCases.mockResolvedValue([caseItem(11)]);
+    render(<DoctorDashboardPage />);
+
+    await waitFor(() => screen.getByTestId("queue-item"));
+
+    for (const testId of ["review-queue", "open-cases"]) {
+      const className = screen.getByTestId(testId).className;
+      expect(className).toContain("rounded-lg");
+      expect(className).toContain("border-hairline");
+      expect(className).toContain("bg-surface");
+    }
+  });
+
+  it("counts the queue and the cases in status chips on the section headers", async () => {
+    getQueue.mockResolvedValue([
+      queueItem({ pre_summary_id: 1 }),
+      queueItem({ pre_summary_id: 2 }),
+    ]);
+    getCases.mockResolvedValue([caseItem(11), caseItem(12), caseItem(13)]);
+    render(<DoctorDashboardPage />);
+
+    await waitFor(() => screen.getByTestId("queue-count"));
+
+    expect(screen.getByTestId("queue-count")).toHaveTextContent("2");
+    expect(screen.getByTestId("cases-count")).toHaveTextContent("3");
+  });
+
+  it("hides the count chips when there is nothing to count", async () => {
+    render(<DoctorDashboardPage />);
+    await waitFor(() =>
+      within(screen.getByTestId("review-queue")).getByTestId("empty-state"),
+    );
+
+    expect(screen.queryByTestId("queue-count")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("cases-count")).not.toBeInTheDocument();
+  });
+
+  it("splits a row onto a full-width action below 720px, in-line above it", async () => {
+    getQueue.mockResolvedValue([queueItem()]);
+    render(<DoctorDashboardPage />);
+
+    await waitFor(() => screen.getByTestId("queue-item-review"));
+
+    const action = screen.getByTestId("queue-item-review");
+    expect(action.className).toContain("w-full");
+    expect(action.className).toContain("min-[720px]:w-auto");
+    // The wrapper owns the responsive switch, so the action never squeezes the
+    // text column on a phone.
+    const row = screen.getByTestId("queue-item");
+    expect(row.className).toContain("min-[720px]:flex-row");
+  });
+
+  it("gives each empty state a body so it explains itself", async () => {
+    getCases.mockResolvedValue([caseItem(11)]);
+    render(<DoctorDashboardPage />);
+    await waitFor(() =>
+      within(screen.getByTestId("review-queue")).getByTestId("empty-state"),
+    );
+
+    expect(
+      within(screen.getByTestId("review-queue")).getByTestId("empty-state"),
+    ).toHaveTextContent(t.queueEmptyBody);
   });
 });
 
@@ -355,6 +552,7 @@ describe("DoctorDashboardPage bilingual parity (REQ-006)", () => {
   it("renders the console copy in Hindi when the locale flips", async () => {
     getQueue.mockResolvedValue([queueItem({ patient_name: null })]);
     getCases.mockResolvedValue([caseItem(11)]);
+    getProfile.mockResolvedValue(doctorProfile({ consultation_fee: 50000 }));
     render(<LangFlipHost />);
     await waitFor(() => screen.getByTestId("queue-item"));
 
@@ -368,8 +566,31 @@ describe("DoctorDashboardPage bilingual parity (REQ-006)", () => {
       hiT.queueItemMeta(42),
     );
     expect(screen.getByText(hiT.title)).toBeInTheDocument();
-    expect(screen.getByTestId("coming-soon-patients")).toHaveTextContent(
-      hiT.patientsComingSoon,
+  });
+
+  it("#544 carries the entry cards, fee summary and empty-state bodies into Hindi", async () => {
+    getProfile.mockResolvedValue(doctorProfile({ consultation_fee: 50000 }));
+    render(<LangFlipHost />);
+    await waitFor(() => screen.getByTestId("fee-summary-value"));
+
+    fireEvent.click(screen.getByText("flip-lang"));
+    await waitFor(() =>
+      expect(screen.getByTestId("fee-summary")).toHaveTextContent(
+        hiT.feeHeading,
+      ),
+    );
+
+    expect(screen.getByTestId("entry-patients")).toHaveTextContent(
+      STRINGS.hi.nav.patients,
+    );
+    expect(screen.getByTestId("entry-patients")).toHaveTextContent(
+      hiT.patientsEntryBody,
+    );
+    expect(screen.getByTestId("entry-profile")).toHaveTextContent(
+      hiT.profileEntryBody,
+    );
+    expect(screen.getByTestId("fee-summary")).toHaveTextContent(
+      hiT.feeEditAction,
     );
   });
 });

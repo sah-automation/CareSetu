@@ -7,18 +7,25 @@
 // built by #451-#453. All copy bilingual en/hi (REQ-006).
 //
 // #543: the consultation-fee editor moved to the Profile page, which is where
-// a doctor edits their own record; this landing keeps the coming-soon tabs
-// until #544 replaces them with real entry cards.
+// a doctor edits their own record; this landing keeps a compact read-only
+// fee summary that links into the moved editor.
+//
+// #544: the coming-soon Patients/Profile tabs are replaced with real entry
+// cards that deep-link to the live pages, and the whole landing adopts the
+// patient shell's card/chip/empty-state/responsive design language.
 
 import Link from "next/link";
+import { ChevronRight, Users, User } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/layout/EmptyState";
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { ApiError } from "@/lib/api-errors";
+import { fetchDoctorProfile, type DoctorProfileView } from "@/lib/doctor/api";
 import { fetchReviewQueue, type ReviewQueueItem } from "@/lib/intake/api";
 import {
   listOpenCases,
@@ -27,6 +34,7 @@ import {
 } from "@/lib/care/api";
 import { STRINGS, type Dictionary } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
+import { formatFeePaise } from "@/components/pick/DoctorPickCard";
 
 // ---- helpers ----
 
@@ -82,86 +90,237 @@ function LoadingSkeleton() {
       {Array.from({ length: 3 }).map((_, i) => (
         <div
           key={i}
-          className="flex items-center gap-4 rounded-lg border border-hairline bg-surface p-4"
+          className="flex items-center justify-between gap-3 rounded-lg border border-hairline bg-surface p-4"
         >
-          <Skeleton className="h-4 w-32" />
+          <div className="space-y-2">
+            <Skeleton className="h-4 w-32" />
+            <Skeleton className="h-5 w-24 rounded-full" />
+          </div>
           <Skeleton className="h-5 w-16 rounded-full" />
-          <Skeleton className="h-4 w-12" />
         </div>
       ))}
     </div>
   );
 }
 
-// ---- main page ----
+function FeeSummarySkeleton() {
+  return (
+    <div className="space-y-2" data-testid="fee-summary-skeleton">
+      <div className="h-4 w-32 rounded bg-hairline-soft animate-pulse" />
+      <div className="h-8 w-24 rounded bg-hairline-soft animate-pulse" />
+    </div>
+  );
+}
 
-export default function DoctorDashboardPage() {
+function EntryCardSkeleton() {
+  return (
+    <Link
+      href="#"
+      aria-disabled="true"
+      tabIndex={-1}
+      className="pointer-events-none rounded-lg border border-hairline bg-surface p-4 min-h-24 opacity-60"
+    >
+      <div className="flex items-center gap-3">
+        <Skeleton className="h-10 w-10 rounded-xl" />
+        <div className="flex-1 space-y-1">
+          <Skeleton className="h-4 w-24" />
+          <Skeleton className="h-3 w-32" />
+        </div>
+      </div>
+    </Link>
+  );
+}
+
+function FeeSummaryCard({ feePaise }: { feePaise: number | null }) {
   const { lang } = useLang();
   const t = STRINGS[lang].doctorConsole;
 
-  const [queue, setQueue] = useState<ReviewQueueItem[]>([]);
-  const [cases, setCases] = useState<CaseDetailView[]>([]);
-  const [loadStatus, setLoadStatus] = useState<LoadStatus>("loading");
-  const [errorTraceId, setErrorTraceId] = useState<string | undefined>();
-  const [bannerOpen, setBannerOpen] = useState(false);
+  return (
+    <section
+      className="rounded-lg border border-hairline bg-surface p-4"
+      data-testid="fee-summary"
+    >
+      <h2 className="text-[1.05rem] font-semibold text-txt">{t.feeHeading}</h2>
 
-  const load = useCallback(() => {
-    setLoadStatus("loading");
-    setBannerOpen(false);
-    Promise.all([fetchReviewQueue(), listOpenCases()])
-      .then(([q, c]) => {
-        setQueue(q);
-        setCases(c);
-        setLoadStatus("ready");
-      })
-      .catch((err: unknown) => {
-        setErrorTraceId(err instanceof ApiError ? err.traceId : undefined);
-        setLoadStatus("error");
-        setBannerOpen(true);
-      });
-  }, []);
+      {feePaise !== null ? (
+        <div className="mt-2 flex flex-col items-start gap-2 min-[720px]:flex-row min-[720px]:items-center min-[720px]:justify-between">
+          <p
+            className="text-2xl font-semibold text-txt"
+            data-testid="fee-summary-value"
+          >
+            {formatFeePaise(feePaise)}
+          </p>
+          <Link
+            href="/doctor/profile#fee-editor"
+            data-testid="fee-summary-edit"
+            className="inline-flex items-center gap-1.5 rounded-md border border-hairline bg-surface px-3 py-1.5 text-xs font-medium text-txt-sub transition-colors hover:border-accent-border hover:bg-accent-soft hover:text-accent-strong"
+          >
+            {t.feeEditAction}
+            <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
+          </Link>
+        </div>
+      ) : (
+        <div className="mt-2 flex flex-col items-start gap-2 min-[720px]:flex-row min-[720px]:items-center min-[720px]:justify-between">
+          <p
+            className="text-2xl font-semibold text-txt-muted"
+            data-testid="fee-summary-value"
+          >
+            {t.feeUnset}
+          </p>
+          <p className="text-sm text-txt-muted">{t.feeUnsetHelp}</p>
+          <Link
+            href="/doctor/profile#fee-editor"
+            data-testid="fee-summary-edit"
+            className="inline-flex items-center gap-1.5 rounded-md border border-hairline bg-surface px-3 py-1.5 text-xs font-medium text-txt-sub transition-colors hover:border-accent-border hover:bg-accent-soft hover:text-accent-strong"
+          >
+            {t.feeEditAction}
+            <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
+          </Link>
+        </div>
+      )}
+    </section>
+  );
+}
 
-  useEffect(() => {
-    load();
-  }, [load]);
+function FeeSummaryError({ onRetry }: { onRetry: () => void }) {
+  const { lang } = useLang();
+  const t = STRINGS[lang].doctorConsole;
 
-  const sortedQueue = useMemo(() => sortQueue(queue), [queue]);
+  return (
+    <section
+      className="rounded-lg border border-hairline bg-surface p-4"
+      data-testid="fee-summary"
+    >
+      <h2 className="text-[1.05rem] font-semibold text-txt">{t.feeHeading}</h2>
+      <div className="mt-3 flex items-center justify-between gap-3">
+        <p
+          className="text-sm text-danger"
+          data-testid="fee-summary-error"
+          role="alert"
+        >
+          {t.feeLoadFailed}
+        </p>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onRetry}
+          data-testid="fee-summary-retry"
+        >
+          {t.retry}
+        </Button>
+      </div>
+    </section>
+  );
+}
 
-  // ---- render ----
+function EntryCards() {
+  const { lang } = useLang();
+  const t = STRINGS[lang].doctorConsole;
+  const nav = STRINGS[lang].nav;
+
+  return (
+    <section className="space-y-3" data-testid="console-entries">
+      <div data-testid="entry-cards" className="grid grid-cols-2 gap-3">
+        <Link
+          href="/doctor/patients"
+          data-testid="entry-patients"
+          className="flex min-h-24 flex-col items-start gap-2.5 rounded-lg border border-hairline bg-surface p-4 transition-[box-shadow,transform] hover:shadow-pop hover:-translate-y-0.5 active:scale-[0.97] active:opacity-90"
+        >
+          <div className="flex items-center gap-3">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent-strong">
+              <Users size={22} strokeWidth={1.8} aria-hidden="true" />
+            </span>
+            <div className="min-w-0 space-y-0.5">
+              <span className="text-sm font-semibold text-txt">
+                {nav.patients}
+              </span>
+              <p className="text-xs text-txt-muted line-clamp-2">
+                {t.patientsEntryBody}
+              </p>
+            </div>
+          </div>
+          <ChevronRight
+            className="h-5 w-5 shrink-0 text-txt-muted"
+            aria-hidden="true"
+          />
+        </Link>
+        <Link
+          href="/doctor/profile"
+          data-testid="entry-profile"
+          className="flex min-h-24 flex-col items-start gap-2.5 rounded-lg border border-hairline bg-surface p-4 transition-[box-shadow,transform] hover:shadow-pop hover:-translate-y-0.5 active:scale-[0.97] active:opacity-90"
+        >
+          <div className="flex items-center gap-3">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent-strong">
+              <User size={22} strokeWidth={1.8} aria-hidden="true" />
+            </span>
+            <div className="min-w-0 space-y-0.5">
+              <span className="text-sm font-semibold text-txt">
+                {nav.profile}
+              </span>
+              <p className="text-xs text-txt-muted line-clamp-2">
+                {t.profileEntryBody}
+              </p>
+            </div>
+          </div>
+          <ChevronRight
+            className="h-5 w-5 shrink-0 text-txt-muted"
+            aria-hidden="true"
+          />
+        </Link>
+      </div>
+    </section>
+  );
+}
+
+function ReviewQueueCard({
+  queue,
+  sortedQueue,
+  loadStatus,
+}: {
+  queue: ReviewQueueItem[];
+  sortedQueue: ReviewQueueItem[];
+  loadStatus: LoadStatus;
+}) {
+  const { lang } = useLang();
+  const t = STRINGS[lang].doctorConsole;
 
   const queueReady = loadStatus === "ready";
   const queueEmpty = queueReady && sortedQueue.length === 0;
-  const casesEmpty = queueReady && cases.length === 0;
 
   return (
-    <>
-      <PageHeader title={t.title} description={t.consoleDescription} />
+    <section
+      className="rounded-lg border border-hairline bg-surface p-4"
+      data-testid="review-queue"
+    >
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <h2 className="text-[1.05rem] font-semibold text-txt">
+          {t.queueHeading}
+        </h2>
+        {queueReady && sortedQueue.length > 0 && (
+          <span
+            data-testid="queue-count"
+            className="inline-flex items-center rounded-full bg-accent-soft px-2 py-0.5 text-xs font-medium text-accent-strong"
+          >
+            {sortedQueue.length}
+          </span>
+        )}
+      </div>
 
-      {loadStatus === "error" && bannerOpen && (
-        <ErrorBanner
-          message={t.loadFailed}
-          traceId={errorTraceId}
-          onRetry={load}
-          onDismiss={() => setBannerOpen(false)}
-        />
+      {loadStatus === "loading" && <LoadingSkeleton />}
+
+      {queueEmpty && (
+        <EmptyState title={t.queueEmpty} body={t.queueEmptyBody} />
       )}
 
-      {/* Review queue section */}
-      <section className="space-y-3" data-testid="review-queue">
-        <h2 className="text-sm font-semibold text-txt">{t.queueHeading}</h2>
-
-        {loadStatus === "loading" && <LoadingSkeleton />}
-
-        {queueEmpty && <EmptyState title={t.queueEmpty} />}
-
-        {queueReady && sortedQueue.length > 0 && (
-          <ul className="space-y-2" data-testid="queue-list">
-            {sortedQueue.map((item) => (
-              <li
-                key={item.pre_summary_id}
-                data-testid="queue-item"
-                className="flex items-center justify-between gap-3 rounded-lg border border-hairline bg-surface p-4"
-              >
+      {queueReady && sortedQueue.length > 0 && (
+        <ul className="mt-2" data-testid="queue-list">
+          {sortedQueue.map((item) => (
+            <li
+              key={item.pre_summary_id}
+              data-testid="queue-item"
+              className="flex flex-col gap-3 min-[720px]:flex-row min-[720px]:items-center min-[720px]:justify-between border-t border-hairline-soft py-3 first:border-t-0 first:pt-0 last:pb-0"
+            >
+              <div className="min-w-0 flex-1 space-y-1">
                 <div className="min-w-0 flex-1 space-y-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <span
@@ -217,32 +376,65 @@ export default function DoctorDashboardPage() {
                 <Link
                   href={`/doctor/review/${item.intake_id}`}
                   data-testid="queue-item-review"
-                  className="inline-flex shrink-0 items-center rounded-md border border-hairline bg-surface px-3 py-1.5 text-xs font-medium text-txt-sub transition-colors hover:border-accent-border hover:bg-accent-soft hover:text-accent-strong"
+                  className="inline-flex shrink-0 items-center justify-center w-full rounded-md border border-hairline bg-surface px-3 py-1.5 text-xs font-medium text-txt-sub transition-colors hover:border-accent-border hover:bg-accent-soft hover:text-accent-strong min-[720px]:w-auto"
                 >
                   {t.reviewAction}
                 </Link>
-              </li>
-            ))}
-          </ul>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function OpenCasesCard({
+  cases,
+  loadStatus,
+}: {
+  cases: CaseDetailView[];
+  loadStatus: LoadStatus;
+}) {
+  const { lang } = useLang();
+  const t = STRINGS[lang].doctorConsole;
+
+  const casesEmpty = loadStatus === "ready" && cases.length === 0;
+
+  return (
+    <section
+      className="mt-6 rounded-lg border border-hairline bg-surface p-4"
+      data-testid="open-cases"
+    >
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <h2 className="text-[1.05rem] font-semibold text-txt">
+          {t.casesHeading}
+        </h2>
+        {loadStatus === "ready" && cases.length > 0 && (
+          <span
+            data-testid="cases-count"
+            className="inline-flex items-center rounded-full bg-accent-soft px-2 py-0.5 text-xs font-medium text-accent-strong"
+          >
+            {cases.length}
+          </span>
         )}
-      </section>
+      </div>
 
-      {/* Open cases section */}
-      <section className="mt-6 space-y-3" data-testid="open-cases">
-        <h2 className="text-sm font-semibold text-txt">{t.casesHeading}</h2>
+      {loadStatus === "loading" && <LoadingSkeleton />}
 
-        {loadStatus === "loading" && <LoadingSkeleton />}
+      {casesEmpty && (
+        <EmptyState title={t.casesEmpty} body={t.casesEmptyBody} />
+      )}
 
-        {casesEmpty && <EmptyState title={t.casesEmpty} />}
-
-        {queueReady && cases.length > 0 && (
-          <ul className="space-y-2" data-testid="cases-list">
-            {cases.map((c) => (
-              <li
-                key={c.case_id}
-                data-testid="case-item"
-                className="flex items-center justify-between gap-3 rounded-lg border border-hairline bg-surface p-4"
-              >
+      {loadStatus === "ready" && cases.length > 0 && (
+        <ul className="mt-2" data-testid="cases-list">
+          {cases.map((c) => (
+            <li
+              key={c.case_id}
+              data-testid="case-item"
+              className="flex flex-col gap-3 min-[720px]:flex-row min-[720px]:items-center min-[720px]:justify-between border-t border-hairline-soft py-3 first:border-t-0 first:pt-0 last:pb-0"
+            >
+              <div className="min-w-0">
                 <div className="min-w-0">
                   <span
                     className="text-sm font-medium text-txt"
@@ -267,39 +459,112 @@ export default function DoctorDashboardPage() {
                 <Link
                   href={`/doctor/cases/${c.case_id}`}
                   data-testid="case-item-open"
-                  className="inline-flex shrink-0 items-center rounded-md border border-hairline bg-surface px-3 py-1.5 text-xs font-medium text-txt-sub transition-colors hover:border-accent-border hover:bg-accent-soft hover:text-accent-strong"
+                  className="inline-flex shrink-0 items-center justify-center w-full rounded-md border border-hairline bg-surface px-3 py-1.5 text-xs font-medium text-txt-sub transition-colors hover:border-accent-border hover:bg-accent-soft hover:text-accent-strong min-[720px]:w-auto"
                 >
                   {t.openCaseAction}
                 </Link>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
 
-      {/* Coming-soon tabs */}
-      <section className="mt-6 space-y-2" data-testid="coming-soon">
-        <Link
-          href="#"
-          aria-disabled="true"
-          tabIndex={-1}
-          className="pointer-events-none block rounded-lg border border-hairline bg-accent-soft px-4 py-3 text-txt opacity-60"
-          data-testid="coming-soon-patients"
-        >
-          <span className="text-sm font-medium">{t.patientsComingSoon}</span>
-          <p className="mt-0.5 text-xs text-txt-muted">{t.comingSoonBody}</p>
-        </Link>
-        <Link
-          href="#"
-          aria-disabled="true"
-          tabIndex={-1}
-          className="pointer-events-none block rounded-lg border border-hairline bg-accent-soft px-4 py-3 text-txt opacity-60"
-          data-testid="coming-soon-profile"
-        >
-          <span className="text-sm font-medium">{t.profileComingSoon}</span>
-          <p className="mt-0.5 text-xs text-txt-muted">{t.comingSoonBody}</p>
-        </Link>
-      </section>
+// ---- main page ----
+
+export default function DoctorDashboardPage() {
+  const { lang } = useLang();
+  const t = STRINGS[lang].doctorConsole;
+
+  const [queue, setQueue] = useState<ReviewQueueItem[]>([]);
+  const [cases, setCases] = useState<CaseDetailView[]>([]);
+  const [loadStatus, setLoadStatus] = useState<LoadStatus>("loading");
+  const [errorTraceId, setErrorTraceId] = useState<string | undefined>();
+  const [bannerOpen, setBannerOpen] = useState(false);
+
+  // Fee summary state - isolated from the console feeds
+  const [feePaise, setFeePaise] = useState<number | null>(null);
+  const [feeLoadStatus, setFeeLoadStatus] = useState<LoadStatus>("loading");
+
+  const load = useCallback(() => {
+    setLoadStatus("loading");
+    setBannerOpen(false);
+    Promise.all([fetchReviewQueue(), listOpenCases()])
+      .then(([q, c]) => {
+        setQueue(q);
+        setCases(c);
+        setLoadStatus("ready");
+      })
+      .catch((err: unknown) => {
+        setErrorTraceId(err instanceof ApiError ? err.traceId : undefined);
+        setLoadStatus("error");
+        setBannerOpen(true);
+      });
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  // Isolated fee read - does not affect console load status
+  useEffect(() => {
+    setFeeLoadStatus("loading");
+    fetchDoctorProfile()
+      .then((profile: DoctorProfileView) => {
+        setFeePaise(profile.consultation_fee);
+        setFeeLoadStatus("ready");
+      })
+      .catch(() => {
+        setFeeLoadStatus("error");
+      });
+  }, []);
+
+  const sortedQueue = useMemo(() => sortQueue(queue), [queue]);
+
+  // ---- render ----
+
+  return (
+    <>
+      <PageHeader title={t.title} description={t.consoleDescription} />
+
+      {loadStatus === "error" && bannerOpen && (
+        <ErrorBanner
+          message={t.loadFailed}
+          traceId={errorTraceId}
+          onRetry={load}
+          onDismiss={() => setBannerOpen(false)}
+        />
+      )}
+
+      <EntryCards />
+
+      {feeLoadStatus === "loading" ? (
+        <FeeSummarySkeleton />
+      ) : feeLoadStatus === "error" ? (
+        <FeeSummaryError
+          onRetry={() => {
+            setFeeLoadStatus("loading");
+            fetchDoctorProfile()
+              .then((p: DoctorProfileView) => {
+                setFeePaise(p.consultation_fee);
+                setFeeLoadStatus("ready");
+              })
+              .catch(() => setFeeLoadStatus("error"));
+          }}
+        />
+      ) : (
+        <FeeSummaryCard feePaise={feePaise} />
+      )}
+
+      <ReviewQueueCard
+        queue={queue}
+        sortedQueue={sortedQueue}
+        loadStatus={loadStatus}
+      />
+
+      <OpenCasesCard cases={cases} loadStatus={loadStatus} />
     </>
   );
 }

@@ -800,6 +800,7 @@ function FeeEditor({ feePaise, onFeeSaved }: FeeEditorProps) {
 
   return (
     <form
+      id="fee-editor"
       className="rounded-lg border border-hairline bg-surface p-4"
       data-testid="fee-editor"
       // The editor validates the amount itself so a bad entry is named in the

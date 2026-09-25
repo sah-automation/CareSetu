@@ -1239,16 +1239,26 @@ const en = {
   },
 
   // doctorConsole.* surface - PHASE-8.1 T12 (#450): the doctor console
-  // landing page. Two stacked sections: review queue (low-confidence first,
-  // oldest-first within each group) and open care cases, plus coming-soon
-  // patients/profile, and a retry path on load failure. The consultation-fee
-  // editor moved to the Profile page in #543. All copy bilingual en/hi
-  // (REQ-006).
+  // landing page. Three surfaces: the entry cards into the live Patients and
+  // Profile pages, the compact consultation-fee summary (the editor itself
+  // lives on Profile since #543), and the review queue (low-confidence first,
+  // oldest-first within each group) plus open care cases, with a retry path on
+  // load failure. #544 replaced the coming-soon patients/profile placeholders
+  // with real entry cards. All copy bilingual en/hi (REQ-006).
   doctorConsole: {
     title: "Doctor console",
-    consoleDescription: "Your review queue and open cases",
+    consoleDescription: "Your review queue, open cases and profile",
+    entryHeading: "Go to",
+    patientsEntryBody: "Everyone who has shared a record with you",
+    profileEntryBody: "Practice details, photo and consultation fee",
+    feeHeading: "Consultation fee",
+    feeUnset: "Not set",
+    feeUnsetHelp: "Set a fee so patients can book you.",
+    feeEditAction: "Edit in Profile",
+    feeLoadFailed: "Could not load your consultation fee.",
     queueHeading: "Review queue",
     queueEmpty: "No pre-summaries waiting for review",
+    queueEmptyBody: "A pre-summary lands here once a patient submits a visit.",
     patientFallback: "Patient",
     patientAge: (age: number) => `${age} yrs`,
     sectionsCount: (n: number) => `${n} ${n === 1 ? "section" : "sections"}`,
@@ -1260,15 +1270,13 @@ const en = {
     reviewAction: "Review",
     casesHeading: "Open cases",
     casesEmpty: "No open care cases",
+    casesEmptyBody: "A case opens as soon as you start a consultation.",
     casesIndexTitle: "My cases",
     casesIndexDescription: "Your open care cases",
     stagePreSummary: "Pre-summary",
     stagePrescriptionPending: "Prescription pending",
     stageClosed: "Closed",
     openCaseAction: "Open",
-    patientsComingSoon: "Patients - coming soon",
-    profileComingSoon: "Profile - coming soon",
-    comingSoonBody: "This area opens in a later update.",
     loadFailed: "Could not load the console.",
     retry: "Try again",
   },
@@ -2677,15 +2685,25 @@ export const STRINGS: Record<Lang, Dictionary> = {
     },
 
     // doctorConsole.* सतह - PHASE-8.1 T12 (#450): डॉक्टर कंसोल लैंडिंग पेज।
-    // दो सेक्शन: समीक्षा कतार (कम विश्वास पहले, पुराने पहले) और खुले केयर केस,
-    // साथ ही आने वाले मरीज़/प्रोफ़ाइल, और लोड विफलता पर पुनः प्रयास।
-    // परामर्श शुल्क संपादक #543 में प्रोफ़ाइल पेज पर चला गया।
-    // सभी कॉपी द्विभाषी en/hi (REQ-006)।
+    // तीन सतहें: लाइव Patients और Profile पेजों के प्रवेश कार्ड, संक्षिप्त
+    // परामर्श-शुल्क सारांश (संपादक #543 से प्रोफ़ाइल पर है), और समीक्षा कतार
+    // (कम विश्वास पहले, पुराने पहले) साथ ही खुले केयर केस, लोड विफलता पर
+    // पुनः प्रयास। #544 ने आने वाले मरीज़/प्रोफ़ाइल प्लेसहोल्डरों को वास्तविक
+    // प्रवेश कार्डों से बदल दिया। सभी कॉपी द्विभाषी en/hi (REQ-006)।
     doctorConsole: {
       title: "डॉक्टर कंसोल",
-      consoleDescription: "आपकी समीक्षा कतार और खुले मामले",
+      consoleDescription: "आपकी समीक्षा कतार, खुले मामले और प्रोफ़ाइल",
+      entryHeading: "यहाँ जाएँ",
+      patientsEntryBody: "जिन्होंने आपके साथ रिकॉर्ड साझा किया है",
+      profileEntryBody: "प्रैक्टिस की जानकारी, फोटो और परामर्श शुल्क",
+      feeHeading: "परामर्श शुल्क",
+      feeUnset: "तय नहीं",
+      feeUnsetHelp: "मरीज़ आपको बुक कर सकें, इसके लिए शुल्क तय करें।",
+      feeEditAction: "प्रोफ़ाइल में बदलें",
+      feeLoadFailed: "आपका परामर्श शुल्क लोड नहीं हो सका।",
       queueHeading: "समीक्षा कतार",
       queueEmpty: "समीक्षा के लिए कोई प्री-सारांश नहीं",
+      queueEmptyBody: "मरीज़ के विज़िट सबमिट करने पर प्री-सारांश यहाँ आते हैं।",
       patientFallback: "मरीज़",
       patientAge: (age: number) => `${age} वर्ष`,
       sectionsCount: (n: number) => `${n} अनुभाग`,
@@ -2697,15 +2715,13 @@ export const STRINGS: Record<Lang, Dictionary> = {
       reviewAction: "समीक्षा करें",
       casesHeading: "खुले मामले",
       casesEmpty: "कोई खुला केयर केस नहीं",
+      casesEmptyBody: "आपकी सलाह शुरू करते ही एक केस खुलता है।",
       casesIndexTitle: "मेरे मामले",
       casesIndexDescription: "आपके खुले केयर मामले",
       stagePreSummary: "प्री-सारांश",
       stagePrescriptionPending: "नुस्ख़ा लंबित",
       stageClosed: "बंद",
       openCaseAction: "खोलें",
-      patientsComingSoon: "मरीज़ - जल्द आ रहा है",
-      profileComingSoon: "प्रोफ़ाइल - जल्द आ रहा है",
-      comingSoonBody: "यह क्षेत्र बाद के अपडेट में खुलेगा।",
       loadFailed: "कंसोल लोड नहीं हो सका।",
       retry: "फिर से कोशिश करें",
     },
