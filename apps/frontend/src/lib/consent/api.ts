@@ -153,11 +153,16 @@ export async function revokeConsent(consentId: number): Promise<ConsentView> {
 export interface GrantConsentRequest {
   counterparty_type: "doctor" | "lab" | "chemist";
   counterparty_id: string;
+  // `health_background` is a real scope in the consent state machine
+  // (modules/consent/domain/state_machine.py) and in the doctor client; the
+  // patient's own client listed only the older five, which would have made a
+  // health_background grant unrepresentable here (#548).
   record_scope:
     | "consultations"
     | "prescriptions"
     | "lab_results"
     | "metrics"
+    | "health_background"
     | "full_record";
 }
 

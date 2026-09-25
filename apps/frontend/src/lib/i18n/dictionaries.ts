@@ -846,6 +846,73 @@ const en = {
     },
   },
 
+  // profileZones.* - PHASE-8.1 #548: the three-zone patient profile page
+  // (US-24/US-25). Identity carries the editable profile fields plus the photo
+  // control (upload/preview/remove against the private photo endpoint, #533);
+  // HealthBackground is a placeholder zone the next ticket fills; Settings
+  // carries notification preferences, the default language, consent-grant
+  // management, and the data export/delete leads. A "coming soon" string is
+  // used only where the capability genuinely does not exist yet, so the page
+  // never promises a control that would do nothing.
+  profileZones: {
+    identityHeading: "Identity",
+    identitySub:
+      "How you appear on your care record and to the providers you see",
+    photoHeading: "Profile photo",
+    photoHelp:
+      "JPEG, PNG or WebP, up to 5MB. Shared only with providers you consent with.",
+    photoUpload: "Upload photo",
+    photoReplace: "Replace photo",
+    photoRemove: "Remove photo",
+    photoFailed: "We could not update your photo. Please try again.",
+    healthHeading: "Health background",
+    healthPending:
+      "Your health background summary is being prepared and will appear here once it is ready.",
+    settingsHeading: "Settings",
+    notificationsHeading: "Notifications",
+    notificationsHelp:
+      "Choose which reminders CareSetu sends you. Arriving with the next release.",
+    notificationsSoon: "Coming soon",
+    notificationLabels: {
+      appointment_reminders: "Appointment reminders",
+      prescription_updates: "Prescription updates",
+      report_ready: "Reports ready",
+      care_messages: "Messages from your provider",
+    },
+    languageHeading: "Default language",
+    languageHelp:
+      "The language your care record uses. You can change it in Identity above.",
+    consentHeading: "Who can see your records",
+    consentSub:
+      "Every access you have granted. Revoking one stops future access from that provider.",
+    consentEmpty: "You have not shared your records with anyone yet.",
+    consentLoading: "Loading your consent grants...",
+    consentLoadFailed: "We could not load your consent grants.",
+    consentRetry: "Try again",
+    consentRevoke: "Revoke access",
+    consentRevokeTitle: "Revoke access?",
+    consentRevokeBody: (name: string) =>
+      `${name} will not be able to see your records from now on. Access already made stays in your access history.`,
+    consentRevokeConfirm: "Revoke",
+    consentRevokeCancel: "Keep access",
+    consentRevokeDone: "Access revoked.",
+    consentRevokeFailed: "We could not revoke that access. Please try again.",
+    dataHeading: "Your data",
+    dataExport: "Download a copy of my data",
+    dataExportHelp: "Everything we hold about you, as a file.",
+    dataDelete: "Delete my account and data",
+    dataDeleteHelp: "Permanently remove your account and care records.",
+    dataSoon: "Coming soon",
+    scopeLabels: {
+      consultations: "Consultations",
+      prescriptions: "Prescriptions",
+      lab_results: "Lab results",
+      metrics: "Metrics",
+      health_background: "Health background",
+      full_record: "Full record",
+    },
+  },
+
   // nav.* surface - the typed nav-config labels (PHASE-2.6 T06, #197).
   // One entry per NavItemDef.labelKey across all four role configs; the
   // bottom tabs / top-nav / sidebar all render through this section.
@@ -2106,6 +2173,68 @@ export const STRINGS: Record<Lang, Dictionary> = {
         checkout: "दवाई डिलीवरी - चेकआउट पर जाएँ",
         proceedNote:
           "यह एक्शन गेटिंग पार करता है - असली इंटेक/बुकिंग/चेकआउट फ़्लो अपने बिल्ड फ़ेज़ में आएँगे।",
+      },
+    },
+
+    // profileZones.* - the three-zone patient profile page (#548). See the en
+    // block for the "coming soon" rule and the placeholder-zone convention.
+    profileZones: {
+      identityHeading: "पहचान",
+      identitySub:
+        "आपके इलाज के रिकॉर्ड में और आपके प्रोवाइडर के सामने आप कैसे दिखते हैं",
+      photoHeading: "प्रोफ़ाइल फ़ोटो",
+      photoHelp:
+        "JPEG, PNG या WebP, 5MB तक। सिर्फ़ उन्हीं प्रोवाइडर को दिखती है जिनकी आप सहमति देते हैं।",
+      photoUpload: "फ़ोटो अपलोड करें",
+      photoReplace: "फ़ोटो बदलें",
+      photoRemove: "फ़ोटो हटाएँ",
+      photoFailed: "आपकी फ़ोटो अपडेट नहीं हो सकी। कृपया फिर से कोशिश करें।",
+      healthHeading: "स्वास्थ्य पृष्ठभूमि",
+      healthPending:
+        "आपकी स्वास्थ्य पृष्ठभूमि का सार तैयार किया जा रहा है और तैयार होते ही यहाँ दिखेगा।",
+      settingsHeading: "सेटिंग",
+      notificationsHeading: "नोटिफ़िकेशन",
+      notificationsHelp:
+        "चुनें कि CareSetu आपको किन याद दिलाव भेजे। अगली रिलीज़ के साथ आ रहा है।",
+      notificationsSoon: "जल्द आ रहा है",
+      notificationLabels: {
+        appointment_reminders: "अपॉइंटमेंट याद दिलाव",
+        prescription_updates: "पर्चे अपडेट",
+        report_ready: "रिपोर्ट तैयार",
+        care_messages: "आपके प्रोवाइडर के संदेश",
+      },
+      languageHeading: "डिफ़ॉल्ट भाषा",
+      languageHelp:
+        "आपके इलाज के रिकॉर्ड की भाषा। आप इसे ऊपर पहचान में बदल सकते हैं।",
+      consentHeading: "आपका रिकॉर्ड कौन देख सकता है",
+      consentSub:
+        "आपने जो हर अनुमति दी है। इसे वापस लेने पर उस प्रोवाइडर को आगे का एक्सेस नहीं मिलेगा।",
+      consentEmpty: "आपने अभी तक अपना रिकॉर्ड किसी के साथ साझा नहीं किया है।",
+      consentLoading: "आपकी सहमति लोड हो रही है...",
+      consentLoadFailed: "आपकी सहमति लोड नहीं हो सकी।",
+      consentRetry: "फिर से कोशिश करें",
+      consentRevoke: "एक्सेस वापस लें",
+      consentRevokeTitle: "एक्सेस वापस लें?",
+      consentRevokeBody: (name: string) =>
+        `${name} अब आपका रिकॉर्ड नहीं देख पाएँगे। पहले किया गया एक्सेस आपके एक्सेस हिस्ट्री में रहेगा।`,
+      consentRevokeConfirm: "वापस लें",
+      consentRevokeCancel: "एक्सेस बनाए रखें",
+      consentRevokeDone: "एक्सेस वापस ले लिया गया।",
+      consentRevokeFailed:
+        "यह एक्सेस वापस नहीं लिया जा सका। कृपया फिर से कोशिश करें।",
+      dataHeading: "आपका डेटा",
+      dataExport: "मेरे डेटा की एक कॉपी डाउनलोड करें",
+      dataExportHelp: "आपके बारे में हमारे पास जो कुछ है, एक फ़ाइल के रूप में।",
+      dataDelete: "मेरा अकाउंट और डेटा मिटाएँ",
+      dataDeleteHelp: "आपका अकाउंट और इलाज के रिकॉर्ड हमेशा के लिए हटाएँ।",
+      dataSoon: "जल्द आ रहा है",
+      scopeLabels: {
+        consultations: "परामर्श",
+        prescriptions: "पर्चे",
+        lab_results: "लैब परिणाम",
+        metrics: "मेट्रिक्स",
+        health_background: "स्वास्थ्य पृष्ठभूमि",
+        full_record: "पूरा रिकॉर्ड",
       },
     },
 

@@ -1,11 +1,15 @@
-// #522/#523: the patient Profile & Settings route (blueprint §5.8). The
-// completion meter reflects draft completeness; personal details, language
-// preference, emergency contact, and area pre-fill from the saved server
-// profile and any identity-keyed in-progress draft. Save reuses the provider's
-// idempotent finishProfile with the basics gate - incomplete basics block the
-// write with a plain explanation, never a partial record - and success/error
-// surface through the bilingual save-status notice plus an axe scan (spec #520
-// seams 1/2).
+// #522/#523: the patient Profile route (blueprint §5.8). The completion meter
+// reflects draft completeness; personal details, language preference, emergency
+// contact, and area pre-fill from the saved server profile and any
+// identity-keyed in-progress draft. Save reuses the provider's idempotent
+// finishProfile with the basics gate - incomplete basics block the write with a
+// plain explanation, never a partial record - and success/error surface through
+// the bilingual save-status notice plus an axe scan (spec #520 seams 1/2).
+//
+// #548: the page is now three zones (Identity / Health background / Settings).
+// The save flow and its payload are unchanged - only the presentation moved -
+// and the Identity zone gained the photo control, whose ref the provider
+// adopts so a later save cannot detach an uploaded photo.
 
 import {
   cleanup,
@@ -15,13 +19,28 @@ import {
   waitFor,
 } from "@testing-library/react";
 import * as axe from "axe-core";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
 import ProfileSettingsPage from "./page";
+import { ApiError } from "@/lib/api-errors";
 import { __resetLangForTests } from "@/lib/i18n/LangContext";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { ProfileProvider } from "@/lib/profile/ProfileContext";
 import type { StoredPatientProfile } from "@/lib/profile/api";
+import {
+  deletePatientPhoto,
+  fetchPatientPhoto,
+  uploadPatientPhoto,
+} from "@/lib/profile/api";
+import { fetchConsentLog, revokeConsent } from "@/lib/consent/api";
 import {
   initialDraft,
   saveDraft,
@@ -38,10 +57,22 @@ const state = vi.hoisted<{
   user: { id: 7, phone: "+91 98765 43210", roles: ["patient"] },
 }));
 
-vi.mock("@/lib/profile/api", () => ({
-  getProfile: state.getProfile,
-  saveProfile: state.saveProfile,
-}));
+vi.mock("@/lib/profile/api", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("@/lib/profile/api")>();
+  return {
+    ...mod,
+    getProfile: state.getProfile,
+    saveProfile: state.saveProfile,
+    uploadPatientPhoto: vi.fn(),
+    fetchPatientPhoto: vi.fn(),
+    deletePatientPhoto: vi.fn(),
+  };
+});
+
+vi.mock("@/lib/consent/api", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("@/lib/consent/api")>();
+  return { ...mod, fetchConsentLog: vi.fn(), revokeConsent: vi.fn() };
+});
 
 vi.mock("@/lib/auth/AuthContext", () => ({
   useAuth: () => ({
@@ -54,6 +85,28 @@ vi.mock("@/lib/auth/AuthContext", () => ({
   }),
 }));
 
+class ResizeObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
+beforeAll(() => {
+  window.ResizeObserver =
+    window.ResizeObserver ??
+    (ResizeObserverStub as unknown as typeof ResizeObserver);
+  if (!window.PointerEvent) {
+    class PointerEventStub extends MouseEvent {}
+    window.PointerEvent = PointerEventStub as unknown as typeof PointerEvent;
+  }
+});
+
+const mockUploadPhoto = vi.mocked(uploadPatientPhoto);
+const mockFetchPhoto = vi.mocked(fetchPatientPhoto);
+const mockDeletePhoto = vi.mocked(deletePatientPhoto);
+const mockFetchConsentLog = vi.mocked(fetchConsentLog);
+const mockRevokeConsent = vi.mocked(revokeConsent);
+
 const savedProfile: StoredPatientProfile = {
   name: "Asha Devi",
   age: 30,
@@ -61,7 +114,7 @@ const savedProfile: StoredPatientProfile = {
   preferred_language: "en",
   area: "Bishrampur",
   emergency_contact: "+91 98765 43210",
-  photo_ref: "me.jpg",
+  photo_ref: "patient/7/photo-1.enc",
 };
 
 const draftFixture = (overrides: Partial<ProfileDraft>): ProfileDraft => ({
@@ -80,6 +133,13 @@ beforeEach(() => {
   state.saveProfile.mockReset();
   state.getProfile.mockResolvedValue({ set: false, profile: null });
   state.saveProfile.mockResolvedValue(savedProfile);
+  mockUploadPhoto.mockReset();
+  mockFetchPhoto.mockReset();
+  mockDeletePhoto.mockReset();
+  mockFetchPhoto.mockResolvedValue(new Blob(["photo"], { type: "image/png" }));
+  mockFetchConsentLog.mockReset();
+  mockFetchConsentLog.mockResolvedValue({ items: [] });
+  mockRevokeConsent.mockReset();
 });
 
 afterEach(() => {
@@ -391,5 +451,346 @@ describe("Profile & Settings page (#522/#523)", () => {
       expect(screen.getByTestId("ps-save-blocked")).toBeInTheDocument(),
     );
     expect((await axe.run(container)).violations).toEqual([]);
+  });
+});
+
+// #548 AC 1: the page is three zones, and the reorganization is presentational
+// - the fields and the save flow are the ones #522/#523 shipped.
+describe("Profile page zones (#548)", () => {
+  async function renderReady() {
+    state.getProfile.mockResolvedValue({ set: true, profile: savedProfile });
+    render(
+      <ProfileProvider>
+        <ProfileSettingsPage />
+      </ProfileProvider>,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("ps-fullname")).toHaveValue("Asha Devi"),
+    );
+  }
+
+  it("presents Identity, Health background, and Settings as three named zones", async () => {
+    await renderReady();
+
+    const z = STRINGS.en.profileZones;
+    expect(screen.getByTestId("ps-zone-identity")).toHaveTextContent(
+      z.identityHeading,
+    );
+    expect(screen.getByTestId("ps-zone-health")).toHaveTextContent(
+      z.healthHeading,
+    );
+    expect(screen.getByTestId("ps-zone-settings")).toHaveTextContent(
+      z.settingsHeading,
+    );
+
+    // Each zone is a labelled landmark, so a screen reader can jump between
+    // them rather than reading one undifferentiated form.
+    for (const id of [
+      "ps-zone-identity",
+      "ps-zone-health",
+      "ps-zone-settings",
+    ]) {
+      const zone = screen.getByTestId(id);
+      const labelledBy = zone.getAttribute("aria-labelledby");
+      expect(labelledBy).toBeTruthy();
+      expect(document.getElementById(labelledBy ?? "")?.tagName).toBe("H2");
+    }
+  });
+
+  it("keeps every existing profile field in the Identity zone", async () => {
+    await renderReady();
+
+    const identity = screen.getByTestId("ps-zone-identity");
+    for (const testId of [
+      "ps-fullname",
+      "ps-age",
+      "ps-gender",
+      "ps-lang",
+      "ps-ec",
+      "ps-area",
+      "ps-save",
+    ]) {
+      expect(identity.querySelector(`[data-testid="${testId}"]`)).toBeTruthy();
+    }
+  });
+
+  it("holds the health background zone as a placeholder, not an error", async () => {
+    await renderReady();
+
+    expect(screen.getByTestId("ps-health-pending")).toHaveTextContent(
+      STRINGS.en.profileZones.healthPending,
+    );
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("shows the default language in Settings without a second bound control", async () => {
+    await renderReady();
+
+    // The value is summarised, not re-editable: two bound controls for one
+    // profile field would drift apart, and the editable one lives in Identity.
+    expect(screen.getByTestId("ps-settings-language-value")).toHaveTextContent(
+      "English",
+    );
+    expect(
+      screen.getByTestId("ps-zone-settings").querySelector("#ps-lang"),
+    ).toBeNull();
+  });
+
+  it("scans clean on axe with all three zones rendered", async () => {
+    state.getProfile.mockResolvedValue({ set: true, profile: savedProfile });
+    const { container } = render(
+      <ProfileProvider>
+        <ProfileSettingsPage />
+      </ProfileProvider>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("ps-fullname")).toHaveValue("Asha Devi"),
+    );
+    expect((await axe.run(container)).violations).toEqual([]);
+  });
+});
+
+// #548 AC 2: the photo control is wired to the photo endpoint and rendered
+// from the stored key; remove clears it.
+describe("Profile page photo (#548)", () => {
+  it("previews the stored photo rather than showing the opaque ref", async () => {
+    state.getProfile.mockResolvedValue({ set: true, profile: savedProfile });
+    render(
+      <ProfileProvider>
+        <ProfileSettingsPage />
+      </ProfileProvider>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("ps-photo-remove")).toBeInTheDocument(),
+    );
+    expect(mockFetchPhoto).toHaveBeenCalled();
+    expect(screen.getByTestId("ps-photo")).toBeInTheDocument();
+  });
+
+  it("uploads a picked photo and keeps it attached to the next save", async () => {
+    // The stored ref moves, then the patient saves their name edit: the save
+    // must carry the NEW ref, or it would detach the photo they just uploaded.
+    mockUploadPhoto.mockResolvedValue({
+      ...savedProfile,
+      photo_ref: "patient/7/photo-2.enc",
+    });
+    state.getProfile.mockResolvedValue({ set: true, profile: savedProfile });
+    render(
+      <ProfileProvider>
+        <ProfileSettingsPage />
+      </ProfileProvider>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("ps-photo-remove")).toBeInTheDocument(),
+    );
+    fireEvent.change(screen.getByTestId("ps-photo-input"), {
+      target: {
+        files: [new File(["photo"], "me.png", { type: "image/png" })],
+      },
+    });
+    await waitFor(() => expect(mockUploadPhoto).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByTestId("ps-save"));
+
+    await waitFor(() =>
+      expect(state.saveProfile).toHaveBeenCalledWith(
+        expect.objectContaining({ photo_ref: "patient/7/photo-2.enc" }),
+      ),
+    );
+  });
+
+  it("removes the photo and the next save carries no ref", async () => {
+    mockDeletePhoto.mockResolvedValue({ ...savedProfile, photo_ref: null });
+    state.getProfile.mockResolvedValue({ set: true, profile: savedProfile });
+    render(
+      <ProfileProvider>
+        <ProfileSettingsPage />
+      </ProfileProvider>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("ps-photo-remove")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId("ps-photo-remove"));
+
+    await waitFor(() => expect(mockDeletePhoto).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(screen.queryByTestId("ps-photo-remove")).not.toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByTestId("ps-save"));
+    await waitFor(() =>
+      expect(state.saveProfile).toHaveBeenCalledWith(
+        expect.objectContaining({ photo_ref: null }),
+      ),
+    );
+  });
+
+  it("leaves the stored photo in place when an upload is rejected", async () => {
+    mockUploadPhoto.mockRejectedValue(
+      new ApiError({
+        code: "PROFILE_PHOTO_INVALID",
+        message: "unsupported media type",
+        trace_id: "trace-page-548",
+        details: {},
+      }),
+    );
+    state.getProfile.mockResolvedValue({ set: true, profile: savedProfile });
+    render(
+      <ProfileProvider>
+        <ProfileSettingsPage />
+      </ProfileProvider>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("ps-photo-remove")).toBeInTheDocument(),
+    );
+    fireEvent.change(screen.getByTestId("ps-photo-input"), {
+      target: {
+        files: [new File(["photo"], "me.gif", { type: "image/gif" })],
+      },
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("ps-photo-failed")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("ps-photo-remove")).toBeInTheDocument();
+  });
+});
+
+// #548 AC 3: Settings carries consent management, and the export/delete leads
+// are marked rather than left as buttons that would do nothing.
+describe("Profile page settings (#548)", () => {
+  async function renderReady() {
+    state.getProfile.mockResolvedValue({ set: true, profile: savedProfile });
+    render(
+      <ProfileProvider>
+        <ProfileSettingsPage />
+      </ProfileProvider>,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("ps-fullname")).toHaveValue("Asha Devi"),
+    );
+  }
+
+  it("surfaces the patient's consent grants inside the Settings zone", async () => {
+    mockFetchConsentLog.mockResolvedValue({
+      items: [
+        {
+          consent_id: 4,
+          lineage_ref: "C-2026-004",
+          patient_id: 7,
+          counterparty_type: "doctor",
+          counterparty_id: "dr-kumar",
+          record_scope: "health_background",
+          status: "granted",
+          version: 1,
+          created_at: "2026-09-01T10:00:00Z",
+          updated_at: "2026-09-01T10:05:00Z",
+          events: [],
+        },
+      ],
+    });
+    await renderReady();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("ps-consent-4")).toBeInTheDocument(),
+    );
+    expect(
+      screen
+        .getByTestId("ps-zone-settings")
+        .querySelector('[data-testid="ps-consent-4"]'),
+    ).toBeTruthy();
+  });
+
+  it("revokes a health_background grant from Settings", async () => {
+    const grant = {
+      consent_id: 4,
+      lineage_ref: "C-2026-004",
+      patient_id: 7,
+      counterparty_type: "doctor",
+      counterparty_id: "dr-kumar",
+      record_scope: "health_background",
+      status: "granted",
+      version: 1,
+      created_at: "2026-09-01T10:00:00Z",
+      updated_at: "2026-09-01T10:05:00Z",
+      events: [],
+    };
+    mockFetchConsentLog.mockResolvedValue({ items: [grant] });
+    mockRevokeConsent.mockResolvedValue({ ...grant, status: "revoked" });
+    await renderReady();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("ps-consent-revoke-4")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId("ps-consent-revoke-4"));
+    fireEvent.click(await screen.findByTestId("ps-consent-confirm"));
+
+    await waitFor(() => expect(mockRevokeConsent).toHaveBeenCalledWith(4));
+    await waitFor(() =>
+      expect(screen.queryByTestId("ps-consent-4")).toBeNull(),
+    );
+  });
+
+  it("marks the notification preferences coming soon instead of faking them", async () => {
+    await renderReady();
+
+    // The patient profile row models no notification preferences, so these
+    // rows are inert and say so - a live toggle would read as saved and change
+    // nothing.
+    const checkbox = screen.getByTestId(
+      "ps-notification-appointment_reminders",
+    );
+    expect(checkbox).toBeDisabled();
+    expect(screen.getByTestId("ps-settings-notifications")).toHaveTextContent(
+      STRINGS.en.profileZones.notificationsSoon,
+    );
+  });
+
+  it("marks data export and delete as coming soon leads, not dead buttons", async () => {
+    await renderReady();
+
+    for (const testId of ["ps-data-export", "ps-data-delete"]) {
+      const row = screen.getByTestId(testId);
+      expect(row).toHaveTextContent(STRINGS.en.profileZones.dataSoon);
+      // A lead, not a control: nothing here looks tappable and does nothing.
+      expect(row.querySelector("button")).toBeNull();
+      expect(row.querySelector("a")).toBeNull();
+    }
+  });
+
+  it("speaks every zone in the chosen locale (EN/HI parity)", async () => {
+    await renderReady();
+
+    fireEvent.change(screen.getByTestId("ps-lang"), {
+      target: { value: "hi" },
+    });
+
+    // The whole page flips, not just the field that was touched - every new
+    // string this ticket added resolves in whichever locale is active.
+    const hi = STRINGS.hi.profileZones;
+    expect(screen.getByTestId("ps-zone-identity")).toHaveTextContent(
+      hi.identityHeading,
+    );
+    expect(screen.getByTestId("ps-zone-health")).toHaveTextContent(
+      hi.healthHeading,
+    );
+    expect(screen.getByTestId("ps-zone-settings")).toHaveTextContent(
+      hi.settingsHeading,
+    );
+    expect(screen.getByTestId("ps-settings-language-value")).toHaveTextContent(
+      "हिंदी",
+    );
+    expect(screen.getByTestId("ps-zone-identity")).toHaveTextContent(
+      hi.photoReplace,
+    );
+    expect(screen.getByTestId("ps-health-pending")).toHaveTextContent(
+      hi.healthPending,
+    );
+    expect(screen.getByTestId("ps-data-export")).toHaveTextContent(hi.dataSoon);
   });
 });

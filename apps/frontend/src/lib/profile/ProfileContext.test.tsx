@@ -64,6 +64,7 @@ function Probe() {
     saveStatus,
     updateDraft,
     finishProfile,
+    syncPhotoRef,
   } = useProfile();
   const basics = {
     name: "Asha Devi",
@@ -76,6 +77,8 @@ function Probe() {
       <span data-testid="probe-saved">{String(saved !== null)}</span>
       <span data-testid="probe-name">{draft.name}</span>
       <span data-testid="probe-status">{saveStatus}</span>
+      <span data-testid="probe-photo-ref">{draft.photoFileName}</span>
+      <span data-testid="probe-saved-photo-ref">{saved?.photo_ref ?? ""}</span>
       <button
         data-testid="probe-set-draft"
         onClick={() => updateDraft({ ...draft, ...basics })}
@@ -89,6 +92,18 @@ function Probe() {
         }}
       >
         finish
+      </button>
+      <button
+        data-testid="probe-sync-photo"
+        onClick={() => syncPhotoRef("patient/7/photo-1.enc")}
+      >
+        sync photo
+      </button>
+      <button
+        data-testid="probe-clear-photo"
+        onClick={() => syncPhotoRef(null)}
+      >
+        clear photo
       </button>
     </div>
   );
@@ -358,5 +373,68 @@ describe("ProfileProvider identity isolation (#488 AC 5)", () => {
     expect(screen.getByTestId("probe-name").textContent).toBe("");
     expect(state.getProfile).toHaveBeenCalledTimes(1);
     expect(window.localStorage.getItem("caresetu.profile.draft.8")).toBeNull();
+  });
+});
+
+// #548: the photo endpoint owns the stored ref, so the provider needs one way
+// to adopt that answer. The invariant it protects: the edit buffer's photo
+// field must always track the stored ref, or the next identity save would PUT
+// a stale ref back and silently detach an uploaded photo.
+describe("ProfileProvider.syncPhotoRef (#548)", () => {
+  it("adopts an uploaded ref into both the buffer and the saved profile", async () => {
+    state.getProfile.mockResolvedValue({ set: true, profile: savedProfile });
+    await renderProvider(<Probe />);
+
+    expect(screen.getByTestId("probe-photo-ref").textContent).toBe("");
+
+    fireEvent.click(screen.getByTestId("probe-sync-photo"));
+
+    expect(screen.getByTestId("probe-photo-ref").textContent).toBe(
+      "patient/7/photo-1.enc",
+    );
+    expect(screen.getByTestId("probe-saved-photo-ref").textContent).toBe(
+      "patient/7/photo-1.enc",
+    );
+    // Persisted, so a reload keeps the ref rather than re-asking for a photo.
+    expect(
+      JSON.parse(
+        window.localStorage.getItem("caresetu.profile.draft.7") ?? "{}",
+      ).photoFileName,
+    ).toBe("patient/7/photo-1.enc");
+  });
+
+  it("sends the adopted ref on the next save, so a save cannot detach it", async () => {
+    state.getProfile.mockResolvedValue({ set: true, profile: savedProfile });
+    state.saveProfile.mockResolvedValue(savedProfile);
+    await renderProvider(<Probe />);
+
+    fireEvent.click(screen.getByTestId("probe-sync-photo"));
+    fireEvent.click(screen.getByTestId("probe-finish"));
+
+    await waitFor(() =>
+      expect(state.saveProfile).toHaveBeenCalledWith(
+        expect.objectContaining({ photo_ref: "patient/7/photo-1.enc" }),
+      ),
+    );
+  });
+
+  it("clears the ref on removal and leaves the save status alone", async () => {
+    state.getProfile.mockResolvedValue({ set: true, profile: savedProfile });
+    state.saveProfile.mockResolvedValue(savedProfile);
+    await renderProvider(<Probe />);
+
+    fireEvent.click(screen.getByTestId("probe-sync-photo"));
+    // A save that lands, then the photo is removed: the removal is its own
+    // committed write, so it must not blank a "Profile saved" notice.
+    fireEvent.click(screen.getByTestId("probe-finish"));
+    await waitFor(() =>
+      expect(screen.getByTestId("probe-status").textContent).toBe("saved"),
+    );
+
+    // removePhoto answers with a null ref; the caller passes it straight on.
+    fireEvent.click(screen.getByTestId("probe-clear-photo"));
+    expect(screen.getByTestId("probe-photo-ref").textContent).toBe("");
+    expect(screen.getByTestId("probe-saved-photo-ref").textContent).toBe("");
+    expect(screen.getByTestId("probe-status").textContent).toBe("saved");
   });
 });

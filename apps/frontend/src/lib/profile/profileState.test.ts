@@ -117,16 +117,18 @@ describe("completion meter", () => {
   });
 
   it("keeps the profile-settings scope free of the wizard-only dimensions (#527)", () => {
-    // Photo upload and the chronic-interest toggles are not collectable on
-    // Profile & Settings, so a fully edited page must read 100% there even
-    // when photoFileName and the tracking flags are absent - while the
-    // full-draft meter (wizard/Home) still counts them as missing.
+    // The chronic-interest toggles are the wizard's skippable step and are not
+    // collectable on Profile & Settings, so a fully edited page - photo
+    // included, since #548 made the photo collectable here - must read 100%
+    // there even when the tracking flags are absent, while the full-draft
+    // meter (wizard/Home) still counts them as missing.
     const fullPage = draftWith({
       name: "Asha Devi",
       age: "30",
       gender: "other",
       area: "Bishrampur",
       emergencyContact: "+91 98765 43210",
+      photoFileName: "patient/7/photo-1.enc",
     });
     expect(profileCompleteness(fullPage, "profile-settings")).toBe(100);
     expect(profileCompleteness(fullPage)).toBeLessThan(100);
@@ -140,6 +142,36 @@ describe("completion meter", () => {
     );
     expect(partial).toBeGreaterThan(0);
     expect(partial).toBeLessThan(100);
+  });
+
+  it("counts the photo on the profile-settings page, which can now collect it (#548)", () => {
+    // #548 put the photo control on the Profile page, so the page-scoped meter
+    // counts it: the page can close that gap itself, which was the whole reason
+    // the dimension used to be excluded from this scope.
+    const withoutPhoto = draftWith({
+      name: "Asha Devi",
+      age: "30",
+      gender: "other",
+      area: "Bishrampur",
+      emergencyContact: "+91 98765 43210",
+    });
+    expect(profileCompleteness(withoutPhoto, "profile-settings")).toBeLessThan(
+      100,
+    );
+    expect(
+      profileCompleteness(
+        { ...withoutPhoto, photoFileName: "patient/7/photo-1.enc" },
+        "profile-settings",
+      ),
+    ).toBe(100);
+
+    // Four of the six page-collectable items, honestly short of 100%.
+    expect(
+      profileCompleteness(
+        { ...withoutPhoto, emergencyContact: "" },
+        "profile-settings",
+      ),
+    ).toBe(67);
   });
 
   it("counts valid fields only and moves monotonically toward 100%", () => {

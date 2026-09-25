@@ -63,6 +63,16 @@ export interface ProfileContextValue {
    * written first so the host's bilingual save-error notice is always shown.
    */
   finishProfile: () => Promise<boolean>;
+  /**
+   * Adopt a photo-endpoint answer (#548) into the profile state. The photo
+   * surface is its own endpoint, not part of the profile form, but its ref
+   * still lives on the profile row - so the buffer must track it. Without this
+   * a save made after an upload would PUT the buffer's stale (or empty) ref
+   * and silently detach the stored photo. Deliberately does not touch
+   * `saveStatus`: the ref is already committed by the photo endpoint, so
+   * adopting it is not a pending identity edit.
+   */
+  syncPhotoRef: (ref: string | null) => void;
 }
 
 const ProfileContext = createContext<ProfileContextValue | null>(null);
@@ -189,6 +199,20 @@ function ProfileProviderInner({
     }
   }, [identityId, draft]);
 
+  const syncPhotoRef = useCallback(
+    (ref: string | null) => {
+      setSavedProfile((current) =>
+        current === null ? current : { ...current, photo_ref: ref },
+      );
+      setDraft((current) => {
+        const next = { ...current, photoFileName: ref ?? "" };
+        saveDraft(next, identityId);
+        return next;
+      });
+    },
+    [identityId],
+  );
+
   const value = useMemo(
     () => ({
       hydrated,
@@ -197,8 +221,17 @@ function ProfileProviderInner({
       saveStatus,
       updateDraft,
       finishProfile,
+      syncPhotoRef,
     }),
-    [hydrated, savedProfile, draft, saveStatus, updateDraft, finishProfile],
+    [
+      hydrated,
+      savedProfile,
+      draft,
+      saveStatus,
+      updateDraft,
+      finishProfile,
+      syncPhotoRef,
+    ],
   );
 
   return (
