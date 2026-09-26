@@ -42,6 +42,12 @@ import {
 } from "@/lib/profile/api";
 import { fetchConsentLog, revokeConsent } from "@/lib/consent/api";
 import {
+  appendHealthMetric,
+  fetchHealthBackground,
+  fetchHealthMetrics,
+  saveHealthBackground,
+} from "@/lib/health-background/api";
+import {
   initialDraft,
   saveDraft,
   type ProfileDraft,
@@ -72,6 +78,23 @@ vi.mock("@/lib/profile/api", async (importOriginal) => {
 vi.mock("@/lib/consent/api", async (importOriginal) => {
   const mod = await importOriginal<typeof import("@/lib/consent/api")>();
   return { ...mod, fetchConsentLog: vi.fn(), revokeConsent: vi.fn() };
+});
+
+// #549: the Health background zone reads the owner's health-background
+// endpoints on mount, so the page suite stands in for them. The defaults are
+// the zero-setup answers (no snapshot yet, no measurements) - this suite is
+// about the page around the zone, and the zone's own behaviour is covered in
+// HealthBackgroundZone.test.tsx.
+vi.mock("@/lib/health-background/api", async (importOriginal) => {
+  const mod =
+    await importOriginal<typeof import("@/lib/health-background/api")>();
+  return {
+    ...mod,
+    fetchHealthBackground: vi.fn(),
+    saveHealthBackground: vi.fn(),
+    fetchHealthMetrics: vi.fn(),
+    appendHealthMetric: vi.fn(),
+  };
 });
 
 vi.mock("@/lib/auth/AuthContext", () => ({
@@ -106,6 +129,10 @@ const mockFetchPhoto = vi.mocked(fetchPatientPhoto);
 const mockDeletePhoto = vi.mocked(deletePatientPhoto);
 const mockFetchConsentLog = vi.mocked(fetchConsentLog);
 const mockRevokeConsent = vi.mocked(revokeConsent);
+const mockFetchHealthBackground = vi.mocked(fetchHealthBackground);
+const mockSaveHealthBackground = vi.mocked(saveHealthBackground);
+const mockFetchHealthMetrics = vi.mocked(fetchHealthMetrics);
+const mockAppendHealthMetric = vi.mocked(appendHealthMetric);
 
 const savedProfile: StoredPatientProfile = {
   name: "Asha Devi",
@@ -140,6 +167,16 @@ beforeEach(() => {
   mockFetchConsentLog.mockReset();
   mockFetchConsentLog.mockResolvedValue({ items: [] });
   mockRevokeConsent.mockReset();
+  mockFetchHealthBackground.mockReset();
+  mockSaveHealthBackground.mockReset();
+  mockFetchHealthMetrics.mockReset();
+  mockAppendHealthMetric.mockReset();
+  mockFetchHealthBackground.mockResolvedValue({
+    set: false,
+    acknowledged: false,
+    background: null,
+  });
+  mockFetchHealthMetrics.mockResolvedValue({ items: [], total: 0 });
 });
 
 afterEach(() => {
@@ -514,13 +551,17 @@ describe("Profile page zones (#548)", () => {
     }
   });
 
-  it("holds the health background zone as a placeholder, not an error", async () => {
+  it("hosts the health background zone's real surface, not a placeholder", async () => {
     await renderReady();
 
-    expect(screen.getByTestId("ps-health-pending")).toHaveTextContent(
-      STRINGS.en.profileZones.healthPending,
-    );
-    expect(screen.queryByRole("alert")).toBeNull();
+    // #549 filled the zone: the snapshot form and the series are here, and the
+    // zone is a real labelled landmark rather than a "coming later" note.
+    const health = screen.getByTestId("ps-zone-health");
+    expect(
+      health.querySelector('[data-testid="ps-hb-snapshot-form"]'),
+    ).toBeTruthy();
+    expect(health.querySelector('[data-testid="ps-hb-metrics"]')).toBeTruthy();
+    expect(health).toHaveTextContent(STRINGS.en.profileZones.healthSub);
   });
 
   it("shows the default language in Settings without a second bound control", async () => {
@@ -790,6 +831,17 @@ describe("Profile page settings (#548)", () => {
     );
     expect(screen.getByTestId("ps-health-pending")).toHaveTextContent(
       hi.healthPending,
+    );
+    // #549: the health background zone's own copy flips with the rest of the
+    // page, not just the zone heading.
+    expect(screen.getByTestId("ps-hb-zone")).toHaveTextContent(
+      hi.bloodGroupLabel,
+    );
+    expect(screen.getByTestId("ps-hb-snapshot-save")).toHaveTextContent(
+      hi.snapshotSave,
+    );
+    expect(screen.getByTestId("ps-hb-metric-add")).toHaveTextContent(
+      hi.metricAdd,
     );
     expect(screen.getByTestId("ps-data-export")).toHaveTextContent(hi.dataSoon);
   });

@@ -866,8 +866,76 @@ const en = {
     photoRemove: "Remove photo",
     photoFailed: "We could not update your photo. Please try again.",
     healthHeading: "Health background",
+    healthSub:
+      "What your providers should know about you before they treat you",
     healthPending:
-      "You have not added a health background yet. Your allergies, conditions and current medicines will be listed here.",
+      "You have not added a health background yet. Add your allergies, conditions and current medicines below.",
+    healthLoading: "Loading your health background...",
+    healthLoadFailed: "We could not load your health background.",
+    healthRetry: "Try again",
+    bloodGroupLabel: "Blood group",
+    bloodGroupPlaceholder: "For example, B+",
+    listHint: "Write one item per line.",
+    conditionsLabel: "Conditions",
+    conditionsPlaceholder: "For example, Asthma",
+    allergiesLabel: "Allergies",
+    allergiesPlaceholder: "For example, Penicillin",
+    medicationsLabel: "Current medicines",
+    medicationsPlaceholder: "For example, Salbutamol inhaler",
+    immunizationsLabel: "Immunizations",
+    immunizationsPlaceholder: "For example, Tetanus in 2024",
+    familyHistoryLabel: "Family history",
+    familyHistoryPlaceholder: "For example, Father - diabetes",
+    snapshotSave: "Save health background",
+    snapshotSaved: "Health background saved.",
+    snapshotSaveFailed:
+      "We could not save your health background. Please try again.",
+    snapshotSharedNote:
+      "Your doctors with an active relationship with you can see this health background.",
+    metricsHeading: "Height and weight",
+    metricsSub: "Your measurements over time, newest first.",
+    metricsEmpty: "You have not added any height or weight measurements yet.",
+    metricsLoading: "Loading your measurements...",
+    metricsLoadFailed: "We could not load your measurements.",
+    // The series is a server-paged list; the rest is one tap away rather than
+    // silently absent.
+    metricsLoadMore: "Show earlier measurements",
+    metricsLoadingMore: "Loading earlier measurements...",
+    metricsMoreFailed: "We could not load the earlier measurements.",
+    heightLabel: "Height (cm)",
+    weightLabel: "Weight (kg)",
+    // The units stand on their own in a measurement row, where the label is
+    // already spoken by the value's own column heading.
+    heightUnit: "cm",
+    weightUnit: "kg",
+    recordedAtLabel: "Measured on",
+    metricAdd: "Add measurement",
+    metricAdded: "Measurement added.",
+    metricAddFailed: "We could not add that measurement. Please try again.",
+    metricNotRecorded: "Not recorded",
+    metricValueRequired: "Enter a height, a weight, or both.",
+    metricValueNotANumber: "Use numbers only, like 170 or 68.5.",
+    // The bounds are interpolated from the constants the same form enforces
+    // (lib/health-background/form.ts), so a change to what the client accepts
+    // cannot leave the message quoting a different range.
+    metricHeightRange: (min: number, max: number) =>
+      `Enter a height between ${min} and ${max} cm.`,
+    metricWeightRange: (min: number, max: number) =>
+      `Enter a weight between ${min} and ${max} kg.`,
+    metricRecordedAtRequired: "Tell us when this was measured.",
+    metricDateInvalid: "That date could not be read. Pick it again.",
+    // The one-time first-save confirmation (US-21/US-22/US-23, ADR-0018). Plain
+    // language about exactly who gains visibility, what they will see, and how
+    // to take it back - never a blanket "your data will be shared" line. The
+    // backend stamps this acknowledgment once and never re-asks, so the sheet
+    // opens only before that first acknowledged save.
+    healthConsentTitle: "Share your health background?",
+    healthConsentBody:
+      "Saving your health background for the first time makes it visible to the doctors you have an active relationship with. They will see your blood group, conditions, allergies, current medicines, immunizations and family history.",
+    healthConsentRecall:
+      "You can take back this access at any time from Who can see your records, further down this page.",
+    healthConsentConfirm: "Save and share",
+    healthConsentCancel: "Not now",
     settingsHeading: "Settings",
     notificationsHeading: "Notifications",
     notificationsHelp:
@@ -2195,8 +2263,64 @@ export const STRINGS: Record<Lang, Dictionary> = {
       photoRemove: "फ़ोटो हटाएँ",
       photoFailed: "आपकी फ़ोटो अपडेट नहीं हो सकी। कृपया फिर से कोशिश करें।",
       healthHeading: "स्वास्थ्य पृष्ठभूमि",
+      healthSub:
+        "इलाज शुरू करने से पहले आपके प्रोवाइडर को आपके बारे में क्या जानना चाहिए",
       healthPending:
-        "आपने अभी तक स्वास्थ्य पृष्ठभूमि नहीं जोड़ी है। आपकी एलर्जी, बीमारियाँ और वर्तमान दवाइयाँ यहाँ दिखाई देंगी।",
+        "आपने अभी तक स्वास्थ्य पृष्ठभूमि नहीं जोड़ी है। नीचे अपनी एलर्जी, बीमारियाँ और वर्तमान दवाइयाँ जोड़ें।",
+      healthLoading: "आपकी स्वास्थ्य पृष्ठभूमि लोड हो रही है...",
+      healthLoadFailed: "आपकी स्वास्थ्य पृष्ठभूमि लोड नहीं हो सकी।",
+      healthRetry: "फिर से कोशिश करें",
+      bloodGroupLabel: "ब्लड ग्रुप",
+      bloodGroupPlaceholder: "उदाहरण के लिए, B+",
+      listHint: "हर आइटम अलग लाइन में लिखें।",
+      conditionsLabel: "बीमारियाँ",
+      conditionsPlaceholder: "उदाहरण के लिए, अस्थमा",
+      allergiesLabel: "एलर्जी",
+      allergiesPlaceholder: "उदाहरण के लिए, पेनिसिलिन",
+      medicationsLabel: "वर्तमान दवाइयाँ",
+      medicationsPlaceholder: "उदाहरण के लिए, सालबुटामोल इनहेलर",
+      immunizationsLabel: "टीकाकरण",
+      immunizationsPlaceholder: "उदाहरण के लिए, 2024 में टिटनेस",
+      familyHistoryLabel: "पारिवारिक इतिहास",
+      familyHistoryPlaceholder: "उदाहरण के लिए, पिता - मधुमेह",
+      snapshotSave: "स्वास्थ्य पृष्ठभूमि सहेजें",
+      snapshotSaved: "स्वास्थ्य पृष्ठभूमि सहेजी गई।",
+      snapshotSaveFailed:
+        "आपकी स्वास्थ्य पृष्ठभूमि सहेजी नहीं जा सकी। कृपया फिर से कोशिश करें।",
+      snapshotSharedNote:
+        "आपसे जुड़े सक्रिय रिश्ते वाले आपके डॉक्टर यह स्वास्थ्य पृष्ठभूमि देख सकते हैं।",
+      metricsHeading: "ऊँचाई और वज़न",
+      metricsSub: "आपके माप, सबसे नए पहले।",
+      metricsEmpty: "आपने अभी तक कोई ऊँचाई या वज़न दर्ज नहीं किया है।",
+      metricsLoading: "आपके माप लोड हो रहे हैं...",
+      metricsLoadFailed: "आपके माप लोड नहीं हो सके।",
+      metricsLoadMore: "पुराने माप दिखाएँ",
+      metricsLoadingMore: "पुराने माप लोड हो रहे हैं...",
+      metricsMoreFailed: "पुराने माप लोड नहीं हो सके।",
+      heightLabel: "ऊँचाई (सेमी)",
+      weightLabel: "वज़न (किलो)",
+      heightUnit: "सेमी",
+      weightUnit: "किलो",
+      recordedAtLabel: "कब मापा",
+      metricAdd: "माप जोड़ें",
+      metricAdded: "माप जोड़ दिया गया।",
+      metricAddFailed: "यह माप जोड़ा नहीं जा सका। कृपया फिर से कोशिश करें।",
+      metricNotRecorded: "दर्ज नहीं",
+      metricValueRequired: "ऊँचाई, वज़न, या दोनों में से कुछ दर्ज करें।",
+      metricValueNotANumber: "केवल अंक लिखें, जैसे 170 या 68.5।",
+      metricHeightRange: (min: number, max: number) =>
+        `${min} से ${max} सेमी के बीच ऊँचाई दर्ज करें।`,
+      metricWeightRange: (min: number, max: number) =>
+        `${min} से ${max} किलो के बीच वज़न दर्ज करें।`,
+      metricRecordedAtRequired: "यह कब मापा गया, यह बताएँ।",
+      metricDateInvalid: "यह तारीख पढ़ी नहीं जा सकी। कृपया दोबारा चुनें।",
+      healthConsentTitle: "अपनी स्वास्थ्य पृष्ठभूमि साझा करें?",
+      healthConsentBody:
+        "पहली बार अपनी स्वास्थ्य पृष्ठभूमि सहेजने पर यह उन डॉक्टरों को दिखने लगेगी जिनका आपसे सक्रिय रिश्ता है। वे आपका ब्लड ग्रुप, बीमारियाँ, एलर्जी, वर्तमान दवाइयाँ, टीकाकरण और पारिवारिक इतिहास देख पाएँगे।",
+      healthConsentRecall:
+        "यह एक्सेस आप कभी भी नीचे दिए गए 'आपका रिकॉर्ड कौन देख सकता है' से वापस ले सकते हैं।",
+      healthConsentConfirm: "सहेजें और साझा करें",
+      healthConsentCancel: "अभी नहीं",
       settingsHeading: "सेटिंग",
       notificationsHeading: "नोटिफ़िकेशन",
       notificationsHelp:

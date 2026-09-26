@@ -3,9 +3,10 @@
 // #548: the patient Profile page reorganized into three professional zones
 // (US-24/US-25). Identity holds the editable personal details plus the photo
 // control (upload/preview/remove against the private photo endpoint, #533);
-// HealthBackground is a placeholder zone #549 fills; Settings holds notification
-// preferences, the default language, consent-grant management, and the data
-// export/delete leads.
+// HealthBackground holds the patient-authored health snapshot and the
+// height/weight series with its one-time first-save confirmation (#549);
+// Settings holds notification preferences, the default language,
+// consent-grant management, and the data export/delete leads.
 //
 // The save flow is unchanged and still the provider's: pre-filling from the
 // saved server profile and the identity-keyed draft buffer, the same
@@ -22,6 +23,7 @@ import { useState, type ReactNode } from "react";
 
 import { PageHeader } from "@/components/layout/PageHeader";
 import { ConsentGrantsPanel } from "@/components/patient/profile/ConsentGrantsPanel";
+import { HealthBackgroundZone } from "@/components/patient/profile/HealthBackgroundZone";
 import { MeterBar } from "@/components/patient/profile/MeterBar";
 import { ProfilePhotoCard } from "@/components/patient/profile/ProfilePhotoCard";
 import { ProfileSaveStatusNotice } from "@/components/patient/profile/SaveStatusNotice";
@@ -316,17 +318,15 @@ export default function ProfileSettingsPage() {
         </Zone>
 
         {/* ---------------------------------------------------------------
-            Zone 2 - Health background: placeholder until #549 lands. The
-            zone is present and named now so the page's shape does not change
-            again when the content arrives.
+            Zone 2 - Health background: the snapshot the patient authors
+            about themselves plus the height/weight series, on the owner's
+            own endpoints (#549). A separate surface from the identity save
+            above - it has its own control, its own draft, and the one-time
+            first-save confirmation that makes the snapshot visible to their
+            verified-relationship doctors.
         ----------------------------------------------------------------*/}
-        <Zone id="ps-zone-health" heading={z.healthHeading}>
-          <p
-            data-testid="ps-health-pending"
-            className="mt-3 text-sm text-txt-muted"
-          >
-            {z.healthPending}
-          </p>
+        <Zone id="ps-zone-health" heading={z.healthHeading} sub={z.healthSub}>
+          <HealthBackgroundZone />
         </Zone>
 
         {/* ---------------------------------------------------------------
