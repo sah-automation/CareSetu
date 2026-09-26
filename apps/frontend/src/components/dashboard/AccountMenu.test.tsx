@@ -14,6 +14,7 @@
 import {
   render,
   screen,
+  act,
   fireEvent,
   cleanup,
   waitFor,
@@ -33,7 +34,10 @@ import * as axe from "axe-core";
 import { AccountMenu } from "./AccountMenu";
 import { AuthProvider } from "@/lib/auth/AuthContext";
 import type { StoredSession } from "@/lib/auth/session";
-import { ProfileProvider } from "@/lib/profile/ProfileContext";
+import {
+  ProfileProvider,
+  useOptionalProfile,
+} from "@/lib/profile/ProfileContext";
 import type { StoredPatientProfile } from "@/lib/profile/api";
 import { __resetLangForTests } from "@/lib/i18n/LangContext";
 import { maskedPhone } from "./BottomTabs";
@@ -43,11 +47,13 @@ import { maskedPhone } from "./BottomTabs";
 const profileApi = vi.hoisted(() => ({
   getProfile: vi.fn(),
   saveProfile: vi.fn(),
+  fetchPatientPhoto: vi.fn(),
 }));
 
 vi.mock("@/lib/profile/api", () => ({
   getProfile: profileApi.getProfile,
   saveProfile: profileApi.saveProfile,
+  fetchPatientPhoto: profileApi.fetchPatientPhoto,
 }));
 
 const VALID_SESSION: StoredSession = {
@@ -166,6 +172,31 @@ function renderPatientWithProfile(profile: StoredPatientProfile | null) {
   return renderClosedTrigger(ME_RESPONSE_SINGLE_ROLE, profile);
 }
 
+// #557: the only thing that moves a stored photo ref is the profile context's
+// syncPhotoRef, so the replace/clear path is driven through the real context
+// rather than a faked setter.
+function PhotoRefControls() {
+  const profile = useOptionalProfile();
+  return (
+    <div>
+      <button
+        type="button"
+        data-testid="replace-photo"
+        onClick={() => profile?.syncPhotoRef("patient/7/photo-2.enc")}
+      >
+        replace
+      </button>
+      <button
+        type="button"
+        data-testid="clear-photo"
+        onClick={() => profile?.syncPhotoRef(null)}
+      >
+        clear
+      </button>
+    </div>
+  );
+}
+
 async function openViaKeyboard() {
   await waitFor(() =>
     expect(screen.getByTestId("account-menu")).toBeInTheDocument(),
@@ -237,6 +268,22 @@ vi.mock("next/link", () => ({
   },
 }));
 
+// #557: the <img> a surface ends up showing. Asserting inside waitFor is what
+// makes it retry - a bare querySelector returns null and resolves immediately.
+async function imageIn(root: ParentNode): Promise<HTMLImageElement> {
+  return waitFor(() => {
+    const img = root.querySelector("img");
+    expect(img).not.toBeNull();
+    return img;
+  }).then((el) => el as HTMLImageElement);
+}
+
+// #557: object-URL plumbing for the shared photo resolver. jsdom implements
+// neither, so the suite supplies them and restores whatever the host has.
+let originalCreate: typeof URL.createObjectURL;
+let originalRevoke: typeof URL.revokeObjectURL;
+let photoUrls: number;
+
 beforeEach(() => {
   vi.restoreAllMocks();
   localStorage.clear();
@@ -246,10 +293,27 @@ beforeEach(() => {
   // restoreAllMocks clears the hoisted module-mock implementations too;
   // re-seed the default "no saved profile" answer every test starts from.
   profileApi.getProfile.mockResolvedValue({ set: false, profile: null });
+  // #557: the stored photo ref resolves to an object URL, and jsdom has no
+  // createObjectURL of its own. A distinct URL per call so a test can tell
+  // *which* generation of the photo a surface is showing.
+  photoUrls = 0;
+  originalCreate = URL.createObjectURL;
+  originalRevoke = URL.revokeObjectURL;
+  URL.createObjectURL = vi.fn(
+    () => `blob:http://localhost/photo-${(photoUrls += 1)}`,
+  ) as unknown as typeof URL.createObjectURL;
+  URL.revokeObjectURL = vi.fn() as unknown as typeof URL.revokeObjectURL;
+  profileApi.fetchPatientPhoto.mockResolvedValue(
+    new Blob(["photo-bytes"], { type: "image/png" }),
+  );
 });
 
 afterEach(() => {
+  // Unmounting is what drops the hook's cache entry, so it has to happen before
+  // the stubs come back - otherwise a live entry survives into the next test.
   cleanup();
+  URL.createObjectURL = originalCreate;
+  URL.revokeObjectURL = originalRevoke;
 });
 
 describe("AccountMenu accessibility", () => {
@@ -336,6 +400,9 @@ describe("AccountMenu patient avatar trigger (#521)", () => {
     await waitFor(() => expect(trigger).toHaveTextContent("A"));
     expect(trigger.querySelector("svg")).toBeNull();
     expect(trigger.querySelector("img")).toBeNull();
+    // No stored photo means nothing to ask the backend for, so the bytes
+    // endpoint is never touched.
+    expect(profileApi.fetchPatientPhoto).not.toHaveBeenCalled();
   });
 
   it("renders a Devanagari initial intact", async () => {
@@ -344,25 +411,102 @@ describe("AccountMenu patient avatar trigger (#521)", () => {
     await waitFor(() => expect(trigger).toHaveTextContent("अ"));
   });
 
-  it("photo_ref wins over the name initial once it resolves", async () => {
+  // #557: the ref is an opaque object key, so the primitive can no longer be
+  // handed it directly. The trigger shows the bytes the backend streams back,
+  // never the stored ref as a browser-reachable URL (ADR-0020 D2).
+  it("photo_ref resolves to a renderable source, never the ref itself", async () => {
     const trigger = await renderClosedTrigger(
       ME_RESPONSE_SINGLE_ROLE,
       PHOTO_PROFILE,
     );
 
-    const img = await waitFor(() => trigger.querySelector("img")).then(
-      (el) => el!,
-    );
-    expect(img.getAttribute("src")).toBe("https://cdn.example.test/me.jpg");
+    const img = await imageIn(trigger);
+    expect(img.getAttribute("src")).toBe("blob:http://localhost/photo-1");
+    expect(img.getAttribute("src")).not.toContain("cdn.example.test");
     expect(trigger).not.toHaveTextContent("A");
+    expect(profileApi.fetchPatientPhoto).toHaveBeenCalledTimes(1);
   });
 
-  it("a bare photo file name stays dormant (no URL seam): letter wins", async () => {
+  it("a stored photo ref renders an image in the trigger and in the identity header", async () => {
     const trigger = await renderClosedTrigger(ME_RESPONSE_SINGLE_ROLE, {
       ...NAMED_PROFILE,
-      photo_ref: "me.jpg",
+      photo_ref: "patient/7/photo-1.enc",
     });
 
+    const triggerImg = await imageIn(trigger);
+    expect(triggerImg.getAttribute("src")).toMatch(/^blob:/);
+
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    await waitFor(() => expect(screen.getByRole("menu")).toBeInTheDocument());
+
+    const headerImg = await imageIn(screen.getByRole("menu"));
+    expect(headerImg.getAttribute("src")).toBe(triggerImg.getAttribute("src"));
+    // Two avatars, one ref, one request: the menu header reads the same
+    // resolution the trigger is already showing.
+    expect(profileApi.fetchPatientPhoto).toHaveBeenCalledTimes(1);
+  });
+
+  it("a photo ref that fails to resolve degrades to the initial, not a broken image", async () => {
+    profileApi.fetchPatientPhoto.mockRejectedValue(new Error("network down"));
+
+    const trigger = await renderClosedTrigger(ME_RESPONSE_SINGLE_ROLE, {
+      ...NAMED_PROFILE,
+      photo_ref: "patient/7/photo-1.enc",
+    });
+    await waitFor(() =>
+      expect(profileApi.fetchPatientPhoto).toHaveBeenCalled(),
+    );
+    await waitFor(() => expect(trigger).toHaveTextContent("A"));
+
+    // A blip is not a photo failure notice: the chrome avatar shows the initial
+    // and nothing else, and no <img> is left pointing at nothing.
+    expect(trigger.querySelector("img")).toBeNull();
+    expect(trigger).toHaveTextContent("A");
+  });
+
+  // The cache is keyed by the ref, so syncPhotoRef is what invalidates it. A
+  // replace or a clear moves every surface at once and never answers from the
+  // bytes the previous ref produced.
+  it("a replaced photo ref re-reads the bytes, and a cleared one falls back to the initial", async () => {
+    setStoredSession(VALID_SESSION);
+    profileApi.getProfile.mockResolvedValue({
+      set: true,
+      profile: { ...NAMED_PROFILE, photo_ref: "patient/7/photo-1.enc" },
+    });
+    mockMeResponse(ME_RESPONSE_SINGLE_ROLE);
+    render(
+      <AuthProvider>
+        <ProfileProvider>
+          <AccountMenu />
+          <PhotoRefControls />
+        </ProfileProvider>
+      </AuthProvider>,
+    );
+    const trigger = await waitFor(() =>
+      expect(screen.getByTestId("account-menu")).toBeInTheDocument(),
+    ).then(() => screen.getByTestId("account-menu"));
+
+    const first = await imageIn(trigger);
+    expect(first.getAttribute("src")).toBe("blob:http://localhost/photo-1");
+
+    fireEvent.click(screen.getByTestId("replace-photo"));
+    // The new ref is a new cache key: a second read, a new object URL, and the
+    // bytes the previous ref produced are no longer in any view.
+    await waitFor(() =>
+      expect(trigger.querySelector("img")?.getAttribute("src")).toBe(
+        "blob:http://localhost/photo-2",
+      ),
+    );
+    expect(profileApi.fetchPatientPhoto).toHaveBeenCalledTimes(2);
+
+    // The header behind the trigger moves with it, not one commit behind.
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    await waitFor(() => expect(screen.getByRole("menu")).toBeInTheDocument());
+    expect(
+      screen.getByRole("menu").querySelector("img")?.getAttribute("src"),
+    ).toBe("blob:http://localhost/photo-2");
+
+    fireEvent.click(screen.getByTestId("clear-photo"));
     await waitFor(() => expect(trigger).toHaveTextContent("A"));
     expect(trigger.querySelector("img")).toBeNull();
   });
@@ -382,13 +526,26 @@ describe("AccountMenu patient avatar trigger (#521)", () => {
   });
 
   it("#538 shows the doctor a person-icon account avatar instead of phone digits", async () => {
-    const trigger = await renderClosedTrigger(ME_RESPONSE_DOCTOR);
+    // #557: seeded with a photo ref on purpose. The doctor disc is deliberately
+    // un-hydrated (that is later work), and this is the assertion that keeps it
+    // that way: a stored photo must not cost a doctor an authed read for bytes
+    // no surface renders.
+    const trigger = await renderClosedTrigger(ME_RESPONSE_DOCTOR, {
+      ...NAMED_PROFILE,
+      photo_ref: "patient/7/photo-1.enc",
+    });
 
     // The generic person icon entry point - no digit text, and no saved photo
     // on the chrome disc (the doctor photo lives on the Profile page, #543).
     expect(trigger).not.toHaveTextContent("90");
     expect(trigger.querySelector("svg")).not.toBeNull();
     expect(trigger.querySelector("img")).toBeNull();
+    // Let hydration settle first: a read that arrives a tick late is still a
+    // read, so this has to be an assertion about the branch, not about timing.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(profileApi.fetchPatientPhoto).not.toHaveBeenCalled();
 
     // The dropdown behind the avatar still carries the full phone, role badge
     // and dictionary-driven Log out.

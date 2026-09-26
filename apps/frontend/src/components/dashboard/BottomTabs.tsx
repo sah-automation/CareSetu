@@ -21,6 +21,7 @@ import {
 import { Avatar } from "@/components/ui/avatar";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { useOptionalProfile } from "@/lib/profile/ProfileContext";
+import { useProfilePhotoSource } from "@/lib/profile/useProfilePhotoSource";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { cn } from "@/lib/utils";
@@ -186,6 +187,12 @@ function AccountCard({
   profileSettingsLabel: string;
   onNavigate: () => void;
 }) {
+  // #557: same resolver as the desktop chrome - the caller threads the stored
+  // ref down and the card owning the avatar makes it renderable. A null answer
+  // (no ref, still streaming, or a failed read) falls through to the name
+  // initial, and the ref is the resolver's cache key, so a replaced or cleared
+  // photo re-reads here too.
+  const { src: photoSrc } = useProfilePhotoSource(photoRef ?? null);
   return (
     <Link
       href="/patient/profile"
@@ -194,7 +201,7 @@ function AccountCard({
       className="flex min-h-12 items-center gap-3 rounded-lg px-2 py-2 transition-colors hover:bg-accent-soft focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
     >
       <Avatar
-        photoRef={photoRef}
+        photoRef={photoSrc}
         name={name}
         className="h-11 w-11 shrink-0 bg-accent-soft text-base font-semibold text-accent-strong"
       />

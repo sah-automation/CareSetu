@@ -34,6 +34,7 @@ import Link from "next/link";
 
 import { useAuth } from "@/lib/auth/AuthContext";
 import { useOptionalProfile } from "@/lib/profile/ProfileContext";
+import { useProfilePhotoSource } from "@/lib/profile/useProfilePhotoSource";
 import type { StoredPatientProfile } from "@/lib/profile/api";
 import {
   basicsComplete,
@@ -99,6 +100,15 @@ export function AccountMenu() {
   const isPatient = currentRole === "patient";
   const isDoctor = currentRole === "doctor";
   const saved = profile?.savedProfile;
+  // #557: the stored photo ref is an opaque object key (ADR-0020 D1), so it is
+  // the shared resolver - not the primitive - that makes it renderable. One call
+  // covers both patient avatars; a null answer (still streaming, or a read that
+  // failed) falls through to the name initial. Only the patient branch resolves,
+  // so a doctor on staff chrome asks for no bytes, and a dual-role session does
+  // not read a photo nothing displays.
+  const { src: photoSrc } = useProfilePhotoSource(
+    isPatient ? saved?.photo_ref ?? null : null,
+  );
   const otherRoles = (user?.roles ?? [])
     .filter(isAppRole)
     .filter((role) => role !== currentRole);
@@ -165,7 +175,7 @@ export function AccountMenu() {
         >
           {isPatient ? (
             <Avatar
-              photoRef={saved?.photo_ref}
+              photoRef={photoSrc}
               name={saved?.name}
               className={avatarClassName}
             />
@@ -185,7 +195,7 @@ export function AccountMenu() {
           <>
             <DropdownMenuLabel className="flex items-center gap-3 font-normal">
               <Avatar
-                photoRef={saved?.photo_ref}
+                photoRef={photoSrc}
                 name={saved?.name}
                 className="h-10 w-10 shrink-0 bg-accent-soft text-base font-semibold text-accent-strong"
               />

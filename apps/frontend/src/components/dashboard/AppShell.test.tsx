@@ -11,7 +11,15 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeAll,
+  beforeEach,
+  afterEach,
+} from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
@@ -21,7 +29,10 @@ import * as axe from "axe-core";
 
 import { AppShell } from "./AppShell";
 import { maskedPhone } from "./BottomTabs";
-import { ProfileProvider } from "@/lib/profile/ProfileContext";
+import {
+  ProfileProvider,
+  useOptionalProfile,
+} from "@/lib/profile/ProfileContext";
 import type { StoredPatientProfile } from "@/lib/profile/api";
 import type { Role } from "./types";
 
@@ -56,10 +67,14 @@ vi.mock("next/link", () => ({
 const switchRole = vi.fn();
 const logout = vi.fn();
 
+// #557: mutable so a test can put the account menu in its patient branch (the
+// shell's own role comes from the role prop, not from the session's choice).
+const authState = vi.hoisted(() => ({ selectedRole: "operator" }));
+
 vi.mock("@/lib/auth/AuthContext", () => ({
   useAuth: () => ({
     user: { id: 1, phone: "+911234567890", roles: ["patient", "operator"] },
-    selectedRole: "operator",
+    selectedRole: authState.selectedRole,
     switchRole,
     logout,
     isAuthenticated: true,
@@ -69,15 +84,18 @@ vi.mock("@/lib/auth/AuthContext", () => ({
 
 // #525: the patient account card reads the saved name/photo through the
 // profile seam; mocked at the module boundary like the ProfileContext suites
-// so the named-card branch can hydrate without HTTP.
+// so the named-card branch can hydrate without HTTP. #557 adds the photo-byte
+// read behind the same seam.
 const profileApi = vi.hoisted(() => ({
   getProfile: vi.fn(),
   saveProfile: vi.fn(),
+  fetchPatientPhoto: vi.fn(),
 }));
 
 vi.mock("@/lib/profile/api", () => ({
   getProfile: profileApi.getProfile,
   saveProfile: profileApi.saveProfile,
+  fetchPatientPhoto: profileApi.fetchPatientPhoto,
 }));
 
 // PHASE-8.1 T8 (#483): the doctor shell's Cases count pill reads the existing
@@ -89,9 +107,73 @@ vi.mock("@/lib/care/api", () => ({
 
 const getOpenCases = vi.mocked(listOpenCases);
 
+// #525: a hydrated patient profile, shared by the named-card and #557 cases.
+const NAMED_PROFILE: StoredPatientProfile = {
+  name: "Asha Rao",
+  age: 34,
+  gender: "female",
+  preferred_language: "en",
+  area: null,
+  emergency_contact: null,
+  photo_ref: null,
+};
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+// Radix popper relies on ResizeObserver and opens menus on real pointer
+// events, neither of which jsdom implements fully. Only the #557 account-menu
+// test needs them; vitest isolates each test file in its own jsdom.
+class ResizeObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
+beforeAll(() => {
+  window.ResizeObserver =
+    window.ResizeObserver ??
+    (ResizeObserverStub as unknown as typeof ResizeObserver);
+  if (!window.PointerEvent) {
+    class PointerEventStub extends MouseEvent {}
+    window.PointerEvent = PointerEventStub as unknown as typeof PointerEvent;
+  }
+});
+
+// #557: the only thing that moves a stored photo ref is the context's
+// syncPhotoRef, so a replace is driven through the real context. This suite
+// keeps its own fixture rather than sharing one - the repo has no shared
+// test-helper module, and only the replace is needed here.
+function PhotoRefControls() {
+  const profile = useOptionalProfile();
+  return (
+    <button
+      type="button"
+      data-testid="replace-photo"
+      onClick={() => profile?.syncPhotoRef("patient/7/photo-2.enc")}
+    >
+      replace
+    </button>
+  );
+}
+
+// #557: the <img> a surface ends up showing. Asserting inside waitFor is what
+// makes it retry - a bare querySelector returns null and resolves immediately.
+async function imageIn(root: ParentNode): Promise<HTMLImageElement> {
+  return waitFor(() => {
+    const img = root.querySelector("img");
+    expect(img).not.toBeNull();
+    return img;
+  }).then((el) => el as HTMLImageElement);
+}
+
+// #557: object-URL plumbing for the shared photo resolver, which jsdom does
+// not implement. A distinct URL per call, so a test can tell which generation
+// of the photo a surface is showing.
+let originalCreate: typeof URL.createObjectURL;
+let originalRevoke: typeof URL.revokeObjectURL;
+let photoUrls: number;
 
 beforeEach(() => {
   vi.restoreAllMocks();
@@ -99,14 +181,29 @@ beforeEach(() => {
   __resetLangForTests();
   mockPathname.mockReturnValue("/patient");
   getOpenCases.mockResolvedValue([]);
+  authState.selectedRole = "operator";
   // #525: default the profile read to "absent" so the masked-phone fallback
   // is the steady state; the named-profile branch re-seeds it per test.
   profileApi.getProfile.mockReset();
   profileApi.getProfile.mockResolvedValue({ set: false, profile: null });
+  photoUrls = 0;
+  originalCreate = URL.createObjectURL;
+  originalRevoke = URL.revokeObjectURL;
+  URL.createObjectURL = vi.fn(
+    () => `blob:http://localhost/photo-${(photoUrls += 1)}`,
+  ) as unknown as typeof URL.createObjectURL;
+  URL.revokeObjectURL = vi.fn() as unknown as typeof URL.revokeObjectURL;
+  profileApi.fetchPatientPhoto.mockResolvedValue(
+    new Blob(["photo-bytes"], { type: "image/png" }),
+  );
 });
 
 afterEach(() => {
+  // Unmounting drops the resolver's cache entry, so it has to happen before the
+  // stubs come back - otherwise a live entry survives into the next test.
   cleanup();
+  URL.createObjectURL = originalCreate;
+  URL.revokeObjectURL = originalRevoke;
 });
 
 describe("AppShell light density (patient)", () => {
@@ -353,16 +450,10 @@ describe("AppShell patient mobile account surface (#525)", () => {
   });
 
   it("shows the saved name and its initial once profile hydration lands", async () => {
-    const named: StoredPatientProfile = {
-      name: "Asha Rao",
-      age: 34,
-      gender: "female",
-      preferred_language: "en",
-      area: null,
-      emergency_contact: null,
-      photo_ref: null,
-    };
-    profileApi.getProfile.mockResolvedValue({ set: true, profile: named });
+    profileApi.getProfile.mockResolvedValue({
+      set: true,
+      profile: NAMED_PROFILE,
+    });
 
     render(
       <ProfileProvider>
@@ -379,6 +470,92 @@ describe("AppShell patient mobile account surface (#525)", () => {
     );
     // The shared Avatar's name-initial fallback ("A") for the unnamed photo.
     expect(screen.getByTestId("more-account-card")).toHaveTextContent("A");
+  });
+
+  // #557: the card's avatar used to be handed the stored photo ref directly,
+  // which the primitive can only reject as unrenderable - so a saved photo never
+  // showed on the phone at all. The ref now goes through the one shared
+  // resolver and the card receives a renderable source.
+  it("#557 renders the account card's stored photo as a renderable source", async () => {
+    profileApi.getProfile.mockResolvedValue({
+      set: true,
+      profile: { ...NAMED_PROFILE, photo_ref: "patient/7/photo-1.enc" },
+    });
+
+    render(
+      <ProfileProvider>
+        <AppShell role="patient">
+          <h1>Patient home</h1>
+        </AppShell>
+      </ProfileProvider>,
+    );
+    await waitFor(() => expect(profileApi.getProfile).toHaveBeenCalled());
+    const card = openMore();
+
+    const img = await imageIn(card);
+    expect(img.getAttribute("src")).toMatch(/^blob:/);
+    // The stored ref is an opaque key: it is never a URL the browser can reach.
+    expect(img.getAttribute("src")).not.toContain("photo-1.enc");
+    // One read answers this card. (The session is on the staff role here, so the
+    // topbar disc above it shows phone digits and asks for nothing - the shared
+    // cache across surfaces is proved by the next test.)
+    expect(profileApi.fetchPatientPhoto).toHaveBeenCalledTimes(1);
+  });
+
+  // The three chrome avatars are three views of one photo, so the ref-keyed
+  // cache is what keeps opening the account surfaces snappy. The patient shell
+  // carries all three at once: the topbar account trigger, the identity header
+  // behind it, and the More-sheet account card. Counting requests is the only
+  // assertion that would notice three per-consumer fetches.
+  it("#557 the desktop trigger, the identity header and the account card read one ref once", async () => {
+    authState.selectedRole = "patient";
+    profileApi.getProfile.mockResolvedValue({
+      set: true,
+      profile: { ...NAMED_PROFILE, photo_ref: "patient/7/photo-1.enc" },
+    });
+
+    render(
+      <ProfileProvider>
+        <AppShell role="patient">
+          <h1>Patient home</h1>
+        </AppShell>
+        <PhotoRefControls />
+      </ProfileProvider>,
+    );
+    await waitFor(() => expect(profileApi.getProfile).toHaveBeenCalled());
+
+    const trigger = screen.getByTestId("account-menu");
+    const triggerImg = await imageIn(trigger);
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    // Read the identity header before the More sheet opens: opening a sheet
+    // dismisses the open dropdown, so the two overlays are not both up at once.
+    await waitFor(() => expect(screen.getByRole("menu")).toBeInTheDocument());
+    const headerImg = await imageIn(screen.getByRole("menu"));
+    const card = openMore();
+    const cardImg = await imageIn(card);
+
+    for (const img of [triggerImg, headerImg, cardImg]) {
+      expect(img.getAttribute("src")).toMatch(/^blob:/);
+    }
+    // Three avatars, one stored ref, one request - not one per surface.
+    expect(profileApi.fetchPatientPhoto).toHaveBeenCalledTimes(1);
+
+    // A replace moves every surface off the old bytes, on both seams at once:
+    // one new read for the new ref, and nothing left showing the previous one.
+    // Which consumer gets which object URL is not pinned - they are per
+    // consumer - but none of them may keep the old one.
+    const beforeTrigger = triggerImg.getAttribute("src");
+    const beforeCard = cardImg.getAttribute("src");
+    fireEvent.click(screen.getByTestId("replace-photo"));
+    await waitFor(() => {
+      const moved = trigger.querySelector("img")?.getAttribute("src");
+      const movedCard = card.querySelector("img")?.getAttribute("src");
+      expect(moved).toMatch(/^blob:/);
+      expect(movedCard).toMatch(/^blob:/);
+      expect(moved).not.toBe(beforeTrigger);
+      expect(movedCard).not.toBe(beforeCard);
+    });
+    expect(profileApi.fetchPatientPhoto).toHaveBeenCalledTimes(2);
   });
 
   it("closes the More sheet when the account card navigates", async () => {
