@@ -962,6 +962,42 @@ class PartnerFacade:
         """
         return await self._directory.get_provider_profile(partner_id)
 
+    async def require_active_doctor(self, doctor_id: int) -> None:
+        """Re-check that this partner profile is an active doctor, and refuse if not.
+
+        The MOD-002 answer to "is this an active doctor?", published as its own
+        narrow seam because the doctor console (MOD-012) must re-check the edge's
+        role decision rather than trust it (api-standards §6,
+        security-phii-standards §3: edge checks are convenience, not the
+        boundary) - and module isolation means it can only ask through this
+        facade, never read ``partner_profiles`` itself.
+
+        Runs the SAME ``_require_active_doctor`` rule every doctor-profile
+        method here runs, so "active doctor" has exactly one definition, and
+        reads only the three columns the decision needs (id-keyed lookup, no
+        profile/credential/directory load) so a re-check is cheap enough to sit
+        in front of every console read. Raises ``PartnerNotFoundError`` when the
+        id holds no profile and ``DoctorProfileNotAllowedError`` when the
+        profile is not a ``doctor`` in the ``Active`` state - both mapped by
+        this module's registered handlers.
+        """
+        async with self._engine.begin() as connection:
+            row = (
+                await connection.execute(
+                    select(
+                        partner_profiles.c.partner_type,
+                        partner_profiles.c.status,
+                    ).where(partner_profiles.c.id == doctor_id)
+                )
+            ).first()
+            if row is None:
+                raise PartnerNotFoundError(doctor_id)
+            _require_active_doctor(
+                partner_id=doctor_id,
+                partner_type=row.partner_type,
+                status=row.status,
+            )
+
     async def get_doctor_profile(self, doctor_id: int) -> DoctorProfileView:
         async with self._engine.begin() as connection:
             row = (
@@ -1095,16 +1131,12 @@ class PartnerFacade:
                 .where(partner_profiles.c.id == doctor_id)
                 .values(**values, updated_at=func.now())
             )
-            await connection.execute(
-                partner_directory_index.update()
-                .where(partner_directory_index.c.partner_id == doctor_id)
-                .values(
-                    practice_latitude=update.practice_latitude,
-                    practice_longitude=update.practice_longitude,
-                    updated_at=func.now(),
-                )
-            )
-        await self._directory_cache.directory_visibility_changed()
+        # The public directory projection is NOT written here: this batch leaves
+        # the public entry read-only to the doctor (a preview, not an editor,
+        # #542), so a private profile save must not move the practice pin the
+        # public ``search_directory`` orders by. The practice geo the private
+        # projection serves lives on ``partner_profiles`` (written above) and
+        # only the partner-approval path re-derives the directory row.
         return await self.get_doctor_profile(doctor_id)
 
     async def update_doctor_photo(

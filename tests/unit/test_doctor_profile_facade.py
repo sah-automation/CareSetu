@@ -181,7 +181,7 @@ async def test_get_doctor_profile_projects_private_fields_and_derived_status() -
 
 
 @pytest.mark.asyncio
-async def test_update_doctor_profile_writes_shared_row_and_directory_geo() -> None:
+async def test_update_doctor_profile_writes_the_private_row_only() -> None:
     update = DoctorProfileUpdate(
         practice_name="Shanti Clinic",
         practice_address="Main Road, Daltonganj",
@@ -196,7 +196,6 @@ async def test_update_doctor_profile_writes_shared_row_and_directory_geo() -> No
     connection = _connection(
         [
             _Result(row=_Row(partner_type="doctor", status="Active")),
-            _Result(),
             _Result(),
             _Result(
                 row=_Row(
@@ -241,15 +240,21 @@ async def test_update_doctor_profile_writes_shared_row_and_directory_geo() -> No
     assert profile.consultation_fee == 50000
     statements = [call.args[0] for call in connection.execute.await_args_list]
     profile_update = statements[1]
-    directory_update = statements[2]
     assert profile_update.table.name == "partner_profiles"
     assert profile_update._values["practice_name"].value == "Shanti Clinic"
+    assert profile_update._values["practice_latitude"].value == 24.483
+    assert profile_update._values["practice_longitude"].value == 87.433
     assert profile_update._values["languages"].value == ["English", "Hindi"]
     assert "consultation_fee_paise" not in profile_update._values
-    assert directory_update.table.name == "partner_directory_index"
-    assert directory_update._values["practice_latitude"].value == 24.483
-    assert directory_update._values["practice_longitude"].value == 87.433
-    assert cache.visibility_changes == 1
+    # The public directory entry is read-only to the doctor in this batch: a
+    # private profile save must not touch the row ``search_directory`` reads.
+    written_tables = {
+        statement.table.name
+        for statement in statements
+        if getattr(statement, "table", None) is not None
+    }
+    assert written_tables == {"partner_profiles"}
+    assert cache.visibility_changes == 0
 
 
 @pytest.mark.asyncio

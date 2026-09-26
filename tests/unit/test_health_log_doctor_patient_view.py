@@ -10,6 +10,9 @@ suite drives the seam through a mocked engine, mirroring
   as the outbox ``record.accessed`` envelope.
 - The ledger row marks the doctor as actor and the list surface as scope, so
   the patient's access view says who viewed a row and from where.
+- The denial twin (``log_doctor_patient_view_denied``) writes the same rows as
+  ``outcome=denied`` plus the reason and a ``record.denied`` envelope: KPI-006
+  covers every read ATTEMPT, not only the served ones.
 """
 
 from __future__ import annotations
@@ -108,5 +111,68 @@ async def test_log_doctor_patient_view_returns_none() -> None:
     facade = _facade(connection)
 
     result = await facade.log_doctor_patient_view(patient_id=10, doctor_id=42)
+
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# log_doctor_patient_view_denied
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_log_doctor_patient_view_denied_writes_denied_ledger_and_outbox() -> None:
+    # The consent-denial twin: same four statements, but the ledger row carries
+    # outcome=denied plus the reason, and the outbox envelope is record.denied -
+    # so the patient's trust view can answer who asked and why it was refused.
+    connection = _connection([_FakeResult(), _FakeResult(scalar=77), _FakeResult(), _FakeResult()])
+    facade = _facade(connection)
+
+    await facade.log_doctor_patient_view_denied(
+        patient_id=10,
+        doctor_id=42,
+        denial_reason="no live consent grant for this patient",
+        scope="doctor_patient_detail",
+    )
+
+    stmts = _statements(connection)
+    assert len(stmts) == 4
+
+    history_params = dict(stmts[2].compile().params)
+    assert "health_record_access_history" in str(stmts[2])
+    assert history_params["record_id"] == 77
+    assert history_params["accessor_identity_id"] == 42
+    assert history_params["outcome"] == "denied"
+    assert history_params["actor_type"] == "doctor"
+    assert history_params["scope"] == "doctor_patient_detail"
+    assert history_params["denial_reason"] == "no live consent grant for this patient"
+
+    outbox_params = dict(stmts[3].compile().params)
+    assert "health_outbox" in str(stmts[3])
+    assert outbox_params["event_type"] == "record.denied"
+    assert outbox_params["status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_log_doctor_patient_view_denied_defaults_to_the_list_marker() -> None:
+    connection = _connection([_FakeResult(), _FakeResult(scalar=77), _FakeResult(), _FakeResult()])
+    facade = _facade(connection)
+
+    await facade.log_doctor_patient_view_denied(
+        patient_id=10, doctor_id=42, denial_reason="consent check failed"
+    )
+
+    history_params = dict(_statements(connection)[2].compile().params)
+    assert history_params["scope"] == "doctor_patients_list"
+
+
+@pytest.mark.asyncio
+async def test_log_doctor_patient_view_denied_returns_none() -> None:
+    connection = _connection([_FakeResult(), _FakeResult(scalar=77), _FakeResult(), _FakeResult()])
+    facade = _facade(connection)
+
+    result = await facade.log_doctor_patient_view_denied(
+        patient_id=10, doctor_id=42, denial_reason="consent check failed"
+    )
 
     assert result is None

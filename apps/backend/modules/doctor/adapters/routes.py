@@ -7,7 +7,14 @@ convention (``require_partner`` + the resolved partner profile): partner scope
 and ``partner_type == "doctor"`` in the ``Active`` lifecycle state, else 403
 ``AUTH_INSUFFICIENT_SCOPE`` at the edge. ``doctor_id`` returned by the guard
 is the partner's MOD-001 gateway identity (``partner_id``), which the
-facades use for attribution and the consent reverse lookup.
+facades use for attribution and the consent reverse lookup - and which the
+console facade independently re-checks through MOD-002 before every read
+(api-standards §6; the edge guard is convenience, the facade is the boundary).
+
+The module's own domain errors are encoded by ``register_error_handlers``,
+wired at the composition root like every other module: the doctor console's
+403 envelope must not depend on whichever module happens to register its
+handler first.
 """
 
 from __future__ import annotations
@@ -15,7 +22,8 @@ from __future__ import annotations
 import logging
 from typing import Annotated, cast
 
-from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile, status
+from fastapi import APIRouter, Depends, FastAPI, File, Query, Request, Response, UploadFile, status
+from fastapi.responses import JSONResponse
 
 from app.gateway.errors import (
     AuthenticationRequiredError,
@@ -26,6 +34,10 @@ from app.gateway.idempotency import run_idempotent
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_partner
 from modules.doctor.doctor_models import DoctorPatientDetailView, PatientsListView
+from modules.doctor.domain.exceptions import (
+    DoctorConsoleAccessDeniedError,
+    DoctorConsoleError,
+)
 from modules.doctor.facade import DoctorConsoleFacade
 from modules.partner.facade import (
     DoctorProfilePhotoView,
@@ -40,6 +52,13 @@ router = APIRouter(prefix="/v1/doctor", tags=["doctor"])
 
 _DEFAULT_PER_PAGE = 25
 _MAX_PER_PAGE = 100
+# The bound on the name filter (api-standards §4: every filter is an explicit,
+# validated query param). One full name is far under this; the cap only stops
+# an unbounded needle from being pushed through the facade on every request.
+_MAX_SEARCH_LENGTH = 120
+
+_CODE_ACCESS_DENIED = "DOCTOR_CONSOLE_ACCESS_DENIED"
+_LOG_TAG = "doctor_console_rejection"
 
 
 def _resolve_subject_id(principal: Principal) -> int:
@@ -181,7 +200,7 @@ async def delete_doctor_profile_photo(
 async def list_patients(
     request: Request,
     account: Annotated[Principal, Depends(require_partner)],
-    search: str | None = None,
+    search: Annotated[str | None, Query(max_length=_MAX_SEARCH_LENGTH)] = None,
     page: Annotated[int, Query(ge=1)] = 1,
     per_page: Annotated[int, Query(ge=1, le=_MAX_PER_PAGE)] = _DEFAULT_PER_PAGE,
 ) -> PatientsListView:
@@ -191,10 +210,11 @@ async def list_patients(
     consenting this doctor or with an open care case (current) plus patients
     whose relationship has ended (past) - is served from the
     ``doctor_console_facade`` on app state. ``search`` optionally narrows to
-    patients whose name contains the query (case-insensitive); ``page``/
-    ``per_page`` bound the returned page (default 25, max 100 per
-    api-standards §4), with ``total`` carrying the full match count. The
-    record access history is the audit trail of which rows were viewed.
+    patients whose name contains the query (case-insensitive, bounded to
+    ``_MAX_SEARCH_LENGTH`` characters); ``page``/``per_page`` bound the
+    returned page (default 25, max 100 per api-standards §4), with ``total``
+    carrying the full match count. The record access history and the consent
+    egress log are the audit trail of which rows were viewed.
     """
     facade = cast(DoctorConsoleFacade, request.app.state.doctor_console_facade)
     doctor_id = await _require_doctor(request, account)
@@ -243,11 +263,14 @@ async def get_patient_photo(
 ) -> Response:
     """Consent-gated photo stream for one patient (US-16, ADR-0020, #540).
 
-    The facade raises the shared record-access-denied error without a live
-    grant - the app-global health handler answers 403 fail-closed - and a
-    patient with no photo answers the shared 404 envelope so the app degrades
-    to the photo-picker card. The image is streamed through the backend and
-    never exposed as a public object URL (ADR-0020).
+    The facade refuses without a live grant by raising MOD-012's own
+    ``DoctorConsoleAccessDeniedError``, encoded by this module's registered
+    handler as the 403 ``DOCTOR_CONSOLE_ACCESS_DENIED`` envelope (fail-closed,
+    shared error shape) - the same shape the route used to build inline, now
+    bound to the module that owns the error. A patient with no photo answers
+    the shared 404 envelope so the app degrades to the photo-picker card. The
+    image is streamed through the backend and never exposed as a public object
+    URL (ADR-0020).
     """
     facade = cast(DoctorConsoleFacade, request.app.state.doctor_console_facade)
     doctor_id = await _require_doctor(request, account)
@@ -258,6 +281,38 @@ async def get_patient_photo(
             "PROFILE_PHOTO_NOT_FOUND",
             "no profile photo is set for this patient",
             request=request,
-            log_tag="doctor_console_rejection",
+            log_tag=_LOG_TAG,
         )
     return Response(content=photo.data, media_type=photo.media_type)
+
+
+def register_error_handlers(app: FastAPI) -> None:
+    """Attach the MOD-012 error envelope to every expected console failure.
+
+    Registered at the composition root like every other module's handlers, so
+    the doctor's 403 depends on the module that owns the error rather than on
+    whichever handler happened to be wired first. The envelope, code, and log
+    tag are exactly what the photo route produced inline before.
+    """
+
+    async def _access_denied(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_403_FORBIDDEN,
+            _CODE_ACCESS_DENIED,
+            str(exc),
+            request=request,
+            log_tag=_LOG_TAG,
+        )
+
+    async def _console_failed(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        return error_response(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "DOCTOR_CONSOLE_INTERNAL",
+            "Internal doctor console error",
+            request=request,
+            log_tag=_LOG_TAG,
+        )
+
+    app.add_exception_handler(DoctorConsoleAccessDeniedError, _access_denied)
+    app.add_exception_handler(DoctorConsoleError, _console_failed)

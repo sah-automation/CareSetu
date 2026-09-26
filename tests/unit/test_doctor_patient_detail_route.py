@@ -4,8 +4,8 @@ The routes are thin adapters over the doctor console facade: the detail
 answers the section-gated typed shape and the photo endpoint streams the
 gated bytes. The facade is stubbed here - the DB-backed gating is the facade
 suite's job. Denials render as (a) locked ``null`` sections (never an error)
-in the detail, and (b) a ``403 RECORD_ACCESS_DENIED`` envelope for a direct
-photo fetch without a grant. Doctor RBAC matches the Patients list route:
+in the detail, and (b) a ``403 DOCTOR_CONSOLE_ACCESS_DENIED`` envelope for a
+direct photo fetch without a grant. Doctor RBAC matches the Patients list route:
 partner scope + ``partner_type == "doctor"`` + ``Active``.
 """
 
@@ -27,7 +27,7 @@ from modules.doctor.doctor_models import (
     DoctorPatientDetailView,
     PatientsListView,
 )
-from modules.health.facade import RecordAccessDeniedError
+from modules.doctor.domain.exceptions import DoctorConsoleAccessDeniedError
 from modules.iam.domain.jwt import issue_token
 from modules.iam.facade import PhotoContent
 from modules.partner.facade import PartnerView
@@ -52,7 +52,7 @@ _DETAIL_VIEW = DoctorPatientDetailView(
         gender="male",
         area="Bengaluru",
         emergency_contact="9876543210",
-        photo_ref="profiles/abc",
+        has_photo=True,
     ),
     consultation_history=None,
     health_background=None,
@@ -150,7 +150,7 @@ def test_detail_returns_section_gated_view() -> None:
         "gender": "male",
         "area": "Bengaluru",
         "emergency_contact": "9876543210",
-        "photo_ref": "profiles/abc",
+        "has_photo": True,
     }
     assert body["consultation_history"] is None
     assert body["health_background"] is None
@@ -217,7 +217,9 @@ def test_photo_without_stored_photo_answers_shared_404() -> None:
 
 def test_photo_without_live_grant_fails_closed_with_403() -> None:
     doctor_facade = StubDoctorConsoleFacade()
-    doctor_facade.photo_error = RecordAccessDeniedError("no live consent grant for this patient")
+    doctor_facade.photo_error = DoctorConsoleAccessDeniedError(
+        "no live consent grant for this patient"
+    )
     client = _client(doctor_facade)
 
     response = client.get(
@@ -226,7 +228,9 @@ def test_photo_without_live_grant_fails_closed_with_403() -> None:
     )
 
     assert response.status_code == 403
-    assert response.json()["code"] == "RECORD_ACCESS_DENIED"
+    body = response.json()
+    assert body["code"] == "DOCTOR_CONSOLE_ACCESS_DENIED"
+    assert body["trace_id"]
 
 
 # ---------------------------------------------------------------------------

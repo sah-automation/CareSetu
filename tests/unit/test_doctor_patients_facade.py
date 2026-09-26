@@ -7,10 +7,13 @@ iam/health facades - no engine, the seam composes reads only:
 - Past = only closed cases and no live grant; a revoked grant falls back.
 - Each row carries the live consent scopes (scope badges) and the most
   recent care stage across its cases.
-- Row enrichment (name/age/photo) degrades safely when a profile is missing
-  or the iam seam fails (review-queue convention), and search is a
+- Row enrichment (name/age/photo presence) degrades safely when a profile
+  is missing or the iam seam fails (review-queue convention), and search is a
   case-insensitive name substring that never matches a nameless row.
-- Every served row is access-logged exactly once through the health facade.
+- Every served row is access-logged exactly once through the health facade and
+  egress-disclosed against the authorizing live grant; a case-only row has no
+  grant to disclose against and is skipped.
+- Rows carry a ``has_photo`` presence flag, never the private storage key.
 """
 
 from __future__ import annotations
@@ -21,7 +24,9 @@ import pytest
 
 from modules.care.facade import CaseDetailView
 from modules.consent.facade import CounterpartyGrantView
+from modules.doctor.domain.exceptions import DoctorConsoleAccessDeniedError
 from modules.doctor.facade import DoctorConsoleFacade
+from modules.partner.facade import DoctorProfileNotAllowedError, PartnerNotFoundError
 
 _DOCTOR_ID = 42
 NOW = datetime.now(UTC)
@@ -33,17 +38,21 @@ NOW = datetime.now(UTC)
 
 
 class StubConsentFacade:
-    """Canned counterparty grants, recording the reverse-lookup call."""
+    """Canned counterparty grants, recording the reverse lookup and egress rows."""
 
     def __init__(self, grants: list[CounterpartyGrantView] | None = None) -> None:
         self.grants = grants or []
         self.calls: list[tuple[str, str]] = []
+        self.egress: list[dict] = []
 
     async def list_counterparty_grants(
         self, *, counterparty_type: str, counterparty_id: str
     ) -> list[CounterpartyGrantView]:
         self.calls.append((counterparty_type, counterparty_id))
         return self.grants
+
+    async def record_egress_disclosure(self, **kwargs: object) -> None:
+        self.egress.append(dict(kwargs))
 
 
 class StubCareFacade:
@@ -88,17 +97,36 @@ class StubHealthFacade:
         self.logged.append((patient_id, doctor_id))
 
 
+class StubPartnerFacade:
+    """The MOD-002 re-check seam; pointed at a non-doctor/non-active partner to refuse."""
+
+    def __init__(self, refusal: str | None = None) -> None:
+        self.refusal = refusal
+        self.checked: list[int] = []
+
+    async def require_active_doctor(self, doctor_id: int) -> None:
+        self.checked.append(doctor_id)
+        if self.refusal == "not_a_doctor":
+            raise DoctorProfileNotAllowedError(doctor_id, "lab", "Active")
+        if self.refusal == "not_active":
+            raise DoctorProfileNotAllowedError(doctor_id, "doctor", "Suspended")
+        if self.refusal == "gone":
+            raise PartnerNotFoundError(doctor_id)
+
+
 def _facade(
     consent: StubConsentFacade | None = None,
     care: StubCareFacade | None = None,
     iam: StubIamFacade | None = None,
     health: StubHealthFacade | None = None,
+    partner: StubPartnerFacade | None = None,
 ) -> DoctorConsoleFacade:
     return DoctorConsoleFacade(
         consent_facade=consent or StubConsentFacade(),
         care_facade=care or StubCareFacade(),
         iam_facade=iam or StubIamFacade(),
         health_facade=health or StubHealthFacade(),
+        partner_facade=partner or StubPartnerFacade(),
     )
 
 
@@ -143,8 +171,8 @@ def _case(
     )
 
 
-def _profile(name: str, age: int = 30) -> object:
-    return type("Profile", (), {"name": name, "age": age, "photo_ref": None})()
+def _profile(name: str, age: int = 30, photo_ref: str | None = None) -> object:
+    return type("Profile", (), {"name": name, "age": age, "photo_ref": photo_ref})()
 
 
 # ---------------------------------------------------------------------------
@@ -321,7 +349,19 @@ async def test_profile_resolution_failure_degrades_to_anonymous_rows() -> None:
     assert result.items[0].patient_id == 10
     assert result.items[0].name is None
     assert result.items[0].age is None
-    assert result.items[0].photo_ref is None
+    assert result.items[0].has_photo is False
+
+
+@pytest.mark.asyncio
+async def test_rows_ship_photo_presence_never_the_storage_key() -> None:
+    consent = StubConsentFacade([_grant(patient_id=10)])
+    iam = StubIamFacade({10: _profile("Ravi Kumar", photo_ref="patient/7/photo-1.enc")})
+    facade = _facade(consent=consent, iam=iam)
+
+    result = await facade.list_doctor_patients(doctor_id=_DOCTOR_ID)
+
+    assert result.items[0].has_photo is True
+    assert "photo-1.enc" not in result.model_dump_json()
 
 
 @pytest.mark.asyncio
@@ -456,3 +496,120 @@ async def test_empty_result_when_no_grants_and_no_cases() -> None:
     assert result.items == []
     assert result.total == 0
     assert health.logged == []
+
+
+# ---------------------------------------------------------------------------
+# Egress disclosure (US-18)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_every_served_granted_row_is_egress_disclosed() -> None:
+    consent = StubConsentFacade(
+        [_grant(patient_id=10, consent_id=1, version=2), _grant(patient_id=20, consent_id=7)]
+    )
+    facade = _facade(consent=consent)
+
+    await facade.list_doctor_patients(doctor_id=_DOCTOR_ID)
+
+    assert consent.egress == [
+        {
+            "patient_id": 10,
+            "consent_id": 1,
+            "version": 2,
+            "counterparty_type": "doctor",
+            "counterparty_id": "42",
+            "record_scope": "full_record",
+            "disclosed_entry_ids": [],
+        },
+        {
+            "patient_id": 20,
+            "consent_id": 7,
+            "version": 1,
+            "counterparty_type": "doctor",
+            "counterparty_id": "42",
+            "record_scope": "full_record",
+            "disclosed_entry_ids": [],
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_egress_prefers_the_full_record_grant_as_authorizing() -> None:
+    consent = StubConsentFacade(
+        [
+            _grant(patient_id=10, scope="lab_results", consent_id=3, version=1),
+            _grant(patient_id=10, scope="full_record", consent_id=9, version=4),
+        ]
+    )
+    facade = _facade(consent=consent)
+
+    await facade.list_doctor_patients(doctor_id=_DOCTOR_ID)
+
+    assert len(consent.egress) == 1
+    assert consent.egress[0]["consent_id"] == 9
+    assert consent.egress[0]["record_scope"] == "full_record"
+    assert consent.egress[0]["version"] == 4
+
+
+@pytest.mark.asyncio
+async def test_list_egress_skips_case_only_rows_with_no_live_grant() -> None:
+    consent = StubConsentFacade([_grant(patient_id=10)])
+    care = StubCareFacade([_case(case_id=1, patient_id=30, stage="closed", updated_at=NOW)])
+    facade = _facade(consent=consent, care=care)
+
+    await facade.list_doctor_patients(doctor_id=_DOCTOR_ID)
+
+    # Past patient 30 is served from the care case alone: there is no standing
+    # grant to cite, so no egress row is fabricated for it.
+    assert [row["patient_id"] for row in consent.egress] == [10]
+
+
+@pytest.mark.asyncio
+async def test_list_egress_covers_the_served_page_only() -> None:
+    consent = StubConsentFacade(
+        [_grant(patient_id=10), _grant(patient_id=20), _grant(patient_id=30)]
+    )
+    facade = _facade(consent=consent)
+
+    await facade.list_doctor_patients(doctor_id=_DOCTOR_ID, page=1, per_page=2)
+
+    assert [row["patient_id"] for row in consent.egress] == [10, 20]
+
+
+# ---------------------------------------------------------------------------
+# Facade-side authorization re-check (api-standards §6)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_rechecks_the_active_doctor_role_in_the_facade() -> None:
+    # The edge guard is convenience; the facade is the boundary, so the id it
+    # was handed is re-checked against MOD-002 before any read happens.
+    partner = StubPartnerFacade()
+    facade = _facade(partner=partner)
+
+    await facade.list_doctor_patients(doctor_id=_DOCTOR_ID)
+
+    assert partner.checked == [_DOCTOR_ID]
+
+
+@pytest.mark.parametrize("refusal", ["not_a_doctor", "not_active", "gone"])
+@pytest.mark.asyncio
+async def test_list_refuses_a_non_doctor_or_non_active_partner(refusal: str) -> None:
+    # Even a caller holding a live grant and cases is refused: the role check
+    # runs first and answers the module's own 403 refusal, so nothing is read,
+    # logged, or disclosed on the way out.
+    consent = StubConsentFacade([_grant(patient_id=10)])
+    care = StubCareFacade([_case(case_id=1, patient_id=10, stage="pre_summary", updated_at=NOW)])
+    health = StubHealthFacade()
+    partner = StubPartnerFacade(refusal=refusal)
+    facade = _facade(consent=consent, care=care, health=health, partner=partner)
+
+    with pytest.raises(DoctorConsoleAccessDeniedError):
+        await facade.list_doctor_patients(doctor_id=_DOCTOR_ID)
+
+    assert consent.calls == []
+    assert care.calls == []
+    assert health.logged == []
+    assert consent.egress == []

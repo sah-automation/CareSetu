@@ -37,7 +37,7 @@ _PATIENTS_VIEW = PatientsListView(
             patient_id=10,
             name="Ravi Kumar",
             age=32,
-            photo_ref=None,
+            has_photo=True,
             bucket="current",
             granted_scopes=["full_record", "health_background"],
             latest_case_stage="pre_summary",
@@ -46,7 +46,7 @@ _PATIENTS_VIEW = PatientsListView(
             patient_id=20,
             name=None,
             age=None,
-            photo_ref=None,
+            has_photo=False,
             bucket="past",
             granted_scopes=[],
             latest_case_stage="closed",
@@ -130,7 +130,9 @@ def test_patients_returns_derived_bucketed_rows() -> None:
     assert current["bucket"] == "current"
     assert current["name"] == "Ravi Kumar"
     assert current["age"] == 32
-    assert current["photo_ref"] is None
+    assert current["has_photo"] is True
+    # The raw private storage key never leaves the backend.
+    assert "photo_ref" not in current
     assert current["granted_scopes"] == ["full_record", "health_background"]
     assert current["latest_case_stage"] == "pre_summary"
     past = body["items"][1]
@@ -192,6 +194,33 @@ def test_patients_rejects_per_page_over_max() -> None:
     )
 
     assert response.status_code == 422
+
+
+def test_patients_rejects_search_over_max_length() -> None:
+    client = _client()
+
+    response = client.get(
+        f"/v1/doctor/patients?search={'r' * 121}",
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 422
+
+
+def test_patients_accepts_search_at_max_length() -> None:
+    doctor_facade = StubDoctorConsoleFacade()
+    client = _client(doctor_facade=doctor_facade)
+    needle = "r" * 120
+
+    response = client.get(
+        f"/v1/doctor/patients?search={needle}",
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 200
+    assert doctor_facade.called_with == [
+        {"doctor_id": _PARTNER_ID, "search": needle, "page": 1, "per_page": 25}
+    ]
 
 
 def test_patients_empty_list_when_no_rows() -> None:
