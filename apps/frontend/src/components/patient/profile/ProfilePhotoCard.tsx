@@ -5,16 +5,15 @@
 // it never learns about object URLs, streams, or idempotency keys.
 //
 // The stored ref is private profile media (ADR-0020), never a public URL, so
-// the preview streams the bytes over the authed transport and presents an
-// object URL, revoked on teardown or replacement. A missing or unreadable photo
-// degrades to the avatar fallback rather than an error surface - a broken
-// image is worse than an initial.
+// the preview resolves it through the shared hook (#556) rather than streaming
+// bytes here. A missing or unreadable photo degrades to the avatar fallback
+// rather than an error surface - a broken image is worse than an initial.
 //
 // Upload and remove are committed writes in their own right, each answering the
 // updated profile. That answer is the only source of the new ref: the card
 // never invents one, so a rejected write can never look like a successful one.
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Avatar } from "@/components/ui/avatar";
@@ -22,11 +21,8 @@ import { ApiError } from "@/lib/api-errors";
 import { idempotencyKey } from "@/lib/idempotency";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
-import {
-  deletePatientPhoto,
-  fetchPatientPhoto,
-  uploadPatientPhoto,
-} from "@/lib/profile/api";
+import { deletePatientPhoto, uploadPatientPhoto } from "@/lib/profile/api";
+import { useProfilePhotoSource } from "@/lib/profile/useProfilePhotoSource";
 
 export interface ProfilePhotoCardProps {
   /** The stored profile-media ref, or null when no photo is set. */
@@ -37,9 +33,6 @@ export interface ProfilePhotoCardProps {
   onPhotoRefChange: (ref: string | null) => void;
 }
 
-/** The backend's answer when the ref has no media behind it. */
-const PHOTO_NOT_FOUND_CODE = "PROFILE_PHOTO_NOT_FOUND";
-
 export function ProfilePhotoCard({
   photoRef,
   name,
@@ -48,7 +41,6 @@ export function ProfilePhotoCard({
   const { lang } = useLang();
   const t = STRINGS[lang].profileZones;
   const inputRef = useRef<HTMLInputElement>(null);
-  const [photoUrl, setPhotoUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<{ traceId?: string } | null>(null);
   // A removal is idempotent on the backend, so a failed one is safe to re-issue
@@ -59,42 +51,11 @@ export function ProfilePhotoCard({
   // with no media behind it: the completion wizard persists a bare file name as
   // a placeholder until a real upload lands (#548 review). Trusting the ref
   // alone would then offer "Remove" for a photo that was never stored, so the
-  // fetch decides - but only a definite "not found" downgrades, never a
-  // transport blip, which must not make a stored photo look absent.
-  const [mediaAbsent, setMediaAbsent] = useState(false);
+  // resolved source decides - but only a definite "not found" counts as absent,
+  // never a transport blip, which must not make a stored photo look absent.
+  const { src: photoUrl, absent: mediaAbsent } =
+    useProfilePhotoSource(photoRef);
   const hasPhoto = photoRef != null && !mediaAbsent;
-
-  useEffect(() => {
-    if (photoRef == null) {
-      setPhotoUrl(null);
-      setMediaAbsent(false);
-      return;
-    }
-    let cancelled = false;
-    let objectUrl: string | null = null;
-    setPhotoUrl(null);
-    setMediaAbsent(false);
-    void fetchPatientPhoto()
-      .then((blob) => {
-        if (cancelled) return;
-        if (typeof URL.createObjectURL !== "function") return;
-        objectUrl = URL.createObjectURL(blob);
-        setPhotoUrl(objectUrl);
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        setPhotoUrl(null);
-        if (err instanceof ApiError && err.code === PHOTO_NOT_FOUND_CODE) {
-          setMediaAbsent(true);
-        }
-      });
-    return () => {
-      cancelled = true;
-      if (objectUrl != null) {
-        URL.revokeObjectURL(objectUrl);
-      }
-    };
-  }, [photoRef]);
 
   async function uploadPhoto(file: File) {
     setBusy(true);
