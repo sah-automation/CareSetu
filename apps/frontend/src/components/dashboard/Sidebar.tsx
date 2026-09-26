@@ -16,7 +16,7 @@
 // group. These are additions to the shared chrome - the light patient shell
 // never renders a sidebar, and the mobile bottom-tab bars are untouched.
 
-import { useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { ChevronLeft, ChevronRight, LogOut } from "lucide-react";
@@ -159,12 +159,23 @@ function SidebarSectionGroup({
 // the captured rect stays valid while the page scrolls. The mouse (and focus)
 // handlers live on the item root (onMouseEnter/onMouseLeave are non-bubbling),
 // with the anchor-level hover only driving the fixed flyout placement.
+//
+// Blueprint §9.4 "Labeled controls" is a hard floor, and a hover-only tooltip
+// is not a name: a `role="tooltip"` nothing references is never announced. So
+// every collapsed control carries its own accessible name (the link's
+// `aria-label` is the item's own localized label; the Soon affordance carries
+// the same label as screen-reader-only text, because `aria-label` is
+// prohibited on a role-less span), and the visual flyout is wired to the
+// control with `aria-describedby` so its text (label, Soon badge, open count)
+// rides along as the description. Focus still opens the flyout for sighted
+// keyboard users, but it is no longer what names the control.
 function CollapsedNavItem({ item }: { item: NavItemDef }) {
   const pathname = usePathname();
   const { lang } = useLang();
   const [flyoutOpen, setFlyoutOpen] = useState(false);
   const [flyoutTop, setFlyoutTop] = useState(0);
   const anchorRef = useRef<HTMLSpanElement>(null);
+  const flyoutId = useId();
 
   const label = STRINGS[lang].nav[item.labelKey];
   const Icon = item.icon;
@@ -181,8 +192,8 @@ function CollapsedNavItem({ item }: { item: NavItemDef }) {
   const handlers = {
     onMouseEnter: openFlyout,
     onMouseLeave: () => setFlyoutOpen(false),
-    // Keyboard users hit the icon rail with Tab: mirror the hover state so
-    // the label flyout is reachable without a pointer.
+    // Sighted keyboard users hit the icon rail with Tab, so focus mirrors the
+    // hover state and surfaces the same visual flyout.
     onFocus: openFlyout,
     onBlur: () => setFlyoutOpen(false),
   };
@@ -190,6 +201,9 @@ function CollapsedNavItem({ item }: { item: NavItemDef }) {
   const anchor = (
     <span
       ref={anchorRef}
+      // Decorative: the name comes from the control (aria-label below), never
+      // from the glyph.
+      aria-hidden="true"
       className={cn(
         "relative flex h-11 w-11 shrink-0 items-center justify-center rounded",
         active
@@ -204,11 +218,15 @@ function CollapsedNavItem({ item }: { item: NavItemDef }) {
 
   const flyout = (
     <div
+      id={flyoutId}
       role="tooltip"
       style={{ top: flyoutTop }}
       className="fixed left-16 z-50 flex -translate-y-1/2 items-center gap-2 rounded-md border border-hairline bg-surface px-3 py-2 text-sm whitespace-nowrap text-txt shadow-card"
       data-testid="sidebar-flyout"
     >
+      {/* The count pill keeps its bare number as its own text: an aria-label
+          here would replace the value-bearing text and announce nothing
+          useful. It reaches AT through the flyout's description instead. */}
       <span
         className={cn(
           "min-w-0 truncate",
@@ -235,12 +253,14 @@ function CollapsedNavItem({ item }: { item: NavItemDef }) {
     return (
       <span
         aria-disabled="true"
+        aria-describedby={flyoutId}
         className="block cursor-not-allowed opacity-60"
         data-soon="true"
         data-testid={`nav-${item.key}`}
         {...handlers}
       >
         {body}
+        <span className="sr-only">{label}</span>
       </span>
     );
   }
@@ -248,7 +268,11 @@ function CollapsedNavItem({ item }: { item: NavItemDef }) {
   return (
     <Link
       href={item.href}
+      aria-label={label}
       aria-current={active ? "page" : undefined}
+      // The flyout only exists while it is open; the reference is inert
+      // otherwise, and the name never depends on it.
+      aria-describedby={flyoutId}
       data-active={active || undefined}
       data-testid={`nav-${item.key}`}
       className="block w-11"

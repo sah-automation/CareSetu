@@ -4,7 +4,9 @@
 // variants (full-shell sidebar, patient desktop top-nav). Mobile tab-bar
 // columns render their own compact markup in BottomTabs. Labels resolve
 // through the i18n engine (blueprint §9.2); Soon entries render dimmed,
-// non-interactive, badged (§2.7).
+// non-interactive, badged (§2.7). The collapsed icon rail is NOT this
+// component: #538 gave it its own renderer (CollapsedNavItem in Sidebar.tsx),
+// so every variant here is text-bearing by construction.
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -61,16 +63,9 @@ export function ActiveIndicator() {
 interface NavItemLinkProps {
   item: NavItemDef;
   variant: NavVariant;
-  // Collapsed full-shell sidebar: icon-only columns (labels, badges, and
-  // count pills hide, mirroring the prototype's collapsed-sidebar rules).
-  hideLabel?: boolean;
 }
 
-export function NavItemLink({
-  item,
-  variant,
-  hideLabel = false,
-}: NavItemLinkProps) {
+export function NavItemLink({ item, variant }: NavItemLinkProps) {
   const pathname = usePathname();
   const { lang } = useLang();
   const label = STRINGS[lang].nav[item.labelKey];
@@ -82,7 +77,6 @@ export function NavItemLink({
     active
       ? "bg-accent-soft font-semibold text-accent-strong"
       : "font-medium text-txt-sub hover:bg-accent-soft hover:text-txt",
-    hideLabel && "justify-center px-0",
   );
 
   const body = (
@@ -92,14 +86,10 @@ export function NavItemLink({
           accent fill. */}
       {variant === "sidebar" && active && <ActiveIndicator />}
       <Icon size={variant === "sidebar" ? 20 : 16} className="shrink-0" />
-      {!hideLabel && (
-        <>
-          <span className="min-w-0 flex-1 truncate">{label}</span>
-          {item.soon && <SoonBadge />}
-          {typeof item.count === "number" && !item.soon && (
-            <CountPill count={item.count} />
-          )}
-        </>
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      {item.soon && <SoonBadge />}
+      {typeof item.count === "number" && !item.soon && (
+        <CountPill count={item.count} />
       )}
     </>
   );

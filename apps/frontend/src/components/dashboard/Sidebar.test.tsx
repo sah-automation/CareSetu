@@ -275,3 +275,130 @@ describe("Sidebar #538 redesigned chrome", () => {
     expect(logout).toHaveAttribute("aria-label", "Log out");
   });
 });
+
+// #538 review: blueprint §9.4 "Labeled controls" - a hover-only flyout is not
+// an accessible name. The collapsed rail must name every icon-only control on
+// its own, and wire the visual flyout to it as a description.
+describe("Sidebar #538 collapsed rail accessible names", () => {
+  it("names every collapsed nav link with its own localized label", () => {
+    mockPathname.mockReturnValue("/doctor");
+    render(
+      <Sidebar role="doctor" collapsed={true} onToggleCollapse={vi.fn()} />,
+    );
+
+    const nav = screen.getByTestId("sidebar-nav");
+    expect(within(nav).getByRole("link", { name: "Queue" })).toHaveAttribute(
+      "href",
+      "/doctor",
+    );
+    expect(within(nav).getByRole("link", { name: "Cases" })).toHaveAttribute(
+      "href",
+      "/doctor/cases",
+    );
+    expect(within(nav).getByRole("link", { name: "Patients" })).toHaveAttribute(
+      "href",
+      "/doctor/patients",
+    );
+    expect(within(nav).getByRole("link", { name: "Profile" })).toHaveAttribute(
+      "href",
+      "/doctor/profile",
+    );
+  });
+
+  it("does not leak the label text into the collapsed tree", () => {
+    mockPathname.mockReturnValue("/doctor");
+    render(
+      <Sidebar role="doctor" collapsed={true} onToggleCollapse={vi.fn()} />,
+    );
+
+    // The names above are author-provided, not visible text.
+    expect(screen.getByRole("link", { name: "Cases" })).toHaveTextContent("");
+  });
+
+  it("describes a collapsed link with the visible flyout instead of naming it by it", () => {
+    mockPathname.mockReturnValue("/doctor");
+    render(
+      <Sidebar role="doctor" collapsed={true} onToggleCollapse={vi.fn()} />,
+    );
+
+    const cases = screen.getByRole("link", { name: "Cases" });
+    // Nothing references the tooltip until it opens, and the name holds
+    // without it.
+    expect(cases).toHaveAccessibleName("Cases");
+    expect(cases).toHaveAccessibleDescription("");
+
+    fireEvent.mouseEnter(cases);
+    const flyout = screen.getByRole("tooltip");
+    expect(cases).toHaveAttribute("aria-describedby", flyout.id);
+    expect(flyout.id).not.toBe("");
+    expect(cases).toHaveAccessibleDescription("Cases");
+    // The tooltip is an addition, never the name's only source.
+    expect(cases).toHaveAccessibleName("Cases");
+  });
+
+  it("carries the open-cases count through the flyout description", () => {
+    mockPathname.mockReturnValue("/doctor");
+    render(
+      <Sidebar
+        role="doctor"
+        collapsed={true}
+        onToggleCollapse={vi.fn()}
+        items={[
+          {
+            key: "queue",
+            labelKey: "queue",
+            href: "/doctor",
+            icon: Home,
+            group: "work",
+          },
+          {
+            key: "cases",
+            labelKey: "cases",
+            href: "/doctor/cases",
+            icon: FolderOpen,
+            count: 3,
+            group: "work",
+          },
+        ]}
+      />,
+    );
+
+    const cases = screen.getByRole("link", { name: "Cases" });
+    fireEvent.mouseEnter(cases);
+    expect(cases).toHaveAccessibleDescription("Cases 3");
+  });
+
+  it("keeps the collapse toggle and Logout reachable by name when collapsed", () => {
+    mockPathname.mockReturnValue("/doctor");
+    const onToggleCollapse = vi.fn();
+    render(
+      <Sidebar
+        role="doctor"
+        collapsed={true}
+        onToggleCollapse={onToggleCollapse}
+      />,
+    );
+
+    const toggle = screen.getByRole("button", { name: "Expand sidebar" });
+    fireEvent.click(toggle);
+    expect(onToggleCollapse).toHaveBeenCalledTimes(1);
+
+    const logout = screen.getByRole("button", { name: "Log out" });
+    fireEvent.click(logout);
+    expect(mockLogout).toHaveBeenCalledTimes(1);
+  });
+
+  it("names a collapsed Soon entry for AT without a prohibited aria-label", () => {
+    mockPathname.mockReturnValue("/patient");
+    render(
+      <Sidebar role="patient" collapsed={true} onToggleCollapse={vi.fn()} />,
+    );
+
+    // A role-less span may not carry aria-label, so the label ships as
+    // screen-reader-only text inside it.
+    const inbox = screen.getByTestId("nav-inbox");
+    expect(inbox).toHaveAttribute("aria-disabled", "true");
+    expect(inbox).not.toHaveAttribute("aria-label");
+    expect(within(inbox).getByText("Inbox")).toHaveClass("sr-only");
+  });
+});
