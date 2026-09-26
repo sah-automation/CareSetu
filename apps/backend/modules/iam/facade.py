@@ -41,6 +41,9 @@ from modules.iam.domain.shared import (
     _identity_phone as _identity_phone,
 )
 from modules.iam.identity_facade import (
+    MAX_PROFILE_PHOTO_BYTES,
+)
+from modules.iam.identity_facade import (
     IdentityFacade as IdentityFacade,
 )
 from modules.iam.identity_facade import (
@@ -130,6 +133,7 @@ class IamFacade:
         refresh_token_ttl_seconds: int = 2_592_000,
         mfa_secret_key: str = "",
         media_store: ProfileMediaStore | None = None,
+        photo_max_bytes: int = MAX_PROFILE_PHOTO_BYTES,
     ) -> None:
         self._engine = engine
         self.delivery_queue = SmsDeliveryQueue(
@@ -151,6 +155,7 @@ class IamFacade:
             self._otp_sender,
             clock,
             media_store=media_store,
+            photo_max_bytes=photo_max_bytes,
         )
         self._otp = OtpFacade(engine, clock, self._otp_sender)
         self._mfa = MfaFacade(engine, clock, mfa_secret_key=mfa_secret_key)
@@ -238,13 +243,14 @@ class IamFacade:
         data: bytes,
         media_type: str | None,
     ) -> PatientProfile:
-        """Upload or replace the caller's profile photo (JPEG/PNG/WebP, <= 5MB).
+        """Upload or replace the caller's profile photo (JPEG/PNG/WebP, size-capped).
 
-        Delegated to ``IdentityFacade``: validates the photo contract, writes
-        the bytes into the private ``profile-media`` store (patient prefix),
-        and persists only the opaque object key on the profile row. Scoped to
-        the authenticated ``identity_id`` so one identity never overwrites
-        another's photo.
+        Delegated to ``IdentityFacade``: validates the photo contract against the
+        configured ``PROFILE_MEDIA_MAX_UPLOAD_BYTES`` ceiling, writes the bytes
+        into the private ``profile-media`` store (patient prefix), and persists
+        only the opaque object key on the profile row. Scoped to the
+        authenticated ``identity_id`` so one identity never overwrites another's
+        photo.
         """
         return await self._identity.save_patient_photo(
             identity_id=identity_id, data=data, media_type=media_type
