@@ -3,7 +3,7 @@
 **Status:** accepted
 **Date:** 2026-09-24
 **Decides:** US-35 of the parent spec (#529) - patient-authored health background becomes its own consent scope rather than hiding inside `full_record`, so patients can grant and revoke a doctor's access to it independently. Records the first-save acknowledgment that auto-grants the scope to a doctor the patient has a live relationship with, and that the scope is revocable in Settings like any other grant.
-**Traceability:** `FEAT-002` (consent), `FEAT-020` (consent lifecycle), `MOD-004`, `NFR-SEC-006`, `NFR-D02`, `ADR-0004`. Implemented by #531 (scope plumbing) and #534 (first-save acknowledgment/auto-grant).
+**Traceability:** `FEAT-002` (consent), `FEAT-020` (consent lifecycle), `MOD-003`, `MOD-004`, `MOD-012`, `NFR-SEC-006`, `NFR-D02`, `ADR-0004`. Implemented by #531 (scope plumbing), #534 (first-save acknowledgment/auto-grant), #549 (the patient-facing one-time acknowledgment surface).
 
 ## Context
 
@@ -23,9 +23,12 @@ The `record scope` closed enum already gates five record areas (`consultations |
 
 The patient's first health-background save must carry an explicit acknowledgment that the snapshot is PHI surfaced to their verified doctors. That first acknowledged save records a `health_background` standing grant to every doctor the patient has a live care-loop relationship with at that moment (a live standing grant of any scope, or an open care case). The outcome is a normal consent grant - fully revocable later in Settings like any other scope - so the patient stays in control after the one-time explicit confirmation.
 
+As delivered, the acknowledgment is write-time and mandatory, never a defaulted flag: a first save without it is refused before anything is persisted, and the confirmation is stamped once (`acknowledged_at`) and never re-prompted. Later saves converge idempotently on the single snapshot row (`INSERT ... ON CONFLICT DO UPDATE`, never overwriting the stamp) and never re-grant. The grants are written in the **same transaction** as the snapshot write, with consent-cache invalidation deferred to after the commit is visible - the fail-closed gate, the ledger, and the egress discipline are unchanged by any of this.
+
 ## Consequences
 
 - A patient can share only health background, or revoke it, without touching the rest of the record - the US-35 property.
 - `full_record` still covers the new scope, so existing full grants need no amendment and the doctor Patients entitlements (ADR-0019) are unaffected by which scope a patient granted.
 - All existing rows survive the additive migration; the fail-closed gate, cache keys, and egress ledger keep their proven shape.
 - The first acknowledged save is the consent-confirmation moment - after it, auto-grant and Settings revocation keep the grant fully patient-controlled.
+- The snapshot is patient-authored, not a care-generated record entry: it lives in the `health` schema under `MOD-003` as its own tables (`health_background_snapshots`, `health_background_metrics`), so no record-entry, timeline, or record-access semantics leak into it.
