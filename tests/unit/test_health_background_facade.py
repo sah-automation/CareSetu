@@ -223,6 +223,39 @@ async def test_later_edit_never_regrants_or_reprompts() -> None:
     assert "updated_at" in sql
 
 
+async def test_save_answers_the_stored_acknowledgement_not_a_constant() -> None:
+    """The answer echoes the row, never a hardcoded ``True`` (#534).
+
+    A first acknowledged save stamps ``acknowledged_at``, so it answers True; a
+    later edit answers the stamp already on the row. A row that somehow carries
+    no stamp answers False instead of claiming a confirmation that was never
+    persisted.
+    """
+    acknowledged_row = _snapshot_row()
+    connection = AsyncMock()
+    connection.execute = AsyncMock(side_effect=[_FakeResult([acknowledged_row]), _scalar_only()])
+    consent = StubConsentFacade()
+    facade = HealthFacade(_engine(connection), consent_facade=consent, care_facade=StubCareFacade())
+
+    view = await facade.save_health_background(7, _BACKGROUND, acknowledge_phi=False)
+
+    assert view.set is True
+    assert view.acknowledged is True
+
+    unstamped_row = _snapshot_row()
+    unstamped_row.acknowledged_at = None
+    connection = AsyncMock()
+    connection.execute = AsyncMock(side_effect=[_FakeResult([unstamped_row]), _scalar_only()])
+    facade = HealthFacade(
+        _engine(connection), consent_facade=StubConsentFacade(), care_facade=StubCareFacade()
+    )
+
+    view = await facade.save_health_background(7, _BACKGROUND, acknowledge_phi=False)
+
+    assert view.set is True
+    assert view.acknowledged is False
+
+
 async def test_save_without_configured_facades_raises() -> None:
     facade = HealthFacade(_engine(AsyncMock()))
 

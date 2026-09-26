@@ -81,6 +81,17 @@ consent_consents = Table(
     ),
     UniqueConstraint("lineage_ref", name="uq_consent_consents_lineage_ref"),
     Index("ix_consent_consents_patient_log", "patient_id", text("updated_at DESC")),
+    # The counterparty reverse lookup behind the doctor console Patients list
+    # (#539): keyed by the counterparty triple, carrying the read's order-by as
+    # trailing keys (v8.15).
+    Index(
+        "ix_consent_consents_counterparty_grants",
+        "counterparty_type",
+        "counterparty_id",
+        "status",
+        "patient_id",
+        "id",
+    ),
 )
 
 

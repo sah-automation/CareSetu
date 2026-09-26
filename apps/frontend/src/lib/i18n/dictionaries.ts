@@ -85,14 +85,21 @@ const en = {
 
   // doneScreen.* surface - #536: the shared verified-login handoff screen
   // rendered after a successful OTP verify (patient flow #536; the doctor
-  // flow #537 consumes the same component). The `openingDashboard` label
-  // rides a soft animated-dots indicator: there is deliberately no fixed
-  // numeric countdown, because the session-resume -> redirect window varies
-  // with server/network latency - an honest indeterminate cue, never fake
-  // digits. `goToDashboard` is the always-available immediate-navigation CTA.
+  // flow #537 consumes the same component). #551 made the handoff carry a
+  // real countdown: `openingDashboard` holds the line while the session-resume
+  // call is still in flight, `openingIn` renders the visible seconds once it
+  // settles, and the tick at zero fires the host's navigation. `goToDashboard`
+  // is the always-available CTA (it goes through the same resume seam).
+  // The remaining keys are the doctor handoff's practice/destination facts
+  // (US-3): values come from data, labels come from here.
   doneScreen: {
     openingDashboard: "Opening your dashboard",
+    openingIn: (seconds: number) => `Opening your dashboard in ${seconds}`,
     goToDashboard: "Go to Dashboard",
+    practiceLabel: "Practice",
+    specialtyLabel: "Specialty",
+    destinationLabel: "Destination",
+    consoleDestination: "Doctor console",
   },
 
   // staffAuth.* surface - PHASE-2.6 T10 (#201): the split-auth staff entry
@@ -1873,7 +1880,12 @@ export const STRINGS: Record<Lang, Dictionary> = {
     },
     doneScreen: {
       openingDashboard: "आपका डैशबोर्ड खुल रहा है",
+      openingIn: (seconds) => `आपका डैशबोर्ड ${seconds} सेकंड में खुल रहा है`,
       goToDashboard: "डैशबोर्ड पर जाएँ",
+      practiceLabel: "प्रैक्टिस",
+      specialtyLabel: "विशेषज्ञता",
+      destinationLabel: "गंतव्य",
+      consoleDestination: "डॉक्टर कंसोल",
     },
     staffAuth: {
       login: {

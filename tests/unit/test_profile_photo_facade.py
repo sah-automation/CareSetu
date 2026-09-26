@@ -25,12 +25,14 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.config import DEFAULT_PROFILE_MEDIA_MAX_UPLOAD_BYTES, Settings
 from modules.iam.domain.exceptions import (
     IamError,
     PatientProfileNotSetError,
     ProfilePhotoTransferError,
     ProfilePhotoValidationError,
 )
+from modules.iam.facade import IamFacade
 from modules.iam.identity_facade import (
     MAX_PROFILE_PHOTO_ATTEMPTS,
     MAX_PROFILE_PHOTO_BYTES,
@@ -133,13 +135,48 @@ def _facade(
     *,
     store: _FakeMediaStore | None = None,
     sleep: _FakeSleep | None = None,
+    photo_max_bytes: int = MAX_PROFILE_PHOTO_BYTES,
 ) -> IdentityFacade:
     return IdentityFacade(
         _engine(connection),
         otp_sender=lambda phone, otp: None,
         media_store=store,
         sleep=sleep or _FakeSleep(),
+        photo_max_bytes=photo_max_bytes,
     )
+
+
+def test_the_photo_ceiling_has_a_single_source() -> None:
+    """coding-standards §9.2: one source of truth for the ceiling.
+
+    ``MAX_PROFILE_PHOTO_BYTES`` is an alias of the settings default, not a
+    second literal, and the facade takes the RESOLVED
+    ``PROFILE_MEDIA_MAX_UPLOAD_BYTES`` so raising that one env var moves the
+    patient and doctor photo limits together.
+    """
+    assert MAX_PROFILE_PHOTO_BYTES == DEFAULT_PROFILE_MEDIA_MAX_UPLOAD_BYTES
+    assert Settings().profile_media_max_upload_bytes == MAX_PROFILE_PHOTO_BYTES
+    assert (
+        IamFacade(
+            engine=AsyncMock(spec=AsyncEngine),
+            sms_adapter=AsyncMock(),
+            photo_max_bytes=7,
+        )._identity._photo_max_bytes
+        == 7
+    )
+
+
+@pytest.mark.asyncio
+async def test_raising_the_configured_ceiling_admits_a_bigger_photo() -> None:
+    oversized = b"\xff\xd8\xff\xe0" + b"\x00" * 2048
+    connection = _connection([_FakeResult(row=_profile_row()), _FakeResult(rowcount=1)])
+    facade = _facade(connection, store=_FakeMediaStore(), photo_max_bytes=len(oversized))
+
+    profile = await facade.save_patient_photo(
+        identity_id=1, data=oversized, media_type="image/jpeg"
+    )
+
+    assert profile.photo_ref == "patient/1/photo-1.jpg"
 
 
 # ---------------------------------------------------------------------------

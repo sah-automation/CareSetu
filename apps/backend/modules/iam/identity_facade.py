@@ -21,6 +21,7 @@ from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from app.config import DEFAULT_PROFILE_MEDIA_MAX_UPLOAD_BYTES
 from bus.outbox_writer import write_outbox
 from modules.iam.domain import events
 from modules.iam.domain.exceptions import (
@@ -136,8 +137,13 @@ ALLOWED_PHOTO_MEDIA_TYPES: Final[frozenset[str]] = frozenset(
     {MEDIA_TYPE_JPEG, MEDIA_TYPE_PNG, MEDIA_TYPE_WEBP}
 )
 
-#: Profile-photo size ceiling (US-20): any photo over 5MB is refused.
-MAX_PROFILE_PHOTO_BYTES: Final[int] = 5 * 1024 * 1024
+#: Profile-photo size ceiling (US-20): any photo over the configured ceiling is
+#: refused. NOT an independent literal: it aliases the settings default, which
+#: is the single source of the value (coding-standards §9.2). The composition
+#: root injects the resolved ``PROFILE_MEDIA_MAX_UPLOAD_BYTES`` into
+#: ``IdentityFacade`` so raising the env var moves the patient and doctor photo
+#: limits together; this alias is only the no-argument default.
+MAX_PROFILE_PHOTO_BYTES: Final[int] = DEFAULT_PROFILE_MEDIA_MAX_UPLOAD_BYTES
 
 #: Attempts (initial + retries) the profile-photo write ladder makes before it
 #: gives up on a flaky store (NFR-PERF-002, mirroring the intake upload ladder).
@@ -153,12 +159,19 @@ def _profile_photo_backoff_delay(attempt: int) -> float:
     return 0.5 * (2.0 ** (attempt - 2))
 
 
-def validate_profile_photo(media_type: str | None, data: bytes) -> None:
-    """Enforce the profile-photo contract (US-20): JPEG/PNG/WebP only, <= 5MB.
+def validate_profile_photo(
+    media_type: str | None,
+    data: bytes,
+    *,
+    max_bytes: int = MAX_PROFILE_PHOTO_BYTES,
+) -> None:
+    """Enforce the profile-photo contract (US-20): JPEG/PNG/WebP only, size cap.
 
     The canonical type is derived from the upload's content type (the
     ``; charset=``-style suffix is stripped and the value lowercased); GIF and
-    every other type are refused, and the byte size must fit the 5MB ceiling.
+    every other type are refused, and the byte size must fit ``max_bytes`` - the
+    resolved ``PROFILE_MEDIA_MAX_UPLOAD_BYTES`` the caller injects, so the
+    patient and doctor photo ceilings move together (coding-standards §9.2).
     A violation raises :class:`ProfilePhotoValidationError` with a human-safe
     message for the 422 envelope.
     """
@@ -167,8 +180,10 @@ def validate_profile_photo(media_type: str | None, data: bytes) -> None:
         raise ProfilePhotoValidationError(
             "profile photo must be JPEG, PNG, or WebP (GIF is not supported)"
         )
-    if len(data) > MAX_PROFILE_PHOTO_BYTES:
-        raise ProfilePhotoValidationError("profile photo must be 5MB or smaller")
+    if len(data) > max_bytes:
+        raise ProfilePhotoValidationError(
+            f"profile photo must be {max_bytes // (1024 * 1024)}MB or smaller"
+        )
 
 
 def _sniff_image_media_type(data: bytes) -> str:
@@ -220,10 +235,16 @@ class IdentityFacade:
         *,
         media_store: ProfileMediaStore | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        photo_max_bytes: int = MAX_PROFILE_PHOTO_BYTES,
     ) -> None:
         self._engine = engine
         self._otp_sender = otp_sender
         self._clock = clock
+        # The profile-photo ceiling comes from the one settings source
+        # (``PROFILE_MEDIA_MAX_UPLOAD_BYTES``, injected at the composition root),
+        # so the patient's photo path and the doctor's share a single value
+        # (coding-standards §9.2).
+        self._photo_max_bytes = photo_max_bytes
         # US-20 (#533): the private profile-media store backs the patient's
         # profile photo. Injected at the composition root; None is the
         # unconfigured state the photo methods refuse loudly.
@@ -532,14 +553,15 @@ class IdentityFacade:
     ) -> PatientProfile:
         """Upload or replace the caller's profile photo (US-20, ticket #533).
 
-        Enforces the photo contract (JPEG/PNG/WebP only, <= 5MB, GIF refused),
-        writes the bytes to the private ``profile-media`` store under the
-        ``patient/`` prefix, and persists only the returned opaque object key
-        on the caller's ``iam_patient_profiles`` row (ADR-0020 D2: refs only
-        in SQL, never the bytes and never a public URL). An existing photo is
-        replaced: the old object is deleted so it is not orphaned. The photo is
-        bound to ``identity_id`` - the route passes the authenticated subject
-        id, so one identity can never overwrite another's photo.
+        Enforces the photo contract (JPEG/PNG/WebP only, within the configured
+        ceiling, GIF refused), writes the bytes to the private ``profile-media``
+        store under the ``patient/`` prefix, and persists only the returned
+        opaque object key on the caller's ``iam_patient_profiles`` row
+        (ADR-0020 D2: refs only in SQL, never the bytes and never a public URL).
+        An existing photo is replaced: the old object is deleted so it is not
+        orphaned. The photo is bound to ``identity_id`` - the route passes the
+        authenticated subject id, so one identity can never overwrite another's
+        photo.
 
         The store write rides an upload-retry ladder (NFR-PERF-002, mirroring
         the intake upload): transient :class:`OSError` is retried up to
@@ -556,7 +578,7 @@ class IdentityFacade:
         """
         if self._media_store is None:
             raise IamError("profile media store is not configured")
-        validate_profile_photo(media_type, data)
+        validate_profile_photo(media_type, data, max_bytes=self._photo_max_bytes)
         profile = await self.get_patient_profile(identity_id)
         if profile is None:
             raise PatientProfileNotSetError(

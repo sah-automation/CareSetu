@@ -25,11 +25,12 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 # Type-only import to avoid circular dependency at runtime
-from typing import TYPE_CHECKING, Any, Literal, TypeVar
+from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app.config import Settings
@@ -59,6 +60,12 @@ if TYPE_CHECKING:
 
 HEALTH_SCHEMA = "health"
 
+# The default page size for the patient's height/weight series list (api-standards
+# §4: default 25, max 100). ONE named constant owned by the module, read by both
+# the route's query default and the facade method's own default, so the two
+# spellings of the page size can never drift.
+DEFAULT_HEALTH_BACKGROUND_PER_PAGE: Final[int] = 25
+
 # The default scope for an owner's own read of their complete record; matches
 # the consent ``RecordScope`` vocabulary ("full_record").
 _OWNER_SCOPE = "full_record"
@@ -87,6 +94,18 @@ _COUNTERPARTY_TYPE_DOCTOR: Literal["doctor", "lab", "chemist"] = "doctor"
 # ``_consent_gated_read``); keeps the shared helper sound under --strict.
 _T = TypeVar("_T")
 
+# Explicit ceilings on the free-form health-background list areas (US-21/22,
+# #534). The columns are unbounded JSONB, so a PHI write would otherwise have no
+# cap at all; these bounds are enforced at the typed boundary so an overrun is a
+# 422, never a stored unbounded payload. Both are generous enough for real
+# clinical history (a decade of chronic conditions, or a full immunisation
+# record) while still bounding one snapshot.
+_HEALTH_BACKGROUND_MAX_LIST_ITEMS = 50
+_HEALTH_BACKGROUND_MAX_ITEM_LENGTH = 200
+
+#: One bounded free-text entry in a list area (a single condition, allergy, ...).
+_HealthBackgroundItem = Annotated[str, Field(max_length=_HEALTH_BACKGROUND_MAX_ITEM_LENGTH)]
+
 
 class HealthBackground(BaseModel):
     """The patient-authored health-background snapshot (#534, US-21/US-22).
@@ -95,15 +114,29 @@ class HealthBackground(BaseModel):
     allergies, current medications, immunizations, family history - each an
     ordered list of the patient's own entries. The wire contract of the
     ``/v1/me/health-background`` GET/PUT surface; height/weight time series
-    live in a separate ticket.
+    live in a separate ticket. Every field is explicitly bounded and extra
+    fields are refused (``extra="forbid"``), matching ``HealthBackgroundMetric``:
+    a patient-authored PHI write has a ceiling on size as well as on shape.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     blood_group: str | None = Field(default=None, max_length=16)
-    conditions: list[str] = Field(default_factory=list)
-    allergies: list[str] = Field(default_factory=list)
-    medications: list[str] = Field(default_factory=list)
-    immunizations: list[str] = Field(default_factory=list)
-    family_history: list[str] = Field(default_factory=list)
+    conditions: list[_HealthBackgroundItem] = Field(
+        default_factory=list, max_length=_HEALTH_BACKGROUND_MAX_LIST_ITEMS
+    )
+    allergies: list[_HealthBackgroundItem] = Field(
+        default_factory=list, max_length=_HEALTH_BACKGROUND_MAX_LIST_ITEMS
+    )
+    medications: list[_HealthBackgroundItem] = Field(
+        default_factory=list, max_length=_HEALTH_BACKGROUND_MAX_LIST_ITEMS
+    )
+    immunizations: list[_HealthBackgroundItem] = Field(
+        default_factory=list, max_length=_HEALTH_BACKGROUND_MAX_LIST_ITEMS
+    )
+    family_history: list[_HealthBackgroundItem] = Field(
+        default_factory=list, max_length=_HEALTH_BACKGROUND_MAX_LIST_ITEMS
+    )
 
 
 class HealthBackgroundView(BaseModel):
@@ -425,8 +458,13 @@ async def query_access_history(connection: AsyncConnection, patient_id: int) -> 
     )
 
 
-def _metric_entry_from_row(row: Any) -> HealthBackgroundMetricEntry:
+def _metric_entry_from_row(row: Row[Any]) -> HealthBackgroundMetricEntry:
     """Concretize one ``health_background_metrics`` row as the typed entry.
+
+    A ``Row[Any]`` proxy is genuinely required here (the columns are read off
+    the driver row by attribute), typed explicitly rather than left a bare
+    ``Any`` (coding-standards §3) - the same row alias the consent module's
+    row mappers use.
 
     Height/weight arrive as ``Decimal`` from the ``Numeric`` columns; they are
     emitted as JSON numbers, never Decimal-backed strings (Pydantic v2
@@ -572,6 +610,42 @@ class HealthFacade:
                 scope=scope,
             )
 
+    async def log_doctor_patient_view_denied(
+        self,
+        *,
+        patient_id: int,
+        doctor_id: int,
+        denial_reason: str,
+        scope: str = _DOCTOR_PATIENTS_LIST_SCOPE,
+    ) -> None:
+        """Ledger a REFUSED doctor view of one patient (KPI-006, security-phii-standards §3).
+
+        The denial twin of ``log_doctor_patient_view``, same shape as the
+        module's other self-ledging refusals (``get_record_as_owner``,
+        ``_consent_gated_read``): a denied attempt is a Security-class event
+        (error-handling-observability §1), so it lands in BOTH the
+        access-history ledger (``outcome=denied`` plus the reason, so the
+        patient's trust view answers who/why) and the outbox ``record.denied``
+        envelope, in one committed transaction.
+
+        Callers MUST await this BEFORE raising their own refusal, so the row is
+        durable before the error leaves the facade - raising inside the
+        transaction would roll it back. A consent denial discloses no PHI, but
+        the attempt is still a regulated act: the KPI-006 promise is 100% of
+        read attempts, not 100% of served reads.
+        """
+        async with self._engine.begin() as connection:
+            record_id = await _ensure_record_shell(connection, patient_id)
+            await _log_access(
+                connection,
+                record_id,
+                doctor_id,
+                "denied",
+                actor_type=_ACTOR_TYPE_DOCTOR,
+                scope=scope,
+                denial_reason=denial_reason,
+            )
+
     async def _discover_live_relationship_doctors(self, patient_id: int) -> set[int]:
         """Return every doctor the patient currently has a live relationship with.
 
@@ -629,7 +703,9 @@ class HealthFacade:
         scope, or an open care case), atomically with the snapshot write in ONE
         transaction and durably committed. Later edits idempotently converge on
         the single row (INSERT ... ON CONFLICT DO UPDATE, mirroring the profile
-        upsert of #482) and never re-prompt or re-grant.
+        upsert of #482) and never re-prompt or re-grant. The returned
+        ``acknowledged`` echoes the stamp the row now carries, so the answer
+        never claims a confirmation that was not persisted.
         """
         if self._consent_facade is None:
             raise RuntimeError("ConsentFacade not configured on HealthFacade")
@@ -638,6 +714,11 @@ class HealthFacade:
 
         granted_doctor_ids: set[int] = set()
         is_first_save = False
+        # The acknowledgement as it will stand after this write: the stored
+        # stamp on a later edit (never overwritten), the fresh stamp on the
+        # first acknowledged save. The answer echoes it rather than asserting a
+        # constant, so a client never reads a confirmation the row lacks.
+        acknowledged_at: datetime | None = None
         async with self._engine.begin() as connection:
             existing = (
                 await connection.execute(
@@ -652,8 +733,10 @@ class HealthFacade:
                     "the first health-background save must acknowledge that the "
                     "snapshot becomes visible to your doctors"
                 )
-            if is_first_save:
+            if existing is None:
                 granted_doctor_ids = await self._discover_live_relationship_doctors(patient_id)
+            else:
+                acknowledged_at = existing.acknowledged_at
 
             values: dict[str, object] = {
                 "identity_id": patient_id,
@@ -665,7 +748,8 @@ class HealthFacade:
                 "family_history": background.family_history,
             }
             if is_first_save:
-                values["acknowledged_at"] = datetime.now(UTC)
+                acknowledged_at = datetime.now(UTC)
+                values["acknowledged_at"] = acknowledged_at
             upsert = (
                 postgresql_insert(health_background_snapshots)
                 .values(**values)
@@ -703,7 +787,11 @@ class HealthFacade:
                 str(doctor_id),
                 _HEALTH_BACKGROUND_SCOPE,
             )
-        return HealthBackgroundView(set=True, acknowledged=True, background=background)
+        return HealthBackgroundView(
+            set=True,
+            acknowledged=acknowledged_at is not None,
+            background=background,
+        )
 
     async def append_health_background_metric(
         self,
@@ -743,7 +831,7 @@ class HealthFacade:
         patient_id: int,
         *,
         page: int = 1,
-        per_page: int = 25,
+        per_page: int = DEFAULT_HEALTH_BACKGROUND_PER_PAGE,
     ) -> HealthBackgroundMetricList:
         """Read one page of the patient's height/weight series, newest-first.
 
@@ -887,6 +975,7 @@ class HealthFacade:
 
     async def read_consented_history(
         self,
+        *,
         patient_id: int,
         scope: str,
         counterparty_type: str,
@@ -898,7 +987,9 @@ class HealthFacade:
         Delegates to the shared two-ledger spine (``_consent_gated_read``):
         allowed reads surface the scoped entries and egress-cite their IDs;
         denied reads fail closed. Owner reads bypass this gate entirely - use
-        ``get_own_record``.
+        ``get_own_record``. Keyword-only (coding-standards §3): a
+        consent-gated read takes five same-typed-ish arguments, so a positional
+        call is a silent scope/counterparty mix-up waiting to happen.
         """
         return await self._consent_gated_read(
             patient_id=patient_id,

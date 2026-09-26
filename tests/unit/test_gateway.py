@@ -755,6 +755,54 @@ async def test_rate_limit_counts_intake_write_surface_only() -> None:
         ).status_code == 200
 
 
+async def test_rate_limit_counts_profile_photo_uploads_only() -> None:
+    """US-20: both profile-photo UPLOAD routes count on the media-write tier.
+
+    ``PUT /v1/me/photo`` and ``PUT /v1/doctor/profile/photo`` each push a
+    multi-MB binary body into object storage - the same abuse target as the
+    intake uploads, so they share that tier. The photo ``GET`` (a read, on the
+    very same path) and the DELETE (a stored-key write, not a media body) stay
+    uncapped, exactly like the intake read shapes.
+    """
+    middleware = RateLimitMiddleware(app=None, enabled=True, max_requests=3, window_seconds=60)
+
+    async def stub_call_next(request: Request) -> Response:
+        return Response(status_code=200)
+
+    for path in (
+        "/v1/me/photo",
+        "/v1/doctor/profile/photo",
+        "/v1/me/photo",
+    ):
+        assert (
+            await middleware.dispatch(
+                _dispatch_request("8.8.8.8", path=path, method="PUT"), stub_call_next
+            )
+        ).status_code == 200
+
+    for path in ("/v1/me/photo", "/v1/doctor/profile/photo"):
+        response = await middleware.dispatch(
+            _dispatch_request("8.8.8.8", path=path, method="PUT"), stub_call_next
+        )
+        assert response.status_code == 429
+        assert response.headers["Retry-After"] == "60"
+
+    # A fresh caller still has its own budget, and the read/remove shapes on the
+    # same paths are never counted.
+    for method, path in (
+        ("GET", "/v1/me/photo"),
+        ("DELETE", "/v1/me/photo"),
+        ("GET", "/v1/doctor/profile/photo"),
+        ("DELETE", "/v1/doctor/profile/photo"),
+    ):
+        for _ in range(5):
+            assert (
+                await middleware.dispatch(
+                    _dispatch_request("7.7.7.7", path=path, method=method), stub_call_next
+                )
+            ).status_code == 200
+
+
 async def test_rate_limit_intake_and_auth_are_independent_tiers() -> None:
     """PS-05: the intake surface keeps its OWN strict tier, independent of auth.
 

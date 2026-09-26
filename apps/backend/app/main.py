@@ -46,6 +46,9 @@ from modules.consent.adapters.routes import (
 from modules.consent.adapters.routes import router as consent_router
 from modules.consent.facade import ConsentFacade
 from modules.consent.redis_cache import close_redis_client, init_redis_client
+from modules.doctor.adapters.routes import (
+    register_error_handlers as register_doctor_error_handlers,
+)
 from modules.doctor.adapters.routes import router as doctor_router
 from modules.doctor.facade import DoctorConsoleFacade
 from modules.health.adapters.routes import register_error_handlers as register_health_error_handlers
@@ -55,7 +58,6 @@ from modules.iam.adapters.routes import register_error_handlers
 from modules.iam.adapters.routes import router as iam_router
 from modules.iam.adapters.sms import MockSmsAdapter, build_sms_adapter
 from modules.iam.facade import IamFacade, PatientProfile
-from modules.iam.identity_facade import MAX_PROFILE_PHOTO_BYTES
 from modules.intake.adapters.media_store import build_media_store
 from modules.intake.adapters.routes import (
     register_error_handlers as register_intake_error_handlers,
@@ -279,6 +281,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         refresh_token_ttl_seconds=resolved_settings.gateway_refresh_token_ttl_seconds,
         mfa_secret_key=resolved_settings.iam_mfa_secret_key,
         media_store=profile_media_store,
+        photo_max_bytes=resolved_settings.profile_media_max_upload_bytes,
     )
     app.state.iam_facade = facade
     # MOD-004 (PHASE-3 T3, #212): the consent facade shares the same settled
@@ -336,16 +339,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         consent_facade=app.state.consent_facade,
         care_facade=app.state.care_console_facade,
     )
-    # MOD-012 (PHASE-8.2 T01, #539): the doctor console facade owns no schema
-    # or outbox - it composes the settled consent/care/iam/health facades into
-    # the derived Patients list (ADR-0019). Stored on state so the doctor
-    # routes read one resolved instance and route tests stub it wholesale.
-    app.state.doctor_console_facade = DoctorConsoleFacade(
-        consent_facade=app.state.consent_facade,
-        care_facade=app.state.care_console_facade,
-        iam_facade=app.state.iam_facade,
-        health_facade=app.state.health_facade,
-    )
     # MOD-011 (PHASE-4 T6, #240): the audit facade shares the settled engine
     # for the operator query surface - stored on state so routes read one
     # resolved object and unit tests stub it. The health facade (MOD-003) is
@@ -380,6 +373,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         credential_cleanup_days=resolved_settings.partner_credential_cleanup_days,
         directory_ttl_seconds=resolved_settings.redis_directory_ttl_seconds,
         directory_max_results=resolved_settings.directory_max_results,
+    )
+
+    # MOD-012 (PHASE-8.2 T01, #539): the doctor console facade owns no schema
+    # or outbox - it composes the settled consent/care/iam/health facades into
+    # the derived Patients list (ADR-0019). Stored on state so the doctor
+    # routes read one resolved instance and route tests stub it wholesale.
+    # Built after the partner facade because the console re-checks the edge's
+    # role decision through MOD-002's ``require_active_doctor`` seam on every
+    # read (api-standards §6) - the one place the console is told whether the
+    # id it was handed is still an active doctor.
+    app.state.doctor_console_facade = DoctorConsoleFacade(
+        consent_facade=app.state.consent_facade,
+        care_facade=app.state.care_console_facade,
+        iam_facade=app.state.iam_facade,
+        health_facade=app.state.health_facade,
+        partner_facade=app.state.partner_facade,
     )
 
     # PHASE-8.1 T10c (#495): the issued-rx attribution reads the issuing
@@ -506,6 +515,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_partner_error_handlers(app)
     register_intake_error_handlers(app)
     register_care_error_handlers(app)
+    register_doctor_error_handlers(app)
 
     # Catch-all for any unhandled exception that escapes the module-level
     # handlers above (e.g. SQLAlchemy OperationalError from a DB connection
@@ -598,7 +608,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request,
         file: Annotated[
             UploadFile,
-            File(description="Profile photo: JPEG, PNG, or WebP of at most 5MB"),
+            File(
+                description=(
+                    "Profile photo: JPEG, PNG, or WebP of at most "
+                    f"{resolved_settings.profile_media_max_upload_bytes // (1024 * 1024)}MB"
+                )
+            ),
         ],
         principal: Annotated[Principal, Depends(require_authenticated)],
     ) -> PatientProfileResponse:
@@ -606,22 +621,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         Thin patient-scoped adapter (#533): the ``require_authenticated`` gate
         admits the session owner, the multipart ``file`` part is read with a
-        size ceiling (``MAX_PROFILE_PHOTO_BYTES`` + 1) so an oversized or
-        malicious upload is bounded in memory, and the facade enforces the
-        photo contract (JPEG/PNG/WebP only - GIF refused - and the 5MB size
-        ceiling) before encrypting the bytes into the private ``profile-media``
-        store under the ``patient/`` prefix, persisting only the opaque ref on
-        the profile row (ADR-0020 D2, never a public URL). The mutation
-        honours the ``Idempotency-Key`` replay contract (api-standards §5) like
-        the other ``/v1/me`` mutations - a replayed key returns the stored
-        result without a second facade call, and the key is namespaced to the
-        principal's subject id. A repeat upload with a fresh key converges to
-        the replaced photo. The photo is bound to the principal's subject id,
-        so one identity can never overwrite another's photo. Answers the
-        updated profile carrying the new ``photo_ref``.
+        size ceiling (the configured ``PROFILE_MEDIA_MAX_UPLOAD_BYTES`` + 1) so
+        an oversized or malicious upload is bounded in memory, and the facade
+        enforces the photo contract (JPEG/PNG/WebP only - GIF refused - and the
+        same size ceiling) before encrypting the bytes into the private
+        ``profile-media`` store under the ``patient/`` prefix, persisting only
+        the opaque ref on the profile row (ADR-0020 D2, never a public URL).
+        Both the read bound and the enforced limit resolve from the one settings
+        value, shared with the doctor console photo path (coding-standards
+        §9.2). The mutation honours the ``Idempotency-Key`` replay contract
+        (api-standards §5) like the other ``/v1/me`` mutations - a replayed key
+        returns the stored result without a second facade call, and the key is
+        namespaced to the principal's subject id. A repeat upload with a fresh
+        key converges to the replaced photo. The photo is bound to the
+        principal's subject id, so one identity can never overwrite another's
+        photo. Answers the updated profile carrying the new ``photo_ref``.
         """
         facade = cast(IamFacade, request.app.state.iam_facade)
-        data = await file.read(MAX_PROFILE_PHOTO_BYTES + 1)
+        max_upload_bytes = cast(int, request.app.state.profile_media_max_upload_bytes)
+        data = await file.read(max_upload_bytes + 1)
         saved = await run_idempotent(
             request,
             lambda: facade.save_patient_photo(

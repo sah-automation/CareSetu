@@ -85,6 +85,12 @@ DEFAULT_PROFILE_MEDIA_JITTER_FRACTION = 0.25
 DEFAULT_PROFILE_MEDIA_CIRCUIT_BREAKER_THRESHOLD = 5
 DEFAULT_PROFILE_MEDIA_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 30.0
 DEFAULT_PROFILE_MEDIA_TIMEOUT_SECONDS = 30.0
+# The profile-photo size ceiling, and the SINGLE source of that value
+# (coding-standards §9.2). Both photo write paths read this one setting: the
+# doctor console route through ``app.state.profile_media_max_upload_bytes`` and
+# the patient's ``/v1/me/photo`` through the ceiling injected into the identity
+# facade, so raising ``PROFILE_MEDIA_MAX_UPLOAD_BYTES`` moves both limits
+# together. Nothing else may re-declare the number.
 DEFAULT_PROFILE_MEDIA_MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 # Rejected-partner re-submission throttle (PHASE-5 T09, #253): the max
 # re-submission rounds a rejected partner may open before the operator queue is

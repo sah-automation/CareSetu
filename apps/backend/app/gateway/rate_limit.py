@@ -1,10 +1,10 @@
 """``rate_limit`` gateway middleware (PHASE-2 T8, ticket #59; REM T8, #78; PS-05, #403).
 
 Enforces the strictest limit on the OTP/auth and intake surfaces
-(``NFR-SEC-004``, api-standards §6): the auth endpoints and the intake
-media-and-row-writing endpoints (patient clips and the doctor's rx-input
-media, #481) are the abuse targets, so only their paths are counted and
-capped. The intake GET reads (detail, pre-summary, clip
+(``NFR-SEC-004``, api-standards §6): the auth endpoints and the media-and-row-
+writing endpoints (patient clips, the doctor's rx-input media #481, and the two
+profile-photo uploads US-20) are the abuse targets, so only their paths are
+counted and capped. The intake GET reads (detail, pre-summary, clip
 playback) stay outside the cap - re-fetching a status is not the threat the
 tier exists for. Each surface keeps its own strict tier - the intake tier has
 its own settings defaulting to the auth tier values (PS-05, #403) - so a burst
@@ -48,6 +48,15 @@ _INTAKE_UPLOAD_DOCTOR_MEDIA_PATH = f"{_DEFAULT_INTAKE_PATH_PREFIX}upload-doctor-
 _INTAKE_SUBMIT_PATH = f"{_DEFAULT_INTAKE_PATH_PREFIX}submit"
 _INTAKE_PICK_DOCTOR_PATH_SUFFIX = "/pick-doctor"
 _INTAKE_RE_RECORD_PATH_SUFFIX = "/re-record"
+# Profile-media write surface (US-20, #533/#529): the two photo UPLOAD routes are
+# exact paths and count on the same strict media-writing tier as the intake
+# uploads - each pushes a multi-MB binary body into object storage, so it is the
+# same abuse target. The photo READ (``GET``) and the DELETE are row/reference
+# writes over a stored key, not media bodies, so they stay uncapped like the
+# intake read shapes; that is why these match on the write METHOD, not the path
+# alone (``/v1/me/photo`` serves a GET on the very same path).
+_MEDIA_WRITE_METHOD = "PUT"
+_PROFILE_PHOTO_UPLOAD_PATHS = frozenset({"/v1/me/photo", "/v1/doctor/profile/photo"})
 # Upper bound on tracked buckets: once exceeded, stale windows are pruned and,
 # if the dict is still over the cap, the oldest live buckets are evicted so an
 # attacker spraying many keys cannot grow the dict without bound.
@@ -97,7 +106,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         if not self.enabled:
             return await call_next(request)
-        surface = self._surface_for(request.url.path)
+        surface = self._surface_for(request.url.path, request.method)
         if surface is None:
             return await call_next(request)
 
@@ -124,20 +133,22 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         request.state.gateway_rate_limit_checked = True
         return await call_next(request)
 
-    def _surface_for(self, path: str) -> str | None:
-        """The strict-tier surface ``path`` belongs to, if any.
+    def _surface_for(self, path: str, method: str) -> str | None:
+        """The strict-tier surface ``path`` + ``method`` belong to, if any.
 
         The auth surface is prefix-matched (``/v1/auth/*``). The intake surface
         is the media-and-row-writing trio - ``upload-media`` (patient), the
         doctor-scoped ``upload-doctor-media`` (#481), ``submit``, and the
-        per-intake ``pick-doctor`` / ``re-record`` shapes - so the patient's
-        read routes (intake detail, pre-summary, clip playback) are never
-        counted: abusing the payer-facing writes is the threat, re-fetching a
-        status or a clip is not (PS-05, #403).
+        per-intake ``pick-doctor`` / ``re-record`` shapes - plus the two
+        profile-photo UPLOAD routes (US-20, a multi-MB body into object storage
+        each), so the patient's read routes (intake detail, pre-summary, clip
+        playback, and the photo ``GET``) are never counted: abusing the
+        payer-facing writes is the threat, re-fetching a status or a clip is not
+        (PS-05, #403).
         """
         if path.startswith(self.auth_path_prefix):
             return _SURFACE_AUTH
-        if path in (
+        is_intake_write = path in (
             _INTAKE_UPLOAD_MEDIA_PATH,
             _INTAKE_UPLOAD_DOCTOR_MEDIA_PATH,
             _INTAKE_SUBMIT_PATH,
@@ -147,7 +158,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 path.endswith(_INTAKE_PICK_DOCTOR_PATH_SUFFIX)
                 or path.endswith(_INTAKE_RE_RECORD_PATH_SUFFIX)
             )
-        ):
+        )
+        is_photo_upload = method == _MEDIA_WRITE_METHOD and path in _PROFILE_PHOTO_UPLOAD_PATHS
+        if is_intake_write or is_photo_upload:
             return _SURFACE_INTAKE
         return None
 

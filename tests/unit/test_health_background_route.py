@@ -185,6 +185,122 @@ def test_later_edit_without_acknowledgement_is_accepted() -> None:
     assert facade.saves == [(7, _BACKGROUND, False)]
 
 
+def test_later_edit_omitting_the_flag_reaches_the_facade() -> None:
+    """#534 AC "later edits do not require it": omission is not a 422.
+
+    The flag defaults to ``False``, so a second save that leaves it out passes
+    validation and reaches the facade, which - the snapshot already existing -
+    accepts it. The FIRST save without the flag is still refused (see
+    ``test_first_save_without_acknowledgement_is_rejected_with_an_envelope``,
+    where the facade raises).
+    """
+    facade = StubHealthFacade()
+    facade.view = _SET_VIEW
+    client = _client(facade)
+
+    response = client.put(
+        "/v1/me/health-background",
+        headers=_bearer(_token()),
+        json={"background": _BACKGROUND.model_dump(mode="json")},
+    )
+
+    assert response.status_code == 200
+    assert facade.saves == [(7, _BACKGROUND, False)]
+
+
+def test_unknown_field_in_the_save_request_is_rejected() -> None:
+    client = _client()
+
+    response = client.put(
+        "/v1/me/health-background",
+        headers=_bearer(_token()),
+        json={**_SAVE_BODY, "acknowledged": True},
+    )
+
+    # api-standards §3: unknown/extra fields are rejected, not silently ignored.
+    assert response.status_code == 422
+    assert response.json()["code"] == "VALIDATION_ERROR"
+
+
+def test_unknown_field_in_the_background_is_rejected() -> None:
+    client = _client()
+
+    body = {
+        "acknowledge_phi": True,
+        "background": {**_BACKGROUND.model_dump(mode="json"), "smoking": "yes"},
+    }
+    response = client.put(
+        "/v1/me/health-background",
+        headers=_bearer(_token()),
+        json=body,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "VALIDATION_ERROR"
+
+
+def test_overlong_list_area_rejected_at_validation() -> None:
+    client = _client()
+
+    body = {
+        "acknowledge_phi": True,
+        "background": {
+            **_BACKGROUND.model_dump(mode="json"),
+            "conditions": [f"condition {index}" for index in range(51)],
+        },
+    }
+    response = client.put(
+        "/v1/me/health-background",
+        headers=_bearer(_token()),
+        json=body,
+    )
+
+    # The JSONB column carries no column-level cap, so the item-count bound is
+    # enforced only here - a PHI write must never be unbounded.
+    assert response.status_code == 422
+    assert response.json()["code"] == "VALIDATION_ERROR"
+
+
+def test_overlong_list_item_rejected_at_validation() -> None:
+    client = _client()
+
+    body = {
+        "acknowledge_phi": True,
+        "background": {
+            **_BACKGROUND.model_dump(mode="json"),
+            "allergies": ["a" * 201],
+        },
+    }
+    response = client.put(
+        "/v1/me/health-background",
+        headers=_bearer(_token()),
+        json=body,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "VALIDATION_ERROR"
+
+
+def test_a_generously_sized_snapshot_is_accepted() -> None:
+    """The bounds are ceilings, not a wall: real clinical history still fits."""
+    facade = StubHealthFacade()
+    facade.view = _SET_VIEW
+    client = _client(facade)
+
+    background = {
+        **_BACKGROUND.model_dump(mode="json"),
+        "immunizations": [f"vaccine-{index}" for index in range(50)],
+        "conditions": ["x" * 200],
+    }
+    response = client.put(
+        "/v1/me/health-background",
+        headers=_bearer(_token()),
+        json={"acknowledge_phi": True, "background": background},
+    )
+
+    assert response.status_code == 200
+
+
 def test_replayed_idempotency_key_does_not_re_save() -> None:
     facade = StubHealthFacade()
     facade.view = _SET_VIEW
@@ -237,10 +353,13 @@ def test_anonymous_access_denied_with_401_envelope(caplog: pytest.LogCaptureFixt
 def test_invalid_body_rejected_at_validation() -> None:
     client = _client()
 
+    # ``background`` is the one required field; ``acknowledge_phi`` now defaults
+    # to ``False`` (a later edit may omit it), so the missing snapshot is what
+    # fails here.
     response = client.put(
         "/v1/me/health-background",
         headers=_bearer(_token()),
-        json={"background": {"blood_group": "B+"}},
+        json={"acknowledge_phi": True},
     )
 
     assert response.status_code == 422

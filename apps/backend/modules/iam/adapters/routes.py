@@ -586,7 +586,15 @@ def _redact_phone(message: str) -> str:
 
 
 def register_error_handlers(app: FastAPI) -> None:
-    """Attach the MOD-001 error envelope to every expected iam failure."""
+    """Attach the MOD-001 error envelope to every expected iam failure.
+
+    Two buckets, never mixed (error-handling-observability §1): ``iam_rejection``
+    is the client/policy class - a bad phone, a refused session, a rejected
+    photo - and ``iam_upstream_failure`` is the third-party/degradation class,
+    used by the two 502s where an external dependency (the SMS provider, the
+    profile-media store) is what failed. Same envelope and status either way;
+    only the log label tells an operator which one to page on.
+    """
 
     async def _invalid_phone(request: Request, exc: Exception) -> JSONResponse:
         return error_response(
@@ -602,7 +610,7 @@ def register_error_handlers(app: FastAPI) -> None:
             status.HTTP_502_BAD_GATEWAY,
             "SMS_DELIVERY_FAILED",
             _redact_phone(str(exc)),
-            log_tag="iam_rejection",
+            log_tag="iam_upstream_failure",
             request=request,
         )
 
@@ -712,7 +720,7 @@ def register_error_handlers(app: FastAPI) -> None:
             status.HTTP_502_BAD_GATEWAY,
             "PROFILE_PHOTO_TRANSFER_FAILED",
             str(exc),
-            log_tag="iam_rejection",
+            log_tag="iam_upstream_failure",
             request=request,
         )
 

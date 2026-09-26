@@ -15,6 +15,7 @@ Every expected failure answers the shared error envelope (api-standards §2).
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime
 
@@ -442,7 +443,13 @@ def test_all_three_verbs_reject_anonymous_callers_with_401() -> None:
         assert response.json()["code"] == "AUTH_UNAUTHENTICATED"
 
 
-def test_transfer_failure_answers_502_envelope() -> None:
+def test_transfer_failure_answers_502_envelope(caplog: pytest.LogCaptureFixture) -> None:
+    """A store failure is the third-party bucket, not a client rejection.
+
+    error-handling-observability §1: it carries its own ``iam_upstream_failure``
+    log tag, never the ``iam_rejection`` label the 422 client errors use.
+    """
+    caplog.set_level(logging.WARNING)
     facade = StubPhotoFacade()
     facade.profiles[1] = _profile()
     facade.error = ProfilePhotoTransferError(
@@ -458,6 +465,10 @@ def test_transfer_failure_answers_502_envelope() -> None:
 
     assert response.status_code == 502
     assert response.json()["code"] == "PROFILE_PHOTO_TRANSFER_FAILED"
+    assert any(
+        "iam_upstream_failure" in record.getMessage() and "iam_rejection" not in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_unexpected_iam_error_answers_500_envelope_without_leaking() -> None:

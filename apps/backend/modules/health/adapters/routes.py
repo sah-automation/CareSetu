@@ -17,7 +17,7 @@ from typing import Annotated, Literal, cast
 
 from fastapi import APIRouter, Depends, FastAPI, Query, Request, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from app.gateway.errors import error_response
 from app.gateway.idempotency import run_idempotent
@@ -30,6 +30,7 @@ from modules.health.domain.exceptions import (
     RecordNotFoundError,
 )
 from modules.health.facade import (
+    DEFAULT_HEALTH_BACKGROUND_PER_PAGE,
     HealthBackground,
     HealthBackgroundMetric,
     HealthBackgroundMetricEntry,
@@ -132,10 +133,17 @@ class HealthBackgroundSaveRequest(BaseModel):
     The snapshot fields plus the one-time ``acknowledge_phi`` flag: the first
     save must carry the explicit acknowledgment that the snapshot becomes
     visible to the patient's verified doctors (ADR-0018) - a first save
-    without it is rejected; later edits never re-prompt.
+    without it is rejected; later edits never re-prompt, so omitting the flag
+    on a later edit is legitimate and the facade decides (defaulting it to
+    ``False`` here keeps such an edit from failing validation at 422 before it
+    ever reaches the facade). Extra fields are refused
+    (``extra="forbid"``, api-standards §3) like the module's other request
+    models.
     """
 
-    acknowledge_phi: bool
+    model_config = ConfigDict(extra="forbid")
+
+    acknowledge_phi: bool = False
     background: HealthBackground
 
 
@@ -195,8 +203,9 @@ async def save_health_background(
 
 
 #: Bounded pagination for the metrics series (api-standards §4: default 25,
-#: max 100) - mirrors the audit-ledger read shape.
-_DEFAULT_PER_PAGE = 25
+#: max 100) - mirrors the audit-ledger read shape. The default page size is the
+#: module-owned ``DEFAULT_HEALTH_BACKGROUND_PER_PAGE`` the facade method also
+#: defaults to, so the route and the facade cannot drift apart.
 _MAX_PER_PAGE = 100
 
 
@@ -210,7 +219,7 @@ async def read_health_background_metrics(
     request: Request,
     principal: Annotated[Principal, Depends(require_patient)],
     page: Annotated[int, Query(ge=1)] = 1,
-    per_page: Annotated[int, Query(ge=1, le=_MAX_PER_PAGE)] = _DEFAULT_PER_PAGE,
+    per_page: Annotated[int, Query(ge=1, le=_MAX_PER_PAGE)] = DEFAULT_HEALTH_BACKGROUND_PER_PAGE,
 ) -> HealthBackgroundMetricList:
     """Read one bounded page of the caller's height/weight series (#535).
 
