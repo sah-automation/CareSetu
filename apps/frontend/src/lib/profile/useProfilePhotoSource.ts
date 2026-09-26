@@ -15,16 +15,15 @@
 // shows "me" (#548's card, #557's chrome avatars), so the resolution is cached
 // by ref: one ref, one request, however many consumers ask.
 //
-// Two failure answers stay distinct, because they are not the same fact. A
-// definite "no media behind this ref" (PROFILE_PHOTO_NOT_FOUND) is an answer -
-// the completion wizard persists a bare file name as a placeholder until a real
-// upload lands, so a set ref is a claim, not proof of media, and a claim with
-// nothing behind it must offer Upload rather than Remove. Any other failure is
-// a blip, not an answer: absence is never reported, because a stored photo that
-// would not load must not look absent or the patient's only way to clear it
-// disappears. A blip is cached like any other answer and re-read on the next
-// ref change, so nothing retries in a loop and a surface mounting later shares
-// the one request rather than adding a second failure.
+// Two failure answers stay distinct, because they are not the same fact. Only
+// PROFILE_PHOTO_NOT_FOUND reports absence: the completion wizard persists a bare
+// file name as a placeholder until a real upload lands, so a set ref is a claim,
+// not proof of media, and a claim with nothing behind it must offer Upload
+// rather than Remove. Any other failure leaves `absent` false, because a stored
+// photo that would not load must not look absent or the patient's only way to
+// clear it disappears. A blip is cached like any other answer and re-read on the
+// next ref change, so nothing retries in a loop and a surface that mounts later
+// shares the one request instead of adding a second failure.
 
 import { useEffect, useState } from "react";
 
@@ -71,19 +70,16 @@ const ABSENT: ProfilePhotoSource = { src: null, absent: true };
  * Keyed by the stored ref, so the same photo is read once no matter how many
  * surfaces show it, and a replace, a remove, or a fresh mount never inherits
  * bytes that may have moved on.
+ *
+ * The ref is the cache key, not a request parameter: the endpoint serves the
+ * caller's *current* photo, so a ref says which generation a consumer believes
+ * it is showing, never which bytes to ask for.
  */
 const CACHE = new Map<string, CacheEntry>();
 
 async function resolveStoredPhoto(): Promise<ResolvedPhoto> {
   try {
-    const blob = await fetchPatientPhoto();
-    // An environment with no object URLs (SSR, a bare jsdom) has no renderable
-    // source to hand back. That is a missing capability, not a missing photo, so
-    // absence stays false and the consumer falls through to the name initial.
-    if (typeof URL.createObjectURL !== "function") {
-      return { blob: null, absent: false };
-    }
-    return { blob, absent: false };
+    return { blob: await fetchPatientPhoto(), absent: false };
   } catch (err) {
     return {
       blob: null,
@@ -123,6 +119,14 @@ export function useProfilePhotoSource(
 
   useEffect(() => {
     if (photoRef == null) {
+      setSource(NO_SOURCE);
+      return;
+    }
+    // Some environments (SSR, a bare jsdom) cannot make an object URL at all, so
+    // there is no renderable source to produce whatever the backend answers. That
+    // is a missing capability, not a missing photo, so nothing is asked for and
+    // absence stays false - the consumer falls through to the name initial.
+    if (typeof URL.createObjectURL !== "function") {
       setSource(NO_SOURCE);
       return;
     }

@@ -76,6 +76,11 @@ function renderSource(initialRef: string | null) {
   );
 }
 
+/** Let the mocked fetch settle and its handler run, without asserting on state. */
+async function flush(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 describe("useProfilePhotoSource", () => {
   it("streams the bytes over the authed transport and hands back an object URL", async () => {
     const { result } = renderSource(REF);
@@ -105,6 +110,20 @@ describe("useProfilePhotoSource", () => {
     expect(getPhoto).toHaveBeenCalledTimes(1);
     expect(first.result.current.src).toBe("blob:http://localhost/photo-1");
     expect(second.result.current.src).toBe("blob:http://localhost/photo-2");
+  });
+
+  it("keeps answering a ref while any consumer still shows it", async () => {
+    // The desktop account menu opens and closes repeatedly against a trigger
+    // that never unmounts, so a consumer mounting after another one let go must
+    // still be answered from the live entry rather than re-reading the photo.
+    const trigger = renderSource(REF);
+    const menu = renderSource(REF);
+    await waitFor(() => expect(trigger.result.current.src).not.toBeNull());
+    menu.unmount();
+
+    const reopened = renderSource(REF);
+    await waitFor(() => expect(reopened.result.current.src).not.toBeNull());
+    expect(getPhoto).toHaveBeenCalledTimes(1);
   });
 
   it("revokes only the URL its own consumer created", async () => {
@@ -189,16 +208,22 @@ describe("useProfilePhotoSource", () => {
     getPhoto.mockRejectedValue(networkBlip());
     const { result } = renderSource(REF);
 
+    // Read against the not-found test above: the same harness with that code
+    // settles on `absent: true`, so a settled blip leaving it false is the
+    // distinction, not just the state the hook starts in.
     await waitFor(() => expect(getPhoto).toHaveBeenCalled());
-    await waitFor(() => expect(result.current.absent).toBe(false));
-    expect(result.current.src).toBeNull();
+    await flush();
+    expect(result.current).toEqual({ src: null, absent: false });
+    // A blip must not even produce a partial photo to show.
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
   });
 
   it("yields no source where object URLs cannot be made", async () => {
     URL.createObjectURL = undefined as unknown as typeof URL.createObjectURL;
     const { result } = renderSource(REF);
 
-    await waitFor(() => expect(getPhoto).toHaveBeenCalled());
+    // Nothing renderable can come of the bytes, so the backend is not asked.
+    expect(getPhoto).not.toHaveBeenCalled();
     expect(result.current).toEqual({ src: null, absent: false });
   });
 });

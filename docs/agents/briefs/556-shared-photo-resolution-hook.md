@@ -7,7 +7,7 @@
 
 Extract the profile photo card's private object-URL resolution into **one shared client-side seam** in the profile client module, and refactor the card onto it with **no user-visible behaviour change**. The hook takes a photo ref and returns a renderable source or `null` - fetch the bytes over the authed transport, present an object URL, revoke on teardown and on replacement, return `null` on any failure, and downgrade to "no photo" specifically on the `PROFILE_PHOTO_NOT_FOUND` error.
 
-The avatar primitive is **not** changed. The ref-keyed cache that lets three consumers share one fetch is **deferred to #557** - #556's hook takes a ref and returns a source; make the cache shape permissive enough to add without rework, but do not migrate consumers here.
+The avatar primitive is **not** changed. The ref-keyed cache **is** built here, because #556's own acceptance criteria ask for it and #557's read-list expects it landed by this slice: one ref, one request, the entry dropped when the ref changes or is cleared. What #557 owns is migrating the three chrome consumers onto the hook, not the cache itself.
 
 ## Read-list (in order)
 
@@ -55,6 +55,6 @@ Confirmed green on the untouched tree at brief time: the card, account-menu and 
 - **The avatar primitive's contract is correct and must not change.** It is a presentational component with no transport knowledge. Loosening it to accept opaque refs would spread key-shape knowledge into every consumer - that is the bug, not the fix. The whole point of this slice is to put the resolution _behind_ the primitive instead.
 - **This is an extract, not a rewrite.** The card's current logic is right. The risk is drift, so move it and change nothing - every behaviour in the existing suite must survive verbatim.
 - **Two fetch sites matter and they differ.** On `PROFILE_PHOTO_NOT_FOUND`, the card must show "no photo" (Remove button disappears). On any other failure it must keep the Remove button and show a failure notice. The hook must not collapse those two into one. Note the doctor case-page effect uses the _audio_ path and adds its own error state - do not copy that shape here.
-- **The cache lands in #557, but design for it.** #557 needs three avatars to resolve one ref with one request, keyed by ref, dropping the entry on change or clear. If the hook shape in #556 makes that awkward, adjust the shape now - but do not migrate consumers.
+- **The cache lands with the hook; the consumers land in #557.** #557 needs three avatars to resolve one ref with one request, keyed by ref, dropping the entry on change or clear. The shape has to make that easy, but do not migrate consumers here.
 - **Object-URL lifecycle is the leak risk.** Revoke on teardown _and_ on replacement. There is a revoke-on-unmount test today; keep it passing.
 - **ADR-0020 D2 must survive the refactor.** Still streamed through the backend, still never publicly addressable, still never a URL the browser reaches without a session.
