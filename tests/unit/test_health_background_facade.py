@@ -153,6 +153,7 @@ async def test_acknowledged_first_save_auto_grants_live_relationship_doctors() -
             _consent("doctor", "11", "granted"),
             _consent("doctor", "22", "granted"),
             _consent("doctor", "33", "revoked"),
+            _consent("doctor", "intake-ai", "granted"),
             _consent("chemist", "44", "granted"),
         ]
     )
@@ -164,20 +165,24 @@ async def test_acknowledged_first_save_auto_grants_live_relationship_doctors() -
     assert view.set is True
     assert view.acknowledged is True
     assert view.background == _BACKGROUND
-    # Live doctors = granted doctor grants {11, 22} UNION open-case doctor {55};
-    # the revoked doctor and the chemist are excluded. Grants run IN the
-    # transaction, on the same connection, in idempotent order.
+    # Live relationships = granted doctor grants {11, 22, intake-ai} UNION
+    # open-case doctor {55}; the revoked doctor and the chemist are excluded.
+    # Grants run IN the transaction, on the same connection, in sorted-id order
+    # (each grant is independently idempotent, so the order carries no meaning
+    # beyond a deterministic replay).
     _, upsert_stmt = [call.args[0] for call in connection.execute.await_args_list]
     assert consent.grants == [
         (connection, 7, "doctor", "11", "health_background"),
         (connection, 7, "doctor", "22", "health_background"),
         (connection, 7, "doctor", "55", "health_background"),
+        (connection, 7, "doctor", "intake-ai", "health_background"),
     ]
     # Cache invalidation lands only after the commit.
     assert consent.invalidations == [
         (7, "doctor", "11", "health_background"),
         (7, "doctor", "22", "health_background"),
         (7, "doctor", "55", "health_background"),
+        (7, "doctor", "intake-ai", "health_background"),
     ]
     # The snapshot upsert stamps acknowledged_at on the first save and never
     # overwrites it on conflict (see the later-edit test).
@@ -185,6 +190,49 @@ async def test_acknowledged_first_save_auto_grants_live_relationship_doctors() -
     assert "INSERT INTO health.health_background_snapshots" in sql
     assert "ON CONFLICT (identity_id) DO UPDATE" in sql
     assert "acknowledged_at" in sql
+
+
+async def test_first_save_grants_non_numeric_counterparty_ids_unchanged() -> None:
+    """Discovery carries each counterparty id through to the grant VERBATIM (#554).
+
+    ``FEAT-002`` / ADR-0018. The consent lineage stores ``counterparty_id`` as a
+    Text column, so a granted ``doctor`` namespace carries OPAQUE ids, not
+    numbers: ``intake-ai`` (the AI egress pseudo-counterparty, whose own grant
+    satisfies the intake consent gate) is a live one, and nothing about the
+    column stops ``007`` either. Re-deriving an id breaks the grant two ways, and
+    this fixture pins both: an id that cannot be coerced RAISES, answering the
+    acknowledged first save with a 500 the client cannot re-ask on, and an id
+    that coerces to a DIFFERENT string (``007`` -> ``7``) would write the grant
+    onto a re-derived lineage triple that no doctor read ever matches - written,
+    and inert. Both must land on the DISCOVERED triple instead.
+    """
+    connection = AsyncMock()
+    connection.execute = AsyncMock(side_effect=[_FakeResult([]), _scalar_only()])
+    consent = StubConsentFacade(
+        consents=[
+            _consent("doctor", "intake-ai", "granted"),
+            _consent("doctor", "007", "granted"),
+        ]
+    )
+    care = StubCareFacade(doctor_ids={77})
+    facade = HealthFacade(_engine(connection), consent_facade=consent, care_facade=care)
+
+    view = await facade.save_health_background(7, _BACKGROUND, acknowledge_phi=True)
+
+    assert view.set is True and view.acknowledged is True
+    # Exactly the discovered lineage triples: the opaque id verbatim, the
+    # zero-padded id NOT normalised to ``7``, the open-case doctor id stringified
+    # into the same ``doctor`` namespace - nothing re-derived, nothing dropped.
+    assert consent.grants == [
+        (connection, 7, "doctor", "007", "health_background"),
+        (connection, 7, "doctor", "77", "health_background"),
+        (connection, 7, "doctor", "intake-ai", "health_background"),
+    ]
+    assert consent.invalidations == [
+        (7, "doctor", "007", "health_background"),
+        (7, "doctor", "77", "health_background"),
+        (7, "doctor", "intake-ai", "health_background"),
+    ]
 
 
 async def test_first_save_with_no_live_doctors_grants_nothing() -> None:

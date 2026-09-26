@@ -646,31 +646,42 @@ class HealthFacade:
                 denial_reason=denial_reason,
             )
 
-    async def _discover_live_relationship_doctors(self, patient_id: int) -> set[int]:
-        """Return every doctor the patient currently has a live relationship with.
+    async def _discover_live_relationship_counterparty_ids(self, patient_id: int) -> set[str]:
+        """Return the counterparty ids of every live relationship the patient has.
 
-        A doctor is live-relationship when EITHER they hold a live standing
+        A counterparty is live-relationship when EITHER it holds a live standing
         consent grant of any scope from this patient (MOD-004, any ``granted``
-        ``doctor`` lineage) OR they are the assigned doctor on one of the
-        patient's open care cases (MOD-006, ``stage != closed``). Both reads go
-        through their module facades - never across schemas (ADR-0003) - and
-        the union is deduplicated by doctor id. This is the set the first
-        acknowledged health-background save auto-grants to (ADR-0018).
+        ``doctor`` lineage) OR it is the assigned doctor on one of the patient's
+        open care cases (MOD-006, ``stage != closed``). Both reads go through
+        their module facades - never across schemas (ADR-0003) - and the union is
+        deduplicated. This is the set the first acknowledged health-background
+        save auto-grants to (ADR-0018).
+
+        Ids are OPAQUE TEXT, never integers: the consent lineage stores
+        ``counterparty_id`` as a Text column with no format constraint, so a
+        granted ``doctor`` namespace carries ids an integer coercion does not
+        survive (``intake-ai``, the AI egress pseudo-counterparty, is a live
+        one - its own grant is what satisfies the intake consent gate). Consent
+        rows contribute their id verbatim; the care seam reports integer doctor
+        ids, which are stringified into the same namespace. Callers pass each
+        discovered id through UNCHANGED - re-deriving one raises here, and even
+        where it does not (``007`` -> ``7``) it would write the grant onto a
+        re-derived lineage triple no doctor read ever matches.
         """
         if self._consent_facade is None:
             raise RuntimeError("ConsentFacade not configured on HealthFacade")
         if self._care_facade is None:
             raise RuntimeError("CareFacade not configured on HealthFacade")
         consent_log = await self._consent_facade.list_consents(patient_id)
-        granted_doctor_ids = {
-            int(item.counterparty_id)
+        granted_counterparty_ids = {
+            item.counterparty_id
             for item in consent_log.items
             if item.counterparty_type == _COUNTERPARTY_TYPE_DOCTOR and item.status == "granted"
         }
         open_case_doctor_ids = await self._care_facade.list_open_case_doctor_ids(
             patient_id=patient_id
         )
-        return granted_doctor_ids | open_case_doctor_ids
+        return granted_counterparty_ids | {str(doctor_id) for doctor_id in open_case_doctor_ids}
 
     async def get_health_background(self, patient_id: int) -> HealthBackgroundView:
         """Owner read of the patient's health-background snapshot, or "not set".
@@ -712,7 +723,7 @@ class HealthFacade:
         if self._care_facade is None:
             raise RuntimeError("CareFacade not configured on HealthFacade")
 
-        granted_doctor_ids: set[int] = set()
+        granted_counterparty_ids: set[str] = set()
         is_first_save = False
         # The acknowledgement as it will stand after this write: the stored
         # stamp on a later edit (never overwritten), the fresh stamp on the
@@ -734,7 +745,9 @@ class HealthFacade:
                     "snapshot becomes visible to your doctors"
                 )
             if existing is None:
-                granted_doctor_ids = await self._discover_live_relationship_doctors(patient_id)
+                granted_counterparty_ids = await self._discover_live_relationship_counterparty_ids(
+                    patient_id
+                )
             else:
                 acknowledged_at = existing.acknowledged_at
 
@@ -769,22 +782,22 @@ class HealthFacade:
                 )
             )
             await connection.execute(upsert)
-            for doctor_id in sorted(granted_doctor_ids):
+            for counterparty_id in sorted(granted_counterparty_ids):
                 await self._consent_facade.grant_consent_on(
                     connection,
                     patient_id,
                     _COUNTERPARTY_TYPE_DOCTOR,
-                    str(doctor_id),
+                    counterparty_id,
                     _HEALTH_BACKGROUND_SCOPE,
                 )
 
         # Cache invalidation lands only after the commit is visible (same
         # discipline as the intake pick-doctor write, #443).
-        for doctor_id in sorted(granted_doctor_ids):
+        for counterparty_id in sorted(granted_counterparty_ids):
             await self._consent_facade.invalidate_consent_cache(
                 patient_id,
                 _COUNTERPARTY_TYPE_DOCTOR,
-                str(doctor_id),
+                counterparty_id,
                 _HEALTH_BACKGROUND_SCOPE,
             )
         return HealthBackgroundView(
