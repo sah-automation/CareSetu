@@ -1230,6 +1230,68 @@ def test_env_example_redis_directory_ttl_comments_the_default() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Deploy manifest media wiring (#555): the committed ``render.yaml`` must point
+# the profile-media store at the durable private bucket and must declare both
+# media encryption keys as dashboard-managed secrets.
+# ---------------------------------------------------------------------------
+
+_RENDER_MANIFEST = Path(__file__).resolve().parents[2] / "render.yaml"
+
+
+def _render_env_var_entry(key: str) -> str:
+    """Return the ``envVars`` entry declaring ``key`` in the committed manifest.
+
+    Only the entry's own deeper-indented lines are collected, so a comment block
+    written at the list indent for the *next* entry cannot leak into this one.
+    The manifest declares a single service, so the first matching entry is the
+    deployed web service's own.
+    """
+    lines = _RENDER_MANIFEST.read_text(encoding="utf-8").splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != f"- key: {key}":
+            continue
+        key_indent = len(line) - len(line.lstrip())
+        entry = [line]
+        for follower in lines[index + 1 :]:
+            indent = len(follower) - len(follower.lstrip())
+            if not follower.strip() or indent <= key_indent:
+                break
+            entry.append(follower)
+        return "\n".join(entry)
+    raise AssertionError(f"{key} is not declared in {_RENDER_MANIFEST.name}")
+
+
+@pytest.mark.parametrize("key", ["INTAKE_MEDIA_BACKEND", "PROFILE_MEDIA_BACKEND"])
+def test_render_manifest_points_media_stores_at_the_durable_backing(key: str) -> None:
+    """#555: both media stores must be wired to the private Supabase bucket.
+
+    The stores default to local disk, so on the deployed service every upload
+    wrote ciphertext to Render's ephemeral disk and was wiped on redeploy while
+    the profile row still claimed a photo existed. Both entries are asserted
+    identically because they are the same declaration: a blueprint-managed
+    ``value`` (not a dashboard secret), and never a half-wired ``sync: false``.
+    """
+    entry = _render_env_var_entry(key)
+    assert "value: supabase" in entry
+    assert "sync:" not in entry
+
+
+@pytest.mark.parametrize("key", ["PROFILE_MEDIA_KEY", "INTAKE_MEDIA_KEY"])
+def test_render_manifest_declares_media_keys_as_unsynced_secrets(key: str) -> None:
+    """#555: both media encryption keys must be declared as unsynced secrets.
+
+    With no key set, BOTH stores derive an ephemeral per-process AES key, so
+    every restart mints a new one and all previously stored ciphertext becomes
+    permanently undecryptable - silently, with no error anywhere. Declaring each
+    key ``sync: false`` (never a value in the repo) is what forces an operator
+    to set it on the deployed service.
+    """
+    entry = _render_env_var_entry(key)
+    assert "sync: false" in entry
+    assert "value:" not in entry
+
+
+# ---------------------------------------------------------------------------
 # Principal contract (unchanged from PHASE-1 T7b, #29)
 # ---------------------------------------------------------------------------
 

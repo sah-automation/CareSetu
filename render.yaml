@@ -91,6 +91,25 @@ services:
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
+      # Durable profile-media backing (#555, ADR-0020): profile photos follow the
+      # same rule as voice captures, in their own private bucket. The store
+      # defaults to local disk, so without this an upload lands on Render's
+      # ephemeral disk and is wiped on the next redeploy while the profile row
+      # still claims a photo exists. Service-role writes only, no public-read
+      # policy: the bucket is private and every read streams through the backend.
+      - key: PROFILE_MEDIA_BACKEND
+        value: supabase
+      # Media encryption keys (#555): with no key configured each store derives an
+      # ephemeral per-process AES-256 key, so every restart mints a new one and
+      # all previously stored ciphertext becomes permanently undecryptable -
+      # silently. Both are base64-encoded 32-byte values generated and set in the
+      # Render Dashboard (DEPLOY-7), never synced from the repo. They are declared
+      # together because the two stores drift independently: intake audio already
+      # used the durable bucket but could not be decrypted back after a restart.
+      - key: INTAKE_MEDIA_KEY
+        sync: false
+      - key: PROFILE_MEDIA_KEY
+        sync: false
       # AI provider gateway (T04, #381; T14, #414): the demo now rides a real
       # OpenAI-compatible provider instead of mock canned pre-summaries.
       # AI_PROVIDER and AI_ALLOW_DEMO_PROVIDER are blueprint-managed toggles so
