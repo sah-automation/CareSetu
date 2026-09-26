@@ -137,6 +137,12 @@ export function HealthMetricsSeries() {
   // landed, so retrying a lost response replays the same mutation instead of
   // writing a second measurement the patient never meant to record.
   const pendingAppendKey = useRef<string | undefined>(undefined);
+  // Which read is allowed to write, counted up as reads start. Two reads can be
+  // in flight at once - the mount load and the reconciliation after an append -
+  // and the one that started earlier can answer last. A late answer from a
+  // superseded read is stale by definition, so it is dropped rather than
+  // allowed to write a list the newer read has already replaced.
+  const readGeneration = useRef(0);
 
   /**
    * Any edit to the draft spends the key. A key identifies ONE mutation: sent
@@ -156,12 +162,15 @@ export function HealthMetricsSeries() {
 
   const loadFirstPage = useCallback(async () => {
     setLoadFailure(null);
+    const generation = ++readGeneration.current;
     try {
       const result = await fetchHealthMetrics({ page: 1 });
+      if (generation !== readGeneration.current) return;
       setEntries(result.items);
       setTotal(result.total);
       setPage(1);
     } catch (err) {
+      if (generation !== readGeneration.current) return;
       setLoadFailure({ traceId: traceIdOf(err) });
     }
   }, []);
@@ -170,13 +179,46 @@ export function HealthMetricsSeries() {
     void loadFirstPage();
   }, [loadFirstPage]);
 
+  /**
+   * Re-read the window the patient has on screen after an append. An append
+   * shifts the server's offset window by one, so what the API says now is the
+   * authority on both the row that just landed and the boundary row behind it.
+   * Every loaded page is re-read rather than only the first: a patient who
+   * paged forward chose to see those measurements, and reconciling to page one
+   * would silently take them away.
+   */
+  async function reconcileLoadedPages() {
+    const generation = ++readGeneration.current;
+    const loadedPages = Math.max(1, page);
+    setLoadFailure(null);
+    try {
+      const pages = await Promise.all(
+        Array.from({ length: loadedPages }, (_, index) =>
+          fetchHealthMetrics({ page: index + 1 }),
+        ),
+      );
+      if (generation !== readGeneration.current) return;
+      setEntries(dedupeById(pages.flatMap((result) => result.items)));
+      setTotal(pages[0].total);
+    } catch (err) {
+      if (generation !== readGeneration.current) return;
+      // The append itself landed, so the row the patient just recorded is on
+      // screen whatever this read does. What is unknown is the rest of the
+      // series, so the read is reported as a read that could not be completed -
+      // the same notice the first load raises, retryable the same way.
+      setLoadFailure({ traceId: traceIdOf(err) });
+    }
+  }
+
   async function loadMore() {
     if (loadingMore) return;
     setMoreFailure(null);
     setLoadingMore(true);
     const next = page + 1;
+    const generation = ++readGeneration.current;
     try {
       const result = await fetchHealthMetrics({ page: next });
+      if (generation !== readGeneration.current) return;
       setEntries((current) => {
         const next_ =
           current === null ? result.items : [...current, ...result.items];
@@ -188,6 +230,7 @@ export function HealthMetricsSeries() {
       setTotal(result.total);
       setPage(next);
     } catch (err) {
+      if (generation !== readGeneration.current) return;
       setMoreFailure({ traceId: traceIdOf(err) });
     } finally {
       setLoadingMore(false);
@@ -214,8 +257,10 @@ export function HealthMetricsSeries() {
       const entry = await appendHealthMetric(parsed.value, key);
       // The appended entry joins the list straight away: the series is the
       // patient's own record of their trend, and a read-back they have to wait
-      // for is a read-back that looks broken. A full re-read is not needed - the
-      // list is newest-first and this is the newest.
+      // for is a read-back that looks broken. The read that follows is not for
+      // the patient to see - it claims the generation, so the load that was
+      // already in flight when they tapped can no longer answer over the top of
+      // it with a list that predates their measurement.
       setEntries((current) =>
         current === null ? [entry] : [entry, ...current],
       );
@@ -224,6 +269,7 @@ export function HealthMetricsSeries() {
       pendingAppendKey.current = undefined;
       setDraft(BLANK_DRAFT);
       setAppended(true);
+      await reconcileLoadedPages();
     } catch (err) {
       // The typed values and the key both stay, so the same tap retries the
       // same measurement rather than risking a duplicate.

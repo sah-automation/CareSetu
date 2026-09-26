@@ -239,7 +239,21 @@ export function HealthBackgroundSnapshotForm() {
       // rather than minting a new one. The draft stays on screen, and the
       // acknowledgment stays unanswered, so a refused first save asks again
       // rather than pretending it was recorded.
-      setSaveFailure({ traceId: traceIdOf(err) });
+      if (
+        err instanceof ApiError &&
+        err.code === "HEALTH_BACKGROUND_ACK_REQUIRED"
+      ) {
+        // The API is the authority on whether the snapshot has been
+        // acknowledged, and a save can reach it unacknowledged from either
+        // direction: the read that gated this tap may have been stale, or the
+        // backend may have lost the acknowledgment. Either way the answer is a
+        // question, not a failure - so the sheet is asked again rather than
+        // reported as a failed write, which is what the patient did nothing
+        // wrong to cause.
+        setConsentOpen(true);
+      } else {
+        setSaveFailure({ traceId: traceIdOf(err) });
+      }
     } finally {
       setSaving(false);
     }

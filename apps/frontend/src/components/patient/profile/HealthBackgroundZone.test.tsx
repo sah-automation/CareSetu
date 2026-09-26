@@ -20,6 +20,7 @@
 // never recorded. So the key handling is pinned in both directions too.
 
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -48,6 +49,7 @@ import {
   type HealthBackground,
   type HealthBackgroundView,
   type HealthMetricEntry,
+  type HealthMetricInput,
 } from "@/lib/health-background/api";
 
 vi.mock("@/lib/health-background/api", async (importOriginal) => {
@@ -99,6 +101,34 @@ function type(testId: string, value: string) {
   fireEvent.change(screen.getByTestId(testId), { target: { value } });
 }
 
+// The series the test has built, and the answer every read of it gets. Both are
+// held as state rather than counted by call, because the component reads the
+// series more than once and the order of those reads is not the test's to
+// control: the first load can still be in flight when a measurement is added
+// (#552). A stub that only knew which call it was on would answer the read that
+// follows an append with the list from before the row landed - which is exactly
+// the bug the series had.
+let landed: HealthMetricEntry[] = [];
+let seriesPage: { items: HealthMetricEntry[]; total: number } = {
+  items: [],
+  total: 0,
+};
+let nextEntryId = 12;
+
+/** Record an append the way the API would: the row joins the series, newest first. */
+function landAppend(input: HealthMetricInput): HealthMetricEntry {
+  const entry: HealthMetricEntry = {
+    entry_id: nextEntryId,
+    height_cm: input.heightCm,
+    weight_kg: input.weightKg,
+    recorded_at: input.recordedAt,
+  };
+  nextEntryId += 1;
+  landed = [entry, ...landed];
+  seriesPage = { items: landed, total: landed.length };
+  return entry;
+}
+
 /** Render the zone and wait for both owner reads to settle. */
 async function renderZone() {
   render(<HealthBackgroundZone />);
@@ -120,8 +150,11 @@ beforeEach(() => {
     acknowledged: true,
     background: storedBackground,
   });
-  mockFetchMetrics.mockResolvedValue({ items: [], total: 0 });
-  mockAppendMetric.mockResolvedValue(firstEntry);
+  landed = [];
+  nextEntryId = 12;
+  seriesPage = { items: [], total: 0 };
+  mockFetchMetrics.mockImplementation(async () => seriesPage);
+  mockAppendMetric.mockImplementation(async (input) => landAppend(input));
 });
 
 afterEach(() => {
@@ -369,7 +402,6 @@ describe("Health background zone surface (#549)", () => {
 
   it("replays the same append key on a retry, so a lost response cannot duplicate the row", async () => {
     mockAppendMetric.mockRejectedValueOnce(new Error("offline"));
-    mockAppendMetric.mockResolvedValueOnce(firstEntry);
     await renderZone();
 
     type("ps-hb-metric-height", "170");
@@ -425,10 +457,6 @@ describe("Health background zone surface (#549)", () => {
     );
     // The patient corrects their own number before retrying.
     type("ps-hb-metric-height", "171");
-    mockAppendMetric.mockResolvedValueOnce({
-      ...firstEntry,
-      height_cm: 171,
-    });
     fireEvent.click(screen.getByTestId("ps-hb-metric-add"));
 
     await waitFor(() => expect(mockAppendMetric).toHaveBeenCalledTimes(2));
@@ -436,7 +464,9 @@ describe("Health background zone surface (#549)", () => {
     expect(mockAppendMetric.mock.calls[1][1]).not.toBe(
       mockAppendMetric.mock.calls[0][1],
     );
-    // And the correction is what the patient sees, not the value they replaced.
+    // And the correction is what the patient sees, not the value they replaced -
+    // the read that follows the append reports the API's own row, so this also
+    // pins that the reconciled list carries the corrected number.
     await waitFor(() =>
       expect(
         within(screen.getByTestId("ps-hb-metric-12")).getByText(
@@ -444,6 +474,78 @@ describe("Health background zone surface (#549)", () => {
         ),
       ).toBeInTheDocument(),
     );
+  });
+
+  it("keeps a measurement added before the first read answers, rather than letting the older read empty the list (#552)", async () => {
+    // The reported bug: the patient taps Add while the first read of the series
+    // is still in flight, and that read answers afterwards with the series as it
+    // was before their row - so the list they just added to empties out under
+    // them and claims they have recorded nothing.
+    let releaseFirstRead: (() => void) | undefined;
+    mockFetchMetrics.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseFirstRead = () => resolve({ items: [], total: 0 });
+        }),
+    );
+    await renderZone();
+
+    // The series is still loading, and the form is already usable.
+    type("ps-hb-metric-height", "170");
+    type("ps-hb-metric-recorded-at", "2026-09-26T10:00");
+    fireEvent.click(screen.getByTestId("ps-hb-metric-add"));
+    await waitFor(() =>
+      expect(screen.getByTestId("ps-hb-metric-added")).toBeInTheDocument(),
+    );
+    // The read that was already in flight now answers, still describing the
+    // series from before the row landed.
+    await act(async () => {
+      releaseFirstRead?.();
+    });
+
+    // The row the patient just recorded is still the row on screen, and the
+    // list is not claiming to be empty.
+    expect(screen.getByTestId("ps-hb-metric-12")).toBeInTheDocument();
+    expect(screen.queryByTestId("ps-hb-metrics-empty")).toBeNull();
+  });
+
+  it("keeps the pages already loaded when a measurement is added (#552)", async () => {
+    // Reconciling to the first page alone would take back the rows the patient
+    // chose to page forward to, which is a worse surprise than a stale row. The
+    // series is served newest-first over two pages, so the read that follows the
+    // append has to re-read both to answer honestly.
+    const stored: HealthMetricEntry[] = [
+      { ...firstEntry, entry_id: 30 },
+      { ...firstEntry, entry_id: 31 },
+      { ...firstEntry, entry_id: 32 },
+    ];
+    mockFetchMetrics.mockImplementation(async ({ page = 1 } = {}) => {
+      const newestFirst = [...landed, ...stored];
+      const start = (page - 1) * 2;
+      return {
+        items: newestFirst.slice(start, start + 2),
+        total: newestFirst.length,
+      };
+    });
+    await renderZone();
+    fireEvent.click(screen.getByTestId("ps-hb-metrics-load-more"));
+    await waitFor(() =>
+      expect(screen.getByTestId("ps-hb-metric-32")).toBeInTheDocument(),
+    );
+
+    type("ps-hb-metric-height", "171");
+    type("ps-hb-metric-recorded-at", "2026-09-27T10:00");
+    fireEvent.click(screen.getByTestId("ps-hb-metric-add"));
+
+    // The row that just landed, and the pages the patient had already asked
+    // for: the read that follows the append reconciles what is on screen rather
+    // than replacing it with page one.
+    await waitFor(() =>
+      expect(screen.getByTestId("ps-hb-metric-12")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("ps-hb-metric-30")).toBeInTheDocument();
+    expect(screen.getByTestId("ps-hb-metric-31")).toBeInTheDocument();
+    expect(screen.getByTestId("ps-hb-metric-32")).toBeInTheDocument();
   });
 
   it("spends the save key when the snapshot draft is edited before a retry", async () => {
@@ -624,15 +726,44 @@ describe("Health background first-save confirmation (#549)", () => {
     );
   });
 
-  it("keeps the draft and re-asks when the acknowledged save is refused", async () => {
-    // The backend refuses a first save that somehow arrives unacknowledged
-    // (422 HEALTH_BACKGROUND_ACK_REQUIRED). Nothing was stored, so the
-    // question is still unanswered and the zone must not mark it answered.
+  it("asks for the acknowledgment when the API says the save still needed one (#552)", async () => {
+    // The read said the snapshot was acknowledged, so the zone saved straight
+    // through without asking - and the API disagreed (422
+    // HEALTH_BACKGROUND_ACK_REQUIRED). Nothing was stored, so the question is
+    // still unanswered. Starting from an acknowledged read is what isolates
+    // this: the local flag alone would not have opened the sheet, so the sheet
+    // can only be here because the refusal was understood as a question.
+    mockFetchBackground.mockResolvedValue(acknowledged);
     mockSaveBackground.mockRejectedValue(
       new ApiError({
         code: "HEALTH_BACKGROUND_ACK_REQUIRED",
         message: "ack required",
-        trace_id: "trace-hb-549",
+        trace_id: "trace-hb-552",
+        details: {},
+      }),
+    );
+    await renderZone();
+
+    type("ps-hb-blood-group", "B+");
+    fireEvent.click(screen.getByTestId("ps-hb-snapshot-save"));
+
+    expect(
+      await screen.findByTestId("ps-hb-consent-sheet"),
+    ).toBeInTheDocument();
+    // Not a failed write: the patient did nothing wrong, so a save-failure
+    // notice here would be a lie about what happened.
+    expect(screen.queryByTestId("ps-hb-save-failed")).toBeNull();
+    // The draft is still theirs to confirm.
+    expect(screen.getByTestId("ps-hb-blood-group")).toHaveValue("B+");
+  });
+
+  it("completes the first save once the re-asked acknowledgment is confirmed (#552)", async () => {
+    mockFetchBackground.mockResolvedValue(acknowledged);
+    mockSaveBackground.mockRejectedValueOnce(
+      new ApiError({
+        code: "HEALTH_BACKGROUND_ACK_REQUIRED",
+        message: "ack required",
+        trace_id: "trace-hb-552",
         details: {},
       }),
     );
@@ -641,18 +772,22 @@ describe("Health background first-save confirmation (#549)", () => {
     type("ps-hb-blood-group", "B+");
     fireEvent.click(screen.getByTestId("ps-hb-snapshot-save"));
     fireEvent.click(await screen.findByTestId("ps-hb-consent-confirm"));
-    fireEvent.click(screen.getByTestId("ps-hb-snapshot-save"));
 
     await waitFor(() =>
-      expect(screen.getByTestId("ps-hb-save-failed")).toHaveTextContent(
-        STRINGS.en.profileZones.snapshotSaveFailed,
+      expect(screen.getByTestId("ps-hb-saved")).toHaveTextContent(
+        STRINGS.en.profileZones.snapshotSharedNote,
       ),
     );
-    expect(screen.getByTestId("ps-hb-blood-group")).toHaveValue("B+");
-    fireEvent.click(screen.getByTestId("ps-hb-snapshot-save"));
-    expect(
-      await screen.findByTestId("ps-hb-consent-sheet"),
-    ).toBeInTheDocument();
+    // The retried save is the acknowledged one, and it is the same mutation:
+    // the key is held across the refusal rather than minted again, or a retry
+    // would be a second snapshot write rather than the first one finishing.
+    const [first, retry] = [
+      mockSaveBackground.mock.calls[0]?.[1],
+      mockSaveBackground.mock.calls.at(-1)?.[1],
+    ];
+    expect(first?.acknowledgePhi).toBe(false);
+    expect(retry?.acknowledgePhi).toBe(true);
+    expect(retry?.retryKey).toBe(first?.retryKey);
   });
 });
 
