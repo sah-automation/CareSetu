@@ -107,11 +107,16 @@ vi.mock("@/lib/partner/api", () => ({
 }));
 
 const mockPostLoginTarget = vi.fn().mockReturnValue("/operator/home");
+const { mockFetchPartnerRouteState } = vi.hoisted(() => ({
+  mockFetchPartnerRouteState: vi.fn(),
+}));
 vi.mock("@/lib/auth/staff-routing", async (importOriginal) => {
   const mod = await importOriginal<typeof import("@/lib/auth/staff-routing")>();
   return {
     ...mod,
     postLoginTarget: (...args: unknown[]) => mockPostLoginTarget(...args),
+    fetchPartnerRouteState: (...args: unknown[]) =>
+      mockFetchPartnerRouteState(...args),
   };
 });
 
@@ -544,6 +549,10 @@ describe("StaffLoginForm - partner code step", () => {
 
   it("verifies the code, mints a partner session, and routes via postLoginTarget", async () => {
     mockPostLoginTarget.mockReturnValue("/doctor");
+    mockFetchPartnerRouteState.mockResolvedValue({
+      partnerState: undefined,
+      partnerType: "doctor",
+    });
     vi.mocked(partnerLogin).mockResolvedValue(LOGIN_OK);
     vi.mocked(partnerVerify).mockResolvedValue({
       outcome: "verified",
@@ -667,6 +676,10 @@ describe("StaffLoginForm - partner code step", () => {
 
   it("derives no partnerState for an active doctor partner and lands via the doctor role rule", async () => {
     mockPostLoginTarget.mockReturnValue("/doctor");
+    mockFetchPartnerRouteState.mockResolvedValue({
+      partnerState: undefined,
+      partnerType: "doctor",
+    });
     await completePartnerLogin("Active");
 
     await waitFor(() => {

@@ -10,7 +10,7 @@
 // left is the build-flag-gated OTP read-back banner (DEPLOY-4, #118), which
 // is inert unless NEXT_PUBLIC_DEMO_MODE is inlined as "true" at build time.
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import {
@@ -223,22 +223,25 @@ function OtpStep({ flow }: { flow: OtpFlow }) {
 
 function DoneStep({
   flow,
-  returnTo,
   doneScreenT,
+  resumePending,
+  onGoToDashboard,
 }: {
   flow: OtpFlow;
-  returnTo: string;
   doneScreenT: DoneScreenStrings;
+  resumePending: boolean;
+  onGoToDashboard: () => void;
 }) {
   const { t } = flow;
-  const router = useRouter();
   return (
     <DoneScreen
       title={t.verifiedTitle}
       body={t.verifiedBody}
       openingLabel={doneScreenT.openingDashboard}
+      openingInLabel={doneScreenT.openingIn}
       goToDashboardLabel={doneScreenT.goToDashboard}
-      onGoToDashboard={() => router.replace(returnTo)}
+      resumePending={resumePending}
+      onGoToDashboard={onGoToDashboard}
     />
   );
 }
@@ -295,25 +298,49 @@ export function PatientAuthWizard({
     router,
   ]);
 
-  // Redirect to the return target after successful login (the done screen's
-  // "Go to Dashboard" button also routes there directly). Await the
-  // session-resume seam so identity/roles land in state BEFORE the post-login
-  // route mounts: if the patient surface mounted identity-less, the Provider
-  // remount that applies identity would reset an in-progress completion wizard
-  // and wipe its draft. A reload is never needed (#496). Best-effort by design
-  // - a resolution failure still navigates, and the never-silent Finish
-  // palette covers it.
+  // #551: one post-login routine for BOTH the countdown and the CTA. The
+  // session-resume seam is started once and awaited by whichever signal
+  // arrives first, so a fast "Go to Dashboard" click goes through the same
+  // resume-then-navigate ordering as the auto path - identity/roles land in
+  // state BEFORE the post-login route mounts, because a patient surface that
+  // mounted identity-less makes the Provider remount that applies identity
+  // reset an in-progress completion wizard and wipe its draft (#496). A reload
+  // is never needed; the seam is best-effort by design, since
+  // resumeSession never rejects. `landedRef` keeps it idempotent, so a click
+  // during the countdown and the tick at zero cannot both navigate.
+  const resumeRef = useRef<Promise<void> | null>(null);
+  const landedRef = useRef(false);
+  const [resumeSettled, setResumeSettled] = useState(false);
+
+  const resumeOnce = useCallback((): Promise<void> => {
+    resumeRef.current ??= resumeSession();
+    return resumeRef.current;
+  }, [resumeSession]);
+
+  // Start the resume once the flow is done; the countdown is released (and
+  // only the countdown drives the auto-redirect) after it settles.
   useEffect(() => {
-    if (flow.state.stage === "done" && flow.state.session) {
-      let cancelled = false;
-      void resumeSession().then(() => {
-        if (!cancelled) router.replace(returnTo);
-      });
-      return () => {
-        cancelled = true;
-      };
+    if (flow.state.stage !== "done" || !flow.state.session) {
+      return;
     }
-  }, [flow.state.stage, flow.state.session, returnTo, router, resumeSession]);
+    let cancelled = false;
+    void resumeOnce().then(() => {
+      if (!cancelled) {
+        setResumeSettled(true);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [flow.state.stage, flow.state.session, resumeOnce]);
+
+  const landOnReturnTarget = useCallback(() => {
+    if (landedRef.current) {
+      return;
+    }
+    landedRef.current = true;
+    void resumeOnce().then(() => router.replace(returnTo));
+  }, [resumeOnce, router, returnTo]);
 
   if (!flow.state.hydrated) {
     return null;
@@ -342,8 +369,9 @@ export function PatientAuthWizard({
           {flow.state.stage === "done" && (
             <DoneStep
               flow={flow}
-              returnTo={returnTo}
               doneScreenT={STRINGS[lang].doneScreen}
+              resumePending={!resumeSettled}
+              onGoToDashboard={landOnReturnTarget}
             />
           )}
         </div>

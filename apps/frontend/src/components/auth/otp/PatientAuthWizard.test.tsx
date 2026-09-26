@@ -6,6 +6,7 @@
 // Updated for T6 (#152): AuthenticatedHome removed, redirect to /patient.
 
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -25,6 +26,7 @@ import {
   type VerifyResult,
 } from "@/lib/auth/api";
 import { PatientAuthWizard } from "./PatientAuthWizard";
+import { DONE_SCREEN_COUNTDOWN_SECONDS } from "../DoneScreen";
 
 vi.mock("@/lib/auth/api", async (importOriginal) => {
   const mod = await importOriginal<typeof import("@/lib/auth/api")>();
@@ -129,6 +131,20 @@ function typeOtp(digits = "123456") {
 
 function verifyButton() {
   return screen.getByRole("button", { name: "Verify & continue" });
+}
+
+// #551: the done-screen countdown is driven by faking ONLY the interval, so
+// the async flow helpers above (findBy*) keep their real timers while the
+// 5-second tick becomes drivable.
+function fakeCountdownClock() {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+}
+
+/** Run the faked countdown forward by `ms`, flushing interval callbacks. */
+async function tick(ms: number) {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
 }
 
 afterEach(() => {
@@ -523,38 +539,135 @@ describe("PatientAuthWizard - success and session", () => {
     fireEvent.click(screen.getByRole("button", { name: "Go to Dashboard" }));
 
     expect(issueSession).toHaveBeenCalledWith(PHONE);
-    expect(mockReplace).toHaveBeenCalledWith("/patient");
+    // #551: the CTA now shares the auto path's resume-then-navigate ordering,
+    // so the route lands one microtask later - never identity-less.
+    await waitFor(() => expect(mockReplace).toHaveBeenCalledWith("/patient"));
 
     const stored = JSON.parse(localStorage.getItem("caresetu.session") ?? "{}");
     expect(stored.jwt).toBe("header.payload.signature");
     expect(stored.refresh_token).toBe("opaque-refresh-token");
   });
 
-  it("shows the shared done screen while the seam is still in flight (#536)", async () => {
-    await startOtpFlow();
-    vi.mocked(verifyOtp).mockResolvedValue(verifiedResult());
-    vi.mocked(issueSession).mockResolvedValue(SESSION);
+  it("shows the shared done screen, counts down, and redirects at zero (#551)", async () => {
+    fakeCountdownClock();
+    try {
+      await startOtpFlow();
+      vi.mocked(verifyOtp).mockResolvedValue(verifiedResult());
+      vi.mocked(issueSession).mockResolvedValue(SESSION);
+      mockReplace.mockClear();
 
-    // Keep the session-resume seam unresolved so the done screen must render
-    // the shown verified state on its own - the blank-flash regression guard.
-    // The AC asks for a rendered component test of the shown state, not a
-    // redirect race.
-    state.resumeSession.mockReturnValue(new Promise<void>(() => {}));
-    mockReplace.mockClear();
+      typeOtp();
+      fireEvent.click(verifyButton());
 
-    typeOtp();
-    fireEvent.click(verifyButton());
+      // The resume seam settles, so the countdown is released with its full
+      // duration and the verified state stands on its own - the blank-flash
+      // regression guard.
+      expect(await screen.findByText("Identity verified")).toBeInTheDocument();
+      expect(
+        screen.getByText("Your number is verified and your session is ready."),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          `Opening your dashboard in ${DONE_SCREEN_COUNTDOWN_SECONDS}`,
+        ),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("progressbar")).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Go to Dashboard" }),
+      ).toBeInTheDocument();
 
-    expect(await screen.findByText("Identity verified")).toBeInTheDocument();
-    expect(
-      screen.getByText("Your number is verified and your session is ready."),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/Opening your dashboard/)).toBeInTheDocument();
+      // Mid-countdown: still counting, and the CTA stays available.
+      await tick(2000);
+      expect(mockReplace).not.toHaveBeenCalled();
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "Opening your dashboard in 3",
+      );
 
-    // The CTA is always available: it navigates immediately to the return
-    // target even though the auto-redirect seam never resolves.
-    fireEvent.click(screen.getByRole("button", { name: "Go to Dashboard" }));
-    expect(mockReplace).toHaveBeenCalledWith("/patient");
+      // At zero the auto-redirect fires.
+      await tick(DONE_SCREEN_COUNTDOWN_SECONDS * 1000);
+      expect(mockReplace).toHaveBeenCalledWith("/patient");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("holds the countdown back until the resume seam settles (#551)", async () => {
+    fakeCountdownClock();
+    try {
+      await startOtpFlow();
+      vi.mocked(verifyOtp).mockResolvedValue(verifiedResult());
+      vi.mocked(issueSession).mockResolvedValue(SESSION);
+
+      let release: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      state.resumeSession.mockReturnValue(gate);
+      mockReplace.mockClear();
+
+      typeOtp();
+      fireEvent.click(verifyButton());
+
+      expect(await screen.findByText("Identity verified")).toBeInTheDocument();
+      await vi.waitFor(() => expect(state.resumeSession).toHaveBeenCalled());
+
+      // The resume call has not resolved: no digits, and the clock never runs
+      // behind it, however long the seam takes.
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "Opening your dashboard",
+      );
+      expect(
+        screen.queryByText(/Opening your dashboard in/),
+      ).not.toBeInTheDocument();
+      await tick(DONE_SCREEN_COUNTDOWN_SECONDS * 1000 * 2);
+      expect(
+        screen.queryByText(/Opening your dashboard in/),
+      ).not.toBeInTheDocument();
+      expect(mockReplace).not.toHaveBeenCalled();
+
+      // Once it settles the countdown starts from the top and owns the
+      // auto-redirect.
+      release!();
+      await tick(0);
+      expect(screen.getByRole("status")).toHaveTextContent(
+        `Opening your dashboard in ${DONE_SCREEN_COUNTDOWN_SECONDS}`,
+      );
+      await tick(DONE_SCREEN_COUNTDOWN_SECONDS * 1000);
+      expect(mockReplace).toHaveBeenCalledWith("/patient");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not double-navigate when the CTA is pressed mid-countdown (#551)", async () => {
+    fakeCountdownClock();
+    try {
+      await startOtpFlow();
+      vi.mocked(verifyOtp).mockResolvedValue(verifiedResult());
+      vi.mocked(issueSession).mockResolvedValue(SESSION);
+      mockReplace.mockClear();
+
+      typeOtp();
+      fireEvent.click(verifyButton());
+      expect(await screen.findByText("Identity verified")).toBeInTheDocument();
+
+      // Wait for the resume seam to settle and the countdown to start.
+      await waitFor(() =>
+        expect(screen.getByRole("status")).toHaveTextContent(
+          `Opening your dashboard in ${DONE_SCREEN_COUNTDOWN_SECONDS}`,
+        ),
+      );
+
+      await tick(2000);
+      fireEvent.click(screen.getByRole("button", { name: "Go to Dashboard" }));
+      await waitFor(() => expect(mockReplace).toHaveBeenCalledWith("/patient"));
+
+      // The countdown reaching zero must not navigate a second time.
+      await tick(DONE_SCREEN_COUNTDOWN_SECONDS * 1000);
+      expect(mockReplace).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("awaits the session-resume seam before routing to the return target (#496)", async () => {
@@ -580,10 +693,21 @@ describe("PatientAuthWizard - success and session", () => {
       "must not route before the seam settles",
     ).not.toHaveBeenCalled();
 
-    release!();
-    await vi.waitFor(() =>
-      expect(mockReplace).toHaveBeenCalledWith("/patient"),
-    );
+    fakeCountdownClock();
+    try {
+      release!();
+      await tick(0);
+      // Settled: the countdown now owns the auto-redirect (#551), so the route
+      // still has not fired.
+      expect(
+        mockReplace,
+        "must not route before the countdown completes",
+      ).not.toHaveBeenCalled();
+      await tick(DONE_SCREEN_COUNTDOWN_SECONDS * 1000);
+      expect(mockReplace).toHaveBeenCalledWith("/patient");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("a stored session triggers a redirect to /patient without showing the form", async () => {
@@ -626,7 +750,9 @@ describe("PatientAuthWizard - success and session", () => {
       fireEvent.click(verifyButton());
       expect(await screen.findByText("Identity verified")).toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: "Go to Dashboard" }));
-      expect(mockReplace).toHaveBeenCalledWith(returnTo);
+      // #551: the CTA resumes the session first, so the route lands one
+      // microtask after the click.
+      await waitFor(() => expect(mockReplace).toHaveBeenCalledWith(returnTo));
     }
 
     it("redirects to the returnTo prop after the Done step", async () => {

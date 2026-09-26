@@ -19,22 +19,25 @@
 // #302: the mode is fixed by the caller's role prop (default "partner",
 // "operator" via ?role=operator) - fields never swap while the user types.
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { ApiError } from "@/lib/api-errors";
+import { ROLE_HOME } from "@/components/dashboard/types";
 import { fetchMe, type SessionResult } from "@/lib/auth/api";
 import {
   fetchPartnerRouteState,
+  isDoctorConsoleLanding,
   postLoginTarget,
 } from "@/lib/auth/staff-routing";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { saveSession } from "@/lib/auth/session";
+import { fetchDoctorProfile } from "@/lib/doctor/api";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { operatorLogin } from "@/lib/operator/api";
 
-import { DoneScreen } from "../DoneScreen";
+import { DoneScreen, type DoneScreenFact } from "../DoneScreen";
 import { formatCountdown } from "../otp/otpState";
 import { usePartnerLoginFlow } from "./partnerLoginState";
 import {
@@ -71,6 +74,43 @@ async function completeStaffLogin(
   return { roles: me.roles, phone: me.phone };
 }
 
+/**
+ * The resolved landing of an Active doctor partner, plus the practice facts
+ * the verified handoff shows (US-3). Null until the landing has resolved;
+ * non-null only for a doctor-console landing, never for a pending or rejected
+ * partner.
+ */
+interface DoctorLanding {
+  /** The post-login destination the countdown and the CTA both route to. */
+  target: string;
+  practiceName: string | null;
+  specialty: string | null;
+}
+
+// The handoff's practice facts come from the private doctor-profile projection
+// the batch already ships (#542) - the same partner record, no new endpoint.
+// The read is best-effort: a failure degrades to a handoff without the
+// practice line (logged, never silently dropped) instead of stranding the
+// login on a blank card.
+async function readPracticeIdentity(): Promise<{
+  practiceName: string | null;
+  specialty: string | null;
+}> {
+  try {
+    const profile = await fetchDoctorProfile();
+    return {
+      practiceName: profile.practice_name,
+      specialty: profile.specialty,
+    };
+  } catch (error) {
+    console.error(
+      "[staff-login] practice details unreadable; handoff without them",
+      error,
+    );
+    return { practiceName: null, specialty: null };
+  }
+}
+
 export function StaffLoginForm({
   role = "partner",
   returnTarget,
@@ -100,13 +140,70 @@ export function StaffLoginForm({
   const [attemptedSubmit, setAttemptedSubmit] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [partnerPhone, setPartnerPhone] = useState("");
-  // #537: the resolved post-login destination for an Active partner landing
-  // after verify. Null until the partner landing has resolved; non-null only
-  // for Active landers (pending/rejected never reach the done screen).
-  const [landingTarget, setLandingTarget] = useState<string | null>(null);
+  // #537/#551: the resolved doctor-console landing for an Active partner
+  // after verify, shown on the shared done screen. Null until the landing has
+  // resolved; non-null only for a console landing (pending/rejected, an
+  // unreadable status and every non-console landing route immediately).
+  const [landing, setLanding] = useState<DoctorLanding | null>(null);
+  // #551: the single post-login resume seam. Started once the landing resolves
+  // and awaited by BOTH the countdown and the CTA, so the countdown starts
+  // only after the session-resume call succeeds and a fast CTA click cannot
+  // navigate before identity lands in state. `landedRef` keeps the routine
+  // idempotent, so a click during the countdown and the tick at zero cannot
+  // both navigate.
+  const resumeRef = useRef<Promise<void> | null>(null);
+  const landedRef = useRef(false);
+  const [resumeSettled, setResumeSettled] = useState(false);
 
   const phoneRef = useRef<HTMLInputElement>(null);
   const totpRef = useRef<HTMLInputElement>(null);
+
+  const resumeOnce = useCallback((): Promise<void> => {
+    resumeRef.current ??= resumeSession();
+    return resumeRef.current;
+  }, [resumeSession]);
+
+  // Resume the saved session in-flow (same no-reload seam as the patient flow,
+  // #496) once the landing is known, then release the countdown. Never a hard
+  // page reload on this path (AC-3).
+  useEffect(() => {
+    if (partner.state.stage !== "done" || landing === null) {
+      return;
+    }
+    let cancelled = false;
+    void resumeOnce().then(() => {
+      if (!cancelled) {
+        setResumeSettled(true);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [partner.state.stage, landing, resumeOnce]);
+
+  // The countdown at zero and the always-visible CTA share this one routine.
+  const landOnConsole = useCallback(() => {
+    if (landedRef.current || landing === null) {
+      return;
+    }
+    landedRef.current = true;
+    void resumeOnce().then(() => router.replace(landing.target));
+  }, [landing, resumeOnce, router]);
+
+  // The immediate active-partner landing that shows no done screen: same
+  // resume-then-navigate ordering, so it too never mounts a route before the
+  // session is in state.
+  const landOn = useCallback(
+    async (target: string) => {
+      if (landedRef.current) {
+        return;
+      }
+      landedRef.current = true;
+      await resumeOnce();
+      router.replace(target);
+    },
+    [resumeOnce, router],
+  );
 
   // Partner landing: once the OTP flow has minted a partner session, resolve
   // the post-login destination and branch (#537). A failed landing surfaces
@@ -123,22 +220,6 @@ export function StaffLoginForm({
     // render-stable helpers that land a signed-in caller exactly once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [partner.state.session]);
-
-  // #537: an ACTIVE partner who just verified lands on the shared done screen
-  // first; once the post-login destination is known, resume the saved session
-  // in-flow (same no-reload seam as the patient flow, #496) and navigate with
-  // the framework router - never a hard page reload on the active path (AC-3).
-  useEffect(() => {
-    if (partner.state.stage === "done" && landingTarget !== null) {
-      let cancelled = false;
-      void resumeSession().then(() => {
-        if (!cancelled) router.replace(landingTarget);
-      });
-      return () => {
-        cancelled = true;
-      };
-    }
-  }, [partner.state.stage, landingTarget, router, resumeSession]);
 
   function errorFor(field: FieldName): FieldErrors[FieldName] | undefined {
     return fieldErrors[field];
@@ -183,10 +264,12 @@ export function StaffLoginForm({
   // (same matrix; postLoginTarget is mocked in tests) but DEPENDS on it for
   // the branch, so it is split from the operator path that keeps the hard
   // reload (out of scope). An ACTIVE DOCTOR partner (partnerState undefined,
-  // doctor type) hands the resolved target to the done screen and navigates
-  // via the framework router once the session resumes (AC-1); any other
-  // landing - pending, rejected, non-doctor or unreadable status - keeps the
-  // immediate status/role route below and never sees the done screen (AC-2).
+  // doctor type) whose resolved target IS a console landing hands that target
+  // to the done screen and moves there via the framework router once the
+  // session resumes (AC-1). Every other landing routes on immediately and
+  // never sees the done screen (AC-2): pending and rejected to their status
+  // screens exactly as before, and an active doctor bound for some other
+  // surface (a ?return= deep link outside the console) to that target.
   async function landPartnerAfterLogin(session: SessionResult) {
     const me = await completeStaffLogin(session);
     const routeState = await fetchPartnerRouteState(me.roles);
@@ -203,7 +286,13 @@ export function StaffLoginForm({
       window.location.replace(target);
       return;
     }
-    setLandingTarget(target);
+    if (!isDoctorConsoleLanding(target)) {
+      // Active doctor, not a console landing: no console-branded handoff, so
+      // route straight on - still the no-hard-reload active path.
+      await landOn(target);
+      return;
+    }
+    setLanding({ target, ...(await readPracticeIdentity()) });
   }
 
   // Map any thrown value onto calm dictionary copy, reusing the operator
@@ -296,6 +385,35 @@ export function StaffLoginForm({
 
   const partnerBlocked =
     partner.state.busy || partner.state.challenge === "locked";
+
+  const doneScreenT = STRINGS[lang].doneScreen;
+  // US-3: the doctor handoff says which practice the caller is signing in to
+  // and where they are headed. The practice name and specialty are the values
+  // already fetched after the partner read; the labels are dictionary copy, and
+  // a fact with no value (unset practice name, unreadable profile) is dropped
+  // rather than rendered blank.
+  const landingFacts: DoneScreenFact[] = [];
+  if (landing !== null) {
+    if (landing.practiceName) {
+      landingFacts.push({
+        label: doneScreenT.practiceLabel,
+        value: landing.practiceName,
+      });
+    }
+    if (landing.specialty) {
+      landingFacts.push({
+        label: doneScreenT.specialtyLabel,
+        value: landing.specialty,
+      });
+    }
+    landingFacts.push({
+      label: doneScreenT.destinationLabel,
+      value:
+        landing.target === ROLE_HOME.doctor
+          ? doneScreenT.consoleDestination
+          : landing.target,
+    });
+  }
 
   return (
     <form onSubmit={handleSubmit} noValidate data-testid="staff-login-form">
@@ -436,16 +554,20 @@ export function StaffLoginForm({
           </>
         )
       ) : partner.state.stage === "done" ? (
-        landingTarget !== null ? (
-          // #537: ACTIVE lander done screen. The destination resolved before
-          // this renders; "Go to Dashboard" routes there directly with the
-          // framework router too.
+        landing !== null ? (
+          // #537: ACTIVE doctor console landing. The destination resolved
+          // before this renders; the countdown owns the auto-redirect and
+          // "Go to Dashboard" routes through the same resume-then-navigate
+          // routine, both with the framework router.
           <DoneScreen
             title={t.verifiedTitle}
             body={t.verifiedBody}
-            openingLabel={STRINGS[lang].doneScreen.openingDashboard}
-            goToDashboardLabel={STRINGS[lang].doneScreen.goToDashboard}
-            onGoToDashboard={() => router.replace(landingTarget)}
+            openingLabel={doneScreenT.openingDashboard}
+            openingInLabel={doneScreenT.openingIn}
+            goToDashboardLabel={doneScreenT.goToDashboard}
+            resumePending={!resumeSettled}
+            onGoToDashboard={landOnConsole}
+            facts={landingFacts}
           />
         ) : null
       ) : (

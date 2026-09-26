@@ -204,6 +204,21 @@ export function postLoginTarget(input: PostLoginInput): string {
 // staff card" instead of re-filtering raw strings ad hoc.
 export type StaffRole = Exclude<Role, "patient">;
 
+/**
+ * Whether a resolved post-login target is a real doctor-console landing
+ * (the console home or anything under it) rather than one of the other
+ * landings the matrix can return - a status screen, another role's home, the
+ * role picker, or a `?return=` deep link into some other owned surface. The
+ * doctor login's verified handoff screen is the CONSOLE handoff (#551), so it
+ * renders only for these targets; every other landing routes immediately
+ * instead of wearing console branding.
+ */
+export function isDoctorConsoleLanding(target: string): boolean {
+  return (
+    target === ROLE_HOME.doctor || target.startsWith(`${ROLE_HOME.doctor}/`)
+  );
+}
+
 export function isStaffRole(value: string): value is StaffRole {
   return isAppRole(value) && value !== "patient";
 }
