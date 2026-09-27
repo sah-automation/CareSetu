@@ -5,6 +5,7 @@
 // patient must be able to undo from here.
 
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -25,6 +26,7 @@ import { ConsentGrantsPanel } from "./ConsentGrantsPanel";
 import { ApiError } from "@/lib/api-errors";
 import { __resetLangForTests } from "@/lib/i18n/LangContext";
 import { STRINGS } from "@/lib/i18n/dictionaries";
+import { REVOCATION_NOTICE_MS } from "@/lib/consent/revocationNotice";
 import {
   fetchConsentLog,
   revokeConsent,
@@ -84,7 +86,14 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.useRealTimers();
 });
+
+/** Flush the load and revoke promises under fake timers, where `waitFor`
+ *  cannot advance the clock itself. */
+async function flush() {
+  await act(async () => {});
+}
 
 describe("ConsentGrantsPanel", () => {
   it("lists the patient's granted consents with a labelled scope", async () => {
@@ -133,6 +142,132 @@ describe("ConsentGrantsPanel", () => {
       expect(screen.queryByTestId("ps-consent-9")).toBeNull(),
     );
     expect(screen.getByTestId("ps-consent-empty")).toBeTruthy();
+  });
+
+  it("confirms the revoke with the shared positive-message treatment (#565)", async () => {
+    const hb = consent({ consent_id: 9, record_scope: "health_background" });
+    mockFetchConsentLog.mockResolvedValue({ items: [hb] });
+    mockRevokeConsent.mockResolvedValue({ ...hb, status: "revoked" });
+
+    render(<ConsentGrantsPanel />);
+    await waitFor(() =>
+      expect(screen.getByTestId("ps-consent-9")).toBeTruthy(),
+    );
+    fireEvent.click(screen.getByTestId("ps-consent-revoke-9"));
+    fireEvent.click(await screen.findByTestId("ps-consent-confirm"));
+
+    const notice = await screen.findByTestId("ps-consent-toast");
+    // Exact string, and load-bearing: this environment loads no stylesheet, so
+    // a colour utility naming a token that does not exist emits no CSS and no
+    // rendered-surface, snapshot, contrast or axe assertion here can see it
+    // (axe reads the accessibility tree, not the cascade). The class list is
+    // the only observable a unit test has for a treatment decision, and
+    // containment - `toHaveClass("bg-success-soft")` - passes on the string
+    // this replaces. Do not "simplify" it into a containment check.
+    expect(notice.className).toBe(
+      "rounded-md border border-success-soft bg-success-soft px-3 py-2 text-sm text-success-text",
+    );
+    // Already a live region before this ticket; the assertion is what keeps it
+    // one, and it is the half of the contract axe cannot check on its own.
+    expect(notice).toHaveAttribute("role", "status");
+    expect(notice).toHaveTextContent(t.consentRevokeDone);
+  });
+
+  it("dismisses the confirmation on its own after the shared countdown (#565)", async () => {
+    const hb = consent({ consent_id: 9, record_scope: "health_background" });
+    mockFetchConsentLog.mockResolvedValue({ items: [hb] });
+    mockRevokeConsent.mockResolvedValue({ ...hb, status: "revoked" });
+    vi.useFakeTimers();
+
+    render(<ConsentGrantsPanel />);
+    await flush();
+    fireEvent.click(screen.getByTestId("ps-consent-revoke-9"));
+    await flush();
+    fireEvent.click(screen.getByTestId("ps-consent-confirm"));
+    await flush();
+
+    expect(screen.getByTestId("ps-consent-toast")).toBeTruthy();
+
+    // Nobody taps it away: the countdown runs on the one shared duration the
+    // consent log reads, and the notice goes with it.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(REVOCATION_NOTICE_MS);
+    });
+    expect(screen.queryByTestId("ps-consent-toast")).toBeNull();
+  });
+
+  it("re-arms the countdown when a second revoke is confirmed (#565)", async () => {
+    const first = consent({ consent_id: 9, record_scope: "health_background" });
+    const second = consent({
+      consent_id: 10,
+      counterparty_id: "dr-vyas",
+      record_scope: "lab_results",
+    });
+    mockFetchConsentLog.mockResolvedValue({ items: [first, second] });
+    mockRevokeConsent.mockImplementation(async (id) =>
+      id === 9
+        ? { ...first, status: "revoked" as const }
+        : { ...second, status: "revoked" as const },
+    );
+    vi.useFakeTimers();
+
+    render(<ConsentGrantsPanel />);
+    await flush();
+
+    fireEvent.click(screen.getByTestId("ps-consent-revoke-9"));
+    await flush();
+    fireEvent.click(screen.getByTestId("ps-consent-confirm"));
+    await flush();
+    expect(screen.getByTestId("ps-consent-toast")).toBeTruthy();
+
+    // Second revoke, late enough that the first countdown is nearly over.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(REVOCATION_NOTICE_MS - 500);
+    });
+    fireEvent.click(screen.getByTestId("ps-consent-revoke-10"));
+    await flush();
+    fireEvent.click(screen.getByTestId("ps-consent-confirm"));
+    await flush();
+
+    // Past the first countdown's expiry. If the guard did not clear it, that
+    // stale timer would still fire here and pull the confirmation off screen
+    // while the second one is still counting.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(screen.getByTestId("ps-consent-toast")).toBeTruthy();
+  });
+
+  it("clears its countdown on unmount, so leaving mid-countdown fires into nothing (#565)", async () => {
+    const hb = consent({ consent_id: 9, record_scope: "health_background" });
+    mockFetchConsentLog.mockResolvedValue({ items: [hb] });
+    mockRevokeConsent.mockResolvedValue({ ...hb, status: "revoked" });
+    vi.useFakeTimers();
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+
+    const { unmount } = render(<ConsentGrantsPanel />);
+    await flush();
+    fireEvent.click(screen.getByTestId("ps-consent-revoke-9"));
+    await flush();
+    fireEvent.click(screen.getByTestId("ps-consent-confirm"));
+    await flush();
+
+    expect(screen.getByTestId("ps-consent-toast")).toBeTruthy();
+    // The countdown is the timer armed for the shared duration. A
+    // `clearTimeout` nobody can observe is the defect being fixed, so the
+    // teardown is measured rather than asserted: unmounting must clear this
+    // exact handle, not merely reduce some timer count.
+    const armed = setTimeoutSpy.mock.results
+      .map((result, index) => ({
+        handle: result.value,
+        delay: setTimeoutSpy.mock.calls[index]?.[1],
+      }))
+      .find((entry) => entry.delay === REVOCATION_NOTICE_MS);
+    expect(armed).toBeDefined();
+
+    unmount();
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(armed?.handle);
   });
 
   it("hides consents that are not granted - they are not access the patient holds", async () => {

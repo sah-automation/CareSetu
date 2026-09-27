@@ -37,9 +37,10 @@ import {
   counterpartyInitials,
   counterpartyLabel,
 } from "@/lib/consent/consentView";
-
-/** Mirrors the consent-log screen so the same success reads the same way. */
-const TOAST_MS = 3500;
+import {
+  REVOCATION_NOTICE_CLASS,
+  REVOCATION_NOTICE_MS,
+} from "@/lib/consent/revocationNotice";
 
 export function ConsentGrantsPanel() {
   const { lang } = useLang();
@@ -84,7 +85,7 @@ export function ConsentGrantsPanel() {
   function flash(message: string) {
     setToast(message);
     if (toastTimer.current !== null) clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToast(null), TOAST_MS);
+    toastTimer.current = setTimeout(() => setToast(null), REVOCATION_NOTICE_MS);
   }
 
   async function confirmRevoke() {
@@ -271,7 +272,7 @@ export function ConsentGrantsPanel() {
         <div
           role="status"
           data-testid="ps-consent-toast"
-          className="fixed bottom-20 left-1/2 z-50 -translate-x-1/2 rounded-lg bg-txt px-4 py-2 text-sm text-on-accent shadow-lg"
+          className={REVOCATION_NOTICE_CLASS}
         >
           {toast}
         </div>

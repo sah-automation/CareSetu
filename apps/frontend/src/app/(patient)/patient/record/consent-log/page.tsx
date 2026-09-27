@@ -7,7 +7,7 @@
 // record. Pending requests sort above everything; revoked grants stay visible
 // with plainly stated stop-forward copy. Fully bilingual EN/HI.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { PageHeader } from "@/components/layout/PageHeader";
 import { EmptyState } from "@/components/layout/EmptyState";
@@ -35,6 +35,10 @@ import {
   counterpartyLabel,
   counterpartyInitials,
 } from "@/lib/consent/consentView";
+import {
+  REVOCATION_NOTICE_CLASS,
+  REVOCATION_NOTICE_MS,
+} from "@/lib/consent/revocationNotice";
 
 type LoadStatus = "loading" | "ready" | "error";
 
@@ -112,6 +116,11 @@ export default function ConsentLogPage() {
   const [revokeTarget, setRevokeTarget] = useState<ConsentView | null>(null);
   const [revoking, setRevoking] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  // #565: the confirmation's countdown is held so it can be re-armed and torn
+  // down, the same way the Settings consent panel holds it. Arming it as a raw
+  // inline setTimeout left a timer running against a tree the patient had
+  // already navigated away from.
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = useCallback(() => {
     setStatus("loading");
@@ -132,6 +141,19 @@ export default function ConsentLogPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(
+    () => () => {
+      if (toastTimer.current !== null) clearTimeout(toastTimer.current);
+    },
+    [],
+  );
+
+  const flash = useCallback((message: string) => {
+    setToast(message);
+    if (toastTimer.current !== null) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), REVOCATION_NOTICE_MS);
+  }, []);
 
   // Sort: pending (requested) first, then by updated_at descending
   const sortedConsents = useMemo(() => {
@@ -164,14 +186,13 @@ export default function ConsentLogPage() {
         prev.map((c) => (c.consent_id === updated.consent_id ? updated : c)),
       );
       setRevokeTarget(null);
-      setToast(t.revokeConfirm.done);
-      setTimeout(() => setToast(null), 3500);
+      flash(t.revokeConfirm.done);
     } catch {
       // Error stays silent; the sheet remains open for retry
     } finally {
       setRevoking(false);
     }
-  }, [revokeTarget, t.revokeConfirm.done]);
+  }, [revokeTarget, flash, t.revokeConfirm.done]);
 
   return (
     <>
@@ -356,7 +377,7 @@ export default function ConsentLogPage() {
       {toast && (
         <div
           role="status"
-          className="fixed bottom-20 left-1/2 z-50 -translate-x-1/2 rounded-lg bg-txt px-4 py-2 text-sm text-on-accent shadow-lg"
+          className={REVOCATION_NOTICE_CLASS}
           data-testid="toast"
         >
           {toast}

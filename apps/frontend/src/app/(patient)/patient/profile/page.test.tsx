@@ -707,7 +707,7 @@ describe("Profile page photo (#548)", () => {
 describe("Profile page settings (#548)", () => {
   async function renderReady() {
     state.getProfile.mockResolvedValue({ set: true, profile: savedProfile });
-    render(
+    const rendered = render(
       <ProfileProvider>
         <ProfileSettingsPage />
       </ProfileProvider>,
@@ -715,6 +715,7 @@ describe("Profile page settings (#548)", () => {
     await waitFor(() =>
       expect(screen.getByTestId("ps-fullname")).toHaveValue("Asha Devi"),
     );
+    return rendered;
   }
 
   it("surfaces the patient's consent grants inside the Settings zone", async () => {
@@ -775,6 +776,49 @@ describe("Profile page settings (#548)", () => {
     await waitFor(() =>
       expect(screen.queryByTestId("ps-consent-4")).toBeNull(),
     );
+  });
+
+  it("confirms a revoke with the shared positive-message treatment, and scans clean on axe while it is up (#565)", async () => {
+    const grant = {
+      consent_id: 4,
+      lineage_ref: "C-2026-004",
+      patient_id: 7,
+      counterparty_type: "doctor",
+      counterparty_id: "dr-kumar",
+      record_scope: "health_background",
+      status: "granted",
+      version: 1,
+      created_at: "2026-09-01T10:00:00Z",
+      updated_at: "2026-09-01T10:05:00Z",
+      events: [],
+    };
+    mockFetchConsentLog.mockResolvedValue({ items: [grant] });
+    mockRevokeConsent.mockResolvedValue({ ...grant, status: "revoked" });
+    const { container } = await renderReady();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("ps-consent-revoke-4")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId("ps-consent-revoke-4"));
+    fireEvent.click(await screen.findByTestId("ps-consent-confirm"));
+
+    // Exact string, and load-bearing: this environment loads no stylesheet, so
+    // a colour utility naming a token that does not exist emits no CSS and no
+    // rendered-surface, snapshot, contrast or axe assertion here can see it
+    // (axe reads the accessibility tree, not the cascade). The class list is
+    // the only observable a unit test has for a treatment decision, and
+    // containment - `toHaveClass("bg-success-soft")` - passes on the string
+    // this replaces. Do not "simplify" it into a containment check.
+    const notice = await screen.findByTestId("ps-consent-toast");
+    expect(notice.className).toBe(
+      "rounded-md border border-success-soft bg-success-soft px-3 py-2 text-sm text-success-text",
+    );
+    // The outcome is announced rather than left for the patient to spot. The
+    // three existing axe sites all render with no confirmation on screen, so
+    // without this scan the accessibility half of the contract is unverified
+    // in exactly the state that matters.
+    expect(notice).toHaveAttribute("role", "status");
+    expect((await axe.run(container)).violations).toEqual([]);
   });
 
   it("marks the notification preferences coming soon instead of faking them", async () => {
