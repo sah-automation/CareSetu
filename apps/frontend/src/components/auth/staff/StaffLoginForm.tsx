@@ -33,13 +33,13 @@ import {
 import { useAuth } from "@/lib/auth/AuthContext";
 import { saveSession } from "@/lib/auth/session";
 import { fetchDoctorProfile } from "@/lib/doctor/api";
-import { STRINGS } from "@/lib/i18n/dictionaries";
+import { STRINGS, type StaffAuthStrings } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { operatorLogin } from "@/lib/operator/api";
 
 import { DoneScreen, type DoneScreenFact } from "../DoneScreen";
 import { formatCountdown } from "../otp/otpState";
-import { usePartnerLoginFlow } from "./partnerLoginState";
+import { usePartnerLoginFlow, type PartnerStage } from "./partnerLoginState";
 import {
   staffOperatorErrorCopy,
   validateStaffLogin,
@@ -78,7 +78,9 @@ async function completeStaffLogin(
  * The resolved landing of an Active doctor partner, plus the practice facts
  * the verified handoff shows (US-3). Null until the landing has resolved;
  * non-null only for a doctor-console landing, never for a pending or rejected
- * partner.
+ * partner. #566: the handoff no longer WAITS for this - it renders on the OTP
+ * stage and shows the resolved facts once they arrive - so "null" now means
+ * "the destination is still in flight", not "there is nothing to show".
  */
 interface DoctorLanding {
   /** The post-login destination the countdown and the CTA both route to. */
@@ -111,13 +113,61 @@ async function readPracticeIdentity(): Promise<{
   }
 }
 
+/**
+ * #566: the submit control's label, as a TOTAL function over the four steps.
+ *
+ * It used to be an inline ternary whose last arm was the phone step's copy, so
+ * on the terminal step it fell all the way through to "Get verification code" -
+ * a live button under an already-verified partner, reading as an invitation to
+ * start signing in again. The fix is an explicit terminal arm, added as a new
+ * case rather than by reordering the existing ones, because reordering silently
+ * changes what the operator and MFA steps render and those are out of scope.
+ *
+ * It lives outside the component so every arm is addressable. The control
+ * itself is rendered out on the terminal step (that is the stronger fix than
+ * disabling it), which would leave the terminal arm as code no test can reach -
+ * and an unreachable arm is exactly the kind of thing that rots. Here the
+ * mapping is a pure function of (strings, step) and all four arms are asserted.
+ */
+export function staffSubmitLabel(
+  login: StaffAuthStrings["login"],
+  step: {
+    isMfaStep: boolean;
+    isOperatorMode: boolean;
+    stage: PartnerStage;
+  },
+): string {
+  if (step.isMfaStep) {
+    return login.mfaSubmit;
+  }
+  if (step.isOperatorMode) {
+    return login.signIn;
+  }
+  if (step.stage === "otp") {
+    return login.mfaSubmit;
+  }
+  if (step.stage === "done") {
+    return login.verifiedSubmit;
+  }
+  return login.getCode;
+}
+
 export function StaffLoginForm({
   role = "partner",
   returnTarget,
+  onTerminalChange,
 }: {
   role?: StaffLoginRole;
   /** `?return=` deep-link target, bounded to the staff groups; see staff-routing. */
   returnTarget?: string | null;
+  /**
+   * #566: reports that the sign-in flow has reached its terminal step, so a
+   * host can retire its own sign-in chrome. The verified handoff brings its own
+   * `h1`, so a host heading left in place would put two on one screen. Pass a
+   * stable callback (a `useState` setter does); it is read in an effect, never
+   * during render.
+   */
+  onTerminalChange?: (terminal: boolean) => void;
 }) {
   const { lang } = useLang();
   const t = STRINGS[lang].staffAuth.login;
@@ -145,15 +195,29 @@ export function StaffLoginForm({
   // resolved; non-null only for a console landing (pending/rejected, an
   // unreadable status and every non-console landing route immediately).
   const [landing, setLanding] = useState<DoctorLanding | null>(null);
-  // #551: the single post-login resume seam. Started once the landing resolves
-  // and awaited by BOTH the countdown and the CTA, so the countdown starts
-  // only after the session-resume call succeeds and a fast CTA click cannot
-  // navigate before identity lands in state. `landedRef` keeps the routine
-  // idempotent, so a click during the countdown and the tick at zero cannot
-  // both navigate.
+  // #551: the single post-login resume seam. Started once the partner session
+  // exists and awaited by BOTH the countdown and the CTA, so the countdown
+  // starts only after the session-resume call succeeds and a fast CTA click
+  // cannot navigate before identity lands in state. `landedRef` keeps the
+  // routine idempotent, so a click during the countdown and the tick at zero
+  // cannot both navigate. #566: keyed on the session, not on the resolved
+  // destination, so it is an independent signal rather than a mirror of
+  // `landing` - the countdown gate is the conjunction of the two, not this
+  // alone.
   const resumeRef = useRef<Promise<void> | null>(null);
   const landedRef = useRef(false);
   const [resumeSettled, setResumeSettled] = useState(false);
+
+  // #566: the flow is terminal the moment the OTP stage hands over to the
+  // handoff - the session is minted before the stage advances, and the
+  // operator and MFA paths never reach this stage at all. The handoff renders
+  // on the stage ALONE: keying it on anything else (the resolved destination, or
+  // a latch the routing exits set) is the blank card this ticket reports.
+  const flowTerminal = partner.state.stage === "done";
+
+  useEffect(() => {
+    onTerminalChange?.(flowTerminal);
+  }, [flowTerminal, onTerminalChange]);
 
   const phoneRef = useRef<HTMLInputElement>(null);
   const totpRef = useRef<HTMLInputElement>(null);
@@ -164,10 +228,14 @@ export function StaffLoginForm({
   }, [resumeSession]);
 
   // Resume the saved session in-flow (same no-reload seam as the patient flow,
-  // #496) once the landing is known, then release the countdown. Never a hard
-  // page reload on this path (AC-3).
+  // #496) as soon as the partner session exists, then release the countdown.
+  // Never a hard page reload on this path (AC-3). #566: keyed on the session
+  // rather than on the resolved destination, so it runs concurrently with the
+  // destination reads instead of after them - which is what lets the handoff be
+  // on screen while they are still in flight. `resumeOnce` is idempotent by
+  // ref, so this stays the one call site.
   useEffect(() => {
-    if (partner.state.stage !== "done" || landing === null) {
+    if (partner.state.session === null) {
       return;
     }
     let cancelled = false;
@@ -179,7 +247,7 @@ export function StaffLoginForm({
     return () => {
       cancelled = true;
     };
-  }, [partner.state.stage, landing, resumeOnce]);
+  }, [partner.state.session, resumeOnce]);
 
   // The countdown at zero and the always-visible CTA share this one routine.
   const landOnConsole = useCallback(() => {
@@ -554,22 +622,39 @@ export function StaffLoginForm({
           </>
         )
       ) : partner.state.stage === "done" ? (
-        landing !== null ? (
-          // #537: ACTIVE doctor console landing. The destination resolved
-          // before this renders; the countdown owns the auto-redirect and
-          // "Go to Dashboard" routes through the same resume-then-navigate
-          // routine, both with the framework router.
-          <DoneScreen
-            title={t.verifiedTitle}
-            body={t.verifiedBody}
-            openingLabel={doneScreenT.openingDashboard}
-            openingInLabel={doneScreenT.openingIn}
-            goToDashboardLabel={doneScreenT.goToDashboard}
-            resumePending={!resumeSettled}
-            onGoToDashboard={landOnConsole}
-            facts={landingFacts}
-          />
-        ) : null
+        // #566: the handoff renders on the STAGE, not on the resolved
+        // destination. Destination resolution is no longer a render
+        // precondition: while the three post-login reads are in flight the
+        // handoff is already up, reporting a pending state and holding its
+        // countdown back until there is genuinely somewhere to count down to.
+        // This is what the patient flow's terminal step already does, and what
+        // the partner flow's old `landing !== null` wrapper did not: that
+        // wrapper returned null for the whole window, which is the blank card
+        // with a live submit button that was reported.
+        //
+        // #537 still holds: the countdown owns the auto-redirect and "Go to
+        // Dashboard" routes through the same resume-then-navigate routine, both
+        // with the framework router rather than a hard reload.
+        //
+        // AC-6 is carried by the routing, not by a second render condition: a
+        // pending or rejected partner's route read resolves to a `location.
+        // replace` that swaps the document, and the countdown and CTA below both
+        // no-op while `landing` is null, so no console destination is ever
+        // engaged for them. A render-level latch here would mean editing the
+        // three exit branches, which the ticket freezes.
+        <DoneScreen
+          title={t.verifiedTitle}
+          body={t.verifiedBody}
+          openingLabel={doneScreenT.openingDashboard}
+          openingInLabel={doneScreenT.openingIn}
+          goToDashboardLabel={doneScreenT.goToDashboard}
+          // The conjunction, and it is load-bearing: the session-resume seam
+          // is one call, the destination is a three-read chain, and the
+          // countdown must not be released by either one alone.
+          resumePending={!resumeSettled || landing === null}
+          onGoToDashboard={landOnConsole}
+          facts={landingFacts}
+        />
       ) : (
         <>
           {/* Partner phone step: collect the number, request the SMS code. */}
@@ -740,20 +825,26 @@ export function StaffLoginForm({
         </>
       )}
 
-      <button
-        type="submit"
-        data-testid="staff-submit"
-        disabled={isOperatorMode || isMfaStep ? loading : partnerBlocked}
-        className="mt-1 w-full rounded-md bg-primary px-4 py-2 font-semibold text-on-accent disabled:opacity-50"
-      >
-        {isMfaStep
-          ? t.mfaSubmit
-          : isOperatorMode
-            ? t.signIn
-            : partner.state.stage === "otp"
-              ? t.mfaSubmit
-              : t.getCode}
-      </button>
+      {/* #566: the submit control is gated on the same terminal-ness as the
+      handoff, so no orphan button can render beneath an in-flight handoff -
+      rendering it out rather than merely disabling it. Its label is a total
+      function of the step (see `staffSubmitLabel`), so the terminal step has its
+      own copy instead of falling through to the phone step's "Get verification
+      code". */}
+      {flowTerminal ? null : (
+        <button
+          type="submit"
+          data-testid="staff-submit"
+          disabled={isOperatorMode || isMfaStep ? loading : partnerBlocked}
+          className="mt-1 w-full rounded-md bg-primary px-4 py-2 font-semibold text-on-accent disabled:opacity-50"
+        >
+          {staffSubmitLabel(t, {
+            isMfaStep,
+            isOperatorMode,
+            stage: partner.state.stage,
+          })}
+        </button>
+      )}
     </form>
   );
 }

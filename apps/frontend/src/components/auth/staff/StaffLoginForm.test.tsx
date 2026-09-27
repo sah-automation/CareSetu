@@ -13,6 +13,7 @@
 // operator flow - without ever touching the patient lifecycle.
 
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -21,6 +22,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import StaffLoginPage from "@/app/staff/login/page";
 import { ApiError } from "@/lib/api-errors";
 import {
   AuthApiError,
@@ -37,9 +39,14 @@ import {
   verifyOtp,
 } from "@/lib/auth/api";
 import { STRINGS } from "@/lib/i18n/dictionaries";
-import type { PartnerStatus, PartnerType } from "@/lib/partner/api";
+import type {
+  PartnerMeView,
+  PartnerStatus,
+  PartnerType,
+} from "@/lib/partner/api";
 
-import { StaffLoginForm } from "./StaffLoginForm";
+import { DONE_SCREEN_COUNTDOWN_SECONDS } from "../DoneScreen";
+import { StaffLoginForm, staffSubmitLabel } from "./StaffLoginForm";
 
 const mockLocationReplace = vi.fn();
 Object.defineProperty(window, "location", {
@@ -94,9 +101,17 @@ vi.mock("@/lib/auth/AuthContext", () => ({
 
 const mockRouterReplace = vi.fn();
 const stableRouter = { replace: mockRouterReplace };
+// #566: the handoff's reported surface is the PAGE's - the sign-in heading it
+// owns is one of the three things the reported flash leaves behind, and the page
+// reads its own search params. `app/staff/login/page.test.tsx` owns the page's
+// own render; the reason this suite also mounts the page is that the heading
+// can only be counted against a document the handoff is inside, which means
+// driving the real flow rather than rendering the form alone.
+const stableSearchParams = new URLSearchParams();
 
 vi.mock("next/navigation", () => ({
   useRouter: () => stableRouter,
+  useSearchParams: () => stableSearchParams,
 }));
 
 const { mockFetchPartnerMe } = vi.hoisted(() => ({
@@ -136,6 +151,10 @@ vi.mock("@/lib/auth/staff-routing", async (importOriginal) => {
 afterEach(() => {
   cleanup();
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
+  // #566: the countdown test fakes the tick only; without this the fake
+  // interval would outlive the suite it was installed for.
+  vi.useRealTimers();
   vi.resetAllMocks();
 });
 
@@ -206,6 +225,88 @@ function fillPhoneAndTotp() {
   fireEvent.change(screen.getByTestId("staff-totp"), {
     target: { value: "123456" },
   });
+}
+
+// #566: the handoff's practice facts come from a doctor-profile read that is
+// deliberately unmocked in this suite, so it reaches a real socket and takes a
+// second to fail. #566 moved the handoff ahead of that read, so any test that
+// has to wait for the destination to resolve stubs it out instead: the
+// degrade-to-nulls path is already pinned, and the facts are not what those
+// tests are about. Unstubbed by the afterEach.
+function stubUnreachableProfileRead() {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockRejectedValue(new TypeError("no network in unit tests")),
+  );
+}
+
+// #566: the handoff now mounts on the OTP STAGE, so its being on screen no
+// longer implies the destination has resolved - and the countdown and the CTA
+// both stay held until it has. Wait for the released countdown before driving
+// the handoff: a press before then is a legitimate no-op, not a defect.
+async function waitForReleasedHandoff() {
+  await waitFor(() => {
+    expect(screen.getByRole("status").textContent).toMatch(/\d/);
+  });
+}
+
+// #566: the destination-resolution seam, held open. After #562 `fetchPartnerMe`
+// IS the route-state transport the production reader calls, and the reader runs
+// it only after the session has been minted and saved - so signalling on entry
+// names a deterministic instant: the flow is already terminal and nothing has
+// resolved the destination yet. That instant is the gap the reported flash
+// shipped through, because every other test in this file asserts the settled
+// end state with waitFor and never looks at the surface in between.
+//
+// `reached` resolves on entry; `settle` closes the read. A test that never calls
+// `settle` leaves the destination in flight for the whole test.
+function holdDestinationRead() {
+  let entered!: () => void;
+  const reached = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let close!: (view: PartnerMeView) => void;
+  const pending = new Promise<PartnerMeView>((resolve) => {
+    close = resolve;
+  });
+  mockFetchPartnerMe.mockImplementation(() => {
+    entered();
+    return pending;
+  });
+  return {
+    reached,
+    settle: (status: PartnerStatus) =>
+      close({ partner_id: 7, partner_type: "doctor", round: 1, status }),
+  };
+}
+
+// #566: the same partner transcript as completePartnerLogin, but on the real
+// page, because the reported surface includes the heading the page owns. The
+// destination is left to the caller (held, or answered by mockFetchPartnerMe).
+async function completePartnerLoginOnPage() {
+  vi.mocked(partnerLogin).mockResolvedValue(LOGIN_OK);
+  vi.mocked(partnerVerify).mockResolvedValue({
+    outcome: "verified",
+    phone_e164: PHONE,
+    identity_id: 7,
+    attempts_left: null,
+    lockout_remaining_seconds: null,
+  });
+  vi.mocked(issuePartnerSession).mockResolvedValue(SESSION);
+  vi.mocked(fetchMe).mockResolvedValue({
+    subject_id: "7",
+    roles: ["partner"],
+    phone: PHONE,
+  });
+  // The one landing the handoff exists for: an active doctor bound for the
+  // doctor console. Any other resolved target routes straight on, with no
+  // handoff, which is the other half of what these tests pin.
+  mockPostLoginTarget.mockReturnValue("/doctor");
+  render(<StaffLoginPage />);
+  typePartnerPhone();
+  fireEvent.click(screen.getByTestId("staff-submit"));
+  await screen.findByTestId("partner-otp");
+  typeCodeAndSubmit();
 }
 
 describe("StaffLoginForm - partner mode UI", () => {
@@ -545,6 +646,7 @@ describe("StaffLoginForm - partner code step", () => {
   });
 
   it("verifies the code, mints a partner session, and routes via postLoginTarget", async () => {
+    stubUnreachableProfileRead();
     mockPostLoginTarget.mockReturnValue("/doctor");
     vi.mocked(partnerLogin).mockResolvedValue(LOGIN_OK);
     vi.mocked(partnerVerify).mockResolvedValue({
@@ -598,6 +700,9 @@ describe("StaffLoginForm - partner code step", () => {
     });
 
     // AC-1 CTA: "Go to Dashboard" routes to the resolved target directly.
+    // #566: it can only do that once the destination is in hand, so wait for
+    // the released countdown rather than assuming the landing already settled.
+    await waitForReleasedHandoff();
     fireEvent.click(screen.getByRole("button", { name: "Go to Dashboard" }));
     await waitFor(() => {
       expect(mockRouterReplace).toHaveBeenCalledWith("/doctor");
@@ -671,10 +776,26 @@ describe("StaffLoginForm - partner code step", () => {
         });
         expect(mockLocationReplace).toHaveBeenCalledWith(expected);
       });
+
+      // #566 AC-6: no console destination is ever engaged for a partner who is
+      // not an active doctor. `landing` is never set on this path, so the
+      // handoff's countdown and its CTA both stay no-ops - asserted here rather
+      // than inferred from the routing call, because a mocked location.replace
+      // never tears the tree down the way a real hard navigation would. What
+      // keeps the handoff from being the active-partner-only moment is the
+      // routing, not a second render condition: the ticket freezes these three
+      // exit branches, and the handoff is keyed to the OTP stage alone.
+      expect(screen.queryByTestId("staff-submit")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("partner-otp")).not.toBeInTheDocument();
+      // Held, because there is nowhere to count down to: the digit-free opening
+      // line, and no navigation to a console path.
+      expect(screen.getByRole("status").textContent).not.toMatch(/\d/);
+      expect(mockRouterReplace).not.toHaveBeenCalled();
     },
   );
 
   it("derives no partnerState for an active doctor partner and lands via the doctor role rule", async () => {
+    stubUnreachableProfileRead();
     mockPostLoginTarget.mockReturnValue("/doctor");
     await completePartnerLogin("Active");
 
@@ -698,7 +819,9 @@ describe("StaffLoginForm - partner code step", () => {
     // #562: the countdown firing at zero is DoneScreen's own pinned contract
     // (DoneScreen.test.tsx, "counts the visible seconds down and fires the host
     // routine at zero (#551)"), so drive the handoff with the CTA rather than
-    // waiting out a 5s timer here.
+    // waiting out a 5s timer here. #566: the CTA holds until the destination
+    // is in hand, so wait for that first.
+    await waitForReleasedHandoff();
     fireEvent.click(screen.getByRole("button", { name: "Go to Dashboard" }));
 
     await waitFor(() => {
@@ -905,7 +1028,167 @@ describe("StaffLoginForm - partner code step", () => {
       const error = screen.getByTestId("staff-login-error");
       expect(error).toHaveTextContent("tr-landing");
     });
+    // #566 AC-4: a destination resolution that fails leaves the handoff up
+    // with the envelope explanation beside it. Before the fix the done branch
+    // returned null while `landing` was unset, so the same failure rendered a
+    // blank card under a live submit button - and the test above, which only
+    // ever read the notice, could not tell the two apart.
+    expect(
+      screen.getByRole("heading", { name: "Identity verified" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("staff-submit")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("partner-otp")).not.toBeInTheDocument();
     expect(mockLocationReplace).not.toHaveBeenCalled();
+  });
+});
+
+// #566: the verified handoff renders on the OTP STAGE, not on the resolved
+// destination. Every test above waits for the destination and then reads the
+// settled end state, so nothing in the suite ever looked at the window between
+// "the code was accepted" and "the destination resolved" - a window exactly as
+// long as the three post-login round-trips, during which the submit button was
+// live and its label had fallen through to the phone step's "Get verification
+// code". These tests assert that window directly.
+describe("StaffLoginForm - verified handoff on the OTP stage (#566)", () => {
+  it("mounts the handoff synchronously at the held instant, with no stale sign-in surface (#566 AC-1/AC-2/AC-8)", async () => {
+    const destination = holdDestinationRead();
+    await completePartnerLoginOnPage();
+
+    // The whole point: the instant. The destination read has been entered and
+    // is still held, so the flow is terminal and nothing has resolved. Reaching
+    // it is a single await on the read itself plus one flush - no waitFor, no
+    // findBy, no polling, and no clock to wait on.
+    await destination.reached;
+    await act(async () => {});
+
+    // The handoff is up, and it says it is still waiting: the digit-free
+    // opening line, not a countdown that has nowhere to count down to.
+    expect(
+      screen.getByRole("heading", { level: 1, name: "Identity verified" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Opening your dashboard",
+    );
+    expect(screen.getByRole("status").textContent).not.toMatch(/\d/);
+    expect(screen.getByRole("progressbar")).toHaveAttribute(
+      "aria-valuenow",
+      String(DONE_SCREEN_COUNTDOWN_SECONDS),
+    );
+
+    // The reported flash, item by item: no code input, no submit control, and
+    // no page heading still telling a verified partner they are signing in.
+    expect(screen.queryByTestId("partner-otp")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("staff-submit")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: t.heading }),
+    ).not.toBeInTheDocument();
+    // Counted, not just absent-by-name: DoneScreen brings its own h1, so a
+    // leftover page heading would leave two on the document.
+    expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
+  });
+
+  it("holds the countdown until the destination is in hand, then fires it exactly once (#566 AC-3)", async () => {
+    // Fake the tick only. DoneScreen counts down on setInterval; faking the
+    // rest of the clock would stall the real doctor-profile read that resolves
+    // the destination, and this test needs that read to actually land.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    stubUnreachableProfileRead();
+    const destination = holdDestinationRead();
+    await completePartnerLoginOnPage();
+    await destination.reached;
+    await act(async () => {});
+
+    // The negative half, and the half that matters: the resume seam has long
+    // settled but the destination has not, so nothing may move. Wiring the
+    // countdown to the resume seam alone passes every other test here and fails
+    // this one - the countdown would run for seconds with no target to reach.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(DONE_SCREEN_COUNTDOWN_SECONDS * 2000);
+    });
+    expect(screen.getByRole("progressbar")).toHaveAttribute(
+      "aria-valuenow",
+      String(DONE_SCREEN_COUNTDOWN_SECONDS),
+    );
+    expect(screen.getByRole("status").textContent).not.toMatch(/\d/);
+    expect(mockRouterReplace).not.toHaveBeenCalled();
+    // The active path is never a hard reload: a released countdown with no
+    // destination must not fall through to one either.
+    expect(mockLocationReplace).not.toHaveBeenCalled();
+    // Started on the session, not on the resolved destination, and still one
+    // call: the handoff is on screen and the resume seam has already run.
+    expect(authState.resumeSession).toHaveBeenCalledTimes(1);
+
+    // Both seams settled: the countdown is released, and it navigates once.
+    await act(async () => {
+      destination.settle("Active");
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("status").textContent).toMatch(/\d/);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(DONE_SCREEN_COUNTDOWN_SECONDS * 1000);
+    });
+    expect(mockRouterReplace).toHaveBeenCalledTimes(1);
+    expect(mockRouterReplace).toHaveBeenCalledWith("/doctor");
+  });
+
+  it("names every step's submit label, the terminal one included (#566 AC-5)", async () => {
+    // The terminal arm, which no DOM assertion can reach: the control is
+    // rendered out on the terminal step, so the mapping is asserted where it
+    // lives. This is the reported defect's label - the phone step's copy under
+    // an already-verified partner.
+    const step = {
+      isMfaStep: false,
+      isOperatorMode: false,
+      stage: "done",
+    } as const;
+    expect(staffSubmitLabel(t, step)).toBe(t.verifiedSubmit);
+    expect(staffSubmitLabel(t, step)).not.toBe(t.getCode);
+    // Both locales carry the terminal copy.
+    const hi = STRINGS.hi.staffAuth.login;
+    expect(staffSubmitLabel(hi, step)).toBe(hi.verifiedSubmit);
+    expect(hi.verifiedSubmit).not.toBe(hi.getCode);
+    // Every other stage keeps its own label: the arms the reordering trap
+    // would silently change, pinned by value rather than by position.
+    expect(staffSubmitLabel(t, { ...step, stage: "phone" })).toBe(t.getCode);
+    expect(staffSubmitLabel(t, { ...step, stage: "otp" })).toBe(t.mfaSubmit);
+    expect(staffSubmitLabel(t, { ...step, isOperatorMode: true })).toBe(
+      t.signIn,
+    );
+    expect(staffSubmitLabel(t, { ...step, isMfaStep: true })).toBe(t.mfaSubmit);
+  });
+
+  it("renders each step's own submit label through the component (#566 AC-5)", async () => {
+    // Phone step: the request-the-code label.
+    render(<StaffLoginForm />);
+    expect(screen.getByTestId("staff-submit")).toHaveTextContent(t.getCode);
+    cleanup();
+
+    // OTP step: the verify-the-code label. The operator and MFA arms are the
+    // ones a "reorder the ternary until it looks right" fix silently changes,
+    // so all three are pinned here through the component too.
+    await startPartnerOtpFlow();
+    expect(screen.getByTestId("staff-submit")).toHaveTextContent(t.mfaSubmit);
+    cleanup();
+
+    render(<StaffLoginForm role="operator" />);
+    fillPhoneAndTotp();
+    expect(screen.getByTestId("staff-submit")).toHaveTextContent(t.signIn);
+    cleanup();
+
+    mockOperatorLogin.mockRejectedValue(
+      new ApiError({
+        code: "SESSION_MFA_REQUIRED",
+        message: "mfa required",
+        trace_id: "tr-label",
+        details: {},
+      }),
+    );
+    render(<StaffLoginForm role="operator" />);
+    fillPhoneAndTotp();
+    fireEvent.click(screen.getByTestId("staff-submit"));
+    await screen.findByTestId("mfa-input");
+    expect(screen.getByTestId("staff-submit")).toHaveTextContent(t.mfaSubmit);
   });
 });
 

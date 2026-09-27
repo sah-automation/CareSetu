@@ -179,6 +179,10 @@ const en = {
       demoOtp: (code: string) => `Demo OTP: ${code}`,
       verifiedTitle: "Identity verified",
       verifiedBody: "Your practice is verified and your console is ready.",
+      // #566: the terminal step's own submit label. The handoff is up and the
+      // sign-in submit control is gone by then, so this only ever names the
+      // state - it must never read as "request a code" again.
+      verifiedSubmit: "Continue",
     },
     pending: {
       badge: "Under Verification",
@@ -1951,6 +1955,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
         demoOtp: (code) => `डेमो OTP: ${code}`,
         verifiedTitle: "पहचान सत्यापित",
         verifiedBody: "आपकी प्रैक्टिस सत्यापित है और आपका कंसोल तैयार है।",
+        verifiedSubmit: "जारी रखें",
       },
       pending: {
         badge: "जाँच प्रक्रिया में",

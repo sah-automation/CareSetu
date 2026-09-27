@@ -10,7 +10,7 @@
 // rules; the interim /choose-role entry stays until Phase 5 replaces staff
 // auth (§4.6).
 
-import { Suspense, useEffect } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 import { BrandMark } from "@/components/brand/BrandMark";
@@ -53,6 +53,11 @@ function StaffLoginView() {
   const role: StaffLoginRole =
     searchParams.get("role") === "operator" ? "operator" : "partner";
 
+  // #566: lifted from the form, which owns the flow state. The card is a
+  // sign-in surface right up until the flow terminates; after that the handoff
+  // inside the form owns the screen and this heading must go.
+  const [terminal, setTerminal] = useState(false);
+
   // A visitor who already holds a staff session lands by the same §4.5
   // routing matrix the sign-in itself will use - never on this form. A
   // partner's own status overrides the role rule (§4.4) exactly like the
@@ -93,8 +98,18 @@ function StaffLoginView() {
       </div>
 
       <div className="mt-6 rounded-lg border border-hairline bg-surface p-6 shadow-card">
-        <h1 className="mb-4 text-xl font-bold">{t.heading}</h1>
-        <StaffLoginForm role={role} returnTarget={returnTarget} />
+        {/* #566: once the flow is terminal the handoff owns the screen, and the
+        handoff brings its own `h1`. A heading still reading "Sign in" would
+        both lie about the state and put a second `h1` on one document, so the
+        page retires it on the signal the form lifts. */}
+        {terminal ? null : (
+          <h1 className="mb-4 text-xl font-bold">{t.heading}</h1>
+        )}
+        <StaffLoginForm
+          role={role}
+          returnTarget={returnTarget}
+          onTerminalChange={setTerminal}
+        />
       </div>
 
       <hr className="my-6 border-hairline-soft" />
