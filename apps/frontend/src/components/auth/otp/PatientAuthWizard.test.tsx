@@ -4,6 +4,29 @@
 // blocking, the duplicate-number notice, session storage landing on the
 // authenticated view, and the hi/en toggle throughout.
 // Updated for T6 (#152): AuthenticatedHome removed, redirect to /patient.
+//
+// #563: why the done-screen countdown tests flush instead of waiting. The
+// countdown clock fakes ONLY the interval (see `fakeCountdownClock`), and that
+// partial fake silently disarms `@testing-library/dom`'s `waitFor`. `waitFor`
+// decides how to poll by asking `jestFakeTimersAreEnabled()`, which probes
+// `setTimeout` alone and, with no `jest` global under Vitest, always answers
+// `false`. So a `waitFor` opened under the fake clock takes its "real timers"
+// path: it registers a MutationObserver and arms its 50ms re-poll on
+// `setInterval` - the one function the fake owns. That poll can then only fire
+// from `tick`, and a re-render to identical output (the done screen's
+// `setDeparted(true)`) trips no observer either, so any wait whose assertion
+// needs a re-check after an async flush never gets one. Its 1000ms timeout
+// stays real, so such a wait runs out and reports that stale first check.
+//
+// THE RULE: under `fakeCountdownClock`, a wait is only trustworthy if a DOM
+// mutation satisfies it - which is why the flow helpers' `findBy*` are fine
+// (each either finds its element on the synchronous first check, or is woken
+// by the React commit that resolves its promise), and why a bare `getByText`
+// for the released countdown, or a `waitFor` on the CTA's navigation, is not.
+// Vitest's own `vi.waitFor` is the one exception: it polls on `setTimeout`,
+// which this fake leaves alone. For anything the resume seam or the navigate
+// routine produces, flush first with `tick(0)` and then assert. Both #563
+// failures were that exact mistake.
 
 import {
   act,
@@ -135,12 +158,20 @@ function verifyButton() {
 
 // #551: the done-screen countdown is driven by faking ONLY the interval, so
 // the async flow helpers above (findBy*) keep their real timers while the
-// 5-second tick becomes drivable.
+// 5-second tick becomes drivable. #563: what that partial fake costs, and the
+// rule it forces on every test that installs it, is in the file header.
 function fakeCountdownClock() {
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
 }
 
-/** Run the faked countdown forward by `ms`, flushing interval callbacks. */
+/**
+ * Run the faked countdown forward by `ms`, flushing interval callbacks.
+ *
+ * #563: `tick(0)` is the flush - it drains the microtask queue inside `act`
+ * without moving the countdown, which is what settles the session-resume seam
+ * and commits the state it releases, and what lets the post-resume navigation
+ * run. See the file header for why a wait cannot be relied on here instead.
+ */
 async function tick(ms: number) {
   await act(async () => {
     await vi.advanceTimersByTimeAsync(ms);
@@ -150,6 +181,10 @@ async function tick(ms: number) {
 afterEach(() => {
   cleanup();
   vi.unstubAllEnvs();
+  // #563: this suite declared mocks and cleared no call counts at all. Not the
+  // cause of the two countdown failures (beforeEach already resets every mock),
+  // but a leak of the same class as #562's, so it is closed here.
+  vi.clearAllMocks();
 });
 
 beforeEach(() => {
@@ -563,6 +598,9 @@ describe("PatientAuthWizard - success and session", () => {
       // duration and the verified state stands on its own - the blank-flash
       // regression guard.
       expect(await screen.findByText("Identity verified")).toBeInTheDocument();
+      // #563: the released countdown only exists once the resume seam's
+      // microtask has committed, so flush it before reading the DOM.
+      await tick(0);
       expect(
         screen.getByText("Your number is verified and your session is ready."),
       ).toBeInTheDocument();
@@ -652,15 +690,19 @@ describe("PatientAuthWizard - success and session", () => {
       expect(await screen.findByText("Identity verified")).toBeInTheDocument();
 
       // Wait for the resume seam to settle and the countdown to start.
-      await waitFor(() =>
-        expect(screen.getByRole("status")).toHaveTextContent(
-          `Opening your dashboard in ${DONE_SCREEN_COUNTDOWN_SECONDS}`,
-        ),
+      // #563: flushed, not waited on - see the file header.
+      await tick(0);
+      expect(screen.getByRole("status")).toHaveTextContent(
+        `Opening your dashboard in ${DONE_SCREEN_COUNTDOWN_SECONDS}`,
       );
 
       await tick(2000);
       fireEvent.click(screen.getByRole("button", { name: "Go to Dashboard" }));
-      await waitFor(() => expect(mockReplace).toHaveBeenCalledWith("/patient"));
+      // #563: `landOnReturnTarget` routes inside `resumeOnce().then(...)`, one
+      // microtask after the click, and the click's re-render is identical so
+      // nothing would re-check it. Flush, then assert.
+      await tick(0);
+      expect(mockReplace).toHaveBeenCalledWith("/patient");
 
       // The countdown reaching zero must not navigate a second time.
       await tick(DONE_SCREEN_COUNTDOWN_SECONDS * 1000);
