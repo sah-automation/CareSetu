@@ -10,6 +10,11 @@
 // absent for single-role, a red dictionary-driven Log out, bilingual copy, the
 // stale-session Subject #id degrade with Log out still working, and an axe
 // scan of the opened menu.
+// #567: the suite is rebuilt around a production-shaped doctor session - a
+// `partner` role, because that is all the grants table can issue - and every
+// render now names the shell the menu sits inside. The synthetic
+// `roles: ["doctor"]` fixture that made the doctor branch look covered is
+// gone, so this class of bug cannot be hidden by a fixture again.
 
 import {
   render,
@@ -30,6 +35,8 @@ import {
   afterEach,
 } from "vitest";
 import * as axe from "axe-core";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 import { AccountMenu } from "./AccountMenu";
 import { AuthProvider } from "@/lib/auth/AuthContext";
@@ -41,6 +48,7 @@ import {
 import type { StoredPatientProfile } from "@/lib/profile/api";
 import { __resetLangForTests } from "@/lib/i18n/LangContext";
 import { maskedPhone } from "./BottomTabs";
+import type { Role } from "./types";
 
 // Profile client mocked at the module boundary (ProfileContext.test prior
 // art) so the patient trigger can hydrate a saved name/photo without HTTP.
@@ -71,15 +79,13 @@ const ME_RESPONSE_SINGLE_ROLE = {
   roles: ["patient"],
 };
 
-// #521 staff regression: a doctor session keeps the generic account avatar
-// entry since #538 (person-icon fallback until the doctor profile seam).
-const ME_RESPONSE_DOCTOR = {
-  subject_id: "42",
-  phone: "+911234567890",
-  roles: ["doctor"],
-};
-
-// #538: partner/operator staff sessions keep the phone-digit trigger verbatim.
+// #567: a partner-role session. This is ALSO the production-shaped doctor
+// session: the grants table issues only patient|partner|operator, so a doctor
+// signs in with `["partner"]` and is a doctor by partner *type*, not by role.
+// Nothing in this payload distinguishes a doctor from a lab, which is exactly
+// why the shell - and only the shell - decides doctor-ness. The suite used to
+// fabricate `roles: ["doctor"]` here, a payload the backend cannot issue, and
+// that fixture is what kept the doctor branch unreachable in production.
 const ME_RESPONSE_PARTNER = {
   subject_id: "42",
   phone: "+911234567890",
@@ -118,10 +124,13 @@ function setStoredSession(session: StoredSession) {
   localStorage.setItem("caresetu.refresh_token", session.refresh_token);
 }
 
-function renderAccountMenu() {
+// #567: every render names the shell it sits inside. The parameter is required
+// on purpose - a default would let a staff test silently land in the patient
+// branch, and would let a doctor test forget the very answer it is testing.
+function renderAccountMenu(shellRole: Role) {
   return render(
     <AuthProvider>
-      <AccountMenu />
+      <AccountMenu shellRole={shellRole} />
     </AuthProvider>,
   );
 }
@@ -134,9 +143,11 @@ function mockMeResponse(payload: unknown) {
 
 // #521: the patient trigger reads name/photo through the shared profile
 // seam. When `profile` is given, wrap in the real ProfileProvider so
-// hydration ordering is exercised (name/photo arrive async).
+// hydration ordering is exercised (name/photo arrive async). `shellRole` is
+// the role of the shell the menu renders inside (#567).
 async function renderClosedTrigger(
   mePayload: unknown,
+  shellRole: Role,
   profile?: StoredPatientProfile | null,
 ) {
   setStoredSession(VALID_SESSION);
@@ -144,10 +155,10 @@ async function renderClosedTrigger(
     <AuthProvider>
       {profile !== undefined ? (
         <ProfileProvider>
-          <AccountMenu />
+          <AccountMenu shellRole={shellRole} />
         </ProfileProvider>
       ) : (
-        <AccountMenu />
+        <AccountMenu shellRole={shellRole} />
       )}
     </AuthProvider>
   );
@@ -169,7 +180,7 @@ async function renderClosedTrigger(
 }
 
 function renderPatientWithProfile(profile: StoredPatientProfile | null) {
-  return renderClosedTrigger(ME_RESPONSE_SINGLE_ROLE, profile);
+  return renderClosedTrigger(ME_RESPONSE_SINGLE_ROLE, "patient", profile);
 }
 
 // #557: the only thing that moves a stored photo ref is the profile context's
@@ -323,7 +334,7 @@ describe("AccountMenu accessibility", () => {
       new Response(JSON.stringify(ME_RESPONSE_SINGLE_ROLE), { status: 200 }),
     );
 
-    renderAccountMenu();
+    renderAccountMenu("patient");
     const trigger = await waitFor(() =>
       expect(screen.getByTestId("account-menu")).toBeInTheDocument(),
     ).then(() => screen.getByTestId("account-menu"));
@@ -338,7 +349,7 @@ describe("AccountMenu accessibility", () => {
       new Response(JSON.stringify(ME_RESPONSE_SINGLE_ROLE), { status: 200 }),
     );
 
-    renderAccountMenu();
+    renderAccountMenu("patient");
     await openViaKeyboard();
 
     expect(
@@ -352,7 +363,7 @@ describe("AccountMenu accessibility", () => {
       new Response(JSON.stringify(ME_RESPONSE_SINGLE_ROLE), { status: 200 }),
     );
 
-    renderAccountMenu();
+    renderAccountMenu("patient");
     const trigger = await openViaKeyboard();
 
     fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
@@ -368,7 +379,7 @@ describe("AccountMenu accessibility", () => {
       new Response(JSON.stringify(ME_RESPONSE_SINGLE_ROLE), { status: 200 }),
     );
 
-    renderAccountMenu();
+    renderAccountMenu("patient");
     await openViaKeyboard();
 
     expect(screen.getByText("+911234567890")).toBeInTheDocument();
@@ -383,7 +394,10 @@ describe("AccountMenu accessibility", () => {
 
 describe("AccountMenu patient avatar trigger (#521)", () => {
   it("falls back to the person icon when no profile is saved", async () => {
-    const trigger = await renderClosedTrigger(ME_RESPONSE_SINGLE_ROLE);
+    const trigger = await renderClosedTrigger(
+      ME_RESPONSE_SINGLE_ROLE,
+      "patient",
+    );
 
     // No digit text and no name: just the icon branch of the chain.
     expect(trigger).toHaveTextContent("");
@@ -417,6 +431,7 @@ describe("AccountMenu patient avatar trigger (#521)", () => {
   it("photo_ref resolves to a renderable source, never the ref itself", async () => {
     const trigger = await renderClosedTrigger(
       ME_RESPONSE_SINGLE_ROLE,
+      "patient",
       PHOTO_PROFILE,
     );
 
@@ -428,10 +443,14 @@ describe("AccountMenu patient avatar trigger (#521)", () => {
   });
 
   it("a stored photo ref renders an image in the trigger and in the identity header", async () => {
-    const trigger = await renderClosedTrigger(ME_RESPONSE_SINGLE_ROLE, {
-      ...NAMED_PROFILE,
-      photo_ref: "patient/7/photo-1.enc",
-    });
+    const trigger = await renderClosedTrigger(
+      ME_RESPONSE_SINGLE_ROLE,
+      "patient",
+      {
+        ...NAMED_PROFILE,
+        photo_ref: "patient/7/photo-1.enc",
+      },
+    );
 
     const triggerImg = await imageIn(trigger);
     expect(triggerImg.getAttribute("src")).toMatch(/^blob:/);
@@ -449,10 +468,14 @@ describe("AccountMenu patient avatar trigger (#521)", () => {
   it("a photo ref that fails to resolve degrades to the initial, not a broken image", async () => {
     profileApi.fetchPatientPhoto.mockRejectedValue(new Error("network down"));
 
-    const trigger = await renderClosedTrigger(ME_RESPONSE_SINGLE_ROLE, {
-      ...NAMED_PROFILE,
-      photo_ref: "patient/7/photo-1.enc",
-    });
+    const trigger = await renderClosedTrigger(
+      ME_RESPONSE_SINGLE_ROLE,
+      "patient",
+      {
+        ...NAMED_PROFILE,
+        photo_ref: "patient/7/photo-1.enc",
+      },
+    );
     await waitFor(() =>
       expect(profileApi.fetchPatientPhoto).toHaveBeenCalled(),
     );
@@ -477,7 +500,7 @@ describe("AccountMenu patient avatar trigger (#521)", () => {
     render(
       <AuthProvider>
         <ProfileProvider>
-          <AccountMenu />
+          <AccountMenu shellRole="patient" />
           <PhotoRefControls />
         </ProfileProvider>
       </AuthProvider>,
@@ -526,11 +549,16 @@ describe("AccountMenu patient avatar trigger (#521)", () => {
   });
 
   it("#538 shows the doctor a person-icon account avatar instead of phone digits", async () => {
+    // #567: a production-shaped doctor session - the grants table issues no
+    // "doctor" role, so this payload reads `["partner"]` and the doctor-ness
+    // comes entirely from the shell the menu is rendered inside. A component
+    // that went back to asking the session would take the else branch here and
+    // fail on the "90" assertion.
     // #557: seeded with a photo ref on purpose. The doctor disc is deliberately
     // un-hydrated (that is later work), and this is the assertion that keeps it
     // that way: a stored photo must not cost a doctor an authed read for bytes
     // no surface renders.
-    const trigger = await renderClosedTrigger(ME_RESPONSE_DOCTOR, {
+    const trigger = await renderClosedTrigger(ME_RESPONSE_PARTNER, "doctor", {
       ...NAMED_PROFILE,
       photo_ref: "patient/7/photo-1.enc",
     });
@@ -548,11 +576,14 @@ describe("AccountMenu patient avatar trigger (#521)", () => {
     expect(profileApi.fetchPatientPhoto).not.toHaveBeenCalled();
 
     // The dropdown behind the avatar still carries the full phone, role badge
-    // and dictionary-driven Log out.
+    // and dictionary-driven Log out. The badge keeps reporting the *session's*
+    // selected role, which for a doctor is `partner` - doctor-ness gates the
+    // affordances, it does not relabel the session (#569/#570 own the doctor's
+    // dropdown body, not the badge).
     await openViaKeyboard();
     expect(screen.getByText("+911234567890")).toBeInTheDocument();
     expect(screen.getByTestId("account-menu-role-badge")).toHaveTextContent(
-      "Doctor",
+      "Partner",
     );
     expect(
       screen.getByRole("menuitem", { name: "Log out" }),
@@ -560,7 +591,7 @@ describe("AccountMenu patient avatar trigger (#521)", () => {
   });
 
   it("#543 opens the doctor Profile page from the avatar dropdown", async () => {
-    await renderClosedTrigger(ME_RESPONSE_DOCTOR);
+    await renderClosedTrigger(ME_RESPONSE_PARTNER, "doctor");
     await openViaKeyboard();
 
     const profileItem = screen.getByTestId("account-menu-doctor-profile");
@@ -569,14 +600,14 @@ describe("AccountMenu patient avatar trigger (#521)", () => {
   });
 
   it("#543 keeps the Profile row off non-doctor staff menus", async () => {
-    await renderClosedTrigger(ME_RESPONSE_PARTNER);
+    await renderClosedTrigger(ME_RESPONSE_PARTNER, "partner");
     await openViaKeyboard();
 
     expect(screen.queryByTestId("account-menu-doctor-profile")).toBeNull();
   });
 
   it("non-doctor staff keeps the phone-digit trigger and dropdown verbatim", async () => {
-    const trigger = await renderClosedTrigger(ME_RESPONSE_PARTNER);
+    const trigger = await renderClosedTrigger(ME_RESPONSE_PARTNER, "partner");
 
     expect(trigger).toHaveTextContent("90");
     expect(trigger.querySelector("svg")).toBeNull();
@@ -592,11 +623,51 @@ describe("AccountMenu patient avatar trigger (#521)", () => {
       screen.getByRole("menuitem", { name: "Log out" }),
     ).toBeInTheDocument();
   });
+
+  // #567: the direction of the fix, pinned from both ends of the same session.
+  // One production-shaped doctor payload - a `partner` role, the only thing
+  // the grants table can issue - rendered inside the doctor shell gains the
+  // doctor affordances; the byte-identical session inside the partner shell
+  // keeps the staff ones. Nothing in the session differs, so a component that
+  // re-derived doctor-ness from the session's roles could only fail the first
+  // half, never pass both.
+  //
+  // Deliberately not a duplicate of the two neighbours: it is their
+  // conjunction over ONE shared fixture, which is the only place the claim
+  // "the session is identical and only the shell moved" is visible rather than
+  // something a reader has to reconstruct across three tests. AppShell's suite
+  // asserts the same pair one level up, with the role threaded rather than
+  // hand-fed.
+  it("reads doctor-ness from the shell it sits in, not from the session's roles", async () => {
+    const doctorShell = await renderClosedTrigger(
+      ME_RESPONSE_PARTNER,
+      "doctor",
+    );
+    expect(doctorShell).not.toHaveTextContent("90");
+    expect(doctorShell.querySelector("svg")).not.toBeNull();
+    await openViaKeyboard();
+    expect(
+      screen.getByTestId("account-menu-doctor-profile"),
+    ).toBeInTheDocument();
+    cleanup();
+
+    const partnerShell = await renderClosedTrigger(
+      ME_RESPONSE_PARTNER,
+      "partner",
+    );
+    expect(partnerShell).toHaveTextContent("90");
+    expect(partnerShell.querySelector("svg")).toBeNull();
+    await openViaKeyboard();
+    expect(screen.queryByTestId("account-menu-doctor-profile")).toBeNull();
+  });
 });
 
 describe("AccountMenu mobile placement (#525)", () => {
   it("hides the patient trigger below lg so the phone account lives only in the More sheet", async () => {
-    const trigger = await renderClosedTrigger(ME_RESPONSE_SINGLE_ROLE);
+    const trigger = await renderClosedTrigger(
+      ME_RESPONSE_SINGLE_ROLE,
+      "patient",
+    );
 
     expect(trigger.className).toContain("hidden");
     expect(trigger.className).toContain("lg:inline-flex");
@@ -605,7 +676,7 @@ describe("AccountMenu mobile placement (#525)", () => {
   });
 
   it("keeps the non-doctor staff phone-digit trigger fully visible at every width", async () => {
-    const trigger = await renderClosedTrigger(ME_RESPONSE_PARTNER);
+    const trigger = await renderClosedTrigger(ME_RESPONSE_PARTNER, "partner");
 
     expect(trigger).toHaveTextContent("90");
     expect(trigger.className).toContain("flex");
@@ -693,10 +764,14 @@ describe("AccountMenu desktop identity dropdown (#526)", () => {
   });
 
   it("keeps the CTA when a saved profile is missing a basic field", async () => {
-    const trigger = await renderClosedTrigger(ME_RESPONSE_SINGLE_ROLE, {
-      ...NAMED_PROFILE,
-      name: "  ",
-    });
+    const trigger = await renderClosedTrigger(
+      ME_RESPONSE_SINGLE_ROLE,
+      "patient",
+      {
+        ...NAMED_PROFILE,
+        name: "  ",
+      },
+    );
     fireEvent.keyDown(trigger, { key: "Enter" });
     await waitFor(() => expect(screen.getByRole("menu")).toBeInTheDocument());
 
@@ -714,27 +789,33 @@ describe("AccountMenu desktop identity dropdown (#526)", () => {
   });
 
   it("keeps role switching for multi-role accounts", async () => {
+    // #567: a real role pair. This used to be ["patient", "doctor"], which the
+    // backend cannot issue - role switching is offered for the *session's*
+    // roles, so the vocabulary it is exercised against is the real one.
     const trigger = await renderClosedTrigger(
       {
         subject_id: "42",
         phone: "+911234567890",
-        roles: ["patient", "doctor"],
+        roles: ["patient", "partner"],
       },
+      "patient",
       NAMED_PROFILE,
     );
     fireEvent.keyDown(trigger, { key: "Enter" });
     await waitFor(() => expect(screen.getByRole("menu")).toBeInTheDocument());
 
     expect(
-      screen.getByRole("menuitem", { name: "Switch to Doctor" }),
+      screen.getByRole("menuitem", { name: "Switch to Partner" }),
     ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("menuitem", { name: "Switch to Doctor" }));
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: "Switch to Partner" }),
+    );
     // Radix closes on select; reopening shows the role did switch.
     fireEvent.keyDown(screen.getByTestId("account-menu"), { key: "Enter" });
     await waitFor(() => expect(screen.getByRole("menu")).toBeInTheDocument());
     expect(screen.getByTestId("account-menu-role-badge")).toHaveTextContent(
-      "Doctor",
+      "Partner",
     );
   });
 
@@ -762,7 +843,7 @@ describe("AccountMenu desktop identity dropdown (#526)", () => {
       new Response(JSON.stringify(ME_RESPONSE_SINGLE_ROLE), { status: 200 }),
     );
 
-    renderAccountMenu();
+    renderAccountMenu("patient");
     const trigger = await waitFor(() =>
       expect(screen.getByTestId("account-menu")).toBeInTheDocument(),
     ).then(() => screen.getByTestId("account-menu"));
@@ -800,7 +881,7 @@ describe("AccountMenu stale sessions", () => {
       new Response(JSON.stringify(ME_RESPONSE_NO_PHONE), { status: 200 }),
     );
 
-    renderAccountMenu();
+    renderAccountMenu("patient");
     await openViaKeyboard();
 
     expect(screen.getByText("Subject #42")).toBeInTheDocument();
@@ -813,7 +894,7 @@ describe("AccountMenu stale sessions", () => {
       new Response(JSON.stringify(ME_RESPONSE_NO_PHONE), { status: 200 }),
     );
 
-    renderAccountMenu();
+    renderAccountMenu("patient");
     await openViaKeyboard();
 
     expect(screen.getByTestId("account-menu-identity")).toHaveTextContent(
@@ -822,5 +903,25 @@ describe("AccountMenu stale sessions", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "Log out" }));
     expect(mockReplace).toHaveBeenCalledWith("/");
     expect(localStorage.getItem("caresetu.session")).toBeNull();
+  });
+});
+
+// #567: a cheap negative guard on the one file that used to get this wrong.
+// The three behavioural tests above and AppShell's suite already prove the
+// direction; these only catch the specific shape coming back in a *different*
+// spot in this file - a second, session-derived doctor check beside the
+// threaded one. Deliberately negative-only: a positive regex would pin
+// implementation text and break on a rename with no behaviour change.
+// Note what this does NOT prove - that the role is threaded from the shell.
+// That needs both files, so it is AppShell's end-to-end test's job, not this.
+describe("AccountMenu never re-derives doctor-ness from the session (#567)", () => {
+  const source = readFileSync(join(__dirname, "AccountMenu.tsx"), "utf8");
+
+  it("asks the session's role about nothing doctor-specific", () => {
+    // The exact shape that made every doctor affordance unreachable, since the
+    // session can only answer patient|partner|operator.
+    expect(source).not.toMatch(/currentRole === "doctor"/);
+    expect(source).not.toMatch(/selectedRole === "doctor"/);
+    expect(source).not.toMatch(/resolveRole\([^)]*\)\s*===\s*"doctor"/);
   });
 });

@@ -15,6 +15,14 @@
 // #538: the doctor branch gains an account avatar entry point - the same
 // Avatar primitive, person-icon fallback until the doctor profile seam lands
 // (#542/#543). Partner/operator keep the phone-digit trigger unchanged.
+// #567: doctor-ness is an INPUT now, not an inference. The identity layer
+// grants exactly three roles (patient|partner|operator), so a doctor is a
+// *partner whose partner type is doctor* and the session can never answer
+// "doctor" - every affordance gated on asking it was unreachable in
+// production. The route group already pins the shell role, so the shell
+// threads its own role down (AppShell -> Topbar -> AccountMenu) and that
+// answer is authoritative. The session role still governs the patient branch
+// and the non-doctor staff branch, unchanged.
 // #525: on phones the patient trigger is hidden below `lg` (account lives in
 // the More sheet); staff visibility is unchanged.
 // #526: the patient dropdown becomes a real account menu - an identity header
@@ -54,6 +62,7 @@ import { useLang } from "@/lib/i18n/LangContext";
 import { cn } from "@/lib/utils";
 
 import { isAppRole, resolveRole, roleLabel } from "./types";
+import type { Role } from "./types";
 // #525/#526 share the stale-session identity resolve (name -> masked phone ->
 // "Subject #id"); the helper lives with the mobile account card and is the
 // single source of it.
@@ -86,7 +95,12 @@ function savedBasicsComplete(saved: StoredPatientProfile | null | undefined) {
   return saved ? basicsComplete(serverProfileToDraft(saved)) : false;
 }
 
-export function AccountMenu() {
+// #567: `shellRole` is the role of the shell this menu renders inside, threaded
+// down from the route group's AppShell. It is deliberately not a boolean
+// "amIADoctor" (that would push the branch decision back down to this leaf) and
+// not a bare `role` (two roles are in play here, and calling them both `role` is
+// how the session's role ended up answering for doctor-ness in the first place).
+export function AccountMenu({ shellRole }: { shellRole: Role }) {
   const { user, selectedRole, switchRole, logout } = useAuth();
   const profile = useOptionalProfile();
   const { lang } = useLang();
@@ -96,9 +110,12 @@ export function AccountMenu() {
   // the doctor entry drops the name/photo so it falls back to the person icon.
   const avatarClassName =
     "h-9 w-9 bg-accent-soft text-sm font-semibold text-accent-strong hover:bg-accent-border";
+  // The session's role still decides the patient and non-doctor-staff branches
+  // and the role badge, exactly as before.
   const currentRole = resolveRole(selectedRole);
   const isPatient = currentRole === "patient";
-  const isDoctor = currentRole === "doctor";
+  // #567: and only the shell decides doctor-ness.
+  const isDoctor = shellRole === "doctor";
   const saved = profile?.savedProfile;
   // #557: the stored photo ref is an opaque object key (ADR-0020 D1), so it is
   // the shared resolver - not the primitive - that makes it renderable. One call

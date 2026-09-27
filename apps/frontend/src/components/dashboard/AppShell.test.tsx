@@ -69,11 +69,18 @@ const logout = vi.fn();
 
 // #557: mutable so a test can put the account menu in its patient branch (the
 // shell's own role comes from the role prop, not from the session's choice).
-const authState = vi.hoisted(() => ({ selectedRole: "operator" }));
+// #567: `roles` is mutable too, so a test can hand the menu a session the
+// backend would actually build. Forcing `selectedRole` to a value the session's
+// own roles array does not contain is a payload /me never issues, which is the
+// same class of fabricated fixture that hid the doctor branch.
+const authState = vi.hoisted(() => ({
+  selectedRole: "operator",
+  roles: ["patient", "operator"],
+}));
 
 vi.mock("@/lib/auth/AuthContext", () => ({
   useAuth: () => ({
-    user: { id: 1, phone: "+911234567890", roles: ["patient", "operator"] },
+    user: { id: 1, phone: "+911234567890", roles: authState.roles },
     selectedRole: authState.selectedRole,
     switchRole,
     logout,
@@ -182,6 +189,7 @@ beforeEach(() => {
   mockPathname.mockReturnValue("/patient");
   getOpenCases.mockResolvedValue([]);
   authState.selectedRole = "operator";
+  authState.roles = ["patient", "operator"];
   // #525: default the profile read to "absent" so the masked-phone fallback
   // is the steady state; the named-profile branch re-seeds it per test.
   profileApi.getProfile.mockReset();
@@ -629,20 +637,26 @@ describe("maskedPhone (#525)", () => {
   });
 });
 
+// One full-density render for every suite: the shell plus a neutral child, on
+// the role's own pathname so nav-config's active highlighting is real.
+function renderShell(role: Role, pathname = `/${role}`) {
+  mockPathname.mockReturnValue(pathname);
+  return render(
+    <AppShell role={role}>
+      <h1>Workspace</h1>
+    </AppShell>,
+  );
+}
+
 describe.each(["doctor", "partner", "operator"] as const)(
   "AppShell full density (%s)",
   (role) => {
-    function setup(pathname: string) {
-      mockPathname.mockReturnValue(pathname);
-      return render(
-        <AppShell role={role}>
-          <h1>Workspace</h1>
-        </AppShell>,
-      );
+    function setup() {
+      return renderShell(role);
     }
 
     it("shows a collapsible sidebar plus topbar, with bottom tabs for phones", () => {
-      setup(`/${role}`);
+      setup();
 
       const sidebar = screen.getByTestId("sidebar");
       expect(sidebar).toBeInTheDocument();
@@ -654,7 +668,7 @@ describe.each(["doctor", "partner", "operator"] as const)(
     });
 
     it("renders the role's nav-config entries with active highlighting", () => {
-      setup(`/${role}`);
+      setup();
 
       const expected = {
         doctor: ["queue", "cases", "patients", "profile"],
@@ -673,7 +687,7 @@ describe.each(["doctor", "partner", "operator"] as const)(
     });
 
     it("keeps staff secondary entries dimmed, non-interactive, and badged", () => {
-      setup(`/${role}`);
+      setup();
 
       const soonItems = screen
         .getAllByTestId(/^nav-/)
@@ -695,6 +709,50 @@ describe.each(["doctor", "partner", "operator"] as const)(
     });
   },
 );
+
+// #567: the whole thread, end to end, with no prop hand-fed at any step. The
+// doctor shell knows its own role (its route group pins it), so the account
+// menu inherits it - which is the only way a doctor-only affordance can be
+// reachable at all, since a doctor's session role is `partner`.
+describe("AppShell supplies its role to the account menu (#567)", () => {
+  // A production-shaped doctor session: the grants table issues no "doctor"
+  // role, so /me answers a doctor with a single `partner` role and doctor-ness
+  // is the partner's type - which is precisely what the shell already encodes.
+  // Byte-identical for both halves below, so the only variable is the shell.
+  function renderDoctorSessionShell(role: Role) {
+    authState.roles = ["partner"];
+    authState.selectedRole = "partner";
+    return renderShell(role);
+  }
+
+  it("renders the doctor affordances inside the doctor shell", async () => {
+    renderDoctorSessionShell("doctor");
+
+    const trigger = screen.getByTestId("account-menu");
+    // The doctor's person-icon disc, not the phone digits a lab partner gets.
+    expect(trigger).not.toHaveTextContent("90");
+    expect(trigger.querySelector("svg")).not.toBeNull();
+
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    await waitFor(() => expect(screen.getByRole("menu")).toBeInTheDocument());
+    expect(screen.getByTestId("account-menu-doctor-profile")).toHaveAttribute(
+      "href",
+      "/doctor/profile",
+    );
+  });
+
+  it("keeps the same session's staff treatment inside the partner shell", async () => {
+    // Same session, different shell: the partner shell owes the phone-digit
+    // trigger, so the answer is the shell's, never the session's.
+    renderDoctorSessionShell("partner");
+
+    const trigger = screen.getByTestId("account-menu");
+    expect(trigger).toHaveTextContent("90");
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    await waitFor(() => expect(screen.getByRole("menu")).toBeInTheDocument());
+    expect(screen.queryByTestId("account-menu-doctor-profile")).toBeNull();
+  });
+});
 
 describe("AppShell doctor Cases count pill (PHASE-8.1 T8, #483)", () => {
   function openCase(id: number) {

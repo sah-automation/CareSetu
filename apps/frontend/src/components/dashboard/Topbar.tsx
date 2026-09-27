@@ -68,7 +68,9 @@ export function Topbar({ density, role }: TopbarProps) {
           <LocationChip placement="topbar" className="hidden lg:inline-flex" />
         )}
         {density === "light" && <LangToggle />}
-        <AccountMenu />
+        {/* #567: the shell's own role, threaded like the sidebar's and the tab
+            bar's. */}
+        <AccountMenu shellRole={role} />
       </div>
     </header>
   );
