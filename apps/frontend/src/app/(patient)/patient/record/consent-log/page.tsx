@@ -356,7 +356,7 @@ export default function ConsentLogPage() {
       {toast && (
         <div
           role="status"
-          className="fixed bottom-20 left-1/2 z-50 -translate-x-1/2 rounded-lg bg-txt px-4 py-2 text-sm text-on-txt shadow-lg"
+          className="fixed bottom-20 left-1/2 z-50 -translate-x-1/2 rounded-lg bg-txt px-4 py-2 text-sm text-on-accent shadow-lg"
           data-testid="toast"
         >
           {toast}

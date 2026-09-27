@@ -745,7 +745,7 @@ function StepConfirm({
         <p className="text-lg font-semibold" data-testid="pr-confirm-countdown">
           {formatCountdown(partner.state.expiresIn)}
         </p>
-        <p className="text-sm text-on-surface" data-testid="pr-confirm-phone">
+        <p className="text-sm text-txt-sub" data-testid="pr-confirm-phone">
           {login.codeHint} <strong>{displayPhone}</strong>
         </p>
       </div>
@@ -798,7 +798,7 @@ function StepConfirm({
       {partner.state.cooldownRemaining > 0 &&
       partner.state.challenge !== "locked" ? (
         <p
-          className="mb-2 text-sm text-on-surface"
+          className="mb-2 text-sm text-txt-sub"
           data-testid="pr-confirm-resend-cooldown"
         >
           {login.resendIn(partner.state.cooldownRemaining)}
@@ -815,7 +815,7 @@ function StepConfirm({
       {partner.state.stage === "otp" &&
       partner.state.challenge === "pending" ? (
         <p
-          className="mb-2 text-sm text-on-surface"
+          className="mb-2 text-sm text-txt-sub"
           data-testid="pr-confirm-attempts"
         >
           {partner.state.attemptsLeft > 0
@@ -834,7 +834,7 @@ function StepConfirm({
       ) : null}
       {partner.state.lastNotice ? (
         <p
-          className="mb-2 text-sm text-on-surface"
+          className="mb-2 text-sm text-txt-sub"
           data-testid="pr-confirm-notice"
         >
           {partner.state.lastNotice}

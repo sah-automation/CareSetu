@@ -447,7 +447,7 @@ export function StaffLoginForm({
           <>
             <p
               data-testid="mfa-phone-display"
-              className="mb-4 text-sm text-on-surface"
+              className="mb-4 text-sm text-txt-sub"
             >
               {mfaContext.masked}
             </p>
@@ -615,7 +615,7 @@ export function StaffLoginForm({
                   {formatCountdown(partner.state.expiresIn)}
                 </p>
                 <p
-                  className="text-sm text-on-surface"
+                  className="text-sm text-txt-sub"
                   data-testid="partner-code-hint"
                 >
                   {t.codeHint} <strong>{partner.state.phone}</strong>
@@ -674,7 +674,7 @@ export function StaffLoginForm({
           {partner.state.stage === "phone" &&
             partner.state.cooldownRemaining > 0 && (
               <p
-                className="mb-2 text-sm text-on-surface"
+                className="mb-2 text-sm text-txt-sub"
                 data-testid="partner-cooldown"
               >
                 {t.resendIn(partner.state.cooldownRemaining)}
@@ -692,7 +692,7 @@ export function StaffLoginForm({
             partner.state.cooldownRemaining > 0 &&
             partner.state.challenge !== "locked" && (
               <p
-                className="mb-2 text-sm text-on-surface"
+                className="mb-2 text-sm text-txt-sub"
                 data-testid="partner-resend-cooldown"
               >
                 {t.resendIn(partner.state.cooldownRemaining)}
@@ -701,7 +701,7 @@ export function StaffLoginForm({
           {partner.state.stage === "otp" &&
             partner.state.challenge === "pending" && (
               <p
-                className="mb-2 text-sm text-on-surface"
+                className="mb-2 text-sm text-txt-sub"
                 data-testid="partner-attempts"
               >
                 {partner.state.attemptsLeft > 0
@@ -720,7 +720,7 @@ export function StaffLoginForm({
           ) : null}
           {partner.state.lastNotice ? (
             <p
-              className="mb-2 text-sm text-on-surface"
+              className="mb-2 text-sm text-txt-sub"
               data-testid="partner-notice"
             >
               {partner.state.lastNotice}
