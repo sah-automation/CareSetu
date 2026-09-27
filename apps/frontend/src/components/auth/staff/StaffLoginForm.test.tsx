@@ -37,7 +37,7 @@ import {
   verifyOtp,
 } from "@/lib/auth/api";
 import { STRINGS } from "@/lib/i18n/dictionaries";
-import type { PartnerStatus } from "@/lib/partner/api";
+import type { PartnerStatus, PartnerType } from "@/lib/partner/api";
 
 import { StaffLoginForm } from "./StaffLoginForm";
 
@@ -107,51 +107,48 @@ vi.mock("@/lib/partner/api", () => ({
 }));
 
 const mockPostLoginTarget = vi.fn().mockReturnValue("/operator/home");
-const { mockFetchPartnerRouteState } = vi.hoisted(() => ({
-  mockFetchPartnerRouteState: vi.fn(),
-}));
+// #562: fetchPartnerRouteState is deliberately NOT replaced. It is the only
+// caller of fetchPartnerMe, so stubbing it here left mockFetchPartnerMe as dead
+// code the suite still asserted on, and left a route-state implementation that
+// leaked between tests. Mocking the transport one level down (mockFetchPartnerMe
+// above) keeps the reader production actually runs, and is the shape
+// staff-routing.test.ts already pins.
 vi.mock("@/lib/auth/staff-routing", async (importOriginal) => {
   const mod = await importOriginal<typeof import("@/lib/auth/staff-routing")>();
   return {
     ...mod,
     postLoginTarget: (...args: unknown[]) => mockPostLoginTarget(...args),
-    fetchPartnerRouteState: (...args: unknown[]) =>
-      mockFetchPartnerRouteState(...args),
   };
 });
 
+// #562 AC-2/AC-4: the uniform mock lifecycle, and the single mechanism that
+// enforces it. vi.clearAllMocks drops call records only, so an implementation a
+// test installed went on answering for the next one - which is how a partner
+// route-state answer set by one test reached four others. resetAllMocks wipes
+// implementations too, so no mock can be quietly omitted from a reset list.
+//
+// The consequence is deliberate: a mock with no answer installed is genuinely
+// bare, and the suite says so rather than papering over it with a blanket
+// default. The two "partner-status answer" tests in the partner code step are
+// the ordering probe: the first installs an answer, the second installs none
+// and asserts the reader degrades. Revert this block to clearAllMocks and that
+// pair goes red.
 afterEach(() => {
   cleanup();
   vi.unstubAllEnvs();
-  vi.clearAllMocks();
-  mockLocationReplace.mockClear();
+  vi.resetAllMocks();
 });
 
+// Declares the defaults a test may rely on without restating them. No resets
+// here: the afterEach above already guarantees a bare mock, and a second reset
+// list is the list things get forgotten from.
 beforeEach(() => {
-  vi.mocked(fetchMe).mockReset();
-  vi.mocked(fetchDemoOtp).mockReset();
-  vi.mocked(issuePartnerSession).mockReset();
-  vi.mocked(issueSession).mockReset();
-  vi.mocked(registerPhone).mockReset();
-  vi.mocked(verifyOtp).mockReset();
-  vi.mocked(partnerLogin).mockReset();
-  vi.mocked(partnerVerify).mockReset();
-  mockOperatorLogin.mockReset();
-  mockSaveSession.mockReset();
-  mockLocationReplace.mockClear();
-  mockRouterReplace.mockClear();
-  authState.resumeSession.mockReset();
   // Default: the seam settles immediately (the app awaits it before routing).
   authState.resumeSession.mockResolvedValue(undefined);
-  mockPostLoginTarget.mockReset().mockReturnValue("/operator/home");
-  // Default an already-active partner so role-less landing assertions in the
-  // generic flow stay deterministic.
-  mockFetchPartnerMe.mockReset().mockResolvedValue({
-    partner_id: 7,
-    partner_type: "doctor",
-    round: 1,
-    status: "Active",
-  });
+  mockPostLoginTarget.mockReturnValue("/operator/home");
+  // No default for mockFetchPartnerMe: every test that reads partner status
+  // states the answer it means, and a test that does not is genuinely reading
+  // "no answer" - the case the ordering probe below asserts.
 });
 
 const t = STRINGS.en.staffAuth.login;
@@ -549,10 +546,6 @@ describe("StaffLoginForm - partner code step", () => {
 
   it("verifies the code, mints a partner session, and routes via postLoginTarget", async () => {
     mockPostLoginTarget.mockReturnValue("/doctor");
-    mockFetchPartnerRouteState.mockResolvedValue({
-      partnerState: undefined,
-      partnerType: "doctor",
-    });
     vi.mocked(partnerLogin).mockResolvedValue(LOGIN_OK);
     vi.mocked(partnerVerify).mockResolvedValue({
       outcome: "verified",
@@ -620,9 +613,14 @@ describe("StaffLoginForm - partner code step", () => {
     expect(vi.mocked(verifyOtp)).not.toHaveBeenCalled();
   });
 
+  // #562: the shared partner-login transcript. `status: undefined` installs NO
+  // partner-status answer, which is how the ordering probe below reads the bare
+  // seam; `partnerType` is a parameter so a test states the type it means rather
+  // than inheriting "doctor".
   async function completePartnerLogin(
-    status: PartnerStatus,
+    status: PartnerStatus | undefined,
     returnTarget?: string | null,
+    partnerType: PartnerType = "doctor",
   ) {
     vi.mocked(partnerLogin).mockResolvedValue(LOGIN_OK);
     vi.mocked(partnerVerify).mockResolvedValue({
@@ -638,12 +636,14 @@ describe("StaffLoginForm - partner code step", () => {
       roles: ["partner"],
       phone: PHONE,
     });
-    mockFetchPartnerMe.mockResolvedValue({
-      partner_id: 7,
-      partner_type: "doctor",
-      round: 1,
-      status,
-    });
+    if (status !== undefined) {
+      mockFetchPartnerMe.mockResolvedValue({
+        partner_id: 7,
+        partner_type: partnerType,
+        round: 1,
+        status,
+      });
+    }
     render(<StaffLoginForm returnTarget={returnTarget} />);
     typePartnerPhone();
     fireEvent.click(screen.getByTestId("staff-submit"));
@@ -676,10 +676,6 @@ describe("StaffLoginForm - partner code step", () => {
 
   it("derives no partnerState for an active doctor partner and lands via the doctor role rule", async () => {
     mockPostLoginTarget.mockReturnValue("/doctor");
-    mockFetchPartnerRouteState.mockResolvedValue({
-      partnerState: undefined,
-      partnerType: "doctor",
-    });
     await completePartnerLogin("Active");
 
     await waitFor(() => {
@@ -698,6 +694,12 @@ describe("StaffLoginForm - partner code step", () => {
         "Opening your dashboard",
       );
     });
+
+    // #562: the countdown firing at zero is DoneScreen's own pinned contract
+    // (DoneScreen.test.tsx, "counts the visible seconds down and fires the host
+    // routine at zero (#551)"), so drive the handoff with the CTA rather than
+    // waiting out a 5s timer here.
+    fireEvent.click(screen.getByRole("button", { name: "Go to Dashboard" }));
 
     await waitFor(() => {
       expect(authState.resumeSession).toHaveBeenCalled();
@@ -824,6 +826,50 @@ describe("StaffLoginForm - partner code step", () => {
       expect(mockPostLoginTarget).toHaveBeenCalledWith({
         surface: "staff",
         roles: ["operator"],
+        partnerState: undefined,
+        partnerType: undefined,
+      });
+    });
+  });
+
+  // #562 AC-4: the two tests below are a deliberate ordering probe. The first
+  // installs a persistent (non-Once) partner-status answer; the second installs
+  // none and reads the bare seam, so it can only be green if that answer was
+  // wiped between the two. Revert the afterEach to vi.clearAllMocks() and the
+  // second inherits "rejected"/"lab" and fails - which is exactly how the ten
+  // original failures read. Each test states its own answer or its own lack of
+  // one, so the pair carries the same verdict in either order and standalone.
+  it("routes by a partner-status answer installed for this test only (#562)", async () => {
+    mockPostLoginTarget.mockReturnValue("/partner/status/rejected");
+    await completePartnerLogin("Rejected", undefined, "lab");
+
+    await waitFor(() => {
+      expect(mockPostLoginTarget).toHaveBeenCalledWith({
+        surface: "staff",
+        roles: ["partner"],
+        partnerState: "rejected",
+        partnerType: "lab",
+      });
+    });
+  });
+
+  it("routes by role when no partner-status answer is installed (#562)", async () => {
+    mockPostLoginTarget.mockReturnValue("/partner");
+    // status: undefined installs NO answer, so the seam is bare: the read
+    // returns no usable status, the reader's defensive catch takes over, and
+    // routing falls back to the role rule. Anything left over from the test
+    // above would arrive here as a real status and fail this assertion - which
+    // is the whole point. (The realistic unreadable-read path is pinned
+    // separately, by the rejected-read test above.)
+    await completePartnerLogin(undefined);
+
+    await waitFor(() => {
+      // The real reader ran, so this is a live seam assertion (AC-3), not a
+      // mock production never reaches.
+      expect(mockFetchPartnerMe).toHaveBeenCalled();
+      expect(mockPostLoginTarget).toHaveBeenCalledWith({
+        surface: "staff",
+        roles: ["partner"],
         partnerState: undefined,
         partnerType: undefined,
       });
