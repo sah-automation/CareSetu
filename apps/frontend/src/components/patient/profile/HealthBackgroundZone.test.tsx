@@ -509,6 +509,45 @@ describe("Health background zone surface (#549)", () => {
     expect(screen.queryByTestId("ps-hb-metrics-empty")).toBeNull();
   });
 
+  it("ignores a first read that FAILS after a measurement has already landed (#558)", async () => {
+    // The same race as the test above, answered the other way. A superseded
+    // read does not only come back stale - it comes back failed, and a
+    // generation claim that guards only the success branch would still raise
+    // "we could not load your measurements" over a series that has since
+    // answered, telling the patient a list they are looking at never loaded.
+    let failFirstRead: ((reason: unknown) => void) | undefined;
+    mockFetchMetrics.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          failFirstRead = reject;
+        }),
+    );
+    await renderZone();
+
+    // The series is still loading and the form is already usable.
+    type("ps-hb-metric-height", "170");
+    type("ps-hb-metric-recorded-at", "2026-09-26T10:00");
+    fireEvent.click(screen.getByTestId("ps-hb-metric-add"));
+    await waitFor(() =>
+      expect(screen.getByTestId("ps-hb-metric-added")).toBeInTheDocument(),
+    );
+    // The read that was already in flight now fails. The read that followed the
+    // append claimed its generation synchronously, as the append path entered
+    // reconciliation, so the older read is already superseded here - the claim
+    // does not wait on that read answering.
+    await act(async () => {
+      failFirstRead?.(new Error("offline"));
+    });
+
+    // A read that nobody is waiting on any more says nothing. The row is what
+    // the patient is looking at, and the absence of the failure notice is the
+    // assertion that carries this: a series that reads as unloadable is exactly
+    // what a superseded failure would leave behind.
+    expect(screen.getByTestId("ps-hb-metric-12")).toBeInTheDocument();
+    expect(screen.queryByTestId("ps-hb-metrics-failed")).toBeNull();
+    expect(screen.queryByTestId("ps-hb-metrics-empty")).toBeNull();
+  });
+
   it("keeps the pages already loaded when a measurement is added (#552)", async () => {
     // Reconciling to the first page alone would take back the rows the patient
     // chose to page forward to, which is a worse surprise than a stale row. The
