@@ -11,6 +11,7 @@ import {
   cleanup,
   fireEvent,
   render,
+  renderHook,
   screen,
   waitFor,
   within,
@@ -31,6 +32,7 @@ import {
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { __resetLangForTests, useLang } from "@/lib/i18n/LangContext";
 import { updateConsultationFee } from "@/lib/partner/api";
+import { useProfilePhotoSource } from "@/lib/profile/useProfilePhotoSource";
 
 vi.mock("next/link", () => {
   return {
@@ -509,6 +511,20 @@ describe("DoctorProfilePage photo", () => {
     expect(avatar?.getAttribute("src")).not.toBe("doctor/7/photo-1.enc");
   });
 
+  it("reads the doctor's photo once, shared with any other surface on that ref", async () => {
+    await renderReady(profile({ photo_ref: "doctor/7/photo-1.enc" }));
+    // A second surface on the same ref - the account menu and the dropdown
+    // header are later work - asks the shared seam, not this page, so the bytes
+    // are read once between them rather than once each.
+    const other = renderHook(() =>
+      useProfilePhotoSource("doctor/7/photo-1.enc", fetchDoctorProfilePhoto),
+    );
+
+    await waitFor(() => expect(other.result.current.src).not.toBeNull());
+    expect(getPhoto).toHaveBeenCalledTimes(1);
+    expect(other.result.current.src).toBe("blob:http://localhost/doctor-photo");
+  });
+
   it("uploads a picked photo and re-streams the stored one", async () => {
     await renderReady();
     const file = new File(["photo"], "me.jpg", { type: "image/jpeg" });
@@ -587,6 +603,32 @@ describe("DoctorProfilePage photo", () => {
     await waitFor(() => expect(getPhoto).toHaveBeenCalled());
     expect(screen.getByTestId("profile-photo").querySelector("img")).toBeNull();
     expect(screen.queryByTestId("error-banner")).toBeNull();
+    // Nothing is behind the ref, so there is nothing to remove: a definite
+    // absence offers Upload rather than a Remove that cannot succeed.
+    expect(screen.queryByTestId("profile-photo-remove")).toBeNull();
+    expect(screen.getByTestId("profile-photo-upload")).toHaveTextContent(
+      t.photoUpload,
+    );
+  });
+
+  it("keeps the stored photo removable when the read fails rather than finding no photo", async () => {
+    getPhoto.mockRejectedValue(
+      new ApiError({
+        code: "NETWORK_ERROR",
+        message: "offline",
+        trace_id: "t",
+        details: {},
+      }),
+    );
+    await renderReady(profile({ photo_ref: "doctor/7/photo-1.enc" }));
+
+    await waitFor(() => expect(getPhoto).toHaveBeenCalled());
+    // A blip is not an absence, so the preview falls back to the avatar and
+    // offers no error surface, but the stored photo still reads as a photo the
+    // doctor can clear.
+    expect(screen.getByTestId("profile-photo").querySelector("img")).toBeNull();
+    expect(screen.queryByTestId("error-banner")).toBeNull();
+    expect(screen.getByTestId("profile-photo-remove")).toBeInTheDocument();
   });
 });
 

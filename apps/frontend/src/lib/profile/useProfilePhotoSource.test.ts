@@ -10,7 +10,10 @@
 import { cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { useProfilePhotoSource } from "./useProfilePhotoSource";
+import {
+  useProfilePhotoSource,
+  type ProfilePhotoReader,
+} from "./useProfilePhotoSource";
 import { ApiError } from "@/lib/api-errors";
 import { fetchPatientPhoto } from "@/lib/profile/api";
 
@@ -23,10 +26,15 @@ const getPhoto = vi.mocked(fetchPatientPhoto);
 
 const REF = "patient/7/photo-1.enc";
 const OTHER_REF = "patient/7/photo-2.enc";
+const DOCTOR_REF = "doctor/7/photo-1.enc";
+const OTHER_DOCTOR_REF = "doctor/7/photo-2.enc";
 
-function photoNotFound(): ApiError {
+// The two photo endpoints spell their 404 differently - /v1/me/photo answers
+// PROFILE_PHOTO_NOT_FOUND and the doctor's own photo answers
+// DOCTOR_PROFILE_PHOTO_NOT_FOUND - so the fixture takes the code.
+function photoNotFound(code = "PROFILE_PHOTO_NOT_FOUND"): ApiError {
   return new ApiError({
-    code: "PROFILE_PHOTO_NOT_FOUND",
+    code,
     message: "no photo",
     trace_id: "trace-556",
     details: {},
@@ -69,9 +77,13 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-function renderSource(initialRef: string | null) {
+function renderSource(
+  initialRef: string | null,
+  /** A surface that brings its own account's transport rather than the default. */
+  read?: ProfilePhotoReader,
+) {
   return renderHook(
-    ({ ref }: { ref: string | null }) => useProfilePhotoSource(ref),
+    ({ ref }: { ref: string | null }) => useProfilePhotoSource(ref, read),
     { initialProps: { ref: initialRef } },
   );
 }
@@ -225,5 +237,81 @@ describe("useProfilePhotoSource", () => {
     // Nothing renderable can come of the bytes, so the backend is not asked.
     expect(getPhoto).not.toHaveBeenCalled();
     expect(result.current).toEqual({ src: null, absent: false });
+  });
+});
+
+// #568: a second account's surface brings its own byte reader rather than
+// getting a second implementation. Every promise the seam makes is the same
+// promise for that reader - one read per ref, the object URL owned by the
+// consumer that renders it, a definite absence never confused with a failed
+// read - so the cases above are re-run against an injected reader, plus the one
+// thing a caller-supplied reader adds: it must not become a per-render input.
+describe("useProfilePhotoSource with a caller-supplied reader", () => {
+  /** The doctor's own transport: another account's `() => Promise<Blob>`. */
+  function doctorReader() {
+    return vi.fn(async () => new Blob(["doctor-photo"], { type: "image/png" }));
+  }
+
+  it("never asks a caller-supplied reader for bytes when the ref is absent", () => {
+    const read = doctorReader();
+    const { result } = renderSource(null, read);
+
+    expect(result.current).toEqual({ src: null, absent: false });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("asks a caller-supplied reader once for a ref however many consumers show it", async () => {
+    const read = doctorReader();
+    const first = renderSource(DOCTOR_REF, read);
+    const second = renderSource(DOCTOR_REF, read);
+
+    await waitFor(() => expect(first.result.current.src).not.toBeNull());
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(first.result.current.src).toBe("blob:http://localhost/photo-1");
+    expect(second.result.current.src).toBe("blob:http://localhost/photo-2");
+  });
+
+  it("does not re-read a ref when the reader arrives as a fresh function each render", async () => {
+    // Which account to ask is not a per-render input, so an inline closure must
+    // not count as a new one: re-reading per render would stream the photo
+    // again, revoke the object URL mid-view and break the one-read contract.
+    const read = doctorReader();
+    const { result, rerender } = renderHook(
+      ({ ref }: { ref: string | null }) =>
+        useProfilePhotoSource(ref, () => read()),
+      { initialProps: { ref: DOCTOR_REF } },
+    );
+    await waitFor(() => expect(result.current.src).not.toBeNull());
+
+    await rerender({ ref: DOCTOR_REF });
+    await rerender({ ref: DOCTOR_REF });
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+    expect(result.current.src).toBe("blob:http://localhost/photo-1");
+  });
+
+  it("reports absence when the supplied reader's endpoint says there is no media", async () => {
+    // The doctor's own 404 is a definite absence, so the seam has to read it as
+    // one even though it is spelled differently from /v1/me/photo's.
+    const read = vi
+      .fn()
+      .mockRejectedValue(photoNotFound("DOCTOR_PROFILE_PHOTO_NOT_FOUND"));
+    const { result } = renderSource(DOCTOR_REF, read);
+
+    await waitFor(() => expect(result.current.absent).toBe(true));
+    expect(result.current.src).toBeNull();
+  });
+
+  it("keeps a caller-supplied reader's failed read looking present", async () => {
+    const read = vi.fn().mockRejectedValue(networkBlip());
+    const { result } = renderSource(OTHER_DOCTOR_REF, read);
+
+    // Read against the two settled answers above: a settled blip leaves `absent`
+    // false and shows nothing, so the stored photo still reads as a photo and
+    // the surface can still offer to remove it.
+    await waitFor(() => expect(read).toHaveBeenCalled());
+    await flush();
+    expect(result.current).toEqual({ src: null, absent: false });
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
   });
 });

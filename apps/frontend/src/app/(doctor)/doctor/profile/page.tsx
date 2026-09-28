@@ -38,6 +38,7 @@ import { idempotencyKey } from "@/lib/idempotency";
 import { STRINGS, type Dictionary } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { updateConsultationFee } from "@/lib/partner/api";
+import { useProfilePhotoSource } from "@/lib/profile/useProfilePhotoSource";
 import { cn } from "@/lib/utils";
 
 type LoadStatus = "loading" | "ready" | "error";
@@ -307,6 +308,8 @@ function Field({ id, label, help, children }: FieldProps) {
 interface PhotoCardProps {
   profile: DoctorProfileView;
   photoUrl: string | null;
+  /** The backend answered this ref has no media behind it, so there is nothing to remove. */
+  mediaAbsent: boolean;
   busy: boolean;
   failure: Failure | null;
   onPick: (file: File) => void;
@@ -317,6 +320,7 @@ interface PhotoCardProps {
 function PhotoCard({
   profile,
   photoUrl,
+  mediaAbsent,
   busy,
   failure,
   onPick,
@@ -326,7 +330,11 @@ function PhotoCard({
   const { lang } = useLang();
   const t = STRINGS[lang].doctorProfile;
   const inputRef = useRef<HTMLInputElement>(null);
-  const hasPhoto = profile.photo_ref != null;
+  // A ref is a claim, the bytes are the fact, exactly as on the patient's photo
+  // card: a set ref with nothing behind it offers Upload rather than a Remove
+  // that cannot succeed. A failed read is not that, so a blip leaves the stored
+  // photo still removable.
+  const hasPhoto = profile.photo_ref != null && !mediaAbsent;
 
   return (
     <section
@@ -893,7 +901,6 @@ export default function DoctorProfilePage() {
   const [errorTraceId, setErrorTraceId] = useState<string | undefined>();
   const [bannerOpen, setBannerOpen] = useState(false);
 
-  const [photoUrl, setPhotoUrl] = useState<string | null>(null);
   const [photoBusy, setPhotoBusy] = useState(false);
   const [photoFailure, setPhotoFailure] = useState<Failure | null>(null);
 
@@ -905,6 +912,15 @@ export default function DoctorProfilePage() {
   // (so a lost response cannot write twice), and an edit starts a new attempt.
   const saveAttemptKey = useRef<string | null>(null);
   const removeAttemptKey = useRef<string | null>(null);
+
+  // The photo is a private profile-media key, never a public URL, so the shared
+  // seam resolves it: the bytes come over the authed transport and this page
+  // names the transport, not the resolution. Its ref came with the profile, so
+  // nothing extra is fetched to resolve it.
+  const { src: photoUrl, absent: mediaAbsent } = useProfilePhotoSource(
+    profile?.photo_ref ?? null,
+    fetchDoctorProfilePhoto,
+  );
 
   const load = useCallback(() => {
     setLoadStatus("loading");
@@ -925,38 +941,6 @@ export default function DoctorProfilePage() {
   useEffect(() => {
     load();
   }, [load]);
-
-  // The photo is a private profile-media key, never a public URL: stream the
-  // bytes over the authed transport and present them as an object URL, the
-  // same shape the consent-gated patient photo uses (#540). A missing or
-  // unreadable photo degrades to the avatar fallback rather than an error
-  // surface, and the object URL is revoked on teardown or replacement.
-  useEffect(() => {
-    if (profile?.photo_ref == null) {
-      setPhotoUrl(null);
-      return;
-    }
-    let cancelled = false;
-    let objectUrl: string | null = null;
-    setPhotoUrl(null);
-    void fetchDoctorProfilePhoto()
-      .then((blob) => {
-        if (cancelled) return;
-        if (typeof URL.createObjectURL !== "function") return;
-        objectUrl = URL.createObjectURL(blob);
-        setPhotoUrl(objectUrl);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setPhotoUrl(null);
-      });
-    return () => {
-      cancelled = true;
-      if (objectUrl != null) {
-        URL.revokeObjectURL(objectUrl);
-      }
-    };
-  }, [profile?.photo_ref]);
 
   function changeForm(patch: Partial<ProfileForm>) {
     setForm((current) => (current ? { ...current, ...patch } : current));
@@ -1014,8 +998,8 @@ export default function DoctorProfilePage() {
         file,
         idempotencyKey(),
       );
-      // The new key re-runs the preview effect, which revokes the old object
-      // URL and streams the stored photo back.
+      // The new key re-runs the resolution, which revokes the old object URL and
+      // streams the stored photo back.
       setProfile((current) => (current ? { ...current, photo_ref } : current));
     } catch (err) {
       setPhotoFailure({
@@ -1111,6 +1095,7 @@ export default function DoctorProfilePage() {
           <PhotoCard
             profile={profile}
             photoUrl={photoUrl}
+            mediaAbsent={mediaAbsent}
             busy={photoBusy}
             failure={photoFailure}
             onPick={(file) => void uploadPhoto(file)}

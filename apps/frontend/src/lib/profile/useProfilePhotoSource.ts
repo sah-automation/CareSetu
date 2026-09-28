@@ -12,11 +12,16 @@
 // It lives beside the profile client (lib/profile/, next to api.ts) because
 // that is where the transport wrapper it builds on sits, and it follows the
 // lib/auth/useRoleHomeHref.ts shape for a shared hook. More than one surface
-// shows "me" (#548's card, #557's chrome avatars), so the resolution is cached
-// by ref: one ref, one request, however many consumers ask.
+// shows "me" (#548's card, #557's chrome avatars, #568's doctor profile page),
+// so the resolution is cached by ref: one ref, one request, however many
+// consumers ask. Each surface supplies its own byte reader - a doctor's photo
+// is a different endpoint - so the seam is the resolution discipline, not a
+// call to one account's transport: a second account gets the same cache, the
+// same object-URL ownership and the same two failure answers without a second
+// implementation to drift.
 //
-// Two failure answers stay distinct, because they are not the same fact. Only
-// PROFILE_PHOTO_NOT_FOUND reports absence: the completion wizard persists a bare
+// Two failure answers stay distinct, because they are not the same fact. Only a
+// definite not-found reports absence: the completion wizard persists a bare
 // file name as a placeholder until a real upload lands, so a set ref is a claim,
 // not proof of media, and a claim with nothing behind it must offer Upload
 // rather than Remove. Any other failure leaves `absent` false, because a stored
@@ -25,13 +30,32 @@
 // next ref change, so nothing retries in a loop and a surface that mounts later
 // shares the one request instead of adding a second failure.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { ApiError } from "@/lib/api-errors";
 import { fetchPatientPhoto } from "@/lib/profile/api";
 
-/** The backend's answer when the ref has no media behind it. */
-const PHOTO_NOT_FOUND_CODE = "PROFILE_PHOTO_NOT_FOUND";
+/**
+ * The backend's answers that a ref has no media behind it. The two photo
+ * endpoints stream private bytes under their own 404 code - `/v1/me/photo`
+ * answers `PROFILE_PHOTO_NOT_FOUND` and the doctor's own photo answers
+ * `DOCTOR_PROFILE_PHOTO_NOT_FOUND` - so the seam reads absence off the set
+ * rather than one endpoint's spelling. What it distinguishes is a *definite*
+ * absence from a blip, not which route answered.
+ */
+const PHOTO_NOT_FOUND_CODES: ReadonlySet<string> = new Set([
+  "PROFILE_PHOTO_NOT_FOUND",
+  "DOCTOR_PROFILE_PHOTO_NOT_FOUND",
+]);
+
+/**
+ * Reads the caller's own current stored photo bytes over the authed transport.
+ * It takes no ref, because both endpoints serve the caller's *current* photo:
+ * the ref says which generation a consumer believes it is showing, so it keys
+ * the cache rather than selecting the bytes. Refs are actor-namespaced, so two
+ * readers never collide on one cache key.
+ */
+export type ProfilePhotoReader = () => Promise<Blob>;
 
 export interface ProfilePhotoSource {
   /**
@@ -52,7 +76,7 @@ export interface ProfilePhotoSource {
 interface ResolvedPhoto {
   /** The stored bytes, or null when the ref resolved to nothing renderable. */
   blob: Blob | null;
-  /** True only for the definite PROFILE_PHOTO_NOT_FOUND answer. */
+  /** True only for a definite not-found answer from the bytes endpoint. */
   absent: boolean;
 }
 
@@ -77,24 +101,26 @@ const ABSENT: ProfilePhotoSource = { src: null, absent: true };
  */
 const CACHE = new Map<string, CacheEntry>();
 
-async function resolveStoredPhoto(): Promise<ResolvedPhoto> {
+async function resolveStoredPhoto(
+  read: ProfilePhotoReader,
+): Promise<ResolvedPhoto> {
   try {
-    return { blob: await fetchPatientPhoto(), absent: false };
+    return { blob: await read(), absent: false };
   } catch (err) {
     return {
       blob: null,
-      absent: err instanceof ApiError && err.code === PHOTO_NOT_FOUND_CODE,
+      absent: err instanceof ApiError && PHOTO_NOT_FOUND_CODES.has(err.code),
     };
   }
 }
 
-function acquire(ref: string): CacheEntry {
+function acquire(ref: string, read: ProfilePhotoReader): CacheEntry {
   const cached = CACHE.get(ref);
   if (cached !== undefined) {
     cached.holders += 1;
     return cached;
   }
-  const entry: CacheEntry = { ready: resolveStoredPhoto(), holders: 1 };
+  const entry: CacheEntry = { ready: resolveStoredPhoto(read), holders: 1 };
   CACHE.set(ref, entry);
   return entry;
 }
@@ -110,12 +136,21 @@ function release(ref: string, entry: CacheEntry): void {
 /**
  * Resolve a stored profile-media ref to a renderable source. Null in, null out:
  * with no ref there is nothing to ask for, so the bytes endpoint is never
- * touched.
+ * touched. The reader defaults to the caller's own patient transport, so every
+ * surface showing the caller's photo asks for it without naming an endpoint.
  */
 export function useProfilePhotoSource(
   photoRef: string | null,
+  read: ProfilePhotoReader = fetchPatientPhoto,
 ): ProfilePhotoSource {
   const [source, setSource] = useState<ProfilePhotoSource>(NO_SOURCE);
+  // Which account to ask is not a per-render input, so the reader is held here
+  // rather than listed as an effect dependency: an inline closure would arrive
+  // as a fresh identity every render and re-read - and revoke - the photo every
+  // render. A different account brings a different ref, so a genuine change of
+  // transport still arrives as a ref change and re-resolves.
+  const reader = useRef(read);
+  reader.current = read;
 
   useEffect(() => {
     if (photoRef == null) {
@@ -137,7 +172,7 @@ export function useProfilePhotoSource(
     // unmount mid-stream never creates one at all.
     let objectUrl: string | null = null;
     setSource(NO_SOURCE);
-    const entry = acquire(photoRef);
+    const entry = acquire(photoRef, reader.current);
 
     void entry.ready.then((resolved) => {
       if (!live) return;
