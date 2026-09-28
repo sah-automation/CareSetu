@@ -12,6 +12,8 @@
 // mints the partner session + routes through the same save/landing path as the
 // operator flow - without ever touching the patient lifecycle.
 
+import { readFileSync } from "node:fs";
+
 import {
   act,
   cleanup,
@@ -46,6 +48,9 @@ import type {
 } from "@/lib/partner/api";
 
 import { DONE_SCREEN_COUNTDOWN_SECONDS } from "../DoneScreen";
+import atomStyles from "../otp/otpShared.module.css";
+import { PrimaryButton } from "../otp/shared";
+import stepStyles from "../otp/variantB.module.css";
 import { StaffLoginForm, staffSubmitLabel } from "./StaffLoginForm";
 
 const mockLocationReplace = vi.fn();
@@ -193,6 +198,16 @@ const SESSION: SessionResult = {
   refresh_token: "opaque-refresh-token",
 };
 
+// The refusal the code step's message arms all read from. Declared once so a
+// test says what it is about rather than restating the shape.
+const WRONG_CODE: PartnerVerifyResult = {
+  outcome: "wrong_code",
+  phone_e164: PHONE,
+  identity_id: null,
+  attempts_left: 4,
+  lockout_remaining_seconds: null,
+};
+
 function typePartnerPhone(digits = "9876543210") {
   fireEvent.change(screen.getByTestId("partner-phone"), {
     target: { value: digits },
@@ -225,6 +240,19 @@ function fillPhoneAndTotp() {
   fireEvent.change(screen.getByTestId("staff-totp"), {
     target: { value: "123456" },
   });
+}
+
+/**
+ * The HTML spec's default button: the form's first submit button in tree order.
+ * Implicit submission - Enter in a text control - activates it, so a form
+ * without one cannot be submitted by Enter. jsdom implements neither implicit
+ * submission nor this lookup, which is why the #572 AC-5 gate reads it
+ * directly instead of dispatching a key.
+ */
+function defaultButtonOf(form: HTMLElement) {
+  return form.querySelector<HTMLButtonElement>(
+    'button[type="submit"], input[type="submit"]',
+  );
 }
 
 // #566: the handoff's practice facts come from a doctor-profile read that is
@@ -565,6 +593,266 @@ describe("StaffLoginForm - partner resend", () => {
 });
 
 describe("StaffLoginForm - partner code step", () => {
+  // #572: the step is built from the shared sign-in atoms the patient wizard
+  // already renders, not from a second hand-built version of the same
+  // interaction. These gates are split in two on purpose. The DOM assertions
+  // prove the atoms render; the source gate proves the one-off utilities are
+  // gone, because jsdom applies no stylesheet and
+  // `expect(otp).not.toHaveClass("tracking-[0.5em]")` passes today while the
+  // arbitrary letter-spacing is still in the file. Same reason
+  // `design-tokens.test.ts` and the ring's CSS contract test read off disk.
+  const here = (rel: string) => new URL(rel, import.meta.url);
+  const source = readFileSync(here("./StaffLoginForm.tsx"), "utf8");
+  // The slice runs from the partner branch's opener to the end of the file, so
+  // it covers the phone step's own paragraph and input too. That is why the
+  // list below holds only strings unique to the code step and the shared submit:
+  // the operator TOTP step's two `opacity-80` help lines sit above the opener
+  // and stay excluded, and the phone step's `mb-2 text-sm text-txt-sub` line
+  // and its own input classes are inside the slice and left off the list,
+  // because that step is not this ticket's.
+  const PARTNER_BRANCH = 'partner.state.stage === "phone" ? (';
+  const partnerBranchStart = source.indexOf(PARTNER_BRANCH);
+  const partnerBranch = source.slice(partnerBranchStart);
+
+  // Every one of these occurs only at a site this ticket replaces, which is
+  // what makes "absent from the partner branch" a claim about the step.
+  const ONE_OFF_UTILITIES = [
+    "tracking-[0.5em]",
+    "opacity-80",
+    "mb-4 text-center",
+    "text-lg font-semibold",
+    "mb-4 flex items-center gap-3",
+    "rounded-md border border-hairline px-3 py-1.5 text-sm",
+    "text-sm underline",
+    "mb-2 rounded-md border border-hairline bg-surface px-3 py-2 text-sm",
+    "mt-1 w-full rounded-md bg-primary px-4 py-2 font-semibold text-on-accent",
+    "mb-2 text-sm text-danger",
+  ];
+
+  it("has no arbitrary letter-spacing, bare percentage opacity, or one-off spacing left at the sites this ticket replaced (#572 AC-6)", () => {
+    // Guards the slice itself: a renamed marker would make every assertion
+    // below trivially true against a one-character string.
+    expect(partnerBranchStart).toBeGreaterThan(0);
+    for (const utility of ONE_OFF_UTILITIES) {
+      expect(partnerBranch, utility).not.toContain(utility);
+    }
+    // Total, not regional: this file carried the letter-spacing exactly once.
+    // The only other occurrence in the auth tree is the partner *registration*
+    // wizard's, a different surface on a different ticket.
+    expect(source).not.toContain("tracking-[0.5em]");
+  });
+
+  it("renders the shared six-box code input, with the hook on the hidden input (#572 AC-1)", async () => {
+    await startPartnerOtpFlow();
+    const otp = screen.getByTestId("partner-otp");
+    expect(otp.tagName).toBe("INPUT");
+    expect(otp).toHaveAttribute("maxlength", "6");
+    expect(otp).toHaveClass(atomStyles.otpHiddenInput);
+    // The boxes are the six siblings of the input, not six inputs of their own.
+    const boxes = otp.parentElement?.querySelectorAll("span");
+    expect(boxes).toHaveLength(6);
+    for (const box of Array.from(boxes ?? [])) {
+      expect(box).toHaveClass(atomStyles.otpBox);
+    }
+  });
+
+  it("renders the shared countdown ring with the seconds inside it (#572 AC-1)", async () => {
+    await startPartnerOtpFlow();
+    const countdown = screen.getByTestId("partner-countdown");
+    expect(countdown).toHaveTextContent("5:00");
+    const ring = countdown.closest("div");
+    expect(ring).toHaveClass(atomStyles.ring);
+    expect(ring).toHaveAttribute("aria-hidden", "true");
+    expect(ring?.querySelector("svg")).not.toBeNull();
+  });
+
+  it("lays the resend ghost and the edit-number link out as one considered row (#572 AC-2)", async () => {
+    await startPartnerOtpFlow();
+    const resend = screen.getByTestId("partner-resend");
+    const edit = screen.getByTestId("partner-edit-number");
+    expect(resend.tagName).toBe("BUTTON");
+    expect(resend).toHaveClass(atomStyles.btnGhost);
+    expect(edit.tagName).toBe("BUTTON");
+    expect(edit).toHaveClass(atomStyles.editLink);
+    expect(resend.parentElement).toBe(edit.parentElement);
+    expect(resend.parentElement).toHaveClass(stepStyles.resendRow);
+  });
+
+  it("gives the demo-code read-back the notice treatment and keeps it a live region (#572 AC-3)", async () => {
+    vi.stubEnv("NEXT_PUBLIC_DEMO_MODE", "true");
+    vi.mocked(fetchDemoOtp).mockResolvedValue("424242");
+    await startPartnerOtpFlow();
+    const banner = await screen.findByTestId("partner-demo-banner");
+    // NoticeMessage, not the bordered neutral box that read as an error.
+    expect(banner.tagName).toBe("P");
+    expect(banner).toHaveClass(atomStyles.notice);
+    // The code arrives asynchronously, so the announcement is the only thing
+    // that reaches a screen reader. Every assertion on this banner is a text
+    // match, so nothing else would notice its loss.
+    expect(banner).toHaveAttribute("role", "status");
+  });
+
+  it("uses the shared error and notice treatments and the shared primary action (#572 AC-4)", async () => {
+    vi.mocked(partnerVerify).mockResolvedValue(WRONG_CODE);
+    await startPartnerOtpFlow({ ...LOGIN_OK, cooldown_remaining_seconds: 0 });
+    typeCodeAndSubmit();
+    const error = await screen.findByTestId("partner-error");
+    expect(error.tagName).toBe("P");
+    expect(error).toHaveClass(atomStyles.error);
+    expect(error).toHaveAttribute("role", "alert");
+
+    // The notice arm. Same atom as the banner, minus the alert: a latest-wins
+    // confirmation is body copy, not a fault.
+    vi.mocked(partnerLogin).mockResolvedValue(LOGIN_OK);
+    fireEvent.click(screen.getByTestId("partner-resend"));
+    const notice = await screen.findByTestId("partner-notice");
+    expect(notice.tagName).toBe("P");
+    expect(notice).toHaveClass(atomStyles.notice);
+    expect(notice).not.toHaveAttribute("role", "alert");
+
+    const submit = screen.getByTestId("staff-submit");
+    expect(submit.tagName).toBe("BUTTON");
+    expect(submit).toHaveClass(atomStyles.btnPrimary);
+  });
+
+  it("carries every state the step carried before the swap (#572 AC-7)", async () => {
+    vi.mocked(partnerVerify).mockResolvedValue(WRONG_CODE);
+    await startPartnerOtpFlow();
+    // On the way up: expiry copy, countdown, the normalised number, the
+    // resend cooldown - and the resend disabled for the same reason it always
+    // was, which is the cooldown rather than the block.
+    expect(screen.getByTestId("partner-code-expires")).toHaveTextContent(
+      t.codeExpires,
+    );
+    expect(screen.getByTestId("partner-countdown")).toHaveTextContent("5:00");
+    expect(screen.getByTestId("partner-code-hint")).toHaveTextContent(PHONE);
+    // The hint's old `text-sm text-txt-sub` is the one string the source gate
+    // cannot name, because the phone step's cooldown line still shares it, so
+    // the treatment is pinned here instead.
+    expect(screen.getByTestId("partner-code-hint")).toHaveClass(stepStyles.sub);
+    expect(screen.getByTestId("partner-code-expires")).toHaveClass(
+      stepStyles.sub,
+    );
+    expect(screen.getByTestId("partner-resend-cooldown")).toHaveTextContent(
+      t.resendIn(60),
+    );
+    expect(screen.getByTestId("partner-resend")).toBeDisabled();
+    // On the way back: the last error and the attempt budget restated against
+    // the same six digits.
+    typeCodeAndSubmit();
+    expect(await screen.findByTestId("partner-error")).toHaveTextContent(
+      t.wrongCode(4),
+    );
+    expect(screen.getByTestId("partner-attempts")).toHaveTextContent(
+      t.attemptsLeft(4),
+    );
+  });
+
+  it("locks the step out on both stages, and keeps the lockout an attempts band (#572 AC-7)", async () => {
+    vi.mocked(partnerLogin).mockResolvedValue({
+      ...LOGIN_OK,
+      outcome: "locked",
+      challenge_id: null,
+      lockout_remaining_seconds: 600,
+    });
+    render(<StaffLoginForm />);
+    typePartnerPhone();
+    fireEvent.click(screen.getByTestId("staff-submit"));
+    // The lockout line carries no stage guard: it is the one state both stages
+    // render, and it shares the attempts treatment rather than a danger class.
+    const lockout = await screen.findByTestId("partner-lockout");
+    expect(lockout).toHaveTextContent(t.lockout(10));
+    expect(lockout).toHaveClass(stepStyles.attempts);
+    expect(screen.getByTestId("partner-phone")).toBeDisabled();
+  });
+
+  it("gives the code field a form whose default button carries the verify (#572 AC-5)", async () => {
+    vi.mocked(partnerVerify).mockResolvedValue(WRONG_CODE);
+    await startPartnerOtpFlow();
+    const form = screen.getByTestId("staff-login-form");
+    const input = screen.getByTestId("partner-otp");
+    const submit = screen.getByTestId("staff-submit");
+    // How Enter in a code field actually verifies, per the HTML spec: implicit
+    // submission activates the form's *default button*, which is the first
+    // submit button in tree order. There is no key handler anywhere in the
+    // auth tree, so the control's `type` is the whole mechanism.
+    //
+    // jsdom implements neither implicit submission nor the default-button
+    // lookup, and a `fireEvent.keyDown` here would be inert - it would pass on
+    // a form with no submit button at all. So the gate is the two facts the
+    // algorithm reads, and then the submission driven the way the brief's
+    // done-verify allows (`fireEvent.submit`). The click path that depends on
+    // the `type` is the negative gate's job, below.
+    //
+    // Precondition one: the field Enter lands in is in the form, and is one of
+    // the input types the spec lists as implicit-submitting (`tel`).
+    expect(form).toContainElement(input);
+    expect(input).toHaveAttribute("type", "tel");
+    // Precondition two: a *disabled* default button submits nothing.
+    expect(submit).toBeEnabled();
+    // Precondition three: this control is the default button. Drop the
+    // `type="submit"` passthrough and the lookup finds nothing at all, which
+    // is precisely why Enter silently stops verifying in a real browser while
+    // every test in this suite stays green.
+    expect(defaultButtonOf(form)).toBe(submit);
+    // And the form does submit, through the handler Enter would have reached.
+    typeCode();
+    fireEvent.submit(form);
+    await waitFor(() => expect(partnerVerify).toHaveBeenCalled());
+    // And it was the code step's arm of the submit, not the phone step's.
+    expect(await screen.findByTestId("partner-error")).toHaveTextContent(
+      t.wrongCode(4),
+    );
+  });
+
+  it("leaves the form with no default button when the passthrough is omitted (#572 AC-5)", () => {
+    // The half that bites, and it is behavioural rather than an attribute
+    // read. A `type="button"` atom inside a form gives the form no default
+    // button, and clicking it does not submit. jsdom enforces exactly that,
+    // which is why the two ids here are deliberately not the step's: this is
+    // the atom's default in a form, not the partner step's own control, and
+    // cloning the step's selectors would let it read as coverage the step does
+    // not have. `shared.test.tsx` owns the default's own assertion; what is new
+    // here is the consequence for a form.
+    const submitted = vi.fn();
+    render(
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          submitted();
+        }}
+        data-testid="probe-form"
+      >
+        <input aria-label="Verification code" inputMode="numeric" />
+        <PrimaryButton testId="probe-submit">{t.getCode}</PrimaryButton>
+      </form>,
+    );
+    const form = screen.getByTestId("probe-form");
+    expect(defaultButtonOf(form)).toBeNull();
+    fireEvent.click(screen.getByTestId("probe-submit"));
+    expect(submitted).not.toHaveBeenCalled();
+  });
+
+  it("keeps the staff surface free of the patient wizard's chrome (#572 AC-9)", async () => {
+    await startPartnerOtpFlow();
+    // The layout classes this step adopts are the step's. The wizard's step
+    // strip and registration value-props belong to the patient surface, and
+    // this is the assertion that keeps them there.
+    const page = readFileSync(
+      here("../../../app/staff/login/page.tsx"),
+      "utf8",
+    );
+    for (const file of [source, page]) {
+      expect(file).not.toContain("valueProps");
+      expect(file).not.toContain("stepNum");
+      expect(file).not.toContain("stepLabel");
+      expect(file).not.toContain("propIcon");
+    }
+    for (const prop of STRINGS.en.auth.valueProps) {
+      expect(screen.queryByText(prop)).not.toBeInTheDocument();
+    }
+  });
+
   it("rejects a short code client-side without calling verify", async () => {
     await startPartnerOtpFlow();
     typeCodeAndSubmit("123");

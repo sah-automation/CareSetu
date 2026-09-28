@@ -38,7 +38,17 @@ import { useLang } from "@/lib/i18n/LangContext";
 import { operatorLogin } from "@/lib/operator/api";
 
 import { DoneScreen, type DoneScreenFact } from "../DoneScreen";
-import { formatCountdown } from "../otp/otpState";
+import {
+  CountdownRing,
+  EditLinkButton,
+  ErrorMessage,
+  FieldLabel,
+  GhostButton,
+  NoticeMessage,
+  OtpInput,
+  PrimaryButton,
+} from "../otp/shared";
+import stepStyles from "../otp/variantB.module.css";
 import { usePartnerLoginFlow, type PartnerStage } from "./partnerLoginState";
 import {
   staffOperatorErrorCopy,
@@ -684,144 +694,123 @@ export function StaffLoginForm({
               />
             </div>
           ) : (
-            <>
-              {/* Partner code step: countdown, code input, resend, back. */}
-              <div className="mb-4 text-center">
-                <p
-                  className="text-xs opacity-80"
-                  data-testid="partner-code-expires"
-                >
-                  {t.codeExpires}
-                </p>
-                <p
-                  className="text-lg font-semibold"
-                  data-testid="partner-countdown"
-                >
-                  {formatCountdown(partner.state.expiresIn)}
-                </p>
-                <p
-                  className="text-sm text-txt-sub"
-                  data-testid="partner-code-hint"
-                >
-                  {t.codeHint} <strong>{partner.state.phone}</strong>
-                </p>
+            // Partner code step: countdown, code input, resend, back. Built
+            // from the shared atoms the patient wizard renders for the same
+            // interaction, so the two surfaces cannot drift (#572). The atoms
+            // carry the treatment; the step carries only the state.
+            //
+            // `mb-4` stays, and is the one Tailwind utility left here: it is
+            // the block margin the phone step above already uses, and the
+            // status lines below are a sibling group, not part of this
+            // section's gap.
+            <div className={`mb-4 ${stepStyles.section}`}>
+              <div className={stepStyles.center}>
+                <div>
+                  <p
+                    className={stepStyles.sub}
+                    data-testid="partner-code-expires"
+                  >
+                    {t.codeExpires}
+                  </p>
+                  <CountdownRing
+                    seconds={partner.state.expiresIn}
+                    testId="partner-countdown"
+                  />
+                </div>
               </div>
-
-              <div className="mb-4">
-                <label
-                  htmlFor="staff-partner-otp"
-                  className="mb-1 block text-sm font-medium"
-                >
-                  {t.codeLabel}
-                </label>
-                <input
-                  id="staff-partner-otp"
-                  inputMode="numeric"
-                  autoComplete="one-time-code"
-                  maxLength={6}
+              <p className={stepStyles.sub} data-testid="partner-code-hint">
+                {t.codeHint} <strong>{partner.state.phone}</strong>
+              </p>
+              <FieldLabel>
+                {t.codeLabel}
+                <OtpInput
                   value={partner.state.otpDraft}
-                  onChange={(event) => partner.setOtpDraft(event.target.value)}
+                  onChange={partner.setOtpDraft}
                   disabled={partnerBlocked}
-                  aria-invalid={partner.state.lastError ? true : undefined}
-                  aria-describedby={
-                    partner.state.lastError ? "partner-error" : undefined
-                  }
-                  className="w-full rounded-md border border-hairline bg-surface px-3 py-2 tracking-[0.5em]"
-                  data-testid="partner-otp"
+                  testId="partner-otp"
                 />
-              </div>
-
-              <div className="mb-4 flex items-center gap-3">
-                <button
-                  type="button"
+              </FieldLabel>
+              <div className={stepStyles.resendRow}>
+                <GhostButton
                   onClick={partner.resendOtp}
                   disabled={
                     partnerBlocked || partner.state.cooldownRemaining > 0
                   }
-                  className="rounded-md border border-hairline px-3 py-1.5 text-sm disabled:opacity-50"
-                  data-testid="partner-resend"
+                  testId="partner-resend"
                 >
                   {t.resend}
-                </button>
-                <button
-                  type="button"
+                </GhostButton>
+                <EditLinkButton
                   onClick={partner.backToPhone}
                   disabled={partner.state.busy}
-                  className="text-sm underline"
-                  data-testid="partner-edit-number"
+                  testId="partner-edit-number"
                 >
                   {t.backToEdit}
-                </button>
+                </EditLinkButton>
               </div>
-            </>
+            </div>
           )}
 
-          {partner.state.stage === "phone" &&
-            partner.state.cooldownRemaining > 0 && (
-              <p
-                className="mb-2 text-sm text-txt-sub"
-                data-testid="partner-cooldown"
-              >
-                {t.resendIn(partner.state.cooldownRemaining)}
+          {/* The step's status lines. No atom owns these - they are the
+          wizard's attempts treatment on hand-marked elements, and the
+          lockout deliberately has no stage guard so it renders on both. */}
+          <div className={stepStyles.section}>
+            {partner.state.stage === "phone" &&
+              partner.state.cooldownRemaining > 0 && (
+                <p
+                  className="mb-2 text-sm text-txt-sub"
+                  data-testid="partner-cooldown"
+                >
+                  {t.resendIn(partner.state.cooldownRemaining)}
+                </p>
+              )}
+            {partner.state.challenge === "locked" && (
+              <p className={stepStyles.attempts} data-testid="partner-lockout">
+                {t.lockout(Math.ceil(partner.state.lockoutRemaining / 60))}
               </p>
             )}
-          {partner.state.challenge === "locked" && (
-            <p
-              className="mb-2 text-sm text-danger"
-              data-testid="partner-lockout"
-            >
-              {t.lockout(Math.ceil(partner.state.lockoutRemaining / 60))}
-            </p>
-          )}
-          {partner.state.stage === "otp" &&
-            partner.state.cooldownRemaining > 0 &&
-            partner.state.challenge !== "locked" && (
-              <p
-                className="mb-2 text-sm text-txt-sub"
-                data-testid="partner-resend-cooldown"
-              >
-                {t.resendIn(partner.state.cooldownRemaining)}
-              </p>
-            )}
-          {partner.state.stage === "otp" &&
-            partner.state.challenge === "pending" && (
-              <p
-                className="mb-2 text-sm text-txt-sub"
-                data-testid="partner-attempts"
-              >
-                {partner.state.attemptsLeft > 0
-                  ? t.attemptsLeft(partner.state.attemptsLeft)
-                  : t.noAttempts}
-              </p>
-            )}
-          {partner.state.lastError ? (
-            <p
-              role="alert"
-              className="mb-2 text-sm text-danger"
-              data-testid="partner-error"
-            >
-              {partner.state.lastError}
-            </p>
-          ) : null}
-          {partner.state.lastNotice ? (
-            <p
-              className="mb-2 text-sm text-txt-sub"
-              data-testid="partner-notice"
-            >
-              {partner.state.lastNotice}
-            </p>
-          ) : null}
-          {partner.state.stage === "otp" &&
-            partner.demoOtp !== null &&
-            partner.state.otpSends > 0 && (
-              <div
-                role="status"
-                data-testid="partner-demo-banner"
-                className="mb-2 rounded-md border border-hairline bg-surface px-3 py-2 text-sm"
-              >
-                {t.demoOtp(partner.demoOtp)}
-              </div>
-            )}
+            {partner.state.stage === "otp" &&
+              partner.state.cooldownRemaining > 0 &&
+              partner.state.challenge !== "locked" && (
+                <p
+                  className={stepStyles.attempts}
+                  data-testid="partner-resend-cooldown"
+                >
+                  {t.resendIn(partner.state.cooldownRemaining)}
+                </p>
+              )}
+            {partner.state.stage === "otp" &&
+              partner.state.challenge === "pending" && (
+                <p
+                  className={stepStyles.attempts}
+                  data-testid="partner-attempts"
+                >
+                  {partner.state.attemptsLeft > 0
+                    ? t.attemptsLeft(partner.state.attemptsLeft)
+                    : t.noAttempts}
+                </p>
+              )}
+            <ErrorMessage
+              message={partner.state.lastError}
+              testId="partner-error"
+            />
+            <NoticeMessage
+              message={partner.state.lastNotice}
+              testId="partner-notice"
+            />
+            {partner.state.stage === "otp" &&
+              partner.demoOtp !== null &&
+              partner.state.otpSends > 0 && (
+                // The notice treatment, not the error one, and still a live
+                // region: the code arrives asynchronously, so the announcement
+                // is the only thing that reaches a screen reader.
+                <NoticeMessage
+                  message={t.demoOtp(partner.demoOtp)}
+                  role="status"
+                  testId="partner-demo-banner"
+                />
+              )}
+          </div>
         </>
       )}
 
@@ -832,18 +821,17 @@ export function StaffLoginForm({
       own copy instead of falling through to the phone step's "Get verification
       code". */}
       {flowTerminal ? null : (
-        <button
+        <PrimaryButton
           type="submit"
-          data-testid="staff-submit"
+          testId="staff-submit"
           disabled={isOperatorMode || isMfaStep ? loading : partnerBlocked}
-          className="mt-1 w-full rounded-md bg-primary px-4 py-2 font-semibold text-on-accent disabled:opacity-50"
         >
           {staffSubmitLabel(t, {
             isMfaStep,
             isOperatorMode,
             stage: partner.state.stage,
           })}
-        </button>
+        </PrimaryButton>
       )}
     </form>
   );
