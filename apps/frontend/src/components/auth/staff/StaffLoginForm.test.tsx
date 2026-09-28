@@ -42,6 +42,8 @@ import {
   verifyOtp,
 } from "@/lib/auth/api";
 import { STRINGS } from "@/lib/i18n/dictionaries";
+import type { DoctorProfileView } from "@/lib/doctor/api";
+import { HANDOFF_MINIMUM_DWELL_MS } from "@/lib/auth/useHandoffNavigation";
 import type {
   PartnerMeView,
   PartnerStatus,
@@ -158,8 +160,9 @@ afterEach(() => {
   cleanup();
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
-  // #566: the countdown test fakes the tick only; without this the fake
-  // interval would outlive the suite it was installed for.
+  // #566: the handoff tests below and in the next block fake the handoff's own
+  // clocks; without this the fake interval would outlive the suite it was
+  // installed for.
   vi.useRealTimers();
   vi.resetAllMocks();
 });
@@ -208,6 +211,34 @@ const WRONG_CODE: PartnerVerifyResult = {
   attempts_left: 4,
   lockout_remaining_seconds: null,
 };
+
+// The private doctor projection the handoff's fact rows are built from. The
+// full shape is spelled out because the client guards it, and only two fields
+// are ever interesting to a test - so `profile.practice_name` and
+// `profile.specialty` are the knobs, by way of the overrides.
+function doctorProfile(
+  overrides: Partial<DoctorProfileView> = {},
+): DoctorProfileView {
+  return {
+    partner_id: 7,
+    photo_ref: null,
+    practice_name: "Kumar Clinic",
+    specialty: "General physician",
+    verified: true,
+    practice_address: "12 MG Road",
+    practice_latitude: 12.9716,
+    practice_longitude: 77.5946,
+    area: "Indiranagar",
+    languages: ["English", "Kannada"],
+    experience_years: 9,
+    about: null,
+    consultation_fee: 50000,
+    availability: null,
+    credentials: [],
+    notification_preferences: {},
+    ...overrides,
+  };
+}
 
 function typePartnerPhone(digits = "9876543210") {
   fireEvent.change(screen.getByTestId("partner-phone"), {
@@ -269,6 +300,23 @@ function stubUnreachableProfileRead() {
   vi.stubGlobal(
     "fetch",
     vi.fn().mockRejectedValue(new TypeError("no network in unit tests")),
+  );
+}
+
+// #579: the same read, ANSWERED instead of made to fail - the only way to get
+// practice and specialty rows onto the handoff, since every other test in this
+// file lets this read degrade to nulls. A stubbed transport rather than a
+// module mock, so the rest of the suite keeps reaching the real client and its
+// real shape guard: the projection below is the full shape precisely because
+// that guard is what rejects a partial one. The client reads a bare JSON body.
+function stubProfileRead(profile: DoctorProfileView) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve(profile),
+    }),
   );
 }
 
@@ -1161,6 +1209,22 @@ describe("StaffLoginForm - partner code step", () => {
       // line, and no navigation to a console path.
       expect(screen.getByRole("status").textContent).not.toMatch(/\d/);
       expect(mockRouterReplace).not.toHaveBeenCalled();
+      // #579 AC-9: the flow is terminal here too, so the handoff is genuinely
+      // mounted - the ticket's "never rendered" is a statement about the
+      // browser, where the `location.replace` above swaps the document and takes
+      // the tree with it, not about a tree that only a mocked replace keeps
+      // alive. What must hold in BOTH worlds is that no console destination is
+      // engaged: `landing` is never set, so readiness is never satisfied, and
+      // the handoff's one control - wired to the go-now callback, not to the
+      // navigate routine - cannot be a way around that. This is the assertion
+      // that fails if a press ever latches a navigation the destination read
+      // merely happened not to be guarding.
+      expect(
+        screen.getByRole("heading", { name: "Identity verified" }),
+      ).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Go to Dashboard" }));
+      expect(mockRouterReplace).not.toHaveBeenCalled();
+      expect(mockLocationReplace).toHaveBeenCalledWith(expected);
     },
   );
 
@@ -1403,11 +1467,24 @@ describe("StaffLoginForm - partner code step", () => {
     // returned null while `landing` was unset, so the same failure rendered a
     // blank card under a live submit button - and the test above, which only
     // ever read the notice, could not tell the two apart.
+    const alert = screen.getByRole("alert");
+    // The envelope explanation AND its correlation reference, not the reference
+    // alone: an alert carrying only a trace id would satisfy the waitFor above
+    // and tell the partner nothing. (Which copy a NETWORK_ERROR maps to is the
+    // error mapper's business, pinned in its own suite.)
+    expect(alert).toHaveTextContent(t.invalidCredentials);
+    expect(alert).toHaveTextContent("tr-landing");
     expect(
       screen.getByRole("heading", { name: "Identity verified" }),
     ).toBeInTheDocument();
     expect(screen.queryByTestId("staff-submit")).not.toBeInTheDocument();
     expect(screen.queryByTestId("partner-otp")).not.toBeInTheDocument();
+    expect(mockLocationReplace).not.toHaveBeenCalled();
+    // #579 AC-8: a destination that never resolves is a flow that is never
+    // ready, so it navigates nothing - and the button, which is the one control
+    // on this screen, must not be the way around it.
+    fireEvent.click(screen.getByRole("button", { name: "Go to Dashboard" }));
+    expect(mockRouterReplace).not.toHaveBeenCalled();
     expect(mockLocationReplace).not.toHaveBeenCalled();
   });
 });
@@ -1455,51 +1532,6 @@ describe("StaffLoginForm - verified handoff on the OTP stage (#566)", () => {
     // Counted, not just absent-by-name: DoneScreen brings its own h1, so a
     // leftover page heading would leave two on the document.
     expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
-  });
-
-  it("holds the countdown until the destination is in hand, then fires it exactly once (#566 AC-3)", async () => {
-    // Fake the tick only. DoneScreen counts down on setInterval; faking the
-    // rest of the clock would stall the real doctor-profile read that resolves
-    // the destination, and this test needs that read to actually land.
-    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
-    stubUnreachableProfileRead();
-    const destination = holdDestinationRead();
-    await completePartnerLoginOnPage();
-    await destination.reached;
-    await act(async () => {});
-
-    // The negative half, and the half that matters: the resume seam has long
-    // settled but the destination has not, so nothing may move. Wiring the
-    // countdown to the resume seam alone passes every other test here and fails
-    // this one - the countdown would run for seconds with no target to reach.
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(DONE_SCREEN_COUNTDOWN_SECONDS * 2000);
-    });
-    expect(screen.getByRole("progressbar")).toHaveAttribute(
-      "aria-valuenow",
-      String(DONE_SCREEN_COUNTDOWN_SECONDS),
-    );
-    expect(screen.getByRole("status").textContent).not.toMatch(/\d/);
-    expect(mockRouterReplace).not.toHaveBeenCalled();
-    // The active path is never a hard reload: a released countdown with no
-    // destination must not fall through to one either.
-    expect(mockLocationReplace).not.toHaveBeenCalled();
-    // Started on the session, not on the resolved destination, and still one
-    // call: the handoff is on screen and the resume seam has already run.
-    expect(authState.resumeSession).toHaveBeenCalledTimes(1);
-
-    // Both seams settled: the countdown is released, and it navigates once.
-    await act(async () => {
-      destination.settle("Active");
-    });
-    await waitFor(() => {
-      expect(screen.getByRole("status").textContent).toMatch(/\d/);
-    });
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(DONE_SCREEN_COUNTDOWN_SECONDS * 1000);
-    });
-    expect(mockRouterReplace).toHaveBeenCalledTimes(1);
-    expect(mockRouterReplace).toHaveBeenCalledWith("/doctor");
   });
 
   it("names every step's submit label, the terminal one included (#566 AC-5)", async () => {
@@ -1560,6 +1592,249 @@ describe("StaffLoginForm - verified handoff on the OTP stage (#566)", () => {
     await screen.findByTestId("mfa-input");
     expect(screen.getByTestId("staff-submit")).toHaveTextContent(t.mfaSubmit);
   });
+});
+
+// #579: the handoff leaves on READINESS, not on a countdown. The frozen screen
+// this replaces shipped because nothing in the suite ever looked at the surface
+// or the state between the destination resolving and the old five seconds
+// expiring - every handoff test here was a `waitFor` on the settled end state.
+// So these tests drive the gap directly: hold the destination read open, assert
+// the INTERMEDIATE state synchronously, then let it land and assert the
+// navigation. Deterministic throughout - no polling and no `waitFor` on the end
+// state - and nothing here asserts on the countdown the shared component still
+// owns, because it is unreachable from this flow (#581 removes it for both
+// hosts). What the progress output DOES carry is asserted as the absence of
+// digits, which is the guarantee the ticket makes.
+describe("StaffLoginForm - the handoff leaves on readiness (#579)", () => {
+  const goToDashboard = () =>
+    screen.getByRole("button", { name: "Go to Dashboard" });
+
+  // Drive the flow to the instant the handoff is up and the destination read is
+  // still held open, with both of the handoff's clocks under the test's control.
+  // The clocks are faked only here, and only AFTER the code step: the helper
+  // reaches it with `findBy`, which polls on the real clock. Nothing downstream
+  // needs the real clock - the destination read is a promise the test resolves
+  // itself, and the handoff's own countdown cannot win the race.
+  //
+  // A test installs whatever it needs to differ (a gated session resume, a
+  // profile read that answers) BEFORE calling this, because the flow starts
+  // inside it.
+  async function holdDestinationOnTheHandoff() {
+    const destination = holdDestinationRead();
+    await completePartnerLoginOnPage();
+    await destination.reached;
+    vi.useFakeTimers({
+      toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"],
+    });
+    await act(async () => {});
+    return destination;
+  }
+
+  it("navigates to the console exactly once, and only once the destination lands (#579 AC-2/AC-3)", async () => {
+    stubProfileRead(doctorProfile());
+    const destination = await holdDestinationOnTheHandoff();
+
+    // AC-2, the negative half and the one that matters. The session-resume seam
+    // has long settled - `resumeSettled` is true - but the destination has not,
+    // so nothing may move. Advancing twice the old five seconds proves it is
+    // not the old countdown's clock that decides: a readiness boolean of just
+    // `resumeSettled` fails exactly here and passes every other test here.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(DONE_SCREEN_COUNTDOWN_SECONDS * 2000);
+    });
+    expect(mockRouterReplace).not.toHaveBeenCalled();
+    // The active path is never a hard reload, whether or not the destination is
+    // in hand.
+    expect(mockLocationReplace).not.toHaveBeenCalled();
+    // Started on the session, not on the resolved destination, and still one
+    // call: the handoff is on screen and the resume seam has already run.
+    expect(authState.resumeSession).toHaveBeenCalledTimes(1);
+    // The progress output carries no countdown digits while there is nowhere to
+    // go, and the bar is still at its opening value: nothing is counting down
+    // towards a destination that does not exist.
+    expect(screen.getByRole("status").textContent).not.toMatch(/\d/);
+
+    // AC-3: both signals settled, so the leave happens - once, to the resolved
+    // console route, through the framework router rather than a document swap.
+    await act(async () => {
+      destination.settle("Active");
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HANDOFF_MINIMUM_DWELL_MS);
+    });
+    expect(mockRouterReplace).toHaveBeenCalledTimes(1);
+    expect(mockRouterReplace).toHaveBeenCalledWith("/doctor");
+    expect(mockLocationReplace).not.toHaveBeenCalled();
+  });
+
+  it("leaves as soon as a slow destination finally lands, with the button live throughout (#579 AC-5)", async () => {
+    // The regression case, and the reason this ticket exists. The reported
+    // screen was a handoff whose five seconds had expired while the
+    // destination was still in flight: the timer had stopped, the auto-redirect
+    // had stopped with it, and the button was wired to a routine that refused.
+    // None of the three can reach here now - the leave is a consequence of
+    // readiness rather than of a clock expiring, and the button cannot be
+    // refused - so the test holds the read open well past the old duration and
+    // insists the flow still leaves.
+    stubProfileRead(doctorProfile());
+    const destination = await holdDestinationOnTheHandoff();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(DONE_SCREEN_COUNTDOWN_SECONDS * 2000);
+    });
+    // Mid-hold, the handoff is still a live surface with a working control -
+    // and pressing it navigates nowhere, because there is nowhere yet.
+    expect(goToDashboard()).toBeEnabled();
+    fireEvent.click(goToDashboard());
+    expect(mockRouterReplace).not.toHaveBeenCalled();
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(
+      "Identity verified",
+    );
+
+    // The read finally lands, a long time after the old countdown would have
+    // expired. The press made above is still remembered, so the leave is
+    // immediate - and it happens exactly once.
+    await act(async () => {
+      destination.settle("Active");
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(mockRouterReplace).toHaveBeenCalledTimes(1);
+    expect(mockRouterReplace).toHaveBeenCalledWith("/doctor");
+    expect(mockLocationReplace).not.toHaveBeenCalled();
+  });
+
+  it("cannot push the route before the session is in state (#579 AC-4)", async () => {
+    stubProfileRead(doctorProfile());
+    // The destination resolves on demand, and so does the session resume, so the
+    // two signals can be separated. This is the ordering the ticket asks for -
+    // the resume call precedes the route push - read as a consequence rather
+    // than as an invocation order the memoized resume would satisfy anyway.
+    let releaseResume!: () => void;
+    const resumeGate = new Promise<void>((resolve) => {
+      releaseResume = resolve;
+    });
+    authState.resumeSession.mockImplementation(() => resumeGate);
+    const destination = await holdDestinationOnTheHandoff();
+
+    // The destination is in hand and the session is not: nothing may navigate,
+    // however long the flow waits. A destination-only readiness boolean fails
+    // here.
+    await act(async () => {
+      destination.settle("Active");
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HANDOFF_MINIMUM_DWELL_MS * 2);
+    });
+    expect(mockRouterReplace).not.toHaveBeenCalled();
+    expect(mockLocationReplace).not.toHaveBeenCalled();
+
+    // The session lands, and the route is pushed immediately behind it - once,
+    // and to the resolved console route.
+    await act(async () => {
+      releaseResume();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HANDOFF_MINIMUM_DWELL_MS);
+    });
+    expect(mockRouterReplace).toHaveBeenCalledTimes(1);
+    expect(mockRouterReplace).toHaveBeenCalledWith("/doctor");
+  });
+
+  it("honours the button at once, never before the destination, and never twice (#579 AC-6)", async () => {
+    stubProfileRead(doctorProfile());
+    const destination = await holdDestinationOnTheHandoff();
+
+    // Pressed while there is nowhere to go, and pressed again: honoured as an
+    // ask, not as a navigation. A button wired straight to the navigate routine
+    // used to swallow both.
+    fireEvent.click(goToDashboard());
+    fireEvent.click(goToDashboard());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(DONE_SCREEN_COUNTDOWN_SECONDS * 2000);
+    });
+    expect(mockRouterReplace).not.toHaveBeenCalled();
+
+    // The destination lands, and the remembered ask means the leave skips the
+    // dwell entirely.
+    await act(async () => {
+      destination.settle("Active");
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(mockRouterReplace).toHaveBeenCalledTimes(1);
+
+    // The button keeps being pressed after the navigation has begun, and the
+    // handoff's own countdown is given all the time it once owned: the call
+    // count does not move. This is the only double-navigation hazard left, and
+    // it is the one that actually reaches the host - the handoff component's
+    // zero tick and the hook's schedule both call the same callback.
+    fireEvent.click(goToDashboard());
+    fireEvent.click(goToDashboard());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(DONE_SCREEN_COUNTDOWN_SECONDS * 2000);
+    });
+    expect(mockRouterReplace).toHaveBeenCalledTimes(1);
+  });
+
+  // Two halves of one rule, stated as rows: what the landing knows, and the
+  // values that must be on screen because of it.
+  const factRows: Array<[string, Partial<DoctorProfileView>, string[]]> = [
+    [
+      "a profile that names the practice and specialty",
+      {},
+      ["Kumar Clinic", "General physician", "Doctor console"],
+    ],
+    [
+      "a profile with neither",
+      { practice_name: null, specialty: null },
+      ["Doctor console"],
+    ],
+  ];
+
+  it.each(factRows)(
+    "shows the fact rows for %s, and skips whatever is absent (#579 AC-7)",
+    async (_case, profileOverrides, expectedValues) => {
+      stubProfileRead(doctorProfile(profileOverrides));
+      const destination = await holdDestinationOnTheHandoff();
+
+      // AC-7, the never-empty half: the bar and its message are up before any
+      // fact is known, so the screen is never blank while the reads land.
+      expect(screen.getByRole("progressbar")).toBeInTheDocument();
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "Opening your dashboard",
+      );
+      expect(screen.queryByText("Practice")).not.toBeInTheDocument();
+
+      await act(async () => {
+        destination.settle("Active");
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
+
+      // Every known value is on screen, and the destination row is always
+      // there - it is the one fact the landing always knows.
+      for (const value of expectedValues) {
+        expect(screen.getByText(value)).toBeInTheDocument();
+      }
+      expect(screen.getByText("Destination")).toBeInTheDocument();
+      // Nothing rendered as a blank: an absent practice or specialty drops its
+      // whole row, label included, rather than showing an empty one.
+      for (const [label, value] of [
+        ["Practice", profileOverrides.practice_name],
+        ["Specialty", profileOverrides.specialty],
+      ] as const) {
+        if (value === null) {
+          expect(screen.queryByText(label)).toBeNull();
+        } else {
+          expect(screen.getByText(label)).toBeInTheDocument();
+        }
+      }
+    },
+  );
 });
 
 describe("StaffLoginForm - partner demo OTP banner", () => {

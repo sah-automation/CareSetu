@@ -32,6 +32,7 @@ import {
 } from "@/lib/auth/staff-routing";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { saveSession } from "@/lib/auth/session";
+import { useHandoffNavigation } from "@/lib/auth/useHandoffNavigation";
 import { fetchDoctorProfile } from "@/lib/doctor/api";
 import { STRINGS, type StaffAuthStrings } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
@@ -93,7 +94,7 @@ async function completeStaffLogin(
  * "the destination is still in flight", not "there is nothing to show".
  */
 interface DoctorLanding {
-  /** The post-login destination the countdown and the CTA both route to. */
+  /** The post-login destination the single exit from the handoff routes to. */
   target: string;
   practiceName: string | null;
   specialty: string | null;
@@ -211,14 +212,12 @@ export function StaffLoginForm({
   // unreadable status and every non-console landing route immediately).
   const [landing, setLanding] = useState<DoctorLanding | null>(null);
   // #551: the single post-login resume seam. Started once the partner session
-  // exists and awaited by BOTH the countdown and the CTA, so the countdown
-  // starts only after the session-resume call succeeds and a fast CTA click
-  // cannot navigate before identity lands in state. `landedRef` keeps the
-  // routine idempotent, so a click during the countdown and the tick at zero
-  // cannot both navigate. #566: keyed on the session, not on the resolved
-  // destination, so it is an independent signal rather than a mirror of
-  // `landing` - the countdown gate is the conjunction of the two, not this
-  // alone.
+  // exists and awaited by the single exit from the handoff, so nothing can
+  // navigate before identity lands in state. `landedRef` keeps that routine
+  // idempotent, so a click, a tick and a hook-scheduled leave cannot all
+  // navigate. #566: keyed on the session, not on the resolved destination, so
+  // it is an independent signal rather than a mirror of `landing` - which is why
+  // #579's readiness gate is the conjunction of the two, not this alone.
   const resumeRef = useRef<Promise<void> | null>(null);
   const landedRef = useRef(false);
   const [resumeSettled, setResumeSettled] = useState(false);
@@ -271,14 +270,42 @@ export function StaffLoginForm({
     };
   }, [partner.state.session, resumeOnce]);
 
-  // The countdown at zero and the always-visible CTA share this one routine.
+  // #579: the one routine that leaves the handoff, whichever way the leave was
+  // scheduled. It no longer refuses a missing destination. That refusal existed
+  // only because a countdown used to call it on a timer, and it is what made
+  // the reported frozen screen possible - the timer would expire, stop, and
+  // leave a button wired to a routine that said no. Readiness is now the
+  // conjunction that guarantees a destination is in hand before the hook calls
+  // this at all, so no return-early guard belongs here: a guard would swallow a
+  // broken invariant and freeze the screen exactly as the refusal did. The throw
+  // below is an assert, not a guard - unreachable while the wiring holds, and
+  // loud if it ever is. No retry and no re-arm either: the fix is structural.
   const landOnConsole = useCallback(() => {
-    if (landedRef.current || landing === null) {
+    if (landedRef.current) {
       return;
+    }
+    // This line narrows `landing` for the promise below, and throws loud if the
+    // readiness conjunction the hook is fed ever stops including `landing !==
+    // null`. The regression test for a slow destination fails if that
+    // conjunction is weakened to the resume signal alone, which is the only way
+    // an assert that should be unreachable could be reached.
+    if (landing === null) {
+      throw new Error("landOnConsole called before the destination resolved");
     }
     landedRef.current = true;
     void resumeOnce().then(() => router.replace(landing.target));
   }, [landing, resumeOnce, router]);
+
+  // #579: "ready" is the conjunction the flow already implied - the in-flow
+  // session resume has settled AND the post-login destination has resolved -
+  // and it is stated once, here, because two independent signals are what makes
+  // it a conjunction. The handoff's own gate and the navigation hook read this
+  // same boolean, so they cannot disagree.
+  const handoffReady = resumeSettled && landing !== null;
+  // The hook owns WHEN the handoff leaves; this flow owns what ready means. It
+  // returns the "go now" callback the CTA is wired to, so a press is honoured at
+  // once but still never before the destination is in hand.
+  const goToDashboard = useHandoffNavigation(handoffReady, landOnConsole);
 
   // The immediate active-partner landing that shows no done screen: same
   // resume-then-navigate ordering, so it too never mounts a route before the
@@ -648,22 +675,24 @@ export function StaffLoginForm({
         // destination. Destination resolution is no longer a render
         // precondition: while the three post-login reads are in flight the
         // handoff is already up, reporting a pending state and holding its
-        // countdown back until there is genuinely somewhere to count down to.
+        // progress output digit-free until there is genuinely somewhere to go.
         // This is what the patient flow's terminal step already does, and what
         // the partner flow's old `landing !== null` wrapper did not: that
         // wrapper returned null for the whole window, which is the blank card
         // with a live submit button that was reported.
         //
-        // #537 still holds: the countdown owns the auto-redirect and "Go to
-        // Dashboard" routes through the same resume-then-navigate routine, both
-        // with the framework router rather than a hard reload.
+        // #537 still holds: the leave routes through the same resume-then-
+        // navigate routine and with the framework router rather than a hard
+        // reload. #579: it is no longer a countdown that decides when - the
+        // shared navigation hook does, the moment this conjunction is true, and
+        // the countdown the component still owns is unreachable from here.
         //
         // AC-6 is carried by the routing, not by a second render condition: a
         // pending or rejected partner's route read resolves to a `location.
-        // replace` that swaps the document, and the countdown and CTA below both
-        // no-op while `landing` is null, so no console destination is ever
-        // engaged for them. A render-level latch here would mean editing the
-        // three exit branches, which the ticket freezes.
+        // replace` that swaps the document, and the conjunction below is never
+        // true for them because `landing` is never set, so no console
+        // destination is ever engaged. A render-level latch here would mean
+        // editing the three exit branches, which the ticket freezes.
         <DoneScreen
           title={t.verifiedTitle}
           body={t.verifiedBody}
@@ -671,10 +700,12 @@ export function StaffLoginForm({
           openingInLabel={doneScreenT.openingIn}
           goToDashboardLabel={doneScreenT.goToDashboard}
           // The conjunction, and it is load-bearing: the session-resume seam
-          // is one call, the destination is a three-read chain, and the
-          // countdown must not be released by either one alone.
-          resumePending={!resumeSettled || landing === null}
-          onGoToDashboard={landOnConsole}
+          // is one call, the destination is a three-read chain, and the leave
+          // must not be released by either one alone.
+          resumePending={!handoffReady}
+          // The hook's go-now callback, NOT the navigate routine: a press is
+          // honoured at once, and still never before the destination is in hand.
+          onGoToDashboard={goToDashboard}
           facts={landingFacts}
         />
       ) : (
