@@ -34,6 +34,7 @@ import * as axe from "axe-core";
 
 import { AppShell } from "./AppShell";
 import { maskedPhone } from "./BottomTabs";
+import { DoctorProfileProvider } from "@/lib/doctor/DoctorProfileContext";
 import {
   ProfileProvider,
   useOptionalProfile,
@@ -119,9 +120,10 @@ vi.mock("@/lib/care/api", () => ({
 
 const getOpenCases = vi.mocked(listOpenCases);
 
-// #569: the doctor shell reads its own private profile projection once and
-// streams the photo bytes for the account avatar. The whole doctor module is
-// mocked for the same unit-scoped reason as the care module above.
+// #569/#583: the doctor profile projection and the bytes behind its avatar. The
+// read itself moved into the shared DoctorProfileProvider (#583), which the
+// (doctor) route-group layout mounts above this shell; the whole doctor module
+// is mocked for the same unit-scoped reason as the care module above.
 vi.mock("@/lib/doctor/api", () => ({
   fetchDoctorProfile: vi.fn(),
   fetchDoctorProfilePhoto: vi.fn(),
@@ -130,9 +132,10 @@ vi.mock("@/lib/doctor/api", () => ({
 const getDoctorProfile = vi.mocked(fetchDoctorProfile);
 const getDoctorPhoto = vi.mocked(fetchDoctorProfilePhoto);
 
-// #569: the projection as the backend answers it. `practice_name` is the only
-// human-readable name a doctor has anywhere in the frontend, which is why the
-// shell takes the whole view rather than the photo ref alone.
+// #569: the projection the shared doctor profile source hydrates from.
+// `photo_ref` is an opaque object key in the doctor's own namespace
+// (ADR-0020 D1) and `practice_name` is the only human-readable name a doctor
+// has anywhere in the frontend, which is why the source takes the whole view.
 function doctorProfileWith(photoRef: string | null): DoctorProfileView {
   return {
     partner_id: 7,
@@ -937,27 +940,43 @@ describe("AppShell doctor Cases count pill (PHASE-8.1 T8, #483)", () => {
   });
 });
 
-// #569: the doctor shell's own profile projection, fetched once per shell beside
-// the open-case count and threaded down to the account menu, which then reads
-// the photo bytes for the disc. The point of the whole ticket is that the leaf
-// adds no request of its own, so the end-to-end counts are the load-bearing
-// assertions: one projection read per doctor shell, one byte read for two
-// avatars, and nothing at all on any other shell.
-describe("AppShell feeds the doctor account avatar (#569)", () => {
+// #583: the doctor account avatar in the shell chrome, fed by the shared doctor
+// profile source the (doctor) route-group layout mounts above the shell. The
+// shell no longer reads the projection and holds no identity data at all, so
+// what is left here is the end-to-end property of one whole render: the source's
+// one read hydrates the disc, both avatars share one byte read, a failed read
+// degrades to the person icon, and a shell with no provider mounted - every
+// partner and operator shell - starts no read at all.
+//
+// The read's own contract (one read per visit, the identity-keyed remount, the
+// exact degrade warning, the adopt seam) belongs to the source's own suite; the
+// source-shape pin that used to assert on AppShell.tsx's own text moved there
+// with it. The cross-surface suite is what proves the chrome and the Profile
+// page cannot disagree.
+describe("AppShell renders the doctor account avatar from the shared source (#583)", () => {
+  // The doctor shell is the one shell whose layout mounts the source, so it is
+  // the only render here that wraps it. The other roles deliberately do not.
   function renderShellFor(role: Role) {
     // A production-shaped doctor session: one `partner` role, doctor-ness from
     // the shell alone.
     authState.roles = ["partner"];
     authState.selectedRole = "partner";
     mockPathname.mockReturnValue(`/${role}`);
-    return render(
+    const shell = (
       <AppShell role={role}>
         <h1>Workspace</h1>
-      </AppShell>,
+      </AppShell>
+    );
+    return render(
+      role === "doctor" ? (
+        <DoctorProfileProvider>{shell}</DoctorProfileProvider>
+      ) : (
+        shell
+      ),
     );
   }
 
-  it("reads the doctor's profile once and hydrates the disc from it", async () => {
+  it("hydrates the disc from the shared source's one read", async () => {
     getDoctorProfile.mockResolvedValue(
       doctorProfileWith("doctor/7/photo-1.enc"),
     );
@@ -966,8 +985,12 @@ describe("AppShell feeds the doctor account avatar (#569)", () => {
     const trigger = screen.getByTestId("account-menu");
     const img = await imageIn(trigger);
     expect(img.getAttribute("src")).toMatch(/^blob:/);
-    // One projection read per shell, and one byte read for the disc - not a
-    // re-read per surface, and not a second projection read to get a name.
+    // The stored key is opaque and never browser-reachable (ADR-0020 D1), so a
+    // src that carried it would be the whole defect back.
+    expect(img.getAttribute("src")).not.toContain("doctor/7/photo-1.enc");
+    // One read for this whole render - not one for the shell and another for the
+    // source, and not a second read to get the practice name. The shell adds
+    // none, so the count is exactly the source's.
     expect(getDoctorProfile).toHaveBeenCalledTimes(1);
     expect(getDoctorPhoto).toHaveBeenCalledTimes(1);
   });
@@ -997,12 +1020,9 @@ describe("AppShell feeds the doctor account avatar (#569)", () => {
     renderShellFor("doctor");
 
     // Let the rejection settle before asserting the degrade, or this would pass
-    // on a feed that has not answered yet.
+    // on a feed that has not answered yet. The exact warning prefix is the
+    // source's own suite to pin, now that the read lives in its module.
     await waitFor(() => expect(warn).toHaveBeenCalled());
-    expect(warn).toHaveBeenCalledWith(
-      "[shell] doctor profile failed to load:",
-      expect.any(Error),
-    );
     const trigger = screen.getByTestId("account-menu");
     expect(trigger).not.toHaveTextContent("90");
     expect(trigger.querySelector("svg")).not.toBeNull();
@@ -1012,6 +1032,10 @@ describe("AppShell feeds the doctor account avatar (#569)", () => {
     expect(getDoctorPhoto).not.toHaveBeenCalled();
   });
 
+  // The read is scoped structurally, not by a runtime role check: the source
+  // mounts only in the (doctor) group layout, so a partner or operator shell has
+  // no provider at all and the account menu's optional accessor yields null.
+  // There is no code path in which one of them can start a doctor read.
   it("reads no doctor profile on the other shells", async () => {
     for (const role of ["patient", "partner", "operator"] as const) {
       const { unmount } = renderShellFor(role);
@@ -1023,19 +1047,6 @@ describe("AppShell feeds the doctor account avatar (#569)", () => {
 
     expect(getDoctorProfile).not.toHaveBeenCalled();
     expect(getDoctorPhoto).not.toHaveBeenCalled();
-  });
-
-  // #569: the shell takes the WHOLE projection, not the photo ref alone.
-  // `practice_name` is the only human-readable name a doctor has anywhere in
-  // the frontend, and a second read to fetch it is the request this feed exists
-  // to remove. Nothing renders that name yet - #570 owns the identity header -
-  // so no behavioural test here could catch a narrowing of the prop; this pins
-  // the shape instead. Source-scoped, like the nav-config and #567 scans.
-  it("threads the whole profile projection from a single read", () => {
-    const source = readFileSync(join(__dirname, "AppShell.tsx"), "utf8");
-    expect(source).toMatch(/useDoctorProfile\([^)]*\): DoctorProfileView/);
-    // One projection read in the shell, and it is this one.
-    expect(source.match(/fetchDoctorProfile\(/g)).toHaveLength(1);
   });
 });
 

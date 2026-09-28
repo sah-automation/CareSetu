@@ -28,6 +28,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import type { ReactNode } from "react";
 import {
   describe,
   it,
@@ -49,6 +50,10 @@ import {
   useOptionalProfile,
 } from "@/lib/profile/ProfileContext";
 import { useProfilePhotoSource } from "@/lib/profile/useProfilePhotoSource";
+import {
+  DoctorProfileProvider,
+  useOptionalDoctorProfile,
+} from "@/lib/doctor/DoctorProfileContext";
 import type { StoredPatientProfile } from "@/lib/profile/api";
 import type { DoctorProfileView } from "@/lib/doctor/api";
 import { ApiError } from "@/lib/api-errors";
@@ -70,15 +75,20 @@ vi.mock("@/lib/profile/api", () => ({
   fetchPatientPhoto: profileApi.fetchPatientPhoto,
 }));
 
-// #569: the doctor's private photo bytes, read over the doctor transport the
-// shell-held projection resolves through. Mocked at the module boundary for the
-// same reason as the profile module: the menu must be able to fail a byte read
-// without HTTP.
+// #569/#583: the doctor's private photo bytes, read over the doctor transport
+// the shared profile source resolves through, and - since the read moved out of
+// the shell - the projection read itself. Mocked at the module boundary for the
+// same reason as the profile module: the menu must be able to seed a projection
+// and fail a byte read without HTTP. Both exports are needed: the account menu
+// reaches the photo reader directly, and it reaches the projection read
+// transitively through the shared source it now reads.
 const doctorApi = vi.hoisted(() => ({
+  fetchDoctorProfile: vi.fn(),
   fetchDoctorProfilePhoto: vi.fn(),
 }));
 
 vi.mock("@/lib/doctor/api", () => ({
+  fetchDoctorProfile: doctorApi.fetchDoctorProfile,
   fetchDoctorProfilePhoto: doctorApi.fetchDoctorProfilePhoto,
 }));
 
@@ -145,10 +155,10 @@ const PHOTO_PROFILE: StoredPatientProfile = {
   photo_ref: "https://cdn.example.test/me.jpg",
 };
 
-// #569: the projection the doctor shell reads once and hands the menu. `photo_ref`
+// #569: the projection the shared doctor profile source hydrates from. `photo_ref`
 // is an opaque object key in the doctor's own namespace (ADR-0020 D1) and
 // `practice_name` is the only human-readable name a doctor has anywhere in the
-// frontend, which is why the shell takes the whole view.
+// frontend, which is why the source takes the whole view.
 function doctorProfileWith(
   photoRef: string | null,
   practiceName: string | null = "Asha Clinic",
@@ -182,10 +192,23 @@ function setStoredSession(session: StoredSession) {
 // #567: every render names the shell it sits inside. The parameter is required
 // on purpose - a default would let a staff test silently land in the patient
 // branch, and would let a doctor test forget the very answer it is testing.
-function renderAccountMenu(shellRole: Role, doctorProfile?: DoctorProfileView) {
+// #583: `doctorProjection` seeds the shared doctor profile source, which the
+// (doctor) route-group layout mounts above the menu in production. Leaving it
+// undefined is the real state for every other shell, which mounts no source at
+// all and whose menu therefore reads nothing.
+function renderAccountMenu(
+  shellRole: Role,
+  doctorProjection?: DoctorProfileView,
+) {
   return render(
     <AuthProvider>
-      <AccountMenu shellRole={shellRole} doctorProfile={doctorProfile} />
+      {doctorProjection === undefined ? (
+        <AccountMenu shellRole={shellRole} />
+      ) : (
+        <DoctorProfileProvider>
+          <AccountMenu shellRole={shellRole} />
+        </DoctorProfileProvider>
+      )}
     </AuthProvider>,
   );
 }
@@ -200,25 +223,38 @@ function mockMeResponse(payload: unknown) {
 // seam. When `profile` is given, wrap in the real ProfileProvider so
 // hydration ordering is exercised (name/photo arrive async). `shellRole` is
 // the role of the shell the menu renders inside (#567).
-// #569: `doctorProfile` is the projection the doctor shell already read and
-// threaded down, hand-fed here so this leaf suite can exercise the doctor's
-// branch without standing up the shell. Passing it undefined is the real
-// state for every non-doctor shell, which never fetches one.
+// #583: `doctorProjection` seeds the shared doctor profile source the doctor's
+// branch now reads, standing in for the (doctor) route-group layout so this leaf
+// suite can exercise the doctor's branch without standing up the shell. Passing
+// it undefined is the real state for every non-doctor shell, which mounts no
+// source and therefore starts no read.
 async function renderClosedTrigger(
   mePayload: unknown,
   shellRole: Role,
   profile?: StoredPatientProfile | null,
-  doctorProfile?: DoctorProfileView,
+  doctorProjection?: DoctorProfileView,
 ) {
   setStoredSession(VALID_SESSION);
+  const menu = <AccountMenu shellRole={shellRole} />;
+  // Each source is named once and stacked, rather than spelled out again per
+  // combination: a doctor source exists only where a doctor projection was asked
+  // for, a patient source only where a patient profile was, and a shell with
+  // neither mounts no source at all - which is the state every non-doctor case
+  // runs in, and the reason `useOptionalDoctorProfile` exists.
+  const sources: ((node: ReactNode) => ReactNode)[] = [];
+  if (profile !== undefined) {
+    sources.push((node) => <ProfileProvider>{node}</ProfileProvider>);
+  }
+  if (doctorProjection !== undefined) {
+    sources.push((node) => (
+      <DoctorProfileProvider>{node}</DoctorProfileProvider>
+    ));
+  }
   const app = (
     <AuthProvider>
-      {profile !== undefined ? (
-        <ProfileProvider>
-          <AccountMenu shellRole={shellRole} doctorProfile={doctorProfile} />
-        </ProfileProvider>
-      ) : (
-        <AccountMenu shellRole={shellRole} doctorProfile={doctorProfile} />
+      {sources.reduceRight<ReactNode>(
+        (node, withSource) => withSource(node),
+        menu,
       )}
     </AuthProvider>
   );
@@ -228,6 +264,9 @@ async function renderClosedTrigger(
       profile,
     });
   }
+  if (doctorProjection !== undefined) {
+    doctorApi.fetchDoctorProfile.mockResolvedValue(doctorProjection);
+  }
   mockMeResponse(mePayload);
   render(app);
   const trigger = await waitFor(() =>
@@ -235,6 +274,11 @@ async function renderClosedTrigger(
   ).then(() => screen.getByTestId("account-menu"));
   if (profile !== undefined) {
     await waitFor(() => expect(profileApi.getProfile).toHaveBeenCalled());
+  }
+  if (doctorProjection !== undefined) {
+    await waitFor(() =>
+      expect(doctorApi.fetchDoctorProfile).toHaveBeenCalled(),
+    );
   }
   return trigger;
 }
@@ -270,13 +314,18 @@ function PhotoRefControls() {
 
 // #569: the seam's internal distinction is invisible in chrome - a definite
 // "no media" answer and a transport blip both render the same person icon, and
-// that is the point. This probe reads the *same* resolution the menu is showing
+// That is the point. This probe reads the *same* resolution the menu is showing
 // (one cached read per ref, so it adds no request) and reports which answer it
 // got, so the two can be told apart in a test without a production attribute
 // that exists only for the assertion.
-function PhotoAbsenceProbe({ photoRef }: { photoRef: string | null }) {
+function PhotoAbsenceProbe() {
+  // The probe reads the ref from the same shared source the menu reads it from
+  // rather than taking it as a prop, so it cannot hold a resolution the menu is
+  // not showing: it picks the ref up on the same commit the menu does, and the
+  // one cached read serves both.
+  const doctor = useOptionalDoctorProfile();
   const { absent } = useProfilePhotoSource(
-    photoRef,
+    doctor?.profile?.photo_ref ?? null,
     doctorApi.fetchDoctorProfilePhoto,
   );
   return <span data-testid="photo-absent">{String(absent)}</span>;
@@ -391,6 +440,11 @@ beforeEach(() => {
   profileApi.fetchPatientPhoto.mockResolvedValue(
     new Blob(["photo-bytes"], { type: "image/png" }),
   );
+  // #583: the shared doctor source reads the projection. Default to a profile
+  // with no photo, so the person-icon disc is the steady state and a doctor's
+  // tests that care about the photo re-seed it; the non-doctor tests never mount
+  // the source, so this default is never read on their behalf.
+  doctorApi.fetchDoctorProfile.mockResolvedValue(doctorProfileWith(null));
   doctorApi.fetchDoctorProfilePhoto.mockResolvedValue(
     new Blob(["doctor-photo-bytes"], { type: "image/png" }),
   );
@@ -752,15 +806,17 @@ describe("AccountMenu patient avatar trigger (#521)", () => {
       // test.
       doctorApi.fetchDoctorProfilePhoto.mockReset();
       doctorApi.fetchDoctorProfilePhoto.mockRejectedValue(rejection);
+      doctorApi.fetchDoctorProfile.mockResolvedValue(
+        doctorProfileWith("doctor/7/photo-1.enc"),
+      );
       setStoredSession(VALID_SESSION);
       mockMeResponse(ME_RESPONSE_PARTNER);
       render(
         <AuthProvider>
-          <AccountMenu
-            shellRole="doctor"
-            doctorProfile={doctorProfileWith("doctor/7/photo-1.enc")}
-          />
-          <PhotoAbsenceProbe photoRef="doctor/7/photo-1.enc" />
+          <DoctorProfileProvider>
+            <AccountMenu shellRole="doctor" />
+            <PhotoAbsenceProbe />
+          </DoctorProfileProvider>
         </AuthProvider>,
       );
       const trigger = screen.getByTestId("account-menu");

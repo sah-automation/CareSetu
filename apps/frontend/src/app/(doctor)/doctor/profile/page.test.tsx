@@ -21,6 +21,7 @@ import type { ReactNode } from "react";
 
 import DoctorProfilePage from "./page";
 import { ApiError } from "@/lib/api-errors";
+import { DoctorProfileProvider } from "@/lib/doctor/DoctorProfileContext";
 import {
   deleteDoctorProfilePhoto,
   fetchDoctorProfile,
@@ -68,6 +69,23 @@ vi.mock("@/lib/partner/api", async (importOriginal) => {
   return { ...mod, updateConsultationFee: vi.fn() };
 });
 
+// #583: the page no longer reads the projection for itself - the shared doctor
+// profile source does, once, and the page renders whatever that source holds.
+// The source keys its state on the doctor's identity, so this suite supplies one
+// directly: standing up the real AuthProvider would put an async /me between the
+// mount and the identity, and with it a remount and a second byte read, neither
+// of which belongs to what this suite is about.
+vi.mock("@/lib/auth/AuthContext", () => ({
+  useAuth: () => ({
+    user: { id: 7, phone: "+911234567890", roles: ["partner"] },
+    selectedRole: "partner",
+    switchRole: vi.fn(),
+    logout: vi.fn(),
+    isAuthenticated: true,
+    isLoading: false,
+  }),
+}));
+
 const t = STRINGS.en.doctorProfile;
 const hiT = STRINGS.hi.doctorProfile;
 const getProfile = vi.mocked(fetchDoctorProfile);
@@ -107,15 +125,27 @@ function profile(
   };
 }
 
+// #583: the page is rendered inside the shared doctor profile source, as the
+// (doctor) route-group layout does in production. The source owns the read, so
+// the only thing the page's own render needs seeded is what the source answers.
 async function renderReady(view: DoctorProfileView = profile()) {
   getProfile.mockResolvedValue(view);
-  render(<DoctorProfilePage />);
+  render(
+    <DoctorProfileProvider>
+      <DoctorProfilePage />
+    </DoctorProfileProvider>,
+  );
   await waitFor(() => screen.getByTestId("profile-details-form"));
 }
 
 let originalCreate: typeof URL.createObjectURL;
 let originalRevoke: typeof URL.revokeObjectURL;
 
+// The defaults every test starts from are installed in `beforeEach`, not
+// `afterEach`: a save now hands its reply to the shared source, so a test that
+// saves has to be holding a real projection to hand over, and a default left to
+// the previous test's teardown is one `clearAllMocks` away from being nothing at
+// all. Installed here, every test starts from the same known answers.
 beforeEach(() => {
   originalCreate = URL.createObjectURL;
   originalRevoke = URL.revokeObjectURL;
@@ -123,14 +153,6 @@ beforeEach(() => {
     () => "blob:http://localhost/doctor-photo",
   ) as typeof URL.createObjectURL;
   URL.revokeObjectURL = vi.fn() as unknown as typeof URL.revokeObjectURL;
-});
-
-afterEach(() => {
-  cleanup();
-  vi.clearAllMocks();
-  __resetLangForTests();
-  URL.createObjectURL = originalCreate;
-  URL.revokeObjectURL = originalRevoke;
   getProfile.mockResolvedValue(profile());
   saveProfile.mockImplementation(async (update) =>
     profile({
@@ -146,6 +168,14 @@ afterEach(() => {
   getPhoto.mockResolvedValue(new Blob(["photo"], { type: "image/jpeg" }));
   deletePhoto.mockResolvedValue(undefined);
   setFee.mockResolvedValue({ partner_id: 7, status: "Active", round: 0 });
+});
+
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+  __resetLangForTests();
+  URL.createObjectURL = originalCreate;
+  URL.revokeObjectURL = originalRevoke;
 });
 
 describe("DoctorProfilePage projection", () => {
@@ -255,7 +285,11 @@ describe("DoctorProfilePage projection", () => {
         details: {},
       }),
     );
-    render(<DoctorProfilePage />);
+    render(
+      <DoctorProfileProvider>
+        <DoctorProfilePage />
+      </DoctorProfileProvider>,
+    );
 
     await waitFor(() => screen.getByTestId("error-banner"));
     expect(screen.getByText(t.loadFailed)).toBeInTheDocument();
@@ -310,6 +344,73 @@ describe("DoctorProfilePage editable fields", () => {
         },
       },
       expect.any(String),
+    );
+  });
+
+  // #583, story 16: an answer that lands while the doctor is typing must not
+  // throw the typing away. Object identity alone does not decide this - a save's
+  // reply and an upload's ref are each a *new* projection, so both would reseed
+  // the buffer and wipe whatever was typed since. Both writes are held open here
+  // so the answer provably lands *after* the keystrokes; a write that resolved on
+  // the spot would be adopted before the typing and prove nothing.
+  it("keeps in-progress typing when a save's own reply lands after it", async () => {
+    await renderReady();
+    let settle: (view: DoctorProfileView) => void = () => {};
+    saveProfile.mockImplementationOnce(
+      () =>
+        new Promise<DoctorProfileView>((resolve) => {
+          settle = resolve;
+        }),
+    );
+
+    fireEvent.click(screen.getByTestId("profile-save"));
+    await waitFor(() => expect(saveProfile).toHaveBeenCalledTimes(1));
+    fireEvent.change(screen.getByTestId("profile-practice-name"), {
+      target: { value: "Sunrise Clinic, typing" },
+    });
+
+    // The write lands now, carrying the name as it was when it was clicked.
+    settle(profile({ practice_name: "Sunrise Clinic" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("profile-saved")).toHaveTextContent(t.saved),
+    );
+
+    expect(screen.getByTestId("profile-practice-name")).toHaveValue(
+      "Sunrise Clinic, typing",
+    );
+  });
+
+  it("keeps in-progress typing when an upload's answer lands after it", async () => {
+    await renderReady();
+    fireEvent.change(screen.getByTestId("profile-about"), {
+      target: { value: "Mid-sentence edit." },
+    });
+    let settle: (ref: { photo_ref: string }) => void = () => {};
+    uploadPhoto.mockImplementationOnce(
+      () =>
+        new Promise<{ photo_ref: string }>((resolve) => {
+          settle = resolve;
+        }),
+    );
+
+    fireEvent.change(screen.getByTestId("profile-photo-input"), {
+      target: {
+        files: [new File(["photo"], "me.jpg", { type: "image/jpeg" })],
+      },
+    });
+    await waitFor(() => expect(uploadPhoto).toHaveBeenCalled());
+    settle({ photo_ref: "doctor/7/photo-2.enc" });
+
+    // The photo answer reseeds nothing the doctor was writing. Waited on the
+    // settled preview rather than the button, because the reseed lands in an
+    // effect after the commit that hides the button.
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("profile-photo").querySelector("img"),
+      ).not.toBeNull(),
+    );
+    expect(screen.getByTestId("profile-about")).toHaveValue(
+      "Mid-sentence edit.",
     );
   });
 
@@ -393,6 +494,11 @@ describe("DoctorProfilePage editable fields", () => {
     expect(
       screen.getByTestId("profile-notification-new_consultations"),
     ).not.toBeChecked();
+    // The save has to have settled before the next interaction: its reply lands
+    // on the shared source, and the buffer is the thing the flip is about.
+    await waitFor(() =>
+      expect(screen.getByTestId("profile-saved")).toHaveTextContent(t.saved),
+    );
     fireEvent.click(screen.getByTestId("profile-notification-case_updates"));
     fireEvent.click(screen.getByTestId("profile-save"));
     await waitFor(() => expect(saveProfile).toHaveBeenCalledTimes(2));
@@ -729,7 +835,11 @@ describe("DoctorProfilePage bilingual parity (REQ-006)", () => {
 
   it("renders the profile copy in Hindi when the locale flips", async () => {
     getProfile.mockResolvedValue(profile());
-    render(<LangFlipHost />);
+    render(
+      <DoctorProfileProvider>
+        <LangFlipHost />
+      </DoctorProfileProvider>,
+    );
     await waitFor(() => screen.getByTestId("profile-details-form"));
 
     fireEvent.click(screen.getByText("flip-lang"));

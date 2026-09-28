@@ -14,12 +14,17 @@
 // nothing.
 // #538: the doctor branch gains an account avatar entry point - the same
 // Avatar primitive. Partner/operator keep the phone-digit trigger unchanged.
-// #569: and that disc is now hydrated: the shell reads the doctor's own
-// profile projection once and threads it down, the shared photo resolver turns
-// its `photo_ref` into an object URL over the doctor's private byte reader, and
+// #569: and that disc is hydrated: the shared photo resolver turns the doctor's
+// `photo_ref` into an object URL over the doctor's private byte reader, and
 // anything that does not resolve - a blip, or media the backend reports absent -
 // degrades to the same person icon. One read feeds the trigger and the dropdown
 // header, so the menu itself never fetches.
+// #583: where that ref comes from changed. The shell used to read the whole
+// projection once and thread it down; it now reads nothing, and the projection
+// arrives from the shared doctor profile source the (doctor) route-group layout
+// mounts above both the chrome and the Profile page. So an upload, a removal or
+// a rename made on that page lands here at once, with no reload - which is the
+// defect this fixes: two private copies of one fact could not see each other.
 // #567: doctor-ness is an INPUT now, not an inference. The identity layer
 // grants exactly three roles (patient|partner|operator), so a doctor is a
 // *partner whose partner type is doctor* and the session can never answer
@@ -46,23 +51,24 @@
 // #570: and the doctor's branch reaches the patient's treatment - the same
 // shared identity header, the same wider content, full-size rows, an
 // unconditional divider and the danger-accented sign-out - supplied with the
-// practice name and the photo the shell already read. Only the doctor's branch
-// changes: the non-doctor staff branch keeps its two-part phone/badge header,
-// its narrow content and its verbatim rows, and the patient branch renders
-// exactly as before.
+// practice name and the photo the shared doctor profile source holds (#583),
+// which is what keeps a rename or an upload on the Profile page from waiting for
+// a reload to reach this header. Only the doctor's branch changes: the non-doctor
+// staff branch keeps its two-part phone/badge header, its narrow content and its
+// verbatim rows, and the patient branch renders exactly as before.
 
 import Link from "next/link";
 import type { ReactNode } from "react";
 
 import { useAuth } from "@/lib/auth/AuthContext";
 import type { User } from "@/lib/auth/AuthContext";
+import { useOptionalDoctorProfile } from "@/lib/doctor/DoctorProfileContext";
 import { useOptionalProfile } from "@/lib/profile/ProfileContext";
 import { useProfilePhotoSource } from "@/lib/profile/useProfilePhotoSource";
 import type { ProfilePhotoReader } from "@/lib/profile/useProfilePhotoSource";
 import { fetchPatientPhoto } from "@/lib/profile/api";
 import { fetchDoctorProfilePhoto } from "@/lib/doctor/api";
 import type { StoredPatientProfile } from "@/lib/profile/api";
-import type { DoctorProfileView } from "@/lib/doctor/api";
 import {
   basicsComplete,
   serverProfileToDraft,
@@ -117,10 +123,10 @@ function savedBasicsComplete(saved: StoredPatientProfile | null | undefined) {
 
 // #570: the identity header, ONE component with two suppliers. The patient
 // supplies its saved profile's name and the ref that name's account resolved;
-// the doctor supplies the shell-held practice name and the ref the doctor
-// transport resolved (#569). They differ in exactly those values, so the header
-// is parameterised rather than copied - and the patient's rendering is
-// unchanged by the doctor's arrival.
+// the doctor supplies the practice name and the photo the shared source resolved
+// (#569, #583). They differ in exactly those values, so the header is
+// parameterised rather than copied - and the patient's rendering is unchanged by
+// the doctor's arrival.
 type IdentityHeaderProps = {
   // The human-readable identity on the first line, resolved through the shared
   // name -> masked phone -> "Subject #id" chain.
@@ -178,22 +184,16 @@ function IdentityHeader({
 // "amIADoctor" (that would push the branch decision back down to this leaf) and
 // not a bare `role` (two roles are in play here, and calling them both `role` is
 // how the session's role ended up answering for doctor-ness in the first place).
-export function AccountMenu({
-  shellRole,
-  doctorProfile,
-}: {
-  shellRole: Role;
-  /**
-   * #569: the doctor shell's own private profile projection. The shell read it
-   * once, beside its open-case count, so the menu issues no request of its own;
-   * `photo_ref` hydrates the avatar and `practice_name` is the only human
-   * readable name a doctor has anywhere in the frontend. Undefined for every
-   * non-doctor shell, which never fetches it.
-   */
-  doctorProfile?: DoctorProfileView;
-}) {
+export function AccountMenu({ shellRole }: { shellRole: Role }) {
   const { user, selectedRole, switchRole, logout } = useAuth();
   const profile = useOptionalProfile();
+  // #583: the doctor's projection now comes from the shared doctor profile
+  // source, which the (doctor) route-group layout mounts above this menu. Read
+  // through the optional accessor, as the patient one already is, so a shell
+  // with no provider - every partner and operator staff shell - yields null and
+  // never starts a read. Only the shell decides doctor-ness, and only the doctor
+  // layout mounts the source, so the two together scope it.
+  const doctorProfile = useOptionalDoctorProfile()?.profile;
   const { lang } = useLang();
   const strings = STRINGS[lang].nav;
   const menuStrings = STRINGS[lang].accountMenu;
@@ -311,11 +311,11 @@ export function AccountMenu({
             />
           ) : isDoctor ? (
             // #538: the doctor account avatar entry point. #569: fed from the
-            // shell-held profile projection through the shared resolver, so a
-            // stored photo shows as the bytes the backend streams and never as
-            // the stored key, and every failure - a blip, or media the backend
-            // says is not there - degrades to the person icon. No `name`, so a
-            // doctor with no photo keeps the icon rather than an initial.
+            // shared profile source through the shared resolver, so a stored
+            // photo shows as the bytes the backend streams and never as the
+            // stored key, and every failure - a blip, or media the backend says
+            // is not there - degrades to the person icon. No `name`, so a doctor
+            // with no photo keeps the icon rather than an initial.
             <Avatar photoRef={photoSrc} className={avatarClassName} />
           ) : (
             (user?.phone || "?").slice(-2)
@@ -362,8 +362,8 @@ export function AccountMenu({
           // cannot have - Complete your profile, gated on a patient profile this
           // shell never holds. The Profile row, role switching, the
           // unconditional divider and the accented sign-out are the patient's
-          // own components, and the name and photo arrive from the shell (#569):
-          // the menu still fetches nothing.
+          // own components, and the name and photo arrive from the shared doctor
+          // profile source (#583): the menu still fetches nothing.
           <>
             <IdentityHeader
               name={doctorProfile?.practice_name}

@@ -10,9 +10,18 @@
 // against the same partner record. The public directory entry stays a
 // read-only preview link. Desktop and mobile, all copy bilingual en/hi
 // (REQ-006).
+//
+// #583: the page keeps no local copy of the projection. It reads the shared
+// doctor profile source the (doctor) route-group layout mounts above it and the
+// console chrome, and hands that source the backend's answer after every edit -
+// which is what makes an upload, a removal or a rename land in the account menu
+// at once instead of after a reload. The editable fields stay page-local: they
+// are an in-flight edit buffer, seeded from the projection once per distinct
+// server answer so neither a late hydration nor an unrelated re-render discards
+// what the doctor is typing.
 
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
@@ -24,7 +33,6 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { ApiError } from "@/lib/api-errors";
 import {
   deleteDoctorProfilePhoto,
-  fetchDoctorProfile,
   fetchDoctorProfilePhoto,
   updateDoctorProfile,
   uploadDoctorProfilePhoto,
@@ -33,6 +41,7 @@ import {
   type DoctorProfileUpdate,
   type DoctorProfileView,
 } from "@/lib/doctor/api";
+import { useDoctorProfile } from "@/lib/doctor/DoctorProfileContext";
 import { providerProfileHref } from "@/lib/directory/links";
 import { idempotencyKey } from "@/lib/idempotency";
 import { STRINGS, type Dictionary } from "@/lib/i18n/dictionaries";
@@ -40,8 +49,6 @@ import { useLang } from "@/lib/i18n/LangContext";
 import { updateConsultationFee } from "@/lib/partner/api";
 import { useProfilePhotoSource } from "@/lib/profile/useProfilePhotoSource";
 import { cn } from "@/lib/utils";
-
-type LoadStatus = "loading" | "ready" | "error";
 
 /**
  * A failed mutation, carrying the API trace id when the failure came from the
@@ -895,10 +902,12 @@ export default function DoctorProfilePage() {
   const { lang } = useLang();
   const t = STRINGS[lang].doctorProfile;
 
-  const [profile, setProfile] = useState<DoctorProfileView | null>(null);
+  // #583: the shared source, not a page-private read. It answers before any
+  // console page renders its contents, and the account menu above this page
+  // reads the same projection - so the two can never drift.
+  const { profile, status, errorTraceId, reload, adoptProfile } =
+    useDoctorProfile();
   const [form, setForm] = useState<ProfileForm | null>(null);
-  const [loadStatus, setLoadStatus] = useState<LoadStatus>("loading");
-  const [errorTraceId, setErrorTraceId] = useState<string | undefined>();
   const [bannerOpen, setBannerOpen] = useState(false);
 
   const [photoBusy, setPhotoBusy] = useState(false);
@@ -913,6 +922,51 @@ export default function DoctorProfilePage() {
   const saveAttemptKey = useRef<string | null>(null);
   const removeAttemptKey = useRef<string | null>(null);
 
+  // The editable fields are an in-flight edit buffer, so they stay here rather
+  // than in the shared source. The guard is object identity: the buffer is seeded
+  // once per *distinct* server answer, so a re-render, a parent re-render or a
+  // late-hydrating projection cannot discard what the doctor is typing. A genuinely
+  // new answer - the hydration, a retry, a save's own reply - would reseed on
+  // identity alone, and that is the one case identity cannot decide: a save's
+  // reply typically lands after the doctor has carried on typing, and a retry can
+  // land at any moment. Reseeding then throws those keystrokes away for a fact the
+  // doctor has already been told. So while the buffer is dirty the doctor's
+  // intent outranks every answer, and the buffer is seeded again only once it is
+  // clean (REQ story 16: typing survives a profile that is still loading or
+  // reloading).
+  const seededFrom = useRef<DoctorProfileView | null>(null);
+  const bufferDirty = useRef(false);
+  useEffect(() => {
+    if (profile == null) return;
+    if (seededFrom.current === profile) return;
+    if (bufferDirty.current) return;
+    seededFrom.current = profile;
+    setForm(formFromProfile(profile));
+  }, [profile]);
+
+  // The newest projection, mirrored out of the render so the partial edits below
+  // merge onto it rather than onto whatever this render happened to close over.
+  // Each of them awaits a request, and a practice-details save that lands in that
+  // window carries a moved `practice_name` and a moved fee - merging the older
+  // render's copy would put them straight back.
+  const newestProfile = useRef<DoctorProfileView | null>(null);
+  useEffect(() => {
+    newestProfile.current = profile;
+  }, [profile]);
+
+  // The one partial edit the source cannot answer on its own: the backend's
+  // upload and remove endpoints hand back a ref (or its absence) and nothing
+  // else, so the page folds that one field into the projection it already holds
+  // and hands the whole view back through the single adopt seam.
+  function adoptRef<K extends keyof DoctorProfileView>(
+    field: K,
+    value: DoctorProfileView[K],
+  ) {
+    const current = newestProfile.current;
+    if (current === null) return;
+    adoptProfile({ ...current, [field]: value });
+  }
+
   // The photo is a private profile-media key, never a public URL, so the shared
   // seam resolves it: the bytes come over the authed transport and this page
   // names the transport, not the resolution. Its ref came with the profile, so
@@ -922,27 +976,20 @@ export default function DoctorProfilePage() {
     fetchDoctorProfilePhoto,
   );
 
-  const load = useCallback(() => {
-    setLoadStatus("loading");
+  function retryLoad() {
     setBannerOpen(false);
-    fetchDoctorProfile()
-      .then((view) => {
-        setProfile(view);
-        setForm(formFromProfile(view));
-        setLoadStatus("ready");
-      })
-      .catch((err: unknown) => {
-        setErrorTraceId(err instanceof ApiError ? err.traceId : undefined);
-        setLoadStatus("error");
-        setBannerOpen(true);
-      });
-  }, []);
+    reload();
+  }
 
+  // The read now lives in the shared source, so the page is told the read
+  // failed rather than catching it. Dismissing sticks until the status changes
+  // again, which is what makes a retry that fails twice show the banner twice.
   useEffect(() => {
-    load();
-  }, [load]);
+    if (status === "error") setBannerOpen(true);
+  }, [status]);
 
   function changeForm(patch: Partial<ProfileForm>) {
+    bufferDirty.current = true;
     setForm((current) => (current ? { ...current, ...patch } : current));
     setSaved(false);
     setSaveFailure(null);
@@ -950,6 +997,7 @@ export default function DoctorProfilePage() {
   }
 
   function toggleNotification(key: NotificationKey, value: boolean) {
+    bufferDirty.current = true;
     setForm((current) =>
       current
         ? {
@@ -974,10 +1022,17 @@ export default function DoctorProfilePage() {
     const attemptKey = saveAttemptKey.current ?? idempotencyKey();
     saveAttemptKey.current = attemptKey;
     try {
-      const view = await updateDoctorProfile(updateFromForm(form), attemptKey);
+      // The write declares no photo ref at all (`DoctorProfileUpdate` has no such
+      // field and the facade writes only declared ones), so saving the practice
+      // details can never detach the stored photo. The reply is the whole
+      // projection, so adopting it is the same seam an upload and a removal use -
+      // and it carries the practice name, which is the one thing the account
+      // menu's identity header names this doctor by.
+      adoptProfile(await updateDoctorProfile(updateFromForm(form), attemptKey));
       saveAttemptKey.current = null;
-      setProfile(view);
-      setForm(formFromProfile(view));
+      // The reply does not clear the dirty flag: it is the same answer the buffer
+      // already holds, so there is nothing to reseed from, and a doctor who kept
+      // typing across the save must not lose those keystrokes to it.
       setSaved(true);
     } catch (err) {
       setSaveFailure({
@@ -999,8 +1054,9 @@ export default function DoctorProfilePage() {
         idempotencyKey(),
       );
       // The new key re-runs the resolution, which revokes the old object URL and
-      // streams the stored photo back.
-      setProfile((current) => (current ? { ...current, photo_ref } : current));
+      // streams the stored photo back - on this page's preview and in the
+      // console chrome at the same time, because they are one source now.
+      adoptRef("photo_ref", photo_ref);
     } catch (err) {
       setPhotoFailure({
         traceId: err instanceof ApiError ? err.traceId : undefined,
@@ -1018,9 +1074,9 @@ export default function DoctorProfilePage() {
         removeAttemptKey.current ?? idempotencyKey(),
       );
       removeAttemptKey.current = null;
-      setProfile((current) =>
-        current ? { ...current, photo_ref: null } : current,
-      );
+      // Cleared, not stale: the chrome stops showing a photo the doctor has just
+      // declared should not be there.
+      adoptRef("photo_ref", null);
     } catch (err) {
       setPhotoFailure({
         traceId: err instanceof ApiError ? err.traceId : undefined,
@@ -1031,27 +1087,25 @@ export default function DoctorProfilePage() {
   }
 
   function onFeeSaved(feePaise: number | null) {
-    setProfile((current) =>
-      current ? { ...current, consultation_fee: feePaise } : current,
-    );
+    adoptRef("consultation_fee", feePaise);
   }
 
-  const ready = loadStatus === "ready" && profile != null && form != null;
+  const ready = status === "ready" && profile != null && form != null;
 
   return (
     <>
       <PageHeader title={t.title} description={t.description} />
 
-      {loadStatus === "error" && bannerOpen && (
+      {status === "error" && bannerOpen && (
         <ErrorBanner
           message={t.loadFailed}
           traceId={errorTraceId}
-          onRetry={load}
+          onRetry={retryLoad}
           onDismiss={() => setBannerOpen(false)}
         />
       )}
 
-      {loadStatus === "loading" && <LoadingSkeleton />}
+      {status === "loading" && <LoadingSkeleton />}
 
       {ready && (
         <div className="space-y-4">

@@ -15,7 +15,6 @@ import { AccountMenu } from "./AccountMenu";
 import { LangToggle } from "./LangToggle";
 import { LocationChip } from "@/components/patient/location/LocationChip";
 import { NavItemLink } from "./NavItemLink";
-import type { DoctorProfileView } from "@/lib/doctor/api";
 import type { Role } from "./types";
 
 export type TopbarDensity = "light" | "full";
@@ -23,20 +22,17 @@ export type TopbarDensity = "light" | "full";
 interface TopbarProps {
   density: TopbarDensity;
   role: Role;
-  /**
-   * #569: the doctor shell's own private profile projection, read once by the
-   * shell and threaded down. Optional because only the full doctor shell has
-   * one - a patient or non-doctor staff shell never fetches it, so there is
-   * nothing to pass.
-   */
-  doctorProfile?: DoctorProfileView;
 }
 
 const TOPNAV_PATIENT: NavItemDef[] = NAV_CONFIG.patient
   .filter((item) => !item.center)
   .slice(0, TABBAR_MAX_DESTINATIONS);
 
-export function Topbar({ density, role, doctorProfile }: TopbarProps) {
+// #583: the top bar threads only its own role. The doctor profile projection it
+// used to pass down to the account menu is gone with the shell's read: the menu
+// reads the shared source itself, through the same optional accessor it already
+// used for the patient one.
+export function Topbar({ density, role }: TopbarProps) {
   return (
     <header
       className="sticky top-0 z-40 flex h-14 shrink-0 items-center gap-3 border-b border-hairline bg-surface px-4"
@@ -77,9 +73,10 @@ export function Topbar({ density, role, doctorProfile }: TopbarProps) {
         )}
         {density === "light" && <LangToggle />}
         {/* #567: the shell's own role, threaded like the sidebar's and the tab
-            bar's. #569: so is the shell-held doctor profile projection it read
-            once - the account menu fetches nothing itself. */}
-        <AccountMenu shellRole={role} doctorProfile={doctorProfile} />
+            bar's. #583: nothing else is threaded - the account menu reaches the
+            doctor profile through the shared source, so the menu still fetches
+            nothing itself. */}
+        <AccountMenu shellRole={role} />
       </div>
     </header>
   );
