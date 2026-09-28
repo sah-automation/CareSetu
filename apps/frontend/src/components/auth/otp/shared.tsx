@@ -4,11 +4,58 @@
 // Variant B prototype's `shared.tsx`. The atoms are the styling vocabulary of
 // the auth wizard; prototype-only chrome (mock OTP hint, state strip, demo
 // toggles) is gone - this is the real flow, not a demo.
+//
+// #571 widened the module for the partner code step (#572). Three additions,
+// none of which changes what a user sees:
+//
+//  - `CountdownRing` moved in from `PatientAuthWizard`, so both wizards render
+//    one ring instead of the patient keeping a private copy.
+//  - `testId` on every atom an existing staff-suite selector resolves to, so
+//    #572 can swap markup without rewriting ~77 selector references. The hook
+//    has to land on the element the selector resolves to today, which is why
+//    `OtpInput`'s lands on the hidden input and not on the box wrapper.
+//  - `PrimaryButton`'s `type` passthrough. Enter-to-verify rides on native
+//    implicit form submission, and a hardcoded `type="button"` would break it
+//    in a browser while every test stayed green.
+//
+// The hook is the deliverable #572 consumes, so here is the whole map, with the
+// element each selector resolves to *today* - which is the element the hook has
+// to land on, or the staff suite needs rewriting. All 30 selectors below are
+// `toHaveTextContent` / `fireEvent.change` against `data-testid`; none queries
+// by role, so moving one to a different node is invisible to the suite.
+//
+//   selector                   atom             lands on
+//   staff-submit               PrimaryButton    the <button>
+//   partner-otp                OtpInput         the hidden <input>, NOT the
+//                                               .otpWrap role="group" div
+//   partner-error              ErrorMessage     the <p role="alert">
+//   partner-resend             GhostButton      the <button> (icon inside it)
+//   partner-notice             NoticeMessage    the <p> (add role="status" for
+//                                               the banner, see below)
+//   partner-demo-banner        NoticeMessage    the <p>; was a
+//                                               <div role="status">, so carry
+//                                               the role across or the async
+//                                               banner stops announcing
+//   partner-edit-number        EditLinkButton   the <button> (was a raw
+//                                               <button className="text-sm
+//                                               underline">, so expect to
+//                                               reconcile the class)
+//   partner-countdown          CountdownRing    the .ringTime <span>, the node
+//                                               that holds the seconds; the
+//                                               ring's wrapper is aria-hidden
+//
+// Six selectors have no atom and stay hand-marked raw elements in #572:
+// `partner-attempts`, `partner-cooldown`, `partner-lockout` and
+// `partner-resend-cooldown` are the attempts banner, `partner-code-hint` and
+// `partner-code-expires` are layout <p>s. None is named in #571's acceptance
+// criteria, and each is asserted once or twice, so they need no atom - but
+// they do need a `data-testid` written onto them by hand.
 
 import { useRef } from "react";
 
 import type { AuthStrings, Lang } from "@/lib/i18n/dictionaries";
 import { IconRefresh } from "@/components/auth/icons";
+import { formatCountdown, OTP_TTL_SECONDS } from "./otpState";
 import styles from "./otpShared.module.css";
 
 export function BrandHeader({
@@ -93,16 +140,63 @@ export function PhoneInput({
   );
 }
 
+export function CountdownRing({
+  seconds,
+  testId,
+}: {
+  seconds: number;
+  testId?: string;
+}) {
+  const r = 26;
+  const c = 2 * Math.PI * r;
+  const frac = Math.max(0, Math.min(1, seconds / OTP_TTL_SECONDS));
+  const low = seconds <= 60;
+  return (
+    <div className={styles.ring} aria-hidden="true">
+      <svg width="72" height="72" viewBox="0 0 72 72">
+        <circle
+          cx="36"
+          cy="36"
+          r={r}
+          fill="none"
+          stroke="var(--hairline)"
+          strokeWidth="5"
+        />
+        <circle
+          cx="36"
+          cy="36"
+          r={r}
+          fill="none"
+          stroke={low ? "var(--danger)" : "var(--accent)"}
+          strokeWidth="5"
+          strokeLinecap="round"
+          strokeDasharray={c}
+          strokeDashoffset={c * (1 - frac)}
+          transform="rotate(-90 36 36)"
+        />
+      </svg>
+      <span
+        className={`${styles.ringTime} ${low ? styles.ringTimeLow : ""}`}
+        data-testid={testId}
+      >
+        {formatCountdown(seconds)}
+      </span>
+    </div>
+  );
+}
+
 export function OtpInput({
   value,
   onChange,
   autoFocus,
   disabled,
+  testId,
 }: {
   value: string;
   onChange: (digits: string) => void;
   autoFocus?: boolean;
   disabled?: boolean;
+  testId?: string;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const boxes = Array.from({ length: 6 }, (_, i) => value[i] ?? "");
@@ -125,6 +219,7 @@ export function OtpInput({
         disabled={disabled}
         onChange={(e) => onChange(e.target.value)}
         aria-label="Verification code"
+        data-testid={testId}
       />
       {boxes.map((digit, i) => (
         <span
@@ -140,18 +235,46 @@ export function OtpInput({
   );
 }
 
-export function ErrorMessage({ message }: { message: string | null }) {
+export function ErrorMessage({
+  message,
+  testId,
+}: {
+  message: string | null;
+  testId?: string;
+}) {
   if (!message) return null;
   return (
-    <p className={styles.error} role="alert">
+    <p className={styles.error} role="alert" data-testid={testId}>
       {message}
     </p>
   );
 }
 
-export function NoticeMessage({ message }: { message: string | null }) {
+/**
+ * `role` is a prop rather than a fixed attribute because the atoms' callers
+ * disagree, and the disagreement is invisible to the suite: the patient
+ * wizard's notice is plain body copy, while the staff step's demo banner is a
+ * `role="status"` region that appears asynchronously. Swapping the banner for a
+ * role-less `NoticeMessage` would drop the announcement with all four of its
+ * assertions still green, so the role is a thing the atom can carry rather than
+ * something each caller has to remember. Defaulting either way would be a
+ * silent change on the other surface.
+ */
+export function NoticeMessage({
+  message,
+  testId,
+  role,
+}: {
+  message: string | null;
+  testId?: string;
+  role?: "status" | "alert";
+}) {
   if (!message) return null;
-  return <p className={styles.notice}>{message}</p>;
+  return (
+    <p className={styles.notice} role={role} data-testid={testId}>
+      {message}
+    </p>
+  );
 }
 
 export function PrimaryButton({
@@ -159,18 +282,30 @@ export function PrimaryButton({
   disabled,
   children,
   pending,
+  testId,
+  type,
 }: {
   onClick?: () => void;
   disabled?: boolean;
   pending?: boolean;
   children: React.ReactNode;
+  testId?: string;
+  /**
+   * Defaults to `"button"` on purpose. Implicit form submission - Enter in a
+   * form's field - is the spec's activation of the form's default button, so
+   * a caller that needs Enter-to-verify inside a real form has to say
+   * `type="submit"`; the default keeps every other call site a non-submitting
+   * button.
+   */
+  type?: "button" | "submit" | "reset";
 }) {
   return (
     <button
-      type="button"
+      type={type ?? "button"}
       className={styles.btnPrimary}
       disabled={disabled || pending}
       onClick={onClick}
+      data-testid={testId}
     >
       {children}
     </button>
@@ -181,10 +316,12 @@ export function GhostButton({
   onClick,
   disabled,
   children,
+  testId,
 }: {
   onClick: () => void;
   disabled?: boolean;
   children: React.ReactNode;
+  testId?: string;
 }) {
   return (
     <button
@@ -192,8 +329,45 @@ export function GhostButton({
       className={styles.btnGhost}
       disabled={disabled}
       onClick={onClick}
+      data-testid={testId}
     >
       <IconRefresh size={14} />
+      {children}
+    </button>
+  );
+}
+
+/**
+ * The link-style "change number" control. Both wizards had their own raw
+ * `<button>` for it; #571 folds them into one atom so the staff step gets a
+ * hook to hang `partner-edit-number` on. No `type` prop: it is a navigation
+ * control, and nothing it replaces was a form submit.
+ */
+export function EditLinkButton({
+  onClick,
+  children,
+  testId,
+  disabled,
+}: {
+  onClick: () => void;
+  children: React.ReactNode;
+  testId?: string;
+  /**
+   * Not decoration. The staff step's raw button is `disabled` while the
+   * partner request is in flight, and the patient wizard's is not; dropping the
+   * prop would let #572's swap re-enable the control mid-request with nothing
+   * to catch it.
+   */
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      className={styles.editLink}
+      onClick={onClick}
+      disabled={disabled}
+      data-testid={testId}
+    >
       {children}
     </button>
   );

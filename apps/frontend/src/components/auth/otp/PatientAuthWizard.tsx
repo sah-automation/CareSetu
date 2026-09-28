@@ -25,9 +25,11 @@ import { useAuth } from "@/lib/auth/AuthContext";
 import { useLang } from "@/lib/i18n/LangContext";
 import { STRINGS, type DoneScreenStrings } from "@/lib/i18n/dictionaries";
 import type { OtpFlow } from "./otpState";
-import { formatCountdown, OTP_TTL_SECONDS, useOtpFlow } from "./otpState";
+import { useOtpFlow } from "./otpState";
 import {
   BrandHeader,
+  CountdownRing,
+  EditLinkButton,
   ErrorMessage,
   FieldLabel,
   GhostButton,
@@ -63,42 +65,6 @@ function StepDots({ flow }: { flow: OtpFlow }) {
         </li>
       ))}
     </ol>
-  );
-}
-
-function CountdownRing({ seconds }: { seconds: number }) {
-  const r = 26;
-  const c = 2 * Math.PI * r;
-  const frac = Math.max(0, Math.min(1, seconds / OTP_TTL_SECONDS));
-  const low = seconds <= 60;
-  return (
-    <div className={stylesB.ring} aria-hidden="true">
-      <svg width="72" height="72" viewBox="0 0 72 72">
-        <circle
-          cx="36"
-          cy="36"
-          r={r}
-          fill="none"
-          stroke="var(--hairline)"
-          strokeWidth="5"
-        />
-        <circle
-          cx="36"
-          cy="36"
-          r={r}
-          fill="none"
-          stroke={low ? "var(--danger)" : "var(--accent)"}
-          strokeWidth="5"
-          strokeLinecap="round"
-          strokeDasharray={c}
-          strokeDashoffset={c * (1 - frac)}
-          transform="rotate(-90 36 36)"
-        />
-      </svg>
-      <span className={`${stylesB.ringTime} ${low ? stylesB.ringTimeLow : ""}`}>
-        {formatCountdown(seconds)}
-      </span>
-    </div>
   );
 }
 
@@ -190,13 +156,9 @@ function OtpStep({ flow }: { flow: OtpFlow }) {
         >
           {t.resend}
         </GhostButton>
-        <button
-          type="button"
-          className={stylesB.editLink}
-          onClick={flow.backToPhone}
-        >
+        <EditLinkButton onClick={flow.backToPhone}>
           {t.backToEdit}
-        </button>
+        </EditLinkButton>
       </div>
       {state.cooldownRemaining > 0 && !lockout && (
         <p className={stylesB.attempts}>

@@ -214,3 +214,49 @@
   border-radius: var(--radius-sm);
   padding: 0.5rem 0.65rem;
 }
+
+/* #571: the countdown ring and the link-style edit control, moved here from
+   `variantB.module.css` byte-for-byte along with the atoms that render them,
+   so a wizard renders the ring without depending on a stylesheet named for a
+   patient-only prototype variant. The ring's four rules are a contract - see
+   `otpShared.module.test.ts`, which pins the SVG-to-container scale that keeps
+   the timer centred on the wheel. Do not re-tune them here. */
+
+.ring {
+  position: relative;
+  width: 5rem;
+  height: 5rem;
+}
+
+.ring svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.ringTime {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.ringTimeLow {
+  color: var(--danger);
+}
+
+.editLink {
+  border: none;
+  background: none;
+  color: var(--txt-muted);
+  font-size: 0.8rem;
+  cursor: pointer;
+  padding: 0.35rem 0.5rem;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
