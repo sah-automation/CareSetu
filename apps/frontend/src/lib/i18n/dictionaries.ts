@@ -1034,6 +1034,12 @@ const en = {
       work: "Work",
       account: "Account",
     },
+    // #574: the sidebar's collapse control. Two flat keys, not one conditional
+    // function - this namespace carries plain strings only, like `logOut`,
+    // `more` and `sections` above. Each names the ACTION, so the polarity
+    // flips with the rail: the collapsed rail's control says "expand".
+    collapseSidebar: "Collapse sidebar",
+    expandSidebar: "Expand sidebar",
   },
 
   // accountMenu.* surface - #526: chrome copy for the desktop account
@@ -2414,6 +2420,10 @@ export const STRINGS: Record<Lang, Dictionary> = {
         work: "कार्य",
         account: "खाता",
       },
+      // #574: the sidebar's collapse control, action-named like the English
+      // pair above. Blueprint §9.2 line 578: neither locale ships alone.
+      collapseSidebar: "साइडबार संकुचित करें",
+      expandSidebar: "साइडबार विस्तार करें",
     },
     accountMenu: {
       trigger: "अकाउंट मेन्यू",

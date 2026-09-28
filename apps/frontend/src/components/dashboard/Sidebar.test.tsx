@@ -11,6 +11,8 @@ import {
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { FolderOpen, Home } from "lucide-react";
 
+import { __resetLangForTests } from "@/lib/i18n/LangContext";
+
 import { Sidebar } from "./Sidebar";
 import type { Role } from "./types";
 
@@ -401,4 +403,122 @@ describe("Sidebar #538 collapsed rail accessible names", () => {
     expect(inbox).not.toHaveAttribute("aria-label");
     expect(within(inbox).getByText("Inbox")).toHaveClass("sr-only");
   });
+});
+
+// #574: the collapse control is brand-header chrome, not a footer row. Paired
+// with sign-out in one undivided stack it read as a nav item, and a nav item
+// must never sit beside "Log out". The header and the footer carry test hooks
+// because neither is otherwise addressable, so placement is asserted
+// structurally - ancestry and absence. Only the two checks jsdom cannot resolve
+// structurally (the 44px box, the header's alignment) reach for class strings.
+describe("Sidebar #574 collapse control placement", () => {
+  function renderDoctor(collapsed: boolean) {
+    mockPathname.mockReturnValue("/doctor");
+    return render(
+      <Sidebar
+        role="doctor"
+        collapsed={collapsed}
+        onToggleCollapse={vi.fn()}
+      />,
+    );
+  }
+
+  // Only this describe switches locale, so only it may reset the store - the
+  // English assertions above it stay untouched, and no suite-wide reset is
+  // added that would stop proving they still hold in the default locale.
+  afterEach(() => {
+    __resetLangForTests();
+  });
+
+  it.each([false, true])(
+    "puts the collapse control inside the brand header (collapsed=%s)",
+    (collapsed) => {
+      renderDoctor(collapsed);
+
+      expect(screen.getByTestId("sidebar-brand")).toContainElement(
+        screen.getByTestId("sidebar-toggle"),
+      );
+    },
+  );
+
+  it("trails the control on the wordmark's edge, and centres it once collapsed", () => {
+    const { unmount } = renderDoctor(false);
+    // Expanded: the wordmark leads, the control is pushed to the far edge.
+    expect(screen.getByTestId("sidebar-brand").className).toContain(
+      "justify-between",
+    );
+    unmount();
+
+    // Collapsed: the wordmark is gone, so a 44px control left on `px-4` would
+    // sit 12px off-centre in the 64px rail. Drop the padding and centre it,
+    // matching the collapsed footer's `justify-center px-0`.
+    renderDoctor(true);
+    const brand = screen.getByTestId("sidebar-brand").className;
+    expect(brand).toContain("justify-center");
+    expect(brand).toContain("px-0");
+    expect(brand).not.toContain("px-4");
+  });
+
+  it.each([false, true])(
+    "leaves the footer holding Log out alone, above the divider's edge (collapsed=%s)",
+    (collapsed) => {
+      renderDoctor(collapsed);
+
+      const footer = screen.getByTestId("sidebar-footer");
+      expect(footer).toContainElement(screen.getByTestId("sidebar-logout"));
+      // Absent by structure: the navigation control is gone from the footer.
+      expect(within(footer).queryByTestId("sidebar-toggle")).toBeNull();
+    },
+  );
+
+  // Blueprint §9.4 line 597: touch targets >= 44px. Compactness is width, so
+  // the control gives up `w-full` but keeps the 44px box in both states.
+  it.each([false, true])(
+    "keeps the control a 44px icon button, never a full-width row (collapsed=%s)",
+    (collapsed) => {
+      renderDoctor(collapsed);
+
+      const toggle = screen.getByTestId("sidebar-toggle");
+      expect(toggle.className).toContain("h-11");
+      expect(toggle.className).toContain("w-11");
+      expect(toggle.className).not.toContain("w-full");
+    },
+  );
+
+  it("flips the chevron with the state, so the glyph is never stale", () => {
+    const { unmount } = renderDoctor(false);
+    // The name flips polarity for the same reason: it names the action, and
+    // the glyph points the way the rail travels. The two states must not
+    // render the same icon, or a stale chevron would invite the wrong click.
+    const expanded = screen.getByTestId("sidebar-toggle").querySelector("svg")
+      ?.innerHTML;
+    expect(expanded).toBeTruthy();
+    unmount();
+
+    renderDoctor(true);
+    const collapsed = screen.getByTestId("sidebar-toggle").querySelector("svg")
+      ?.innerHTML;
+    expect(collapsed).toBeTruthy();
+    expect(collapsed).not.toBe(expanded);
+  });
+
+  // The two accessible names name the action, not the state, so they are two
+  // flat keys rather than one conditional. Blueprint §9.2 line 578: no key
+  // ships in one locale only.
+  it.each([
+    { collapsed: false, en: "Collapse sidebar", hi: "साइडबार संकुचित करें" },
+    { collapsed: true, en: "Expand sidebar", hi: "साइडबार विस्तार करें" },
+  ])(
+    "names the control in both locales (collapsed=$collapsed)",
+    ({ collapsed, en, hi }) => {
+      const { unmount } = renderDoctor(collapsed);
+      expect(screen.getByTestId("sidebar-toggle")).toHaveAccessibleName(en);
+      unmount();
+
+      // Same control, same state, second locale - the name rides the dictionary.
+      localStorage.setItem("caresetu.lang", "hi");
+      renderDoctor(collapsed);
+      expect(screen.getByTestId("sidebar-toggle")).toHaveAccessibleName(hi);
+    },
+  );
 });

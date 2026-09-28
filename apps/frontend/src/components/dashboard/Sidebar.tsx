@@ -12,9 +12,17 @@
 // the active item carries a left accent indicator; the collapsed icon rail
 // shows hover label flyouts (with the open-cases count pill on the Cases
 // flyout) rendered as a viewport-fixed tooltip so the aside's overflow never
-// clips them; the collapse toggle is icon-only; Logout lives in the lower
-// group. These are additions to the shared chrome - the light patient shell
-// never renders a sidebar, and the mobile bottom-tab bars are untouched.
+// clips them. These are additions to the shared chrome - the light patient
+// shell never renders a sidebar, and the mobile bottom-tab bars are untouched.
+//
+// #574: the collapse control is brand-header chrome, not a footer row - a
+// compact icon control on the header's trailing edge, 44px tall in both states
+// and centred in the collapsed rail. It used to sit under Logout in one
+// undivided stack, which read a navigation control as one more nav item and
+// paired it with sign-out; the footer now holds Log out alone inside the
+// divider it already had. Both of its accessible names come from the string
+// dictionary (nav.collapseSidebar / nav.expandSidebar) rather than being
+// hardcoded English, so they exist in both locales per blueprint §9.2.
 
 import { useId, useRef, useState } from "react";
 import Link from "next/link";
@@ -66,12 +74,39 @@ export function Sidebar({
       data-collapsed={collapsed || undefined}
       data-testid="sidebar"
     >
-      <div className="flex h-14 shrink-0 items-center overflow-hidden border-b border-hairline px-4">
+      <div
+        className={cn(
+          "flex h-14 shrink-0 items-center overflow-hidden border-b border-hairline",
+          // Expanded: the wordmark leads and the control trails it. Collapsed:
+          // the wordmark is gone, and a 44px control left on `px-4` would sit
+          // 12px off-centre in the 64px rail - so the row centres it instead,
+          // the same shape the collapsed footer uses.
+          collapsed ? "justify-center px-0" : "justify-between px-4",
+        )}
+        data-testid="sidebar-brand"
+      >
         {!collapsed && (
           <span className="text-base font-semibold whitespace-nowrap text-accent">
             CareSetu
           </span>
         )}
+        <button
+          type="button"
+          onClick={onToggleCollapse}
+          aria-label={
+            collapsed ? strings.expandSidebar : strings.collapseSidebar
+          }
+          data-testid="sidebar-toggle"
+          // Compact means narrower, never smaller to hit: `w-full` goes, the
+          // 44px box stays (blueprint §9.4 line 597, touch targets).
+          className="flex h-11 w-11 shrink-0 items-center justify-center rounded text-txt-sub hover:bg-accent-soft hover:text-txt"
+        >
+          {collapsed ? (
+            <ChevronRight size={20} className="shrink-0" />
+          ) : (
+            <ChevronLeft size={20} className="shrink-0" />
+          )}
+        </button>
       </div>
 
       <nav className="flex-1 space-y-4 p-2" data-testid="sidebar-nav">
@@ -84,39 +119,26 @@ export function Sidebar({
         ))}
       </nav>
 
-      <div className="shrink-0 border-t border-hairline-soft p-2">
-        <div className="space-y-1">
-          <button
-            type="button"
-            onClick={logout}
-            aria-label={strings.logOut}
-            data-testid="sidebar-logout"
-            className={cn(
-              "flex min-h-11 w-full items-center gap-3 rounded px-3 text-sm font-medium text-txt-sub hover:bg-danger-soft hover:text-danger",
-              collapsed && "justify-center px-0",
-            )}
-          >
-            <LogOut size={20} className="shrink-0" />
-            {!collapsed && (
-              <span className="min-w-0 truncate">{strings.logOut}</span>
-            )}
-          </button>
-          <button
-            type="button"
-            onClick={onToggleCollapse}
-            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            data-testid="sidebar-toggle"
-            className={cn(
-              "flex min-h-11 w-full items-center justify-center rounded px-3 text-sm font-medium text-txt-sub hover:bg-accent-soft hover:text-txt",
-            )}
-          >
-            {collapsed ? (
-              <ChevronRight size={20} className="shrink-0" />
-            ) : (
-              <ChevronLeft size={20} className="shrink-0" />
-            )}
-          </button>
-        </div>
+      {/* Sign-out alone, inside the divider this footer already had (#574). */}
+      <div
+        className="shrink-0 border-t border-hairline-soft p-2"
+        data-testid="sidebar-footer"
+      >
+        <button
+          type="button"
+          onClick={logout}
+          aria-label={strings.logOut}
+          data-testid="sidebar-logout"
+          className={cn(
+            "flex min-h-11 w-full items-center gap-3 rounded px-3 text-sm font-medium text-txt-sub hover:bg-danger-soft hover:text-danger",
+            collapsed && "justify-center px-0",
+          )}
+        >
+          <LogOut size={20} className="shrink-0" />
+          {!collapsed && (
+            <span className="min-w-0 truncate">{strings.logOut}</span>
+          )}
+        </button>
       </div>
     </aside>
   );
