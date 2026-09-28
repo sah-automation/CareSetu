@@ -148,6 +148,7 @@ function OtpStep({ flow }: { flow: OtpFlow }) {
         onChange={flow.setOtpDraft}
         autoFocus
         disabled={blocked}
+        label={t.codeLabel}
       />
       <div className={stylesB.resendRow}>
         <GhostButton

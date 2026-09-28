@@ -746,6 +746,15 @@ export function StaffLoginForm({
                   onChange={partner.setOtpDraft}
                   disabled={partnerBlocked}
                   testId="partner-otp"
+                  label={t.codeLabel}
+                  // #576: the raw input this atom replaced carried both, and
+                  // #572 had nowhere on the atom to put them. Restored here, so
+                  // the code field is marked invalid and points at the error the
+                  // step renders.
+                  invalid={partner.state.lastError ? true : undefined}
+                  describedBy={
+                    partner.state.lastError ? "partner-error" : undefined
+                  }
                 />
               </FieldLabel>
               <div className={stepStyles.resendRow}>
@@ -811,6 +820,9 @@ export function StaffLoginForm({
             <ErrorMessage
               message={partner.state.lastError}
               testId="partner-error"
+              // #576: the target of the phone and code inputs'
+              // `aria-describedby`. See `ErrorMessage`'s `id`.
+              id="partner-error"
             />
             <NoticeMessage
               message={partner.state.lastNotice}

@@ -660,6 +660,42 @@ describe("StaffLoginForm - partner code step", () => {
     }
   });
 
+  // #576: #572 rebuilt this step on the shared `OtpInput` atom, and the atom
+  // carried a hardcoded English `aria-label` that outranks the step's localized
+  // `FieldLabel`. `t` here is the English dictionary, so this suite cannot
+  // observe the parity break by itself; what it can pin is that the name comes
+  // from the dictionary at all, and that the invalid/error association the raw
+  // input used to carry survived the swap. Together with the Hindi assertion in
+  // `otp/shared.test.tsx`, that closes the gap.
+  it("names the code field from the dictionary, not a literal (#576)", async () => {
+    await startPartnerOtpFlow();
+    const otp = screen.getByTestId("partner-otp");
+    expect(otp).toHaveAttribute("aria-label", t.codeLabel);
+    // And the visible label and the accessible name are the same string, so
+    // reading the step in any locale hears what is on screen.
+    expect(screen.getByText(t.codeLabel)).toBeInTheDocument();
+  });
+
+  it("marks the code field invalid and points it at the error the step renders (#576)", async () => {
+    await startPartnerOtpFlow();
+    // Fresh step, no error yet: nothing claimed.
+    const otp = screen.getByTestId("partner-otp");
+    expect(otp).not.toHaveAttribute("aria-invalid");
+    expect(otp).not.toHaveAttribute("aria-describedby");
+
+    vi.mocked(partnerVerify).mockResolvedValue(WRONG_CODE);
+    typeCodeAndSubmit();
+    const error = await screen.findByTestId("partner-error");
+    // The `aria-describedby` target has to resolve to the rendered error, not
+    // merely to a plausible-looking id.
+    expect(otp).toHaveAttribute("aria-invalid", "true");
+    expect(otp).toHaveAttribute("aria-describedby", "partner-error");
+    expect(document.getElementById(otp.getAttribute("aria-describedby")!)).toBe(
+      error,
+    );
+    expect(error).toHaveAttribute("role", "alert");
+  });
+
   it("renders the shared countdown ring with the seconds inside it (#572 AC-1)", async () => {
     await startPartnerOtpFlow();
     const countdown = screen.getByTestId("partner-countdown");

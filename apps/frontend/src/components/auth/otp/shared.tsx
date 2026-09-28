@@ -191,22 +191,44 @@ export function OtpInput({
   autoFocus,
   disabled,
   testId,
+  label,
+  invalid,
+  describedBy,
 }: {
   value: string;
   onChange: (digits: string) => void;
   autoFocus?: boolean;
   disabled?: boolean;
   testId?: string;
+  /**
+   * The field's accessible name, supplied by the caller because the caller owns
+   * the locale. #576: this used to be a hardcoded `aria-label` on the input set
+   * to the English "Verification code", and an `aria-label` outranks the
+   * wrapping `<label>` in the accessible-name computation - so when #572 built
+   * the partner step (whose visible label is `t.codeLabel`) on this atom, a
+   * partner reading the step in Hindi saw the Hindi label and heard English.
+   * The name belongs to whichever wizard is asking, not to the atom.
+   */
+  label: string;
+  /**
+   * #576: `aria-invalid` and `aria-describedby` are the caller's to set, for
+   * the same reason. The raw input #572 replaced carried both, pointed at
+   * `partner-error`; the atom had nowhere to put them, so the swap dropped them
+   * and no selector in the staff suite noticed.
+   */
+  invalid?: boolean;
+  describedBy?: string;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const boxes = Array.from({ length: 6 }, (_, i) => value[i] ?? "");
   return (
-    <div
-      className={styles.otpWrap}
-      onClick={() => inputRef.current?.focus()}
-      role="group"
-      aria-label="OTP"
-    >
+    // #576: the wrapper used to be a `role="group"` div with an `aria-label`
+    // set to the literal "OTP", a second hardcoded English name over the one
+    // control it contains. Naming the input from the caller's string is enough,
+    // and a group that repeats its only child's name is announced twice and
+    // makes the field ambiguous to `getByLabelText`. The boxes are decorative;
+    // the input is the control.
+    <div className={styles.otpWrap} onClick={() => inputRef.current?.focus()}>
       <input
         ref={inputRef}
         className={styles.otpHiddenInput}
@@ -218,7 +240,9 @@ export function OtpInput({
         maxLength={6}
         disabled={disabled}
         onChange={(e) => onChange(e.target.value)}
-        aria-label="Verification code"
+        aria-label={label}
+        aria-invalid={invalid ? true : undefined}
+        aria-describedby={describedBy}
         data-testid={testId}
       />
       {boxes.map((digit, i) => (
@@ -238,13 +262,22 @@ export function OtpInput({
 export function ErrorMessage({
   message,
   testId,
+  id,
 }: {
   message: string | null;
   testId?: string;
+  /**
+   * #576: `aria-describedby` resolves against a DOM `id`, not a test id. The
+   * partner phone and code inputs both point at `"partner-error"`, but the
+   * element carrying that `data-testid` had no `id`, so both references dangled
+   * and a screen reader read the field with no description at all. A caller that
+   * wires `describedBy` passes the same string here.
+   */
+  id?: string;
 }) {
   if (!message) return null;
   return (
-    <p className={styles.error} role="alert" data-testid={testId}>
+    <p className={styles.error} role="alert" data-testid={testId} id={id}>
       {message}
     </p>
   );

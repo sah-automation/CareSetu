@@ -93,14 +93,19 @@ describe("CountdownRing", () => {
 
 describe("atom test-hooks", () => {
   it("'partner-otp' lands on the hidden input, not the box wrapper", () => {
-    render(<OtpInput testId="partner-otp" value="12" onChange={() => {}} />);
+    render(
+      <OtpInput
+        testId="partner-otp"
+        label="Verification code"
+        value="12"
+        onChange={() => {}}
+      />,
+    );
     const input = screen.getByTestId("partner-otp");
     expect(input.tagName).toBe("INPUT");
-    // The wrapper is the click-to-focus group; a hook there would leave the
+    // The wrapper is the click-to-focus box row; a hook there would leave the
     // staff suite's `fireEvent.change` driving a div.
-    expect(screen.getByRole("group", { name: "OTP" })).not.toHaveAttribute(
-      "data-testid",
-    );
+    expect(input.parentElement).not.toHaveAttribute("data-testid");
   });
 
   it("'partner-error' lands on the alert paragraph and renders nothing for a null message", () => {
@@ -213,7 +218,7 @@ describe("atom test-hooks", () => {
     // would put a test id in the patient wizard's DOM.
     const { container } = render(
       <>
-        <OtpInput value="" onChange={() => {}} />
+        <OtpInput label="Verification code" value="" onChange={() => {}} />
         <ErrorMessage message="Wrong code." />
         <NoticeMessage message="Code sent." />
         <PrimaryButton>Verify</PrimaryButton>
@@ -319,7 +324,12 @@ describe("OtpInput stays a controlled single input", () => {
     function Harness() {
       const [value, setValue] = useState("");
       return (
-        <OtpInput testId="partner-otp" value={value} onChange={setValue} />
+        <OtpInput
+          testId="partner-otp"
+          label="Verification code"
+          value={value}
+          onChange={setValue}
+        />
       );
     }
     render(<Harness />);
@@ -328,5 +338,63 @@ describe("OtpInput stays a controlled single input", () => {
     });
     expect(screen.getByTestId("partner-otp")).toHaveValue("123456");
     expect(screen.getByText("6")).toBeInTheDocument();
+  });
+});
+
+describe("#576: the code field's accessible name and error wiring are the caller's", () => {
+  // #572 rebuilt the partner code step on this atom and, in doing so, gave the
+  // field a hardcoded English `aria-label` that takes precedence over the
+  // dictionary label the step renders beside it. An `aria-label` outranks the
+  // wrapping `<label>` in the accessible-name computation, so a partner reading
+  // the step in Hindi saw "वेरिफिकेशन कोड" on screen and heard "Verification
+  // code" - the bilingual parity rule the whole string dictionary exists to
+  // enforce, broken by the atom the step was moved onto. The same swap dropped
+  // the `aria-invalid` and `aria-describedby` the raw input carried, and the
+  // staff suite has no selector that notices either loss.
+  //
+  // The Hindi value is the load-bearing half. Asserting the English string would
+  // pass against the hardcoded literal, which is exactly the defect.
+  it("names the field from the caller's string, in either locale", () => {
+    const { unmount } = render(
+      <OtpInput label="वेरिफिकेशन कोड" value="" onChange={() => {}} />,
+    );
+    expect(screen.getByLabelText("वेरिफिकेशन कोड")).toBeInTheDocument();
+    unmount();
+
+    render(<OtpInput label="Verification code" value="" onChange={() => {}} />);
+    expect(screen.getByLabelText("Verification code")).toBeInTheDocument();
+  });
+
+  it("carries the invalid state and the error association the caller asks for", () => {
+    render(
+      <OtpInput
+        label="Verification code"
+        value=""
+        onChange={() => {}}
+        invalid
+        describedBy="partner-error"
+      />,
+    );
+    const input = screen.getByLabelText("Verification code");
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    expect(input).toHaveAttribute("aria-describedby", "partner-error");
+  });
+
+  it("claims neither when the caller has no error to report", () => {
+    render(<OtpInput label="Verification code" value="" onChange={() => {}} />);
+    const input = screen.getByLabelText("Verification code");
+    expect(input).not.toHaveAttribute("aria-invalid");
+    expect(input).not.toHaveAttribute("aria-describedby");
+  });
+
+  // A source-level rule, not a DOM one: jsdom resolves no stylesheet and no
+  // dictionary, so a hardcoded literal and a dictionary-driven prop are
+  // indistinguishable in the rendered tree except by the locale assertion above.
+  // This pins the shape of the fix, in the same shape the parity gate and the
+  // token gate use for the same reason.
+  it("carries no literal accessible name of its own", () => {
+    const source = readFileSync(here("shared.tsx"), "utf8");
+    expect(source).not.toMatch(/aria-label="Verification code"/);
+    expect(source).not.toMatch(/aria-label="OTP"/);
   });
 });
