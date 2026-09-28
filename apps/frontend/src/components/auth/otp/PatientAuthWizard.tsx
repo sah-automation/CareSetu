@@ -188,12 +188,10 @@ function OtpStep({ flow }: { flow: OtpFlow }) {
 function DoneStep({
   flow,
   doneScreenT,
-  resumePending,
   onGoToDashboard,
 }: {
   flow: OtpFlow;
   doneScreenT: DoneScreenStrings;
-  resumePending: boolean;
   onGoToDashboard: () => void;
 }) {
   const { t } = flow;
@@ -202,9 +200,7 @@ function DoneStep({
       title={t.verifiedTitle}
       body={t.verifiedBody}
       openingLabel={doneScreenT.openingDashboard}
-      openingInLabel={doneScreenT.openingIn}
       goToDashboardLabel={doneScreenT.goToDashboard}
-      resumePending={resumePending}
       onGoToDashboard={onGoToDashboard}
     />
   );
@@ -280,9 +276,10 @@ export function PatientAuthWizard({
     return resumeRef.current;
   }, [resumeSession]);
 
-  // Start the resume once the flow is done; `resumeSettled` is what the handoff
-  // reads as its readiness, so the auto-redirect begins only after the resume
-  // call has succeeded.
+  // Start the resume once the flow is done. #581: `resumeSettled` is read as
+  // this flow's readiness by the shared navigation hook and by nothing else -
+  // the handoff no longer gates on it - so the leave can only begin after the
+  // resume call has succeeded.
   useEffect(() => {
     if (flow.state.stage !== "done" || !flow.state.session) {
       return;
@@ -346,7 +343,6 @@ export function PatientAuthWizard({
             <DoneStep
               flow={flow}
               doneScreenT={STRINGS[lang].doneScreen}
-              resumePending={!resumeSettled}
               onGoToDashboard={goToDashboardNow}
             />
           )}

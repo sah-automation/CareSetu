@@ -214,10 +214,10 @@ export function StaffLoginForm({
   // #551: the single post-login resume seam. Started once the partner session
   // exists and awaited by the single exit from the handoff, so nothing can
   // navigate before identity lands in state. `landedRef` keeps that routine
-  // idempotent, so a click, a tick and a hook-scheduled leave cannot all
-  // navigate. #566: keyed on the session, not on the resolved destination, so
-  // it is an independent signal rather than a mirror of `landing` - which is why
-  // #579's readiness gate is the conjunction of the two, not this alone.
+  // idempotent, so a click and a hook-scheduled leave cannot both navigate.
+  // #566: keyed on the session, not on the resolved destination, so it is an
+  // independent signal rather than a mirror of `landing` - which is why #579's
+  // readiness gate is the conjunction of the two, not this alone.
   const resumeRef = useRef<Promise<void> | null>(null);
   const landedRef = useRef(false);
   const [resumeSettled, setResumeSettled] = useState(false);
@@ -249,12 +249,14 @@ export function StaffLoginForm({
   }, [resumeSession]);
 
   // Resume the saved session in-flow (same no-reload seam as the patient flow,
-  // #496) as soon as the partner session exists, then release the countdown.
-  // Never a hard page reload on this path (AC-3). #566: keyed on the session
-  // rather than on the resolved destination, so it runs concurrently with the
-  // destination reads instead of after them - which is what lets the handoff be
-  // on screen while they are still in flight. `resumeOnce` is idempotent by
-  // ref, so this stays the one call site.
+  // #496) as soon as the partner session exists, so identity is in state before
+  // anything leaves this flow. Never a hard page reload on this path (AC-3).
+  // #566: keyed on the session rather than on the resolved destination, so it
+  // runs concurrently with the destination reads instead of after them - which
+  // is what lets the handoff be on screen while they are still in flight.
+  // #581: there is no countdown left for it to release; it settles the first
+  // half of #579's readiness conjunction, and the hook acts on the conjunction.
+  // `resumeOnce` is idempotent by ref, so this stays the one call site.
   useEffect(() => {
     if (partner.state.session === null) {
       return;
@@ -299,8 +301,9 @@ export function StaffLoginForm({
   // #579: "ready" is the conjunction the flow already implied - the in-flow
   // session resume has settled AND the post-login destination has resolved -
   // and it is stated once, here, because two independent signals are what makes
-  // it a conjunction. The handoff's own gate and the navigation hook read this
-  // same boolean, so they cannot disagree.
+  // it a conjunction. #581 removed the handoff's own gate, so the navigation
+  // hook is now the only reader of this boolean and therefore the only place a
+  // leave can be decided.
   const handoffReady = resumeSettled && landing !== null;
   // The hook owns WHEN the handoff leaves; this flow owns what ready means. It
   // returns the "go now" callback the CTA is wired to, so a press is honoured at
@@ -683,26 +686,22 @@ export function StaffLoginForm({
         //
         // #537 still holds: the leave routes through the same resume-then-
         // navigate routine and with the framework router rather than a hard
-        // reload. #579: it is no longer a countdown that decides when - the
-        // shared navigation hook does, the moment this conjunction is true, and
-        // the countdown the component still owns is unreachable from here.
+        // reload. #579: it is the shared navigation hook that decides when -
+        // the moment this conjunction is true. #581 took the rest away: the
+        // handoff no longer owns a clock, so there is nothing here that a
+        // delay could race.
         //
         // AC-6 is carried by the routing, not by a second render condition: a
         // pending or rejected partner's route read resolves to a `location.
-        // replace` that swaps the document, and the conjunction below is never
-        // true for them because `landing` is never set, so no console
+        // replace` that swaps the document, and the conjunction in the flow is
+        // never true for them because `landing` is never set, so no console
         // destination is ever engaged. A render-level latch here would mean
         // editing the three exit branches, which the ticket freezes.
         <DoneScreen
           title={t.verifiedTitle}
           body={t.verifiedBody}
           openingLabel={doneScreenT.openingDashboard}
-          openingInLabel={doneScreenT.openingIn}
           goToDashboardLabel={doneScreenT.goToDashboard}
-          // The conjunction, and it is load-bearing: the session-resume seam
-          // is one call, the destination is a three-read chain, and the leave
-          // must not be released by either one alone.
-          resumePending={!handoffReady}
           // The hook's go-now callback, NOT the navigate routine: a press is
           // honoured at once, and still never before the destination is in hand.
           onGoToDashboard={goToDashboard}

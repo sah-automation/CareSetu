@@ -49,8 +49,14 @@ import {
   type VerifyResult,
 } from "@/lib/auth/api";
 import { PatientAuthWizard } from "./PatientAuthWizard";
-import { DONE_SCREEN_COUNTDOWN_SECONDS } from "../DoneScreen";
 import { HANDOFF_MINIMUM_DWELL_MS } from "@/lib/auth/useHandoffNavigation";
+
+// A span long enough to outlast any delay this screen could impose. The
+// negative assertions below advance past it to prove a clock decides nothing
+// here - ten seconds, twice what the handoff used to hold anyone for. #581
+// deleted that duration along with the countdown it drove, so it is stated here
+// in milliseconds rather than imported from the component.
+const PAST_ANY_HANDOFF_DELAY_MS = 10_000;
 
 vi.mock("@/lib/auth/api", async (importOriginal) => {
   const mod = await importOriginal<typeof import("@/lib/auth/api")>();
@@ -643,12 +649,23 @@ describe("PatientAuthWizard - success and session", () => {
     expect(screen.getByRole("status")).toHaveTextContent(
       "Opening your dashboard",
     );
-    expect(
-      screen.queryByText(/Opening your dashboard in/),
-    ).not.toBeInTheDocument();
+    // #581: there is no second, digit-bearing line to be absent any more. The
+    // progress output carries no digits at all, and the indicator is
+    // indeterminate - the whole guarantee in one assertion.
+    expect(screen.getByRole("status").textContent).not.toMatch(/\d/);
+    expect(screen.getByRole("progressbar")).not.toHaveAttribute(
+      "aria-valuenow",
+    );
     expect(
       screen.getByRole("button", { name: "Go to Dashboard" }),
     ).toBeInTheDocument();
+    // #581 AC-6, this flow's half: the handoff brings its own h1, and it is
+    // the only one on the page while it is up. Counted, not just found by name,
+    // so a leftover page heading cannot pass unnoticed.
+    expect(
+      screen.getByRole("heading", { level: 1, name: "Identity verified" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
 
     fakeHandoffClock();
     try {
@@ -669,7 +686,7 @@ describe("PatientAuthWizard - success and session", () => {
 
       // One leave, ever - and through the framework router, never by replacing
       // the document.
-      await tick(DONE_SCREEN_COUNTDOWN_SECONDS * 1000 * 2);
+      await tick(PAST_ANY_HANDOFF_DELAY_MS);
       expect(mockReplace).toHaveBeenCalledTimes(1);
       expect(
         window.location.href,
@@ -691,13 +708,12 @@ describe("PatientAuthWizard - success and session", () => {
       // Twice the hold this screen used to impose, and the handoff is still
       // there with no digits and no navigation: elapsed time is not what
       // releases it.
-      await tick(DONE_SCREEN_COUNTDOWN_SECONDS * 1000 * 2);
+      await tick(PAST_ANY_HANDOFF_DELAY_MS);
       expect(screen.getByRole("status")).toHaveTextContent(
         "Opening your dashboard",
       );
-      expect(
-        screen.queryByText(/Opening your dashboard in/),
-      ).not.toBeInTheDocument();
+      // Still the same line, still digit-free, however long the clock runs.
+      expect(screen.getByRole("status").textContent).not.toMatch(/\d/);
       expect(
         mockReplace,
         "must not route while the resume is outstanding",
@@ -756,7 +772,7 @@ describe("PatientAuthWizard - success and session", () => {
       // screen used to hold is given its full old duration to try.
       fireEvent.click(screen.getByRole("button", { name: "Go to Dashboard" }));
       await flush();
-      await tick(DONE_SCREEN_COUNTDOWN_SECONDS * 1000);
+      await tick(PAST_ANY_HANDOFF_DELAY_MS);
       expect(mockReplace).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();

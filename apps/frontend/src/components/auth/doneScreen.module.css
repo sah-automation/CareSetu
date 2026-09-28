@@ -53,11 +53,31 @@
   overflow: hidden;
 }
 
+/* #581: the bar is indeterminate, so it slides a fixed-length segment across
+   the track on a transform. A width transition would imply a known duration,
+   which the code does not have. 1.4s per pass is a glance, not a wait: the
+   screen is a confirmation the user is meant to read, and a segment that
+   crosses in under a second reads as a flicker instead. The base-layer
+   reduced-motion floor in globals.css kills this animation app-wide; there is
+   deliberately no per-component motion guard beside it. */
 .progressFill {
+  width: 35%;
   height: 100%;
   border-radius: 9999px;
   background: var(--accent);
-  transition: width 1s linear;
+  animation: progressSlide 1.4s ease-in-out infinite;
+}
+
+/* 35% of the track is 0.35 track units wide, so 286% of the fill's own width
+   carries its left edge from just off the left clip to just off the right. */
+@keyframes progressSlide {
+  0% {
+    transform: translateX(-100%);
+  }
+
+  100% {
+    transform: translateX(286%);
+  }
 }
 
 .facts {

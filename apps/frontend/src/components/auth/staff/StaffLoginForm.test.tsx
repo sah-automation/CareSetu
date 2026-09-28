@@ -50,7 +50,6 @@ import type {
   PartnerType,
 } from "@/lib/partner/api";
 
-import { DONE_SCREEN_COUNTDOWN_SECONDS } from "../DoneScreen";
 import atomStyles from "../otp/otpShared.module.css";
 import { PrimaryButton } from "../otp/shared";
 import stepStyles from "../otp/variantB.module.css";
@@ -318,16 +317,6 @@ function stubProfileRead(profile: DoctorProfileView) {
       json: () => Promise.resolve(profile),
     }),
   );
-}
-
-// #566: the handoff now mounts on the OTP STAGE, so its being on screen no
-// longer implies the destination has resolved - and the countdown and the CTA
-// both stay held until it has. Wait for the released countdown before driving
-// the handoff: a press before then is a legitimate no-op, not a defect.
-async function waitForReleasedHandoff() {
-  await waitFor(() => {
-    expect(screen.getByRole("status").textContent).toMatch(/\d/);
-  });
 }
 
 // #566: the destination-resolution seam, held open. After #562 `fetchPartnerMe`
@@ -1118,9 +1107,9 @@ describe("StaffLoginForm - partner code step", () => {
     });
 
     // AC-1 CTA: "Go to Dashboard" routes to the resolved target directly.
-    // #566: it can only do that once the destination is in hand, so wait for
-    // the released countdown rather than assuming the landing already settled.
-    await waitForReleasedHandoff();
+    // #579: a press is remembered rather than obeyed, and honoured the instant
+    // the destination is in hand, so there is nothing to wait for first.
+    // #581: the handoff no longer counts down, so there is no clock to wait out.
     fireEvent.click(screen.getByRole("button", { name: "Go to Dashboard" }));
     await waitFor(() => {
       expect(mockRouterReplace).toHaveBeenCalledWith("/doctor");
@@ -1250,12 +1239,9 @@ describe("StaffLoginForm - partner code step", () => {
       );
     });
 
-    // #562: the countdown firing at zero is DoneScreen's own pinned contract
-    // (DoneScreen.test.tsx, "counts the visible seconds down and fires the host
-    // routine at zero (#551)"), so drive the handoff with the CTA rather than
-    // waiting out a 5s timer here. #566: the CTA holds until the destination
-    // is in hand, so wait for that first.
-    await waitForReleasedHandoff();
+    // #579: the leave is the navigation hook's, on readiness, and a press is
+    // remembered rather than obeyed, so the CTA is the drive and there is no
+    // timer here to wait out. #581: the handoff carries no countdown at all.
     fireEvent.click(screen.getByRole("button", { name: "Go to Dashboard" }));
 
     await waitFor(() => {
@@ -1517,9 +1503,14 @@ describe("StaffLoginForm - verified handoff on the OTP stage (#566)", () => {
       "Opening your dashboard",
     );
     expect(screen.getByRole("status").textContent).not.toMatch(/\d/);
-    expect(screen.getByRole("progressbar")).toHaveAttribute(
+    // #581: the bar is indeterminate, so it announces a name and no values. A
+    // surviving `aria-valuenow` would put a countdown back into the
+    // accessibility tree on this very surface.
+    expect(screen.getByRole("progressbar")).not.toHaveAttribute(
       "aria-valuenow",
-      String(DONE_SCREEN_COUNTDOWN_SECONDS),
+    );
+    expect(screen.getByRole("progressbar")).not.toHaveAttribute(
+      "aria-valuetext",
     );
 
     // The reported flash, item by item: no code input, no submit control, and
@@ -1601,11 +1592,17 @@ describe("StaffLoginForm - verified handoff on the OTP stage (#566)", () => {
 // So these tests drive the gap directly: hold the destination read open, assert
 // the INTERMEDIATE state synchronously, then let it land and assert the
 // navigation. Deterministic throughout - no polling and no `waitFor` on the end
-// state - and nothing here asserts on the countdown the shared component still
-// owns, because it is unreachable from this flow (#581 removes it for both
-// hosts). What the progress output DOES carry is asserted as the absence of
-// digits, which is the guarantee the ticket makes.
+// state - and nothing here asserts on a countdown, because #581 removed the
+// component's entirely. What the progress output carries is asserted as the
+// absence of digits, which is the guarantee the ticket makes.
 describe("StaffLoginForm - the handoff leaves on readiness (#579)", () => {
+  // A span long enough to outlast any delay this screen could impose. The
+  // negative assertions below advance past it to prove a clock decides nothing
+  // here - ten seconds, twice what the handoff used to hold anyone for. #581
+  // deleted that duration along with the countdown, so it is stated here in
+  // milliseconds rather than imported from the component.
+  const PAST_ANY_HANDOFF_DELAY_MS = 10_000;
+
   const goToDashboard = () =>
     screen.getByRole("button", { name: "Go to Dashboard" });
 
@@ -1640,7 +1637,7 @@ describe("StaffLoginForm - the handoff leaves on readiness (#579)", () => {
     // not the old countdown's clock that decides: a readiness boolean of just
     // `resumeSettled` fails exactly here and passes every other test here.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(DONE_SCREEN_COUNTDOWN_SECONDS * 2000);
+      await vi.advanceTimersByTimeAsync(PAST_ANY_HANDOFF_DELAY_MS);
     });
     expect(mockRouterReplace).not.toHaveBeenCalled();
     // The active path is never a hard reload, whether or not the destination is
@@ -1680,7 +1677,7 @@ describe("StaffLoginForm - the handoff leaves on readiness (#579)", () => {
     const destination = await holdDestinationOnTheHandoff();
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(DONE_SCREEN_COUNTDOWN_SECONDS * 2000);
+      await vi.advanceTimersByTimeAsync(PAST_ANY_HANDOFF_DELAY_MS);
     });
     // Mid-hold, the handoff is still a live surface with a working control -
     // and pressing it navigates nowhere, because there is nowhere yet.
@@ -1752,7 +1749,7 @@ describe("StaffLoginForm - the handoff leaves on readiness (#579)", () => {
     fireEvent.click(goToDashboard());
     fireEvent.click(goToDashboard());
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(DONE_SCREEN_COUNTDOWN_SECONDS * 2000);
+      await vi.advanceTimersByTimeAsync(PAST_ANY_HANDOFF_DELAY_MS);
     });
     expect(mockRouterReplace).not.toHaveBeenCalled();
 
@@ -1774,7 +1771,7 @@ describe("StaffLoginForm - the handoff leaves on readiness (#579)", () => {
     fireEvent.click(goToDashboard());
     fireEvent.click(goToDashboard());
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(DONE_SCREEN_COUNTDOWN_SECONDS * 2000);
+      await vi.advanceTimersByTimeAsync(PAST_ANY_HANDOFF_DELAY_MS);
     });
     expect(mockRouterReplace).toHaveBeenCalledTimes(1);
   });

@@ -85,16 +85,15 @@ const en = {
 
   // doneScreen.* surface - #536: the shared verified-login handoff screen
   // rendered after a successful OTP verify (patient flow #536; the doctor
-  // flow #537 consumes the same component). #551 made the handoff carry a
-  // real countdown: `openingDashboard` holds the line while the session-resume
-  // call is still in flight, `openingIn` renders the visible seconds once it
-  // settles, and the tick at zero fires the host's navigation. `goToDashboard`
-  // is the always-available CTA (it goes through the same resume seam).
-  // The remaining keys are the doctor handoff's practice/destination facts
-  // (US-3): values come from data, labels come from here.
+  // flow #537 consumes the same component). #581 made it a loading mask
+  // rather than a countdown: `openingDashboard` is the one status line for
+  // the whole life of the screen and names the indeterminate progress
+  // indicator, and no key here carries a digit. `goToDashboard` is the
+  // always-available CTA, which navigates through the host's own readiness
+  // gate (#578's hook). The remaining keys are the doctor handoff's
+  // practice/destination facts (US-3): values come from data, labels from here.
   doneScreen: {
     openingDashboard: "Opening your dashboard",
-    openingIn: (seconds: number) => `Opening your dashboard in ${seconds}`,
     goToDashboard: "Go to Dashboard",
     practiceLabel: "Practice",
     specialtyLabel: "Specialty",
@@ -1894,7 +1893,6 @@ export const STRINGS: Record<Lang, Dictionary> = {
     },
     doneScreen: {
       openingDashboard: "आपका डैशबोर्ड खुल रहा है",
-      openingIn: (seconds) => `आपका डैशबोर्ड ${seconds} सेकंड में खुल रहा है`,
       goToDashboard: "डैशबोर्ड पर जाएँ",
       practiceLabel: "प्रैक्टिस",
       specialtyLabel: "विशेषज्ञता",
