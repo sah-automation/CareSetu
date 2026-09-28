@@ -165,8 +165,9 @@ function verifyButton() {
 
 // #580: the handoff's leave is scheduled with a `setTimeout` (the shared
 // navigation hook's minimum dwell), so the fake owns that as well as the
-// interval that drove the countdown - a `setInterval`-only fake would leave the
-// leave unmovable and the tests below would read as "never navigates".
+// `setInterval` that drives this file's cooldowns - a `setInterval`-only fake
+// would leave the leave unmovable and the tests below would read as "never
+// navigates".
 //
 // Install it ONLY once the flow is on screen and the session resume is still
 // outstanding, i.e. before the handoff has armed anything: see the file header
@@ -720,9 +721,9 @@ describe("PatientAuthWizard - success and session", () => {
       ).not.toHaveBeenCalled();
 
       // The dwell is measured from readiness, not from mount, so a slow resume
-      // is not also made to wait out a hold afterwards - the countdown is
-      // released by the same commit that released the readiness, and the route
-      // lands a dwell later rather than five seconds later.
+      // is not also made to wait out a hold afterwards - the route lands a dwell
+      // after the commit that released the readiness, rather than the five
+      // seconds after it the old countdown would have cost.
       release();
       await flush();
       expect(

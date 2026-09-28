@@ -5,8 +5,6 @@ import { describe, expect, it } from "vitest";
 // which would turn a literal CSS asset reference into a non-file URL.
 const here = (rel: string) => new URL(rel, import.meta.url);
 
-const css = readFileSync(here("./doneScreen.module.css"), "utf8");
-
 // #581: the handoff's progress bar is indeterminate, and jsdom applies no
 // stylesheet, so a sliding segment and a plain div are indistinguishable in the
 // rendered tree. This gate reads the sheet off disk for the same reason the
@@ -14,6 +12,7 @@ const css = readFileSync(here("./doneScreen.module.css"), "utf8");
 // ring's CSS contract test do: the contract lives in the CSS, so the assertion
 // reads the CSS. A `transition: width` here would reintroduce a bar that fills
 // towards a known endpoint - the countdown's visual, without the countdown.
+const css = readFileSync(here("./doneScreen.module.css"), "utf8");
 
 describe("DoneScreen progress indicator animation", () => {
   it("slides the fill on a transform, so nothing implies a known duration", () => {

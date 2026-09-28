@@ -1186,16 +1186,17 @@ describe("StaffLoginForm - partner code step", () => {
 
       // #566 AC-6: no console destination is ever engaged for a partner who is
       // not an active doctor. `landing` is never set on this path, so the
-      // handoff's countdown and its CTA both stay no-ops - asserted here rather
-      // than inferred from the routing call, because a mocked location.replace
-      // never tears the tree down the way a real hard navigation would. What
+      // handoff's readiness conjunction is never satisfied and its one control
+      // stays a no-op - asserted here rather than inferred from the routing
+      // call, because a mocked location.replace never tears the tree down the
+      // way a real hard navigation would. What
       // keeps the handoff from being the active-partner-only moment is the
       // routing, not a second render condition: the ticket freezes these three
       // exit branches, and the handoff is keyed to the OTP stage alone.
       expect(screen.queryByTestId("staff-submit")).not.toBeInTheDocument();
       expect(screen.queryByTestId("partner-otp")).not.toBeInTheDocument();
-      // Held, because there is nowhere to count down to: the digit-free opening
-      // line, and no navigation to a console path.
+      // Held, because there is nowhere to go yet: the digit-free opening line,
+      // and no navigation to a console path.
       expect(screen.getByRole("status").textContent).not.toMatch(/\d/);
       expect(mockRouterReplace).not.toHaveBeenCalled();
       // #579 AC-9: the flow is terminal here too, so the handoff is genuinely
@@ -1495,7 +1496,7 @@ describe("StaffLoginForm - verified handoff on the OTP stage (#566)", () => {
     await act(async () => {});
 
     // The handoff is up, and it says it is still waiting: the digit-free
-    // opening line, not a countdown that has nowhere to count down to.
+    // opening line, and no destination to go to yet.
     expect(
       screen.getByRole("heading", { level: 1, name: "Identity verified" }),
     ).toBeInTheDocument();
@@ -1611,7 +1612,8 @@ describe("StaffLoginForm - the handoff leaves on readiness (#579)", () => {
   // The clocks are faked only here, and only AFTER the code step: the helper
   // reaches it with `findBy`, which polls on the real clock. Nothing downstream
   // needs the real clock - the destination read is a promise the test resolves
-  // itself, and the handoff's own countdown cannot win the race.
+  // itself, and the handoff's leave is armed by readiness, which has not
+  // happened while the read is held.
   //
   // A test installs whatever it needs to differ (a gated session resume, a
   // profile read that answers) BEFORE calling this, because the flow starts
@@ -1664,33 +1666,91 @@ describe("StaffLoginForm - the handoff leaves on readiness (#579)", () => {
     expect(mockLocationReplace).not.toHaveBeenCalled();
   });
 
-  it("leaves as soon as a slow destination finally lands, with the button live throughout (#579 AC-5)", async () => {
-    // The regression case, and the reason this ticket exists. The reported
-    // screen was a handoff whose five seconds had expired while the
-    // destination was still in flight: the timer had stopped, the auto-redirect
-    // had stopped with it, and the button was wired to a routine that refused.
-    // None of the three can reach here now - the leave is a consequence of
-    // readiness rather than of a clock expiring, and the button cannot be
-    // refused - so the test holds the read open well past the old duration and
-    // insists the flow still leaves.
+  // #582: the regression case, and the reason #579 exists. The reported screen
+  // was a handoff whose five seconds had expired while the destination was
+  // still in flight: the timer had stopped, the auto-redirect had stopped with
+  // it, and the button was wired to a routine that refused. Every one of those
+  // three escapes was closed, so the partner had nothing left to press.
+  //
+  // It is pinned as TWO tests, not one, and the split is load-bearing rather
+  // than tidier. A press on a handoff whose destination is still in flight sets
+  // the hook's go-now ask, which drops the dwell on readiness - so a single test
+  // that presses and then settles only ever exercises the go-now path. Folded
+  // into one, it would still pass with the dwell-scheduled leave after a long
+  // hold entirely broken, which is half the defect: the reported screen was not
+  // one where the user pressed the button, it was one where nothing happened
+  // until they did. The first test is the unattended path, the second is the
+  // press, and the load-bearing name is on the unattended one.
+  it("a destination slower than the old five-second hold still leaves exactly once, unattended (#579 AC-5)", async () => {
     stubProfileRead(doctorProfile());
     const destination = await holdDestinationOnTheHandoff();
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(PAST_ANY_HANDOFF_DELAY_MS);
-    });
-    // Mid-hold, the handoff is still a live surface with a working control -
-    // and pressing it navigates nowhere, because there is nowhere yet.
+    // The surface is live at the held instant, not just at the end of it: a
+    // handoff that has already given up reads identically to one that is
+    // waiting, which is exactly why this defect reached a production page.
     expect(goToDashboard()).toBeEnabled();
-    fireEvent.click(goToDashboard());
-    expect(mockRouterReplace).not.toHaveBeenCalled();
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(
       "Identity verified",
     );
 
-    // The read finally lands, a long time after the old countdown would have
-    // expired. The press made above is still remembered, so the leave is
-    // immediate - and it happens exactly once.
+    // Twice the old hold, with nobody touching anything. Elapsed time is not
+    // what releases this screen, so this is a long silence and not a leave.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(PAST_ANY_HANDOFF_DELAY_MS);
+    });
+    expect(mockRouterReplace).not.toHaveBeenCalled();
+    expect(mockLocationReplace).not.toHaveBeenCalled();
+    // Still a live surface after the silence, with a control that still does
+    // something the moment there is somewhere to go.
+    expect(goToDashboard()).toBeEnabled();
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(
+      "Identity verified",
+    );
+
+    // The read finally lands, long after the old countdown would have expired
+    // with its refuse already latched. The dwell is measured from this
+    // readiness, not from mount, so the route is not pushed in the same
+    // instant either.
+    await act(async () => {
+      destination.settle("Active");
+    });
+    // Flush the resume seam's microtask, so readiness is committed and the
+    // dwell is armed, without moving the clock that will run it.
+    await act(async () => {});
+    expect(mockRouterReplace).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HANDOFF_MINIMUM_DWELL_MS);
+    });
+    expect(mockRouterReplace).toHaveBeenCalledTimes(1);
+    expect(mockRouterReplace).toHaveBeenCalledWith("/doctor");
+    // Through the framework router rather than a document swap: the no-hard-
+    // reload invariant is the one a frozen screen tempted people to break.
+    expect(mockLocationReplace).not.toHaveBeenCalled();
+    // One leave, ever - a second long wait adds no second navigation.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(PAST_ANY_HANDOFF_DELAY_MS);
+    });
+    expect(mockRouterReplace).toHaveBeenCalledTimes(1);
+  });
+
+  it("a press on a handoff held as long as the old countdown is remembered, not lost (#579 AC-5)", async () => {
+    stubProfileRead(doctorProfile());
+    const destination = await holdDestinationOnTheHandoff();
+
+    // Pressed mid-hold, long past the old countdown: the ask is remembered
+    // rather than obeyed, because there is still nowhere to go. In the reported
+    // defect this is the press that did nothing, forever.
+    fireEvent.click(goToDashboard());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(PAST_ANY_HANDOFF_DELAY_MS);
+    });
+    expect(mockRouterReplace).not.toHaveBeenCalled();
+    expect(mockLocationReplace).not.toHaveBeenCalled();
+    expect(goToDashboard()).toBeEnabled();
+
+    // The read lands, the ask is honoured at once rather than after a beat, and
+    // it happens exactly once.
     await act(async () => {
       destination.settle("Active");
     });
@@ -1764,10 +1824,10 @@ describe("StaffLoginForm - the handoff leaves on readiness (#579)", () => {
     expect(mockRouterReplace).toHaveBeenCalledTimes(1);
 
     // The button keeps being pressed after the navigation has begun, and the
-    // handoff's own countdown is given all the time it once owned: the call
-    // count does not move. This is the only double-navigation hazard left, and
-    // it is the one that actually reaches the host - the handoff component's
-    // zero tick and the hook's schedule both call the same callback.
+    // hold this screen used to impose is given all the time it once owned: the
+    // call count does not move. The hook's own once-only latch is what stops
+    // it, and it is the only double-navigation hazard left now that the
+    // handoff component owns no clock of its own.
     fireEvent.click(goToDashboard());
     fireEvent.click(goToDashboard());
     await act(async () => {
