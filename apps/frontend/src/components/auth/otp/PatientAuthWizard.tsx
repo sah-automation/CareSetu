@@ -22,6 +22,7 @@ import {
 import { DoneScreen } from "@/components/auth/DoneScreen";
 import { fetchDemoOtp } from "@/lib/auth/api";
 import { useAuth } from "@/lib/auth/AuthContext";
+import { useHandoffNavigation } from "@/lib/auth/useHandoffNavigation";
 import { useLang } from "@/lib/i18n/LangContext";
 import { STRINGS, type DoneScreenStrings } from "@/lib/i18n/dictionaries";
 import type { OtpFlow } from "./otpState";
@@ -261,16 +262,15 @@ export function PatientAuthWizard({
     router,
   ]);
 
-  // #551: one post-login routine for BOTH the countdown and the CTA. The
-  // session-resume seam is started once and awaited by whichever signal
-  // arrives first, so a fast "Go to Dashboard" click goes through the same
-  // resume-then-navigate ordering as the auto path - identity/roles land in
-  // state BEFORE the post-login route mounts, because a patient surface that
-  // mounted identity-less makes the Provider remount that applies identity
-  // reset an in-progress completion wizard and wipe its draft (#496). A reload
-  // is never needed; the seam is best-effort by design, since
-  // resumeSession never rejects. `landedRef` keeps it idempotent, so a click
-  // during the countdown and the tick at zero cannot both navigate.
+  // #551: the post-login routine, and the identity/roles go into state BEFORE
+  // the post-login route mounts, because a patient surface that mounted
+  // identity-less makes the Provider remount that applies identity reset an
+  // in-progress completion wizard and wipe its draft (#496). So the route is
+  // pushed inside `resumeOnce().then(...)`, never a bare `router.replace`. A
+  // reload is never needed; the seam is best-effort by design, since
+  // resumeSession never rejects. `landedRef` keeps it idempotent, so two
+  // requests to leave - the shared hook's own once-only latch aside - cannot
+  // both navigate.
   const resumeRef = useRef<Promise<void> | null>(null);
   const landedRef = useRef(false);
   const [resumeSettled, setResumeSettled] = useState(false);
@@ -280,8 +280,9 @@ export function PatientAuthWizard({
     return resumeRef.current;
   }, [resumeSession]);
 
-  // Start the resume once the flow is done; the countdown is released (and
-  // only the countdown drives the auto-redirect) after it settles.
+  // Start the resume once the flow is done; `resumeSettled` is what the handoff
+  // reads as its readiness, so the auto-redirect begins only after the resume
+  // call has succeeded.
   useEffect(() => {
     if (flow.state.stage !== "done" || !flow.state.session) {
       return;
@@ -304,6 +305,18 @@ export function PatientAuthWizard({
     landedRef.current = true;
     void resumeOnce().then(() => router.replace(returnTo));
   }, [resumeOnce, router, returnTo]);
+
+  // #580: when to leave the handoff is the shared hook's decision, not ours.
+  // This flow's only precondition is the in-flow resume above - there is no
+  // destination read on this path - and the hook owns the minimum dwell
+  // measured from that readiness, plus the at-most-once guarantee, so the
+  // partner flow and this one agree on what a leave costs by construction. The
+  // callback it hands back is the handoff's "Go to Dashboard" button: a press
+  // mid-load is honoured the moment the resume lands, and still never before it.
+  const goToDashboardNow = useHandoffNavigation(
+    resumeSettled,
+    landOnReturnTarget,
+  );
 
   if (!flow.state.hydrated) {
     return null;
@@ -334,7 +347,7 @@ export function PatientAuthWizard({
               flow={flow}
               doneScreenT={STRINGS[lang].doneScreen}
               resumePending={!resumeSettled}
-              onGoToDashboard={landOnReturnTarget}
+              onGoToDashboard={goToDashboardNow}
             />
           )}
         </div>

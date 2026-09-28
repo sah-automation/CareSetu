@@ -5,28 +5,28 @@
 // authenticated view, and the hi/en toggle throughout.
 // Updated for T6 (#152): AuthenticatedHome removed, redirect to /patient.
 //
-// #563: why the done-screen countdown tests flush instead of waiting. The
-// countdown clock fakes ONLY the interval (see `fakeCountdownClock`), and that
-// partial fake silently disarms `@testing-library/dom`'s `waitFor`. `waitFor`
-// decides how to poll by asking `jestFakeTimersAreEnabled()`, which probes
-// `setTimeout` alone and, with no `jest` global under Vitest, always answers
-// `false`. So a `waitFor` opened under the fake clock takes its "real timers"
-// path: it registers a MutationObserver and arms its 50ms re-poll on
-// `setInterval` - the one function the fake owns. That poll can then only fire
-// from `tick`, and a re-render to identical output (the done screen's
-// `setDeparted(true)`) trips no observer either, so any wait whose assertion
-// needs a re-check after an async flush never gets one. Its 1000ms timeout
-// stays real, so such a wait runs out and reports that stale first check.
+// #563: why the done-screen tests flush instead of waiting. Under the handoff
+// clock fake (`fakeHandoffClock`, which since #580 owns `setInterval` AND
+// `setTimeout`) every RTL wait in this file hangs. `@testing-library/react`'s
+// `asyncWrapper` drains its microtask queue with a real `setTimeout(0)`, and
+// that drain is the last step of every `findBy*` and `waitFor` - so with the
+// timeout faked it never fires and the wait never settles, even for an element
+// that is already on screen. `waitFor` has a second problem: it decides how to
+// poll by asking `jestFakeTimersAreEnabled()`, which needs a `jest` global; under
+// Vitest there is none, so it always answers `false` and takes its "real timers"
+// path - a MutationObserver plus a 50ms re-poll on `setInterval` that only ever
+// fires from `tick`, and since #580 a 1000ms timeout that is itself faked and so
+// can no longer report a failure, only hang. Vitest's own `vi.waitFor` is worse:
+// it re-arms its poll on `setTimeout`, which the fake now owns, so it never
+// polls at all.
 //
-// THE RULE: under `fakeCountdownClock`, a wait is only trustworthy if a DOM
-// mutation satisfies it - which is why the flow helpers' `findBy*` are fine
-// (each either finds its element on the synchronous first check, or is woken
-// by the React commit that resolves its promise), and why a bare `getByText`
-// for the released countdown, or a `waitFor` on the CTA's navigation, is not.
-// Vitest's own `vi.waitFor` is the one exception: it polls on `setTimeout`,
-// which this fake leaves alone. For anything the resume seam or the navigate
-// routine produces, flush first with `tick(0)` and then assert. Both #563
-// failures were that exact mistake.
+// THE RULE: the flow helpers' `findBy*` run BEFORE the fake is installed, which
+// is why the four #580 tests reach the handoff first and fake the clock after.
+// The fake goes on only while the resume is still outstanding, so no leave is
+// already sitting on the real clock when it does - one armed before the switch
+// would outlive the fake and fire against real time. Once it is installed, use
+// synchronous queries, `flush()` to settle the session-resume seam, and
+// `tick(ms)` to move the clock. Both #563 failures were that exact mistake.
 
 import {
   act,
@@ -50,6 +50,7 @@ import {
 } from "@/lib/auth/api";
 import { PatientAuthWizard } from "./PatientAuthWizard";
 import { DONE_SCREEN_COUNTDOWN_SECONDS } from "../DoneScreen";
+import { HANDOFF_MINIMUM_DWELL_MS } from "@/lib/auth/useHandoffNavigation";
 
 vi.mock("@/lib/auth/api", async (importOriginal) => {
   const mod = await importOriginal<typeof import("@/lib/auth/api")>();
@@ -156,26 +157,70 @@ function verifyButton() {
   return screen.getByRole("button", { name: "Verify & continue" });
 }
 
-// #551: the done-screen countdown is driven by faking ONLY the interval, so
-// the async flow helpers above (findBy*) keep their real timers while the
-// 5-second tick becomes drivable. #563: what that partial fake costs, and the
-// rule it forces on every test that installs it, is in the file header.
-function fakeCountdownClock() {
-  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+// #580: the handoff's leave is scheduled with a `setTimeout` (the shared
+// navigation hook's minimum dwell), so the fake owns that as well as the
+// interval that drove the countdown - a `setInterval`-only fake would leave the
+// leave unmovable and the tests below would read as "never navigates".
+//
+// Install it ONLY once the flow is on screen and the session resume is still
+// outstanding, i.e. before the handoff has armed anything: see the file header
+// for why every RTL wait in this file hangs while it is installed. #563: what a
+// faked clock costs, and the rule it forces on every test that installs it, is
+// in there too.
+function fakeHandoffClock() {
+  vi.useFakeTimers({
+    toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"],
+  });
 }
 
 /**
- * Run the faked countdown forward by `ms`, flushing interval callbacks.
+ * Drain the microtask queue and commit the state it released, without moving
+ * the clock - "the session-resume seam has settled, and nothing has left yet".
  *
- * #563: `tick(0)` is the flush - it drains the microtask queue inside `act`
- * without moving the countdown, which is what settles the session-resume seam
- * and commits the state it releases, and what lets the post-resume navigation
- * run. See the file header for why a wait cannot be relied on here instead.
+ * #580: separate from `tick` because act settles the seam (and so the hook
+ * arms its leave timer) only after `advanceTimersByTimeAsync` has already run,
+ * so one `tick` cannot both settle the seam and fire what settling armed.
+ */
+async function flush() {
+  await act(async () => {});
+}
+
+/**
+ * Run the faked clock forward by `ms`, flushing interval and timeout callbacks.
+ *
+ * #563: `tick(0)` is also a flush - it drains the microtask queue inside `act`
+ * without moving the clock, which is what lets the post-resume leave run. See
+ * the file header for why a wait cannot be relied on here instead.
  */
 async function tick(ms: number) {
   await act(async () => {
     await vi.advanceTimersByTimeAsync(ms);
   });
+}
+
+/**
+ * Drive the flow to the handoff with the session-resume seam held open, and
+ * return the release for it.
+ *
+ * #580: the handoff's own loading state is only observable if the resume is
+ * held, so all four tests below need one, and need it before the verify click -
+ * the seam starts on the commit that lands the done stage. Holding it also
+ * leaves the handoff with nothing scheduled, which is what makes installing the
+ * clock fake afterwards race-free.
+ */
+async function startOtpFlowWithHeldResume(): Promise<() => void> {
+  await startOtpFlow();
+  vi.mocked(verifyOtp).mockResolvedValue(verifiedResult());
+  vi.mocked(issueSession).mockResolvedValue(SESSION);
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  state.resumeSession.mockReturnValue(gate);
+  mockReplace.mockClear();
+  typeOtp();
+  fireEvent.click(verifyButton());
+  return release;
 }
 
 afterEach(() => {
@@ -583,128 +628,134 @@ describe("PatientAuthWizard - success and session", () => {
     expect(stored.refresh_token).toBe("opaque-refresh-token");
   });
 
-  it("shows the shared done screen, counts down, and redirects at zero (#551)", async () => {
-    fakeCountdownClock();
+  it("keeps the handoff up while the session resumes, then leaves once (#580)", async () => {
+    const release = await startOtpFlowWithHeldResume();
+    const hrefBefore = window.location.href;
+
+    // #580: the handoff IS the loading surface, so the resume runs behind it
+    // and its progress line carries no countdown digits. Read synchronously -
+    // the resume is deliberately still outstanding here. This is the
+    // blank-flash regression guard #566 and #563 left in this place.
+    expect(await screen.findByText("Identity verified")).toBeInTheDocument();
+    expect(
+      screen.getByText("Your number is verified and your session is ready."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Opening your dashboard",
+    );
+    expect(
+      screen.queryByText(/Opening your dashboard in/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Go to Dashboard" }),
+    ).toBeInTheDocument();
+
+    fakeHandoffClock();
     try {
-      await startOtpFlow();
-      vi.mocked(verifyOtp).mockResolvedValue(verifiedResult());
-      vi.mocked(issueSession).mockResolvedValue(SESSION);
-      mockReplace.mockClear();
-
-      typeOtp();
-      fireEvent.click(verifyButton());
-
-      // The resume seam settles, so the countdown is released with its full
-      // duration and the verified state stands on its own - the blank-flash
-      // regression guard.
-      expect(await screen.findByText("Identity verified")).toBeInTheDocument();
-      // #563: the released countdown only exists once the resume seam's
-      // microtask has committed, so flush it before reading the DOM.
-      await tick(0);
+      // Settled, but not gone: a destination that is ready almost at once still
+      // gets the shared hook's readable beat, so the route is NOT pushed at
+      // this instant. This is the criterion that keeps the dwell from being
+      // optimised away later.
+      release();
+      await flush();
       expect(
-        screen.getByText("Your number is verified and your session is ready."),
-      ).toBeInTheDocument();
-      expect(
-        screen.getByText(
-          `Opening your dashboard in ${DONE_SCREEN_COUNTDOWN_SECONDS}`,
-        ),
-      ).toBeInTheDocument();
-      expect(screen.getByRole("progressbar")).toBeInTheDocument();
-      expect(
-        screen.getByRole("button", { name: "Go to Dashboard" }),
-      ).toBeInTheDocument();
+        mockReplace,
+        "must not route before the minimum dwell has elapsed",
+      ).not.toHaveBeenCalled();
 
-      // Mid-countdown: still counting, and the CTA stays available.
-      await tick(2000);
-      expect(mockReplace).not.toHaveBeenCalled();
-      expect(screen.getByRole("status")).toHaveTextContent(
-        "Opening your dashboard in 3",
-      );
-
-      // At zero the auto-redirect fires.
-      await tick(DONE_SCREEN_COUNTDOWN_SECONDS * 1000);
+      await tick(HANDOFF_MINIMUM_DWELL_MS);
       expect(mockReplace).toHaveBeenCalledWith("/patient");
+      expect(mockReplace).toHaveBeenCalledTimes(1);
+
+      // One leave, ever - and through the framework router, never by replacing
+      // the document.
+      await tick(DONE_SCREEN_COUNTDOWN_SECONDS * 1000 * 2);
+      expect(mockReplace).toHaveBeenCalledTimes(1);
+      expect(
+        window.location.href,
+        "must leave with the framework router, not a document navigation",
+      ).toBe(hrefBefore);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("holds the countdown back until the resume seam settles (#551)", async () => {
-    fakeCountdownClock();
+  it("leaves when the resume settles, never because time passed (#580)", async () => {
+    const release = await startOtpFlowWithHeldResume();
+
+    expect(await screen.findByText("Identity verified")).toBeInTheDocument();
+    expect(state.resumeSession).toHaveBeenCalled();
+
+    fakeHandoffClock();
     try {
-      await startOtpFlow();
-      vi.mocked(verifyOtp).mockResolvedValue(verifiedResult());
-      vi.mocked(issueSession).mockResolvedValue(SESSION);
-
-      let release: () => void;
-      const gate = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      state.resumeSession.mockReturnValue(gate);
-      mockReplace.mockClear();
-
-      typeOtp();
-      fireEvent.click(verifyButton());
-
-      expect(await screen.findByText("Identity verified")).toBeInTheDocument();
-      await vi.waitFor(() => expect(state.resumeSession).toHaveBeenCalled());
-
-      // The resume call has not resolved: no digits, and the clock never runs
-      // behind it, however long the seam takes.
+      // Twice the hold this screen used to impose, and the handoff is still
+      // there with no digits and no navigation: elapsed time is not what
+      // releases it.
+      await tick(DONE_SCREEN_COUNTDOWN_SECONDS * 1000 * 2);
       expect(screen.getByRole("status")).toHaveTextContent(
         "Opening your dashboard",
       );
       expect(
         screen.queryByText(/Opening your dashboard in/),
       ).not.toBeInTheDocument();
-      await tick(DONE_SCREEN_COUNTDOWN_SECONDS * 1000 * 2);
       expect(
-        screen.queryByText(/Opening your dashboard in/),
-      ).not.toBeInTheDocument();
-      expect(mockReplace).not.toHaveBeenCalled();
+        mockReplace,
+        "must not route while the resume is outstanding",
+      ).not.toHaveBeenCalled();
 
-      // Once it settles the countdown starts from the top and owns the
-      // auto-redirect.
-      release!();
-      await tick(0);
-      expect(screen.getByRole("status")).toHaveTextContent(
-        `Opening your dashboard in ${DONE_SCREEN_COUNTDOWN_SECONDS}`,
-      );
-      await tick(DONE_SCREEN_COUNTDOWN_SECONDS * 1000);
+      // The dwell is measured from readiness, not from mount, so a slow resume
+      // is not also made to wait out a hold afterwards - the countdown is
+      // released by the same commit that released the readiness, and the route
+      // lands a dwell later rather than five seconds later.
+      release();
+      await flush();
+      expect(
+        mockReplace,
+        "must not route before the minimum dwell has elapsed",
+      ).not.toHaveBeenCalled();
+      await tick(HANDOFF_MINIMUM_DWELL_MS);
+      expect(mockReplace).toHaveBeenCalledTimes(1);
       expect(mockReplace).toHaveBeenCalledWith("/patient");
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("does not double-navigate when the CTA is pressed mid-countdown (#551)", async () => {
-    fakeCountdownClock();
+  it("honours a mid-load CTA press once the session is ready, exactly once (#580)", async () => {
+    const release = await startOtpFlowWithHeldResume();
+
+    expect(await screen.findByText("Identity verified")).toBeInTheDocument();
+
+    // Pressed mid-load, while there is nothing to leave to: the ask has to be
+    // remembered rather than obeyed, so it cannot navigate an identity-less
+    // surface.
+    fireEvent.click(screen.getByRole("button", { name: "Go to Dashboard" }));
+
+    fakeHandoffClock();
     try {
-      await startOtpFlow();
-      vi.mocked(verifyOtp).mockResolvedValue(verifiedResult());
-      vi.mocked(issueSession).mockResolvedValue(SESSION);
-      mockReplace.mockClear();
+      await flush();
+      await tick(HANDOFF_MINIMUM_DWELL_MS * 2);
+      expect(
+        mockReplace,
+        "must not route before the session is resumed",
+      ).not.toHaveBeenCalled();
 
-      typeOtp();
-      fireEvent.click(verifyButton());
-      expect(await screen.findByText("Identity verified")).toBeInTheDocument();
-
-      // Wait for the resume seam to settle and the countdown to start.
-      // #563: flushed, not waited on - see the file header.
-      await tick(0);
-      expect(screen.getByRole("status")).toHaveTextContent(
-        `Opening your dashboard in ${DONE_SCREEN_COUNTDOWN_SECONDS}`,
-      );
-
-      await tick(2000);
-      fireEvent.click(screen.getByRole("button", { name: "Go to Dashboard" }));
-      // #563: `landOnReturnTarget` routes inside `resumeOnce().then(...)`, one
-      // microtask after the click, and the click's re-render is identical so
-      // nothing would re-check it. Flush, then assert.
-      await tick(0);
+      // The ask is not lost either: readiness is the only thing it was ever
+      // waiting on, and once it lands the ask drops the dwell entirely.
+      release();
+      await flush();
+      expect(
+        mockReplace,
+        "a go-now ask is remembered, not obeyed, on readiness",
+      ).not.toHaveBeenCalled();
+      await tick(1);
+      expect(mockReplace).toHaveBeenCalledTimes(1);
       expect(mockReplace).toHaveBeenCalledWith("/patient");
 
-      // The countdown reaching zero must not navigate a second time.
+      // A second press must not leave a second time, and the countdown this
+      // screen used to hold is given its full old duration to try.
+      fireEvent.click(screen.getByRole("button", { name: "Go to Dashboard" }));
+      await flush();
       await tick(DONE_SCREEN_COUNTDOWN_SECONDS * 1000);
       expect(mockReplace).toHaveBeenCalledTimes(1);
     } finally {
@@ -713,39 +764,28 @@ describe("PatientAuthWizard - success and session", () => {
   });
 
   it("awaits the session-resume seam before routing to the return target (#496)", async () => {
-    await startOtpFlow();
-    vi.mocked(verifyOtp).mockResolvedValue(verifiedResult());
-    vi.mocked(issueSession).mockResolvedValue(SESSION);
-
     // The seam must settle BEFORE the post-login route mounts, so the patient
     // surface never renders identity-less (and never remounts mid-flow).
-    let release: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    state.resumeSession.mockReturnValue(gate);
-    mockReplace.mockClear();
+    const release = await startOtpFlowWithHeldResume();
 
-    typeOtp();
-    fireEvent.click(verifyButton());
-
-    await vi.waitFor(() => expect(state.resumeSession).toHaveBeenCalled());
+    expect(await screen.findByText("Identity verified")).toBeInTheDocument();
+    expect(state.resumeSession).toHaveBeenCalled();
     expect(
       mockReplace,
       "must not route before the seam settles",
     ).not.toHaveBeenCalled();
 
-    fakeCountdownClock();
+    fakeHandoffClock();
     try {
-      release!();
-      await tick(0);
-      // Settled: the countdown now owns the auto-redirect (#551), so the route
-      // still has not fired.
+      release();
+      await flush();
+      // Settled: the shared hook owns the leave now (#580), and its minimum
+      // dwell has not elapsed yet, so the route still has not fired.
       expect(
         mockReplace,
-        "must not route before the countdown completes",
+        "must not route before the minimum dwell has elapsed",
       ).not.toHaveBeenCalled();
-      await tick(DONE_SCREEN_COUNTDOWN_SECONDS * 1000);
+      await tick(HANDOFF_MINIMUM_DWELL_MS);
       expect(mockReplace).toHaveBeenCalledWith("/patient");
     } finally {
       vi.useRealTimers();
@@ -778,7 +818,9 @@ describe("PatientAuthWizard - success and session", () => {
   // wizard - a deep link bounced to /login?return=... lands back on the
   // original destination after sign-in, never dead-ending on /patient.
   describe("return-url redirect target", () => {
-    async function completeFlowWithReturnTo(returnTo: string) {
+    // #580: called with no argument the prop is undefined, so the fallback
+    // case exercises the wizard's own default rather than restating it.
+    async function completeFlowWithReturnTo(returnTo?: string) {
       vi.mocked(registerPhone).mockResolvedValue(REGISTER_OK);
       render(<PatientAuthWizard returnTo={returnTo} />);
       await enterPhone();
@@ -794,7 +836,9 @@ describe("PatientAuthWizard - success and session", () => {
       fireEvent.click(screen.getByRole("button", { name: "Go to Dashboard" }));
       // #551: the CTA resumes the session first, so the route lands one
       // microtask after the click.
-      await waitFor(() => expect(mockReplace).toHaveBeenCalledWith(returnTo));
+      await waitFor(() =>
+        expect(mockReplace).toHaveBeenCalledWith(returnTo ?? "/patient"),
+      );
     }
 
     it("redirects to the returnTo prop after the Done step", async () => {
@@ -802,7 +846,7 @@ describe("PatientAuthWizard - success and session", () => {
     });
 
     it("falls back to /patient when no returnTo is given", async () => {
-      await completeFlowWithReturnTo("/patient");
+      await completeFlowWithReturnTo();
     });
 
     it("routes an already-stored session to the returnTo prop", async () => {
