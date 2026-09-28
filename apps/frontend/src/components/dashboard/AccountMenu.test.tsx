@@ -116,6 +116,15 @@ const ME_RESPONSE_NO_PHONE = {
   roles: ["patient"],
 };
 
+// #570: an operator session - the third non-doctor staff shell. It shares the
+// staff branch with a lab or chemist partner, and the doctor's parity work must
+// not reach it either.
+const ME_RESPONSE_OPERATOR = {
+  subject_id: "42",
+  phone: "+911234567890",
+  roles: ["operator"],
+};
+
 const NAMED_PROFILE: StoredPatientProfile = {
   name: "Asha Devi",
   age: 30,
@@ -649,14 +658,14 @@ describe("AccountMenu patient avatar trigger (#521)", () => {
     expect(profileApi.fetchPatientPhoto).not.toHaveBeenCalled();
 
     // The dropdown behind the avatar still carries the full phone, role badge
-    // and dictionary-driven Log out. The badge keeps reporting the *session's*
-    // selected role, which for a doctor is `partner` - doctor-ness gates the
-    // affordances, it does not relabel the session (#570 owns the doctor's
-    // dropdown body, not the badge).
+    // and dictionary-driven Log out. #570: the badge now follows the shell the
+    // doctor is sitting in rather than the session's grant, so it reads
+    // "Doctor" - the session could only ever answer "partner", which is the
+    // same word a lab partner's badge shows.
     await openViaKeyboard();
     expect(screen.getByText("+911234567890")).toBeInTheDocument();
     expect(screen.getByTestId("account-menu-role-badge")).toHaveTextContent(
-      "Partner",
+      "Doctor",
     );
     expect(
       screen.getByRole("menuitem", { name: "Log out" }),
@@ -1081,6 +1090,234 @@ describe("AccountMenu desktop identity dropdown (#526)", () => {
 
     const { violations } = await axe.run(screen.getByRole("menu"));
     expect(violations).toEqual([]);
+  });
+});
+
+// #570: the doctor branch reaches the patient branch's treatment, and these
+// cases are the patient's own assertion shapes driven by the production-shaped
+// doctor session - a `partner` role, since that is all the grants table issues,
+// with doctor-ness coming from the shell alone. The three properties that make
+// the difference are pinned separately: what the identity header carries, how
+// wide the content is, and which rows are full-size tap targets.
+describe("AccountMenu doctor dropdown parity (#570)", () => {
+  function openDoctorMenu(
+    mePayload: unknown = ME_RESPONSE_PARTNER,
+    photoRef: string | null = null,
+    practiceName: string | null = "Asha Clinic",
+  ) {
+    return renderClosedTrigger(
+      mePayload,
+      "doctor",
+      undefined,
+      doctorProfileWith(photoRef, practiceName),
+    ).then((trigger) => {
+      fireEvent.keyDown(trigger, { key: "Enter" });
+      return waitFor(() =>
+        expect(screen.getByRole("menu")).toBeInTheDocument(),
+      );
+    });
+  }
+
+  it("identity header shows the practice name, the full E.164 and the Doctor badge", async () => {
+    await openDoctorMenu();
+
+    // The practice name off the shell-held projection is the only human-readable
+    // name a doctor has anywhere in the frontend, and it resolves through the
+    // same shared name -> masked phone -> "Subject #id" chain the patient uses.
+    expect(screen.getByTestId("account-menu-identity")).toHaveTextContent(
+      "Asha Clinic",
+    );
+    // The FULL E.164, not the masked form and not the last two digits.
+    expect(screen.getByText("+911234567890")).toBeInTheDocument();
+    expect(screen.queryByText(maskedPhone("+911234567890"))).toBeNull();
+    // The session can only answer "partner"; the shell knows which partner this
+    // is, so the badge follows the shell and reads from the same ROLE_LABELS
+    // vocabulary every other badge reads.
+    expect(screen.getByTestId("account-menu-role-badge")).toHaveTextContent(
+      "Doctor",
+    );
+  });
+
+  it("header avatar shows the doctor's own photo, never the stored ref", async () => {
+    await openDoctorMenu(ME_RESPONSE_PARTNER, "doctor/7/photo-1.enc");
+
+    const img = await imageIn(screen.getByRole("menu"));
+    expect(img.getAttribute("src")).toMatch(/^blob:/);
+    expect(img.getAttribute("src")).not.toContain("doctor/7/photo-1.enc");
+  });
+
+  it("with no stored photo the header keeps the person icon and reads no bytes", async () => {
+    await openDoctorMenu();
+
+    const menu = screen.getByRole("menu");
+    expect(menu.querySelector("img")).toBeNull();
+    expect(menu.querySelector("svg")).not.toBeNull();
+    // No ref, so nothing to resolve - the icon rather than an initial borrowed
+    // from the practice name, which is a clinic and not a person (#538).
+    expect(doctorApi.fetchDoctorProfilePhoto).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the masked phone when the projection carries no practice name", async () => {
+    await openDoctorMenu(ME_RESPONSE_PARTNER, null, null);
+
+    expect(screen.getByTestId("account-menu-identity")).toHaveTextContent(
+      maskedPhone("+911234567890"),
+    );
+    // The full number is still on its own line, exactly as for a patient.
+    expect(screen.getByText("+911234567890")).toBeInTheDocument();
+  });
+
+  it("renders a live Profile row, one click from the dropdown", async () => {
+    await openDoctorMenu();
+
+    const entry = screen.getByTestId("account-menu-doctor-profile");
+    expect(entry).toHaveTextContent("Profile");
+    expect(entry).toHaveAttribute("href", "/doctor/profile");
+
+    fireEvent.click(entry);
+    await waitFor(() =>
+      expect(mockPush).toHaveBeenCalledWith("/doctor/profile"),
+    );
+  });
+
+  it("every row is a full-size tap target, the patient's >=44px contract", async () => {
+    await openDoctorMenu({
+      subject_id: "42",
+      phone: "+911234567890",
+      roles: ["partner", "patient"],
+    });
+
+    for (const testId of [
+      "account-menu-doctor-profile",
+      "switch-to-patient",
+      "account-menu-doctor-logout",
+    ]) {
+      expect(screen.getByTestId(testId).className).toContain("min-h-11");
+    }
+  });
+
+  it("opens at the wider content width the patient menu uses", async () => {
+    await openDoctorMenu();
+
+    // The patient's own value, adopted - not a third width.
+    expect(screen.getByRole("menu").className).toContain("w-60");
+  });
+
+  it("renders a red dictionary-driven Log out that ends the session", async () => {
+    await openDoctorMenu();
+
+    const logoutItem = screen.getByTestId("account-menu-doctor-logout");
+    expect(logoutItem.className).toContain("text-danger");
+    expect(logoutItem.className).toContain("focus:bg-danger-soft");
+
+    fireEvent.click(logoutItem);
+    expect(mockReplace).toHaveBeenCalledWith("/");
+    expect(localStorage.getItem("caresetu.session")).toBeNull();
+  });
+
+  it("always draws the divider above the sign-out row", async () => {
+    // A single-role session is the case the staff branch drops its divider on,
+    // so this only passes if the doctor's is unconditional, as the patient's is.
+    await openDoctorMenu();
+
+    expect(screen.getByRole("separator")).toBeInTheDocument();
+  });
+
+  it("keeps the role-switch row for a multi-role doctor, and off a single-role one", async () => {
+    await openDoctorMenu({
+      subject_id: "42",
+      phone: "+911234567890",
+      roles: ["partner", "patient"],
+    });
+
+    const switchRow = screen.getByTestId("switch-to-patient");
+    expect(switchRow).toHaveTextContent("Switch to Patient");
+
+    // The same shared `switchRole` wiring the patient menu uses: selecting it
+    // hands the session over and Radix closes the menu.
+    fireEvent.click(switchRow);
+    await waitFor(() =>
+      expect(screen.queryByRole("menu")).not.toBeInTheDocument(),
+    );
+    cleanup();
+
+    await openDoctorMenu();
+    expect(screen.queryByText(/Switch to/)).not.toBeInTheDocument();
+  });
+
+  it("never offers the patient Complete your profile CTA", async () => {
+    await openDoctorMenu();
+
+    // Gated on a patient profile a doctor does not have, so it must not be
+    // inherited by a later "just reuse the patient branch" edit.
+    expect(screen.queryByTestId("account-menu-complete-profile")).toBeNull();
+  });
+
+  it("renders the doctor's account menu strings bilingually", async () => {
+    localStorage.setItem("caresetu.lang", "hi");
+    setStoredSession(VALID_SESSION);
+    mockMeResponse(ME_RESPONSE_PARTNER);
+
+    renderAccountMenu("doctor", doctorProfileWith(null));
+    const trigger = await waitFor(() =>
+      expect(screen.getByTestId("account-menu")).toBeInTheDocument(),
+    ).then(() => screen.getByTestId("account-menu"));
+
+    expect(trigger.getAttribute("aria-label")).toBe("अकाउंट मेन्यू");
+
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    await waitFor(() => expect(screen.getByRole("menu")).toBeInTheDocument());
+
+    expect(
+      screen.getByRole("menuitem", { name: "लॉग आउट" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitem", { name: "प्रोफ़ाइल" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the accent, the width and the row sizing off non-doctor staff menus", async () => {
+    // The same doctor payload in the partner shell: a lab or chemist partner.
+    // The doctor's icon treatment must not leak onto it, and the staff branch's
+    // own rows stay exactly as narrow, as small and as neutral as they were.
+    await renderClosedTrigger(ME_RESPONSE_PARTNER, "partner");
+    await openViaKeyboard();
+
+    const menu = screen.getByRole("menu");
+    expect(menu.className).toContain("w-52");
+    const staffLogout = screen.getByTestId("logout-button");
+    expect(staffLogout.className).not.toContain("text-danger");
+    expect(staffLogout.className).not.toContain("min-h-11");
+    expect(screen.getByTestId("account-menu-role-badge")).toHaveTextContent(
+      "Partner",
+    );
+    // No identity header, no avatar: the staff header is the two-part
+    // phone/badge row, with the doctor's identity layout kept off it.
+    expect(screen.queryByTestId("account-menu-identity")).toBeNull();
+    expect(menu.querySelector("img")).toBeNull();
+    expect(menu.querySelector("svg")).toBeNull();
+  });
+
+  it("leaves the operator's account menu exactly as it was", async () => {
+    // Pinned rather than assumed: the operator shares the staff branch, so
+    // "unchanged" has to be a claim about the operator's own session, not an
+    // inference from the partner shell's case.
+    await renderClosedTrigger(ME_RESPONSE_OPERATOR, "operator");
+    await openViaKeyboard();
+
+    const menu = screen.getByRole("menu");
+    expect(menu.className).toContain("w-52");
+    expect(screen.getByTestId("account-menu-role-badge")).toHaveTextContent(
+      "Operator",
+    );
+    const operatorLogout = screen.getByTestId("logout-button");
+    expect(operatorLogout.className).not.toContain("text-danger");
+    expect(operatorLogout.className).not.toContain("min-h-11");
+    // Still the two-part phone/badge header: the phone on its own, no identity
+    // line, no avatar.
+    expect(screen.getByText("+911234567890")).toBeInTheDocument();
+    expect(screen.queryByTestId("account-menu-identity")).toBeNull();
+    expect(menu.querySelector("img")).toBeNull();
   });
 });
 

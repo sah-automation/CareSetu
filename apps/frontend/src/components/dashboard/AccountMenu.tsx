@@ -43,9 +43,19 @@
 // dictionary-driven (nav.* and accountMenu.*, both locales); the identity
 // degrade is the shared accountIdentity (which owns the mask format).
 
+// #570: and the doctor's branch reaches the patient's treatment - the same
+// shared identity header, the same wider content, full-size rows, an
+// unconditional divider and the danger-accented sign-out - supplied with the
+// practice name and the photo the shell already read. Only the doctor's branch
+// changes: the non-doctor staff branch keeps its two-part phone/badge header,
+// its narrow content and its verbatim rows, and the patient branch renders
+// exactly as before.
+
 import Link from "next/link";
+import type { ReactNode } from "react";
 
 import { useAuth } from "@/lib/auth/AuthContext";
+import type { User } from "@/lib/auth/AuthContext";
 import { useOptionalProfile } from "@/lib/profile/ProfileContext";
 import { useProfilePhotoSource } from "@/lib/profile/useProfilePhotoSource";
 import type { ProfilePhotoReader } from "@/lib/profile/useProfilePhotoSource";
@@ -90,10 +100,11 @@ function identityLine(user: { phone?: string; id: number } | null): string {
   return user.phone || accountIdentity(null, user);
 }
 
-// #527: every patient dropdown row is a >=44px tap target (spec #520 story
-// 30). Shared so a future patient row cannot silently drop the contract; the
-// staff branch deliberately never uses it (staff stays verbatim).
-const patientMenuItemClass = "min-h-11";
+// #527: every row of a real account menu (patient or doctor) is a >=44px tap
+// target (spec #520 story 30). Shared so a future row cannot silently drop the
+// contract. The non-doctor staff branch deliberately never uses it - that menu
+// stays verbatim.
+const menuRowClass = "min-h-11";
 
 // The "Complete your profile" CTA shows only while the saved profile is absent
 // or fails the care-action basics gate (name + age + gender, spec #520). The
@@ -102,6 +113,64 @@ const patientMenuItemClass = "min-h-11";
 // unset gender counts as incomplete the same way the profile page judges it.
 function savedBasicsComplete(saved: StoredPatientProfile | null | undefined) {
   return saved ? basicsComplete(serverProfileToDraft(saved)) : false;
+}
+
+// #570: the identity header, ONE component with two suppliers. The patient
+// supplies its saved profile's name and the ref that name's account resolved;
+// the doctor supplies the shell-held practice name and the ref the doctor
+// transport resolved (#569). They differ in exactly those values, so the header
+// is parameterised rather than copied - and the patient's rendering is
+// unchanged by the doctor's arrival.
+type IdentityHeaderProps = {
+  // The human-readable identity on the first line, resolved through the shared
+  // name -> masked phone -> "Subject #id" chain.
+  name: string | null | undefined;
+  // The session, for that resolve and for the full E.164 on the second line. The
+  // full number is dropped rather than faked when the session has none.
+  user: User | null;
+  // The already-resolved avatar source (an object URL) or null. Never the stored
+  // ref, which is opaque and not browser-reachable (ADR-0020 D1).
+  photoSrc: string | null;
+  // What the avatar falls back to when no photo resolves. The patient passes the
+  // name so the disc shows an initial; a doctor passes nothing and keeps the
+  // person icon (#538) - a practice name has no person to take an initial from.
+  // The one thing the two suppliers do not agree on, so it is an explicit input
+  // rather than a silent difference.
+  avatarName?: string | null;
+  // The shared role chip, rendered in the right slot.
+  badge: ReactNode;
+};
+
+function IdentityHeader({
+  name,
+  user,
+  photoSrc,
+  avatarName,
+  badge,
+}: IdentityHeaderProps) {
+  return (
+    <DropdownMenuLabel className="flex items-center gap-3 font-normal">
+      <Avatar
+        photoRef={photoSrc}
+        name={avatarName}
+        className="h-10 w-10 shrink-0 bg-accent-soft text-base font-semibold text-accent-strong"
+      />
+      <span className="min-w-0 flex-1">
+        <span
+          data-testid="account-menu-identity"
+          className="block truncate text-sm font-semibold text-txt"
+        >
+          {accountIdentity(name, user)}
+        </span>
+        {user?.phone && (
+          <span className="block truncate text-xs leading-5 text-txt-muted">
+            {user.phone}
+          </span>
+        )}
+      </span>
+      {badge}
+    </DropdownMenuLabel>
+  );
 }
 
 // #567: `shellRole` is the role of the shell this menu renders inside, threaded
@@ -133,7 +202,8 @@ export function AccountMenu({
   const avatarClassName =
     "h-9 w-9 bg-accent-soft text-sm font-semibold text-accent-strong hover:bg-accent-border";
   // The session's role still decides the patient and non-doctor-staff branches
-  // and the role badge, exactly as before.
+  // and the non-doctor badges, exactly as before. #570: inside the doctor shell
+  // the badge follows the shell instead - see roleBadge below.
   const currentRole = resolveRole(selectedRole);
   const isPatient = currentRole === "patient";
   // #567: and only the shell decides doctor-ness.
@@ -160,27 +230,34 @@ export function AccountMenu({
   const otherRoles = (user?.roles ?? [])
     .filter(isAppRole)
     .filter((role) => role !== currentRole);
+  // #570: the patient and the doctor are the two real account menus - each
+  // opens onto an identity header - so both get the wider content that header
+  // needs and the full-size rows. The non-doctor staff branch keeps the narrower
+  // content and its verbatim rows.
+  const isRealAccountMenu = isPatient || isDoctor;
 
   const roleSwitchItems = otherRoles.map((role) => (
     <DropdownMenuItem
       key={role}
       onSelect={() => switchRole(role)}
       data-testid={`switch-to-${role}`}
-      className={isPatient ? patientMenuItemClass : undefined}
+      className={isRealAccountMenu ? menuRowClass : undefined}
     >
       {menuStrings.switchRole(roleLabel(role))}
     </DropdownMenuItem>
   ));
 
-  // #526: patient only - the red, accented Log out row; the staff branch keeps
-  // today's neutral row so only the patient account menu surfaces the red
-  // sign-out treatment.
-  const redLogoutItem = (
+  // #526: the red, accented Log out row, for whichever account menu is a real
+  // one - the patient's, and since #570 the doctor's. The non-doctor staff branch
+  // keeps today's neutral row. The test id is an input because the doctor's row
+  // is a third element of this shape and an id is what tells the three apart in
+  // a test; the patient keeps the historic one.
+  const redLogoutItem = (testId: string) => (
     <DropdownMenuItem
       onSelect={() => logout()}
-      data-testid="logout-button"
+      data-testid={testId}
       className={cn(
-        patientMenuItemClass,
+        menuRowClass,
         "text-danger focus:bg-danger-soft focus:text-danger",
       )}
     >
@@ -188,13 +265,18 @@ export function AccountMenu({
     </DropdownMenuItem>
   );
 
-  // Shared by both branches: the role chip in the header's right slot.
-  const roleBadge = (
+  // The role chip in a header's right slot, from the same ROLE_LABELS vocabulary
+  // every role label in the app reads - one factory so the chip is one element
+  // with one test id wherever it appears, and so each branch states the role it
+  // is labelling. #570: a doctor is a `partner` by grant and a doctor by partner
+  // *type*, so the session's role alone would label the doctor's chip "Partner";
+  // the shell knows which partner this is, and the doctor's branch asks it.
+  const roleBadgeFor = (role: Role) => (
     <span
       className="shrink-0 rounded bg-accent-soft px-1.5 py-0.5 text-xs font-medium text-accent"
       data-testid="account-menu-role-badge"
     >
-      {roleLabel(currentRole)}
+      {roleLabel(role)}
     </span>
   );
 
@@ -240,34 +322,23 @@ export function AccountMenu({
           )}
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className={isPatient ? "w-60" : "w-52"}>
+      <DropdownMenuContent
+        align="end"
+        className={isRealAccountMenu ? "w-60" : "w-52"}
+      >
         {isPatient ? (
           <>
-            <DropdownMenuLabel className="flex items-center gap-3 font-normal">
-              <Avatar
-                photoRef={photoSrc}
-                name={saved?.name}
-                className="h-10 w-10 shrink-0 bg-accent-soft text-base font-semibold text-accent-strong"
-              />
-              <span className="min-w-0 flex-1">
-                <span
-                  data-testid="account-menu-identity"
-                  className="block truncate text-sm font-semibold text-txt"
-                >
-                  {accountIdentity(saved?.name, user)}
-                </span>
-                {user?.phone && (
-                  <span className="block truncate text-xs leading-5 text-txt-muted">
-                    {user.phone}
-                  </span>
-                )}
-              </span>
-              {roleBadge}
-            </DropdownMenuLabel>
+            <IdentityHeader
+              name={saved?.name}
+              avatarName={saved?.name}
+              user={user}
+              photoSrc={photoSrc}
+              badge={roleBadgeFor(currentRole)}
+            />
             <DropdownMenuItem
               asChild
               data-testid="account-menu-profile-settings"
-              className={patientMenuItemClass}
+              className={menuRowClass}
             >
               <Link href="/patient/profile">{strings.profileSettings}</Link>
             </DropdownMenuItem>
@@ -275,7 +346,7 @@ export function AccountMenu({
               <DropdownMenuItem
                 asChild
                 data-testid="account-menu-complete-profile"
-                className={patientMenuItemClass}
+                className={menuRowClass}
               >
                 <Link href="/patient/profile">
                   {menuStrings.completeProfile}
@@ -284,46 +355,49 @@ export function AccountMenu({
             )}
             {roleSwitchItems}
             <DropdownMenuSeparator />
-            {redLogoutItem}
+            {redLogoutItem("logout-button")}
+          </>
+        ) : isDoctor ? (
+          // #570: the doctor's menu is the patient's, minus the one row a doctor
+          // cannot have - Complete your profile, gated on a patient profile this
+          // shell never holds. The Profile row, role switching, the
+          // unconditional divider and the accented sign-out are the patient's
+          // own components, and the name and photo arrive from the shell (#569):
+          // the menu still fetches nothing.
+          <>
+            <IdentityHeader
+              name={doctorProfile?.practice_name}
+              avatarName={null}
+              user={user}
+              photoSrc={photoSrc}
+              badge={roleBadgeFor(shellRole)}
+            />
+            {/* #543: the doctor's own Profile page, one click from the avatar
+                dropdown, now a full-size row like every other one here. */}
+            <DropdownMenuItem
+              asChild
+              data-testid="account-menu-doctor-profile"
+              className={menuRowClass}
+            >
+              <Link href="/doctor/profile">{strings.profile}</Link>
+            </DropdownMenuItem>
+            {roleSwitchItems}
+            <DropdownMenuSeparator />
+            {redLogoutItem("account-menu-doctor-logout")}
           </>
         ) : (
           <>
-            <DropdownMenuLabel
-              className={cn(
-                "flex items-center font-normal",
-                // A doctor's row is a three-part flex (avatar, identity, badge);
-                // every other menu keeps the two-part spread verbatim. #570 owns
-                // this header's identity layout.
-                isDoctor ? "gap-3" : "justify-between gap-2",
-              )}
-            >
-              {/* #569: the doctor's dropdown header reads the same resolved
-                  source the trigger is already showing, so two avatars on one
-                  ref still cost one read. Gated on doctor-ness, so the avatar
-                  treatment does not leak onto a lab or an operator menu. */}
-              {isDoctor && (
-                <Avatar
-                  photoRef={photoSrc}
-                  className="h-10 w-10 shrink-0 bg-accent-soft text-base font-semibold text-accent-strong"
-                />
-              )}
+            <DropdownMenuLabel className="flex items-center justify-between gap-2 font-normal">
               <span className="text-sm text-txt">{identityLine(user)}</span>
-              {roleBadge}
+              {roleBadgeFor(currentRole)}
             </DropdownMenuLabel>
-            {/* #543: the doctor's own Profile page is the entry point this
-                avatar opens into; the label reuses the nav dictionary word. */}
-            {isDoctor && (
-              <DropdownMenuItem
-                asChild
-                data-testid="account-menu-doctor-profile"
-              >
-                <Link href="/doctor/profile">{strings.profile}</Link>
-              </DropdownMenuItem>
-            )}
             {roleSwitchItems}
             {otherRoles.length > 0 && <DropdownMenuSeparator />}
             <DropdownMenuItem
               onSelect={() => logout()}
+              // The historic id, kept deliberately: it labels the neutral
+              // sign-out row of the staff branch, which only ever renders when
+              // the accented row above is not. See redLogoutItem.
               data-testid="logout-button"
             >
               {strings.logOut}
