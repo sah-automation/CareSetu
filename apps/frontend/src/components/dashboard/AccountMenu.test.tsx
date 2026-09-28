@@ -15,6 +15,9 @@
 // render now names the shell the menu sits inside. The synthetic
 // `roles: ["doctor"]` fixture that made the doctor branch look covered is
 // gone, so this class of bug cannot be hidden by a fixture again.
+// #569: the doctor's disc is hydrated from the shell-held profile projection -
+// the object URL, the single read shared with the dropdown header, and both
+// ways a read can fail to resolve - with the un-hydrated icon case kept pinned.
 
 import {
   render,
@@ -45,7 +48,10 @@ import {
   ProfileProvider,
   useOptionalProfile,
 } from "@/lib/profile/ProfileContext";
+import { useProfilePhotoSource } from "@/lib/profile/useProfilePhotoSource";
 import type { StoredPatientProfile } from "@/lib/profile/api";
+import type { DoctorProfileView } from "@/lib/doctor/api";
+import { ApiError } from "@/lib/api-errors";
 import { __resetLangForTests } from "@/lib/i18n/LangContext";
 import { maskedPhone } from "./BottomTabs";
 import type { Role } from "./types";
@@ -62,6 +68,18 @@ vi.mock("@/lib/profile/api", () => ({
   getProfile: profileApi.getProfile,
   saveProfile: profileApi.saveProfile,
   fetchPatientPhoto: profileApi.fetchPatientPhoto,
+}));
+
+// #569: the doctor's private photo bytes, read over the doctor transport the
+// shell-held projection resolves through. Mocked at the module boundary for the
+// same reason as the profile module: the menu must be able to fail a byte read
+// without HTTP.
+const doctorApi = vi.hoisted(() => ({
+  fetchDoctorProfilePhoto: vi.fn(),
+}));
+
+vi.mock("@/lib/doctor/api", () => ({
+  fetchDoctorProfilePhoto: doctorApi.fetchDoctorProfilePhoto,
 }));
 
 const VALID_SESSION: StoredSession = {
@@ -118,6 +136,34 @@ const PHOTO_PROFILE: StoredPatientProfile = {
   photo_ref: "https://cdn.example.test/me.jpg",
 };
 
+// #569: the projection the doctor shell reads once and hands the menu. `photo_ref`
+// is an opaque object key in the doctor's own namespace (ADR-0020 D1) and
+// `practice_name` is the only human-readable name a doctor has anywhere in the
+// frontend, which is why the shell takes the whole view.
+function doctorProfileWith(
+  photoRef: string | null,
+  practiceName: string | null = "Asha Clinic",
+): DoctorProfileView {
+  return {
+    partner_id: 7,
+    photo_ref: photoRef,
+    practice_name: practiceName,
+    specialty: "General",
+    verified: true,
+    practice_address: "1 Clinic Road",
+    practice_latitude: 12.97,
+    practice_longitude: 77.59,
+    area: "Indiranagar",
+    languages: ["en"],
+    experience_years: 9,
+    about: null,
+    consultation_fee: 400,
+    availability: null,
+    credentials: [],
+    notification_preferences: {},
+  };
+}
+
 function setStoredSession(session: StoredSession) {
   localStorage.setItem("caresetu.session", JSON.stringify(session));
   localStorage.setItem("caresetu.access_jwt", session.jwt);
@@ -127,10 +173,10 @@ function setStoredSession(session: StoredSession) {
 // #567: every render names the shell it sits inside. The parameter is required
 // on purpose - a default would let a staff test silently land in the patient
 // branch, and would let a doctor test forget the very answer it is testing.
-function renderAccountMenu(shellRole: Role) {
+function renderAccountMenu(shellRole: Role, doctorProfile?: DoctorProfileView) {
   return render(
     <AuthProvider>
-      <AccountMenu shellRole={shellRole} />
+      <AccountMenu shellRole={shellRole} doctorProfile={doctorProfile} />
     </AuthProvider>,
   );
 }
@@ -145,20 +191,25 @@ function mockMeResponse(payload: unknown) {
 // seam. When `profile` is given, wrap in the real ProfileProvider so
 // hydration ordering is exercised (name/photo arrive async). `shellRole` is
 // the role of the shell the menu renders inside (#567).
+// #569: `doctorProfile` is the projection the doctor shell already read and
+// threaded down, hand-fed here so this leaf suite can exercise the doctor's
+// branch without standing up the shell. Passing it undefined is the real
+// state for every non-doctor shell, which never fetches one.
 async function renderClosedTrigger(
   mePayload: unknown,
   shellRole: Role,
   profile?: StoredPatientProfile | null,
+  doctorProfile?: DoctorProfileView,
 ) {
   setStoredSession(VALID_SESSION);
   const app = (
     <AuthProvider>
       {profile !== undefined ? (
         <ProfileProvider>
-          <AccountMenu shellRole={shellRole} />
+          <AccountMenu shellRole={shellRole} doctorProfile={doctorProfile} />
         </ProfileProvider>
       ) : (
-        <AccountMenu shellRole={shellRole} />
+        <AccountMenu shellRole={shellRole} doctorProfile={doctorProfile} />
       )}
     </AuthProvider>
   );
@@ -206,6 +257,20 @@ function PhotoRefControls() {
       </button>
     </div>
   );
+}
+
+// #569: the seam's internal distinction is invisible in chrome - a definite
+// "no media" answer and a transport blip both render the same person icon, and
+// that is the point. This probe reads the *same* resolution the menu is showing
+// (one cached read per ref, so it adds no request) and reports which answer it
+// got, so the two can be told apart in a test without a production attribute
+// that exists only for the assertion.
+function PhotoAbsenceProbe({ photoRef }: { photoRef: string | null }) {
+  const { absent } = useProfilePhotoSource(
+    photoRef,
+    doctorApi.fetchDoctorProfilePhoto,
+  );
+  return <span data-testid="photo-absent">{String(absent)}</span>;
 }
 
 async function openViaKeyboard() {
@@ -316,6 +381,9 @@ beforeEach(() => {
   URL.revokeObjectURL = vi.fn() as unknown as typeof URL.revokeObjectURL;
   profileApi.fetchPatientPhoto.mockResolvedValue(
     new Blob(["photo-bytes"], { type: "image/png" }),
+  );
+  doctorApi.fetchDoctorProfilePhoto.mockResolvedValue(
+    new Blob(["doctor-photo-bytes"], { type: "image/png" }),
   );
 });
 
@@ -554,17 +622,19 @@ describe("AccountMenu patient avatar trigger (#521)", () => {
     // comes entirely from the shell the menu is rendered inside. A component
     // that went back to asking the session would take the else branch here and
     // fail on the "90" assertion.
-    // #557: seeded with a photo ref on purpose. The doctor disc is deliberately
-    // un-hydrated (that is later work), and this is the assertion that keeps it
-    // that way: a stored photo must not cost a doctor an authed read for bytes
-    // no surface renders.
-    const trigger = await renderClosedTrigger(ME_RESPONSE_PARTNER, "doctor", {
-      ...NAMED_PROFILE,
-      photo_ref: "patient/7/photo-1.enc",
-    });
+    // #569: the shell-held projection carries no photo ref, so the disc has
+    // nothing to resolve and keeps the person icon. The person-icon path stays
+    // pinned for the doctor-with-no-photo case even though the hydrated case
+    // exists now.
+    const trigger = await renderClosedTrigger(
+      ME_RESPONSE_PARTNER,
+      "doctor",
+      undefined,
+      doctorProfileWith(null),
+    );
 
-    // The generic person icon entry point - no digit text, and no saved photo
-    // on the chrome disc (the doctor photo lives on the Profile page, #543).
+    // The generic person icon entry point - no digit text, and no <img> where
+    // a ref was never stored.
     expect(trigger).not.toHaveTextContent("90");
     expect(trigger.querySelector("svg")).not.toBeNull();
     expect(trigger.querySelector("img")).toBeNull();
@@ -573,12 +643,15 @@ describe("AccountMenu patient avatar trigger (#521)", () => {
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
+    // No ref, so no bytes endpoint is touched - over either transport. And a
+    // doctor never reads the patient one: the shell told us whose photo it is.
+    expect(doctorApi.fetchDoctorProfilePhoto).not.toHaveBeenCalled();
     expect(profileApi.fetchPatientPhoto).not.toHaveBeenCalled();
 
     // The dropdown behind the avatar still carries the full phone, role badge
     // and dictionary-driven Log out. The badge keeps reporting the *session's*
     // selected role, which for a doctor is `partner` - doctor-ness gates the
-    // affordances, it does not relabel the session (#569/#570 own the doctor's
+    // affordances, it does not relabel the session (#570 owns the doctor's
     // dropdown body, not the badge).
     await openViaKeyboard();
     expect(screen.getByText("+911234567890")).toBeInTheDocument();
@@ -588,6 +661,143 @@ describe("AccountMenu patient avatar trigger (#521)", () => {
     expect(
       screen.getByRole("menuitem", { name: "Log out" }),
     ).toBeInTheDocument();
+  });
+
+  // #569: the whole of the defect, inverted. The doctor disc shows the photo
+  // the backend streams, never the stored key, and the read is the doctor's
+  // own private one - the ref arrives from the shell, the bytes from the doctor
+  // transport, and the patient endpoint is never touched.
+  it("#569 renders the doctor's stored photo as an object URL, never the stored key", async () => {
+    const trigger = await renderClosedTrigger(
+      ME_RESPONSE_PARTNER,
+      "doctor",
+      undefined,
+      doctorProfileWith("doctor/7/photo-1.enc"),
+    );
+
+    const img = await imageIn(trigger);
+    expect(img.getAttribute("src")).toMatch(/^blob:/);
+    // ADR-0020 D1/D2: the key is opaque and never browser-reachable, so a src
+    // that contained it would be the whole defect back.
+    expect(img.getAttribute("src")).not.toContain("doctor/7/photo-1.enc");
+    expect(doctorApi.fetchDoctorProfilePhoto).toHaveBeenCalledTimes(1);
+    // The doctor's own bytes, not the patient's.
+    expect(profileApi.fetchPatientPhoto).not.toHaveBeenCalled();
+  });
+
+  it("#569 shares one doctor read between the trigger and the dropdown header", async () => {
+    const trigger = await renderClosedTrigger(
+      ME_RESPONSE_PARTNER,
+      "doctor",
+      undefined,
+      doctorProfileWith("doctor/7/photo-1.enc"),
+    );
+
+    const triggerImg = await imageIn(trigger);
+    expect(triggerImg.getAttribute("src")).toMatch(/^blob:/);
+
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    await waitFor(() => expect(screen.getByRole("menu")).toBeInTheDocument());
+
+    const headerImg = await imageIn(screen.getByRole("menu"));
+    expect(headerImg.getAttribute("src")).toBe(triggerImg.getAttribute("src"));
+    // Two avatars, one ref, one request - counted, not inferred.
+    expect(doctorApi.fetchDoctorProfilePhoto).toHaveBeenCalledTimes(1);
+  });
+
+  it("#569 degrades a failed doctor photo read to the person icon, not a broken image", async () => {
+    doctorApi.fetchDoctorProfilePhoto.mockRejectedValue(
+      new Error("network down"),
+    );
+    const trigger = await renderClosedTrigger(
+      ME_RESPONSE_PARTNER,
+      "doctor",
+      undefined,
+      doctorProfileWith("doctor/7/photo-1.enc"),
+    );
+
+    await waitFor(() =>
+      expect(doctorApi.fetchDoctorProfilePhoto).toHaveBeenCalled(),
+    );
+    // The call is made before the rejection settles, so "no img yet" would
+    // pass on a read that has not answered. Flush it before asserting the
+    // degrade - the same settle the un-hydrated #538 assertion used.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    // A blip is not a failure notice on a chrome avatar: the icon, and nothing
+    // else, with no <img> left pointing at nothing.
+    expect(trigger.querySelector("img")).toBeNull();
+    expect(trigger.querySelector("svg")).not.toBeNull();
+    expect(trigger).not.toHaveTextContent("90");
+  });
+
+  it("#569 tells a definitely-absent doctor photo from a blip, though both show the icon", async () => {
+    // The seam reads absence off a not-found code only, so a stored ref whose
+    // media is gone reads as absent while a blip leaves it looking present - the
+    // difference a later pass on the identity header will need, invisible in
+    // chrome today. The probe holds the same ref, so the two share one read.
+    async function renderAgainst(rejection: unknown) {
+      // Each render is its own mount, and the seam drops a ref's cached read
+      // when the last consumer lets go - so the count is per render, not per
+      // test.
+      doctorApi.fetchDoctorProfilePhoto.mockReset();
+      doctorApi.fetchDoctorProfilePhoto.mockRejectedValue(rejection);
+      setStoredSession(VALID_SESSION);
+      mockMeResponse(ME_RESPONSE_PARTNER);
+      render(
+        <AuthProvider>
+          <AccountMenu
+            shellRole="doctor"
+            doctorProfile={doctorProfileWith("doctor/7/photo-1.enc")}
+          />
+          <PhotoAbsenceProbe photoRef="doctor/7/photo-1.enc" />
+        </AuthProvider>,
+      );
+      const trigger = screen.getByTestId("account-menu");
+      await waitFor(() =>
+        expect(doctorApi.fetchDoctorProfilePhoto).toHaveBeenCalled(),
+      );
+      return trigger;
+    }
+
+    const absentTrigger = await renderAgainst(
+      new ApiError({
+        code: "DOCTOR_PROFILE_PHOTO_NOT_FOUND",
+        message: "no photo",
+        trace_id: "trace-569",
+        details: {},
+      }),
+    );
+    expect(absentTrigger.querySelector("img")).toBeNull();
+    expect(absentTrigger.querySelector("svg")).not.toBeNull();
+    // Absence is the settled answer and the pending one is not, so this wait is
+    // the settle - it cannot pass on a read that has not answered yet.
+    await waitFor(() =>
+      expect(screen.getByTestId("photo-absent")).toHaveTextContent("true"),
+    );
+    // Menu and probe, one ref, one read - the probe observed, it did not add.
+    expect(doctorApi.fetchDoctorProfilePhoto).toHaveBeenCalledTimes(1);
+    cleanup();
+
+    const blipTrigger = await renderAgainst(
+      new ApiError({
+        code: "NETWORK_ERROR",
+        message: "connection reset",
+        trace_id: "trace-569",
+        details: {},
+      }),
+    );
+    expect(blipTrigger.querySelector("img")).toBeNull();
+    expect(blipTrigger.querySelector("svg")).not.toBeNull();
+    // A blip settles looking present, so the answer has to be read after the
+    // rejection has actually run - and the contrast with the case above is the
+    // point: same icon, different internal verdict.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(screen.getByTestId("photo-absent")).toHaveTextContent("false");
+    expect(doctorApi.fetchDoctorProfilePhoto).toHaveBeenCalledTimes(1);
   });
 
   it("#543 opens the doctor Profile page from the avatar dropdown", async () => {

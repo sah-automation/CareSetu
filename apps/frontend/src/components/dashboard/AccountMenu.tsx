@@ -13,8 +13,13 @@
 // digit signal) - never the phone itself, so the closed trigger leaks
 // nothing.
 // #538: the doctor branch gains an account avatar entry point - the same
-// Avatar primitive, person-icon fallback until the doctor profile seam lands
-// (#542/#543). Partner/operator keep the phone-digit trigger unchanged.
+// Avatar primitive. Partner/operator keep the phone-digit trigger unchanged.
+// #569: and that disc is now hydrated: the shell reads the doctor's own
+// profile projection once and threads it down, the shared photo resolver turns
+// its `photo_ref` into an object URL over the doctor's private byte reader, and
+// anything that does not resolve - a blip, or media the backend reports absent -
+// degrades to the same person icon. One read feeds the trigger and the dropdown
+// header, so the menu itself never fetches.
 // #567: doctor-ness is an INPUT now, not an inference. The identity layer
 // grants exactly three roles (patient|partner|operator), so a doctor is a
 // *partner whose partner type is doctor* and the session can never answer
@@ -43,7 +48,11 @@ import Link from "next/link";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { useOptionalProfile } from "@/lib/profile/ProfileContext";
 import { useProfilePhotoSource } from "@/lib/profile/useProfilePhotoSource";
+import type { ProfilePhotoReader } from "@/lib/profile/useProfilePhotoSource";
+import { fetchPatientPhoto } from "@/lib/profile/api";
+import { fetchDoctorProfilePhoto } from "@/lib/doctor/api";
 import type { StoredPatientProfile } from "@/lib/profile/api";
+import type { DoctorProfileView } from "@/lib/doctor/api";
 import {
   basicsComplete,
   serverProfileToDraft,
@@ -100,7 +109,20 @@ function savedBasicsComplete(saved: StoredPatientProfile | null | undefined) {
 // "amIADoctor" (that would push the branch decision back down to this leaf) and
 // not a bare `role` (two roles are in play here, and calling them both `role` is
 // how the session's role ended up answering for doctor-ness in the first place).
-export function AccountMenu({ shellRole }: { shellRole: Role }) {
+export function AccountMenu({
+  shellRole,
+  doctorProfile,
+}: {
+  shellRole: Role;
+  /**
+   * #569: the doctor shell's own private profile projection. The shell read it
+   * once, beside its open-case count, so the menu issues no request of its own;
+   * `photo_ref` hydrates the avatar and `practice_name` is the only human
+   * readable name a doctor has anywhere in the frontend. Undefined for every
+   * non-doctor shell, which never fetches it.
+   */
+  doctorProfile?: DoctorProfileView;
+}) {
   const { user, selectedRole, switchRole, logout } = useAuth();
   const profile = useOptionalProfile();
   const { lang } = useLang();
@@ -118,14 +140,23 @@ export function AccountMenu({ shellRole }: { shellRole: Role }) {
   const isDoctor = shellRole === "doctor";
   const saved = profile?.savedProfile;
   // #557: the stored photo ref is an opaque object key (ADR-0020 D1), so it is
-  // the shared resolver - not the primitive - that makes it renderable. One call
-  // covers both patient avatars; a null answer (still streaming, or a read that
-  // failed) falls through to the name initial. Only the patient branch resolves,
-  // so a doctor on staff chrome asks for no bytes, and a dual-role session does
-  // not read a photo nothing displays.
-  const { src: photoSrc } = useProfilePhotoSource(
-    isPatient ? saved?.photo_ref ?? null : null,
-  );
+  // the shared resolver - not the primitive - that makes it renderable. One
+  // resolved source covers every avatar on a ref, so the trigger and the
+  // dropdown header cost a single read between them.
+  // #569: ONE branch, because the ref and the transport that can read it must
+  // come from the same account. Two independent selections would pair a
+  // patient's ref with the doctor's byte endpoint on a dual-role session in the
+  // doctor shell, and the two endpoints serve disjoint actor-namespaced
+  // namespaces. Non-doctor staff resolve nothing at all - a lab or an operator
+  // keeps the phone-digit trigger and must not read a photo nothing shows. The
+  // seam holds the reader in a ref rather than a dependency, so selecting it
+  // costs no extra read.
+  const [photoRef, photoReader]: [string | null, ProfilePhotoReader] = isPatient
+    ? [saved?.photo_ref ?? null, fetchPatientPhoto]
+    : isDoctor
+      ? [doctorProfile?.photo_ref ?? null, fetchDoctorProfilePhoto]
+      : [null, fetchPatientPhoto];
+  const { src: photoSrc } = useProfilePhotoSource(photoRef, photoReader);
   const otherRoles = (user?.roles ?? [])
     .filter(isAppRole)
     .filter((role) => role !== currentRole);
@@ -197,11 +228,13 @@ export function AccountMenu({ shellRole }: { shellRole: Role }) {
               className={avatarClassName}
             />
           ) : isDoctor ? (
-            // #538: the doctor account avatar entry - person-icon fallback.
-            // #543: the doctor's own Profile page now owns their photo and
-            // name; the chrome disc keeps the icon until a later pass
-            // hydrates it from that projection.
-            <Avatar className={avatarClassName} />
+            // #538: the doctor account avatar entry point. #569: fed from the
+            // shell-held profile projection through the shared resolver, so a
+            // stored photo shows as the bytes the backend streams and never as
+            // the stored key, and every failure - a blip, or media the backend
+            // says is not there - degrades to the person icon. No `name`, so a
+            // doctor with no photo keeps the icon rather than an initial.
+            <Avatar photoRef={photoSrc} className={avatarClassName} />
           ) : (
             (user?.phone || "?").slice(-2)
           )}
@@ -255,7 +288,25 @@ export function AccountMenu({ shellRole }: { shellRole: Role }) {
           </>
         ) : (
           <>
-            <DropdownMenuLabel className="flex items-center justify-between gap-2 font-normal">
+            <DropdownMenuLabel
+              className={cn(
+                "flex items-center font-normal",
+                // A doctor's row is a three-part flex (avatar, identity, badge);
+                // every other menu keeps the two-part spread verbatim. #570 owns
+                // this header's identity layout.
+                isDoctor ? "gap-3" : "justify-between gap-2",
+              )}
+            >
+              {/* #569: the doctor's dropdown header reads the same resolved
+                  source the trigger is already showing, so two avatars on one
+                  ref still cost one read. Gated on doctor-ness, so the avatar
+                  treatment does not leak onto a lab or an operator menu. */}
+              {isDoctor && (
+                <Avatar
+                  photoRef={photoSrc}
+                  className="h-10 w-10 shrink-0 bg-accent-soft text-base font-semibold text-accent-strong"
+                />
+              )}
               <span className="text-sm text-txt">{identityLine(user)}</span>
               {roleBadge}
             </DropdownMenuLabel>

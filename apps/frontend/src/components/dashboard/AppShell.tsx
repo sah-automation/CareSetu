@@ -16,12 +16,14 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { listOpenCases } from "@/lib/care/api";
+import { fetchDoctorProfile } from "@/lib/doctor/api";
 
 import { NAV_CONFIG, sidebarStorageKey } from "./nav-config";
 import { BottomTabs } from "./BottomTabs";
 import { Sidebar } from "./Sidebar";
 import { Topbar } from "./Topbar";
 import type { NavItemDef } from "./nav-config";
+import type { DoctorProfileView } from "@/lib/doctor/api";
 import type { Role } from "./types";
 
 export function AppShell({
@@ -75,6 +77,10 @@ function FullShellBody({
   // shell, shared by the sidebar and phone tab bar. Failures are silent: the
   // pill is a bonus, never a navigational blocker.
   const openCasesCount = useOpenCasesCount(role);
+  // #569: the doctor shell's own profile projection rides the same shell-level
+  // feed - one fetch per full shell, degrading the same silent way - so the
+  // account menu asks for nothing of its own.
+  const doctorProfile = useDoctorProfile(role);
   const navItems = useMemo(() => {
     if (role !== "doctor" || openCasesCount === undefined) {
       return undefined;
@@ -108,7 +114,7 @@ function FullShellBody({
         items={navItems}
       />
       <div className="flex min-w-0 flex-1 flex-col">
-        <Topbar density="full" role={role} />
+        <Topbar density="full" role={role} doctorProfile={doctorProfile} />
         <main className="flex-1 p-6 pb-28 lg:pb-8">{children}</main>
       </div>
       <BottomTabs role={role} items={navItems} />
@@ -139,4 +145,37 @@ function useOpenCasesCount(role: Role): number | undefined {
   }, [role]);
 
   return count;
+}
+
+// #569: the doctor shell's own private profile projection, fetched once per
+// full shell beside the open-case count and in exactly its shape: one
+// `useEffect`, a `cancelled` flag, a silent degrade with a single warn. The
+// whole projection is taken rather than the photo ref alone because
+// `practice_name` is the only human-readable name a doctor has anywhere in the
+// frontend (`user` is `{ id, phone, roles }`), and a second read to fetch it is
+// exactly the request this feed exists to remove.
+function useDoctorProfile(role: Role): DoctorProfileView | undefined {
+  const [profile, setProfile] = useState<DoctorProfileView | undefined>(
+    undefined,
+  );
+
+  useEffect(() => {
+    if (role !== "doctor") return;
+    let cancelled = false;
+    fetchDoctorProfile()
+      .then((view) => {
+        if (!cancelled) setProfile(view);
+      })
+      .catch((err: unknown) => {
+        // Degrade to no profile - the account avatar falls back to its icon.
+        // Chrome identity is a bonus, never a blocker. Still surfaced so a
+        // silent feed failure stays visible.
+        console.warn("[shell] doctor profile failed to load:", err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [role]);
+
+  return profile;
 }

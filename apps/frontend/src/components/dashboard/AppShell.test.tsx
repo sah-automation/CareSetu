@@ -25,6 +25,11 @@ import { join } from "node:path";
 
 import { __resetLangForTests } from "@/lib/i18n/LangContext";
 import { listOpenCases, type CaseDetailView } from "@/lib/care/api";
+import {
+  fetchDoctorProfile,
+  fetchDoctorProfilePhoto,
+  type DoctorProfileView,
+} from "@/lib/doctor/api";
 import * as axe from "axe-core";
 
 import { AppShell } from "./AppShell";
@@ -113,6 +118,41 @@ vi.mock("@/lib/care/api", () => ({
 }));
 
 const getOpenCases = vi.mocked(listOpenCases);
+
+// #569: the doctor shell reads its own private profile projection once and
+// streams the photo bytes for the account avatar. The whole doctor module is
+// mocked for the same unit-scoped reason as the care module above.
+vi.mock("@/lib/doctor/api", () => ({
+  fetchDoctorProfile: vi.fn(),
+  fetchDoctorProfilePhoto: vi.fn(),
+}));
+
+const getDoctorProfile = vi.mocked(fetchDoctorProfile);
+const getDoctorPhoto = vi.mocked(fetchDoctorProfilePhoto);
+
+// #569: the projection as the backend answers it. `practice_name` is the only
+// human-readable name a doctor has anywhere in the frontend, which is why the
+// shell takes the whole view rather than the photo ref alone.
+function doctorProfileWith(photoRef: string | null): DoctorProfileView {
+  return {
+    partner_id: 7,
+    photo_ref: photoRef,
+    practice_name: "Asha Clinic",
+    specialty: "General",
+    verified: true,
+    practice_address: "1 Clinic Road",
+    practice_latitude: 12.97,
+    practice_longitude: 77.59,
+    area: "Indiranagar",
+    languages: ["en"],
+    experience_years: 9,
+    about: null,
+    consultation_fee: 400,
+    availability: null,
+    credentials: [],
+    notification_preferences: {},
+  };
+}
 
 // #525: a hydrated patient profile, shared by the named-card and #557 cases.
 const NAMED_PROFILE: StoredPatientProfile = {
@@ -203,6 +243,14 @@ beforeEach(() => {
   URL.revokeObjectURL = vi.fn() as unknown as typeof URL.revokeObjectURL;
   profileApi.fetchPatientPhoto.mockResolvedValue(
     new Blob(["photo-bytes"], { type: "image/png" }),
+  );
+  // #569: the doctor feeds default to a projection with no photo, so the
+  // person-icon disc is the steady state; the hydrated case re-seeds the ref.
+  getDoctorProfile.mockReset();
+  getDoctorProfile.mockResolvedValue(doctorProfileWith(null));
+  getDoctorPhoto.mockReset();
+  getDoctorPhoto.mockResolvedValue(
+    new Blob(["doctor-photo-bytes"], { type: "image/png" }),
   );
 });
 
@@ -886,6 +934,108 @@ describe("AppShell doctor Cases count pill (PHASE-8.1 T8, #483)", () => {
     );
     expect(screen.getByTestId("tab-profile").tagName).toBe("A");
     expect(screen.getByTestId("tab-profile")).not.toHaveAttribute("data-soon");
+  });
+});
+
+// #569: the doctor shell's own profile projection, fetched once per shell beside
+// the open-case count and threaded down to the account menu, which then reads
+// the photo bytes for the disc. The point of the whole ticket is that the leaf
+// adds no request of its own, so the end-to-end counts are the load-bearing
+// assertions: one projection read per doctor shell, one byte read for two
+// avatars, and nothing at all on any other shell.
+describe("AppShell feeds the doctor account avatar (#569)", () => {
+  function renderShellFor(role: Role) {
+    // A production-shaped doctor session: one `partner` role, doctor-ness from
+    // the shell alone.
+    authState.roles = ["partner"];
+    authState.selectedRole = "partner";
+    mockPathname.mockReturnValue(`/${role}`);
+    return render(
+      <AppShell role={role}>
+        <h1>Workspace</h1>
+      </AppShell>,
+    );
+  }
+
+  it("reads the doctor's profile once and hydrates the disc from it", async () => {
+    getDoctorProfile.mockResolvedValue(
+      doctorProfileWith("doctor/7/photo-1.enc"),
+    );
+    renderShellFor("doctor");
+
+    const trigger = screen.getByTestId("account-menu");
+    const img = await imageIn(trigger);
+    expect(img.getAttribute("src")).toMatch(/^blob:/);
+    // One projection read per shell, and one byte read for the disc - not a
+    // re-read per surface, and not a second projection read to get a name.
+    expect(getDoctorProfile).toHaveBeenCalledTimes(1);
+    expect(getDoctorPhoto).toHaveBeenCalledTimes(1);
+  });
+
+  it("shares the one byte read with the dropdown header's avatar", async () => {
+    getDoctorProfile.mockResolvedValue(
+      doctorProfileWith("doctor/7/photo-1.enc"),
+    );
+    renderShellFor("doctor");
+
+    const trigger = screen.getByTestId("account-menu");
+    const triggerImg = await imageIn(trigger);
+
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    await waitFor(() => expect(screen.getByRole("menu")).toBeInTheDocument());
+    const headerImg = await imageIn(screen.getByRole("menu"));
+    expect(headerImg.getAttribute("src")).toBe(triggerImg.getAttribute("src"));
+    // Two avatars, one ref, one request - the menu opened and nothing was
+    // re-read.
+    expect(getDoctorPhoto).toHaveBeenCalledTimes(1);
+    expect(getDoctorProfile).toHaveBeenCalledTimes(1);
+  });
+
+  it("degrades a failed profile read to the person icon, silently and visibly logged", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    getDoctorProfile.mockRejectedValue(new Error("profile feed down"));
+    renderShellFor("doctor");
+
+    // Let the rejection settle before asserting the degrade, or this would pass
+    // on a feed that has not answered yet.
+    await waitFor(() => expect(warn).toHaveBeenCalled());
+    expect(warn).toHaveBeenCalledWith(
+      "[shell] doctor profile failed to load:",
+      expect.any(Error),
+    );
+    const trigger = screen.getByTestId("account-menu");
+    expect(trigger).not.toHaveTextContent("90");
+    expect(trigger.querySelector("svg")).not.toBeNull();
+    expect(trigger.querySelector("img")).toBeNull();
+    // A chrome avatar that cannot resolve is not a broken one, and it costs no
+    // byte read: there is no ref to ask for.
+    expect(getDoctorPhoto).not.toHaveBeenCalled();
+  });
+
+  it("reads no doctor profile on the other shells", async () => {
+    for (const role of ["patient", "partner", "operator"] as const) {
+      const { unmount } = renderShellFor(role);
+      await waitFor(() =>
+        expect(screen.getByTestId("app-shell")).toBeVisible(),
+      );
+      unmount();
+    }
+
+    expect(getDoctorProfile).not.toHaveBeenCalled();
+    expect(getDoctorPhoto).not.toHaveBeenCalled();
+  });
+
+  // #569: the shell takes the WHOLE projection, not the photo ref alone.
+  // `practice_name` is the only human-readable name a doctor has anywhere in
+  // the frontend, and a second read to fetch it is the request this feed exists
+  // to remove. Nothing renders that name yet - #570 owns the identity header -
+  // so no behavioural test here could catch a narrowing of the prop; this pins
+  // the shape instead. Source-scoped, like the nav-config and #567 scans.
+  it("threads the whole profile projection from a single read", () => {
+    const source = readFileSync(join(__dirname, "AppShell.tsx"), "utf8");
+    expect(source).toMatch(/useDoctorProfile\([^)]*\): DoctorProfileView/);
+    // One projection read in the shell, and it is this one.
+    expect(source.match(/fetchDoctorProfile\(/g)).toHaveLength(1);
   });
 });
 
