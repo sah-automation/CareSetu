@@ -1054,7 +1054,7 @@ describe("full-shell collapse preference persistence", () => {
 
     const sidebar = screen.getByTestId("sidebar");
     expect(sidebar.getAttribute("data-collapsed")).toBeNull();
-    expect(sidebar.className).toContain("w-60");
+    expect(sidebar.className).toContain("w-52");
 
     fireEvent.click(screen.getByTestId("sidebar-toggle"));
 
@@ -1085,7 +1085,7 @@ describe("full-shell collapse preference persistence", () => {
     // The partner shell ignores the operator's stored choice and starts
     // expanded, persisting its own default under its own key.
     expect(localStorage.getItem("caresetu.sidebar.partner")).toBe("expanded");
-    expect(screen.getByTestId("sidebar").className).toContain("w-60");
+    expect(screen.getByTestId("sidebar").className).toContain("w-52");
   });
 
   it("labels toggle accessibly in both states", () => {

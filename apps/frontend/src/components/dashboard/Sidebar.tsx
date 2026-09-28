@@ -23,6 +23,15 @@
 // divider it already had. Both of its accessible names come from the string
 // dictionary (nav.collapseSidebar / nav.expandSidebar) rather than being
 // hardcoded English, so they exist in both locales per blueprint §9.2.
+//
+// #575: the expanded rail narrows from 240px to 208px (`w-60` -> `w-52`) so
+// more of the clinical workspace is visible. The collapsed rail keeps its 64px
+// `w-16` on purpose: it is the width the doctor is used to, and the
+// viewport-fixed flyout below positions itself with a hardcoded `left-16`, so
+// the two must move together or the hover label detaches from the rail. Only
+// the expanded branch of the width ternary changed, and the pinned collapsed
+// assertions were left alone. No design token was added or re-valued - both
+// widths remain literal stock spacing utilities, as #560 requires.
 
 import { useId, useRef, useState } from "react";
 import Link from "next/link";
@@ -69,7 +78,16 @@ export function Sidebar({
     <aside
       className={cn(
         "sticky top-0 hidden h-dvh shrink-0 flex-col overflow-y-auto border-r border-hairline bg-surface transition-[width] duration-200 lg:flex",
-        collapsed ? "w-16" : "w-60",
+        // The expanded rail is 208px (#575), down from 240px, so more of the
+        // clinical workspace is visible. The longest nav label is
+        // `Profile & Settings` at ~116px in text-sm (~95px in Hindi, whose
+        // conjuncts stack), and the row spends a fixed 72px on nav p-2, row
+        // px-3, the 20px icon and gap-3, so the floor is 188px. w-48 (192px)
+        // clears that floor by 4px, which is not a margin; 208px is the next
+        // stock step and leaves 17% of headroom. The collapsed `w-16` rail is
+        // deliberately untouched, and the collapsed flyout's `left-16` below
+        // depends on it staying 64px.
+        collapsed ? "w-16" : "w-52",
       )}
       data-collapsed={collapsed || undefined}
       data-testid="sidebar"
