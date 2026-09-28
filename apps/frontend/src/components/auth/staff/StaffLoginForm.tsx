@@ -165,19 +165,24 @@ export function staffSubmitLabel(
 export function StaffLoginForm({
   role = "partner",
   returnTarget,
-  onTerminalChange,
+  onOwnsHeadingChange,
 }: {
   role?: StaffLoginRole;
   /** `?return=` deep-link target, bounded to the staff groups; see staff-routing. */
   returnTarget?: string | null;
   /**
-   * #566: reports that the sign-in flow has reached its terminal step, so a
-   * host can retire its own sign-in chrome. The verified handoff brings its own
-   * `h1`, so a host heading left in place would put two on one screen. Pass a
-   * stable callback (a `useState` setter does); it is read in an effect, never
-   * during render.
+   * #566/#573: reports whether the step on screen owns the document's
+   * top-level heading, so a host can retire its own sign-in heading. Two steps
+   * own one - the code step's, and the verified handoff's - and two `h1`s on
+   * one document is a structure regression whichever pair produces them.
+   *
+   * #573 widened this from #566's "the flow is terminal" to the reason the page
+   * actually cares: the code step is not terminal and still owns a heading, so a
+   * signal keyed on terminality would leave the page's heading standing beside
+   * the step's. Pass a stable callback (a `useState` setter does); it is read in
+   * an effect, never during render.
    */
-  onTerminalChange?: (terminal: boolean) => void;
+  onOwnsHeadingChange?: (ownsHeading: boolean) => void;
 }) {
   const { lang } = useLang();
   const t = STRINGS[lang].staffAuth.login;
@@ -225,9 +230,16 @@ export function StaffLoginForm({
   // a latch the routing exits set) is the blank card this ticket reports.
   const flowTerminal = partner.state.stage === "done";
 
+  // #573: the two steps that carry their own `h1` - the code step and the
+  // handoff. A partner condition, not a role-agnostic one: the operator branch
+  // shares this component and never reaches either stage, and its heading
+  // arrangement is the page's to keep.
+  const ownsHeading =
+    !isOperatorMode && (partner.state.stage === "otp" || flowTerminal);
+
   useEffect(() => {
-    onTerminalChange?.(flowTerminal);
-  }, [flowTerminal, onTerminalChange]);
+    onOwnsHeadingChange?.(ownsHeading);
+  }, [ownsHeading, onOwnsHeadingChange]);
 
   const phoneRef = useRef<HTMLInputElement>(null);
   const totpRef = useRef<HTMLInputElement>(null);
@@ -704,6 +716,12 @@ export function StaffLoginForm({
             // status lines below are a sibling group, not part of this
             // section's gap.
             <div className={`mb-4 ${stepStyles.section}`}>
+              {/* #573: the step's own top-level heading, the same one-line
+              treatment the patient wizard gives its code step
+              (`PatientAuthWizard.tsx`). The page's "Sign in" heading names the
+              page, not the step, and it stands down for the stages that own a
+              heading of their own - the signal is `onOwnsHeadingChange`. */}
+              <h1 className={stepStyles.title}>{t.codeStepTitle}</h1>
               <div className={stepStyles.center}>
                 <div>
                   <p

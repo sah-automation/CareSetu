@@ -152,6 +152,10 @@ const en = {
       // Partner phone-OTP mode (F014-T07 #467): partner staff sign in with
       // phone + SMS code, mirroring the patient wizard's interaction copy.
       getCode: "Get verification code",
+      // #573: the code step's own top-level heading, so a partner can tell which
+      // step they are on without reading the copy around it. Deliberately not
+      // `heading` ("Sign in"): that names the page, this names the step.
+      codeStepTitle: "Enter the verification code",
       codeLabel: "Verification code",
       codeHint: "6-digit code sent by SMS to",
       codeExpires: "Code expires in",
@@ -1933,6 +1937,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
           "कुछ गड़बड़ हुई, कृपया अपनी साख़ीयाँ जाँचें और फिर से कोशिश करें।",
         invalidOperatorCode: "अमान्य प्रमाणीकरण कोड। कृपया फिर से कोशिश करें।",
         getCode: "वेरिफिकेशन कोड पाएँ",
+        codeStepTitle: "वेरिफिकेशन कोड दर्ज करें",
         codeLabel: "वेरिफिकेशन कोड",
         codeHint: "SMS से भेजा गया 6 अंकों का कोड",
         codeExpires: "कोड समाप्त होने में",

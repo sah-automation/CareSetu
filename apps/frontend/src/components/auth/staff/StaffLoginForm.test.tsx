@@ -23,6 +23,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as axe from "axe-core";
 
 import StaffLoginPage from "@/app/staff/login/page";
 import { ApiError } from "@/lib/api-errors";
@@ -227,10 +228,13 @@ function typeCodeAndSubmit(digits = "123456") {
 
 async function startPartnerOtpFlow(loginResult: PartnerLoginResult = LOGIN_OK) {
   vi.mocked(partnerLogin).mockResolvedValue(loginResult);
-  render(<StaffLoginForm />);
+  // The container comes back so a caller can scope a query or a scan to the
+  // step. Nothing here changes for the callers that ignore it.
+  const { container } = render(<StaffLoginForm />);
   typePartnerPhone();
   fireEvent.click(screen.getByTestId("staff-submit"));
   await screen.findByTestId("partner-otp");
+  return container;
 }
 
 function fillPhoneAndTotp() {
@@ -690,6 +694,48 @@ describe("StaffLoginForm - partner code step", () => {
     // that reaches a screen reader. Every assertion on this banner is a text
     // match, so nothing else would notice its loss.
     expect(banner).toHaveAttribute("role", "status");
+  });
+
+  // #573: the step's own heading and the scan over it. The page's heading and
+  // the cross-stage count are NOT here - this suite renders the form bare, so
+  // the page's `h1` is not in this DOM at all and could not be asserted on.
+  // That half is `app/staff/login/page.test.tsx`, which renders the real page
+  // around the real form. The split is what each DOM can see, not a dodge.
+  it("carries its own top-level heading, the shared title class (#573 AC-1)", async () => {
+    const container = await startPartnerOtpFlow();
+    // An `h1` and not an `h2` or a `<p>`: "exactly one top-level heading per
+    // stage" is only reachable if the steps that own one own it at level 1,
+    // which is the treatment the patient wizard already gives this same step
+    // (`PatientAuthWizard.tsx`).
+    const heading = screen.getByRole("heading", { level: 1 });
+    expect(heading.tagName).toBe("H1");
+    expect(heading).toHaveTextContent(t.codeStepTitle);
+    expect(heading).toHaveClass(stepStyles.title);
+    // The step's own, and its only: the page's is not in this tree, so a second
+    // one here would be a second owner, not the page's.
+    expect(container.querySelectorAll("h1")).toHaveLength(1);
+  });
+
+  it("leaves the phone step with no heading of its own (#573 AC-5)", () => {
+    // The page's "Sign in" is this step's heading, so a heading here too would
+    // double it on the real page. Asserted bare, where the page's is absent.
+    // Every level and the explicit role, since an ARIA heading is a heading.
+    const { container } = render(<StaffLoginForm />);
+    expect(
+      container.querySelectorAll("h1,h2,h3,h4,h5,h6,[role=heading]"),
+    ).toHaveLength(0);
+  });
+
+  it("scans clean on axe with the code step rendered (#573 AC-3)", async () => {
+    // The seventh local scan in the tree, and the same shape as the patient
+    // profile page's three: render, wait for the surface, run the scan on the
+    // container. Scoped to the container rather than `document.body` because
+    // this ticket owns the step, not the page's wordmark and register CTAs.
+    // Note what it does and does not police: axe has no duplicate-`h1` rule, so
+    // the heading count is a separate assertion and this scan is the guard on
+    // the step's names, roles and live regions.
+    const container = await startPartnerOtpFlow();
+    expect((await axe.run(container)).violations).toEqual([]);
   });
 
   it("uses the shared error and notice treatments and the shared primary action (#572 AC-4)", async () => {
