@@ -63,6 +63,19 @@ export async function requestBlob(
 }
 
 /**
+ * Fetch wrapper for no-content responses: same auth + error handling as
+ * `request<T>`, but resolves without reading a body (a 204 delete). Without it
+ * a delete would have to call `authedFetch` directly and re-implement the
+ * network-failure and error-envelope mapping above.
+ */
+export async function requestVoid(
+  path: string,
+  options?: RequestInit,
+): Promise<void> {
+  await authedResponse(path, options);
+}
+
+/**
  * Validate that a value matches an expected shape using a type guard.
  * Throws `ApiError` with `UNEXPECTED_ERROR` when the guard fails.
  *

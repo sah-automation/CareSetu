@@ -157,6 +157,12 @@ _Traceability: `REQ-021`, `REQ-003`, `NFR-002`, `GAP-001`, `GAP-005`, `GAP-013`,
 - `consent_granted` / `consent_revoked`: `patient_id`, `consent_id`, `timestamp`
 - `record_accessed`: `patient_id`, `actor_id`, `access_type`, `timestamp`
 
+**Delivery Notes (batch #529):**
+
+- The grantable `record_scope` set is now the closed enum `consultations | prescriptions | lab_results | metrics | health_background | full_record`. `health_background` was added by the doctor-console/profiles batch (#529) so a patient can share - or revoke - their own health background independently of the rest of the record; `full_record` still subsumes it, and every existing grant is unaffected. Resolved in `ADR-0018`.
+- A patient's **first** health-background save carries a one-time acknowledgment; it records a normal, fully revocable `health_background` grant to each doctor the patient has a live relationship with, in the same transaction as the write. Later saves never re-prompt and never re-grant.
+- Doctor-side reads stay fail-closed per scope and are ledgered: the doctor Patients list, the patient-detail sections, and the patient photo each write an access-history entry, and every served section writes an egress-disclosure row pinned to the authorizing consent id + version.
+
 #### Feature 4.1.3: Patient Record Access & Audit View
 
 - **Feature ID:** `FEAT-003`
@@ -186,6 +192,10 @@ _Traceability: `REQ-021`, `REQ-003`, `NFR-002`, `GAP-001`, `GAP-005`, `GAP-013`,
 **Telemetry & Event Tracking:**
 
 - `record.denied`: `patient_id`, `actor_id`, `reason`, `timestamp`
+
+**Delivery Notes (batch #529):**
+
+- The access history now also records surface-level reads that are not tied to a single record entry: serving a row of the doctor's derived Patients list and reading a patient's detail or photo each append an entry under a surface marker (`doctor_patients_list`, `doctor_patient_detail`) alongside the existing owner, partner, and denied-attempt rows. This is what lets the trust view answer "who has seen this" for the doctor console as well as for the record timeline. Delivered by #539/#540.
 
 ---
 
@@ -255,6 +265,12 @@ _Traceability: `REQ-001`, `REQ-008`, `REQ-022`, `REQ-005`, `GAP-009`_
 
 - `credential_displayed`: `provider_id`, `credential_type`, `timestamp`
 - `credential_invalidated`: `provider_id`, `reason`, `timestamp`
+
+**Delivery Notes (batch #529):**
+
+- Profiles are now **private, self-service surfaces** for the subject as well as public projections for others: a patient maintains their own profile photo, and an active doctor has a private profile (photo, practice details, experience, languages, about, availability, notification preferences) plus the consultation-fee editor moved onto it. Delivered by #533 (patient), #542/#543 (doctor).
+- Every profile photo lives in one private, encrypted object store (`profile-media`, ADR-0020) under a role-prefixed key, with only the object key held in SQL. Photos are never publicly addressable and are always streamed decrypted through the backend - a doctor's read of a patient photo passes the consent gate first.
+- Uploads are validated before any write (JPEG/PNG/WebP, ≤ 5 MB, GIF refused) and go through a bounded retry so a flaky store fails loudly instead of silently dropping the photo.
 
 ---
 
@@ -373,6 +389,8 @@ _Traceability: `REQ-004`, `REQ-013`, `REQ-023`, `REQ-005`, `CFL-002`, `CFL-003`,
 
 - The pick-a-doctor step delivered with the doctor-console chassis insert: after completing the pre-summary (editable before pick if low-confidence), the patient picks exactly one doctor from the filtered verified directory - pre-filtered by the suggested specialty (child → Pediatrician, pregnancy/menstrual → Gynecologist, dental → Dentist, otherwise General Physician), each card showing verified tick, practice, specialty, distance, consultation fee (renders "fee not set" when unset and never blocks care), and a credentials summary. The pick is the consent moment (`MOD-004`): one plain-language sheet names what the chosen doctor will see, and the choice plus the consent grant are recorded atomically; thereafter the pre-summary is visible only to that doctor. A confirmation screen follows with next steps. The doctor sets the consultation fee from their console; it surfaces on the pick card and the verified provider profile.
 - The doctor side of this feature is delivered inside the console: a review queue of assigned pre-summaries awaiting review (low-confidence first, amber "Verify" chip) and a case workspace where one attributed review finalizes a low-confidence pre-summary in the same action (no stuck cases), and the "Mark consult complete" handshake moves the case to Prescription Pending. This delivery covers the blueprint §6.1-§6.4 doctor-channel shell; Patients and Profile console areas render as "coming soon" placeholders in this phase.
+
+**Delivery Notes (batch #529):** the two placeholders above are now live. The doctor's **Patients** area is the care-loop anchor: a derived Current/Past list (Current = a live standing grant to this doctor of any scope, or an open care case; Past = closed care cases only, with no live grant), recomputed on every read from the consent lineage and care cases - never a stored patient-relationship table (ADR-0019). Selecting a patient opens a section-gated detail: contact/photo on any live grant, consultation history on `consultations`, health background on `health_background`, with a deep link into the case workspace. A denied section renders locked rather than leaking (a patient with no live grant at all answers every section locked, and the photo stream fails closed with 403), and every served row and section is access-logged and egress-disclosed. The **Profile** area carries the doctor's private profile and fee editor. The doctor console chrome (account avatar, Patients/Profile nav, collapsible sidebar) and the professional restyle of landing, cases, workspace, and review shipped in the same batch; the backend seam is a facade-only `MOD-012` console seam with no schema of its own.
 
 #### Feature 4.4.2: E-Prescription - AI Draft & Doctor Approval
 
@@ -811,6 +829,11 @@ _Traceability: `REQ-005`, `NFR-002`, `GAP-011`, `GAP-013`_
 - `audit_event_written`: `event_type`, `actor_id`, `target_id`, `timestamp`
 - `audit_tamper_attempt`: `event_id`, `timestamp`
 
+**Delivery Notes (batch #529):**
+
+- Consent lifecycle coverage is now complete against the delivered scope set: a patient's first health-background save records its grant, and the patient can later revoke any scope - including the new independent `health_background` scope - from Settings, exactly as for any other scope (ADR-0018). The grant is a normal, versioned, revocable consent, so the audit trail records it with no special case.
+- Every consent-authorized disclosure made by the doctor console writes an egress row pinned to the authorizing consent id + version, and every served read writes an access-history entry - so the "complete trail of regulated acts" above now includes the doctor Patients list, the patient-detail sections, and the patient photo read. No new event vocabulary was introduced: these ride the existing `audit.event`, `record.accessed`, and `consent.*` lifecycle.
+
 ---
 
 ## 5. System Workflows & Edge Cases
@@ -922,3 +945,5 @@ _Traceability: `REQ-005`, `NFR-002`, `GAP-011`, `GAP-013`_
 | `NFR-002`               | `NFR-002`                       | `GAP-011`, `GAP-013`                        | Baseline Approved (Section 6)                  |
 | `NFR-003`               | `NFR-003`                       | -                                           | Baseline Approved (Section 6)                  |
 | `NFR-004`               | `NFR-004`                       | `GAP-012`                                   | Baseline Approved (Section 6)                  |
+
+> **Delivery annotation - doctor-console/profiles batch (#529, delivered 2026-09-24).** The batch created no new feature id; it extended five existing ones additively, each annotated with a `Delivery Notes (batch #529)` block in its section above: `FEAT-002` (the `health_background` record scope, independently grantable and revocable - `ADR-0018`), `FEAT-003` (access-history surface markers for the doctor console), `FEAT-005` (private patient and doctor profile surfaces on encrypted, non-public photo storage - `ADR-0020`), `FEAT-008` (the doctor Patients list as the care-loop anchor, plus the section-gated patient detail - `ADR-0019`), and `FEAT-020` (consent-lifecycle and egress completeness for the new scope and the new reads). The module and storage side of the same delivery is registered in `docs/architecture/internal-modules.md` §3.12/§3.13, §4.1, §4.2, and §5.

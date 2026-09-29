@@ -74,7 +74,7 @@ export function SearchCard({
   const activeClass = (active: boolean) =>
     `min-h-11 flex-1 rounded-full px-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring sm:flex-none sm:px-5 ${
       active
-        ? "bg-surface font-semibold text-txt-strong shadow-[0_1px_3px_rgba(2,6,23,0.12)]"
+        ? "bg-surface font-semibold text-accent-strong shadow-[0_1px_3px_rgba(2,6,23,0.12)]"
         : // txt-muted (slate-500) on the pill-group hairline-soft background
           // measured 4.23:1 - below the 4.5 WCAG AA floor the axe gate enforces.
           // txt-sub (slate-700) clears it and matches the house inactive-chip

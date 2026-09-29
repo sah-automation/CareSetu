@@ -83,6 +83,24 @@ const en = {
     signOut: "Sign out",
   },
 
+  // doneScreen.* surface - #536: the shared verified-login handoff screen
+  // rendered after a successful OTP verify (patient flow #536; the doctor
+  // flow #537 consumes the same component). #581 made it a loading mask
+  // rather than a countdown: `openingDashboard` is the one status line for
+  // the whole life of the screen and names the indeterminate progress
+  // indicator, and no key here carries a digit. `goToDashboard` is the
+  // always-available CTA, which navigates through the host's own readiness
+  // gate (#578's hook). The remaining keys are the doctor handoff's
+  // practice/destination facts (US-3): values come from data, labels from here.
+  doneScreen: {
+    openingDashboard: "Opening your dashboard",
+    goToDashboard: "Go to Dashboard",
+    practiceLabel: "Practice",
+    specialtyLabel: "Specialty",
+    destinationLabel: "Destination",
+    consoleDestination: "Doctor console",
+  },
+
   // staffAuth.* surface - PHASE-2.6 T10 (#201): the split-auth staff entry
   // (/staff/login), partner status screens, and the scoped staff-role picker.
   // Pages only this phase: submits name Phase 5 honestly, never fake success.
@@ -133,6 +151,10 @@ const en = {
       // Partner phone-OTP mode (F014-T07 #467): partner staff sign in with
       // phone + SMS code, mirroring the patient wizard's interaction copy.
       getCode: "Get verification code",
+      // #573: the code step's own top-level heading, so a partner can tell which
+      // step they are on without reading the copy around it. Deliberately not
+      // `heading` ("Sign in"): that names the page, this names the step.
+      codeStepTitle: "Enter the verification code",
       codeLabel: "Verification code",
       codeHint: "6-digit code sent by SMS to",
       codeExpires: "Code expires in",
@@ -158,6 +180,12 @@ const en = {
       networkError: "Could not reach the server. Check your connection.",
       smsFailed: "We could not send the code. Try again in a moment.",
       demoOtp: (code: string) => `Demo OTP: ${code}`,
+      verifiedTitle: "Identity verified",
+      verifiedBody: "Your practice is verified and your console is ready.",
+      // #566: the terminal step's own submit label. The handoff is up and the
+      // sign-in submit control is gone by then, so this only ever names the
+      // state - it must never read as "request a code" again.
+      verifiedSubmit: "Continue",
     },
     pending: {
       badge: "Under Verification",
@@ -832,6 +860,146 @@ const en = {
     },
   },
 
+  // profileZones.* - PHASE-8.1 #548: the three-zone patient profile page
+  // (US-24/US-25). Identity carries the editable profile fields plus the photo
+  // control (upload/preview/remove against the private photo endpoint, #533);
+  // HealthBackground is a placeholder zone the next ticket fills; Settings
+  // carries notification preferences, the default language, consent-grant
+  // management, and the data export/delete leads. A "coming soon" string is
+  // used only where the capability genuinely does not exist yet, so the page
+  // never promises a control that would do nothing.
+  profileZones: {
+    identityHeading: "Identity",
+    identitySub:
+      "How you appear on your care record and to the providers you see",
+    photoHeading: "Profile photo",
+    photoHelp:
+      "JPEG, PNG or WebP, up to 5MB. Shared only with providers you consent with.",
+    photoUpload: "Upload photo",
+    photoReplace: "Replace photo",
+    photoRemove: "Remove photo",
+    photoFailed: "We could not update your photo. Please try again.",
+    healthHeading: "Health background",
+    healthSub:
+      "What your providers should know about you before they treat you",
+    healthPending:
+      "You have not added a health background yet. Add your allergies, conditions and current medicines below.",
+    healthLoading: "Loading your health background...",
+    healthLoadFailed: "We could not load your health background.",
+    healthRetry: "Try again",
+    bloodGroupLabel: "Blood group",
+    bloodGroupPlaceholder: "For example, B+",
+    listHint: "Write one item per line.",
+    conditionsLabel: "Conditions",
+    conditionsPlaceholder: "For example, Asthma",
+    allergiesLabel: "Allergies",
+    allergiesPlaceholder: "For example, Penicillin",
+    medicationsLabel: "Current medicines",
+    medicationsPlaceholder: "For example, Salbutamol inhaler",
+    immunizationsLabel: "Immunizations",
+    immunizationsPlaceholder: "For example, Tetanus in 2024",
+    familyHistoryLabel: "Family history",
+    familyHistoryPlaceholder: "For example, Father - diabetes",
+    snapshotSave: "Save health background",
+    snapshotSaved: "Health background saved.",
+    snapshotSaveFailed:
+      "We could not save your health background. Please try again.",
+    snapshotSharedNote:
+      "Your doctors with an active relationship with you can see this health background.",
+    metricsHeading: "Height and weight",
+    metricsSub: "Your measurements over time, newest first.",
+    metricsEmpty: "You have not added any height or weight measurements yet.",
+    metricsLoading: "Loading your measurements...",
+    metricsLoadFailed: "We could not load your measurements.",
+    // The series is a server-paged list; the rest is one tap away rather than
+    // silently absent.
+    metricsLoadMore: "Show earlier measurements",
+    metricsLoadingMore: "Loading earlier measurements...",
+    metricsMoreFailed: "We could not load the earlier measurements.",
+    heightLabel: "Height (cm)",
+    weightLabel: "Weight (kg)",
+    // The units stand on their own in a measurement row, where the label is
+    // already spoken by the value's own column heading.
+    heightUnit: "cm",
+    weightUnit: "kg",
+    recordedAtLabel: "Measured on",
+    metricAdd: "Add measurement",
+    metricAdded: "Measurement added.",
+    metricAddFailed: "We could not add that measurement. Please try again.",
+    metricNotRecorded: "Not recorded",
+    metricValueRequired: "Enter a height, a weight, or both.",
+    metricValueNotANumber: "Use numbers only, like 170 or 68.5.",
+    // The bounds are interpolated from the constants the same form enforces
+    // (lib/health-background/form.ts), so a change to what the client accepts
+    // cannot leave the message quoting a different range.
+    metricHeightRange: (min: number, max: number) =>
+      `Enter a height between ${min} and ${max} cm.`,
+    metricWeightRange: (min: number, max: number) =>
+      `Enter a weight between ${min} and ${max} kg.`,
+    metricRecordedAtRequired: "Tell us when this was measured.",
+    metricDateInvalid: "That date could not be read. Pick it again.",
+    // The one-time first-save confirmation (US-21/US-22/US-23, ADR-0018). Plain
+    // language about exactly who gains visibility, what they will see, and how
+    // to take it back - never a blanket "your data will be shared" line. The
+    // backend stamps this acknowledgment once and never re-asks, so the sheet
+    // opens only before that first acknowledged save.
+    healthConsentTitle: "Share your health background?",
+    healthConsentBody:
+      "Saving your health background for the first time makes it visible to the doctors you have an active relationship with. They will see your blood group, conditions, allergies, current medicines, immunizations and family history.",
+    healthConsentRecall:
+      "You can take back this access at any time from Who can see your records, further down this page.",
+    healthConsentConfirm: "Save and share",
+    healthConsentCancel: "Not now",
+    settingsHeading: "Settings",
+    notificationsHeading: "Notifications",
+    notificationsHelp:
+      "Choose which reminders CareSetu sends you. Arriving with the next release.",
+    notificationsSoon: "Coming soon",
+    notificationLabels: {
+      appointment_reminders: "Appointment reminders",
+      prescription_updates: "Prescription updates",
+      report_ready: "Reports ready",
+      care_messages: "Messages from your provider",
+    },
+    languageHeading: "Default language",
+    languageHelp:
+      "The language your care record uses. You can change it in Identity above.",
+    consentHeading: "Who can see your records",
+    consentSub:
+      "Every access you have granted. Revoking one stops future access from that provider.",
+    consentEmpty: "You have not shared your records with anyone yet.",
+    consentLoading: "Loading your consent grants...",
+    consentLoadFailed: "We could not load your consent grants.",
+    consentRetry: "Try again",
+    consentRevoke: "Revoke access",
+    consentRevokeTitle: "Revoke access?",
+    consentRevokeBody: (name: string) =>
+      `${name} will not be able to see your records from now on. Access already made stays in your access history.`,
+    consentRevokeConfirm: "Revoke",
+    consentRevokeCancel: "Keep access",
+    consentRevokeDone: "Access revoked.",
+    consentRevokeFailed: "We could not revoke that access. Please try again.",
+    dataHeading: "Your data",
+    dataExport: "Download a copy of my data",
+    dataExportHelp: "Everything we hold about you, as a file.",
+    dataDelete: "Delete my account and data",
+    dataDeleteHelp: "Permanently remove your account and care records.",
+    dataSoon: "Coming soon",
+    scopeLabels: {
+      consultations: "Consultations",
+      prescriptions: "Prescriptions",
+      lab_results: "Lab results",
+      metrics: "Metrics",
+      health_background: "Health background",
+      full_record: "Full record",
+    },
+    // Shown when the backend returns a scope this build has no label for. The
+    // patient must never read a raw snake_case token as though it were a name,
+    // and the revoke control stays available regardless: an unlabelled scope is
+    // still access they hold and can give back.
+    consentScopeOther: "Other parts of your record",
+  },
+
   // nav.* surface - the typed nav-config labels (PHASE-2.6 T06, #197).
   // One entry per NavItemDef.labelKey across all four role configs; the
   // bottom tabs / top-nav / sidebar all render through this section.
@@ -858,6 +1026,19 @@ const en = {
     verifications: "Verifications",
     disputes: "Disputes",
     audit: "Audit",
+    // #538: section-group labels for the redesigned full-shell sidebar. Nav
+    // items declare a group via NavItemDef.group; the sidebar composes ordered
+    // labeled groups from these keys.
+    sections: {
+      work: "Work",
+      account: "Account",
+    },
+    // #574: the sidebar's collapse control. Two flat keys, not one conditional
+    // function - this namespace carries plain strings only, like `logOut`,
+    // `more` and `sections` above. Each names the ACTION, so the polarity
+    // flips with the rail: the collapsed rail's control says "expand".
+    collapseSidebar: "Collapse sidebar",
+    expandSidebar: "Expand sidebar",
   },
 
   // accountMenu.* surface - #526: chrome copy for the desktop account
@@ -1218,15 +1399,26 @@ const en = {
   },
 
   // doctorConsole.* surface - PHASE-8.1 T12 (#450): the doctor console
-  // landing page. Two stacked sections: review queue (low-confidence first,
-  // oldest-first within each group) and open care cases, plus the fee editor,
-  // coming-soon patients/profile, and a retry path on load failure. All copy
-  // bilingual en/hi (REQ-006).
+  // landing page. Three surfaces: the entry cards into the live Patients and
+  // Profile pages, the compact consultation-fee summary (the editor itself
+  // lives on Profile since #543), and the review queue (low-confidence first,
+  // oldest-first within each group) plus open care cases, with a retry path on
+  // load failure. #544 replaced the coming-soon patients/profile placeholders
+  // with real entry cards. All copy bilingual en/hi (REQ-006).
   doctorConsole: {
     title: "Doctor console",
-    consoleDescription: "Your review queue and open cases",
+    consoleDescription: "Your review queue, open cases and profile",
+    entryHeading: "Go to",
+    patientsEntryBody: "Everyone who has shared a record with you",
+    profileEntryBody: "Practice details, photo and consultation fee",
+    feeHeading: "Consultation fee",
+    feeUnset: "Not set",
+    feeUnsetHelp: "Set a fee so patients can book you.",
+    feeEditAction: "Edit in Profile",
+    feeLoadFailed: "Could not load your consultation fee.",
     queueHeading: "Review queue",
     queueEmpty: "No pre-summaries waiting for review",
+    queueEmptyBody: "A pre-summary lands here once a patient submits a visit.",
     patientFallback: "Patient",
     patientAge: (age: number) => `${age} yrs`,
     sectionsCount: (n: number) => `${n} ${n === 1 ? "section" : "sections"}`,
@@ -1238,26 +1430,154 @@ const en = {
     reviewAction: "Review",
     casesHeading: "Open cases",
     casesEmpty: "No open care cases",
+    casesEmptyBody: "A case opens as soon as you start a consultation.",
     casesIndexTitle: "My cases",
     casesIndexDescription: "Your open care cases",
     stagePreSummary: "Pre-summary",
     stagePrescriptionPending: "Prescription pending",
     stageClosed: "Closed",
     openCaseAction: "Open",
-    feeEditorHeading: "Consultation fee",
-    feeEditorHelp:
+    loadFailed: "Could not load the console.",
+    retry: "Try again",
+  },
+
+  // doctorProfile.* surface - PHASE-8.1 (#543): the doctor console Profile
+  // page, the live destination behind the un-sooned Profile nav entry. Renders
+  // and edits the private projection from #542 - photo upload/preview/remove,
+  // practice details, experience, languages, about, availability, credential
+  // status, notification toggles - and hosts the consultation-fee editor that
+  // moved here off the landing (its save still runs the unchanged PATCH route).
+  // The public directory entry stays a read-only preview link. All copy
+  // bilingual en/hi (REQ-006).
+  doctorProfile: {
+    title: "My profile",
+    description: "Your practice details, photo and consultation fee",
+    loadFailed: "Could not load your profile.",
+    photoHeading: "Profile photo",
+    photoHelp: "JPG, PNG or WebP. Your photo stays private to this page.",
+    photoUpload: "Upload photo",
+    photoReplace: "Replace photo",
+    photoRemove: "Remove photo",
+    photoFailed: "Could not update your photo.",
+    identityHeading: "Practice",
+    practiceNameLabel: "Practice name",
+    specialtyLabel: "Specialty",
+    areaLabel: "Area",
+    verified: "Verified",
+    notVerified: "Not verified",
+    credentialsHeading: "Credentials",
+    credentialsEmpty: "No credentials on file",
+    credentialExpires: (date: string) => `Valid until ${date}`,
+    credentialStatus: {
+      pending: "Pending review",
+      verified: "Verified",
+      expired: "Expired",
+      revoked: "Revoked",
+      reverification_failed: "Re-verification failed",
+    },
+    // The two credential kinds a doctor partner may hold; any other literal the
+    // API sends falls back to its own text rather than going unlabelled.
+    credentialType: {
+      medical_registration: "Medical registration",
+      qualification_certificate: "Qualification certificate",
+    },
+    detailsHeading: "Details",
+    experienceLabel: "Years of experience",
+    languagesLabel: "Languages",
+    languagesHelp: "Separate with commas",
+    languagesPlaceholder: "Hindi, English",
+    aboutLabel: "About",
+    aboutPlaceholder: "Tell patients about your practice",
+    availabilityLabel: "Availability",
+    availabilityPlaceholder: "e.g. Mon-Sat, 9am-1pm",
+    addressLabel: "Practice address",
+    latitudeLabel: "Latitude",
+    longitudeLabel: "Longitude",
+    coordinatesHelp: "Your practice location, used for the directory entry.",
+    notificationsHeading: "Notifications",
+    notificationLabels: {
+      new_consultations: "New consultations",
+      record_shared: "Records shared with you",
+      pre_summary_ready: "Pre-summaries ready to review",
+      case_updates: "Case updates",
+      credential_status: "Credential status changes",
+    },
+    save: "Save changes",
+    saved: "Profile saved.",
+    saveFailed: "Could not save your profile.",
+    invalidFields: "Check the highlighted fields and try again.",
+    publicPreviewHeading: "Public profile",
+    publicPreviewHelp:
+      "This is how patients see you in the directory. It is read-only here.",
+    publicPreviewAction: "View public profile",
+    feeHeading: "Consultation fee",
+    feeHelp:
       "Set the fee patients see when choosing you. Leave blank until set.",
     feeFieldLabel: "Fee (\u20B9)",
     feeFieldPlaceholder: "e.g. 400",
     saveFee: "Save fee",
     clearFee: "Clear fee",
+    feeInvalid: "Enter a fee of 0 or more.",
     feeSaved: "Fee saved.",
     feeSaveFailed: "Could not save the fee.",
-    patientsComingSoon: "Patients - coming soon",
-    profileComingSoon: "Profile - coming soon",
-    comingSoonBody: "This area opens in a later update.",
-    loadFailed: "Could not load the console.",
+  },
+
+  // doctorPatients.* surface - PHASE-8.1 (#541): the doctor console Patients
+  // page (US-11..US-19). Groups Current/Past rows from the derived list API,
+  // with name search, granted-scope badges and the latest case stage; the
+  // per-patient detail view surfaces contact/photo/consultation-history/
+  // health-background sections, where an ungranted section renders a calm
+  // locked "not shared" state - never an error. Stage chips reuse
+  // doctorConsole.stage*; entry-type labels reuse record.badge*. All copy
+  // bilingual en/hi (REQ-006).
+  doctorPatients: {
+    title: "My patients",
+    description: "Patients currently sharing records with you, and past ones",
+    searchPlaceholder: "Search by name",
+    currentHeading: "Current",
+    pastHeading: "Past",
+    patientsEmpty: "No patients yet",
+    currentEmpty: "No current patients",
+    pastEmpty: "No past patients",
+    noResultsTitle: "No patients found",
+    noResultsBody: "No patient name matches your search.",
+    noCaseStage: "No open case",
+    openPatientAction: "Open",
+    loadFailed: "Could not load your patients.",
     retry: "Try again",
+    backToPatients: "Back to patients",
+    loadFailedDetail: "Could not load this patient.",
+    notSharedTitle: "Not shared",
+    notSharedBody: "The patient has not shared this section with you.",
+    contactHeading: "Contact",
+    ageLabel: "Age",
+    genderLabel: "Gender",
+    areaLabel: "Area",
+    emergencyContactLabel: "Emergency contact",
+    notRecorded: "Not recorded",
+    consultationHistoryHeading: "Consultation history",
+    consultationHistoryEmpty: "No consultations yet.",
+    healthBackgroundHeading: "Health background",
+    healthBackgroundEmpty: "No health background shared yet.",
+    caseWorkspaceHeading: "Case workspace",
+    openCaseAction: "Open case",
+    noPhoto: "No photo",
+    photoAlt: (name: string) => `${name}'s photo`,
+    bloodGroupLabel: "Blood group",
+    conditionsLabel: "Conditions",
+    allergiesLabel: "Allergies",
+    medicationsLabel: "Medications",
+    immunizationsLabel: "Immunizations",
+    familyHistoryLabel: "Family history",
+    noneRecorded: "None recorded",
+    scopeBadge: {
+      consultations: "Consultations",
+      prescriptions: "Prescriptions",
+      lab_results: "Lab results",
+      metrics: "Metrics",
+      health_background: "Health background",
+      full_record: "Full record",
+    },
   },
 
   // caseWorkspace.* surface - PHASE-8.1 T13/T14 (#451/#452): the case
@@ -1299,6 +1619,11 @@ const en = {
     tabPreSummary: "Pre-summary",
     tabHistory: "History",
     tabPrescription: "Prescription",
+    // Case stepper step labels (FEAT-008, PROTO-8)
+    consultCompleteStep: "Consult complete",
+    rxPendingStep: "Rx pending",
+    issuedStep: "Issued",
+    caseProgressLabel: "Case progress",
     transcriptHeading: "Original intake",
     transcriptEmpty: "No transcript available for this intake.",
     transcriptLoadFail: "Could not load the intake transcript.",
@@ -1306,6 +1631,17 @@ const en = {
     audioLoadFail: "Could not load the recording.",
     loadFailed: "Could not load this case workspace.",
     retry: "Try again",
+    // PHASE-8.1 #547: the review route's restyled surface - its own titled
+    // review-action card, and the calm case-not-showing empty state. The copy
+    // states only what is observable (no care case in the open list) rather
+    // than asserting a cause: a queue-originated review has no case until the
+    // outbox consumer births it, and the post-finalize re-poll can still come
+    // back empty, so "not created yet" would be wrong in the second case.
+    reviewActionHeading: "Your review",
+    handshakeHeading: "Consultation",
+    casePendingTitle: "Care case not showing",
+    casePendingBody:
+      "This pre-summary has no care case in your open cases yet. The case is created when the pre-summary is finalized.",
     finalizeAction: "Finalize + attribute review",
     finalizeHelp:
       "One action records your review and finalizes the pre-summary.",
@@ -1322,6 +1658,12 @@ const en = {
     // the pending item is the consult-complete handshake, and the action jumps
     // to the pre-summary tab where the handshake form lives.
     rxLockTitle: "Prescription not yet open",
+    rxLockSubtitle:
+      "To unlock the prescription, both of these must be complete:",
+    rxLockPreSummary: "Pre-summary finalized",
+    rxLockHandshake: "Consult marked complete",
+    rxLockGoToSummary: "Go to summary",
+    rxLockMarkComplete: "Mark complete",
     rxLockDone: "Pre-summary finalized",
     rxLockPending: "Consult marked complete",
     rxLockAction: "Complete consultation",
@@ -1388,15 +1730,22 @@ const en = {
     decisionHeading: "Doctor decision",
     editedTracker: (n: number) =>
       n === 1 ? "1 item edited by you" : `${n} items edited by you`,
+    // Step 1: Review & approve
     approvalGateTitle: "Review & approve",
     approvalGateHelp:
       "Confirm you reviewed every item against the patient record before issuing.",
     verificationDeclaration:
       "I have reviewed this prescription (Maine check kar liya)",
+    // Step 2: Confirm issue details
+    confirmIssueTitle: "Confirm issue details",
+    confirmIssueHelp:
+      "By confirming, this prescription will be issued to the patient and cannot be changed.",
+    confirmIssueDeclaration:
+      "I confirm this prescription is correct and ready to issue to the patient.",
     approveIssueAction: "Approve & issue",
     approvingIssuance: "Approving",
     approveBlockedHelp:
-      "Tick the verification declaration to approve and issue the prescription.",
+      "Complete both confirmations to approve and issue the prescription.",
     approveFail: "Could not approve and issue this prescription.",
     issuedHeading: "Prescription issued",
     issuedImmutableNote:
@@ -1481,6 +1830,7 @@ const en = {
 
 export type Dictionary = typeof en;
 export type AuthStrings = Dictionary["auth"];
+export type DoneScreenStrings = Dictionary["doneScreen"];
 export type StaffAuthStrings = Dictionary["staffAuth"];
 export type ProfileStrings = Dictionary["profile"];
 export type DoctorStrings = Dictionary["doctor"];
@@ -1541,6 +1891,14 @@ export const STRINGS: Record<Lang, Dictionary> = {
       signedInAs: (phone) => `${phone} से साइन इन`,
       signOut: "साइन आउट",
     },
+    doneScreen: {
+      openingDashboard: "आपका डैशबोर्ड खुल रहा है",
+      goToDashboard: "डैशबोर्ड पर जाएँ",
+      practiceLabel: "प्रैक्टिस",
+      specialtyLabel: "विशेषज्ञता",
+      destinationLabel: "गंतव्य",
+      consoleDestination: "डॉक्टर कंसोल",
+    },
     staffAuth: {
       login: {
         brand: "CareSetu",
@@ -1583,6 +1941,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
           "कुछ गड़बड़ हुई, कृपया अपनी साख़ीयाँ जाँचें और फिर से कोशिश करें।",
         invalidOperatorCode: "अमान्य प्रमाणीकरण कोड। कृपया फिर से कोशिश करें।",
         getCode: "वेरिफिकेशन कोड पाएँ",
+        codeStepTitle: "वेरिफिकेशन कोड दर्ज करें",
         codeLabel: "वेरिफिकेशन कोड",
         codeHint: "SMS से भेजा गया 6 अंकों का कोड",
         codeExpires: "कोड समाप्त होने में",
@@ -1603,6 +1962,9 @@ export const STRINGS: Record<Lang, Dictionary> = {
         networkError: "सर्वर से संपर्क नहीं हो सका। अपना कनेक्शन जाँचें।",
         smsFailed: "कोड भेजा नहीं जा सका। कुछ देर में फिर कोशिश करें।",
         demoOtp: (code) => `डेमो OTP: ${code}`,
+        verifiedTitle: "पहचान सत्यापित",
+        verifiedBody: "आपकी प्रैक्टिस सत्यापित है और आपका कंसोल तैयार है।",
+        verifiedSubmit: "जारी रखें",
       },
       pending: {
         badge: "जाँच प्रक्रिया में",
@@ -1913,6 +2275,125 @@ export const STRINGS: Record<Lang, Dictionary> = {
       },
     },
 
+    // profileZones.* - the three-zone patient profile page (#548). See the en
+    // block for the "coming soon" rule and the placeholder-zone convention.
+    profileZones: {
+      identityHeading: "पहचान",
+      identitySub:
+        "आपके इलाज के रिकॉर्ड में और आपके प्रोवाइडर के सामने आप कैसे दिखते हैं",
+      photoHeading: "प्रोफ़ाइल फ़ोटो",
+      photoHelp:
+        "JPEG, PNG या WebP, 5MB तक। सिर्फ़ उन्हीं प्रोवाइडर को दिखती है जिनकी आप सहमति देते हैं।",
+      photoUpload: "फ़ोटो अपलोड करें",
+      photoReplace: "फ़ोटो बदलें",
+      photoRemove: "फ़ोटो हटाएँ",
+      photoFailed: "आपकी फ़ोटो अपडेट नहीं हो सकी। कृपया फिर से कोशिश करें।",
+      healthHeading: "स्वास्थ्य पृष्ठभूमि",
+      healthSub:
+        "इलाज शुरू करने से पहले आपके प्रोवाइडर को आपके बारे में क्या जानना चाहिए",
+      healthPending:
+        "आपने अभी तक स्वास्थ्य पृष्ठभूमि नहीं जोड़ी है। नीचे अपनी एलर्जी, बीमारियाँ और वर्तमान दवाइयाँ जोड़ें।",
+      healthLoading: "आपकी स्वास्थ्य पृष्ठभूमि लोड हो रही है...",
+      healthLoadFailed: "आपकी स्वास्थ्य पृष्ठभूमि लोड नहीं हो सकी।",
+      healthRetry: "फिर से कोशिश करें",
+      bloodGroupLabel: "ब्लड ग्रुप",
+      bloodGroupPlaceholder: "उदाहरण के लिए, B+",
+      listHint: "हर आइटम अलग लाइन में लिखें।",
+      conditionsLabel: "बीमारियाँ",
+      conditionsPlaceholder: "उदाहरण के लिए, अस्थमा",
+      allergiesLabel: "एलर्जी",
+      allergiesPlaceholder: "उदाहरण के लिए, पेनिसिलिन",
+      medicationsLabel: "वर्तमान दवाइयाँ",
+      medicationsPlaceholder: "उदाहरण के लिए, सालबुटामोल इनहेलर",
+      immunizationsLabel: "टीकाकरण",
+      immunizationsPlaceholder: "उदाहरण के लिए, 2024 में टिटनेस",
+      familyHistoryLabel: "पारिवारिक इतिहास",
+      familyHistoryPlaceholder: "उदाहरण के लिए, पिता - मधुमेह",
+      snapshotSave: "स्वास्थ्य पृष्ठभूमि सहेजें",
+      snapshotSaved: "स्वास्थ्य पृष्ठभूमि सहेजी गई।",
+      snapshotSaveFailed:
+        "आपकी स्वास्थ्य पृष्ठभूमि सहेजी नहीं जा सकी। कृपया फिर से कोशिश करें।",
+      snapshotSharedNote:
+        "आपसे जुड़े सक्रिय रिश्ते वाले आपके डॉक्टर यह स्वास्थ्य पृष्ठभूमि देख सकते हैं।",
+      metricsHeading: "ऊँचाई और वज़न",
+      metricsSub: "आपके माप, सबसे नए पहले।",
+      metricsEmpty: "आपने अभी तक कोई ऊँचाई या वज़न दर्ज नहीं किया है।",
+      metricsLoading: "आपके माप लोड हो रहे हैं...",
+      metricsLoadFailed: "आपके माप लोड नहीं हो सके।",
+      metricsLoadMore: "पुराने माप दिखाएँ",
+      metricsLoadingMore: "पुराने माप लोड हो रहे हैं...",
+      metricsMoreFailed: "पुराने माप लोड नहीं हो सके।",
+      heightLabel: "ऊँचाई (सेमी)",
+      weightLabel: "वज़न (किलो)",
+      heightUnit: "सेमी",
+      weightUnit: "किलो",
+      recordedAtLabel: "कब मापा",
+      metricAdd: "माप जोड़ें",
+      metricAdded: "माप जोड़ दिया गया।",
+      metricAddFailed: "यह माप जोड़ा नहीं जा सका। कृपया फिर से कोशिश करें।",
+      metricNotRecorded: "दर्ज नहीं",
+      metricValueRequired: "ऊँचाई, वज़न, या दोनों में से कुछ दर्ज करें।",
+      metricValueNotANumber: "केवल अंक लिखें, जैसे 170 या 68.5।",
+      metricHeightRange: (min: number, max: number) =>
+        `${min} से ${max} सेमी के बीच ऊँचाई दर्ज करें।`,
+      metricWeightRange: (min: number, max: number) =>
+        `${min} से ${max} किलो के बीच वज़न दर्ज करें।`,
+      metricRecordedAtRequired: "यह कब मापा गया, यह बताएँ।",
+      metricDateInvalid: "यह तारीख पढ़ी नहीं जा सकी। कृपया दोबारा चुनें।",
+      healthConsentTitle: "अपनी स्वास्थ्य पृष्ठभूमि साझा करें?",
+      healthConsentBody:
+        "पहली बार अपनी स्वास्थ्य पृष्ठभूमि सहेजने पर यह उन डॉक्टरों को दिखने लगेगी जिनका आपसे सक्रिय रिश्ता है। वे आपका ब्लड ग्रुप, बीमारियाँ, एलर्जी, वर्तमान दवाइयाँ, टीकाकरण और पारिवारिक इतिहास देख पाएँगे।",
+      healthConsentRecall:
+        "यह एक्सेस आप कभी भी नीचे दिए गए 'आपका रिकॉर्ड कौन देख सकता है' से वापस ले सकते हैं।",
+      healthConsentConfirm: "सहेजें और साझा करें",
+      healthConsentCancel: "अभी नहीं",
+      settingsHeading: "सेटिंग",
+      notificationsHeading: "नोटिफ़िकेशन",
+      notificationsHelp:
+        "चुनें कि CareSetu आपको किन याद दिलाव भेजे। अगली रिलीज़ के साथ आ रहा है।",
+      notificationsSoon: "जल्द आ रहा है",
+      notificationLabels: {
+        appointment_reminders: "अपॉइंटमेंट याद दिलाव",
+        prescription_updates: "पर्चे अपडेट",
+        report_ready: "रिपोर्ट तैयार",
+        care_messages: "आपके प्रोवाइडर के संदेश",
+      },
+      languageHeading: "डिफ़ॉल्ट भाषा",
+      languageHelp:
+        "आपके इलाज के रिकॉर्ड की भाषा। आप इसे ऊपर पहचान में बदल सकते हैं।",
+      consentHeading: "आपका रिकॉर्ड कौन देख सकता है",
+      consentSub:
+        "आपने जो हर अनुमति दी है। इसे वापस लेने पर उस प्रोवाइडर को आगे का एक्सेस नहीं मिलेगा।",
+      consentEmpty: "आपने अभी तक अपना रिकॉर्ड किसी के साथ साझा नहीं किया है।",
+      consentLoading: "आपकी सहमति लोड हो रही है...",
+      consentLoadFailed: "आपकी सहमति लोड नहीं हो सकी।",
+      consentRetry: "फिर से कोशिश करें",
+      consentRevoke: "एक्सेस वापस लें",
+      consentRevokeTitle: "एक्सेस वापस लें?",
+      consentRevokeBody: (name: string) =>
+        `${name} अब आपका रिकॉर्ड नहीं देख पाएँगे। पहले किया गया एक्सेस आपके एक्सेस हिस्ट्री में रहेगा।`,
+      consentRevokeConfirm: "वापस लें",
+      consentRevokeCancel: "एक्सेस बनाए रखें",
+      consentRevokeDone: "एक्सेस वापस ले लिया गया।",
+      consentRevokeFailed:
+        "यह एक्सेस वापस नहीं लिया जा सका। कृपया फिर से कोशिश करें।",
+      dataHeading: "आपका डेटा",
+      dataExport: "मेरे डेटा की एक कॉपी डाउनलोड करें",
+      dataExportHelp: "आपके बारे में हमारे पास जो कुछ है, एक फ़ाइल के रूप में।",
+      dataDelete: "मेरा अकाउंट और डेटा मिटाएँ",
+      dataDeleteHelp: "आपका अकाउंट और इलाज के रिकॉर्ड हमेशा के लिए हटाएँ।",
+      dataSoon: "जल्द आ रहा है",
+      scopeLabels: {
+        consultations: "परामर्श",
+        prescriptions: "पर्चे",
+        lab_results: "लैब परिणाम",
+        metrics: "मेट्रिक्स",
+        health_background: "स्वास्थ्य पृष्ठभूमि",
+        full_record: "पूरा रिकॉर्ड",
+      },
+      consentScopeOther: "आपके रिकॉर्ड के अन्य हिस्से",
+    },
+
     nav: {
       home: "होम",
       find: "खोजें",
@@ -1933,6 +2414,14 @@ export const STRINGS: Record<Lang, Dictionary> = {
       verifications: "सत्यापन",
       disputes: "विवाद",
       audit: "ऑडिट",
+      sections: {
+        work: "कार्य",
+        account: "खाता",
+      },
+      // #574: the sidebar's collapse control, action-named like the English
+      // pair above. Blueprint §9.2 line 578: neither locale ships alone.
+      collapseSidebar: "साइडबार संकुचित करें",
+      expandSidebar: "साइडबार विस्तार करें",
     },
     accountMenu: {
       trigger: "अकाउंट मेन्यू",
@@ -2514,14 +3003,25 @@ export const STRINGS: Record<Lang, Dictionary> = {
     },
 
     // doctorConsole.* सतह - PHASE-8.1 T12 (#450): डॉक्टर कंसोल लैंडिंग पेज।
-    // दो सेक्शन: समीक्षा कतार (कम विश्वास पहले, पुराने पहले) और खुले केयर केस,
-    // साथ ही शुल्क संपादक, आने वाले मरीज़/प्रोफ़ाइल, और लोड विफलता पर पुनः प्रयास।
-    // सभी कॉपी द्विभाषी en/hi (REQ-006)।
+    // तीन सतहें: लाइव Patients और Profile पेजों के प्रवेश कार्ड, संक्षिप्त
+    // परामर्श-शुल्क सारांश (संपादक #543 से प्रोफ़ाइल पर है), और समीक्षा कतार
+    // (कम विश्वास पहले, पुराने पहले) साथ ही खुले केयर केस, लोड विफलता पर
+    // पुनः प्रयास। #544 ने आने वाले मरीज़/प्रोफ़ाइल प्लेसहोल्डरों को वास्तविक
+    // प्रवेश कार्डों से बदल दिया। सभी कॉपी द्विभाषी en/hi (REQ-006)।
     doctorConsole: {
       title: "डॉक्टर कंसोल",
-      consoleDescription: "आपकी समीक्षा कतार और खुले मामले",
+      consoleDescription: "आपकी समीक्षा कतार, खुले मामले और प्रोफ़ाइल",
+      entryHeading: "यहाँ जाएँ",
+      patientsEntryBody: "जिन्होंने आपके साथ रिकॉर्ड साझा किया है",
+      profileEntryBody: "प्रैक्टिस की जानकारी, फोटो और परामर्श शुल्क",
+      feeHeading: "परामर्श शुल्क",
+      feeUnset: "तय नहीं",
+      feeUnsetHelp: "मरीज़ आपको बुक कर सकें, इसके लिए शुल्क तय करें।",
+      feeEditAction: "प्रोफ़ाइल में बदलें",
+      feeLoadFailed: "आपका परामर्श शुल्क लोड नहीं हो सका।",
       queueHeading: "समीक्षा कतार",
       queueEmpty: "समीक्षा के लिए कोई प्री-सारांश नहीं",
+      queueEmptyBody: "मरीज़ के विज़िट सबमिट करने पर प्री-सारांश यहाँ आते हैं।",
       patientFallback: "मरीज़",
       patientAge: (age: number) => `${age} वर्ष`,
       sectionsCount: (n: number) => `${n} अनुभाग`,
@@ -2533,26 +3033,152 @@ export const STRINGS: Record<Lang, Dictionary> = {
       reviewAction: "समीक्षा करें",
       casesHeading: "खुले मामले",
       casesEmpty: "कोई खुला केयर केस नहीं",
+      casesEmptyBody: "आपकी सलाह शुरू करते ही एक केस खुलता है।",
       casesIndexTitle: "मेरे मामले",
       casesIndexDescription: "आपके खुले केयर मामले",
       stagePreSummary: "प्री-सारांश",
       stagePrescriptionPending: "नुस्ख़ा लंबित",
       stageClosed: "बंद",
       openCaseAction: "खोलें",
-      feeEditorHeading: "परामर्श शुल्क",
-      feeEditorHelp:
+      loadFailed: "कंसोल लोड नहीं हो सका।",
+      retry: "फिर से कोशिश करें",
+    },
+
+    // doctorProfile.* सतह - PHASE-8.1 (#543): डॉक्टर कंसोल का प्रोफ़ाइल
+    // पेज, अन-सून किए गए Profile नेव प्रविष्टि के पीछे का जीवंत पृष्ठ।
+    // #542 का निजी प्रोजेक्शन दिखाता और बदलता है - फोटो अपलोड/प्रीव्यू/
+    // हटाना, प्रैक्टिस विवरण, अनुभव, भाषाएँ, परिचय, उपलब्धता, प्रमाण
+    // स्थिति, सूचना टॉगल - और लैंडिंग से यहाँ आया परामर्श शुल्क संपादक
+    // (सेव अब भी अपरिवर्तित PATCH रूट से होता है)। सार्वजनिक डायरेक्टरी
+    // प्रविष्टि केवल-पढ़ने का पूर्वावलोकन लिंक रहती है। सभी कॉपी द्विभाषी
+    // en/hi (REQ-006)।
+    doctorProfile: {
+      title: "मेरी प्रोफ़ाइल",
+      description: "आपकी प्रैक्टिस की जानकारी, फोटो और परामर्श शुल्क",
+      loadFailed: "आपकी प्रोफ़ाइल लोड नहीं हो सकी।",
+      photoHeading: "प्रोफ़ाइल फोटो",
+      photoHelp: "JPG, PNG या WebP। आपकी फोटो इसी पेज पर निजी रहती है।",
+      photoUpload: "फोटो अपलोड करें",
+      photoReplace: "फोटो बदलें",
+      photoRemove: "फोटो हटाएँ",
+      photoFailed: "आपकी फोटो अपडेट नहीं हो सकी।",
+      identityHeading: "प्रैक्टिस",
+      practiceNameLabel: "प्रैक्टिस का नाम",
+      specialtyLabel: "विशेषज्ञता",
+      areaLabel: "क्षेत्र",
+      verified: "सत्यापित",
+      notVerified: "सत्यापित नहीं",
+      credentialsHeading: "प्रमाण",
+      credentialsEmpty: "कोई प्रमाण दर्ज नहीं",
+      credentialExpires: (date: string) => `${date} तक वैध`,
+      credentialStatus: {
+        pending: "समीक्षा बाकी",
+        verified: "सत्यापित",
+        expired: "मान्यता समाप्त",
+        revoked: "निरस्त",
+        reverification_failed: "पुनः सत्यापन विफल",
+      },
+      credentialType: {
+        medical_registration: "चिकित्सा पंजीकरण",
+        qualification_certificate: "योग्यता प्रमाणपत्र",
+      },
+      detailsHeading: "विवरण",
+      experienceLabel: "अनुभव के वर्ष",
+      languagesLabel: "भाषाएँ",
+      languagesHelp: "कॉमा से अलग करके लिखें",
+      languagesPlaceholder: "हिंदी, अंग्रेज़ी",
+      aboutLabel: "आपके बारे में",
+      aboutPlaceholder: "मरीज़ों को अपनी प्रैक्टिस के बारे में बताएँ",
+      availabilityLabel: "उपलब्धता",
+      availabilityPlaceholder: "जैसे सोम-शनि, सुबह 9 से दोपहर 1",
+      addressLabel: "प्रैक्टिस का पता",
+      latitudeLabel: "अक्षांश",
+      longitudeLabel: "देशांतर",
+      coordinatesHelp:
+        "प्रैक्टिस का स्थान, डायरेक्टरी प्रविष्टि के लिए उपयोग होता है।",
+      notificationsHeading: "सूचनाएँ",
+      notificationLabels: {
+        new_consultations: "नई परामर्श",
+        record_shared: "आपके साथ साझा किए गए रिकॉर्ड",
+        pre_summary_ready: "समीक्षा के लिए तैयार प्री-सारांश",
+        case_updates: "केस अपडेट",
+        credential_status: "प्रमाण स्थिति में बदलाव",
+      },
+      save: "बदलाव सहेजें",
+      saved: "प्रोफ़ाइल सहेजी गई।",
+      saveFailed: "आपकी प्रोफ़ाइल सहेजी नहीं जा सकी।",
+      invalidFields: "चिह्नित फ़ील्ड जाँचें और फिर कोशिश करें।",
+      publicPreviewHeading: "सार्वजनिक प्रोफ़ाइल",
+      publicPreviewHelp:
+        "मरीज़ आपको डायरेक्टरी में इसी तरह देखते हैं। यहाँ यह केवल-पढ़ने के लिए है।",
+      publicPreviewAction: "सार्वजनिक प्रोफ़ाइल देखें",
+      feeHeading: "परामर्श शुल्क",
+      feeHelp:
         "वह शुल्क सेट करें जो मरीज़ आपको चुनने पर देखें। सेट न होने तक खाली रहेगा।",
       feeFieldLabel: "शुल्क (\u20B9)",
       feeFieldPlaceholder: "जैसे 400",
       saveFee: "शुल्क सहेजें",
       clearFee: "शुल्क हटाएँ",
+      feeInvalid: "0 या उससे अधिक शुल्क दर्ज करें।",
       feeSaved: "शुल्क सहेजा गया।",
       feeSaveFailed: "शुल्क सहेजा नहीं जा सका।",
-      patientsComingSoon: "मरीज़ - जल्द आ रहा है",
-      profileComingSoon: "प्रोफ़ाइल - जल्द आ रहा है",
-      comingSoonBody: "यह क्षेत्र बाद के अपडेट में खुलेगा।",
-      loadFailed: "कंसोल लोड नहीं हो सका।",
+    },
+
+    // doctorPatients.* सतह - PHASE-8.1 (#541): डॉक्टर कंसोल का मरीज़ पेज
+    // (US-11..US-19)। व्युत्पन्न सूची API से वर्तमान/पूर्व समूह, नाम खोज,
+    // अनुमत-क्षेत्र बैज और नवीनतम केस अवस्था; प्रति-मरीज़ विवरण दृश्य में
+    // संपर्क/फोटो/परामर्श-इतिहास/स्वास्थ्य-पृष्ठभूमि अनुभाग, जहाँ बिना अनुमति
+    // वाला अनुभाग शांत "साझा नहीं" अवस्था दिखाता है - कभी त्रुटि नहीं। अवस्था
+    // चिप doctorConsole.stage* और प्रविष्टि-प्रकार लेबल record.badge* से लिए
+    // गए हैं। सभी कॉपी द्विभाषी en/hi (REQ-006)।
+    doctorPatients: {
+      title: "मेरे मरीज़",
+      description: "वर्तमान में रिकॉर्ड साझा करने वाले और पूर्व के मरीज़",
+      searchPlaceholder: "नाम से खोजें",
+      currentHeading: "वर्तमान",
+      pastHeading: "पूर्व",
+      patientsEmpty: "अभी कोई मरीज़ नहीं",
+      currentEmpty: "कोई वर्तमान मरीज़ नहीं",
+      pastEmpty: "कोई पूर्व मरीज़ नहीं",
+      noResultsTitle: "कोई मरीज़ नहीं मिला",
+      noResultsBody: "आपकी खोज से मेल खाता कोई मरीज़ नाम नहीं है।",
+      noCaseStage: "कोई खुला मामला नहीं",
+      openPatientAction: "खोलें",
+      loadFailed: "आपके मरीज़ लोड नहीं हो सके।",
       retry: "फिर से कोशिश करें",
+      backToPatients: "मरीज़ों पर वापस",
+      loadFailedDetail: "यह मरीज़ लोड नहीं हो सका।",
+      notSharedTitle: "साझा नहीं",
+      notSharedBody: "मरीज़ ने यह अनुभाग आपसे साझा नहीं किया है।",
+      contactHeading: "संपर्क",
+      ageLabel: "आयु",
+      genderLabel: "लिंग",
+      areaLabel: "क्षेत्र",
+      emergencyContactLabel: "आपातकालीन संपर्क",
+      notRecorded: "दर्ज नहीं",
+      consultationHistoryHeading: "परामर्श इतिहास",
+      consultationHistoryEmpty: "अभी कोई परामर्श नहीं।",
+      healthBackgroundHeading: "स्वास्थ्य पृष्ठभूमि",
+      healthBackgroundEmpty: "अभी कोई स्वास्थ्य पृष्ठभूमि साझा नहीं।",
+      caseWorkspaceHeading: "केस वर्कस्पेस",
+      openCaseAction: "मामला खोलें",
+      noPhoto: "कोई फोटो नहीं",
+      photoAlt: (name: string) => `${name} की फोटो`,
+      bloodGroupLabel: "रक्त समूह",
+      conditionsLabel: "बीमारियाँ",
+      allergiesLabel: "एलर्जी",
+      medicationsLabel: "दवाइयाँ",
+      immunizationsLabel: "टीके",
+      familyHistoryLabel: "पारिवारिक इतिहास",
+      noneRecorded: "कोई दर्ज नहीं",
+      scopeBadge: {
+        consultations: "परामर्श",
+        prescriptions: "नुस्ख़े",
+        lab_results: "प्रयोगशाला परिणाम",
+        metrics: "माप",
+        health_background: "स्वास्थ्य पृष्ठभूमि",
+        full_record: "पूरा रिकॉर्ड",
+      },
     },
 
     // caseWorkspace.* सतह - PHASE-8.1 T13/T14 (#451/#452): केस वर्कस्पेस।
@@ -2591,6 +3217,11 @@ export const STRINGS: Record<Lang, Dictionary> = {
       tabPreSummary: "प्री-सारांश",
       tabHistory: "इतिहास",
       tabPrescription: "नुस्ख़ा",
+      // केस स्टेपर चरण लेबल (FEAT-008, PROTO-8)
+      consultCompleteStep: "परामर्श पूर्ण",
+      rxPendingStep: "नुस्ख़ा लंबित",
+      issuedStep: "जारी",
+      caseProgressLabel: "केस प्रगति",
       transcriptHeading: "मूल इंटेक",
       transcriptEmpty: "इस इंटेक के लिए कोई प्रतिलेख उपलब्ध नहीं है।",
       transcriptLoadFail: "इंटेक प्रतिलेख लोड नहीं हो सका।",
@@ -2598,6 +3229,16 @@ export const STRINGS: Record<Lang, Dictionary> = {
       audioLoadFail: "रिकॉर्डिंग लोड नहीं हो सकी।",
       loadFailed: "यह केस वर्कस्पेस लोड नहीं हो सका।",
       retry: "फिर कोशिश करें",
+      // PHASE-8.1 #547: समीक्षा मार्ग का री-स्टाइल सतह - अपना शीर्षक वाला
+      // समीक्षा-एक्शन कार्ड, और शांत "केस नहीं दिख रहा" खाली अवस्था। यह
+      // प्रतिलेख केवल अवलोकन बताता है (खुली सूची में कोई केयर केस नहीं), कारण
+      // का दावा नहीं: कतार से शुरू समीक्षा में आउटबॉक्स कंज़्यूमर के केस बनाने
+      // तक केस नहीं होता, और अंतिम करने के बाद की दोबारा पढ़ी भी खाली आ सकती है।
+      reviewActionHeading: "आपकी समीक्षा",
+      handshakeHeading: "परामर्श",
+      casePendingTitle: "केयर केस नहीं दिख रहा",
+      casePendingBody:
+        "इस प्री-सारांश का कोई केयर केस अभी आपके खुले मामलों में नहीं है। प्री-सारांश अंतिम होने पर केस बनता है।",
       finalizeAction: "अंतिम करें + समीक्षा का श्रेय",
       finalizeHelp:
         "एक क्रिया से आपकी समीक्षा दर्ज होती है और प्री-सारांश अंतिम हो जाता है।",
@@ -2612,6 +3253,11 @@ export const STRINGS: Record<Lang, Dictionary> = {
       // पूर्ण होना चाहिए। जन्मा मामला हमेशा अंतिम प्री-सारांश रखता है; बाकी
       // कदम परामर्श-पूर्ण हैंडशेक है, और क्रिया प्री-सारांश टैब पर ले जाती है।
       rxLockTitle: "नुस्ख़ा अभी खुला नहीं",
+      rxLockSubtitle: "नुस्ख़ा खोलने के लिए ये दोनों पूरे होने चाहिए:",
+      rxLockPreSummary: "प्री-सारांश अंतिम",
+      rxLockHandshake: "परामर्श पूर्ण दर्ज",
+      rxLockGoToSummary: "सारांश पर जाएँ",
+      rxLockMarkComplete: "पूर्ण दर्ज करें",
       rxLockDone: "प्री-सारांश अंतिम",
       rxLockPending: "परामर्श पूर्ण दर्ज",
       rxLockAction: "परामर्श पूर्ण करें",
@@ -2677,15 +3323,22 @@ export const STRINGS: Record<Lang, Dictionary> = {
       rxStatusFulfilled: "पूर्ण हुई",
       decisionHeading: "डॉक्टर का निर्णय",
       editedTracker: (n: number) => `${n} आइटम आपके द्वारा संपादित`,
+      // Step 1: Review & approve
       approvalGateTitle: "समीक्षा करें और अनुमोदित करें",
       approvalGateHelp:
         "जारी करने से पहले पुष्टि करें कि आपने हर वस्तु मरीज़ के रिकॉर्ड के अनुसार जाँची है।",
       verificationDeclaration:
         "मैंने यह नुस्ख़ा जाँच लिया है (Maine check kar liya)",
+      // Step 2: Confirm issue details
+      confirmIssueTitle: "जारी करने का विवरण पुष्टि करें",
+      confirmIssueHelp:
+        "पुष्टि करने पर, यह नुस्ख़ा मरीज़ को जारी होगा और बदला नहीं जा सकेगा।",
+      confirmIssueDeclaration:
+        "मैं पुष्टि करता हूँ कि यह नुस्ख़ा सही है और मरीज़ को जारी करने के लिए तैयार है।",
       approveIssueAction: "अनुमोदित करें और जारी करें",
       approvingIssuance: "अनुमोदित हो रहा है",
       approveBlockedHelp:
-        "नुस्ख़ा अनुमोदित और जारी करने के लिए सत्यापन घोषणा पर टिक करें।",
+        "नुस्ख़ा अनुमोदित और जारी करने के लिए दोनों पुष्टियाँ पूरी करें।",
       approveFail: "यह नुस्ख़ा अनुमोदित और जारी नहीं हो सका।",
       issuedHeading: "नुस्ख़ा जारी हुआ",
       issuedImmutableNote: "जारी नुस्ख़ा अंतिम है और बदला नहीं जा सकता।",

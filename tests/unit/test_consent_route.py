@@ -144,6 +144,19 @@ def test_grant_answers_201_with_the_typed_view() -> None:
     assert facade.grants == [(7, "doctor", "dr-77", "consultations")]
 
 
+def test_grant_accepts_the_health_background_scope() -> None:
+    """#531: the new scope is a valid grant target and reaches the facade."""
+    facade = StubConsentFacade()
+    client = _client(facade)
+    body = {**_TRIPLE_BODY, "record_scope": "health_background"}
+
+    response = client.post("/v1/consents", json=body, headers=_bearer(_token()))
+
+    assert response.status_code == 201
+    assert response.json() == facade.view.model_dump(mode="json")
+    assert facade.grants == [(7, "doctor", "dr-77", "health_background")]
+
+
 def test_request_answers_201_in_the_requested_state() -> None:
     facade = StubConsentFacade()
     client = _client(facade)

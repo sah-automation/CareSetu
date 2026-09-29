@@ -755,6 +755,54 @@ async def test_rate_limit_counts_intake_write_surface_only() -> None:
         ).status_code == 200
 
 
+async def test_rate_limit_counts_profile_photo_uploads_only() -> None:
+    """US-20: both profile-photo UPLOAD routes count on the media-write tier.
+
+    ``PUT /v1/me/photo`` and ``PUT /v1/doctor/profile/photo`` each push a
+    multi-MB binary body into object storage - the same abuse target as the
+    intake uploads, so they share that tier. The photo ``GET`` (a read, on the
+    very same path) and the DELETE (a stored-key write, not a media body) stay
+    uncapped, exactly like the intake read shapes.
+    """
+    middleware = RateLimitMiddleware(app=None, enabled=True, max_requests=3, window_seconds=60)
+
+    async def stub_call_next(request: Request) -> Response:
+        return Response(status_code=200)
+
+    for path in (
+        "/v1/me/photo",
+        "/v1/doctor/profile/photo",
+        "/v1/me/photo",
+    ):
+        assert (
+            await middleware.dispatch(
+                _dispatch_request("8.8.8.8", path=path, method="PUT"), stub_call_next
+            )
+        ).status_code == 200
+
+    for path in ("/v1/me/photo", "/v1/doctor/profile/photo"):
+        response = await middleware.dispatch(
+            _dispatch_request("8.8.8.8", path=path, method="PUT"), stub_call_next
+        )
+        assert response.status_code == 429
+        assert response.headers["Retry-After"] == "60"
+
+    # A fresh caller still has its own budget, and the read/remove shapes on the
+    # same paths are never counted.
+    for method, path in (
+        ("GET", "/v1/me/photo"),
+        ("DELETE", "/v1/me/photo"),
+        ("GET", "/v1/doctor/profile/photo"),
+        ("DELETE", "/v1/doctor/profile/photo"),
+    ):
+        for _ in range(5):
+            assert (
+                await middleware.dispatch(
+                    _dispatch_request("7.7.7.7", path=path, method=method), stub_call_next
+                )
+            ).status_code == 200
+
+
 async def test_rate_limit_intake_and_auth_are_independent_tiers() -> None:
     """PS-05: the intake surface keeps its OWN strict tier, independent of auth.
 
@@ -993,6 +1041,150 @@ def test_settings_local_backend_needs_no_supabase_env(
     assert settings.intake_media_backend == "local"
 
 
+# ---------------------------------------------------------------------------
+# profile-media config (profiles batch #529, ADR-0020, ticket #532)
+# ---------------------------------------------------------------------------
+
+
+def test_settings_profile_media_backend_defaults_to_local() -> None:
+    settings = Settings()
+
+    assert settings.profile_media_backend == "local"
+    assert settings.profile_media_root == "var/profile-media"
+    assert settings.profile_media_key == ""
+    assert settings.profile_media_max_attempts == 3
+    assert settings.profile_media_backoff_seconds == 0.5
+    assert settings.profile_media_jitter_fraction == 0.25
+    assert settings.profile_media_circuit_breaker_threshold == 5
+    assert settings.profile_media_circuit_breaker_cooldown_seconds == 30.0
+    assert settings.profile_media_timeout_seconds == 30.0
+    assert settings.profile_media_max_upload_bytes == 5 * 1024 * 1024
+
+
+def test_settings_profile_media_backend_reads_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PROFILE_MEDIA_BACKEND", "supabase")
+    monkeypatch.setenv("PROFILE_MEDIA_ROOT", "var/uploaded-photos")
+    monkeypatch.setenv("PROFILE_MEDIA_KEY", "cGFzc3dvcmQ=")
+    monkeypatch.setenv("PROFILE_MEDIA_MAX_ATTEMPTS", "4")
+    monkeypatch.setenv("PROFILE_MEDIA_BACKOFF_SECONDS", "0.75")
+    monkeypatch.setenv("PROFILE_MEDIA_JITTER_FRACTION", "0.4")
+    monkeypatch.setenv("PROFILE_MEDIA_CIRCUIT_BREAKER_THRESHOLD", "6")
+    monkeypatch.setenv("PROFILE_MEDIA_CIRCUIT_BREAKER_COOLDOWN_SECONDS", "45.5")
+    monkeypatch.setenv("PROFILE_MEDIA_TIMEOUT_SECONDS", "12.5")
+    monkeypatch.setenv("PROFILE_MEDIA_MAX_UPLOAD_BYTES", "4194304")
+    monkeypatch.setenv("SUPABASE_URL", "https://abc.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "sb-test-key")
+
+    settings = get_settings()
+
+    assert settings.profile_media_backend == "supabase"
+    assert settings.profile_media_root == "var/uploaded-photos"
+    assert settings.profile_media_key == "cGFzc3dvcmQ="
+    assert settings.profile_media_max_attempts == 4
+    assert settings.profile_media_backoff_seconds == 0.75
+    assert settings.profile_media_jitter_fraction == 0.4
+    assert settings.profile_media_circuit_breaker_threshold == 6
+    assert settings.profile_media_circuit_breaker_cooldown_seconds == 45.5
+    assert settings.profile_media_timeout_seconds == 12.5
+    assert settings.profile_media_max_upload_bytes == 4194304
+    assert settings.supabase_url == "https://abc.supabase.co"
+    assert settings.supabase_service_role_key == "sb-test-key"
+
+
+def test_settings_profile_media_supabase_requires_url_and_service_role_key() -> None:
+    with pytest.raises(ValueError, match="SUPABASE_URL"):
+        Settings(profile_media_backend="supabase")
+    with pytest.raises(ValueError, match="SUPABASE_SERVICE_ROLE_KEY"):
+        Settings(
+            profile_media_backend="supabase",
+            supabase_url="https://abc.supabase.co",
+        )
+
+
+def test_settings_rejects_unknown_profile_media_backend() -> None:
+    with pytest.raises(ValueError, match="unsupported profile_media_backend"):
+        Settings(profile_media_backend="s3")
+
+
+def test_settings_profile_media_supabase_needs_url_env_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INTAKE_MEDIA_BACKEND", "local")
+    monkeypatch.setenv("PROFILE_MEDIA_BACKEND", "supabase")
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+
+    with pytest.raises(ValueError, match="SUPABASE_URL"):
+        get_settings()
+
+
+def test_settings_profile_media_local_backend_needs_no_supabase_env() -> None:
+    settings = Settings(profile_media_backend="local")
+
+    assert settings.profile_media_backend == "local"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("profile_media_max_attempts", 0, "profile_media_max_attempts must be positive"),
+        (
+            "profile_media_backoff_seconds",
+            0.0,
+            "profile_media_backoff_seconds must be finite and positive",
+        ),
+        (
+            "profile_media_backoff_seconds",
+            float("nan"),
+            "profile_media_backoff_seconds must be finite and positive",
+        ),
+        (
+            "profile_media_jitter_fraction",
+            1.0,
+            "profile_media_jitter_fraction must be finite and between 0 inclusive and 1 exclusive",
+        ),
+        (
+            "profile_media_circuit_breaker_threshold",
+            0,
+            "profile_media_circuit_breaker_threshold must be positive",
+        ),
+        (
+            "profile_media_circuit_breaker_cooldown_seconds",
+            0.0,
+            "profile_media_circuit_breaker_cooldown_seconds must be finite and positive",
+        ),
+        (
+            "profile_media_circuit_breaker_cooldown_seconds",
+            float("inf"),
+            "profile_media_circuit_breaker_cooldown_seconds must be finite and positive",
+        ),
+        (
+            "profile_media_timeout_seconds",
+            0.0,
+            "profile_media_timeout_seconds must be finite and positive",
+        ),
+        (
+            "profile_media_timeout_seconds",
+            float("nan"),
+            "profile_media_timeout_seconds must be finite and positive",
+        ),
+        (
+            "profile_media_max_upload_bytes",
+            0,
+            "profile_media_max_upload_bytes must be positive",
+        ),
+    ],
+)
+def test_settings_rejects_invalid_profile_media_retry_policy(
+    field: str,
+    value: float,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        Settings(**{field: value})
+
+
 def _env_example_text() -> str:
     return _ENV_EXAMPLE.read_text(encoding="utf-8")
 
@@ -1015,10 +1207,88 @@ def test_env_example_documents_intake_media_supabase_switch() -> None:
     assert "SUPABASE_SERVICE_ROLE_KEY=" in text
 
 
+def test_env_example_documents_profile_media_supabase_switch() -> None:
+    text = _env_example_text()
+    # The profile-media backend switch (ADR-0020, #532) must be documented with
+    # both backends and the three env vars so the config is discoverable at boot.
+    assert "PROFILE_MEDIA_BACKEND=" in text
+    assert "PROFILE_MEDIA_ROOT=" in text
+    assert "PROFILE_MEDIA_KEY=" in text
+    assert "PROFILE_MEDIA_MAX_ATTEMPTS=" in text
+    assert "PROFILE_MEDIA_BACKOFF_SECONDS=" in text
+    assert "PROFILE_MEDIA_JITTER_FRACTION=" in text
+    assert "PROFILE_MEDIA_CIRCUIT_BREAKER_THRESHOLD=" in text
+    assert "PROFILE_MEDIA_CIRCUIT_BREAKER_COOLDOWN_SECONDS=" in text
+    assert "PROFILE_MEDIA_TIMEOUT_SECONDS=" in text
+    assert "PROFILE_MEDIA_MAX_UPLOAD_BYTES=" in text
+
+
 def test_env_example_redis_directory_ttl_comments_the_default() -> None:
     text = _env_example_text()
     # The 300 default must be called out in a comment so the knob is discoverable.
     assert "default 300" in text
+
+
+# ---------------------------------------------------------------------------
+# Deploy manifest media wiring (#555): the committed ``render.yaml`` must point
+# the profile-media store at the durable private bucket and must declare both
+# media encryption keys as dashboard-managed secrets.
+# ---------------------------------------------------------------------------
+
+_RENDER_MANIFEST = Path(__file__).resolve().parents[2] / "render.yaml"
+
+
+def _render_env_var_entry(key: str) -> str:
+    """Return the ``envVars`` entry declaring ``key`` in the committed manifest.
+
+    Only the entry's own deeper-indented lines are collected, so a comment block
+    written at the list indent for the *next* entry cannot leak into this one.
+    The manifest declares a single service, so the first matching entry is the
+    deployed web service's own.
+    """
+    lines = _RENDER_MANIFEST.read_text(encoding="utf-8").splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != f"- key: {key}":
+            continue
+        key_indent = len(line) - len(line.lstrip())
+        entry = [line]
+        for follower in lines[index + 1 :]:
+            indent = len(follower) - len(follower.lstrip())
+            if not follower.strip() or indent <= key_indent:
+                break
+            entry.append(follower)
+        return "\n".join(entry)
+    raise AssertionError(f"{key} is not declared in {_RENDER_MANIFEST.name}")
+
+
+@pytest.mark.parametrize("key", ["INTAKE_MEDIA_BACKEND", "PROFILE_MEDIA_BACKEND"])
+def test_render_manifest_points_media_stores_at_the_durable_backing(key: str) -> None:
+    """#555: both media stores must be wired to the private Supabase bucket.
+
+    The stores default to local disk, so on the deployed service every upload
+    wrote ciphertext to Render's ephemeral disk and was wiped on redeploy while
+    the profile row still claimed a photo existed. Both entries are asserted
+    identically because they are the same declaration: a blueprint-managed
+    ``value`` (not a dashboard secret), and never a half-wired ``sync: false``.
+    """
+    entry = _render_env_var_entry(key)
+    assert "value: supabase" in entry
+    assert "sync:" not in entry
+
+
+@pytest.mark.parametrize("key", ["PROFILE_MEDIA_KEY", "INTAKE_MEDIA_KEY"])
+def test_render_manifest_declares_media_keys_as_unsynced_secrets(key: str) -> None:
+    """#555: both media encryption keys must be declared as unsynced secrets.
+
+    With no key set, BOTH stores derive an ephemeral per-process AES key, so
+    every restart mints a new one and all previously stored ciphertext becomes
+    permanently undecryptable - silently, with no error anywhere. Declaring each
+    key ``sync: false`` (never a value in the repo) is what forces an operator
+    to set it on the deployed service.
+    """
+    entry = _render_env_var_entry(key)
+    assert "sync: false" in entry
+    assert "value:" not in entry
 
 
 # ---------------------------------------------------------------------------

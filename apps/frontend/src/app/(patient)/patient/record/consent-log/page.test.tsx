@@ -3,6 +3,7 @@
 // stop-forward copy, egress slice, and bilingual EN/HI contract.
 
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -22,6 +23,7 @@ import {
 import ConsentLogPage from "./page";
 import { __resetLangForTests, useLang } from "@/lib/i18n/LangContext";
 import { STRINGS } from "@/lib/i18n/dictionaries";
+import { REVOCATION_NOTICE_MS } from "@/lib/consent/revocationNotice";
 import {
   fetchConsentLog,
   revokeConsent,
@@ -256,7 +258,14 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.useRealTimers();
 });
+
+/** Flush the load and revoke promises under fake timers, where `waitFor`
+ *  cannot advance the clock itself. */
+async function flush() {
+  await act(async () => {});
+}
 
 async function waitForLog() {
   // Wait for either pending or history section to appear
@@ -409,6 +418,91 @@ describe("Inline-confirm revoke flow", () => {
     expect(screen.getByTestId("toast")).toHaveTextContent(
       "Permission taken back - future sharing stopped.",
     );
+  });
+
+  // #565: this screen and the Settings consent panel are one confirmation shown
+  // in two places, so both carry the same treatment and dismiss it the same way.
+  it("confirms the revoke with the shared positive-message treatment (#565)", async () => {
+    mockRevokeConsent.mockResolvedValue(
+      consent({ consent_id: 1, status: "revoked" }),
+    );
+
+    render(<ConsentLogPage />);
+    await waitForLog();
+
+    fireEvent.click(screen.getByTestId("revoke-1"));
+    await screen.findByTestId("revoke-sheet");
+    fireEvent.click(screen.getByTestId("revoke-confirm"));
+
+    const notice = await screen.findByTestId("toast");
+    // Exact string, and load-bearing: this environment loads no stylesheet, so
+    // a colour utility naming a token that does not exist emits no CSS and no
+    // rendered-surface, snapshot, contrast or axe assertion here can see it
+    // (axe reads the accessibility tree, not the cascade). The class list is
+    // the only observable a unit test has for a treatment decision, and
+    // containment - `toHaveClass("bg-success-soft")` - passes on the string
+    // this replaces. Do not "simplify" it into a containment check.
+    expect(notice.className).toBe(
+      "rounded-md border border-success-soft bg-success-soft px-3 py-2 text-sm text-success-text",
+    );
+    // The outcome is announced, not left for the patient to spot.
+    expect(notice).toHaveAttribute("role", "status");
+  });
+
+  it("dismisses the confirmation on its own and leaves no timer behind on unmount (#565)", async () => {
+    mockRevokeConsent.mockResolvedValue(
+      consent({ consent_id: 1, status: "revoked" }),
+    );
+    vi.useFakeTimers();
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+
+    const { unmount } = render(<ConsentLogPage />);
+    await flush();
+    fireEvent.click(screen.getByTestId("revoke-1"));
+    await flush();
+    fireEvent.click(screen.getByTestId("revoke-confirm"));
+    await flush();
+
+    expect(screen.getByTestId("toast")).toBeTruthy();
+    // The countdown is the timer armed for the shared duration. This screen
+    // used to arm a raw inline setTimeout with no handle and no teardown, so a
+    // patient who navigated away mid-countdown left it running against a gone
+    // tree. The teardown is measured, not asserted: unmounting must clear this
+    // exact handle, not merely reduce some timer count.
+    const armed = setTimeoutSpy.mock.results
+      .map((result, index) => ({
+        handle: result.value,
+        delay: setTimeoutSpy.mock.calls[index]?.[1],
+      }))
+      .find((entry) => entry.delay === REVOCATION_NOTICE_MS);
+    expect(armed).toBeDefined();
+
+    unmount();
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(armed?.handle);
+  });
+
+  it("clears the confirmation on its own after the shared countdown (#565)", async () => {
+    mockRevokeConsent.mockResolvedValue(
+      consent({ consent_id: 1, status: "revoked" }),
+    );
+    vi.useFakeTimers();
+
+    render(<ConsentLogPage />);
+    await flush();
+    fireEvent.click(screen.getByTestId("revoke-1"));
+    await flush();
+    fireEvent.click(screen.getByTestId("revoke-confirm"));
+    await flush();
+
+    expect(screen.getByTestId("toast")).toBeTruthy();
+
+    // One named duration, imported from the same place the Settings panel reads
+    // it - not a second literal that can drift from the first.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(REVOCATION_NOTICE_MS);
+    });
+    expect(screen.queryByTestId("toast")).toBeNull();
   });
 
   it("cancel closes the sheet without revoking", async () => {

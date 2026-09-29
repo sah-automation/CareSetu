@@ -1,0 +1,137 @@
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  text-align: center;
+}
+
+.center {
+  display: flex;
+  justify-content: center;
+}
+
+.successIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 4.25rem;
+  height: 4.25rem;
+  border-radius: 9999px;
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.title {
+  font-size: 1.15rem;
+  margin: 0;
+  text-align: center;
+}
+
+.body {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--txt-muted);
+  text-align: center;
+}
+
+.progress {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  margin: 0.15rem 0 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.progressTrack {
+  width: 100%;
+  height: 0.35rem;
+  border-radius: 9999px;
+  background: var(--hairline);
+  overflow: hidden;
+}
+
+/* #581: the bar is indeterminate, so it slides a fixed-length segment across
+   the track on a transform. A width transition would imply a known duration,
+   which the code does not have. 1.4s per pass is a glance, not a wait: the
+   screen is a confirmation the user is meant to read, and a segment that
+   crosses in under a second reads as a flicker instead. The base-layer
+   reduced-motion floor in globals.css kills this animation app-wide; there is
+   deliberately no per-component motion guard beside it. */
+.progressFill {
+  width: 35%;
+  height: 100%;
+  border-radius: 9999px;
+  background: var(--accent);
+  animation: progressSlide 1.4s ease-in-out infinite;
+}
+
+/* 35% of the track is 0.35 track units wide, so 286% of the fill's own width
+   carries its left edge from just off the left clip to just off the right. */
+@keyframes progressSlide {
+  0% {
+    transform: translateX(-100%);
+  }
+
+  100% {
+    transform: translateX(286%);
+  }
+}
+
+.facts {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0.35rem 0 0;
+  text-align: left;
+}
+
+.fact {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.8rem;
+}
+
+.factLabel {
+  color: var(--txt-muted);
+}
+
+.factValue {
+  margin: 0;
+  font-weight: 600;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.cta {
+  width: 100%;
+  margin-top: 0.35rem;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 0.95rem;
+  font-weight: 600;
+  padding: 0.85rem 1rem;
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    transform 0.1s ease;
+}
+
+.cta:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+.cta:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.cta:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}

@@ -4,18 +4,18 @@
 
 ## Doc inventory
 
-| File                                     | Purpose                                                                                                                                                                                       | Read when                                                                                                                   | ~Tokens  |
-| :--------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------- | :------- |
-| `CONTEXT.md` (this file)                 | Navigation guide - what to read/skip                                                                                                                                                          | Always (first)                                                                                                              | ~0.5K    |
-| `docs/prd/project-prd.md`                | WHAT we build: epics, features (`FEAT-xxx`), NFRs, risks                                                                                                                                      | Every build; the §4.x section for the features in scope                                                                     | ~13K     |
-| `docs/architecture/system-context.md`    | External actors (`ACT-xxx`) + third-party integrations (`EXT-001..004`)                                                                                                                       | When touching integrations, actors, or boundary rules                                                                       | ~6K      |
-| `docs/architecture/internal-modules.md`  | HOW modules work: per-module specs (`MOD-001..011`), sync matrix §4.1, event registry §4.2, traceability §5                                                                                   | Every build; specs for the modules you touch                                                                                | ~14K     |
-| `docs/roadmap/implementation-roadmap.md` | IN WHAT ORDER we build: per-phase specs (`PHASE-0..14` plus delivered chassis inserts `PHASE-2.5`/`PHASE-2.6` in §2.2a/§2.2b), phased traceability §3                                         | Every build; the section for the current phase                                                                              | ~17K     |
-| `docs/adr/*`                             | Resolved decisions (ADR-0001: confidence split; ADR-0005: dual JWT storage; **ADR-0007: split-origin deploy + session-transport invariants**; **ADR-0016: partner login method - phone-OTP**) | When a decision or `AMB`/`CFL`/`GAP` baseline is in scope; ADR-0007 before ANY auth/session/CORS/middleware/deploy-env work | ~1K each |
-| `docs/design/ui-blueprint.md`            | Top-level UI design for all five surfaces: navigation model, design system, per-surface IA, cross-cutting patterns                                                                            | Any UI/frontend build; the surface sections you touch                                                                       | ~10K     |
-| `docs/research/ui-component-library.md`  | Component-library evidence and migration notes behind the blueprint's §1.1 recommendation                                                                                                     | When adopting UI components or touching bundle budget                                                                       | ~2K      |
-| `docs/standards/*`                       | Top-level rules per area (coding, api, integrations, errors, security, AI)                                                                                                                    | The relevant standard before working in its area                                                                            | ~2K each |
-| `docs/agents/briefs/*`                   | Per-ticket **context packs** (read-list, do-not-read, baseline/done-verify) - the contract for implementing a ticket                                                                          | The ticket's own brief, before anything else                                                                                | ~2K each |
+| File                                     | Purpose                                                                                                                                                                                                                                 | Read when                                                                                                                   | ~Tokens  |
+| :--------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------- | :------- |
+| `CONTEXT.md` (this file)                 | Navigation guide - what to read/skip                                                                                                                                                                                                    | Always (first)                                                                                                              | ~0.5K    |
+| `docs/prd/project-prd.md`                | WHAT we build: epics, features (`FEAT-xxx`), NFRs, risks                                                                                                                                                                                | Every build; the §4.x section for the features in scope                                                                     | ~13K     |
+| `docs/architecture/system-context.md`    | External actors (`ACT-xxx`) + third-party integrations (`EXT-001..004`)                                                                                                                                                                 | When touching integrations, actors, or boundary rules                                                                       | ~6K      |
+| `docs/architecture/internal-modules.md`  | HOW modules work: per-module specs (`MOD-001..011` plus the two delivered schema-less seams - the facade-only `MOD-012` doctor console and the `profile-media` storage adapter), sync matrix §4.1, event registry §4.2, traceability §5 | Every build; specs for the modules you touch                                                                                | ~15K     |
+| `docs/roadmap/implementation-roadmap.md` | IN WHAT ORDER we build: per-phase specs (`PHASE-0..14` plus delivered chassis inserts `PHASE-2.5`/`PHASE-2.6` in §2.2a/§2.2b), phased traceability §3                                                                                   | Every build; the section for the current phase                                                                              | ~17K     |
+| `docs/adr/*`                             | Resolved decisions (ADR-0001: confidence split; ADR-0005: dual JWT storage; **ADR-0007: split-origin deploy + session-transport invariants**; **ADR-0016: partner login method - phone-OTP**)                                           | When a decision or `AMB`/`CFL`/`GAP` baseline is in scope; ADR-0007 before ANY auth/session/CORS/middleware/deploy-env work | ~1K each |
+| `docs/design/ui-blueprint.md`            | Top-level UI design for all five surfaces: navigation model, design system, per-surface IA, cross-cutting patterns                                                                                                                      | Any UI/frontend build; the surface sections you touch                                                                       | ~10K     |
+| `docs/research/ui-component-library.md`  | Component-library evidence and migration notes behind the blueprint's §1.1 recommendation                                                                                                                                               | When adopting UI components or touching bundle budget                                                                       | ~2K      |
+| `docs/standards/*`                       | Top-level rules per area (coding, api, integrations, errors, security, AI)                                                                                                                                                              | The relevant standard before working in its area                                                                            | ~2K each |
+| `docs/agents/briefs/*`                   | Per-ticket **context packs** (read-list, do-not-read, baseline/done-verify) - the contract for implementing a ticket                                                                                                                    | The ticket's own brief, before anything else                                                                                | ~2K each |
 
 ## Build-session protocol
 
@@ -102,8 +102,20 @@ _Avoid_: mobile number (when meaning the stored canonical form), client-supplied
 ### Record & consent
 
 **record scope**:
-The closed enum of record areas a consent grant may name - `consultations | prescriptions | lab_results | metrics | full_record`; `check_consent` matches on (counterparty, scope). Never per-entry, never free-form.
+The closed enum of record areas a consent grant may name - `consultations | prescriptions | lab_results | metrics | health_background | full_record`; `check_consent` matches on (counterparty, scope). Never per-entry, never free-form.
 _Avoid_: data category (when meaning a grant's scope), permission level
+
+**health background**:
+The patient-authored snapshot of their own health - blood group, conditions, allergies, medications, immunizations, and family history - plus height/weight entries kept as a timestamped time series. Owned by `MOD-003` in the `health` schema as its own patient-authored tables (`health_background_snapshots`, `health_background_metrics`), never a care-generated record entry; surfaced to a doctor only through a `health_background` consent check, fail-closed on denial with the same access-history and egress-disclosure discipline as any consented record read. Its first write carries the first-save acknowledgment (`ADR-0018`).
+_Avoid_: health record (that is the `MOD-003` care-generated timeline), patient history (when meaning the stored snapshot), health profile (that is the `MOD-001` identity profile)
+
+**first-save acknowledgment**:
+The one-time PHI confirmation a patient gives on the first health-background write, before anything persists: it states the snapshot becomes visible to their live-relationship doctors and records a normal `health_background` standing grant to each of them. Refused (not defaulted) when absent on a first save, stamped once and never re-prompted, and never re-granting afterwards.
+_Avoid_: consent checkbox, opt-in banner (it is a write-time gate, not a passive notice)
+
+**profile media**:
+The private, encrypted object storage for profile photos: one `profile-media` bucket, never public, holding role-prefixed keys - `patient/{user_id}/...` and `doctor/{user_id}/...`, each object AES-256-GCM encrypted at rest. Backend-only (service-role) writes; SQL stores only the object key (`photo_ref` on the patient or partner profile row), and every read streams decrypted bytes through the backend, so a leaked URL discloses nothing. Delivered as the `ProfileMediaStore` adapter (protocol, local + object-storage backends, factory, retry/circuit-breaker wrapper) behind ADR-0020.
+_Avoid_: avatar URL, public image link, media bucket (that is the intake/`rx_input` media store)
 
 **standing grant**:
 One live consent authorization for one (patient, counterparty, record scope) triple, effective from grant until revoked or superseded by a re-grant. "Per-action" consent means this per-purpose targeting, never a one-shot token. Pick-at-doctor (Phase 8.1) is the deliberate multi-grant moment: it records `consultations` and `prescriptions` standing grants together, atomically in the same transaction as the doctor assignment, so the AI drafting assistant's consent-gated read can pass.
@@ -184,8 +196,8 @@ The consent-schema ledger of successful, consent-authorized PHI disclosures - wh
 _Avoid_: access log (that is the record access history), audit log (that is the Phase 4 engine)
 
 **record access history**:
-The health-schema ledger of every read attempt on a record - owner reads, partner reads, denied attempts; feeds the patient's trust view (`FEAT-003`, Phase 4).
-_Avoid_: audit trail
+The health-schema ledger of every read attempt on a record - owner reads, partner reads, denied attempts; feeds the patient's trust view (`FEAT-003`, Phase 4). Consent-scoped reads record the record scope; surfaces that are not entry-keyed record a surface marker instead (`doctor_patients_list`, `doctor_patient_detail` for the doctor console), so revoking consent never rewinds the historical "viewed where" signal.
+_Avoid_: audit trail, disclosure log (that is the `egress log`)
 
 ### Provider directory & credential validity (Phase 6)
 
@@ -270,6 +282,20 @@ _Avoid_: media upload, attachment
 **close-without-prescription**:
 The doctor's deliberate terminal action that moves a care case to `Closed` with no prescription - recorded with a close reason and leaving the pending list. A rejected draft never auto-closes the case; only this explicit action closes a visit when no medicine is needed.
 _Avoid_: close case, end-visit-without-prescription
+
+### Doctor console & care loops (doctor-console/profiles batch)
+
+**care loop**:
+The continuous patient-doctor relationship where a patient returns to the same doctor across visits; the doctor Patients list is the care-loop anchor - a patient stays listed while any live standing grant remains or a care case is open, and drops from Current only once both the last grant is revoked and no open care case remains.
+_Avoid_: patient-doctor bond, follow-up relationship
+
+**doctor patients list**:
+The derived, consent-gated Current/Past patient list for a doctor - Current = live standing grant (any record scope) or an open care case; Past = closed care cases only with no live grant. Never stored; recomputed from the standing-grant lineage and care cases on every read, with no patient-relationship table. The two buckets are the wire vocabulary (`current` / `past`); the read is paginated and name-searchable, and every row actually served is access-logged (`ADR-0019`).
+_Avoid_: patient registry, my patients (that is UI copy)
+
+**patient detail section**:
+One block of the doctor console's per-patient read, gated on its own consent scope: contact/photo on any live grant, consultation history on `consultations`, health background on `health_background`. A denied section renders locked, never an error, and never a leak; a patient with no live grant at all answers every section locked (the detail read still returns 200 and leaks nothing), while the photo stream itself fails closed with 403.
+_Avoid_: patient record (that is the `MOD-003` timeline), detail tab
 
 ### Event bus & module seams
 

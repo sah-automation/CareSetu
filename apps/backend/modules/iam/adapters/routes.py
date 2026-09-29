@@ -35,6 +35,9 @@ from modules.iam.domain.exceptions import (
     InvalidOperatorCodeError,
     InvalidPhoneError,
     OperatorMfaError,
+    PatientProfileNotSetError,
+    ProfilePhotoTransferError,
+    ProfilePhotoValidationError,
     RefreshTokenExpiredError,
     RefreshTokenRevokedError,
     RefreshTokenUnknownError,
@@ -583,7 +586,15 @@ def _redact_phone(message: str) -> str:
 
 
 def register_error_handlers(app: FastAPI) -> None:
-    """Attach the MOD-001 error envelope to every expected iam failure."""
+    """Attach the MOD-001 error envelope to every expected iam failure.
+
+    Two buckets, never mixed (error-handling-observability §1): ``iam_rejection``
+    is the client/policy class - a bad phone, a refused session, a rejected
+    photo - and ``iam_upstream_failure`` is the third-party/degradation class,
+    used by the two 502s where an external dependency (the SMS provider, the
+    profile-media store) is what failed. Same envelope and status either way;
+    only the log label tells an operator which one to page on.
+    """
 
     async def _invalid_phone(request: Request, exc: Exception) -> JSONResponse:
         return error_response(
@@ -599,7 +610,7 @@ def register_error_handlers(app: FastAPI) -> None:
             status.HTTP_502_BAD_GATEWAY,
             "SMS_DELIVERY_FAILED",
             _redact_phone(str(exc)),
-            log_tag="iam_rejection",
+            log_tag="iam_upstream_failure",
             request=request,
         )
 
@@ -686,6 +697,33 @@ def register_error_handlers(app: FastAPI) -> None:
             details=details,
         )
 
+    async def _profile_photo_invalid(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "PROFILE_PHOTO_INVALID",
+            str(exc),
+            log_tag="iam_rejection",
+            request=request,
+        )
+
+    async def _profile_not_set(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_409_CONFLICT,
+            "PROFILE_NOT_SET",
+            str(exc),
+            log_tag="iam_rejection",
+            request=request,
+        )
+
+    async def _photo_transfer_failed(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_502_BAD_GATEWAY,
+            "PROFILE_PHOTO_TRANSFER_FAILED",
+            str(exc),
+            log_tag="iam_upstream_failure",
+            request=request,
+        )
+
     app.add_exception_handler(InvalidPhoneError, _invalid_phone)
     app.add_exception_handler(SmsDeliveryError, _sms_failed)
     app.add_exception_handler(SessionIssuanceError, _session_refused)
@@ -694,5 +732,8 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(RefreshTokenUnknownError, _refresh_token_unknown)
     app.add_exception_handler(RefreshTokenExpiredError, _refresh_token_expired)
     app.add_exception_handler(RefreshTokenRevokedError, _refresh_token_revoked)
+    app.add_exception_handler(ProfilePhotoValidationError, _profile_photo_invalid)
+    app.add_exception_handler(PatientProfileNotSetError, _profile_not_set)
+    app.add_exception_handler(ProfilePhotoTransferError, _photo_transfer_failed)
     app.add_exception_handler(IamError, _iam_failed)
     app.add_exception_handler(RequestValidationError, _validation_failed)

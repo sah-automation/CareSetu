@@ -74,6 +74,15 @@ def _assert_iam_rejection_logged(caplog: pytest.LogCaptureFixture, trace_id: str
     )
 
 
+def _assert_iam_upstream_failure_logged(caplog: pytest.LogCaptureFixture, trace_id: str) -> None:
+    """One ``iam_upstream_failure`` line carries the same id as the envelope."""
+    assert any(
+        "iam_upstream_failure" in record.getMessage()
+        and f"trace_id={trace_id}" in record.getMessage()
+        for record in caplog.records
+    )
+
+
 def test_register_returns_flow_state_and_forwards_raw_phone() -> None:
     facade = StubFacade()
     client = _client_with(facade)
@@ -116,17 +125,29 @@ def test_invalid_phone_answers_422_envelope(caplog: pytest.LogCaptureFixture) ->
     _assert_iam_rejection_logged(caplog, _TRACE_ID)
 
 
-def test_sms_delivery_failure_answers_502_envelope() -> None:
+def test_sms_delivery_failure_answers_502_envelope(caplog: pytest.LogCaptureFixture) -> None:
+    """A provider outage is the third-party bucket, not a client rejection.
+
+    error-handling-observability §1: the two classes are logged under different
+    tags so an operator can tell "the caller is bad" from "the SMS provider is
+    down" without reading the message.
+    """
+    caplog.set_level(logging.WARNING)
     facade = StubFacade()
     facade.error = SmsDeliveryError("EXT-001 send failed")
     client = _client_with(facade)
 
-    response = client.post("/v1/auth/register", json={"phone": "9876543210"})
+    response = client.post(
+        "/v1/auth/register",
+        json={"phone": "9876543210"},
+        headers={"X-Request-Id": _TRACE_ID},
+    )
 
     assert response.status_code == 502
     body = response.json()
     assert body["code"] == "SMS_DELIVERY_FAILED"
     assert "EXT-001 send failed" in body["message"]
+    _assert_iam_upstream_failure_logged(caplog, _TRACE_ID)
 
 
 def test_unexpected_iam_error_answers_500_envelope() -> None:

@@ -22,7 +22,6 @@ import type { ProviderType } from "@/lib/directory/links";
 import { ApiError } from "@/lib/api-errors";
 import { AuthApiError, type SessionResult } from "@/lib/auth/api";
 import { postLoginTarget } from "@/lib/auth/staff-routing";
-import { saveSession } from "@/lib/auth/session";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import {
@@ -745,7 +744,7 @@ function StepConfirm({
         <p className="text-lg font-semibold" data-testid="pr-confirm-countdown">
           {formatCountdown(partner.state.expiresIn)}
         </p>
-        <p className="text-sm text-on-surface" data-testid="pr-confirm-phone">
+        <p className="text-sm text-txt-sub" data-testid="pr-confirm-phone">
           {login.codeHint} <strong>{displayPhone}</strong>
         </p>
       </div>
@@ -798,7 +797,7 @@ function StepConfirm({
       {partner.state.cooldownRemaining > 0 &&
       partner.state.challenge !== "locked" ? (
         <p
-          className="mb-2 text-sm text-on-surface"
+          className="mb-2 text-sm text-txt-sub"
           data-testid="pr-confirm-resend-cooldown"
         >
           {login.resendIn(partner.state.cooldownRemaining)}
@@ -815,7 +814,7 @@ function StepConfirm({
       {partner.state.stage === "otp" &&
       partner.state.challenge === "pending" ? (
         <p
-          className="mb-2 text-sm text-on-surface"
+          className="mb-2 text-sm text-txt-sub"
           data-testid="pr-confirm-attempts"
         >
           {partner.state.attemptsLeft > 0
@@ -834,7 +833,7 @@ function StepConfirm({
       ) : null}
       {partner.state.lastNotice ? (
         <p
-          className="mb-2 text-sm text-on-surface"
+          className="mb-2 text-sm text-txt-sub"
           data-testid="pr-confirm-notice"
         >
           {partner.state.lastNotice}
@@ -1155,13 +1154,13 @@ export function ProviderRegisterWizard({
     }
   }
 
-  // Finalize once the confirm step has minted a partner session: persist it
-  // through the shared save path, submit any uploaded credentials, then land
-  // on the same waiting-screen target as before this step existed.
+  // Finalize once the confirm step has minted a partner session: submit any
+  // uploaded credentials, then land on the same waiting-screen target as before
+  // this step existed. #584: the shared partner flow persists the minted
+  // session at the mint, before publishing it (partnerLoginState.ts), so this
+  // no longer writes - a wizard-driven login would otherwise store the same
+  // session twice, the second time a network round trip later.
   async function finalizeRegistration(session: SessionResult) {
-    const phone = submittedPhone ?? partner.state.phone;
-    saveSession(session, phone);
-
     const slots = UPLOAD_SLOTS[type];
     const credentialMap = new Map<CredentialType, string[]>();
     for (const slotId of slots) {

@@ -137,15 +137,18 @@ function completenessItems(draft: ProfileDraft): boolean[] {
 }
 
 // The items Profile & Settings can actually collect (spec #520): basics +
-// area + emergency. Photo upload is a later seam (out of scope) and the
-// chronic-interest tracking toggles are the wizard's skippable step, so a
-// page that counted them would cap a fully-edited profile below 100% with no
-// way to close the gap - "what is left to fill" must always be fillable here.
+// photo + area + emergency. The chronic-interest tracking toggles are the
+// wizard's skippable step, so a page that counted them would cap a
+// fully-edited profile below 100% with no way to close the gap - "what is left
+// to fill" must always be fillable here. The photo joined this scope in #548,
+// when the page gained the upload control: it is fillable here now, so
+// excluding it would under-report what the patient can still complete.
 function profileSettingsItems(draft: ProfileDraft): boolean[] {
   return [
     hasText(draft.name),
     parseAge(draft.age) !== null,
     draft.gender !== "",
+    photoPresent(draft),
     areaComplete(draft),
     emergencyPresent(draft),
   ];
@@ -154,7 +157,7 @@ function profileSettingsItems(draft: ProfileDraft): boolean[] {
 /**
  * Which dimension set a meter measures. Defaults to "all" (the wizard/Home
  * meters); Profile & Settings passes "profile-settings" so its meter never
- * counts the two dimensions that page cannot collect.
+ * counts the dimension that page cannot collect.
  */
 export type CompletenessScope = "all" | "profile-settings";
 

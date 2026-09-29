@@ -26,6 +26,7 @@ import {
 } from "@/lib/auth/api";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
+import { saveSession } from "@/lib/auth/session";
 
 import {
   LOCKOUT_SECONDS,
@@ -257,6 +258,19 @@ export function usePartnerLoginFlow(): PartnerOtpFlow {
             if (result.outcome === "verified") {
               return issuePartnerSession(s.phone)
                 .then((sessionResult) => {
+                  // #584: persist BEFORE publishing, the ordering the patient
+                  // flow already follows (otpState.ts). The in-flow identity
+                  // resume in StaffLoginForm is keyed on the published session
+                  // and reads STORAGE, so publishing first made it resume the
+                  // previously stored session - a stale patient session on a
+                  // phone registered as both, or nothing at all on a clean
+                  // browser. The doctor console is the only partner landing
+                  // that routes with the client-side router instead of a full
+                  // reload, so that stale identity used to ride into the shell
+                  // and a hard refresh was the only cure. The phone is the one
+                  // the code was verified against, which is the same number the
+                  // patient flow stores.
+                  saveSession(sessionResult, s.phone);
                   setState((prev) => ({
                     ...prev,
                     stage: "done",

@@ -90,7 +90,7 @@ async def read_access_history(
     ``patient_id`` must equal the authenticated caller's subject id; any other
     value is a cross-patient probe and answers the gateway's 403 envelope -
     and, being an access denial, is audited through the gateway's
-    ``_emit_access_denial`` path (security-phii-standards KPI-006). The typed
+    ``emit_access_denial`` path (security-phii-standards KPI-006). The typed
     view is delegated to MOD-003's ``get_access_history`` through the audit
     facade seam.
     """

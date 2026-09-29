@@ -4,7 +4,9 @@
 // variants (full-shell sidebar, patient desktop top-nav). Mobile tab-bar
 // columns render their own compact markup in BottomTabs. Labels resolve
 // through the i18n engine (blueprint §9.2); Soon entries render dimmed,
-// non-interactive, badged (§2.7).
+// non-interactive, badged (§2.7). The collapsed icon rail is NOT this
+// component: #538 gave it its own renderer (CollapsedNavItem in Sidebar.tsx),
+// so every variant here is text-bearing by construction.
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -19,7 +21,7 @@ export type NavVariant = "sidebar" | "topnav";
 
 const VARIANT_BASE: Record<NavVariant, string> = {
   sidebar:
-    "flex min-h-11 items-center gap-3 whitespace-nowrap rounded px-3 py-2 text-sm",
+    "relative flex min-h-11 items-center gap-3 whitespace-nowrap rounded px-3 py-2 text-sm",
   topnav: "flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm",
 };
 
@@ -45,19 +47,25 @@ export function CountPill({ count }: { count: number }) {
   );
 }
 
+// #538: the left accent bar marking the active destination in the full-density
+// sidebar. Shared between the expanded row and the collapsed icon anchor so
+// the two chrome states cannot drift.
+export function ActiveIndicator() {
+  return (
+    <span
+      aria-hidden="true"
+      className="absolute top-1/2 left-0 h-5 w-0.5 -translate-y-1/2 rounded-r-sm bg-accent"
+      data-testid="nav-active-indicator"
+    />
+  );
+}
+
 interface NavItemLinkProps {
   item: NavItemDef;
   variant: NavVariant;
-  // Collapsed full-shell sidebar: icon-only columns (labels, badges, and
-  // count pills hide, mirroring the prototype's collapsed-sidebar rules).
-  hideLabel?: boolean;
 }
 
-export function NavItemLink({
-  item,
-  variant,
-  hideLabel = false,
-}: NavItemLinkProps) {
+export function NavItemLink({ item, variant }: NavItemLinkProps) {
   const pathname = usePathname();
   const { lang } = useLang();
   const label = STRINGS[lang].nav[item.labelKey];
@@ -69,20 +77,19 @@ export function NavItemLink({
     active
       ? "bg-accent-soft font-semibold text-accent-strong"
       : "font-medium text-txt-sub hover:bg-accent-soft hover:text-txt",
-    hideLabel && "justify-center px-0",
   );
 
   const body = (
     <>
+      {/* #538: refined active state - a left accent indicator bar on the
+          sidebar variant marks the current destination alongside the soft
+          accent fill. */}
+      {variant === "sidebar" && active && <ActiveIndicator />}
       <Icon size={variant === "sidebar" ? 20 : 16} className="shrink-0" />
-      {!hideLabel && (
-        <>
-          <span className="min-w-0 flex-1 truncate">{label}</span>
-          {item.soon && <SoonBadge />}
-          {typeof item.count === "number" && !item.soon && (
-            <CountPill count={item.count} />
-          )}
-        </>
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      {item.soon && <SoonBadge />}
+      {typeof item.count === "number" && !item.soon && (
+        <CountPill count={item.count} />
       )}
     </>
   );

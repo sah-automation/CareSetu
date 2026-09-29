@@ -31,7 +31,9 @@ from modules.audit.domain.chain import compute_audit_hash
 ConsentAuditAction = Literal["requested", "granted", "revoked", "declined"]
 
 #: The ``record_scope`` vocabulary carried by consent audit payloads.
-RecordScope = Literal["consultations", "prescriptions", "lab_results", "metrics", "full_record"]
+RecordScope = Literal[
+    "consultations", "prescriptions", "lab_results", "metrics", "health_background", "full_record"
+]
 
 #: Stable namespace for the deterministic int->UUID derivation. Fixed so the
 #: same consent int id always maps to the same ``audit_events`` actor/target

@@ -72,6 +72,14 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/me",
         # PHASE-8.1 T1 (#482): the patient's own profile-completion read/write.
         "/v1/me/profile",
+        # US-20 (#533): the patient's own profile-photo upload/replace/preview/remove.
+        "/v1/me/photo",
+        # US-21/US-22 (#534): the patient's health-background snapshot read/write
+        # with the one-time first-save acknowledgement.
+        "/v1/me/health-background",
+        # US-23 (#535): the height/weight time series the patient appends next
+        # to the snapshot - append (POST) and newest-first paged list (GET).
+        "/v1/me/health-background/metrics",
         # PHASE-3 T2 (#211): the owner-only record surface.
         "/v1/records",
         "/v1/records/{record_id}",
@@ -179,6 +187,16 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/care/cases/{case_id}/rx/current",
         "/v1/care/cases/{case_id}/close",
         "/v1/care/prescriptions/{rx_id}",
+        # PHASE-8.2 T01 (#539): the doctor console Patients list - derived
+        # Current/Past buckets over live grants + care cases (ADR-0019).
+        "/v1/doctor/patients",
+        # PHASE-8.2 T02 (#540): the consent-gated patient detail read and
+        # its gated photo stream - contact/consultation/health-background
+        # sections locked under the wrong grant (ADR-0019).
+        "/v1/doctor/patients/{patient_id}",
+        "/v1/doctor/patients/{patient_id}/photo",
+        "/v1/doctor/profile",
+        "/v1/doctor/profile/photo",
     }
 
 

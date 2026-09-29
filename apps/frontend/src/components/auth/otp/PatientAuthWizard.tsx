@@ -10,24 +10,27 @@
 // left is the build-flag-gated OTP read-back banner (DEPLOY-4, #118), which
 // is inert unless NEXT_PUBLIC_DEMO_MODE is inlined as "true" at build time.
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import {
   IconCheck,
-  IconDirectory,
   IconHeart,
-  IconLock,
   IconPhone,
   IconShield,
 } from "@/components/auth/icons";
+import { DoneScreen } from "@/components/auth/DoneScreen";
 import { fetchDemoOtp } from "@/lib/auth/api";
 import { useAuth } from "@/lib/auth/AuthContext";
+import { useHandoffNavigation } from "@/lib/auth/useHandoffNavigation";
 import { useLang } from "@/lib/i18n/LangContext";
+import { STRINGS, type DoneScreenStrings } from "@/lib/i18n/dictionaries";
 import type { OtpFlow } from "./otpState";
-import { formatCountdown, OTP_TTL_SECONDS, useOtpFlow } from "./otpState";
+import { useOtpFlow } from "./otpState";
 import {
   BrandHeader,
+  CountdownRing,
+  EditLinkButton,
   ErrorMessage,
   FieldLabel,
   GhostButton,
@@ -63,42 +66,6 @@ function StepDots({ flow }: { flow: OtpFlow }) {
         </li>
       ))}
     </ol>
-  );
-}
-
-function CountdownRing({ seconds }: { seconds: number }) {
-  const r = 26;
-  const c = 2 * Math.PI * r;
-  const frac = Math.max(0, Math.min(1, seconds / OTP_TTL_SECONDS));
-  const low = seconds <= 60;
-  return (
-    <div className={stylesB.ring} aria-hidden="true">
-      <svg width="72" height="72" viewBox="0 0 72 72">
-        <circle
-          cx="36"
-          cy="36"
-          r={r}
-          fill="none"
-          stroke="var(--hairline)"
-          strokeWidth="5"
-        />
-        <circle
-          cx="36"
-          cy="36"
-          r={r}
-          fill="none"
-          stroke={low ? "var(--danger)" : "var(--accent)"}
-          strokeWidth="5"
-          strokeLinecap="round"
-          strokeDasharray={c}
-          strokeDashoffset={c * (1 - frac)}
-          transform="rotate(-90 36 36)"
-        />
-      </svg>
-      <span className={`${stylesB.ringTime} ${low ? stylesB.ringTimeLow : ""}`}>
-        {formatCountdown(seconds)}
-      </span>
-    </div>
   );
 }
 
@@ -182,6 +149,7 @@ function OtpStep({ flow }: { flow: OtpFlow }) {
         onChange={flow.setOtpDraft}
         autoFocus
         disabled={blocked}
+        label={t.codeLabel}
       />
       <div className={stylesB.resendRow}>
         <GhostButton
@@ -190,13 +158,9 @@ function OtpStep({ flow }: { flow: OtpFlow }) {
         >
           {t.resend}
         </GhostButton>
-        <button
-          type="button"
-          className={stylesB.editLink}
-          onClick={flow.backToPhone}
-        >
+        <EditLinkButton onClick={flow.backToPhone}>
           {t.backToEdit}
-        </button>
+        </EditLinkButton>
       </div>
       {state.cooldownRemaining > 0 && !lockout && (
         <p className={stylesB.attempts}>
@@ -221,36 +185,24 @@ function OtpStep({ flow }: { flow: OtpFlow }) {
   );
 }
 
-function DoneStep({ flow, returnTo }: { flow: OtpFlow; returnTo: string }) {
+function DoneStep({
+  flow,
+  doneScreenT,
+  onGoToDashboard,
+}: {
+  flow: OtpFlow;
+  doneScreenT: DoneScreenStrings;
+  onGoToDashboard: () => void;
+}) {
   const { t } = flow;
-  const router = useRouter();
   return (
-    <section className={stylesB.section}>
-      <div className={stylesB.center}>
-        <span className={stylesB.successIcon}>
-          <IconCheck size={40} />
-        </span>
-      </div>
-      <h1 className={stylesB.title}>{t.verifiedTitle}</h1>
-      <p className={stylesB.sub}>{t.verifiedBody}</p>
-      <ul className={stylesB.props}>
-        <li>
-          <span className={stylesB.propIcon}>
-            <IconDirectory size={16} />
-          </span>
-          {t.valueProps[1]}
-        </li>
-        <li>
-          <span className={stylesB.propIcon}>
-            <IconLock size={16} />
-          </span>
-          {t.valueProps[2]}
-        </li>
-      </ul>
-      <PrimaryButton onClick={() => router.replace(returnTo)}>
-        {t.goHome}
-      </PrimaryButton>
-    </section>
+    <DoneScreen
+      title={t.verifiedTitle}
+      body={t.verifiedBody}
+      openingLabel={doneScreenT.openingDashboard}
+      goToDashboardLabel={doneScreenT.goToDashboard}
+      onGoToDashboard={onGoToDashboard}
+    />
   );
 }
 
@@ -306,24 +258,62 @@ export function PatientAuthWizard({
     router,
   ]);
 
-  // Redirect to the return target after successful login (Done step "Go to
-  // CareSetu home" also routes there directly). Await the session-resume seam
-  // so identity/roles land in state BEFORE the post-login route mounts: if the
-  // patient surface mounted identity-less, the Provider remount that applies
-  // identity would reset an in-progress completion wizard and wipe its draft.
-  // A reload is never needed (#496). Best-effort by design - a resolution
-  // failure still navigates, and the never-silent Finish palette covers it.
+  // #551: the post-login routine, and the identity/roles go into state BEFORE
+  // the post-login route mounts, because a patient surface that mounted
+  // identity-less makes the Provider remount that applies identity reset an
+  // in-progress completion wizard and wipe its draft (#496). So the route is
+  // pushed inside `resumeOnce().then(...)`, never a bare `router.replace`. A
+  // reload is never needed; the seam is best-effort by design, since
+  // resumeSession never rejects. `landedRef` keeps it idempotent, so two
+  // requests to leave - the shared hook's own once-only latch aside - cannot
+  // both navigate.
+  const resumeRef = useRef<Promise<void> | null>(null);
+  const landedRef = useRef(false);
+  const [resumeSettled, setResumeSettled] = useState(false);
+
+  const resumeOnce = useCallback((): Promise<void> => {
+    resumeRef.current ??= resumeSession();
+    return resumeRef.current;
+  }, [resumeSession]);
+
+  // Start the resume once the flow is done. #581: `resumeSettled` is read as
+  // this flow's readiness by the shared navigation hook and by nothing else -
+  // the handoff no longer gates on it - so the leave can only begin after the
+  // resume call has succeeded.
   useEffect(() => {
-    if (flow.state.stage === "done" && flow.state.session) {
-      let cancelled = false;
-      void resumeSession().then(() => {
-        if (!cancelled) router.replace(returnTo);
-      });
-      return () => {
-        cancelled = true;
-      };
+    if (flow.state.stage !== "done" || !flow.state.session) {
+      return;
     }
-  }, [flow.state.stage, flow.state.session, returnTo, router, resumeSession]);
+    let cancelled = false;
+    void resumeOnce().then(() => {
+      if (!cancelled) {
+        setResumeSettled(true);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [flow.state.stage, flow.state.session, resumeOnce]);
+
+  const landOnReturnTarget = useCallback(() => {
+    if (landedRef.current) {
+      return;
+    }
+    landedRef.current = true;
+    void resumeOnce().then(() => router.replace(returnTo));
+  }, [resumeOnce, router, returnTo]);
+
+  // #580: when to leave the handoff is the shared hook's decision, not ours.
+  // This flow's only precondition is the in-flow resume above - there is no
+  // destination read on this path - and the hook owns the minimum dwell
+  // measured from that readiness, plus the at-most-once guarantee, so the
+  // partner flow and this one agree on what a leave costs by construction. The
+  // callback it hands back is the handoff's "Go to Dashboard" button: a press
+  // mid-load is honoured the moment the resume lands, and still never before it.
+  const goToDashboardNow = useHandoffNavigation(
+    resumeSettled,
+    landOnReturnTarget,
+  );
 
   if (!flow.state.hydrated) {
     return null;
@@ -350,7 +340,11 @@ export function PatientAuthWizard({
           {flow.state.stage === "phone" && <PhoneStep flow={flow} />}
           {flow.state.stage === "otp" && <OtpStep flow={flow} />}
           {flow.state.stage === "done" && (
-            <DoneStep flow={flow} returnTo={returnTo} />
+            <DoneStep
+              flow={flow}
+              doneScreenT={STRINGS[lang].doneScreen}
+              onGoToDashboard={goToDashboardNow}
+            />
           )}
         </div>
       </main>

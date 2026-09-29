@@ -578,9 +578,11 @@ describe("CaseWorkspacePage inner tabs, transcript and audio (US-14, #484)", () 
     render(<CaseWorkspacePage />);
     await waitFor(() => screen.getByTestId("prescription-lock"));
 
-    expect(screen.getByTestId("rx-lock-done")).toHaveTextContent(t.rxLockDone);
-    expect(screen.getByTestId("rx-lock-pending")).toHaveTextContent(
-      t.rxLockPending,
+    expect(screen.getByTestId("rx-lock-presummary")).toHaveTextContent(
+      t.rxLockPreSummary,
+    );
+    expect(screen.getByTestId("rx-lock-handshake")).toHaveTextContent(
+      t.rxLockHandshake,
     );
 
     fireEvent.click(screen.getByRole("tab", { name: t.tabPrescription }));
@@ -588,7 +590,7 @@ describe("CaseWorkspacePage inner tabs, transcript and audio (US-14, #484)", () 
       "hidden",
     );
 
-    fireEvent.click(screen.getByTestId("rx-lock-action"));
+    fireEvent.click(screen.getByTestId("rx-lock-presummary-action"));
     expect(screen.getByTestId("tab-panel-pre-summary")).not.toHaveAttribute(
       "hidden",
     );
@@ -1147,6 +1149,7 @@ describe("CaseWorkspacePage approval, rejection, close (#453, US-19..22)", () =>
 
     await waitFor(() => screen.getByTestId("approve-issue-action"));
     fireEvent.click(screen.getByTestId("verification-declaration"));
+    fireEvent.click(screen.getByTestId("confirm-issue-declaration"));
     fireEvent.click(screen.getByTestId("approve-issue-action"));
 
     await waitFor(() => expect(doApprove).toHaveBeenCalledWith(11, 21));
@@ -1178,6 +1181,7 @@ describe("CaseWorkspacePage approval, rejection, close (#453, US-19..22)", () =>
 
     await waitFor(() => screen.getByTestId("approve-issue-action"));
     fireEvent.click(screen.getByTestId("verification-declaration"));
+    fireEvent.click(screen.getByTestId("confirm-issue-declaration"));
     fireEvent.click(screen.getByTestId("approve-issue-action"));
 
     await waitFor(() => screen.getByTestId("issued-rx"));
@@ -1201,6 +1205,7 @@ describe("CaseWorkspacePage approval, rejection, close (#453, US-19..22)", () =>
 
     await waitFor(() => screen.getByTestId("approve-issue-action"));
     fireEvent.click(screen.getByTestId("verification-declaration"));
+    fireEvent.click(screen.getByTestId("confirm-issue-declaration"));
     fireEvent.click(screen.getByTestId("approve-issue-action"));
 
     await waitFor(() =>
@@ -1694,6 +1699,7 @@ describe("CaseWorkspacePage bilingual parity (REQ-006)", () => {
     await waitFor(() => screen.getByTestId("approve-issue-action"));
     fireEvent.click(screen.getByText("flip-lang"));
     fireEvent.click(screen.getByTestId("verification-declaration"));
+    fireEvent.click(screen.getByTestId("confirm-issue-declaration"));
     fireEvent.click(screen.getByTestId("approve-issue-action"));
 
     await waitFor(() => screen.getByTestId("issued-rx"));
@@ -1717,6 +1723,7 @@ describe("CaseWorkspacePage bilingual parity (REQ-006)", () => {
     await waitFor(() => screen.getByTestId("approve-issue-action"));
     fireEvent.click(screen.getByText("flip-lang"));
     fireEvent.click(screen.getByTestId("verification-declaration"));
+    fireEvent.click(screen.getByTestId("confirm-issue-declaration"));
     fireEvent.click(screen.getByTestId("approve-issue-action"));
 
     await waitFor(() => screen.getByTestId("issued-rx"));

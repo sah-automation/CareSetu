@@ -32,7 +32,9 @@ from bus.events import (
 PRODUCER_MODULE = "consent"
 
 CounterpartyType = Literal["doctor", "lab", "chemist"]
-RecordScope = Literal["consultations", "prescriptions", "lab_results", "metrics", "full_record"]
+RecordScope = Literal[
+    "consultations", "prescriptions", "lab_results", "metrics", "health_background", "full_record"
+]
 
 
 class ConsentRequestedPayload(BaseModel):

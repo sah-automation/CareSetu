@@ -23,3 +23,13 @@ class RecordAccessDeniedError(HealthError):
     this is raised (KPI-006: 100% of record accesses logged); the route maps
     it to the 403 ``RECORD_ACCESS_DENIED`` envelope.
     """
+
+
+class HealthBackgroundAcknowledgmentRequiredError(HealthError):
+    """The first health-background save omitted its PHI acknowledgment (#534).
+
+    Saving a health background for the first time makes the snapshot visible
+    to the patient's verified-relationship doctors, so that first save must
+    carry the explicit ``acknowledge_phi`` flag; without it the write is
+    refused before anything is persisted. Later edits never re-prompt.
+    """

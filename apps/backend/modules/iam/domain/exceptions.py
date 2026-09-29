@@ -124,3 +124,33 @@ class RefreshTokenRevokedError(InvalidRefreshTokenError):
 
 class RefreshTokenExpiredError(InvalidRefreshTokenError):
     """The ~30-day sliding refresh window has closed; the patient must re-auth."""
+
+
+class ProfilePhotoValidationError(IamError):
+    """A profile-photo upload failed the content-type or size contract (US-20, #533).
+
+    Raised by ``save_patient_photo`` when the photo is not a JPEG/PNG/WebP
+    (GIF and every other type are refused) or exceeds the 5MB ceiling. The
+    message is the human-safe validation reason the 422 envelope answers.
+    """
+
+
+class PatientProfileNotSetError(IamError):
+    """A photo mutation requires a saved profile row to carry the key (US-20, #533).
+
+    Raised by ``save_patient_photo`` / ``delete_patient_photo`` when the
+    caller has no ``iam_patient_profiles`` row yet: ``photo_ref`` lives on
+    that row, so there is nowhere to attach or clear the key until the profile
+    is set. The message is human-safe for the 409 envelope.
+    """
+
+
+class ProfilePhotoTransferError(IamError):
+    """The profile-media store write stayed failed after the retry ladder (#533).
+
+    Raised by ``save_patient_photo`` when every ``ProfileMediaStore.save``
+    attempt raised a transient :class:`OSError` (NFR-PERF-002 upload
+    resilience, mirroring the intake upload ladder). The message names the
+    failing patient only - never the ciphertext or object state - so a 502 is
+    safe for the envelope and logs.
+    """

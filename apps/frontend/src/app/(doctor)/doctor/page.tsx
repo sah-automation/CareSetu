@@ -2,32 +2,39 @@
 
 // PHASE-8.1 T12 (#450): doctor console landing page - replaces the Phase 5
 // placeholder with the review queue (low-confidence first, oldest within each
-// group, US-11/12), open care cases (US-15), the consultation fee editor
-// (US-25), and coming-soon patients/profile tabs (US-26). The review queue
-// items link into the case workspace (review/[intakeId], cases/[caseId]);
-// those pages are built by #451-#453. All copy bilingual en/hi (REQ-006).
+// group, US-11/12) and open care cases (US-15). The review queue items link
+// into the case workspace (review/[intakeId], cases/[caseId]); those pages are
+// built by #451-#453. All copy bilingual en/hi (REQ-006).
+//
+// #543: the consultation-fee editor moved to the Profile page, which is where
+// a doctor edits their own record; this landing keeps a compact read-only
+// fee summary that links into the moved editor.
+//
+// #544: the coming-soon Patients/Profile tabs are replaced with real entry
+// cards that deep-link to the live pages, and the whole landing adopts the
+// patient shell's card/chip/empty-state/responsive design language.
 
-import type { FormEvent } from "react";
 import Link from "next/link";
+import { ChevronRight, Users, User } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/layout/EmptyState";
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
 import { PageHeader } from "@/components/layout/PageHeader";
-import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { formatFeePaise } from "@/components/pick/DoctorPickCard";
 import { cn } from "@/lib/utils";
 import { ApiError } from "@/lib/api-errors";
+import { fetchDoctorProfile, type DoctorProfileView } from "@/lib/doctor/api";
 import { fetchReviewQueue, type ReviewQueueItem } from "@/lib/intake/api";
 import {
   listOpenCases,
   type CaseDetailView,
   type CareCaseStage,
 } from "@/lib/care/api";
-import { updateConsultationFee } from "@/lib/partner/api";
 import { STRINGS, type Dictionary } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
+import { formatFeePaise } from "@/components/pick/DoctorPickCard";
 
 // ---- helpers ----
 
@@ -83,130 +90,237 @@ function LoadingSkeleton() {
       {Array.from({ length: 3 }).map((_, i) => (
         <div
           key={i}
-          className="flex items-center gap-4 rounded-lg border border-hairline bg-surface p-4"
+          className="flex items-center justify-between gap-3 rounded-lg border border-hairline bg-surface p-4"
         >
-          <Skeleton className="h-4 w-32" />
+          <div className="space-y-2">
+            <Skeleton className="h-4 w-32" />
+            <Skeleton className="h-5 w-24 rounded-full" />
+          </div>
           <Skeleton className="h-5 w-16 rounded-full" />
-          <Skeleton className="h-4 w-12" />
         </div>
       ))}
     </div>
   );
 }
 
-// ---- main page ----
+function FeeSummarySkeleton() {
+  return (
+    <div className="space-y-2" data-testid="fee-summary-skeleton">
+      <div className="h-4 w-32 rounded bg-hairline-soft animate-pulse" />
+      <div className="h-8 w-24 rounded bg-hairline-soft animate-pulse" />
+    </div>
+  );
+}
 
-export default function DoctorDashboardPage() {
+function EntryCardSkeleton() {
+  return (
+    <Link
+      href="#"
+      aria-disabled="true"
+      tabIndex={-1}
+      className="pointer-events-none rounded-lg border border-hairline bg-surface p-4 min-h-24 opacity-60"
+    >
+      <div className="flex items-center gap-3">
+        <Skeleton className="h-10 w-10 rounded-xl" />
+        <div className="flex-1 space-y-1">
+          <Skeleton className="h-4 w-24" />
+          <Skeleton className="h-3 w-32" />
+        </div>
+      </div>
+    </Link>
+  );
+}
+
+function FeeSummaryCard({ feePaise }: { feePaise: number | null }) {
   const { lang } = useLang();
   const t = STRINGS[lang].doctorConsole;
 
-  const [queue, setQueue] = useState<ReviewQueueItem[]>([]);
-  const [cases, setCases] = useState<CaseDetailView[]>([]);
-  const [loadStatus, setLoadStatus] = useState<LoadStatus>("loading");
-  const [errorTraceId, setErrorTraceId] = useState<string | undefined>();
-  const [bannerOpen, setBannerOpen] = useState(false);
+  return (
+    <section
+      className="rounded-lg border border-hairline bg-surface p-4"
+      data-testid="fee-summary"
+    >
+      <h2 className="text-[1.05rem] font-semibold text-txt">{t.feeHeading}</h2>
 
-  // Fee editor state
-  const [feeInput, setFeeInput] = useState("");
-  const [feeCurrentPaise, setFeeCurrentPaise] = useState<number | null>(null);
-  const [feeSaving, setFeeSaving] = useState(false);
-  const [feeSaved, setFeeSaved] = useState(false);
-  const [feeError, setFeeError] = useState(false);
+      {feePaise !== null ? (
+        <div className="mt-2 flex flex-col items-start gap-2 min-[720px]:flex-row min-[720px]:items-center min-[720px]:justify-between">
+          <p
+            className="text-2xl font-semibold text-txt"
+            data-testid="fee-summary-value"
+          >
+            {formatFeePaise(feePaise)}
+          </p>
+          <Link
+            href="/doctor/profile#fee-editor"
+            data-testid="fee-summary-edit"
+            className="inline-flex items-center gap-1.5 rounded-md border border-hairline bg-surface px-3 py-1.5 text-xs font-medium text-txt-sub transition-colors hover:border-accent-border hover:bg-accent-soft hover:text-accent-strong"
+          >
+            {t.feeEditAction}
+            <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
+          </Link>
+        </div>
+      ) : (
+        <div className="mt-2 flex flex-col items-start gap-2 min-[720px]:flex-row min-[720px]:items-center min-[720px]:justify-between">
+          <p
+            className="text-2xl font-semibold text-txt-muted"
+            data-testid="fee-summary-value"
+          >
+            {t.feeUnset}
+          </p>
+          <p className="text-sm text-txt-muted">{t.feeUnsetHelp}</p>
+          <Link
+            href="/doctor/profile#fee-editor"
+            data-testid="fee-summary-edit"
+            className="inline-flex items-center gap-1.5 rounded-md border border-hairline bg-surface px-3 py-1.5 text-xs font-medium text-txt-sub transition-colors hover:border-accent-border hover:bg-accent-soft hover:text-accent-strong"
+          >
+            {t.feeEditAction}
+            <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
+          </Link>
+        </div>
+      )}
+    </section>
+  );
+}
 
-  const load = useCallback(() => {
-    setLoadStatus("loading");
-    setBannerOpen(false);
-    Promise.all([fetchReviewQueue(), listOpenCases()])
-      .then(([q, c]) => {
-        setQueue(q);
-        setCases(c);
-        setLoadStatus("ready");
-      })
-      .catch((err: unknown) => {
-        setErrorTraceId(err instanceof ApiError ? err.traceId : undefined);
-        setLoadStatus("error");
-        setBannerOpen(true);
-      });
-  }, []);
+function FeeSummaryError({ onRetry }: { onRetry: () => void }) {
+  const { lang } = useLang();
+  const t = STRINGS[lang].doctorConsole;
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  return (
+    <section
+      className="rounded-lg border border-hairline bg-surface p-4"
+      data-testid="fee-summary"
+    >
+      <h2 className="text-[1.05rem] font-semibold text-txt">{t.feeHeading}</h2>
+      <div className="mt-3 flex items-center justify-between gap-3">
+        <p
+          className="text-sm text-danger"
+          data-testid="fee-summary-error"
+          role="alert"
+        >
+          {t.feeLoadFailed}
+        </p>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onRetry}
+          data-testid="fee-summary-retry"
+        >
+          {t.retry}
+        </Button>
+      </div>
+    </section>
+  );
+}
 
-  const sortedQueue = useMemo(() => sortQueue(queue), [queue]);
+function EntryCards() {
+  const { lang } = useLang();
+  const t = STRINGS[lang].doctorConsole;
+  const nav = STRINGS[lang].nav;
 
-  // ---- fee handlers ----
+  return (
+    <section className="space-y-3" data-testid="console-entries">
+      <div data-testid="entry-cards" className="grid grid-cols-2 gap-3">
+        <Link
+          href="/doctor/patients"
+          data-testid="entry-patients"
+          className="flex min-h-24 flex-col items-start gap-2.5 rounded-lg border border-hairline bg-surface p-4 transition-[box-shadow,transform] hover:shadow-pop hover:-translate-y-0.5 active:scale-[0.97] active:opacity-90"
+        >
+          <div className="flex items-center gap-3">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent-strong">
+              <Users size={22} strokeWidth={1.8} aria-hidden="true" />
+            </span>
+            <div className="min-w-0 space-y-0.5">
+              <span className="text-sm font-semibold text-txt">
+                {nav.patients}
+              </span>
+              <p className="text-xs text-txt-muted line-clamp-2">
+                {t.patientsEntryBody}
+              </p>
+            </div>
+          </div>
+          <ChevronRight
+            className="h-5 w-5 shrink-0 text-txt-muted"
+            aria-hidden="true"
+          />
+        </Link>
+        <Link
+          href="/doctor/profile"
+          data-testid="entry-profile"
+          className="flex min-h-24 flex-col items-start gap-2.5 rounded-lg border border-hairline bg-surface p-4 transition-[box-shadow,transform] hover:shadow-pop hover:-translate-y-0.5 active:scale-[0.97] active:opacity-90"
+        >
+          <div className="flex items-center gap-3">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent-strong">
+              <User size={22} strokeWidth={1.8} aria-hidden="true" />
+            </span>
+            <div className="min-w-0 space-y-0.5">
+              <span className="text-sm font-semibold text-txt">
+                {nav.profile}
+              </span>
+              <p className="text-xs text-txt-muted line-clamp-2">
+                {t.profileEntryBody}
+              </p>
+            </div>
+          </div>
+          <ChevronRight
+            className="h-5 w-5 shrink-0 text-txt-muted"
+            aria-hidden="true"
+          />
+        </Link>
+      </div>
+    </section>
+  );
+}
 
-  async function handleSaveFee(e: FormEvent) {
-    e.preventDefault();
-    setFeeSaving(true);
-    setFeeSaved(false);
-    setFeeError(false);
-    try {
-      const rupees = Number(feeInput);
-      if (!Number.isFinite(rupees) || rupees < 0) throw new Error("invalid");
-      const paise = Math.round(rupees * 100);
-      await updateConsultationFee(paise);
-      setFeeCurrentPaise(paise);
-      setFeeSaved(true);
-    } catch {
-      setFeeError(true);
-    } finally {
-      setFeeSaving(false);
-    }
-  }
-
-  async function handleClearFee() {
-    setFeeSaving(true);
-    setFeeSaved(false);
-    setFeeError(false);
-    try {
-      await updateConsultationFee(null);
-      setFeeCurrentPaise(null);
-      setFeeInput("");
-      setFeeSaved(true);
-    } catch {
-      setFeeError(true);
-    } finally {
-      setFeeSaving(false);
-    }
-  }
-
-  // ---- render ----
+function ReviewQueueCard({
+  queue,
+  sortedQueue,
+  loadStatus,
+}: {
+  queue: ReviewQueueItem[];
+  sortedQueue: ReviewQueueItem[];
+  loadStatus: LoadStatus;
+}) {
+  const { lang } = useLang();
+  const t = STRINGS[lang].doctorConsole;
 
   const queueReady = loadStatus === "ready";
   const queueEmpty = queueReady && sortedQueue.length === 0;
-  const casesEmpty = queueReady && cases.length === 0;
 
   return (
-    <>
-      <PageHeader title={t.title} description={t.consoleDescription} />
+    <section
+      className="rounded-lg border border-hairline bg-surface p-4"
+      data-testid="review-queue"
+    >
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <h2 className="text-[1.05rem] font-semibold text-txt">
+          {t.queueHeading}
+        </h2>
+        {queueReady && sortedQueue.length > 0 && (
+          <span
+            data-testid="queue-count"
+            className="inline-flex items-center rounded-full bg-accent-soft px-2 py-0.5 text-xs font-medium text-accent-strong"
+          >
+            {sortedQueue.length}
+          </span>
+        )}
+      </div>
 
-      {loadStatus === "error" && bannerOpen && (
-        <ErrorBanner
-          message={t.loadFailed}
-          traceId={errorTraceId}
-          onRetry={load}
-          onDismiss={() => setBannerOpen(false)}
-        />
+      {loadStatus === "loading" && <LoadingSkeleton />}
+
+      {queueEmpty && (
+        <EmptyState title={t.queueEmpty} body={t.queueEmptyBody} />
       )}
 
-      {/* Review queue section */}
-      <section className="space-y-3" data-testid="review-queue">
-        <h2 className="text-sm font-semibold text-txt">{t.queueHeading}</h2>
-
-        {loadStatus === "loading" && <LoadingSkeleton />}
-
-        {queueEmpty && <EmptyState title={t.queueEmpty} />}
-
-        {queueReady && sortedQueue.length > 0 && (
-          <ul className="space-y-2" data-testid="queue-list">
-            {sortedQueue.map((item) => (
-              <li
-                key={item.pre_summary_id}
-                data-testid="queue-item"
-                className="flex items-center justify-between gap-3 rounded-lg border border-hairline bg-surface p-4"
-              >
+      {queueReady && sortedQueue.length > 0 && (
+        <ul className="mt-2" data-testid="queue-list">
+          {sortedQueue.map((item) => (
+            <li
+              key={item.pre_summary_id}
+              data-testid="queue-item"
+              className="flex flex-col gap-3 min-[720px]:flex-row min-[720px]:items-center min-[720px]:justify-between border-t border-hairline-soft py-3 first:border-t-0 first:pt-0 last:pb-0"
+            >
+              <div className="min-w-0 flex-1 space-y-1">
                 <div className="min-w-0 flex-1 space-y-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <span
@@ -226,7 +340,7 @@ export default function DoctorDashboardPage() {
                     {item.low_confidence && (
                       <span
                         data-testid="queue-item-verify"
-                        className="inline-flex items-center rounded-full bg-warning-soft px-2 py-0.5 text-xs font-medium text-warning-text"
+                        className="inline-flex items-center rounded-full bg-warn-soft px-2 py-0.5 text-xs font-medium text-warn-text"
                       >
                         {t.verifyChip}
                       </span>
@@ -262,32 +376,65 @@ export default function DoctorDashboardPage() {
                 <Link
                   href={`/doctor/review/${item.intake_id}`}
                   data-testid="queue-item-review"
-                  className="inline-flex shrink-0 items-center rounded-md border border-hairline bg-surface px-3 py-1.5 text-xs font-medium text-txt-sub transition-colors hover:border-accent-border hover:bg-accent-soft hover:text-accent-strong"
+                  className="inline-flex shrink-0 items-center justify-center w-full rounded-md border border-hairline bg-surface px-3 py-1.5 text-xs font-medium text-txt-sub transition-colors hover:border-accent-border hover:bg-accent-soft hover:text-accent-strong min-[720px]:w-auto"
                 >
                   {t.reviewAction}
                 </Link>
-              </li>
-            ))}
-          </ul>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function OpenCasesCard({
+  cases,
+  loadStatus,
+}: {
+  cases: CaseDetailView[];
+  loadStatus: LoadStatus;
+}) {
+  const { lang } = useLang();
+  const t = STRINGS[lang].doctorConsole;
+
+  const casesEmpty = loadStatus === "ready" && cases.length === 0;
+
+  return (
+    <section
+      className="mt-6 rounded-lg border border-hairline bg-surface p-4"
+      data-testid="open-cases"
+    >
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <h2 className="text-[1.05rem] font-semibold text-txt">
+          {t.casesHeading}
+        </h2>
+        {loadStatus === "ready" && cases.length > 0 && (
+          <span
+            data-testid="cases-count"
+            className="inline-flex items-center rounded-full bg-accent-soft px-2 py-0.5 text-xs font-medium text-accent-strong"
+          >
+            {cases.length}
+          </span>
         )}
-      </section>
+      </div>
 
-      {/* Open cases section */}
-      <section className="mt-6 space-y-3" data-testid="open-cases">
-        <h2 className="text-sm font-semibold text-txt">{t.casesHeading}</h2>
+      {loadStatus === "loading" && <LoadingSkeleton />}
 
-        {loadStatus === "loading" && <LoadingSkeleton />}
+      {casesEmpty && (
+        <EmptyState title={t.casesEmpty} body={t.casesEmptyBody} />
+      )}
 
-        {casesEmpty && <EmptyState title={t.casesEmpty} />}
-
-        {queueReady && cases.length > 0 && (
-          <ul className="space-y-2" data-testid="cases-list">
-            {cases.map((c) => (
-              <li
-                key={c.case_id}
-                data-testid="case-item"
-                className="flex items-center justify-between gap-3 rounded-lg border border-hairline bg-surface p-4"
-              >
+      {loadStatus === "ready" && cases.length > 0 && (
+        <ul className="mt-2" data-testid="cases-list">
+          {cases.map((c) => (
+            <li
+              key={c.case_id}
+              data-testid="case-item"
+              className="flex flex-col gap-3 min-[720px]:flex-row min-[720px]:items-center min-[720px]:justify-between border-t border-hairline-soft py-3 first:border-t-0 first:pt-0 last:pb-0"
+            >
+              <div className="min-w-0">
                 <div className="min-w-0">
                   <span
                     className="text-sm font-medium text-txt"
@@ -301,7 +448,7 @@ export default function DoctorDashboardPage() {
                       className={cn(
                         "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
                         c.stage === "pre_summary"
-                          ? "bg-warning-soft text-warning-text"
+                          ? "bg-warn-soft text-warn-text"
                           : "bg-accent-soft text-accent-strong",
                       )}
                     >
@@ -312,109 +459,112 @@ export default function DoctorDashboardPage() {
                 <Link
                   href={`/doctor/cases/${c.case_id}`}
                   data-testid="case-item-open"
-                  className="inline-flex shrink-0 items-center rounded-md border border-hairline bg-surface px-3 py-1.5 text-xs font-medium text-txt-sub transition-colors hover:border-accent-border hover:bg-accent-soft hover:text-accent-strong"
+                  className="inline-flex shrink-0 items-center justify-center w-full rounded-md border border-hairline bg-surface px-3 py-1.5 text-xs font-medium text-txt-sub transition-colors hover:border-accent-border hover:bg-accent-soft hover:text-accent-strong min-[720px]:w-auto"
                 >
                   {t.openCaseAction}
                 </Link>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
 
-      {/* Consultation fee editor */}
-      <section
-        className="mt-6 rounded-lg border border-border bg-bg p-4"
-        data-testid="fee-editor"
-      >
-        <h2 className="text-sm font-semibold text-txt">{t.feeEditorHeading}</h2>
-        <p className="mt-1 text-sm text-txt-muted">{t.feeEditorHelp}</p>
+// ---- main page ----
 
-        {feeCurrentPaise !== null && (
-          <p className="mt-2 text-sm text-txt" data-testid="fee-current">
-            {formatFeePaise(feeCurrentPaise)}
-          </p>
-        )}
+export default function DoctorDashboardPage() {
+  const { lang } = useLang();
+  const t = STRINGS[lang].doctorConsole;
 
-        <form className="mt-3 flex items-end gap-2" onSubmit={handleSaveFee}>
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-medium text-txt-muted">
-              {t.feeFieldLabel}
-            </span>
-            <input
-              type="number"
-              inputMode="decimal"
-              min="0"
-              step="1"
-              value={feeInput}
-              onChange={(e) => setFeeInput(e.target.value)}
-              placeholder={t.feeFieldPlaceholder}
-              className="h-9 rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-              data-testid="fee-input"
-            />
-          </label>
-          <Button
-            type="submit"
-            size="sm"
-            disabled={feeSaving || feeInput === ""}
-            loading={feeSaving}
-            data-testid="fee-save"
-          >
-            {t.saveFee}
-          </Button>
-          {feeCurrentPaise !== null && (
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              disabled={feeSaving}
-              onClick={handleClearFee}
-              data-testid="fee-clear"
-            >
-              {t.clearFee}
-            </Button>
-          )}
-        </form>
+  const [queue, setQueue] = useState<ReviewQueueItem[]>([]);
+  const [cases, setCases] = useState<CaseDetailView[]>([]);
+  const [loadStatus, setLoadStatus] = useState<LoadStatus>("loading");
+  const [errorTraceId, setErrorTraceId] = useState<string | undefined>();
+  const [bannerOpen, setBannerOpen] = useState(false);
 
-        {feeSaved && (
-          <p className="mt-2 text-sm text-success" data-testid="fee-message">
-            {t.feeSaved}
-          </p>
-        )}
-        {feeError && (
-          <p
-            className="mt-2 text-sm text-danger"
-            data-testid="fee-message"
-            role="alert"
-          >
-            {t.feeSaveFailed}
-          </p>
-        )}
-      </section>
+  // Fee summary state - isolated from the console feeds
+  const [feePaise, setFeePaise] = useState<number | null>(null);
+  const [feeLoadStatus, setFeeLoadStatus] = useState<LoadStatus>("loading");
 
-      {/* Coming-soon tabs */}
-      <section className="mt-6 space-y-2" data-testid="coming-soon">
-        <Link
-          href="#"
-          aria-disabled="true"
-          tabIndex={-1}
-          className="pointer-events-none block rounded-lg border border-hairline bg-accent-soft px-4 py-3 text-txt opacity-60"
-          data-testid="coming-soon-patients"
-        >
-          <span className="text-sm font-medium">{t.patientsComingSoon}</span>
-          <p className="mt-0.5 text-xs text-txt-muted">{t.comingSoonBody}</p>
-        </Link>
-        <Link
-          href="#"
-          aria-disabled="true"
-          tabIndex={-1}
-          className="pointer-events-none block rounded-lg border border-hairline bg-accent-soft px-4 py-3 text-txt opacity-60"
-          data-testid="coming-soon-profile"
-        >
-          <span className="text-sm font-medium">{t.profileComingSoon}</span>
-          <p className="mt-0.5 text-xs text-txt-muted">{t.comingSoonBody}</p>
-        </Link>
-      </section>
+  const load = useCallback(() => {
+    setLoadStatus("loading");
+    setBannerOpen(false);
+    Promise.all([fetchReviewQueue(), listOpenCases()])
+      .then(([q, c]) => {
+        setQueue(q);
+        setCases(c);
+        setLoadStatus("ready");
+      })
+      .catch((err: unknown) => {
+        setErrorTraceId(err instanceof ApiError ? err.traceId : undefined);
+        setLoadStatus("error");
+        setBannerOpen(true);
+      });
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  // Isolated fee read - does not affect console load status
+  useEffect(() => {
+    setFeeLoadStatus("loading");
+    fetchDoctorProfile()
+      .then((profile: DoctorProfileView) => {
+        setFeePaise(profile.consultation_fee);
+        setFeeLoadStatus("ready");
+      })
+      .catch(() => {
+        setFeeLoadStatus("error");
+      });
+  }, []);
+
+  const sortedQueue = useMemo(() => sortQueue(queue), [queue]);
+
+  // ---- render ----
+
+  return (
+    <>
+      <PageHeader title={t.title} description={t.consoleDescription} />
+
+      {loadStatus === "error" && bannerOpen && (
+        <ErrorBanner
+          message={t.loadFailed}
+          traceId={errorTraceId}
+          onRetry={load}
+          onDismiss={() => setBannerOpen(false)}
+        />
+      )}
+
+      <EntryCards />
+
+      {feeLoadStatus === "loading" ? (
+        <FeeSummarySkeleton />
+      ) : feeLoadStatus === "error" ? (
+        <FeeSummaryError
+          onRetry={() => {
+            setFeeLoadStatus("loading");
+            fetchDoctorProfile()
+              .then((p: DoctorProfileView) => {
+                setFeePaise(p.consultation_fee);
+                setFeeLoadStatus("ready");
+              })
+              .catch(() => setFeeLoadStatus("error"));
+          }}
+        />
+      ) : (
+        <FeeSummaryCard feePaise={feePaise} />
+      )}
+
+      <ReviewQueueCard
+        queue={queue}
+        sortedQueue={sortedQueue}
+        loadStatus={loadStatus}
+      />
+
+      <OpenCasesCard cases={cases} loadStatus={loadStatus} />
     </>
   );
 }

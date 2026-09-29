@@ -4,7 +4,11 @@ import { describe, expect, it } from "vitest";
 // Indirection avoids Vite's static rewrite of `new URL("./x.css", import.meta.url)`,
 // which would turn a literal CSS asset reference into a non-file URL.
 const here = (rel: string) => new URL(rel, import.meta.url);
-const css = readFileSync(here("./variantB.module.css"), "utf8");
+
+// #571 moved CountdownRing out of the patient wizard and its four rules with it,
+// so the sheet this gate reads moved with them. Retargeted, not widened: the
+// selector names and the 5rem / 100% values are unchanged.
+const css = readFileSync(here("./otpShared.module.css"), "utf8");
 
 // Contract gate for the countdown wheel centering regression: CountdownRing
 // renders a 72x72 SVG inside a 5rem (.ring) container, with the timer text

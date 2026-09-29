@@ -15,19 +15,30 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, cast
 
-from fastapi import APIRouter, Depends, FastAPI, Request, status
+from fastapi import APIRouter, Depends, FastAPI, Query, Request, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from app.gateway.errors import error_response
+from app.gateway.idempotency import run_idempotent
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_partner, require_patient
 from modules.health.domain.exceptions import (
+    HealthBackgroundAcknowledgmentRequiredError,
     HealthError,
     RecordAccessDeniedError,
     RecordNotFoundError,
 )
-from modules.health.facade import HealthFacade, RecordTimeline
+from modules.health.facade import (
+    DEFAULT_HEALTH_BACKGROUND_PER_PAGE,
+    HealthBackground,
+    HealthBackgroundMetric,
+    HealthBackgroundMetricEntry,
+    HealthBackgroundMetricList,
+    HealthBackgroundView,
+    HealthFacade,
+    RecordTimeline,
+)
 
 router = APIRouter(tags=["record"])
 
@@ -116,6 +127,148 @@ async def read_consented_record(
     )
 
 
+class HealthBackgroundSaveRequest(BaseModel):
+    """Input of the patient's health-background save (#534).
+
+    The snapshot fields plus the one-time ``acknowledge_phi`` flag: the first
+    save must carry the explicit acknowledgment that the snapshot becomes
+    visible to the patient's verified doctors (ADR-0018) - a first save
+    without it is rejected; later edits never re-prompt, so omitting the flag
+    on a later edit is legitimate and the facade decides (defaulting it to
+    ``False`` here keeps such an edit from failing validation at 422 before it
+    ever reaches the facade). Extra fields are refused
+    (``extra="forbid"``, api-standards §3) like the module's other request
+    models.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    acknowledge_phi: bool = False
+    background: HealthBackground
+
+
+@router.get(
+    "/v1/me/health-background",
+    response_model=HealthBackgroundView,
+    status_code=status.HTTP_200_OK,
+    summary="Read the caller's health background snapshot",
+)
+async def read_health_background(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_patient)],
+) -> HealthBackgroundView:
+    """Owner read resolved from the session subject - zero setup.
+
+    The snapshot is addressed by the token's subject id (never client input):
+    a patient who has not saved one yet answers the typed "not recorded" view.
+    This surface serves the owning patient only (the ``require_patient`` gate
+    plus owner-scoping in the facade); a doctor read is consent-gated on a
+    separate doctor-facing surface in later work and never reaches this route.
+    """
+    facade = cast(HealthFacade, request.app.state.health_facade)
+    return await facade.get_health_background(int(principal.subject_id))
+
+
+@router.put(
+    "/v1/me/health-background",
+    response_model=HealthBackgroundView,
+    status_code=status.HTTP_200_OK,
+    summary="Save or update the caller's health background snapshot",
+)
+async def save_health_background(
+    request: Request,
+    payload: HealthBackgroundSaveRequest,
+    principal: Annotated[Principal, Depends(require_patient)],
+) -> HealthBackgroundView:
+    """Persist the caller's health-background snapshot idempotently (#534).
+
+    The first save requires ``acknowledge_phi`` and, on that acknowledged save,
+    records the ``health_background`` consent grant to every doctor the patient
+    has a live relationship with - atomically with the snapshot write. Later
+    edits converge on the one row and never re-prompt. The mutation honours the
+    ``Idempotency-Key`` replay contract (api-standards §5) like the other
+    ``/v1/me`` mutations, namespaced to the principal's subject id.
+    """
+    facade = cast(HealthFacade, request.app.state.health_facade)
+    saved = await run_idempotent(
+        request,
+        lambda: facade.save_health_background(
+            int(principal.subject_id),
+            payload.background,
+            acknowledge_phi=payload.acknowledge_phi,
+        ),
+        namespace=f"identity:{principal.subject_id}",
+    )
+    return saved
+
+
+#: Bounded pagination for the metrics series (api-standards §4: default 25,
+#: max 100) - mirrors the audit-ledger read shape. The default page size is the
+#: module-owned ``DEFAULT_HEALTH_BACKGROUND_PER_PAGE`` the facade method also
+#: defaults to, so the route and the facade cannot drift apart.
+_MAX_PER_PAGE = 100
+
+
+@router.get(
+    "/v1/me/health-background/metrics",
+    response_model=HealthBackgroundMetricList,
+    status_code=status.HTTP_200_OK,
+    summary="List the caller's height/weight series, newest-first",
+)
+async def read_health_background_metrics(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_patient)],
+    page: Annotated[int, Query(ge=1)] = 1,
+    per_page: Annotated[int, Query(ge=1, le=_MAX_PER_PAGE)] = DEFAULT_HEALTH_BACKGROUND_PER_PAGE,
+) -> HealthBackgroundMetricList:
+    """Read one bounded page of the caller's height/weight series (#535).
+
+    Owner-only resolution from the token's subject id (never client input):
+    a patient's own series is always returned, newest-first, one page at a
+    time; a patient who has not appended a measurement answers an empty page.
+    This surface serves the owning patient only (the ``require_patient`` gate
+    plus identity-scoping in the facade); a doctor read of the series is
+    consent-gated on a separate doctor-facing surface and never reaches it.
+    """
+    facade = cast(HealthFacade, request.app.state.health_facade)
+    return await facade.list_health_background_metrics(
+        int(principal.subject_id),
+        page=page,
+        per_page=per_page,
+    )
+
+
+@router.post(
+    "/v1/me/health-background/metrics",
+    response_model=HealthBackgroundMetricEntry,
+    status_code=status.HTTP_201_CREATED,
+    summary="Append a height/weight measurement to the caller's series",
+)
+async def append_health_background_metric(
+    request: Request,
+    payload: HealthBackgroundMetric,
+    principal: Annotated[Principal, Depends(require_patient)],
+) -> HealthBackgroundMetricEntry:
+    """Append one timestamped height/weight row to the caller's series (#535).
+
+    The measurement is keyed to the session subject (never client input) and
+    the row id is server-minted - a client-supplied id is refused at the
+    typed boundary (``extra="forbid"``), so the patient never chooses a series
+    identity. The mutation honours the ``Idempotency-Key`` replay contract
+    (api-standards §5) like the other ``/v1/me`` mutations, namespaced to the
+    principal's subject id.
+    """
+    facade = cast(HealthFacade, request.app.state.health_facade)
+    return await run_idempotent(
+        request,
+        lambda: facade.append_health_background_metric(
+            int(principal.subject_id),
+            payload,
+        ),
+        namespace=f"identity:{principal.subject_id}",
+    )
+
+
 def register_error_handlers(app: FastAPI) -> None:
     """Attach the MOD-003 error envelope to every expected health failure."""
 
@@ -137,6 +290,17 @@ def register_error_handlers(app: FastAPI) -> None:
             request=request,
         )
 
+    async def _acknowledgment_required(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "HEALTH_BACKGROUND_ACK_REQUIRED",
+            "the first health-background save must acknowledge that the snapshot "
+            "becomes visible to your doctors",
+            log_tag="health_rejection",
+            request=request,
+        )
+
     async def _health_failed(request: Request, exc: Exception) -> JSONResponse:
         del exc
         return error_response(
@@ -149,4 +313,5 @@ def register_error_handlers(app: FastAPI) -> None:
 
     app.add_exception_handler(RecordNotFoundError, _record_not_found)
     app.add_exception_handler(RecordAccessDeniedError, _access_denied)
+    app.add_exception_handler(HealthBackgroundAcknowledgmentRequiredError, _acknowledgment_required)
     app.add_exception_handler(HealthError, _health_failed)

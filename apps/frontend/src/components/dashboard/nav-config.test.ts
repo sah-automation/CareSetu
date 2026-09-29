@@ -11,6 +11,7 @@ import {
   NAV_CONFIG,
   TABBAR_CENTER_COLUMN,
   TABBAR_MAX_DESTINATIONS,
+  sidebarSections,
   sidebarStorageKey,
   splitMobileTabs,
 } from "./nav-config";
@@ -34,12 +35,18 @@ describe("NAV_CONFIG", () => {
     expect(home.soon).toBeUndefined();
   });
 
-  it("keeps every non-home staff entry as Soon except the doctor Cases tab", () => {
+  it("keeps every non-home staff entry as Soon except the doctor Cases, Patients and Profile tabs", () => {
     for (const role of ["doctor", "partner", "operator"] as const) {
       for (const item of NAV_CONFIG[role].slice(1)) {
-        const isLiveDoctorCases = role === "doctor" && item.key === "cases";
+        // #543: Profile joins Cases/Patients as a live doctor tab - each one
+        // has a real route behind it, so none may stay dimmed.
+        const isLiveDoctorTab =
+          role === "doctor" &&
+          (item.key === "cases" ||
+            item.key === "patients" ||
+            item.key === "profile");
         expect(item.soon, `${role}/${item.key}`).toBe(
-          isLiveDoctorCases ? undefined : true,
+          isLiveDoctorTab ? undefined : true,
         );
       }
     }
@@ -244,5 +251,58 @@ describe("sidebar collapse persistence key", () => {
   it("namespaces the stored preference by role", () => {
     expect(sidebarStorageKey("operator")).toBe("caresetu.sidebar.operator");
     expect(sidebarStorageKey("doctor")).toBe("caresetu.sidebar.doctor");
+  });
+});
+
+describe("sidebarSections (#538)", () => {
+  it("orders the doctor console under Work then Account", () => {
+    const sections = sidebarSections(NAV_CONFIG.doctor);
+
+    expect(sections.map((s) => s.labelKey)).toEqual(["work", "account"]);
+    expect(sections[0].items.map((item) => item.key)).toEqual([
+      "queue",
+      "cases",
+      "patients",
+    ]);
+    expect(sections[1].items.map((item) => item.key)).toEqual(["profile"]);
+  });
+
+  it("keeps the patient config flat with no section labels", () => {
+    const sections = sidebarSections(NAV_CONFIG.patient);
+
+    expect(sections).toEqual([{ labelKey: null, items: NAV_CONFIG.patient }]);
+  });
+
+  it("groups by declared membership and preserves config order within a section", () => {
+    const synthetic: NavItemDef[] = [
+      { key: "b", labelKey: "queue", href: "/b", icon: Home, group: "work" },
+      { key: "a", labelKey: "cases", href: "/a", icon: Home, group: "work" },
+      {
+        key: "c",
+        labelKey: "profile",
+        href: "/c",
+        icon: Home,
+        group: "account",
+      },
+    ];
+
+    const sections = sidebarSections(synthetic);
+
+    expect(sections.map((s) => s.labelKey)).toEqual(["work", "account"]);
+    expect(sections[0].items.map((item) => item.key)).toEqual(["b", "a"]);
+    expect(sections[1].items.map((item) => item.key)).toEqual(["c"]);
+  });
+
+  it("keeps every full-shell role item in a labeled membership (no orphan rows)", () => {
+    for (const role of ["doctor", "partner", "operator"] as const) {
+      const grouped = sidebarSections(NAV_CONFIG[role]).flatMap(
+        (section) => section.items,
+      );
+      expect(grouped, role).toEqual(NAV_CONFIG[role]);
+      expect(
+        NAV_CONFIG[role].every((item) => item.group !== undefined),
+        `${role} group`,
+      ).toBe(true);
+    }
   });
 });

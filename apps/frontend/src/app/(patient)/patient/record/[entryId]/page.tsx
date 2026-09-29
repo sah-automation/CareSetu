@@ -68,8 +68,8 @@ function payloadResults(entry: RecordEntryView): LabResult[] | null {
 
 const STATUS_TONE: Record<string, string> = {
   in_range: "bg-success-soft text-success-text",
-  below_range: "bg-warm-soft text-warm-text",
-  above_range: "bg-warm-soft text-warm-text",
+  below_range: "bg-warm-soft text-warm",
+  above_range: "bg-warm-soft text-warm",
 };
 
 export default function EntryDetailPage() {

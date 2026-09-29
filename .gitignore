@@ -40,6 +40,9 @@ Thumbs.db
 # Local tooling
 .actrc
 
+# Local agent tooling install, per developer (never repo content)
+/.opencode/
+
 # Disposable prototype UI views (gitignored by design; deleted at project end)
 /prototype/
 

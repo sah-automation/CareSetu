@@ -11,17 +11,34 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeAll,
+  beforeEach,
+  afterEach,
+} from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { __resetLangForTests } from "@/lib/i18n/LangContext";
 import { listOpenCases, type CaseDetailView } from "@/lib/care/api";
+import {
+  fetchDoctorProfile,
+  fetchDoctorProfilePhoto,
+  type DoctorProfileView,
+} from "@/lib/doctor/api";
 import * as axe from "axe-core";
 
 import { AppShell } from "./AppShell";
 import { maskedPhone } from "./BottomTabs";
-import { ProfileProvider } from "@/lib/profile/ProfileContext";
+import { DoctorProfileProvider } from "@/lib/doctor/DoctorProfileContext";
+import {
+  ProfileProvider,
+  useOptionalProfile,
+} from "@/lib/profile/ProfileContext";
 import type { StoredPatientProfile } from "@/lib/profile/api";
 import type { Role } from "./types";
 
@@ -56,10 +73,21 @@ vi.mock("next/link", () => ({
 const switchRole = vi.fn();
 const logout = vi.fn();
 
+// #557: mutable so a test can put the account menu in its patient branch (the
+// shell's own role comes from the role prop, not from the session's choice).
+// #567: `roles` is mutable too, so a test can hand the menu a session the
+// backend would actually build. Forcing `selectedRole` to a value the session's
+// own roles array does not contain is a payload /me never issues, which is the
+// same class of fabricated fixture that hid the doctor branch.
+const authState = vi.hoisted(() => ({
+  selectedRole: "operator",
+  roles: ["patient", "operator"],
+}));
+
 vi.mock("@/lib/auth/AuthContext", () => ({
   useAuth: () => ({
-    user: { id: 1, phone: "+911234567890", roles: ["patient", "operator"] },
-    selectedRole: "operator",
+    user: { id: 1, phone: "+911234567890", roles: authState.roles },
+    selectedRole: authState.selectedRole,
     switchRole,
     logout,
     isAuthenticated: true,
@@ -69,15 +97,18 @@ vi.mock("@/lib/auth/AuthContext", () => ({
 
 // #525: the patient account card reads the saved name/photo through the
 // profile seam; mocked at the module boundary like the ProfileContext suites
-// so the named-card branch can hydrate without HTTP.
+// so the named-card branch can hydrate without HTTP. #557 adds the photo-byte
+// read behind the same seam.
 const profileApi = vi.hoisted(() => ({
   getProfile: vi.fn(),
   saveProfile: vi.fn(),
+  fetchPatientPhoto: vi.fn(),
 }));
 
 vi.mock("@/lib/profile/api", () => ({
   getProfile: profileApi.getProfile,
   saveProfile: profileApi.saveProfile,
+  fetchPatientPhoto: profileApi.fetchPatientPhoto,
 }));
 
 // PHASE-8.1 T8 (#483): the doctor shell's Cases count pill reads the existing
@@ -89,9 +120,110 @@ vi.mock("@/lib/care/api", () => ({
 
 const getOpenCases = vi.mocked(listOpenCases);
 
+// #569/#583: the doctor profile projection and the bytes behind its avatar. The
+// read itself moved into the shared DoctorProfileProvider (#583), which the
+// (doctor) route-group layout mounts above this shell; the whole doctor module
+// is mocked for the same unit-scoped reason as the care module above.
+vi.mock("@/lib/doctor/api", () => ({
+  fetchDoctorProfile: vi.fn(),
+  fetchDoctorProfilePhoto: vi.fn(),
+}));
+
+const getDoctorProfile = vi.mocked(fetchDoctorProfile);
+const getDoctorPhoto = vi.mocked(fetchDoctorProfilePhoto);
+
+// #569: the projection the shared doctor profile source hydrates from.
+// `photo_ref` is an opaque object key in the doctor's own namespace
+// (ADR-0020 D1) and `practice_name` is the only human-readable name a doctor
+// has anywhere in the frontend, which is why the source takes the whole view.
+function doctorProfileWith(photoRef: string | null): DoctorProfileView {
+  return {
+    partner_id: 7,
+    photo_ref: photoRef,
+    practice_name: "Asha Clinic",
+    specialty: "General",
+    verified: true,
+    practice_address: "1 Clinic Road",
+    practice_latitude: 12.97,
+    practice_longitude: 77.59,
+    area: "Indiranagar",
+    languages: ["en"],
+    experience_years: 9,
+    about: null,
+    consultation_fee: 400,
+    availability: null,
+    credentials: [],
+    notification_preferences: {},
+  };
+}
+
+// #525: a hydrated patient profile, shared by the named-card and #557 cases.
+const NAMED_PROFILE: StoredPatientProfile = {
+  name: "Asha Rao",
+  age: 34,
+  gender: "female",
+  preferred_language: "en",
+  area: null,
+  emergency_contact: null,
+  photo_ref: null,
+};
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+// Radix popper relies on ResizeObserver and opens menus on real pointer
+// events, neither of which jsdom implements fully. Only the #557 account-menu
+// test needs them; vitest isolates each test file in its own jsdom.
+class ResizeObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
+beforeAll(() => {
+  window.ResizeObserver =
+    window.ResizeObserver ??
+    (ResizeObserverStub as unknown as typeof ResizeObserver);
+  if (!window.PointerEvent) {
+    class PointerEventStub extends MouseEvent {}
+    window.PointerEvent = PointerEventStub as unknown as typeof PointerEvent;
+  }
+});
+
+// #557: the only thing that moves a stored photo ref is the context's
+// syncPhotoRef, so a replace is driven through the real context. This suite
+// keeps its own fixture rather than sharing one - the repo has no shared
+// test-helper module, and only the replace is needed here.
+function PhotoRefControls() {
+  const profile = useOptionalProfile();
+  return (
+    <button
+      type="button"
+      data-testid="replace-photo"
+      onClick={() => profile?.syncPhotoRef("patient/7/photo-2.enc")}
+    >
+      replace
+    </button>
+  );
+}
+
+// #557: the <img> a surface ends up showing. Asserting inside waitFor is what
+// makes it retry - a bare querySelector returns null and resolves immediately.
+async function imageIn(root: ParentNode): Promise<HTMLImageElement> {
+  return waitFor(() => {
+    const img = root.querySelector("img");
+    expect(img).not.toBeNull();
+    return img;
+  }).then((el) => el as HTMLImageElement);
+}
+
+// #557: object-URL plumbing for the shared photo resolver, which jsdom does
+// not implement. A distinct URL per call, so a test can tell which generation
+// of the photo a surface is showing.
+let originalCreate: typeof URL.createObjectURL;
+let originalRevoke: typeof URL.revokeObjectURL;
+let photoUrls: number;
 
 beforeEach(() => {
   vi.restoreAllMocks();
@@ -99,14 +231,38 @@ beforeEach(() => {
   __resetLangForTests();
   mockPathname.mockReturnValue("/patient");
   getOpenCases.mockResolvedValue([]);
+  authState.selectedRole = "operator";
+  authState.roles = ["patient", "operator"];
   // #525: default the profile read to "absent" so the masked-phone fallback
   // is the steady state; the named-profile branch re-seeds it per test.
   profileApi.getProfile.mockReset();
   profileApi.getProfile.mockResolvedValue({ set: false, profile: null });
+  photoUrls = 0;
+  originalCreate = URL.createObjectURL;
+  originalRevoke = URL.revokeObjectURL;
+  URL.createObjectURL = vi.fn(
+    () => `blob:http://localhost/photo-${(photoUrls += 1)}`,
+  ) as unknown as typeof URL.createObjectURL;
+  URL.revokeObjectURL = vi.fn() as unknown as typeof URL.revokeObjectURL;
+  profileApi.fetchPatientPhoto.mockResolvedValue(
+    new Blob(["photo-bytes"], { type: "image/png" }),
+  );
+  // #569: the doctor feeds default to a projection with no photo, so the
+  // person-icon disc is the steady state; the hydrated case re-seeds the ref.
+  getDoctorProfile.mockReset();
+  getDoctorProfile.mockResolvedValue(doctorProfileWith(null));
+  getDoctorPhoto.mockReset();
+  getDoctorPhoto.mockResolvedValue(
+    new Blob(["doctor-photo-bytes"], { type: "image/png" }),
+  );
 });
 
 afterEach(() => {
+  // Unmounting drops the resolver's cache entry, so it has to happen before the
+  // stubs come back - otherwise a live entry survives into the next test.
   cleanup();
+  URL.createObjectURL = originalCreate;
+  URL.revokeObjectURL = originalRevoke;
 });
 
 describe("AppShell light density (patient)", () => {
@@ -353,16 +509,10 @@ describe("AppShell patient mobile account surface (#525)", () => {
   });
 
   it("shows the saved name and its initial once profile hydration lands", async () => {
-    const named: StoredPatientProfile = {
-      name: "Asha Rao",
-      age: 34,
-      gender: "female",
-      preferred_language: "en",
-      area: null,
-      emergency_contact: null,
-      photo_ref: null,
-    };
-    profileApi.getProfile.mockResolvedValue({ set: true, profile: named });
+    profileApi.getProfile.mockResolvedValue({
+      set: true,
+      profile: NAMED_PROFILE,
+    });
 
     render(
       <ProfileProvider>
@@ -379,6 +529,92 @@ describe("AppShell patient mobile account surface (#525)", () => {
     );
     // The shared Avatar's name-initial fallback ("A") for the unnamed photo.
     expect(screen.getByTestId("more-account-card")).toHaveTextContent("A");
+  });
+
+  // #557: the card's avatar used to be handed the stored photo ref directly,
+  // which the primitive can only reject as unrenderable - so a saved photo never
+  // showed on the phone at all. The ref now goes through the one shared
+  // resolver and the card receives a renderable source.
+  it("#557 renders the account card's stored photo as a renderable source", async () => {
+    profileApi.getProfile.mockResolvedValue({
+      set: true,
+      profile: { ...NAMED_PROFILE, photo_ref: "patient/7/photo-1.enc" },
+    });
+
+    render(
+      <ProfileProvider>
+        <AppShell role="patient">
+          <h1>Patient home</h1>
+        </AppShell>
+      </ProfileProvider>,
+    );
+    await waitFor(() => expect(profileApi.getProfile).toHaveBeenCalled());
+    const card = openMore();
+
+    const img = await imageIn(card);
+    expect(img.getAttribute("src")).toMatch(/^blob:/);
+    // The stored ref is an opaque key: it is never a URL the browser can reach.
+    expect(img.getAttribute("src")).not.toContain("photo-1.enc");
+    // One read answers this card. (The session is on the staff role here, so the
+    // topbar disc above it shows phone digits and asks for nothing - the shared
+    // cache across surfaces is proved by the next test.)
+    expect(profileApi.fetchPatientPhoto).toHaveBeenCalledTimes(1);
+  });
+
+  // The three chrome avatars are three views of one photo, so the ref-keyed
+  // cache is what keeps opening the account surfaces snappy. The patient shell
+  // carries all three at once: the topbar account trigger, the identity header
+  // behind it, and the More-sheet account card. Counting requests is the only
+  // assertion that would notice three per-consumer fetches.
+  it("#557 the desktop trigger, the identity header and the account card read one ref once", async () => {
+    authState.selectedRole = "patient";
+    profileApi.getProfile.mockResolvedValue({
+      set: true,
+      profile: { ...NAMED_PROFILE, photo_ref: "patient/7/photo-1.enc" },
+    });
+
+    render(
+      <ProfileProvider>
+        <AppShell role="patient">
+          <h1>Patient home</h1>
+        </AppShell>
+        <PhotoRefControls />
+      </ProfileProvider>,
+    );
+    await waitFor(() => expect(profileApi.getProfile).toHaveBeenCalled());
+
+    const trigger = screen.getByTestId("account-menu");
+    const triggerImg = await imageIn(trigger);
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    // Read the identity header before the More sheet opens: opening a sheet
+    // dismisses the open dropdown, so the two overlays are not both up at once.
+    await waitFor(() => expect(screen.getByRole("menu")).toBeInTheDocument());
+    const headerImg = await imageIn(screen.getByRole("menu"));
+    const card = openMore();
+    const cardImg = await imageIn(card);
+
+    for (const img of [triggerImg, headerImg, cardImg]) {
+      expect(img.getAttribute("src")).toMatch(/^blob:/);
+    }
+    // Three avatars, one stored ref, one request - not one per surface.
+    expect(profileApi.fetchPatientPhoto).toHaveBeenCalledTimes(1);
+
+    // A replace moves every surface off the old bytes, on both seams at once:
+    // one new read for the new ref, and nothing left showing the previous one.
+    // Which consumer gets which object URL is not pinned - they are per
+    // consumer - but none of them may keep the old one.
+    const beforeTrigger = triggerImg.getAttribute("src");
+    const beforeCard = cardImg.getAttribute("src");
+    fireEvent.click(screen.getByTestId("replace-photo"));
+    await waitFor(() => {
+      const moved = trigger.querySelector("img")?.getAttribute("src");
+      const movedCard = card.querySelector("img")?.getAttribute("src");
+      expect(moved).toMatch(/^blob:/);
+      expect(movedCard).toMatch(/^blob:/);
+      expect(moved).not.toBe(beforeTrigger);
+      expect(movedCard).not.toBe(beforeCard);
+    });
+    expect(profileApi.fetchPatientPhoto).toHaveBeenCalledTimes(2);
   });
 
   it("closes the More sheet when the account card navigates", async () => {
@@ -452,20 +688,26 @@ describe("maskedPhone (#525)", () => {
   });
 });
 
+// One full-density render for every suite: the shell plus a neutral child, on
+// the role's own pathname so nav-config's active highlighting is real.
+function renderShell(role: Role, pathname = `/${role}`) {
+  mockPathname.mockReturnValue(pathname);
+  return render(
+    <AppShell role={role}>
+      <h1>Workspace</h1>
+    </AppShell>,
+  );
+}
+
 describe.each(["doctor", "partner", "operator"] as const)(
   "AppShell full density (%s)",
   (role) => {
-    function setup(pathname: string) {
-      mockPathname.mockReturnValue(pathname);
-      return render(
-        <AppShell role={role}>
-          <h1>Workspace</h1>
-        </AppShell>,
-      );
+    function setup() {
+      return renderShell(role);
     }
 
     it("shows a collapsible sidebar plus topbar, with bottom tabs for phones", () => {
-      setup(`/${role}`);
+      setup();
 
       const sidebar = screen.getByTestId("sidebar");
       expect(sidebar).toBeInTheDocument();
@@ -477,7 +719,7 @@ describe.each(["doctor", "partner", "operator"] as const)(
     });
 
     it("renders the role's nav-config entries with active highlighting", () => {
-      setup(`/${role}`);
+      setup();
 
       const expected = {
         doctor: ["queue", "cases", "patients", "profile"],
@@ -496,11 +738,19 @@ describe.each(["doctor", "partner", "operator"] as const)(
     });
 
     it("keeps staff secondary entries dimmed, non-interactive, and badged", () => {
-      setup(`/${role}`);
+      setup();
 
       const soonItems = screen
         .getAllByTestId(/^nav-/)
         .filter((el) => el.getAttribute("data-soon") === "true");
+      // #543: the doctor console carries no coming-soon row any more - queue,
+      // cases, patients and profile all have live pages - so the dimmed-row
+      // contract now only applies to the roles that still have one.
+      if (role === "doctor") {
+        expect(soonItems).toHaveLength(0);
+        expect(screen.queryAllByTestId("soon-badge")).toHaveLength(0);
+        return;
+      }
       expect(soonItems.length).toBeGreaterThan(0);
       for (const item of soonItems) {
         expect(item).toHaveAttribute("aria-disabled", "true");
@@ -510,6 +760,50 @@ describe.each(["doctor", "partner", "operator"] as const)(
     });
   },
 );
+
+// #567: the whole thread, end to end, with no prop hand-fed at any step. The
+// doctor shell knows its own role (its route group pins it), so the account
+// menu inherits it - which is the only way a doctor-only affordance can be
+// reachable at all, since a doctor's session role is `partner`.
+describe("AppShell supplies its role to the account menu (#567)", () => {
+  // A production-shaped doctor session: the grants table issues no "doctor"
+  // role, so /me answers a doctor with a single `partner` role and doctor-ness
+  // is the partner's type - which is precisely what the shell already encodes.
+  // Byte-identical for both halves below, so the only variable is the shell.
+  function renderDoctorSessionShell(role: Role) {
+    authState.roles = ["partner"];
+    authState.selectedRole = "partner";
+    return renderShell(role);
+  }
+
+  it("renders the doctor affordances inside the doctor shell", async () => {
+    renderDoctorSessionShell("doctor");
+
+    const trigger = screen.getByTestId("account-menu");
+    // The doctor's person-icon disc, not the phone digits a lab partner gets.
+    expect(trigger).not.toHaveTextContent("90");
+    expect(trigger.querySelector("svg")).not.toBeNull();
+
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    await waitFor(() => expect(screen.getByRole("menu")).toBeInTheDocument());
+    expect(screen.getByTestId("account-menu-doctor-profile")).toHaveAttribute(
+      "href",
+      "/doctor/profile",
+    );
+  });
+
+  it("keeps the same session's staff treatment inside the partner shell", async () => {
+    // Same session, different shell: the partner shell owes the phone-digit
+    // trigger, so the answer is the shell's, never the session's.
+    renderDoctorSessionShell("partner");
+
+    const trigger = screen.getByTestId("account-menu");
+    expect(trigger).toHaveTextContent("90");
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    await waitFor(() => expect(screen.getByRole("menu")).toBeInTheDocument());
+    expect(screen.queryByTestId("account-menu-doctor-profile")).toBeNull();
+  });
+});
 
 describe("AppShell doctor Cases count pill (PHASE-8.1 T8, #483)", () => {
   function openCase(id: number) {
@@ -603,7 +897,7 @@ describe("AppShell doctor Cases count pill (PHASE-8.1 T8, #483)", () => {
     expect(screen.queryByTestId("count-pill")).not.toBeInTheDocument();
   });
 
-  it("keeps doctor Patients and Profile coming-soon while Cases is live", async () => {
+  it("links doctor Patients and Profile live (#541, #543)", async () => {
     renderDoctor();
 
     await waitFor(() =>
@@ -612,16 +906,147 @@ describe("AppShell doctor Cases count pill (PHASE-8.1 T8, #483)", () => {
         "/doctor/cases",
       ),
     );
+    // #541: Patients un-sooned - /doctor/patients is a real page, so the
+    // nav entry renders as a live link on every surface (sidebar + tab bar).
     expect(screen.getByTestId("nav-patients")).toHaveAttribute(
-      "data-soon",
-      "true",
+      "href",
+      "/doctor/patients",
     );
+    expect(screen.getByTestId("nav-patients").tagName).toBe("A");
+    expect(screen.getByTestId("nav-patients")).not.toHaveAttribute("data-soon");
+    // The same config entry drives the phone tab bar (#541): Patients now
+    // renders as a live bottom tab, without regressing the other doctor tabs.
+    expect(screen.getByTestId("tab-patients")).toHaveAttribute(
+      "href",
+      "/doctor/patients",
+    );
+    expect(screen.getByTestId("tab-patients").tagName).toBe("A");
+    expect(screen.getByTestId("tab-patients")).not.toHaveAttribute("data-soon");
+    // #543: Profile un-sooned - /doctor/profile is the live private profile
+    // projection plus the fee editor, so it links on the sidebar and the
+    // phone tab bar like the other real doctor destinations.
     expect(screen.getByTestId("nav-profile")).toHaveAttribute(
-      "data-soon",
-      "true",
+      "href",
+      "/doctor/profile",
     );
-    expect(screen.getByTestId("nav-patients").tagName).toBe("SPAN");
-    expect(screen.getByTestId("nav-profile").tagName).toBe("SPAN");
+    expect(screen.getByTestId("nav-profile").tagName).toBe("A");
+    expect(screen.getByTestId("nav-profile")).not.toHaveAttribute("data-soon");
+    expect(screen.getByTestId("tab-profile")).toHaveAttribute(
+      "href",
+      "/doctor/profile",
+    );
+    expect(screen.getByTestId("tab-profile").tagName).toBe("A");
+    expect(screen.getByTestId("tab-profile")).not.toHaveAttribute("data-soon");
+  });
+});
+
+// #583: the doctor account avatar in the shell chrome, fed by the shared doctor
+// profile source the (doctor) route-group layout mounts above the shell. The
+// shell no longer reads the projection and holds no identity data at all, so
+// what is left here is the end-to-end property of one whole render: the source's
+// one read hydrates the disc, both avatars share one byte read, a failed read
+// degrades to the person icon, and a shell with no provider mounted - every
+// partner and operator shell - starts no read at all.
+//
+// The read's own contract (one read per visit, the identity-keyed remount, the
+// exact degrade warning, the adopt seam) belongs to the source's own suite; the
+// source-shape pin that used to assert on AppShell.tsx's own text moved there
+// with it. The cross-surface suite is what proves the chrome and the Profile
+// page cannot disagree.
+describe("AppShell renders the doctor account avatar from the shared source (#583)", () => {
+  // The doctor shell is the one shell whose layout mounts the source, so it is
+  // the only render here that wraps it. The other roles deliberately do not.
+  function renderShellFor(role: Role) {
+    // A production-shaped doctor session: one `partner` role, doctor-ness from
+    // the shell alone.
+    authState.roles = ["partner"];
+    authState.selectedRole = "partner";
+    mockPathname.mockReturnValue(`/${role}`);
+    const shell = (
+      <AppShell role={role}>
+        <h1>Workspace</h1>
+      </AppShell>
+    );
+    return render(
+      role === "doctor" ? (
+        <DoctorProfileProvider>{shell}</DoctorProfileProvider>
+      ) : (
+        shell
+      ),
+    );
+  }
+
+  it("hydrates the disc from the shared source's one read", async () => {
+    getDoctorProfile.mockResolvedValue(
+      doctorProfileWith("doctor/7/photo-1.enc"),
+    );
+    renderShellFor("doctor");
+
+    const trigger = screen.getByTestId("account-menu");
+    const img = await imageIn(trigger);
+    expect(img.getAttribute("src")).toMatch(/^blob:/);
+    // The stored key is opaque and never browser-reachable (ADR-0020 D1), so a
+    // src that carried it would be the whole defect back.
+    expect(img.getAttribute("src")).not.toContain("doctor/7/photo-1.enc");
+    // One read for this whole render - not one for the shell and another for the
+    // source, and not a second read to get the practice name. The shell adds
+    // none, so the count is exactly the source's.
+    expect(getDoctorProfile).toHaveBeenCalledTimes(1);
+    expect(getDoctorPhoto).toHaveBeenCalledTimes(1);
+  });
+
+  it("shares the one byte read with the dropdown header's avatar", async () => {
+    getDoctorProfile.mockResolvedValue(
+      doctorProfileWith("doctor/7/photo-1.enc"),
+    );
+    renderShellFor("doctor");
+
+    const trigger = screen.getByTestId("account-menu");
+    const triggerImg = await imageIn(trigger);
+
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    await waitFor(() => expect(screen.getByRole("menu")).toBeInTheDocument());
+    const headerImg = await imageIn(screen.getByRole("menu"));
+    expect(headerImg.getAttribute("src")).toBe(triggerImg.getAttribute("src"));
+    // Two avatars, one ref, one request - the menu opened and nothing was
+    // re-read.
+    expect(getDoctorPhoto).toHaveBeenCalledTimes(1);
+    expect(getDoctorProfile).toHaveBeenCalledTimes(1);
+  });
+
+  it("degrades a failed profile read to the person icon, silently and visibly logged", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    getDoctorProfile.mockRejectedValue(new Error("profile feed down"));
+    renderShellFor("doctor");
+
+    // Let the rejection settle before asserting the degrade, or this would pass
+    // on a feed that has not answered yet. The exact warning prefix is the
+    // source's own suite to pin, now that the read lives in its module.
+    await waitFor(() => expect(warn).toHaveBeenCalled());
+    const trigger = screen.getByTestId("account-menu");
+    expect(trigger).not.toHaveTextContent("90");
+    expect(trigger.querySelector("svg")).not.toBeNull();
+    expect(trigger.querySelector("img")).toBeNull();
+    // A chrome avatar that cannot resolve is not a broken one, and it costs no
+    // byte read: there is no ref to ask for.
+    expect(getDoctorPhoto).not.toHaveBeenCalled();
+  });
+
+  // The read is scoped structurally, not by a runtime role check: the source
+  // mounts only in the (doctor) group layout, so a partner or operator shell has
+  // no provider at all and the account menu's optional accessor yields null.
+  // There is no code path in which one of them can start a doctor read.
+  it("reads no doctor profile on the other shells", async () => {
+    for (const role of ["patient", "partner", "operator"] as const) {
+      const { unmount } = renderShellFor(role);
+      await waitFor(() =>
+        expect(screen.getByTestId("app-shell")).toBeVisible(),
+      );
+      unmount();
+    }
+
+    expect(getDoctorProfile).not.toHaveBeenCalled();
+    expect(getDoctorPhoto).not.toHaveBeenCalled();
   });
 });
 
@@ -640,7 +1065,7 @@ describe("full-shell collapse preference persistence", () => {
 
     const sidebar = screen.getByTestId("sidebar");
     expect(sidebar.getAttribute("data-collapsed")).toBeNull();
-    expect(sidebar.className).toContain("w-60");
+    expect(sidebar.className).toContain("w-52");
 
     fireEvent.click(screen.getByTestId("sidebar-toggle"));
 
@@ -671,7 +1096,7 @@ describe("full-shell collapse preference persistence", () => {
     // The partner shell ignores the operator's stored choice and starts
     // expanded, persisting its own default under its own key.
     expect(localStorage.getItem("caresetu.sidebar.partner")).toBe("expanded");
-    expect(screen.getByTestId("sidebar").className).toContain("w-60");
+    expect(screen.getByTestId("sidebar").className).toContain("w-52");
   });
 
   it("labels toggle accessibly in both states", () => {

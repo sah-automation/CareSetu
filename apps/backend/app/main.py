@@ -16,15 +16,15 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal, cast
 
-from fastapi import Depends, FastAPI, Request, status
+from fastapi import Depends, FastAPI, File, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.config import Settings, get_settings
-from app.gateway.errors import ErrorEnvelope, register_gateway_error_handlers
+from app.gateway.errors import ErrorEnvelope, error_response, register_gateway_error_handlers
 from app.gateway.idempotency import IdempotencyStore, run_idempotent
 from app.gateway.jwt_verify import JWTVerifyMiddleware
 from app.gateway.principal import Principal
@@ -46,6 +46,11 @@ from modules.consent.adapters.routes import (
 from modules.consent.adapters.routes import router as consent_router
 from modules.consent.facade import ConsentFacade
 from modules.consent.redis_cache import close_redis_client, init_redis_client
+from modules.doctor.adapters.routes import (
+    register_error_handlers as register_doctor_error_handlers,
+)
+from modules.doctor.adapters.routes import router as doctor_router
+from modules.doctor.facade import DoctorConsoleFacade
 from modules.health.adapters.routes import register_error_handlers as register_health_error_handlers
 from modules.health.adapters.routes import router as health_router
 from modules.health.facade import HealthFacade
@@ -70,6 +75,8 @@ from modules.partner.directory_cache import (
     init_directory_redis_client,
 )
 from modules.partner.facade import PartnerFacade, ProviderProfileNotFoundError
+from modules.profile_media.adapters.media_store import build_profile_media_store
+from modules.profile_media.facade import ProfileMediaRetryPolicy
 from worker.main import run_worker_until_stopped
 
 logger = logging.getLogger(__name__)
@@ -234,6 +241,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # MockSmsAdapter whenever it is stored.
     engine = create_async_engine(resolved_settings.database_url, poolclass=NullPool)
     sms_adapter = build_sms_adapter(resolved_settings)
+    # Profile photos (#529, ADR-0020, #532): the private ``profile-media``
+    # object-storage surface holds patient/doctor profile photos, encrypted at
+    # rest (AES-256-GCM) and written with the service-role key only - never a
+    # public bucket. The store is built at the composition root and injected
+    # into the iam facade so the patient photo surface (``/v1/me/photo``,
+    # #533) reads one settled instance; it is also exposed on state so the
+    # doctor private-profile surface (#540) injects the same store. Only the
+    # ref, never a blob URL, is persisted on the owning profile. The key comes
+    # from the environment (never committed), dev/test without a key derives an
+    # ephemeral one, and the concrete backend is selected by
+    # ``PROFILE_MEDIA_BACKEND``: local disk (default) or a private Supabase
+    # Storage bucket (production, same SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY
+    # pair as the intake store).
+    profile_media_store = build_profile_media_store(
+        root=resolved_settings.profile_media_root,
+        b64_key=resolved_settings.profile_media_key,
+        backend=resolved_settings.profile_media_backend,
+        supabase_url=resolved_settings.supabase_url,
+        supabase_service_role_key=resolved_settings.supabase_service_role_key,
+        retry_policy=ProfileMediaRetryPolicy(
+            max_attempts=resolved_settings.profile_media_max_attempts,
+            backoff_seconds=resolved_settings.profile_media_backoff_seconds,
+            jitter_fraction=resolved_settings.profile_media_jitter_fraction,
+            circuit_breaker_threshold=(resolved_settings.profile_media_circuit_breaker_threshold),
+            circuit_breaker_cooldown_seconds=(
+                resolved_settings.profile_media_circuit_breaker_cooldown_seconds
+            ),
+        ),
+        timeout_seconds=resolved_settings.profile_media_timeout_seconds,
+    )
+    app.state.profile_media_store = profile_media_store
+    app.state.profile_media_max_upload_bytes = resolved_settings.profile_media_max_upload_bytes
     facade = IamFacade(
         engine=engine,
         sms_adapter=sms_adapter,
@@ -241,50 +280,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         access_token_ttl_seconds=resolved_settings.gateway_access_token_ttl_seconds,
         refresh_token_ttl_seconds=resolved_settings.gateway_refresh_token_ttl_seconds,
         mfa_secret_key=resolved_settings.iam_mfa_secret_key,
+        media_store=profile_media_store,
+        photo_max_bytes=resolved_settings.profile_media_max_upload_bytes,
     )
     app.state.iam_facade = facade
     # MOD-004 (PHASE-3 T3, #212): the consent facade shares the same settled
     # engine and app-state pattern - routes read one resolved object and unit
     # tests stub it on state.
     app.state.consent_facade = ConsentFacade(engine=engine)
-    # MOD-003 (PHASE-3 T2, #211): the record facade shares the one settled
-    # engine - no connection opens at boot - and is stored like the iam
-    # instance so routes read one resolved object and unit tests can stub it.
-    # Pass consent_facade for PHASE-3 T5 (#214) gated reads.
-    app.state.health_facade = HealthFacade(engine=engine, consent_facade=app.state.consent_facade)
-    # MOD-011 (PHASE-4 T6, #240): the audit facade shares the settled engine
-    # for the operator query surface - stored on state so routes read one
-    # resolved object and unit tests stub it. The health facade (MOD-003) is
-    # passed for T7's patient access-history delegation: the ledger lives in
-    # the health schema, so the audit facade calls through the facade seam
-    # instead of reading across schemas (module isolation rule).
-    app.state.audit_facade = AuditFacade(engine=engine, health_facade=app.state.health_facade)
-    # MOD-002 (PHASE-5 T05, #249): the partner facade shares the settled engine
-    # and, for open registration (ADR-0010), the settled iam facade - the sync
-    # ``create_credential_account`` seam is called in-sequence at registration
-    # so a login-capable account exists before the partner can authenticate.
-    # Stored on state so the registration route reads one resolved instance and
-    # unit tests stub it.
-    # MOD-002 (PHASE-5 T06, #251): credential documents are AES-encrypted into
-    # the ``partner/`` object-storage prefix before a Step-1 pass enters the
-    # queue. The store's key/root come from the environment (fail-closed when a
-    # key is supplied but malformed); dev/test without a key derives an ephemeral
-    # one so the encrypted write path still runs.
-    partner_artifact_store = build_artifact_store(
-        root=resolved_settings.partner_artifact_root,
-        b64_key=resolved_settings.partner_artifact_key,
-    )
-    app.state.partner_facade = PartnerFacade(
-        engine=engine,
-        iam_facade=facade,
-        artifact_store=partner_artifact_store,
-        audit_facade=app.state.audit_facade,
-        re_submission_max=resolved_settings.partner_re_submission_max,
-        re_submission_cooldown_days=resolved_settings.partner_re_submission_cooldown_days,
-        credential_cleanup_days=resolved_settings.partner_credential_cleanup_days,
-        directory_ttl_seconds=resolved_settings.redis_directory_ttl_seconds,
-        directory_max_results=resolved_settings.directory_max_results,
-    )
     # MOD-005 (PHASE-7 T12, #356): the intake facade shares the settled engine
     # and is stored on state so the patient intake routes read one resolved
     # instance and unit tests can stub it. MOD-006 (PHASE-7 T08, #373; #385):
@@ -323,6 +326,69 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.care_console_facade = CaseConsoleFacade(
         engine=engine,
         intake_facade=app.state.intake_facade,
+    )
+    # MOD-003 (PHASE-3 T2, #211): the record facade shares the one settled
+    # engine - no connection opens at boot - and is stored like the iam
+    # instance so routes read one resolved object and unit tests can stub it.
+    # Pass consent_facade for PHASE-3 T5 (#214) gated reads, and scope the
+    # health-background first-save auto-grant's live-doctor discovery through
+    # the care facade's open-case seam (#534, ADR-0018) - both facades are
+    # built above so the health facade can close over the settled instances.
+    app.state.health_facade = HealthFacade(
+        engine=engine,
+        consent_facade=app.state.consent_facade,
+        care_facade=app.state.care_console_facade,
+    )
+    # MOD-011 (PHASE-4 T6, #240): the audit facade shares the settled engine
+    # for the operator query surface - stored on state so routes read one
+    # resolved object and unit tests stub it. The health facade (MOD-003) is
+    # passed for T7's patient access-history delegation: the ledger lives in
+    # the health schema, so the audit facade calls through the facade seam
+    # instead of reading across schemas (module isolation rule).
+    app.state.audit_facade = AuditFacade(engine=engine, health_facade=app.state.health_facade)
+    # MOD-002 (PHASE-5 T05, #249): the partner facade shares the settled engine
+    # and, for open registration (ADR-0010), the settled iam facade - the sync
+    # ``create_credential_account`` seam is called in-sequence at registration
+    # so a login-capable account exists before the partner can authenticate.
+    # Stored on state so the registration route reads one resolved instance and
+    # unit tests stub it.
+    # MOD-002 (PHASE-5 T06, #251): credential documents are AES-encrypted into
+    # the ``partner/`` object-storage prefix before a Step-1 pass enters the
+    # queue. The store's key/root come from the environment (fail-closed when a
+    # key is supplied but malformed); dev/test without a key derives an ephemeral
+    # one so the encrypted write path still runs.
+    partner_artifact_store = build_artifact_store(
+        root=resolved_settings.partner_artifact_root,
+        b64_key=resolved_settings.partner_artifact_key,
+    )
+    app.state.partner_facade = PartnerFacade(
+        engine=engine,
+        iam_facade=facade,
+        artifact_store=partner_artifact_store,
+        audit_facade=app.state.audit_facade,
+        profile_media_store=profile_media_store,
+        doctor_profile_photo_max_bytes=resolved_settings.profile_media_max_upload_bytes,
+        re_submission_max=resolved_settings.partner_re_submission_max,
+        re_submission_cooldown_days=resolved_settings.partner_re_submission_cooldown_days,
+        credential_cleanup_days=resolved_settings.partner_credential_cleanup_days,
+        directory_ttl_seconds=resolved_settings.redis_directory_ttl_seconds,
+        directory_max_results=resolved_settings.directory_max_results,
+    )
+
+    # MOD-012 (PHASE-8.2 T01, #539): the doctor console facade owns no schema
+    # or outbox - it composes the settled consent/care/iam/health facades into
+    # the derived Patients list (ADR-0019). Stored on state so the doctor
+    # routes read one resolved instance and route tests stub it wholesale.
+    # Built after the partner facade because the console re-checks the edge's
+    # role decision through MOD-002's ``require_active_doctor`` seam on every
+    # read (api-standards §6) - the one place the console is told whether the
+    # id it was handed is still an active doctor.
+    app.state.doctor_console_facade = DoctorConsoleFacade(
+        consent_facade=app.state.consent_facade,
+        care_facade=app.state.care_console_facade,
+        iam_facade=app.state.iam_facade,
+        health_facade=app.state.health_facade,
+        partner_facade=app.state.partner_facade,
     )
 
     # PHASE-8.1 T10c (#495): the issued-rx attribution reads the issuing
@@ -441,6 +507,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(directory_router)
     app.include_router(intake_router)
     app.include_router(care_router)
+    app.include_router(doctor_router)
     register_error_handlers(app)
     register_gateway_error_handlers(app)
     register_health_error_handlers(app)
@@ -448,6 +515,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_partner_error_handlers(app)
     register_intake_error_handlers(app)
     register_care_error_handlers(app)
+    register_doctor_error_handlers(app)
 
     # Catch-all for any unhandled exception that escapes the module-level
     # handlers above (e.g. SQLAlchemy OperationalError from a DB connection
@@ -534,6 +602,105 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             namespace=f"identity:{principal.subject_id}",
         )
         return PatientProfileResponse(set=True, profile=saved)
+
+    @app.put("/v1/me/photo", response_model=PatientProfileResponse)
+    async def me_photo_put(
+        request: Request,
+        file: Annotated[
+            UploadFile,
+            File(
+                description=(
+                    "Profile photo: JPEG, PNG, or WebP of at most "
+                    f"{resolved_settings.profile_media_max_upload_bytes // (1024 * 1024)}MB"
+                )
+            ),
+        ],
+        principal: Annotated[Principal, Depends(require_authenticated)],
+    ) -> PatientProfileResponse:
+        """Protected upload/replace: persist the caller's profile photo (US-20).
+
+        Thin patient-scoped adapter (#533): the ``require_authenticated`` gate
+        admits the session owner, the multipart ``file`` part is read with a
+        size ceiling (the configured ``PROFILE_MEDIA_MAX_UPLOAD_BYTES`` + 1) so
+        an oversized or malicious upload is bounded in memory, and the facade
+        enforces the photo contract (JPEG/PNG/WebP only - GIF refused - and the
+        same size ceiling) before encrypting the bytes into the private
+        ``profile-media`` store under the ``patient/`` prefix, persisting only
+        the opaque ref on the profile row (ADR-0020 D2, never a public URL).
+        Both the read bound and the enforced limit resolve from the one settings
+        value, shared with the doctor console photo path (coding-standards
+        §9.2). The mutation honours the ``Idempotency-Key`` replay contract
+        (api-standards §5) like the other ``/v1/me`` mutations - a replayed key
+        returns the stored result without a second facade call, and the key is
+        namespaced to the principal's subject id. A repeat upload with a fresh
+        key converges to the replaced photo. The photo is bound to the
+        principal's subject id, so one identity can never overwrite another's
+        photo. Answers the updated profile carrying the new ``photo_ref``.
+        """
+        facade = cast(IamFacade, request.app.state.iam_facade)
+        max_upload_bytes = cast(int, request.app.state.profile_media_max_upload_bytes)
+        data = await file.read(max_upload_bytes + 1)
+        saved = await run_idempotent(
+            request,
+            lambda: facade.save_patient_photo(
+                identity_id=int(principal.subject_id),
+                data=data,
+                media_type=file.content_type,
+            ),
+            namespace=f"identity:{principal.subject_id}",
+        )
+        return PatientProfileResponse(set=True, profile=saved)
+
+    @app.get("/v1/me/photo")
+    async def me_photo_get(
+        request: Request, principal: Annotated[Principal, Depends(require_authenticated)]
+    ) -> Response:
+        """Protected read: stream the caller's stored profile photo (US-20).
+
+        Thin patient-scoped adapter (#533): the facade resolves the caller's
+        stored ref and returns the decrypted bytes with their sniffed
+        ``Content-Type`` - the image is streamed through the backend for the
+        session owner and is never exposed as a public URL (ADR-0020). A
+        missing photo (no profile, no ref, or a dangling ref whose object is
+        gone) answers the shared 404 envelope so the app degrades to the
+        photo-picker card instead of a broken image. The scope is the
+        principal's subject id; a doctor's read of a patient photo is later
+        consent-gated work (#540).
+        """
+        facade = cast(IamFacade, request.app.state.iam_facade)
+        photo = await facade.get_patient_photo(identity_id=int(principal.subject_id))
+        if photo is None:
+            return error_response(
+                status.HTTP_404_NOT_FOUND,
+                "PROFILE_PHOTO_NOT_FOUND",
+                "no profile photo is set for this patient",
+                request=request,
+                log_tag="iam_rejection",
+            )
+        return Response(content=photo.data, media_type=photo.media_type)
+
+    @app.delete("/v1/me/photo", response_model=PatientProfileResponse)
+    async def me_photo_delete(
+        request: Request, principal: Annotated[Principal, Depends(require_authenticated)]
+    ) -> PatientProfileResponse:
+        """Protected remove: clear the caller's stored profile photo (US-20).
+
+        Thin patient-scoped adapter (#533): the facade clears the profile's
+        ref first (removal means "the stored key is gone"), then best-effort
+        deletes the ciphertext so a removed photo is not orphaned. Removal is
+        idempotent - a caller with no photo answers the unchanged profile - and
+        bound to the principal's subject id so one identity can never clear
+        another's photo. The ``Idempotency-Key`` replay contract (api-standards
+        §5) applies like the other mutations, with the key namespaced to the
+        principal.
+        """
+        facade = cast(IamFacade, request.app.state.iam_facade)
+        profile = await run_idempotent(
+            request,
+            lambda: facade.delete_patient_photo(identity_id=int(principal.subject_id)),
+            namespace=f"identity:{principal.subject_id}",
+        )
+        return PatientProfileResponse(set=True, profile=profile)
 
     @app.get("/v1/auth/dev/otp", response_model=MockOtpResponse)
     async def dev_otp(request: Request, phone: str) -> MockOtpResponse | JSONResponse:

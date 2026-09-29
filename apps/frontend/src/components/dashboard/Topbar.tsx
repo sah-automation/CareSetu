@@ -28,6 +28,10 @@ const TOPNAV_PATIENT: NavItemDef[] = NAV_CONFIG.patient
   .filter((item) => !item.center)
   .slice(0, TABBAR_MAX_DESTINATIONS);
 
+// #583: the top bar threads only its own role. The doctor profile projection it
+// used to pass down to the account menu is gone with the shell's read: the menu
+// reads the shared source itself, through the same optional accessor it already
+// used for the patient one.
 export function Topbar({ density, role }: TopbarProps) {
   return (
     <header
@@ -68,7 +72,11 @@ export function Topbar({ density, role }: TopbarProps) {
           <LocationChip placement="topbar" className="hidden lg:inline-flex" />
         )}
         {density === "light" && <LangToggle />}
-        <AccountMenu />
+        {/* #567: the shell's own role, threaded like the sidebar's and the tab
+            bar's. #583: nothing else is threaded - the account menu reaches the
+            doctor profile through the shared source, so the menu still fetches
+            nothing itself. */}
+        <AccountMenu shellRole={role} />
       </div>
     </header>
   );

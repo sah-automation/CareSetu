@@ -92,15 +92,17 @@ the state transitions and event constants/builders they need already live in
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import datetime
 from uuid import UUID
 
+from cryptography.exceptions import InvalidTag
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from modules.audit.facade import AuditFacade
-from modules.iam.facade import IamFacade
+from modules.iam.facade import IamFacade, PhotoContent
 from modules.partner import credential_validity as credential_validity_module
 from modules.partner import directory_cache as directory_cache_module
 from modules.partner.adapters.artifact_store import CredentialArtifactStore
@@ -143,6 +145,21 @@ from modules.partner.directory_facade import (
 from modules.partner.directory_facade import (
     ProviderProfileView as ProviderProfileView,
 )
+from modules.partner.doctor_profile_models import (
+    DoctorCredentialStatus as DoctorCredentialStatus,
+)
+from modules.partner.doctor_profile_models import (
+    DoctorProfileCredential as DoctorProfileCredential,
+)
+from modules.partner.doctor_profile_models import (
+    DoctorProfilePhotoView as DoctorProfilePhotoView,
+)
+from modules.partner.doctor_profile_models import (
+    DoctorProfileUpdate as DoctorProfileUpdate,
+)
+from modules.partner.doctor_profile_models import (
+    DoctorProfileView as DoctorProfileView,
+)
 from modules.partner.domain.credentials import CredentialInvalidatedReason
 from modules.partner.domain.events import (
     PartnerType,
@@ -156,6 +173,21 @@ from modules.partner.domain.exceptions import (
 )
 from modules.partner.domain.exceptions import (
     ConsultationFeeNotAllowedError as ConsultationFeeNotAllowedError,
+)
+from modules.partner.domain.exceptions import (
+    DoctorProfileNotAllowedError as DoctorProfileNotAllowedError,
+)
+from modules.partner.domain.exceptions import (
+    DoctorProfilePhotoNotFoundError as DoctorProfilePhotoNotFoundError,
+)
+from modules.partner.domain.exceptions import (
+    DoctorProfilePhotoStoreUnavailableError as DoctorProfilePhotoStoreUnavailableError,
+)
+from modules.partner.domain.exceptions import (
+    DoctorProfilePhotoTransferError as DoctorProfilePhotoTransferError,
+)
+from modules.partner.domain.exceptions import (
+    DoctorProfilePhotoValidationError as DoctorProfilePhotoValidationError,
 )
 from modules.partner.domain.exceptions import (
     PartnerNotActiveError as PartnerNotActiveError,
@@ -213,7 +245,9 @@ from modules.partner.registration_models import (
 )
 from modules.partner.schema.models import (
     partner_credentials,
+    partner_directory_index,
     partner_profiles,
+    partner_service_areas,
 )
 from modules.partner.shared import (
     DEFAULT_SERVICE_AREA_NAME as DEFAULT_SERVICE_AREA_NAME,
@@ -233,6 +267,13 @@ from modules.partner.shared import (
 from modules.partner.shared import (
     load_profile_by_identity as _load_profile_by_identity,
 )
+from modules.profile_media.facade import (
+    DOCTOR_PREFIX,
+    ProfileMediaStore,
+    ProfileMediaStoreError,
+)
+
+logger = logging.getLogger(__name__)
 
 # The Phase-5 launch service area (REQ-008): a partner that does not declare a
 # ``service_area_id`` defaults to this vocabulary row (seeded by migration
@@ -253,6 +294,86 @@ from modules.partner.shared import (
 # cross-module imports are capped at the facade (coding-standards §6 module
 # isolation).
 _IAM_SUSPENDED = "Suspended"
+_ALLOWED_DOCTOR_PROFILE_PHOTO_TYPES = frozenset({"image/jpeg", "image/png", "image/webp"})
+
+
+def _canonical_doctor_profile_media_type(
+    media_type: str | None,
+    data: bytes,
+    *,
+    max_bytes: int,
+) -> str:
+    normalized = (media_type or "").split(";", 1)[0].strip().lower()
+    if normalized not in _ALLOWED_DOCTOR_PROFILE_PHOTO_TYPES:
+        raise DoctorProfilePhotoValidationError("doctor profile photo must be JPEG, PNG, or WebP")
+    if len(data) > max_bytes:
+        raise DoctorProfilePhotoValidationError(
+            "doctor profile photo exceeds the configured size limit"
+        )
+    signature_matches = {
+        "image/jpeg": data.startswith(b"\xff\xd8\xff"),
+        "image/png": data.startswith(b"\x89PNG\r\n\x1a\n"),
+        "image/webp": data.startswith(b"RIFF") and data[8:12] == b"WEBP",
+    }
+    if not signature_matches[normalized]:
+        raise DoctorProfilePhotoValidationError(
+            "doctor profile photo content does not match its media type"
+        )
+    return normalized
+
+
+def _sniff_doctor_profile_media_type(data: bytes) -> str:
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "application/octet-stream"
+
+
+def _require_active_doctor(
+    *,
+    partner_id: int,
+    partner_type: str,
+    status: str,
+) -> None:
+    if partner_type != "doctor" or status != PartnerStatus.ACTIVE.value:
+        raise DoctorProfileNotAllowedError(partner_id, partner_type, status)
+
+
+async def _delete_doctor_profile_media(
+    media_store: ProfileMediaStore,
+    object_key: str,
+) -> None:
+    try:
+        await media_store.delete(object_key=object_key)
+    except Exception as exc:
+        logger.warning(
+            "doctor_profile_photo_cleanup_failed",
+            extra={"error_type": type(exc).__name__},
+        )
+
+
+def _doctor_credential_status(
+    record: credential_validity_module.CredentialRecord,
+    *,
+    now: datetime,
+) -> DoctorCredentialStatus:
+    reason = record.invalidation_reason
+    if reason == CredentialInvalidatedReason.EXPIRED:
+        return "expired"
+    if reason == CredentialInvalidatedReason.REVOKED:
+        return "revoked"
+    if reason == CredentialInvalidatedReason.REVERIFICATION_FAILED:
+        return "reverification_failed"
+    if not record.verified:
+        return "pending"
+    if record.revoked_at is not None:
+        return "revoked"
+    if record.expires_at is not None and record.expires_at <= now:
+        return "expired"
+    return "verified"
 
 
 class PartnerFacade:
@@ -265,6 +386,8 @@ class PartnerFacade:
         artifact_store: CredentialArtifactStore | None = None,
         audit_facade: AuditFacade | None = None,
         *,
+        profile_media_store: ProfileMediaStore | None = None,
+        doctor_profile_photo_max_bytes: int | None = None,
         re_submission_max: int = 3,
         re_submission_cooldown_days: int = 30,
         credential_cleanup_days: int = 30,
@@ -273,6 +396,8 @@ class PartnerFacade:
         clock: Callable[[], datetime] = _default_clock,
     ) -> None:
         self._engine = engine
+        self._profile_media_store = profile_media_store
+        self._doctor_profile_photo_max_bytes = doctor_profile_photo_max_bytes
         # Credential documents are encrypted into the ``partner/`` object-storage
         # prefix on a Step-1 pass (ADR-0008, T06). The store must be configured;
         # ``submit_credentials`` refuses to run a passing submission without one
@@ -836,6 +961,351 @@ class PartnerFacade:
         exposed: artifact refs, emails, phones, PHI.
         """
         return await self._directory.get_provider_profile(partner_id)
+
+    async def require_active_doctor(self, doctor_id: int) -> None:
+        """Re-check that this partner profile is an active doctor, and refuse if not.
+
+        The MOD-002 answer to "is this an active doctor?", published as its own
+        narrow seam because the doctor console (MOD-012) must re-check the edge's
+        role decision rather than trust it (api-standards §6,
+        security-phii-standards §3: edge checks are convenience, not the
+        boundary) - and module isolation means it can only ask through this
+        facade, never read ``partner_profiles`` itself.
+
+        Runs the SAME ``_require_active_doctor`` rule every doctor-profile
+        method here runs, so "active doctor" has exactly one definition, and
+        reads only the three columns the decision needs (id-keyed lookup, no
+        profile/credential/directory load) so a re-check is cheap enough to sit
+        in front of every console read. Raises ``PartnerNotFoundError`` when the
+        id holds no profile and ``DoctorProfileNotAllowedError`` when the
+        profile is not a ``doctor`` in the ``Active`` state - both mapped by
+        this module's registered handlers.
+        """
+        async with self._engine.begin() as connection:
+            row = (
+                await connection.execute(
+                    select(
+                        partner_profiles.c.partner_type,
+                        partner_profiles.c.status,
+                    ).where(partner_profiles.c.id == doctor_id)
+                )
+            ).first()
+            if row is None:
+                raise PartnerNotFoundError(doctor_id)
+            _require_active_doctor(
+                partner_id=doctor_id,
+                partner_type=row.partner_type,
+                status=row.status,
+            )
+
+    async def get_doctor_profile(self, doctor_id: int) -> DoctorProfileView:
+        async with self._engine.begin() as connection:
+            row = (
+                await connection.execute(
+                    select(
+                        partner_profiles.c.id.label("partner_id"),
+                        partner_profiles.c.partner_type,
+                        partner_profiles.c.status,
+                        partner_profiles.c.photo_ref,
+                        partner_profiles.c.practice_name,
+                        partner_directory_index.c.specialty,
+                        partner_profiles.c.practice_address,
+                        partner_profiles.c.practice_latitude,
+                        partner_profiles.c.practice_longitude,
+                        partner_service_areas.c.name.label("area_name"),
+                        partner_profiles.c.languages,
+                        partner_profiles.c.experience_years,
+                        partner_profiles.c.about,
+                        partner_profiles.c.consultation_fee_paise,
+                        partner_profiles.c.availability,
+                        partner_profiles.c.notification_preferences,
+                    )
+                    .select_from(partner_profiles)
+                    .outerjoin(
+                        partner_directory_index,
+                        partner_directory_index.c.partner_id == partner_profiles.c.id,
+                    )
+                    .outerjoin(
+                        partner_service_areas,
+                        partner_service_areas.c.id == partner_profiles.c.service_area_id,
+                    )
+                    .where(partner_profiles.c.id == doctor_id)
+                )
+            ).first()
+            if row is None:
+                raise PartnerNotFoundError(doctor_id)
+            _require_active_doctor(
+                partner_id=doctor_id,
+                partner_type=row.partner_type,
+                status=row.status,
+            )
+            credential_rows = (
+                await connection.execute(
+                    select(
+                        partner_credentials.c.credential_type,
+                        partner_credentials.c.verified,
+                        partner_credentials.c.expires_at,
+                        partner_credentials.c.revoked_at,
+                        partner_credentials.c.invalidation_reason,
+                    )
+                    .where(partner_credentials.c.profile_id == doctor_id)
+                    .order_by(partner_credentials.c.round.desc(), partner_credentials.c.id)
+                )
+            ).all()
+
+        now = self._clock()
+        credential_records = [
+            credential_validity_module.CredentialRecord(
+                id=index,
+                verified=bool(credential.verified),
+                expires_at=credential.expires_at,
+                revoked_at=credential.revoked_at,
+                invalidation_reason=credential.invalidation_reason,
+            )
+            for index, credential in enumerate(credential_rows, start=1)
+        ]
+        eligibility = credential_validity_module.evaluate_eligibility(
+            credential_records,
+            now=now,
+        )
+        return DoctorProfileView(
+            partner_id=int(row.partner_id),
+            photo_ref=row.photo_ref,
+            practice_name=row.practice_name,
+            specialty=row.specialty,
+            verified=eligibility.has_any and not eligibility.has_invalid,
+            practice_address=str(row.practice_address),
+            practice_latitude=float(row.practice_latitude),
+            practice_longitude=float(row.practice_longitude),
+            area=str(row.area_name) if row.area_name is not None else DEFAULT_SERVICE_AREA_NAME,
+            languages=list(row.languages or []),
+            experience_years=(
+                int(row.experience_years) if row.experience_years is not None else None
+            ),
+            about=row.about,
+            consultation_fee=(
+                int(row.consultation_fee_paise) if row.consultation_fee_paise is not None else None
+            ),
+            availability=row.availability,
+            credentials=[
+                DoctorProfileCredential(
+                    credential_type=str(credential.credential_type),
+                    status=_doctor_credential_status(record, now=now),
+                    expires_at=credential.expires_at,
+                )
+                for credential, record in zip(
+                    credential_rows,
+                    credential_records,
+                    strict=True,
+                )
+            ],
+            notification_preferences=dict(row.notification_preferences or {}),
+        )
+
+    async def update_doctor_profile(
+        self,
+        doctor_id: int,
+        update: DoctorProfileUpdate,
+    ) -> DoctorProfileView:
+        values = update.model_dump()
+        async with self._engine.begin() as connection:
+            row = (
+                await connection.execute(
+                    select(
+                        partner_profiles.c.partner_type,
+                        partner_profiles.c.status,
+                    )
+                    .where(partner_profiles.c.id == doctor_id)
+                    .with_for_update()
+                )
+            ).first()
+            if row is None:
+                raise PartnerNotFoundError(doctor_id)
+            _require_active_doctor(
+                partner_id=doctor_id,
+                partner_type=row.partner_type,
+                status=row.status,
+            )
+            await connection.execute(
+                partner_profiles.update()
+                .where(partner_profiles.c.id == doctor_id)
+                .values(**values, updated_at=func.now())
+            )
+        # The public directory projection is NOT written here: this batch leaves
+        # the public entry read-only to the doctor (a preview, not an editor,
+        # #542), so a private profile save must not move the practice pin the
+        # public ``search_directory`` orders by. The practice geo the private
+        # projection serves lives on ``partner_profiles`` (written above) and
+        # only the partner-approval path re-derives the directory row.
+        return await self.get_doctor_profile(doctor_id)
+
+    async def update_doctor_photo(
+        self,
+        doctor_id: int,
+        *,
+        media_type: str | None,
+        data: bytes,
+    ) -> DoctorProfilePhotoView:
+        media_store = self._profile_media_store
+        max_bytes = self._doctor_profile_photo_max_bytes
+        if media_store is None or max_bytes is None:
+            raise DoctorProfilePhotoStoreUnavailableError(
+                "doctor profile media store is not configured"
+            )
+        _canonical_doctor_profile_media_type(
+            media_type,
+            data,
+            max_bytes=max_bytes,
+        )
+        async with self._engine.begin() as connection:
+            row = (
+                await connection.execute(
+                    select(
+                        partner_profiles.c.partner_type,
+                        partner_profiles.c.status,
+                    ).where(partner_profiles.c.id == doctor_id)
+                )
+            ).first()
+        if row is None:
+            raise PartnerNotFoundError(doctor_id)
+        _require_active_doctor(
+            partner_id=doctor_id,
+            partner_type=row.partner_type,
+            status=row.status,
+        )
+        try:
+            new_key = await media_store.save(
+                data=data,
+                subject_id=doctor_id,
+                prefix=DOCTOR_PREFIX,
+            )
+        except ProfileMediaStoreError as exc:
+            if exc.retries_exhausted:
+                raise DoctorProfilePhotoTransferError("doctor profile photo upload failed") from exc
+            raise DoctorProfilePhotoStoreUnavailableError(
+                "doctor profile media store is unavailable"
+            ) from exc
+        except InvalidTag as exc:
+            logger.critical("profile media integrity failure")
+            raise DoctorProfilePhotoStoreUnavailableError(
+                "doctor profile media store returned unreadable data"
+            ) from exc
+        except OSError as exc:
+            raise DoctorProfilePhotoTransferError("doctor profile photo upload failed") from exc
+
+        previous_key: str | None = None
+        try:
+            async with self._engine.begin() as connection:
+                locked_row = (
+                    await connection.execute(
+                        select(
+                            partner_profiles.c.partner_type,
+                            partner_profiles.c.status,
+                            partner_profiles.c.photo_ref,
+                        )
+                        .where(partner_profiles.c.id == doctor_id)
+                        .with_for_update()
+                    )
+                ).first()
+                if locked_row is None:
+                    raise PartnerNotFoundError(doctor_id)
+                _require_active_doctor(
+                    partner_id=doctor_id,
+                    partner_type=locked_row.partner_type,
+                    status=locked_row.status,
+                )
+                previous_key = locked_row.photo_ref
+                await connection.execute(
+                    partner_profiles.update()
+                    .where(partner_profiles.c.id == doctor_id)
+                    .values(photo_ref=new_key, updated_at=func.now())
+                )
+        except Exception:
+            await _delete_doctor_profile_media(media_store, new_key)
+            raise
+
+        if previous_key is not None and previous_key != new_key:
+            await _delete_doctor_profile_media(media_store, previous_key)
+        return DoctorProfilePhotoView(photo_ref=new_key)
+
+    async def get_doctor_photo(self, doctor_id: int) -> PhotoContent:
+        media_store = self._profile_media_store
+        if media_store is None:
+            raise DoctorProfilePhotoStoreUnavailableError(
+                "doctor profile media store is not configured"
+            )
+        async with self._engine.begin() as connection:
+            row = (
+                await connection.execute(
+                    select(
+                        partner_profiles.c.partner_type,
+                        partner_profiles.c.status,
+                        partner_profiles.c.photo_ref,
+                    ).where(partner_profiles.c.id == doctor_id)
+                )
+            ).first()
+        if row is None:
+            raise PartnerNotFoundError(doctor_id)
+        _require_active_doctor(
+            partner_id=doctor_id,
+            partner_type=row.partner_type,
+            status=row.status,
+        )
+        if row.photo_ref is None:
+            raise DoctorProfilePhotoNotFoundError(doctor_id)
+        try:
+            data = await media_store.read(object_key=row.photo_ref)
+        except FileNotFoundError as exc:
+            raise DoctorProfilePhotoNotFoundError(doctor_id) from exc
+        except InvalidTag as exc:
+            logger.critical("profile media integrity failure")
+            raise DoctorProfilePhotoStoreUnavailableError(
+                "doctor profile media store returned unreadable data"
+            ) from exc
+        except OSError as exc:
+            raise DoctorProfilePhotoStoreUnavailableError(
+                "doctor profile photo storage read failed"
+            ) from exc
+        return PhotoContent(
+            data=data,
+            media_type=_sniff_doctor_profile_media_type(data),
+        )
+
+    async def delete_doctor_photo(self, doctor_id: int) -> None:
+        media_store = self._profile_media_store
+        if media_store is None:
+            raise DoctorProfilePhotoStoreUnavailableError(
+                "doctor profile media store is not configured"
+            )
+        old_key: str
+        async with self._engine.begin() as connection:
+            row = (
+                await connection.execute(
+                    select(
+                        partner_profiles.c.partner_type,
+                        partner_profiles.c.status,
+                        partner_profiles.c.photo_ref,
+                    )
+                    .where(partner_profiles.c.id == doctor_id)
+                    .with_for_update()
+                )
+            ).first()
+            if row is None:
+                raise PartnerNotFoundError(doctor_id)
+            _require_active_doctor(
+                partner_id=doctor_id,
+                partner_type=row.partner_type,
+                status=row.status,
+            )
+            if row.photo_ref is None:
+                return
+            old_key = row.photo_ref
+            await connection.execute(
+                partner_profiles.update()
+                .where(partner_profiles.c.id == doctor_id)
+                .values(photo_ref=None, updated_at=func.now())
+            )
+        await _delete_doctor_profile_media(media_store, old_key)
 
     async def update_consultation_fee(
         self,

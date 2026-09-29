@@ -1,10 +1,11 @@
 // #286: shared request<T> helper. Cover the three failure paths (network
 // error, non-ok error envelope, shape guard) plus the success JSON parse.
+// #543 adds the no-content transport the 204-returning photo delete needs.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError } from "@/lib/api-errors";
-import { guardShape, request } from "./request";
+import { guardShape, request, requestVoid } from "./request";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -65,6 +66,42 @@ describe("request", () => {
     await expect(request("/v1/placeholder")).rejects.toMatchObject({
       code: "INVALID_ARGS",
     });
+  });
+});
+
+describe("requestVoid", () => {
+  it("resolves without reading a body on a 204", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      requestVoid("/v1/doctor/profile/photo", { method: "DELETE" }),
+    ).resolves.toBeUndefined();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("still maps a non-ok response to the error envelope", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          {
+            code: "PERMISSION_DENIED",
+            message: "nope",
+            trace_id: "t",
+            details: {},
+          },
+          403,
+        ),
+      ),
+    );
+
+    await expect(
+      requestVoid("/v1/doctor/profile/photo", { method: "DELETE" }),
+    ).rejects.toMatchObject({ code: "PERMISSION_DENIED" });
   });
 });
 

@@ -10,7 +10,7 @@
 // rules; the interim /choose-role entry stays until Phase 5 replaces staff
 // auth (§4.6).
 
-import { Suspense, useEffect } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 import { BrandMark } from "@/components/brand/BrandMark";
@@ -53,6 +53,13 @@ function StaffLoginView() {
   const role: StaffLoginRole =
     searchParams.get("role") === "operator" ? "operator" : "partner";
 
+  // #566: lifted from the form, which owns the flow state. #573: keyed on
+  // whether the step on screen owns the document's top-level heading, which is
+  // what this page actually has to yield - the code step and the handoff each
+  // bring one, and the phone step brings none. One heading per stage, from one
+  // owner, is the whole rule.
+  const [formOwnsHeading, setFormOwnsHeading] = useState(false);
+
   // A visitor who already holds a staff session lands by the same §4.5
   // routing matrix the sign-in itself will use - never on this form. A
   // partner's own status overrides the role rule (§4.4) exactly like the
@@ -93,8 +100,19 @@ function StaffLoginView() {
       </div>
 
       <div className="mt-6 rounded-lg border border-hairline bg-surface p-6 shadow-card">
-        <h1 className="mb-4 text-xl font-bold">{t.heading}</h1>
-        <StaffLoginForm role={role} returnTarget={returnTarget} />
+        {/* #566: once the flow is terminal the handoff owns the screen, and the
+        handoff brings its own `h1`. #573: the code step is not terminal and
+        brings one too. A heading still reading "Sign in" would both lie about
+        the step and put a second `h1` on one document, so the page retires it
+        on the signal the form lifts. */}
+        {formOwnsHeading ? null : (
+          <h1 className="mb-4 text-xl font-bold">{t.heading}</h1>
+        )}
+        <StaffLoginForm
+          role={role}
+          returnTarget={returnTarget}
+          onOwnsHeadingChange={setFormOwnsHeading}
+        />
       </div>
 
       <hr className="my-6 border-hairline-soft" />

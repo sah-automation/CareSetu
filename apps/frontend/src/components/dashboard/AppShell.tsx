@@ -75,6 +75,11 @@ function FullShellBody({
   // shell, shared by the sidebar and phone tab bar. Failures are silent: the
   // pill is a bonus, never a navigational blocker.
   const openCasesCount = useOpenCasesCount(role);
+  // #583: the doctor's own profile projection is no longer read here. It moved
+  // into the shared DoctorProfileProvider, which the (doctor) route-group layout
+  // mounts above this shell - so the shell holds no identity data that can go
+  // stale, the account menu reads the same source the Profile page edits, and an
+  // edit on either side lands on both without a reload.
   const navItems = useMemo(() => {
     if (role !== "doctor" || openCasesCount === undefined) {
       return undefined;
