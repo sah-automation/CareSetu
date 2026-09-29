@@ -41,8 +41,12 @@ async function startRegistration(page: Page, number: string): Promise<void> {
   ).toBeVisible({ timeout: 60_000 });
   await page.getByPlaceholder("10-digit mobile number").fill(number);
   await page.getByRole("button", { name: "Get verification code" }).click();
-  const otpGroup = page.getByRole("group", { name: "OTP" });
-  await otpGroup
+  // #576 removed the `role="group" aria-label="OTP"` wrapper that used to
+  // surround the code input - a duplicate name over its only child. The control
+  // itself is the accessible landmark now, and carries the caller's label
+  // ("Verification code"), the same element verifyOtp fills.
+  const otpInput = page.getByLabel("Verification code");
+  await otpInput
     .waitFor({ state: "visible", timeout: 15_000 })
     .catch(async () => {
       await expect(page.getByText("Resend in")).toBeVisible({
@@ -50,7 +54,7 @@ async function startRegistration(page: Page, number: string): Promise<void> {
       });
       await page.waitForTimeout(62_000);
       await page.getByRole("button", { name: "Get verification code" }).click();
-      await expect(otpGroup).toBeVisible({ timeout: 30_000 });
+      await expect(otpInput).toBeVisible({ timeout: 30_000 });
     });
 }
 

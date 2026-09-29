@@ -90,12 +90,16 @@ async function startRegistration(page: Page, number: string): Promise<void> {
   });
   await page.getByPlaceholder("10-digit mobile number").fill(number);
   await page.getByRole("button", { name: "Get verification code" }).click();
-  const otpGroup = page.getByRole("group", { name: "OTP" });
+  // #576 removed the `role="group" aria-label="OTP"` wrapper that used to
+  // surround the code input - a duplicate name over its only child. The control
+  // itself is the accessible landmark now, and carries the caller's label
+  // ("Verification code"), the same element verifyOtp fills.
+  const otpInput = page.getByLabel("Verification code");
   // Re-registering a phone inside its 60 s resend cooldown is refused on the
   // phone step (register honours the resend cooldown - PHASE-2 REM T3): the
   // PWA shows the countdown instead of a fresh code. Wait the window out and
   // retry so the duplicate-login case still resolves to the same identity.
-  await otpGroup
+  await otpInput
     .waitFor({ state: "visible", timeout: 15_000 })
     .catch(async () => {
       await expect(page.getByText("Resend in")).toBeVisible({
@@ -103,7 +107,7 @@ async function startRegistration(page: Page, number: string): Promise<void> {
       });
       await page.waitForTimeout(62_000);
       await page.getByRole("button", { name: "Get verification code" }).click();
-      await expect(otpGroup).toBeVisible({ timeout: 30_000 });
+      await expect(otpInput).toBeVisible({ timeout: 30_000 });
     });
 }
 
@@ -471,7 +475,7 @@ test("an unauthenticated attempt at the protected surface is denied", async ({
   const returnPhone = randomPhone();
   await page.getByPlaceholder("10-digit mobile number").fill(returnPhone);
   await page.getByRole("button", { name: "Get verification code" }).click();
-  await expect(page.getByRole("group", { name: "OTP" })).toBeVisible({
+  await expect(page.getByLabel("Verification code")).toBeVisible({
     timeout: 30_000,
   });
   const code = await readMockOtp(request, returnPhone);
