@@ -75,8 +75,11 @@ function maskPhone(phone: string): string {
 }
 
 // Shared post-auth landing: fetch the /v1/me profile, persist the session,
-// then route through postLoginTarget. Used by the TOTP step and the partner
-// OTP flow so a session/route change stays in one place.
+// then route through postLoginTarget. Used by the TOTP step so a session/route
+// change stays in one place. #584: the partner OTP flow persists its minted
+// session at the mint, before publishing it (partnerLoginState.ts), so the
+// partner landing below resolves identity WITHOUT writing - the TOTP path is
+// the one that has no earlier writer and needs this to reach storage.
 async function completeStaffLogin(
   session: SessionResult,
 ): Promise<{ roles: string[]; phone: string }> {
@@ -391,7 +394,10 @@ export function StaffLoginForm({
   // screens exactly as before, and an active doctor bound for some other
   // surface (a ?return= deep link outside the console) to that target.
   async function landPartnerAfterLogin(session: SessionResult) {
-    const me = await completeStaffLogin(session);
+    // #584: identity only, no save. The flow persisted this session at the
+    // mint, before publishing it, which is what makes the in-flow resume above
+    // read the partner session rather than whatever was in storage.
+    const me = await fetchMe(session.jwt);
     const routeState = await fetchPartnerRouteState(me.roles);
     const target = postLoginTarget({
       surface: "staff",

@@ -22,7 +22,6 @@ import type { ProviderType } from "@/lib/directory/links";
 import { ApiError } from "@/lib/api-errors";
 import { AuthApiError, type SessionResult } from "@/lib/auth/api";
 import { postLoginTarget } from "@/lib/auth/staff-routing";
-import { saveSession } from "@/lib/auth/session";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import {
@@ -1155,13 +1154,13 @@ export function ProviderRegisterWizard({
     }
   }
 
-  // Finalize once the confirm step has minted a partner session: persist it
-  // through the shared save path, submit any uploaded credentials, then land
-  // on the same waiting-screen target as before this step existed.
+  // Finalize once the confirm step has minted a partner session: submit any
+  // uploaded credentials, then land on the same waiting-screen target as before
+  // this step existed. #584: the shared partner flow persists the minted
+  // session at the mint, before publishing it (partnerLoginState.ts), so this
+  // no longer writes - a wizard-driven login would otherwise store the same
+  // session twice, the second time a network round trip later.
   async function finalizeRegistration(session: SessionResult) {
-    const phone = submittedPhone ?? partner.state.phone;
-    saveSession(session, phone);
-
     const slots = UPLOAD_SLOTS[type];
     const credentialMap = new Map<CredentialType, string[]>();
     for (const slotId of slots) {

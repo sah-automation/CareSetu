@@ -201,13 +201,18 @@ export function AccountMenu({ shellRole }: { shellRole: Role }) {
   // the doctor entry drops the name/photo so it falls back to the person icon.
   const avatarClassName =
     "h-9 w-9 bg-accent-soft text-sm font-semibold text-accent-strong hover:bg-accent-border";
-  // The session's role still decides the patient and non-doctor-staff branches
-  // and the non-doctor badges, exactly as before. #570: inside the doctor shell
-  // the badge follows the shell instead - see roleBadge below.
+  // #584: the SESSION's role still owns the badges and the role-switch rows -
+  // a session can honestly be "partner" or "operator" and say so - but it no
+  // longer owns the *surface*. `resolveRole` answers "patient" for an
+  // unresolved identity, so a doctor shell whose session had not resolved (or
+  // was still the stale patient session a dual-registered phone carries mid
+  // login) used to open the PATIENT menu. The shell role is the answer that
+  // holds in every one of those states, because the route group already knows
+  // which surface it is rendering.
   const currentRole = resolveRole(selectedRole);
-  const isPatient = currentRole === "patient";
   // #567: and only the shell decides doctor-ness.
   const isDoctor = shellRole === "doctor";
+  const isPatient = shellRole === "patient";
   const saved = profile?.savedProfile;
   // #557: the stored photo ref is an opaque object key (ADR-0020 D1), so it is
   // the shared resolver - not the primitive - that makes it renderable. One

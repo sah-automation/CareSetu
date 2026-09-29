@@ -1409,6 +1409,218 @@ describe("AccountMenu stale sessions", () => {
   });
 });
 
+// #584: the reported defect, and the guard against it. Two client-side faults
+// stacked: the account menu picked its *surface* from the session's role, and
+// `resolveRole` answers "patient" for an unresolved identity - so a doctor shell
+// whose session had not resolved, or was still the stale patient session a
+// dual-registered phone carries, opened the PATIENT menu. One assertion shape
+// runs over every shell and both identity states, because the claim is a single
+// rule: the shell owns the surface, the session owns the badges and the
+// role-switch rows.
+describe("AccountMenu surface belongs to the shell, not the session (#584)", () => {
+  // The rows that only exist on one surface. A doctor's menu is the patient's
+  // minus Complete-your-profile; a staff menu is neither. Presence or absence
+  // of these test ids IS the surface, so a whole row list is the assertion.
+  const DOCTOR_ROWS = [
+    "account-menu-doctor-profile",
+    "account-menu-doctor-logout",
+  ];
+  const PATIENT_ROWS = [
+    "account-menu-profile-settings",
+    "account-menu-complete-profile",
+  ];
+
+  /** The identity the doctor shell is asked to render under. */
+  type ShellIdentity =
+    // Nothing stored at all: a cold load where /me has not answered, so
+    // `user` is null and the session's role is not merely stale - it is absent.
+    | { kind: "unresolved" }
+    // The report's exact state: the same phone already holds a patient
+    // session, so the identity resolves to "patient" inside the doctor shell.
+    | { kind: "stale-patient" };
+
+  // The existing helpers all seed a session, which is the state the bug did
+  // NOT happen in. This one is the only place either identity state is built,
+  // and the shell role stays a required parameter for the same reason it is
+  // everywhere else: a default would let a staff case slip into the patient
+  // branch and still pass.
+  function renderInShell(
+    shellRole: Role,
+    identity: ShellIdentity,
+    doctorProjection?: DoctorProfileView,
+  ) {
+    if (identity.kind === "stale-patient") {
+      setStoredSession(VALID_SESSION);
+      mockMeResponse(ME_RESPONSE_SINGLE_ROLE);
+    }
+    if (doctorProjection !== undefined) {
+      doctorApi.fetchDoctorProfile.mockResolvedValue(doctorProjection);
+    }
+    // Only a stored session causes a /me read at all, so the unresolved case
+    // deliberately mocks nothing: an unanswered identity, not a failed one.
+    render(
+      <AuthProvider>
+        {doctorProjection === undefined ? (
+          <AccountMenu shellRole={shellRole} />
+        ) : (
+          <DoctorProfileProvider>
+            <AccountMenu shellRole={shellRole} />
+          </DoctorProfileProvider>
+        )}
+      </AuthProvider>,
+    );
+  }
+
+  function expectRows(testIds: string[], present: boolean) {
+    for (const id of testIds) {
+      if (present) {
+        expect(screen.getByTestId(id)).toBeInTheDocument();
+      } else {
+        expect(screen.queryByTestId(id)).toBeNull();
+      }
+    }
+  }
+
+  // Waits for the identity the case is actually about before opening, so a
+  // doctor row can never win by having been rendered a moment before /me
+  // answered. The trigger is re-queried rather than held: the identity
+  // resolution re-renders it, so a captured node goes stale.
+  async function openInShell(
+    shellRole: Role,
+    identity: ShellIdentity,
+    doctorProjection?: DoctorProfileView,
+  ) {
+    renderInShell(shellRole, identity, doctorProjection);
+    await waitFor(() =>
+      expect(screen.getByTestId("account-menu")).toHaveAttribute(
+        "data-session-resolved",
+        identity.kind === "unresolved" ? "false" : "true",
+      ),
+    );
+    const trigger = await openViaKeyboard();
+    return trigger;
+  }
+
+  it("a doctor shell with an UNRESOLVED identity shows the doctor menu, not the patient's", async () => {
+    await openInShell(
+      "doctor",
+      { kind: "unresolved" },
+      doctorProfileWith(null),
+    );
+
+    // On a cold load the shell already knows it is a doctor shell, so the
+    // patient menu is never the correct answer at any moment - including the
+    // moment before /me answers, which the next test pins directly.
+    expectRows(DOCTOR_ROWS, true);
+    expectRows(PATIENT_ROWS, false);
+  });
+
+  it("a doctor shell's FIRST paint is already the doctor's, never a patient frame", () => {
+    // A4's "never flashes the patient menu first", asserted with no wait at
+    // all: the very first commit, while /me is still unanswered, must already
+    // carry the doctor's trigger. Waiting for the identity to settle first would
+    // let a patient frame in between go unnoticed, and that frame is the
+    // visible half of the report.
+    renderInShell("doctor", { kind: "unresolved" }, doctorProfileWith(null));
+
+    const firstPaint = screen.getByTestId("account-menu");
+    expect(firstPaint).toHaveAttribute("data-session-resolved", "false");
+    // The doctor's 36px disc, not the patient's 44px mobile-only trigger: the
+    // patient trigger is hidden below lg, so a patient frame would be absent
+    // from view entirely.
+    expect(firstPaint).toHaveClass("h-9", "w-9");
+    expect(firstPaint).not.toHaveClass("hidden");
+    expect(firstPaint.querySelector("svg")).not.toBeNull();
+  });
+
+  it("a doctor shell holding a STALE PATIENT session still shows the doctor menu", async () => {
+    // The dual-registered phone from the report. The session really does say
+    // "patient" here, and the doctor menu must still win.
+    await openInShell(
+      "doctor",
+      { kind: "stale-patient" },
+      doctorProfileWith(null),
+    );
+
+    expectRows(DOCTOR_ROWS, true);
+    expectRows(PATIENT_ROWS, false);
+  });
+
+  it("a doctor shell's avatar shows the person icon, never the phone digits", async () => {
+    const trigger = await openInShell("doctor", { kind: "unresolved" });
+
+    // #538/A5: the doctor trigger never borrows the phone digits, which is
+    // what the staff branch is for. Asserted on the trigger so a correct menu
+    // cannot hide a wrong avatar.
+    expect(trigger).not.toHaveTextContent("90");
+    expect(trigger.querySelector("img")).toBeNull();
+    expect(trigger.querySelector("svg")).not.toBeNull();
+  });
+
+  // A7: the staff shells must keep their own treatment, not merely lack the
+  // doctor and patient rows. `logout-button` cannot do that job alone - the
+  // patient branch reuses the same test id - so the trigger's shape and the
+  // width carry it: digits where the other surfaces draw an icon, and `w-52`
+  // against the real menus' `w-60`. The digits are the identity's own, so an
+  // unresolved identity shows the branch's `?` fallback rather than "90".
+  function expectStaffTreatment(trigger: HTMLElement, digits: string) {
+    expect(trigger).toHaveTextContent(digits);
+    expect(trigger.querySelector("svg")).toBeNull();
+    expect(trigger.querySelector("img")).toBeNull();
+    expect(screen.getByRole("menu")).toHaveClass("w-52");
+    expect(screen.getByRole("menu")).not.toHaveClass("w-60");
+    expect(screen.getByRole("menuitem", { name: "Log out" })).not.toHaveClass(
+      "text-danger",
+    );
+  }
+
+  it("keeps a lab or chemist partner on the staff menu under both identity states", async () => {
+    let trigger = await openInShell("partner", { kind: "unresolved" });
+    expectRows(DOCTOR_ROWS, false);
+    expectRows(PATIENT_ROWS, false);
+    expectStaffTreatment(trigger, "?");
+    cleanup();
+
+    trigger = await openInShell("partner", { kind: "stale-patient" });
+    expectRows(DOCTOR_ROWS, false);
+    expectRows(PATIENT_ROWS, false);
+    expectStaffTreatment(trigger, "90");
+  });
+
+  it("keeps the operator on the staff menu under both identity states", async () => {
+    let trigger = await openInShell("operator", { kind: "unresolved" });
+    expectRows(DOCTOR_ROWS, false);
+    expectRows(PATIENT_ROWS, false);
+    expectStaffTreatment(trigger, "?");
+    cleanup();
+
+    trigger = await openInShell("operator", { kind: "stale-patient" });
+    expectRows(DOCTOR_ROWS, false);
+    expectRows(PATIENT_ROWS, false);
+    expectStaffTreatment(trigger, "90");
+  });
+
+  it("opens a doctor menu at the wider real-account width, not the staff one", async () => {
+    await openInShell(
+      "doctor",
+      { kind: "unresolved" },
+      doctorProfileWith(null),
+    );
+
+    // The width is the cheapest thing that separates a real account menu from
+    // the staff branch, since both draw a Log out row.
+    expect(screen.getByRole("menu")).toHaveClass("w-60");
+  });
+
+  it("pins the patient menu unchanged in the patient shell", async () => {
+    await openInShell("patient", { kind: "stale-patient" });
+
+    // A9: the fix moves the *selection*, never the patient branch's content.
+    expectRows(PATIENT_ROWS, true);
+    expectRows(DOCTOR_ROWS, false);
+  });
+});
+
 // #567: a cheap negative guard on the one file that used to get this wrong.
 // The three behavioural tests above and AppShell's suite already prove the
 // direction; these only catch the specific shape coming back in a *different*
