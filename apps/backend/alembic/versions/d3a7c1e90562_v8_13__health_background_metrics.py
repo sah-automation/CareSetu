@@ -41,9 +41,15 @@ def upgrade() -> None:
                 CHECK (height_cm IS NULL OR (height_cm >= 30 AND height_cm <= 250)),
             CONSTRAINT ck_health_background_metrics_weight_kg
                 CHECK (weight_kg IS NULL OR (weight_kg >= 1 AND weight_kg <= 500))
-        );
+        )
+        """
+    )
+    # One statement per op.execute: asyncpg refuses a multi-statement string
+    # ("cannot insert multiple commands into a prepared statement").
+    op.execute(
+        """
         CREATE INDEX ix_health_background_metrics_series
-            ON health.health_background_metrics (identity_id, recorded_at DESC, id DESC);
+            ON health.health_background_metrics (identity_id, recorded_at DESC, id DESC)
         """
     )
 

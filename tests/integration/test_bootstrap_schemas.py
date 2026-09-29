@@ -74,6 +74,8 @@ EXPECTED_HEALTH_TABLES = {
     "health.health_record_entries",
     "health.health_record_access_history",
     "health.health_outbox",
+    "health.health_background_snapshots",
+    "health.health_background_metrics",
     "health.consumed_events",
 }
 

@@ -57,24 +57,33 @@ def migrated_schema(database_url: str) -> Iterator[None]:
     command.downgrade(config, "base")
 
 
-@pytest_asyncio.fixture
-async def clean_tables(database_url: str, migrated_schema: None) -> AsyncIterator[None]:
+_TABLES = (
+    "consent.consent_consents, "
+    "consent.consent_events, consent.consent_outbox, "
+    "health.health_patient_records, health.health_record_entries, "
+    "health.health_background_snapshots, "
+    "health.health_record_access_history, "
+    "consent.consent_egress_log CASCADE"
+)
+
+
+async def _truncate(database_url: str) -> None:
     engine = create_async_engine(database_url, poolclass=NullPool)
     try:
         async with engine.begin() as connection:
-            await connection.execute(
-                text(
-                    "TRUNCATE TABLE consent.consent_consents, "
-                    "consent.consent_events, consent.consent_outbox, "
-                    "health.health_patient_records, health.health_record_entries, "
-                    "health.health_background_snapshots, "
-                    "health.health_record_access_history, "
-                    "consent.consent_egress_log CASCADE"
-                )
-            )
+            await connection.execute(text(f"TRUNCATE TABLE {_TABLES}"))
     finally:
         await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def clean_tables(database_url: str, migrated_schema: None) -> AsyncIterator[None]:
+    # Truncate after the test as well as before: a leftover ``health_background``
+    # egress row would violate the pre-v8.11 CHECK when the module teardown
+    # downgrades to base, failing every sibling module that follows.
+    await _truncate(database_url)
     yield
+    await _truncate(database_url)
 
 
 def _facades(database_url: str) -> tuple[HealthFacade, ConsentFacade]:

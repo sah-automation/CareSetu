@@ -56,21 +56,33 @@ def migrated_schema(database_url: str) -> Iterator[None]:
     command.downgrade(config, "base")
 
 
-@pytest_asyncio.fixture
-async def clean_tables(database_url: str, migrated_schema: None) -> AsyncIterator[None]:
-    """Empty the consent tables before every test."""
+_TABLES = (
+    "consent.consent_consents, "
+    "consent.consent_events, consent.consent_outbox, "
+    "consent.consent_egress_log CASCADE"
+)
+
+
+async def _truncate(database_url: str) -> None:
     engine = create_async_engine(database_url, poolclass=NullPool)
     try:
         async with engine.begin() as connection:
-            await connection.execute(
-                text(
-                    "TRUNCATE TABLE consent.consent_consents, "
-                    "consent.consent_events, consent.consent_outbox CASCADE"
-                )
-            )
+            await connection.execute(text(f"TRUNCATE TABLE {_TABLES}"))
     finally:
         await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def clean_tables(database_url: str, migrated_schema: None) -> AsyncIterator[None]:
+    """Empty the consent tables around every test.
+
+    The post-yield truncate matters: a live ``health_background`` grant left in
+    ``consent_consents`` violates the pre-v8.11 CHECK when this module's
+    teardown downgrades to base.
+    """
+    await _truncate(database_url)
     yield
+    await _truncate(database_url)
 
 
 def _facade(database_url: str) -> ConsentFacade:
