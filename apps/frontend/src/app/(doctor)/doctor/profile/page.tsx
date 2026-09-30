@@ -20,10 +20,24 @@
 // server answer so neither a late hydration nor an unrelated re-render discards
 // what the doctor is typing.
 
+// #605: the page's editable fields are now one `useSectionEditBuffer` per
+// section and the saving section renders through the reusable
+// `ProfileSectionShell`, so the in-flight-edit discipline that used to be
+// written out inline here is stated once, in the buffer, and a future section
+// inherits it instead of restating it. What stays on the page is what is
+// specific to this surface: the whole-form request builder, its validation pass,
+// the partial-field `adoptRef` seam and the per-attempt idempotency keys.
+
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 
+import {
+  ProfileSectionShell,
+  type SectionFailure,
+  type SectionSaveResult,
+} from "@/components/doctor/profile/ProfileSectionShell";
+import { useSectionEditBuffer } from "@/components/doctor/profile/useSectionEditBuffer";
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { formatFeePaise } from "@/components/pick/DoctorPickCard";
@@ -49,14 +63,6 @@ import { useLang } from "@/lib/i18n/LangContext";
 import { updateConsultationFee } from "@/lib/partner/api";
 import { useProfilePhotoSource } from "@/lib/profile/useProfilePhotoSource";
 import { cn } from "@/lib/utils";
-
-/**
- * A failed mutation, carrying the API trace id when the failure came from the
- * API so support can correlate it (ErrorBanner falls back to a client id).
- */
-interface Failure {
-  traceId?: string;
-}
 
 // The private PUT is a whole-form write, not a patch: the backend requires the
 // practice address and coordinates on every call and bounds every field
@@ -318,7 +324,7 @@ interface PhotoCardProps {
   /** The backend answered this ref has no media behind it, so there is nothing to remove. */
   mediaAbsent: boolean;
   busy: boolean;
-  failure: Failure | null;
+  failure: SectionFailure | null;
   onPick: (file: File) => void;
   onRemove: () => void;
   onDismissFailure: () => void;
@@ -498,25 +504,22 @@ function CredentialsCard({ profile }: CredentialsCardProps) {
 interface DetailsFormProps {
   form: ProfileForm;
   invalid: ProfileField[];
-  saving: boolean;
-  saved: boolean;
-  failure: Failure | null;
+  dirty: boolean;
+  /** The buffer's edit count, so the shell can outdate a stale confirmation. */
+  edits: number;
   onChange: (patch: Partial<ProfileForm>) => void;
   onToggle: (key: NotificationKey, value: boolean) => void;
-  onSubmit: () => void;
-  onDismissFailure: () => void;
+  onSave: () => Promise<SectionSaveResult>;
 }
 
 function DetailsForm({
   form,
   invalid,
-  saving,
-  saved,
-  failure,
+  dirty,
+  edits,
   onChange,
   onToggle,
-  onSubmit,
-  onDismissFailure,
+  onSave,
 }: DetailsFormProps) {
   const { lang } = useLang();
   const t = STRINGS[lang].doctorProfile;
@@ -525,21 +528,23 @@ function DetailsForm({
     cn(inputClassName, isInvalid(field) && "border-danger");
 
   return (
-    <form
-      className="rounded-lg border border-hairline bg-surface p-4"
-      data-testid="profile-details-form"
-      // The page owns its own validation pass and renders one message for the
-      // offending fields, so the browser's constraint bubbles must not preempt
-      // the submit (and silently swallow the attempt).
-      noValidate
-      onSubmit={(event) => {
-        event.preventDefault();
-        onSubmit();
+    <ProfileSectionShell
+      title={t.detailsHeading}
+      testId="profile-details-form"
+      save={{
+        onSave,
+        dirty,
+        edits,
+        label: t.save,
+        savedLabel: t.saved,
+        unsavedLabel: t.unsavedChanges,
+        failureMessage: t.saveFailed,
+        buttonTestId: "profile-save",
+        savedTestId: "profile-saved",
+        unsavedTestId: "profile-unsaved",
       }}
     >
-      <h2 className="text-sm font-semibold text-txt">{t.detailsHeading}</h2>
-
-      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+      <div className="grid gap-3 sm:grid-cols-2">
         <Field id="profile-practice-name" label={t.practiceNameLabel}>
           <input
             id="profile-practice-name"
@@ -694,32 +699,6 @@ function DetailsForm({
         ))}
       </ul>
 
-      <div className="mt-4 flex items-center gap-2">
-        <Button
-          type="submit"
-          size="sm"
-          disabled={saving}
-          loading={saving}
-          data-testid="profile-save"
-        >
-          {t.save}
-        </Button>
-        {saved && (
-          <p className="text-sm text-success" data-testid="profile-saved">
-            {t.saved}
-          </p>
-        )}
-      </div>
-
-      {failure && (
-        <ErrorBanner
-          message={t.saveFailed}
-          traceId={failure.traceId}
-          onRetry={onSubmit}
-          onDismiss={onDismissFailure}
-        />
-      )}
-
       {invalid.length > 0 && (
         <p
           className="mt-2 text-sm text-danger"
@@ -729,7 +708,7 @@ function DetailsForm({
           {t.invalidFields}
         </p>
       )}
-    </form>
+    </ProfileSectionShell>
   );
 }
 
@@ -746,7 +725,7 @@ function FeeEditor({ feePaise, onFeeSaved }: FeeEditorProps) {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [invalid, setInvalid] = useState(false);
-  const [failure, setFailure] = useState<Failure | null>(null);
+  const [failure, setFailure] = useState<SectionFailure | null>(null);
   // One idempotency key per attempt, so a retry of the same amount cannot be
   // written twice; a new amount mints a new one.
   const attemptKey = useRef<string | null>(null);
@@ -907,42 +886,28 @@ export default function DoctorProfilePage() {
   // reads the same projection - so the two can never drift.
   const { profile, status, errorTraceId, reload, adoptProfile } =
     useDoctorProfile();
-  const [form, setForm] = useState<ProfileForm | null>(null);
   const [bannerOpen, setBannerOpen] = useState(false);
 
   const [photoBusy, setPhotoBusy] = useState(false);
-  const [photoFailure, setPhotoFailure] = useState<Failure | null>(null);
+  const [photoFailure, setPhotoFailure] = useState<SectionFailure | null>(null);
 
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [saveFailure, setSaveFailure] = useState<Failure | null>(null);
   const [invalid, setInvalid] = useState<ProfileField[]>([]);
   // One idempotency key per user attempt: a retry of the same attempt reuses it
   // (so a lost response cannot write twice), and an edit starts a new attempt.
+  // The key stays with the request builder rather than moving into the section
+  // shell, because the shell owns no transport - it owns only the button.
   const saveAttemptKey = useRef<string | null>(null);
   const removeAttemptKey = useRef<string | null>(null);
 
-  // The editable fields are an in-flight edit buffer, so they stay here rather
-  // than in the shared source. The guard is object identity: the buffer is seeded
-  // once per *distinct* server answer, so a re-render, a parent re-render or a
-  // late-hydrating projection cannot discard what the doctor is typing. A genuinely
-  // new answer - the hydration, a retry, a save's own reply - would reseed on
-  // identity alone, and that is the one case identity cannot decide: a save's
-  // reply typically lands after the doctor has carried on typing, and a retry can
-  // land at any moment. Reseeding then throws those keystrokes away for a fact the
-  // doctor has already been told. So while the buffer is dirty the doctor's
-  // intent outranks every answer, and the buffer is seeded again only once it is
-  // clean (REQ story 16: typing survives a profile that is still loading or
-  // reloading).
-  const seededFrom = useRef<DoctorProfileView | null>(null);
-  const bufferDirty = useRef(false);
-  useEffect(() => {
-    if (profile == null) return;
-    if (seededFrom.current === profile) return;
-    if (bufferDirty.current) return;
-    seededFrom.current = profile;
-    setForm(formFromProfile(profile));
-  }, [profile]);
+  // #605: the editable fields are one in-flight edit buffer, seeded from the
+  // shared projection and holding nothing else. The buffer owns the discipline
+  // that made an in-flight edit safe - seeded once per distinct server answer by
+  // object identity, never reseeded while the doctor is typing, and never
+  // reseeded by a save's own reply - so the reasoning lives with the rule rather
+  // than in this page's render (REQ story 16: typing survives a profile that is
+  // still loading or reloading).
+  const formBuffer = useSectionEditBuffer(profile, formFromProfile);
+  const { value: form } = formBuffer;
 
   // The newest projection, mirrored out of the render so the partial edits below
   // merge onto it rather than onto whatever this render happened to close over.
@@ -988,37 +953,25 @@ export default function DoctorProfilePage() {
     if (status === "error") setBannerOpen(true);
   }, [status]);
 
+  // One edit seam for the whole section, so the idempotency key is cleared in
+  // exactly one place: a fresh edit is a fresh attempt, and nothing else is.
   function changeForm(patch: Partial<ProfileForm>) {
-    bufferDirty.current = true;
-    setForm((current) => (current ? { ...current, ...patch } : current));
-    setSaved(false);
-    setSaveFailure(null);
+    formBuffer.change(patch);
     saveAttemptKey.current = null;
   }
 
   function toggleNotification(key: NotificationKey, value: boolean) {
-    bufferDirty.current = true;
-    setForm((current) =>
-      current
-        ? {
-            ...current,
-            notifications: { ...current.notifications, [key]: value },
-          }
-        : current,
-    );
-    setSaved(false);
-    setSaveFailure(null);
-    saveAttemptKey.current = null;
+    if (form == null) return;
+    changeForm({
+      notifications: { ...form.notifications, [key]: value },
+    });
   }
 
-  async function saveProfile() {
-    if (form == null) return;
+  async function saveProfile(): Promise<SectionSaveResult> {
+    if (form == null) return { status: "declined" };
     const problems = invalidFields(form);
     setInvalid(problems);
-    if (problems.length > 0) return;
-    setSaving(true);
-    setSaved(false);
-    setSaveFailure(null);
+    if (problems.length > 0) return { status: "declined" };
     const attemptKey = saveAttemptKey.current ?? idempotencyKey();
     saveAttemptKey.current = attemptKey;
     try {
@@ -1030,16 +983,18 @@ export default function DoctorProfilePage() {
       // menu's identity header names this doctor by.
       adoptProfile(await updateDoctorProfile(updateFromForm(form), attemptKey));
       saveAttemptKey.current = null;
-      // The reply does not clear the dirty flag: it is the same answer the buffer
-      // already holds, so there is nothing to reseed from, and a doctor who kept
-      // typing across the save must not lose those keystrokes to it.
-      setSaved(true);
+      // The reply does not clear the buffer's dirty flag, and the buffer is what
+      // decides whether a late answer may reseed: it is the same answer the
+      // buffer already holds, so there is nothing to reseed from, and a doctor
+      // who kept typing across the save must not lose those keystrokes to it.
+      return { status: "saved" };
     } catch (err) {
-      setSaveFailure({
-        traceId: err instanceof ApiError ? err.traceId : undefined,
-      });
-    } finally {
-      setSaving(false);
+      return {
+        status: "failed",
+        failure: {
+          traceId: err instanceof ApiError ? err.traceId : undefined,
+        },
+      };
     }
   }
 
@@ -1162,13 +1117,11 @@ export default function DoctorProfilePage() {
           <DetailsForm
             form={form}
             invalid={invalid}
-            saving={saving}
-            saved={saved}
-            failure={saveFailure}
+            dirty={formBuffer.dirty}
+            edits={formBuffer.edits}
             onChange={changeForm}
             onToggle={toggleNotification}
-            onSubmit={() => void saveProfile()}
-            onDismissFailure={() => setSaveFailure(null)}
+            onSave={saveProfile}
           />
 
           <FeeEditor

@@ -1516,6 +1516,10 @@ const en = {
     },
     save: "Save changes",
     saved: "Profile saved.",
+    // #605: the reusable section shell's dirty hint - the only copy the shell
+    // presents that no section owns, so it ships here in both locales like the
+    // rest of the surface.
+    unsavedChanges: "Unsaved changes",
     saveFailed: "Could not save your profile.",
     invalidFields: "Check the highlighted fields and try again.",
     publicPreviewHeading: "Public profile",
@@ -3128,6 +3132,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
       },
       save: "बदलाव सहेजें",
       saved: "प्रोफ़ाइल सहेजी गई।",
+      unsavedChanges: "असहेजे बदलाव",
       saveFailed: "आपकी प्रोफ़ाइल सहेजी नहीं जा सकी।",
       invalidFields: "चिह्नित फ़ील्ड जाँचें और फिर कोशिश करें।",
       publicPreviewHeading: "सार्वजनिक प्रोफ़ाइल",
