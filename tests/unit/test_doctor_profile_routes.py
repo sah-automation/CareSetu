@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.config import Settings
@@ -180,8 +181,6 @@ def test_put_doctor_profile_updates_editable_fields_for_active_doctor() -> None:
     body = {
         "practice_name": "Shanti Clinic",
         "practice_address": "Main Road, Daltonganj",
-        "practice_latitude": 24.483,
-        "practice_longitude": 87.433,
         "experience_years": 12,
         "languages": ["English", "Hindi"],
         "about": "Primary care physician.",
@@ -199,14 +198,44 @@ def test_put_doctor_profile_updates_editable_fields_for_active_doctor() -> None:
     assert update.model_dump(mode="json") == body
 
 
+@pytest.mark.parametrize(
+    "rejected",
+    [
+        {"practice_latitude": 24.483},
+        {"practice_longitude": 87.433},
+        {"practice_latitude": 24.483, "practice_longitude": 87.433},
+    ],
+    ids=["latitude", "longitude", "both"],
+)
+def test_put_doctor_profile_rejects_client_supplied_coordinates(
+    rejected: dict[str, float],
+) -> None:
+    """#606: the practice position is server-written only, and this is the proof.
+
+    ``DoctorProfileUpdate`` is ``extra="forbid"``, so dropping the two coordinate
+    fields from it turns "a client can no longer supply them" from a documentation
+    change into a live 422 rather than a silent write. Both columns stay NOT NULL
+    in the database; #609 derives them from the declared PIN.
+
+    Until the whole-form write is retired by #611 the shipped profile page still
+    sends both on every save, so this rejects every save from the real client.
+    That window is the intended loud failure - accepting and discarding the field
+    would tell a doctor their coordinates saved when they did not.
+    """
+    facade = StubPartnerFacade()
+    client = _client(facade)
+    body = {"practice_address": "Main Road, Daltonganj", **rejected}
+
+    response = client.put("/v1/doctor/profile", json=body, headers=_bearer(_token()))
+
+    assert response.status_code == 422
+    assert facade.update_calls == []
+
+
 def test_profile_idempotency_key_is_scoped_to_the_doctor() -> None:
     facade = StubPartnerFacade()
     client = _client(facade)
-    body = {
-        "practice_address": "Main Road, Daltonganj",
-        "practice_latitude": 24.483,
-        "practice_longitude": 87.433,
-    }
+    body = {"practice_address": "Main Road, Daltonganj"}
     first_headers = {
         **_bearer(_token()),
         "Idempotency-Key": "shared-profile-key",

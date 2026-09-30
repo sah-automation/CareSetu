@@ -20,6 +20,7 @@ from __future__ import annotations
 from enum import StrEnum
 
 import pytest
+from sqlalchemy.dialects.postgresql import JSONB
 
 from modules.partner.domain.exceptions import (
     InvalidConsultingDayError,
@@ -36,7 +37,7 @@ from modules.partner.domain.vocabularies import (
     require_specialties,
     require_specialty,
 )
-from modules.partner.schema.models import partner_directory_index
+from modules.partner.schema.models import partner_directory_index, partner_profiles
 
 #: The four values the retired ``ck_partner_directory_index_specialty`` CHECK
 #: accepted. They stay members so no existing meaning is lost; #606 replaces
@@ -170,13 +171,19 @@ def test_require_consulting_days_rejects_a_repeated_member() -> None:
         require_consulting_days(["Monday", "Monday"])
 
 
-def test_every_specialty_fits_the_directory_index_column() -> None:
-    # The widened pick-list must not need a wider column than the one the
-    # applied migration created, so the width is read off the table rather than
-    # copied here. #606 is the ticket that may change either side.
-    width = partner_directory_index.c.specialty.type.length
-    assert width is not None
-    assert all(len(member.value) <= width for member in Specialty)
+def test_directory_index_specialty_holds_a_whole_selection() -> None:
+    # #606 widened the directory entry's specialty column to the multi-valued
+    # JSONB array the profile's own ``specialties`` uses. The pre-#606 form of
+    # this test read ``column.type.length`` to prove the widened pick-list fit
+    # the applied VARCHAR(40); that question is now vacuous, because the column
+    # is no longer sized per value at all - a selection of all twenty members is
+    # exactly what it is for. Pinned so a silent narrowing back to a scalar column
+    # cannot reintroduce a width the vocabulary outgrew.
+    assert isinstance(partner_directory_index.c.specialty.type, JSONB)
+    # The same shape as the profile's own selection, which is what lets #607 copy
+    # one into the other with no conversion and what makes one membership rule
+    # serve both columns.
+    assert isinstance(partner_profiles.c.specialties.type, JSONB)
 
 
 def test_require_specialties_accepts_known_values() -> None:

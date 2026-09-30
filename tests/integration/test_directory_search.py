@@ -27,7 +27,8 @@ Requires the native PostgreSQL; the suite skips cleanly when unreachable.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterator
+import json
+from collections.abc import AsyncIterator, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from itertools import count
 from pathlib import Path
@@ -146,20 +147,31 @@ async def _execute(database_url: str, sql: str, params: dict[str, Any]) -> None:
         await engine.dispose()
 
 
-async def _seed_specialty(database_url: str, partner_id: int, specialty: str) -> None:
-    """Publish a doctor's closed pick-list specialty onto its index entry (#459).
+async def _seed_specialty(
+    database_url: str,
+    partner_id: int,
+    specialty: str | Sequence[str],
+) -> None:
+    """Publish a doctor's declared specialty selection onto its index entry (#459, #606).
 
-    The activation seam (#456) creates the partner's ``directory_index`` row
-    with ``specialty = NULL`` (no profile specialty source exists yet), so no
-    writer seam publishes the value. Seeding the single column on that
-    seam-created row is a legitimate data-field seed, not a hand-written index
-    row - the row itself always comes from operator approval.
+    The activation seam (#456) creates the partner's ``directory_index`` row with
+    no specialty (no profile specialty source existed when it shipped, and #607
+    adds the writer that copies the profile's selection here), so no writer seam
+    publishes the value. Seeding the single column on that seam-created row is a
+    legitimate data-field seed, not a hand-written index row - the row itself
+    always comes from operator approval.
+
+    Since #606 the column is a multi-valued JSONB selection, so the seed writes an
+    ARRAY. A single value seeds a one-member selection, which is exactly the
+    pre-#606 meaning; pass several to seed a doctor who practises more than one
+    kind of care, which is what the search's membership predicate matches on.
     """
+    selection = [specialty] if isinstance(specialty, str) else list(specialty)
     await _execute(
         database_url,
-        "UPDATE partner.partner_directory_index SET specialty = :specialty "
+        "UPDATE partner.partner_directory_index SET specialty = CAST(:specialty AS jsonb) "
         "WHERE partner_id = :partner_id",
-        {"partner_id": partner_id, "specialty": specialty},
+        {"partner_id": partner_id, "specialty": json.dumps(selection)},
     )
 
 
@@ -403,6 +415,51 @@ async def test_search_composes_partner_type_specialty_and_free_text(
 
     composed = await partner.search_directory(query="mehta", partner_type="doctor")
     assert [e.practice_name for e in composed.items] == ["Mehta Children's Clinic"]
+
+
+@pytest.mark.asyncio
+async def test_specialty_filter_matches_any_member_of_a_multi_valued_column(
+    database_url: str, clean_partner: None, tmp_path: Path
+) -> None:
+    """#606: the filter overlaps the doctor's whole selection, not one value.
+
+    The directory entry's ``specialty`` column widened from a single label to a
+    multi-valued selection, and this is the proof the search still filters on it:
+    a doctor who declares two specialties matches a request for EITHER one, and
+    not a request for a third. Before #606 this column could hold one value at
+    all, so the assertion that a second declared specialty is findable is only
+    expressible now.
+
+    The request side stays a single specialty - that is #612's to widen - so this
+    pins the narrow, honest form of the overlap: one requested value, matched as
+    a member of the stored set.
+    """
+    _, partner = _facade(database_url, tmp_path)
+    await _activate_partner(
+        database_url,
+        partner,
+        practice_name="Sharma Clinic and Sons",
+        specialty=["General Physician", "Pediatrician"],
+    )
+    await _activate_partner(
+        database_url,
+        partner,
+        practice_name="Solo Dentist",
+        specialty=["Dentist"],
+    )
+
+    for requested, expected in (
+        ("General Physician", "Sharma Clinic and Sons"),
+        ("Pediatrician", "Sharma Clinic and Sons"),
+        ("Dentist", "Solo Dentist"),
+    ):
+        matched = await partner.search_directory(specialty=requested)
+        assert [e.practice_name for e in matched.items] == [expected], requested
+
+    # A value the doctor did not declare matches nothing, rather than the filter
+    # falling back to "any doctor".
+    unmatched = await partner.search_directory(specialty="Psychiatrist")
+    assert unmatched.items == []
 
 
 @pytest.mark.asyncio

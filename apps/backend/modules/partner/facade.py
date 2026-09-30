@@ -267,6 +267,9 @@ from modules.partner.shared import (
 from modules.partner.shared import (
     load_profile_by_identity as _load_profile_by_identity,
 )
+from modules.partner.shared import (
+    representative_specialty as _representative_specialty,
+)
 from modules.profile_media.facade import (
     DOCTOR_PREFIX,
     ProfileMediaStore,
@@ -1072,7 +1075,7 @@ class PartnerFacade:
             partner_id=int(row.partner_id),
             photo_ref=row.photo_ref,
             practice_name=row.practice_name,
-            specialty=row.specialty,
+            specialty=_representative_specialty(row.specialty),
             verified=eligibility.has_any and not eligibility.has_invalid,
             practice_address=str(row.practice_address),
             practice_latitude=float(row.practice_latitude),

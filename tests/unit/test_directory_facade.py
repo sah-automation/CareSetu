@@ -130,7 +130,10 @@ def _entry_row(*, partner_id: int, area_name: Any = None) -> _Row:
         partner_id=partner_id,
         practice_name=f"Practice {partner_id}",
         partner_type="doctor",
-        specialty="General Physician" if partner_id % 2 else None,
+        # A JSONB array, as the widened multi-valued column decodes (#606), and
+        # NULL for an even partner - the shape that still says "carries no
+        # specialty", which is what a lab/chemist entry carries.
+        specialty=["General Physician"] if partner_id % 2 else None,
         area_name=area_name,
         distance_km=3.5,
     )
@@ -277,7 +280,7 @@ async def test_get_provider_profile_projects_the_verified_safe_payload() -> None
                     partner_id=3,
                     practice_name="Healing Hands",
                     partner_type="doctor",
-                    specialty="Dentist",
+                    specialty=["Dentist"],
                     area_name="DALTONGANJ",
                 )
             ),

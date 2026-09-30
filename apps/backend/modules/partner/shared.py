@@ -109,6 +109,42 @@ class DirectoryCachePort(Protocol):
 DEFAULT_SERVICE_AREA_NAME = "Daltonganj"
 
 
+def representative_specialty(raw: object) -> str | None:
+    """Project a multi-valued specialty selection onto one representative value.
+
+    The directory entry's ``specialty`` column became a multi-valued selection in
+    #606, because a doctor practises more than one kind of care and the overlap
+    search (#612) matches on membership. Three projections still declare the field
+    as a single nullable string - the private doctor profile view and, through
+    it, the provider profile view and the directory browse entry - and each is
+    owned by a later ticket that widens it deliberately: #608 sources the private
+    view from the profile row and returns the whole selection, #612 decides
+    whether the browse projection widens, #613 owns the public one.
+
+    Until then this is the one place those three readers agree on what a
+    selection projects to: the FIRST member, or ``None`` for an empty selection
+    and for a lab or chemist row, whose directory entry carries no specialty at
+    all. Order is the selection's own, so the value is the doctor's first
+    declared specialty rather than an alphabetical or arbitrary one.
+
+    Defensive by design, because the value arrives off the driver as whatever
+    asyncpg decoded: a JSONB array arrives as a list, ``NULL`` as ``None``, and a
+    non-array JSONB scalar - which nothing writes, but a hand-repaired row might -
+    is not silently rendered as its own text repr. The first member that is a
+    non-empty string wins, so a junk member cannot swallow a real one and hide a
+    doctor from their own specialty search; a value that is not a list or tuple,
+    or a list with no usable member, projects to ``None``, so a malformed row
+    reads as "no specialty" rather than leaking a Python ``repr`` into a response
+    field.
+    """
+    if isinstance(raw, (str, bytes)) or not isinstance(raw, (list, tuple)):
+        return None
+    for member in raw:
+        if isinstance(member, str) and member:
+            return member
+    return None
+
+
 @dataclass(frozen=True)
 class Profile:
     """One ``partner_profiles`` row, converted off the driver."""

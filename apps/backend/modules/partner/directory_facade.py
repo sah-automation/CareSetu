@@ -35,7 +35,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import Text, cast, func, literal, select
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from bus.outbox_writer import write_outbox
@@ -69,6 +70,7 @@ from modules.partner.shared import (
     PARTNER_SCHEMA,
     CredentialValidityPort,
     DirectoryCachePort,
+    representative_specialty,
 )
 
 # The peri-urban scope of the Phase-6 launch directory (FEAT-004, REQ-008):
@@ -224,9 +226,27 @@ class DirectoryFacade:
                 conditions.append(partner_directory_index.c.partner_type == partner_type)
             if specialty is not None:
                 # Specialty is doctors-only (closed pick-list, glossary); a
-                # lab/chemist row never carries one, so pin the type too.
+                # lab/chemist row never carries one, so pin the type too. The pin
+                # is load-bearing rather than a nicety: since #606 the column is a
+                # multi-valued selection and a non-doctor row could physically
+                # carry an array, so "labs carry no specialty" is no longer a
+                # database guarantee and this explicit condition is the mechanism.
                 conditions.append(partner_directory_index.c.partner_type == "doctor")
-                conditions.append(partner_directory_index.c.specialty == specialty)
+                # The column is a multi-valued selection (#606), so an equality
+                # comparison against a JSONB column would ask PostgreSQL an
+                # operator question it answers "no operator". ``?|`` is the JSONB
+                # membership test: the requested specialty is one value, the
+                # column holds the doctor's full set, and the row matches when the
+                # value is one of its members. NULL and ``[]`` both fail, which is
+                # the same answer the pre-#606 equality gave for an unset column.
+                # #612 owns the request-side widening (a list of specialties) and
+                # the projection decision; this keeps the scalar-request contract
+                # working against the new column shape.
+                conditions.append(
+                    partner_directory_index.c.specialty.op("?|")(
+                        cast(literal([specialty]), ARRAY(Text))
+                    )
+                )
             if query and query.strip():
                 conditions.append(partner_profiles.c.practice_name.ilike(f"%{query.strip()}%"))
             if peri_urban_only:
@@ -294,7 +314,7 @@ class DirectoryFacade:
                         str(row.practice_name) if row.practice_name is not None else None
                     ),
                     partner_type=str(row.partner_type),
-                    specialty=str(row.specialty) if row.specialty is not None else None,
+                    specialty=representative_specialty(row.specialty),
                     area=(
                         str(row.area_name)
                         if row.area_name is not None
@@ -418,7 +438,7 @@ class DirectoryFacade:
             partner_id=int(row.partner_id),
             practice_name=(str(row.practice_name) if row.practice_name is not None else None),
             partner_type=str(row.partner_type),
-            specialty=(str(row.specialty) if row.specialty is not None else None),
+            specialty=representative_specialty(row.specialty),
             area=(str(row.area_name) if row.area_name is not None else DEFAULT_SERVICE_AREA_NAME),
             verified=True,
             consultation_fee=_row_fee_paise(row),

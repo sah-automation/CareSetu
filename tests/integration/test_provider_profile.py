@@ -22,6 +22,7 @@ Requires the native PostgreSQL; the suite skips cleanly when unreachable.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 from itertools import count
@@ -159,20 +160,25 @@ async def _seed_partner(
                 },
             )
             if indexed:
+                # The specialty column is a multi-valued JSONB selection since
+                # #606, so a single seeded value is written as a one-member array
+                # - the pre-#606 meaning, preserved. NULL stays NULL: that is how
+                # a directory entry still says "carries no specialty", which is
+                # what the lab/chemist rows below rely on.
                 await connection.execute(
                     text(
                         "INSERT INTO partner.partner_directory_index "
                         "(partner_id, practice_latitude, practice_longitude, partner_type, "
                         " specialty, is_active) "
                         "VALUES (:partner_id, :latitude, :longitude, :partner_type, "
-                        " :specialty, :is_active)"
+                        " CAST(:specialty AS jsonb), :is_active)"
                     ),
                     {
                         "partner_id": partner_id,
                         "latitude": DALTONGANJ_LATITUDE,
                         "longitude": DALTONGANJ_LONGITUDE,
                         "partner_type": partner_type,
-                        "specialty": specialty,
+                        "specialty": (None if specialty is None else json.dumps([specialty])),
                         "is_active": is_active,
                     },
                 )

@@ -114,7 +114,7 @@ async def test_get_doctor_profile_projects_private_fields_and_derived_status() -
                     status="Active",
                     photo_ref="doctor/12/photo.enc",
                     practice_name="Shanti Clinic",
-                    specialty="General Physician",
+                    specialty=["General Physician"],
                     practice_address="Main Road, Daltonganj",
                     practice_latitude=24.483,
                     practice_longitude=87.433,
@@ -185,8 +185,6 @@ async def test_update_doctor_profile_writes_the_private_row_only() -> None:
     update = DoctorProfileUpdate(
         practice_name="Shanti Clinic",
         practice_address="Main Road, Daltonganj",
-        practice_latitude=24.483,
-        practice_longitude=87.433,
         experience_years=12,
         languages=["English", "Hindi"],
         about="Primary care physician.",
@@ -204,7 +202,7 @@ async def test_update_doctor_profile_writes_the_private_row_only() -> None:
                     status="Active",
                     photo_ref=None,
                     practice_name="Shanti Clinic",
-                    specialty="General Physician",
+                    specialty=["General Physician"],
                     practice_address="Main Road, Daltonganj",
                     practice_latitude=24.483,
                     practice_longitude=87.433,
@@ -242,10 +240,18 @@ async def test_update_doctor_profile_writes_the_private_row_only() -> None:
     profile_update = statements[1]
     assert profile_update.table.name == "partner_profiles"
     assert profile_update._values["practice_name"].value == "Shanti Clinic"
-    assert profile_update._values["practice_latitude"].value == 24.483
-    assert profile_update._values["practice_longitude"].value == 87.433
     assert profile_update._values["languages"].value == ["English", "Hindi"]
     assert "consultation_fee_paise" not in profile_update._values
+    # #606: the practice position is server-written only. The update model no
+    # longer carries the coordinate fields, and ``update.model_dump()`` is the
+    # exact mechanism that turns each model field into a written column - so a
+    # field that is gone from the model silently stops being written, with no
+    # other code change. Asserted as ABSENCE rather than a value, because that is
+    # the property: these columns stay NOT NULL in the database (registration
+    # writes them, #609 derives them from the declared PIN) and this write does
+    # not touch them.
+    assert "practice_latitude" not in profile_update._values
+    assert "practice_longitude" not in profile_update._values
     # The public directory entry is read-only to the doctor in this batch: a
     # private profile save must not touch the row ``search_directory`` reads.
     written_tables = {
@@ -286,8 +292,6 @@ async def test_registered_doctor_cannot_read_or_update_profile() -> None:
             12,
             DoctorProfileUpdate(
                 practice_address="Main Road",
-                practice_latitude=24.483,
-                practice_longitude=87.433,
             ),
         )
 
