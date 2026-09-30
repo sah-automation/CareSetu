@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from modules.partner.directory_facade import PERI_URBAN_RADIUS_KM
 from modules.partner.doctor_profile_models import (
+    DoctorProfileAddressUpdate,
     DoctorProfilePracticeUpdate,
     DoctorProfileUpdate,
 )
-from modules.partner.domain.exceptions import InvalidSpecialtyError
+from modules.partner.domain.exceptions import InvalidSpecialtyError, PracticePinUnresolvedError
+from modules.partner.domain.practice_position import PinResolutionReason
 from modules.partner.domain.vocabularies import Specialty
 from modules.partner.facade import (
     DoctorProfileNotAllowedError,
@@ -125,6 +129,15 @@ async def test_get_doctor_profile_projects_private_fields_and_derived_status() -
                     # outer-joined from the directory entry.
                     specialties=["Pediatrician", "General Physician"],
                     practice_address="Main Road, Daltonganj",
+                    # #609: a registration-era row carries only the display column.
+                    # The structured parts read empty rather than being parsed back
+                    # out of the assembled string, which is what makes the projection
+                    # honest about what was actually declared.
+                    address_line=None,
+                    address_landmark=None,
+                    address_locality=None,
+                    address_city=None,
+                    address_pin=None,
                     practice_latitude=24.483,
                     practice_longitude=87.433,
                     area_name="Daltonganj",
@@ -215,6 +228,11 @@ async def test_update_doctor_profile_writes_the_private_row_only() -> None:
                     clinic_name="Shanti Clinic",
                     specialties=["Pediatrician", "General Physician"],
                     practice_address="Main Road, Daltonganj",
+                    address_line=None,
+                    address_landmark=None,
+                    address_locality=None,
+                    address_city=None,
+                    address_pin=None,
                     practice_latitude=24.483,
                     practice_longitude=87.433,
                     area_name="Daltonganj",
@@ -286,6 +304,11 @@ def _practice_read_back_row() -> _Row:
         clinic_name="Shanti Clinic",
         specialties=["Pediatrician", "General Physician"],
         practice_address="Main Road, Daltonganj",
+        address_line=None,
+        address_landmark=None,
+        address_locality=None,
+        address_city=None,
+        address_pin=None,
         practice_latitude=24.483,
         practice_longitude=87.433,
         area_name="Daltonganj",
@@ -485,6 +508,293 @@ def test_practice_update_names_the_member_an_oversized_selection_broke() -> None
         ).specialties
         == every_member
     )
+
+
+@pytest.mark.asyncio
+async def test_update_doctor_address_resolves_the_pin_and_writes_the_derived_position() -> None:
+    """#609: the position is DERIVED from the declared PIN, never supplied.
+
+    The four statements are the write's whole contract, in order:
+
+    1. the row-locked active-doctor recheck, so a deactivation landing after the
+       edge guard cannot slip past it;
+    2. the one indexed primary-key hit on the bundled centroid table;
+    3. the profile write - the declared parts, the assembled display string and
+       the resolved coordinates;
+    4. the shared directory-entry refresh, INSIDE this transaction, so the entry
+       reads the position this statement just wrote (it reads the profile row by
+       ``INSERT ... FROM SELECT``, which is the whole correctness argument for
+       doing both in one transaction).
+
+    ``written_tables`` naming both tables is the assertion that the listing
+    actually moved: a profile-only write would leave ``search_directory``
+    returning the old position until the entry's next refresh.
+    """
+    update = DoctorProfileAddressUpdate(
+        address_line="12 Main Road",
+        landmark="Near the water tower",
+        locality="Daltonganj",
+        city="Daltonganj",
+        pin_code="826001",
+    )
+    connection = _connection(
+        [
+            _Result(row=_Row(partner_type="doctor", status="Active")),
+            _Result(row=_centroid_row("826001", 24.05, 84.09)),
+            _Result(),
+            _Result(),
+            _Result(row=_address_read_back_row()),
+            _Result(rows=[]),
+        ]
+    )
+    facade = _facade(connection)
+
+    profile = await facade.update_doctor_address(12, update)
+
+    assert profile.address_line == "12 Main Road"
+    assert profile.pin_code == "826001"
+    assert profile.practice_address == (
+        "12 Main Road, Near the water tower, Daltonganj, Daltonganj, 826001"
+    )
+    assert profile.practice_latitude == pytest.approx(24.05)
+    assert profile.practice_longitude == pytest.approx(84.09)
+
+    statements = [call.args[0] for call in connection.execute.await_args_list]
+    recheck, centroid_lookup, profile_update, refresh = statements[:4]
+    assert "FOR UPDATE" in str(recheck)
+    # The lookup is an exact primary-key hit bound to the code the doctor declared,
+    # and it asks for the three columns the decision needs - nothing else off the
+    # reference row.
+    assert "partner.partner_pin_centroids.pin = :" in str(centroid_lookup)
+    assert next(iter(centroid_lookup.compile().params.values())) == "826001"
+    written_tables = {
+        statement.table.name
+        for statement in statements
+        if getattr(statement, "table", None) is not None
+    }
+    assert written_tables == {"partner_profiles", "partner_directory_index"}
+    assert profile_update.table.name == "partner_profiles"
+    assert refresh.table.name == "partner_directory_index"
+    assert set(profile_update._values) == {
+        "address_line",
+        "address_landmark",
+        "address_locality",
+        "address_city",
+        "address_pin",
+        "practice_address",
+        "practice_latitude",
+        "practice_longitude",
+        "updated_at",
+    }
+    assert profile_update._values["address_pin"].value == "826001"
+    assert profile_update._values["practice_address"].value == profile.practice_address
+    # The derived position is the centroid's own point, in the columns' own
+    # precision - not rounded, snapped or re-geocoded.
+    assert float(profile_update._values["practice_latitude"].value) == pytest.approx(24.05)
+    assert float(profile_update._values["practice_longitude"].value) == pytest.approx(84.09)
+    # Nothing outside this card moves: no name, no clinic, no selection, no fee.
+    for another_cards_column in (
+        "practice_name",
+        "clinic_name",
+        "specialties",
+        "experience_years",
+        "languages",
+        "about",
+        "availability",
+        "notification_preferences",
+        "consultation_fee_paise",
+        "service_area_id",
+    ):
+        assert another_cards_column not in profile_update._values
+
+
+def _centroid_row(pin_code: str, latitude: float, longitude: float) -> _Row:
+    """One ``partner_pin_centroids`` row, as the driver hands it over.
+
+    The coordinates arrive as ``Decimal`` off a ``Numeric`` column, which is why
+    ``PinCentroid`` is typed ``float``: the conversion happens here, at the
+    boundary the caller owns.
+    """
+    return _Row(pin=pin_code, latitude=Decimal(str(latitude)), longitude=Decimal(str(longitude)))
+
+
+def _address_read_back_row() -> _Row:
+    """The row ``get_doctor_profile`` returns after the address write commits."""
+    return _Row(
+        partner_id=12,
+        partner_type="doctor",
+        status="Active",
+        photo_ref=None,
+        practice_name="Anita Verma",
+        clinic_name="Shanti Clinic",
+        specialties=["Pediatrician"],
+        practice_address="12 Main Road, Near the water tower, Daltonganj, Daltonganj, 826001",
+        address_line="12 Main Road",
+        address_landmark="Near the water tower",
+        address_locality="Daltonganj",
+        address_city="Daltonganj",
+        address_pin="826001",
+        practice_latitude=24.05,
+        practice_longitude=84.09,
+        area_name="Daltonganj",
+        languages=["English", "Hindi"],
+        experience_years=12,
+        about="Primary care physician.",
+        consultation_fee_paise=50000,
+        availability="Monday to Friday, 9 AM to 5 PM",
+        notification_preferences={"appointment_reminders": True},
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_doctor_address_rejects_a_pin_absent_from_the_dataset() -> None:
+    """#609: an unlisted PIN refuses this write and writes nothing at all.
+
+    ``execute.await_count == 2`` is the whole assertion: the locked recheck ran,
+    the lookup ran, the decision refused - and no ``UPDATE`` and no directory
+    refresh were ever issued. Acceptance criterion 6 is explicit that the data gap
+    is a follow-up rather than something to work around, so there is no fallback
+    position and no row written anywhere to compensate.
+    """
+    connection = _connection(
+        [
+            _Result(row=_Row(partner_type="doctor", status="Active")),
+            _Result(row=None),
+        ]
+    )
+    facade = _facade(connection)
+
+    with pytest.raises(PracticePinUnresolvedError) as refused:
+        await facade.update_doctor_address(12, DoctorProfileAddressUpdate(pin_code="999999"))
+
+    assert refused.value.reason is PinResolutionReason.UNKNOWN
+    assert connection.execute.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_update_doctor_address_rejects_a_pin_that_is_not_a_pin_code() -> None:
+    """#609: the format rule is the domain's, and it refuses before any write too.
+
+    No length or pattern bound sits on the request model, deliberately: a bound
+    there would be checked first and would refuse an over-long value as a bare
+    ``too_long``, shadowing the one rule the field actually has and splitting the
+    malformed case in two on the wire. ``resolve_pin_code`` owns both the length
+    and the character-class failure, and neither can be told from the other by the
+    caller - which is why the field-level detail says the PIN is not a PIN code
+    rather than guessing which rule was broken.
+    """
+    connection = _connection(
+        [
+            _Result(row=_Row(partner_type="doctor", status="Active")),
+            _Result(row=None),
+        ]
+    )
+    facade = _facade(connection)
+
+    with pytest.raises(PracticePinUnresolvedError) as refused:
+        await facade.update_doctor_address(12, DoctorProfileAddressUpdate(pin_code="82 6001"))
+
+    assert refused.value.reason is PinResolutionReason.MALFORMED
+    assert connection.execute.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_update_doctor_address_refuses_a_centroid_keyed_to_another_pin() -> None:
+    """#609: a centroid for a different code is not a resolution of the declared one.
+
+    The lookup is exact, so this can only happen if a caller supplies a mismatched
+    row - and the refusal is what keeps the possibility of attaching a doctor's
+    practice to someone else's neighbourhood from ever becoming a misplaced
+    doctor. ``await_count == 2`` proves it refuses rather than writing the point.
+    """
+    connection = _connection(
+        [
+            _Result(row=_Row(partner_type="doctor", status="Active")),
+            _Result(row=_centroid_row("826002", 24.05, 84.09)),
+        ]
+    )
+    facade = _facade(connection)
+
+    with pytest.raises(PracticePinUnresolvedError) as refused:
+        await facade.update_doctor_address(12, DoctorProfileAddressUpdate(pin_code="826001"))
+
+    assert refused.value.reason is PinResolutionReason.UNKNOWN
+    assert connection.execute.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("latitude", "longitude", "expected_outside"),
+    [
+        (24.05, 84.09, False),
+        (24.46, 87.44, True),
+    ],
+    ids=["inside-the-belt", "far-outside-the-belt"],
+)
+async def test_update_doctor_address_warns_outside_the_belt_and_saves_anyway(
+    latitude: float,
+    longitude: float,
+    expected_outside: bool,
+) -> None:
+    """#609: the belt is a WARNING, never a refusal, on both sides of the boundary.
+
+    A doctor who corrects a wrong sign-up PIN must not be blocked by where they
+    turned out to be, so both cases take the same four statements and return 200 -
+    the far one differing only in the flag and the distance it reports. The
+    boundary is passed in from the directory sub-facade's own constant, which is
+    what keeps the belt one boundary rather than two (#603).
+    """
+    connection = _connection(
+        [
+            _Result(row=_Row(partner_type="doctor", status="Active")),
+            _Result(row=_centroid_row("826001", latitude, longitude)),
+            _Result(),
+            _Result(),
+            _Result(row=_address_read_back_row()),
+            _Result(rows=[]),
+        ]
+    )
+    facade = _facade(connection)
+
+    profile = await facade.update_doctor_address(12, DoctorProfileAddressUpdate(pin_code="826001"))
+
+    assert profile.outside_peri_urban_belt is expected_outside
+    assert profile.distance_from_belt_centre_km is not None
+    if expected_outside:
+        assert profile.distance_from_belt_centre_km > PERI_URBAN_RADIUS_KM
+    else:
+        assert profile.distance_from_belt_centre_km <= PERI_URBAN_RADIUS_KM
+    # Saved either way: the position landed on the row regardless of the warning.
+    assert connection.execute.await_count == 6
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("partner_type", "status"),
+    [("doctor", "Registered"), ("lab", "Active")],
+    ids=["not-active", "not-a-doctor"],
+)
+async def test_update_doctor_address_refuses_a_partner_that_is_not_an_active_doctor(
+    partner_type: str,
+    status: str,
+) -> None:
+    """#609: the refusal happens before the PIN is even looked up.
+
+    ``await_count == 1`` proves the order: the locked recheck refused, so the
+    centroid table was never read and no column was written. A partner who is not
+    an ``[Active]`` doctor learns nothing about the centroid dataset either.
+    """
+    connection = _connection(
+        [
+            _Result(row=_Row(partner_type=partner_type, status=status)),
+        ]
+    )
+    facade = _facade(connection)
+
+    with pytest.raises(DoctorProfileNotAllowedError):
+        await facade.update_doctor_address(12, DoctorProfileAddressUpdate(pin_code="826001"))
+
+    assert connection.execute.await_count == 1
 
 
 @pytest.mark.asyncio

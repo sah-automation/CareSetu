@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from enum import StrEnum
 
+from modules.partner.domain.practice_position import PinResolutionReason
+
 
 class VocabularyRejectionReason(StrEnum):
     """Why a value was refused by a multi-valued closed vocabulary (#602).
@@ -258,6 +260,40 @@ class InvalidSpecialtyError(PartnerError):
             super().__init__(f"{reason} specialty at position {position}: {value!r}")
         self.value = value
         self.position = position
+        self.reason = reason
+
+
+class PracticePinUnresolvedError(PartnerError):
+    """A declared practice PIN code does not resolve to a position (#609).
+
+    Raised by the address section write when ``resolve_pin_code`` (#603) answers
+    with anything but a position. It is an **expected 4xx**, not an operational
+    failure (error taxonomy): the doctor typed something this platform cannot
+    place, the save is refused, and every other edit on their profile is untouched.
+    The partner adapter encodes it as a 422 whose ``details.errors[].path`` is the
+    PIN field, which is what lets the client render the problem under that input
+    instead of guessing which one failed.
+
+    **Both refusals are the same error to the caller.** ``reason`` distinguishes
+    them for the machine - ``MALFORMED`` means "fix this field", ``UNKNOWN`` means
+    "this well-formed PIN code is not one we can place yet" - but the doctor cannot
+    tell a length failure from a character-class failure, so the message never
+    claims to. The data gap behind ``UNKNOWN`` is a follow-up, not something this
+    write works around: there is no support-request surface in the repo to route it
+    to, so the field-level error is genuinely all the doctor gets, and inventing a
+    fallback position would be worse than the refusal.
+
+    ``pin_code`` is the declared value, carried so a caller can report which value
+    it refused. It is never echoed into the response body or the log line.
+    """
+
+    def __init__(self, pin_code: str, reason: PinResolutionReason) -> None:
+        if reason is PinResolutionReason.MALFORMED:
+            message = "the PIN code must be six digits"
+        else:
+            message = "this PIN code is not one we can place yet"
+        super().__init__(message)
+        self.pin_code = pin_code
         self.reason = reason
 
 

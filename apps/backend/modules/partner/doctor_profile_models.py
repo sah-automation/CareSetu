@@ -130,6 +130,46 @@ class DoctorProfilePracticeUpdate(BaseModel):
         return [member.value for member in require_specialties(value)]
 
 
+class DoctorProfileAddressUpdate(BaseModel):
+    """The Address section write (#609) - where the practice is, declared not pinned.
+
+    A doctor declares an address; the platform derives the one position every
+    reader sees. So this model declares **no coordinate field at all**, and
+    ``extra="forbid"`` is what makes that a live guarantee rather than a comment: a
+    client still sending ``practice_latitude`` or ``practice_longitude`` is a 422,
+    and it cannot place its own pin. Accepting and discarding the field instead
+    would tell a doctor their coordinates saved when they did not.
+
+    ``pin_code`` is the only required part, because it is the only one the position
+    is derived from: without a PIN code this write has nothing to resolve and
+    cannot produce a position, so requiring it here states that in the schema
+    rather than discovering it as a field-level error after the fact.
+
+    Deliberately **no** length bound and **no** pattern on ``pin_code``. Any bound
+    here would be checked before anything else and would refuse the value as a bare
+    ``too_short``/``too_long`` with no ``reason`` and no machine value - shadowing
+    the one rule the field has, and splitting the malformed case in two on the wire
+    for a doctor who cannot tell a length failure from a character-class failure
+    anyway. ``resolve_pin_code`` (#603) owns that rule: an Indian PIN code is
+    exactly six ASCII digits, and it reports malformed and unknown as two
+    machine-readable reasons. So a blank, an over-long and a well-formed but
+    unlisted code all arrive in the same PIN-keyed envelope, because they are all
+    the same answer to the doctor: this is not a PIN code we can place.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Column-matched bounds (#606): ``address_line``/``address_landmark`` are
+    # String(200), ``address_locality``/``address_city`` String(120). Every part is
+    # nullable on the row, so every part is optional here - a doctor who has not
+    # finished their address is a state the write can hold.
+    address_line: str | None = Field(default=None, max_length=200)
+    landmark: str | None = Field(default=None, max_length=200)
+    locality: str | None = Field(default=None, max_length=120)
+    city: str | None = Field(default=None, max_length=120)
+    pin_code: str
+
+
 class DoctorProfilePhotoView(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -167,6 +207,20 @@ class DoctorProfileView(BaseModel):
     # read-only here - it has two writers (registration and the address section
     # write) and this view is neither.
     practice_address: str
+    # The structured parts themselves, which are what the address card edits and
+    # what it seeds its form from (#609). Served beside the display projection
+    # rather than instead of it: the column is assembled from these, so a client
+    # that had to parse the display string back into fields would be guessing at a
+    # format it is not meant to own.
+    #
+    # Nullable for the same reason the columns are - a doctor can hold a partly
+    # declared address, and registration writes only the display column until the
+    # structured parts exist.
+    address_line: str | None = None
+    landmark: str | None = None
+    locality: str | None = None
+    city: str | None = None
+    pin_code: str | None = None
     # Server-written, never client-written (#606); #609 derives them from the
     # declared PIN. Still served here because the profile header shows the
     # practice's own position while the address section is the only editor.
@@ -183,3 +237,32 @@ class DoctorProfileView(BaseModel):
     availability: str | None = None
     credentials: list[DoctorProfileCredential] = Field(default_factory=list)
     notification_preferences: dict[str, bool] = Field(default_factory=dict)
+
+
+class DoctorProfileAddressView(DoctorProfileView):
+    """The Address section write's answer (#609): the profile plus the belt warning.
+
+    A separate response model rather than two nullable fields on
+    :class:`DoctorProfileView`, because **only this write evaluates the belt**. The
+    decision needs the PIN's resolved centroid, and the only place that resolution
+    already exists is the write's own transaction; re-deriving it on every profile
+    read would put a centroid lookup on the GET path to answer a question no reader
+    asked. So ``outside_peri_urban_belt`` is required here and absent from the read
+    projection entirely, rather than being a tri-state field whose value depends on
+    which endpoint produced the response - which is exactly the kind of field that
+    reads as "known to be in-belt" everywhere else. The card renders no notice before
+    the doctor's first address save because there is no field to render, which is the
+    honest state rather than a promise or a spinner.
+
+    It is a **warning, never a refusal**: the position is written either way and the
+    save succeeds, and only the doctor's own listing surfaces as an outside-your-area
+    result (the wider-area fallback, glossary).
+    """
+
+    outside_peri_urban_belt: bool
+    # The measured great-circle distance from the belt centre, so the warning can
+    # say how far out the practice sits rather than only that it is out. Carried
+    # because ``PeriUrbanBeltDecision`` produces it for that purpose (#603) and
+    # because a doctor told only "outside" cannot tell whether they mistyped or
+    # genuinely practise further out.
+    distance_from_belt_centre_km: float

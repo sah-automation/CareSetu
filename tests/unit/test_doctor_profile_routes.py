@@ -11,17 +11,21 @@ from app.main import create_app
 from modules.iam.domain.jwt import issue_token
 from modules.iam.facade import PhotoContent
 from modules.partner.doctor_profile_models import (
+    DoctorProfileAddressUpdate,
+    DoctorProfileAddressView,
     DoctorProfileCredential,
     DoctorProfilePhotoView,
     DoctorProfilePracticeUpdate,
     DoctorProfileUpdate,
     DoctorProfileView,
 )
+from modules.partner.domain.practice_position import PinResolutionReason
 from modules.partner.facade import (
     DoctorProfileNotAllowedError,
     DoctorProfilePhotoNotFoundError,
     DoctorProfilePhotoValidationError,
     PartnerView,
+    PracticePinUnresolvedError,
 )
 
 _SIGNING_KEY = "test-doctor-profile-route-signing-key"
@@ -58,6 +62,7 @@ class StubPartnerFacade:
         self.profile_calls: list[int] = []
         self.update_calls: list[tuple[int, DoctorProfileUpdate]] = []
         self.practice_update_calls: list[tuple[int, DoctorProfilePracticeUpdate]] = []
+        self.address_update_calls: list[tuple[int, DoctorProfileAddressUpdate]] = []
         self.photo_update_calls: list[tuple[int, str | None, bytes]] = []
         self.photo_get_calls: list[int] = []
         self.photo_delete_calls: list[int] = []
@@ -95,6 +100,14 @@ class StubPartnerFacade:
             ],
             notification_preferences={"appointment_reminders": True, "sms": True},
         )
+        # #609: the address write answers with the profile plus its own belt
+        # warning. A plain profile read never evaluates the belt, so this is the
+        # write's response and not the read projection's.
+        self.address_view = DoctorProfileAddressView(
+            **self.view.model_dump(),
+            outside_peri_urban_belt=False,
+            distance_from_belt_centre_km=1.4,
+        )
 
     async def resolve_partner(self, identity_id: int) -> PartnerView:
         return PartnerView(
@@ -127,6 +140,16 @@ class StubPartnerFacade:
         if self.profile_error is not None:
             raise self.profile_error
         return self.view
+
+    async def update_doctor_address(
+        self,
+        doctor_id: int,
+        update: DoctorProfileAddressUpdate,
+    ) -> DoctorProfileAddressView:
+        self.address_update_calls.append((doctor_id, update))
+        if self.profile_error is not None:
+            raise self.profile_error
+        return self.address_view
 
     async def update_doctor_photo(
         self,
@@ -480,6 +503,202 @@ def test_practice_facade_authorization_denial_is_audited() -> None:
     response = client.put(
         "/v1/doctor/profile/practice",
         json={"full_name": "Anita Verma"},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "DOCTOR_PROFILE_NOT_ALLOWED"
+    assert iam.access_denials == [_IDENTITY_ID]
+
+
+def test_put_doctor_profile_address_saves_the_address_card_for_active_doctor() -> None:
+    """#609: the address write returns 200 and forwards its body verbatim.
+
+    Verbatim means the router parsed and re-serialized nothing: the model the
+    facade receives dumps back to exactly the submitted JSON, so a field cannot
+    have been quietly dropped or renamed between the wire and the write.
+    """
+    facade = StubPartnerFacade()
+    client = _client(facade)
+    body = {
+        "address_line": "12 Main Road",
+        "landmark": "Near the water tower",
+        "locality": "Daltonganj",
+        "city": "Daltonganj",
+        "pin_code": "826001",
+    }
+
+    response = client.put("/v1/doctor/profile/address", json=body, headers=_bearer(_token()))
+
+    assert response.status_code == 200
+    assert response.json() == facade.address_view.model_dump(mode="json")
+    assert len(facade.address_update_calls) == 1
+    doctor_id, update = facade.address_update_calls[0]
+    assert doctor_id == _PARTNER_ID
+    assert update.model_dump(mode="json") == body
+
+
+@pytest.mark.parametrize(
+    "borrowed",
+    [
+        {"practice_latitude": 24.483},
+        {"practice_longitude": 87.433},
+        {"full_name": "Anita Verma"},
+        {"notification_preferences": {"sms": True}},
+    ],
+    ids=["latitude", "longitude", "practice", "notifications"],
+)
+def test_put_doctor_profile_address_refuses_a_field_no_card_declares(
+    borrowed: dict[str, object],
+) -> None:
+    """#609: the address card cannot write a coordinate, ever.
+
+    The two coordinate cases are the load-bearing ones. The doctor declares an
+    address and the backend derives the position from its PIN, so a client-supplied
+    latitude or longitude is refused at the edge by ``extra="forbid"`` - and it is
+    asserted here rather than left to the comment, because accepting and discarding
+    the field would tell a doctor their coordinates saved when they did not.
+    """
+    facade = StubPartnerFacade()
+    client = _client(facade)
+    body = {"address_line": "12 Main Road", "pin_code": "826001", **borrowed}
+
+    response = client.put("/v1/doctor/profile/address", json=body, headers=_bearer(_token()))
+
+    assert response.status_code == 422
+    assert facade.address_update_calls == []
+
+
+@pytest.mark.parametrize(
+    ("pin_code", "reason", "reason_text"),
+    [
+        ("8260", PinResolutionReason.MALFORMED, "must be six digits"),
+        ("82 6001", PinResolutionReason.MALFORMED, "must be six digits"),
+        ("", PinResolutionReason.MALFORMED, "must be six digits"),
+        ("1234567890123456789012345678901234", PinResolutionReason.MALFORMED, "must be six"),
+        ("999999", PinResolutionReason.UNKNOWN, "not one we can place yet"),
+    ],
+    ids=["too-short", "not-digits", "blank", "over-long", "not-in-the-dataset"],
+)
+def test_put_doctor_profile_address_rejects_an_unresolvable_pin(
+    pin_code: str,
+    reason: PinResolutionReason,
+    reason_text: str,
+) -> None:
+    """#609: a PIN that cannot be placed fails this card alone, under the PIN input.
+
+    The detail's ``path`` names the PIN field, which is the whole point of the
+    shape: the client renders the error under that input instead of guessing which
+    one failed. Every shape of unusable code arrives HERE rather than as a Pydantic
+    ``too_short``/``too_long``, because the domain owns the rule - which is why the
+    blank and the over-long cases are in this list at all: a length bound on the
+    request model would have made those two a different envelope with no PIN-keyed
+    detail, and the doctor cannot tell a length failure from a character-class one.
+    The two reasons differ only in which sentence the same actionable message is,
+    which is what ``PinResolutionReason`` says the client is meant to show.
+
+    The refusal itself is the facade's decision (the companion facade test proves
+    nothing was written); what this test owns is that the raised domain error
+    arrives in the one envelope with a PIN-keyed detail.
+    """
+    facade = StubPartnerFacade()
+    facade.profile_error = PracticePinUnresolvedError(pin_code, reason)
+    client = _client(facade)
+
+    response = client.put(
+        "/v1/doctor/profile/address",
+        json={"address_line": "12 Main Road", "pin_code": pin_code},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 422
+    envelope = response.json()
+    assert envelope["code"] == "DOCTOR_PROFILE_ADDRESS_PIN_UNRESOLVED"
+    assert [error["path"] for error in envelope["details"]["errors"]] == ["pin_code"]
+    assert reason_text in envelope["details"]["errors"][0]["reason"]
+    # The write was reached and refused by the facade's decision - not refused at
+    # the edge - which is the split between "the router refused the body" and "the
+    # server cannot place this PIN".
+    assert len(facade.address_update_calls) == 1
+
+
+def test_address_write_returns_the_outside_belt_warning_and_still_saves() -> None:
+    """#609: an outlying PIN saves and warns - it is never a refusal.
+
+    A doctor who corrects a wrong sign-up PIN must not be blocked by where they
+    turned out to be, so the warning rides on the same 200 the save returns.
+    """
+    facade = StubPartnerFacade()
+    facade.address_view = facade.address_view.model_copy(
+        update={"outside_peri_urban_belt": True, "distance_from_belt_centre_km": 78.4}
+    )
+    client = _client(facade)
+
+    response = client.put(
+        "/v1/doctor/profile/address",
+        json={"pin_code": "826001"},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["outside_peri_urban_belt"] is True
+    assert response.json()["distance_from_belt_centre_km"] == pytest.approx(78.4)
+    assert len(facade.address_update_calls) == 1
+
+
+def test_address_idempotency_key_is_scoped_to_the_doctor() -> None:
+    """#609: one doctor's replayed address key never answers for another's save."""
+    facade = StubPartnerFacade()
+    client = _client(facade)
+    body = {"address_line": "12 Main Road", "pin_code": "826001"}
+    first_headers = {**_bearer(_token()), "Idempotency-Key": "shared-address-key"}
+    second_headers = {
+        **_bearer(_token(subject_id=_OTHER_IDENTITY_ID)),
+        "Idempotency-Key": "shared-address-key",
+    }
+
+    first = client.put("/v1/doctor/profile/address", json=body, headers=first_headers)
+    second = client.put("/v1/doctor/profile/address", json=body, headers=second_headers)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert [doctor_id for doctor_id, _ in facade.address_update_calls] == [
+        _PARTNER_ID,
+        _OTHER_PARTNER_ID,
+    ]
+
+
+def test_put_doctor_profile_address_refuses_non_active_doctor() -> None:
+    facade = StubPartnerFacade()
+    facade.partner_status = "Registered"
+    client = _client(facade)
+
+    response = client.put(
+        "/v1/doctor/profile/address",
+        json={"pin_code": "826001"},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "AUTH_INSUFFICIENT_SCOPE"
+    assert facade.address_update_calls == []
+
+
+def test_address_facade_authorization_denial_is_audited() -> None:
+    """#609: the row-locked recheck's refusal is audited, not just refused."""
+    facade = StubPartnerFacade()
+    facade.profile_error = DoctorProfileNotAllowedError(
+        _PARTNER_ID,
+        "doctor",
+        "Registered",
+    )
+    client = _client(facade)
+    iam = client.app.state.iam_facade
+    assert isinstance(iam, StubIamFacade)
+
+    response = client.put(
+        "/v1/doctor/profile/address",
+        json={"pin_code": "826001"},
         headers=_bearer(_token()),
     )
 

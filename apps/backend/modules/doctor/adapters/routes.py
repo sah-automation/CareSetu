@@ -40,6 +40,8 @@ from modules.doctor.domain.exceptions import (
 )
 from modules.doctor.facade import DoctorConsoleFacade
 from modules.partner.facade import (
+    DoctorProfileAddressUpdate,
+    DoctorProfileAddressView,
     DoctorProfilePhotoView,
     DoctorProfilePracticeUpdate,
     DoctorProfileUpdate,
@@ -154,6 +156,45 @@ async def update_doctor_profile_practice(
 
     async def _call() -> DoctorProfileView:
         return await facade.update_doctor_practice(doctor_id, body)
+
+    return await run_idempotent(request, _call, namespace=f"doctor:{doctor_id}")
+
+
+@router.put(
+    "/profile/address",
+    response_model=DoctorProfileAddressView,
+    status_code=status.HTTP_200_OK,
+    summary="Save the calling active doctor's practice address",
+)
+async def update_doctor_profile_address(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+    body: DoctorProfileAddressUpdate,
+) -> DoctorProfileAddressView:
+    """Save the Address card on its own path, not on ``/profile`` (#609).
+
+    The second of the four section writes, and the one that moves something public:
+    the backend resolves the declared PIN code and derives the position from it, so
+    correcting a wrong sign-up PIN moves the doctor's directory listing. The route
+    is otherwise #608 exactly - its own path under the profile prefix, the same
+    doctor guard, the same per-doctor ``run_idempotent`` namespace, the same facade
+    read-back shape.
+
+    The response model is the write's own rather than ``DoctorProfileView`` because
+    the outside-the-belt warning is this write's answer alone; a plain profile read
+    never evaluates the belt and carries no such field.
+
+    The request model declares no coordinate field, so ``extra="forbid"`` makes a
+    client-supplied position a 422 rather than a silently discarded one, and an
+    unresolvable PIN reaches the client as a 422 whose ``details.errors[].path``
+    names the PIN field - rendered under that input, leaving every other card's
+    unsaved edit untouched.
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    doctor_id = await _require_doctor(request, account)
+
+    async def _call() -> DoctorProfileAddressView:
+        return await facade.update_doctor_address(doctor_id, body)
 
     return await run_idempotent(request, _call, namespace=f"doctor:{doctor_id}")
 

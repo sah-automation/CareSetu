@@ -47,6 +47,7 @@ from modules.partner.domain.exceptions import (
     PartnerNotActiveError,
     PartnerNotRejectedError,
     PartnerSuspendedError,
+    PracticePinUnresolvedError,
     ProviderProfileNotFoundError,
     RejectionReasonRequiredError,
     ReSubmissionThrottledError,
@@ -862,6 +863,26 @@ def register_error_handlers(app: FastAPI) -> None:
             details={"errors": [{"path": "specialties", "reason": str(invalid)}]},
         )
 
+    async def _practice_pin_unresolved(request: Request, exc: Exception) -> JSONResponse:
+        unresolved = cast(PracticePinUnresolvedError, exc)
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "DOCTOR_PROFILE_ADDRESS_PIN_UNRESOLVED",
+            "the declared PIN code does not resolve to a practice position",
+            log_tag="doctor_profile",
+            request=request,
+            # ``path`` is the wire name of the PIN field, and it is the reason this
+            # handler exists in the shape it does: the client renders the detail
+            # under that input rather than guessing which one failed. The detail is
+            # exactly ``path`` + ``reason`` like the specialty and photo refusals -
+            # no second machine key - because ``PinResolutionReason`` states that
+            # both refusals get the same actionable message anyway; what differs
+            # between them is only which sentence that message is.
+            #
+            # ``str(unresolved)`` never quotes the submitted code back.
+            details={"errors": [{"path": "pin_code", "reason": str(unresolved)}]},
+        )
+
     async def _provider_profile_not_found(request: Request, exc: Exception) -> JSONResponse:
         del exc
         return error_response(
@@ -894,5 +915,6 @@ def register_error_handlers(app: FastAPI) -> None:
         _doctor_profile_photo_store_unavailable,
     )
     app.add_exception_handler(InvalidSpecialtyError, _invalid_specialty)
+    app.add_exception_handler(PracticePinUnresolvedError, _practice_pin_unresolved)
     app.add_exception_handler(ProviderProfileNotFoundError, _provider_profile_not_found)
     app.add_exception_handler(PartnerError, _partner_failed)

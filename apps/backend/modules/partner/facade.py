@@ -131,6 +131,9 @@ from modules.partner.directory_facade import (
     DALTONGANJ_LONGITUDE as DALTONGANJ_LONGITUDE,
 )
 from modules.partner.directory_facade import (
+    PERI_URBAN_RADIUS_KM as PERI_URBAN_RADIUS_KM,
+)
+from modules.partner.directory_facade import (
     DirectoryEntry as DirectoryEntry,
 )
 from modules.partner.directory_facade import (
@@ -147,6 +150,12 @@ from modules.partner.directory_facade import (
 )
 from modules.partner.doctor_profile_models import (
     DoctorCredentialStatus as DoctorCredentialStatus,
+)
+from modules.partner.doctor_profile_models import (
+    DoctorProfileAddressUpdate as DoctorProfileAddressUpdate,
+)
+from modules.partner.doctor_profile_models import (
+    DoctorProfileAddressView as DoctorProfileAddressView,
 )
 from modules.partner.doctor_profile_models import (
     DoctorProfileCredential as DoctorProfileCredential,
@@ -205,10 +214,21 @@ from modules.partner.domain.exceptions import (
     PartnerSuspendedError as PartnerSuspendedError,
 )
 from modules.partner.domain.exceptions import (
+    PracticePinUnresolvedError as PracticePinUnresolvedError,
+)
+from modules.partner.domain.exceptions import (
     ProviderProfileNotFoundError as ProviderProfileNotFoundError,
 )
 from modules.partner.domain.exceptions import (
     ReSubmissionThrottledError as ReSubmissionThrottledError,
+)
+from modules.partner.domain.practice_position import (
+    AddressParts,
+    PinCentroid,
+    PracticePosition,
+    evaluate_peri_urban_belt,
+    format_display_address,
+    resolve_pin_code,
 )
 from modules.partner.domain.state_machine import (
     PartnerStatus,
@@ -248,6 +268,7 @@ from modules.partner.registration_models import (
 )
 from modules.partner.schema.models import (
     partner_credentials,
+    partner_pin_centroids,
     partner_profiles,
     partner_service_areas,
 )
@@ -347,30 +368,25 @@ def _require_active_doctor(
         raise DoctorProfileNotAllowedError(partner_id, partner_type, status)
 
 
-async def _update_active_doctor_profile(
+async def _lock_active_doctor_profile(
     connection: AsyncConnection,
     doctor_id: int,
-    values: dict[str, object],
 ) -> None:
-    """Write one profile section's columns, after a row-locked active-doctor recheck.
+    """Re-read ``partner_type``/``status`` under ``SELECT ... FOR UPDATE`` and refuse.
 
-    The shape every private profile write shares, and the reason the four section
-    writes (#608, #609, #610) do not each hand-roll it:
+    The first half of every private profile write, split out from
+    :func:`_update_active_doctor_profile` because the address write (#609) cannot
+    compose its ``UPDATE`` until its PIN has resolved, and the resolution is a read
+    of the centroid table that must happen **after** the recheck and **before** any
+    write. Refusing first is not only a matter of tidiness: a partner who is not an
+    ``[Active]`` doctor learns nothing about the centroid dataset, and no lock is
+    held across a decision that was never made.
 
-    1. Re-read ``partner_type``/``status`` under ``SELECT ... FOR UPDATE`` and
-       refuse anything that is not an ``[Active]`` doctor. The row lock is what
-       makes the re-check worth doing: the edge guard resolved this same partner
-       in a different transaction, so without the lock a deactivation landing
-       between the two would let the save through. A doctor removed outright is a
-       ``PartnerNotFoundError`` here rather than a write against no row.
-    2. Issue the ``UPDATE`` with exactly the columns the caller passed plus
-       ``updated_at``. ``values`` is the section's own field set and nothing is
-       merged into it, so a section write can only ever move the columns its own
-       card declares.
-
-    The caller owns the read-back and any post-commit follow-up, because those
-    differ per section; this owns the lock, the refusal and the update, because
-    none of them may differ.
+    The row lock is what makes the re-check worth doing at all: the edge guard
+    resolved this same partner in a different transaction, so without it a
+    deactivation landing between the two would let the save through. A doctor
+    removed outright is a ``PartnerNotFoundError`` here rather than a write against
+    no row.
     """
     row = (
         await connection.execute(
@@ -389,10 +405,92 @@ async def _update_active_doctor_profile(
         partner_type=row.partner_type,
         status=row.status,
     )
+
+
+async def _update_active_doctor_profile(
+    connection: AsyncConnection,
+    doctor_id: int,
+    values: dict[str, object],
+) -> None:
+    """Write one profile section's columns, after a row-locked active-doctor recheck.
+
+    The shape a section write that has nothing to read first shares: re-check under
+    ``SELECT ... FOR UPDATE``, refuse anything that is not an ``[Active]`` doctor,
+    then issue the ``UPDATE`` with exactly the columns the caller passed plus
+    ``updated_at``. ``values`` is the section's own field set and nothing is merged
+    into it, so a section write can only ever move the columns its own card declares.
+
+    The two halves are separately callable because #609 cannot build its ``values``
+    until its PIN has resolved - a read of the centroid table that must happen after
+    the recheck and before any write. That write calls
+    :func:`_lock_active_doctor_profile` and :func:`_write_active_doctor_profile`
+    itself with a decision between them; every other section write calls this, which
+    is why the lock cannot be forgotten at one call site and skipped at another.
+    """
+    await _lock_active_doctor_profile(connection, doctor_id)
+    await _write_active_doctor_profile(connection, doctor_id, values)
+
+
+async def _write_active_doctor_profile(
+    connection: AsyncConnection,
+    doctor_id: int,
+    values: dict[str, object],
+) -> None:
+    """Issue the section's ``UPDATE``, assuming the row lock is already held.
+
+    Split from the recheck so #609 can resolve the declared PIN between the two: the
+    lock is taken and the partner refused before the centroid table is read, and the
+    ``UPDATE`` is issued only once a position exists to write. Every other section
+    write goes through :func:`_update_active_doctor_profile`, which calls this
+    immediately after the recheck and so cannot forget the lock.
+    """
     await connection.execute(
         partner_profiles.update()
         .where(partner_profiles.c.id == doctor_id)
         .values(**values, updated_at=func.now())
+    )
+
+
+async def _load_pin_centroid(
+    connection: AsyncConnection,
+    pin_code: str,
+) -> PinCentroid | None:
+    """Look the declared PIN code up in the bundled centroid table (#601, #609).
+
+    One exact primary-key hit in the ``partner`` schema this module already owns -
+    no join, no cross-schema read, no foreign key (ADR-0003). It selects the three
+    columns the resolution decision needs and nothing else off the reference row,
+    and returns ``None`` when the code is absent, which is the "unknown" input
+    :func:`~modules.partner.domain.practice_position.resolve_pin_code` is told
+    about rather than the refusal itself: the decision owns what a missing centroid
+    MEANS (coding-standards §4).
+
+    ``Numeric`` coordinates arrive from the driver as ``Decimal``, so they are
+    converted to ``float`` here, at the boundary this function owns - which is what
+    lets the domain type stay a plain ``float``.
+
+    The lookup is issued for a malformed code too, where it misses by
+    construction. That is one wasted indexed hit on the error path, paid for a
+    single code path: deciding whether to skip it would mean re-deriving the
+    format rule here, and a second copy of "what is a PIN code" is exactly the
+    drift :func:`~modules.partner.domain.practice_position.resolve_pin_code`
+    exists to prevent.
+    """
+    row = (
+        await connection.execute(
+            select(
+                partner_pin_centroids.c.pin,
+                partner_pin_centroids.c.latitude,
+                partner_pin_centroids.c.longitude,
+            ).where(partner_pin_centroids.c.pin == pin_code)
+        )
+    ).first()
+    if row is None:
+        return None
+    return PinCentroid(
+        pin_code=str(row.pin),
+        latitude=float(row.latitude),
+        longitude=float(row.longitude),
     )
 
 
@@ -1074,6 +1172,15 @@ class PartnerFacade:
                         # is the normal case.
                         partner_profiles.c.specialties,
                         partner_profiles.c.practice_address,
+                        # The structured address parts, which is what the address
+                        # card edits and seeds from (#609). Read here beside the
+                        # display projection so a client never has to parse an
+                        # assembled string back into the fields it declared.
+                        partner_profiles.c.address_line,
+                        partner_profiles.c.address_landmark,
+                        partner_profiles.c.address_locality,
+                        partner_profiles.c.address_city,
+                        partner_profiles.c.address_pin,
                         partner_profiles.c.practice_latitude,
                         partner_profiles.c.practice_longitude,
                         partner_service_areas.c.name.label("area_name"),
@@ -1136,6 +1243,11 @@ class PartnerFacade:
             specialties=_specialty_selection(row.specialties),
             verified=eligibility.has_any and not eligibility.has_invalid,
             practice_address=str(row.practice_address),
+            address_line=row.address_line,
+            landmark=row.address_landmark,
+            locality=row.address_locality,
+            city=row.address_city,
+            pin_code=row.address_pin,
             practice_latitude=float(row.practice_latitude),
             practice_longitude=float(row.practice_longitude),
             area=str(row.area_name) if row.area_name is not None else DEFAULT_SERVICE_AREA_NAME,
@@ -1225,6 +1337,123 @@ class PartnerFacade:
         # one call. The public directory entry is still NOT written here - the
         # shared refresh (#607) owns copying the specialties selection onto it.
         return await self.get_doctor_profile(doctor_id)
+
+    async def update_doctor_address(
+        self,
+        doctor_id: int,
+        update: DoctorProfileAddressUpdate,
+    ) -> DoctorProfileAddressView:
+        """Save the Address card: where the practice is (#609).
+
+        The heart of the defect fix. The doctor declares an address and the backend
+        DERIVES the practice position from the declared PIN code - never from a
+        coordinate the client sent, which this write's model does not declare at
+        all. That is what lets a doctor who signed up with a wrong PIN actually
+        correct it, and it is why the position columns stay ``NOT NULL`` while no
+        update schema carries them (#606).
+
+        **The order inside one transaction is the correctness argument.**
+
+        1. Lock the row and re-check the partner is an ``[Active]`` doctor
+           (:func:`_lock_active_doctor_profile`) - before the centroid table is
+           read, so a refused partner learns nothing and nothing is written.
+        2. Look the declared code up (:func:`_load_pin_centroid`) and hand the row
+           to the pure decision. A PIN that cannot be placed raises
+           ``PracticePinUnresolvedError`` here, which is a 422 keyed to the PIN
+           field - and it raises BEFORE the ``UPDATE``, so an unresolvable PIN
+           leaves every column and the directory entry untouched. There is no
+           fallback position and no queue row to compensate: the unlisted-PIN data
+           gap is a follow-up, not something to work around.
+        3. Evaluate the peri-urban belt against the resolved point. This is a
+           WARNING, never a refusal: the belt boundary is passed in from the
+           directory sub-facade's own ``PERI_URBAN_RADIUS_KM`` so the warning and
+           the search clamp are one boundary rather than two (#603), and a doctor in
+           a real but outlying town is never blocked from correcting their address.
+        4. Write the declared parts, the assembled display string and the derived
+           position.
+        5. Re-derive the directory entry through the shared refresh (#607), in this
+           same transaction. The refresh is an ``INSERT ... FROM SELECT`` that reads
+           the profile row, so the position written in step 4 is what lands in the
+           entry - that is why the two cannot be separate transactions, and why
+           ``search_directory`` returns the doctor at the new position immediately
+           afterwards. The refresh also flushes the directory-search namespace
+           itself, so this method does not: exactly one flush, inside the operation
+           that owns it.
+
+        Nothing about credentials is touched. Profile fields are DECLARED,
+        credentials are VERIFIED (ADR-0011), and the refresh cannot write the
+        listed flag - so a doctor cannot activate themselves by editing their
+        address, which is the invariant #607 already asserts for the operator path.
+
+        Returns :class:`DoctorProfileAddressView`, not the plain read projection:
+        the belt warning is this write's answer and no other read's, so it is a
+        field on this response rather than a nullable one every GET would carry.
+        """
+        # One strip, applied where the database needs it: the ``address_pin`` CHECK
+        # is ``^[0-9]{6}$`` and the column is ``String(6)``, so the stored form has
+        # to be the six digits themselves and the declared value is stripped once
+        # here for that reason. It is the SAME normalisation
+        # ``resolve_pin_code`` applies - the point is not a second copy of the rule
+        # but that the value written is the value the decision accepted.
+        # ``AddressParts`` keeps the raw declared value and lets
+        # ``format_display_address`` normalise it for display, exactly as it does
+        # for every other absent-or-blank part.
+        declared_pin = update.pin_code.strip()
+        parts = AddressParts(
+            address_line=update.address_line,
+            landmark=update.landmark,
+            locality=update.locality,
+            city=update.city,
+            pin_code=update.pin_code,
+        )
+        async with self._engine.begin() as connection:
+            await _lock_active_doctor_profile(connection, doctor_id)
+            resolution = resolve_pin_code(
+                declared_pin,
+                await _load_pin_centroid(connection, declared_pin),
+            )
+            position = resolution.position
+            if position is None:
+                raise PracticePinUnresolvedError(declared_pin, resolution.reason)
+            belt = evaluate_peri_urban_belt(
+                position,
+                centre=PracticePosition(
+                    latitude=DALTONGANJ_LATITUDE,
+                    longitude=DALTONGANJ_LONGITUDE,
+                ),
+                radius_km=PERI_URBAN_RADIUS_KM,
+            )
+            await _write_active_doctor_profile(
+                connection,
+                doctor_id,
+                {
+                    # The declared parts and the derived position, in one dictionary
+                    # built from ``parts`` so the display string and the columns
+                    # cannot be assembled from two different readings of the body.
+                    # Four of the five wire-to-column moves are a rename onto the
+                    # ``address_`` prefix the columns carry, because the wire field
+                    # says what the field MEANS and the column keeps the name its
+                    # other readers already use.
+                    "address_line": parts.address_line,
+                    "address_landmark": parts.landmark,
+                    "address_locality": parts.locality,
+                    "address_city": parts.city,
+                    "address_pin": declared_pin,
+                    # The retained display column is a backend-assembled projection
+                    # of exactly these parts (#603), rewritten here so the column,
+                    # the write and every renderer cannot disagree.
+                    "practice_address": format_display_address(parts),
+                    "practice_latitude": position.latitude,
+                    "practice_longitude": position.longitude,
+                },
+            )
+            await self._credential_validity.refresh_directory_entry(connection, doctor_id)
+        profile = await self.get_doctor_profile(doctor_id)
+        return DoctorProfileAddressView(
+            **profile.model_dump(),
+            outside_peri_urban_belt=not belt.within_belt,
+            distance_from_belt_centre_km=belt.distance_km,
+        )
 
     async def update_doctor_photo(
         self,
