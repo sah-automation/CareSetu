@@ -6,6 +6,20 @@ with the tickets that introduce real validation.
 
 from __future__ import annotations
 
+from enum import StrEnum
+
+
+class VocabularyRejectionReason(StrEnum):
+    """Why a value was refused by a multi-valued closed vocabulary (#602).
+
+    A closed list refuses a value for exactly two member-level reasons, and both
+    are reported on the raised error so the message names the rule the member
+    broke rather than blaming the whole selection.
+    """
+
+    UNKNOWN = "unknown"
+    REPEATED = "repeated"
+
 
 class PartnerError(Exception):
     """Base error for the partner module."""
@@ -214,3 +228,81 @@ class ReSubmissionThrottledError(PartnerError):
         super().__init__(message)
         self.partner_id = partner_id
         self.retry_at = retry_at
+
+
+class InvalidSpecialtyError(PartnerError):
+    """The submitted specialty breaks the closed pick-list rule (#602).
+
+    Raised by ``require_specialty`` and ``require_specialties``, the two
+    validation entry points for the doctor specialty pick-list (FEAT-004,
+    glossary). The field is never free-form, so a value outside the list is an
+    explicit rejection (422) rather than a value that persists and can never be
+    filtered on.
+
+    ``value`` is typed ``object`` because a malformed submission is not
+    necessarily a string - the entry point refuses a non-string as readily as an
+    unknown string. ``position`` and ``reason`` are carried only when a member of
+    a multi-valued selection broke a rule, so the single-valued field keeps a
+    plain ``"unknown specialty"`` message.
+    """
+
+    def __init__(
+        self,
+        value: object,
+        position: int | None = None,
+        reason: VocabularyRejectionReason = VocabularyRejectionReason.UNKNOWN,
+    ) -> None:
+        if position is None:
+            super().__init__(f"{reason} specialty: {value!r}")
+        else:
+            super().__init__(f"{reason} specialty at position {position}: {value!r}")
+        self.value = value
+        self.position = position
+        self.reason = reason
+
+
+class InvalidConsultLanguageError(PartnerError):
+    """A submitted consulting language breaks the closed-list rule (#602).
+
+    Raised by ``require_consult_languages``, which validates a multi-valued
+    selection member by member. ``position`` is the index of the offending
+    member, and ``reason`` says which of the two member-level rules it broke,
+    so the message points at the member instead of blaming the whole selection.
+    """
+
+    def __init__(self, value: object, position: int, reason: VocabularyRejectionReason) -> None:
+        super().__init__(f"{reason} consulting language at position {position}: {value!r}")
+        self.value = value
+        self.position = position
+        self.reason = reason
+
+
+class InvalidConsultingDayError(PartnerError):
+    """A submitted consulting day breaks the closed seven-day rule (#602).
+
+    The consulting-day counterpart of :class:`InvalidConsultLanguageError`:
+    raised by ``require_consulting_days`` with the same ``value`` / ``position``
+    / ``reason`` shape.
+    """
+
+    def __init__(self, value: object, position: int, reason: VocabularyRejectionReason) -> None:
+        super().__init__(f"{reason} consulting day at position {position}: {value!r}")
+        self.value = value
+        self.position = position
+        self.reason = reason
+
+
+class InvalidSelectionError(PartnerError):
+    """A multi-valued field was submitted as one bare value instead of a selection.
+
+    A ``str`` is itself iterable, so ``require_consulting_days("Monday")`` would
+    otherwise walk one character at a time and reject the letter ``M`` - a
+    legitimate single-day submission reported as nonsense. One day is a
+    one-member selection, so the caller sends a list; this error says exactly
+    that instead of blaming a character (coding-standards §3: type everything,
+    but ``Iterable`` cannot exclude ``str``, so the check is at runtime).
+    """
+
+    def __init__(self, value: object) -> None:
+        super().__init__(f"expected a selection of values, not a single value: {value!r}")
+        self.value = value

@@ -210,7 +210,7 @@ The single read-side row per `[Active]` partner that makes them discoverable in 
 _Avoid_: provider record, listing
 
 **specialty**:
-The label from a closed pick-list (doctors only) of the kind of care an `[Active]` doctor offers - e.g. `General Physician | Pediatrician | Gynecologist | Dentist`. Labs and chemists carry no specialty; the field is never free-form. Homepage chips pre-seed the search filter over it.
+The label from a closed pick-list (doctors only) of about twenty values of the kind of care an `[Active]` doctor offers - e.g. `General Physician | Pediatrician | Gynecologist | Dentist`, among many others that account for most small-town practice. Labs and chemists carry no specialty; the field is never free-form. Homepage chips pre-seed the search filter over it.
 _Avoid_: consultation type (that PRD phrase was dropped - it is not a field), expertise
 
 **verified**:

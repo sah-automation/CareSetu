@@ -273,8 +273,9 @@ partner_directory_index = Table(
     Column("practice_longitude", Numeric(9, 6), nullable=False),
     Column("partner_type", String(20), nullable=False),
     # Closed pick-list, doctors only (ADR-0012, glossary). Labs and chemists
-    # carry NULL - the field is never free-form. Kept in lockstep with the
-    # Specialty vocabulary (domain credentials.py).
+    # carry NULL - the field is never free-form. The Specialty vocabulary
+    # (domain vocabularies.py) is WIDER than this constraint since #602; the
+    # column and the constraint below are replaced by #606.
     Column("specialty", String(40), nullable=True),
     # Read-side active flag derived from partner status (de-index on activation
     # loss / credential invalidation). True when the partner is [Active].
@@ -287,8 +288,10 @@ partner_directory_index = Table(
     ),
     # Specialty only from the closed list, and only for doctors (ADR-0012,
     # glossary). Labs and chemists must always carry NULL - the field is never
-    # free-form. Kept in lockstep with the Specialty vocabulary (domain
-    # credentials.py).
+    # free-form. This constraint still names the ORIGINAL four values while the
+    # domain vocabulary (domain vocabularies.py) carries about twenty since
+    # #602; no runtime writer sets the column, so the wider values cannot reach
+    # it. #606 replaces this constraint and the column.
     CheckConstraint(
         "specialty IS NULL OR (partner_type = 'doctor' AND specialty IN "
         "('General Physician', 'Pediatrician', 'Gynecologist', 'Dentist'))",

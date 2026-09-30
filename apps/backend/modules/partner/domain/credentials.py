@@ -6,6 +6,10 @@ a ``chemist`` a drug license; each may carry one or two supporting documents).
 The enum mirrors the ``partner_credentials.credential_type`` CHECK constraint so
 the domain never names a value the schema cannot hold - a single source of truth
 for the closed enum (coding-standards §3, pure domain: no schema imports).
+
+The doctor specialty pick-list lived here until #602 moved it to
+``domain/vocabularies.py``: the practice a doctor declares is not a credential
+document.
 """
 
 from __future__ import annotations
@@ -51,14 +55,3 @@ class CredentialInvalidatedReason(StrEnum):
     EXPIRED = "expired"
     REVOKED = "revoked"
     REVERIFICATION_FAILED = "reverification_failed"
-
-
-#: The closed pick-list of the kind of care an [Active] doctor offers
-#: (FEAT-004, glossary). Doctors only - labs and chemists carry no specialty,
-#: the field is never free-form. Mirrors the ``directory_index.specialty``
-#: CHECK constraint and pre-seeds the homepage/directory search filter chips.
-class Specialty(StrEnum):
-    GENERAL_PHYSICIAN = "General Physician"
-    PEDIATRICIAN = "Pediatrician"
-    GYNECOLOGIST = "Gynecologist"
-    DENTIST = "Dentist"

@@ -29,7 +29,7 @@ from app.gateway.errors import emit_access_denial, error_response
 from app.gateway.idempotency import run_idempotent
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_operator, require_partner
-from modules.partner.domain.credentials import CredentialType, Specialty
+from modules.partner.domain.credentials import CredentialType
 from modules.partner.domain.events import PartnerType
 from modules.partner.domain.exceptions import (
     AppealAlreadyUsedError,
@@ -51,6 +51,7 @@ from modules.partner.domain.exceptions import (
     ReSubmissionThrottledError,
     ServiceAreaNotFoundError,
 )
+from modules.partner.domain.vocabularies import Specialty
 from modules.partner.facade import (
     CredentialSubmission,
     CredentialSubmissionResult,
