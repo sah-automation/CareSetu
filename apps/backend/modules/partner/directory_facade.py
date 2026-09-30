@@ -56,6 +56,7 @@ from modules.partner.domain.events import (
     partner_selected_envelope,
 )
 from modules.partner.domain.exceptions import ProviderProfileNotFoundError
+from modules.partner.domain.practice_position import EARTH_MEAN_RADIUS_KM
 from modules.partner.outbox import PARTNER_OUTBOX_TABLE
 from modules.partner.schema.models import (
     partner_credentials,
@@ -106,7 +107,9 @@ def _haversine_km(latitude: float, longitude: float) -> Any:
     Computed in SQL over ``practice_latitude``/``practice_longitude`` so the
     peri-urban range clamp and the nearest-first sort both stay in the
     database (FEAT-004 geo via SQL range; PostGIS optional at the cost floor,
-    MOD-002 §4). Returns the SQL expression - 6371 km mean Earth radius.
+    MOD-002 §4). Returns the SQL expression - 6371 km mean Earth radius, the
+    same ``EARTH_MEAN_RADIUS_KM`` the pure ``great_circle_km`` decision uses, so
+    the expression and the Python calculation cannot drift apart (#603).
     """
     rad_lat_me = func.radians(latitude)
     rad_lng_me = func.radians(longitude)
@@ -117,7 +120,7 @@ def _haversine_km(latitude: float, longitude: float) -> Any:
     a = func.power(func.sin(dlat / 2), 2) + func.cos(rad_lat_me) * func.cos(
         rad_lat_row
     ) * func.power(func.sin(dlon / 2), 2)
-    return 6371.0 * 2.0 * func.asin(func.sqrt(a))
+    return EARTH_MEAN_RADIUS_KM * 2.0 * func.asin(func.sqrt(a))
 
 
 class DirectoryFacade:
