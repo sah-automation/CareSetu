@@ -370,10 +370,13 @@ partner_directory_index = Table(
     # search (#612) matches on membership, and the column holds the same
     # JSONB-array shape the profile does.
     #
-    # NULLABLE on purpose, unlike the profile's own ``specialties``. NULL is how
-    # a directory entry says "carries no specialty" - a lab or chemist row, and
-    # every row written before #606 - and the glossary keeps that a distinct
-    # state from a doctor who has declared an empty selection.
+    # NULLABLE on purpose, unlike the profile's own ``specialties``. The value
+    # is that selection copied verbatim by ``refresh_directory_entry`` (#607) -
+    # the entry is a projection of the profile row and holds no vocabulary rule
+    # of its own - so a doctor who has declared an empty selection carries
+    # ``[]``. NULL is what every row written before #606 carries, and the
+    # readers treat the two alike: the search's membership predicate fails
+    # both, and ``representative_specialty`` projects both to no specialty.
     #
     # VALIDATION IS APPLICATION-LEVEL, and deliberately so. The retired
     # ``ck_partner_directory_index_specialty`` CHECK hard-coded the original four

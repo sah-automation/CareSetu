@@ -47,9 +47,20 @@ PARTNER_SCHEMA = "partner"
 class CredentialValidityPort(Protocol):
     """Surface the credential-validity deep module exposes to sub-facades.
 
-    Captures the 3 SQL predicates, the single close-out transition and the
-    single activate transition so sub-facades depend on a typed seam rather
-    than ``Any`` or ``ModuleType`` (coding-standards S3).
+    Captures the 3 SQL predicates, the single close-out transition, the single
+    activate transition and the shared directory-entry refresh so sub-facades
+    depend on a typed seam rather than ``Any`` or ``ModuleType``
+    (coding-standards S3).
+
+    ``refresh_directory_entry`` sits here rather than in a second one-method
+    port, and the reason is worth stating because the fit is imperfect: it is a
+    read-side projection write owned by the same module as the predicates that
+    read it, and the doctor's own address save (#609) reaches it through this
+    seam even though the write is not about credential validity. A second port
+    with one method would be a thinner abstraction, not a clearer one - and
+    whoever opens this file next is exactly the person who must not read a
+    doctor-triggered call as a privilege escalation, so the operation's name and
+    this note carry that.
     """
 
     def provider_visible(self, column: ColumnElement[Any]) -> ColumnElement[bool]: ...
@@ -66,6 +77,11 @@ class CredentialValidityPort(Protocol):
         partner_id: int,
         *,
         round: int,
+    ) -> None: ...
+    async def refresh_directory_entry(
+        self,
+        connection: AsyncConnection,
+        partner_id: int,
     ) -> None: ...
 
 
