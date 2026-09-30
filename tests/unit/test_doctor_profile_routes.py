@@ -13,6 +13,7 @@ from modules.iam.facade import PhotoContent
 from modules.partner.doctor_profile_models import (
     DoctorProfileCredential,
     DoctorProfilePhotoView,
+    DoctorProfilePracticeUpdate,
     DoctorProfileUpdate,
     DoctorProfileView,
 )
@@ -56,6 +57,7 @@ class StubPartnerFacade:
     def __init__(self) -> None:
         self.profile_calls: list[int] = []
         self.update_calls: list[tuple[int, DoctorProfileUpdate]] = []
+        self.practice_update_calls: list[tuple[int, DoctorProfilePracticeUpdate]] = []
         self.photo_update_calls: list[tuple[int, str | None, bytes]] = []
         self.photo_get_calls: list[int] = []
         self.photo_delete_calls: list[int] = []
@@ -71,8 +73,9 @@ class StubPartnerFacade:
         self.view = DoctorProfileView(
             partner_id=_PARTNER_ID,
             photo_ref="doctor/12/photo.enc",
-            practice_name="Shanti Clinic",
-            specialty="General Physician",
+            practice_name="Anita Verma",
+            clinic_name="Shanti Clinic",
+            specialties=["General Physician", "Pediatrician"],
             verified=True,
             practice_address="Main Road, Daltonganj",
             practice_latitude=24.483,
@@ -113,6 +116,16 @@ class StubPartnerFacade:
         update: DoctorProfileUpdate,
     ) -> DoctorProfileView:
         self.update_calls.append((doctor_id, update))
+        return self.view
+
+    async def update_doctor_practice(
+        self,
+        doctor_id: int,
+        update: DoctorProfilePracticeUpdate,
+    ) -> DoctorProfileView:
+        self.practice_update_calls.append((doctor_id, update))
+        if self.profile_error is not None:
+            raise self.profile_error
         return self.view
 
     async def update_doctor_photo(
@@ -254,6 +267,225 @@ def test_profile_idempotency_key_is_scoped_to_the_doctor() -> None:
         _PARTNER_ID,
         _OTHER_PARTNER_ID,
     ]
+
+
+def test_put_doctor_profile_practice_saves_the_practice_card_for_active_doctor() -> None:
+    """#608: the practice write returns 200 and forwards its body verbatim.
+
+    Verbatim means the router parsed and re-serialized nothing: the model the
+    facade receives dumps back to exactly the submitted JSON, so a client cannot
+    have a field quietly dropped, renamed or reordered between the wire and the
+    write. The section write's own fields only - no address, languages, about or
+    notification keys ride along.
+    """
+    facade = StubPartnerFacade()
+    client = _client(facade)
+    body = {
+        "full_name": "Anita Verma",
+        "clinic_name": "Shanti Clinic",
+        "specialties": ["Pediatrician", "General Physician"],
+        "experience_years": 12,
+    }
+
+    response = client.put("/v1/doctor/profile/practice", json=body, headers=_bearer(_token()))
+
+    assert response.status_code == 200
+    assert response.json() == facade.view.model_dump(mode="json")
+    assert len(facade.practice_update_calls) == 1
+    doctor_id, update = facade.practice_update_calls[0]
+    assert doctor_id == _PARTNER_ID
+    assert update.model_dump(mode="json") == body
+
+
+@pytest.mark.parametrize(
+    "borrowed",
+    [
+        {"practice_address": "Main Road, Daltonganj"},
+        {"notification_preferences": {"sms": True}},
+        {"availability": "Monday to Friday"},
+        {"practice_latitude": 24.483},
+    ],
+    ids=["address", "notifications", "availability", "coordinates"],
+)
+def test_put_doctor_profile_practice_refuses_another_cards_field(
+    borrowed: dict[str, object],
+) -> None:
+    """#608: a section save cannot write a field no card on screen is editing.
+
+    ``extra="forbid"`` on the practice model is what makes the four-way split
+    real rather than nominal. Each case is a field owned by another card (or, for
+    the coordinates, by no card at all - they are server-written from the declared
+    PIN), and every one of them is a 422 with no facade call, so a stale client
+    saving the practice card cannot silently move the address.
+    """
+    facade = StubPartnerFacade()
+    client = _client(facade)
+    body = {"full_name": "Anita Verma", **borrowed}
+
+    response = client.put("/v1/doctor/profile/practice", json=body, headers=_bearer(_token()))
+
+    assert response.status_code == 422
+    assert facade.practice_update_calls == []
+
+
+def test_put_doctor_profile_practice_rejects_specialty_outside_the_closed_list() -> None:
+    """#608: a specialty off the closed pick-list is a 422 with a field-level detail.
+
+    The field is never free-form, so an unknown value is refused rather than
+    persisted into a column nothing can filter on later. The detail names the
+    ``specialties`` field, which is what the client renders the error under.
+    """
+    facade = StubPartnerFacade()
+    client = _client(facade)
+    body = {"full_name": "Anita Verma", "specialties": ["General Physician", "Homeopathy"]}
+
+    response = client.put("/v1/doctor/profile/practice", json=body, headers=_bearer(_token()))
+
+    assert response.status_code == 422
+    envelope = response.json()
+    assert envelope["code"] == "INVALID_SPECIALTY"
+    assert [error["path"] for error in envelope["details"]["errors"]] == ["specialties"]
+    assert "Homeopathy" in envelope["details"]["errors"][0]["reason"]
+    assert facade.practice_update_calls == []
+
+
+def test_put_doctor_profile_practice_accepts_an_empty_specialty_selection() -> None:
+    """#608: declaring no specialty yet is a state a doctor can hold.
+
+    The counterpart to the closed-list refusal: an empty selection is a real
+    answer for a practice that has not decided, so it is saved as the empty array
+    rather than refused - the same call ``require_consult_languages`` makes for a
+    doctor who consults in no declared language yet.
+    """
+    facade = StubPartnerFacade()
+    client = _client(facade)
+
+    response = client.put(
+        "/v1/doctor/profile/practice",
+        json={"full_name": "Anita Verma", "specialties": []},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 200
+    assert facade.practice_update_calls[0][1].specialties == []
+
+
+def test_practice_idempotency_key_is_scoped_to_the_doctor() -> None:
+    """#608: one client's key never answers for another doctor's save.
+
+    The section writes are the only writes that can arrive concurrently from two
+    browsers signed in as different doctors, so the per-doctor namespace is what
+    stops one doctor's replayed key from being served the other doctor's stored
+    result. Same key, same body, two identities, two writes.
+    """
+    facade = StubPartnerFacade()
+    client = _client(facade)
+    body = {"full_name": "Anita Verma", "specialties": ["Pediatrician"]}
+    first_headers = {
+        **_bearer(_token()),
+        "Idempotency-Key": "shared-practice-key",
+    }
+    second_headers = {
+        **_bearer(_token(subject_id=_OTHER_IDENTITY_ID)),
+        "Idempotency-Key": "shared-practice-key",
+    }
+
+    first = client.put("/v1/doctor/profile/practice", json=body, headers=first_headers)
+    second = client.put("/v1/doctor/profile/practice", json=body, headers=second_headers)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert [doctor_id for doctor_id, _ in facade.practice_update_calls] == [
+        _PARTNER_ID,
+        _OTHER_PARTNER_ID,
+    ]
+
+
+def test_put_doctor_profile_practice_replays_the_same_idempotency_key() -> None:
+    """#608: a retry of the same doctor's save does not execute twice."""
+    facade = StubPartnerFacade()
+    client = _client(facade)
+    headers = {
+        **_bearer(_token()),
+        "Idempotency-Key": "practice-retry-key",
+    }
+    body = {"full_name": "Anita Verma"}
+
+    first = client.put("/v1/doctor/profile/practice", json=body, headers=headers)
+    second = client.put("/v1/doctor/profile/practice", json=body, headers=headers)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert len(facade.practice_update_calls) == 1
+
+
+def test_put_doctor_profile_practice_refuses_non_active_doctor() -> None:
+    """#608: the edge refusal, and no facade call behind it.
+
+    The guard resolves the principal to its partner profile and refuses a
+    partner who is not an ``[Active]`` doctor before the section write is reached,
+    so an unverified doctor cannot save a practice card at all. The facade
+    re-checks the same rule under a row lock; this case is the edge half.
+    """
+    facade = StubPartnerFacade()
+    facade.partner_status = "Registered"
+    client = _client(facade)
+
+    response = client.put(
+        "/v1/doctor/profile/practice",
+        json={"full_name": "Anita Verma"},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "AUTH_INSUFFICIENT_SCOPE"
+    assert facade.practice_update_calls == []
+
+
+def test_put_doctor_profile_practice_refuses_non_doctor_partner() -> None:
+    """#608: the practice card is a doctor's, not any partner's."""
+    facade = StubPartnerFacade()
+    facade.partner_type = "lab"
+    client = _client(facade)
+
+    response = client.put(
+        "/v1/doctor/profile/practice",
+        json={"full_name": "Anita Verma"},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "AUTH_INSUFFICIENT_SCOPE"
+    assert facade.practice_update_calls == []
+
+
+def test_practice_facade_authorization_denial_is_audited() -> None:
+    """#608: the facade half of the refusal is a denial, not a silent 403.
+
+    A doctor deactivated between the edge guard and the write is refused by the
+    facade's row-locked recheck, and that refusal is audited through iam - the
+    reason the section write is not reachable by a client that only satisfies the
+    edge.
+    """
+    facade = StubPartnerFacade()
+    facade.profile_error = DoctorProfileNotAllowedError(
+        _PARTNER_ID,
+        "doctor",
+        "Registered",
+    )
+    client = _client(facade)
+    iam = client.app.state.iam_facade
+    assert isinstance(iam, StubIamFacade)
+
+    response = client.put(
+        "/v1/doctor/profile/practice",
+        json={"full_name": "Anita Verma"},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "DOCTOR_PROFILE_NOT_ALLOWED"
+    assert iam.access_denials == [_IDENTITY_ID]
 
 
 def test_put_doctor_profile_photo_uploads_private_doctor_media() -> None:

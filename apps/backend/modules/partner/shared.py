@@ -130,15 +130,16 @@ def representative_specialty(raw: object) -> str | None:
 
     The directory entry's ``specialty`` column became a multi-valued selection in
     #606, because a doctor practises more than one kind of care and the overlap
-    search (#612) matches on membership. Three projections still declare the field
-    as a single nullable string - the private doctor profile view and, through
-    it, the provider profile view and the directory browse entry - and each is
-    owned by a later ticket that widens it deliberately: #608 sources the private
-    view from the profile row and returns the whole selection, #612 decides
-    whether the browse projection widens, #613 owns the public one.
+    search (#612) matches on membership. Two projections still declare the field
+    as a single nullable string - the directory browse entry and, through it, the
+    public provider profile - and each is owned by a later ticket that widens it
+    deliberately: #612 decides whether the browse projection widens, #613 owns
+    the public one. The private doctor profile view is no longer one of them -
+    # #608 sources it from the profile row and returns the whole selection, which
+    is :func:`specialty_selection` below.
 
-    Until then this is the one place those three readers agree on what a
-    selection projects to: the FIRST member, or ``None`` for an empty selection
+    Until then this is the one place those readers agree on what a selection
+    projects to: the FIRST member, or ``None`` for an empty selection
     and for a lab or chemist row, whose directory entry carries no specialty at
     all. Order is the selection's own, so the value is the doctor's first
     declared specialty rather than an alphabetical or arbitrary one.
@@ -153,12 +154,32 @@ def representative_specialty(raw: object) -> str | None:
     reads as "no specialty" rather than leaking a Python ``repr`` into a response
     field.
     """
+    members = specialty_selection(raw)
+    return members[0] if members else None
+
+
+def specialty_selection(raw: object) -> list[str]:
+    """Project a multi-valued specialty column onto the selection it holds.
+
+    The whole-selection counterpart of :func:`representative_specialty`, and the
+    read side of the column the practice section write (#608) lands on. The
+    private doctor profile view returns the doctor's declared selection rather
+    than one of its members, because that is what the row holds and what the
+    doctor just wrote.
+
+    Equally defensive, for the same reason and with the same driver-shaped
+    inputs - a JSONB array arrives as a list, ``NULL`` as ``None``, and a
+    hand-repaired row could hold a scalar: a non-list reads as the empty
+    selection rather than as a Python ``repr``. Non-string and empty-string
+    members are DROPPED rather than rendered, because this view is declared
+    ``extra="forbid"`` with a ``list[str]`` field and a junk member would
+    otherwise surface as a 500 from the response model instead of a readable
+    profile. Order is the stored selection's own, so the doctor sees their
+    declared order, which is what the overlap search (#612) matches against.
+    """
     if isinstance(raw, (str, bytes)) or not isinstance(raw, (list, tuple)):
-        return None
-    for member in raw:
-        if isinstance(member, str) and member:
-            return member
-    return None
+        return []
+    return [member for member in raw if isinstance(member, str) and member]
 
 
 @dataclass(frozen=True)

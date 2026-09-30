@@ -6,7 +6,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from modules.partner.doctor_profile_models import DoctorProfileUpdate
+from modules.partner.doctor_profile_models import (
+    DoctorProfilePracticeUpdate,
+    DoctorProfileUpdate,
+)
+from modules.partner.domain.exceptions import InvalidSpecialtyError
+from modules.partner.domain.vocabularies import Specialty
 from modules.partner.facade import (
     DoctorProfileNotAllowedError,
     DoctorProfilePhotoNotFoundError,
@@ -113,8 +118,12 @@ async def test_get_doctor_profile_projects_private_fields_and_derived_status() -
                     partner_type="doctor",
                     status="Active",
                     photo_ref="doctor/12/photo.enc",
-                    practice_name="Shanti Clinic",
-                    specialty=["General Physician"],
+                    practice_name="Anita Verma",
+                    clinic_name="Shanti Clinic",
+                    # #608: read off the PROFILE ROW, multi-valued, in the
+                    # doctor's declared order - not a single representative value
+                    # outer-joined from the directory entry.
+                    specialties=["Pediatrician", "General Physician"],
                     practice_address="Main Road, Daltonganj",
                     practice_latitude=24.483,
                     practice_longitude=87.433,
@@ -153,8 +162,9 @@ async def test_get_doctor_profile_projects_private_fields_and_derived_status() -
 
     assert profile.partner_id == 12
     assert profile.photo_ref == "doctor/12/photo.enc"
-    assert profile.practice_name == "Shanti Clinic"
-    assert profile.specialty == "General Physician"
+    assert profile.practice_name == "Anita Verma"
+    assert profile.clinic_name == "Shanti Clinic"
+    assert profile.specialties == ["Pediatrician", "General Physician"]
     assert profile.verified is True
     assert profile.practice_address == "Main Road, Daltonganj"
     assert profile.practice_latitude == pytest.approx(24.483)
@@ -201,8 +211,9 @@ async def test_update_doctor_profile_writes_the_private_row_only() -> None:
                     partner_type="doctor",
                     status="Active",
                     photo_ref=None,
-                    practice_name="Shanti Clinic",
-                    specialty=["General Physician"],
+                    practice_name="Anita Verma",
+                    clinic_name="Shanti Clinic",
+                    specialties=["Pediatrician", "General Physician"],
                     practice_address="Main Road, Daltonganj",
                     practice_latitude=24.483,
                     practice_longitude=87.433,
@@ -234,7 +245,8 @@ async def test_update_doctor_profile_writes_the_private_row_only() -> None:
 
     profile = await facade.update_doctor_profile(12, update)
 
-    assert profile.practice_name == "Shanti Clinic"
+    assert profile.practice_name == "Anita Verma"
+    assert profile.specialties == ["Pediatrician", "General Physician"]
     assert profile.consultation_fee == 50000
     statements = [call.args[0] for call in connection.execute.await_args_list]
     profile_update = statements[1]
@@ -261,6 +273,218 @@ async def test_update_doctor_profile_writes_the_private_row_only() -> None:
     }
     assert written_tables == {"partner_profiles"}
     assert cache.visibility_changes == 0
+
+
+def _practice_read_back_row() -> _Row:
+    """The row ``get_doctor_profile`` returns after the practice write commits."""
+    return _Row(
+        partner_id=12,
+        partner_type="doctor",
+        status="Active",
+        photo_ref=None,
+        practice_name="Anita Verma",
+        clinic_name="Shanti Clinic",
+        specialties=["Pediatrician", "General Physician"],
+        practice_address="Main Road, Daltonganj",
+        practice_latitude=24.483,
+        practice_longitude=87.433,
+        area_name="Daltonganj",
+        languages=["English", "Hindi"],
+        experience_years=12,
+        about="Primary care physician.",
+        consultation_fee_paise=50000,
+        availability="Monday to Friday, 9 AM to 5 PM",
+        notification_preferences={"appointment_reminders": True, "sms": True},
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_doctor_practice_writes_only_its_own_columns() -> None:
+    """#608: the practice write touches its own columns and no one else's.
+
+    Two assertions, and the second is the one that matters for the four-way split.
+    The written TABLE set proves the save stays on the doctor's own private row -
+    it moves nothing in the public directory entry that ``search_directory`` reads.
+    The written COLUMN set then proves the save stays inside its own card: the
+    address, the languages, the about text, the availability and the notification
+    preferences are all absent, so a doctor editing their practice card cannot
+    move a field the card they are looking at does not show.
+    """
+    update = DoctorProfilePracticeUpdate(
+        full_name="Anita Verma",
+        clinic_name="Shanti Clinic",
+        specialties=["Pediatrician", "General Physician"],
+        experience_years=12,
+    )
+    connection = _connection(
+        [
+            _Result(row=_Row(partner_type="doctor", status="Active")),
+            _Result(),
+            _Result(row=_practice_read_back_row()),
+            _Result(
+                rows=[
+                    _Row(
+                        credential_type="medical_registration",
+                        verified=True,
+                        expires_at=_NOW + timedelta(days=180),
+                        revoked_at=None,
+                        invalidation_reason=None,
+                    )
+                ]
+            ),
+        ]
+    )
+    facade = _facade(connection)
+    cache = _Cache()
+    facade._directory_cache = cache
+
+    profile = await facade.update_doctor_practice(12, update)
+
+    # The read-back is what the doctor next GET would serve, straight off the row
+    # the write just landed - the selection whole, not one representative member.
+    assert profile.practice_name == "Anita Verma"
+    assert profile.clinic_name == "Shanti Clinic"
+    assert profile.specialties == ["Pediatrician", "General Physician"]
+    assert profile.experience_years == 12
+
+    statements = [call.args[0] for call in connection.execute.await_args_list]
+    recheck, profile_update = statements[0], statements[1]
+    # The active-doctor recheck is a row lock, not a bare read: a concurrent
+    # deactivation between the edge guard and this write must not slip past it.
+    assert "FOR UPDATE" in str(recheck)
+    written_tables = {
+        statement.table.name
+        for statement in statements
+        if getattr(statement, "table", None) is not None
+    }
+    assert written_tables == {"partner_profiles"}
+    assert profile_update.table.name == "partner_profiles"
+    # ``full_name`` is the wire name for the ``practice_name`` column; every other
+    # field is name-for-name. ``updated_at`` is the server-written touch.
+    assert set(profile_update._values) == {
+        "practice_name",
+        "clinic_name",
+        "specialties",
+        "experience_years",
+        "updated_at",
+    }
+    assert profile_update._values["practice_name"].value == "Anita Verma"
+    assert profile_update._values["clinic_name"].value == "Shanti Clinic"
+    assert profile_update._values["specialties"].value == ["Pediatrician", "General Physician"]
+    assert profile_update._values["experience_years"].value == 12
+    for another_cards_column in (
+        "practice_address",
+        "practice_latitude",
+        "practice_longitude",
+        "languages",
+        "about",
+        "availability",
+        "notification_preferences",
+        "consultation_fee_paise",
+    ):
+        assert another_cards_column not in profile_update._values
+    # The public directory entry keeps a COPY of the selection, refreshed by the
+    # shared operation (#607); a private section save never rewrites it.
+    assert cache.visibility_changes == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("partner_type", "status"),
+    [("doctor", "Registered"), ("lab", "Active")],
+    ids=["not-active", "not-a-doctor"],
+)
+async def test_update_doctor_practice_refuses_a_partner_that_is_not_an_active_doctor(
+    partner_type: str,
+    status: str,
+) -> None:
+    """#608: the refusal happens before any write, under the row lock.
+
+    ``execute.await_count == 1`` is the whole assertion: the locked recheck ran,
+    the rule refused, and the ``UPDATE`` was never issued - so a partner who is not
+    an ``[Active]`` doctor cannot have written a single practice column.
+    """
+    connection = _connection(
+        [
+            _Result(row=_Row(partner_type=partner_type, status=status)),
+        ]
+    )
+    facade = _facade(connection)
+
+    with pytest.raises(DoctorProfileNotAllowedError):
+        await facade.update_doctor_practice(
+            12,
+            DoctorProfilePracticeUpdate(full_name="Anita Verma"),
+        )
+
+    assert connection.execute.await_count == 1
+    recheck = connection.execute.await_args_list[0].args[0]
+    assert "FOR UPDATE" in str(recheck)
+
+
+def test_practice_update_rejects_a_specialty_off_the_closed_list() -> None:
+    """#608: the closed pick-list is enforced before the write is even constructible.
+
+    The model's validator delegates to the domain's ``require_specialties``, so a
+    value outside the list cannot reach the facade at all - the write is refused
+    at the boundary, naming the offending member and its position. #602 owns the
+    list and the error type; this is the proof the practice card is wired to them
+    rather than carrying its own copy of either.
+    """
+    with pytest.raises(InvalidSpecialtyError) as rejected:
+        DoctorProfilePracticeUpdate(
+            full_name="Anita Verma",
+            specialties=["General Physician", "Homeopathy"],
+        )
+
+    assert rejected.value.value == "Homeopathy"
+    assert rejected.value.position == 1
+
+    # A member spelled differently is not a member: the list is closed, so nothing
+    # is case-folded or tidied on the way in.
+    with pytest.raises(InvalidSpecialtyError):
+        DoctorProfilePracticeUpdate(
+            full_name="Anita Verma",
+            specialties=["general physician"],
+        )
+
+    # A repeated selection entry is a data-entry slip, not a second specialty.
+    with pytest.raises(InvalidSpecialtyError):
+        DoctorProfilePracticeUpdate(
+            full_name="Anita Verma",
+            specialties=["Pediatrician", "Pediatrician"],
+        )
+
+
+def test_practice_update_names_the_member_an_oversized_selection_broke() -> None:
+    """#608: the closed-list rule reports the member, not a bare length failure.
+
+    A ``max_length`` on the field would be checked first and would refuse an
+    oversized selection as a ``too_long`` naming no member - shadowing the only
+    rule this field has. So the field carries no cap and the closed list is the
+    bound: a selection longer than the whole pick-list is caught as the repeat it
+    necessarily contains, with the position reported.
+    """
+    every_member = [member.value for member in Specialty]
+
+    with pytest.raises(InvalidSpecialtyError) as rejected:
+        DoctorProfilePracticeUpdate(
+            full_name="Anita Verma",
+            specialties=[*every_member, "Pediatrician"],
+        )
+
+    assert rejected.value.value == "Pediatrician"
+    assert rejected.value.position == len(every_member)
+
+    # Every member at once is the longest legal selection, and it is accepted -
+    # the cap is the vocabulary's own size, never smaller.
+    assert (
+        DoctorProfilePracticeUpdate(
+            full_name="Anita Verma",
+            specialties=every_member,
+        ).specialties
+        == every_member
+    )
 
 
 @pytest.mark.asyncio

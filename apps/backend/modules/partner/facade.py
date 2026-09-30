@@ -155,6 +155,9 @@ from modules.partner.doctor_profile_models import (
     DoctorProfilePhotoView as DoctorProfilePhotoView,
 )
 from modules.partner.doctor_profile_models import (
+    DoctorProfilePracticeUpdate as DoctorProfilePracticeUpdate,
+)
+from modules.partner.doctor_profile_models import (
     DoctorProfileUpdate as DoctorProfileUpdate,
 )
 from modules.partner.doctor_profile_models import (
@@ -245,7 +248,6 @@ from modules.partner.registration_models import (
 )
 from modules.partner.schema.models import (
     partner_credentials,
-    partner_directory_index,
     partner_profiles,
     partner_service_areas,
 )
@@ -268,7 +270,7 @@ from modules.partner.shared import (
     load_profile_by_identity as _load_profile_by_identity,
 )
 from modules.partner.shared import (
-    representative_specialty as _representative_specialty,
+    specialty_selection as _specialty_selection,
 )
 from modules.profile_media.facade import (
     DOCTOR_PREFIX,
@@ -343,6 +345,55 @@ def _require_active_doctor(
 ) -> None:
     if partner_type != "doctor" or status != PartnerStatus.ACTIVE.value:
         raise DoctorProfileNotAllowedError(partner_id, partner_type, status)
+
+
+async def _update_active_doctor_profile(
+    connection: AsyncConnection,
+    doctor_id: int,
+    values: dict[str, object],
+) -> None:
+    """Write one profile section's columns, after a row-locked active-doctor recheck.
+
+    The shape every private profile write shares, and the reason the four section
+    writes (#608, #609, #610) do not each hand-roll it:
+
+    1. Re-read ``partner_type``/``status`` under ``SELECT ... FOR UPDATE`` and
+       refuse anything that is not an ``[Active]`` doctor. The row lock is what
+       makes the re-check worth doing: the edge guard resolved this same partner
+       in a different transaction, so without the lock a deactivation landing
+       between the two would let the save through. A doctor removed outright is a
+       ``PartnerNotFoundError`` here rather than a write against no row.
+    2. Issue the ``UPDATE`` with exactly the columns the caller passed plus
+       ``updated_at``. ``values`` is the section's own field set and nothing is
+       merged into it, so a section write can only ever move the columns its own
+       card declares.
+
+    The caller owns the read-back and any post-commit follow-up, because those
+    differ per section; this owns the lock, the refusal and the update, because
+    none of them may differ.
+    """
+    row = (
+        await connection.execute(
+            select(
+                partner_profiles.c.partner_type,
+                partner_profiles.c.status,
+            )
+            .where(partner_profiles.c.id == doctor_id)
+            .with_for_update()
+        )
+    ).first()
+    if row is None:
+        raise PartnerNotFoundError(doctor_id)
+    _require_active_doctor(
+        partner_id=doctor_id,
+        partner_type=row.partner_type,
+        status=row.status,
+    )
+    await connection.execute(
+        partner_profiles.update()
+        .where(partner_profiles.c.id == doctor_id)
+        .values(**values, updated_at=func.now())
+    )
 
 
 async def _delete_doctor_profile_media(
@@ -1011,7 +1062,17 @@ class PartnerFacade:
                         partner_profiles.c.status,
                         partner_profiles.c.photo_ref,
                         partner_profiles.c.practice_name,
-                        partner_directory_index.c.specialty,
+                        partner_profiles.c.clinic_name,
+                        # The specialty selection comes from the PROFILE ROW, not
+                        # from the directory entry this read used to outer-join
+                        # (#608). The profile row is the source of truth - it is
+                        # the column the practice section write lands on - and the
+                        # directory entry only receives a copy from the shared
+                        # refresh (#607). Joining instead would let this read
+                        # disagree with the row that was just written whenever the
+                        # write and the refresh are not in one transaction, which
+                        # is the normal case.
+                        partner_profiles.c.specialties,
                         partner_profiles.c.practice_address,
                         partner_profiles.c.practice_latitude,
                         partner_profiles.c.practice_longitude,
@@ -1024,10 +1085,6 @@ class PartnerFacade:
                         partner_profiles.c.notification_preferences,
                     )
                     .select_from(partner_profiles)
-                    .outerjoin(
-                        partner_directory_index,
-                        partner_directory_index.c.partner_id == partner_profiles.c.id,
-                    )
                     .outerjoin(
                         partner_service_areas,
                         partner_service_areas.c.id == partner_profiles.c.service_area_id,
@@ -1075,7 +1132,8 @@ class PartnerFacade:
             partner_id=int(row.partner_id),
             photo_ref=row.photo_ref,
             practice_name=row.practice_name,
-            specialty=_representative_specialty(row.specialty),
+            clinic_name=row.clinic_name,
+            specialties=_specialty_selection(row.specialties),
             verified=eligibility.has_any and not eligibility.has_invalid,
             practice_address=str(row.practice_address),
             practice_latitude=float(row.practice_latitude),
@@ -1112,34 +1170,60 @@ class PartnerFacade:
     ) -> DoctorProfileView:
         values = update.model_dump()
         async with self._engine.begin() as connection:
-            row = (
-                await connection.execute(
-                    select(
-                        partner_profiles.c.partner_type,
-                        partner_profiles.c.status,
-                    )
-                    .where(partner_profiles.c.id == doctor_id)
-                    .with_for_update()
-                )
-            ).first()
-            if row is None:
-                raise PartnerNotFoundError(doctor_id)
-            _require_active_doctor(
-                partner_id=doctor_id,
-                partner_type=row.partner_type,
-                status=row.status,
-            )
-            await connection.execute(
-                partner_profiles.update()
-                .where(partner_profiles.c.id == doctor_id)
-                .values(**values, updated_at=func.now())
-            )
+            await _update_active_doctor_profile(connection, doctor_id, values)
         # The public directory projection is NOT written here: this batch leaves
         # the public entry read-only to the doctor (a preview, not an editor,
         # #542), so a private profile save must not move the practice pin the
         # public ``search_directory`` orders by. The practice geo the private
         # projection serves lives on ``partner_profiles`` (written above) and
         # only the partner-approval path re-derives the directory row.
+        return await self.get_doctor_profile(doctor_id)
+
+    async def update_doctor_practice(
+        self,
+        doctor_id: int,
+        update: DoctorProfilePracticeUpdate,
+    ) -> DoctorProfileView:
+        """Save the Practice card: the doctor's name, clinic, specialties, experience (#608).
+
+        The first of the four section writes that replace the whole-form
+        ``update_doctor_profile`` (#611 retires that one, and adds nothing). It
+        touches ONLY this card's columns - the doctor's ``practice_name``, the
+        ``clinic_name`` building, the ``specialties`` selection and
+        ``experience_years`` - and never the address, the languages, the about
+        text, the availability or the notification preferences. That is the whole
+        point of the split: a save of one card cannot move a field no card on the
+        screen is editing, so two doctors editing their profile concurrently lose
+        nothing but the field they were both typing in.
+
+        The refusal and the lock are the whole-form write's, deliberately
+        unchanged and now shared rather than copied: ``_update_active_doctor_profile``
+        owns the ``SELECT ... FOR UPDATE`` recheck, the ``[Active]``-doctor refusal
+        and the update itself (api-standards §6: every authorization is re-checked
+        in the facade, not only at the edge). #609 and #610 call the same helper,
+        so all four section writes share one lock shape rather than four.
+
+        The wire field ``full_name`` maps to the ``practice_name`` column here -
+        see ``DoctorProfilePracticeUpdate`` for why the rename is on the wire and
+        not the column. Everything else is name-for-name, so this write's
+        ``.values()`` payload is the model's ``model_dump()`` with that one key
+        moved.
+
+        Nothing about credentials is touched: profile fields are DECLARED,
+        credentials are VERIFIED (ADR-0011), so the derived ``verified`` flag in
+        the read-back is unaffected by what this writes.
+        """
+        values = update.model_dump()
+        # The one wire-to-column rename, applied once here rather than by every
+        # caller - see the model docstring. ``pop`` so the dictionary never holds
+        # both keys and the column set cannot drift with the field name.
+        values["practice_name"] = values.pop("full_name")
+        async with self._engine.begin() as connection:
+            await _update_active_doctor_profile(connection, doctor_id, values)
+        # Same read-back as the whole-form write: the write returns the profile
+        # the doctor's next GET would serve, so the section card re-renders from
+        # one call. The public directory entry is still NOT written here - the
+        # shared refresh (#607) owns copying the specialties selection onto it.
         return await self.get_doctor_profile(doctor_id)
 
     async def update_doctor_photo(

@@ -42,6 +42,7 @@ from modules.partner.domain.exceptions import (
     IllegalPartnerTransitionError,
     InvalidQueueSortError,
     InvalidQueueStatusError,
+    InvalidSpecialtyError,
     PartnerError,
     PartnerNotActiveError,
     PartnerNotRejectedError,
@@ -837,6 +838,30 @@ def register_error_handlers(app: FastAPI) -> None:
             request=request,
         )
 
+    # A specialty outside the closed pick-list is an expected 4xx, not a 500:
+    # the field is never free-form, so an unknown value can never persist and be
+    # unfilterable later. ``InvalidSpecialtyError`` escapes the request model's
+    # validator on purpose - a ``ValueError`` there would be swallowed into
+    # Pydantic's generic 422 and lose this envelope - and the handler below is
+    # what turns it into the standard field-level ``details.errors`` shape.
+    #
+    # ``path`` is the wire name of the field the doctor submitted, which is the
+    # practice card's multi-valued ``specialties`` (#608). The single-valued
+    # ``require_specialty`` entry point raises the same error but has no HTTP
+    # surface today; if one lands it registers its own handler rather than having
+    # this one report a field the request never carried.
+    async def _invalid_specialty(request: Request, exc: Exception) -> JSONResponse:
+        invalid = cast(InvalidSpecialtyError, exc)
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "INVALID_SPECIALTY",
+            "specialty must be a value from the closed specialty pick-list, "
+            "and must not repeat within the selection",
+            log_tag="doctor_profile",
+            request=request,
+            details={"errors": [{"path": "specialties", "reason": str(invalid)}]},
+        )
+
     async def _provider_profile_not_found(request: Request, exc: Exception) -> JSONResponse:
         del exc
         return error_response(
@@ -868,5 +893,6 @@ def register_error_handlers(app: FastAPI) -> None:
         DoctorProfilePhotoStoreUnavailableError,
         _doctor_profile_photo_store_unavailable,
     )
+    app.add_exception_handler(InvalidSpecialtyError, _invalid_specialty)
     app.add_exception_handler(ProviderProfileNotFoundError, _provider_profile_not_found)
     app.add_exception_handler(PartnerError, _partner_failed)
