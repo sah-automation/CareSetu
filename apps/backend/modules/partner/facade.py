@@ -152,6 +152,9 @@ from modules.partner.doctor_profile_models import (
     DoctorCredentialStatus as DoctorCredentialStatus,
 )
 from modules.partner.doctor_profile_models import (
+    DoctorProfileAboutUpdate as DoctorProfileAboutUpdate,
+)
+from modules.partner.doctor_profile_models import (
     DoctorProfileAddressUpdate as DoctorProfileAddressUpdate,
 )
 from modules.partner.doctor_profile_models import (
@@ -159,6 +162,9 @@ from modules.partner.doctor_profile_models import (
 )
 from modules.partner.doctor_profile_models import (
     DoctorProfileCredential as DoctorProfileCredential,
+)
+from modules.partner.doctor_profile_models import (
+    DoctorProfileNotificationUpdate as DoctorProfileNotificationUpdate,
 )
 from modules.partner.doctor_profile_models import (
     DoctorProfilePhotoView as DoctorProfilePhotoView,
@@ -233,6 +239,9 @@ from modules.partner.domain.practice_position import (
 from modules.partner.domain.state_machine import (
     PartnerStatus,
 )
+from modules.partner.domain.vocabularies import (
+    merge_notification_preferences,
+)
 from modules.partner.operator_gate_facade import (
     OperatorGateFacade as OperatorGateFacade,
 )
@@ -291,7 +300,7 @@ from modules.partner.shared import (
     load_profile_by_identity as _load_profile_by_identity,
 )
 from modules.partner.shared import (
-    specialty_selection as _specialty_selection,
+    selection_members as _selection_members,
 )
 from modules.profile_media.facade import (
     DOCTOR_PREFIX,
@@ -1188,7 +1197,15 @@ class PartnerFacade:
                         partner_profiles.c.experience_years,
                         partner_profiles.c.about,
                         partner_profiles.c.consultation_fee_paise,
-                        partner_profiles.c.availability,
+                        # #610: the availability split. ``consulting_days`` is the
+                        # closed seven-day selection the about write lands on, and
+                        # ``consulting_hours`` is the prose that replaces the
+                        # ``availability`` blob this projection used to serve. The
+                        # retired column is no longer selected: it is inert (#606)
+                        # and rendering an availability no card can edit is worse
+                        # than not rendering one.
+                        partner_profiles.c.consulting_days,
+                        partner_profiles.c.consulting_hours,
                         partner_profiles.c.notification_preferences,
                     )
                     .select_from(partner_profiles)
@@ -1240,7 +1257,6 @@ class PartnerFacade:
             photo_ref=row.photo_ref,
             practice_name=row.practice_name,
             clinic_name=row.clinic_name,
-            specialties=_specialty_selection(row.specialties),
             verified=eligibility.has_any and not eligibility.has_invalid,
             practice_address=str(row.practice_address),
             address_line=row.address_line,
@@ -1251,7 +1267,6 @@ class PartnerFacade:
             practice_latitude=float(row.practice_latitude),
             practice_longitude=float(row.practice_longitude),
             area=str(row.area_name) if row.area_name is not None else DEFAULT_SERVICE_AREA_NAME,
-            languages=list(row.languages or []),
             experience_years=(
                 int(row.experience_years) if row.experience_years is not None else None
             ),
@@ -1259,7 +1274,15 @@ class PartnerFacade:
             consultation_fee=(
                 int(row.consultation_fee_paise) if row.consultation_fee_paise is not None else None
             ),
-            availability=row.availability,
+            # All THREE selections this view serves, through one defensive
+            # projection: a junk member reads as an absent one rather than failing
+            # the response model. The two the about write owns join the specialty
+            # selection #608 landed, so the three cannot drift apart on how a
+            # stored JSONB array becomes a wire list.
+            specialties=_selection_members(row.specialties),
+            languages=_selection_members(row.languages),
+            consulting_days=_selection_members(row.consulting_days),
+            consulting_hours=row.consulting_hours,
             credentials=[
                 DoctorProfileCredential(
                     credential_type=str(credential.credential_type),
@@ -1454,6 +1477,124 @@ class PartnerFacade:
             outside_peri_urban_belt=not belt.within_belt,
             distance_from_belt_centre_km=belt.distance_km,
         )
+
+    async def update_doctor_about(
+        self,
+        doctor_id: int,
+        update: DoctorProfileAboutUpdate,
+    ) -> DoctorProfileView:
+        """Save the About card: about text, languages, consulting days, hours (#610).
+
+        The third of the four section writes, and the one that splits a field
+        rather than moving it: the old ``availability`` blob becomes a closed
+        seven-day SELECTION plus a free-prose hours string. The two halves go to
+        two columns (``consulting_days``, ``consulting_hours``) and the old column
+        is not written at all - it is inert from #606 and #611 retires the
+        whole-form write that still addresses it. Nothing parses an existing
+        ``availability`` value into the two new columns: recovering chips from
+        hand-typed free text is guesswork, and a wrong guess is worse than an
+        empty prompt.
+
+        It touches ONLY this card's columns - ``about``, the ``languages``
+        selection, ``consulting_days`` and ``consulting_hours`` - and never the
+        doctor's name, the specialties, the address or the notification
+        preferences. The ``.values()`` payload is the model's ``model_dump()``
+        verbatim: every field is name-for-name with its column, and the two closed
+        lists arrive as the resolved members rather than the submitted strings,
+        because the model's validators ran before this was reached.
+
+        The refusal and the lock are the other section writes', unchanged and
+        shared rather than copied: :func:`_update_active_doctor_profile` owns the
+        ``SELECT ... FOR UPDATE`` recheck, the ``[Active]``-doctor refusal and the
+        update itself (api-standards §6).
+
+        **No directory entry is refreshed and no cache is flushed**, and that is
+        the point: these four columns are DECLARED prose and selections, none of
+        them a search filter or a positioning input. The one filterable field a
+        doctor would expect to move here - the specialty - is the practice card's
+        (#608), and the address write (#609) is the only one that calls the shared
+        refresh.
+
+        Nothing about credentials is touched: profile fields are DECLARED,
+        credentials are VERIFIED (ADR-0011), so the derived ``verified`` flag in
+        the read-back is unaffected by what this writes.
+        """
+        values = update.model_dump()
+        async with self._engine.begin() as connection:
+            await _update_active_doctor_profile(connection, doctor_id, values)
+        return await self.get_doctor_profile(doctor_id)
+
+    async def update_doctor_notification(
+        self,
+        doctor_id: int,
+        update: DoctorProfileNotificationUpdate,
+    ) -> DoctorProfileView:
+        """Save the Notification card: which of the five things to be told about (#610).
+
+        The fourth and last section write, and the only **single-column** write in
+        the module outside the consultation-fee editor. The acceptance criterion
+        that it touches only its own column is therefore cheap to state and cheap
+        to hold: the ``.values()`` payload is exactly one key plus the
+        ``updated_at`` touch, so no other field on this profile can move because of
+        a switch the doctor flipped.
+
+        The payload is NOT the submitted dict, though, and that is the only thing
+        worth reading here. The row is read under the lock the other section writes
+        take, its stored preferences are merged with the submission through
+        :func:`~modules.partner.domain.vocabularies.merge_notification_preferences`,
+        and the merge is what gets written. So:
+
+        - a key the five do not name and the row already holds is **carried
+          through untouched**, which is the promise the doctor Profile page used to
+          keep client-side and the server now keeps for every client;
+        - a key the five do not name and the row does not hold is **refused**,
+          because carrying is not the same as being able to write one;
+        - a key the five DO name and the submission omits is **dropped**, so a save
+          means "these are my five toggles" and a doctor can turn them all off.
+
+        That read is a third statement inside the write's transaction, not a fourth
+        card's worth of work: the row is already locked by the recheck, so the
+        stored preferences come off the SAME row rather than from a second query
+        that could see a different state than the one being written over.
+
+        The refusal and the lock are the other section writes', unchanged and
+        shared: :func:`_lock_active_doctor_profile` then
+        :func:`_write_active_doctor_profile`, which is #609's split - the lock is
+        taken and the partner refused before the stored preferences are read, so a
+        partner who is not an ``[Active]`` doctor writes nothing and learns nothing
+        about their own row.
+
+        Nothing about credentials is touched (ADR-0011), and no notification is
+        actually sent: this records which of the five a doctor wants, and the
+        delivery side is a separate concern from a preference a doctor declared.
+        """
+        async with self._engine.begin() as connection:
+            await _lock_active_doctor_profile(connection, doctor_id)
+            # The row is locked, so this is the row the write is about to replace -
+            # not a second look that could disagree with it. ``notification_preferences``
+            # is NOT NULL with a ``{}`` default, so a legacy row is a dict here and
+            # a hand-repaired non-dict degrades to nothing stored rather than 500ing
+            # a doctor's save - an ``isinstance`` check, not a truthiness test, since
+            # a truthy non-dict would still reach ``.items()`` and raise.
+            stored = (
+                await connection.execute(
+                    select(partner_profiles.c.notification_preferences).where(
+                        partner_profiles.c.id == doctor_id
+                    )
+                )
+            ).first()
+            stored_preferences = getattr(stored, "notification_preferences", None)
+            await _write_active_doctor_profile(
+                connection,
+                doctor_id,
+                {
+                    "notification_preferences": merge_notification_preferences(
+                        submitted=update.notification_preferences,
+                        stored=(stored_preferences if isinstance(stored_preferences, dict) else {}),
+                    )
+                },
+            )
+        return await self.get_doctor_profile(doctor_id)
 
     async def update_doctor_photo(
         self,

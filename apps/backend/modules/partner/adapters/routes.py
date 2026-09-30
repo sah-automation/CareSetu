@@ -40,6 +40,9 @@ from modules.partner.domain.exceptions import (
     DoctorProfilePhotoTransferError,
     DoctorProfilePhotoValidationError,
     IllegalPartnerTransitionError,
+    InvalidConsultingDayError,
+    InvalidConsultLanguageError,
+    InvalidNotificationKeyError,
     InvalidQueueSortError,
     InvalidQueueStatusError,
     InvalidSpecialtyError,
@@ -851,6 +854,33 @@ def register_error_handlers(app: FastAPI) -> None:
     # ``require_specialty`` entry point raises the same error but has no HTTP
     # surface today; if one lands it registers its own handler rather than having
     # this one report a field the request never carried.
+    def _field_rejection(
+        request: Request,
+        exc: Exception,
+        *,
+        code: str,
+        message: str,
+        path: str,
+    ) -> JSONResponse:
+        """Encode a domain pre-condition refusal as a FIELD-level validation error.
+
+        The one shape every closed-list refusal on this router takes: 422, the
+        domain's own code, and ``details.errors[0].path`` naming the field so the
+        doctor's card can point at the input that was refused. Four closed lists
+        are pinned here (#602's specialties, languages and days, plus #610's
+        notification keys) and each needs its own ``code`` and ``path``, which is why
+        they stay four registrations - but the encoding is written once, so a fifth
+        list cannot arrive with a subtly different envelope.
+        """
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            code,
+            message,
+            log_tag="doctor_profile",
+            request=request,
+            details={"errors": [{"path": path, "reason": str(exc)}]},
+        )
+
     async def _invalid_specialty(request: Request, exc: Exception) -> JSONResponse:
         invalid = cast(InvalidSpecialtyError, exc)
         return error_response(
@@ -881,6 +911,54 @@ def register_error_handlers(app: FastAPI) -> None:
             #
             # ``str(unresolved)`` never quotes the submitted code back.
             details={"errors": [{"path": "pin_code", "reason": str(unresolved)}]},
+        )
+
+    # The two closed lists the About card draws on (#610), plus the notification
+    # keys. All three are the ``_invalid_specialty`` argument above applied three
+    # more times: the domain raises a typed error out of the request model's
+    # validator, and the handler is what turns it into the standard field-level
+    # ``details.errors`` shape instead of Pydantic swallowing it into a generic
+    # 422 the client cannot render under the offending input.
+    #
+    # Three handlers rather than one, because the three ``path`` values are the
+    # whole point: the client renders the detail under the language chips, under
+    # the day chips, or under the notification switches, and a shared handler
+    # reporting one field for all of them would put two of the three errors in the
+    # wrong place. The messages are user-safe and carry no PHI - a language or a
+    # day is a pick-list value, and a notification key is a machine identifier.
+    async def _invalid_consult_language(request: Request, exc: Exception) -> JSONResponse:
+        invalid = cast(InvalidConsultLanguageError, exc)
+        return _field_rejection(
+            request,
+            invalid,
+            code="INVALID_CONSULT_LANGUAGE",
+            message="each language must be a value from the scheduled-languages list, "
+            "and must not repeat within the selection",
+            path="languages",
+        )
+
+    async def _invalid_consulting_day(request: Request, exc: Exception) -> JSONResponse:
+        invalid = cast(InvalidConsultingDayError, exc)
+        return _field_rejection(
+            request,
+            invalid,
+            code="INVALID_CONSULTING_DAY",
+            message="each consulting day must be a value from the seven-day list, "
+            "and must not repeat within the selection",
+            path="consulting_days",
+        )
+
+    async def _invalid_notification_key(request: Request, exc: Exception) -> JSONResponse:
+        invalid = cast(InvalidNotificationKeyError, exc)
+        # No "must not repeat" clause, unlike the three pick-lists: a JSON object
+        # cannot hold the same key twice, so repeating is not a mistake this field
+        # can express.
+        return _field_rejection(
+            request,
+            invalid,
+            code="INVALID_NOTIFICATION_KEY",
+            message="each notification preference must be one of the keys this console offers",
+            path="notification_preferences",
         )
 
     async def _provider_profile_not_found(request: Request, exc: Exception) -> JSONResponse:
@@ -915,6 +993,9 @@ def register_error_handlers(app: FastAPI) -> None:
         _doctor_profile_photo_store_unavailable,
     )
     app.add_exception_handler(InvalidSpecialtyError, _invalid_specialty)
+    app.add_exception_handler(InvalidConsultLanguageError, _invalid_consult_language)
+    app.add_exception_handler(InvalidConsultingDayError, _invalid_consulting_day)
+    app.add_exception_handler(InvalidNotificationKeyError, _invalid_notification_key)
     app.add_exception_handler(PracticePinUnresolvedError, _practice_pin_unresolved)
     app.add_exception_handler(ProviderProfileNotFoundError, _provider_profile_not_found)
     app.add_exception_handler(PartnerError, _partner_failed)

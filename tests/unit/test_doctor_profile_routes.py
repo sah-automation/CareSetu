@@ -11,9 +11,11 @@ from app.main import create_app
 from modules.iam.domain.jwt import issue_token
 from modules.iam.facade import PhotoContent
 from modules.partner.doctor_profile_models import (
+    DoctorProfileAboutUpdate,
     DoctorProfileAddressUpdate,
     DoctorProfileAddressView,
     DoctorProfileCredential,
+    DoctorProfileNotificationUpdate,
     DoctorProfilePhotoView,
     DoctorProfilePracticeUpdate,
     DoctorProfileUpdate,
@@ -63,6 +65,8 @@ class StubPartnerFacade:
         self.update_calls: list[tuple[int, DoctorProfileUpdate]] = []
         self.practice_update_calls: list[tuple[int, DoctorProfilePracticeUpdate]] = []
         self.address_update_calls: list[tuple[int, DoctorProfileAddressUpdate]] = []
+        self.about_update_calls: list[tuple[int, DoctorProfileAboutUpdate]] = []
+        self.notification_update_calls: list[tuple[int, DoctorProfileNotificationUpdate]] = []
         self.photo_update_calls: list[tuple[int, str | None, bytes]] = []
         self.photo_get_calls: list[int] = []
         self.photo_delete_calls: list[int] = []
@@ -90,7 +94,10 @@ class StubPartnerFacade:
             experience_years=12,
             about="Primary care physician.",
             consultation_fee=50000,
-            availability="Monday to Friday, 9 AM to 5 PM",
+            # #610: the availability split - a closed seven-day selection and the
+            # prose that replaces the single ``availability`` blob.
+            consulting_days=["Monday", "Tuesday", "Saturday"],
+            consulting_hours="Monday to Friday, 9 AM to 5 PM; Saturday morning clinic",
             credentials=[
                 DoctorProfileCredential(
                     credential_type="medical_registration",
@@ -151,6 +158,26 @@ class StubPartnerFacade:
             raise self.profile_error
         return self.address_view
 
+    async def update_doctor_about(
+        self,
+        doctor_id: int,
+        update: DoctorProfileAboutUpdate,
+    ) -> DoctorProfileView:
+        self.about_update_calls.append((doctor_id, update))
+        if self.profile_error is not None:
+            raise self.profile_error
+        return self.view
+
+    async def update_doctor_notification(
+        self,
+        doctor_id: int,
+        update: DoctorProfileNotificationUpdate,
+    ) -> DoctorProfileView:
+        self.notification_update_calls.append((doctor_id, update))
+        if self.profile_error is not None:
+            raise self.profile_error
+        return self.view
+
     async def update_doctor_photo(
         self,
         doctor_id: int,
@@ -180,6 +207,16 @@ def _client(facade: StubPartnerFacade | None = None) -> TestClient:
     app.state.partner_facade = facade if facade is not None else StubPartnerFacade()
     app.state.iam_facade = StubIamFacade()
     return TestClient(app)
+
+
+def _about_body() -> dict[str, object]:
+    """A complete About card body - #610 requires every one of its four fields."""
+    return {
+        "about": "Primary care physician.",
+        "languages": ["Hindi", "English"],
+        "consulting_days": ["Monday", "Tuesday"],
+        "consulting_hours": "Weekday mornings, Saturday morning clinic.",
+    }
 
 
 def test_get_doctor_profile_returns_private_projection_for_active_doctor() -> None:
@@ -699,6 +736,452 @@ def test_address_facade_authorization_denial_is_audited() -> None:
     response = client.put(
         "/v1/doctor/profile/address",
         json={"pin_code": "826001"},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "DOCTOR_PROFILE_NOT_ALLOWED"
+    assert iam.access_denials == [_IDENTITY_ID]
+
+
+# --------------------------------------------------------------------------
+# #610 - the About and Notification section writes
+# --------------------------------------------------------------------------
+
+
+def test_put_doctor_profile_about_saves_the_about_card_for_active_doctor() -> None:
+    """#610: the about write returns 200 and forwards its body verbatim.
+
+    Verbatim means the router parsed and re-serialized nothing: the model the
+    facade receives dumps back to exactly the submitted JSON, so no field has been
+    quietly dropped or renamed between the wire and the write. The card's four
+    fields only - no practice, address or notification key rides along.
+    """
+    facade = StubPartnerFacade()
+    client = _client(facade)
+    body = {
+        "about": "Twenty years of primary care in the block.",
+        "languages": ["Hindi", "English", "Maithili"],
+        "consulting_days": ["Monday", "Tuesday", "Saturday"],
+        "consulting_hours": "Weekdays 9 AM to 5 PM; Saturday morning clinic only.",
+    }
+
+    response = client.put("/v1/doctor/profile/about", json=body, headers=_bearer(_token()))
+
+    assert response.status_code == 200
+    assert response.json() == facade.view.model_dump(mode="json")
+    assert len(facade.about_update_calls) == 1
+    doctor_id, update = facade.about_update_calls[0]
+    assert doctor_id == _PARTNER_ID
+    assert update.model_dump(mode="json") == body
+
+
+def test_put_doctor_profile_about_keeps_consulting_hours_as_prose() -> None:
+    """#610: consulting hours cross the wire as an arbitrary string.
+
+    This is the "no weekly template, no slot structure" criterion, asserted on the
+    value rather than on a bound: a sentence no template would produce - mixed case,
+    a day-range written with dashes, a parenthetical, and a second clause - arrives
+    and is forwarded byte for byte. A model that had grown a weekly template or a
+    per-day slot list could not carry this at all, and a bound-only assertion would
+    have passed against one that could.
+    """
+    facade = StubPartnerFacade()
+    client = _client(facade)
+    hours = (
+        "Mon-Sat 10-2 (walk-ins after 12), Sat 5-7 pm only if the registrar is in; "
+        "closed the 2nd and 4th Sat of every month"
+    )
+
+    response = client.put(
+        "/v1/doctor/profile/about",
+        json={
+            "about": None,
+            "languages": [],
+            "consulting_days": ["Monday", "Saturday"],
+            "consulting_hours": hours,
+        },
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 200
+    assert facade.about_update_calls[0][1].consulting_hours == hours
+
+
+@pytest.mark.parametrize(
+    "borrowed",
+    [
+        {"full_name": "Anita Verma"},
+        {"pin_code": "826001"},
+        {"notification_preferences": {"new_consultations": True}},
+        {"consulting_fee": 50000},
+    ],
+    ids=["practice", "address", "notifications", "fee"],
+)
+def test_put_doctor_profile_about_refuses_another_cards_field(
+    borrowed: dict[str, object],
+) -> None:
+    """#610: the about card cannot write a field no card on screen is editing.
+
+    ``extra="forbid"`` on the about model is what makes the four-way split real
+    rather than nominal. The consultation fee is here too, and it is the case worth
+    naming: it is a real column with its own dedicated PATCH route on the doctor
+    landing page, and it is still not a field this card declares.
+    """
+    facade = StubPartnerFacade()
+    client = _client(facade)
+    body = {"about": "Primary care.", **borrowed}
+
+    response = client.put("/v1/doctor/profile/about", json=body, headers=_bearer(_token()))
+
+    assert response.status_code == 422
+    assert facade.about_update_calls == []
+
+
+@pytest.mark.parametrize("omitted", ["about", "languages", "consulting_days", "consulting_hours"])
+def test_put_doctor_profile_about_requires_the_whole_card(omitted: str) -> None:
+    """#610: a section save declares its whole card, so nothing is optional.
+
+    Not just ``extra="forbid"``, but REQUIRED - because the ``UPDATE`` payload is
+    the model's dump, and a default would mean a client that forgot one field
+    silently CLEARED that column and was told the save succeeded. An omitted
+    ``about`` would erase the doctor's own words about themselves; an omitted
+    ``consulting_days`` would wipe their availability. ``null`` is still how a
+    doctor clears one deliberately, and those two are different things.
+    """
+    facade = StubPartnerFacade()
+    client = _client(facade)
+    body = {
+        "about": "Primary care.",
+        "languages": ["Hindi"],
+        "consulting_days": ["Monday"],
+        "consulting_hours": "Weekday mornings",
+    }
+    body.pop(omitted)
+
+    response = client.put("/v1/doctor/profile/about", json=body, headers=_bearer(_token()))
+
+    assert response.status_code == 422
+    assert facade.about_update_calls == []
+
+
+@pytest.mark.parametrize(
+    ("field", "submitted", "code", "path", "offender"),
+    [
+        (
+            "languages",
+            ["Hindi", "Klingon"],
+            "INVALID_CONSULT_LANGUAGE",
+            "languages",
+            "Klingon",
+        ),
+        (
+            # A member spelled differently is not a member. This is the ticket's
+            # opening sentence - "the same language twice in two spellings" - and
+            # the answer is stronger than case-folding: the list cannot produce a
+            # second spelling at all.
+            "languages",
+            ["Hindi", "hindi"],
+            "INVALID_CONSULT_LANGUAGE",
+            "languages",
+            "hindi",
+        ),
+        (
+            "consulting_days",
+            ["Monday", "Caturday"],
+            "INVALID_CONSULTING_DAY",
+            "consulting_days",
+            "Caturday",
+        ),
+    ],
+    ids=["unknown-language", "two-spellings", "unknown-day"],
+)
+def test_put_doctor_profile_about_refuses_a_value_off_the_closed_list(
+    field: str,
+    submitted: list[str],
+    code: str,
+    path: str,
+    offender: str,
+) -> None:
+    """#610: a value outside a closed list is a 422 naming the offending field.
+
+    Both lists are checked member by member, so the refusal names WHICH member
+    broke the rule and not merely that the selection did. The ``path`` is what the
+    client renders the error under - the language chips or the day chips - so a
+    doctor who tapped four good days and one bad one sees the problem on the one
+    chip rather than as a whole-card failure that discards every other unsaved edit.
+    """
+    facade = StubPartnerFacade()
+    client = _client(facade)
+    body = {
+        "about": "Primary care.",
+        "languages": ["Hindi"],
+        "consulting_days": ["Monday"],
+        "consulting_hours": "Weekday mornings",
+        field: submitted,
+    }
+
+    response = client.put("/v1/doctor/profile/about", json=body, headers=_bearer(_token()))
+
+    assert response.status_code == 422
+    envelope = response.json()
+    assert envelope["code"] == code
+    assert [error["path"] for error in envelope["details"]["errors"]] == [path]
+    assert offender in envelope["details"]["errors"][0]["reason"]
+    assert facade.about_update_calls == []
+
+
+def test_about_idempotency_key_is_scoped_to_the_doctor() -> None:
+    """#610: one client's key never answers for another doctor's save."""
+    facade = StubPartnerFacade()
+    client = _client(facade)
+    body = _about_body()
+    first_headers = {
+        **_bearer(_token()),
+        "Idempotency-Key": "shared-about-key",
+    }
+    second_headers = {
+        **_bearer(_token(subject_id=_OTHER_IDENTITY_ID)),
+        "Idempotency-Key": "shared-about-key",
+    }
+
+    first = client.put("/v1/doctor/profile/about", json=body, headers=first_headers)
+    second = client.put("/v1/doctor/profile/about", json=body, headers=second_headers)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert [doctor_id for doctor_id, _ in facade.about_update_calls] == [
+        _PARTNER_ID,
+        _OTHER_PARTNER_ID,
+    ]
+
+
+def test_put_doctor_profile_about_refuses_non_active_doctor() -> None:
+    """#610: the edge refusal, and no facade call behind it."""
+    facade = StubPartnerFacade()
+    facade.partner_status = "Registered"
+    client = _client(facade)
+
+    response = client.put(
+        "/v1/doctor/profile/about",
+        json=_about_body(),
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "AUTH_INSUFFICIENT_SCOPE"
+    assert facade.about_update_calls == []
+
+
+def test_put_doctor_profile_about_facade_authorization_denial_is_audited() -> None:
+    """#610: the row-locked recheck's refusal is audited, not just refused."""
+    facade = StubPartnerFacade()
+    facade.profile_error = DoctorProfileNotAllowedError(
+        _PARTNER_ID,
+        "doctor",
+        "Registered",
+    )
+    client = _client(facade)
+    iam = client.app.state.iam_facade
+    assert isinstance(iam, StubIamFacade)
+
+    response = client.put(
+        "/v1/doctor/profile/about",
+        json=_about_body(),
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "DOCTOR_PROFILE_NOT_ALLOWED"
+    assert iam.access_denials == [_IDENTITY_ID]
+
+
+def test_put_doctor_profile_notifications_saves_the_card_for_active_doctor() -> None:
+    """#610: the notification write returns 200 and forwards its body verbatim."""
+    facade = StubPartnerFacade()
+    client = _client(facade)
+    body = {
+        "notification_preferences": {
+            "new_consultations": True,
+            "record_shared": False,
+            "pre_summary_ready": True,
+            "case_updates": True,
+            "credential_status": False,
+        }
+    }
+
+    response = client.put(
+        "/v1/doctor/profile/notifications",
+        json=body,
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == facade.view.model_dump(mode="json")
+    assert len(facade.notification_update_calls) == 1
+    doctor_id, update = facade.notification_update_calls[0]
+    assert doctor_id == _PARTNER_ID
+    assert update.model_dump(mode="json") == body
+
+
+def test_put_doctor_profile_notifications_accepts_an_empty_preference_set() -> None:
+    """#610: every toggle off is a real answer, not an absent one.
+
+    The counterpart to the closed-list refusals, and the reason the merge drops a
+    known stored key the submission omits: a doctor who turns all five switches off
+    must be able to say so with an empty selection.
+    """
+    facade = StubPartnerFacade()
+    client = _client(facade)
+
+    response = client.put(
+        "/v1/doctor/profile/notifications",
+        json={"notification_preferences": {}},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 200
+    assert facade.notification_update_calls[0][1].notification_preferences == {}
+
+
+def test_put_doctor_profile_notifications_refuses_a_key_off_the_list() -> None:
+    """#610: only the five keys can be written.
+
+    This is what "accepts the five existing notification keys" has to mean on the
+    server. The dictionary was an open one - 20 entries, 50-character keys, shape
+    only - so before #610 a save could write any key at all and the only named list
+    of the five in the repository was a TypeScript tuple on the profile page. The
+    refusal names the ``notification_preferences`` field so the card renders it
+    against the switches rather than as an opaque page-level failure.
+    """
+    facade = StubPartnerFacade()
+    client = _client(facade)
+
+    response = client.put(
+        "/v1/doctor/profile/notifications",
+        json={"notification_preferences": {"new_consultations": True, "sms": True}},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 422
+    envelope = response.json()
+    assert envelope["code"] == "INVALID_NOTIFICATION_KEY"
+    assert [error["path"] for error in envelope["details"]["errors"]] == [
+        "notification_preferences"
+    ]
+    assert "sms" in envelope["details"]["errors"][0]["reason"]
+    assert facade.notification_update_calls == []
+
+
+@pytest.mark.parametrize(
+    "borrowed",
+    [
+        {"about": "Primary care."},
+        {"full_name": "Anita Verma"},
+        {"pin_code": "826001"},
+    ],
+    ids=["about", "practice", "address"],
+)
+def test_put_doctor_profile_notifications_refuses_another_cards_field(
+    borrowed: dict[str, object],
+) -> None:
+    """#610: the smallest card cannot write a bigger card's field."""
+    facade = StubPartnerFacade()
+    client = _client(facade)
+
+    response = client.put(
+        "/v1/doctor/profile/notifications",
+        json={"notification_preferences": {"case_updates": True}, **borrowed},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 422
+    assert facade.notification_update_calls == []
+
+
+def test_put_doctor_profile_notifications_requires_the_preference_dict() -> None:
+    """#610: required, so an omitted dict cannot clear the doctor's toggles.
+
+    The single-column write is where this bites hardest: with a default, a client
+    that sent no preferences at all would have written ``{}`` and reported success,
+    switching the doctor off from every notification in one request.
+    """
+    facade = StubPartnerFacade()
+    client = _client(facade)
+
+    response = client.put(
+        "/v1/doctor/profile/notifications",
+        json={},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 422
+    assert facade.notification_update_calls == []
+
+
+def test_notification_idempotency_key_is_scoped_to_the_doctor() -> None:
+    """#610: the fourth section write keeps the same per-doctor scoping.
+
+    All four share the ``f"doctor:{doctor_id}"`` namespace, so the property is
+    stated per write rather than assumed from its siblings - and it is the
+    smallest write where a leaked namespace would be most expensive, since it
+    carries a doctor's stored notification preferences in the response.
+    """
+    facade = StubPartnerFacade()
+    client = _client(facade)
+    body = {"notification_preferences": {"new_consultations": True}}
+    first_headers = {
+        **_bearer(_token()),
+        "Idempotency-Key": "shared-notification-key",
+    }
+    second_headers = {
+        **_bearer(_token(subject_id=_OTHER_IDENTITY_ID)),
+        "Idempotency-Key": "shared-notification-key",
+    }
+
+    first = client.put("/v1/doctor/profile/notifications", json=body, headers=first_headers)
+    second = client.put("/v1/doctor/profile/notifications", json=body, headers=second_headers)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert [doctor_id for doctor_id, _ in facade.notification_update_calls] == [
+        _PARTNER_ID,
+        _OTHER_PARTNER_ID,
+    ]
+
+
+def test_put_doctor_profile_notifications_refuses_non_active_doctor() -> None:
+    """#610: the edge refusal, and no facade call behind it."""
+    facade = StubPartnerFacade()
+    facade.partner_status = "Registered"
+    client = _client(facade)
+
+    response = client.put(
+        "/v1/doctor/profile/notifications",
+        json={"notification_preferences": {}},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "AUTH_INSUFFICIENT_SCOPE"
+    assert facade.notification_update_calls == []
+
+
+def test_put_doctor_profile_notifications_facade_authorization_denial_is_audited() -> None:
+    """#610: the row-locked recheck's refusal is audited, not just refused."""
+    facade = StubPartnerFacade()
+    facade.profile_error = DoctorProfileNotAllowedError(
+        _PARTNER_ID,
+        "doctor",
+        "Registered",
+    )
+    client = _client(facade)
+    iam = client.app.state.iam_facade
+    assert isinstance(iam, StubIamFacade)
+
+    response = client.put(
+        "/v1/doctor/profile/notifications",
+        json={"notification_preferences": {}},
         headers=_bearer(_token()),
     )
 

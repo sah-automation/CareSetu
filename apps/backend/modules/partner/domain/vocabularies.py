@@ -1,6 +1,6 @@
 """MOD-002: the doctor's closed practice vocabularies (FEAT-004/005, ticket #602).
 
-Three pick-lists the domain owns, with the validation that refuses a value
+Four pick-lists the domain owns, with the validation that refuses a value
 outside its own list:
 
 - :class:`Specialty` - the roughly twenty specialties that account for most
@@ -8,34 +8,49 @@ outside its own list:
 - :class:`ConsultLanguage` - the languages a doctor consults in, the languages
   of the Eighth Schedule of the Constitution of India plus English.
 - :class:`ConsultingDay` - the seven days of the week.
+- :class:`NotificationPreferenceKey` - the five things a doctor can be notified
+  about (#610).
 
 A closed vocabulary is domain language, not a model constant
 (coding-standards §2/§3): the values are declared here, the profile model
 mirrors them, and the pre-condition is validated in the domain core, never in
 the router. One entry point per field that draws on a list -
 :func:`require_specialty` and :func:`require_specialties`,
-:func:`require_consult_languages`, :func:`require_consulting_days` - each
-raising a named :class:`~modules.partner.domain.exceptions.PartnerError`
-subclass, so a value outside a list is an explicit rejection rather than
-something that persists and can never be filtered on. A multi-valued selection
-is validated member by member and names the offending position.
+:func:`require_consult_languages`, :func:`require_consulting_days`,
+:func:`require_notification_preferences` - each raising a named
+:class:`~modules.partner.domain.exceptions.PartnerError` subclass, so a value
+outside a list is an explicit rejection rather than something that persists and
+can never be filtered on. A multi-valued selection is validated member by member
+and names the offending position.
+
+The one entry point that is not a bare list-membership check is
+:func:`merge_notification_preferences`, which is what a notification save
+actually decides: which of the five the doctor submitted, and what happens to a
+stored key the five do not name.
 
 Values are stable, machine-readable keys. Display labels in either locale are
 the section writers' job, not this module's.
 
 ``Specialty`` moved here from ``domain/credentials.py`` (#602): the practice a
 doctor declares is not a credential document, and the two had outgrown one file.
+``NotificationPreferenceKey`` joined them for the opposite reason (#610): until
+then the ONLY named list of the five keys anywhere in the repository was the
+frontend ``NOTIFICATION_KEYS`` tuple on the doctor Profile page, so the server's
+"preferences" were an untyped dict no vocabulary, and no pre-condition, existed
+for. See :func:`merge_notification_preferences` for what that cost and what the
+merge keeps.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from enum import StrEnum
 from typing import TypeVar
 
 from modules.partner.domain.exceptions import (
     InvalidConsultingDayError,
     InvalidConsultLanguageError,
+    InvalidNotificationKeyError,
     InvalidSelectionError,
     InvalidSpecialtyError,
     PartnerError,
@@ -133,12 +148,39 @@ class ConsultingDay(StrEnum):
     SUNDAY = "Sunday"
 
 
+class NotificationPreferenceKey(StrEnum):
+    #: The five things a doctor can be notified about, and the ONLY five a save
+    #: may set (#610).
+    #:
+    #: :attr:`~modules.intake.domain.events.IntakeLanguage` has no say in this,
+    #: and neither has the patient's own ``NOTIFICATION_KEYS`` list on their
+    #: profile page: those are a different vocabulary for a different reader, and
+    #: neither list extends this one. These five are the doctor's, and they are
+    #: the keys the stored preferences on every profile row already use.
+    #:
+    #: This enum is the reason the write is a closed list at all. Before #610 the
+    #: server stored an untyped ``dict[str, bool]`` with a 20-entry cap and a
+    #: 50-character key cap, validated for shape only - so the only named list of
+    #: the five in the entire repository was a TypeScript tuple in the doctor
+    #: Profile page, and "accepts the five existing notification keys" had no
+    #: server-side meaning to enforce. Ownership of a vocabulary belongs with the
+    #: domain that also refuses values outside it (coding-standards §4).
+    NEW_CONSULTATIONS = "new_consultations"
+    RECORD_SHARED = "record_shared"
+    PRE_SUMMARY_READY = "pre_summary_ready"
+    CASE_UPDATES = "case_updates"
+    CREDENTIAL_STATUS = "credential_status"
+
+
 _SPECIALTY_BY_VALUE: dict[str, Specialty] = {member.value: member for member in Specialty}
 _CONSULT_LANGUAGE_BY_VALUE: dict[str, ConsultLanguage] = {
     member.value: member for member in ConsultLanguage
 }
 _CONSULTING_DAY_BY_VALUE: dict[str, ConsultingDay] = {
     member.value: member for member in ConsultingDay
+}
+_NOTIFICATION_KEY_BY_VALUE: dict[str, NotificationPreferenceKey] = {
+    member.value: member for member in NotificationPreferenceKey
 }
 
 
@@ -204,6 +246,103 @@ def require_consulting_days(raw: Iterable[object]) -> tuple[ConsultingDay, ...]:
     in :func:`require_consult_languages`.
     """
     return _require_members(raw, _CONSULTING_DAY_BY_VALUE, InvalidConsultingDayError)
+
+
+def require_notification_preferences(raw: Mapping[str, bool]) -> dict[str, bool]:
+    """Resolve a submitted notification preference dict against the five keys (#610).
+
+    The write-side entry point for the notification section save, and the
+    notification counterpart of :func:`require_consult_languages`: every submitted
+    key must be a member of :class:`NotificationPreferenceKey`, and the first one
+    that is not raises :class:`~modules.partner.domain.exceptions.InvalidNotificationKeyError`
+    carrying the key.
+
+    ``bool`` values are **carried through, not coerced**. The wire is JSON, where
+    ``true``/``false`` arrive as Python ``bool``, and a Pydantic model asked for
+    ``dict[str, bool]`` has already normalised them by the time this runs - which is
+    why the parameter is typed ``Mapping[str, bool]`` and mypy holds every call site
+    to it.
+
+    Coercing here would be worse than useless: ``bool("false")`` is ``True``, so a
+    truthiness cast does not merely tolerate a sloppy value, it stores the exact
+    opposite of what the caller wrote. Declaring the type keeps that decision out of
+    the domain entirely - there is no coercion left here to get wrong.
+
+    Unlike the three pick-lists there is no ``position`` and no ``reason``: a
+    preference is a **dict**, so it has no member order to point into and only one
+    member-level rule to break. The key is the answer.
+    """
+    for key in raw:
+        if key not in _NOTIFICATION_KEY_BY_VALUE:
+            raise InvalidNotificationKeyError(key)
+    return dict(raw)
+
+
+def merge_notification_preferences(
+    *,
+    submitted: Mapping[str, bool],
+    stored: Mapping[str, object],
+) -> dict[str, object]:
+    """Decide what a notification save writes: the five, plus what it already held.
+
+    The whole decision a notification section write makes, kept in the domain
+    because it is the one place that can enforce it (coding-standards §4). Two
+    answers had to be decided together, and neither is obvious:
+
+    **1. Pin the five, or keep the open dict?** The dict was validated for shape
+    only - 20 entries, 50-character keys - so a save could write any key at all
+    and "accepts the five existing notification keys" was not something the server
+    could mean. Pinned. The trade is explicit: a preference stored under some
+    other key can no longer be *set*, only carried (see below).
+
+    **2. What happens to a stored key outside the five?** Refusing the write
+    strands a doctor behind a preference they cannot turn off or replace;
+    dropping it silently loses a preference the doctor had set. Both are worse
+    than preserving it. The doctor's Profile page already promised the third
+    behaviour - "a key the server already holds that this list does not know is
+    carried through untouched on save" - and that promise was the CLIENT's to
+    keep. The page is now four independent section writes, so the promise is the
+    server's, or it stops being true for every client that is not the page. So
+    unknown STORED keys are preserved verbatim, and only the submitted ones are
+    validated.
+
+    The asymmetry is deliberate and is the whole rule: **preserving a stored key
+    is not the same as being able to write one.** A caller cannot introduce an
+    unknown key through the save (:func:`require_notification_preferences` still
+    refuses it) - it can only decline to drop one that was already there, which
+    is the difference between a save and a migration.
+
+    A KNOWN stored key the submission omits is dropped, which is what makes a save
+    mean "these are my five toggles" rather than "here is one more change". A
+    doctor who turns every switch off submits five falses, or an empty selection,
+    and ends up with no toggles - an empty submission is a real answer, not an
+    absent one.
+
+    ``stored`` is not mutated. It is the read projection's input, and a merge
+    that edited it in place would make the row a function of write order. A copy
+    is the price of that, and it is cheap: the result is at most five keys plus
+    whatever the row already held.
+
+    This also retires the 20-entry / 50-character caps on this field, and the
+    reason is the pinning rather than a preference for fewer rules: a save can
+    now contribute at most five keys, every one of them a known identifier well
+    under 50 characters, so both caps bound nothing that can arrive. What
+    survives them - a hand-repaired row carrying junk - is carried, not refused,
+    because refusing the save over a key the doctor did not touch would be the
+    stranding case above.
+
+    A carried value is copied **verbatim**, not narrowed to a bool, which is why the
+    result is typed ``dict[str, object]``. Truthiness is not a reading: a
+    hand-repaired row holding ``{"sms": "false"}`` would ``bool()`` to the exact
+    opposite of what it says, and a save is the one moment that rewrites the whole
+    column - so the narrowing has to happen on the way IN (the model's
+    ``dict[str, bool]``) and never on the way through.
+    """
+    merged: dict[str, object] = {
+        key: value for key, value in stored.items() if key not in _NOTIFICATION_KEY_BY_VALUE
+    }
+    merged.update(require_notification_preferences(submitted))
+    return merged
 
 
 def _selection(raw: Iterable[object]) -> Iterable[object]:

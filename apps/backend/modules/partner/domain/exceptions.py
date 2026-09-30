@@ -342,3 +342,26 @@ class InvalidSelectionError(PartnerError):
     def __init__(self, value: object) -> None:
         super().__init__(f"expected a selection of values, not a single value: {value!r}")
         self.value = value
+
+
+class InvalidNotificationKeyError(PartnerError):
+    """A submitted notification preference key is not one of the five (#610).
+
+    Raised by ``require_notification_preferences`` and
+    :func:`~modules.partner.domain.vocabularies.merge_notification_preferences`
+    when the save carries a key outside ``NotificationPreferenceKey``. It is an
+    **expected 4xx**, encoded by the partner adapter as a 422 whose
+    ``details.errors[].path`` is ``notification_preferences``, so the client
+    renders it against the card rather than guessing which toggle failed.
+
+    No ``position`` and no ``reason``, unlike the three multi-valued pick-lists:
+    a preference is a **dict**, so there is no member order to point into and
+    only one member-level rule to break - a key that is not on the list. The key
+    itself is the whole answer, and it is carried so a caller can report which
+    one was refused. ``str(err)`` quotes the submitted key back, which is a
+    machine-readable identifier and never free text a doctor typed.
+    """
+
+    def __init__(self, key: object) -> None:
+        super().__init__(f"unknown notification preference key: {key!r}")
+        self.key = key

@@ -5,7 +5,12 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from modules.partner.domain.vocabularies import require_specialties
+from modules.partner.domain.vocabularies import (
+    require_consult_languages,
+    require_consulting_days,
+    require_notification_preferences,
+    require_specialties,
+)
 
 DoctorCredentialStatus = Literal[
     "pending",
@@ -170,6 +175,160 @@ class DoctorProfileAddressUpdate(BaseModel):
     pin_code: str
 
 
+class DoctorProfileAboutUpdate(BaseModel):
+    """The About section write (#610) - who the doctor is, in their own words.
+
+    The third of the four section writes that replace the whole-form
+    ``DoctorProfileUpdate`` (#611 retires that one). The card it saves splits the
+    old ``availability`` blob in two, because the two halves want opposite
+    things:
+
+    - **The days become a selection.** A doctor taps the days they consult on, out
+      of the closed seven-day list, so the field is filterable and cannot carry a
+      spelling nobody can match. That is the same fix the languages field gets,
+      and for the same reason: a hand-typed list of days is a doctor guessing at
+      our vocabulary.
+    - **The hours stay prose.** Deliberately unbounded in shape, and deliberately
+      structured in nothing: no weekly template, no per-day ranges, no slots. The
+      platform has no booking system, so a shape that invited one would be a lie
+      the doctor could act on. The only rule here is a length bound, because the
+      column is ``Text`` and an unbounded string is not a thing to store. A
+      doctor who writes "Mon-Sat mornings, and Sat evening clinic after 5" gets
+      that back, byte for byte.
+
+    **Every field is required.** Not ``extra="forbid"`` alone - required as well,
+    which is a stronger statement than its siblings make. A section save declares
+    the whole card, so every field here is on screen at the moment of the save,
+    and a default would mean that a client which forgot one silently CLEARS the
+    column: an omitted ``about`` would erase the doctor's own words about
+    themselves and the save would report success. Nullable is still meaningful -
+    ``about: null`` is how a doctor clears it deliberately - but it has to be said
+    out loud.
+
+    Two of the four fields do not name their column, because the closed-list walk
+    returns the resolved members rather than the submitted strings: a doctor who
+    submits ``"Hindi"`` gets ``"Hindi"`` stored, which is the point.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    about: str | None = Field(max_length=5000)
+    # A SELECTION of the closed ``ConsultLanguage`` list (#602), stored as a JSONB
+    # array on ``partner_profiles.languages``. NO ``max_length``, for the same
+    # reason ``specialties`` has none: a cap is checked first and would refuse an
+    # oversized selection as a bare ``too_long`` naming no member, shadowing the
+    # one rule the field has. The closed list is the bound - a selection longer
+    # than ``ConsultLanguage`` cannot hold that many distinct members.
+    languages: list[str]
+    # The same shape over the closed seven-day list, on ``consulting_days``. A
+    # selection, not a week template: an empty selection is valid and is a state
+    # the doctor can hold, exactly as an empty specialty selection is.
+    consulting_days: list[str]
+    # PROSE. The half of the old ``availability`` blob that is genuinely the
+    # doctor's own words, bounded and otherwise unstructured - see the class
+    # docstring. The bound matches the column's retired predecessor so a doctor
+    # who typed a long availability note into the old field can move it across
+    # without losing it.
+    consulting_hours: str | None = Field(max_length=1000)
+
+    @field_validator("languages")
+    @classmethod
+    def validate_languages(cls, value: list[str]) -> list[str]:
+        """Delegate the closed-list rule to the domain core (coding-standards §4).
+
+        ``require_consult_languages`` is the ONE place the list is enforced, so
+        this validator names no language and re-derives nothing: it walks the
+        submission member by member and returns the resolved values in the doctor's
+        declared order, which is also the order the stored selection reads back in.
+
+        The domain raises :class:`~modules.partner.domain.exceptions.InvalidConsultLanguageError`,
+        which is deliberately NOT a ``ValueError``: a closed-list rejection is an
+        expected 4xx with a field-level detail, and the partner adapter's handler
+        encodes it as one (``details.errors[].path == "languages"``). Letting it
+        escape the validator is what routes it there - a ``ValueError`` would be
+        swallowed into Pydantic's own generic 422 and lose the envelope.
+
+        **No strip and no case-folding, and that is #602's decision, not an
+        oversight.** The retired ``DoctorProfileUpdate.validate_languages`` trimmed
+        each name and de-duplicated case-insensitively, because the field was free
+        text and a repair was better than a rejection. A closed list has no repair
+        to make: ``"Hindi "`` is not ``ConsultLanguage.HINDI``, so it is refused
+        rather than tidied, and ``"hindi"`` alongside ``"Hindi"`` is refused as the
+        second member - which is a STRONGER answer to the same-language-twice-in-two
+        spellings problem this ticket opens with than case-folding ever was,
+        because the list can only produce one spelling in the first place. #611
+        retires the free-text validator, leaving this as the only rule on
+        languages, so the two cannot disagree.
+        """
+        return [member.value for member in require_consult_languages(value)]
+
+    @field_validator("consulting_days")
+    @classmethod
+    def validate_consulting_days(cls, value: list[str]) -> list[str]:
+        """Delegate the day rule to ``require_consulting_days``, exactly as above.
+
+        The consulting-day counterpart of :meth:`validate_languages`, over
+        :class:`~modules.partner.domain.vocabularies.ConsultingDay`, and refused
+        the same way: ``InvalidConsultingDayError`` escapes the validator on
+        purpose and the partner adapter's handler turns it into a 422 whose
+        ``details.errors[].path`` names ``consulting_days``.
+        """
+        return [member.value for member in require_consulting_days(value)]
+
+
+class DoctorProfileNotificationUpdate(BaseModel):
+    """The Notification section write (#610) - which of the five things to be told.
+
+    The fourth and last section write, and the smallest: ONE field, because
+    notification preferences are one column and one card. The four-field
+    ``DoctorProfileAboutUpdate`` above is the opposite extreme, and the two
+    together are why the split exists - a doctor toggling one switch must not be
+    able to half-save their about text, and a doctor rewriting their about text
+    must not be able to flip a switch they never saw.
+
+    **Every field is required**, for the same reason as the about model: the card
+    declares its whole contents, and a default would let a client that sent only
+    the toggles it cared about silently switch off the rest.
+
+    The dict is validated against the closed ``NotificationPreferenceKey``
+    vocabulary by ``require_notification_preferences`` (#602's pattern, on a list
+    #610 added), so a save can set one of the five and nothing else. What happens
+    to a stored key the five do not name is NOT decided here - the model cannot,
+    because it has no row to look at - and is decided by
+    :func:`~modules.partner.domain.vocabularies.merge_notification_preferences`
+    in the facade, which merges rather than replaces. See that function for why
+    preserving is neither dropping nor refusing.
+
+    No entry and no key-length cap, and the reason is the closed list rather than
+    a preference for fewer rules: a save contributes at most five known keys, each
+    well under the old 50-character cap, so the retired 20-entry and 50-character
+    bounds on this field bound nothing that can arrive. Adding them back would
+    reintroduce a length failure that arrives as a bare ``too_long`` naming no key,
+    which is the exact shadowing the two selection fields above avoid.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    notification_preferences: dict[str, bool]
+
+    @field_validator("notification_preferences")
+    @classmethod
+    def validate_notification_preferences(cls, value: dict[str, bool]) -> dict[str, bool]:
+        """Delegate the closed-key rule to the domain core (coding-standards §4).
+
+        ``InvalidNotificationKeyError`` escapes the validator on purpose - a
+        ``ValueError`` would be swallowed into Pydantic's generic 422 and lose the
+        envelope - and the partner adapter's handler encodes it as a 422 whose
+        ``details.errors[].path`` names ``notification_preferences``.
+
+        A key the vocabulary does not know is refused here, at the boundary, so the
+        facade is never reached with one. A key the vocabulary DOES know but the
+        row already holds under some other name is a different matter entirely and
+        is the merge's business, not this validator's.
+        """
+        return require_notification_preferences(value)
+
+
 class DoctorProfilePhotoView(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -227,14 +386,29 @@ class DoctorProfileView(BaseModel):
     practice_latitude: float
     practice_longitude: float
     area: str | None = None
-    languages: list[str] = Field(default_factory=list)
     # The bound is #606's realistic 0..60, in lockstep with the database CHECK
     # and the migration. The read side carries it so a row holding a value the
     # write refuses surfaces as an error rather than being silently served.
     experience_years: int | None = Field(default=None, ge=0, le=60)
     about: str | None = None
     consultation_fee: int | None = Field(default=None, ge=0)
-    availability: str | None = None
+    # The declared consulting-language SELECTION, off the profile row - the column
+    # the about section write (#610) lands on, and therefore a closed-vocabulary
+    # selection rather than the hand-typed free text this field used to carry.
+    languages: list[str] = Field(default_factory=list)
+    # The days this doctor consults on, off ``consulting_days``. Multi-valued for
+    # the same reason as ``languages``, and closed over ``ConsultingDay`` (#602),
+    # so a filter on it is a membership match.
+    consulting_days: list[str] = Field(default_factory=list)
+    # The hours this doctor consults in, off ``consulting_hours``: PROSE, kept
+    # that way on the wire as well as in the write. It replaces this view's
+    # ``availability`` field (#610), which projected the column ``consulting_hours``
+    # supersedes - a single blob mixing days and hours, where the days now have a
+    # closed list of their own. The COLUMN is retained rather than dropped (#606)
+    # because the whole-form write still addresses it until #611 retires it; the
+    # projection is not, because nothing new writes it and no reader should render
+    # an availability a doctor cannot edit.
+    consulting_hours: str | None = None
     credentials: list[DoctorProfileCredential] = Field(default_factory=list)
     notification_preferences: dict[str, bool] = Field(default_factory=dict)
 
