@@ -289,10 +289,11 @@ describe("Sidebar #538 collapsed rail accessible names", () => {
     );
 
     const nav = screen.getByTestId("sidebar-nav");
-    expect(within(nav).getByRole("link", { name: "Queue" })).toHaveAttribute(
-      "href",
-      "/doctor",
-    );
+    // #604: the landing area's label is "Dashboard" now; the href asserted
+    // alongside it is what proves the route did not move with the copy.
+    expect(
+      within(nav).getByRole("link", { name: "Dashboard" }),
+    ).toHaveAttribute("href", "/doctor");
     expect(within(nav).getByRole("link", { name: "Cases" })).toHaveAttribute(
       "href",
       "/doctor/cases",

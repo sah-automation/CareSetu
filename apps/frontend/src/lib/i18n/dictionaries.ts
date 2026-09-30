@@ -1016,7 +1016,13 @@ const en = {
     // sheet and the desktop dropdown. Spell "Log out" as two words per spec
     // #520 vocabulary.
     logOut: "Log out",
-    queue: "Queue",
+    // #604: the doctor landing area is the doctor's Dashboard, not a "Queue".
+    // Value-only change on this one key: NavItemDef.key stays "queue" and
+    // href stays /doctor, so the route and every test id derived from that key
+    // (nav-queue, tab-queue, more-queue) are untouched, while the sidebar and
+    // the phone tab bar - both fed from NAV_CONFIG.doctor and both resolving
+    // this same labelKey - move together and cannot drift.
+    queue: "Dashboard",
     cases: "Cases",
     patients: "Patients",
     orders: "Orders",
@@ -1049,6 +1055,12 @@ const en = {
   accountMenu: {
     trigger: "Account menu",
     completeProfile: "Complete your profile",
+    // #604: the popup's own Profile row label. It used to read nav.profile -
+    // the sidebar's label key - so the popup row and the sidebar entry could
+    // only ever say the same thing. This namespace owns it instead, so the
+    // popup can say what it means (Profile & Settings) and the sidebar label
+    // for the profile entry stays exactly as it was.
+    profileSettings: "Profile & Settings",
     switchRole: (roleLabel: string) => `Switch to ${roleLabel}`,
   },
 
@@ -2404,7 +2416,13 @@ export const STRINGS: Record<Lang, Dictionary> = {
       profileSettings: "प्रोफ़ाइल और सेटिंग",
       more: "और",
       logOut: "लॉग आउट",
-      queue: "कतार",
+      // #604: replaces "कतार". Spelled without a nukta it is also how the
+      // country name is written, so as console chrome a doctor's nav could
+      // read "Qatar" - it belongs to no such thing on this screen. "डैशबोर्ड"
+      // is the Hindi this dictionary already uses for Dashboard
+      // (openingDashboard, goToDashboard, home.authButton.dashboard), so the
+      // landing label matches it.
+      queue: "डैशबोर्ड",
       cases: "केस",
       patients: "मरीज़",
       orders: "ऑर्डर",
@@ -2426,6 +2444,10 @@ export const STRINGS: Record<Lang, Dictionary> = {
     accountMenu: {
       trigger: "अकाउंट मेन्यू",
       completeProfile: "अपनी प्रोफ़ाइल पूरी करें",
+      // #604: this namespace's own Profile row label, replacing the borrowed
+      // nav.profile. Same Hindi the patient popup row already renders from
+      // nav.profileSettings above.
+      profileSettings: "प्रोफ़ाइल और सेटिंग",
       switchRole: (roleLabel: string) => `${roleLabel} पर स्विच करें`,
     },
     home: {

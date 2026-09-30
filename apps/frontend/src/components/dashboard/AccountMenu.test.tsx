@@ -871,7 +871,9 @@ describe("AccountMenu patient avatar trigger (#521)", () => {
 
     const profileItem = screen.getByTestId("account-menu-doctor-profile");
     expect(profileItem).toHaveAttribute("href", "/doctor/profile");
-    expect(profileItem).toHaveTextContent("Profile");
+    // #604: the whole label, not the "Profile" prefix it used to match - the
+    // row now reads Profile & Settings from its own accountMenu key.
+    expect(profileItem).toHaveTextContent("Profile & Settings");
   });
 
   it("#543 keeps the Profile row off non-doctor staff menus", async () => {
@@ -1227,7 +1229,9 @@ describe("AccountMenu doctor dropdown parity (#570)", () => {
     await openDoctorMenu();
 
     const entry = screen.getByTestId("account-menu-doctor-profile");
-    expect(entry).toHaveTextContent("Profile");
+    // #604: full label, so a future drift back to the sidebar's bare "Profile"
+    // fails here instead of passing on a prefix match.
+    expect(entry).toHaveTextContent("Profile & Settings");
     expect(entry).toHaveAttribute("href", "/doctor/profile");
 
     fireEvent.click(entry);
@@ -1327,8 +1331,11 @@ describe("AccountMenu doctor dropdown parity (#570)", () => {
     expect(
       screen.getByRole("menuitem", { name: "लॉग आउट" }),
     ).toBeInTheDocument();
+    // #604: the doctor's own row label in Hindi, read by accessible name so
+    // this proves the whole string - not a prefix - and not the sidebar's
+    // nav.profile ("प्रोफ़ाइल") that it used to borrow.
     expect(
-      screen.getByRole("menuitem", { name: "प्रोफ़ाइल" }),
+      screen.getByRole("menuitem", { name: "प्रोफ़ाइल और सेटिंग" }),
     ).toBeInTheDocument();
   });
 
