@@ -13,6 +13,9 @@ The transactional outbox mirrors the shared ``bus/outbox_ddl.py`` shape
 lives in the same schema but is materialized only by the migration and
 addressed through ``bus.outbox_ddl.consumed_events_table``, never this
 metadata (its name carries no module prefix by shared contract).
+PHASE-8 #601 adds the ``partner_pin_centroids`` reference dataset the doctor
+profile's practice position resolves against: an all-India PIN-code vocabulary
+with its centroid coordinates, seeded by migration, keyed by no row of ours.
 """
 
 from __future__ import annotations
@@ -302,6 +305,48 @@ partner_directory_index = Table(
     # Search filters by partner type, then geo distance; avoid paying an extra
     # seq scan when filtering by a type. Active-only reads are the common case.
     Index("ix_partner_directory_index_type_active", "partner_type", "is_active"),
+)
+
+
+partner_pin_centroids = Table(
+    "partner_pin_centroids",
+    MODULE_METADATA,
+    # PHASE-8 #601: the all-India PIN centroid reference dataset the doctor
+    # profile's practice position is resolved against. A vocabulary, not an
+    # entity: the PIN is the natural key and there is no row of ours to point
+    # at, so this table carries no foreign key (ADR-0003 also forbids the
+    # cross-schema reference a FK would imply).
+    #
+    # The PIN is a fixed-width 6-character code and is stored as text, never as
+    # an integer, so the value is never numerically reinterpreted. The
+    # coordinate columns match the profile's practice position precision
+    # (Numeric(9, 6)) so a resolved centroid drops straight into the
+    # derived-position write.
+    #
+    # ``district`` and ``region`` are the read-only confirmation the doctor sees
+    # back for the PIN they typed, so they are stored as the source publishes
+    # them and need no translation table on the read side. ``region`` is India
+    # Post's ``RegionName``, which is the placeholder ``DivReportingCircle``
+    # wherever a circle publishes no region subdivision; that is stored as
+    # published rather than substituted.
+    Column("pin", String(6), primary_key=True),
+    # The post office serving this PIN. A PIN is served by several offices and
+    # the key admits one, so this is a representative office name, not a claim
+    # that the PIN has a single office.
+    Column("office_name", String(80), nullable=False),
+    Column("district", String(80), nullable=False),
+    Column("region", String(80), nullable=False),
+    Column("latitude", Numeric(9, 6), nullable=False),
+    Column("longitude", Numeric(9, 6), nullable=False),
+    CheckConstraint("pin ~ '^[0-9]{6}$'", name="ck_partner_pin_centroids_pin_format"),
+    CheckConstraint(
+        "latitude BETWEEN -90 AND 90",
+        name="ck_partner_pin_centroids_latitude",
+    ),
+    CheckConstraint(
+        "longitude BETWEEN -180 AND 180",
+        name="ck_partner_pin_centroids_longitude",
+    ),
 )
 
 
