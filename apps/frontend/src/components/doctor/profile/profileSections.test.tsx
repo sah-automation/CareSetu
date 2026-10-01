@@ -61,12 +61,9 @@ describe("PracticeFields", () => {
 });
 
 describe("AddressFields", () => {
-  it("edits the address and the languages", () => {
+  it("edits the languages", () => {
     render(<AddressFields form={form()} invalid={[]} onChange={() => {}} />);
 
-    expect(screen.getByLabelText(t.addressLabel)).toHaveValue(
-      "Main Road, Daltonganj",
-    );
     // Matched by prefix: the field's help text sits inside its label, so the
     // control's accessible name carries both ("Languages Separate with commas").
     // That is one binding for the label and its hint, which is what the pre-split
@@ -87,6 +84,21 @@ describe("AddressFields", () => {
     expect(container.querySelectorAll('input[type="number"]')).toHaveLength(0);
     expect(screen.queryByText("24.1957")).toBeNull();
     expect(screen.queryByText("85.3656")).toBeNull();
+  });
+
+  // #616: the address moved to its own card, and this is the assertion that keeps
+  // it from moving BACK. Two editors for one address is the failure this is
+  // written against - they would disagree, and nothing on the page would tell the
+  // doctor which one the listing shows.
+  it("no longer renders a free-text address beside the address card", () => {
+    const { container } = render(
+      <AddressFields form={form()} invalid={[]} onChange={() => {}} />,
+    );
+
+    expect(screen.queryByTestId("profile-address")).toBeNull();
+    // And the anchor went with it: `PROFILE_ANCHORS.address` is the card's id now,
+    // so two elements carrying it would make the chip's target a coin toss.
+    expect(container.querySelector(`#${PROFILE_ANCHORS.address}`)).toBeNull();
   });
 });
 
@@ -191,13 +203,11 @@ describe("section anchors", () => {
     ).not.toBeNull();
     practice.unmount();
 
-    const address = render(
-      <AddressFields form={form()} invalid={[]} onChange={() => {}} />,
-    );
-    expect(
-      document.querySelector(`#${PROFILE_ANCHORS.address}`),
-    ).not.toBeNull();
-    address.unmount();
+    // #616: the address anchor is NOT asserted here. It moved to
+    // `AddressSectionCard`, which needs the shared doctor profile source to
+    // render and so cannot stand up in this file, which has no provider - the
+    // page suite asserts that one id renders exactly once on the real page, which
+    // is the claim that matters.
 
     const about = render(
       <AboutFields form={form()} invalid={[]} onChange={() => {}} />,

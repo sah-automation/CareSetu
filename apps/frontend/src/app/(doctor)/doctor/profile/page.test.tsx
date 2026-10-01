@@ -27,7 +27,9 @@ import {
   fetchDoctorProfile,
   fetchDoctorProfilePhoto,
   updateDoctorProfile,
+  updateDoctorProfileAddress,
   uploadDoctorProfilePhoto,
+  type DoctorProfileAddressView,
   type DoctorProfileView,
 } from "@/lib/doctor/api";
 import { STRINGS } from "@/lib/i18n/dictionaries";
@@ -58,6 +60,7 @@ vi.mock("@/lib/doctor/api", async (importOriginal) => {
     ...mod,
     fetchDoctorProfile: vi.fn(),
     updateDoctorProfile: vi.fn(),
+    updateDoctorProfileAddress: vi.fn(),
     uploadDoctorProfilePhoto: vi.fn(),
     fetchDoctorProfilePhoto: vi.fn(),
     deleteDoctorProfilePhoto: vi.fn(),
@@ -90,6 +93,7 @@ const t = STRINGS.en.doctorProfile;
 const hiT = STRINGS.hi.doctorProfile;
 const getProfile = vi.mocked(fetchDoctorProfile);
 const saveProfile = vi.mocked(updateDoctorProfile);
+const saveAddress = vi.mocked(updateDoctorProfileAddress);
 const uploadPhoto = vi.mocked(uploadDoctorProfilePhoto);
 const getPhoto = vi.mocked(fetchDoctorProfilePhoto);
 const deletePhoto = vi.mocked(deleteDoctorProfilePhoto);
@@ -132,6 +136,32 @@ function profile(
   };
 }
 
+// #616: what the address write answers with - the projection as the backend
+// reassembles it from the structured parts, plus the outside-the-belt warning
+// only this write evaluates. `practice_address` is the server's own assembled
+// display string, so the fixture rebuilds it the same way rather than echoing the
+// doctor's input back.
+function addressAnswer(
+  overrides: Partial<DoctorProfileAddressView> = {},
+): DoctorProfileAddressView {
+  const parts = [
+    overrides.address_line,
+    overrides.landmark,
+    overrides.locality,
+    overrides.city,
+    overrides.pin_code,
+  ].filter((part): part is string => part != null && part !== "");
+  // The belt defaults come BEFORE `overrides`, so a case that reports an
+  // outside-the-belt position is not silently overwritten by them.
+  return {
+    ...profile(),
+    outside_peri_urban_belt: false,
+    distance_from_belt_centre_km: 0,
+    ...overrides,
+    practice_address: parts.join(", "),
+  };
+}
+
 // #583: the page is rendered inside the shared doctor profile source, as the
 // (doctor) route-group layout does in production. The source owns the read, so
 // the only thing the page's own render needs seeded is what the source answers.
@@ -143,6 +173,11 @@ async function renderReady(view: DoctorProfileView = profile()) {
     </DoctorProfileProvider>,
   );
   await waitFor(() => screen.getByTestId("profile-declared-band"));
+  // The address card seeds its edit buffer from the shared answer in an effect, so
+  // it has nothing to render for one commit after the page itself is ready. Waiting
+  // for it here keeps every test on a page that is ready in the same sense: no chip
+  // pointing at an anchor that has not landed yet.
+  await waitFor(() => screen.getByTestId("profile-address-card"));
 }
 
 let originalCreate: typeof URL.createObjectURL;
@@ -170,6 +205,16 @@ beforeEach(() => {
       verified: true,
       area: "Daltonganj",
       consultation_fee: 40000,
+    }),
+  );
+  // #616: the address card's own write, answered with the projection plus the two
+  // fields only that write produces. A default that reported an outside-the-belt
+  // position would put a notice on the page in tests that are about something else.
+  saveAddress.mockImplementation(async (update) =>
+    addressAnswer({
+      ...update,
+      outside_peri_urban_belt: false,
+      distance_from_belt_centre_km: 0,
     }),
   );
   uploadPhoto.mockResolvedValue({ photo_ref: "doctor/7/photo-1.enc" });
@@ -344,13 +389,14 @@ describe("DoctorProfilePage shell (#615)", () => {
       expect(target).not.toBeNull();
     }
 
-    // The two bands and the fee card carry a heading at their anchor; the four
-    // field groups inside the declared band do not yet, because their headings
-    // belong to #616/#617. Asserted as the KNOWN state rather than left implied -
-    // when the section headings land this becomes a failure to fix, which is the
-    // point of writing it down.
-    const withHeading = ["verified", "declared", "fee"];
-    const withoutHeading = ["practice", "address", "about", "notifications"];
+    // The two bands, the fee card and the address card carry a heading at their
+    // anchor; the three field groups still inside the declared band do not, because
+    // their headings belong to #617. Asserted as the KNOWN state rather than left
+    // implied - when those headings land this becomes a failure to fix, which is
+    // the point of writing it down. The address moved out of that set in #616,
+    // because the card that owns the address is a card with its own heading.
+    const withHeading = ["verified", "declared", "address", "fee"];
+    const withoutHeading = ["practice", "about", "notifications"];
     for (const key of withHeading) {
       const target = document.querySelector(`#profile-section-${key}`);
       expect(
@@ -406,9 +452,16 @@ describe("DoctorProfilePage projection", () => {
     expect(screen.getByTestId("profile-verified")).toHaveTextContent(
       t.verified,
     );
-    expect(screen.getByTestId("profile-address")).toHaveValue(
-      "Main Road, Daltonganj",
+    // #616: the address renders from the projection's STRUCTURED parts now, in its
+    // own card, rather than as the declared band's free-text blob. Same stored
+    // address, one editor, and the parts the backend assembles the display string
+    // from are the ones the doctor can correct.
+    expect(screen.getByTestId("profile-address-line")).toHaveValue("Main Road");
+    expect(screen.getByTestId("profile-address-locality")).toHaveValue(
+      "Daltonganj",
     );
+    expect(screen.getByTestId("profile-address-pin")).toHaveValue("822001");
+    expect(screen.queryByTestId("profile-address")).toBeNull();
     expect(screen.getByTestId("profile-experience")).toHaveValue(12);
     expect(screen.getByTestId("profile-languages")).toHaveValue(
       "Hindi, English",
@@ -716,23 +769,25 @@ describe("DoctorProfilePage editable fields", () => {
     ).toBe(true);
   });
 
-  it("blocks a save with an unusable address before calling the API", async () => {
+  // #616: the declared band's free-text address is gone, so the case that used to
+  // prove "a blank address blocks the whole-form save" has no field to blank. The
+  // rule it guarded still exists in `invalidFields` - `practice_address` is still
+  // in the transitional request builder - but it is now unreachable through the UI
+  // by construction, which is a stronger guarantee than a red textarea. So this
+  // asserts the absence, and the card's own validation is asserted by its suite.
+  it("offers no free-text address in the declared band any more", async () => {
     await renderReady();
 
-    fireEvent.change(screen.getByTestId("profile-address"), {
-      target: { value: "  " },
-    });
-    fireEvent.click(screen.getByTestId("profile-save"));
-
-    await waitFor(() =>
-      expect(screen.getByTestId("profile-invalid")).toHaveTextContent(
-        t.invalidFields,
-      ),
-    );
-    expect(saveProfile).not.toHaveBeenCalled();
-    expect(screen.getByTestId("profile-address")).toHaveAttribute(
-      "aria-invalid",
-      "true",
+    expect(screen.queryByTestId("profile-address")).toBeNull();
+    // The card seeds its buffer in an effect, so it arrives one commit after the
+    // band this helper waits on - found, not gotten, for that reason alone.
+    expect(
+      await screen.findByTestId("profile-address-card"),
+    ).toBeInTheDocument();
+    // And the anchor moved with it: one id, one element, so the Address chip's
+    // target is the card rather than a coin toss between two elements.
+    expect(document.querySelectorAll("#profile-section-address")).toHaveLength(
+      1,
     );
   });
 

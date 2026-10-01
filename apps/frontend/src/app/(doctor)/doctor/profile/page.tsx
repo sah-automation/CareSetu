@@ -46,9 +46,11 @@
 // 2. The declared band's save calls a route #611 removed, so it 405s today. Left
 //    in place deliberately - see the note above `saveProfile` - because fixing it
 //    means the section-write clients, which are #616/#617's.
-// 3. Four chips address field groups with no heading of their own, because those
-//    headings are section CONTENT and belong to #616/#617. Asserted as the known
-//    state in the page suite rather than left implied.
+// 3. Three chips address field groups with no heading of their own, because those
+//    headings are section CONTENT and belong to #617. Asserted as the known state
+//    in the page suite rather than left implied. #616 closed one of the four: the
+//    address chip now lands on a card that HAS a heading, because the card is
+//    what carries it.
 // 4. Vocabulary that does not resolve yet: `locality` and `clinic name` are
 //    glossary entries #622 introduces, and #615 was their first consumer on the
 //    doctor surface. No glossary entry is added here. The one place the wording
@@ -61,10 +63,17 @@
 //    `address_line` and `pin_code` arrive on the projection and are deliberately
 //    NOT shown: printing raw wire values ("mon, tue") is not doctor-facing copy,
 //    and the translation belongs to the section that will own them.
+// 6. #616 changed a landed sibling's content: `AddressFields` lost the free-text
+//    `practice_address` textarea and the `PROFILE_ANCHORS.address` id, because the
+//    address card now owns both. `practice_address` stays in `ProfileForm` and in
+//    this page's request builder - seeded, never edited, sent unedited - because
+//    that builder is #611's to retire, not this ticket's. One page, one address
+//    editor: a doctor cannot be shown two address fields that disagree.
 
 import { useEffect, useRef, useState } from "react";
 
 import { AddressFields } from "@/components/doctor/profile/AddressFields";
+import { AddressSectionCard } from "@/components/doctor/profile/AddressSectionCard";
 import { AboutFields } from "@/components/doctor/profile/AboutFields";
 import { ConsultationFeeCard } from "@/components/doctor/profile/ConsultationFeeCard";
 import { NotificationFields } from "@/components/doctor/profile/NotificationFields";
@@ -177,7 +186,7 @@ function invalidFields(form: ProfileForm): ProfileFieldName[] {
   }
 
   const address = form.practice_address.trim();
-  if (address === "" || address.length > LIMITS.practiceAddress) {
+  if (address.length > LIMITS.practiceAddress) {
     invalid.push("practice_address");
   }
 
@@ -431,13 +440,14 @@ export default function DoctorProfilePage() {
   // The two bands keep separate chips rather than sharing one "details" target:
   // two bands, two anchors, two ids, and no chip pointing at both.
   //
-  // KNOWN GAP, owned by #616/#617: four of these chips - practice, address,
-  // about, notifications - address a field group inside the declared band, and
-  // those groups carry no heading yet, because the section headings belong to the
-  // section-content tickets. A reader who jumps to one of those four lands
+  // KNOWN GAP, owned by #617: three of these chips - practice, about,
+  // notifications - address a field group inside the declared band, and those
+  // groups carry no heading yet, because the section headings belong to the
+  // section-content ticket. A reader who jumps to one of those three lands
   // correctly but hears no heading announced. Adding headings here would be
-  // pre-empting #616/#617's presentation; this note records the gap so the next
-  // ticket inherits it knowingly rather than discovering it.
+  // pre-empting #617's presentation; this note records the gap so that ticket
+  // inherits it knowingly rather than discovering it. The address chip is no
+  // longer in this set: #616 gave it a card with its own heading.
   const anchors = [
     { id: PROFILE_ANCHORS.verified, label: t.verifiedBandTitle },
     { id: PROFILE_ANCHORS.declared, label: t.declaredBandTitle },
@@ -550,6 +560,15 @@ export default function DoctorProfilePage() {
               </p>
             )}
           </ProfileSectionShell>
+
+          {/* #616: the address, as its own section with its own save, its own
+              buffer and its own route. It sits BELOW the declared band rather
+              than inside it: a section that saves on its own cannot live inside
+              a shell that saves a different set of fields, and putting it there
+              would give one form two submit buttons writing two different bodies.
+              The band keeps `practice_address` in its own request builder only -
+              seeded from the projection, never edited, never shown. */}
+          <AddressSectionCard />
 
           <ConsultationFeeCard
             feePaise={profile.consultation_fee}

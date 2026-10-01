@@ -1543,14 +1543,64 @@ const en = {
     languagesPlaceholder: "Hindi, English",
     aboutLabel: "About",
     aboutPlaceholder: "Tell patients about your practice",
-    // NOTE: the consulting days/hours and structured-address copy this ticket
-    // first added is gone again. The projection serves `consulting_days`,
-    // `consulting_hours`, `address_line` and `pin_code`, but the brief puts the
-    // address card's content in #616 and the about card's in #617 - and adding
-    // labels here would mean writing those sections' presentation before their
-    // owning tickets exist. Those tickets add their own keys when they render
-    // their own fields.
-    addressLabel: "Practice address",
+    // NOTE: the consulting days/hours copy is still absent. The projection
+    // serves `consulting_days` and `consulting_hours` and the about section write
+    // (#610) takes them, but #617 owns that card's presentation, and raw wire
+    // values ("mon, tue") are not doctor-facing copy anyway.
+    // #616: the Address section card's copy, which replaces the free-text
+    // `addressLabel` this card took over - the field that key named is gone with
+    // the declared band's whole-form textarea, because the address now has
+    // exactly one editor on the page and this card is it.
+    //
+    // The two derived rows (district, state) are labelled and read-only, and they
+    // render empty today: the profile projection and the address write's answer
+    // both stop at the PIN code, and the centroid table's own district/region
+    // columns are not carried through the position decision (#603), so there is
+    // nothing for the client to read them from. The labels stay so the shape is
+    // on the page and the gap is a visible empty value, not a missing row.
+    addressSectionHelp:
+      "CareSetu works out your map position from your PIN code, so there are no coordinates to enter.",
+    addressLineLabel: "Building and street",
+    addressLineHelp: "Building, street and locality",
+    addressLandmarkLabel: "Landmark (optional)",
+    addressLocalityLabel: "Locality",
+    addressCityLabel: "City",
+    addressPinLabel: "PIN code",
+    addressPinHelp: "Six digits",
+    addressDistrictLabel: "District",
+    addressStateLabel: "State",
+    addressDerivedHelp:
+      "CareSetu fills these in from your PIN code. They are not editable.",
+    addressDerivedEmpty: "Not available",
+    // The client-side mirror of the server's own PIN rule (#603: an Indian PIN code
+    // is exactly six ASCII digits), refused on submit rather than by rewriting
+    // what the doctor typed.
+    addressPinInvalid: "Enter the six-digit PIN code.",
+    // The expected-4xx copy for a 422 whose `details.errors[].path` names the PIN
+    // field, keyed on the envelope's stable code and never on its `reason`: one
+    // client sentence covers both machine reasons because a doctor cannot tell a
+    // length failure from an unlisted code, and the API's prose is not copy this
+    // surface may show (api-standards §2, ui-blueprint §9.5).
+    addressPinUnresolved:
+      "CareSetu cannot place this PIN code. Check the six digits and save again.",
+    // The belt notice, and it is a warning rather than a refusal: the save
+    // succeeded and only this doctor's own listing surfaces as an
+    // outside-your-area result, which is why the copy says so instead of calling
+    // the address invalid (ADR-0021, the wider-area fallback).
+    addressOutsideBelt: (km: string) =>
+      `This address is ${km} km from the centre of the area CareSetu serves. Your address is saved, and patients searching nearby will see you as a result from outside your area.`,
+    // The form summary (ui-blueprint §9.5): a failed submit states how many
+    // fields need attention and takes focus to the first of them. A server path
+    // the card cannot map lands here too, as client copy - a raw path or the
+    // API's own reason is never shown to a doctor.
+    addressInvalidSummary: (count: number) =>
+      count === 1
+        ? "Check the highlighted field and save again."
+        : `Check the ${count} highlighted fields and save again.`,
+    addressUnmappedField:
+      "CareSetu could not check one of these fields. Review your address and save again.",
+    addressSaved: "Address saved.",
+    addressSaveFailed: "Could not save your address.",
     notificationsHeading: "Notifications",
     notificationLabels: {
       new_consultations: "New consultations",
@@ -3197,13 +3247,47 @@ export const STRINGS: Record<Lang, Dictionary> = {
       languagesPlaceholder: "हिंदी, अंग्रेज़ी",
       aboutLabel: "आपके बारे में",
       aboutPlaceholder: "मरीज़ों को अपनी प्रैक्टिस के बारे में बताएँ",
-      // नोट: परामर्श के दिन/समय और संरचित पते की यह कॉपी फिर से हटा दी गई है।
-      // प्रोजेक्शन `consulting_days`, `consulting_hours`, `address_line` और
-      // `pin_code` भेजता है, पर ब्रीफ़ पता कार्ड का कॉन्टेंट #616 को और परिचय
-      // कार्ड का #617 को देता है - और यहाँ लेबल जोड़ना उन अनुभागों की प्रस्तुति
-      // उनके टिकट होने से पहले लिख देना होता। वे टिकट अपने अपने फ़ील्ड दिखाते
-      // समय अपनी कुंजियाँ जोड़ेंगे।
-      addressLabel: "प्रैक्टिस का पता",
+      // नोट: परामर्श के दिन/समय की कॉपी अब भी नहीं है। प्रोजेक्शन
+      // `consulting_days` और `consulting_hours` भेजता है और परिचय अनुभाग की
+      // राइट (#610) उन्हें लेती है, पर #617 उस कार्ड की प्रस्तुति का मालिक है,
+      // और कच्चे वायर मान ("mon, tue") डॉक्टर-दिखने वाली कॉपी हैं ही नहीं।
+      // #616: पता कार्ड की कॉपी, जो मुक्त-पाठ वाले `addressLabel` की जगह आई -
+      // वह फ़ील्ड उसके साथ ही चला गया, क्योंकि अब पेज पर पते का एक ही एडिटर है
+      // और वह यही कार्ड है।
+      //
+      // दो निगमित पंक्तियाँ (ज़िला, राज्य) लेबल सहित पढ़ने-योग्य हैं और आज ख़ाली
+      // दिखती हैं: प्रोफ़ाइल प्रोजेक्शन और पते की राइट का जवाब दोनों पिन कोड पर
+      // रुकते हैं, और सेंट्रॉइड तालिका के अपने ज़िला/क्षेत्र कॉलम स्थिति के निर्णय
+      // (#603) से गुजरते नहीं, इसलिए क्लाइंट के पास पढ़ने को कुछ नहीं है। लेबल रहते
+      // हैं ताकि आकृति पेज पर रहे और अभाव किसी छूटी पंक्ति के रूप में नहीं, एक
+      // दिखने वाले ख़ाली मान के रूप में दिखे।
+      addressSectionHelp:
+        "आपका मानचित्र स्थान CareSetu आपके पिन कोड से निकालता है, इसलिए नक़्शे के निर्देशांक भरने की ज़रूरत नहीं है।",
+      addressLineLabel: "इमारत और सड़क",
+      addressLineHelp: "इमारत, सड़क और इलाका",
+      addressLandmarkLabel: "पहचान की जगह (वैकल्पिक)",
+      addressLocalityLabel: "इलाका",
+      addressCityLabel: "शहर",
+      addressPinLabel: "पिन कोड",
+      addressPinHelp: "छह अंक",
+      addressDistrictLabel: "ज़िला",
+      addressStateLabel: "राज्य",
+      addressDerivedHelp:
+        "ये CareSetu आपके पिन कोड से भरता है। इन्हें नहीं बदला जा सकता।",
+      addressDerivedEmpty: "उपलब्ध नहीं",
+      addressPinInvalid: "छह अंकों का पिन कोड दर्ज करें।",
+      addressPinUnresolved:
+        "CareSetu इस पिन कोड की जगह नहीं बता सकता। छह अंक जाँचें और फिर सहेजें।",
+      addressOutsideBelt: (km: string) =>
+        `यह पता उस इलाक़े के केंद्र से ${km} किमी दूर है जिसकी सेवा CareSetu करता है। आपका पता सहेज लिया गया है, और आस-पास खोजने वाले मरीज़ आपको आपके इलाक़े के बाहर के परिणाम के रूप में देखेंगे।`,
+      addressInvalidSummary: (count: number) =>
+        count === 1
+          ? "चिह्नित फ़ील्ड जाँचें और फिर सहेजें।"
+          : `चिह्नित ${count} फ़ील्ड जाँचें और फिर सहेजें।`,
+      addressUnmappedField:
+        "CareSetu इनमें से किसी फ़ील्ड की जाँच नहीं कर सका। अपना पता दोबारा देखें और सहेजें।",
+      addressSaved: "पता सहेज लिया गया।",
+      addressSaveFailed: "आपका पता सहेजा नहीं जा सका।",
       notificationsHeading: "सूचनाएँ",
       notificationLabels: {
         new_consultations: "नई परामर्श",

@@ -346,6 +346,55 @@ export interface DoctorProfilePhotoRef {
   photo_ref: string;
 }
 
+/**
+ * The Address section write's body (#609), mirroring
+ * `DoctorProfileAddressUpdate`.
+ *
+ * **No coordinate field, and that is the guarantee rather than an omission.**
+ * The backend model sets `extra="forbid"`, so a body still carrying
+ * `practice_latitude` or `practice_longitude` is a 422 rather than a silently
+ * discarded one - accepting it would tell a doctor their coordinates saved when
+ * they did not. The practice position is derived from `pin_code` by the server
+ * (ADR-0022), so the doctor is never asked the question only a map could answer.
+ *
+ * `pin_code` is the only required part because it is the only one the position is
+ * derived from. Deliberately **no** pattern or length bound here either: the
+ * backend's domain decision (#603) owns that rule and reports malformed and
+ * unlisted as two machine reasons inside one PIN-keyed envelope, so a bound
+ * checked here would refuse the value before the rule that explains it ever
+ * runs. The client's mirror of that rule is the card's validation pass, which
+ * refuses a submission rather than rewriting the value.
+ */
+export interface DoctorProfileAddressUpdate {
+  address_line: string | null;
+  landmark: string | null;
+  locality: string | null;
+  city: string | null;
+  pin_code: string;
+}
+
+/**
+ * The Address section write's answer (#609): the profile projection plus the
+ * outside-the-belt warning.
+ *
+ * A separate type rather than two nullable fields on `DoctorProfileView`,
+ * because **only this write evaluates the belt** - the decision needs the PIN's
+ * resolved centroid, which exists only inside this write's transaction. So a
+ * plain profile read carries no belt field at all rather than carrying one whose
+ * meaning depends on which endpoint produced it, and the card has nothing to
+ * render a notice from before its first save. That is the honest state: absent,
+ * not a spinner and not a promise.
+ *
+ * It is a warning, never a refusal. The position is written either way and the
+ * save succeeds; only this doctor's own listing surfaces as an outside-your-area
+ * result (the wider-area fallback, glossary).
+ */
+export interface DoctorProfileAddressView extends DoctorProfileView {
+  outside_peri_urban_belt: boolean;
+  /** Carried so the notice can say how far out the practice sits, not only that it is. */
+  distance_from_belt_centre_km: number;
+}
+
 const CREDENTIAL_STATUSES: readonly string[] = [
   "pending",
   "verified",
@@ -422,6 +471,24 @@ function isDoctorProfilePhotoRef(
   );
 }
 
+function isDoctorProfileAddressView(
+  value: unknown,
+): value is DoctorProfileAddressView {
+  // The profile guard first: the write's answer IS the profile projection, plus
+  // the two fields only this write produces. Guarding them separately is what
+  // makes a backend that quietly dropped the belt warning fail loudly here
+  // rather than leave the card rendering nothing and saying nothing.
+  if (!isDoctorProfileView(value)) return false;
+  // Read off a widened local rather than off the narrowed value: the profile
+  // guard's whole point is that those two fields are NOT on the projection, so
+  // asking the narrowed type for them is the type error, not a runtime concern.
+  const answer = value as Partial<DoctorProfileAddressView>;
+  return (
+    typeof answer.outside_peri_urban_belt === "boolean" &&
+    typeof answer.distance_from_belt_centre_km === "number"
+  );
+}
+
 /** Read the calling active doctor's private profile projection. */
 export async function fetchDoctorProfile(): Promise<DoctorProfileView> {
   const data = await request<unknown>("/v1/doctor/profile");
@@ -449,6 +516,39 @@ export async function updateDoctorProfile(
     data,
     isDoctorProfileView,
     "The API returned an unexpected doctor profile shape",
+  );
+}
+
+/**
+ * Save the calling active doctor's practice address through the section write
+ * (#609), on its own path rather than on `/profile`.
+ *
+ * Its own path is load-bearing: the backend namespaces its stored idempotency
+ * result per route, so a key issued against another write would otherwise be
+ * served this write's response.
+ *
+ * `retryKey` carries the per-attempt discipline (api-standards §5): a retry of
+ * the same attempt passes the failed attempt's key back, so a lost response
+ * cannot write the address twice, while a fresh edit mints a new one. Nothing in
+ * here mints a key - `idempotencyKey` is the shared module's, and the caller
+ * owns the attempt.
+ */
+export async function updateDoctorProfileAddress(
+  update: DoctorProfileAddressUpdate,
+  retryKey?: string,
+): Promise<DoctorProfileAddressView> {
+  const data = await request<unknown>("/v1/doctor/profile/address", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      [IDEMPOTENCY_KEY_HEADER]: idempotencyKey(retryKey),
+    },
+    body: JSON.stringify(update),
+  });
+  return guardShape(
+    data,
+    isDoctorProfileAddressView,
+    "The API returned an unexpected doctor address shape",
   );
 }
 
