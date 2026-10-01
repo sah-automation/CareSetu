@@ -565,10 +565,15 @@ describe("DoctorProfilePage shell (#615)", () => {
     expect(clone.textContent).not.toMatch(/area/i);
 
     // And inside the preview it is the locality on the patient surface's own
-    // label - never the platform seed beside it.
+    // label - never the platform seed beside it. #619 moved that label from the
+    // solid-edged summary into the declared band, and this is the assertion for
+    // it: the patient surface says "Locality" now, so a preview still saying
+    // "Service area" would be showing the doctor a page we do not ship.
     const preview = screen.getByTestId("profile-live-preview");
-    expect(preview).toHaveTextContent("Service area");
-    expect(preview).toHaveTextContent("Daltonganj");
+    expect(preview).not.toHaveTextContent("Service area");
+    expect(
+      within(preview).getByTestId("profile-declared-address-locality"),
+    ).toHaveTextContent("Daltonganj");
   });
 });
 
@@ -1941,6 +1946,10 @@ describe("DoctorProfilePage live preview (#618)", () => {
     // The public projection serves the DECLARED locality, so the locality field is
     // the one address input the preview can honestly show. The PIN, the street and
     // the city are not on the public surface at all.
+    //
+    // #619: it now appears in the DECLARED band rather than the solid-edged
+    // summary, because that is where the public page renders it and a preview that
+    // put it somewhere else would teach the doctor a page we do not ship.
     await renderReady();
 
     fireEvent.change(screen.getByTestId("profile-address-locality"), {
@@ -1949,7 +1958,7 @@ describe("DoctorProfilePage live preview (#618)", () => {
 
     expect(
       within(screen.getByTestId("profile-live-preview")).getByTestId(
-        "profile-details",
+        "profile-declared-address-locality",
       ),
     ).toHaveTextContent("Medininagar");
   });

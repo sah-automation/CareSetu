@@ -37,6 +37,18 @@ function doctorProfile() {
         expires_at: null,
       },
     ],
+    clinic_name: "Sharma Clinic",
+    specialties: ["General Physician", "Pediatrician"],
+    languages: ["English", "Hindi"],
+    consulting_days: ["Monday", "Saturday"],
+    consulting_hours: "9am-5pm",
+    about: "Twelve years in general practice.",
+    experience_years: 12,
+    address_line: "Main Road",
+    landmark: null,
+    locality: "Daltonganj",
+    city: "Daltonganj",
+    pin_code: "826001",
   };
 }
 
@@ -138,5 +150,95 @@ describe("fetchProviderProfile", () => {
     );
 
     await expect(fetchProviderProfile(7)).rejects.toBeInstanceOf(ApiError);
+  });
+
+  // #619 (FEAT-005, MOD-002): the guard widened with the payload. A declared field
+  // that arrives as the wrong type, or a selection that is not a list of strings,
+  // has to fail the shape rather than reach a page that would render it - the
+  // whole point of guarding is that a server which quietly changed its answer
+  // produces a visible failure instead of a profile that is silently short. And a
+  // profile that is short is a page where a patient cannot tell the difference
+  // between "the provider declared nothing" and "the platform dropped it".
+  const declaredRejections: [
+    string,
+    (payload: Record<string, unknown>) => void,
+  ][] = [
+    ["a missing declared field", (payload) => void delete payload.about],
+    ["a non-string declared text", (payload) => void (payload.about = 42)],
+    [
+      "a non-numeric experience",
+      (payload) => void (payload.experience_years = "12"),
+    ],
+    [
+      "a selection that is not a list",
+      (payload) => void (payload.languages = "Hindi"),
+    ],
+    [
+      "a selection holding a non-string",
+      (payload) => void (payload.consulting_days = ["Monday", 7]),
+    ],
+  ];
+
+  for (const [name, corrupt] of declaredRejections) {
+    it(`rejects ${name}`, async () => {
+      const payload: Record<string, unknown> = { ...doctorProfile() };
+      corrupt(payload);
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(payload)));
+
+      await expect(fetchProviderProfile(7)).rejects.toBeInstanceOf(ApiError);
+    });
+  }
+
+  it("accepts a provider that has declared nothing at all", async () => {
+    // FEAT-005, the other side of the same coin: a half-finished profile is a
+    // state a provider can legitimately hold, so a payload of nulls and empty
+    // lists is a FOUND profile and not a bad shape. The guard has to let it
+    // through, because refusing it would turn "this doctor has not written an
+    // about page yet" into an error page - and an error page looks like something
+    // is wrong with the doctor's practice rather than something they have not
+    // filled in yet.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          ...doctorProfile(),
+          clinic_name: null,
+          specialties: [],
+          languages: [],
+          consulting_days: [],
+          consulting_hours: null,
+          about: null,
+          experience_years: null,
+          address_line: null,
+          locality: null,
+          city: null,
+          pin_code: null,
+        }),
+      ),
+    );
+
+    await expect(fetchProviderProfile(7)).resolves.toMatchObject({
+      status: "found",
+    });
+  });
+
+  it("accepts a selection holding a blank member, which the renderer drops", async () => {
+    // The same argument as above, one level down. A blank member is CONTENT, and
+    // the renderer already answers it - a member no label map holds renders as
+    // nothing - so the guard has no business failing the profile over it. Failing
+    // here would trade a dropped chip for a patient looking at an error page.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          ...doctorProfile(),
+          specialties: ["", "Pediatrician"],
+        }),
+      ),
+    );
+
+    await expect(fetchProviderProfile(7)).resolves.toMatchObject({
+      status: "found",
+    });
   });
 });

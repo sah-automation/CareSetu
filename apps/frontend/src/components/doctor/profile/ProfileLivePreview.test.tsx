@@ -42,7 +42,7 @@ function profile(
     photo_ref: null,
     practice_name: "Asha Rao",
     clinic_name: "Asha Clinic",
-    specialties: ["General Physician"],
+    specialties: ["General Physician", "Pediatrician"],
     verified: true,
     practice_address: "Main Road",
     address_line: null,
@@ -57,7 +57,7 @@ function profile(
     experience_years: 12,
     about: null,
     consultation_fee: null,
-    consulting_days: ["mon"],
+    consulting_days: ["Monday"],
     consulting_hours: "9am-5pm",
     credentials: [
       {
@@ -94,7 +94,7 @@ function DraftPublisher() {
         onClick={() =>
           publish("practice", {
             practiceName: "Asha R. Verma",
-            specialties: ["Paediatrics"],
+            specialties: ["Pediatrician"],
           })
         }
       >
@@ -216,29 +216,47 @@ describe("ProfileLivePreview tracks the form", () => {
     );
 
     fireEvent.click(screen.getByTestId("type-locality"));
-    expect(screen.getByTestId("profile-details")).toHaveTextContent(
-      "Medininagar",
-    );
+    // #619: the typed locality renders in the DECLARED band, because that is where
+    // a provider's own claim belongs. It used to appear in the solid-edged summary,
+    // which is exactly the reading the band exists to stop - and this preview is
+    // where that mistake would have taught a doctor the wrong page.
+    expect(
+      screen.getByTestId("profile-declared-address-locality"),
+    ).toHaveTextContent("Medininagar");
   });
 
-  it("shows the first declared specialty and drops the row when the selection empties", () => {
-    // The public surface publishes the FIRST member of the selection, so the
-    // preview has to as well: a preview that joined the list would show a doctor
-    // something the real page cannot.
+  it("shows the declared specialties and drops the row when the selection empties", () => {
+    // Two claims, and #619 is why both hold. The hero's subtitle publishes the
+    // FIRST member of the selection, because that is the single label the narrow
+    // directory surfaces render and a preview that joined the list would show a
+    // doctor something the card behind it cannot. The declared band shows EVERY
+    // member, because that is what the profile page renders for a patient. The
+    // preview has to agree with both, or it teaches the doctor the wrong page.
     renderPreview();
+
+    // Saved selection: the band shows every kind of care, not just the one the
+    // hero's subtitle names.
+    expect(
+      screen.getByTestId("profile-declared-specialties"),
+    ).toHaveTextContent("General Physician, Pediatrician");
 
     fireEvent.click(screen.getByTestId("type-specialties"));
     expect(screen.getByTestId("profile-subtitle")).toHaveTextContent(
-      "Paediatrics",
+      "Pediatrician",
     );
     expect(screen.getByTestId("profile-subtitle")).not.toHaveTextContent(
       "General Physician",
     );
+    expect(
+      screen.getByTestId("profile-declared-specialties"),
+    ).toHaveTextContent("Pediatrician");
 
     fireEvent.click(screen.getByTestId("clear-specialties"));
-    expect(
-      within(screen.getByTestId("profile-details")).queryByText("Specialty"),
-    ).toBeNull();
+    const declared = screen.getByTestId("profile-declared");
+    expect(within(declared).queryByText("Specialties")).toBeNull();
+    expect(screen.getByTestId("profile-subtitle")).not.toHaveTextContent(
+      "Pediatrician",
+    );
   });
 
   it("renders no tick for a doctor the API has not verified", () => {
@@ -311,10 +329,11 @@ describe("ProfileLivePreview tracks the form", () => {
       </LangProvider>,
     );
 
-    // The address card published nothing, so its slice reseeded to the new answer.
-    expect(screen.getByTestId("profile-details")).toHaveTextContent(
-      "Medininagar",
-    );
+    // The address card published nothing, so its slice reseeded to the new answer -
+    // in the declared band, which is where the locality renders.
+    expect(
+      screen.getByTestId("profile-declared-address-locality"),
+    ).toHaveTextContent("Medininagar");
     // And the practice card's own edits were not dragged along with it.
     expect(screen.getByTestId("profile-name")).toHaveTextContent(
       "Asha R. Verma",

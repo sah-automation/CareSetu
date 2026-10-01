@@ -11,13 +11,24 @@
 //     the not-found state and the retryable error are about the request, and the
 //     retry button's state lives with the request.
 //
-// Truthfulness rules (FEAT-005 / ADR-0011), unchanged by the extraction: the
-// verified badge, the trust cue and each credential's status render ONLY from the
-// fields the projection carries - `verified` and `credential.status`. Nothing
-// here invents a verification, and nothing renders a field the payload does not
-// carry (no fee/languages/experience/services/consult-type - those exceed the
-// API's verified-safe projection, and #619 widens the set rather than this
-// component widening it).
+// Truthfulness rules (FEAT-005 / ADR-0011): the verified badge, the trust cue and
+// each credential's status render ONLY from the fields the projection carries -
+// `verified` and `credential.status`. Nothing here invents a verification, and
+// nothing renders a field the payload does not carry.
+//
+// #619: the profile now has TWO bands, and this file owns the platform's half of
+// the boundary. The VERIFIED bands are here - the seal, the trust cue and the
+// credentials, each with a solid edge and a tick that came from the API. The
+// DECLARED band is the doctor's own claims and lives beside this file, in
+// `ProviderProfileDeclaredBand`, with a dashed edge and a heading that says
+// nobody checked it.
+//
+// The one rule that decides what belongs where: a value the platform derived may
+// sit in a solid-edged band, and a value the provider DECLARED may not - not
+// because it reads untrustworthy, but because putting it inside the verified edge
+// would vouch for it. That is why the summary rows below carry the provider's
+// type and nothing else: `area` is the declared locality since #612/#613, so it
+// renders in the declared band with the rest of the address rather than here.
 //
 // The breadcrumb is in the body, not in the container, on purpose: it is what a
 // patient actually reads on this surface, so the doctor's preview shows it too
@@ -33,6 +44,7 @@
 
 import Link from "next/link";
 
+import { ProviderProfileDeclaredBand } from "./ProviderProfileDeclaredBand";
 import {
   DIRECTORY_ROUTE,
   DIRECTORY_VARIANT_ROUTES,
@@ -99,6 +111,14 @@ export function ProviderProfileBody({
   const variantHref =
     DIRECTORY_VARIANT_ROUTES[profile.partner_type] ?? DIRECTORY_ROUTE;
   const variantLabel = typeLabel[profile.partner_type];
+  // The singular `specialty` here IS the declared band's first member, so the two
+  // do print the same word. That overlap is #613's decision rather than this
+  // file's: the subtitle is the one line the narrow surfaces read - the directory
+  // card and every rail that reuses it - and the band is where the whole selection
+  // is answered. Dropping the subtitle would strip those surfaces of a label they
+  // have always had; dropping the band would leave a patient shown only the first
+  // of the kinds of care a provider practises. So it is stated twice, on purpose,
+  // and the band is the one that is honest about being unverified.
   const subtitle = joinParts([
     variantLabel,
     ...(profile.specialty ? [profile.specialty] : []),
@@ -174,7 +194,8 @@ export function ProviderProfileBody({
         )}
       </section>
 
-      {/* Credentials display (FEAT-005 - label + status, never raw documents) */}
+      {/* Credentials display (FEAT-005 - label + status, never raw documents).
+          This is the VERIFIED band, and it is the only band with a solid edge. */}
       <section
         className="mt-3 rounded-lg border border-hairline bg-surface p-5 shadow-card"
         data-testid="profile-credentials"
@@ -204,7 +225,10 @@ export function ProviderProfileBody({
                 ) : null}
               </div>
               {credential.status === "verified" && (
-                <span className="shrink-0 rounded-full bg-success-soft px-2 py-0.5 text-xs font-medium text-success-text">
+                <span
+                  data-testid="credential-verified"
+                  className="shrink-0 rounded-full bg-success-soft px-2 py-0.5 text-xs font-medium text-success-text"
+                >
                   {t.verified}
                 </span>
               )}
@@ -213,7 +237,10 @@ export function ProviderProfileBody({
         </ul>
       </section>
 
-      {/* Details (verified-safe fields only: type, specialty, service area) */}
+      {/* The platform's own summary of what this provider IS. It is a solid-edged
+          band, so it carries platform-derived facts only: the type is the fact,
+          and the declared band's specialties, address and locality live below, in
+          the band that says they are claims. Nothing declared appears here. */}
       <section
         className="mt-3 rounded-lg border border-hairline bg-surface p-5 shadow-card"
         data-testid="profile-details"
@@ -228,24 +255,15 @@ export function ProviderProfileBody({
             <dt className="text-txt-muted">{t.typeLabel}</dt>
             <dd className="text-right font-medium text-txt">{variantLabel}</dd>
           </div>
-          {profile.specialty ? (
-            <div className="flex justify-between gap-3">
-              <dt className="text-txt-muted">{t.specialtyLabel}</dt>
-              <dd className="text-right font-medium text-txt">
-                {profile.specialty}
-              </dd>
-            </div>
-          ) : null}
-          {profile.area ? (
-            <div className="flex justify-between gap-3">
-              <dt className="text-txt-muted">{t.areaLabel}</dt>
-              <dd className="text-right font-medium text-txt">
-                {profile.area}
-              </dd>
-            </div>
-          ) : null}
         </dl>
       </section>
+
+      {/* The provider's own claims, last of the bands and visibly outside them.
+          Placed after the platform's summary rather than before it so the page
+          reads in one direction: what CareSetu checked, what this provider is,
+          and then what the provider says - in that order, with the edge change
+          marking the handover. */}
+      <ProviderProfileDeclaredBand profile={profile} />
 
       {/* CTA (future phase) */}
       <section className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-hairline bg-surface p-5 shadow-card">

@@ -53,7 +53,9 @@ import { fetchProviderProfile } from "@/lib/directory/profile";
 
 const mockFetch = vi.mocked(fetchProviderProfile);
 
-function doctorProfile(): ProviderProfileShape {
+function doctorProfile(
+  overrides: Partial<ProviderProfileShape> = {},
+): ProviderProfileShape {
   return {
     partner_id: 7,
     practice_name: "Dr. Rakesh Sharma",
@@ -73,6 +75,23 @@ function doctorProfile(): ProviderProfileShape {
         expires_at: null,
       },
     ],
+    // The declared band (#619). Chosen to be a half-finished profile on purpose:
+    // a clinic name and two specialties, no landmark and no building line, so the
+    // suite proves the parts that are absent render nothing rather than an empty
+    // row, alongside the parts that are present.
+    clinic_name: "Sharma Clinic",
+    specialties: ["General Physician", "Pediatrician"],
+    languages: ["English", "Hindi"],
+    consulting_days: ["Monday", "Saturday"],
+    consulting_hours: "9am-5pm, Saturdays after 5 pm",
+    about: "Twelve years in general practice.",
+    experience_years: 12,
+    address_line: "Main Road",
+    landmark: null,
+    locality: "Daltonganj",
+    city: "Daltonganj",
+    pin_code: "826001",
+    ...overrides,
   };
 }
 
@@ -82,7 +101,12 @@ function labProfile(): ProviderProfileShape {
     practice_name: "Sahyog Path Lab",
     partner_type: "lab",
     specialty: null,
-    area: "Daltonganj",
+    // Null, and that is the point of the fixture: the server serves `area` and
+    // `locality` from the same column, so a lab that declares no locality has
+    // neither. Declaring nothing means `locality` is null - which is what makes
+    // the "no band at all" assertion below a real test of the band's
+    // conditionality rather than a test of a fixture that left one field set.
+    area: null,
     verified: true,
     credentials: [
       {
@@ -91,6 +115,20 @@ function labProfile(): ProviderProfileShape {
         expires_at: "2027-03-31T00:00:00Z",
       },
     ],
+    // A lab declares nothing in this band, which is what proves the band itself
+    // is conditional rather than an empty heading over nothing.
+    clinic_name: null,
+    specialties: [],
+    languages: [],
+    consulting_days: [],
+    consulting_hours: null,
+    about: null,
+    experience_years: null,
+    address_line: null,
+    landmark: null,
+    locality: null,
+    city: null,
+    pin_code: null,
   };
 }
 
@@ -118,11 +156,14 @@ function doctorView(
     partner_id: 7,
     photo_ref: null,
     practice_name: "Dr. Rakesh Sharma",
-    clinic_name: null,
-    specialties: ["General Physician", "Paediatrics"],
+    clinic_name: "Sharma Clinic",
+    // "Pediatrician", not "Paediatrics": the closed `Specialty` list is what the
+    // renderer has labels for, and a member outside it is dropped rather than
+    // shown as a raw wire string.
+    specialties: ["General Physician", "Pediatrician"],
     verified: true,
     practice_address: "Main Road",
-    address_line: null,
+    address_line: "Main Road",
     landmark: null,
     locality: "Daltonganj",
     city: "Daltonganj",
@@ -132,10 +173,10 @@ function doctorView(
     area: "Daltonganj",
     languages: ["English", "Hindi"],
     experience_years: 12,
-    about: null,
+    about: "Twelve years in general practice.",
     consultation_fee: null,
-    consulting_days: ["mon"],
-    consulting_hours: "9am-5pm",
+    consulting_days: ["Monday", "Saturday"],
+    consulting_hours: "9am-5pm, Saturdays after 5 pm",
     credentials: [
       {
         credential_type: "medical_registration",
@@ -233,13 +274,28 @@ describe("ProviderProfile rendering a reachable profile", () => {
     expect(
       screen.getByRole("heading", { name: "Practice details" }),
     ).toBeInTheDocument();
+    // The summary band's whole content is the provider TYPE, and that is not an
+    // accident of this fixture: it is what a solid-edged band is allowed to hold.
     expect(screen.getByText("Type")).toBeInTheDocument();
-    expect(screen.getByText("Specialty")).toBeInTheDocument();
-    expect(screen.getByText("Service area")).toBeInTheDocument();
-    // Fields the API payload does not carry are never invented (fee, consult
-    // types, languages, experience, services).
+    const summary = screen.getByTestId("profile-details");
+    expect(summary).toHaveTextContent("Doctor");
+    // #619: the service area moved out of here and into the declared band, and
+    // that is the one structural change the ticket forced on this section. `area`
+    // is the provider's DECLARED locality since #612/#613, so leaving it here
+    // would put an unverified claim inside a solid-edged band right beside the
+    // credentials - the exact reading the band exists to prevent. It now renders
+    // once, in the band that says nobody checked it.
+    expect(screen.queryByText("Service area")).not.toBeInTheDocument();
+    expect(within(summary).queryByText("Specialty")).toBeNull();
+    expect(
+      screen.getByTestId("profile-declared-address-locality"),
+    ).toHaveTextContent("Daltonganj");
+    // Fields no part of the payload carries are still never invented. The
+    // consultation fee is the one the backend serves and the page deliberately
+    // does not show (nothing on this page can book, so a price would be a
+    // promise); the services and consult-type blobs were never served at all.
     expect(screen.queryByText(/consultation fee/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/languages/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/services/i)).not.toBeInTheDocument();
   });
 
   it("renders the lab variant with the credentials & licenses heading", async () => {
@@ -257,8 +313,10 @@ describe("ProviderProfile rendering a reachable profile", () => {
     expect(
       screen.getByRole("heading", { name: "Details" }),
     ).toBeInTheDocument();
-    // No specialty row for labs.
+    // No specialty row for labs, and no declared band at all: a lab that declares
+    // nothing gets no heading over nothing.
     expect(screen.queryByText("Specialty")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("profile-declared")).not.toBeInTheDocument();
     expect(screen.getByTestId("profile-subtitle")).toHaveTextContent(
       "Laboratory",
     );
@@ -289,6 +347,240 @@ describe("ProviderProfile rendering a reachable profile", () => {
 
     await screen.findByTestId("profile-hero");
     expect(screen.queryByTestId("profile-verified")).not.toBeInTheDocument();
+  });
+});
+
+// #619 AC 1 and AC 2 (FEAT-005, MOD-002): the declared band. A patient reads two
+// bands on this page and has to be able to tell them apart - "we checked this"
+// from "the doctor wrote this" - so the suite asserts both halves of that: that
+// every declared field renders, and that nothing in the band can be mistaken for
+// something verified. ADR-0011 is the decision these assertions exist to hold, and
+// the reason this suite is as long as it is: the failure mode is not a crash, it
+// is a page that looks correct.
+describe("the declared band renders the provider's own claims", () => {
+  it("renders the clinic name, every specialty, the languages, the days and the hours", async () => {
+    mockFetch.mockResolvedValue({ status: "found", profile: doctorProfile() });
+
+    renderProfile();
+
+    const band = await screen.findByTestId("profile-declared");
+    expect(
+      within(band).getByTestId("profile-declared-clinic-name"),
+    ).toHaveTextContent("Sharma Clinic");
+    // EVERY specialty, not the one representative label the directory card shows.
+    expect(
+      within(band).getByTestId("profile-declared-specialties"),
+    ).toHaveTextContent("General Physician, Pediatrician");
+    expect(
+      within(band).getByTestId("profile-declared-languages"),
+    ).toHaveTextContent("English, Hindi");
+    // Days are the closed vocabulary's own values, so they render as named days
+    // rather than as the wire slugs.
+    expect(within(band).getByTestId("profile-declared-days")).toHaveTextContent(
+      "Monday, Saturday",
+    );
+    expect(
+      within(band).getByTestId("profile-declared-hours"),
+    ).toHaveTextContent("9am-5pm, Saturdays after 5 pm");
+  });
+
+  it("renders the structured address, the years of experience and the about text", async () => {
+    mockFetch.mockResolvedValue({ status: "found", profile: doctorProfile() });
+
+    renderProfile();
+
+    const band = await screen.findByTestId("profile-declared");
+    // The five parts stay five separately declared rows, and only the parts that
+    // were declared render: this fixture has no landmark, so there is no landmark
+    // row at all rather than an empty one.
+    expect(
+      within(band).getByTestId("profile-declared-address-address-line"),
+    ).toHaveTextContent("Main Road");
+    expect(
+      within(band).getByTestId("profile-declared-address-locality"),
+    ).toHaveTextContent("Daltonganj");
+    expect(
+      within(band).getByTestId("profile-declared-address-city"),
+    ).toHaveTextContent("Daltonganj");
+    // The PIN code is the part a patient types into a map app, so it is asserted
+    // by its own hook rather than swept up in a row's text.
+    expect(
+      within(band).getByTestId("profile-declared-address-pin-code"),
+    ).toHaveTextContent("826001");
+    expect(
+      within(band).queryByTestId("profile-declared-address-landmark"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(band).getByTestId("profile-declared-experience"),
+    ).toHaveTextContent("12 years of experience");
+    expect(
+      within(band).getByTestId("profile-declared-about"),
+    ).toHaveTextContent("Twelve years in general practice.");
+  });
+
+  it("draws the band boundary in shape, so no legend is needed to read it", async () => {
+    // AC 2, the half that is not copy: the declared band's edge is dashed where
+    // the verified band's is solid. The words in the note are the other half, and
+    // neither one is doing the other's job - a sighted patient reads the shape,
+    // and nobody has to know what a dashed border means.
+    mockFetch.mockResolvedValue({ status: "found", profile: doctorProfile() });
+
+    renderProfile();
+
+    const declared = await screen.findByTestId("profile-declared");
+    expect(declared.className).toContain("border-dashed");
+    for (const testId of ["profile-credentials", "profile-details"]) {
+      expect(screen.getByTestId(testId).className).not.toContain(
+        "border-dashed",
+      );
+    }
+    expect(screen.getByTestId("profile-declared-note")).toHaveTextContent(
+      "CareSetu has not checked them",
+    );
+  });
+
+  it("keeps every declared value out of the solid-edged bands", async () => {
+    // AC 2 again, as a claim about VALUES rather than about the dashed edge. A
+    // dashed border is a promise about styling; this is the promise that matters -
+    // that a patient cannot read a claim the provider made out of a box the
+    // platform vouched for. `area` is the one that would slip through, because
+    // since #612/#613 it is the declared locality, and the summary band used to
+    // print it with a solid edge right beside the credentials.
+    mockFetch.mockResolvedValue({ status: "found", profile: doctorProfile() });
+
+    renderProfile();
+
+    await screen.findByTestId("profile-declared");
+    const declaredClaims = [
+      "Sharma Clinic",
+      "Pediatrician",
+      "English",
+      "Daltonganj",
+      "826001",
+      "12 years of experience",
+      "Twelve years in general practice.",
+      "9am-5pm",
+    ];
+    for (const testId of ["profile-credentials", "profile-details"]) {
+      const solid = screen.getByTestId(testId);
+      for (const claim of declaredClaims) {
+        expect(solid).not.toHaveTextContent(claim);
+      }
+    }
+  });
+
+  it("renders no verified marker anywhere inside the declared band", async () => {
+    // AC 3 from the band's own side: a declared field is not checked by anyone,
+    // so nothing in the band may be marked as though it were. Every field is
+    // populated here, and the profile is genuinely verified - the band is still
+    // the one thing on this page with no tick in it.
+    mockFetch.mockResolvedValue({ status: "found", profile: doctorProfile() });
+
+    renderProfile();
+
+    const band = await screen.findByTestId("profile-declared");
+    expect(
+      within(band).queryByTestId("credential-verified"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(band).queryByTestId("profile-verified"),
+    ).not.toBeInTheDocument();
+    // The tick the verified band does carry is still there, on the other side of
+    // the boundary - the bands are distinguished, not the tick suppressed.
+    expect(
+      within(screen.getByTestId("profile-credentials")).getAllByText(
+        "Verified",
+      ),
+    ).toHaveLength(2);
+  });
+
+  it("renders nothing for a field the projection does not carry", async () => {
+    // The discipline the whole renderer runs on, now covering the declared band:
+    // a null or an empty selection is a state a provider can hold, and it renders
+    // as nothing rather than as a blank row or an invented string.
+    mockFetch.mockResolvedValue({
+      status: "found",
+      profile: doctorProfile({
+        clinic_name: null,
+        specialties: [],
+        languages: [],
+        consulting_days: [],
+        consulting_hours: null,
+        about: null,
+        experience_years: null,
+        address_line: null,
+        // `area` too, not just `locality`: the server serves both from the same
+        // column, so a profile that still carries `area` has declared a locality
+        // and leaving it set here would not be "declared nothing".
+        locality: null,
+        area: null,
+        city: null,
+        pin_code: null,
+      }),
+    });
+
+    renderProfile();
+
+    await screen.findByTestId("profile-hero");
+    expect(screen.queryByTestId("profile-declared")).not.toBeInTheDocument();
+  });
+
+  it("treats an empty or unknown declared value as absent rather than as a word", async () => {
+    mockFetch.mockResolvedValue({
+      status: "found",
+      profile: doctorProfile({
+        clinic_name: "   ",
+        // A member of no closed list, which a hand-repaired row can hold, and a
+        // blank member, which an unfilled one can: both are dropped, so no value is
+        // rendered from a raw wire string - and the blank one is dropped HERE
+        // rather than in the guard, because a member no label map holds is a
+        // content question and failing the whole profile over one would be a
+        // patient staring at an error page.
+        specialties: ["Astrology", ""],
+        experience_years: 0,
+      }),
+    });
+
+    renderProfile();
+
+    const band = await screen.findByTestId("profile-declared");
+    expect(band).not.toHaveTextContent("Clinic name");
+    expect(band).not.toHaveTextContent("Astrology");
+    // Nothing named at all is no row, rather than a row with an empty value.
+    expect(
+      within(band).queryByTestId("profile-declared-specialties"),
+    ).not.toBeInTheDocument();
+    // Zero years is a declared fact, not a missing one - it renders, singularly.
+    expect(
+      within(band).getByTestId("profile-declared-experience"),
+    ).toHaveTextContent("0 years of experience");
+  });
+
+  it("keeps the band bilingual - the labels follow the language, the claims do not", async () => {
+    mockFetch.mockResolvedValue({ status: "found", profile: doctorProfile() });
+    const { unmount } = renderProfile();
+
+    await screen.findByTestId("profile-declared");
+    fireEvent.click(screen.getByRole("button", { name: "\u0939\u093F\u0902" }));
+
+    const band = await screen.findByTestId("profile-declared");
+    expect(
+      within(band).getByRole("heading", { name: "प्रोवाइडर द्वारा घोषित" }),
+    ).toBeInTheDocument();
+    // The vocabulary labels are translated; the provider's own words are not.
+    expect(within(band).getByTestId("profile-declared-days")).toHaveTextContent(
+      "सोमवार, शनिवार",
+    );
+    expect(
+      within(band).getByTestId("profile-declared-languages"),
+    ).toHaveTextContent("अंग्रेज़ी, हिंदी");
+    expect(
+      within(band).getByTestId("profile-declared-clinic-name"),
+    ).toHaveTextContent("Sharma Clinic");
+    expect(
+      within(band).getByTestId("profile-declared-about"),
+    ).toHaveTextContent("Twelve years in general practice.");
+    unmount();
   });
 });
 

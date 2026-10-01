@@ -705,8 +705,35 @@ const en = {
     practiceDetailsHeading: "Practice details",
     detailsHeading: "Details",
     typeLabel: "Type",
-    specialtyLabel: "Specialty",
-    areaLabel: "Service area",
+    // #619: the DECLARED band - what the provider says about itself, as opposed
+    // to the verified band above, which is what the platform checked. The copy has
+    // to make that split legible in words, because the section's dashed edge only
+    // makes it legible in shape: a patient must not have to infer which half of
+    // the page we are standing behind.
+    declaredHeading: "Declared by the provider",
+    declaredNote:
+      "The provider's own details. CareSetu has not checked them - only the credentials above are verified.",
+    declaredPracticeHeading: "Clinic",
+    declaredAddressHeading: "Address",
+    declaredConsultingHeading: "Consulting",
+    declaredAboutHeading: "About",
+    clinicNameLabel: "Clinic name",
+    specialtiesLabel: "Specialties",
+    languagesLabel: "Languages",
+    consultingDaysLabel: "Consulting days",
+    consultingHoursLabel: "Consulting hours",
+    // The address parts are NOT re-declared here. `doctorProfile` already owns a
+    // label for each of the same five fields - the same form the doctor fills in,
+    // for the same fact - and a second set of Hindi words for "Locality" would be
+    // a second place to reword it and a second place to get it wrong. The band
+    // reads those maps. The one exception is the landmark: the editor's copy says
+    // "optional" because that is an instruction to the doctor filling a form, and
+    // on a patient-facing page a landmark they saved is not optional - so that
+    // word is ours and only ours.
+    declaredLandmarkLabel: "Landmark",
+    yearsOfExperience: (years: number) =>
+      years === 1 ? "1 year of experience" : `${years} years of experience`,
+    experienceLabel: "Experience",
     expiresOn: (date: string) => `Expires ${date}`,
     credentialTypes: {
       medical_registration: "Medical registration",
@@ -2935,8 +2962,28 @@ export const STRINGS: Record<Lang, Dictionary> = {
       practiceDetailsHeading: "अभ्यास विवरण",
       detailsHeading: "विवरण",
       typeLabel: "प्रकार",
-      specialtyLabel: "विशेषज्ञता",
-      areaLabel: "सेवा क्षेत्र",
+      // #619: `specialtyLabel` and `areaLabel` are GONE from this namespace. The
+      // singular specialty now reads through the hero subtitle and the whole
+      // selection through the declared band, and `area` IS the declared locality -
+      // so the band owns both. A string with no reader is a string nobody can
+      // reword, and one more of them is one more place for the two locales to
+      // drift apart.
+      declaredHeading: "प्रोवाइडर द्वारा घोषित",
+      declaredNote:
+        "यह प्रोवाइडर के अपने विवरण हैं। CareSetu ने इनकी जाँच नहीं की है - केवल ऊपर दिए गए प्रमाण सत्यापित हैं।",
+      declaredPracticeHeading: "क्लिनिक",
+      declaredAddressHeading: "पता",
+      declaredConsultingHeading: "परामर्श",
+      declaredAboutHeading: "परिचय",
+      clinicNameLabel: "क्लिनिक का नाम",
+      specialtiesLabel: "विशेषज्ञताएँ",
+      languagesLabel: "भाषाएँ",
+      consultingDaysLabel: "परामर्श के दिन",
+      consultingHoursLabel: "परामर्श का समय",
+      declaredLandmarkLabel: "पहचान की जगह",
+      yearsOfExperience: (years: number) =>
+        years === 1 ? "1 वर्ष का अनुभव" : `${years} वर्ष का अनुभव`,
+      experienceLabel: "अनुभव",
       expiresOn: (date: string) => `${date} तक वैध`,
       credentialTypes: {
         medical_registration: "मेडिकल पंजीकरण",

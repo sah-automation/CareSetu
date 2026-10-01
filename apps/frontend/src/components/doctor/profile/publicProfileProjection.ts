@@ -27,12 +27,29 @@
 // already proved them all valid - so hardcoding the same word here would be a
 // second derivation site that can disagree with the server's, and it would show a
 // doctor an expired credential as ticked. The preview reports each credential's
-// real status and so can differ from the public page until #619 serves the real
-// one. The renderer still invents no tick: a typed value cannot reach either
-// field.
+// real status and so can differ from the public page on that one field. The
+// renderer still invents no tick: a typed value cannot reach either field.
+//
+// #619 widened the projection with the DECLARED band, so this file now carries it
+// too - and the split above is unchanged by that. The band is where the two hosts
+// differ most, so it is worth being exact about which of its fields a keystroke
+// reaches. `practice_name`, `specialty`, `area` and `locality` DO come from the
+// draft, because the doctor is editing them in the cards that publish today, and a
+// preview that ignored them would be lying about the two sections it claims to be
+// live. Every other declared field is a saved fact passed through from the private
+// projection, so a doctor typing in the About or Languages card does not move the
+// preview until that section publishes into the draft - which is the honest version
+// of "live". The preview shows the saved profile plus the fields that are actually
+// being typed, and never claims to show a sentence that has not been saved.
+//
+// The band is also where the shared renderer is least forgiving, which is why it is
+// the band with the loudest rules: a declared field that reached a solid-edged band
+// would read as platform-vouched, so the band component refuses to put a tick on
+// any of it regardless of how plausible the value looks.
+
+import { declaredText, type ProviderProfile } from "@/lib/directory/profile";
 
 import type { DoctorProfileView } from "@/lib/doctor/api";
-import type { ProviderProfile } from "@/lib/directory/profile";
 
 import type { AddressFields } from "./addressCardFields";
 import type { PracticeFields } from "./practiceCardFields";
@@ -65,12 +82,6 @@ export function draftFromProfile(
     },
     address: { locality: profile.locality ?? "" },
   };
-}
-
-/** Blank is a value the projection omits rather than serves as an empty string. */
-function declaredText(value: string): string | null {
-  const trimmed = value.trim();
-  return trimmed === "" ? null : trimmed;
 }
 
 /**
@@ -126,5 +137,24 @@ export function projectPublicProfile(
       status: credential.status,
       expires_at: credential.expires_at,
     })),
+    // #619: the rest of the DECLARED band, passed through from the private
+    // projection the server already serves. These are saved facts rather than
+    // typed ones, so they read the API answer - the two sections that publish into
+    // the draft today (`practice`, `address`) are the two whose declared fields are
+    // already handled above, and the rule that will keep this list honest as the
+    // other sections gain editors is the same one: a field only moves to the draft
+    // when a card publishes it.
+    clinic_name: profile.clinic_name,
+    specialties: [...draft.practice.specialties],
+    languages: [...profile.languages],
+    consulting_days: [...profile.consulting_days],
+    consulting_hours: profile.consulting_hours,
+    about: profile.about,
+    experience_years: profile.experience_years,
+    address_line: profile.address_line,
+    landmark: profile.landmark,
+    locality: declaredText(draft.address.locality),
+    city: profile.city,
+    pin_code: profile.pin_code,
   };
 }

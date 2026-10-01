@@ -19,7 +19,7 @@ function view(overrides: Partial<DoctorProfileView> = {}): DoctorProfileView {
     photo_ref: null,
     practice_name: "Dr. Rakesh Sharma",
     clinic_name: "Sharma Clinic",
-    specialties: ["General Physician", "Paediatrics"],
+    specialties: ["General Physician", "Pediatrician"],
     verified: true,
     practice_address: "Main Road",
     address_line: null,
@@ -34,7 +34,7 @@ function view(overrides: Partial<DoctorProfileView> = {}): DoctorProfileView {
     experience_years: 12,
     about: "Twelve years in general practice.",
     consultation_fee: 30000,
-    consulting_days: ["mon", "tue"],
+    consulting_days: ["Monday", "Tuesday"],
     consulting_hours: "9am-5pm",
     credentials: [
       {
@@ -53,13 +53,23 @@ function view(overrides: Partial<DoctorProfileView> = {}): DoctorProfileView {
   };
 }
 
+/** A draft, with the slices MERGED rather than replaced. The two publishing
+ * sections are what a test here varies independently - a doctor editing their
+ * name has not cleared their specialties, and a fixture that made them do so
+ * would be testing a state no sequence of keystrokes produces. */
 function draft(
-  overrides: Partial<PublicProfileDraft> = {},
+  overrides: Partial<{
+    practice: Partial<PublicProfileDraft["practice"]>;
+    address: Partial<PublicProfileDraft["address"]>;
+  }> = {},
 ): PublicProfileDraft {
   return {
-    practice: { practiceName: "Dr. Rakesh Sharma", specialties: [] },
-    address: { locality: "Daltonganj" },
-    ...overrides,
+    practice: {
+      practiceName: "Dr. Rakesh Sharma",
+      specialties: [],
+      ...overrides.practice,
+    },
+    address: { locality: "Daltonganj", ...overrides.address },
   };
 }
 
@@ -189,20 +199,99 @@ describe("projectPublicProfile", () => {
     expect(projected.partner_type).toBe("doctor");
   });
 
-  it("drops a value the projection does not carry rather than inventing one", () => {
-    // The declared band the public projection cannot carry yet (#619 widens it):
-    // about, languages, hours, fee and experience have nowhere to go, so the
-    // preview renders exactly the fields the surface can show today.
+  it("carries every field the public projection can carry, and nothing else", () => {
+    // #619 (FEAT-005, MOD-002): the projection and the public payload are one
+    // contract - a field the patient can read has to be here, and a field here is a
+    // field a patient can read. #619 widened both sides, so this list is what stops
+    // the two drifting apart again: a field added to one and not the other renders
+    // nothing on the public page while looking perfectly served here.
     const projected = projectPublicProfile(view(), draft());
 
     expect(Object.keys(projected).sort()).toEqual([
+      "about",
+      "address_line",
       "area",
+      "city",
+      "clinic_name",
+      "consulting_days",
+      "consulting_hours",
       "credentials",
+      "experience_years",
+      "landmark",
+      "languages",
+      "locality",
       "partner_id",
       "partner_type",
+      "pin_code",
       "practice_name",
+      "specialties",
       "specialty",
       "verified",
     ]);
+  });
+
+  it("passes the saved declared band through, and takes only the drafted fields from the draft", () => {
+    // #619 (FEAT-005): the rule this file exists to hold, now that the band is
+    // here. A value the doctor is TYPING lives in the draft; a value they SAVED
+    // lives in the private projection. The About card's text is saved, so a doctor
+    // who has not touched it still sees it - and the converse, that no keystroke
+    // can reach a field the draft does not carry, is structural: there is no path.
+    //
+    // The split is not even, and the test says so rather than asserting a tidier
+    // story: the two cards that publish into the draft own the practice name, the
+    // specialty selection and the locality, and everything else in the band is a
+    // saved fact. `specialties` and `locality` are asserted BELOW as draft-owned
+    // precisely because the band comment used to claim otherwise.
+    const projected = projectPublicProfile(view(), draft());
+
+    expect(projected.about).toBe("Twelve years in general practice.");
+    expect(projected.clinic_name).toBe("Sharma Clinic");
+    expect(projected.languages).toEqual(["English", "Hindi"]);
+    expect(projected.consulting_hours).toBe("9am-5pm");
+    expect(projected.experience_years).toBe(12);
+    expect(projected.address_line).toBeNull();
+    expect(projected.landmark).toBeNull();
+    expect(projected.city).toBe("Daltonganj");
+    expect(projected.pin_code).toBe("826001");
+  });
+
+  it("lets a keystroke reach the declared fields the publishing cards own", () => {
+    // The other half of the split above, stated as its own assertion: the draft
+    // really does drive the declared band for the sections that publish. A preview
+    // that ignored these would be claiming to be live about the two cards a doctor
+    // is most likely to be editing while they watch it.
+    const projected = projectPublicProfile(
+      view(),
+      draft({
+        practice: {
+          practiceName: "Asha R. Verma",
+          specialties: ["Pediatrician"],
+        },
+        address: { locality: "Medininagar" },
+      }),
+    );
+
+    expect(projected.specialties).toEqual(["Pediatrician"]);
+    expect(projected.locality).toBe("Medininagar");
+    expect(projected.area).toBe("Medininagar");
+    // The representative the narrow surfaces read still comes from the same
+    // selection's first member, so the hero and the band cannot disagree.
+    expect(projected.specialty).toBe("Pediatrician");
+    // And the saved facts did not move, because nobody edited them.
+    expect(projected.clinic_name).toBe("Sharma Clinic");
+  });
+
+  it("keeps the declared band out of reach of every derived marker", () => {
+    // Nothing in the band may be read as, or promoted into, a verification. The
+    // projection has exactly one verified field and it comes from the API answer;
+    // a doctor who declares twelve years of experience does not become verified,
+    // because nobody checked those twelve years.
+    const projected = projectPublicProfile(
+      view({ verified: false, experience_years: 12, about: "Twelve years." }),
+      draft(),
+    );
+
+    expect(projected.verified).toBe(false);
+    expect(projected.experience_years).toBe(12);
   });
 });
