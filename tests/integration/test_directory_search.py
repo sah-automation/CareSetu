@@ -13,6 +13,16 @@ SQL rows to fake partner state (#459).
   on read, never cached). Under Verification partners and partners whose
   credentials expired/revoked stay hidden even though they held an ``Active``
   index entry before their state changed.
+- The specialty filter is an OVERLAP against the entry's multi-valued selection
+  (#606): one requested value, matched as a member of the doctor's declared set,
+  and pinned to ``partner_type == "doctor"`` so a lab that physically carries a
+  specialty still matches nothing. A doctor who declared none is found by an
+  unfiltered search.
+- The area on each result is the doctor-DECLARED locality and is null when they
+  declared none (#612). It is no longer read from ``partner_service_areas`` -
+  that vocabulary, its seeded row and ``partner_profiles.service_area_id`` all
+  survive, because registration still resolves them; they just stop being
+  rendered to patients.
 - The wider-area fallback relaxes ONLY the location constraint - type,
   specialty and free-text filters hold while ``fell_back`` labels the results
   "outside your area"; a match inside the peri-urban scope never falls back.
@@ -120,11 +130,13 @@ async def clean_partner(database_url: str, migration: None) -> AsyncIterator[Non
     yield
 
 
-async def _query(database_url: str, sql: str) -> list[dict[str, Any]]:
+async def _query(
+    database_url: str, sql: str, params: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
     engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
     try:
         async with engine.connect() as connection:
-            result = await connection.execute(text(sql))
+            result = await connection.execute(text(sql), params or {})
             return [dict(row) for row in result.mappings().all()]
     finally:
         await engine.dispose()
@@ -138,11 +150,11 @@ def _facade(database_url: str, tmp_path: Path) -> tuple[IamFacade, PartnerFacade
     return iam, partner
 
 
-async def _execute(database_url: str, sql: str, params: dict[str, Any]) -> None:
+async def _execute(database_url: str, sql: str, params: dict[str, Any] | None = None) -> None:
     engine = create_async_engine(database_url, poolclass=NullPool)
     try:
         async with engine.begin() as connection:
-            await connection.execute(text(sql), params)
+            await connection.execute(text(sql), params or {})
     finally:
         await engine.dispose()
 
@@ -175,6 +187,24 @@ async def _seed_specialty(
     )
 
 
+async def _seed_locality(database_url: str, partner_id: int, locality: str) -> None:
+    """Write the profile's declared ``address_locality`` (#609's field, #612's source).
+
+    Registration captures a single pre-structured ``practice_address`` string and no
+    address parts, because the structured-address write (#609) did not exist when it
+    shipped - so seeding the one structured part this read depends on is standing in
+    for that write, exactly as ``_seed_specialty`` stands in for the directory-index
+    publisher. Only called when a doctor DID declare a locality: the undeclared case
+    is simply not seeded, which is also what a real pre-address-save profile looks
+    like, and the column's NULL default stands in for it.
+    """
+    await _execute(
+        database_url,
+        "UPDATE partner.partner_profiles SET address_locality = :locality WHERE id = :partner_id",
+        {"partner_id": partner_id, "locality": locality},
+    )
+
+
 async def _expire_credentials(database_url: str, partner_id: int) -> None:
     """Stamp the partner's recorded ``expires_at`` far in the past (#459).
 
@@ -199,7 +229,8 @@ async def _activate_partner(
     practice_name: str,
     latitude: float = DALTONGANJ_LATITUDE,
     longitude: float = DALTONGANJ_LONGITUDE,
-    specialty: str | None = None,
+    specialty: str | Sequence[str] | None = None,
+    locality: str | None = None,
     service_area_id: int | None = None,
 ) -> int:
     """Drive the real Phase-5 operator-approval path to directory visibility.
@@ -210,6 +241,7 @@ async def _activate_partner(
     credentials ``verified`` and upserts the ``partner_directory_index`` row in
     the same transaction - no fixture hand-builds those rows. ``specialty`` is a
     data-field seed over the seam-created entry (see ``_seed_specialty``);
+    ``locality`` is the profile's declared address part (#612), and
     ``service_area_id`` pins the recorded service area exactly like the profile
     route.
     """
@@ -234,6 +266,8 @@ async def _activate_partner(
     await partner.operator_decision(registered.partner_id, decision_by=_OPERATOR_ID, approve=True)
     if specialty is not None:
         await _seed_specialty(database_url, registered.partner_id, specialty)
+    if locality is not None:
+        await _seed_locality(database_url, registered.partner_id, locality)
     return registered.partner_id
 
 
@@ -394,7 +428,17 @@ async def test_search_composes_partner_type_specialty_and_free_text(
         practice_name="Mehta Children's Clinic",
         specialty="Pediatrician",
     )
-    await _activate_partner(database_url, partner, practice_name="MedPlus Lab", partner_type="lab")
+    # The lab carries a specialty on purpose. Since #606 the column is a multi-valued
+    # JSONB selection with no CHECK constraint, so a lab row COULD physically hold an
+    # array - nothing in the database prevents it. Seeding one is what makes the
+    # doctors-only pin below provable rather than assumed.
+    await _activate_partner(
+        database_url,
+        partner,
+        practice_name="MedPlus Lab",
+        partner_type="lab",
+        specialty=["Pediatrician"],
+    )
 
     doctors = await partner.search_directory(partner_type="doctor")
     assert {e.practice_name for e in doctors.items} == {
@@ -405,8 +449,11 @@ async def test_search_composes_partner_type_specialty_and_free_text(
     pediatricians = await partner.search_directory(specialty="Pediatrician")
     assert [e.practice_name for e in pediatricians.items] == ["Mehta Children's Clinic"]
 
-    # Specialty pins the type: a lab row never carries one, so a lab + specialty
-    # request matches nothing rather than silently dropping the specialty.
+    # Specialty pins the type: even a lab that PHYSICALLY carries the requested
+    # specialty matches nothing, rather than the filter silently dropping either the
+    # specialty or the type. This is what makes the pin provable rather than assumed:
+    # the only thing standing between the seeded lab and a result is the explicit
+    # ``partner_type == "doctor"`` condition.
     lab_specialty = await partner.search_directory(partner_type="lab", specialty="Pediatrician")
     assert lab_specialty.items == []
 
@@ -430,9 +477,9 @@ async def test_specialty_filter_matches_any_member_of_a_multi_valued_column(
     all, so the assertion that a second declared specialty is findable is only
     expressible now.
 
-    The request side stays a single specialty - that is #612's to widen - so this
-    pins the narrow, honest form of the overlap: one requested value, matched as
-    a member of the stored set.
+    The request side stays a single specialty - #612 decided to keep it scalar and
+    overlap only the stored side - so this pins the narrow, honest form of the
+    overlap: one requested value, matched as a member of the stored set.
     """
     _, partner = _facade(database_url, tmp_path)
     await _activate_partner(
@@ -447,6 +494,16 @@ async def test_specialty_filter_matches_any_member_of_a_multi_valued_column(
         practice_name="Solo Dentist",
         specialty=["Dentist"],
     )
+    # #606's migration reset every existing doctor's specialty set to empty, so a
+    # doctor with NO specialty is the real-world default, not an edge case. The
+    # overlap predicate fails both NULL and ``[]`` - the same answer the pre-#606
+    # equality gave for an unset column - and that must not hide them from an
+    # unfiltered search, which is how a brand-new practice is found at all.
+    await _activate_partner(
+        database_url,
+        partner,
+        practice_name="Brand New Practice",
+    )
 
     for requested, expected in (
         ("General Physician", "Sharma Clinic and Sons"),
@@ -460,6 +517,13 @@ async def test_specialty_filter_matches_any_member_of_a_multi_valued_column(
     # falling back to "any doctor".
     unmatched = await partner.search_directory(specialty="Psychiatrist")
     assert unmatched.items == []
+
+    # An unfiltered search still finds the doctor who declared nothing.
+    unfiltered = await partner.search_directory()
+    assert "Brand New Practice" in {e.practice_name for e in unfiltered.items}
+    # ...and their projected specialty is None, not a stand-in value.
+    by_name = {e.practice_name: e for e in unfiltered.items}
+    assert by_name["Brand New Practice"].specialty is None
 
 
 @pytest.mark.asyncio
@@ -595,43 +659,95 @@ async def test_search_caps_fallback_results_at_directory_max_results(
 
 
 @pytest.mark.asyncio
-async def test_search_maps_area_from_recorded_service_area_with_fallback(
+async def test_search_maps_area_from_the_declared_locality_not_the_service_area(
     database_url: str, clean_partner: None, tmp_path: Path
 ) -> None:
-    """The area on each entry comes from the recorded service area, exactly like
-    ``get_provider_profile``: a partner with no ``service_area_id`` falls back to
-    Daltonganj, never invented. Distance ordering is unaffected by the join."""
-    engine = create_async_engine(database_url, poolclass=NullPool)
-    try:
-        async with engine.begin() as connection:
-            await connection.execute(
-                text(
-                    "INSERT INTO partner.partner_service_areas (id, name) "
-                    "VALUES (2, 'Hutar') ON CONFLICT (name) DO NOTHING"
-                )
-            )
-    finally:
-        await engine.dispose()
+    """#612: the area on each entry is where the doctor says they practise.
 
+    This replaces ``test_search_maps_area_from_recorded_service_area_with_fallback``,
+    which asserted the behaviour this ticket retires. The old projection read
+    ``partner_service_areas`` - a platform vocabulary every profile resolves into
+    at registration whether or not the doctor lives there - so every card in the
+    launch directory rendered as Daltonganj. The area now comes from the doctor's
+    own ``address_locality``.
+
+    Four things are pinned, and the second is the one a patient would call a bug:
+
+    - a doctor who declared a locality shows exactly that locality;
+    - a doctor whose recorded SERVICE AREA disagrees with their declared locality
+      still shows the declared one, which is what actually proves the vocabulary is
+      no longer the source (the old test's doctors had no declared locality at all,
+      so "declared wins" would have passed there vacuously);
+    - a doctor who declared none shows ``None`` rather than a substituted vocabulary
+      row - a null area is a shape the card already handles, and inventing a locality
+      is the same dishonesty with a different string;
+    - AC4: the vocabulary table, its seeded row and ``partner_profiles.service_area_id``
+      all still exist and are still written - registration keeps resolving them, they
+      simply stop being rendered. Distance ordering is unaffected by the dropped join.
+    """
+    # A second vocabulary row, so "the recorded area differs from the declared
+    # locality" is a real distinction and not the launch default read twice.
+    await _execute(
+        database_url,
+        "INSERT INTO partner.partner_service_areas (id, name) "
+        "VALUES (2, 'Hutar') ON CONFLICT (name) DO NOTHING",
+    )
     _, partner = _facade(database_url, tmp_path)
-    await _activate_partner(
+    hutar_id = await _activate_partner(
         database_url,
         partner,
-        practice_name="Dr. Hutar Clinic",
+        practice_name="Dr. Medininagar Clinic",
         longitude=DALTONGANJ_LONGITUDE + 0.008,
+        locality="Medininagar",
         service_area_id=2,
     )
-    await _activate_partner(
+    daltonganj_id = await _activate_partner(
         database_url,
         partner,
-        practice_name="Dr. No Area",
+        practice_name="Dr. Elsewhere Clinic",
+        longitude=DALTONGANJ_LONGITUDE + 0.016,
+        locality="Hazaribagh",
+    )
+    undeclared_id = await _activate_partner(
+        database_url,
+        partner,
+        practice_name="Dr. No Locality",
         longitude=DALTONGANJ_LONGITUDE + 0.030,
     )
 
     view = await partner.search_directory()
 
     name_to_area = {entry.practice_name: entry.area for entry in view.items}
-    assert name_to_area["Dr. Hutar Clinic"] == "Hutar"
-    assert name_to_area["Dr. No Area"] == DEFAULT_SERVICE_AREA_NAME
+    assert name_to_area["Dr. Medininagar Clinic"] == "Medininagar"
+    assert name_to_area["Dr. Elsewhere Clinic"] == "Hazaribagh"
+    assert name_to_area["Dr. No Locality"] is None
+    # Not one of them reads as a service-area vocabulary name any more.
+    assert DEFAULT_SERVICE_AREA_NAME not in set(name_to_area.values())
     distances = [entry.distance_km for entry in view.items]
     assert distances == sorted(distances)
+
+    # AC4: the vocabulary and the column that points at it survive untouched - it
+    # is registration that still resolves them, so a patient no longer reads them.
+    areas = await _query(
+        database_url,
+        "SELECT id, name FROM partner.partner_service_areas ORDER BY name",
+    )
+    assert [row["name"] for row in areas] == sorted([DEFAULT_SERVICE_AREA_NAME, "Hutar"]), (
+        "the service-area vocabulary row was dropped by a read-path change"
+    )
+    daltonganj_area_id = next(
+        int(row["id"]) for row in areas if row["name"] == DEFAULT_SERVICE_AREA_NAME
+    )
+    recorded = {
+        int(row["id"]): row["service_area_id"]
+        for row in await _query(
+            database_url,
+            "SELECT id, service_area_id FROM partner.partner_profiles ORDER BY id",
+        )
+    }
+    # Registration still resolves: the Hutar applicant got Hutar, the other two got
+    # the seeded Daltonganj row. Nothing about that default changed - only whether
+    # the patient-facing search renders it.
+    assert recorded[hutar_id] == 2
+    assert recorded[daltonganj_id] == daltonganj_area_id
+    assert recorded[undeclared_id] == daltonganj_area_id

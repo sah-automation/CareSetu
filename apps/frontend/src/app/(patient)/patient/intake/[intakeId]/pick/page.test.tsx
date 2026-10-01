@@ -50,6 +50,32 @@ vi.mock("@/lib/intake/api", () => ({
 
 const { searchDirectory } = vi.hoisted(() => ({ searchDirectory: vi.fn() }));
 
+// #612 AC5, reviewed and recorded: this mock is a CORRECT test of the page's
+// argument and a VACUOUS test of the filter, and that is why it stayed green while
+// production returned nothing. Concretely:
+//
+//   - The whole `@/lib/directory/search` module's `searchDirectory` is replaced with
+//     a bare `vi.fn()`, so the real client - the one that puts `specialty` on the
+//     query string and lets the backend predicate run - never executes here.
+//   - The mock resolves the same hand-built doctor list for EVERY argument, so the
+//     suite proves nothing about which doctors the request returns.
+//   - The assertions are `expect(search).toHaveBeenLastCalledWith({ specialty })`:
+//     they check that the page derived "Pediatrician" from "child has fever" and
+//     passed it on. That is the page's half of the contract, and it is genuinely
+//     worth having. The backend half - that one requested specialty overlaps the
+//     doctor's multi-valued selection rather than matching it by equality - is
+//     invisible from here by construction.
+//
+// Deliberately NOT fixed in #612. Rewiring this suite to exercise the real query
+// would mean a live HTTP round-trip in a component test, which is the integration
+// tier's job, and the honest proof is a backend integration test asserting the
+// overlap predicate against Postgres:
+// tests/integration/test_directory_search.py::
+// `test_specialty_filter_matches_any_member_of_a_multi_valued_column`. If the
+// frontend suite is ever tightened, tighten it by asserting the QUERY STRING the
+// client builds (a unit test over `searchDirectory` itself), not by asserting on a
+// mocked-out client - and add a case that a request naming a specialty the doctor
+// does not declare renders no cards, which this mock can never distinguish.
 vi.mock("@/lib/directory/search", async (importOriginal) => {
   const original =
     await importOriginal<typeof import("@/lib/directory/search")>();

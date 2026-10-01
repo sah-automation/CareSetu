@@ -9,10 +9,12 @@ class DirectoryEntry(BaseModel):
     """One public directory search result (FEAT-004, user story 7).
 
     A verified-safe projection of an ``[Active]`` partner with valid
-    credentials: display name (``practice_name``), partner type, specialty
-    (doctors only), the partner's ``area`` (its recorded service area, with the
-    Daltonganj fallback when none is recorded - the same optionality and
-    derivation the provider profile uses), the derived ``verified``
+    credentials: display name (``practice_name``), partner type, the
+    representative ``specialty`` (doctors only, one member of the doctor's
+    declared selection - ``shared.representative_specialty``), the partner's
+    ``area`` (its DECLARED locality, ``None`` when it declared none, since #612
+    - the platform's service-area vocabulary is a registration default and must
+    not be rendered as where the practice is), the derived ``verified``
     indicator plus its great-circle ``distance_km`` from the caller's geo
     point, and the nullable ``consultation_fee`` (integer paise, null until
     the doctor sets one). The tick is always True for a returned row - search

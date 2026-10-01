@@ -176,12 +176,18 @@ class DirectoryFacade:
         unexpired and unrevoked (the "provider" visibility rule - REQ-028 +
         ADR-0011, both derived on read, never cached), nearest-first by
         great-circle distance from the caller's geo point. ``partner_type``
-        filters on the closed doctor/lab/chemist enum; ``specialty`` applies the
-        closed pick-list and is doctors-only (a non-doctor type with a specialty
-        matches nothing); ``query`` is free-text over the practice name. A
-        missing geo point anchors the sort on the Daltonganj centre - the
-        launch-geography default the callers rely on (REQ-008 decision record;
-        the adapters stay geography-agnostic and let the domain own its default).
+        filters on the closed doctor/lab/chemist enum; ``specialty`` names ONE
+        closed-pick-list value and OVERLAPS it against the doctor's whole declared
+        selection (#606), and is doctors-only, so a lab matches nothing when one is
+        asked for; ``query`` is free-text over the practice name. A missing geo point
+        anchors the sort on the Daltonganj centre - the launch-geography default the
+        callers rely on (REQ-008 decision record; the adapters stay
+        geography-agnostic and let the domain own its default).
+
+        ``area`` on each entry is the doctor's own DECLARED locality and is ``None``
+        when they declared none (#612). It is not the service-area vocabulary, which
+        is a registration default rather than something a patient should read as
+        where the practice is.
 
         The wider-area fallback (glossary): when no entry matches within the
         peri-urban scope, the location constraint alone is relaxed (type,
@@ -225,23 +231,34 @@ class DirectoryFacade:
             if partner_type is not None:
                 conditions.append(partner_directory_index.c.partner_type == partner_type)
             if specialty is not None:
-                # Specialty is doctors-only (closed pick-list, glossary); a
-                # lab/chemist row never carries one, so pin the type too. The pin
-                # is load-bearing rather than a nicety: since #606 the column is a
-                # multi-valued selection and a non-doctor row could physically
-                # carry an array, so "labs carry no specialty" is no longer a
-                # database guarantee and this explicit condition is the mechanism.
+                # Specialty is doctors-only (closed pick-list, glossary), so the type
+                # is pinned too. The pin is load-bearing rather than a nicety: since
+                # #606 the column is a multi-valued selection with no CHECK
+                # constraint, so a lab or chemist row could physically carry an
+                # array, and "non-doctors carry no specialty" is no longer a database
+                # guarantee. This explicit condition is the mechanism, and it is an
+                # AND with ``partner_type`` above rather than a replacement for it -
+                # a request naming a lab AND a specialty matches nothing either way.
                 conditions.append(partner_directory_index.c.partner_type == "doctor")
                 # The column is a multi-valued selection (#606), so an equality
-                # comparison against a JSONB column would ask PostgreSQL an
-                # operator question it answers "no operator". ``?|`` is the JSONB
-                # membership test: the requested specialty is one value, the
-                # column holds the doctor's full set, and the row matches when the
-                # value is one of its members. NULL and ``[]`` both fail, which is
-                # the same answer the pre-#606 equality gave for an unset column.
-                # #612 owns the request-side widening (a list of specialties) and
-                # the projection decision; this keeps the scalar-request contract
-                # working against the new column shape.
+                # comparison against a JSONB column would ask PostgreSQL an operator
+                # question it answers "no operator". ``?|`` is the JSONB membership
+                # test, so the OVERLAP is on the STORED side: the requested value is
+                # one member, the column holds the doctor's whole declared set, and
+                # the row matches when the requested value is one of them. NULL and
+                # ``[]`` both fail, which is the same answer the pre-#606 equality
+                # gave for an unset column - and it fails only the specialty FILTER,
+                # so a doctor who declared none is still found by an unfiltered search.
+                #
+                # #612 decided the request side stays a SCALAR. The caller asks for
+                # one specialty (the route adapter types it as one closed-list
+                # ``Specialty``; the homepage chips, the browse facets and the
+                # wider-area fallback all speak in one value), which is why the
+                # predicate casts a one-element array rather than using the value
+                # directly. Widening the request to a list is NOT free: ``literal``
+                # would wrap a list inside the array and match nothing, so a caller
+                # that sent several values would need this cast and the route adapter
+                # widened together - a deliberate change, not a no-op.
                 conditions.append(
                     partner_directory_index.c.specialty.op("?|")(
                         cast(literal([specialty]), ARRAY(Text))
@@ -254,24 +271,36 @@ class DirectoryFacade:
             return conditions
 
         async with self._engine.begin() as connection:
-            base = (
-                select(
-                    partner_directory_index.c.partner_id,
-                    partner_directory_index.c.partner_type,
-                    partner_directory_index.c.specialty,
-                    partner_profiles.c.practice_name,
-                    partner_service_areas.c.name.label("area_name"),
-                    partner_profiles.c.consultation_fee_paise.label("consultation_fee"),
-                    distance_km.label("distance_km"),
-                )
-                .join(
-                    partner_profiles,
-                    partner_profiles.c.id == partner_directory_index.c.partner_id,
-                )
-                .outerjoin(
-                    partner_service_areas,
-                    partner_service_areas.c.id == partner_profiles.c.service_area_id,
-                )
+            base = select(
+                partner_directory_index.c.partner_id,
+                partner_directory_index.c.partner_type,
+                partner_directory_index.c.specialty,
+                partner_profiles.c.practice_name,
+                # #612: the area a patient reads is the locality the doctor
+                # DECLARED, which is a column on the profile this query already
+                # joins. It used to come from ``partner_service_areas`` - the
+                # platform's service-area vocabulary, which every profile resolves
+                # into at registration whether or not the doctor lives there - so
+                # every result in the launch directory rendered as Daltonganj. The
+                # vocabulary, its seeded row and ``partner_profiles.service_area_id``
+                # all STAY (AC4): registration still resolves them, and the private
+                # doctor profile and the operator views still read them. Only the
+                # patient-facing search result stops rendering it, so the join goes
+                # with it (ADR-0003: two same-schema tables, so dropping a join is a
+                # read change, not a schema one).
+                #
+                # KNOWN, DELIBERATE: ``get_provider_profile`` is also patient-facing
+                # (no login) and still projects the vocabulary default with its
+                # Daltonganj fallback, so for now a card reads the doctor's locality
+                # and the public profile behind it reads the service area. #613 owns
+                # the public profile and is where the two are reconciled; this ticket
+                # does not widen it.
+                partner_profiles.c.address_locality.label("declared_locality"),
+                partner_profiles.c.consultation_fee_paise.label("consultation_fee"),
+                distance_km.label("distance_km"),
+            ).join(
+                partner_profiles,
+                partner_profiles.c.id == partner_directory_index.c.partner_id,
             )
 
             async def _rows(peri_urban_only: bool) -> list[Any]:
@@ -315,10 +344,18 @@ class DirectoryFacade:
                     ),
                     partner_type=str(row.partner_type),
                     specialty=representative_specialty(row.specialty),
+                    # #612: a doctor who declared no locality gets NO area, not a
+                    # substituted vocabulary row. A null area is already a shape the
+                    # frontend card handles (its ``DirectoryEntry.area`` is
+                    # ``string | null`` and the card joins non-null meta only), and
+                    # inventing a locality the doctor never declared is the same
+                    # dishonesty as the Daltonganj default this replaces, just with
+                    # a different string. Until the address-section save (#609) has
+                    # run, ``address_locality`` is NULL for a freshly registered
+                    # doctor - so this is the DEFAULT a new practice renders, and it
+                    # is an honest one.
                     area=(
-                        str(row.area_name)
-                        if row.area_name is not None
-                        else DEFAULT_SERVICE_AREA_NAME
+                        str(row.declared_locality) if row.declared_locality is not None else None
                     ),
                     distance_km=float(row.distance_km),
                     verified=True,

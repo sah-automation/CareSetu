@@ -10,10 +10,15 @@ suite's job.
 
 Pins:
 
-- ``search_directory`` projects SQL rows into a ``DirectorySearchView`` (area
-  fallback, ``verified`` tick), applies the wider-area fallback with the honest
-  ``fell_back`` flag, and writes the ``directory.search`` analytics envelope in
-  the same transaction.
+- ``search_directory`` projects SQL rows into a ``DirectorySearchView``
+  (``area`` from the doctor-declared locality, null when none, ``verified`` tick),
+  applies the wider-area fallback with the honest ``fell_back`` flag, and writes
+  the ``directory.search`` analytics envelope in the same transaction. That the
+  projected area comes from ``address_locality`` and NOT from
+  ``partner_service_areas`` is a DB-backed property - only a real query can show a
+  doctor whose recorded service area disagrees with their declared locality - so it
+  is the integration suite's pin
+  (``tests/integration/test_directory_search.py``, #612), not this one's.
 - The cached-search accelerator (PHASE-6 T02b, #314): a valid cache hit is
   served without re-scanning; a hit whose cached ids no longer pass validity is
   rejected and fresh SQL replaces the stale row (ADR-0011 lazy correctness).
@@ -33,7 +38,6 @@ from sqlalchemy.sql.dml import Insert
 
 from modules.partner.directory_facade import DirectoryFacade
 from modules.partner.domain.exceptions import ProviderProfileNotFoundError
-from modules.partner.facade import DEFAULT_SERVICE_AREA_NAME
 
 
 class _FakeValidity:
@@ -125,7 +129,7 @@ def _facade(
     )
 
 
-def _entry_row(*, partner_id: int, area_name: Any = None) -> _Row:
+def _entry_row(*, partner_id: int, locality: Any = None) -> _Row:
     return _Row(
         partner_id=partner_id,
         practice_name=f"Practice {partner_id}",
@@ -134,7 +138,10 @@ def _entry_row(*, partner_id: int, area_name: Any = None) -> _Row:
         # NULL for an even partner - the shape that still says "carries no
         # specialty", which is what a lab/chemist entry carries.
         specialty=["General Physician"] if partner_id % 2 else None,
-        area_name=area_name,
+        # The doctor-declared locality column (#612), and NULL for a doctor who
+        # declared none - which projects to a null area, not a substituted
+        # vocabulary row.
+        declared_locality=locality,
         distance_km=3.5,
     )
 
@@ -160,14 +167,14 @@ def _cached_entry(partner_id: int) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_search_directory_projects_rows_with_the_area_fallback() -> None:
-    """SQL rows project into entries; a missing recorded area falls back to the launch default."""
+async def test_search_directory_projects_rows_with_the_declared_locality() -> None:
+    """SQL rows project into entries; ``area`` is the declared locality, null when none (#612)."""
     connection = _connection(
         [
             _FakeResult(
                 rows=[
                     _entry_row(partner_id=1),
-                    _entry_row(partner_id=2, area_name="Med"),
+                    _entry_row(partner_id=2, locality="Medininagar"),
                 ]
             ),
             _FakeResult(),  # directory.search analytics outbox write
@@ -180,9 +187,12 @@ async def test_search_directory_projects_rows_with_the_area_fallback() -> None:
     assert view.fell_back is False
     assert [entry.partner_id for entry in view.items] == [1, 2]
     first, second = view.items
-    assert first.area == DEFAULT_SERVICE_AREA_NAME
+    # No declared locality means NO area. The pre-#612 projection substituted the
+    # launch service-area name here, which rendered every doctor in the directory
+    # as Daltonganj - a platform default the doctor never declared.
+    assert first.area is None
     assert first.verified is True
-    assert second.area == "Med"
+    assert second.area == "Medininagar"
     assert isinstance(first.partner_id, int)
     assert isinstance(first.distance_km, float)
     # The analytics envelope is written in the same transaction as the read.
