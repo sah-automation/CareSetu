@@ -50,6 +50,7 @@ import {
   fetchDoctorProfile,
   fetchDoctorProfilePhoto,
   updateDoctorProfile,
+  updateDoctorProfilePractice,
   uploadDoctorProfilePhoto,
   type DoctorProfileView,
 } from "@/lib/doctor/api";
@@ -107,6 +108,10 @@ vi.mock("@/lib/care/api", () => ({
 vi.mock("@/lib/doctor/api", () => ({
   fetchDoctorProfile: vi.fn(),
   updateDoctorProfile: vi.fn(),
+  // #617: the practice write the practice card makes. The whole-form PUT above is
+  // left mocked and unused on purpose - the page no longer calls it, and this suite
+  // asserting against it would be asserting against a route that 405s.
+  updateDoctorProfilePractice: vi.fn(),
   uploadDoctorProfilePhoto: vi.fn(),
   fetchDoctorProfilePhoto: vi.fn(),
   deleteDoctorProfilePhoto: vi.fn(),
@@ -119,6 +124,7 @@ vi.mock("@/lib/partner/api", () => ({
 
 const getProfile = vi.mocked(fetchDoctorProfile);
 const saveProfile = vi.mocked(updateDoctorProfile);
+const savePractice = vi.mocked(updateDoctorProfilePractice);
 const uploadPhoto = vi.mocked(uploadDoctorProfilePhoto);
 const getPhoto = vi.mocked(fetchDoctorProfilePhoto);
 const deletePhoto = vi.mocked(deleteDoctorProfilePhoto);
@@ -163,17 +169,22 @@ function profile(
   };
 }
 
-// The private PUT writes only the fields its model declares, and the reply is
-// the whole projection with everything the write did not touch carried through -
-// including the photo ref, which the write body cannot even mention.
+// A section write touches only its own columns, and the reply is the whole
+// projection with everything the write did not touch carried through - including
+// the photo ref, which no section write body can even mention. The projection
+// names the doctor's practice as `practice_name` while the practice write names
+// the column it owns `full_name`, so the rename happens here rather than by
+// spreading a body whose keys are not the projection's.
 function saveEchoesTheStoredRef() {
-  saveProfile.mockImplementation(async (update) => {
+  savePractice.mockImplementation(async (update) => {
     const current = getStored();
     return {
       ...current,
-      ...update,
+      practice_name: update.full_name,
+      clinic_name: update.clinic_name,
+      specialties: update.specialties,
+      experience_years: update.experience_years,
       photo_ref: current.photo_ref,
-      specialties: current.specialties,
       verified: current.verified,
       area: current.area,
       credentials: current.credentials,
@@ -285,6 +296,7 @@ beforeEach(() => {
   getOpenCases.mockResolvedValue([]);
   getProfile.mockReset();
   saveProfile.mockReset();
+  savePractice.mockReset();
   uploadPhoto.mockReset();
   getPhoto.mockReset();
   deletePhoto.mockReset();
@@ -427,9 +439,11 @@ describe("the doctor account menu and the doctor Profile page share one profile 
     fireEvent.change(screen.getByTestId("profile-practice-name"), {
       target: { value: "Sunrise Clinic 2" },
     });
-    fireEvent.click(screen.getByTestId("profile-save"));
+    fireEvent.click(screen.getByTestId("profile-practice-save"));
     await waitFor(() =>
-      expect(screen.getByTestId("profile-saved")).toHaveTextContent(t.saved),
+      expect(screen.getByTestId("profile-practice-saved")).toHaveTextContent(
+        t.practiceSaved,
+      ),
     );
 
     // The dropdown's identity header is the ONLY place anywhere in the doctor
@@ -440,9 +454,9 @@ describe("the doctor account menu and the doctor Profile page share one profile 
       "Sunrise Clinic 2",
     );
     await closeIdentityHeader();
-    // The save declared no photo ref, so it could not have detached the stored
-    // photo; the reply carried it through and the chrome still shows it.
-    expect(saveProfile.mock.calls[0][0]).not.toHaveProperty("photo_ref");
+    // The practice write declared no photo ref, so it could not have detached the
+    // stored photo; the reply carried it through and the chrome still shows it.
+    expect(savePractice.mock.calls[0][0]).not.toHaveProperty("photo_ref");
     expect((await imageIn(accountTrigger())).getAttribute("src")).toMatch(
       /^blob:/,
     );

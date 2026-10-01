@@ -1473,7 +1473,7 @@ const en = {
     photoFailed: "Could not update your photo.",
     // #615: the identity band. `photoHeading` no longer titles a card of its own
     // - the picker moved into the band - so it names the control group instead.
-    practiceNameLabel: "Full name / practice name",
+
     // #615: names the identity band's chip row, which now holds two different
     // things - the verification verdict and the specialty selection. Neither
     // existing label fits: "Specialties" alone would hide the verdict from
@@ -1538,15 +1538,137 @@ const en = {
       qualification_certificate: "Qualification certificate",
     },
     experienceLabel: "Years of experience",
-    languagesLabel: "Languages",
-    languagesHelp: "Separate with commas",
-    languagesPlaceholder: "Hindi, English",
+    // #617: the languages are a closed selection of chips now, not a comma-
+    // separated box, so `languagesHelp` says "choose" rather than "separate with
+    // commas" - the old sentence described an editor this surface no longer has.
+    // `languagesPlaceholder` is gone with that editor.
+    experienceHelp: "Whole years, up to 60",
+    languagesLabel: "Languages you consult in",
+    languagesHelp: "Choose every language you see patients in",
     aboutLabel: "About",
+    aboutHelp: "In your own words. Patients read this before they choose you.",
     aboutPlaceholder: "Tell patients about your practice",
-    // NOTE: the consulting days/hours copy is still absent. The projection
-    // serves `consulting_days` and `consulting_hours` and the about section write
-    // (#610) takes them, but #617 owns that card's presentation, and raw wire
-    // values ("mon, tue") are not doctor-facing copy anyway.
+    // #617: the consulting days and the consulting hours, which #610 split out of
+    // the retired free-text `availability` blob. The days are a closed selection
+    // of the week; the hours stay PROSE, and the copy says why - the platform
+    // does not book appointments, so an editor that invited a weekly template
+    // would be promising something the server cannot keep.
+    consultingDaysLabel: "Days you consult on",
+    consultingDaysHelp: "Choose every day you see patients",
+    consultingHoursLabel: "Consulting hours",
+    consultingHoursHelp:
+      "In your own words. CareSetu does not book appointments.",
+    consultingHoursPlaceholder: "e.g. Mon-Sat mornings, Saturday after 5 pm",
+    // #617: the Practice card's copy, and the only place the doctor's name is
+    // named now. The retired `PracticeFields` labelled this row `practiceNameLabel`,
+    // "Full name / practice name", which hedged between two readings the card cannot
+    // hedge between: this field IS the full name, and the clinic name is the row
+    // below it.
+    practiceSectionHelp:
+      "The name and the kinds of care patients see when they choose you.",
+    practiceFullNameLabel: "Full name",
+    practiceFullNameHelp: "The name patients see",
+    practiceClinicNameLabel: "Clinic name",
+    practiceClinicNameHelp: "The building you see patients in. Optional.",
+    practiceSpecialtiesLabel: "Specialties",
+    practiceSpecialtiesHelp:
+      "Choose every kind of care you offer. You may choose more than one.",
+    // #617: the three closed vocabularies' labels, keyed by the DOMAIN's machine
+    // value rather than by a slug of this surface's own. The key is what the wire
+    // carries and what the column is keyed on, so a label can be reworded in
+    // either locale without touching a value or a chip test hook.
+    //
+    // In English every label equals its own value, and that is deliberate rather
+    // than a lazy copy: these are English medical terms already, so an "English
+    // label" for them can only differ by rewriting a term doctors use. The map is
+    // still spelled out, because a dictionary whose English half is derived is a
+    // dictionary whose Hindi half nobody can diff against it.
+    specialtyLabels: {
+      "General Physician": "General Physician",
+      Pediatrician: "Pediatrician",
+      Gynecologist: "Gynecologist",
+      Dentist: "Dentist",
+      "General Surgeon": "General Surgeon",
+      "Orthopedic Surgeon": "Orthopedic Surgeon",
+      Ophthalmologist: "Ophthalmologist",
+      "ENT Specialist": "ENT Specialist",
+      Dermatologist: "Dermatologist",
+      Psychiatrist: "Psychiatrist",
+      Cardiologist: "Cardiologist",
+      Neurologist: "Neurologist",
+      Gastroenterologist: "Gastroenterologist",
+      Urologist: "Urologist",
+      Nephrologist: "Nephrologist",
+      Pulmonologist: "Pulmonologist",
+      Endocrinologist: "Endocrinologist",
+      Oncologist: "Oncologist",
+      "Ayurvedic Practitioner": "Ayurvedic Practitioner",
+      "Homeopathy Practitioner": "Homeopathy Practitioner",
+    },
+    languageLabels: {
+      Assamese: "Assamese",
+      Bengali: "Bengali",
+      Bodo: "Bodo",
+      Dogri: "Dogri",
+      English: "English",
+      Gujarati: "Gujarati",
+      Hindi: "Hindi",
+      Kannada: "Kannada",
+      Kashmiri: "Kashmiri",
+      Konkani: "Konkani",
+      Maithili: "Maithili",
+      Malayalam: "Malayalam",
+      Manipuri: "Manipuri",
+      Marathi: "Marathi",
+      Nepali: "Nepali",
+      Odia: "Odia",
+      Punjabi: "Punjabi",
+      Sanskrit: "Sanskrit",
+      Santali: "Santali",
+      Sindhi: "Sindhi",
+      Tamil: "Tamil",
+      Telugu: "Telugu",
+      Urdu: "Urdu",
+    },
+    dayLabels: {
+      Monday: "Monday",
+      Tuesday: "Tuesday",
+      Wednesday: "Wednesday",
+      Thursday: "Thursday",
+      Friday: "Friday",
+      Saturday: "Saturday",
+      Sunday: "Sunday",
+    },
+    // The one client-side rule the Practice card can state in a sentence.
+    practiceNameRequired: "Enter your name.",
+    practiceNameTooLong: "This name is too long.",
+    practiceClinicNameTooLong: "This clinic name is too long.",
+    practiceExperienceInvalid: "Enter whole years between 0 and 60.",
+    // The expected-4xx copy for a 422 whose `details.errors[].path` names the
+    // selection field. Client sentence, never the API's own `reason`
+    // (api-standards §2, blueprint §9.5) - the API says which member it refused,
+    // and a doctor who tapped a chip cannot have meant the value it rejected.
+    practiceSpecialtiesRejected:
+      "CareSetu could not accept one of the specialties you chose. Choose again and save.",
+    practiceSaved: "Practice details saved.",
+    practiceSaveFailed: "Could not save your practice details.",
+    aboutSectionHelp:
+      "Your own words, the languages you consult in, and the days you see patients.",
+    aboutTooLong: "This text is too long.",
+    aboutSaved: "About section saved.",
+    aboutSaveFailed: "Could not save your about section.",
+    languagesRejected:
+      "CareSetu could not accept one of the languages you chose. Choose again and save.",
+    consultingDaysRejected:
+      "CareSetu could not accept one of the days you chose. Choose again and save.",
+    // #617: the Notification card's copy. `notificationsHeading` above titles the
+    // section and its anchor chip; these are the card's own strings.
+    notificationsHelp: "Choose what CareSetu tells you about.",
+    notificationGroupLabel: "Notification choices",
+    notificationPreferencesRejected:
+      "CareSetu could not accept one of these choices. Try again.",
+    notificationsSaved: "Notification choices saved.",
+    notificationsSaveFailed: "Could not save your notification choices.",
     // #616: the Address section card's copy, which replaces the free-text
     // `addressLabel` this card took over - the field that key named is gone with
     // the declared band's whole-form textarea, because the address now has
@@ -1589,16 +1711,21 @@ const en = {
     // the address invalid (ADR-0021, the wider-area fallback).
     addressOutsideBelt: (km: string) =>
       `This address is ${km} km from the centre of the area CareSetu serves. Your address is saved, and patients searching nearby will see you as a result from outside your area.`,
-    // The form summary (ui-blueprint §9.5): a failed submit states how many
+    // The form summary (blueprint §9.5): a failed submit states how many
     // fields need attention and takes focus to the first of them. A server path
     // the card cannot map lands here too, as client copy - a raw path or the
     // API's own reason is never shown to a doctor.
-    addressInvalidSummary: (count: number) =>
+    //
+    // #617: `addressInvalidSummary`/`addressUnmappedField` were address-prefixed
+    // names for the two sentences every saving card needs. They are section-
+    // generic, and #617 needs them on three more cards, so one key each replaces
+    // the pair rather than four copies of the same sentence in four locales.
+    invalidSummary: (count: number) =>
       count === 1
         ? "Check the highlighted field and save again."
         : `Check the ${count} highlighted fields and save again.`,
-    addressUnmappedField:
-      "CareSetu could not check one of these fields. Review your address and save again.",
+    unmappedField:
+      "CareSetu could not check one of these fields. Review this section and save again.",
     addressSaved: "Address saved.",
     addressSaveFailed: "Could not save your address.",
     notificationsHeading: "Notifications",
@@ -1610,13 +1737,15 @@ const en = {
       credential_status: "Credential status changes",
     },
     save: "Save changes",
-    saved: "Profile saved.",
+    // #617 retired the page's one whole-form save, and with it the one string that
+    // said "Profile saved." / "Could not save your profile." for every section at
+    // once. Each saving card now owns its own saved and failed sentence, next to the
+    // section those sentences are about.
+    //
     // #605: the reusable section shell's dirty hint - the only copy the shell
     // presents that no section owns, so it ships here in both locales like the
     // rest of the surface.
     unsavedChanges: "Unsaved changes",
-    saveFailed: "Could not save your profile.",
-    invalidFields: "Check the highlighted fields and try again.",
     publicPreviewHeading: "Public profile",
     publicPreviewHelp:
       "This is how patients see you in the directory. It is read-only here.",
@@ -3185,7 +3314,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
       photoFailed: "आपकी फोटो अपडेट नहीं हो सकी।",
       // #615: पहचान बैंड। `photoHeading` अब अपने किसी कार्ड का शीर्षक नहीं है -
       // पिकर बैंड में चला गया है - इसलिए यह नियंत्रण समूह का नाम देता है।
-      practiceNameLabel: "पूरा नाम / प्रैक्टिस का नाम",
+
       // #615: पहचान बैंड की चिप पंक्ति को नाम देता है, जो अब दो अलग चीज़ें
       // रखती है - सत्यापन का निर्णय और विशेषज्ञता का चयन। कोई भी मौजूदा
       // लेबल नहीं बैठता: अकेला "विशेषज्ञताएँ" सहायक तकनीकी से निर्णय छिपा
@@ -3242,15 +3371,126 @@ export const STRINGS: Record<Lang, Dictionary> = {
         qualification_certificate: "योग्यता प्रमाणपत्र",
       },
       experienceLabel: "अनुभव के वर्ष",
-      languagesLabel: "भाषाएँ",
-      languagesHelp: "कॉमा से अलग करके लिखें",
-      languagesPlaceholder: "हिंदी, अंग्रेज़ी",
+      // #617: भाषाएँ अब अलग-अलग चिप्स का बंद चयन हैं, कॉमा से अलग करने वाला
+      // बॉक्स नहीं - इसलिए `languagesHelp` अब "चुनें" कहता है, "कॉमा से अलग
+      // करके लिखें" नहीं, क्योंकि वह वाक्य उस एडिटर का वर्णन था जो इस सतह पर
+      // अब नहीं है। वह एडिटर उसके साथ ही `languagesPlaceholder` भी चला गया।
+      experienceHelp: "पूरे वर्ष, अधिकतम 60",
+      languagesLabel: "आप जिन भाषाओं में परामर्श करते हैं",
+      languagesHelp: "हर वह भाषा चुनें जिसमें आप मरीज़ों को देखते हैं",
       aboutLabel: "आपके बारे में",
+      aboutHelp: "अपने शब्दों में। मरीज़ आपको चुनने से पहले यह पढ़ते हैं।",
       aboutPlaceholder: "मरीज़ों को अपनी प्रैक्टिस के बारे में बताएँ",
-      // नोट: परामर्श के दिन/समय की कॉपी अब भी नहीं है। प्रोजेक्शन
-      // `consulting_days` और `consulting_hours` भेजता है और परिचय अनुभाग की
-      // राइट (#610) उन्हें लेती है, पर #617 उस कार्ड की प्रस्तुति का मालिक है,
-      // और कच्चे वायर मान ("mon, tue") डॉक्टर-दिखने वाली कॉपी हैं ही नहीं।
+      // #617: परामर्श के दिन और परामर्श का समय, जिन्हें #610 ने सेवा हटाए गए
+      // मुक्त-पाठ `availability` ब्लॉब से अलग किया। दिन हफ़्ते का बंद चयन हैं;
+      // समय मुक्त-पाठ रहता है, और कॉपी बताती है क्यों - प्लेटफ़ॉर्म अपॉइंटमेंट
+      // बुक नहीं करता, इसलिए साप्ताहिक टेम्पलेट खातूला एडिटर ऐसा वादा करता जो
+      // सर्वर नहीं निभा सकता।
+      consultingDaysLabel: "जिन दिनों आप परामर्श करते हैं",
+      consultingDaysHelp: "हर वह दिन चुनें जिस दिन आप मरीज़ों को देखते हैं",
+      consultingHoursLabel: "परामर्श का समय",
+      consultingHoursHelp:
+        "अपने शब्दों में। CareSetu अपॉइंटमेंट बुक नहीं करता।",
+      consultingHoursPlaceholder: "जैसे सोम-शनि सुबह, शनि शाम 5 बजे के बाद",
+      // #617: प्रैक्टिस कार्ड की कॉपी, और अब डॉक्टर के नाम का उल्लेख सिर्फ़ यहीं है।
+      // हटाया गया `PracticeFields` इस पंक्ति को `practiceNameLabel` ("पूरा नाम /
+      // प्रैक्टिस का नाम") से सजाता था, जो दो पढ़ों के बीच हिजकत करता था और यह कार्ड
+      // नहीं कर सकता: यह फ़ील्ड पूरा नाम ही है, और क्लिनिक का नाम इसके ठीक नीचे है।
+      practiceSectionHelp:
+        "वह नाम और वे देखभाल के प्रकार जो मरीज़ आपको चुनते समय देखते हैं।",
+      practiceFullNameLabel: "पूरा नाम",
+      practiceFullNameHelp: "वह नाम जो मरीज़ देखते हैं",
+      practiceClinicNameLabel: "क्लिनिक का नाम",
+      practiceClinicNameHelp:
+        "वह इमारत जिसमें आप मरीज़ों को देखते हैं। वैकल्पिक।",
+      practiceSpecialtiesLabel: "विशेषज्ञताएँ",
+      practiceSpecialtiesHelp:
+        "देखभाल का हर प्रकार चुनें जो आप देते हैं। आप एक से अधिक चुन सकते हैं।",
+      // #617: तीनों बंद शब्दकोशों के लेबल, सतह के अपने स्लग की बजाय डोमेन के
+      // मशीन मान से कुंजीबद्ध। कुंजी वही है जो वायर ले जाता है और जिस पर कॉलम
+      // बना है, इसलिए किसी भी लोकेल में लेबल बदलने के लिए न मान बदलना पड़े, न
+      // चिप का टेस्ट हुक।
+      specialtyLabels: {
+        "General Physician": "सामान्य चिकित्सक",
+        Pediatrician: "बाल रोग विशेषज्ञ",
+        Gynecologist: "स्त्री रोग विशेषज्ञ",
+        Dentist: "दंत चिकित्सक",
+        "General Surgeon": "सामान्य शल्य चिकित्सक",
+        "Orthopedic Surgeon": "हड्डी-जोड़ शल्य चिकित्सक",
+        Ophthalmologist: "नेत्र चिकित्सक",
+        "ENT Specialist": "कान-नाक-गला विशेषज्ञ",
+        Dermatologist: "त्वचा विशेषज्ञ",
+        Psychiatrist: "मनोचिकित्सक",
+        Cardiologist: "हृदय विशेषज्ञ",
+        Neurologist: "तंत्रिका विशेषज्ञ",
+        Gastroenterologist: "पाचन-विशेषज्ञ",
+        Urologist: "मूत्ररोग विशेषज्ञ",
+        Nephrologist: "गुर्दा-विशेषज्ञ",
+        Pulmonologist: "फेफड़ा-विशेषज्ञ",
+        Endocrinologist: "अंतःस्रावी-विशेषज्ञ",
+        Oncologist: "कैंसर-विशेषज्ञ",
+        "Ayurvedic Practitioner": "आयुर्वेदिक चिकित्सक",
+        "Homeopathy Practitioner": "होम्योपैथी चिकित्सक",
+      },
+      languageLabels: {
+        Assamese: "असमिया",
+        Bengali: "बंगाली",
+        Bodo: "बोडो",
+        Dogri: "डोगरी",
+        English: "अंग्रेज़ी",
+        Gujarati: "गुजराती",
+        Hindi: "हिंदी",
+        Kannada: "कन्नड़",
+        Kashmiri: "कश्मीरी",
+        Konkani: "कोंकणी",
+        Maithili: "मैथिली",
+        Malayalam: "मलयालम",
+        Manipuri: "मणिपुरी",
+        Marathi: "मराठी",
+        Nepali: "नेपाली",
+        Odia: "ओडिया",
+        Punjabi: "पंजाबी",
+        Sanskrit: "संस्कृत",
+        Santali: "संताली",
+        Sindhi: "सिंधी",
+        Tamil: "तमिल",
+        Telugu: "तेलुगु",
+        Urdu: "उर्दू",
+      },
+      dayLabels: {
+        Monday: "सोमवार",
+        Tuesday: "मंगलवार",
+        Wednesday: "बुधवार",
+        Thursday: "गुरुवार",
+        Friday: "शुक्रवार",
+        Saturday: "शनिवार",
+        Sunday: "रविवार",
+      },
+      practiceNameRequired: "अपना नाम दर्ज करें।",
+      practiceNameTooLong: "यह नाम बहुत लंबा है।",
+      practiceClinicNameTooLong: "यह क्लिनिक का नाम बहुत लंबा है।",
+      practiceExperienceInvalid: "0 से 60 के बीच पूरे वर्ष दर्ज करें।",
+      practiceSpecialtiesRejected:
+        "CareSetu आपकी चुनी हुई विशेषज्ञताओं में से किसी को स्वीकार नहीं कर सका। दोबारा चुनें और सहेजें।",
+      practiceSaved: "प्रैक्टिस की जानकारी सहेज ली गई।",
+      practiceSaveFailed: "प्रैक्टिस की जानकारी सहेजी नहीं जा सकी।",
+      aboutSectionHelp:
+        "आपके अपने शब्द, वे भाषाएँ जिनमें आप परामर्श करते हैं, और वे दिन जिनमें आप मरीज़ों को देखते हैं।",
+      aboutTooLong: "यह पाठ बहुत लंबा है।",
+      aboutSaved: "परिचय अनुभाग सहेज लिया गया।",
+      aboutSaveFailed: "परिचय अनुभाग सहेजा नहीं जा सका।",
+      languagesRejected:
+        "CareSetu आपकी चुनी हुई भाषाओं में से किसी को स्वीकार नहीं कर सका। दोबारा चुनें और सहेजें।",
+      consultingDaysRejected:
+        "CareSetu आपके चुने दिनों में से किसी को स्वीकार नहीं कर सका। दोबारा चुनें और सहेजें।",
+      // #617: सूचना कार्ड की कॉपी। ऊपर `notificationsHeading` अनुभाग और उसके
+      // एंकर चिप का शीर्षक है; ये कार्ड के अपने तार हैं।
+      notificationsHelp: "चुनें कि CareSetu आपको किस बात की सूचना दे।",
+      notificationGroupLabel: "सूचना संबंधी चयन",
+      notificationPreferencesRejected:
+        "CareSetu इन चयनों में से किसी को स्वीकार नहीं कर सका। फिर से कोशिश करें।",
+      notificationsSaved: "सूचना संबंधी चयन सहेज लिए गए।",
+      notificationsSaveFailed: "सूचना संबंधी चयन सहेजे नहीं जा सके।",
       // #616: पता कार्ड की कॉपी, जो मुक्त-पाठ वाले `addressLabel` की जगह आई -
       // वह फ़ील्ड उसके साथ ही चला गया, क्योंकि अब पेज पर पते का एक ही एडिटर है
       // और वह यही कार्ड है।
@@ -3280,12 +3520,12 @@ export const STRINGS: Record<Lang, Dictionary> = {
         "CareSetu इस पिन कोड की जगह नहीं बता सकता। छह अंक जाँचें और फिर सहेजें।",
       addressOutsideBelt: (km: string) =>
         `यह पता उस इलाक़े के केंद्र से ${km} किमी दूर है जिसकी सेवा CareSetu करता है। आपका पता सहेज लिया गया है, और आस-पास खोजने वाले मरीज़ आपको आपके इलाक़े के बाहर के परिणाम के रूप में देखेंगे।`,
-      addressInvalidSummary: (count: number) =>
+      invalidSummary: (count: number) =>
         count === 1
           ? "चिह्नित फ़ील्ड जाँचें और फिर सहेजें।"
           : `चिह्नित ${count} फ़ील्ड जाँचें और फिर सहेजें।`,
-      addressUnmappedField:
-        "CareSetu इनमें से किसी फ़ील्ड की जाँच नहीं कर सका। अपना पता दोबारा देखें और सहेजें।",
+      unmappedField:
+        "CareSetu इनमें से किसी फ़ील्ड की जाँच नहीं कर सका। यह अनुभाग दोबारा देखें और सहेजें।",
       addressSaved: "पता सहेज लिया गया।",
       addressSaveFailed: "आपका पता सहेजा नहीं जा सका।",
       notificationsHeading: "सूचनाएँ",
@@ -3297,10 +3537,10 @@ export const STRINGS: Record<Lang, Dictionary> = {
         credential_status: "प्रमाण स्थिति में बदलाव",
       },
       save: "बदलाव सहेजें",
-      saved: "प्रोफ़ाइल सहेजी गई।",
+      // #617: the whole-form save is gone, so the one sentence every section shared
+      // goes with it - see the English branch for why. Each card's own saved and
+      // failed sentences sit next to its own section title.
       unsavedChanges: "असहेजे बदलाव",
-      saveFailed: "आपकी प्रोफ़ाइल सहेजी नहीं जा सकी।",
-      invalidFields: "चिह्नित फ़ील्ड जाँचें और फिर कोशिश करें।",
       publicPreviewHeading: "सार्वजनिक प्रोफ़ाइल",
       publicPreviewHelp:
         "मरीज़ आपको डायरेक्टरी में इसी तरह देखते हैं। यहाँ यह केवल-पढ़ने के लिए है।",

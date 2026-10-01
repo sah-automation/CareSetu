@@ -1,11 +1,16 @@
 // PHASE-8.1 (#543): doctor console Profile page suite. Renders the private
 // profile projection from #542 (photo preview, practice details, experience,
 // languages, about, availability, credential/verified status, notification
-// toggles), saves the editable fields through the private PUT, runs the
-// consultation-fee editor through the unchanged PATCH fee path it inherited
-// from the landing, drives photo upload/remove over the profile-media-backed
-// endpoints, shows the read-only public-directory preview link, and covers
-// load failure with retry plus bilingual EN/HI parity (REQ-006).
+// toggles), runs the consultation-fee editor through the unchanged PATCH fee path
+// it inherited from the landing, drives photo upload/remove over the
+// profile-media-backed endpoints, shows the read-only public-directory preview
+// link, and covers load failure with retry plus bilingual EN/HI parity (REQ-006).
+//
+// #617 retired the transitional whole-form PUT and its page-level save. The four
+// declared sections now save through four section writers - practice, address,
+// about, notifications - so every editable case below names the writer it expects
+// and asserts the other three stayed untouched, and the declared band is asserted
+// as a plain section grouping the four cards rather than a card holding one save.
 
 import {
   cleanup,
@@ -16,18 +21,32 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as axe from "axe-core";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import type { ReactNode } from "react";
 
 import DoctorProfilePage from "./page";
 import { ApiError } from "@/lib/api-errors";
+import { ABOUT_LIMITS } from "@/components/doctor/profile/aboutCardFields";
+import { PRACTICE_LIMITS } from "@/components/doctor/profile/practiceCardFields";
 import { DoctorProfileProvider } from "@/lib/doctor/DoctorProfileContext";
 import {
   deleteDoctorProfilePhoto,
   fetchDoctorProfile,
   fetchDoctorProfilePhoto,
   updateDoctorProfile,
+  updateDoctorProfileAbout,
   updateDoctorProfileAddress,
+  updateDoctorProfileNotifications,
+  updateDoctorProfilePractice,
   uploadDoctorProfilePhoto,
   type DoctorProfileAddressView,
   type DoctorProfileView,
@@ -61,6 +80,9 @@ vi.mock("@/lib/doctor/api", async (importOriginal) => {
     fetchDoctorProfile: vi.fn(),
     updateDoctorProfile: vi.fn(),
     updateDoctorProfileAddress: vi.fn(),
+    updateDoctorProfilePractice: vi.fn(),
+    updateDoctorProfileAbout: vi.fn(),
+    updateDoctorProfileNotifications: vi.fn(),
     uploadDoctorProfilePhoto: vi.fn(),
     fetchDoctorProfilePhoto: vi.fn(),
     deleteDoctorProfilePhoto: vi.fn(),
@@ -92,7 +114,14 @@ vi.mock("@/lib/auth/AuthContext", () => ({
 const t = STRINGS.en.doctorProfile;
 const hiT = STRINGS.hi.doctorProfile;
 const getProfile = vi.mocked(fetchDoctorProfile);
+// #617: the transitional whole-form write is gone from the page. The mock stays so
+// that a card reaching for it fails loudly rather than silently hitting the network -
+// but the cases below assert the four SECTION writers, and the "no single save"
+// assertion in the shell suite is what keeps it that way.
 const saveProfile = vi.mocked(updateDoctorProfile);
+const savePractice = vi.mocked(updateDoctorProfilePractice);
+const saveAbout = vi.mocked(updateDoctorProfileAbout);
+const saveNotifications = vi.mocked(updateDoctorProfileNotifications);
 const saveAddress = vi.mocked(updateDoctorProfileAddress);
 const uploadPhoto = vi.mocked(uploadDoctorProfilePhoto);
 const getPhoto = vi.mocked(fetchDoctorProfilePhoto);
@@ -122,7 +151,11 @@ function profile(
     experience_years: 12,
     about: "Twelve years of primary care.",
     consultation_fee: 40000,
-    consulting_days: ["mon", "tue"],
+    // #617: vocabulary MEMBERS, not the wire slugs this fixture carried before the
+    // vocabularies existed. A stored value outside the closed list has no label, so
+    // the cards would render nothing for it and the fixture would be quietly
+    // describing an empty selection while claiming a two-day one.
+    consulting_days: ["Monday", "Tuesday"],
     consulting_hours: "Mon-Sat, 9am-1pm",
     credentials: [
       {
@@ -167,7 +200,7 @@ function addressAnswer(
 // the only thing the page's own render needs seeded is what the source answers.
 async function renderReady(view: DoctorProfileView = profile()) {
   getProfile.mockResolvedValue(view);
-  render(
+  const { container } = render(
     <DoctorProfileProvider>
       <DoctorProfilePage />
     </DoctorProfileProvider>,
@@ -178,7 +211,39 @@ async function renderReady(view: DoctorProfileView = profile()) {
   // for it here keeps every test on a page that is ready in the same sense: no chip
   // pointing at an anchor that has not landed yet.
   await waitFor(() => screen.getByTestId("profile-address-card"));
+  // The other three seed from the same shared answer in their own effects, so they
+  // land one commit later than the address card did. Waiting for the last of the
+  // four means the returned container is a page with all four cards present - which
+  // is what an axe scan needs, and what a save assertion needs so that the click it
+  // makes lands on a rendered button rather than on nothing.
+  await waitFor(() => screen.getByTestId("profile-notification-card"));
+  await waitFor(() => screen.getByTestId("profile-about-card"));
+  await waitFor(() => screen.getByTestId("profile-practice-card"));
+  return { container };
 }
+
+// ---------------------------------------------------------------------------
+// jsdom plumbing
+// ---------------------------------------------------------------------------
+
+// Radix's `Switch` sizes its thumb through `@radix-ui/react-use-size`, which is
+// the one adopted primitive on this page that observes an element. jsdom has no
+// `ResizeObserver` and no layout, so the observer's first callback would throw out
+// of a layout effect - surfacing as an unhandled exception that fails all 47 cases
+// here without any of them saying why. The stub reports nothing and never fires
+// again, which is the honest answer for a layout that does not exist; nothing in
+// this page resizes itself from the observed size.
+class ResizeObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
+beforeAll(() => {
+  window.ResizeObserver =
+    window.ResizeObserver ??
+    (ResizeObserverStub as unknown as typeof ResizeObserver);
+});
 
 let originalCreate: typeof URL.createObjectURL;
 let originalRevoke: typeof URL.revokeObjectURL;
@@ -205,6 +270,16 @@ beforeEach(() => {
       verified: true,
       area: "Daltonganj",
       consultation_fee: 40000,
+    }),
+  );
+  // #617: each section write is answered with the projection carrying that section's
+  // own change, and nothing else. A mock that echoed the whole stored view would
+  // hide a card that re-seeded itself from a sibling's field.
+  savePractice.mockImplementation(async (update) => profile({ ...update }));
+  saveAbout.mockImplementation(async (update) => profile({ ...update }));
+  saveNotifications.mockImplementation(async (update) =>
+    profile({
+      notification_preferences: update.notification_preferences,
     }),
   );
   // #616: the address card's own write, answered with the projection plus the two
@@ -288,7 +363,7 @@ describe("DoctorProfilePage shell (#615)", () => {
       within(verified).getByTestId("profile-public-preview"),
     ).toBeInTheDocument();
 
-    // ...and what the doctor typed sits in the declared band, which says so in
+    // ...and what the doctor declared sits in the declared band, which says so in
     // words rather than leaving the distinction to colour alone (§1.6, §9.4).
     const declared = screen.getByTestId("profile-declared-band");
     expect(within(declared).getByText(t.declaredBandHelp)).toBeInTheDocument();
@@ -298,11 +373,53 @@ describe("DoctorProfilePage shell (#615)", () => {
     expect(
       within(declared).getByTestId("profile-notification-case_updates"),
     ).toBeInTheDocument();
-    // The declared band carries the transitional whole-form save, and it is
-    // beside its own fields rather than hoisted to a page-level button.
-    expect(within(declared).getByTestId("profile-save")).toBeInTheDocument();
-    // Nothing the doctor typed leaked into the verified band.
+    // #617: FOUR saving cards inside the band and no band-level save. The band
+    // groups them; it does not write them. A single save here would be one button
+    // writing four different bodies, which is the failure AC 2 names.
+    for (const testId of [
+      "profile-practice-save",
+      "profile-address-save",
+      "profile-about-save",
+      "profile-notifications-save",
+    ]) {
+      expect(within(declared).getByTestId(testId)).toBeInTheDocument();
+    }
+    expect(within(declared).queryByTestId("profile-save")).toBeNull();
+    // Nothing the doctor declared leaked into the verified band.
     expect(within(verified).queryByTestId("profile-practice-name")).toBeNull();
+  });
+
+  // #617: the band is a plain section grouping four cards, not a fifth card. A
+  // card inside a card is two nested surfaces reading as one, and the assertion
+  // that catches it is the DOM shape rather than the styling class.
+  it("groups the four declared cards without nesting a card inside one", async () => {
+    await renderReady();
+
+    const band = screen.getByTestId("profile-declared-band");
+    expect(band.tagName).toBe("SECTION");
+    // The band's own heading and its sentence, which is what makes it a band.
+    expect(
+      within(band).getByRole("heading", { name: t.declaredBandTitle }),
+    ).toBeInTheDocument();
+    for (const testId of [
+      "profile-practice-card",
+      "profile-address-card",
+      "profile-about-card",
+      "profile-notification-card",
+    ]) {
+      const card = within(band).getByTestId(testId);
+      expect(card.tagName).toBe("FORM");
+      // Not nested: a card's ancestor chain back to the band holds no other card.
+      let node = card.parentElement;
+      let nested = false;
+      while (node != null && node !== band) {
+        if (node.getAttribute("data-testid")?.startsWith("profile-") === true) {
+          nested = true;
+        }
+        node = node.parentElement;
+      }
+      expect(nested, `${testId} sits inside another card`).toBe(false);
+    }
   });
 
   it("drops the tick and still shows the credentials when the flag is false", async () => {
@@ -389,25 +506,25 @@ describe("DoctorProfilePage shell (#615)", () => {
       expect(target).not.toBeNull();
     }
 
-    // The two bands, the fee card and the address card carry a heading at their
-    // anchor; the three field groups still inside the declared band do not, because
-    // their headings belong to #617. Asserted as the KNOWN state rather than left
-    // implied - when those headings land this becomes a failure to fix, which is
-    // the point of writing it down. The address moved out of that set in #616,
-    // because the card that owns the address is a card with its own heading.
-    const withHeading = ["verified", "declared", "address", "fee"];
-    const withoutHeading = ["practice", "about", "notifications"];
+    // The two bands, the fee card and the four declared cards all carry a heading
+    // at their anchor. #617 gave the last three their own headings: what used to be
+    // a field group inside the band is a card that is individually linked, so a
+    // heading has to be what the chip names.
+    const withHeading = [
+      "verified",
+      "declared",
+      "practice",
+      "address",
+      "about",
+      "notifications",
+      "fee",
+    ];
     for (const key of withHeading) {
       const target = document.querySelector(`#profile-section-${key}`);
       expect(
         target?.querySelector("h2") ??
           target?.parentElement?.querySelector("h2"),
       ).not.toBeNull();
-    }
-    for (const key of withoutHeading) {
-      expect(
-        document.querySelector(`#profile-section-${key}`)?.querySelector("h2"),
-      ).toBeNull();
     }
 
     // "Holds no state" read as a prohibition: no scroll-spy, no observer, no
@@ -463,8 +580,34 @@ describe("DoctorProfilePage projection", () => {
     expect(screen.getByTestId("profile-address-pin")).toHaveValue("822001");
     expect(screen.queryByTestId("profile-address")).toBeNull();
     expect(screen.getByTestId("profile-experience")).toHaveValue(12);
-    expect(screen.getByTestId("profile-languages")).toHaveValue(
-      "Hindi, English",
+    // #617: the languages are CHOSEN from the closed list now, not typed into a box
+    // the page parsed by commas. So the projection's two stored members have to be
+    // two pressed chips, and the free-text editor this used to be is gone.
+    expect(screen.getByTestId("profile-about-languages-hindi")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(
+      screen.getByTestId("profile-about-languages-english"),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByTestId("profile-languages")).toBeNull();
+    // The same holds for the day chips the free-text field replaced.
+    expect(screen.getByTestId("profile-about-days-monday")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByTestId("profile-about-days-tuesday")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByTestId("profile-about-days-wednesday")).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    // Hours stayed prose: "Mon-Sat, 9am-1pm" is a sentence a doctor wrote, not a
+    // value any closed list could have named, so it survives in a textarea as typed.
+    expect(screen.getByTestId("profile-consulting-hours")).toHaveValue(
+      "Mon-Sat, 9am-1pm",
     );
     expect(screen.getByTestId("profile-about")).toHaveValue(
       "Twelve years of primary care.",
@@ -561,8 +704,108 @@ describe("DoctorProfilePage projection", () => {
   });
 });
 
-describe("DoctorProfilePage editable fields", () => {
-  it("saves the whole editable projection through the private PUT", async () => {
+// #617: the four declared sections save through four section writers, each
+// carrying only its own columns. Every case here states which writer was called
+// AND that the other three were not - a page that quietly reached the
+// transitional whole-form PUT would satisfy a body assertion on its own, and this
+// is the assertion that says it did not.
+describe("DoctorProfilePage editable fields (#617)", () => {
+  // §9.5 says validate on blur AND on submit. The submit half is covered by the
+  // refusal cases below; these three cover the blur half, which is the half that is
+  // easy to leave out and the half a doctor meets first.
+  describe("validation on blur", () => {
+    it("says a field is wrong when it loses focus, without a save", async () => {
+      await renderReady();
+
+      // The seeded value is usable, so nothing is wrong until the doctor breaks it.
+      expect(
+        screen.queryByTestId("profile-practice-name-error"),
+      ).not.toBeInTheDocument();
+
+      fireEvent.change(screen.getByTestId("profile-practice-name"), {
+        target: { value: "   " },
+      });
+      // Mid-edit: still silent. Announcing a field wrong while it is being typed
+      // is how a message gets ignored.
+      expect(
+        screen.queryByTestId("profile-practice-name-error"),
+      ).not.toBeInTheDocument();
+
+      fireEvent.blur(screen.getByTestId("profile-practice-name"));
+
+      expect(
+        screen.getByTestId("profile-practice-name-error"),
+      ).toHaveTextContent(t.practiceNameRequired);
+      expect(screen.getByTestId("profile-practice-name")).toHaveAttribute(
+        "aria-invalid",
+        "true",
+      );
+      // A blur is not a submit, so no write and no count-and-focus summary.
+      expect(savePractice).not.toHaveBeenCalled();
+      expect(
+        screen.queryByTestId("profile-practice-summary"),
+      ).not.toBeInTheDocument();
+    });
+
+    it("clears the message as soon as the value becomes usable again", async () => {
+      await renderReady();
+
+      fireEvent.change(screen.getByTestId("profile-practice-name"), {
+        target: { value: "   " },
+      });
+      fireEvent.blur(screen.getByTestId("profile-practice-name"));
+      expect(
+        screen.getByTestId("profile-practice-name-error"),
+      ).toBeInTheDocument();
+
+      fireEvent.change(screen.getByTestId("profile-practice-name"), {
+        target: { value: "Sunrise Clinic 9" },
+      });
+
+      // Still blurred, so still checked - and now the pass has nothing to say, so
+      // the message goes rather than lingering until the next blur.
+      expect(
+        screen.queryByTestId("profile-practice-name-error"),
+      ).not.toBeInTheDocument();
+      expect(screen.getByTestId("profile-practice-name")).toHaveAttribute(
+        "aria-invalid",
+        "false",
+      );
+    });
+
+    it("does not drag focus back to the field being left", async () => {
+      await renderReady();
+
+      fireEvent.change(screen.getByTestId("profile-practice-name"), {
+        target: { value: "   " },
+      });
+      const name = screen.getByTestId("profile-practice-name");
+      name.focus();
+      fireEvent.blur(name);
+      const clinic = screen.getByTestId("profile-practice-clinic");
+      clinic.focus();
+
+      // The focus walk is gated on a submit. Ungated, a blur-time check would pull
+      // focus straight back to the field the doctor just left, which is the exact
+      // opposite of what blur validation is for.
+      expect(document.activeElement).toBe(clinic);
+    });
+
+    it("catches the About card's own bounds on blur, through the same hook", async () => {
+      await renderReady();
+
+      fireEvent.change(screen.getByTestId("profile-about"), {
+        target: { value: "x".repeat(ABOUT_LIMITS.about + 1) },
+      });
+      fireEvent.blur(screen.getByTestId("profile-about"));
+
+      expect(screen.getByTestId("profile-about-error")).toHaveTextContent(
+        t.aboutTooLong,
+      );
+    });
+  });
+
+  it("saves the practice card's own columns and nothing from its siblings", async () => {
     await renderReady();
 
     fireEvent.change(screen.getByTestId("profile-practice-name"), {
@@ -571,32 +814,106 @@ describe("DoctorProfilePage editable fields", () => {
     fireEvent.change(screen.getByTestId("profile-experience"), {
       target: { value: "13" },
     });
-    fireEvent.change(screen.getByTestId("profile-languages"), {
-      target: { value: "Hindi, English, Maithili" },
+    // A specialty is a CHOICE now, so it is toggled rather than typed. The stored
+    // selection already holds "General Physician"; adding a second member is what
+    // a doctor's actual edit looks like.
+    fireEvent.click(screen.getByTestId("profile-practice-specialties-dentist"));
+    fireEvent.click(screen.getByTestId("profile-practice-save"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("profile-practice-saved")).toHaveTextContent(
+        t.practiceSaved,
+      ),
+    );
+
+    expect(savePractice).toHaveBeenCalledWith(
+      {
+        // `full_name`, not `practice_name`: the section write names the column it
+        // owns, and the projection's display string is assembled from it elsewhere.
+        full_name: "Sunrise Clinic 2",
+        clinic_name: "Sunrise Clinic",
+        specialties: ["General Physician", "Dentist"],
+        experience_years: 13,
+      },
+      expect.any(String),
+    );
+    // The other three sections were not dragged along, and no about text,
+    // notification flag or address part was in that body.
+    expect(saveAbout).not.toHaveBeenCalled();
+    expect(saveNotifications).not.toHaveBeenCalled();
+    expect(saveAddress).not.toHaveBeenCalled();
+    const body = savePractice.mock.calls[0][0];
+    expect(Object.keys(body).sort()).toEqual([
+      "clinic_name",
+      "experience_years",
+      "full_name",
+      "specialties",
+    ]);
+  });
+
+  it("saves the about card's vocabulary selections, prose hours and text", async () => {
+    await renderReady();
+
+    // Two decisions at once, one per vocabulary: add a language, drop a day. The
+    // stored selection is Hindi+English over Monday+Tuesday, so the clicks below
+    // are one turn on and one turn off - a toggle group has to do both, and a
+    // select-multiple could not express the second without clearing the first.
+    fireEvent.click(screen.getByTestId("profile-about-languages-maithili"));
+    fireEvent.click(screen.getByTestId("profile-about-days-tuesday"));
+    fireEvent.change(screen.getByTestId("profile-consulting-hours"), {
+      target: { value: "Mon-Sat, 9am-1pm, 5pm-8pm" },
     });
     fireEvent.change(screen.getByTestId("profile-about"), {
       target: { value: "Now also runs evening clinics." },
     });
-    fireEvent.click(screen.getByTestId("profile-notification-case_updates"));
-    fireEvent.click(screen.getByTestId("profile-save"));
+    fireEvent.click(screen.getByTestId("profile-about-save"));
 
     await waitFor(() =>
-      expect(screen.getByTestId("profile-saved")).toHaveTextContent(t.saved),
+      expect(screen.getByTestId("profile-about-saved")).toHaveTextContent(
+        t.aboutSaved,
+      ),
     );
 
-    expect(saveProfile).toHaveBeenCalledWith(
+    expect(saveAbout).toHaveBeenCalledWith(
       {
-        practice_name: "Sunrise Clinic 2",
-        practice_address: "Main Road, Daltonganj",
-        practice_latitude: 24.1957,
-        practice_longitude: 85.3656,
-        experience_years: 13,
-        languages: ["Hindi", "English", "Maithili"],
         about: "Now also runs evening clinics.",
-        // #615: `availability` is gone from the body with its editor. The
-        // coordinates are still declared, carried unedited from the projection -
-        // the whole-form write requires them even though nothing collects them.
-        // The canonical toggles plus the one key the server already holds.
+        languages: ["Hindi", "English", "Maithili"],
+        consulting_days: ["Monday"],
+        // Prose, exactly as typed. Nothing parses it, nothing reformats it, and no
+        // vocabulary owns it - which is why it is a textarea and not chips.
+        consulting_hours: "Mon-Sat, 9am-1pm, 5pm-8pm",
+      },
+      expect.any(String),
+    );
+    expect(savePractice).not.toHaveBeenCalled();
+    expect(saveNotifications).not.toHaveBeenCalled();
+    expect(saveAddress).not.toHaveBeenCalled();
+    // The selection is DECLARED, so what is stored comes back in the card's own
+    // vocabulary order rather than in click order.
+    expect(screen.getByTestId("profile-about-days-tuesday")).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(screen.getByTestId("profile-about-days-monday")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
+
+  it("sends the notification card exactly the five known keys", async () => {
+    await renderReady();
+
+    fireEvent.click(screen.getByTestId("profile-notification-case_updates"));
+    fireEvent.click(screen.getByTestId("profile-notifications-save"));
+
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("profile-notifications-saved"),
+      ).toHaveTextContent(t.notificationsSaved),
+    );
+
+    expect(saveNotifications).toHaveBeenCalledWith(
+      {
         notification_preferences: {
           new_consultations: true,
           record_shared: false,
@@ -607,6 +924,80 @@ describe("DoctorProfilePage editable fields", () => {
       },
       expect.any(String),
     );
+    expect(savePractice).not.toHaveBeenCalled();
+    expect(saveAbout).not.toHaveBeenCalled();
+    expect(saveAddress).not.toHaveBeenCalled();
+  });
+
+  // #617: the five switches are a CLOSED set, and this is the case that says so
+  // from the wire side. #602's `require_notification_preferences` refuses any key
+  // outside the five, so a client that echoed a stored `sms_digest` back would 422
+  // on every save. The preservation of that key is the backend's merge
+  // (`merge_notification_preferences`), not this card's - so what the card must
+  // NOT do is send it, and what it must DO is keep rendering the five it knows.
+  it("never echoes a stored key outside the five back at the backend", async () => {
+    await renderReady(
+      profile({ notification_preferences: { sms_digest: true } }),
+    );
+
+    fireEvent.click(
+      screen.getByTestId("profile-notification-new_consultations"),
+    );
+    fireEvent.click(screen.getByTestId("profile-notifications-save"));
+
+    await waitFor(() => expect(saveNotifications).toHaveBeenCalledTimes(1));
+    const sent = saveNotifications.mock.calls[0][0].notification_preferences;
+    expect(Object.keys(sent).sort()).toEqual([
+      "case_updates",
+      "credential_status",
+      "new_consultations",
+      "pre_summary_ready",
+      "record_shared",
+    ]);
+    expect(sent).not.toHaveProperty("sms_digest");
+    // And the flip that drove the save is still on screen: the unknown key was
+    // dropped at the seam, not by failing the save. A stored dict holding only
+    // `sms_digest` seeds the five as false, so one click turns one on.
+    expect(
+      screen.getByTestId("profile-notification-new_consultations"),
+    ).toBeChecked();
+  });
+
+  // #617: a stored value outside a vocabulary has no label, so the card cannot
+  // render it. The declared outcome is that it is dropped from the selection - and
+  // that the doctor then sees the selection they can actually see, rather than a
+  // chip whose text is a raw wire string.
+  it("narrows a stored value outside the vocabulary out of the shown selection", async () => {
+    await renderReady(
+      profile({
+        specialties: ["General Physician", "Quantum Surgery"],
+        languages: ["Hindi", "Klingon"],
+      }),
+    );
+
+    // The known member is pressed, the unknown one is not offered at all, and the
+    // card's own count reflects only what it can render.
+    expect(
+      await screen.findByTestId(
+        "profile-practice-specialties-general-physician",
+      ),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.queryByTestId("profile-practice-specialties-quantum-surgery"),
+    ).toBeNull();
+    expect(screen.getByTestId("profile-about-languages-hindi")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.queryByTestId("profile-about-languages-klingon")).toBeNull();
+
+    // Saving declares the narrowed selection, and the server accepts it because
+    // every value in it is a member.
+    fireEvent.click(screen.getByTestId("profile-about-save"));
+    await waitFor(() => expect(saveAbout).toHaveBeenCalledTimes(1));
+    expect(saveAbout.mock.calls[0][0]).toMatchObject({
+      languages: ["Hindi"],
+    });
   });
 
   // #583, story 16: an answer that lands while the doctor is typing must not
@@ -615,18 +1006,18 @@ describe("DoctorProfilePage editable fields", () => {
   // the buffer and wipe whatever was typed since. Both writes are held open here
   // so the answer provably lands *after* the keystrokes; a write that resolved on
   // the spot would be adopted before the typing and prove nothing.
-  it("keeps in-progress typing when a save's own reply lands after it", async () => {
+  it("keeps in-progress typing when a section save's own reply lands after it", async () => {
     await renderReady();
     let settle: (view: DoctorProfileView) => void = () => {};
-    saveProfile.mockImplementationOnce(
+    savePractice.mockImplementationOnce(
       () =>
         new Promise<DoctorProfileView>((resolve) => {
           settle = resolve;
         }),
     );
 
-    fireEvent.click(screen.getByTestId("profile-save"));
-    await waitFor(() => expect(saveProfile).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByTestId("profile-practice-save"));
+    await waitFor(() => expect(savePractice).toHaveBeenCalledTimes(1));
     fireEvent.change(screen.getByTestId("profile-practice-name"), {
       target: { value: "Sunrise Clinic, typing" },
     });
@@ -634,12 +1025,62 @@ describe("DoctorProfilePage editable fields", () => {
     // The write lands now, carrying the name as it was when it was clicked.
     settle(profile({ practice_name: "Sunrise Clinic" }));
     await waitFor(() =>
-      expect(screen.getByTestId("profile-saved")).toHaveTextContent(t.saved),
+      expect(screen.getByTestId("profile-practice-saved")).toHaveTextContent(
+        t.practiceSaved,
+      ),
     );
 
     expect(screen.getByTestId("profile-practice-name")).toHaveValue(
       "Sunrise Clinic, typing",
     );
+  });
+
+  // #617: the same late-answer rule across cards. A save's reply adopts the WHOLE
+  // projection onto the shared source, and every card re-seeds from that source in
+  // an effect - so without the dirty-buffer guard one card's late reply would wipe
+  // what the doctor is typing into a DIFFERENT card. The two cards here are held
+  // open in opposite order, so the adoption lands while the other is mid-edit.
+  it("keeps one card's late reply from wiping the typing in another", async () => {
+    await renderReady();
+    let settleAbout: (view: DoctorProfileView) => void = () => {};
+    saveAbout.mockImplementationOnce(
+      () =>
+        new Promise<DoctorProfileView>((resolve) => {
+          settleAbout = resolve;
+        }),
+    );
+
+    fireEvent.click(screen.getByTestId("profile-about-save"));
+    await waitFor(() => expect(saveAbout).toHaveBeenCalledTimes(1));
+
+    // The doctor moves on and starts typing in the practice card.
+    fireEvent.change(screen.getByTestId("profile-practice-name"), {
+      target: { value: "Sunrise Clinic, typing" },
+    });
+    fireEvent.change(screen.getByTestId("profile-experience"), {
+      target: { value: "14" },
+    });
+
+    // The about write lands, adopting a projection whose own about fields are the
+    // ones from BEFORE the doctor opened this page.
+    settleAbout(
+      profile({
+        about: "Stale about text",
+        languages: ["Hindi"],
+        consulting_days: ["Monday"],
+        consulting_hours: "Stale hours",
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("profile-about-saved")).toHaveTextContent(
+        t.aboutSaved,
+      ),
+    );
+
+    expect(screen.getByTestId("profile-practice-name")).toHaveValue(
+      "Sunrise Clinic, typing",
+    );
+    expect(screen.getByTestId("profile-experience")).toHaveValue(14);
   });
 
   it("keeps in-progress typing when an upload's answer lands after it", async () => {
@@ -677,7 +1118,7 @@ describe("DoctorProfilePage editable fields", () => {
   });
 
   it("reuses one idempotency key across a retry of the same save", async () => {
-    saveProfile.mockRejectedValueOnce(
+    savePractice.mockRejectedValueOnce(
       new ApiError({
         code: "INTERNAL_ERROR",
         message: "boom",
@@ -687,17 +1128,17 @@ describe("DoctorProfilePage editable fields", () => {
     );
     await renderReady();
 
-    fireEvent.click(screen.getByTestId("profile-save"));
-    await waitFor(() => expect(saveProfile).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByTestId("profile-practice-save"));
+    await waitFor(() => expect(savePractice).toHaveBeenCalledTimes(1));
 
     fireEvent.click(screen.getByTestId("error-banner-retry"));
-    await waitFor(() => expect(saveProfile).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(savePractice).toHaveBeenCalledTimes(2));
 
-    expect(saveProfile.mock.calls[0][1]).toBe(saveProfile.mock.calls[1][1]);
+    expect(savePractice.mock.calls[0][1]).toBe(savePractice.mock.calls[1][1]);
   });
 
-  it("mints a new idempotency key once the form is edited", async () => {
-    saveProfile.mockRejectedValue(
+  it("mints a new idempotency key once the card is edited", async () => {
+    savePractice.mockRejectedValue(
       new ApiError({
         code: "INTERNAL_ERROR",
         message: "boom",
@@ -707,80 +1148,29 @@ describe("DoctorProfilePage editable fields", () => {
     );
     await renderReady();
 
-    fireEvent.click(screen.getByTestId("profile-save"));
-    await waitFor(() => expect(saveProfile).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByTestId("profile-practice-save"));
+    await waitFor(() => expect(savePractice).toHaveBeenCalledTimes(1));
 
     fireEvent.change(screen.getByTestId("profile-practice-name"), {
       target: { value: "Sunrise Clinic 3" },
     });
-    fireEvent.click(screen.getByTestId("profile-save"));
-    await waitFor(() => expect(saveProfile).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByTestId("profile-practice-save"));
+    await waitFor(() => expect(savePractice).toHaveBeenCalledTimes(2));
 
-    expect(saveProfile.mock.calls[0][1]).not.toBe(saveProfile.mock.calls[1][1]);
+    expect(savePractice.mock.calls[0][1]).not.toBe(
+      savePractice.mock.calls[1][1],
+    );
   });
 
-  it("carries an unknown stored notification key through the save", async () => {
-    await renderReady(
-      profile({ notification_preferences: { sms_digest: true } }),
-    );
-
-    fireEvent.click(screen.getByTestId("profile-save"));
-
-    await waitFor(() => expect(saveProfile).toHaveBeenCalled());
-    expect(saveProfile.mock.calls[0][0]?.notification_preferences).toEqual({
-      new_consultations: false,
-      record_shared: false,
-      pre_summary_ready: false,
-      case_updates: false,
-      credential_status: false,
-      sms_digest: true,
-    });
-  });
-
-  it("keeps a full stored preference dict saveable without exceeding the cap", async () => {
-    // The validator refuses more than 20 entries, so a doctor holding a full
-    // dict must not have the canonical toggles added on top of it.
-    const stored = Object.fromEntries(
-      Array.from({ length: 20 }, (_, i) => [`legacy_${i}`, i % 2 === 0]),
-    );
-    await renderReady(profile({ notification_preferences: stored }));
-
-    fireEvent.click(screen.getByTestId("profile-save"));
-
-    await waitFor(() => expect(saveProfile).toHaveBeenCalled());
-    const sent = saveProfile.mock.calls[0][0]?.notification_preferences ?? {};
-    expect(Object.keys(sent)).toHaveLength(20);
-    expect(sent.legacy_0).toBe(true);
-    expect(sent.legacy_19).toBe(false);
-    // The toggles still render, and a flip is what adds the key back.
-    expect(
-      screen.getByTestId("profile-notification-new_consultations"),
-    ).not.toBeChecked();
-    // The save has to have settled before the next interaction: its reply lands
-    // on the shared source, and the buffer is the thing the flip is about.
-    await waitFor(() =>
-      expect(screen.getByTestId("profile-saved")).toHaveTextContent(t.saved),
-    );
-    fireEvent.click(screen.getByTestId("profile-notification-case_updates"));
-    fireEvent.click(screen.getByTestId("profile-save"));
-    await waitFor(() => expect(saveProfile).toHaveBeenCalledTimes(2));
-    expect(
-      saveProfile.mock.calls[1][0]?.notification_preferences.case_updates,
-    ).toBe(true);
-  });
-
-  // #616: the declared band's free-text address is gone, so the case that used to
-  // prove "a blank address blocks the whole-form save" has no field to blank. The
-  // rule it guarded still exists in `invalidFields` - `practice_address` is still
-  // in the transitional request builder - but it is now unreachable through the UI
-  // by construction, which is a stronger guarantee than a red textarea. So this
-  // asserts the absence, and the card's own validation is asserted by its suite.
+  // #616: the declared band's free-text address is gone, and #617 retired the
+  // whole-form validator that used to guard it, so there is neither a field to blank
+  // nor a rule that a blank field would have blocked. The address now has exactly one
+  // editor - the card's own - whose validation its own suite asserts. What this
+  // asserts is the absence, which is a stronger guarantee than a red textarea.
   it("offers no free-text address in the declared band any more", async () => {
     await renderReady();
 
     expect(screen.queryByTestId("profile-address")).toBeNull();
-    // The card seeds its buffer in an effect, so it arrives one commit after the
-    // band this helper waits on - found, not gotten, for that reason alone.
     expect(
       await screen.findByTestId("profile-address-card"),
     ).toBeInTheDocument();
@@ -811,49 +1201,63 @@ describe("DoctorProfilePage editable fields", () => {
     fireEvent.change(screen.getByTestId("profile-about"), {
       target: { value: "x".repeat(5001) },
     });
-    fireEvent.click(screen.getByTestId("profile-save"));
+    fireEvent.click(screen.getByTestId("profile-about-save"));
 
-    await waitFor(() =>
-      expect(screen.getByTestId("profile-invalid")).toHaveTextContent(
-        t.invalidFields,
-      ),
-    );
-    expect(saveProfile).not.toHaveBeenCalled();
+    // The card's own summary counts what it refused, and it is an `alert` so the
+    // refusal is announced rather than only coloured.
+    const summary = await screen.findByTestId("profile-about-summary");
+    expect(summary).toHaveAttribute("role", "alert");
+    expect(summary).toHaveTextContent(t.invalidSummary(1));
+    expect(saveAbout).not.toHaveBeenCalled();
     expect(screen.getByTestId("profile-about")).toHaveAttribute(
       "aria-invalid",
       "true",
     );
+    // The over-long field is the ONLY reason the save was refused: its sibling in
+    // the same card is explicitly not invalid, and no other card's writer ran.
+    expect(screen.getByTestId("profile-consulting-hours")).toHaveAttribute(
+      "aria-invalid",
+      "false",
+    );
+    expect(saveNotifications).not.toHaveBeenCalled();
+    expect(savePractice).not.toHaveBeenCalled();
   });
 
-  it("blocks an over-long or over-numerous language list", async () => {
+  // #617: the language field is a closed pick-list now, so "too many languages"
+  // and "a language that does not exist" are not reachable states - the one cap
+  // that still exists is how many members the list itself offers. Asserting the
+  // bound here rather than in the card suite keeps the page honest about the
+  // thing it used to let a doctor type: a free-text list of unknown length.
+  it("offers a closed language list rather than a free-text one", async () => {
     await renderReady();
 
-    fireEvent.change(screen.getByTestId("profile-languages"), {
-      target: { value: "Hindi, " + "x".repeat(51) },
-    });
-    fireEvent.click(screen.getByTestId("profile-save"));
-    await waitFor(() =>
-      expect(screen.getByTestId("profile-invalid")).toBeInTheDocument(),
-    );
-    expect(saveProfile).not.toHaveBeenCalled();
-
-    fireEvent.change(screen.getByTestId("profile-languages"), {
-      target: {
-        value: Array.from({ length: 21 }, (_, i) => `Lang${i}`).join(", "),
-      },
-    });
-    fireEvent.click(screen.getByTestId("profile-save"));
-    await waitFor(() =>
-      expect(screen.getByTestId("profile-languages")).toHaveAttribute(
-        "aria-invalid",
-        "true",
-      ),
-    );
-    expect(saveProfile).not.toHaveBeenCalled();
+    // No text input anywhere in the card, so there is nothing to type a value the
+    // domain would refuse.
+    expect(screen.queryByTestId("profile-languages")).toBeNull();
+    // Every offered chip is a member, and the count matches the vocabulary's.
+    const chips = screen
+      .getByTestId("profile-about-languages")
+      .querySelectorAll('[data-testid^="profile-about-languages-"]');
+    expect(chips).toHaveLength(23);
+    for (const chip of chips) {
+      expect(chip.getAttribute("aria-pressed")).toMatch(/true|false/);
+    }
+    // A member the doctor does not currently speak is offered unchecked, and
+    // clicking it adds it: the selection grows by choosing, never by typing.
+    const tamil = screen.getByTestId("profile-about-languages-tamil");
+    expect(tamil).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(tamil);
+    expect(tamil).toHaveAttribute("aria-pressed", "true");
+    // And the day list is the same kind of control over seven members.
+    expect(
+      screen
+        .getByTestId("profile-about-days")
+        .querySelectorAll('[data-testid^="profile-about-days-"]'),
+    ).toHaveLength(7);
   });
 
   it("surfaces the save failure with the API trace id and a retry", async () => {
-    saveProfile.mockRejectedValue(
+    savePractice.mockRejectedValue(
       new ApiError({
         code: "INTERNAL_ERROR",
         message: "boom",
@@ -863,15 +1267,16 @@ describe("DoctorProfilePage editable fields", () => {
     );
     await renderReady();
 
-    fireEvent.click(screen.getByTestId("profile-save"));
+    fireEvent.click(screen.getByTestId("profile-practice-save"));
 
     const banner = await screen.findByTestId("error-banner");
-    expect(banner).toHaveTextContent(t.saveFailed);
-    expect(
-      within(screen.getByTestId("profile-declared-band")).getByTestId(
-        "error-banner-trace-id",
-      ),
-    ).toHaveTextContent("trace-save-543");
+    expect(banner).toHaveTextContent(t.practiceSaveFailed);
+    // The banner is inside the card that failed, so it is not a card the doctor
+    // was not editing and not a page-level error standing over the other three.
+    const card = screen.getByTestId("profile-practice-card");
+    expect(within(card).getByTestId("error-banner-trace-id")).toHaveTextContent(
+      "trace-save-543",
+    );
   });
 });
 
@@ -1128,10 +1533,351 @@ describe("DoctorProfilePage bilingual parity (REQ-006)", () => {
       ),
     );
 
-    expect(screen.getByTestId("profile-save")).toHaveTextContent(hiT.save);
+    // #617: each card has its own Hindi title and its own save copy, and the chips
+    // carry Hindi LABELS over the same machine values - which is the whole point of
+    // keeping labels in the dictionary and values out of it.
+    for (const [testId, title] of [
+      ["profile-practice-card", hiT.practiceSectionTitle],
+      ["profile-about-card", hiT.aboutSectionTitle],
+      ["profile-notification-card", hiT.notificationsHeading],
+    ] as const) {
+      expect(
+        within(screen.getByTestId(testId)).getByRole("heading", {
+          name: title,
+        }),
+      ).toBeInTheDocument();
+    }
+    expect(screen.getByTestId("profile-about-save")).toHaveTextContent(
+      hiT.save,
+    );
+    expect(
+      screen.getByTestId("profile-notification-new_consultations"),
+    ).toHaveAccessibleName(hiT.notificationLabels.new_consultations);
+    expect(
+      screen.getByTestId("profile-about-languages-hindi"),
+    ).toHaveTextContent(hiT.languageLabels.Hindi);
     expect(screen.getByTestId("fee-editor")).toHaveTextContent(hiT.feeHeading);
     expect(screen.getByTestId("profile-public-preview")).toHaveTextContent(
       hiT.publicPreviewAction,
     );
+  });
+
+  // #617 (REQ-006): the two dictionaries carry the same KEYS for everything this
+  // ticket added. Key parity is the failure that actually ships - a missing Hindi
+  // string renders as `undefined` on the page, and a missing Hindi vocabular
+  // LABEL renders a chip whose text is a machine key, which is exactly the thing
+  // this ticket replaced. Asserted structurally so the shape cannot drift.
+  it("gives every practice/about/notification key a Hindi string", () => {
+    const added = [
+      "practiceSectionTitle",
+      "practiceSectionHelp",
+      "practiceFullNameLabel",
+      "practiceFullNameHelp",
+      "practiceClinicNameLabel",
+      "practiceClinicNameHelp",
+      "practiceSpecialtiesLabel",
+      "practiceNameRequired",
+      "practiceNameTooLong",
+      "practiceClinicNameTooLong",
+      "practiceExperienceInvalid",
+      "practiceSpecialtiesRejected",
+      "practiceSaved",
+      "practiceSaveFailed",
+      "aboutSectionTitle",
+      "aboutSectionHelp",
+      "aboutLabel",
+      "aboutHelp",
+      "aboutTooLong",
+      "aboutSaved",
+      "aboutSaveFailed",
+      "languagesLabel",
+      "languagesHelp",
+      "languagesRejected",
+      "consultingDaysLabel",
+      "consultingDaysHelp",
+      "consultingDaysRejected",
+      "consultingHoursLabel",
+      "consultingHoursHelp",
+      "consultingHoursPlaceholder",
+      "notificationsHeading",
+      "notificationsHelp",
+      "notificationGroupLabel",
+      "notificationPreferencesRejected",
+      "notificationsSaved",
+      "notificationsSaveFailed",
+      "specialtyLabels",
+      "languageLabels",
+      "dayLabels",
+      "notificationLabels",
+    ] as const;
+    for (const key of added) {
+      expect(
+        Object.prototype.hasOwnProperty.call(hiT, key),
+        `hi.doctorProfile.${key} is missing`,
+      ).toBe(true);
+    }
+    // Every member of all three vocabularies plus the five keys is labelled in
+    // BOTH locales. A count alone would pass with a member renamed, so each side
+    // is checked against the same member list the card renders.
+    expect(Object.keys(hiT.specialtyLabels).sort()).toEqual(
+      Object.keys(t.specialtyLabels).sort(),
+    );
+    expect(Object.keys(hiT.languageLabels).sort()).toEqual(
+      Object.keys(t.languageLabels).sort(),
+    );
+    expect(Object.keys(hiT.dayLabels).sort()).toEqual(
+      Object.keys(t.dayLabels).sort(),
+    );
+    expect(Object.keys(hiT.notificationLabels).sort()).toEqual(
+      Object.keys(t.notificationLabels).sort(),
+    );
+    expect(Object.keys(hiT.specialtyLabels)).toHaveLength(20);
+    expect(Object.keys(hiT.languageLabels)).toHaveLength(23);
+    expect(Object.keys(hiT.dayLabels)).toHaveLength(7);
+    expect(Object.keys(hiT.notificationLabels)).toHaveLength(5);
+    // A Hindi label that is a copy of the machine value is the failure this
+    // ticket exists to prevent: the chip would read "Hindi" in English too, and
+    // for the twelve languages whose name is not itself Hindi the doctor would be
+    // choosing from a value instead of a label.
+    for (const [member, label] of Object.entries(hiT.languageLabels)) {
+      expect(label.length, `${member} has no Hindi label`).toBeGreaterThan(0);
+    }
+  });
+});
+
+// #617 (AC 1, AC 2): keyboard operability and the ROLE, both asserted through what
+// a screen reader announces rather than through the control's class or its internal
+// state. This suite drives the keyboard with `fireEvent` because the repo has no
+// `user-event` and this ticket does not add one.
+describe("DoctorProfilePage keyboard and roles (#617)", () => {
+  // What jsdom can and cannot show about a keyboard, stated once here rather than
+  // pretended away in each case: ACTIVATION of a native `<button>` (Space, Enter) is
+  // the browser's own behaviour and jsdom does not synthesise a click from a key
+  // event, so `fireEvent.click` stands in for "the doctor pressed the key" and the
+  // assertions below are about the state that press produces. NAVIGATION between
+  // chips is Radix's own code and is exercised with real key events here, which is
+  // the half a click-only test would miss: a group a keyboard cannot walk is not
+  // operable by keyboard at all.
+  it("announces pressed state and walks between chips with the arrow keys", async () => {
+    await renderReady();
+
+    const chip = screen.getByTestId(
+      "profile-about-languages-maithili",
+    ) as HTMLButtonElement;
+    // What it IS: a toggle button whose state is "pressed", not a checkbox and not
+    // a button that says "selected". A screen reader announces exactly this, so
+    // this is the assertion that proves the primitive was composed rather than
+    // hand-rolled to look like it.
+    expect(chip.tagName).toBe("BUTTON");
+    expect(chip).toHaveAttribute("aria-pressed", "false");
+    expect(chip).toHaveAccessibleName(t.languageLabels.Maithili);
+
+    // Roaming tabindex, in the state a page actually loads in: until focus has
+    // entered, Radix puts the single tab stop on the GROUP and leaves every chip at
+    // -1, so Tab reaches the control once rather than walking twenty-three chips.
+    const group = screen.getByTestId("profile-about-languages");
+    const chips: (HTMLButtonElement | null)[] = [
+      group.querySelector<HTMLButtonElement>(
+        '[data-testid="profile-about-languages-assamese"]',
+      ),
+      group.querySelector<HTMLButtonElement>(
+        '[data-testid="profile-about-languages-bengali"]',
+      ),
+      group.querySelector<HTMLButtonElement>(
+        '[data-testid="profile-about-languages-bodo"]',
+      ),
+    ];
+    for (const el of chips) expect(el?.tabIndex).toBe(-1);
+    expect(group).toHaveAttribute("tabindex", "0");
+
+    // Entering the group and pressing the arrow key moves focus along it, and the
+    // chip that now holds focus becomes the tab stop - so the next Tab returns to
+    // where the keyboard left off rather than to the top of the list. Radix defers
+    // the move by a task so a re-render cannot steal the focus it is setting, so
+    // this is awaited rather than asserted synchronously.
+    const start = chips[0] as HTMLButtonElement;
+    start.focus();
+    fireEvent.keyDown(start, { key: "ArrowRight" });
+    await waitFor(() => expect(document.activeElement).toBe(chips[1]));
+    expect(chips[1]?.tabIndex).toBe(0);
+    expect(chips[0]?.tabIndex).toBe(-1);
+
+    // Activating a chip flips the state a screen reader reads, and that selection
+    // is what a save declares.
+    fireEvent.click(chip);
+    expect(chip).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByTestId("profile-about-save"));
+    await waitFor(() => expect(saveAbout).toHaveBeenCalledTimes(1));
+    expect(saveAbout.mock.calls[0][0].languages).toContain("Maithili");
+  });
+
+  it("names each notification control as a switch rather than a bare checkbox", async () => {
+    await renderReady();
+
+    // The role assertion, by accessible name rather than by test id: this is what
+    // replaced a bare `<input type="checkbox">`, and a control that kept the old
+    // role would still pass every other assertion in this file.
+    const first = screen.getByRole("switch", {
+      name: t.notificationLabels.new_consultations,
+    });
+    expect(first).toHaveAttribute("aria-checked", "true");
+
+    // Radix's switch carries a hidden native input so the value participates in a
+    // form POST. It is `aria-hidden` and untabbable, so it is not a control a doctor
+    // can reach or a second thing announced - which is what "not a bare checkbox"
+    // has to mean for a switch that is still a button.
+    const natives = screen
+      .getByTestId("profile-notification-group")
+      .querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+    expect(natives).toHaveLength(5);
+    for (const native of natives) {
+      expect(native).toHaveAttribute("aria-hidden", "true");
+      expect(native.tabIndex).toBe(-1);
+    }
+    // Exactly five controls in the group, and the fifth is reachable by name too.
+    expect(
+      screen
+        .getAllByRole("switch")
+        .map((el) => el.getAttribute("aria-checked")),
+    ).toHaveLength(5);
+    const second = screen.getByRole("switch", {
+      name: t.notificationLabels.record_shared,
+    });
+    fireEvent.click(second);
+    expect(second).toHaveAttribute("aria-checked", "true");
+
+    fireEvent.click(screen.getByTestId("profile-notifications-save"));
+    await waitFor(() => expect(saveNotifications).toHaveBeenCalledTimes(1));
+    expect(
+      saveNotifications.mock.calls[0][0].notification_preferences,
+    ).toMatchObject({ record_shared: true, new_consultations: true });
+  });
+  // §9.4's floor, pinned. axe cannot catch this one: `target-size` is a WCAG 2.2
+  // rule and jsdom has no layout, so the class list is the only observable a unit
+  // test has. `min-h-11`/`h-11` are Tailwind's 44px and nothing else, and a
+  // "simplification" to a shorter size here would pass every other assertion in
+  // this file while shipping forty-seven sub-44px tap targets.
+  it("keeps every new control at or above the 44px touch-target floor", async () => {
+    await renderReady();
+
+    // Each notification row is the tap target, because the switch inside it is not.
+    const rows = screen
+      .getByTestId("profile-notification-group")
+      .querySelectorAll("label");
+    expect(rows).toHaveLength(5);
+    for (const row of rows) {
+      expect(row.className).toContain("min-h-11");
+    }
+    // And every vocabulary chip resolves to the 44px size rather than the 36px one.
+    const chips = screen
+      .getByTestId("profile-about-languages")
+      .querySelectorAll("button");
+    expect(chips.length).toBe(23);
+    for (const chip of chips) {
+      expect(chip.className).toContain("h-11");
+      expect(chip.className).not.toContain("h-9");
+    }
+  });
+});
+
+// #617 (REQ): the declared band now carries 47 chips that did not exist before -
+// 20 specialties, 23 languages and 7 days, each a focusable control with a name.
+// A chip with no name, or a group of chips announced as one control, is exactly the
+// failure a scan catches and a unit assertion about `aria-pressed` cannot. The scan
+// is local to this suite and runs over this page's own container, so it says
+// something about THIS page rather than asserting some shared helper stays quiet.
+//
+// Two states, because the interesting one is the state with the error surfaces up:
+// an alert region that has been given focus, and a card whose fields are marked
+// invalid, are new nodes since the ready state was scanned.
+describe("DoctorProfilePage axe (REQ)", () => {
+  it("scans clean with the four declared cards rendered", async () => {
+    const { container } = await renderReady();
+
+    // The three vocabularies really are on the page in this state - a scan of a page
+    // that rendered no chips would pass without having checked anything.
+    expect(
+      container.querySelectorAll(
+        '[data-testid^="profile-practice-specialties-"]',
+      ).length,
+    ).toBe(20);
+    expect((await axe.run(container)).violations).toEqual([]);
+  });
+
+  // A client-side REFUSAL, which puts the card's own `role="alert"` summary on the
+  // page holding focus. The over-long value cannot reach the network, so this case
+  // is about the summary and nothing else - the server-refusal state is the next
+  // case, and the pending state the one after it.
+  it("scans clean with a client-refused save on screen", async () => {
+    const { container } = await renderReady();
+
+    fireEvent.change(screen.getByTestId("profile-practice-name"), {
+      target: { value: "x".repeat(PRACTICE_LIMITS.fullName + 1) },
+    });
+    fireEvent.click(screen.getByTestId("profile-practice-save"));
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("profile-practice-summary"),
+      ).toBeInTheDocument(),
+    );
+    // The refusal is client-side, so nothing was called: the state on screen is the
+    // summary, not an error banner.
+    expect(savePractice).not.toHaveBeenCalled();
+
+    expect((await axe.run(container)).violations).toEqual([]);
+  });
+
+  // A rejected WRITE, not a client refusal: only one of the two puts the error
+  // banner and its trace id on the page. A blank name would have been refused
+  // before the request left, which is the case above wearing this one's name.
+  it("scans clean with a server-refused save on screen", async () => {
+    savePractice.mockRejectedValue(
+      new ApiError({
+        code: "INTERNAL_ERROR",
+        message: "boom",
+        trace_id: "trace-axe-617",
+        details: {},
+      }),
+    );
+    const { container } = await renderReady();
+
+    fireEvent.change(screen.getByTestId("profile-practice-name"), {
+      target: { value: "Sunrise Clinic 3" },
+    });
+    fireEvent.click(screen.getByTestId("profile-practice-save"));
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId("profile-practice-card")).getByTestId(
+          "error-banner-trace-id",
+        ),
+      ).toHaveTextContent("trace-axe-617"),
+    );
+
+    expect((await axe.run(container)).violations).toEqual([]);
+  });
+
+  // The pending state is its own scan because the shell swaps the save button for a
+  // spinner and mutes it, and a spinner with no accessible name is announced as
+  // nothing at all.
+  it("scans clean with a save in flight", async () => {
+    const { container } = await renderReady();
+    let settle: (view: DoctorProfileView) => void = () => {};
+    savePractice.mockImplementationOnce(
+      () =>
+        new Promise<DoctorProfileView>((resolve) => {
+          settle = resolve;
+        }),
+    );
+
+    fireEvent.change(screen.getByTestId("profile-practice-name"), {
+      target: { value: "Sunrise Clinic 4" },
+    });
+    fireEvent.click(screen.getByTestId("profile-practice-save"));
+    await waitFor(() =>
+      expect(screen.getByTestId("profile-practice-save")).toBeDisabled(),
+    );
+
+    expect((await axe.run(container)).violations).toEqual([]);
+    settle(profile({ practice_name: "Sunrise Clinic 4" }));
   });
 });

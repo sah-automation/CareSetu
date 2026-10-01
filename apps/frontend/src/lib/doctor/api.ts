@@ -395,6 +395,69 @@ export interface DoctorProfileAddressView extends DoctorProfileView {
   distance_from_belt_centre_km: number;
 }
 
+/**
+ * The Practice section write's body (#608), mirroring
+ * `DoctorProfilePracticeUpdate`.
+ *
+ * `full_name` is the doctor's own name on the wire even though the column it
+ * writes is the registration-era `practice_name`: a doctor names themselves, they
+ * do not name a practice, and the field name is what says which one this is.
+ *
+ * `specialties` and (on the About body) the other two selections are `string[]`
+ * rather than closed unions on purpose. This module is the transport: it guards
+ * the SHAPE of an answer, not the vocabulary, and the vocabulary's owning home is
+ * `components/doctor/profile/profileVocabularies.ts` - the one client reads. A
+ * union here would be a second list to keep in step, and a closed list the
+ * transport re-declares is a closed list that can drift from the one that refuses
+ * the value.
+ *
+ * No length bound on `specialties` either, mirroring the backend: a cap is
+ * checked before the closed-list walk runs, so it would refuse an oversized
+ * selection as a bare `too_long` naming no member and shadow the one rule the
+ * field has. The closed list is already the bound.
+ */
+export interface DoctorProfilePracticeUpdate {
+  full_name: string;
+  clinic_name: string | null;
+  specialties: string[];
+  experience_years: number | null;
+}
+
+/**
+ * The About section write's body (#610), mirroring `DoctorProfileAboutUpdate`.
+ *
+ * **Every field is required, including the nullable ones.** That is the model's
+ * statement and this is its mirror: a section save declares the whole card, so a
+ * client which omitted a field would silently CLEAR that column - an omitted
+ * `about` would erase the doctor's own words and the save would report success.
+ * Nullable is still meaningful (`about: null` clears it deliberately); it just
+ * has to be said out loud, which is why there is no `?` on these keys.
+ */
+export interface DoctorProfileAboutUpdate {
+  about: string | null;
+  languages: string[];
+  consulting_days: string[];
+  consulting_hours: string | null;
+}
+
+/**
+ * The Notification section write's body (#610), mirroring
+ * `DoctorProfileNotificationUpdate`: one field, because notification preferences
+ * are one column and one card.
+ *
+ * The value is a plain `Record<string, boolean>` and NOT a five-key map, because
+ * the five keys are a domain vocabulary (#602's
+ * `NotificationPreferenceKey`) rather than a transport fact - the same reasoning
+ * as the selections above. What the body MUST NOT carry is a key the vocabulary
+ * does not name: `require_notification_preferences` refuses it, so a client that
+ * echoed back a stored key it did not recognise would turn every save into a 422.
+ * A stored key outside the five is preserved by the SERVER's merge, which is the
+ * right home for that promise - see `merge_notification_preferences`.
+ */
+export interface DoctorProfileNotificationUpdate {
+  notification_preferences: Record<string, boolean>;
+}
+
 const CREDENTIAL_STATUSES: readonly string[] = [
   "pending",
   "verified",
@@ -549,6 +612,99 @@ export async function updateDoctorProfileAddress(
     data,
     isDoctorProfileAddressView,
     "The API returned an unexpected doctor address shape",
+  );
+}
+
+/**
+ * Save the Practice card through the section write (#608), on its own path
+ * rather than on `/profile`.
+ *
+ * The per-route path and the per-attempt `retryKey` are the Address write's
+ * discipline verbatim, and for the same two reasons: the backend namespaces its
+ * stored idempotency result per route, and a retry of one attempt must reuse that
+ * attempt's key while a fresh edit mints a new one.
+ *
+ * The answer is the plain `DoctorProfileView`, not the address write's extended
+ * one: the belt warning is that write's own product and this write does not
+ * evaluate it (see `DoctorProfileAddressView`). So the card has no warning to
+ * render and this function does not pretend to have one.
+ */
+export async function updateDoctorProfilePractice(
+  update: DoctorProfilePracticeUpdate,
+  retryKey?: string,
+): Promise<DoctorProfileView> {
+  const data = await request<unknown>("/v1/doctor/profile/practice", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      [IDEMPOTENCY_KEY_HEADER]: idempotencyKey(retryKey),
+    },
+    body: JSON.stringify(update),
+  });
+  return guardShape(
+    data,
+    isDoctorProfileView,
+    "The API returned an unexpected doctor profile shape",
+  );
+}
+
+/**
+ * Save the About card through the section write (#610): the doctor's own words,
+ * the languages they consult in, the days they consult on, and the consulting
+ * hours as prose.
+ *
+ * Same per-route path and same per-attempt key as its two siblings. The hours
+ * cross this boundary as a string and nothing more - no weekly template, no
+ * per-day ranges, no slots - because the platform has no booking system, so a
+ * shape that invited one would be a promise the server cannot keep.
+ */
+export async function updateDoctorProfileAbout(
+  update: DoctorProfileAboutUpdate,
+  retryKey?: string,
+): Promise<DoctorProfileView> {
+  const data = await request<unknown>("/v1/doctor/profile/about", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      [IDEMPOTENCY_KEY_HEADER]: idempotencyKey(retryKey),
+    },
+    body: JSON.stringify(update),
+  });
+  return guardShape(
+    data,
+    isDoctorProfileView,
+    "The API returned an unexpected doctor profile shape",
+  );
+}
+
+/**
+ * Save the Notification card through the section write (#610): one field, and a
+ * card the doctor can flip a single switch on without half-saving their about
+ * text.
+ *
+ * Same per-route path and same per-attempt key as its siblings. The answer is the
+ * plain profile projection, whose `notification_preferences` the backend MERGED -
+ * so a stored key outside the five is still in there afterwards, and the card
+ * re-seeds from the merge rather than from what it submitted. That is the promise
+ * #602's merge took over from the client, and this function is the seam it moved
+ * across.
+ */
+export async function updateDoctorProfileNotifications(
+  update: DoctorProfileNotificationUpdate,
+  retryKey?: string,
+): Promise<DoctorProfileView> {
+  const data = await request<unknown>("/v1/doctor/profile/notifications", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      [IDEMPOTENCY_KEY_HEADER]: idempotencyKey(retryKey),
+    },
+    body: JSON.stringify(update),
+  });
+  return guardShape(
+    data,
+    isDoctorProfileView,
+    "The API returned an unexpected doctor profile shape",
   );
 }
 

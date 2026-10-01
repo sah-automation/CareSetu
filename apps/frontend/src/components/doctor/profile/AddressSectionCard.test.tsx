@@ -485,7 +485,7 @@ describe("AddressSectionCard unresolvable PIN (#616 AC 3)", () => {
     // Assertive, because this is the announcement of a failed submit and it
     // states the count rather than making the doctor count the marks.
     expect(summary).toHaveAttribute("aria-live", "assertive");
-    expect(summary).toHaveTextContent(t.addressInvalidSummary(1));
+    expect(summary).toHaveTextContent(t.invalidSummary(1));
     // §9.4: focus goes to the offending field, so the summary is a count and not
     // the only route to the problem.
     await waitFor(() =>
@@ -502,7 +502,7 @@ describe("AddressSectionCard unresolvable PIN (#616 AC 3)", () => {
     // Dropping it would hide a real failure; putting it on the PIN would blame a
     // field the server never named.
     const summary = await screen.findByTestId("profile-address-summary");
-    expect(summary).toHaveTextContent(t.addressUnmappedField);
+    expect(summary).toHaveTextContent(t.unmappedField);
     expect(screen.queryByTestId("profile-address-pin-error")).toBeNull();
     expect(screen.getByTestId("profile-address-pin")).toHaveAttribute(
       "aria-invalid",

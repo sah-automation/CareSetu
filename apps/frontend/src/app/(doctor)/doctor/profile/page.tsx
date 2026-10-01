@@ -19,18 +19,23 @@
 // #615: the page is now a SHELL. The identity band heads it, the sticky
 // anchor-chip index sits under the chrome, and every section is a component in
 // `@/components/doctor/profile` rather than markup inlined here. What stays on
-// this page is exactly what the brief scopes to it: the whole-form request
-// builder, its validation pass, the partial-field `adoptRef` seam, the per-attempt
-// idempotency keys, and the photo seam's transport.
+// this page is exactly what the brief scopes to it: the photo seam's transport,
+// the partial-field `adoptRef` seam, and the fee's own save callback.
 //
-// The declared band's ONE save is the whole-form write, which #611 RETIRED - so
-// that save currently 405s and the declared band is not yet savable. The
-// section-write client calls that replace it are out of scope here (#616/#617
-// own them), which is why the practice, address, about and notification sections
-// render inside the declared band and share one save for now. That is a
-// transition, not the destination: when the section writes land, the band drops
-// its save and each section carries its own, which is why each one is already a
-// separate component with no shared markup. See the note above `saveProfile`.
+// #617 closed the gap #615 recorded. The declared band no longer owns a save at
+// all: the four section writes (#608/#609/#610) have their clients, so each
+// declared section carries its own card, its own buffer, its own route and its
+// own save. That retires this page's whole-form request builder, its validation
+// pass, the per-attempt key it owned and the `updateDoctorProfile` call that
+// #611's route removal had left 405ing - so the page below no longer calls a
+// route that does not exist.
+//
+// The declared band is a plain `<section>` and not a `ProfileSectionShell`
+// because it now GROUPS four cards rather than holding fields of its own: a card
+// inside a card is two nested surfaces reading as one, which is exactly what the
+// design system's own flat-card rule refuses. It keeps the band's heading, its
+// help sentence, its anchor and its test id, so the chip index and the
+// declared-vs-verified distinction are untouched by the move.
 //
 // The page heading is the identity band's, not `PageHeader`'s: the band renders
 // the doctor's own name as the h1, which is what a profile page is for. The
@@ -40,44 +45,35 @@
 // CLOSING NOTES, per the brief's ask to record what a reviewer cannot see:
 //
 // 1. Changed a landed sibling's contract: `ProfileSectionShell` gained an
-//    optional `anchorId`, because the index needs a target per section and
-//    wrapping every section in a second element for its id would give each one
-//    two headings and two landmarks. Optional, so no existing caller changed.
-// 2. The declared band's save calls a route #611 removed, so it 405s today. Left
-//    in place deliberately - see the note above `saveProfile` - because fixing it
-//    means the section-write clients, which are #616/#617's.
-// 3. Three chips address field groups with no heading of their own, because those
-//    headings are section CONTENT and belong to #617. Asserted as the known state
-//    in the page suite rather than left implied. #616 closed one of the four: the
-//    address chip now lands on a card that HAS a heading, because the card is
-//    what carries it.
+//    optional `anchorId` (#615), and this ticket added a shared
+//    `useRefusedFieldErrors` hook that all four saving cards read, so #616's
+//    address card's bespoke pin-refusal bookkeeping is now the same hook with a
+//    one-path mappable set. Optional and additive; no existing caller changed
+//    shape.
+// 2. Two dictionary keys were renamed, both `#616`'s: `addressInvalidSummary` and
+//    `addressUnmappedField` became `invalidSummary` and `unmappedField`. They
+//    were the two sentences every saving card needs and three more cards need
+//    them now; four locale-spelled copies of one sentence is the thing this
+//    avoids. The address card and its suite were re-pointed, and the copy lost
+//    the word "address" - it had to, since it now serves cards that have none.
+// 3. `profileForm.ts` is GONE, along with the three `*Fields` placeholders and
+//    `AddressFields`. Each was the editable shape of a write that no longer
+//    exists, and every field they rendered is now on a card that can save it -
+//    which is the whole reason they were placeholders.
 // 4. Vocabulary that does not resolve yet: `locality` and `clinic name` are
-//    glossary entries #622 introduces, and #615 was their first consumer on the
-//    doctor surface. No glossary entry is added here. The one place the wording
-//    felt wrong: the identity band prints the clinic name with NO label of its
-//    own, directly beneath the doctor's name, so this ticket needed no label for
-//    it at all - if #616's address card ends up labelling it "Clinic name", that
-//    string is #622's to fix, not this ticket's.
-// 5. `PracticeFields`, `AddressFields` and `AboutFields` render exactly the fields
-//    they rendered before the split. `consulting_days`, `consulting_hours`,
-//    `address_line` and `pin_code` arrive on the projection and are deliberately
-//    NOT shown: printing raw wire values ("mon, tue") is not doctor-facing copy,
-//    and the translation belongs to the section that will own them.
-// 6. #616 changed a landed sibling's content: `AddressFields` lost the free-text
-//    `practice_address` textarea and the `PROFILE_ANCHORS.address` id, because the
-//    address card now owns both. `practice_address` stays in `ProfileForm` and in
-//    this page's request builder - seeded, never edited, sent unedited - because
-//    that builder is #611's to retire, not this ticket's. One page, one address
-//    editor: a doctor cannot be shown two address fields that disagree.
+//    glossary entries #622 introduces. No glossary entry is added here.
+// 5. The language editor MOVED from the address section to the About card. It
+//    was on the address card only because #615 had nowhere else to put a field
+//    the whole-form write carried, and #610's About write is the one that takes
+//    languages - so the editor now sits on the card that can save it.
 
 import { useEffect, useRef, useState } from "react";
 
-import { AddressFields } from "@/components/doctor/profile/AddressFields";
+import { AboutSectionCard } from "@/components/doctor/profile/AboutSectionCard";
 import { AddressSectionCard } from "@/components/doctor/profile/AddressSectionCard";
-import { AboutFields } from "@/components/doctor/profile/AboutFields";
 import { ConsultationFeeCard } from "@/components/doctor/profile/ConsultationFeeCard";
-import { NotificationFields } from "@/components/doctor/profile/NotificationFields";
-import { PracticeFields } from "@/components/doctor/profile/PracticeFields";
+import { NotificationSectionCard } from "@/components/doctor/profile/NotificationSectionCard";
+import { PracticeSectionCard } from "@/components/doctor/profile/PracticeSectionCard";
 import { ProfileCredentialList } from "@/components/doctor/profile/ProfileCredentialList";
 import { ProfileIdentityBand } from "@/components/doctor/profile/ProfileIdentityBand";
 import {
@@ -87,18 +83,7 @@ import {
 import {
   ProfileSectionShell,
   type SectionFailure,
-  type SectionSaveResult,
 } from "@/components/doctor/profile/ProfileSectionShell";
-import {
-  LIMITS,
-  MAX_NOTIFICATION_ENTRIES,
-  MAX_NOTIFICATION_KEY_LENGTH,
-  NOTIFICATION_KEYS,
-  type NotificationKey,
-  type ProfileFieldName,
-  type ProfileForm,
-} from "@/components/doctor/profile/profileForm";
-import { useSectionEditBuffer } from "@/components/doctor/profile/useSectionEditBuffer";
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -106,9 +91,7 @@ import { ApiError } from "@/lib/api-errors";
 import {
   deleteDoctorProfilePhoto,
   fetchDoctorProfilePhoto,
-  updateDoctorProfile,
   uploadDoctorProfilePhoto,
-  type DoctorProfileUpdate,
   type DoctorProfileView,
 } from "@/lib/doctor/api";
 import { useDoctorProfile } from "@/lib/doctor/DoctorProfileContext";
@@ -116,122 +99,6 @@ import { idempotencyKey } from "@/lib/idempotency";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { useProfilePhotoSource } from "@/lib/profile/useProfilePhotoSource";
-
-function optionalText(value: string): string | null {
-  const trimmed = value.trim();
-  return trimmed === "" ? null : trimmed;
-}
-
-/** Parse the comma-separated languages editor into the backend list shape. */
-function splitLanguages(value: string): string[] {
-  const seen = new Set<string>();
-  const languages: string[] = [];
-  for (const part of value.split(",")) {
-    const language = part.trim();
-    if (language === "") continue;
-    // The backend rejects duplicate language names (case-insensitive), so fold
-    // them here rather than failing the doctor's save over their typing.
-    const key = language.toLocaleLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    languages.push(language);
-  }
-  return languages;
-}
-
-function seedNotifications(
-  stored: Record<string, boolean>,
-): Record<string, boolean> {
-  const seeded: Record<string, boolean> = {};
-  for (const [key, value] of Object.entries(stored)) {
-    // A key the validator would refuse to accept back is dropped: keeping it
-    // would make every later save 422. Nothing else is ever dropped.
-    if (key.length <= MAX_NOTIFICATION_KEY_LENGTH) seeded[key] = value;
-  }
-  for (const key of NOTIFICATION_KEYS) {
-    if (key in seeded) continue;
-    // A stored dict already at the cap keeps its entries; the toggle still
-    // renders and a flip adds the key once there is room on a later save.
-    if (Object.keys(seeded).length >= MAX_NOTIFICATION_ENTRIES) continue;
-    // An absent key means the doctor never chose, so the toggle starts off.
-    seeded[key] = false;
-  }
-  return seeded;
-}
-
-function formFromProfile(profile: DoctorProfileView): ProfileForm {
-  return {
-    practice_name: profile.practice_name ?? "",
-    practice_address: profile.practice_address,
-    // Carried, never edited. #615 removed the coordinate inputs, and the backend
-    // writes these two itself from the declared PIN code (#609), so the doctor is
-    // never asked the question. The two strings stay in the form because the
-    // transitional request builder still declares them - see the note above
-    // `saveProfile` for what that builder currently is worth.
-    practice_latitude: String(profile.practice_latitude),
-    practice_longitude: String(profile.practice_longitude),
-    experience_years:
-      profile.experience_years == null ? "" : String(profile.experience_years),
-    languages: profile.languages.join(", "),
-    about: profile.about ?? "",
-    notifications: seedNotifications(profile.notification_preferences),
-  };
-}
-
-function invalidFields(form: ProfileForm): ProfileFieldName[] {
-  const invalid: ProfileFieldName[] = [];
-
-  if (form.practice_name.trim().length > LIMITS.practiceName) {
-    invalid.push("practice_name");
-  }
-
-  const address = form.practice_address.trim();
-  if (address.length > LIMITS.practiceAddress) {
-    invalid.push("practice_address");
-  }
-
-  if (form.experience_years.trim() !== "") {
-    const years = Number(form.experience_years);
-    if (
-      !Number.isInteger(years) ||
-      years < LIMITS.experienceYears.min ||
-      years > LIMITS.experienceYears.max
-    ) {
-      invalid.push("experience_years");
-    }
-  }
-
-  // The validator bounds the list length and each name inside it.
-  const languages = splitLanguages(form.languages);
-  if (
-    languages.length > LIMITS.languages ||
-    languages.some((language) => language.length > LIMITS.languageNameLength)
-  ) {
-    invalid.push("languages");
-  }
-
-  if (form.about.trim().length > LIMITS.about) {
-    invalid.push("about");
-  }
-
-  return invalid;
-}
-
-function updateFromForm(form: ProfileForm): DoctorProfileUpdate {
-  return {
-    practice_name: optionalText(form.practice_name),
-    practice_address: form.practice_address.trim(),
-    practice_latitude: Number(form.practice_latitude),
-    practice_longitude: Number(form.practice_longitude),
-    experience_years:
-      form.experience_years.trim() === ""
-        ? null
-        : Number(form.experience_years),
-    languages: splitLanguages(form.languages),
-    about: optionalText(form.about),
-    notification_preferences: form.notifications,
-  };
-}
 
 function LoadingSkeleton() {
   return (
@@ -266,23 +133,7 @@ export default function DoctorProfilePage() {
   const [photoBusy, setPhotoBusy] = useState(false);
   const [photoFailure, setPhotoFailure] = useState<SectionFailure | null>(null);
 
-  const [invalid, setInvalid] = useState<ProfileFieldName[]>([]);
-  // One idempotency key per user attempt: a retry of the same attempt reuses it
-  // (so a lost response cannot write twice), and an edit starts a new attempt.
-  // The key stays with the request builder rather than moving into the section
-  // shell, because the shell owns no transport - it owns only the button.
-  const saveAttemptKey = useRef<string | null>(null);
   const removeAttemptKey = useRef<string | null>(null);
-
-  // #605: the editable fields are one in-flight edit buffer, seeded from the
-  // shared projection and holding nothing else. The buffer owns the discipline
-  // that made an in-flight edit safe - seeded once per distinct server answer by
-  // object identity, never reseeded while the doctor is typing, and never
-  // reseeded by a save's own reply - so the reasoning lives with the rule rather
-  // than in this page's render (REQ story 16: typing survives a profile that is
-  // still loading or reloading).
-  const formBuffer = useSectionEditBuffer(profile, formFromProfile);
-  const { value: form } = formBuffer;
 
   // The newest projection, mirrored out of the render so the partial edits below
   // merge onto it rather than onto whatever this render happened to close over.
@@ -327,64 +178,6 @@ export default function DoctorProfilePage() {
   useEffect(() => {
     if (status === "error") setBannerOpen(true);
   }, [status]);
-
-  // One edit seam for the whole section, so the idempotency key is cleared in
-  // exactly one place: a fresh edit is a fresh attempt, and nothing else is.
-  function changeForm(patch: Partial<ProfileForm>) {
-    formBuffer.change(patch);
-    saveAttemptKey.current = null;
-  }
-
-  function toggleNotification(key: NotificationKey, value: boolean) {
-    if (form == null) return;
-    changeForm({
-      notifications: { ...form.notifications, [key]: value },
-    });
-  }
-
-  async function saveProfile(): Promise<SectionSaveResult> {
-    if (form == null) return { status: "declined" };
-    const problems = invalidFields(form);
-    setInvalid(problems);
-    if (problems.length > 0) return { status: "declined" };
-    const attemptKey = saveAttemptKey.current ?? idempotencyKey();
-    saveAttemptKey.current = attemptKey;
-    try {
-      // STILL CALLING A RETIRED ROUTE, and known to be so. #611 removed the
-      // whole-form `PUT /v1/doctor/profile`; the backend now serves four
-      // per-section writes (`/profile/practice`, `/profile/address`,
-      // `/profile/about`, `/profile/notifications`) and no whole-form body at
-      // all. So this call currently 405s, and the declared band's Save button
-      // cannot succeed until the section-write clients land (#616/#617).
-      //
-      // It is left in place deliberately. #615's brief scopes the page's SPLIT
-      // and forbids touching `updateDoctorProfile`, and the four section
-      // components are already independent - so #616/#617 is a change of which
-      // client each section calls, not a rewrite. Removing the save instead would
-      // take away the one affordance the existing suite proves works (the
-      // per-attempt idempotency-key discipline, which the section writes inherit
-      // through the same shell) and would hide the gap rather than record it.
-      //
-      // What this means for a reader: the declared band's fields are rendered
-      // editable and are NOT yet savable, and that is a known transitional state
-      // rather than a working feature. `updateDoctorProfile` writes no photo ref
-      // (its model declares none), so nothing here can detach a stored photo.
-      adoptProfile(await updateDoctorProfile(updateFromForm(form), attemptKey));
-      saveAttemptKey.current = null;
-      // The reply does not clear the buffer's dirty flag, and the buffer is what
-      // decides whether a late answer may reseed: it is the same answer the
-      // buffer already holds, so there is nothing to reseed from, and a doctor
-      // who kept typing across the save must not lose those keystrokes to it.
-      return { status: "saved" };
-    } catch (err) {
-      return {
-        status: "failed",
-        failure: {
-          traceId: err instanceof ApiError ? err.traceId : undefined,
-        },
-      };
-    }
-  }
 
   async function uploadPhoto(file: File) {
     setPhotoBusy(true);
@@ -433,21 +226,20 @@ export default function DoctorProfilePage() {
     adoptRef("consultation_fee", feePaise);
   }
 
-  const ready = status === "ready" && profile != null && form != null;
+  const ready = status === "ready" && profile != null;
   // The chip labels are the target sections' own dictionary headings, so a chip
   // never names a section differently from the way the section names itself.
   //
   // The two bands keep separate chips rather than sharing one "details" target:
   // two bands, two anchors, two ids, and no chip pointing at both.
   //
-  // KNOWN GAP, owned by #617: three of these chips - practice, about,
-  // notifications - address a field group inside the declared band, and those
-  // groups carry no heading yet, because the section headings belong to the
-  // section-content ticket. A reader who jumps to one of those three lands
-  // correctly but hears no heading announced. Adding headings here would be
-  // pre-empting #617's presentation; this note records the gap so that ticket
-  // inherits it knowingly rather than discovering it. The address chip is no
-  // longer in this set: #616 gave it a card with its own heading.
+  // #617 closed the gap #615 recorded here. The practice, about and notification
+  // chips used to address field groups inside the declared band, and those groups
+  // carried no heading of their own, so a reader who jumped to one landed correctly
+  // and heard nothing announced. Each of the three is now a card with a heading of
+  // its own - the card is what carries it - and all four declared cards live
+  // inside the declared band, which is why the band is a section rather than a
+  // fourth card.
   const anchors = [
     { id: PROFILE_ANCHORS.verified, label: t.verifiedBandTitle },
     { id: PROFILE_ANCHORS.declared, label: t.declaredBandTitle },
@@ -508,67 +300,42 @@ export default function DoctorProfilePage() {
             <ProfileCredentialList profile={profile} />
           </ProfileSectionShell>
 
-          {/* The declared band: everything the doctor typed, and it says so in
-              words. Its one save is the transitional whole-form write, because
-              the section-write clients belong to #616/#617 - the sections below
-              are already separate components, so giving each its own save is a
-              wiring change and not a rewrite. */}
-          <ProfileSectionShell
-            title={t.declaredBandTitle}
-            help={t.declaredBandHelp}
-            anchorId={PROFILE_ANCHORS.declared}
-            testId="profile-declared-band"
-            save={{
-              onSave: saveProfile,
-              dirty: formBuffer.dirty,
-              edits: formBuffer.edits,
-              label: t.save,
-              savedLabel: t.saved,
-              unsavedLabel: t.unsavedChanges,
-              failureMessage: t.saveFailed,
-              buttonTestId: "profile-save",
-              savedTestId: "profile-saved",
-              unsavedTestId: "profile-unsaved",
-            }}
+          {/* The declared band: everything the doctor declared, and it says so in
+              words. It is a plain section, NOT a card, because it groups the four
+              saving cards below rather than holding fields of its own - and a card
+              inside a card is two nested surfaces reading as one.
+
+              The heading and the sentence beneath it are what make it a band at
+              all, and they are the reason the declared-vs-verified distinction is
+              still visible: every card inside this section is unchecked by
+              CareSetu, which is exactly what `declaredBandHelp` says. */}
+          <section
+            id={PROFILE_ANCHORS.declared}
+            data-testid="profile-declared-band"
+            className="space-y-4"
+            aria-labelledby="profile-declared-band-heading"
           >
-            <div className="space-y-5">
-              <PracticeFields
-                form={form}
-                invalid={invalid}
-                onChange={changeForm}
-              />
-              <AddressFields
-                form={form}
-                invalid={invalid}
-                onChange={changeForm}
-              />
-              <AboutFields
-                form={form}
-                invalid={invalid}
-                onChange={changeForm}
-              />
-              <NotificationFields form={form} onToggle={toggleNotification} />
+            <div className="rounded-lg border border-hairline bg-surface p-4">
+              <h2
+                id="profile-declared-band-heading"
+                className="text-sm font-semibold text-txt"
+              >
+                {t.declaredBandTitle}
+              </h2>
+              <p className="mt-1 text-xs text-txt-muted">
+                {t.declaredBandHelp}
+              </p>
             </div>
 
-            {invalid.length > 0 && (
-              <p
-                className="mt-2 text-sm text-danger"
-                role="alert"
-                data-testid="profile-invalid"
-              >
-                {t.invalidFields}
-              </p>
-            )}
-          </ProfileSectionShell>
-
-          {/* #616: the address, as its own section with its own save, its own
-              buffer and its own route. It sits BELOW the declared band rather
-              than inside it: a section that saves on its own cannot live inside
-              a shell that saves a different set of fields, and putting it there
-              would give one form two submit buttons writing two different bodies.
-              The band keeps `practice_address` in its own request builder only -
-              seeded from the projection, never edited, never shown. */}
-          <AddressSectionCard />
+            {/* Four cards, four routes, four buffers. #616 built the first of
+                these; #617 built the other three and brought the address card
+                inside the band it belongs to, so the band's four declared
+                sections are together rather than split across the page. */}
+            <PracticeSectionCard />
+            <AddressSectionCard />
+            <AboutSectionCard />
+            <NotificationSectionCard />
+          </section>
 
           <ConsultationFeeCard
             feePaise={profile.consultation_fee}

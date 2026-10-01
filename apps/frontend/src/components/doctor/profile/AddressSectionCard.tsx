@@ -55,6 +55,7 @@ import {
   ProfileSectionShell,
   type SectionSaveResult,
 } from "./ProfileSectionShell";
+import { useRefusedFieldErrors } from "./useRefusedFieldErrors";
 import { useSectionEditBuffer } from "./useSectionEditBuffer";
 import { ApiError } from "@/lib/api-errors";
 import { useDoctorProfile } from "@/lib/doctor/DoctorProfileContext";
@@ -99,12 +100,13 @@ export function AddressSectionCard() {
   // edit so a stale line never outlives the state it described, and they are
   // mutually exclusive by construction: a validation failure never reaches the
   // API, and the attempt that would clear one starts by clearing the other.
+  //
+  // #617: the server side is now the shared `useRefusedFieldErrors` hook rather
+  // than this card's own two booleans. Three sibling cards read the same 422 the
+  // same way, so the reading - which paths are mine, which are not - lives in one
+  // place and this card declares only the one path it can map.
   const [clientInvalid, setClientInvalid] = useState<AddressFieldName[]>([]);
-  const [serverPinError, setServerPinError] = useState(false);
-  // A server `path` this card cannot map to an input lands in the form summary
-  // instead (ui-blueprint §9.5): dropping it would hide a real failure, and
-  // guessing it onto the nearest input would blame a field the server never named.
-  const [unmappedServerError, setUnmappedServerError] = useState(false);
+  const refused = useRefusedFieldErrors([PIN_PATH]);
   const [belt, setBelt] = useState<BeltNotice | null>(null);
 
   // One idempotency key per user attempt (api-standards §5): a retry of the same
@@ -116,13 +118,17 @@ export function AddressSectionCard() {
   const firstPartRef = useRef<HTMLInputElement | null>(null);
 
   const pinInvalid = clientInvalid.includes(PIN_PATH);
+  const serverPinError = refused.refused.has(PIN_PATH);
+  // A server `path` this card cannot map to an input lands in the form summary
+  // instead (ui-blueprint §9.5): dropping it would hide a real failure, and
+  // guessing it onto the nearest input would blame a field the server never named.
+  const unmappedServerError = refused.unmapped;
   const showSummary = clientInvalid.length > 0 || unmappedServerError;
 
   function change(patch: Parameters<typeof buffer.change>[0]) {
     buffer.change(patch);
     setClientInvalid([]);
-    setServerPinError(false);
-    setUnmappedServerError(false);
+    refused.clear();
     attemptKey.current = null;
   }
 
@@ -161,8 +167,7 @@ export function AddressSectionCard() {
 
     const problems = invalidAddressFields(fields);
     setClientInvalid(problems);
-    setServerPinError(false);
-    setUnmappedServerError(false);
+    refused.clear();
     if (problems.length > 0) return { status: "declined" };
 
     const attempt = attemptKey.current ?? idempotencyKey();
@@ -194,10 +199,7 @@ export function AddressSectionCard() {
       // and must reuse its key. Every other section's unsaved buffer therefore
       // keeps its own edits, and so does this one (AC 3).
       if (err instanceof ApiError) {
-        const refused = err.fieldErrors;
-        const pinRefused = refused.some((field) => field.path === PIN_PATH);
-        setServerPinError(pinRefused);
-        setUnmappedServerError(refused.length > 0 && !pinRefused);
+        refused.record(err);
         return { status: "failed", failure: { traceId: err.traceId } };
       }
       // Not an envelope: a shape-guard failure or a transport bug, so there are no
@@ -242,13 +244,11 @@ export function AddressSectionCard() {
         >
           {clientInvalid.length > 0 && (
             <p data-testid="profile-address-summary-count">
-              {t.addressInvalidSummary(clientInvalid.length)}
+              {t.invalidSummary(clientInvalid.length)}
             </p>
           )}
           {unmappedServerError && (
-            <p data-testid="profile-address-unmapped">
-              {t.addressUnmappedField}
-            </p>
+            <p data-testid="profile-address-unmapped">{t.unmappedField}</p>
           )}
         </div>
       )}
