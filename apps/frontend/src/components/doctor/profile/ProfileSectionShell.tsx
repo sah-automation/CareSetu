@@ -93,6 +93,17 @@ export interface ProfileSectionShellProps {
    * no footer, no confirmation, no form element and no dirty state at all.
    */
   save?: ProfileSectionSave;
+  /**
+   * The in-page anchor this section answers to, rendered as the `id` on whichever
+   * element the shell returns.
+   *
+   * #615 added this to a landed sibling's contract. The page's sticky anchor-chip
+   * index (#615) needs a target per section, and the alternative - wrapping every
+   * section in a second element to hang the `id` on - would give each section two
+   * headings and two landmarks, which is exactly the accessibility floor biting.
+   * Optional, so every existing caller is unaffected.
+   */
+  anchorId?: string;
   testId?: string;
 }
 
@@ -101,6 +112,7 @@ export function ProfileSectionShell({
   help,
   children,
   save,
+  anchorId,
   testId,
 }: ProfileSectionShellProps) {
   const { dirty, edits } = save ?? { dirty: false, edits: 0 };
@@ -198,7 +210,11 @@ export function ProfileSectionShell({
   // and one submit path is what makes the retry and the button the same attempt.
   // A read-only section is not a form: it has nothing to submit.
   if (save == null) {
-    return <Card data-testid={testId}>{body}</Card>;
+    return (
+      <Card id={anchorId} data-testid={testId}>
+        {body}
+      </Card>
+    );
   }
 
   return (
@@ -207,6 +223,7 @@ export function ProfileSectionShell({
       // offending fields, so the browser's constraint bubbles must not preempt
       // the submit (and silently swallow the attempt).
       noValidate
+      id={anchorId}
       data-testid={testId}
       onSubmit={(event) => {
         event.preventDefault();

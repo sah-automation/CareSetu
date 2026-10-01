@@ -214,7 +214,7 @@ const WRONG_CODE: PartnerVerifyResult = {
 // The private doctor projection the handoff's fact rows are built from. The
 // full shape is spelled out because the client guards it, and only two fields
 // are ever interesting to a test - so `profile.practice_name` and
-// `profile.specialty` are the knobs, by way of the overrides.
+// `profile.specialties` are the knobs, by way of the overrides.
 function doctorProfile(
   overrides: Partial<DoctorProfileView> = {},
 ): DoctorProfileView {
@@ -222,9 +222,15 @@ function doctorProfile(
     partner_id: 7,
     photo_ref: null,
     practice_name: "Kumar Clinic",
-    specialty: "General physician",
+    clinic_name: "Kumar Clinic",
+    specialties: ["General physician"],
     verified: true,
     practice_address: "12 MG Road",
+    address_line: "12 MG Road",
+    landmark: null,
+    locality: "Indiranagar",
+    city: "Bengaluru",
+    pin_code: "560038",
     practice_latitude: 12.9716,
     practice_longitude: 77.5946,
     area: "Indiranagar",
@@ -232,7 +238,8 @@ function doctorProfile(
     experience_years: 9,
     about: null,
     consultation_fee: 50000,
-    availability: null,
+    consulting_days: [],
+    consulting_hours: null,
     credentials: [],
     notification_preferences: {},
     ...overrides,
@@ -1836,24 +1843,29 @@ describe("StaffLoginForm - the handoff leaves on readiness (#579)", () => {
     expect(mockRouterReplace).toHaveBeenCalledTimes(1);
   });
 
-  // Two halves of one rule, stated as rows: what the landing knows, and the
-  // values that must be on screen because of it.
-  const factRows: Array<[string, Partial<DoctorProfileView>, string[]]> = [
+  // Two halves of one rule, stated as rows: what the landing knows, the values
+  // that must be on screen because of it, and the labels whose whole row must be
+  // absent when the value behind it is missing.
+  const factRows: Array<
+    [string, Partial<DoctorProfileView>, string[], string[]]
+  > = [
     [
       "a profile that names the practice and specialty",
       {},
       ["Kumar Clinic", "General physician", "Doctor console"],
+      [],
     ],
     [
       "a profile with neither",
-      { practice_name: null, specialty: null },
+      { practice_name: null, specialties: [] },
       ["Doctor console"],
+      ["Practice", "Specialty"],
     ],
   ];
 
   it.each(factRows)(
     "shows the fact rows for %s, and skips whatever is absent (#579 AC-7)",
-    async (_case, profileOverrides, expectedValues) => {
+    async (_case, profileOverrides, expectedValues, absentLabels) => {
       stubProfileRead(doctorProfile(profileOverrides));
       const destination = await holdDestinationOnTheHandoff();
 
@@ -1879,16 +1891,10 @@ describe("StaffLoginForm - the handoff leaves on readiness (#579)", () => {
       }
       expect(screen.getByText("Destination")).toBeInTheDocument();
       // Nothing rendered as a blank: an absent practice or specialty drops its
-      // whole row, label included, rather than showing an empty one.
-      for (const [label, value] of [
-        ["Practice", profileOverrides.practice_name],
-        ["Specialty", profileOverrides.specialty],
-      ] as const) {
-        if (value === null) {
-          expect(screen.queryByText(label)).toBeNull();
-        } else {
-          expect(screen.getByText(label)).toBeInTheDocument();
-        }
+      // whole row, label included, rather than showing an empty one. A specialty
+      // SELECTION with nothing in it is the same absence as no selection at all.
+      for (const label of absentLabels) {
+        expect(screen.queryByText(label)).toBeNull();
       }
     },
   );

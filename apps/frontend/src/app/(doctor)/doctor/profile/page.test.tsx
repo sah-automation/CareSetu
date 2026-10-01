@@ -102,9 +102,15 @@ function profile(
     partner_id: 7,
     photo_ref: null,
     practice_name: "Sunrise Clinic",
-    specialty: "General Physician",
+    clinic_name: "Sunrise Clinic",
+    specialties: ["General Physician"],
     verified: true,
     practice_address: "Main Road, Daltonganj",
+    address_line: "Main Road",
+    landmark: null,
+    locality: "Daltonganj",
+    city: "Daltonganj",
+    pin_code: "822001",
     practice_latitude: 24.1957,
     practice_longitude: 85.3656,
     area: "Daltonganj",
@@ -112,7 +118,8 @@ function profile(
     experience_years: 12,
     about: "Twelve years of primary care.",
     consultation_fee: 40000,
-    availability: "Mon-Sat, 9am-1pm",
+    consulting_days: ["mon", "tue"],
+    consulting_hours: "Mon-Sat, 9am-1pm",
     credentials: [
       {
         credential_type: "medical_registration",
@@ -135,7 +142,7 @@ async function renderReady(view: DoctorProfileView = profile()) {
       <DoctorProfilePage />
     </DoctorProfileProvider>,
   );
-  await waitFor(() => screen.getByTestId("profile-details-form"));
+  await waitFor(() => screen.getByTestId("profile-declared-band"));
 }
 
 let originalCreate: typeof URL.createObjectURL;
@@ -158,7 +165,8 @@ beforeEach(() => {
     profile({
       ...update,
       photo_ref: null,
-      specialty: "General Physician",
+      clinic_name: "Sunrise Clinic",
+      specialties: ["General Physician"],
       verified: true,
       area: "Daltonganj",
       consultation_fee: 40000,
@@ -178,11 +186,217 @@ afterEach(() => {
   URL.revokeObjectURL = originalRevoke;
 });
 
+// #615: the rebuilt shell's own four acceptance criteria, each stated as the
+// smallest observable claim it makes. The one inside a band is asserted through
+// the band's own testid rather than by text, because the same copy also appears
+// in the anchor chip that jumps to it.
+describe("DoctorProfilePage shell (#615)", () => {
+  it("heads the page with an identity band: the name, the clinic, the tick and the specialties", async () => {
+    await renderReady();
+
+    const band = screen.getByTestId("profile-identity");
+    // The doctor's name is the page's heading, not a label above a form.
+    expect(within(band).getByRole("heading", { level: 1 })).toHaveTextContent(
+      "Sunrise Clinic",
+    );
+    expect(screen.getByTestId("profile-clinic")).toHaveTextContent(
+      "Sunrise Clinic",
+    );
+    // Both trust cues come from the one flag, so the chip row and the verified
+    // band below cannot end up telling two different stories.
+    expect(screen.getByTestId("profile-verified")).toHaveTextContent(
+      t.verified,
+    );
+    expect(
+      within(screen.getByTestId("profile-verified-band")).getByText(
+        t.verifiedBandTitle,
+      ),
+    ).toBeInTheDocument();
+    // The picker sits in the band, not across the page from the face it replaces.
+    expect(
+      within(band).getByTestId("profile-photo-upload"),
+    ).toBeInTheDocument();
+
+    // The identity band is not the only h1 on the page: the section headings
+    // below it stay h2s, which is the outline the whole split rests on.
+    expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
+  });
+
+  it("names an empty specialty selection instead of rendering no chip at all", async () => {
+    await renderReady(profile({ specialties: [] }));
+
+    expect(screen.getByTestId("profile-specialties-empty")).toHaveTextContent(
+      t.noSpecialtiesYet,
+    );
+    expect(screen.queryByTestId("profile-specialty")).toBeNull();
+  });
+
+  it("shows the credentials in the verified band and the typed details in the declared one", async () => {
+    await renderReady();
+
+    // What the platform derived and checked sits in the verified band...
+    const verified = screen.getByTestId("profile-verified-band");
+    expect(
+      within(verified).getByTestId("profile-credential"),
+    ).toBeInTheDocument();
+    expect(
+      within(verified).getByTestId("profile-public-preview"),
+    ).toBeInTheDocument();
+
+    // ...and what the doctor typed sits in the declared band, which says so in
+    // words rather than leaving the distinction to colour alone (§1.6, §9.4).
+    const declared = screen.getByTestId("profile-declared-band");
+    expect(within(declared).getByText(t.declaredBandHelp)).toBeInTheDocument();
+    expect(
+      within(declared).getByTestId("profile-practice-name"),
+    ).toBeInTheDocument();
+    expect(
+      within(declared).getByTestId("profile-notification-case_updates"),
+    ).toBeInTheDocument();
+    // The declared band carries the transitional whole-form save, and it is
+    // beside its own fields rather than hoisted to a page-level button.
+    expect(within(declared).getByTestId("profile-save")).toBeInTheDocument();
+    // Nothing the doctor typed leaked into the verified band.
+    expect(within(verified).queryByTestId("profile-practice-name")).toBeNull();
+  });
+
+  it("drops the tick and still shows the credentials when the flag is false", async () => {
+    // A doctor whose credentials are pending or expired is not verified, and a
+    // band that kept a tick beside that list would be claiming a check that did
+    // not happen - the exact failure "tick gone = card gone" rules out.
+    await renderReady(profile({ verified: false }));
+
+    expect(screen.getByTestId("profile-verified")).toHaveTextContent(
+      t.notVerified,
+    );
+    const verified = screen.getByTestId("profile-verified-band");
+    expect(
+      within(verified).getByTestId("profile-credential-status"),
+    ).toHaveTextContent(t.credentialStatus.verified);
+  });
+
+  it("states the activation state in words, off the one flag, when true", async () => {
+    // AC 3: "the credentials AND activation state render in the verified band
+    // carrying the tick". The activation state is a stated value, not just a
+    // tick's presence - a tick a screen reader never announces tells a blind
+    // doctor nothing about what CareSetu actually decided.
+    await renderReady(profile({ verified: true }));
+
+    const state = within(
+      screen.getByTestId("profile-verified-band"),
+    ).getByTestId("profile-activation-state");
+    expect(state).toHaveTextContent(t.activationStateLabel);
+    expect(state).toHaveTextContent(t.verified);
+    expect(within(state).getByText(t.verifiedTickLabel)).toBeInTheDocument();
+  });
+
+  it("says the activation state is not verified, with no tick beside it", async () => {
+    await renderReady(profile({ verified: false }));
+
+    // The value and the symbol are the same claim, so neither can be present
+    // alone: a false flag gets the words and loses the tick.
+    const state = within(
+      screen.getByTestId("profile-verified-band"),
+    ).getByTestId("profile-activation-state");
+    expect(state).toHaveTextContent(t.notVerified);
+    expect(within(state).queryByText(t.verifiedTickLabel)).toBeNull();
+    expect(state.querySelector("svg")).toBeNull();
+  });
+
+  it("never claims the outcome in the verified band's own heading", async () => {
+    // The band's title says what KIND of thing it is, not the verdict. Were it
+    // "Verified by CareSetu", a doctor whose flag is false would read a claim
+    // the backend is not making - overclaiming is the §1.6 failure.
+    await renderReady(profile({ verified: false }));
+
+    const band = screen.getByTestId("profile-verified-band");
+    expect(within(band).getByText(t.verifiedBandTitle)).toBeInTheDocument();
+    expect(band.textContent).not.toContain("Verified by CareSetu");
+  });
+
+  it("offers a sticky anchor chip per section, each pointing at an id the page renders", async () => {
+    await renderReady();
+
+    const index = screen.getByTestId("profile-section-index");
+    // The chips' labels are the sections' own headings, read from the dictionary.
+    const labels = [
+      t.verifiedBandTitle,
+      t.declaredBandTitle,
+      t.practiceSectionTitle,
+      t.addressSectionTitle,
+      t.aboutSectionTitle,
+      t.notificationsHeading,
+      t.feeHeading,
+    ];
+    for (const label of labels) {
+      expect(within(index).getAllByText(label).length).toBeGreaterThan(0);
+    }
+
+    // Every chip resolves to an element that is actually in the document: a chip
+    // pointing at an id nothing renders is a dead control, not a jump.
+    const hrefs = within(index)
+      .getAllByRole("link")
+      .map((link) => link.getAttribute("href") ?? "");
+    expect(hrefs.length).toBe(labels.length);
+    for (const href of hrefs) {
+      expect(href.startsWith("#")).toBe(true);
+      const target = document.querySelector(href);
+      expect(target).not.toBeNull();
+    }
+
+    // The two bands and the fee card carry a heading at their anchor; the four
+    // field groups inside the declared band do not yet, because their headings
+    // belong to #616/#617. Asserted as the KNOWN state rather than left implied -
+    // when the section headings land this becomes a failure to fix, which is the
+    // point of writing it down.
+    const withHeading = ["verified", "declared", "fee"];
+    const withoutHeading = ["practice", "address", "about", "notifications"];
+    for (const key of withHeading) {
+      const target = document.querySelector(`#profile-section-${key}`);
+      expect(
+        target?.querySelector("h2") ??
+          target?.parentElement?.querySelector("h2"),
+      ).not.toBeNull();
+    }
+    for (const key of withoutHeading) {
+      expect(
+        document.querySelector(`#profile-section-${key}`)?.querySelector("h2"),
+      ).toBeNull();
+    }
+
+    // "Holds no state" read as a prohibition: no scroll-spy, no observer, no
+    // scroll listener, nothing that hides a section body, and every save button
+    // still beside its own fields rather than collected at the top.
+    expect(within(index).queryByRole("button")).toBeNull();
+    expect(within(index).getAllByRole("link")).toHaveLength(labels.length);
+  });
+
+  it("never renders the service-area vocabulary name to the doctor", async () => {
+    // The fixture carries an `area` that is deliberately not a substring of
+    // anything else on the page, so "this value is absent from the document"
+    // cannot pass by coincidence - and a unique value keeps the assertion about
+    // the AREA field rather than about a locality string the address also
+    // happens to contain. The area is a platform seed; the neighbourhood a
+    // practice sits in is `locality`, which is a different field under a
+    // different name.
+    const area = "Zzz-platform-seed-area";
+    await renderReady(profile({ area }));
+
+    expect(screen.queryByText(area)).toBeNull();
+    // And the label that named it is gone from the copy, not merely unrendered.
+    expect(screen.queryByText(/area/i)).toBeNull();
+  });
+});
+
 describe("DoctorProfilePage projection", () => {
   it("renders the private projection and the read-only public preview link", async () => {
     await renderReady();
 
-    expect(screen.getByText(t.title)).toBeInTheDocument();
+    // #615: the identity band carries the page's own h1 (the doctor's name), so
+    // the ready state has no separate `PageHeader` title to find.
+    expect(
+      screen.getByRole("heading", { level: 1, name: "Sunrise Clinic" }),
+    ).toBeInTheDocument();
     expect(screen.getByTestId("profile-practice-name")).toHaveValue(
       "Sunrise Clinic",
     );
@@ -192,22 +406,15 @@ describe("DoctorProfilePage projection", () => {
     expect(screen.getByTestId("profile-verified")).toHaveTextContent(
       t.verified,
     );
-    // The directory's own locality label for the saved address is shown too.
-    expect(screen.getByTestId("profile-area")).toHaveTextContent("Daltonganj");
     expect(screen.getByTestId("profile-address")).toHaveValue(
       "Main Road, Daltonganj",
     );
-    expect(screen.getByTestId("profile-latitude")).toHaveValue(24.1957);
-    expect(screen.getByTestId("profile-longitude")).toHaveValue(85.3656);
     expect(screen.getByTestId("profile-experience")).toHaveValue(12);
     expect(screen.getByTestId("profile-languages")).toHaveValue(
       "Hindi, English",
     );
     expect(screen.getByTestId("profile-about")).toHaveValue(
       "Twelve years of primary care.",
-    );
-    expect(screen.getByTestId("profile-availability")).toHaveValue(
-      "Mon-Sat, 9am-1pm",
     );
     expect(
       screen.getByTestId("profile-notification-new_consultations"),
@@ -296,7 +503,7 @@ describe("DoctorProfilePage projection", () => {
 
     getProfile.mockResolvedValue(profile());
     fireEvent.click(screen.getByTestId("error-banner-retry"));
-    await waitFor(() => screen.getByTestId("profile-details-form"));
+    await waitFor(() => screen.getByTestId("profile-declared-band"));
     expect(getProfile).toHaveBeenCalledTimes(2);
   });
 });
@@ -333,7 +540,9 @@ describe("DoctorProfilePage editable fields", () => {
         experience_years: 13,
         languages: ["Hindi", "English", "Maithili"],
         about: "Now also runs evening clinics.",
-        availability: "Mon-Sat, 9am-1pm",
+        // #615: `availability` is gone from the body with its editor. The
+        // coordinates are still declared, carried unedited from the projection -
+        // the whole-form write requires them even though nothing collects them.
         // The canonical toggles plus the one key the server already holds.
         notification_preferences: {
           new_consultations: true,
@@ -406,7 +615,7 @@ describe("DoctorProfilePage editable fields", () => {
     // effect after the commit that hides the button.
     await waitFor(() =>
       expect(
-        screen.getByTestId("profile-photo").querySelector("img"),
+        screen.getByTestId("profile-identity").querySelector("img"),
       ).not.toBeNull(),
     );
     expect(screen.getByTestId("profile-about")).toHaveValue(
@@ -507,14 +716,11 @@ describe("DoctorProfilePage editable fields", () => {
     ).toBe(true);
   });
 
-  it("blocks a save with an unusable address or latitude before calling the API", async () => {
+  it("blocks a save with an unusable address before calling the API", async () => {
     await renderReady();
 
     fireEvent.change(screen.getByTestId("profile-address"), {
       target: { value: "  " },
-    });
-    fireEvent.change(screen.getByTestId("profile-latitude"), {
-      target: { value: "120" },
     });
     fireEvent.click(screen.getByTestId("profile-save"));
 
@@ -528,10 +734,20 @@ describe("DoctorProfilePage editable fields", () => {
       "aria-invalid",
       "true",
     );
-    expect(screen.getByTestId("profile-latitude")).toHaveAttribute(
-      "aria-invalid",
-      "true",
-    );
+  });
+
+  // #615: the coordinates are server-written and derived from the declared PIN
+  // code (#609), so there is nothing for the doctor to get wrong and nothing on
+  // this page for them to fix. The two rules that used to sit beside this one -
+  // a latitude inside its bound and a longitude inside its own - are the same
+  // rule now: the page never asks.
+  it("shows no coordinate input at all", async () => {
+    await renderReady();
+
+    expect(screen.queryByTestId("profile-latitude")).toBeNull();
+    expect(screen.queryByTestId("profile-longitude")).toBeNull();
+    // And the retired free-text availability blob's input is gone with it.
+    expect(screen.queryByTestId("profile-availability")).toBeNull();
   });
 
   it("blocks an over-long free-text field before calling the API", async () => {
@@ -597,7 +813,7 @@ describe("DoctorProfilePage editable fields", () => {
     const banner = await screen.findByTestId("error-banner");
     expect(banner).toHaveTextContent(t.saveFailed);
     expect(
-      within(screen.getByTestId("profile-details-form")).getByTestId(
+      within(screen.getByTestId("profile-declared-band")).getByTestId(
         "error-banner-trace-id",
       ),
     ).toHaveTextContent("trace-save-543");
@@ -609,7 +825,7 @@ describe("DoctorProfilePage photo", () => {
     await renderReady(profile({ photo_ref: "doctor/7/photo-1.enc" }));
 
     await waitFor(() => expect(getPhoto).toHaveBeenCalled());
-    const avatar = screen.getByTestId("profile-photo").querySelector("img");
+    const avatar = screen.getByTestId("profile-identity").querySelector("img");
     await waitFor(() => expect(avatar).not.toBeNull());
     expect(avatar?.getAttribute("src")).toBe(
       "blob:http://localhost/doctor-photo",
@@ -660,7 +876,7 @@ describe("DoctorProfilePage photo", () => {
     // avatar is asserted on the settled state, not the first render after.
     await waitFor(() =>
       expect(
-        screen.getByTestId("profile-photo").querySelector("img"),
+        screen.getByTestId("profile-identity").querySelector("img"),
       ).toBeNull(),
     );
   });
@@ -707,7 +923,9 @@ describe("DoctorProfilePage photo", () => {
     await renderReady(profile({ photo_ref: "doctor/7/photo-1.enc" }));
 
     await waitFor(() => expect(getPhoto).toHaveBeenCalled());
-    expect(screen.getByTestId("profile-photo").querySelector("img")).toBeNull();
+    expect(
+      screen.getByTestId("profile-identity").querySelector("img"),
+    ).toBeNull();
     expect(screen.queryByTestId("error-banner")).toBeNull();
     // Nothing is behind the ref, so there is nothing to remove: a definite
     // absence offers Upload rather than a Remove that cannot succeed.
@@ -732,7 +950,9 @@ describe("DoctorProfilePage photo", () => {
     // A blip is not an absence, so the preview falls back to the avatar and
     // offers no error surface, but the stored photo still reads as a photo the
     // doctor can clear.
-    expect(screen.getByTestId("profile-photo").querySelector("img")).toBeNull();
+    expect(
+      screen.getByTestId("profile-identity").querySelector("img"),
+    ).toBeNull();
     expect(screen.queryByTestId("error-banner")).toBeNull();
     expect(screen.getByTestId("profile-photo-remove")).toBeInTheDocument();
   });
@@ -840,10 +1060,18 @@ describe("DoctorProfilePage bilingual parity (REQ-006)", () => {
         <LangFlipHost />
       </DoctorProfileProvider>,
     );
-    await waitFor(() => screen.getByTestId("profile-details-form"));
+    await waitFor(() => screen.getByTestId("profile-declared-band"));
 
     fireEvent.click(screen.getByText("flip-lang"));
-    await waitFor(() => screen.getByText(hiT.title));
+    // #615: the ready state has no `PageHeader` title - the identity band's own
+    // h1 and the two band headings are the copy that has to flip with the locale.
+    // `getAllByText` because the declared band's title is deliberately in the
+    // document twice: once as its heading, once as its anchor chip's label.
+    await waitFor(() =>
+      expect(screen.getAllByText(hiT.declaredBandTitle).length).toBeGreaterThan(
+        0,
+      ),
+    );
 
     expect(screen.getByTestId("profile-save")).toHaveTextContent(hiT.save);
     expect(screen.getByTestId("fee-editor")).toHaveTextContent(hiT.feeHeading);

@@ -1471,12 +1471,56 @@ const en = {
     photoReplace: "Replace photo",
     photoRemove: "Remove photo",
     photoFailed: "Could not update your photo.",
-    identityHeading: "Practice",
-    practiceNameLabel: "Practice name",
-    specialtyLabel: "Specialty",
-    areaLabel: "Area",
+    // #615: the identity band. `photoHeading` no longer titles a card of its own
+    // - the picker moved into the band - so it names the control group instead.
+    practiceNameLabel: "Full name / practice name",
+    // #615: names the identity band's chip row, which now holds two different
+    // things - the verification verdict and the specialty selection. Neither
+    // existing label fits: "Specialties" alone would hide the verdict from
+    // assistive tech, and the verdict's own label would hide the selection.
+    //
+    // No `clinicNameLabel` here on purpose. The identity band shows the clinic
+    // directly beneath the doctor's name and it is no longer a labelled row, so a
+    // separate label would have no label to sit on. `practice_name` is the
+    // doctor's own name on this projection, which is why this field says so.
+    identityChipsLabel: "Profile status and specialties",
+    // The identity band's empty chip. Named "yet" rather than as a dead end: the
+    // selection belongs to #608's closed pick-list, and this page has no editor
+    // for it yet, so the chip states the absence instead of implying the doctor
+    // has no specialty.
+    noSpecialtiesYet: "No specialty added yet",
     verified: "Verified",
     notVerified: "Not verified",
+    // #615: the two trust bands. The verified band is what the platform derived
+    // and checked; the declared band is what the doctor typed, and it SAYS SO in
+    // words rather than leaving the distinction to colour alone (blueprint §1.6,
+    // §9.4 - a tick the platform cannot substantiate is the failure this avoids).
+    // State-NEUTRAL on purpose. This titles the band of things CareSetu checked;
+    // it does not assert the outcome, because a doctor whose flag is false would
+    // read "Verified by CareSetu" as a claim the backend is not making. The
+    // outcome is the activation row's job, one line below, and it reads the same
+    // flag the tick reads - so the heading cannot overclaim a verdict its child
+    // is about to contradict.
+    verifiedBandTitle: "Checked by CareSetu",
+    verifiedBandHelp:
+      "CareSetu checks your credentials and your activation status.",
+    // AC 3: the activation state the platform derived, beside the tick. Label and
+    // value both come from `verified` - one flag, three reads (heading, tick,
+    // value), so the band cannot claim one verdict and show another.
+    activationStateLabel: "Activation state",
+    // The tick's own accessible name. The tick is decorative next to a text
+    // verdict in the same row, so the name says what it means rather than being
+    // read as "check mark" and leaving the doctor to work out what was checked.
+    verifiedTickLabel: "CareSetu verified this profile",
+    declaredBandTitle: "Your details",
+    declaredBandHelp:
+      "These are the details you typed. CareSetu has not checked them.",
+    // The sticky anchor-chip index: an accessible name for the landmark, plus the
+    // section titles it jumps between and those sections' own headings reuse.
+    sectionIndexLabel: "Sections",
+    practiceSectionTitle: "Practice",
+    addressSectionTitle: "Address",
+    aboutSectionTitle: "About",
     credentialsHeading: "Credentials",
     credentialsEmpty: "No credentials on file",
     credentialExpires: (date: string) => `Valid until ${date}`,
@@ -1493,19 +1537,20 @@ const en = {
       medical_registration: "Medical registration",
       qualification_certificate: "Qualification certificate",
     },
-    detailsHeading: "Details",
     experienceLabel: "Years of experience",
     languagesLabel: "Languages",
     languagesHelp: "Separate with commas",
     languagesPlaceholder: "Hindi, English",
     aboutLabel: "About",
     aboutPlaceholder: "Tell patients about your practice",
-    availabilityLabel: "Availability",
-    availabilityPlaceholder: "e.g. Mon-Sat, 9am-1pm",
+    // NOTE: the consulting days/hours and structured-address copy this ticket
+    // first added is gone again. The projection serves `consulting_days`,
+    // `consulting_hours`, `address_line` and `pin_code`, but the brief puts the
+    // address card's content in #616 and the about card's in #617 - and adding
+    // labels here would mean writing those sections' presentation before their
+    // owning tickets exist. Those tickets add their own keys when they render
+    // their own fields.
     addressLabel: "Practice address",
-    latitudeLabel: "Latitude",
-    longitudeLabel: "Longitude",
-    coordinatesHelp: "Your practice location, used for the directory entry.",
     notificationsHeading: "Notifications",
     notificationLabels: {
       new_consultations: "New consultations",
@@ -3088,12 +3133,50 @@ export const STRINGS: Record<Lang, Dictionary> = {
       photoReplace: "फोटो बदलें",
       photoRemove: "फोटो हटाएँ",
       photoFailed: "आपकी फोटो अपडेट नहीं हो सकी।",
-      identityHeading: "प्रैक्टिस",
-      practiceNameLabel: "प्रैक्टिस का नाम",
-      specialtyLabel: "विशेषज्ञता",
-      areaLabel: "क्षेत्र",
+      // #615: पहचान बैंड। `photoHeading` अब अपने किसी कार्ड का शीर्षक नहीं है -
+      // पिकर बैंड में चला गया है - इसलिए यह नियंत्रण समूह का नाम देता है।
+      practiceNameLabel: "पूरा नाम / प्रैक्टिस का नाम",
+      // #615: पहचान बैंड की चिप पंक्ति को नाम देता है, जो अब दो अलग चीज़ें
+      // रखती है - सत्यापन का निर्णय और विशेषज्ञता का चयन। कोई भी मौजूदा
+      // लेबल नहीं बैठता: अकेला "विशेषज्ञताएँ" सहायक तकनीकी से निर्णय छिपा
+      // देता, और निर्णय का लेबल चयन छिपा देता।
+      //
+      // यहाँ `clinicNameLabel` इरादे से नहीं है। पहचान बैंड क्लिनिक को डॉक्टर
+      // के नाम के ठीक नीचे दिखाता है और वह अब किसी लेबल वाली पंक्ति नहीं
+      // है, इसलिए अलग लेबल के पास रखने को कुछ नहीं बचता। इस प्रोजेक्शन पर
+      // `practice_name` डॉक्टर का अपना नाम है, इसलिए यह फ़ील्ड यही कहता है।
+      identityChipsLabel: "प्रोफ़ाइल की स्थिति और विशेषज्ञताएँ",
+      noSpecialtiesYet: "अभी कोई विशेषज्ञता नहीं जोड़ी गई",
       verified: "सत्यापित",
       notVerified: "सत्यापित नहीं",
+      // #615: दो ट्रस्ट बैंड। सत्यापित बैंड वह है जो प्लेटफ़ॉर्म ने स्वयं
+      // निकाला और जाँचा है; घोषित बैंड वह है जो डॉक्टर ने स्वयं लिखा है, और
+      // वह इसे शब्दों में कहता है, न कि अंतर केवल रंग पर छोड़ता है
+      // (ui-blueprint §1.6, §9.4)।
+      // अवस्था-निष्पक्ष इरादे से। यह CareSetu द्वारा जाँची गई चीज़ों के बैंड का
+      // शीर्षक है; यह परिणाम नहीं दावा करता, क्योंकि जिस डॉक्टर का फ़्लैग
+      // `false` है वह "CareSetu द्वारा सत्यापित" पढ़कर वही समझेगा जो बैकएंड
+      // नहीं कह रहा। परिणाम नीचे एक पंक्ति का काम है, और वही फ़्लैग पढ़ती है
+      // जो टिक पढ़ता है - इसलिए शीर्षक अपने ही बच्चे के विरुद्ध कोई दावा नहीं
+      // कर सकता।
+      verifiedBandTitle: "CareSetu द्वारा जाँची गई",
+      verifiedBandHelp:
+        "CareSetu आपके प्रमाणों और आपकी सक्रियता स्थिति की जाँच करता है।",
+      // AC 3: प्लेटफ़ॉर्म द्वारा निकाली गई सक्रियता स्थिति, टिक के पास।
+      // लेबल और मान दोनों `verified` से आते हैं - एक फ़्लैग, तीन पठन
+      // (शीर्षक, टिक, मान)।
+      activationStateLabel: "सक्रियता स्थिति",
+      // टिक का अपना सुलभ नाम।
+      verifiedTickLabel: "CareSetu ने यह प्रोफ़ाइल सत्यापित किया",
+      declaredBandTitle: "आपकी जानकारी",
+      declaredBandHelp:
+        "ये वही जानकारी है जो आपने लिखी है। CareSetu ने इनकी जाँच नहीं की है।",
+      // स्टिकी एंकर-चिप सूचक: लैंडमार्क का सुलभ नाम, साथ ही वे अनुभाग
+      // शीर्षक जिनके बीच यह कूदता है और जिन्हें वे अनुभाग दोबारा उपयोग करते हैं।
+      sectionIndexLabel: "अनुभाग",
+      practiceSectionTitle: "प्रैक्टिस",
+      addressSectionTitle: "पता",
+      aboutSectionTitle: "परिचय",
       credentialsHeading: "प्रमाण",
       credentialsEmpty: "कोई प्रमाण दर्ज नहीं",
       credentialExpires: (date: string) => `${date} तक वैध`,
@@ -3108,20 +3191,19 @@ export const STRINGS: Record<Lang, Dictionary> = {
         medical_registration: "चिकित्सा पंजीकरण",
         qualification_certificate: "योग्यता प्रमाणपत्र",
       },
-      detailsHeading: "विवरण",
       experienceLabel: "अनुभव के वर्ष",
       languagesLabel: "भाषाएँ",
       languagesHelp: "कॉमा से अलग करके लिखें",
       languagesPlaceholder: "हिंदी, अंग्रेज़ी",
       aboutLabel: "आपके बारे में",
       aboutPlaceholder: "मरीज़ों को अपनी प्रैक्टिस के बारे में बताएँ",
-      availabilityLabel: "उपलब्धता",
-      availabilityPlaceholder: "जैसे सोम-शनि, सुबह 9 से दोपहर 1",
+      // नोट: परामर्श के दिन/समय और संरचित पते की यह कॉपी फिर से हटा दी गई है।
+      // प्रोजेक्शन `consulting_days`, `consulting_hours`, `address_line` और
+      // `pin_code` भेजता है, पर ब्रीफ़ पता कार्ड का कॉन्टेंट #616 को और परिचय
+      // कार्ड का #617 को देता है - और यहाँ लेबल जोड़ना उन अनुभागों की प्रस्तुति
+      // उनके टिकट होने से पहले लिख देना होता। वे टिकट अपने अपने फ़ील्ड दिखाते
+      // समय अपनी कुंजियाँ जोड़ेंगे।
       addressLabel: "प्रैक्टिस का पता",
-      latitudeLabel: "अक्षांश",
-      longitudeLabel: "देशांतर",
-      coordinatesHelp:
-        "प्रैक्टिस का स्थान, डायरेक्टरी प्रविष्टि के लिए उपयोग होता है।",
       notificationsHeading: "सूचनाएँ",
       notificationLabels: {
         new_consultations: "नई परामर्श",

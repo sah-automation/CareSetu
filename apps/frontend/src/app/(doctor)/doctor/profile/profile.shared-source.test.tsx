@@ -139,9 +139,15 @@ function profile(
     partner_id: 7,
     photo_ref: STORED_REF,
     practice_name: "Sunrise Clinic",
-    specialty: "General Physician",
+    clinic_name: "Sunrise Clinic",
+    specialties: ["General Physician"],
     verified: true,
     practice_address: "Main Road, Daltonganj",
+    address_line: "Main Road, Daltonganj",
+    landmark: null,
+    locality: "Daltonganj",
+    city: "Daltonganj",
+    pin_code: "822001",
     practice_latitude: 24.1957,
     practice_longitude: 85.3656,
     area: "Daltonganj",
@@ -149,7 +155,8 @@ function profile(
     experience_years: 12,
     about: "Twelve years of primary care.",
     consultation_fee: 40000,
-    availability: "Mon-Sat, 9am-1pm",
+    consulting_days: ["mon", "tue"],
+    consulting_hours: "Mon-Sat, 9am-1pm",
     credentials: [],
     notification_preferences: {},
     ...overrides,
@@ -166,7 +173,7 @@ function saveEchoesTheStoredRef() {
       ...current,
       ...update,
       photo_ref: current.photo_ref,
-      specialty: current.specialty,
+      specialties: current.specialties,
       verified: current.verified,
       area: current.area,
       credentials: current.credentials,
@@ -204,7 +211,7 @@ async function renderBothSurfaces(view: DoctorProfileView = profile()) {
   const result = renderConsoleAndProfilePage();
   // The page is the page's own readiness signal, so waiting on it is waiting
   // on the shared read having answered.
-  await waitFor(() => screen.getByTestId("profile-details-form"));
+  await waitFor(() => screen.getByTestId("profile-declared-band"));
   return result;
 }
 
@@ -320,8 +327,9 @@ describe("the doctor account menu and the doctor Profile page share one profile 
     uploadPhoto.mockResolvedValue({ photo_ref: UPLOADED_REF });
     pickPhoto("me.jpg");
 
-    // The page's own preview lands first...
-    const pageImg = await imageIn(screen.getByTestId("profile-photo"));
+    // The page's own preview lands first, in the identity band's avatar (#615
+    // moved the picker into the band, so the avatar is the page's surface)...
+    const pageImg = await imageIn(screen.getByTestId("profile-identity"));
     // ...and so does the chrome's account avatar, off the same source. No
     // reload, no second read of the projection, no second read of the bytes.
     const triggerImg = await imageIn(trigger);
@@ -378,7 +386,7 @@ describe("the doctor account menu and the doctor Profile page share one profile 
     expect(accountTrigger().querySelector("svg")).not.toBeNull();
     await waitFor(() =>
       expect(
-        screen.getByTestId("profile-photo").querySelector("img"),
+        screen.getByTestId("profile-identity").querySelector("img"),
       ).toBeNull(),
     );
     // The identity header's avatar agrees with the trigger rather than keeping
@@ -457,7 +465,7 @@ describe("the doctor account menu and the doctor Profile page share one profile 
         </AppShell>
       </DoctorProfileProvider>,
     );
-    await waitFor(() => screen.getByTestId("profile-details-form"));
+    await waitFor(() => screen.getByTestId("profile-declared-band"));
     expect(getProfile).toHaveBeenCalledTimes(1);
 
     // And the account menu makes no request of its own: opening it is instant.
@@ -489,7 +497,7 @@ describe("the doctor account menu and the doctor Profile page share one profile 
     await act(async () => {
       fireEvent.click(screen.getByTestId("error-banner-retry"));
     });
-    await waitFor(() => screen.getByTestId("profile-details-form"));
+    await waitFor(() => screen.getByTestId("profile-declared-band"));
     expect(getProfile).toHaveBeenCalledTimes(2);
     const triggerImg = await imageIn(accountTrigger());
     expect(triggerImg.getAttribute("src")).not.toContain(STORED_REF);

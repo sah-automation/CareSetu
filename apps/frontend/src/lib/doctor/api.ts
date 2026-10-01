@@ -254,17 +254,61 @@ export interface DoctorProfileView {
   partner_id: number;
   photo_ref: string | null;
   practice_name: string | null;
-  specialty: string | null;
+  /**
+   * The building the doctor practises in, distinct from `practice_name`, which is
+   * the doctor's own name. Nullable: a doctor can name who they are before they
+   * have named the building they see patients in.
+   */
+  clinic_name: string | null;
+  /**
+   * The declared specialty SELECTION, not one value: a doctor may practise more
+   * than one kind of care. The values are the closed pick-list's own
+   * display-ready strings, so the chip row renders them verbatim.
+   */
+  specialties: string[];
+  /**
+   * The stored verification indicator, derived server-side from activation state
+   * plus credential dates and never recomputed here. Both the identity band's
+   * tick and the verified band's own tick read this one flag, so they cannot
+   * disagree about the same doctor.
+   */
   verified: boolean;
+  /**
+   * A DENORMALISED display projection of the structured address parts below,
+   * read-only on the client. Served beside the parts rather than instead of them:
+   * it is assembled from them, so parsing it back into fields would be guessing
+   * at a format this client does not own.
+   */
   practice_address: string;
+  address_line: string | null;
+  landmark: string | null;
+  locality: string | null;
+  city: string | null;
+  pin_code: string | null;
+  /**
+   * Server-written and never client-written: the practice position is derived
+   * from the declared PIN code, so the doctor is never asked a question only a map
+   * could answer. Still served because the band reads it back as a confirmation.
+   */
   practice_latitude: number;
   practice_longitude: number;
+  /**
+   * The platform's service-area vocabulary name. Deliberately NOT rendered to
+   * the doctor: the concept was demoted to non-user-facing because it is a
+   * platform seed, not the neighbourhood a practice sits in (`locality` is).
+   */
   area: string | null;
   languages: string[];
   experience_years: number | null;
   about: string | null;
   consultation_fee: number | null;
-  availability: string | null;
+  /**
+   * The declared consulting-day SELECTION, closed over the seven days of the
+   * week, replacing the retired free-text `availability` blob whose days and
+   * hours were one string. The hours survive separately as prose.
+   */
+  consulting_days: string[];
+  consulting_hours: string | null;
   credentials: DoctorProfileCredential[];
   notification_preferences: Record<string, boolean>;
 }
@@ -274,6 +318,19 @@ export interface DoctorProfileView {
  * patch: the backend requires the practice address and coordinates on every
  * call, so a caller always sends the complete editable projection.
  */
+/**
+ * The transitional whole-form write's body, as this client still sends it.
+ *
+ * `availability` is GONE: #615 removed the only editor that fed it, and #610
+ * already retired the column it projected. The projection no longer carries the
+ * field either, so declaring it here would mean the page has to invent a value
+ * for a blob the backend has no writer for.
+ *
+ * What this type still describes is a route #611 removed. That is a known
+ * transitional gap this ticket deliberately does not close - the section-write
+ * calls (#616/#617) replace it, and each of them declares a different body
+ * (`DoctorProfilePracticeUpdate` and friends) rather than this one.
+ */
 export interface DoctorProfileUpdate {
   practice_name: string | null;
   practice_address: string;
@@ -282,7 +339,6 @@ export interface DoctorProfileUpdate {
   experience_years: number | null;
   languages: string[];
   about: string | null;
-  availability: string | null;
   notification_preferences: Record<string, boolean>;
 }
 
@@ -320,9 +376,15 @@ function isDoctorProfileView(value: unknown): value is DoctorProfileView {
     !("partner_id" in value) ||
     !("photo_ref" in value) ||
     !("practice_name" in value) ||
-    !("specialty" in value) ||
+    !("clinic_name" in value) ||
+    !("specialties" in value) ||
     !("verified" in value) ||
     !("practice_address" in value) ||
+    !("address_line" in value) ||
+    !("landmark" in value) ||
+    !("locality" in value) ||
+    !("city" in value) ||
+    !("pin_code" in value) ||
     !("practice_latitude" in value) ||
     !("practice_longitude" in value) ||
     !("area" in value) ||
@@ -330,7 +392,8 @@ function isDoctorProfileView(value: unknown): value is DoctorProfileView {
     !("experience_years" in value) ||
     !("about" in value) ||
     !("consultation_fee" in value) ||
-    !("availability" in value) ||
+    !("consulting_days" in value) ||
+    !("consulting_hours" in value) ||
     !("credentials" in value) ||
     !("notification_preferences" in value)
   ) {
@@ -338,7 +401,9 @@ function isDoctorProfileView(value: unknown): value is DoctorProfileView {
   }
   const view = value as DoctorProfileView;
   return (
+    Array.isArray(view.specialties) &&
     Array.isArray(view.languages) &&
+    Array.isArray(view.consulting_days) &&
     Array.isArray(view.credentials) &&
     view.credentials.every(isDoctorProfileCredential) &&
     typeof view.notification_preferences === "object" &&
