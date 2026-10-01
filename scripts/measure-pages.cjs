@@ -3,8 +3,10 @@ const net = require('node:net');
 
 // PHASE-2.6 T09 (#200): the homepage joins the measured routes; T10 (#201)
 // adds /staff/login so every shipped public/entry surface stays under the
-// NFR-003 budget.
-const CHANNELS = ['/', '/staff/login', '/patient', '/partner', '/operator'];
+// NFR-003 budget. #614 adds /doctor/profile - the first doctor console surface
+// under this gate, measured in the same change as the shadcn primitives it
+// adopts so the reported total already carries them.
+const CHANNELS = ['/', '/staff/login', '/patient', '/partner', '/operator', '/doctor/profile'];
 const WORKSPACE = '@caresetu/frontend';
 const BUDGET_BYTES = 1.5 * 1024 * 1024;
 const BUDGET_LABEL = `1.5 MB (${BUDGET_BYTES} bytes)`;
