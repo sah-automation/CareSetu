@@ -1,4 +1,4 @@
-"""PHASE-6 T03: the public provider profile against Postgres (#309).
+"""PHASE-6 T03: the public provider profile against Postgres (#309, widened #613).
 
 Exercises the ``MOD-002`` ``get_provider_profile`` facade against a live
 PostgreSQL mirroring ``test_directory_search.py`` (alembic head + raw seeding
@@ -6,16 +6,26 @@ of profiles/credentials/index rows):
 
 - Only ``[Active]`` partners with a ``directory_index`` entry AND all valid
   (verified, unexpired, unrevoked) credentials resolve a profile.
-- Not-``[Active]`` partners, partners with no index row, no credentials, or
+- Not ``[Active]`` partners, partners with no index row, no credentials, or
   any expired/revoked/unverified credential raise
   ``ProviderProfileNotFoundError`` - the 404 that keeps a hidden partner's
   identity private (never a "hidden" 200).
-- The profile payload carries only verified-safe fields: practice name,
-  partner type, specialty (doctors only), service area, the ``verified``
-  indicator and per-credential type + status label + expiry. Artifact refs and
-  PHI never appear.
+- The payload carries two bands. The **credential** band the platform checked:
+  practice name, partner type, the ``verified`` indicator and per-credential type
+  + status label + expiry. The **declared** band the doctor wrote since #613:
+  clinic name, the specialty SELECTION and the singular label taken from it,
+  languages, consulting days, consulting hours, about text, years of experience,
+  the structured address parts and the ``area`` label - all read off the profile
+  row, so they reflect the doctor's last save rather than a directory-entry copy
+  of it, and ``area`` is the declared locality the search card already reads
+  rather than the service-area vocabulary (#612).
+- The widening leaks nothing: a fully-declared partner resolves a payload with
+  no photo ref, no artifact refs, no coordinates, no notification preferences
+  and no registration-era display address in it, and a HIDDEN partner's declared
+  text never appears in the error either.
 - The ``verified`` indicator always agrees with search visibility: a partner
-  whose profile resolves is exactly one whose card appears in search.
+  whose profile resolves is exactly one whose card appears in search - and the
+  declared band does not reach it.
 
 Requires the native PostgreSQL; the suite skips cleanly when unreachable.
 """
@@ -115,12 +125,36 @@ async def _seed_partner(
     indexed: bool = True,
     is_active: bool = True,
     service_area_id: int | None = 1,
+    specialties: list[str] | None = None,
+    clinic_name: str | None = None,
+    languages: list[str] | None = None,
+    consulting_days: list[str] | None = None,
+    consulting_hours: str | None = None,
+    about: str | None = None,
+    experience_years: int | None = None,
+    address_line: str | None = None,
+    address_landmark: str | None = None,
+    address_locality: str | None = None,
+    address_city: str | None = None,
+    address_pin: str | None = None,
+    photo_ref: str | None = None,
+    notification_preferences: dict[str, bool] | None = None,
+    availability: str | None = None,
 ) -> int:
     """Seed profile + credential + optional directory index row directly.
 
-    ``service_area_id`` defaults to 1 (the Daltonganj row) so a resolved
-    profile carries a real area name; pass ``None`` to exercise the
-    application-layer default.
+    ``service_area_id`` is kept as a knob because it is exactly the recorded
+    value the public read must IGNORE: it defaults to 1 (the seeded Daltonganj
+    row) so a profile carrying a declared locality still has a recorded area to
+    disagree with.
+
+    The keyword arguments after ``service_area_id`` write the columns the four
+    section writes own (#608/#609/#610), so the widened payload can be asserted
+    against a real row rather than a mock. ``specialty`` seeds the DIRECTORY
+    ENTRY's copy and ``specialties`` the PROFILE ROW's selection - two columns,
+    kept separate here on purpose, because the entry only receives a copy from
+    the shared refresh (#607) and the profile row is the source of truth the
+    public read uses.
     """
     engine = create_async_engine(database_url, poolclass=NullPool)
     try:
@@ -129,9 +163,18 @@ async def _seed_partner(
                 text(
                     "INSERT INTO partner.partner_profiles "
                     "(identity_id, partner_type, status, practice_name, practice_address, "
-                    " practice_latitude, practice_longitude, service_area_id) "
+                    " practice_latitude, practice_longitude, service_area_id, "
+                    " clinic_name, specialties, languages, consulting_days, "
+                    " consulting_hours, about, experience_years, address_line, "
+                    " address_landmark, address_locality, address_city, address_pin, "
+                    " photo_ref, notification_preferences, availability) "
                     "VALUES (:identity_id, :partner_type, :status, :practice_name, "
-                    " 'integration test address', :latitude, :longitude, :service_area_id) "
+                    " 'integration test address', :latitude, :longitude, :service_area_id, "
+                    " :clinic_name, CAST(:specialties AS jsonb), CAST(:languages AS jsonb), "
+                    " CAST(:consulting_days AS jsonb), :consulting_hours, :about, "
+                    " :experience_years, :address_line, :address_landmark, "
+                    " :address_locality, :address_city, :address_pin, :photo_ref, "
+                    " CAST(:notification_preferences AS jsonb), :availability) "
                     "RETURNING id"
                 ),
                 {
@@ -142,6 +185,21 @@ async def _seed_partner(
                     "latitude": DALTONGANJ_LATITUDE,
                     "longitude": DALTONGANJ_LONGITUDE,
                     "service_area_id": service_area_id,
+                    "clinic_name": clinic_name,
+                    "specialties": json.dumps(specialties or []),
+                    "languages": json.dumps(languages or []),
+                    "consulting_days": json.dumps(consulting_days or []),
+                    "consulting_hours": consulting_hours,
+                    "about": about,
+                    "experience_years": experience_years,
+                    "address_line": address_line,
+                    "address_landmark": address_landmark,
+                    "address_locality": address_locality,
+                    "address_city": address_city,
+                    "address_pin": address_pin,
+                    "photo_ref": photo_ref,
+                    "notification_preferences": json.dumps(notification_preferences or {}),
+                    "availability": availability,
                 },
             )
             partner_id = int(profile.scalar_one())
@@ -204,7 +262,7 @@ async def test_profile_resolves_active_partner_with_safe_fields(
     partner_id = await _seed_partner(
         database_url,
         practice_name="Dr. Sharma Clinic",
-        specialty="General Physician",
+        specialties=["General Physician"],
     )
 
     view = await partner.get_provider_profile(partner_id)
@@ -212,13 +270,91 @@ async def test_profile_resolves_active_partner_with_safe_fields(
     assert view.partner_id == partner_id
     assert view.practice_name == "Dr. Sharma Clinic"
     assert view.partner_type == "doctor"
+    # The singular label is the first member of the declared selection (#613).
     assert view.specialty == "General Physician"
-    assert view.area == "Daltonganj"
     assert view.verified is True
     assert len(view.credentials) == 1
     credential = view.credentials[0]
     assert credential.credential_type == "medical_registration"
     assert credential.status == "verified"
+
+
+@pytest.mark.asyncio
+async def test_profile_carries_the_declared_fields_off_the_profile_row(
+    database_url: str, clean_partner: None, tmp_path: Path
+) -> None:
+    """#613: a completed profile surfaces every declared field, field by field.
+
+    Seeded on the PROFILE ROW - the column each section write lands on - which is
+    what the read projects. Asserted field by field rather than as a dict
+    comparison so a renamed or dropped field names itself instead of hiding
+    inside a mismatch.
+    """
+    _, partner = _facade(database_url, tmp_path)
+    partner_id = await _seed_partner(
+        database_url,
+        practice_name="Dr. Asha Verma",
+        specialty="General Physician",
+        specialties=["General Physician", "Pediatrician"],
+        clinic_name="Shanti Clinic",
+        languages=["Hindi", "English"],
+        consulting_days=["Monday", "Tuesday", "Saturday"],
+        consulting_hours="Mon-Sat, 9am-1pm",
+        about="Twenty years of neighbourhood practice, children first.",
+        experience_years=20,
+        address_line="12, Nehru Road",
+        address_landmark="Near the water tank",
+        address_locality="Sadar",
+        address_city="Daltonganj",
+        address_pin="827101",
+    )
+
+    view = await partner.get_provider_profile(partner_id)
+
+    assert view.clinic_name == "Shanti Clinic"
+    # The declared SELECTION, multi-valued: the representative ``specialty`` the
+    # narrow surfaces render stays, and this is the whole thing behind it.
+    assert view.specialties == ["General Physician", "Pediatrician"]
+    assert view.languages == ["Hindi", "English"]
+    assert view.consulting_days == ["Monday", "Tuesday", "Saturday"]
+    assert view.consulting_hours == "Mon-Sat, 9am-1pm"
+    assert view.about == "Twenty years of neighbourhood practice, children first."
+    assert view.experience_years == 20
+    assert view.address_line == "12, Nehru Road"
+    assert view.landmark == "Near the water tank"
+    assert view.locality == "Sadar"
+    assert view.city == "Daltonganj"
+    assert view.pin_code == "827101"
+    # AC 4: the widening reached the payload and NOT the indicator.
+    assert view.verified is True
+
+
+@pytest.mark.asyncio
+async def test_profile_reads_an_undeclared_band_as_nulls_and_empty_lists(
+    database_url: str, clean_partner: None, tmp_path: Path
+) -> None:
+    """A doctor who has declared nothing still resolves, with empties not nulls."""
+    _, partner = _facade(database_url, tmp_path)
+    partner_id = await _seed_partner(
+        database_url,
+        practice_name="Dr. Bare",
+        specialty="General Physician",
+    )
+
+    view = await partner.get_provider_profile(partner_id)
+
+    assert view.clinic_name is None
+    assert view.specialties == []
+    assert view.languages == []
+    assert view.consulting_days == []
+    assert view.consulting_hours is None
+    assert view.about is None
+    assert view.experience_years is None
+    assert view.address_line is None
+    assert view.landmark is None
+    assert view.locality is None
+    assert view.city is None
+    assert view.pin_code is None
 
 
 @pytest.mark.asyncio
@@ -293,21 +429,36 @@ async def test_profile_hides_partner_without_any_credential(
 
 
 @pytest.mark.asyncio
-async def test_profile_area_falls_back_to_daltonganj_default(
+async def test_profile_area_reads_the_declared_locality_not_the_service_area(
     database_url: str, clean_partner: None, tmp_path: Path
 ) -> None:
-    """A partner declaring no service area resolves the Daltonganj default area."""
+    """#613 closes what #612 left: the profile's area is the DECLARED locality.
+
+    #612 moved the search card onto ``address_locality`` and named this read as
+    the half it did not touch, so a patient comparing the card with the profile
+    behind it was reading two different places. This pins that the two now agree
+    by giving the row a RECORDED service area (the seeded Daltonganj row) and a
+    DIFFERENT declared locality - "declared wins over recorded" is therefore a
+    real distinction and not the launch default read twice. The second profile
+    pins the other half: an undeclared locality is ``None``, not a substituted
+    vocabulary row name.
+    """
     _, partner = _facade(database_url, tmp_path)
-    partner_id = await _seed_partner(
+    declared = await _seed_partner(
         database_url,
-        practice_name="Dr. No Area",
+        practice_name="Dr. Sadar Practice",
+        service_area_id=1,
+        address_locality="Medininagar",
+    )
+    undeclared = await _seed_partner(
+        database_url,
+        practice_name="Dr. Nowhere Practice",
         service_area_id=None,
     )
 
-    view = await partner.get_provider_profile(partner_id)
-
-    assert view.area == "Daltonganj"
-    assert view.verified is True
+    assert (await partner.get_provider_profile(declared)).area == "Medininagar"
+    assert (await partner.get_provider_profile(undeclared)).area is None
+    assert (await partner.get_provider_profile(declared)).verified is True
 
 
 @pytest.mark.asyncio
@@ -326,6 +477,7 @@ async def test_profile_specialty_doctors_only_lab_is_none(
 
     assert view.partner_type == "lab"
     assert view.specialty is None
+    assert view.specialties == []
     assert view.verified is True
 
 
@@ -352,3 +504,124 @@ async def test_profile_verified_agrees_with_search_visibility(
     assert await _raises_not_found(partner.get_provider_profile(expired_id))
     profile = await partner.get_provider_profile(visible_id)
     assert profile.verified is True
+
+
+@pytest.mark.asyncio
+async def test_widened_profile_leaks_nothing_outside_its_two_bands(
+    database_url: str, clean_partner: None, tmp_path: Path
+) -> None:
+    """A completed profile still serializes nothing but the bands it declares.
+
+    The row is seeded with a photo ref, a credential artifact ref, notification
+    preferences, the inert pre-#610 ``availability`` blob and the
+    registration-era display address - every one of them a real column - and the
+    serialized response is scanned for all of them. A whole-body substring scan
+    rather than a key allowlist, so a field renamed into one of these fails here
+    instead of quietly widening the disclosure.
+    """
+    _, partner = _facade(database_url, tmp_path)
+    partner_id = await _seed_partner(
+        database_url,
+        practice_name="Dr. Asha Verma",
+        specialty="General Physician",
+        specialties=["General Physician"],
+        clinic_name="Shanti Clinic",
+        languages=["Hindi"],
+        consulting_days=["Monday"],
+        consulting_hours="Mon-Sat, 9am-1pm",
+        about="Twenty years of neighbourhood practice.",
+        experience_years=20,
+        address_line="12, Nehru Road",
+        address_locality="Sadar",
+        address_city="Daltonganj",
+        address_pin="827101",
+        photo_ref="doctor/9f1c/portrait.jpg",
+        notification_preferences={"new_consultations": True, "sms": True},
+        availability="Retired hand-typed blob",
+    )
+    engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "UPDATE partner.partner_credentials "
+                    "SET artifact_refs = CAST(:refs AS jsonb) WHERE profile_id = :profile_id"
+                ),
+                {
+                    "refs": json.dumps({"registration_certificate": "partner/9f1c/reg.pdf"}),
+                    "profile_id": partner_id,
+                },
+            )
+    finally:
+        await engine.dispose()
+
+    view = await partner.get_provider_profile(partner_id)
+    raw = json.dumps(view.model_dump(mode="json"))
+
+    for forbidden in (
+        "artifact",
+        "photo_ref",
+        "9f1c",
+        "identity_id",
+        "email",
+        "phone",
+        "notification_preferences",
+        "new_consultations",
+        "practice_address",
+        "integration test address",
+        "practice_latitude",
+        "practice_longitude",
+        "revoked_at",
+        "availability",
+        "Retired hand-typed blob",
+    ):
+        assert forbidden.lower() not in raw.lower(), forbidden
+    # The declared band IS present, so the scan above is a real pass rather than
+    # a projection that quietly dropped everything it was meant to carry.
+    assert view.clinic_name == "Shanti Clinic"
+    assert view.pin_code == "827101"
+
+
+@pytest.mark.asyncio
+async def test_a_hidden_partners_declared_fields_never_reach_the_caller(
+    database_url: str, clean_partner: None, tmp_path: Path
+) -> None:
+    """The widening must not open a second door for a partner search already hides.
+
+    A fully-declared doctor whose credential lapsed answers the same
+    ``ProviderProfileNotFoundError`` every other hidden shape answers, and the
+    error carries none of what the profile read now returns. That 404 is the
+    privacy posture, not a detail of it: a hidden partner has to be
+    indistinguishable from one who never existed, so no declared text may ride
+    out on the error instead.
+    """
+    _, partner = _facade(database_url, tmp_path)
+    partner_id = await _seed_partner(
+        database_url,
+        practice_name="Dr. Lapsed",
+        specialty="General Physician",
+        specialties=["General Physician"],
+        clinic_name="Confidential Clinic",
+        languages=["Hindi"],
+        consulting_days=["Monday"],
+        consulting_hours="Confidential hours",
+        about="Confidential about text.",
+        experience_years=41,
+        address_line="Confidential Road",
+        address_locality="Confidential",
+        address_city="Confidential",
+        address_pin="827101",
+        credential_expires_at=datetime.now(UTC) - timedelta(days=1),
+    )
+
+    with pytest.raises(ProviderProfileNotFoundError) as excinfo:
+        await partner.get_provider_profile(partner_id)
+
+    assert excinfo.value.partner_id == partner_id
+    # Distinctive TEXT markers only. The partner id is the one thing the error is
+    # entitled to carry, and it is a bare counter, so pinning a numeric field
+    # here would collide with it and make this a flaky assertion about the wrong
+    # thing.
+    error_text = f"{excinfo.value} {excinfo.value.__dict__}".lower()
+    for leaked in ("confidential", "shanti", "827101", "pediatrician"):
+        assert leaked.lower() not in error_text, leaked

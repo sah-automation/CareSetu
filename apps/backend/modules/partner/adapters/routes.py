@@ -129,16 +129,20 @@ async def public_provider_profile(
     request: Request,
     partner_id: int,
 ) -> ProviderProfileView:
-    """Public provider profile (FEAT-005, PHASE-6 T03 #309).
+    """Public provider profile (FEAT-005, PHASE-6 T03 #309, widened by #613).
 
-    Thin unauthenticated adapter over the ``MOD-002`` profile facade:
-    patients view a provider's verified credentials (type + status labels,
-    expiry date), service area and a truthful ``verified`` indicator.
+    Thin unauthenticated adapter over the ``MOD-002`` profile facade: patients
+    view a provider's verified credentials (type + status labels, expiry date)
+    and a truthful ``verified`` indicator, alongside the practice details the
+    doctor declared (clinic, specialties, languages, consulting days and hours,
+    about, experience, structured address parts, and the declared locality as
+    ``area``). Which of those fields a patient may believe is told by the field
+    itself, not by a flag - ``verified`` covers the credential band only.
     ``partner_id`` is the path parameter. The facade owns the visibility gate:
     not ``[Active]``, no index row, no credentials or any invalid credential
-    raises :class:`ProviderProfileNotFoundError` mapped to the 404 envelope.
-    The route carries no business logic - visibility derivation, credential
-    display, and the service-area default live in the facade.
+    raises :class:`ProviderProfileNotFoundError` mapped to the 404 envelope. The
+    route carries no business logic - visibility derivation, credential display
+    and the declared-field projections live in the facade.
     """
     facade = cast(PartnerFacade, request.app.state.partner_facade)
     return await facade.get_provider_profile(partner_id)

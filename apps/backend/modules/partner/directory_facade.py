@@ -13,8 +13,9 @@ The sub-facade owns the patient-facing read surface:
   verified, unexpired and unrevoked, nearest-first by great-circle distance,
   with the wider-area fallback and the ``directory.search`` analytics event.
 - ``get_provider_profile`` is the public provider profile (FEAT-005, PHASE-6
-  T03 #309): the verified-safe profile, hidden exactly when search hides the
-  card.
+  T03 #309, widened by #613 with the doctor's declared fields): the verified
+  credential band plus the band the doctor declared, hidden exactly when
+  search hides the card.
 - ``record_partner_selected`` records one ``partner.selected`` analytics pick
   (PHASE-6 T4 #326).
 - ``_cached_search_view`` / ``_cached_ids_still_valid`` are the cached-search
@@ -58,18 +59,22 @@ from modules.partner.domain.events import (
 )
 from modules.partner.domain.exceptions import ProviderProfileNotFoundError
 from modules.partner.domain.practice_position import EARTH_MEAN_RADIUS_KM
+from modules.partner.domain.vocabularies import (
+    ConsultingDay,
+    ConsultLanguage,
+    Specialty,
+)
 from modules.partner.outbox import PARTNER_OUTBOX_TABLE
 from modules.partner.schema.models import (
     partner_credentials,
     partner_directory_index,
     partner_profiles,
-    partner_service_areas,
 )
 from modules.partner.shared import (
-    DEFAULT_SERVICE_AREA_NAME,
     PARTNER_SCHEMA,
     CredentialValidityPort,
     DirectoryCachePort,
+    known_selection,
     representative_specialty,
 )
 
@@ -411,9 +416,9 @@ class DirectoryFacade:
             )
 
     async def get_provider_profile(self, partner_id: int) -> ProviderProfileView:
-        """Public provider profile (MOD-002, FEAT-005, PHASE-6 T03 #309).
+        """Public provider profile (MOD-002, FEAT-005, PHASE-6 T03 #309, #613).
 
-        Returns the verified-safe profile of an ``[Active]`` partner that has a
+        Returns the profile of an ``[Active]`` partner that has a
         ``directory_index`` entry and valid (verified, unexpired, unrevoked)
         credentials. The four-condition visibility gate matches search exactly
         (ADR-0011 "tick gone = card gone"): not ``[Active]``, no index row, no
@@ -422,11 +427,23 @@ class DirectoryFacade:
         is hidden exactly when search hides the card, so the indicator can
         never drift.
 
-        Payload carries only verified-safe fields: display name
-        (``practice_name``), partner type, specialty (doctors only), service
-        area, the ``verified`` indicator (always True for a reachable profile)
-        and per-credential type + status label + expiry date. Never exposed:
-        artifact refs, emails, phones, PHI.
+        The payload carries two bands, and the gate above is what separates them
+        for a reader. The **verified** band - display name
+        (``practice_name``), partner type, the ``verified`` indicator (always
+        True for a reachable profile) and the per-credential type + status label
+        + expiry date - is what the platform checked. The **declared** band -
+        ``clinic_name``, the ``specialties`` SELECTION and the singular
+        ``specialty`` label derived from it, ``languages``, ``consulting_days``,
+        ``consulting_hours``, ``about``, ``experience_years``, the structured
+        address parts and the ``area`` label - is what the doctor wrote, and
+        widening it to those does not widen ``verified``: reaching the profile
+        still proves exactly the four gate conditions and not one declared field
+        among them.
+
+        Never exposed, before or after the widening: artifact refs (photo and
+        credential bytes stay in private object storage, ADR-0020), the
+        practice's coordinates, emails, phones, the partner's identity id,
+        notification preferences, and PHI.
         """
         async with self._engine.begin() as connection:
             row = (
@@ -436,16 +453,33 @@ class DirectoryFacade:
                         partner_directory_index.c.partner_type,
                         partner_directory_index.c.specialty,
                         partner_profiles.c.practice_name,
-                        partner_service_areas.c.name.label("area_name"),
                         partner_profiles.c.consultation_fee_paise.label("consultation_fee"),
+                        # The declared band (#613), all off the PROFILE ROW. The
+                        # profile row is the source of truth for every one of
+                        # these - it is what the four section writes land on -
+                        # so reading them here cannot disagree with what the
+                        # doctor last saved the way a directory-entry copy could.
+                        partner_profiles.c.clinic_name,
+                        partner_profiles.c.specialties,
+                        partner_profiles.c.languages,
+                        partner_profiles.c.consulting_days,
+                        partner_profiles.c.consulting_hours,
+                        partner_profiles.c.about,
+                        partner_profiles.c.experience_years,
+                        # The structured address parts rather than the
+                        # ``practice_address`` display string, which is a
+                        # denormalised registration-era projection of these
+                        # (#606) and stays private to the console and the
+                        # operator queue.
+                        partner_profiles.c.address_line,
+                        partner_profiles.c.address_landmark,
+                        partner_profiles.c.address_locality,
+                        partner_profiles.c.address_city,
+                        partner_profiles.c.address_pin,
                     )
                     .join(
                         partner_profiles,
                         partner_profiles.c.id == partner_directory_index.c.partner_id,
-                    )
-                    .outerjoin(
-                        partner_service_areas,
-                        partner_service_areas.c.id == partner_profiles.c.service_area_id,
                     )
                     .where(
                         partner_directory_index.c.partner_id == partner_id,
@@ -471,14 +505,48 @@ class DirectoryFacade:
                 )
             ).all()
 
+        # The three selections go through the closed vocabularies that own them
+        # (#602), not through a copy of a list restated here: a value outside
+        # ``Specialty`` / ``ConsultLanguage`` / ``ConsultingDay`` cannot reach a
+        # patient even off a hand-repaired row.
+        specialties = known_selection(row.specialties, Specialty)
         return ProviderProfileView(
             partner_id=int(row.partner_id),
             practice_name=(str(row.practice_name) if row.practice_name is not None else None),
             partner_type=str(row.partner_type),
-            specialty=representative_specialty(row.specialty),
-            area=(str(row.area_name) if row.area_name is not None else DEFAULT_SERVICE_AREA_NAME),
+            # The representative label is the FIRST member of the same filtered
+            # selection that ``specialties`` publishes, so one payload cannot
+            # report a label the list does not contain. That is also why it reads
+            # the profile row rather than the directory entry's copy (#606 kept
+            # both in step; the profile row is the one that is written).
+            specialty=(specialties[0] if specialties else None),
+            # The DECLARED locality, which is what search now reads for the
+            # card (#612), rather than the ``partner_service_areas`` vocabulary
+            # with its launch-default fallback - #612 named this the half it
+            # left, and a patient who compares the card with the profile behind
+            # it was reading two different places. Undeclared locality stays
+            # ``None``, the honest answer and the DEFAULT for a practice whose
+            # address section has not been saved yet.
+            area=row.address_locality,
+            # Reachability already proved all four gate conditions, so this is a
+            # derivation rather than a stored flag - and it stays that narrow: it
+            # covers the credential band, never a declared field.
             verified=True,
             consultation_fee=_row_fee_paise(row),
+            specialties=specialties,
+            languages=known_selection(row.languages, ConsultLanguage),
+            consulting_days=known_selection(row.consulting_days, ConsultingDay),
+            clinic_name=(str(row.clinic_name) if row.clinic_name is not None else None),
+            consulting_hours=row.consulting_hours,
+            about=row.about,
+            experience_years=(
+                int(row.experience_years) if row.experience_years is not None else None
+            ),
+            address_line=row.address_line,
+            landmark=row.address_landmark,
+            locality=row.address_locality,
+            city=row.address_city,
+            pin_code=row.address_pin,
             credentials=[
                 ProviderCredential(
                     credential_type=str(c.credential_type),

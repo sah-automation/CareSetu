@@ -43,7 +43,8 @@ Methods (delegated to the directory sub-facade - WI-2 p2b #337):
   analytics event; Redis-accelerated with lazy validity re-derivation
   (PHASE-6 T02b, #314).
 - ``get_provider_profile`` is the public provider profile (FEAT-005): the
-  verified-safe profile, hidden exactly when search hides the card.
+  verified credential band plus the practice details the doctor declared
+  (#613), hidden exactly when search hides the card.
 - ``record_partner_selected`` records one ``partner.selected`` analytics pick.
 
 Methods (delegated to the credential-intake sub-facade - WI-2 p2c #338):
@@ -1108,15 +1109,18 @@ class PartnerFacade:
         )
 
     async def get_provider_profile(self, partner_id: int) -> ProviderProfileView:
-        """Public provider profile (MOD-002, FEAT-005, PHASE-6 T03 #309).
+        """Public provider profile (MOD-002, FEAT-005, PHASE-6 T03 #309, #613).
 
         Delegated to the directory sub-facade (ADR-0006, WI-2 p2b #337): the
-        verified-safe profile of an ``[Active]`` partner with a
-        ``directory_index`` entry and valid (verified, unexpired, unrevoked)
-        credentials. The visibility gate matches search exactly - the profile
-        is hidden (``ProviderProfileNotFoundError``, mapped to a 404) exactly
-        when search hides the card (ADR-0011 "tick gone = card gone"). Never
-        exposed: artifact refs, emails, phones, PHI.
+        profile of an ``[Active]`` partner with a ``directory_index`` entry and
+        valid (verified, unexpired, unrevoked) credentials - the credential band
+        the platform checked plus the practice details the doctor declared. The
+        visibility gate matches search exactly - the profile is hidden
+        (``ProviderProfileNotFoundError``, mapped to a 404) exactly when search
+        hides the card (ADR-0011 "tick gone = card gone"), and widening the
+        payload to the declared fields widened nothing about it. Never exposed:
+        artifact refs, the practice's coordinates, emails, phones, the partner's
+        identity id, notification preferences, PHI.
         """
         return await self._directory.get_provider_profile(partner_id)
 
