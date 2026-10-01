@@ -1750,6 +1750,16 @@ const en = {
     publicPreviewHelp:
       "This is how patients see you in the directory. It is read-only here.",
     publicPreviewAction: "View public profile",
+    // #618: the LIVE preview - the public profile rendered from the fields being
+    // edited, updating as they are typed. It says where it comes from and that the
+    // tick in it is CareSetu's, because a doctor who cannot tell those apart is
+    // being shown a verification they did not earn. `Show`/`Hide` are the mobile
+    // disclosure's own two states (blueprint §9.3 progressive disclosure).
+    livePreviewHeading: "Live preview",
+    livePreviewHelp:
+      "Updates as you type. The tick is CareSetu's, not something you set.",
+    livePreviewShow: "Show",
+    livePreviewHide: "Hide",
     feeHeading: "Consultation fee",
     feeHelp:
       "Set the fee patients see when choosing you. Leave blank until set.",
@@ -3545,6 +3555,15 @@ export const STRINGS: Record<Lang, Dictionary> = {
       publicPreviewHelp:
         "मरीज़ आपको डायरेक्टरी में इसी तरह देखते हैं। यहाँ यह केवल-पढ़ने के लिए है।",
       publicPreviewAction: "सार्वजनिक प्रोफ़ाइल देखें",
+      // #618: the live preview's own copy. The bilingual parity rule (§9.2) means
+      // these ship in Hindi in the same commit - a doctor flipping the language
+      // must not meet an English sentence inside the thing showing them what a
+      // patient reads.
+      livePreviewHeading: "तत्काल पूर्वावलोकन",
+      livePreviewHelp:
+        "आपके लिखते ही यह बदलता है। यह टिक CareSetu का है, आपके द्वारा नहीं।",
+      livePreviewShow: "दिखाएँ",
+      livePreviewHide: "छिपाएँ",
       feeHeading: "परामर्श शुल्क",
       feeHelp:
         "वह शुल्क सेट करें जो मरीज़ आपको चुनने पर देखें। सेट न होने तक खाली रहेगा।",

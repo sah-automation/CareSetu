@@ -95,14 +95,14 @@ describe("ProfileIdentityBand", () => {
     // to decide what to tick would be a second derivation site, and the two would
     // eventually disagree - which is the failure "tick gone = card gone" rules out.
     renderBand({ verified: true });
-    expect(screen.getByTestId("profile-verified")).toHaveTextContent(
+    expect(screen.getByTestId("profile-identity-verified")).toHaveTextContent(
       t.verified,
     );
 
     cleanup();
 
     renderBand({ verified: false });
-    expect(screen.getByTestId("profile-verified")).toHaveTextContent(
+    expect(screen.getByTestId("profile-identity-verified")).toHaveTextContent(
       t.notVerified,
     );
   });

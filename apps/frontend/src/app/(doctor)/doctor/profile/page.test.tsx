@@ -324,7 +324,7 @@ describe("DoctorProfilePage shell (#615)", () => {
     );
     // Both trust cues come from the one flag, so the chip row and the verified
     // band below cannot end up telling two different stories.
-    expect(screen.getByTestId("profile-verified")).toHaveTextContent(
+    expect(screen.getByTestId("profile-identity-verified")).toHaveTextContent(
       t.verified,
     );
     expect(
@@ -428,7 +428,7 @@ describe("DoctorProfilePage shell (#615)", () => {
     // not happen - the exact failure "tick gone = card gone" rules out.
     await renderReady(profile({ verified: false }));
 
-    expect(screen.getByTestId("profile-verified")).toHaveTextContent(
+    expect(screen.getByTestId("profile-identity-verified")).toHaveTextContent(
       t.notVerified,
     );
     const verified = screen.getByTestId("profile-verified-band");
@@ -545,9 +545,30 @@ describe("DoctorProfilePage shell (#615)", () => {
     const area = "Zzz-platform-seed-area";
     await renderReady(profile({ area }));
 
+    // Still absent from the WHOLE page, live preview included: the preview maps
+    // the declared locality onto the public projection's `area`, so a regression
+    // that reached for the platform seed would show this string.
     expect(screen.queryByText(area)).toBeNull();
-    // And the label that named it is gone from the copy, not merely unrendered.
-    expect(screen.queryByText(/area/i)).toBeNull();
+
+    // #618 changed where the WORD lives, not what it may label. The doctor's own
+    // copy still never names a service area - but the live preview does, because
+    // the public profile labels the declared locality "Service area" and the whole
+    // point of the preview is that it says what the patient surface says. So the
+    // word's absence is asserted over the doctor's own copy, with the preview
+    // excluded rather than the assertion weakened.
+    const clone = document.body.cloneNode(true) as HTMLElement;
+    for (const node of clone.querySelectorAll(
+      '[data-testid="profile-live-preview"]',
+    )) {
+      node.remove();
+    }
+    expect(clone.textContent).not.toMatch(/area/i);
+
+    // And inside the preview it is the locality on the patient surface's own
+    // label - never the platform seed beside it.
+    const preview = screen.getByTestId("profile-live-preview");
+    expect(preview).toHaveTextContent("Service area");
+    expect(preview).toHaveTextContent("Daltonganj");
   });
 });
 
@@ -566,7 +587,7 @@ describe("DoctorProfilePage projection", () => {
     expect(screen.getByTestId("profile-specialty")).toHaveTextContent(
       "General Physician",
     );
-    expect(screen.getByTestId("profile-verified")).toHaveTextContent(
+    expect(screen.getByTestId("profile-identity-verified")).toHaveTextContent(
       t.verified,
     );
     // #616: the address renders from the projection's STRUCTURED parts now, in its
@@ -1879,5 +1900,71 @@ describe("DoctorProfilePage axe (REQ)", () => {
 
     expect((await axe.run(container)).violations).toEqual([]);
     settle(profile({ practice_name: "Sunrise Clinic 4" }));
+  });
+});
+
+describe("DoctorProfilePage live preview (#618)", () => {
+  it("renders the public profile's renderer beside the form", async () => {
+    await renderReady();
+
+    // The preview is not a summary the page wrote: it is the same renderer the
+    // public route runs, which the no-drift suite in `components/public` pins.
+    expect(screen.getByTestId("profile-live-preview")).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("profile-live-preview")).getByTestId(
+        "profile-hero",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("profile-live-preview")).toHaveTextContent(
+      t.livePreviewHelp,
+    );
+  });
+
+  it("follows the practice name as the doctor types, with no save in between", async () => {
+    // The whole reason the preview exists: what the doctor is about to publish is
+    // visible while they are still deciding it.
+    await renderReady();
+
+    const preview = () => screen.getByTestId("profile-live-preview");
+    expect(preview()).toHaveTextContent("Sunrise Clinic");
+
+    fireEvent.change(screen.getByTestId("profile-practice-name"), {
+      target: { value: "Sunrise Clinic 4" },
+    });
+
+    expect(within(preview()).getByTestId("profile-name")).toHaveTextContent(
+      "Sunrise Clinic 4",
+    );
+  });
+
+  it("follows the declared locality as the doctor types it", async () => {
+    // The public projection serves the DECLARED locality, so the locality field is
+    // the one address input the preview can honestly show. The PIN, the street and
+    // the city are not on the public surface at all.
+    await renderReady();
+
+    fireEvent.change(screen.getByTestId("profile-address-locality"), {
+      target: { value: "Medininagar" },
+    });
+
+    expect(
+      within(screen.getByTestId("profile-live-preview")).getByTestId(
+        "profile-details",
+      ),
+    ).toHaveTextContent("Medininagar");
+  });
+
+  it("leaves the page with exactly one h1", async () => {
+    // The preview renders the same name the public page shows as its heading, so
+    // the level is a prop: a second `h1` here would give a screen reader two
+    // titles and undo what the identity band was built to do.
+    await renderReady();
+
+    expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
+    expect(
+      within(screen.getByTestId("profile-live-preview")).getByTestId(
+        "profile-name",
+      ).tagName,
+    ).toBe("H2");
   });
 });

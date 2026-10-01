@@ -33,6 +33,7 @@ import {
   type SectionSaveResult,
 } from "./ProfileSectionShell";
 import { ProfileToggleField } from "./ProfileToggleField";
+import { usePublicProfileDraft } from "./PublicProfileDraftContext";
 import { SPECIALTIES, type ProfileSpecialty } from "./profileVocabularies";
 import {
   invalidPracticeFields,
@@ -42,6 +43,7 @@ import {
   type PracticeFieldName,
   type PracticeFields,
 } from "./practiceCardFields";
+import { practiceDraftFromFields } from "./publicProfileProjection";
 import { useRefusedFieldErrors } from "./useRefusedFieldErrors";
 import { useSectionEditBuffer } from "./useSectionEditBuffer";
 import { useSectionValidation } from "./useSectionValidation";
@@ -97,6 +99,10 @@ export function PracticeSectionCard() {
   // The same shared answer object every other surface reads, which is what makes
   // the buffer's identity guard correct.
   const { profile, adoptProfile } = useDoctorProfile();
+  // #618: the live preview reads this card's typed values. The card is the only
+  // writer of its own slice, so the publication lives in its change handler rather
+  // than in an effect - which is also what keeps it on the keystroke.
+  const { publish } = usePublicProfileDraft();
 
   const buffer = useSectionEditBuffer(profile, practiceFromProfile);
   const fields = buffer.value;
@@ -136,6 +142,12 @@ export function PracticeSectionCard() {
 
   function change(patch: Partial<PracticeFields>) {
     buffer.change(patch);
+    // #618: publish the values the card NOW holds rather than the ones it held a
+    // render ago, so the preview and the input are never a keystroke apart. The
+    // draft carries no verified field, so nothing typed here can reach a tick.
+    if (fields != null) {
+      publish("practice", practiceDraftFromFields({ ...fields, ...patch }));
+    }
     validation.changed(patch);
     refused.clear();
     attemptKey.current = null;

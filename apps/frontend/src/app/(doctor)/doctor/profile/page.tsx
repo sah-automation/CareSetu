@@ -42,6 +42,18 @@
 // `PageHeader` therefore survives for the two states with no name to show -
 // loading and a failed read.
 //
+// #618: the page mounts the live preview. The public profile's renderer now lives
+// in one presentational component, and the page renders it in a second column
+// beside the form - sticky on a desktop, collapsible on a phone - fed by a draft
+// provider the two cards with a publishable field write into as the doctor types.
+// So what a patient will see is on the doctor's own screen, updating per
+// keystroke, and it cannot be a second copy that drifts.
+//
+// The one provider for the whole page is why the cards need to know nothing about
+// each other: `PublicProfileDraftProvider` is seeded from the SAME `profile` the
+// bands read, and the practice and address cards fold their typed values into it.
+// No card fetches anything new and no field is stored twice.
+//
 // CLOSING NOTES, per the brief's ask to record what a reviewer cannot see:
 //
 // 1. Changed a landed sibling's contract: `ProfileSectionShell` gained an
@@ -66,6 +78,26 @@
 //    was on the address card only because #615 had nowhere else to put a field
 //    the whole-form write carried, and #610's About write is the one that takes
 //    languages - so the editor now sits on the card that can save it.
+// 6. #618 changed the page's LAYOUT, which no earlier note records: the two bands
+//    and the fee card moved into the left cell of a two-column grid with the
+//    preview in the right. `items-start` is deliberately absent - the preview is
+//    sticky and needs the full height of its cell - and the preview's cell is
+//    `order-first` so a phone shows it directly under the identity band.
+// 7. #618 renamed the identity band's tick test id from `profile-verified` to
+//    `profile-identity-verified`, because the preview puts the public renderer's
+//    `profile-verified` on this same page and two components cannot share a test
+//    id. The renderer kept its name: it predates this page and its own suite pins
+//    it. The band's markup, copy and dictionary keys are untouched.
+// 8. A landed test changed meaning, not strength: "never renders the service-area
+//    vocabulary name" now excludes the preview from the word's absence, because
+//    the public profile labels the declared locality "Service area" and the
+//    preview's job is to say what the patient surface says. The value the test was
+//    really guarding - the platform seed - is still asserted absent from the whole
+//    page, and the preview is additionally asserted to show the locality beside
+//    that label.
+// 9. Two cards now require `PublicProfileDraftProvider` to render. That is the
+//    cost of the seam: a card that could silently fail to publish would show a
+//    preview that stopped updating, which is worse than a loud failure.
 
 import { useEffect, useRef, useState } from "react";
 
@@ -76,6 +108,8 @@ import { NotificationSectionCard } from "@/components/doctor/profile/Notificatio
 import { PracticeSectionCard } from "@/components/doctor/profile/PracticeSectionCard";
 import { ProfileCredentialList } from "@/components/doctor/profile/ProfileCredentialList";
 import { ProfileIdentityBand } from "@/components/doctor/profile/ProfileIdentityBand";
+import { ProfileLivePreview } from "@/components/doctor/profile/ProfileLivePreview";
+import { PublicProfileDraftProvider } from "@/components/doctor/profile/PublicProfileDraftContext";
 import {
   PROFILE_ANCHORS,
   ProfileSectionIndex,
@@ -273,75 +307,101 @@ export default function DoctorProfilePage() {
       {status === "loading" && <LoadingSkeleton />}
 
       {ready && (
-        <div className="space-y-4">
-          <ProfileIdentityBand
-            profile={profile}
-            photoUrl={photoUrl}
-            mediaAbsent={mediaAbsent}
-            busy={photoBusy}
-            failure={photoFailure}
-            onPick={(file) => void uploadPhoto(file)}
-            onRemove={() => void removePhoto()}
-            onDismissFailure={() => setPhotoFailure(null)}
-          />
+        // #618: one provider for the page, and the reason the cards can publish
+        // without knowing about each other. It is seeded from the SAME projection
+        // the bands read, and the two cards that carry a field the public profile
+        // shows fold their typed values into it on every keystroke.
+        <PublicProfileDraftProvider profile={profile}>
+          <div className="space-y-4">
+            <ProfileIdentityBand
+              profile={profile}
+              photoUrl={photoUrl}
+              mediaAbsent={mediaAbsent}
+              busy={photoBusy}
+              failure={photoFailure}
+              onPick={(file) => void uploadPhoto(file)}
+              onRemove={() => void removePhoto()}
+              onDismissFailure={() => setPhotoFailure(null)}
+            />
 
-          <ProfileSectionIndex anchors={anchors} />
+            <ProfileSectionIndex anchors={anchors} />
 
-          {/* The verified band: what the platform derived and checked. Read-only,
-              and its tick is the identity band's tick - one flag, read twice -
-              so the two bands cannot disagree about the same doctor. A false flag
-              renders no tick here at all, never a tick beside a stale list. */}
-          <ProfileSectionShell
-            title={t.verifiedBandTitle}
-            help={t.verifiedBandHelp}
-            anchorId={PROFILE_ANCHORS.verified}
-            testId="profile-verified-band"
-          >
-            <ProfileCredentialList profile={profile} />
-          </ProfileSectionShell>
+            {/* Two columns on a desktop: the form, and the profile it is about.
+                The preview is `order-first` so on a phone it sits directly under
+                the identity band - the doctor sees the effect of a keystroke before
+                the field they are typing in scrolls away - while on a desktop the
+                grid places it in the second column. `items-start` is deliberately
+                absent: the preview is sticky, and it needs the full height of its
+                grid cell to have anywhere to stick to. */}
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px] lg:gap-6">
+              <div className="min-w-0 space-y-4">
+                {/* The verified band: what the platform derived and checked.
+                    Read-only, and its tick is the identity band's tick - one flag,
+                    read twice - so the two bands cannot disagree about the same
+                    doctor. A false flag renders no tick here at all, never a tick
+                    beside a stale list. The preview beside it reads that same flag
+                    for its own tick, so all three agree or none does. */}
+                <ProfileSectionShell
+                  title={t.verifiedBandTitle}
+                  help={t.verifiedBandHelp}
+                  anchorId={PROFILE_ANCHORS.verified}
+                  testId="profile-verified-band"
+                >
+                  <ProfileCredentialList profile={profile} />
+                </ProfileSectionShell>
 
-          {/* The declared band: everything the doctor declared, and it says so in
-              words. It is a plain section, NOT a card, because it groups the four
-              saving cards below rather than holding fields of its own - and a card
-              inside a card is two nested surfaces reading as one.
+                {/* The declared band: everything the doctor declared, and it says
+                    so in words. It is a plain section, NOT a card, because it
+                    groups the four saving cards below rather than holding fields of
+                    its own - and a card inside a card is two nested surfaces
+                    reading as one.
 
-              The heading and the sentence beneath it are what make it a band at
-              all, and they are the reason the declared-vs-verified distinction is
-              still visible: every card inside this section is unchecked by
-              CareSetu, which is exactly what `declaredBandHelp` says. */}
-          <section
-            id={PROFILE_ANCHORS.declared}
-            data-testid="profile-declared-band"
-            className="space-y-4"
-            aria-labelledby="profile-declared-band-heading"
-          >
-            <div className="rounded-lg border border-hairline bg-surface p-4">
-              <h2
-                id="profile-declared-band-heading"
-                className="text-sm font-semibold text-txt"
-              >
-                {t.declaredBandTitle}
-              </h2>
-              <p className="mt-1 text-xs text-txt-muted">
-                {t.declaredBandHelp}
-              </p>
+                    The heading and the sentence beneath it are what make it a band
+                    at all, and they are the reason the declared-vs-verified
+                    distinction is still visible: every card inside this section is
+                    unchecked by CareSetu, which is exactly what `declaredBandHelp`
+                    says - and the preview in the second column is the rendered
+                    proof of it. */}
+                <section
+                  id={PROFILE_ANCHORS.declared}
+                  data-testid="profile-declared-band"
+                  className="space-y-4"
+                  aria-labelledby="profile-declared-band-heading"
+                >
+                  <div className="rounded-lg border border-hairline bg-surface p-4">
+                    <h2
+                      id="profile-declared-band-heading"
+                      className="text-sm font-semibold text-txt"
+                    >
+                      {t.declaredBandTitle}
+                    </h2>
+                    <p className="mt-1 text-xs text-txt-muted">
+                      {t.declaredBandHelp}
+                    </p>
+                  </div>
+
+                  {/* Four cards, four routes, four buffers. #616 built the first
+                      of these; #617 built the other three and brought the address
+                      card inside the band it belongs to, so the band's four declared
+                      sections are together rather than split across the page. */}
+                  <PracticeSectionCard />
+                  <AddressSectionCard />
+                  <AboutSectionCard />
+                  <NotificationSectionCard />
+                </section>
+
+                <ConsultationFeeCard
+                  feePaise={profile.consultation_fee}
+                  onFeeSaved={onFeeSaved}
+                />
+              </div>
+
+              <div className="order-first min-w-0 lg:order-none">
+                <ProfileLivePreview />
+              </div>
             </div>
-
-            {/* Four cards, four routes, four buffers. #616 built the first of
-                these; #617 built the other three and brought the address card
-                inside the band it belongs to, so the band's four declared
-                sections are together rather than split across the page. */}
-            <PracticeSectionCard />
-            <AddressSectionCard />
-            <AboutSectionCard />
-            <NotificationSectionCard />
-          </section>
-
-          <ConsultationFeeCard
-            feePaise={profile.consultation_fee}
-            onFeeSaved={onFeeSaved}
-          />
-        </div>
+          </div>
+        </PublicProfileDraftProvider>
       )}
     </>
   );

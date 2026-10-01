@@ -50,6 +50,8 @@ import {
   type AddressFieldName,
 } from "./addressCardFields";
 import { inputClassName, ProfileField, fieldClassName } from "./ProfileField";
+import { usePublicProfileDraft } from "./PublicProfileDraftContext";
+import { addressDraftFromFields } from "./publicProfileProjection";
 import { PROFILE_ANCHORS } from "./ProfileSectionIndex";
 import {
   ProfileSectionShell,
@@ -92,6 +94,9 @@ export function AddressSectionCard() {
   // the buffer's identity guard correct: a card seeded from its own slice would
   // reseed whenever any other section's answer landed.
   const { profile, adoptProfile } = useDoctorProfile();
+  // #618: the live preview reads this card's typed locality, so this card is the
+  // only writer of that one slice of the draft.
+  const { publish } = usePublicProfileDraft();
 
   const buffer = useSectionEditBuffer(profile, addressFromProfile);
   const fields = buffer.value;
@@ -127,6 +132,13 @@ export function AddressSectionCard() {
 
   function change(patch: Parameters<typeof buffer.change>[0]) {
     buffer.change(patch);
+    // #618: publish the values the card NOW holds, so the preview and the input
+    // are never a keystroke apart. Only the locality is published - the PIN, the
+    // line and the city are not on the public projection (#619 widens that set),
+    // and publishing a field nothing renders would be publishing to nowhere.
+    if (fields != null) {
+      publish("address", addressDraftFromFields({ ...fields, ...patch }));
+    }
     setClientInvalid([]);
     refused.clear();
     attemptKey.current = null;

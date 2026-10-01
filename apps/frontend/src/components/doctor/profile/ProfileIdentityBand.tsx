@@ -117,7 +117,12 @@ export function ProfileIdentityBand({
               gone" means on a doctor's own page (ADR-0011). */}
           <Badge
             variant={profile.verified ? "default" : "secondary"}
-            data-testid="profile-verified"
+            // #618 renamed this from `profile-verified`. The live preview mounts
+            // the public profile's renderer on this same page, and that renderer's
+            // hero has carried `profile-verified` since #312 - two components on
+            // one screen cannot share a test id. The band is the one that needed a
+            // name of its own, since the renderer could not take one.
+            data-testid="profile-identity-verified"
             className={cn(
               "inline-flex items-center gap-1",
               profile.verified

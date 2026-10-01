@@ -38,6 +38,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 
 import { AddressSectionCard } from "./AddressSectionCard";
+import { PublicProfileDraftProvider } from "./PublicProfileDraftContext";
 import {
   ProfileSectionShell,
   type SectionSaveResult,
@@ -239,8 +240,12 @@ async function renderCard(
   getProfile.mockResolvedValue(view);
   render(
     <DoctorProfileProvider>
-      <AddressSectionCard />
-      {withSibling ? <SiblingSection /> : null}
+      {/* #618: the page mounts this around the form, and the card publishes its
+          typed values into it, so a card rendered on its own needs it too. */}
+      <PublicProfileDraftProvider profile={view}>
+        <AddressSectionCard />
+        {withSibling ? <SiblingSection /> : null}
+      </PublicProfileDraftProvider>
     </DoctorProfileProvider>,
   );
   return screen.findByTestId("profile-address-card");
@@ -632,8 +637,10 @@ describe("AddressSectionCard saves on its own (#616 AC 5)", () => {
   it("is not reseeded by another section's answer landing mid-edit", async () => {
     render(
       <DoctorProfileProvider>
-        <AddressSectionCard />
-        <AdoptProbe />
+        <PublicProfileDraftProvider profile={profile()}>
+          <AddressSectionCard />
+          <AdoptProbe />
+        </PublicProfileDraftProvider>
       </DoctorProfileProvider>,
     );
     await screen.findByTestId("profile-address-card");
