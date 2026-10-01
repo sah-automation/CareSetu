@@ -153,11 +153,12 @@ partner_profiles = Table(
     # SUPERSEDED by ``consulting_hours`` (#606), retained rather than dropped.
     # It was a single free-text blob typed against a placeholder reading "e.g.
     # Mon-Sat, 9am-1pm"; splitting it into a closed day selection plus hours as
-    # prose is what #610 writes. Nothing new writes this column, and the shipped
-    # whole-form write (retired by #611) still addresses it, so it is inert
-    # rather than gone. Its existing values are NOT parsed into the two new
-    # columns - recovering chips from hand-typed free text is guesswork, and a
-    # wrong guess is worse than an empty prompt.
+    # prose is what #610 writes. Nothing new writes this column and nothing does
+    # now: #611 retired the whole-form write that last addressed it, so it is
+    # inert rather than gone - kept until a migration of its own drops it (#606
+    # deferred that deliberately). Its existing values are NOT parsed into the
+    # two new columns - recovering chips from hand-typed free text is guesswork,
+    # and a wrong guess is worse than an empty prompt.
     Column("availability", Text, nullable=True),
     # The days this doctor consults on, as a selection against ``ConsultingDay``
     # (#602), written by #610. "A week, not a working week" - the closed list

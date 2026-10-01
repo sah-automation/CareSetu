@@ -46,7 +46,6 @@ from modules.partner.facade import (
     DoctorProfileNotificationUpdate,
     DoctorProfilePhotoView,
     DoctorProfilePracticeUpdate,
-    DoctorProfileUpdate,
     DoctorProfileView,
     PartnerFacade,
 )
@@ -113,26 +112,6 @@ async def get_doctor_profile(
 
 
 @router.put(
-    "/profile",
-    response_model=DoctorProfileView,
-    status_code=status.HTTP_200_OK,
-    summary="Update the calling active doctor's private profile",
-)
-async def update_doctor_profile(
-    request: Request,
-    account: Annotated[Principal, Depends(require_partner)],
-    body: DoctorProfileUpdate,
-) -> DoctorProfileView:
-    facade = cast(PartnerFacade, request.app.state.partner_facade)
-    doctor_id = await _require_doctor(request, account)
-
-    async def _call() -> DoctorProfileView:
-        return await facade.update_doctor_profile(doctor_id, body)
-
-    return await run_idempotent(request, _call, namespace=f"doctor:{doctor_id}")
-
-
-@router.put(
     "/profile/practice",
     response_model=DoctorProfileView,
     status_code=status.HTTP_200_OK,
@@ -145,12 +124,12 @@ async def update_doctor_profile_practice(
 ) -> DoctorProfileView:
     """Save the Practice card on its own path, not on ``/profile`` (#608).
 
-    The first of the four section writes; #611 retires the whole-form
-    ``update_doctor_profile`` above and #609/#610 add the other three. Each gets
-    its OWN path under the profile prefix rather than a second verb on
-    ``/profile``, because ``run_idempotent`` keys its stored result on the route
-    and the namespace: a client replaying an ``Idempotency-Key`` issued against
-    the whole-form write would otherwise be served this write's stored response.
+    The first of the four section writes that replaced the retired whole-form
+    profile ``PUT`` (#611); #609/#610 added the other three. Each gets its OWN
+    path under the profile prefix rather than a second verb on ``/profile``,
+    because ``run_idempotent`` keys its stored result on the route and the
+    namespace: a client replaying an ``Idempotency-Key`` issued against the
+    whole-form write would otherwise be served this write's stored response.
     The scoping itself is unchanged - per doctor, as on every other write here.
     """
     facade = cast(PartnerFacade, request.app.state.partner_facade)

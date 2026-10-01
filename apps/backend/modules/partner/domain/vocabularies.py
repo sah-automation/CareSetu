@@ -230,8 +230,8 @@ def require_consult_languages(raw: Iterable[object]) -> tuple[ConsultLanguage, .
     Stricter than the retired ``DoctorProfileUpdate.validate_languages`` on
     purpose. That validator trimmed each name and bounded it at 50 characters
     because the field was free text; a closed list has no such repair, so
-    ``"Hindi "`` is refused rather than tidied. #611 retires the model validator
-    and leaves this as the only rule.
+    ``"Hindi "`` is refused rather than tidied. #611 retired the model validator
+    with the whole-form model it belonged to, leaving this as the only rule.
     """
     return _require_members(raw, _CONSULT_LANGUAGE_BY_VALUE, InvalidConsultLanguageError)
 

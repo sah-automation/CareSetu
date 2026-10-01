@@ -29,56 +29,15 @@ class DoctorProfileCredential(BaseModel):
     expires_at: datetime | None
 
 
-class DoctorProfileUpdate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    practice_name: str | None = Field(default=None, max_length=120)
-    practice_address: str = Field(min_length=1, max_length=1000)
-    # ``practice_latitude`` / ``practice_longitude`` are GONE (#606) and this is
-    # what makes that a live guarantee rather than a documentation note: with
-    # ``extra="forbid"``, a request still sending either field is a 422, so a
-    # client can no longer place its own pin. The columns stay NOT NULL in the
-    # database because registration writes them and #609 derives them from the
-    # declared PIN; until the whole-form write is retired by #611 the shipped
-    # profile page still sends both, so every save from the real client is
-    # rejected until then. That is the intended loud failure - the alternative,
-    # accepting and discarding the field, would tell a doctor their coordinates
-    # saved when they did not.
-    experience_years: int | None = Field(default=None, ge=0, le=60)
-    languages: list[str] = Field(default_factory=list, max_length=20)
-    about: str | None = Field(default=None, max_length=5000)
-    availability: str | None = Field(default=None, max_length=1000)
-    notification_preferences: dict[str, bool] = Field(default_factory=dict)
-
-    @field_validator("languages")
-    @classmethod
-    def validate_languages(cls, value: list[str]) -> list[str]:
-        normalized = [language.strip() for language in value]
-        if any(not language or len(language) > 50 for language in normalized):
-            raise ValueError("languages must contain 1 to 50 character names")
-        if len({language.casefold() for language in normalized}) != len(normalized):
-            raise ValueError("languages must be unique")
-        return normalized
-
-    @field_validator("notification_preferences")
-    @classmethod
-    def validate_notification_preferences(cls, value: dict[str, bool]) -> dict[str, bool]:
-        if len(value) > 20:
-            raise ValueError("notification_preferences may contain at most 20 entries")
-        if any(not key or len(key) > 50 for key in value):
-            raise ValueError("notification preference names must contain 1 to 50 characters")
-        return value
-
-
 class DoctorProfilePracticeUpdate(BaseModel):
     """The Practice section write (#608) - who the doctor is and where they practise.
 
-    The first of the four section writes that replace the whole-form
-    ``DoctorProfileUpdate`` (#611 retires that one). A section save is the doctor
-    declaring one card's worth of fields, so it carries ONLY this card's fields
-    and ``extra="forbid"`` makes any other field a 422 rather than a silent
-    write: a client that saves the practice card cannot quietly rewrite the
-    address or the notification preferences it did not show.
+    The first of the four section writes that replaced the retired whole-form
+    profile write (#611). A section save is the doctor declaring one card's worth
+    of fields, so it carries ONLY this card's fields and ``extra="forbid"`` makes
+    any other field a 422 rather than a silent write: a client that saves the
+    practice card cannot quietly rewrite the address or the notification
+    preferences it did not show.
 
     Two of the four wire fields do not name their column, and both mappings are
     fixed here rather than guessed per call site:
@@ -111,7 +70,7 @@ class DoctorProfilePracticeUpdate(BaseModel):
     # rejects the first repeat or unknown member and says which one.
     specialties: list[str] = Field(default_factory=list)
     # #606's realistic 0..60 bound, in lockstep with the database CHECK and the
-    # migration - not the 0..100 the whole-form model carried before it.
+    # migration.
     experience_years: int | None = Field(default=None, ge=0, le=60)
 
     @field_validator("specialties")
@@ -178,10 +137,9 @@ class DoctorProfileAddressUpdate(BaseModel):
 class DoctorProfileAboutUpdate(BaseModel):
     """The About section write (#610) - who the doctor is, in their own words.
 
-    The third of the four section writes that replace the whole-form
-    ``DoctorProfileUpdate`` (#611 retires that one). The card it saves splits the
-    old ``availability`` blob in two, because the two halves want opposite
-    things:
+    The third of the four section writes that replaced the retired whole-form
+    profile write (#611). The card it saves splits the old ``availability`` blob
+    in two, because the two halves want opposite things:
 
     - **The days become a selection.** A doctor taps the days they consult on, out
       of the closed seven-day list, so the field is filterable and cannot carry a
@@ -257,8 +215,8 @@ class DoctorProfileAboutUpdate(BaseModel):
         second member - which is a STRONGER answer to the same-language-twice-in-two
         spellings problem this ticket opens with than case-folding ever was,
         because the list can only produce one spelling in the first place. #611
-        retires the free-text validator, leaving this as the only rule on
-        languages, so the two cannot disagree.
+        retires that free-text validator with the whole-form model it belonged to,
+        leaving this as the only rule on languages, so the two cannot disagree.
         """
         return [member.value for member in require_consult_languages(value)]
 
@@ -404,10 +362,11 @@ class DoctorProfileView(BaseModel):
     # that way on the wire as well as in the write. It replaces this view's
     # ``availability`` field (#610), which projected the column ``consulting_hours``
     # supersedes - a single blob mixing days and hours, where the days now have a
-    # closed list of their own. The COLUMN is retained rather than dropped (#606)
-    # because the whole-form write still addresses it until #611 retires it; the
-    # projection is not, because nothing new writes it and no reader should render
-    # an availability a doctor cannot edit.
+    # closed list of their own. The retired ``availability`` COLUMN is now inert
+    # too: #611 removed the last writer, and it is kept rather than dropped in a
+    # migration of its own (#606 deliberately deferred that). The projection is
+    # not replaced by anything, because no reader should render an availability a
+    # doctor cannot edit.
     consulting_hours: str | None = None
     credentials: list[DoctorProfileCredential] = Field(default_factory=list)
     notification_preferences: dict[str, bool] = Field(default_factory=dict)

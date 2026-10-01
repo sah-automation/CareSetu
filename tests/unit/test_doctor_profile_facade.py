@@ -14,7 +14,6 @@ from modules.partner.doctor_profile_models import (
     DoctorProfileAddressUpdate,
     DoctorProfileNotificationUpdate,
     DoctorProfilePracticeUpdate,
-    DoctorProfileUpdate,
 )
 from modules.partner.domain.exceptions import (
     InvalidConsultingDayError,
@@ -216,100 +215,6 @@ async def test_get_doctor_profile_projects_private_fields_and_derived_status() -
             "expires_at": None,
         },
     ]
-
-
-@pytest.mark.asyncio
-async def test_update_doctor_profile_writes_the_private_row_only() -> None:
-    update = DoctorProfileUpdate(
-        practice_name="Shanti Clinic",
-        practice_address="Main Road, Daltonganj",
-        experience_years=12,
-        languages=["English", "Hindi"],
-        about="Primary care physician.",
-        # #611 retires this whole-form write and with it the last writer of the
-        # inert ``availability`` column. Until then it still addresses that column,
-        # which is the one reader/writer left of it.
-        availability="Monday to Friday, 9 AM to 5 PM",
-        notification_preferences={"appointment_reminders": True, "sms": True},
-    )
-    connection = _connection(
-        [
-            _Result(row=_Row(partner_type="doctor", status="Active")),
-            _Result(),
-            _Result(
-                row=_Row(
-                    partner_id=12,
-                    partner_type="doctor",
-                    status="Active",
-                    photo_ref=None,
-                    practice_name="Anita Verma",
-                    clinic_name="Shanti Clinic",
-                    specialties=["Pediatrician", "General Physician"],
-                    practice_address="Main Road, Daltonganj",
-                    address_line=None,
-                    address_landmark=None,
-                    address_locality=None,
-                    address_city=None,
-                    address_pin=None,
-                    practice_latitude=24.483,
-                    practice_longitude=87.433,
-                    area_name="Daltonganj",
-                    languages=["English", "Hindi"],
-                    experience_years=12,
-                    about="Primary care physician.",
-                    consultation_fee_paise=50000,
-                    consulting_days=["Monday", "Tuesday", "Saturday"],
-                    consulting_hours="Monday to Friday, 9 AM to 5 PM",
-                    notification_preferences={"appointment_reminders": True, "sms": True},
-                )
-            ),
-            _Result(
-                rows=[
-                    _Row(
-                        credential_type="medical_registration",
-                        verified=True,
-                        expires_at=_NOW + timedelta(days=180),
-                        revoked_at=None,
-                        invalidation_reason=None,
-                    )
-                ]
-            ),
-        ]
-    )
-    facade = _facade(connection)
-    cache = _Cache()
-    facade._directory_cache = cache
-
-    profile = await facade.update_doctor_profile(12, update)
-
-    assert profile.practice_name == "Anita Verma"
-    assert profile.specialties == ["Pediatrician", "General Physician"]
-    assert profile.consultation_fee == 50000
-    statements = [call.args[0] for call in connection.execute.await_args_list]
-    profile_update = statements[1]
-    assert profile_update.table.name == "partner_profiles"
-    assert profile_update._values["practice_name"].value == "Shanti Clinic"
-    assert profile_update._values["languages"].value == ["English", "Hindi"]
-    assert "consultation_fee_paise" not in profile_update._values
-    # #606: the practice position is server-written only. The update model no
-    # longer carries the coordinate fields, and ``update.model_dump()`` is the
-    # exact mechanism that turns each model field into a written column - so a
-    # field that is gone from the model silently stops being written, with no
-    # other code change. Asserted as ABSENCE rather than a value, because that is
-    # the property: these columns stay NOT NULL in the database (registration
-    # writes them, #609 derives them from the declared PIN) and this write does
-    # not touch them.
-    assert "practice_latitude" not in profile_update._values
-    assert "practice_longitude" not in profile_update._values
-    # The public directory entry is read-only to the doctor in this batch: a
-    # private profile save must not touch the row ``search_directory`` reads.
-    written_tables = {
-        statement.table.name
-        for statement in statements
-        if getattr(statement, "table", None) is not None
-    }
-    assert written_tables == {"partner_profiles"}
-    assert cache.visibility_changes == 0
 
 
 def _practice_read_back_row() -> _Row:
@@ -1393,16 +1298,15 @@ async def test_update_doctor_about_and_notification_refuse_a_non_active_doctor(
 
 
 @pytest.mark.asyncio
-async def test_registered_doctor_cannot_read_or_update_profile() -> None:
+async def test_registered_doctor_cannot_read_the_profile() -> None:
+    """The private profile read refuses a partner who is not an ``[Active]`` doctor.
+
+    The write half of this test went with the whole-form write (#611); each
+    surviving section write asserts the same refusal under the row lock in its own
+    test, and the photo paths keep theirs in the two that follow.
+    """
     connection = _connection(
         [
-            _Result(
-                row=_Row(
-                    partner_type="doctor",
-                    status="Registered",
-                    photo_ref=None,
-                )
-            ),
             _Result(
                 row=_Row(
                     partner_type="doctor",
@@ -1416,15 +1320,8 @@ async def test_registered_doctor_cannot_read_or_update_profile() -> None:
 
     with pytest.raises(DoctorProfileNotAllowedError):
         await facade.get_doctor_profile(12)
-    with pytest.raises(DoctorProfileNotAllowedError):
-        await facade.update_doctor_profile(
-            12,
-            DoctorProfileUpdate(
-                practice_address="Main Road",
-            ),
-        )
 
-    assert connection.execute.await_count == 2
+    assert connection.execute.await_count == 1
 
 
 @pytest.mark.asyncio

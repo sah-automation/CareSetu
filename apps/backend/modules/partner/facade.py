@@ -173,9 +173,6 @@ from modules.partner.doctor_profile_models import (
     DoctorProfilePracticeUpdate as DoctorProfilePracticeUpdate,
 )
 from modules.partner.doctor_profile_models import (
-    DoctorProfileUpdate as DoctorProfileUpdate,
-)
-from modules.partner.doctor_profile_models import (
     DoctorProfileView as DoctorProfileView,
 )
 from modules.partner.domain.credentials import CredentialInvalidatedReason
@@ -1298,22 +1295,6 @@ class PartnerFacade:
             notification_preferences=dict(row.notification_preferences or {}),
         )
 
-    async def update_doctor_profile(
-        self,
-        doctor_id: int,
-        update: DoctorProfileUpdate,
-    ) -> DoctorProfileView:
-        values = update.model_dump()
-        async with self._engine.begin() as connection:
-            await _update_active_doctor_profile(connection, doctor_id, values)
-        # The public directory projection is NOT written here: this batch leaves
-        # the public entry read-only to the doctor (a preview, not an editor,
-        # #542), so a private profile save must not move the practice pin the
-        # public ``search_directory`` orders by. The practice geo the private
-        # projection serves lives on ``partner_profiles`` (written above) and
-        # only the partner-approval path re-derives the directory row.
-        return await self.get_doctor_profile(doctor_id)
-
     async def update_doctor_practice(
         self,
         doctor_id: int,
@@ -1321,22 +1302,22 @@ class PartnerFacade:
     ) -> DoctorProfileView:
         """Save the Practice card: the doctor's name, clinic, specialties, experience (#608).
 
-        The first of the four section writes that replace the whole-form
-        ``update_doctor_profile`` (#611 retires that one, and adds nothing). It
-        touches ONLY this card's columns - the doctor's ``practice_name``, the
-        ``clinic_name`` building, the ``specialties`` selection and
-        ``experience_years`` - and never the address, the languages, the about
-        text, the availability or the notification preferences. That is the whole
-        point of the split: a save of one card cannot move a field no card on the
-        screen is editing, so two doctors editing their profile concurrently lose
-        nothing but the field they were both typing in.
+        The first of the four section writes that replaced the retired whole-form
+        profile write (#611). It touches ONLY this card's columns - the doctor's
+        ``practice_name``, the ``clinic_name`` building, the ``specialties``
+        selection and ``experience_years`` - and never the address, the languages,
+        the about text, the availability or the notification preferences. That is
+        the whole point of the split: a save of one card cannot move a field no
+        card on the screen is editing, so two doctors editing their profile
+        concurrently lose nothing but the field they were both typing in.
 
-        The refusal and the lock are the whole-form write's, deliberately
-        unchanged and now shared rather than copied: ``_update_active_doctor_profile``
-        owns the ``SELECT ... FOR UPDATE`` recheck, the ``[Active]``-doctor refusal
-        and the update itself (api-standards §6: every authorization is re-checked
-        in the facade, not only at the edge). #609 and #610 call the same helper,
-        so all four section writes share one lock shape rather than four.
+        The refusal and the lock are the retired whole-form write's, deliberately
+        unchanged and now shared rather than copied:
+        ``_update_active_doctor_profile`` owns the ``SELECT ... FOR UPDATE``
+        recheck, the ``[Active]``-doctor refusal and the update itself
+        (api-standards §6: every authorization is re-checked in the facade, not
+        only at the edge). #609 and #610 call the same helper, so all four section
+        writes share one lock shape rather than four.
 
         The wire field ``full_name`` maps to the ``practice_name`` column here -
         see ``DoctorProfilePracticeUpdate`` for why the rename is on the wire and
@@ -1355,10 +1336,10 @@ class PartnerFacade:
         values["practice_name"] = values.pop("full_name")
         async with self._engine.begin() as connection:
             await _update_active_doctor_profile(connection, doctor_id, values)
-        # Same read-back as the whole-form write: the write returns the profile
-        # the doctor's next GET would serve, so the section card re-renders from
-        # one call. The public directory entry is still NOT written here - the
-        # shared refresh (#607) owns copying the specialties selection onto it.
+        # Every section write answers with the profile the doctor's next GET would
+        # serve, so the card re-renders from one call. The public directory entry
+        # is still NOT written here - the shared refresh (#607) owns copying the
+        # specialties selection onto it.
         return await self.get_doctor_profile(doctor_id)
 
     async def update_doctor_address(
@@ -1489,11 +1470,11 @@ class PartnerFacade:
         rather than moving it: the old ``availability`` blob becomes a closed
         seven-day SELECTION plus a free-prose hours string. The two halves go to
         two columns (``consulting_days``, ``consulting_hours``) and the old column
-        is not written at all - it is inert from #606 and #611 retires the
-        whole-form write that still addresses it. Nothing parses an existing
-        ``availability`` value into the two new columns: recovering chips from
-        hand-typed free text is guesswork, and a wrong guess is worse than an
-        empty prompt.
+        is not written at all - it has been inert since #606, and #611 retired the
+        whole-form write that last addressed it, so nothing writes it at all now.
+        Nothing parses an existing ``availability`` value into the two new
+        columns: recovering chips from hand-typed free text is guesswork, and a
+        wrong guess is worse than an empty prompt.
 
         It touches ONLY this card's columns - ``about``, the ``languages``
         selection, ``consulting_days`` and ``consulting_hours`` - and never the
