@@ -1,9 +1,19 @@
+"use client";
+
 // PHASE-8.1 (#543): doctor console Profile page - the live destination behind
 // the Profile nav entry that #541 left coming-soon. Renders and edits the private
 // profile projection from #542: photo upload/preview/remove through the
 // profile-media-backed private endpoints, practice details, experience,
 // languages, about, the verified/credential status, and the notification toggles.
 // Desktop and mobile, all copy bilingual en/hi (REQ-006).
+//
+// The directive is load-bearing: this module reads the shared profile source the
+// route-group layout mounts above it, holds the page's own photo/upload state, and
+// renders client children. Without it Next treats the module as a Server Component
+// and refuses to build it, so the route 500s rather than rendering a page with no
+// profile on it. It went missing in #615 and nothing noticed until #621, whose first
+// assertion failed - the vitest suite renders this component in jsdom, where there is
+// no Server/Client boundary to get wrong.
 
 // #583: the page keeps no local copy of the projection. It reads the shared
 // doctor profile source the (doctor) route-group layout mounts above it and the
