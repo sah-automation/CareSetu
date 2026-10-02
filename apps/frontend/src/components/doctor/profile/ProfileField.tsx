@@ -15,12 +15,16 @@
 // `htmlFor` is still declared, so the association is a real one and not a
 // positional coincidence - it is what a reader tool follows.
 //
-// A consequence worth stating, because the existing suite depends on it: the
-// help text sits INSIDE the label, so it joins the control's accessible name
-// ("Languages Separate with commas"). One binding that carries the label and its
-// hint beats a placeholder-only field, and it is why the tests match the language
-// field by prefix. The help text therefore must never be a full sentence that
-// reads oddly appended to the label.
+// #623 moved the help text OUT of the wrapping label and onto the control's
+// `aria-describedby`. Inside a `<label>` the help joins the control's ACCESSIBLE
+// NAME, so the languages field announced itself as "Languages Separate with
+// commas" - a screen reader user heard the hint as part of the field's name, and
+// any future full-sentence hint read as a broken field name. A name is what the
+// thing IS; a description is extra guidance about it, and `aria-describedby` is
+// the attribute that says "extra guidance". The binding is made by cloning the
+// control rather than by asking all thirteen call sites to thread an id, so the
+// fix is in one file; `mergeDescribedBy` keeps a caller's own `aria-describedby`
+// (the address card's error message, for one) instead of overwriting it.
 //
 // Deliberately NOT the adopted `Input` / `Textarea` primitives (#600): #615 splits
 // the page, it does not re-skin its fields, and the four sections' own contents
@@ -28,7 +32,7 @@
 // replace, and `fieldClassName` is the one place that decides what a field looks
 // like, so that replacement touches one file.
 
-import type { ReactNode } from "react";
+import { Children, cloneElement, isValidElement, type ReactNode } from "react";
 
 import { cn } from "@/lib/utils";
 
@@ -41,6 +45,19 @@ export function fieldClassName(invalid: boolean): string {
   return cn(inputClassName, invalid && "border-danger");
 }
 
+/** The help text's element id, derived from the control's own so it needs no prop. */
+function helpId(id: string): string {
+  return `${id}-help`;
+}
+
+/** Add the help to whatever descriptions the control already carries, not over them. */
+function mergeDescribedBy(existing: unknown, added: string): string {
+  if (typeof existing !== "string" || existing.length === 0) return added;
+  return existing.split(/\s+/).includes(added)
+    ? existing
+    : `${existing} ${added}`;
+}
+
 export interface ProfileFieldProps {
   id: string;
   label: string;
@@ -49,11 +66,39 @@ export interface ProfileFieldProps {
 }
 
 export function ProfileField({ id, label, help, children }: ProfileFieldProps) {
+  const control = Children.only(children);
+
+  // A caller that passes a fragment or several nodes gets the help rendered as
+  // plain adjacent text, unassociated rather than wrongly associated: there is no
+  // single control to describe, and guessing which one was meant is worse than
+  // the hint simply not being announced by name.
+  if (!isValidElement<{ "aria-describedby"?: unknown }>(control)) {
+    return (
+      <>
+        <label className="flex flex-col gap-1" htmlFor={id}>
+          <span className={labelClassName}>{label}</span>
+          {children}
+        </label>
+        {help && <p className="text-xs text-txt-muted">{help}</p>}
+      </>
+    );
+  }
+
   return (
-    <label className="flex flex-col gap-1" htmlFor={id}>
-      <span className={labelClassName}>{label}</span>
-      {children}
-      {help && <span className="text-xs text-txt-muted">{help}</span>}
-    </label>
+    <div className="flex flex-col gap-1">
+      <label className="flex flex-col gap-1" htmlFor={id}>
+        <span className={labelClassName}>{label}</span>
+        {cloneElement(control, {
+          "aria-describedby": help
+            ? mergeDescribedBy(control.props["aria-describedby"], helpId(id))
+            : control.props["aria-describedby"],
+        })}
+      </label>
+      {help && (
+        <p id={helpId(id)} className="text-xs text-txt-muted">
+          {help}
+        </p>
+      )}
+    </div>
   );
 }

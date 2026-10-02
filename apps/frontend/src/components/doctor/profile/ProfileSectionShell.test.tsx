@@ -216,6 +216,12 @@ describe("ProfileSectionShell", () => {
   });
 
   it("presents an unclassified throw as a failed attempt rather than letting it escape", async () => {
+    // #623: the catch used to be a bare `catch {}`, so the doctor got the banner
+    // and nothing else - the one place in the frontend where a real defect left no
+    // trace. An unexpected throw is an operational failure, not a rejected write,
+    // and the log line is what tells the two apart after the fact. Pinned because
+    // the log is the whole point of the catch: drop it and this suite stays green.
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     render(
       <Harness onSave={() => Promise.reject(new Error("no classification"))} />,
     );
@@ -227,6 +233,12 @@ describe("ProfileSectionShell", () => {
     await waitFor(() =>
       expect(screen.getByTestId("practice-save")).toBeEnabled(),
     );
+    // The `[scope] message:` shape the other unexpected-failure catches use.
+    expect(logged).toHaveBeenCalledWith(
+      expect.stringContaining("[profile-section]"),
+      expect.any(Error),
+    );
+    logged.mockRestore();
   });
 
   it("shows the unsaved hint once the section is dirty", () => {

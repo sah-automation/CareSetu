@@ -48,6 +48,7 @@ import {
   addressUpdateFromFields,
   invalidAddressFields,
   type AddressFieldName,
+  type AddressFields,
 } from "./addressCardFields";
 import { inputClassName, ProfileField, fieldClassName } from "./ProfileField";
 import { usePublicProfileDraft } from "./PublicProfileDraftContext";
@@ -59,6 +60,7 @@ import {
 } from "./ProfileSectionShell";
 import { useRefusedFieldErrors } from "./useRefusedFieldErrors";
 import { useSectionEditBuffer } from "./useSectionEditBuffer";
+import { useSectionValidation } from "./useSectionValidation";
 import { ApiError } from "@/lib/api-errors";
 import { useDoctorProfile } from "@/lib/doctor/DoctorProfileContext";
 import { updateDoctorProfileAddress } from "@/lib/doctor/api";
@@ -110,7 +112,17 @@ export function AddressSectionCard() {
   // than this card's own two booleans. Three sibling cards read the same 422 the
   // same way, so the reading - which paths are mine, which are not - lives in one
   // place and this card declares only the one path it can map.
-  const [clientInvalid, setClientInvalid] = useState<AddressFieldName[]>([]);
+  //
+  // #623: the CLIENT side moved onto the shared `useSectionValidation` too. It was
+  // the last card still holding its own `clientInvalid` state, which meant it
+  // validated on submit and never on blur - so a doctor who typed an unresolvable
+  // PIN, tabbed away and came back got nothing until they pressed Save, while the
+  // three sibling cards had already told them at the blur. Blueprint A9.5 asks for
+  // both, and "the fourth card is the exception" is how four cards drift apart.
+  const validation = useSectionValidation<AddressFieldName, AddressFields>(
+    fields,
+    invalidAddressFields,
+  );
   const refused = useRefusedFieldErrors([PIN_PATH]);
   const [belt, setBelt] = useState<BeltNotice | null>(null);
 
@@ -122,13 +134,17 @@ export function AddressSectionCard() {
   const pinRef = useRef<HTMLInputElement | null>(null);
   const firstPartRef = useRef<HTMLInputElement | null>(null);
 
-  const pinInvalid = clientInvalid.includes(PIN_PATH);
+  const pinInvalid = validation.showsError(PIN_PATH);
   const serverPinError = refused.refused.has(PIN_PATH);
   // A server `path` this card cannot map to an input lands in the form summary
   // instead (ui-blueprint §9.5): dropping it would hide a real failure, and
   // guessing it onto the nearest input would blame a field the server never named.
   const unmappedServerError = refused.unmapped;
-  const showSummary = clientInvalid.length > 0 || unmappedServerError;
+  // A submit answer, not a blur answer: one refused PIN belongs beside the PIN,
+  // and the count-and-walk summary is for the moment more than one thing is wrong.
+  const showSummary =
+    (validation.submitted && validation.invalid.length > 0) ||
+    unmappedServerError;
 
   function change(patch: Parameters<typeof buffer.change>[0]) {
     buffer.change(patch);
@@ -139,7 +155,9 @@ export function AddressSectionCard() {
     if (fields != null) {
       publish("address", addressDraftFromFields({ ...fields, ...patch }));
     }
-    setClientInvalid([]);
+    // The pass re-runs on the merged value, which is what clears the message the
+    // moment the PIN becomes usable rather than at the next submit.
+    validation.changed(patch);
     refused.clear();
     attemptKey.current = null;
   }
@@ -149,14 +167,16 @@ export function AddressSectionCard() {
   // no mappable field takes the first input rather than a guess at a nearer one.
   // A server PIN refusal focuses the PIN itself, which is what makes its
   // `aria-describedby` message the first thing announced rather than something
-  // the doctor has to find.
+  // the doctor has to find. The client half is gated on `submitted` so a blur can
+  // never yank focus back to the field the doctor just left.
   useEffect(() => {
+    if (!validation.submitted) return;
     if (pinInvalid || unmappedServerError) {
       (pinInvalid ? pinRef.current : firstPartRef.current)?.focus();
     } else if (serverPinError) {
       pinRef.current?.focus();
     }
-  }, [pinInvalid, unmappedServerError, serverPinError]);
+  }, [validation.submitted, pinInvalid, unmappedServerError, serverPinError]);
 
   // The first navigation guard in this app. Registered with the dirty flag and
   // removed with it, so a clean card adds no listener and a saved card stops
@@ -177,8 +197,7 @@ export function AddressSectionCard() {
   async function saveAddress(): Promise<SectionSaveResult> {
     if (fields == null) return { status: "declined" };
 
-    const problems = invalidAddressFields(fields);
-    setClientInvalid(problems);
+    const problems = validation.submit();
     refused.clear();
     if (problems.length > 0) return { status: "declined" };
 
@@ -192,6 +211,10 @@ export function AddressSectionCard() {
       // Cleared, not stale: the next edit is a new attempt, and this one has
       // landed, so there is no attempt left to retry.
       attemptKey.current = null;
+      // The failed-submit context is over, so the next submit is a first submit
+      // again rather than inheriting a summary and a focus walk from a save that
+      // has since worked.
+      validation.settled();
       setBelt({
         outside: answer.outside_peri_urban_belt,
         distanceKm: answer.distance_from_belt_centre_km,
@@ -254,9 +277,9 @@ export function AddressSectionCard() {
           aria-live="assertive"
           data-testid="profile-address-summary"
         >
-          {clientInvalid.length > 0 && (
+          {validation.submitted && validation.invalid.length > 0 && (
             <p data-testid="profile-address-summary-count">
-              {t.invalidSummary(clientInvalid.length)}
+              {t.invalidSummary(validation.invalid.length)}
             </p>
           )}
           {unmappedServerError && (
@@ -344,6 +367,11 @@ export function AddressSectionCard() {
               maxLength={6}
               value={fields.pin_code}
               onChange={(event) => change({ pin_code: event.target.value })}
+              // #623: the blur check the three sibling cards already had. Marking
+              // the field touched here is what makes the message appear when the
+              // doctor leaves the PIN - while the answer is still in their head -
+              // rather than only after they press Save and are told about it.
+              onBlur={() => validation.blur(PIN_PATH)}
               aria-invalid={pinFlag}
               aria-describedby={pinFlag ? PIN_ERROR_ID : undefined}
               className={fieldClassName(pinFlag)}

@@ -20,7 +20,7 @@
 //   flag for the same reason.
 
 import { useRef } from "react";
-import { BadgeCheck, Camera } from "lucide-react";
+import { Camera } from "lucide-react";
 
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
 import { Avatar } from "@/components/ui/avatar";
@@ -28,10 +28,12 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import type { DoctorProfileView } from "@/lib/doctor/api";
+import { specialtyLabel } from "@/lib/directory/specialtyLabel";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { cn } from "@/lib/utils";
 import type { SectionFailure } from "./ProfileSectionShell";
+import { VerifiedBadge } from "./VerifiedBadge";
 
 export interface ProfileIdentityBandProps {
   profile: DoctorProfileView;
@@ -113,28 +115,26 @@ export function ProfileIdentityBand({
               disagree - a tick without its word would be colour doing the talking,
               and the word without its tick would be a claim with no symbol the
               rest of this product uses for exactly that claim. When the flag is
-              false neither appears, which is what "if the tick is gone, the card is
-              gone" means on a doctor's own page (ADR-0011). */}
-          <Badge
-            variant={profile.verified ? "default" : "secondary"}
-            // #618 renamed this from `profile-verified`. The live preview mounts
-            // the public profile's renderer on this same page, and that renderer's
-            // hero has carried `profile-verified` since #312 - two components on
-            // one screen cannot share a test id. The band is the one that needed a
-            // name of its own, since the renderer could not take one.
+              false neither appears, which is what "if the tick is gone, the card
+              is gone" means on a doctor's own page (ADR-0011).
+
+              #623 moved the drawing into the shared `VerifiedBadge` the
+              credential band's verdict row also renders: this chip and that row
+              were two hand-written copies of the same four decisions, free to
+              drift into a tick on one and a word on the other.
+
+              #618 renamed this test id from `profile-verified`. The live preview
+              mounts the public profile's renderer on this same page, and that
+              renderer's hero has carried `profile-verified` since #312 - two
+              components on one screen cannot share a test id. The band is the one
+              that needed a name of its own, since the renderer could not take
+              one. */}
+          <VerifiedBadge
+            verified={profile.verified}
+            verifiedLabel={t.verified}
+            notVerifiedLabel={t.notVerified}
             data-testid="profile-identity-verified"
-            className={cn(
-              "inline-flex items-center gap-1",
-              profile.verified
-                ? "bg-success-soft text-success-text"
-                : "bg-accent-soft text-accent-strong",
-            )}
-          >
-            {profile.verified && (
-              <BadgeCheck aria-hidden="true" className="h-3.5 w-3.5" />
-            )}
-            {profile.verified ? t.verified : t.notVerified}
-          </Badge>
+          />
           {specialties.length === 0 ? (
             <Badge
               variant="outline"
@@ -151,7 +151,15 @@ export function ProfileIdentityBand({
                 className="border-hairline text-txt"
                 data-testid="profile-specialty"
               >
-                {specialty}
+                {/* #623: through the shared label helper, not the raw value. The
+                    chip row is the most-read rendering of a doctor's declared
+                    specialties - it sits beside the doctor's own name in the
+                    heading band - and a Hindi-speaking doctor was seeing
+                    "General Physician" beside their own name while the Practice
+                    card three sections down showed the same value translated.
+                    Keyed by the raw value so the chip identity is still the
+                    value, not its rendering. */}
+                {specialtyLabel(lang, specialty)}
               </Badge>
             ))
           )}

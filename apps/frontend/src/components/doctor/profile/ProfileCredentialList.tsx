@@ -7,15 +7,15 @@
 //
 // The band decides where this list sits; this component does not decide whether
 // it deserves a tick. Validity is read off each credential for DISPLAY only, and
-// the band's tick comes from the projection's single `verified` flag, so the two
-// can never tell a doctor two different stories (ADR-0011, blueprint §1.6). The
-// activation row below is that flag's second read; the identity band's chip is
-// its third.
+// the verdict row's badge comes from the projection's single `verified` flag, so
+// the two can never tell a doctor two different stories (ADR-0011, blueprint 1.6).
+// #623 moved that badge into the shared `VerifiedBadge`, which the identity
+// band's chip row renders too - the verdict row below is that flag's second read,
+// and the identity band chip is its third, both through the one component that
+// keeps the tick and its word from coming apart.
 
 import Link from "next/link";
-import { BadgeCheck } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
 import type {
   DoctorProfileCredential,
   DoctorProfileView,
@@ -24,6 +24,7 @@ import { providerProfileHref } from "@/lib/directory/links";
 import { STRINGS, type Dictionary } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { cn } from "@/lib/utils";
+import { VerifiedBadge } from "./VerifiedBadge";
 
 /**
  * What still counts as valid for display, or null when there is no expiry to
@@ -57,7 +58,7 @@ export function ProfileCredentialList({
 
   return (
     <>
-      {/* AC 3's "activation state", read off the one flag. It sits ABOVE the
+      {/* AC 3's verdict row, read off the one flag. It sits ABOVE the
           credential list on purpose: it is the verdict, and the list is the
           evidence, so a false flag is stated before the evidence rather than
           after it.
@@ -66,36 +67,36 @@ export function ProfileCredentialList({
           verified is true iff the partner is active AND every required
           credential is unexpired and unrevoked, and "if the tick is gone, the
           card is gone" - so a tick drawn beside a stale list is the one claim
-          this page must never make (ADR-0011, blueprint §1.6).
+          this page must never make (ADR-0011, blueprint 1.6).
 
-          The value is `verified ? t.verified : t.notVerified`, never a value
-          recomputed from the credentials below: the client reading credential
-          dates would be a second derivation site, and the two would eventually
-          disagree. The list's own `credentialExpiry` labels are for display. */}
+          #623 relabelled this row. It read `t.activationStateLabel` over the
+          value `profile.verified`, and those are two different facts: the flag
+          is a COMPOSITE of activation state AND every credential's dates, so an
+          Active doctor whose medical registration lapsed next month was shown
+          "Activation state: Not verified" - a statement about their activation
+          that is simply false, produced by labelling one quantity with another
+          quantity's name. The row now names what is actually rendered. The
+          alternative, adding a real activation state to the view and showing
+          both, is the correct end state but a backend contract change, and
+          guessing the value here instead would be the client-side derivation
+          site the paragraph below exists to prevent.
+
+          The value is never recomputed from the credentials below: the client
+          reading credential dates would be a second derivation site, and the two
+          would eventually disagree. The list's own `credentialExpiry` labels are
+          for display. */}
       <div
         className="flex flex-wrap items-center gap-2"
-        data-testid="profile-activation-state"
+        data-testid="profile-verification-state"
       >
         <span className="text-sm font-medium text-txt">
-          {t.activationStateLabel}
+          {t.verificationStateLabel}
         </span>
-        <Badge
-          variant={profile.verified ? "default" : "secondary"}
-          className={cn(
-            "inline-flex items-center gap-1",
-            profile.verified
-              ? "bg-success-soft text-success-text"
-              : "bg-accent-soft text-accent-strong",
-          )}
-        >
-          {profile.verified && (
-            <BadgeCheck aria-hidden="true" className="h-3.5 w-3.5" />
-          )}
-          {/* The name goes on the tick, not only on the text beside it: the icon
-              is decorative, and the verdict it qualifies is already spelled out
-              next to it. */}
-          {profile.verified ? t.verified : t.notVerified}
-        </Badge>
+        <VerifiedBadge
+          verified={profile.verified}
+          verifiedLabel={t.verified}
+          notVerifiedLabel={t.notVerified}
+        />
         {profile.verified && (
           <span className="sr-only">{t.verifiedTickLabel}</span>
         )}

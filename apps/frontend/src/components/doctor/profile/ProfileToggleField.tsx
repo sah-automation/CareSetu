@@ -14,9 +14,11 @@
 //      "Languages". The heading text is its own element and the group points at
 //      it, which is the relationship a `role="group"` is for.
 //   2. **The help text sits outside the labelled span**, so it is a description
-//      rather than part of every chip's accessible name. `ProfileField` puts its
-//      help inside the label on purpose (there, one control absorbs it), so this
-//      is a deliberate difference and not a second spelling of the same helper.
+//      rather than part of every chip's accessible name. `ProfileField` now does
+//      the same thing - #623 moved its help out of the wrapping label and onto the
+//      control's `aria-describedby`, closing the same hole for single inputs - so
+//      the two helpers now agree on the rule and differ only in how they bind it
+//      (one clones its control, this one names a group).
 //   3. **The chips are a wrapped flex row**, not the primitive's centered single
 //      line. Twenty-three languages cannot fit on a phone's width, and a control
 //      that scrolls its own options out of reach is a control half the list has
@@ -42,9 +44,25 @@ export interface ProfileToggleFieldProps<V extends string> {
   /** The closed vocabulary, in the order the domain declares it. */
   vocabulary: readonly V[];
   selected: readonly V[];
-  /** The bilingual label for one member - copy, so it lives in the dictionary. */
+  /**
+   * The bilingual label for one member - copy, so it lives in the dictionary.
+   */
   labelFor: (value: V) => string;
   onChange: (values: V[]) => void;
+  /**
+   * The element id of a refusal message rendered by the CALLER as this group's
+   * sibling, added to the group's `aria-describedby` alongside the help.
+   *
+   * #623: the refusal used to be a `<p role="alert">` sitting next to the group
+   * with nothing connecting the two. A live region is announced when it appears,
+   * but it is not *associated*: pressing Tab into the group and reading it gave
+   * no hint that twenty-three languages had just been refused, and an
+   * accessibility checker reports the group as having no description of its
+   * refusal. The caller owns the message's markup (it is also rendered when there
+   * is no group, and its `role` depends on whether the refusal came from the
+   * client), so this takes the id rather than the element.
+   */
+  describedById?: string;
 }
 
 export function ProfileToggleField<V extends string>({
@@ -55,9 +73,18 @@ export function ProfileToggleField<V extends string>({
   selected,
   labelFor,
   onChange,
+  describedById,
 }: ProfileToggleFieldProps<V>) {
   const labelId = `${id}-label`;
   const helpId = `${id}-help`;
+  // Whichever descriptions exist, in the order a reader should hear them: what
+  // the group is, then how to use it, then what the server said about the last
+  // attempt. `undefined` rather than "" when there is nothing to point at, since
+  // an empty `aria-describedby` is a reference to nothing.
+  const describedBy =
+    [help ? helpId : null, describedById ?? null]
+      .filter((value): value is string => value != null)
+      .join(" ") || undefined;
 
   return (
     <div className="flex flex-col gap-1">
@@ -79,7 +106,7 @@ export function ProfileToggleField<V extends string>({
         value={[...selected]}
         onValueChange={(next) => onChange(next as V[])}
         aria-labelledby={labelId}
-        aria-describedby={help ? helpId : undefined}
+        aria-describedby={describedBy}
         className="flex flex-wrap items-start justify-start gap-2"
         data-testid={id}
       >

@@ -101,19 +101,36 @@ export function AboutSectionCard() {
   const aboutRef = useRef<HTMLTextAreaElement | null>(null);
   const hoursRef = useRef<HTMLTextAreaElement | null>(null);
 
-  const aboutFlag = isBad("about");
-  const hoursFlag = isBad("consulting_hours");
-  const languagesFlag = isBad("languages");
-  const daysFlag = isBad("consulting_days");
+  /**
+   * Why a field is showing an error, which is what decides both its WORDS and
+   * whether it is announced.
+   *
+   * #623: this returns a kind rather than a boolean. The two are not the same
+   * question. The rendered messages used to hardcode `t.aboutTooLong`, so a 422 on
+   * `about` for any reason at all - a server-side length rule, a stale-content
+   * refusal, anything future - told the doctor their text was too long, and a
+   * refusal on `consulting_hours` said the same thing about a different field. That
+   * also meant `FIELD_MESSAGES`' `client` and `server` entries were read by nothing:
+   * the one lookup built to tell the two cases apart had no caller.
+   *
+   * "server" first, because a field the server just refused keeps its refusal even
+   * if a client rule would also fire on the current text - the server's answer is
+   * the newer fact and is the one the doctor has to act on.
+   */
+  function errorKind(field: string): "client" | "server" | null {
+    if (refused.refused.has(field)) return "server";
+    if (validation.showsError(field as AboutFieldName)) return "client";
+    return null;
+  }
+
+  const aboutKind = errorKind("about");
+  const hoursKind = errorKind("consulting_hours");
+  const aboutFlag = aboutKind != null;
+  const hoursFlag = hoursKind != null;
+  const languagesFlag = errorKind("languages") != null;
+  const daysFlag = errorKind("consulting_days") != null;
   const summaryOpen =
     (validation.submitted && validation.invalid.length > 0) || refused.unmapped;
-
-  function isBad(field: string) {
-    return (
-      refused.refused.has(field) ||
-      validation.showsError(field as AboutFieldName)
-    );
-  }
 
   function messageFor(field: string, kind: "client" | "server") {
     const key = FIELD_MESSAGES[field]?.[kind];
@@ -247,12 +264,16 @@ export function AboutSectionCard() {
             vocabulary={CONSULT_LANGUAGES}
             selected={fields.languages}
             labelFor={(value) => t.languageLabels[value]}
+            describedById={
+              languagesFlag ? "profile-about-languages-error" : undefined
+            }
             onChange={(values: ProfileConsultLanguage[]) =>
               change({ languages: values })
             }
           />
           {languagesFlag && (
             <p
+              id="profile-about-languages-error"
               className="mt-1 text-sm text-danger"
               role="alert"
               data-testid="profile-about-languages-error"
@@ -270,12 +291,14 @@ export function AboutSectionCard() {
             vocabulary={CONSULTING_DAYS}
             selected={fields.consulting_days}
             labelFor={(value) => t.dayLabels[value]}
+            describedById={daysFlag ? "profile-about-days-error" : undefined}
             onChange={(values: ProfileConsultingDay[]) =>
               change({ consulting_days: values })
             }
           />
           {daysFlag && (
             <p
+              id="profile-about-days-error"
               className="mt-1 text-sm text-danger"
               role="alert"
               data-testid="profile-about-days-error"
@@ -319,22 +342,23 @@ export function AboutSectionCard() {
             <p
               id="profile-about-error"
               className="text-sm text-danger"
-              role={refused.refused.has("about") ? undefined : "alert"}
+              // Only a client-side flag announces: a refusal the server sent in the
+              // save's own response is presented with the rest of that response,
+              // not announced twice.
+              role={aboutKind === "client" ? "alert" : undefined}
               data-testid="profile-about-error"
             >
-              {t.aboutTooLong}
+              {messageFor("about", aboutKind ?? "client")}
             </p>
           )}
           {hoursFlag && (
             <p
               id="profile-consulting-hours-error"
               className="text-sm text-danger"
-              role={
-                refused.refused.has("consulting_hours") ? undefined : "alert"
-              }
+              role={hoursKind === "client" ? "alert" : undefined}
               data-testid="profile-consulting-hours-error"
             >
-              {t.aboutTooLong}
+              {messageFor("consulting_hours", hoursKind ?? "client")}
             </p>
           )}
         </div>

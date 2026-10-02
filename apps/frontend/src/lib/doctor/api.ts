@@ -313,35 +313,6 @@ export interface DoctorProfileView {
   notification_preferences: Record<string, boolean>;
 }
 
-/**
- * The editable body of the private profile. It is a whole-form PUT, not a
- * patch: the backend requires the practice address and coordinates on every
- * call, so a caller always sends the complete editable projection.
- */
-/**
- * The transitional whole-form write's body, as this client still sends it.
- *
- * `availability` is GONE: #615 removed the only editor that fed it, and #610
- * already retired the column it projected. The projection no longer carries the
- * field either, so declaring it here would mean the page has to invent a value
- * for a blob the backend has no writer for.
- *
- * What this type still describes is a route #611 removed. That is a known
- * transitional gap this ticket deliberately does not close - the section-write
- * calls (#616/#617) replace it, and each of them declares a different body
- * (`DoctorProfilePracticeUpdate` and friends) rather than this one.
- */
-export interface DoctorProfileUpdate {
-  practice_name: string | null;
-  practice_address: string;
-  practice_latitude: number;
-  practice_longitude: number;
-  experience_years: number | null;
-  languages: string[];
-  about: string | null;
-  notification_preferences: Record<string, boolean>;
-}
-
 export interface DoctorProfilePhotoRef {
   photo_ref: string;
 }
@@ -555,26 +526,6 @@ function isDoctorProfileAddressView(
 /** Read the calling active doctor's private profile projection. */
 export async function fetchDoctorProfile(): Promise<DoctorProfileView> {
   const data = await request<unknown>("/v1/doctor/profile");
-  return guardShape(
-    data,
-    isDoctorProfileView,
-    "The API returned an unexpected doctor profile shape",
-  );
-}
-
-/** Write the editable profile fields; the fee and photo keep their own routes. */
-export async function updateDoctorProfile(
-  update: DoctorProfileUpdate,
-  retryKey?: string,
-): Promise<DoctorProfileView> {
-  const data = await request<unknown>("/v1/doctor/profile", {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      [IDEMPOTENCY_KEY_HEADER]: idempotencyKey(retryKey),
-    },
-    body: JSON.stringify(update),
-  });
   return guardShape(
     data,
     isDoctorProfileView,

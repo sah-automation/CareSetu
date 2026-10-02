@@ -49,7 +49,6 @@ import {
   deleteDoctorProfilePhoto,
   fetchDoctorProfile,
   fetchDoctorProfilePhoto,
-  updateDoctorProfile,
   updateDoctorProfilePractice,
   uploadDoctorProfilePhoto,
   type DoctorProfileView,
@@ -107,10 +106,10 @@ vi.mock("@/lib/care/api", () => ({
 
 vi.mock("@/lib/doctor/api", () => ({
   fetchDoctorProfile: vi.fn(),
-  updateDoctorProfile: vi.fn(),
-  // #617: the practice write the practice card makes. The whole-form PUT above is
-  // left mocked and unused on purpose - the page no longer calls it, and this suite
-  // asserting against it would be asserting against a route that 405s.
+  // #617, #623: the practice write the practice card makes, and the only one this
+  // suite exercises. The whole-form PUT used to sit above it mocked and unused - a
+  // fake standing in for a route that 405s. #623 deleted it with the client export
+  // it stood in for, so this suite now mocks exactly what it calls.
   updateDoctorProfilePractice: vi.fn(),
   uploadDoctorProfilePhoto: vi.fn(),
   fetchDoctorProfilePhoto: vi.fn(),
@@ -123,7 +122,9 @@ vi.mock("@/lib/partner/api", () => ({
 }));
 
 const getProfile = vi.mocked(fetchDoctorProfile);
-const saveProfile = vi.mocked(updateDoctorProfile);
+// #623: the whole-form `saveProfile` mock went with the export it stubbed; #611
+// removed the route and every section writes its own. What is left is the
+// practice-section writer, which is the only one this suite exercises.
 const savePractice = vi.mocked(updateDoctorProfilePractice);
 const uploadPhoto = vi.mocked(uploadDoctorProfilePhoto);
 const getPhoto = vi.mocked(fetchDoctorProfilePhoto);
@@ -295,7 +296,6 @@ beforeEach(() => {
   getOpenCases.mockReset();
   getOpenCases.mockResolvedValue([]);
   getProfile.mockReset();
-  saveProfile.mockReset();
   savePractice.mockReset();
   uploadPhoto.mockReset();
   getPhoto.mockReset();

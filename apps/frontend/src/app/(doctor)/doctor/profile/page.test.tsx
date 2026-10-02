@@ -42,7 +42,6 @@ import {
   deleteDoctorProfilePhoto,
   fetchDoctorProfile,
   fetchDoctorProfilePhoto,
-  updateDoctorProfile,
   updateDoctorProfileAbout,
   updateDoctorProfileAddress,
   updateDoctorProfileNotifications,
@@ -78,7 +77,6 @@ vi.mock("@/lib/doctor/api", async (importOriginal) => {
   return {
     ...mod,
     fetchDoctorProfile: vi.fn(),
-    updateDoctorProfile: vi.fn(),
     updateDoctorProfileAddress: vi.fn(),
     updateDoctorProfilePractice: vi.fn(),
     updateDoctorProfileAbout: vi.fn(),
@@ -114,11 +112,12 @@ vi.mock("@/lib/auth/AuthContext", () => ({
 const t = STRINGS.en.doctorProfile;
 const hiT = STRINGS.hi.doctorProfile;
 const getProfile = vi.mocked(fetchDoctorProfile);
-// #617: the transitional whole-form write is gone from the page. The mock stays so
-// that a card reaching for it fails loudly rather than silently hitting the network -
-// but the cases below assert the four SECTION writers, and the "no single save"
-// assertion in the shell suite is what keeps it that way.
-const saveProfile = vi.mocked(updateDoctorProfile);
+// #617: the transitional whole-form write is gone from the page, and #623 took
+// its client export with it, so there is no longer a function here to stub. A card
+// reaching for the retired route fails at the type level and at runtime on an
+// unmocked network call rather than quietly succeeding against a fake. The cases
+// below assert the four SECTION writers, and the "no single save" assertion in
+// the shell suite is what keeps it that way.
 const savePractice = vi.mocked(updateDoctorProfilePractice);
 const saveAbout = vi.mocked(updateDoctorProfileAbout);
 const saveNotifications = vi.mocked(updateDoctorProfileNotifications);
@@ -261,17 +260,11 @@ beforeEach(() => {
   ) as typeof URL.createObjectURL;
   URL.revokeObjectURL = vi.fn() as unknown as typeof URL.revokeObjectURL;
   getProfile.mockResolvedValue(profile());
-  saveProfile.mockImplementation(async (update) =>
-    profile({
-      ...update,
-      photo_ref: null,
-      clinic_name: "Sunrise Clinic",
-      specialties: ["General Physician"],
-      verified: true,
-      area: "Daltonganj",
-      consultation_fee: 40000,
-    }),
-  );
+  // #623: the whole-form `saveProfile` mock is gone with the export it stubbed.
+  // #611 removed `PUT /v1/doctor/profile` and every section writes its own route,
+  // so this mock was never called and never asserted against - it only made the
+  // suite look like it covered the retired write. If a test wanted the old
+  // behaviour back it would have to name the four section mocks below instead.
   // #617: each section write is answered with the projection carrying that section's
   // own change, and nothing else. A mock that echoed the whole stored view would
   // hide a card that re-seeded itself from a sibling's field.
@@ -437,32 +430,50 @@ describe("DoctorProfilePage shell (#615)", () => {
     ).toHaveTextContent(t.credentialStatus.verified);
   });
 
-  it("states the activation state in words, off the one flag, when true", async () => {
+  it("states the verification status in words, off the one flag, when true", async () => {
     // AC 3: "the credentials AND activation state render in the verified band
-    // carrying the tick". The activation state is a stated value, not just a
-    // tick's presence - a tick a screen reader never announces tells a blind
-    // doctor nothing about what CareSetu actually decided.
+    // carrying the tick". The verdict is a stated value, not just a tick's
+    // presence - a tick a screen reader never announces tells a blind doctor
+    // nothing about what CareSetu actually decided.
+    //
+    // #623: the row reads `t.verificationStateLabel`, not an activation label.
+    // It renders the composite `verified` flag, so naming it "activation state"
+    // told an Active doctor with one lapsed credential that their activation was
+    // not verified, which is false.
     await renderReady(profile({ verified: true }));
 
     const state = within(
       screen.getByTestId("profile-verified-band"),
-    ).getByTestId("profile-activation-state");
-    expect(state).toHaveTextContent(t.activationStateLabel);
+    ).getByTestId("profile-verification-state");
+    expect(state).toHaveTextContent(t.verificationStateLabel);
     expect(state).toHaveTextContent(t.verified);
     expect(within(state).getByText(t.verifiedTickLabel)).toBeInTheDocument();
   });
 
-  it("says the activation state is not verified, with no tick beside it", async () => {
+  it("says the verification status is not verified, with no tick beside it", async () => {
     await renderReady(profile({ verified: false }));
 
     // The value and the symbol are the same claim, so neither can be present
     // alone: a false flag gets the words and loses the tick.
     const state = within(
       screen.getByTestId("profile-verified-band"),
-    ).getByTestId("profile-activation-state");
+    ).getByTestId("profile-verification-state");
     expect(state).toHaveTextContent(t.notVerified);
     expect(within(state).queryByText(t.verifiedTickLabel)).toBeNull();
     expect(state.querySelector("svg")).toBeNull();
+  });
+
+  // #623: the flag is a composite, so the label must not name one of its two
+  // inputs. A row titled "Activation state" reading "Not verified" is a false
+  // claim about an Active doctor's activation, and this pins the word that makes
+  // the row describe what is rendered instead.
+  it("never labels the composite flag as an activation state", async () => {
+    await renderReady(profile({ verified: false }));
+
+    const state = within(
+      screen.getByTestId("profile-verified-band"),
+    ).getByTestId("profile-verification-state");
+    expect(state.textContent).not.toMatch(/activation/i);
   });
 
   it("never claims the outcome in the verified band's own heading", async () => {
@@ -1735,6 +1746,69 @@ describe("DoctorProfilePage keyboard and roles (#617)", () => {
     fireEvent.click(screen.getByTestId("profile-about-save"));
     await waitFor(() => expect(saveAbout).toHaveBeenCalledTimes(1));
     expect(saveAbout.mock.calls[0][0].languages).toContain("Maithili");
+  });
+
+  // #623: the help text used to sit inside the wrapping `<label>`, which made it
+  // part of the control's ACCESSIBLE NAME - a hint read as "Languages Separate with
+  // commas". The hint is now a DESCRIPTION, which is what it is. Asserted on the
+  // rendered name AND on the description binding, because either half alone would
+  // pass a broken fix, and on both field shapes because they take different routes:
+  // `ProfileField` clones its single control, `ProfileToggleField` names a group.
+  it("keeps a field's hint out of its accessible name and binds it as a description", async () => {
+    await renderReady();
+
+    // The single-input shape: a number input whose label wraps it.
+    const experience = screen.getByRole("spinbutton", {
+      name: t.experienceLabel,
+    });
+    expect(experience).toHaveAccessibleName(t.experienceLabel);
+    expect(experience).toHaveAccessibleDescription(t.experienceHelp);
+
+    // The group shape: twenty-three chips that a wrapping label would have named
+    // all twenty-three times. The group's name is the label alone.
+    const languages = screen.getByTestId("profile-about-languages");
+    expect(languages).toHaveAccessibleName(t.languagesLabel);
+    expect(languages).toHaveAccessibleDescription(t.languagesHelp);
+
+    // And a field carrying both a hint and a validation message: the PIN input's
+    // error and its hint are two descriptions of one control, and the merge must
+    // keep both rather than letting either replace the other.
+    const pin = screen.getByTestId("profile-address-pin");
+    expect(pin.getAttribute("aria-describedby")?.split(/\s+/)).toContain(
+      "profile-address-pin-help",
+    );
+  });
+
+  // #623: a refusal rendered as a sibling live region is ANNOUNCED when it appears,
+  // but it is not ASSOCIATED - tabbing into the twenty-three language chips gave no
+  // hint that the server had just refused the last attempt, and an accessibility
+  // checker reports the group as undescribed. The group's `aria-describedby` now
+  // carries the refusal's id alongside the help text.
+  it("associates a toggle group's refusal with the group, not just the page", async () => {
+    // A real `ApiError` carrying a 422 that names `languages`: the hook reads the
+    // refusal out of `details.errors[].path`, so a plain object here would be
+    // correctly ignored and the test would prove nothing.
+    saveAbout.mockRejectedValue(
+      new ApiError({
+        code: "DOCTOR_PROFILE_INVALID_CONSULT_LANGUAGE",
+        message: "that language is not offered",
+        trace_id: "t-rx-lang",
+        details: { errors: [{ path: "languages", reason: "not_offered" }] },
+      }),
+    );
+    await renderReady();
+
+    fireEvent.click(screen.getByTestId("profile-about-save"));
+    const refusal = await screen.findByTestId("profile-about-languages-error");
+
+    const group = screen.getByTestId("profile-about-languages");
+    expect(group.getAttribute("aria-describedby")?.split(/\s+/)).toContain(
+      refusal.id,
+    );
+    // The help text is still described too - a refusal does not replace the guidance.
+    expect(group.getAttribute("aria-describedby")?.split(/\s+/)).toContain(
+      "profile-about-languages-help",
+    );
   });
 
   it("names each notification control as a switch rather than a bare checkbox", async () => {

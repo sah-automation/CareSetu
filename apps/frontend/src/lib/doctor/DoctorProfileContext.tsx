@@ -26,10 +26,11 @@
 // read to fetch the second field is exactly the request this read removes. That
 // is also why the one adopt seam takes a whole view: a practice-details save can
 // move the name, so a ref-only seam would fix the avatar and leave the name
-// stale. The doctor's own profile write declares no photo ref at all
-// (`DoctorProfileUpdate` has nine fields and none of them is `photo_ref`, and
-// the facade writes only declared fields), so the ref-only seam would guard an
-// impossible hazard while leaving a real one unfixed.
+// stale. None of the doctor's own profile writes declares a photo ref at all
+// (the four section bodies - #608's practice, #609's address, #617's about,
+// #617's notifications - have no `photo_ref` field, and the facade writes only
+// declared fields), so the ref-only seam would guard an impossible hazard while
+// leaving a real one unfixed.
 //
 // The degrade discipline is the shell feed's, unchanged: one read per visit, a
 // `cancelled` guard against a stale answer landing after unmount, and a silent

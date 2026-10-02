@@ -1525,10 +1525,14 @@ const en = {
     verifiedBandTitle: "Checked by CareSetu",
     verifiedBandHelp:
       "CareSetu checks your credentials and your activation status.",
-    // AC 3: the activation state the platform derived, beside the tick. Label and
-    // value both come from `verified` - one flag, three reads (heading, tick,
-    // value), so the band cannot claim one verdict and show another.
-    activationStateLabel: "Activation state",
+    // #623: relabelled from "Activation state". The row shows `verified`,
+    // which is a COMPOSITE - activation state AND every credential's dates - so
+    // the old label made an Active doctor with one lapsed credential read
+    // "Activation state: Not verified", which is a false claim about their
+    // activation. The label now names the quantity that is actually rendered.
+    // Label and value still come from one flag, so the band cannot claim one
+    // verdict and show another.
+    verificationStateLabel: "Verification status",
     // The tick's own accessible name. The tick is decorative next to a text
     // verdict in the same row, so the name says what it means rather than being
     // read as "check mark" and leaving the doctor to work out what was checked.
@@ -3386,10 +3390,13 @@ export const STRINGS: Record<Lang, Dictionary> = {
       verifiedBandTitle: "CareSetu द्वारा जाँची गई",
       verifiedBandHelp:
         "CareSetu आपके प्रमाणों और आपकी सक्रियता स्थिति की जाँच करता है।",
-      // AC 3: प्लेटफ़ॉर्म द्वारा निकाली गई सक्रियता स्थिति, टिक के पास।
-      // लेबल और मान दोनों `verified` से आते हैं - एक फ़्लैग, तीन पठन
-      // (शीर्षक, टिक, मान)।
-      activationStateLabel: "सक्रियता स्थिति",
+      // #623: the row is labelled by what it renders. It used to read
+      // "Activation state" (सक्रियता स्थिति) over the value `verified`, which
+      // is a composite of activation state AND every credential's dates - so an
+      // Active doctor with one lapsed credential was told their activation state
+      // was "Not verified", a claim about activation that was simply false.
+      // सत्यापन स्थिति is the honest name for the flag the row actually shows.
+      verificationStateLabel: "सत्यापन स्थिति",
       // टिक का अपना सुलभ नाम।
       verifiedTickLabel: "CareSetu ने यह प्रोफ़ाइल सत्यापित किया",
       declaredBandTitle: "आपकी जानकारी",

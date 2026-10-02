@@ -1,6 +1,18 @@
+"use client";
+
 // PHASE-6 T06 (#312), extracted by #618: the public provider profile's RENDERER.
 // One presentational component, fed a projection, that owns no transport - so the
 // public page and the doctor's live preview run the same code and cannot drift.
+//
+// #623: the file declares `"use client"` now. It calls `useLang()`, which reads a
+// React context, so it is a client component whichever way it is imported - and it
+// happened to work only because both current importers happen to be client
+// components too. That is an accident of the import graph, not a property of this
+// file: the next surface that imports this renderer into a server component (a
+// server-rendered variant, a static export, a page that stops being a client page)
+// gets "You're importing a component that needs useState" at render time, in
+// production, from a file whose own header claims to own no client concerns. The
+// directive states what the file already is.
 //
 // The split is the whole point, so both halves say what they are for:
 //

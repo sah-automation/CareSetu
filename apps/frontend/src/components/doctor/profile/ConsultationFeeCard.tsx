@@ -3,11 +3,11 @@
 // #615: the consultation-fee editor, lifted out of the page's `FeeEditor` as the
 // page's last section component.
 //
-// It keeps the fee's OWN save rather than joining the declared band's whole-form
-// write, because the fee is not part of that write at all: it goes through the
+// It keeps the fee's OWN save rather than joining the declared band's section
+// writes, because the fee is not part of any of them: it goes through the
 // unchanged `PATCH /v1/partner/consultation-fee` route against the same partner
 // record, and the landing page's editor used the same path. Folding it in would
-// mean re-declaring the fee on a `DoctorProfileUpdate` that has no such field -
+// mean re-declaring the fee on a profile section body that has no such field -
 // the one save button per write is what keeps each write honest about what it
 // carries.
 //

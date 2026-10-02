@@ -186,6 +186,56 @@ describe("useSectionEditBuffer", () => {
     expect(screen.getByTestId("section-edits")).toHaveTextContent("0");
   });
 
+  // #623: `change` used to set the dirty ref before folding the patch, so an edit
+  // that arrived before the buffer's first answer was dropped AND armed rule 2
+  // against the answer that was about to seed it. The buffer then stayed empty for
+  // the rest of the session: the flag claimed the doctor was mid-edit while the
+  // field held nothing, and the reseed guard honoured the flag. This is the exact
+  // sequence - the host starts with no answer at all.
+  it("still seeds after an edit that landed before the first answer", () => {
+    render(<Host toSlice={practiceSlice} />);
+
+    // No answer yet, so there is no slice to fold into.
+    fireEvent.change(screen.getByTestId("section-name"), {
+      target: { value: "typed too early" },
+    });
+    // The dropped edit must not have latched the flag or counted as an edit.
+    expect(screen.getByTestId("section-dirty")).toHaveTextContent("false");
+    expect(screen.getByTestId("section-edits")).toHaveTextContent("0");
+
+    fireEvent.click(screen.getByTestId("first-answer"));
+
+    // The seed lands and renders - the section is alive, not silently dead.
+    expect(screen.getByTestId("section-name")).toHaveValue("Sunrise Clinic");
+    expect(screen.getByTestId("section-dirty")).toHaveTextContent("false");
+  });
+
+  it("latches and counts an edit that lands after the first answer", () => {
+    render(<Host toSlice={practiceSlice} />);
+
+    fireEvent.click(screen.getByTestId("first-answer"));
+    fireEvent.change(screen.getByTestId("section-name"), {
+      target: { value: "Sunrise Clinic, typed" },
+    });
+
+    // The mirror above is only correct for the seeded path; a real edit folds and
+    // latches exactly as it always did.
+    expect(screen.getByTestId("section-name")).toHaveValue(
+      "Sunrise Clinic, typed",
+    );
+    expect(screen.getByTestId("section-dirty")).toHaveTextContent("true");
+    expect(screen.getByTestId("section-edits")).toHaveTextContent("1");
+
+    // And two edits compose rather than the second replacing the first.
+    fireEvent.change(screen.getByTestId("section-name"), {
+      target: { value: "Sunrise Clinic, typed more" },
+    });
+    expect(screen.getByTestId("section-name")).toHaveValue(
+      "Sunrise Clinic, typed more",
+    );
+    expect(screen.getByTestId("section-edits")).toHaveTextContent("2");
+  });
+
   it("seeds again for a distinct answer while the buffer is clean", () => {
     render(<Host toSlice={practiceSlice} />);
 

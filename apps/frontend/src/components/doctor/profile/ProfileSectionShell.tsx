@@ -135,10 +135,21 @@ export function ProfileSectionShell({
     setResult(null);
     try {
       setResult(await save.onSave());
-    } catch {
+    } catch (error) {
       // The section classifies its own failures, so a throw reaching here is a
       // classification it never made. It is still presented as a failed attempt
       // rather than left to escape the submit handler as an unhandled rejection.
+      // The doctor already sees the ErrorBanner; what they cannot see is that
+      // this is an operational bug rather than a rejected write, and a catch
+      // that reported nothing was the one place in the frontend where a real
+      // defect left no trace at all. Same `[scope] message:` shape the other
+      // unexpected-failure catches use (`AuthContext`, `DirectoryBrowser`,
+      // `ProviderProfile`), and the same error/warn split: this is `error`
+      // because nothing classified it, not a degradation worth a warning.
+      console.error(
+        "[profile-section] save threw instead of reporting:",
+        error,
+      );
       setResult({ status: "failed", failure: {} });
     } finally {
       setPending(false);

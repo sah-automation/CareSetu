@@ -383,10 +383,20 @@ describe("AddressSectionCard unresolvable PIN (#616 AC 3)", () => {
     expect(message).toHaveTextContent(t.addressPinUnresolved);
     // The PIN input points at it, which is how a screen reader announces the
     // problem with the field rather than leaving the doctor to find it.
-    expect(screen.getByTestId("profile-address-pin")).toHaveAttribute(
-      "aria-describedby",
-      message.id,
-    );
+    //
+    // #623: the attribute now carries the field's HELP id as well, because
+    // `ProfileField` moved the hint out of the wrapping label and onto
+    // `aria-describedby`. Both are descriptions of the same control and both are
+    // wanted - the hint says what a PIN is, the message says why this one was
+    // refused - so the assertion is that the error id is present rather than that
+    // it is the only one. Overwriting instead of merging would have silently
+    // dropped the refusal the moment a field grew a hint.
+    const describedBy = screen
+      .getByTestId("profile-address-pin")
+      .getAttribute("aria-describedby")
+      ?.split(/\s+/);
+    expect(describedBy).toContain(message.id);
+    expect(describedBy).toContain("profile-address-pin-help");
     expect(screen.getByTestId("profile-address-pin")).toHaveAttribute(
       "aria-invalid",
       "true",
@@ -476,6 +486,51 @@ describe("AddressSectionCard unresolvable PIN (#616 AC 3)", () => {
     // A validation failure is the section declining, so the shell stays quiet -
     // there is no failed request to report a trace id for.
     expect(screen.queryByTestId("error-banner")).toBeNull();
+  });
+
+  // #623: this card was the last one holding its own client-validation state, so
+  // it checked on submit only. A doctor who typed a bad PIN, tabbed to the next
+  // field and looked back at a clean form had to press Save to be told - while the
+  // practice, about and notification cards had already said so at the blur. Both
+  // halves are pinned: the blur reveals, and the message clears as soon as the
+  // value becomes usable rather than lingering until the next submit.
+  it("reports a malformed PIN at the blur, not only at the submit", async () => {
+    await renderCard();
+
+    const pin = screen.getByTestId("profile-address-pin");
+    fireEvent.change(pin, { target: { value: "12345" } });
+
+    // Nothing yet: a value the doctor has not finished editing is not announced.
+    expect(screen.queryByTestId("profile-address-pin-error")).toBeNull();
+
+    fireEvent.blur(pin);
+
+    const message = await screen.findByTestId("profile-address-pin-error");
+    expect(message).toHaveTextContent(t.addressPinInvalid);
+    // A blur is not a submit: nothing was attempted, so nothing was asked of the
+    // server and no count-and-walk summary is warranted for one bad field.
+    expect(saveAddress).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("profile-address-summary")).toBeNull();
+    // And the blur must not have stolen focus back to the field the doctor left.
+    expect(document.activeElement).not.toBe(pin);
+  });
+
+  it("clears the blur-time PIN message as soon as the value becomes usable", async () => {
+    await renderCard();
+
+    const pin = screen.getByTestId("profile-address-pin");
+    fireEvent.change(pin, { target: { value: "12345" } });
+    fireEvent.blur(pin);
+    expect(
+      await screen.findByTestId("profile-address-pin-error"),
+    ).toBeInTheDocument();
+
+    fireEvent.change(pin, { target: { value: "822101" } });
+
+    // A red field that stays red while it is being fixed reads as "still broken"
+    // and trains people to ignore the colour.
+    expect(screen.queryByTestId("profile-address-pin-error")).toBeNull();
+    expect(pin).not.toHaveAttribute("aria-invalid", "true");
   });
 
   it("counts the invalid fields in a summary and takes focus to the first", async () => {

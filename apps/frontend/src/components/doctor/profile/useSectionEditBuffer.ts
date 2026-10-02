@@ -61,6 +61,14 @@ export function useSectionEditBuffer<S, T>(
     toSliceRef.current = toSlice;
   }, [toSlice]);
 
+  // The slice is mirrored into a ref too, so `change` can read the current value
+  // synchronously. #623: it needs to, because the guard below is a decision about
+  // whether this edit is real, and a `setValue` updater would be the only other
+  // way to see the current value - a decision made inside a state updater is a
+  // side effect in something React may call twice, so the mirror carries it
+  // instead.
+  const valueRef = useRef<T | null>(null);
+
   useEffect(() => {
     // The three guards, in this order. Identity first: it is what makes a plain
     // re-render a no-op, which is the common case. Dirty second: it is the rule
@@ -69,16 +77,28 @@ export function useSectionEditBuffer<S, T>(
     if (seededFrom.current === answer) return;
     if (dirtyRef.current) return;
     seededFrom.current = answer;
-    setValue(toSliceRef.current(answer));
+    const seeded = toSliceRef.current(answer);
+    valueRef.current = seeded;
+    setValue(seeded);
   }, [answer]);
 
   const change = useCallback((patch: Partial<T>) => {
+    const current = valueRef.current;
+    // #623: an edit that arrives before the buffer's first answer has nothing to
+    // fold into, and it must NOT latch the dirty flag on its way out. Latching
+    // first and folding second meant the one edit the buffer could not hold also
+    // armed rule 2 forever: the flag said "the doctor is mid-edit, never reseed"
+    // while the buffer was still empty, so the answer that was about to arrive was
+    // refused and the section rendered nothing for the rest of the session - a
+    // dead control with no visible cause. A dropped edit that does not latch still
+    // lets the seed land, which is what the doctor actually needed.
+    if (current == null) return;
+    const next = { ...current, ...patch };
+    valueRef.current = next;
     dirtyRef.current = true;
     setDirty(true);
     setEdits((count) => count + 1);
-    setValue((current) =>
-      current == null ? current : { ...current, ...patch },
-    );
+    setValue(next);
   }, []);
 
   return { value, dirty, edits, change };
