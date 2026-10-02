@@ -431,12 +431,31 @@ partner_pin_centroids = Table(
     # (Numeric(9, 6)) so a resolved centroid drops straight into the
     # derived-position write.
     #
-    # ``district`` and ``region`` are the read-only confirmation the doctor sees
-    # back for the PIN they typed, so they are stored as the source publishes
-    # them and need no translation table on the read side. ``region`` is India
-    # Post's ``RegionName``, which is the placeholder ``DivReportingCircle``
-    # wherever a circle publishes no region subdivision; that is stored as
-    # published rather than substituted.
+    # ``district`` and ``region`` are the administrative labels the source
+    # publishes alongside the coordinates. They are stored as published and need
+    # no translation table on the read side.
+    #
+    # ``region`` is India Post's ``RegionName``, which is NOT a state and must
+    # never be rendered as one: across the 19,258 committed rows it holds 48
+    # distinct values, of which ``DivReportingCircle`` is a literal placeholder
+    # covering 4,087 PINs in single-region circles and the rest are postal CIRCLE
+    # names ("South Karnataka Region", "Kochi Region"). This dataset therefore
+    # contains no state for any PIN, which is why the doctor console's read-only
+    # State row has no source to read from and states so on the page rather than
+    # showing a circle name or the placeholder as a doctor's state.
+    #
+    # Neither column is read by any projection today, and that is a recorded
+    # decision rather than an oversight. #603's ``PinCentroid`` carries only the
+    # position because the resolution decision needs only the position, and the
+    # address card's two derived rows stay empty for the same reason. Delivering
+    # them needs a source of truth for the doctor profile's own reads - either a
+    # centroid lookup on the GET path (rejected in ``DoctorProfileAddressView``,
+    # which declines to put a lookup on a read no reader asked for) or new
+    # columns on the profile row (a migration that would turn a DERIVED label
+    # into a doctor-editable declared one, the exact thing the four-way section
+    # split exists to prevent). Correcting a false claim in this comment is the
+    # honest fix; shipping one of the two rows and not the other would imply the
+    # missing one was unavailable for some other reason.
     Column("pin", String(6), primary_key=True),
     # The post office serving this PIN. A PIN is served by several offices and
     # the key admits one, so this is a representative office name, not a claim

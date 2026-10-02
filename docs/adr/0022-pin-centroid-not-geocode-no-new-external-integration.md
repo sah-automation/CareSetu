@@ -2,7 +2,8 @@
 
 **Status:** accepted
 **Date:** 2026-09-30
-**Traceability:** `FEAT-004`, `FEAT-005`, `MOD-002`, `MOD-012`, `ADR-0021`, `batch #599`.
+**Decides:** How a declared practice PIN becomes a reproducible geo point - by resolving it against a bundled, committed centroid table, not by calling a geocoding service, not by letting the doctor drop a map pin, and not by reading the browser's location. The resolution is one exact primary-key hit in the `partner` schema the doctor profile already owns, with no new external integration, no new cost, and no third-party dependency on the beachhead.
+**Traceability:** `FEAT-004`, `FEAT-005`, `MOD-002`, `MOD-012`, `ADR-0021`, `batch #599`. Implemented by #601 (the `partner_pin_centroids` table and its committed seed) and #603 (the resolution and display-address decisions, including the no-partial-resolution rule).
 
 ## Context
 

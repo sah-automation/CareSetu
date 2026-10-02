@@ -209,6 +209,10 @@ _Avoid_: using "provider" where the entity/status/lifecycle is meant - say partn
 The neighbourhood a practice sits in. Distinct from the broader service area.
 _Avoid_: area, sector, colony
 
+**service area**:
+DEMOTED, deliberately (`batch #599`). The table, its seeded Daltonganj row and the `service_area_id` column all still exist and registration still resolves them, but no user-visible surface renders the name any more - search has always used the 25 km peri-urban radius as its real constraint, so the vocabulary was a second, unrepresented notion of "where". The terms and column are **kept, not deleted**: removing them is separate cleanup and is explicitly out of scope. If you grep for "service area" and find it still wired up, that is this decision standing, not work someone forgot.
+_Avoid_: using it in patient- or doctor-facing copy; treating the seeded row as the search radius
+
 **clinic name**:
 The optional clinic or hospital name for a practice; distinct from the doctor's own name. Not treated as the display name for the doctor.
 _Avoid_: treating it as the display name, practice name (when conflated with the doctor name)
