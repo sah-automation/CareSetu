@@ -217,6 +217,104 @@ async def test_get_doctor_profile_projects_private_fields_and_derived_status() -
     ]
 
 
+def _projected_profile_values() -> dict[str, object]:
+    """Every column ``get_doctor_profile`` reads, at neutral values.
+
+    A full projection row so a test about ONE field does not have to restate the
+    other thirty, and so a column added to the projection later fails these tests
+    loudly rather than silently reading ``None``.
+    """
+    return {
+        "partner_id": 12,
+        "partner_type": "doctor",
+        "status": "Active",
+        "photo_ref": None,
+        "practice_name": "Anita Verma",
+        "clinic_name": "Shanti Clinic",
+        "specialties": ["Pediatrician", "General Physician"],
+        "practice_address": "Main Road, Daltonganj",
+        "address_line": None,
+        "address_landmark": None,
+        "address_locality": None,
+        "address_city": None,
+        "address_pin": None,
+        "practice_latitude": 24.483,
+        "practice_longitude": 87.433,
+        "area_name": "Daltonganj",
+        "languages": ["English", "Hindi"],
+        "experience_years": 12,
+        "about": "Primary care physician.",
+        "consultation_fee_paise": 50000,
+        "consulting_days": ["Monday", "Tuesday", "Saturday"],
+        "consulting_hours": "Monday to Friday, 9 AM to 5 PM",
+        "notification_preferences": {"appointment_reminders": True, "sms": True},
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        # A stored key the closed five do not name is still a real preference the
+        # doctor set, and the merge carries it on every save - so the read shows it
+        # rather than hiding a switch the doctor can act on.
+        pytest.param(
+            {"legacy_whatsapp": True},
+            {"legacy_whatsapp": True},
+            id="unknown-key-real-bool",
+        ),
+        # ``{"sms": "false"}`` is a hand-repaired row meaning OFF. Truthiness is
+        # not a reading - bool("false") is True - so it reads as the OFF the
+        # doctor wrote.
+        pytest.param({"sms": "false"}, {"sms": False}, id="string-false-reads-off"),
+        pytest.param({"n": 0}, {"n": False}, id="integer-zero-reads-off"),
+        # An unrenderable value is dropped from the VIEW ONLY: the row still holds
+        # it and the merge still carries it on the next save.
+        pytest.param(
+            {"sms": "banana", "record_shared": True},
+            {"record_shared": True},
+            id="unreadable-dropped-not-raised",
+        ),
+        pytest.param({"sms": None}, {}, id="null-dropped"),
+        pytest.param("not-a-mapping", {}, id="non-mapping-column"),
+    ],
+)
+async def test_get_doctor_profile_survives_a_stored_preference_it_cannot_render(
+    stored: object,
+    expected: dict[str, bool],
+) -> None:
+    """#623: one unrenderable entry must not take down the doctor's whole profile.
+
+    ``notification_preferences`` is a JSON blob whose stored keys the merge
+    deliberately carries verbatim, so a hand-repaired row is a supported state,
+    not an impossible one. Projecting it straight into the view's
+    ``dict[str, bool]`` made ``bool_parsing`` raise inside the view's own
+    validation - and the doctor's name, address, credentials and all four cards
+    stopped rendering because one notification entry was not a bool. The entry
+    is dropped from the view instead; nothing is lost from the row and no save
+    is refused.
+    """
+    connection = _connection(
+        [
+            _Result(
+                row=_Row(
+                    **{**_projected_profile_values(), "notification_preferences": stored},
+                )
+            ),
+            _Result(rows=[]),
+        ]
+    )
+    facade = _facade(connection)
+
+    profile = await facade.get_doctor_profile(12)
+
+    assert profile.notification_preferences == expected
+    # The rest of the profile is unaffected, which is the whole point: the failure
+    # this fixes was never about the notification dict.
+    assert profile.practice_name == "Anita Verma"
+    assert profile.partner_id == 12
+
+
 def _practice_read_back_row() -> _Row:
     """The row ``get_doctor_profile`` returns after the practice write commits."""
     return _Row(

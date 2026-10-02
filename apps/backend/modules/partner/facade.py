@@ -99,6 +99,7 @@ from datetime import datetime
 from uuid import UUID
 
 from cryptography.exceptions import InvalidTag
+from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
@@ -499,6 +500,58 @@ async def _load_pin_centroid(
         latitude=float(row.latitude),
         longitude=float(row.longitude),
     )
+
+
+def _renderable_notification_preferences(
+    stored: object,
+) -> dict[str, bool]:
+    """Narrow the stored preferences column into the view's ``dict[str, bool]``.
+
+    The column is a JSON blob and
+    :func:`~modules.partner.domain.vocabularies.merge_notification_preferences`
+    deliberately carries a stored key the closed vocabulary does not name,
+    **verbatim**, rather than dropping or refusing it. That promise has a
+    consequence this function exists to honour: the read projection must not be
+    the place where an odd stored value becomes a failure.
+
+    Without it, a row holding ``{"sms": "banana"}`` raises ``bool_parsing`` inside
+    the view's own validation and the doctor's ENTIRE profile - name, address,
+    credentials, every card - fails to render, because one unrenderable entry in
+    a notification dict took down the page. A toggle the value cannot be read as
+    is not a toggle, so the entry is dropped from the VIEW and only from the
+    view: the row still holds it, and the merge still carries it on the next
+    save, so nothing is lost and nothing is refused. The doctor sees the five
+    switches they can actually read.
+
+    The coercion is deliberately the same one the write model's validator uses,
+    so a value a save would have accepted as ``False`` reads as ``False`` on the
+    way out too: ``{"sms": "false"}`` is a hand-repaired row meaning OFF, and
+    ``bool("false")`` would read as ON. Truthiness is not a reading - the domain
+    docstring says so about the write path and it holds here.
+
+    Logged, not silent (coding-standards S3): a key name and a value TYPE are
+    not PHI, and a row that needs hand-repair is a data problem somebody has to
+    be able to find.
+    """
+    if not isinstance(stored, dict):
+        logger.warning(
+            "doctor_profile_notification_preferences_not_a_mapping",
+            extra={"value_type": type(stored).__name__},
+        )
+        return {}
+    renderable: dict[str, bool] = {}
+    unreadable: list[str] = []
+    for key, value in stored.items():
+        try:
+            renderable[key] = TypeAdapter(bool).validate_python(value)
+        except ValidationError:
+            unreadable.append(key)
+    if unreadable:
+        logger.warning(
+            "doctor_profile_notification_preferences_unreadable_values_dropped",
+            extra={"dropped_key_count": len(unreadable)},
+        )
+    return renderable
 
 
 async def _delete_doctor_profile_media(
@@ -1296,7 +1349,9 @@ class PartnerFacade:
                     strict=True,
                 )
             ],
-            notification_preferences=dict(row.notification_preferences or {}),
+            notification_preferences=_renderable_notification_preferences(
+                row.notification_preferences,
+            ),
         )
 
     async def update_doctor_practice(

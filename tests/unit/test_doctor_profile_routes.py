@@ -406,7 +406,7 @@ def test_put_doctor_profile_practice_rejects_specialty_outside_the_closed_list()
 
     assert response.status_code == 422
     envelope = response.json()
-    assert envelope["code"] == "INVALID_SPECIALTY"
+    assert envelope["code"] == "DOCTOR_PROFILE_INVALID_SPECIALTY"
     assert [error["path"] for error in envelope["details"]["errors"]] == ["specialties"]
     assert "Homeopathy" in envelope["details"]["errors"][0]["reason"]
     assert facade.practice_update_calls == []
@@ -874,7 +874,7 @@ def test_put_doctor_profile_about_requires_the_whole_card(omitted: str) -> None:
         (
             "languages",
             ["Hindi", "Klingon"],
-            "INVALID_CONSULT_LANGUAGE",
+            "DOCTOR_PROFILE_INVALID_CONSULT_LANGUAGE",
             "languages",
             "Klingon",
         ),
@@ -885,14 +885,14 @@ def test_put_doctor_profile_about_requires_the_whole_card(omitted: str) -> None:
             # second spelling at all.
             "languages",
             ["Hindi", "hindi"],
-            "INVALID_CONSULT_LANGUAGE",
+            "DOCTOR_PROFILE_INVALID_CONSULT_LANGUAGE",
             "languages",
             "hindi",
         ),
         (
             "consulting_days",
             ["Monday", "Caturday"],
-            "INVALID_CONSULTING_DAY",
+            "DOCTOR_PROFILE_INVALID_CONSULTING_DAY",
             "consulting_days",
             "Caturday",
         ),
@@ -1068,7 +1068,7 @@ def test_put_doctor_profile_notifications_refuses_a_key_off_the_list() -> None:
 
     assert response.status_code == 422
     envelope = response.json()
-    assert envelope["code"] == "INVALID_NOTIFICATION_KEY"
+    assert envelope["code"] == "DOCTOR_PROFILE_INVALID_NOTIFICATION_KEY"
     assert [error["path"] for error in envelope["details"]["errors"]] == [
         "notification_preferences"
     ]

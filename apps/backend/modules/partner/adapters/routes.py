@@ -889,7 +889,12 @@ def register_error_handlers(app: FastAPI) -> None:
         invalid = cast(InvalidSpecialtyError, exc)
         return error_response(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "INVALID_SPECIALTY",
+            # Namespaced by module (api-standards: every code is ``SCREAMING_SNAKE``
+            # namespaced by module), matching the ``DOCTOR_PROFILE_*`` prefix the
+            # two refusals above already carry. A bare ``INVALID_SPECIALTY`` reads
+            # as a property of the vocabulary rather than of this console, and would
+            # collide the moment a second surface rejects a specialty.
+            "DOCTOR_PROFILE_INVALID_SPECIALTY",
             "specialty must be a value from the closed specialty pick-list, "
             "and must not repeat within the selection",
             log_tag="doctor_profile",
@@ -935,7 +940,7 @@ def register_error_handlers(app: FastAPI) -> None:
         return _field_rejection(
             request,
             invalid,
-            code="INVALID_CONSULT_LANGUAGE",
+            code="DOCTOR_PROFILE_INVALID_CONSULT_LANGUAGE",
             message="each language must be a value from the scheduled-languages list, "
             "and must not repeat within the selection",
             path="languages",
@@ -946,7 +951,7 @@ def register_error_handlers(app: FastAPI) -> None:
         return _field_rejection(
             request,
             invalid,
-            code="INVALID_CONSULTING_DAY",
+            code="DOCTOR_PROFILE_INVALID_CONSULTING_DAY",
             message="each consulting day must be a value from the seven-day list, "
             "and must not repeat within the selection",
             path="consulting_days",
@@ -960,7 +965,7 @@ def register_error_handlers(app: FastAPI) -> None:
         return _field_rejection(
             request,
             invalid,
-            code="INVALID_NOTIFICATION_KEY",
+            code="DOCTOR_PROFILE_INVALID_NOTIFICATION_KEY",
             message="each notification preference must be one of the keys this console offers",
             path="notification_preferences",
         )
