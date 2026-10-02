@@ -30,15 +30,34 @@ export const DIRECTORY_VARIANT_ROUTES: Record<ProviderType, string> = {
   chemist: "/chemists",
 };
 
-// Directory links pre-seed filters (blueprint §3.1): tiles/chips carry the
-// provider type plus, for chips, the specialty as the free-text query.
+// Directory links pre-seed filters (blueprint §3.1): tiles carry the provider
+// type, chips carry the provider type plus a text filter.
+//
+// #623: those two text filters are NOT the same parameter and must not share a
+// positional one. `q` is the backend's free-text search, which matches across a
+// practice name, clinic name and area; `specialty` is the closed-vocabulary
+// membership filter, which matches a doctor declaring that specialty. Sending a
+// specialty as `q` searches for that word in three columns instead of filtering
+// on the one that matters, so a homepage chip for a doctor filtered on
+// "Cardiologist" returned every partner whose name or area happened to contain
+// the string and silently dropped the filter UI. An options bag rather than a
+// third positional argument, so a caller cannot express one of the two by
+// accident and the compiler rejects an unknown filter name.
+export interface DirectoryFilters {
+  /** Free-text search across name, clinic name and area. */
+  q?: string;
+  /** Closed-vocabulary specialty membership. Doctors only. */
+  specialty?: string;
+}
+
 export function directoryHref(
   providerType?: ProviderType,
-  query?: string,
+  filters?: DirectoryFilters,
 ): string {
   const params = new URLSearchParams();
   if (providerType) params.set("type", providerType);
-  if (query) params.set("q", query);
+  if (filters?.q) params.set("q", filters.q);
+  if (filters?.specialty) params.set("specialty", filters.specialty);
   const qs = params.toString();
   return qs ? `${DIRECTORY_ROUTE}?${qs}` : DIRECTORY_ROUTE;
 }

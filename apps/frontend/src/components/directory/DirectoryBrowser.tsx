@@ -34,6 +34,7 @@ import {
 } from "@/lib/directory/search";
 import { DIRECTORY_ROUTE, type ProviderType } from "@/lib/directory/links";
 import { DIRECTORY_VARIANT_ROUTES } from "@/lib/directory/links";
+import { specialtyLabel } from "@/lib/directory/specialtyLabel";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 
@@ -42,18 +43,6 @@ type LoadState = "loading" | "loaded" | "error";
 const PROVIDER_TYPES: ProviderType[] = ["doctor", "lab", "chemist"];
 
 type TypeKey = "typeDoctor" | "typeLab" | "typeChemist";
-type SpecialtyKey =
-  | "generalPhysician"
-  | "pediatrician"
-  | "gynecologist"
-  | "dentist";
-
-const SPECIALTY_LABEL_KEY: Record<string, SpecialtyKey> = {
-  "General Physician": "generalPhysician",
-  Pediatrician: "pediatrician",
-  Gynecologist: "gynecologist",
-  Dentist: "dentist",
-};
 
 const TYPE_LABEL_KEY: Record<ProviderType, TypeKey> = {
   doctor: "typeDoctor",
@@ -308,7 +297,7 @@ export function DirectoryBrowser({
                   onClick={() => selectSpecialty(active ? null : specialty)}
                   className={chipClass(active)}
                 >
-                  {t.specialties[SPECIALTY_LABEL_KEY[specialty]]}
+                  {specialtyLabel(lang, specialty)}
                 </button>
               );
             })}
@@ -414,8 +403,7 @@ export function DirectoryBrowser({
                   typeLabel={t[TYPE_LABEL_KEY[entry.partner_type]]}
                   specialtyLabel={
                     entry.specialty
-                      ? t.specialties[SPECIALTY_LABEL_KEY[entry.specialty]] ??
-                        entry.specialty
+                      ? specialtyLabel(lang, entry.specialty)
                       : null
                   }
                   verifiedLabel={t.verified}

@@ -28,6 +28,7 @@ import { fetchRecommended } from "@/lib/directory/recommended";
 import type { DirectoryEntry } from "@/lib/directory/search";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
+import { specialtyLabel } from "@/lib/directory/specialtyLabel";
 
 // Directory card-language maps (same keys DirectoryBrowser feeds DirectoryCard
 // with) - the rail joins the shared card vocabulary rather than inventing its
@@ -37,19 +38,6 @@ const TYPE_LABEL_KEY = {
   lab: "typeLab",
   chemist: "typeChemist",
 } as const;
-
-type SpecialtyKey =
-  | "generalPhysician"
-  | "pediatrician"
-  | "gynecologist"
-  | "dentist";
-
-const SPECIALTY_LABEL_KEY: Record<string, SpecialtyKey> = {
-  "General Physician": "generalPhysician",
-  Pediatrician: "pediatrician",
-  Gynecologist: "gynecologist",
-  Dentist: "dentist",
-};
 
 /** Two-letter initials for the avatar circle, "?" when the name is empty. */
 function initials(name: string): string {
@@ -221,11 +209,7 @@ export function RecommendedRail({ scope }: RecommendedRailProps) {
               entry={entry}
               typeLabel={t.directory[TYPE_LABEL_KEY[entry.partner_type]]}
               specialtyLabel={
-                entry.specialty
-                  ? t.directory.specialties[
-                      SPECIALTY_LABEL_KEY[entry.specialty]
-                    ] ?? entry.specialty
-                  : null
+                entry.specialty ? specialtyLabel(lang, entry.specialty) : null
               }
               verifiedLabel={t.directory.verified}
               distanceLabel={formatDistanceKm(

@@ -12,13 +12,37 @@ import { guardShape, request } from "@/lib/request";
 import type { ProviderType } from "./links";
 
 /** Specialties the backend accepts for doctor entries (closed pick-list,
- * modules/partner/domain/credentials.py). Doctors only - labs and chemists
- * carry no specialty and match nothing when one is set (facade). */
+ * modules/partner/domain/vocabularies.py `Specialty`). Doctors only - labs and
+ * chemists carry no specialty and match nothing when one is set (facade).
+ *
+ * #623: this list was four long, which left the other sixteen of the backend's
+ * twenty unreachable from every frontend surface that offers a specialty -
+ * the homepage chips, the directory filter and the pick-a-doctor pre-filter.
+ * The frontend cannot import a Python enum, so the twenty values are restated
+ * here; `tests/unit/directory-specialty-parity.test.ts` fails if the two
+ * lists ever drift apart again.
+ */
 export const DIRECTORIES_SPECIALTIES = [
   "General Physician",
   "Pediatrician",
   "Gynecologist",
   "Dentist",
+  "General Surgeon",
+  "Orthopedic Surgeon",
+  "Ophthalmologist",
+  "ENT Specialist",
+  "Dermatologist",
+  "Psychiatrist",
+  "Cardiologist",
+  "Neurologist",
+  "Gastroenterologist",
+  "Urologist",
+  "Nephrologist",
+  "Pulmonologist",
+  "Endocrinologist",
+  "Oncologist",
+  "Ayurvedic Practitioner",
+  "Homeopathy Practitioner",
 ] as const;
 
 export type Specialty = (typeof DIRECTORIES_SPECIALTIES)[number];

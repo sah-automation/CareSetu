@@ -19,7 +19,10 @@ import {
   useLang,
   __resetLangForTests,
 } from "@/lib/i18n/LangContext";
-import type { DirectorySearchView } from "@/lib/directory/search";
+import {
+  DIRECTORIES_SPECIALTIES,
+  type DirectorySearchView,
+} from "@/lib/directory/search";
 import { DirectoryBrowser } from "./DirectoryBrowser";
 
 // The mocked router.push/replace commits to the same reactive store the mocked
@@ -200,6 +203,61 @@ describe("DirectoryBrowser loading the directory", () => {
     expect(screen.queryByText("Dr. Ghost")).not.toBeInTheDocument();
     expect(screen.getAllByTestId("directory-card")).toHaveLength(1);
     expect(screen.getAllByText("Verified")).toHaveLength(1);
+  });
+});
+
+// #623 (FEAT-004): the specialty filter offered twenty values on the backend
+// and four here, so sixteen specialties no patient could filter by. The chip
+// row is asserted over the WHOLE vocabulary rather than a sample, because the
+// failure mode this fixes was a silently short list.
+describe("DirectoryBrowser specialty filter offers the whole vocabulary (#623)", () => {
+  it("renders a chip for all twenty backend specialties", async () => {
+    searchDirectory.mockResolvedValue(view([doctor(1, "Dr. Smile")]));
+    render(<DirectoryBrowser />);
+    await screen.findByTestId("directory-cards");
+
+    const chips = screen.getAllByTestId("specialty-chip");
+    expect(chips.map((chip) => chip.textContent)).toEqual([
+      ...DIRECTORIES_SPECIALTIES,
+    ]);
+    expect(chips).toHaveLength(20);
+  });
+
+  it("commits any of the twenty as the specialty filter, not just the first four", async () => {
+    searchDirectory.mockResolvedValue(view([doctor(1, "Dr. Smile")]));
+    render(<DirectoryBrowser />);
+    await screen.findByTestId("directory-cards");
+
+    for (const specialty of [
+      "General Surgeon",
+      "Ophthalmologist",
+      "Cardiologist",
+      "Homeopathy Practitioner",
+    ]) {
+      mockReplace.mockClear();
+      fireEvent.click(screen.getByRole("button", { name: specialty }));
+
+      expect(searchDirectory).toHaveBeenLastCalledWith({
+        q: "",
+        partnerType: "doctor",
+        specialty,
+      });
+      expect(mockReplace).toHaveBeenCalledWith(
+        `/directory?type=doctor&${new URLSearchParams({ specialty })}`,
+      );
+    }
+  });
+
+  it("labels a card whose specialty is outside the legacy four truthfully", async () => {
+    searchDirectory.mockResolvedValue(
+      view([doctor(1, "Dr. Rao", { specialty: "Cardiologist" })]),
+    );
+    render(<DirectoryBrowser />);
+    await screen.findByTestId("directory-cards");
+
+    expect(screen.getByTestId("directory-cards")).toHaveTextContent(
+      "Cardiologist",
+    );
   });
 });
 

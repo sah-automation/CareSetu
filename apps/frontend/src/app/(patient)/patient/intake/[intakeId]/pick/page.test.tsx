@@ -250,6 +250,67 @@ describe("PickDoctorPage suggested specialty", () => {
   });
 });
 
+// #623 (FEAT-005): a specialty outside the four the old private label map
+// covered used to render as "General Physician" - the pick page's `??`
+// fallback. A cardiologist was therefore shown to a patient as a general
+// physician, which is not a missing translation but a wrong clinical claim on
+// a screen whose whole purpose is choosing between doctors.
+describe("PickDoctorPage labels every declared specialty truthfully (#623)", () => {
+  it("renders a specialty outside the legacy four as itself, not as General Physician", async () => {
+    await renderWithCards([
+      doctor(1, "Dr A. Rao", { specialty: "Cardiologist" }),
+      doctor(2, "Dr B. Sen", { specialty: "Nephrologist" }),
+    ]);
+
+    const meta = screen
+      .getAllByTestId("pick-doctor-card")
+      .map((card) => card.textContent ?? "");
+    expect(meta.some((text) => text.includes("Cardiologist"))).toBe(true);
+    expect(meta.some((text) => text.includes("Nephrologist"))).toBe(true);
+    // The clinical claim is the point: a cardiologist must never read as a
+    // general physician.
+    for (const text of meta) {
+      expect(text.startsWith("General Physician")).toBe(false);
+    }
+  });
+
+  it("translates a declared specialty in the Hindi locale", async () => {
+    getPreSummary.mockResolvedValue(preSummary());
+    search.mockResolvedValue({
+      items: [doctor(1, "Dr A. Rao", { specialty: "Cardiologist" })],
+      fell_back: false,
+    });
+
+    function LangFlipHost() {
+      const { lang, setLang } = useLang();
+      return (
+        <>
+          <button
+            type="button"
+            onClick={() => setLang(lang === "en" ? "hi" : "en")}
+          >
+            flip-lang
+          </button>
+          <PickDoctorPage />
+        </>
+      );
+    }
+
+    render(<LangFlipHost />);
+    await waitFor(() => screen.getByTestId("pick-cards"));
+    expect(screen.getByTestId("pick-doctor-card")).toHaveTextContent(
+      "Cardiologist",
+    );
+
+    fireEvent.click(screen.getByText("flip-lang"));
+    await waitFor(() =>
+      expect(screen.getByTestId("pick-doctor-card")).toHaveTextContent(
+        "\u0939\u0943\u0926\u092f \u0935\u093f\u0936\u0947\u0937\u091c\u094d\u091e",
+      ),
+    );
+  });
+});
+
 describe("PickDoctorPage cards", () => {
   it("renders verified tick, practice, distance, fee and credentials summary (US-4)", async () => {
     await renderWithCards([doctor(1, "Dr. A. Kumar")]);
