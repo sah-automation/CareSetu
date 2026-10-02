@@ -1,3 +1,4 @@
+// PRD trace: FEAT-005 (Provider Profiles and Credential Display).
 // #583: the cross-surface seam for the doctor profile source.
 //
 // Every doctor-avatar test that existed before this ticket passes with the

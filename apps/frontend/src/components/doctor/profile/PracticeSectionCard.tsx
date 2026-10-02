@@ -303,10 +303,19 @@ export function PracticeSectionCard() {
             vocabulary={SPECIALTIES}
             selected={fields.specialties}
             labelFor={(value) => t.specialtyLabels[value]}
+            // #623: the refusal below is announced as a sibling live region but
+            // was not ASSOCIATED with the group, so tabbing into twenty
+            // specialty chips gave no hint the server had just refused the last
+            // attempt. This is the third toggle-group refusal - About's language
+            // and consulting-day groups were wired first and this one was missed.
+            describedById={
+              specialtiesFlag ? "profile-practice-specialties-error" : undefined
+            }
             onChange={changeSpecialties}
           />
           {specialtiesFlag && (
             <p
+              id="profile-practice-specialties-error"
               className="mt-1 text-sm text-danger"
               role="alert"
               data-testid="profile-practice-specialties-error"

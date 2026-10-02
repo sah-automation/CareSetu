@@ -1,4 +1,7 @@
-"""PHASE-5 T08: the operator verification console facade seams (ticket #252).
+"""
+
+Trace: FEAT-015 (Operator Console - Verification and Moderation).
+PHASE-5 T08: the operator verification console facade seams (ticket #252).
 
 Pins the DB-backed queue/detail/decision behavior against a mocked engine -
 the HTTP surface and RBAC are covered by ``test_partner_verification_route``

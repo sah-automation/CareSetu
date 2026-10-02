@@ -1,4 +1,7 @@
-"""PHASE-6 T03: the public provider profile against Postgres (#309, widened #613).
+"""
+
+Trace: FEAT-005 (Provider Profiles and Credential Display).
+PHASE-6 T03: the public provider profile against Postgres (#309, widened #613).
 
 Exercises the ``MOD-002`` ``get_provider_profile`` facade against a live
 PostgreSQL mirroring ``test_directory_search.py`` (alembic head + raw seeding
@@ -280,6 +283,53 @@ async def test_profile_resolves_active_partner_with_safe_fields(
 
 
 @pytest.mark.asyncio
+async def test_profile_omits_a_pending_credential_row_while_staying_visible(
+    database_url: str, clean_partner: None, tmp_path: Path
+) -> None:
+    """#623 (B3): a pending re-verification round is neither listed nor de-listing.
+
+    The row the read previously published for a partner mid-round was labelled
+    ``verified`` unconditionally, because the mapper emitted the literal string
+    rather than reading the column - and the trust cue that label carries is the
+    whole reason the band exists. Meanwhile the reachability gate scopes
+    ``has_invalid_credential`` to ``verified IS TRUE``, which is deliberate: a
+    partner whose renewal is in flight stays [Active] instead of vanishing from
+    search (ADR-0011's grace window). So a pending row can be reached, and it
+    used to be published as though it were settled.
+
+    Two halves, and the second is the one that makes the first safe. Omitting the
+    pending row is only correct because the partner is still reachable at all -
+    filtering it out of the LIST must not start hiding the PROFILE.
+    """
+    _, partner = _facade(database_url, tmp_path)
+    partner_id = await _seed_partner(
+        database_url, practice_name="Dr. Renewing", specialties=["General Physician"]
+    )
+
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO partner.partner_credentials "
+                    "(profile_id, credential_type, verified, expires_at, revoked_at) "
+                    "VALUES (:profile_id, 'qualification_certificate', FALSE, NULL, NULL)"
+                ),
+                {"profile_id": partner_id},
+            )
+    finally:
+        await engine.dispose()
+
+    view = await partner.get_provider_profile(partner_id)
+
+    # Still reachable: the pending row did not de-list them.
+    assert view.partner_id == partner_id
+    # The approved row is published, and only it - one row, not two.
+    assert [c.credential_type for c in view.credentials] == ["medical_registration"]
+    assert all(c.status == "verified" for c in view.credentials)
+
+
+@pytest.mark.asyncio
 async def test_profile_carries_the_declared_fields_off_the_profile_row(
     database_url: str, clean_partner: None, tmp_path: Path
 ) -> None:
@@ -465,20 +515,43 @@ async def test_profile_area_reads_the_declared_locality_not_the_service_area(
 async def test_profile_specialty_doctors_only_lab_is_none(
     database_url: str, clean_partner: None, tmp_path: Path
 ) -> None:
-    """A lab profile carries no specialty; only doctors do."""
+    """Specialty belongs to the doctor, and the lab's is absent because a lab has none.
+
+    #623: this used to seed only the lab and assert an empty list, which passed for
+    any seed - including a broken projection that dropped every specialty, or one
+    that read the column off the wrong row. A claim about a DISTINCTION needs both
+    sides of it, so a doctor carrying a specialty is seeded alongside and asserted
+    to keep it. The lab's empty list is now meaningful: it is empty while a
+    specialty exists in the same database.
+    """
     _, partner = _facade(database_url, tmp_path)
+    doctor_id = await _seed_partner(
+        database_url,
+        partner_type="doctor",
+        practice_name="Dr. Specialised",
+        # `specialties`, not `specialty`: the first seeds the DIRECTORY ENTRY's
+        # copy, and the public profile reads the PROFILE ROW's selection (#613
+        # moved the declared band onto the profile row). Seeding the entry alone
+        # left the profile's own selection empty - the same empty seed this test
+        # was written to stop relying on.
+        specialties=["General Physician"],
+    )
     lab_id = await _seed_partner(
         database_url,
         partner_type="lab",
         practice_name="MedPlus Lab",
     )
 
-    view = await partner.get_provider_profile(lab_id)
+    doctor_view = await partner.get_provider_profile(doctor_id)
+    assert doctor_view.partner_type == "doctor"
+    assert doctor_view.specialty == "General Physician"
+    assert doctor_view.specialties == ["General Physician"]
 
-    assert view.partner_type == "lab"
-    assert view.specialty is None
-    assert view.specialties == []
-    assert view.verified is True
+    lab_view = await partner.get_provider_profile(lab_id)
+    assert lab_view.partner_type == "lab"
+    assert lab_view.specialty is None
+    assert lab_view.specialties == []
+    assert lab_view.verified is True
 
 
 @pytest.mark.asyncio

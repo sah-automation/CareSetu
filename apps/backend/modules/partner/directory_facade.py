@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import Text, cast, func, literal, select
+from sqlalchemy import Text, cast, func, literal, or_, select
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
@@ -500,6 +500,31 @@ class DirectoryFacade:
                     )
                     .where(
                         partner_credentials.c.profile_id == partner_id,
+                        # #623 (B3): the label below is the literal "verified",
+                        # so this query has to make it true rather than assume it.
+                        # The reachability gate that got us here does NOT cover
+                        # every row: `has_invalid_credential` is scoped to
+                        # `verified IS TRUE`, which is what keeps a pending
+                        # re-verification round from de-listing an [Active]
+                        # partner (ADR-0011's grace window). A partner mid-round is
+                        # therefore reachable WITH their pending rows, and those
+                        # rows were being labelled "verified" on a patient-facing
+                        # profile - the one field that can drive the trust cue the
+                        # whole band exists to carry.
+                        #
+                        # The same scoping the gate uses is applied here, so the
+                        # set that survives is exactly the set the gate called
+                        # valid. Revoked and expired approved-round rows cannot
+                        # reach this query at all (the gate already excluded the
+                        # partner), and pending rows are now excluded rather than
+                        # mislabelled - the same choice `has_invalid_credential`
+                        # makes, so the two agree by construction.
+                        partner_credentials.c.verified.is_(True),
+                        partner_credentials.c.revoked_at.is_(None),
+                        or_(
+                            partner_credentials.c.expires_at.is_(None),
+                            partner_credentials.c.expires_at > func.now(),
+                        ),
                     )
                     .order_by(partner_credentials.c.credential_type)
                 )

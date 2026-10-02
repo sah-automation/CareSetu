@@ -1,3 +1,4 @@
+// PRD trace: FEAT-005 (Provider Profiles and Credential Display).
 // @vitest-environment node
 
 import { readFileSync } from "node:fs";

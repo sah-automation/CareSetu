@@ -211,7 +211,10 @@ def _client(facade: StubPartnerFacade | None = None) -> TestClient:
 
 
 def _about_body() -> dict[str, object]:
-    """A complete About card body - #610 requires every one of its four fields."""
+    """
+
+    Trace: FEAT-005 (Provider Profiles and Credential Display).
+    A complete About card body - #610 requires every one of its four fields."""
     return {
         "about": "Primary care physician.",
         "languages": ["Hindi", "English"],

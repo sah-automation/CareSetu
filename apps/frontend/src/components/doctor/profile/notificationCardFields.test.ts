@@ -1,3 +1,4 @@
+// PRD trace: FEAT-005 (Provider Profiles and Credential Display).
 import { describe, expect, it } from "vitest";
 
 import type { DoctorProfileView } from "@/lib/doctor/api";

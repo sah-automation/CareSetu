@@ -32,7 +32,13 @@
 // replace, and `fieldClassName` is the one place that decides what a field looks
 // like, so that replacement touches one file.
 
-import { Children, cloneElement, isValidElement, type ReactNode } from "react";
+import {
+  Children,
+  cloneElement,
+  Fragment,
+  isValidElement,
+  type ReactNode,
+} from "react";
 
 import { cn } from "@/lib/utils";
 
@@ -66,13 +72,28 @@ export interface ProfileFieldProps {
 }
 
 export function ProfileField({ id, label, help, children }: ProfileFieldProps) {
-  const control = Children.only(children);
+  // #623: this used to be `Children.only(children)`, which THROWS when handed
+  // several nodes or a fragment - so the degradation branch below it was
+  // unreachable for the two cases its own comment named. A caller who passed a
+  // fragment got a React crash rather than unassociated help, which is the worse
+  // of the two outcomes the comment was arguing against. Resolving the single
+  // control by hand makes the policy true instead of aspirational.
+  const [first, ...rest] = Children.toArray(children);
+  const single = rest.length === 0 ? first : null;
 
-  // A caller that passes a fragment or several nodes gets the help rendered as
-  // plain adjacent text, unassociated rather than wrongly associated: there is no
-  // single control to describe, and guessing which one was meant is worse than
-  // the hint simply not being announced by name.
-  if (!isValidElement<{ "aria-describedby"?: unknown }>(control)) {
+  // A Fragment is a valid element but not a control, and `aria-describedby` on
+  // one is dropped by every consumer - so it takes the same path as "no control".
+  const control =
+    isValidElement<{ "aria-describedby"?: unknown }>(single) &&
+    single.type !== Fragment
+      ? single
+      : null;
+
+  // A caller that passes a fragment, several nodes, or bare text gets the help
+  // rendered as plain adjacent text, unassociated rather than wrongly associated:
+  // there is no single control to describe, and guessing which one was meant is
+  // worse than the hint simply not being announced by name.
+  if (!control) {
     return (
       <>
         <label className="flex flex-col gap-1" htmlFor={id}>

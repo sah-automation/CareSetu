@@ -1,3 +1,4 @@
+// PRD trace: FEAT-005 (Provider Profiles and Credential Display).
 // #605: the per-section edit buffer's own suite. It renders tiny harnesses that
 // each own one buffer and are driven with `fireEvent`, so the rules the buffer
 // exists to keep - seed once per distinct server answer, never reseed a dirty

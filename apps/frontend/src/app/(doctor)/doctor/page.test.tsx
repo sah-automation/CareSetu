@@ -1,3 +1,4 @@
+// PRD trace: FEAT-005 (Provider Profiles and Credential Display).
 // PHASE-8.1 T12 (#450): doctor console landing page suite. Covers the review
 // queue (ranked low-confidence first with the amber Verify chip and a
 // confidence flag, US-11/12), the open care-cases section with stage chips

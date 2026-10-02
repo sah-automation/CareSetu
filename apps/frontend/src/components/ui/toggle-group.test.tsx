@@ -1,10 +1,22 @@
 import { render, screen, cleanup, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, it, expect, afterEach, vi } from "vitest";
 
+// PRD trace: FEAT-005 (Provider Profiles and Credential Display).
 // #600 - the ToggleGroup primitive adopted over the #193 design tokens. It is
 // the one primitive the ticket calls out for pressed-state and keyboard
 // assertions, so both are pinned here: per-item pressed state, and that the
 // keyboard path is left open to the browser's native button activation.
+//
+// #623: the activation cases drive `user-event` rather than following the key
+// events with a synthetic `fireEvent.click`. That click was doing the browser's
+// job for it, so every state change in this file came from a mouse even though
+// the suite claimed to be about the keyboard - and the claim was the part that
+// mattered, because "operable from the keyboard alone" is an accessibility
+// promise about a doctor who never touches a pointer. `user-event` implements
+// the browser's default action for a key on a focused native button, so the
+// click now comes from the keypress. The repo had no `user-event`; #623 added it
+// rather than leaving the simulation in place.
 import { ToggleGroup, ToggleGroupItem, toggleVariants } from "./toggle-group";
 
 afterEach(() => {
@@ -22,33 +34,41 @@ function specialties(type: "single" | "multiple") {
 }
 
 /**
- * Presses a key on a focused item the way a browser does, and asserts the part
- * that is actually the primitive's responsibility: that the key event is not
- * default-prevented, so the browser is free to perform its native activation
- * on the focused `<button>`. Radix installs no key handler for this - Space and
- * Enter reach the item because it is a native button, and that is the whole
- * keyboard contract. The state change then comes from the click a browser
- * synthesises on that keypress, which jsdom does not run for a synthetic key
- * event, so it is dispatched here.
+ * Presses an activation key on a focused item the way a browser does.
  *
- * A primitive that swallowed the key (calling preventDefault) fails on the
- * fireEvent return value; a primitive that was not a real button fails
- * regardless of the key, which is why the button-ness is asserted separately.
+ * Two assertions, and they are the primitive's whole responsibility split:
+ *
+ *   1. The key event is not default-prevented, so the browser is free to perform
+ *      its native activation on the focused `<button>`. A primitive that swallowed
+ *      the key fails on the `fireEvent` return value.
+ *   2. The state change then arrives on its own, because `user-event` runs the
+ *      browser's default action for that key on that element - the same click a
+ *      real browser synthesises, produced here by the keypress rather than
+ *      dispatched by hand.
+ *
+ * Before #623 the second step was an explicit `fireEvent.click`, which meant the
+ * suite proved only that clicking worked and asserted the keyboard in a comment.
  */
-function pressKey(control: HTMLElement, key: " " | "Enter") {
+async function pressKey(control: HTMLElement, key: " " | "Enter") {
+  const user = userEvent.setup();
+  control.focus();
   expect(
     fireEvent.keyDown(control, { key }),
     `keyDown "${key}" was default-prevented`,
   ).toBe(true);
+  // `{Enter}` is user-event's syntax for pressing a named key. Without the
+  // braces it types the five characters "Enter" instead, which presses nothing
+  // - and pressing nothing is exactly what a test claiming keyboard
+  // operability must never be able to pass as.
+  await user.keyboard(key === "Enter" ? "{Enter}" : " ");
   expect(
     fireEvent.keyUp(control, { key }),
     `keyUp "${key}" was default-prevented`,
   ).toBe(true);
-  fireEvent.click(control);
 }
 
 describe("ToggleGroup", () => {
-  it("renders one natively focusable button per item", () => {
+  it("renders one natively focusable button per item", async () => {
     render(specialties("multiple"));
 
     for (const name of ["General Physician", "Pediatrician", "Dentist"]) {
@@ -58,7 +78,7 @@ describe("ToggleGroup", () => {
     }
   });
 
-  it("reports unpressed state per item to begin with", () => {
+  it("reports unpressed state per item to begin with", async () => {
     render(specialties("multiple"));
 
     for (const name of ["General Physician", "Pediatrician", "Dentist"]) {
@@ -73,7 +93,7 @@ describe("ToggleGroup", () => {
     }
   });
 
-  it("leaves the activation keys to the browser instead of swallowing them", () => {
+  it("leaves the activation keys to the browser instead of swallowing them", async () => {
     render(specialties("multiple"));
 
     // The keyboard contract, stated directly: nothing on the item calls
@@ -92,13 +112,13 @@ describe("ToggleGroup", () => {
     }
   });
 
-  it("reports pressed state per item once a focused item is activated", () => {
+  it("reports pressed state per item once a focused item is activated", async () => {
     render(specialties("multiple"));
 
     // No pointer event: focus the item, then press Space on it.
     const general = screen.getByRole("button", { name: "General Physician" });
     general.focus();
-    pressKey(general, " ");
+    await pressKey(general, " ");
 
     expect(general).toHaveAttribute("aria-pressed", "true");
     expect(general).toHaveAttribute("data-state", "on");
@@ -112,13 +132,13 @@ describe("ToggleGroup", () => {
     );
   });
 
-  it("accumulates a multi-select from the keyboard", () => {
+  it("accumulates a multi-select from the keyboard", async () => {
     render(specialties("multiple"));
 
     for (const name of ["General Physician", "Pediatrician"]) {
       const control = screen.getByRole("button", { name });
       control.focus();
-      pressKey(control, " ");
+      await pressKey(control, " ");
     }
 
     expect(
@@ -133,29 +153,29 @@ describe("ToggleGroup", () => {
     );
   });
 
-  it("also answers Enter, the other key a native button takes", () => {
+  it("also answers Enter, the other key a native button takes", async () => {
     render(specialties("multiple"));
 
     const general = screen.getByRole("button", { name: "General Physician" });
     general.focus();
-    pressKey(general, "Enter");
+    await pressKey(general, "Enter");
 
     expect(general).toHaveAttribute("aria-pressed", "true");
   });
 
-  it("un-presses an item pressed twice", () => {
+  it("un-presses an item pressed twice", async () => {
     render(specialties("multiple"));
 
     const general = screen.getByRole("button", { name: "General Physician" });
     general.focus();
-    pressKey(general, " ");
-    pressKey(general, " ");
+    await pressKey(general, " ");
+    await pressKey(general, " ");
 
     expect(general).toHaveAttribute("aria-pressed", "false");
     expect(general).toHaveAttribute("data-state", "off");
   });
 
-  it("carries the multi-select group's toolbar role", () => {
+  it("carries the multi-select group's toolbar role", async () => {
     render(specialties("multiple"));
 
     expect(
@@ -163,7 +183,7 @@ describe("ToggleGroup", () => {
     ).toBeInTheDocument();
   });
 
-  it("reports single-select selection through radio semantics", () => {
+  it("reports single-select selection through radio semantics", async () => {
     render(specialties("single"));
 
     // Radix maps `single` onto radio semantics, not aria-pressed.
@@ -173,17 +193,17 @@ describe("ToggleGroup", () => {
       screen.getByRole("radiogroup", { name: "Specialties" }),
     ).toBeInTheDocument();
 
-    pressKey(pediatrics, " ");
+    await pressKey(pediatrics, " ");
     expect(pediatrics).toHaveAttribute("aria-checked", "true");
 
     // Single-select: choosing the next one releases the previous.
     const dentist = screen.getByRole("radio", { name: "Dentist" });
-    pressKey(dentist, " ");
+    await pressKey(dentist, " ");
     expect(dentist).toHaveAttribute("aria-checked", "true");
     expect(pediatrics).toHaveAttribute("aria-checked", "false");
   });
 
-  it("honours a controlled value and reports it back on change", () => {
+  it("honours a controlled value and reports it back on change", async () => {
     const onValueChange = vi.fn();
     render(
       <ToggleGroup
@@ -201,13 +221,13 @@ describe("ToggleGroup", () => {
       screen.getByRole("button", { name: "General Physician" }),
     ).toHaveAttribute("aria-pressed", "true");
 
-    pressKey(screen.getByRole("button", { name: "Pediatrician" }), " ");
+    await pressKey(screen.getByRole("button", { name: "Pediatrician" }), " ");
     // Uncontrolled from the item's point of view: it reports the whole next
     // selection and lets the owner decide.
     expect(onValueChange).toHaveBeenCalledWith(["general", "pediatrics"]);
   });
 
-  it("resolves the selected state to the accent-soft / accent-strong pair", () => {
+  it("resolves the selected state to the accent-soft / accent-strong pair", async () => {
     expect(toggleVariants()).toContain("data-[state=on]:bg-accent-soft");
     expect(toggleVariants()).toContain("data-[state=on]:text-accent-strong");
     // `accent-foreground` is not a token in this app (#193) - upstream's pair
@@ -215,13 +235,13 @@ describe("ToggleGroup", () => {
     expect(toggleVariants()).not.toContain("accent-foreground");
   });
 
-  it("gives the outline variant a token edge and token elevation", () => {
+  it("gives the outline variant a token edge and token elevation", async () => {
     expect(toggleVariants({ variant: "outline" })).toContain("border-input");
     expect(toggleVariants({ variant: "outline" })).toContain("shadow-card");
     expect(toggleVariants({ variant: "outline" })).not.toContain("shadow-sm");
   });
 
-  it("applies the group variant and size to every item", () => {
+  it("applies the group variant and size to every item", async () => {
     render(
       <ToggleGroup type="multiple" variant="outline" size="sm">
         <ToggleGroupItem value="general" data-testid="general">
@@ -235,7 +255,7 @@ describe("ToggleGroup", () => {
     expect(className).toContain("h-9");
   });
 
-  it("lets an item pick its own size only when the group sets none", () => {
+  it("lets an item pick its own size only when the group sets none", async () => {
     const { rerender } = render(
       <ToggleGroup type="multiple">
         <ToggleGroupItem value="general" size="lg" data-testid="general">
@@ -256,7 +276,7 @@ describe("ToggleGroup", () => {
     expect(screen.getByTestId("general").className).toContain("h-9");
   });
 
-  it("marks every item disabled and refuses the keyboard when the group is", () => {
+  it("marks every item disabled and refuses the keyboard when the group is", async () => {
     render(
       <ToggleGroup type="multiple" disabled aria-label="Specialties">
         <ToggleGroupItem value="general">General Physician</ToggleGroupItem>
@@ -266,7 +286,7 @@ describe("ToggleGroup", () => {
     const general = screen.getByRole("button", { name: "General Physician" });
     expect(general).toBeDisabled();
     general.focus();
-    pressKey(general, " ");
+    await pressKey(general, " ");
 
     expect(general).toHaveAttribute("aria-pressed", "false");
   });

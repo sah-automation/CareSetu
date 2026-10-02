@@ -1,4 +1,7 @@
-"""PHASE-6 T01 (#307): directory-schema domain enums + schema lockstep.
+"""
+
+Trace: FEAT-004 (Provider Directory and Search).
+PHASE-6 T01 (#307): directory-schema domain enums + schema lockstep.
 
 The ticket introduces two closed vocabularies - the credential close-out reason
 (CredentialInvalidatedReason) and the doctor specialty pick-list (Specialty) -

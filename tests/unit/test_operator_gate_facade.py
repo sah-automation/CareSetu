@@ -1,4 +1,7 @@
-"""WI-2 p2a (#334): OperatorGateFacade direct-seam unit suite.
+"""
+
+Trace: FEAT-015 (Operator Console - Verification and Moderation).
+WI-2 p2a (#334): OperatorGateFacade direct-seam unit suite.
 
 Drives the operator-gate sub-facade (:mod:`modules.partner.operator_gate_facade`)
 through a mocked engine, mirroring the iam MFA facade direct-seam suite - no

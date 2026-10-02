@@ -1,3 +1,4 @@
+// PRD trace: FEAT-005 (Provider Profiles and Credential Display).
 // PHASE-8.1 (#543): doctor console Profile page suite. Renders the private
 // profile projection from #542 (photo preview, practice details, experience,
 // languages, about, availability, credential/verified status, notification
@@ -21,6 +22,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import * as axe from "axe-core";
 import {
   afterEach,
@@ -1684,17 +1686,23 @@ describe("DoctorProfilePage bilingual parity (REQ-006)", () => {
 
 // #617 (AC 1, AC 2): keyboard operability and the ROLE, both asserted through what
 // a screen reader announces rather than through the control's class or its internal
-// state. This suite drives the keyboard with `fireEvent` because the repo has no
-// `user-event` and this ticket does not add one.
+// state.
+//
+// #623: this suite used to drive the keyboard with `fireEvent` on the stated
+// grounds that the repo had no `user-event`, and compensated by following each key
+// event with a synthetic `fireEvent.click`. That compensation meant every assertion
+// in the activation steps below was reached by a mouse - the suite asserted
+// keyboard operability in its comments while proving only that clicking worked, and
+// it could not have failed for a chip the keyboard could not reach. `user-event` is
+// now a dependency, so the keypress performs the activation itself: it runs the
+// browser's default action for the key on the focused native `<button>`, and the
+// state a screen reader reads arrives from the keystroke that caused it.
 describe("DoctorProfilePage keyboard and roles (#617)", () => {
-  // What jsdom can and cannot show about a keyboard, stated once here rather than
-  // pretended away in each case: ACTIVATION of a native `<button>` (Space, Enter) is
-  // the browser's own behaviour and jsdom does not synthesise a click from a key
-  // event, so `fireEvent.click` stands in for "the doctor pressed the key" and the
-  // assertions below are about the state that press produces. NAVIGATION between
-  // chips is Radix's own code and is exercised with real key events here, which is
-  // the half a click-only test would miss: a group a keyboard cannot walk is not
-  // operable by keyboard at all.
+  // ACTIVATION and NAVIGATION are both the browser's own behaviour on a native
+  // `<button>`, and both are now driven by real key presses rather than simulated.
+  // The one thing still worth knowing is that jsdom has no default-action machinery
+  // of its own, so that behaviour comes from `user-event` here; what is asserted is
+  // what the browser does with the key, which is the part this page controls.
   it("announces pressed state and walks between chips with the arrow keys", async () => {
     await renderReady();
 
@@ -1732,18 +1740,32 @@ describe("DoctorProfilePage keyboard and roles (#617)", () => {
     // where the keyboard left off rather than to the top of the list. Radix defers
     // the move by a task so a re-render cannot steal the focus it is setting, so
     // this is awaited rather than asserted synchronously.
+    const user = userEvent.setup();
     const start = chips[0] as HTMLButtonElement;
+
+    // Entering the group and pressing the arrow key moves focus along it, and the
+    // chip that now holds focus becomes the tab stop - so the next Tab returns to
+    // where the keyboard left off rather than to the top of the list. Radix defers
+    // the move by a task so a re-render cannot steal the focus it is setting, so
+    // this is awaited rather than asserted synchronously.
     start.focus();
-    fireEvent.keyDown(start, { key: "ArrowRight" });
+    await user.keyboard("{ArrowRight}");
     await waitFor(() => expect(document.activeElement).toBe(chips[1]));
     expect(chips[1]?.tabIndex).toBe(0);
     expect(chips[0]?.tabIndex).toBe(-1);
 
     // Activating a chip flips the state a screen reader reads, and that selection
-    // is what a save declares.
-    fireEvent.click(chip);
+    // is what a save declares. Nothing here clicks the chip: the space keypress is
+    // the cause of the `aria-pressed` change asserted right after it.
+    chip.focus();
+    await user.keyboard(" ");
     expect(chip).toHaveAttribute("aria-pressed", "true");
-    fireEvent.click(screen.getByTestId("profile-about-save"));
+
+    // Save is reached and pressed from the keyboard too, so a doctor who never
+    // touches a pointer can commit the selection the walk produced.
+    const save = screen.getByTestId("profile-about-save");
+    save.focus();
+    await user.keyboard("{Enter}");
     await waitFor(() => expect(saveAbout).toHaveBeenCalledTimes(1));
     expect(saveAbout.mock.calls[0][0].languages).toContain("Maithili");
   });
@@ -1809,6 +1831,35 @@ describe("DoctorProfilePage keyboard and roles (#617)", () => {
     expect(group.getAttribute("aria-describedby")?.split(/\s+/)).toContain(
       "profile-about-languages-help",
     );
+  });
+
+  // The same association on the OTHER toggle group. #623 wired About's language and
+  // consulting-day chips first and missed the Practice card's specialty group, so
+  // it was the one chip row on the page still describing itself with help text
+  // alone. Asserted here rather than only for About because the point of the fix
+  // is a rule about toggle groups, and a rule pinned on one instance is not a
+  // rule - it is a patch that the next toggle group walks straight past.
+  it("associates the specialty group's refusal with the group as well", async () => {
+    savePractice.mockRejectedValue(
+      new ApiError({
+        code: "DOCTOR_PROFILE_INVALID_SPECIALTY",
+        message: "that specialty is not offered",
+        trace_id: "t-rx-spec",
+        details: { errors: [{ path: "specialties", reason: "not_offered" }] },
+      }),
+    );
+    await renderReady();
+
+    fireEvent.click(screen.getByTestId("profile-practice-save"));
+    const refusal = await screen.findByTestId(
+      "profile-practice-specialties-error",
+    );
+
+    const group = screen.getByTestId("profile-practice-specialties");
+    const described = group.getAttribute("aria-describedby")?.split(/\s+/);
+    expect(described).toContain(refusal.id);
+    // And the help text still rides along, as on the About group.
+    expect(described).toContain("profile-practice-specialties-help");
   });
 
   it("names each notification control as a switch rather than a bare checkbox", async () => {

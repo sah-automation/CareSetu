@@ -1,4 +1,7 @@
-"""DirectoryFacade direct-seam suite (ADR-0006, WI-2 p2b #337).
+"""
+
+Trace: FEAT-004 (Provider Directory and Search).
+DirectoryFacade direct-seam suite (ADR-0006, WI-2 p2b #337).
 
 Drives the directory sub-facade through a mocked engine, mirroring the iam MFA
 facade direct-seam suite and the registration/operator-gate sub-facade suites:

@@ -1,4 +1,7 @@
-"""PHASE-6 T02a: the public provider directory search against Postgres (#313).
+"""
+
+Trace: FEAT-004 (Provider Directory and Search).
+PHASE-6 T02a: the public provider directory search against Postgres (#313).
 
 Exercises the ``MOD-002`` ``search_directory`` facade against a live PostgreSQL
 (alembic head). Directory-visible partners are constructed through the real

@@ -1,10 +1,14 @@
+// PRD trace: FEAT-005 (Provider Profiles and Credential Display).
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { useEffect, type ReactNode } from "react";
 
 import { ProfileIdentityBand } from "./ProfileIdentityBand";
+import { ProfileCredentialList } from "./ProfileCredentialList";
 import { PROFILE_ANCHORS, ProfileSectionIndex } from "./ProfileSectionIndex";
 import type { DoctorProfileView } from "@/lib/doctor/api";
-import { STRINGS } from "@/lib/i18n/dictionaries";
+import { STRINGS, type Lang } from "@/lib/i18n/dictionaries";
+import { LangProvider, __resetLangForTests } from "@/lib/i18n/LangContext";
 
 const t = STRINGS.en.doctorProfile;
 
@@ -58,7 +62,13 @@ function renderBand(overrides: Partial<DoctorProfileView> = {}) {
   );
 }
 
-afterEach(cleanup);
+// The locale store is process-global, so a test that switches to Hindi would
+// otherwise leave every later test in this file asserting English strings
+// against Hindi markup. `cleanup` alone does not reset it.
+afterEach(() => {
+  cleanup();
+  __resetLangForTests();
+});
 
 describe("ProfileIdentityBand", () => {
   it("makes the doctor's name the page's only h1 and the clinic the line beneath", () => {
@@ -200,6 +210,277 @@ describe("ProfileIdentityBand", () => {
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(
       t.title,
     );
+  });
+});
+
+// #623 (F15): the declared band's copy (#619) rendered in both locales.
+//
+// Every assertion above reads its expected string out of `STRINGS.en`, and that
+// is this assertion pattern's blind spot rather than the band's: reading a string
+// back out of the same dictionary entry the component reads it from proves the
+// component is WIRED, not that the string is right. A Hindi entry copied from the
+// English one, left empty, or never written passes all of them while shipping a
+// page a Hindi-reading doctor cannot use. REQ-006 asks for equal-quality copy in
+// both locales, and equal quality is not equal KEYS - key parity, which #617
+// already asserts, is satisfied by a Hindi file full of English.
+//
+// So each string is asserted in BOTH locales, each one queried the way the band
+// actually puts it on the page - some are visible text, some are accessible names
+// on a non-text element, and two only render on a fallback path. Asserting them by
+// a single generic `getByText` would have quietly dropped the aria-labelled ones,
+// which is the failure mode this suite exists to remove.
+describe("declared band copy in both locales (#619, #623 F15)", () => {
+  type Strings = (typeof STRINGS)[Lang]["doctorProfile"];
+
+  // Midday, so the date cannot slip a day in a timezone west of UTC and make the
+  // assertion flaky rather than wrong.
+  const EXPIRES_AT = "2030-01-31T12:00:00";
+
+  // The expiry sentence is a function of a locale-formatted date, so the expected
+  // string has to be built from the same formatting the band uses. Asserting the
+  // English template in both locales would pass for the wrong reason - the
+  // Hindi sentence wraps a Hindi date, and a Hindi doctor reads that pair.
+  function expiryLabel(lang: Lang, s: Strings) {
+    return s.credentialExpires(
+      new Date(EXPIRES_AT).toLocaleDateString(
+        lang === "hi" ? "hi-IN" : "en-IN",
+        { day: "numeric", month: "short", year: "numeric" },
+      ),
+    );
+  }
+
+  // A photo, a credential with an expiry, and names - the tree in which most of
+  // the band's copy is on screen at once.
+  function Band({ strings }: { strings: Strings }) {
+    return (
+      <>
+        <ProfileIdentityBand
+          profile={profile({ photo_ref: "doctor/7/photo-1.enc" })}
+          photoUrl={null}
+          mediaAbsent={false}
+          busy={false}
+          failure={null}
+          onPick={noop}
+          onRemove={noop}
+          onDismissFailure={noop}
+        />
+        <ProfileCredentialList
+          profile={{
+            credentials: [
+              {
+                credential_type: "medical_registration",
+                status: "verified",
+                expires_at: EXPIRES_AT,
+              },
+            ],
+            partner_id: 7,
+            verified: true,
+          }}
+        />
+      </>
+    );
+  }
+
+  // The two strings that render only on a fallback: the h1 with nothing left to
+  // fall back to, and the empty specialty row.
+  function Fallbacks({ strings }: { strings: Strings }) {
+    return (
+      <ProfileIdentityBand
+        profile={profile({
+          practice_name: null,
+          clinic_name: null,
+          specialties: [],
+          photo_ref: null,
+        })}
+        photoUrl={null}
+        mediaAbsent={false}
+        busy={false}
+        failure={null}
+        onPick={noop}
+        onRemove={noop}
+        onDismissFailure={noop}
+      />
+    );
+  }
+
+  // The locale is seeded BEFORE the tree mounts, which is how the app itself
+  // starts in a non-default language (LangProvider adopts the stored preference in
+  // its own mount effect). Setting it from an effect instead loses the flip: a
+  // child's effect runs before the provider subscribes, so the notification goes
+  // nowhere and the tree stays in English - a failure that would have made these
+  // tests assert Hindi strings against English markup and pass for the wrong
+  // reason.
+  function InLang({ lang, children }: { lang: Lang; children: ReactNode }) {
+    return (
+      <LangProvider>
+        <LangSeed lang={lang} />
+        {children}
+      </LangProvider>
+    );
+  }
+
+  function LangSeed({ lang }: { lang: Lang }) {
+    // Rendered before the surfaces below it in the same tree, so its effect -
+    // which runs first - lands the preference before any of them read it.
+    useEffect(() => {
+      window.localStorage.setItem("caresetu.lang", lang);
+    }, [lang]);
+    return null;
+  }
+
+  for (const lang of ["en", "hi"] as const) {
+    describe(lang, () => {
+      const s = STRINGS[lang].doctorProfile;
+
+      it("renders the band's visible copy", () => {
+        render(
+          <InLang lang={lang}>
+            <Band strings={s} />
+          </InLang>,
+        );
+
+        for (const [name, value] of [
+          ["photo help", s.photoHelp],
+          ["replace action", s.photoReplace],
+          ["remove action", s.photoRemove],
+          ["verified badge", s.verified],
+          ["credentials heading", s.credentialsHeading],
+          ["credential type", s.credentialType.medical_registration],
+          ["credential status", s.credentialStatus.verified],
+          ["credential expiry", expiryLabel(lang, s)],
+          ["public preview heading", s.publicPreviewHeading],
+          ["public preview help", s.publicPreviewHelp],
+          ["public preview action", s.publicPreviewAction],
+          ["verified tick label", s.verifiedTickLabel],
+        ] as const) {
+          expect(
+            screen.getAllByText(value).length,
+            `${name} (${lang}) never rendered`,
+          ).toBeGreaterThan(0);
+        }
+      });
+
+      // These three are accessible NAMES rather than text: the picker is labelled
+      // but not captioned, and the chips row is named by its label rather than by
+      // a visible heading. `getByText` would not find them, which is why the
+      // identity band's own name was unasserted in both locales until now.
+      it("renders the band's accessible names", () => {
+        render(
+          <InLang lang={lang}>
+            <Band strings={s} />
+          </InLang>,
+        );
+
+        expect(screen.getByTestId("profile-photo")).toHaveAccessibleName(
+          s.photoHeading,
+        );
+        expect(screen.getByTestId("profile-photo-input")).toHaveAccessibleName(
+          s.photoReplace,
+        );
+        expect(screen.getByLabelText(s.identityChipsLabel)).toBeInTheDocument();
+      });
+
+      it("renders the verification row and its unverified wording", () => {
+        render(
+          <InLang lang={lang}>
+            <Band strings={s} />
+          </InLang>,
+        );
+
+        expect(
+          screen.getByTestId("profile-verification-state"),
+        ).toHaveTextContent(s.verificationStateLabel);
+
+        cleanup();
+        render(
+          <ProfileIdentityBand
+            profile={profile({ verified: false })}
+            photoUrl={null}
+            mediaAbsent={false}
+            busy={false}
+            failure={null}
+            onPick={noop}
+            onRemove={noop}
+            onDismissFailure={noop}
+          />,
+        );
+        expect(
+          screen.getByTestId("profile-identity-verified"),
+        ).toHaveTextContent(s.notVerified);
+      });
+
+      it("renders the band's fallback copy when there is nothing to show", () => {
+        render(
+          <InLang lang={lang}>
+            <Fallbacks strings={s} />
+          </InLang>,
+        );
+
+        expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(
+          s.title,
+        );
+        expect(
+          screen.getByTestId("profile-specialties-empty"),
+        ).toHaveTextContent(s.noSpecialtiesYet);
+        // No photo stored, so the band offers Upload - the string the replace
+        // action above deliberately was not.
+        expect(screen.getByTestId("profile-photo-upload")).toHaveTextContent(
+          s.photoUpload,
+        );
+      });
+
+      it("names the credential list's empty state rather than a bare list", () => {
+        render(
+          <InLang lang={lang}>
+            <ProfileCredentialList
+              profile={{ credentials: [], partner_id: 7, verified: false }}
+            />
+          </InLang>,
+        );
+
+        expect(
+          screen.getByTestId("profile-credentials-empty"),
+        ).toHaveTextContent(s.credentialsEmpty);
+      });
+    });
+  }
+
+  // The falsifiability check: the band's OWN copy must actually differ between
+  // locales. Deliberately scoped to these strings - shared vocabulary (the 20
+  // specialty names, `Save`, `Cancel`) is intentionally identical in places, and
+  // demanding a difference there would assert a translation the glossary does not
+  // promise. A single untranslated string fails here by name.
+  it("gives no band string the same text in both locales", () => {
+    const en = STRINGS.en.doctorProfile;
+    const hi = STRINGS.hi.doctorProfile;
+
+    const fields: (keyof typeof en & keyof typeof hi)[] = [
+      "photoHeading",
+      "photoHelp",
+      "photoUpload",
+      "photoReplace",
+      "photoRemove",
+      "identityChipsLabel",
+      "noSpecialtiesYet",
+      "title",
+      "verificationStateLabel",
+      "verifiedTickLabel",
+      "credentialsHeading",
+      "credentialsEmpty",
+      "publicPreviewHeading",
+      "publicPreviewHelp",
+      "publicPreviewAction",
+      "verifiedBandTitle",
+    ];
+
+    const untranslated = fields.filter(
+      (field) => String(en[field]) === String(hi[field]),
+    );
+
+    expect(
+      untranslated,
+      "these band strings are byte-identical in hi and en, so REQ-006's equal-quality copy is not met",
+    ).toEqual([]);
   });
 });
 

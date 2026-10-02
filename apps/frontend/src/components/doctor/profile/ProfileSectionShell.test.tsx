@@ -1,3 +1,4 @@
+// PRD trace: FEAT-005 (Provider Profiles and Credential Display).
 // #605: the reusable profile section shell's own suite. It renders the shell
 // alone - no page, no provider, no network mock - and drives it with
 // `fireEvent`, so the seven responsibilities it owns (title, help text, dirty

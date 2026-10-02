@@ -1,3 +1,4 @@
+// PRD trace: FEAT-005 (Provider Profiles and Credential Display).
 // #618 AC 2: the doctor's live preview. What this suite holds is the preview's
 // own job rather than the renderer's (the renderer is pinned by the no-drift suite
 // in `components/public/ProviderProfile.test.tsx`): that it tracks the form as it

@@ -1,3 +1,4 @@
+// PRD trace: FEAT-005 (Provider Profiles and Credential Display).
 // #616: the Address card's own suite.
 //
 // It renders the card inside a real `DoctorProfileProvider` and mocks the doctor
@@ -35,7 +36,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { AddressSectionCard } from "./AddressSectionCard";
 import { PublicProfileDraftProvider } from "./PublicProfileDraftContext";
@@ -56,7 +57,8 @@ import {
   useDoctorProfile,
 } from "@/lib/doctor/DoctorProfileContext";
 import { IDEMPOTENCY_KEY_HEADER } from "@/lib/idempotency";
-import { STRINGS } from "@/lib/i18n/dictionaries";
+import { STRINGS, type Lang } from "@/lib/i18n/dictionaries";
+import { LangProvider, __resetLangForTests } from "@/lib/i18n/LangContext";
 
 vi.mock("@/lib/doctor/api", async (importOriginal) => {
   const mod = await importOriginal<typeof import("@/lib/doctor/api")>();
@@ -236,19 +238,33 @@ function AdoptProbe() {
 async function renderCard(
   view: DoctorProfileView = profile(),
   withSibling = false,
+  lang: Lang = "en",
 ) {
   getProfile.mockResolvedValue(view);
   render(
-    <DoctorProfileProvider>
-      {/* #618: the page mounts this around the form, and the card publishes its
+    // The locale is seeded by a sibling that mounts first, which is how the app
+    // itself starts in a non-default language. Seeding from the card's own effect
+    // would be too late - it is the card under test.
+    <LangProvider>
+      <LangSeed lang={lang} />
+      <DoctorProfileProvider>
+        {/* #618: the page mounts this around the form, and the card publishes its
           typed values into it, so a card rendered on its own needs it too. */}
-      <PublicProfileDraftProvider profile={view}>
-        <AddressSectionCard />
-        {withSibling ? <SiblingSection /> : null}
-      </PublicProfileDraftProvider>
-    </DoctorProfileProvider>,
+        <PublicProfileDraftProvider profile={view}>
+          <AddressSectionCard />
+          {withSibling ? <SiblingSection /> : null}
+        </PublicProfileDraftProvider>
+      </DoctorProfileProvider>
+    </LangProvider>,
   );
   return screen.findByTestId("profile-address-card");
+}
+
+function LangSeed({ lang }: { lang: Lang }) {
+  useEffect(() => {
+    window.localStorage.setItem("caresetu.lang", lang);
+  }, [lang]);
+  return null;
 }
 
 beforeEach(() => {
@@ -259,6 +275,90 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  // The locale store is process-global; without this a Hindi case would leave
+  // every later assertion in this file reading Hindi strings against English
+  // markup.
+  __resetLangForTests();
+});
+
+// #623 (F15): #616's address copy in both locales.
+//
+// The card's field labels and hints are asserted only against `STRINGS.en` above,
+// and reading an expected string back out of the same dictionary entry the
+// component reads proves the card is wired, not that the sentence is right - a
+// Hindi entry left empty, or copied from the English one, passes every assertion
+// in this file while shipping a card a Hindi-reading doctor cannot fill in. REQ-006
+// asks for equal-quality copy in both locales, and equal quality is the sentence
+// itself, not an equal set of keys.
+describe("AddressSectionCard copy in both locales (#616, #623 F15)", () => {
+  // The nine address field keys #616 added, plus the three the card's derived rows
+  // and shell render - all of them read off the component, so a key that exists in
+  // the dictionary but is never drawn cannot pass this as coverage.
+  const addressCopy = (s: (typeof STRINGS)[Lang]["doctorProfile"]) =>
+    [
+      ["street label", s.addressLineLabel],
+      ["street help", s.addressLineHelp],
+      ["landmark label", s.addressLandmarkLabel],
+      ["locality label", s.addressLocalityLabel],
+      ["city label", s.addressCityLabel],
+      ["PIN label", s.addressPinLabel],
+      ["PIN help", s.addressPinHelp],
+      ["district label", s.addressDistrictLabel],
+      ["state label", s.addressStateLabel],
+      ["derived help", s.addressDerivedHelp],
+      ["derived empty", s.addressDerivedEmpty],
+      ["section title", s.addressSectionTitle],
+      ["section help", s.addressSectionHelp],
+      // `addressPinInvalid` is deliberately absent: it is submit-time validation
+      // copy that renders only after a refused save, so asserting it here would
+      // have been asserting a string no doctor sees on a correctly-filled card.
+      // Its own tests drive the failure path, and the parity check below still
+      // covers both locales.
+    ] as const;
+
+  for (const lang of ["en", "hi"] as const) {
+    it(`renders every address label and hint in ${lang}`, async () => {
+      await renderCard(profile(), false, lang);
+
+      for (const [name, value] of addressCopy(STRINGS[lang].doctorProfile)) {
+        expect(
+          screen.getAllByText(value).length,
+          `${name} (${lang}) never rendered`,
+        ).toBeGreaterThan(0);
+      }
+    });
+  }
+
+  // The falsifiability check: no address string may read the same in both
+  // locales. A PIN code is still "PIN" in Hindi and a city is still a city, so
+  // this deliberately does not demand a difference from every possible string -
+  // it demands one from the sentences a doctor reads.
+  it("gives no address sentence the same text in both locales", () => {
+    const en = STRINGS.en.doctorProfile;
+    const hi = STRINGS.hi.doctorProfile;
+
+    const fields = [
+      "addressSectionHelp",
+      "addressLineHelp",
+      "addressLandmarkLabel",
+      "addressDerivedHelp",
+      "addressDerivedEmpty",
+      "addressPinHelp",
+      "addressPinInvalid",
+      "addressPinUnresolved",
+      "invalidSummary",
+      "unmappedField",
+    ] as const;
+
+    const untranslated = fields.filter(
+      (field) => String(en[field]) === String(hi[field]),
+    );
+
+    expect(
+      untranslated,
+      "these address strings are byte-identical in hi and en, so REQ-006's equal-quality copy is not met",
+    ).toEqual([]);
+  });
 });
 
 describe("AddressSectionCard field set (#616 AC 1)", () => {

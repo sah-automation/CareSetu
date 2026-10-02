@@ -1,3 +1,4 @@
+// PRD trace: FEAT-005 (Provider Profiles and Credential Display).
 // #583: provider suite for the doctor console's shared profile source. The
 // doctor client is mocked at the module boundary, so what is pinned here is the
 // discipline the read itself has to keep now that the chrome and the Profile page

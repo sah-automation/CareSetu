@@ -1,4 +1,7 @@
-"""#607: the shared directory-entry refresh against Postgres.
+"""
+
+Trace: FEAT-004 (Provider Directory and Search).
+#607: the shared directory-entry refresh against Postgres.
 
 The directory entry is the read-side row search and the public profile read, and
 this ticket gives it a second writer: the doctor's own address save joins the

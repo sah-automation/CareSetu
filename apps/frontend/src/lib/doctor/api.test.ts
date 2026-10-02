@@ -1,3 +1,4 @@
+// PRD trace: FEAT-005 (Provider Profiles and Credential Display).
 // #623 (F19): the doctor profile view's runtime guard.
 //
 // `fetchDoctorProfile` runs every answer through `isDoctorProfileView` before the

@@ -218,11 +218,14 @@ async def test_get_doctor_profile_projects_private_fields_and_derived_status() -
 
 
 def _projected_profile_values() -> dict[str, object]:
-    """Every column ``get_doctor_profile`` reads, at neutral values.
+    """
 
-    A full projection row so a test about ONE field does not have to restate the
-    other thirty, and so a column added to the projection later fails these tests
-    loudly rather than silently reading ``None``.
+    Trace: FEAT-005 (Provider Profiles and Credential Display).
+    Every column ``get_doctor_profile`` reads, at neutral values.
+
+        A full projection row so a test about ONE field does not have to restate the
+        other thirty, and so a column added to the projection later fails these tests
+        loudly rather than silently reading ``None``.
     """
     return {
         "partner_id": 12,

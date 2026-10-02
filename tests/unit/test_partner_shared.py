@@ -1,4 +1,7 @@
-"""PHASE-6: shared internal helpers of the partner module (tickets #606, #613).
+"""
+
+Trace: FEAT-004 (Provider Directory and Search).
+PHASE-6: shared internal helpers of the partner module (tickets #606, #613).
 
 ``shared.py`` is a grab-bag of profile-loading and registration race-retry
 helpers, so it has no single subject to name. It is pinned here because #606
