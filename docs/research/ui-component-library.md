@@ -66,7 +66,7 @@ The existing shell needs **no rewrite** - adoption is additive, component by com
 ## Adoption steps & guardrails
 
 1. Run `npx shadcn@latest init` against the Tailwind v3 path; verify `components.json` records the v3 style explicitly (guards against the stale-style CLI drift in discussion #6714). Pin the Radix base at init.
-2. Add components lazily per feature ticket - never bulk-add; each addition is reviewed like any other source file since we own it.
+2. Add components lazily per feature ticket - never bulk-add; each addition is reviewed like any other source file since we own it. For the profile redesign, the adopted components are `card`, `input`, `textarea`, and `badge` as pure Tailwind, with `switch` and `toggle-group` as the two small Radix dependencies.
 3. Keep the EN/Hindi string layer app-owned (shadcn adds no translations); use React Aria-based internationalized inputs for DOB/appointment fields.
-4. Add a CI bundle-size check against the NFR-003 1.5 MB page budget (e.g., `@next/bundle-analyzer` + a hard budget assertion) so every adopted component's cost is visible at PR time.
+4. Add a CI bundle-size check against the NFR-003 1.5 MB page budget (e.g., `@next/bundle-analyzer` + a hard budget assertion) so every adopted component's cost is visible at PR time. The profile route is inside the budget gate; the two Radix dependencies represent the only new client-side runtime weight in this change.
 5. Revisit the Base UI default decision (and the Tailwind v4 migration) as separate future tickets, not bundled into adoption.
