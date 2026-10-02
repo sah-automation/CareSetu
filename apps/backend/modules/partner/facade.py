@@ -1331,7 +1331,11 @@ class PartnerFacade:
 
         Nothing about credentials is touched: profile fields are DECLARED,
         credentials are VERIFIED (ADR-0011), so the derived ``verified`` flag in
-        the read-back is unaffected by what this writes.
+        the read-back is unaffected by what this writes. Nor is the directory
+        entry's listed flag: this write reaches the entry only through the shared
+        refresh (#607), which copies the position and the specialties and never a
+        listed flag or any verified derivation, so a doctor cannot list themselves
+        by editing their own practice card (ADR-0008).
         """
         values = update.model_dump()
         # The one wire-to-column rename, applied once here rather than by every
@@ -1340,10 +1344,17 @@ class PartnerFacade:
         values["practice_name"] = values.pop("full_name")
         async with self._engine.begin() as connection:
             await _update_active_doctor_profile(connection, doctor_id, values)
+            # This card is one of the two writers of the ``specialties`` selection,
+            # so it is one of the two callers of the shared refresh (#607). Without
+            # it a doctor who saved only the Practice card would carry their
+            # specialties on their public profile (which reads the profile row)
+            # while directory search kept filtering on the stale index value - two
+            # public surfaces disagreeing about the same doctor. The refresh writes
+            # only the entry's position and specialties, so the caller's row lock
+            # and the [Active] recheck already decided everything it touches.
+            await self._credential_validity.refresh_directory_entry(connection, doctor_id)
         # Every section write answers with the profile the doctor's next GET would
-        # serve, so the card re-renders from one call. The public directory entry
-        # is still NOT written here - the shared refresh (#607) owns copying the
-        # specialties selection onto it.
+        # serve, so the card re-renders from one call.
         return await self.get_doctor_profile(doctor_id)
 
     async def update_doctor_address(

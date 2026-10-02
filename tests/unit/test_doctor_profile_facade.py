@@ -247,17 +247,21 @@ def _practice_read_back_row() -> _Row:
 
 
 @pytest.mark.asyncio
-async def test_update_doctor_practice_writes_only_its_own_columns() -> None:
+async def test_update_doctor_practice_writes_only_its_own_columns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """#608: the practice write touches its own columns and no one else's.
 
-    Two assertions, and the second is the one that matters for the four-way split.
-    The written TABLE set proves the save stays on the doctor's own private row -
-    it moves nothing in the public directory entry that ``search_directory`` reads.
-    The written COLUMN set then proves the save stays inside its own card: the
+    Three assertions, and the third is the one that matters beyond the four-way
+    split. The written COLUMN set proves the save stays inside its own card: the
     address, the languages, the about text, the consulting days, the consulting
     hours and the notification preferences are all absent, so a doctor editing
     their practice card cannot move a field the card they are looking at does not
-    show.
+    show. The written TABLE set then proves the save stays on the doctor's own
+    private row plus the ONE shared projection write - the directory entry - which
+    carries the selection onto the column ``search_directory`` filters on. The
+    third assertion is that the refresh is the only thing that touched the entry,
+    and specifically that it never carried a listed flag or a verified derivation.
     """
     update = DoctorProfilePracticeUpdate(
         full_name="Anita Verma",
@@ -268,6 +272,7 @@ async def test_update_doctor_practice_writes_only_its_own_columns() -> None:
     connection = _connection(
         [
             _Result(row=_Row(partner_type="doctor", status="Active")),
+            _Result(),
             _Result(),
             _Result(row=_practice_read_back_row()),
             _Result(
@@ -286,6 +291,18 @@ async def test_update_doctor_practice_writes_only_its_own_columns() -> None:
     facade = _facade(connection)
     cache = _Cache()
     facade._directory_cache = cache
+    # The refresh owns its own namespace flush (ADR-0011) rather than each caller
+    # remembering it, so the flush is asserted HERE, at the shared operation, and
+    # the two callers are free to be added later without anyone re-deriving it.
+    flushes: list[int] = []
+
+    async def _record_flush() -> None:
+        flushes.append(1)
+
+    monkeypatch.setattr(
+        "modules.partner.credential_validity.directory_visibility_changed",
+        _record_flush,
+    )
 
     profile = await facade.update_doctor_practice(12, update)
 
@@ -297,7 +314,7 @@ async def test_update_doctor_practice_writes_only_its_own_columns() -> None:
     assert profile.experience_years == 12
 
     statements = [call.args[0] for call in connection.execute.await_args_list]
-    recheck, profile_update = statements[0], statements[1]
+    recheck, profile_update, refresh = statements[0], statements[1], statements[2]
     # The active-doctor recheck is a row lock, not a bare read: a concurrent
     # deactivation between the edge guard and this write must not slip past it.
     assert "FOR UPDATE" in str(recheck)
@@ -306,7 +323,7 @@ async def test_update_doctor_practice_writes_only_its_own_columns() -> None:
         for statement in statements
         if getattr(statement, "table", None) is not None
     }
-    assert written_tables == {"partner_profiles"}
+    assert written_tables == {"partner_profiles", "partner_directory_index"}
     assert profile_update.table.name == "partner_profiles"
     # ``full_name`` is the wire name for the ``practice_name`` column; every other
     # field is name-for-name. ``updated_at`` is the server-written touch.
@@ -334,8 +351,28 @@ async def test_update_doctor_practice_writes_only_its_own_columns() -> None:
         "consultation_fee_paise",
     ):
         assert another_cards_column not in profile_update._values
-    # The public directory entry keeps a COPY of the selection, refreshed by the
-    # shared operation (#607); a private section save never rewrites it.
+    # The one write the save makes outside its own card is the shared refresh
+    # (#607), and it writes the position and the selection. Without it the doctor's
+    # public profile would carry the selection (it reads the profile row) while
+    # directory search kept filtering on the stale index value - two public
+    # surfaces disagreeing about one doctor, which is the defect #612 fixed the
+    # read path for.
+    assert refresh.table.name == "partner_directory_index"
+    # The refresh's whole job on this path is the selection: the upsert carries the
+    # ``specialty`` column on insert AND on conflict, so an entry written by an
+    # earlier save is brought forward rather than left on its old value.
+    assert "specialty = excluded.specialty" in str(refresh)
+    # The safety property the operator approval path depends on: the refresh is
+    # reachable from a doctor's own save, so it must never move the listed flag or
+    # any verified derivation. A doctor editing their practice card cannot make
+    # themselves listed.
+    assert "is_active" not in str(refresh)
+    # The refresh owns its own cache flush, so the entry a patient searches is
+    # rebuilt from the row this save just wrote rather than from the pre-save one.
+    # Without it a specialty change would keep serving the previous selection out
+    # of Redis for a whole TTL, which is the exact staleness ADR-0011 permits and
+    # the reason the flush lives inside the shared operation.
+    assert len(flushes) == 1
     assert cache.visibility_changes == 0
 
 

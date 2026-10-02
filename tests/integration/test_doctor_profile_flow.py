@@ -751,9 +751,12 @@ async def test_multi_valued_specialties_round_trip_and_match_a_specialty_filtere
     A doctor's selection is a SET, not a single value: it round-trips through the
     private profile read-back, and a patient filtering on ANY one member finds
     the doctor. The directory entry receives that selection through the shared
-    refresh (#607), whose only caller on the doctor's own side is the address
-    write, so the flow below is the one a doctor finishing their profile really
-    makes - save the practice card, then the address card.
+    refresh (#607), and the practice card is one of that refresh's two callers -
+    so the assertion below is made straight after the PRACTICE save, with no
+    address save in between. A doctor who finishes their profile card first, or
+    who never touches the address card at all, must still be findable by their
+    declared specialty; making the address save a prerequisite here would hide
+    the opposite bug.
 
     The second half is the other half of the same rule: a doctor who has declared
     no specialty yet is not invisible. The membership predicate fails only the
@@ -779,16 +782,18 @@ async def test_multi_valued_specialties_round_trip_and_match_a_specialty_filtere
     )
     assert _read_profile(client, multi_headers)["specialties"] == selection
 
-    # The address save is the caller that re-derives the entry, which is what
-    # publishes the declared selection onto it.
-    _save_address(client, multi_headers, pin_code=_IN_BELT_PIN)
-
+    # The practice save alone publishes the declared selection onto the entry the
+    # specialty filter reads - asserted BEFORE any address save, because that is
+    # the ordering a doctor completing the Practice card first actually makes.
     entry_specialties = await _query(
         database_url,
         "SELECT specialty FROM partner.partner_directory_index WHERE partner_id = :partner_id",
         {"partner_id": multi_id},
     )
-    assert entry_specialties[0]["specialty"] == selection
+    assert entry_specialties[0]["specialty"] == selection, (
+        "a practice-only save must not leave the directory entry filtering on the "
+        "pre-save selection while the public profile already shows the new one"
+    )
 
     for requested in selection:
         filtered = _search(client, specialty=requested)
@@ -804,6 +809,16 @@ async def test_multi_valued_specialties_round_trip_and_match_a_specialty_filtere
     assert _search(client, specialty="Cardiologist")["items"] == [], (
         "a specialty nobody declared matches nobody"
     )
+
+    # The address save re-derives the same entry for the POSITION, and must leave
+    # the selection the practice save published exactly as it was.
+    _save_address(client, multi_headers, pin_code=_IN_BELT_PIN)
+    after_address = await _query(
+        database_url,
+        "SELECT specialty FROM partner.partner_directory_index WHERE partner_id = :partner_id",
+        {"partner_id": multi_id},
+    )
+    assert after_address[0]["specialty"] == selection
 
     # The doctor who declared none is still in the directory, unfiltered.
     unfiltered = _search(client)
