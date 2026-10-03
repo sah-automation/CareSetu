@@ -11,6 +11,13 @@
 // consultations | prescriptions | lab_results | metrics | health_background |
 // full_record; a section the doctor is not granted is null, which the UI
 // renders as a calm "not shared" state.
+//
+// Patient photos are a presence flag here, never a ref: `has_photo` is the only
+// photo field a patient DTO carries, because the private storage key must never
+// cross to the client (security-phii-standards S2, ADR-0020) and the bytes come
+// from the consent-gated photo route. The doctor's own profile DTOs further down
+// are a different thing - they describe the doctor's own media - and keep
+// `photo_ref` deliberately.
 
 import { IDEMPOTENCY_KEY_HEADER, idempotencyKey } from "@/lib/idempotency";
 import { guardShape, request, requestBlob, requestVoid } from "@/lib/request";
@@ -30,7 +37,7 @@ export interface DoctorPatientRow {
   patient_id: number;
   name: string | null;
   age: number | null;
-  photo_ref: string | null;
+  has_photo: boolean;
   bucket: DoctorPatientBucket;
   granted_scopes: RecordScope[];
   latest_case_stage: string | null;
@@ -47,7 +54,7 @@ export interface ContactSection {
   gender: string | null;
   area: string | null;
   emergency_contact: string | null;
-  photo_ref: string | null;
+  has_photo: boolean;
 }
 
 export interface CaseWorkspaceLink {
@@ -88,7 +95,8 @@ function isDoctorPatientRow(value: unknown): value is DoctorPatientRow {
     "patient_id" in value &&
     "name" in value &&
     "age" in value &&
-    "photo_ref" in value &&
+    "has_photo" in value &&
+    typeof (value as DoctorPatientRow).has_photo === "boolean" &&
     "bucket" in value &&
     "granted_scopes" in value &&
     "latest_case_stage" in value
@@ -104,7 +112,8 @@ function isContactSection(value: unknown): value is ContactSection {
     "gender" in value &&
     "area" in value &&
     "emergency_contact" in value &&
-    "photo_ref" in value
+    "has_photo" in value &&
+    typeof (value as ContactSection).has_photo === "boolean"
   );
 }
 
