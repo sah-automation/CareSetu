@@ -1,4 +1,4 @@
-"""Export named OpenAPI component schemas to a JSON file the frontend can read.
+"""MOD-012: export named OpenAPI component schemas to a file the frontend reads.
 
 Ticket #624: the doctor console's frontend guards drifted from the backend's
 serialised DTOs, and the drift shipped green because every page suite mocks the
@@ -9,7 +9,7 @@ published OpenAPI schema rather than hand-copying one, and needs that schema
 available in a language it can read. This script is the bridge: it reads the
 schema the running app serves (``/openapi.json`` or in-process from
 ``app.main``) and writes the component schemas named below to a checked-in JSON
-file. ``tests/unit/test_doctor_openapi_fixture.py`` asserts the checked-in copy
+file. ``tests/unit/test_doctor_openapi_slice.py`` asserts the checked-in copy
 still equals a freshly generated one, so a backend field rename fails the
 backend suite instead of silently re-introducing the drift.
 
@@ -29,6 +29,9 @@ import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TypeAlias
+
+JsonValue: TypeAlias = "bool | int | float | str | list[JsonValue] | dict[str, JsonValue] | None"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BACKEND_DIR = REPO_ROOT / "apps" / "backend"
@@ -59,19 +62,24 @@ EXPORTED_SCHEMAS: tuple[str, ...] = (
 # pin. Everything the frontend needs to build and check a body survives.
 DROPPED_KEYS: frozenset[str] = frozenset({"description", "title"})
 
+# A schema fetch that hangs is worse than one that fails: the exporter is a
+# dev/CI gate, so a bounded wait is the behaviour we want. Named because the
+# value is a policy, not a fact about urlopen.
+HTTP_TIMEOUT_SECONDS = 30
+
 
 class SchemaExportError(RuntimeError):
     """A named schema is absent from the OpenAPI document."""
 
 
-def load_openapi(source: str | None) -> dict:
+def load_openapi(source: str | None) -> dict[str, JsonValue]:
     """The OpenAPI schema: fetched from a URL, read from a file, or generated."""
     if source is None:
         return _generate_openapi()
     if source.startswith("http://") or source.startswith("https://"):
         import urllib.request
 
-        with urllib.request.urlopen(source, timeout=30) as response:  # nosec B310 - dev-only CLI; the URL is a fixed CI/localhost value, never user input, and urllib keeps the exporter stdlib-only
+        with urllib.request.urlopen(source, timeout=HTTP_TIMEOUT_SECONDS) as response:  # nosec B310 - dev-only CLI; the URL is a fixed CI/localhost value, never user input, and urllib keeps the exporter stdlib-only
             return json.loads(response.read().decode("utf-8"))
     path = Path(source)
     if not path.is_file():
@@ -79,7 +87,7 @@ def load_openapi(source: str | None) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _generate_openapi() -> dict:
+def _generate_openapi() -> dict[str, JsonValue]:
     """Build the OpenAPI document in-process from the app shell (local default)."""
     if str(BACKEND_DIR) not in sys.path:
         sys.path.insert(0, str(BACKEND_DIR))
@@ -88,7 +96,7 @@ def _generate_openapi() -> dict:
     return app.main.app.openapi()
 
 
-def select_schemas(spec: dict, names: Sequence[str]) -> dict[str, dict]:
+def select_schemas(spec: dict[str, JsonValue], names: Sequence[str]) -> dict[str, JsonValue]:
     """Return the named component schemas, in the order given, or raise."""
     components = (spec.get("components") or {}).get("schemas") or {}
     missing = [name for name in names if name not in components]
@@ -100,7 +108,7 @@ def select_schemas(spec: dict, names: Sequence[str]) -> dict[str, dict]:
     return {name: components[name] for name in names}
 
 
-def strip_noise(node):
+def strip_noise(node: JsonValue) -> JsonValue:
     """Drop ``description``/``title`` keys at every depth, keeping the shape."""
     if isinstance(node, dict):
         return {key: strip_noise(value) for key, value in node.items() if key not in DROPPED_KEYS}
@@ -109,7 +117,9 @@ def strip_noise(node):
     return node
 
 
-def build(spec: dict, names: Sequence[str] = EXPORTED_SCHEMAS) -> dict:
+def build(
+    spec: dict[str, JsonValue], names: Sequence[str] = EXPORTED_SCHEMAS
+) -> dict[str, JsonValue]:
     """The exported slice as a dict - the shape any comparison should use.
 
     Compare parsed documents, never serialised text: the destination is run
@@ -119,7 +129,7 @@ def build(spec: dict, names: Sequence[str] = EXPORTED_SCHEMAS) -> dict:
     return {"schemas": strip_noise(select_schemas(spec, names))}
 
 
-def render(spec: dict, names: Sequence[str] = EXPORTED_SCHEMAS) -> str:
+def render(spec: dict[str, JsonValue], names: Sequence[str] = EXPORTED_SCHEMAS) -> str:
     """Serialise the exported slice deterministically, for a diffable file."""
     return json.dumps(build(spec, names), indent=2, sort_keys=True) + "\n"
 

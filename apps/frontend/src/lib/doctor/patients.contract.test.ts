@@ -19,7 +19,7 @@
 // tests/unit/test_doctor_openapi_slice.py), so a backend rename fails here
 // instead of failing a page.
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { fetchDoctorPatientDetail, listDoctorPatients } from "./api";
 import { request } from "@/lib/request";
@@ -89,7 +89,9 @@ function build(node: OpenApiNode, over: Record<string, unknown> = {}): unknown {
     }
     return shape;
   }
-  if (node.type === "array") return [build(node.items ?? {}, over)];
+  // No `over` for element nodes: an override names a field of THIS body, and
+  // passing it down would let a parent field name collide with a nested one.
+  if (node.type === "array") return [build(node.items ?? {})];
   if (node.type === "boolean") return true;
   if (node.type === "integer" || node.type === "number") return 1;
   if (node.type === "string") return "value";
@@ -139,34 +141,33 @@ function patientDetail(
   });
 }
 
-/** Ask the real read path to refuse a body, and report whether it did. */
-async function listRefuses(shape: unknown): Promise<boolean> {
+/** Ask a real read path to refuse a body, and report whether it did. */
+async function refuses(
+  shape: unknown,
+  read: () => Promise<unknown>,
+  guardMessage: string,
+): Promise<boolean> {
   ask.mockResolvedValue(shape);
   try {
-    await listDoctorPatients();
+    await read();
     return false;
   } catch (error) {
-    expect(String(error)).toContain("unexpected patients list shape");
+    expect(String(error)).toContain(guardMessage);
     return true;
   }
 }
 
-async function detailRefuses(shape: unknown): Promise<boolean> {
-  ask.mockResolvedValue(shape);
-  try {
-    await fetchDoctorPatientDetail(7);
-    return false;
-  } catch (error) {
-    expect(String(error)).toContain("unexpected patient detail shape");
-    return true;
-  }
-}
+const listRefuses = (shape: unknown) =>
+  refuses(shape, () => listDoctorPatients(), "unexpected patients list shape");
+
+const detailRefuses = (shape: unknown) =>
+  refuses(
+    shape,
+    () => fetchDoctorPatientDetail(7),
+    "unexpected patient detail shape",
+  );
 
 beforeEach(() => {
-  ask.mockReset();
-});
-
-afterEach(() => {
   ask.mockReset();
 });
 

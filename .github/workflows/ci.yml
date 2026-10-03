@@ -237,6 +237,12 @@ jobs:
           DATABASE_URL: postgresql+asyncpg://caresetu:caresetu@localhost:5432/caresetu
       - name: run contract check against the booted app
         run: uv run --project apps/backend python scripts/contract_check.py --openapi http://127.0.0.1:8000/openapi.json
+      - name: check the doctor console OpenAPI slice the frontend asserts on (#624)
+        # The frontend doctor console contract test builds its fixture from the
+        # exported component schemas, so a stale slice means it asserts a shape
+        # the running server no longer serves. Checked against the booted app,
+        # not an in-process generation, for the same reason as the step above.
+        run: uv run --project apps/backend python scripts/export_openapi_schemas.py --openapi http://127.0.0.1:8000/openapi.json --check
 
   integration:
     name: integration tests (pytest vs Postgres)
