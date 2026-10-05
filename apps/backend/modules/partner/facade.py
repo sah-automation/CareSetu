@@ -101,7 +101,6 @@ from uuid import UUID
 from cryptography.exceptions import InvalidTag
 from pydantic import TypeAdapter, ValidationError
 
-)
 from modules.partner.doctor_profile_models import (
     DoctorProfileView as DoctorProfileView,
 )
