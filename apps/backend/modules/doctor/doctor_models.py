@@ -1,4 +1,4 @@
-"""MOD-012 doctor console: the typed wire contracts of the Patients list (#539).
+"""MOD-012 doctor console: the typed wire contracts of the console reads (#539, #646).
 
 The console is a facade-only composition seam (ADR-0003): it owns no schema,
 so every DTO here is a read projection over other modules' seams - never a
@@ -7,6 +7,7 @@ table-backed model. Naming follows the module convention (``*View``/``*Item``).
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -54,6 +55,59 @@ class PatientsListView(BaseModel):
 
     items: list[DoctorPatientRow]
     total: int
+
+
+class DoctorCaseRow(BaseModel):
+    """One open care case in the doctor console, enriched for the work list (#646).
+
+    A doctor's cases list answered ``Case #<id>`` alone, so a console with
+    several open cases showed rows the doctor could not tell apart without
+    opening each one. This row carries the patient's ``name``/``age`` beside
+    the case facts the console already reads, composed at read time over the
+    care facade and the identity profile seam - ``MOD-006`` cannot read the
+    identity schema (the module isolation rule forbids cross-schema SQL), so
+    the enrichment belongs to this seam, not to the care module, and is stored
+    nowhere.
+
+    ``patient_name``/``patient_age`` degrade to ``None`` when the profile
+    cannot be resolved - the whole batch degrades together (a failed identity
+    read costs every row its name, never the list itself).
+
+    ``has_photo`` is a boolean presence flag, never the private storage object
+    key, for the same reason as ``DoctorPatientRow.has_photo``: the console
+    only ever asks "is there a photo to fetch", and the bytes come from the
+    consent-gated photo route (security-phii-standards §2).
+    """
+
+    case_id: int
+    stage: str
+    forced_review: bool = False
+    created_at: datetime
+    updated_at: datetime
+    patient_id: int
+    patient_name: str | None = None
+    patient_age: int | None = None
+    has_photo: bool = False
+
+
+class DoctorCasesListView(BaseModel):
+    """The doctor's open care cases, ordered creation-ascending (#646).
+
+    Derived on every read from ``MOD-006``'s care cases, never stored. Closed
+    cases are absent - a closed case is a finished visit, so it belongs to the
+    patient's history rather than to the doctor's work list - and
+    ``created_at`` ascending puts the oldest still-open case first.
+
+    Deliberately unpaginated, and registered as the console's one deviation
+    from the list envelope: sorting, filtering, and pagination on this list are
+    out of scope, so there is nothing for a ``total`` to be a counterpart to.
+    The cost of that choice is recorded rather than hidden - every served row
+    is access-logged in its own transaction, so unlike the paginated Patients
+    list (whose page size bounds the ledger writes per request, ADR-0019 D3)
+    this read's write cost scales with the doctor's open caseload.
+    """
+
+    items: list[DoctorCaseRow]
 
 
 class ContactSection(BaseModel):
