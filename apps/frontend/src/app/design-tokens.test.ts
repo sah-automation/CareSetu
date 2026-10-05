@@ -89,7 +89,6 @@ const SHADOW_TOKEN_PATHS = new Set(
 const RADIUS_TOKEN_PATHS = new Set(
   themeTokens(themeExtend.borderRadius).map((t) => t.path),
 );
-origin / main;
 
 describe("resolved brand palette (#193)", () => {
   // The cases below walk the whole source tree with synchronous file reads, so

@@ -985,6 +985,466 @@ async def test_update_doctor_about_writes_only_its_own_columns() -> None:
     # Nothing here is a search filter or a positioning input, so no directory entry
     # is refreshed and no search cache is flushed. The one filterable field a doctor
     # might expect to move here - the specialty - belongs to the practice card.
+    assert cache.visibility_changes == 0
+
+
+@pytest.mark.asyncio
+async def test_update_doctor_about_round_trips_consulting_hours_as_prose() -> None:
+    """#610: consulting hours survive as an arbitrary string, unchanged.
+
+    This is the "no weekly template, no slot structure" criterion, asserted on a
+    value rather than on a bound: a sentence no template would produce - mixed
+    case, dashes, a parenthetical, and a second clause - is stored and read back
+    byte for byte. A model that had grown a weekly template or a per-day slot list
+    could not carry this at all, and a length-bound assertion would have passed
+    against one that could.
+    """
+    hours = (
+        "Mon-Sat 10-2 (walk-ins after 12), Sat 5-7 pm only if the registrar is in; "
+        "closed the 2nd and 4th Sat of every month"
+    )
+    update = DoctorProfileAboutUpdate(
+        about=None,
+        languages=[],
+        consulting_days=["Monday", "Saturday"],
+        consulting_hours=hours,
+    )
+    read_back = _about_read_back_row()
+    read_back.consulting_hours = hours
+    connection = _connection(
+        [
+            _Result(row=_Row(partner_type="doctor", status="Active")),
+            _Result(),
+            _Result(row=read_back),
+            _Result(rows=[]),
+        ]
+    )
+    facade = _facade(connection)
+
+    profile = await facade.update_doctor_about(12, update)
+
+    assert profile.consulting_hours == hours
+    statements = [call.args[0] for call in connection.execute.await_args_list]
+    assert statements[1]._values["consulting_hours"].value == hours
+    # An empty selection on both closed lists is a state the doctor can hold, and
+    # ``about=None`` is how they clear their own words deliberately.
+    assert statements[1]._values["languages"].value == []
+    assert statements[1]._values["consulting_days"].value == ["Monday", "Saturday"]
+    assert statements[1]._values["about"].value is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "submitted", "error"),
+    [
+        ("languages", ["Hindi", "Klingon"], InvalidConsultLanguageError),
+        ("consulting_days", ["Monday", "Caturday"], InvalidConsultingDayError),
+    ],
+    ids=["unknown-language", "unknown-day"],
+)
+async def test_about_write_never_reaches_the_database_off_the_closed_lists(
+    field: str,
+    submitted: list[str],
+    error: type[Exception],
+) -> None:
+    """#610: a value outside a closed list cannot reach a statement at all.
+
+    Constructing the model IS the refusal: the validators delegate to #602's
+    ``require_consult_languages`` / ``require_consulting_days``, which raise the
+    domain's own errors naming the offending member and its position. So a doctor
+    who tapped four good days and one bad one never reaches the transaction - the
+    save writes nothing, which is what leaves every other unsaved edit on their page
+    alone.
+
+    The message names the member ("unknown consulting day at position 1:
+    'Caturday'"), which is what the 422 handler puts in ``reason`` so the card can
+    render it under the one chip that is wrong.
+    """
+    connection = _connection([])
+    facade = _facade(connection)
+    whole_card: dict[str, object] = {
+        "about": "Primary care.",
+        "languages": ["Hindi"],
+        "consulting_days": ["Monday"],
+        "consulting_hours": None,
+        field: submitted,
+    }
+
+    with pytest.raises(error) as rejected:
+        await facade.update_doctor_about(12, DoctorProfileAboutUpdate(**whole_card))  # type: ignore[arg-type]
+
+    assert rejected.value.position == 1  # type: ignore[attr-defined]
+    assert connection.execute.await_count == 0
+
+
+def test_about_write_refuses_two_spellings_of_one_language() -> None:
+    """#610: the ticket's opening sentence, answered by the closed list itself.
+
+    "So a doctor cannot record the same language twice in two spellings" - and the
+    answer is a refusal, not a case-folded de-duplication. The retired free-text
+    validator trimmed each name and folded case, because a repair was better than
+    a rejection when the field was text. A closed list has no repair to make:
+    ``"hindi"`` is not ``ConsultLanguage.HINDI``, so it is refused as the second
+    member, and there is no spelling the list cannot produce.
+
+    Pinned here rather than only implied, because it is the one rule where the
+    behaviour CHANGED from the whole-form write and the reason is worth stating out
+    loud: the same rule is what #611 leaves behind when it retires that validator,
+    so the two cannot be allowed to disagree about what the field means.
+    """
+    with pytest.raises(InvalidConsultLanguageError) as rejected:
+        DoctorProfileAboutUpdate(
+            about="Primary care.",
+            languages=["Hindi", "hindi"],
+            consulting_days=["Monday"],
+            consulting_hours=None,
+        )
+
+    assert rejected.value.value == "hindi"
+    assert rejected.value.position == 1
+
+    # Whitespace is not tidied either: a closed member has one spelling and the
+    # stored value must be a member verbatim, so a stray trailing space is a typo
+    # the doctor can see rather than something the server guessed at.
+    with pytest.raises(InvalidConsultLanguageError):
+        DoctorProfileAboutUpdate(
+            about="Primary care.",
+            languages=["Hindi "],
+            consulting_days=["Monday"],
+            consulting_hours=None,
+        )
+
+
+def test_about_write_names_the_member_an_oversized_selection_broke() -> None:
+    """#610: the closed lists are the bound, so no ``max_length`` sits on the fields.
+
+    The same argument ``specialties`` made in #608: a length cap is checked before
+    the validator runs and would refuse an oversized selection as a bare
+    ``too_long`` naming no member, shadowing the one rule these two fields have. So
+    the fields carry no cap and the closed list is the bound - a selection longer
+    than the whole vocabulary necessarily contains a repeat, and that is what
+    catches it, with the position reported.
+    """
+    every_language = [member.value for member in ConsultLanguage]
+    with pytest.raises(InvalidConsultLanguageError) as rejected:
+        DoctorProfileAboutUpdate(
+            about="Primary care.",
+            languages=[*every_language, "Hindi"],
+            consulting_days=[],
+            consulting_hours=None,
+        )
+
+    assert rejected.value.value == "Hindi"
+    assert rejected.value.position == len(every_language)
+
+    # Every member at once is the longest legal selection, and it is accepted.
+    assert (
+        DoctorProfileAboutUpdate(
+            about="Primary care.",
+            languages=every_language,
+            consulting_days=[member.value for member in ConsultingDay],
+            consulting_hours=None,
+        ).languages
+        == every_language
+    )
+
+
+def _notification_read_back_row(preferences: dict[str, bool]) -> _Row:
+    """The row ``get_doctor_profile`` returns after the notification write commits."""
+    row = _about_read_back_row()
+    row.notification_preferences = preferences
+    return row
+
+
+@pytest.mark.asyncio
+async def test_update_doctor_notification_writes_only_the_preferences_column() -> None:
+    """#610: the single-column write, and the whole of its guarantee in one set.
+
+    ``set(profile_update._values)`` is ``{"notification_preferences", "updated_at"}``
+    and nothing else. That is acceptance criterion 2 stated as an assertion rather
+    than a claim: the smallest card in the module is also the one where a stray
+    column would be least expected, because a doctor flipping one switch has no
+    reason to be trusted with anything else on the page.
+
+    Three statements, in this order, and the middle one is why there are three: the
+    row-locked recheck, then the stored preferences off the SAME locked row, then
+    the update. Reading them on the row the write is about to replace is what keeps
+    the merge from being computed against a state the update does not land on.
+    """
+    connection = _connection(
+        [
+            _Result(row=_Row(partner_type="doctor", status="Active")),
+            _Result(row=_Row(notification_preferences={"new_consultations": False})),
+            _Result(),
+            _Result(row=_notification_read_back_row({"new_consultations": True})),
+            _Result(rows=[]),
+        ]
+    )
+    facade = _facade(connection)
+    cache = _Cache()
+    facade._directory_cache = cache
+
+    profile = await facade.update_doctor_notification(
+        12,
+        DoctorProfileNotificationUpdate(
+            notification_preferences={"new_consultations": True, "record_shared": True},
+        ),
+    )
+
+    assert profile.notification_preferences == {"new_consultations": True}
+
+    statements = [call.args[0] for call in connection.execute.await_args_list]
+    recheck, stored_preferences, profile_update = statements[0], statements[1], statements[2]
+    assert "FOR UPDATE" in str(recheck)
+    # The middle statement reads exactly one column, off the profile row, by id.
+    assert str(stored_preferences).count("notification_preferences") == 1
+    written_tables = {
+        statement.table.name
+        for statement in statements
+        if getattr(statement, "table", None) is not None
+    }
+    assert written_tables == {"partner_profiles"}
+    assert set(profile_update._values) == {"notification_preferences", "updated_at"}
+    assert profile_update._values["notification_preferences"].value == {
+        "new_consultations": True,
+        "record_shared": True,
+    }
+    for another_cards_column in (
+        "about",
+        "languages",
+        "consulting_days",
+        "consulting_hours",
+        "practice_name",
+        "specialties",
+        "practice_address",
+        "consultation_fee_paise",
+    ):
+        assert another_cards_column not in profile_update._values
+    assert cache.visibility_changes == 0
+
+
+@pytest.mark.asyncio
+async def test_update_doctor_notification_preserves_a_stored_key_it_does_not_know() -> None:
+    """#610: a save never silently drops a stored preference.
+
+    The doctor's Profile page has always promised this - "a key the server already
+    holds that this list does not know is carried through untouched on save" - but
+    it was the CLIENT's promise, made by a page that sent the whole form. Four
+    independent section writes means the client cannot keep it for us, so the
+    server's merge does.
+
+    The stored ``sms`` flag predates the five keys being pinned and no doctor can
+    turn it off through this write. That is the deliberate cost of pinning them:
+    refusing the save would strand it behind a toggle the doctor cannot see, and
+    dropping it would lose a preference they did set. Carrying it is the third
+    answer, and it is the one the client already gave.
+    """
+    connection = _connection(
+        [
+            _Result(row=_Row(partner_type="doctor", status="Active")),
+            _Result(
+                row=_Row(
+                    notification_preferences={
+                        "sms": True,
+                        "record_shared": True,
+                        "legacy_opt_in": True,
+                    }
+                )
+            ),
+            _Result(),
+            _Result(row=_notification_read_back_row({})),
+            _Result(rows=[]),
+        ]
+    )
+    facade = _facade(connection)
+
+    await facade.update_doctor_notification(
+        12,
+        DoctorProfileNotificationUpdate(
+            notification_preferences={"record_shared": False},
+        ),
+    )
+
+    statements = [call.args[0] for call in connection.execute.await_args_list]
+    assert statements[2]._values["notification_preferences"].value == {
+        # The submitted key wins, including turned OFF - a doctor who switches a
+        # toggle off must actually switch it off.
+        "record_shared": False,
+        # Both keys the five do not name survive the save untouched.
+        "sms": True,
+        "legacy_opt_in": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_update_doctor_notification_clears_the_five_when_all_are_turned_off() -> None:
+    """#610: an empty submission means "none of them on", and the merge honours it.
+
+    The counterpart to the preservation rule, and the reason a KNOWN stored key the
+    submission omits is dropped rather than kept: if omission meant "leave it alone"
+    the doctor could never switch a toggle off, because the request would have to
+    omit the key rather than set it false - and omitting it is what an empty
+    selection looks like. So an empty submission is a real answer.
+
+    ``legacy_opt_in`` still survives, because the doctor did not touch it and no
+    toggle on the card offers it.
+    """
+    connection = _connection(
+        [
+            _Result(row=_Row(partner_type="doctor", status="Active")),
+            _Result(
+                row=_Row(
+                    notification_preferences={
+                        "new_consultations": True,
+                        "case_updates": True,
+                        "sms": True,
+                    }
+                )
+            ),
+            _Result(),
+            _Result(row=_notification_read_back_row({})),
+            _Result(rows=[]),
+        ]
+    )
+    facade = _facade(connection)
+
+    await facade.update_doctor_notification(
+        12,
+        DoctorProfileNotificationUpdate(notification_preferences={}),
+    )
+
+    statements = [call.args[0] for call in connection.execute.await_args_list]
+    assert statements[2]._values["notification_preferences"].value == {"sms": True}
+
+
+def test_notification_write_refuses_a_key_off_the_list_before_any_statement() -> None:
+    """#610: preserving a stored key is not the same as being able to write one.
+
+    ``sms`` is legitimate to CARRY - the previous case proves it - and illegitimate
+    to SET. The model's validator refuses it at the boundary, so the facade is never
+    reached and no transaction is opened. That asymmetry is the whole contract:
+    without it, "preserve what we do not know" would be a back door to writing an
+    arbitrary key, which is the open dict #610 closed.
+    """
+    connection = _connection([])
+
+    with pytest.raises(InvalidNotificationKeyError) as rejected:
+        DoctorProfileNotificationUpdate(
+            notification_preferences={"new_consultations": True, "sms": True},
+        )
+
+    assert rejected.value.key == "sms"
+    assert connection.execute.await_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stored_value",
+    [None, "yes", [("sms", True)]],
+    ids=["null", "truthy-string", "truthy-list"],
+)
+async def test_update_doctor_notification_handles_a_row_with_no_usable_preferences(
+    stored_value: object,
+) -> None:
+    """#610: a row whose preferences read empty merges to exactly what was submitted.
+
+    ``notification_preferences`` is ``NOT NULL`` with a ``{}`` default, so the null
+    case is the registration-era row rather than an edge case - but the read degrades
+    to "nothing stored" rather than 500ing, because a doctor's save must not depend on
+    whether a hand-repaired row holds a dict.
+
+    The truthy cases are the ones that matter: an earlier draft guarded this with
+    ``or {}``, which catches only FALSY junk, so a row holding ``"yes"`` sailed
+    through to ``.items()`` and raised ``AttributeError`` - a 500 on the save rather
+    than a save. An ``isinstance`` check is what the claim in the facade actually
+    takes.
+    """
+    connection = _connection(
+        [
+            _Result(row=_Row(partner_type="doctor", status="Active")),
+            _Result(row=_Row(notification_preferences=stored_value)),
+            _Result(),
+            _Result(row=_notification_read_back_row({})),
+            _Result(rows=[]),
+        ]
+    )
+    facade = _facade(connection)
+
+    await facade.update_doctor_notification(
+        12,
+        DoctorProfileNotificationUpdate(notification_preferences={"case_updates": True}),
+    )
+
+    statements = [call.args[0] for call in connection.execute.await_args_list]
+    assert statements[2]._values["notification_preferences"].value == {"case_updates": True}
+
+
+async def _save_about(facade: PartnerFacade) -> None:
+    await facade.update_doctor_about(
+        12,
+        DoctorProfileAboutUpdate(
+            about="Primary care.",
+            languages=["Hindi"],
+            consulting_days=["Monday"],
+            consulting_hours=None,
+        ),
+    )
+
+
+async def _save_notification(facade: PartnerFacade) -> None:
+    await facade.update_doctor_notification(
+        12,
+        DoctorProfileNotificationUpdate(notification_preferences={}),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("save", "partner_type", "status"),
+    [
+        pytest.param(_save_about, "doctor", "Registered", id="about/not-active"),
+        pytest.param(_save_about, "lab", "Active", id="about/not-a-doctor"),
+        pytest.param(_save_notification, "doctor", "Registered", id="notification/not-active"),
+        pytest.param(_save_notification, "lab", "Active", id="notification/not-a-doctor"),
+    ],
+)
+async def test_update_doctor_about_and_notification_refuse_a_non_active_doctor(
+    save: Callable[[PartnerFacade], Awaitable[None]],
+    partner_type: str,
+    status: str,
+) -> None:
+    """#610: both writes refuse under the row lock, before anything is read or written.
+
+    The notification write is the case worth being strict about, because it reads
+    the stored preferences between the recheck and the update. ``await_count == 1``
+    for both proves the order: the locked recheck refused, so the row's own
+    preferences were never read and no column was written - a partner who is not an
+    ``[Active]`` doctor learns nothing about their row and moves nothing in it.
+    """
+    connection = _connection(
+        [
+            _Result(row=_Row(partner_type=partner_type, status=status)),
+        ]
+    )
+    facade = _facade(connection)
+
+    with pytest.raises(DoctorProfileNotAllowedError):
+        await save(facade)
+
+    assert connection.execute.await_count == 1
+    assert "FOR UPDATE" in str(connection.execute.await_args_list[0].args[0])
+
+
+@pytest.mark.asyncio
+async def test_registered_doctor_cannot_read_the_profile() -> None:
+    """The private profile read refuses a partner who is not an ``[Active]`` doctor.
+
+    The write half of this test went with the whole-form write (#611); each
+    surviving section write asserts the same refusal under the row lock in its own
+    test, and the photo paths keep theirs in the two that follow.
+    """
+    connection = _connection(
+        [
             _Result(
                 row=_Row(
                     partner_type="doctor",

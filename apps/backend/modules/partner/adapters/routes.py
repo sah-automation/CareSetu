@@ -1006,6 +1006,5 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(InvalidConsultingDayError, _invalid_consulting_day)
     app.add_exception_handler(InvalidNotificationKeyError, _invalid_notification_key)
     app.add_exception_handler(PracticePinUnresolvedError, _practice_pin_unresolved)
-
     app.add_exception_handler(ProviderProfileNotFoundError, _provider_profile_not_found)
     app.add_exception_handler(PartnerError, _partner_failed)

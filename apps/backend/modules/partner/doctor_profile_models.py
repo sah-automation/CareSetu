@@ -12,6 +12,182 @@ from modules.partner.domain.vocabularies import (
     require_specialties,
 )
 
+DoctorCredentialStatus = Literal[
+    "pending",
+    "verified",
+    "expired",
+    "revoked",
+    "reverification_failed",
+]
+
+
+class DoctorProfileCredential(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    credential_type: str
+    status: DoctorCredentialStatus
+    expires_at: datetime | None
+
+
+class DoctorProfilePracticeUpdate(BaseModel):
+    """The Practice section write (#608) - who the doctor is and where they practise.
+
+    The first of the four section writes that replaced the retired whole-form
+    profile write (#611). A section save is the doctor declaring one card's worth
+    of fields, so it carries ONLY this card's fields and ``extra="forbid"`` makes
+    any other field a 422 rather than a silent write: a client that saves the
+    practice card cannot quietly rewrite the address or the notification
+    preferences it did not show.
+
+    Two of the four wire fields do not name their column, and both mappings are
+    fixed here rather than guessed per call site:
+
+    - ``full_name`` is the doctor's own name, written to ``practice_name``. That
+      column is the display name registration fills with the doctor's name, and
+      it is what the directory search's free-text ``query`` matches
+      (``ilike`` on ``partner_profiles.practice_name``), so a patient can still
+      search this doctor by their own name. The wire field says what the field
+      MEANS - a doctor names themselves, they do not name a practice - while the
+      column keeps its registration-era name so nothing that already reads it
+      moves. ``clinic_name`` is the building they practise in and writes the
+      column of that name (#606).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    full_name: str = Field(min_length=1, max_length=120)
+    clinic_name: str | None = Field(default=None, max_length=120)
+    # A SELECTION of the closed ``Specialty`` pick-list, stored as a JSONB array
+    # on ``partner_profiles.specialties`` (#606). An empty selection is valid and
+    # is a state the doctor can hold - "declares no specialty yet" - exactly as
+    # for languages.
+    #
+    # Deliberately NO ``max_length`` here. A length cap is checked before the
+    # validator below runs, so an oversized selection would be refused as a plain
+    # ``too_long`` with no member named - shadowing the one rule this field
+    # actually has. The closed list is already an upper bound: a selection longer
+    # than ``Specialty`` cannot hold that many distinct members, so the validator
+    # rejects the first repeat or unknown member and says which one.
+    specialties: list[str] = Field(default_factory=list)
+    # #606's realistic 0..60 bound, in lockstep with the database CHECK and the
+    # migration.
+    experience_years: int | None = Field(default=None, ge=0, le=60)
+
+    @field_validator("specialties")
+    @classmethod
+    def validate_specialties(cls, value: list[str]) -> list[str]:
+        """Delegate the closed-list rule to the domain core (coding-standards §4).
+
+        ``require_specialties`` is the ONE place the pick-list is enforced, so
+        this validator names no specialty and re-derives no list: it walks the
+        submission member by member and returns the resolved values in the
+        doctor's declared order, which is also the order the stored selection and
+        every later membership match (#612) read.
+
+        The domain raises :class:`~modules.partner.domain.exceptions.InvalidSpecialtyError`,
+        which is deliberately NOT a ``ValueError``: a closed-list rejection is an
+        expected 4xx with a field-level detail, and the partner adapter's handler
+        encodes it as one (``details.errors[].path == "specialties"``). Letting it
+        escape the validator is what routes it there - a ``ValueError`` would be
+        swallowed into Pydantic's own generic 422 and lose the envelope.
+        """
+        return [member.value for member in require_specialties(value)]
+
+
+class DoctorProfileAddressUpdate(BaseModel):
+    """The Address section write (#609) - where the practice is, declared not pinned.
+
+    A doctor declares an address; the platform derives the one position every
+    reader sees. So this model declares **no coordinate field at all**, and
+    ``extra="forbid"`` is what makes that a live guarantee rather than a comment: a
+    client still sending ``practice_latitude`` or ``practice_longitude`` is a 422,
+    and it cannot place its own pin. Accepting and discarding the field instead
+    would tell a doctor their coordinates saved when they did not.
+
+    ``pin_code`` is the only required part, because it is the only one the position
+    is derived from: without a PIN code this write has nothing to resolve and
+    cannot produce a position, so requiring it here states that in the schema
+    rather than discovering it as a field-level error after the fact.
+
+    Deliberately **no** length bound and **no** pattern on ``pin_code``. Any bound
+    here would be checked before anything else and would refuse the value as a bare
+    ``too_short``/``too_long`` with no ``reason`` and no machine value - shadowing
+    the one rule the field has, and splitting the malformed case in two on the wire
+    for a doctor who cannot tell a length failure from a character-class failure
+    anyway. ``resolve_pin_code`` (#603) owns that rule: an Indian PIN code is
+    exactly six ASCII digits, and it reports malformed and unknown as two
+    machine-readable reasons. So a blank, an over-long and a well-formed but
+    unlisted code all arrive in the same PIN-keyed envelope, because they are all
+    the same answer to the doctor: this is not a PIN code we can place.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Column-matched bounds (#606): ``address_line``/``address_landmark`` are
+    # String(200), ``address_locality``/``address_city`` String(120). Every part is
+    # nullable on the row, so every part is optional here - a doctor who has not
+    # finished their address is a state the write can hold.
+    address_line: str | None = Field(default=None, max_length=200)
+    landmark: str | None = Field(default=None, max_length=200)
+    locality: str | None = Field(default=None, max_length=120)
+    city: str | None = Field(default=None, max_length=120)
+    pin_code: str
+
+
+class DoctorProfileAboutUpdate(BaseModel):
+    """The About section write (#610) - who the doctor is, in their own words.
+
+    The third of the four section writes that replaced the retired whole-form
+    profile write (#611). The card it saves splits the old ``availability`` blob
+    in two, because the two halves want opposite things:
+
+    - **The days become a selection.** A doctor taps the days they consult on, out
+      of the closed seven-day list, so the field is filterable and cannot carry a
+      spelling nobody can match. That is the same fix the languages field gets,
+      and for the same reason: a hand-typed list of days is a doctor guessing at
+      our vocabulary.
+    - **The hours stay prose.** Deliberately unbounded in shape, and deliberately
+      structured in nothing: no weekly template, no per-day ranges, no slots. The
+      platform has no booking system, so a shape that invited one would be a lie
+      the doctor could act on. The only rule here is a length bound, because the
+      column is ``Text`` and an unbounded string is not a thing to store. A
+      doctor who writes "Mon-Sat mornings, and Sat evening clinic after 5" gets
+      that back, byte for byte.
+
+    **Every field is required.** Not ``extra="forbid"`` alone - required as well,
+    which is a stronger statement than its siblings make. A section save declares
+    the whole card, so every field here is on screen at the moment of the save,
+    and a default would mean that a client which forgot one silently CLEARS the
+    column: an omitted ``about`` would erase the doctor's own words about
+    themselves and the save would report success. Nullable is still meaningful -
+    ``about: null`` is how a doctor clears it deliberately - but it has to be said
+    out loud.
+
+    Two of the four fields do not name their column, because the closed-list walk
+    returns the resolved members rather than the submitted strings: a doctor who
+    submits ``"Hindi"`` gets ``"Hindi"`` stored, which is the point.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    about: str | None = Field(max_length=5000)
+    # A SELECTION of the closed ``ConsultLanguage`` list (#602), stored as a JSONB
+    # array on ``partner_profiles.languages``. NO ``max_length``, for the same
+    # reason ``specialties`` has none: a cap is checked first and would refuse an
+    # oversized selection as a bare ``too_long`` naming no member, shadowing the
+    # one rule the field has. The closed list is the bound - a selection longer
+    # than ``ConsultLanguage`` cannot hold that many distinct members.
+    languages: list[str]
+    # The same shape over the closed seven-day list, on ``consulting_days``. A
+    # selection, not a week template: an empty selection is valid and is a state
+    # the doctor can hold, exactly as an empty specialty selection is.
+    consulting_days: list[str]
+    # PROSE. The half of the old ``availability`` blob that is genuinely the
+    # doctor's own words, bounded and otherwise unstructured - see the class
+    # docstring. The bound matches the column's retired predecessor so a doctor
+    # who typed a long availability note into the old field can move it across
+    # without losing it.
+    consulting_hours: str | None = Field(max_length=1000)
 
     @field_validator("languages")
     @classmethod

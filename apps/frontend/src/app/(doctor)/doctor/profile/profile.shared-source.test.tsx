@@ -1,4 +1,56 @@
 // PRD trace: FEAT-005 (Provider Profiles and Credential Display).
+// #583: the cross-surface seam for the doctor profile source.
+//
+// Every doctor-avatar test that existed before this ticket passes with the
+// defect fully present, because each one exercises a single consumer: the shell
+// suite injects the projection as a prop, the account-menu suite hand-feeds it,
+// the page suite mocks the read per surface. A defect that exists only as a
+// *divergence between two consumers* is therefore invisible to all of them - each
+// sees a world where the shell's copy and the page's copy are trivially in
+// agreement. Only a simultaneous two-surface render can observe it.
+//
+// So this suite mounts the console chrome and the real Profile page in one tree,
+// under the shared source the (doctor) route-group layout mounts, seeds the
+// transport, and then drives each of the three edits on the real page and asserts
+// on what the chrome renders. The remove is the sharpest of the three and is
+// asserted rather than assumed: a photo the doctor has deleted continuing to
+// render in the account menu is the most user-visible form of this defect.
+//
+// Everything here asserts on rendered output - a `blob:` source, a name, an icon
+// - and never on which hook was called, so the suite cannot pass while the
+// avatar is still wrong. The only call counts are the "one read" claims, which
+// are counted rather than inferred from a rendering that happened to look right.
+
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+import type { ReactNode } from "react";
+
+import DoctorProfilePage from "./page";
+import { AppShell } from "@/components/dashboard/AppShell";
+import { DoctorProfileProvider } from "@/lib/doctor/DoctorProfileContext";
+import { listOpenCases } from "@/lib/care/api";
+import { STRINGS } from "@/lib/i18n/dictionaries";
+import { __resetLangForTests } from "@/lib/i18n/LangContext";
+import {
+  deleteDoctorProfilePhoto,
+  fetchDoctorProfile,
+  fetchDoctorProfilePhoto,
+  updateDoctorProfilePractice,
   uploadDoctorProfilePhoto,
   type DoctorProfileView,
 } from "@/lib/doctor/api";

@@ -1785,6 +1785,1629 @@ const en = {
       "Updates as you type. The tick is CareSetu's, not something you set.",
     livePreviewShow: "Show",
     livePreviewHide: "Hide",
+    feeHeading: "Consultation fee",
+    feeHelp:
+      "Set the fee patients see when choosing you. Leave blank until set.",
+    feeFieldLabel: "Fee (\u20B9)",
+    feeFieldPlaceholder: "e.g. 400",
+    saveFee: "Save fee",
+    clearFee: "Clear fee",
+    feeInvalid: "Enter a fee of 0 or more.",
+    feeSaved: "Fee saved.",
+    feeSaveFailed: "Could not save the fee.",
+  },
+
+  // doctorPatients.* surface - PHASE-8.1 (#541): the doctor console Patients
+  // page (US-11..US-19). Groups Current/Past rows from the derived list API,
+  // with name search, granted-scope badges and the latest case stage; the
+  // per-patient detail view surfaces contact/photo/consultation-history/
+  // health-background sections, where an ungranted section renders a calm
+  // locked "not shared" state - never an error. Stage chips reuse
+  // doctorConsole.stage*; entry-type labels reuse record.badge*. All copy
+  // bilingual en/hi (REQ-006).
+  doctorPatients: {
+    title: "My patients",
+    description: "Patients currently sharing records with you, and past ones",
+    searchPlaceholder: "Search by name",
+    currentHeading: "Current",
+    pastHeading: "Past",
+    patientsEmpty: "No patients yet",
+    currentEmpty: "No current patients",
+    pastEmpty: "No past patients",
+    noResultsTitle: "No patients found",
+    noResultsBody: "No patient name matches your search.",
+    noCaseStage: "No open case",
+    openPatientAction: "Open",
+    loadFailed: "Could not load your patients.",
+    retry: "Try again",
+    backToPatients: "Back to patients",
+    loadFailedDetail: "Could not load this patient.",
+    notSharedTitle: "Not shared",
+    notSharedBody: "The patient has not shared this section with you.",
+    contactHeading: "Contact",
+    ageLabel: "Age",
+    genderLabel: "Gender",
+    areaLabel: "Area",
+    emergencyContactLabel: "Emergency contact",
+    notRecorded: "Not recorded",
+    consultationHistoryHeading: "Consultation history",
+    consultationHistoryEmpty: "No consultations yet.",
+    healthBackgroundHeading: "Health background",
+    healthBackgroundEmpty: "No health background shared yet.",
+    caseWorkspaceHeading: "Case workspace",
+    openCaseAction: "Open case",
+    noPhoto: "No photo",
+    photoAlt: (name: string) => `${name}'s photo`,
+    bloodGroupLabel: "Blood group",
+    conditionsLabel: "Conditions",
+    allergiesLabel: "Allergies",
+    medicationsLabel: "Medications",
+    immunizationsLabel: "Immunizations",
+    familyHistoryLabel: "Family history",
+    noneRecorded: "None recorded",
+    scopeBadge: {
+      consultations: "Consultations",
+      prescriptions: "Prescriptions",
+      lab_results: "Lab results",
+      metrics: "Metrics",
+      health_background: "Health background",
+      full_record: "Full record",
+    },
+  },
+
+  // caseWorkspace.* surface - PHASE-8.1 T13/T14 (#451/#452): the case
+  // workspace. Serves both the review-entry (queue -> review/[intakeId]) and
+  // the case-entry (open cases -> cases/[caseId]) routes: case stage chip, the
+  // forced-review requirement, the full pre-summary content, the patient's
+  // consented health history, the single-action attributed review+finalize,
+  // and the consult-complete handshake into prescription-pending (US-13/14/16/
+  // 17/24). Prescription drafting (US-18/#452) covers the AI-draft request,
+  // the editable rx-item rows, save-revision, and reload of the in-progress
+  // working revision; approval/rejection/close are built by #453.
+  caseWorkspace: {
+    title: "Case workspace",
+    backToConsole: "Back to console",
+    stageLabel: "Stage",
+    forcedReviewChip: "Review required",
+    forcedReviewDetail:
+      "This pre-summary has low confidence and needs your review before any prescription.",
+    summaryHeading: "Pre-summary to review",
+    confidenceLabel: "Confidence",
+    chiefComplaintsLabel: "Chief complaints",
+    symptomsLabel: "Symptoms",
+    durationLabel: "Duration",
+    durationNotSet: "Not captured",
+    patientEditsLabel: "Patient edits",
+    patientEditsNone: "No patient edits",
+    reviewStateLabel: "Review state",
+    reviewStateDraft: "Awaiting your review",
+    reviewStateReviewed: "Reviewed",
+    reviewStateFinal: "Finalized",
+    attributionLabel: "Attributed to",
+    reviewedOnLabel: "Reviewed on",
+    notReviewedYet: "Not yet attributed",
+    historyHeading: "Patient history",
+    historyConsentNote: "Only what the patient consented to share.",
+    historyEmpty: "No history yet.",
+    historyLoadFail: "Could not load patient history.",
+    // PHASE-8.1 #484: case workspace inner tabs + original transcript + audio.
+    tabPreSummary: "Pre-summary",
+    tabHistory: "History",
+    tabPrescription: "Prescription",
+    // Case stepper step labels (FEAT-008, PROTO-8)
+    consultCompleteStep: "Consult complete",
+    rxPendingStep: "Rx pending",
+    issuedStep: "Issued",
+    caseProgressLabel: "Case progress",
+    transcriptHeading: "Original intake",
+    transcriptEmpty: "No transcript available for this intake.",
+    transcriptLoadFail: "Could not load the intake transcript.",
+    audioPlayLabel: "Play recording",
+    audioLoadFail: "Could not load the recording.",
+    loadFailed: "Could not load this case workspace.",
+    retry: "Try again",
+    // PHASE-8.1 #547: the review route's restyled surface - its own titled
+    // review-action card, and the calm case-not-showing empty state. The copy
+    // states only what is observable (no care case in the open list) rather
+    // than asserting a cause: a queue-originated review has no case until the
+    // outbox consumer births it, and the post-finalize re-poll can still come
+    // back empty, so "not created yet" would be wrong in the second case.
+    reviewActionHeading: "Your review",
+    handshakeHeading: "Consultation",
+    casePendingTitle: "Care case not showing",
+    casePendingBody:
+      "This pre-summary has no care case in your open cases yet. The case is created when the pre-summary is finalized.",
+    finalizeAction: "Finalize + attribute review",
+    finalizeHelp:
+      "One action records your review and finalizes the pre-summary.",
+    finalizeSuccess: "Pre-summary finalized and attributed to you.",
+    finalizeFail: "Could not finalize this pre-summary.",
+    handshakeAction: "Complete consultation",
+    handshakeHelp: "Moves the case to prescription pending.",
+    handshakeFail: "Could not complete the consultation.",
+    handshakeSuccess:
+      "Consultation complete - the case is now prescription pending.",
+    prescriptionPendingCta: "The prescription editor is ready below.",
+    // PHASE-8.1 #484: prescription tab stage lock - the case must consult
+    // before any prescription. Pre-summary is always finalized on a born case;
+    // the pending item is the consult-complete handshake, and the action jumps
+    // to the pre-summary tab where the handshake form lives.
+    rxLockTitle: "Prescription not yet open",
+    rxLockSubtitle:
+      "To unlock the prescription, both of these must be complete:",
+    rxLockPreSummary: "Pre-summary finalized",
+    rxLockHandshake: "Consult marked complete",
+    rxLockGoToSummary: "Go to summary",
+    rxLockMarkComplete: "Mark complete",
+    rxLockDone: "Pre-summary finalized",
+    rxLockPending: "Consult marked complete",
+    rxLockAction: "Complete consultation",
+    prescriptionHeading: "Prescription",
+    prescriptionHelp:
+      "Request an AI draft, then edit the items to match your clinical judgment before saving.",
+    requestDraftAction: "Request AI draft",
+    requestingDraft: "Requesting",
+    requestDraftFail: "Could not generate the AI draft.",
+    draftCapReached:
+      "The AI drafting limit for this case has been reached. Edit and save the current draft instead.",
+    noDraftYet:
+      "No prescription draft yet. Add your input below to get started.",
+    // PHASE-8.1 T6 (#490): the empty-state doctor-input capture surface -
+    // voice note / photo / typed addendum ride the doctor media route and
+    // post media_ref to doctor-input; the AI draft gate and manual authoring
+    // live here too. Refusal codes map to specific messages (#487).
+    doctorInputHelp:
+      "Share what informed this prescription - a voice note, a photo, or a short typed addendum.",
+    voiceNoteAction: "Voice note",
+    photoAction: "Photo",
+    addendumLabel: "Typed addendum (optional)",
+    addendumPlaceholder: "e.g. dosage notes or instructions",
+    addendumSubmit: "Attach addendum",
+    inputSubmitting: "Uploading",
+    doctorInputFail: "Could not attach your input. Please try again.",
+    doctorInputReceived: "Input attached - you can now request the AI draft.",
+    requestDraftBlocked:
+      "Attach a voice note, photo, or typed addendum to enable the AI draft.",
+    manualAuthoringAction: "Type prescription yourself",
+    manualAuthoringHelp:
+      "Write the prescription items yourself - no AI needed, and no patient consent required.",
+    draftConsentDenied:
+      "The patient has not granted consent for the AI to consult their records. Type the prescription yourself, or ask the patient to grant access.",
+    draftNoDoctorInput:
+      "Attach a voice note, photo, or typed addendum before requesting the AI draft.",
+    draftCaseClosed: "This case is closed, so no new draft can be requested.",
+    draftCaseNotFound:
+      "This case could not be found. It may be closed or assigned to a different doctor.",
+    workingRxLoadFail: "Could not load the in-progress prescription.",
+    rxItemsLabel: "Prescription items",
+    rxNameLabel: "Medicine",
+    rxDoseLabel: "Dose",
+    rxDurationLabel: "Duration",
+    rxFrequencyLabel: "Frequency",
+    rxEmptyItems: "No items yet. Add the first one below.",
+    addItemAction: "Add item",
+    removeItemAction: "Remove",
+    saveRevisionAction: "Save revision",
+    savingRevision: "Saving",
+    revisionSaved: "Revision saved.",
+    saveRevisionFail: "Could not save this revision.",
+    sourceLabel: "Source",
+    sourceAiDraft: "AI draft",
+    sourceManual: "Manual",
+    // Approval/rejection/close (#453, US-19..22): the review decision on the
+    // prescription plus close-without-prescription for the case.
+    rxStatusLabel: "Prescription status",
+    rxStatusDraft: "Draft",
+    rxStatusReviewed: "Reviewed",
+    rxStatusRejected: "Rejected",
+    rxStatusIssued: "Issued",
+    rxStatusFulfilled: "Fulfilled",
+    decisionHeading: "Doctor decision",
+    editedTracker: (n: number) =>
+      n === 1 ? "1 item edited by you" : `${n} items edited by you`,
+    // Step 1: Review & approve
+    approvalGateTitle: "Review & approve",
+    approvalGateHelp:
+      "Confirm you reviewed every item against the patient record before issuing.",
+    verificationDeclaration:
+      "I have reviewed this prescription (Maine check kar liya)",
+    // Step 2: Confirm issue details
+    confirmIssueTitle: "Confirm issue details",
+    confirmIssueHelp:
+      "By confirming, this prescription will be issued to the patient and cannot be changed.",
+    confirmIssueDeclaration:
+      "I confirm this prescription is correct and ready to issue to the patient.",
+    approveIssueAction: "Approve & issue",
+    approvingIssuance: "Approving",
+    approveBlockedHelp:
+      "Complete both confirmations to approve and issue the prescription.",
+    approveFail: "Could not approve and issue this prescription.",
+    issuedHeading: "Prescription issued",
+    issuedImmutableNote:
+      "The issued prescription is final and cannot be changed.",
+    issuedAtLabel: "Issued on",
+    issuedAttributedTo: "Attributed to you",
+    rejectAction: "Reject draft",
+    rejectingDraft: "Rejecting",
+    rejectReasonLabel: "Reason for the patient",
+    rejectReasonPlaceholder:
+      "Explain in plain language why this draft was not approved, so the patient understands.",
+    rejectFail: "Could not reject the draft.",
+    rejectedHeading: "Draft rejected",
+    rejectedHelp:
+      "The reason is recorded for the patient. The case stays open - you can request a new draft or close without prescribing.",
+    rejectedReasonLabel: "Recorded reason",
+    closeWithoutRxHeading: "Close without prescription",
+    closeWithoutRxHelp:
+      "Use when no medicine is needed. The case moves to Closed and leaves your pending list.",
+    closeReasonLabel: "Close reason",
+    closeCaseAction: "Close case",
+    closingCase: "Closing",
+    closeFail: "Could not close the case.",
+    closeReasons: {
+      patientWithdrawn: "Patient withdrew",
+      doctorRejected: "Doctor declined treatment",
+      noShow: "Patient did not show up",
+      duplicate: "Duplicate visit",
+    },
+  },
+
+  // pick.* surface - PHASE-8.1 T11 (#449): the patient pick-a-doctor step
+  // (suggested specialty, verified doctor cards, consent sheet, confirmation).
+  // Suggested specialty is a start-here filter, not blocking choice (US-2/US-3).
+  pick: {
+    title: "Choose your doctor",
+    subtitle: "Pick the doctor who will review your pre-summary",
+    suggestedSpecialtyLabel: "Suggested for you",
+    suggestionNote: "You can choose any verified doctor",
+    bookCta: "Book with this doctor",
+    viewProfile: "View verified profile",
+    feeNotSet: "Fee not set",
+    feeLabel: "Consultation fee",
+    credentialsVerified: "Credentials verified",
+    noDoctorsTitle: "No doctors found",
+    noDoctorsBody:
+      "There are no verified doctors available for this specialty right now.",
+    lowConfidenceHint:
+      "Your pre-summary needs review. You can edit your symptoms before choosing a doctor.",
+    editSymptoms: "Edit symptoms",
+    allow: "Allow",
+    consentTitle: "Sharing your pre-summary",
+    consentScope:
+      "This doctor will see your symptoms summary and may consult your consultations and prescriptions records while drafting your care.",
+    consentValidity: "This access lasts until you revoke it.",
+    confirmTitle: "Doctor chosen",
+    confirmBody: "Your pre-summary is now visible to this doctor only.",
+    whatHappensNext: "What happens next",
+    whatHappensNextItems:
+      "The doctor reviews your pre-summary. If needed, they will contact you for a consultation. You can track the status from your intake page.",
+    loading: "Finding verified doctors…",
+    recordingChoice: "Recording your choice…",
+    genericError: "Something went wrong. Please try again.",
+    viewIntakeStatus: "View intake status",
+    errorTitle: "We couldn't load the doctor list",
+    errorBody: "Check your connection and try again.",
+    retry: "Try again",
+    breadcrumb: "Choose doctor",
+  },
+
+  // findCare.* surface - PHASE-8.1 T11 (#485): the authed Find Care page at
+  // /patient/find (blueprint §5.3). Reuses the verified directory browse;
+  // the continuation CTA deep-links back into the intake pick step when an
+  // intake is in progress (the intake flow carries ?intake=<id>).
+  findCare: {
+    resumeTitle: "A consultation is in progress",
+    resumeBody:
+      "Your pre-summary is ready. Resume choosing the doctor who will review it.",
+    bookCta: "Book consultation",
+  },
+};
+
+export type Dictionary = typeof en;
+export type AuthStrings = Dictionary["auth"];
+export type DoneScreenStrings = Dictionary["doneScreen"];
+export type StaffAuthStrings = Dictionary["staffAuth"];
+export type ProfileStrings = Dictionary["profile"];
+export type DoctorStrings = Dictionary["doctor"];
+export type PatientHomeStrings = Dictionary["patientHome"];
+export type SearchStrings = Dictionary["search"];
+export type RecStrings = Dictionary["rec"];
+export type ServicesStrings = Dictionary["services"];
+export type ActionsStrings = Dictionary["actions"];
+export type RecentStrings = Dictionary["recent"];
+export type HealthStrings = Dictionary["health"];
+
+export const STRINGS: Record<Lang, Dictionary> = {
+  en,
+  hi: {
+    auth: {
+      brand: "सेतु",
+      tagline: "आपका स्वास्थ्य, जुड़ा हुआ",
+      phoneLabel: "मोबाइल नंबर",
+      phonePlaceholder: "10 अंकों का मोबाइल नंबर",
+      getCode: "वेरिफिकेशन कोड पाएँ",
+      verify: "सत्यापित करें",
+      resend: "कोड फिर से भेजें",
+      backToEdit: "नंबर बदलें",
+      codeLabel: "वेरिफिकेशन कोड",
+      codeHint: "SMS से भेजा गया 6 अंकों का कोड",
+      codeExpires: "कोड समाप्त होने में",
+      resendIn: (s) => `${s}s में फिर से भेजें`,
+      attemptsLeft: (n) => `${n} प्रयास शेष`,
+      noAttempts: "कोई प्रयास नहीं बचा। नया कोड माँगें।",
+      wrongCode: (n) => `गलत कोड। ${n} प्रयास शेष।`,
+      badPhone: "सही 10 अंकों का भारतीय मोबाइल नंबर दर्ज करें।",
+      shortCode: "पूरा 6 अंकों का कोड दर्ज करें।",
+      lockout: (m) => `बहुत अधिक गलत प्रयास। ${m} मिनट के लिए लॉक किया गया।`,
+      resendEarly: (s) => `कूलडाउन सक्रिय। ${s}s में फिर से भेजें।`,
+      expiredOrUsed: "यह कोड समाप्त या उपयोग हो चुका है। नया कोड माँगें।",
+      latestWins: "नया कोड भेजा गया। पुराना कोड अब मान्य नहीं है।",
+      duplicateNotice:
+        "यह नंबर पहले से पंजीकृत है - सत्यापन से आप लॉग इन होंगे।",
+      verifiedTitle: "पहचान सत्यापित",
+      verifiedBody: "आपका नंबर सत्यापित हो गया और सत्र तैयार है।",
+      goHome: "सेतु होम पर जाएँ",
+      welcome: "आपकी पूरी स्वास्थ्य यात्रा के लिए एक स्थिर पहचान।",
+      stepPhone: "फ़ोन",
+      stepVerify: "सत्यापन",
+      stepDone: "पूर्ण",
+      stepProgress: "साइन इन प्रगति",
+      valueProps: [
+        "एक स्थिर पहचान - कोई डुप्लीकेट खाता नहीं",
+        "आपका रिकॉर्ड आपका है, केवल आपकी सहमति से साझा",
+        "हिंदी और अंग्रेज़ी दोनों में",
+      ],
+      networkError: "सर्वर से संपर्क नहीं हो सका। अपना कनेक्शन जाँचें।",
+      smsFailed: "कोड भेजा नहीं जा सका। कुछ देर में फिर कोशिश करें।",
+      suspendedNotice: "यह नंबर निलंबित है। सहायता के लिए संपर्क करें।",
+      notRegistered: "यह नंबर पंजीकृत नहीं था। वापस जाकर पहले कोड माँगें।",
+      sessionTitle: "आप साइन इन हैं",
+      sessionBody: "आपकी पहचान सत्यापित है और स्वास्थ्य यात्रा तैयार है।",
+      signedInAs: (phone) => `${phone} से साइन इन`,
+      signOut: "साइन आउट",
+    },
+    doneScreen: {
+      openingDashboard: "आपका डैशबोर्ड खुल रहा है",
+      goToDashboard: "डैशबोर्ड पर जाएँ",
+      practiceLabel: "प्रैक्टिस",
+      specialtyLabel: "विशेषज्ञता",
+      destinationLabel: "गंतव्य",
+      consoleDestination: "डॉक्टर कंसोल",
+    },
+    staffAuth: {
+      login: {
+        brand: "CareSetu",
+        subtitle: "स्टाफ साइन-इन - डॉक्टर, लैब, केमिस्ट",
+        heading: "साइन इन करें",
+        emailLabel: "ईमेल",
+        emailPlaceholder: "you@example.com",
+        passwordLabel: "पासवर्ड",
+        showPassword: "दिखाएँ",
+        hidePassword: "छिपाएँ",
+        forgotPassword: "पासवर्ड भूल गए?",
+        signIn: "साइन इन करें",
+        phoneLabel: "फ़ोन नंबर",
+        phonePlaceholder: "10 अंकों का मोबाइल नंबर",
+        phoneInvalid: "एक सही फ़ोन नंबर दर्ज करें।",
+        mfaCodeLabel: "प्रमाणीकरण कोड (2FA)",
+        mfaHelp: "अपने authenticator ऐप से 6 अंकों का कोड दर्ज करें।",
+        mfaSubmit: "कोड सत्यापित करें",
+        codeRequired: "6 अंकों का कोड दर्ज करें।",
+        codeInvalid: "कोड ठीक 6 अंकों का होना चाहिए।",
+        newHereTitle: "CareSetu पर नए हैं?",
+        newHereBody:
+          "अपनी प्रैक्टिस या व्यवसाय रजिस्टर करें - लिस्ट होने से पहले हमारी टीम जाँच करती है।",
+        registerDoctor: "डॉक्टर",
+        registerLab: "लैब",
+        registerChemist: "केमिस्ट",
+        noRolePickerNote:
+          "यहाँ जानबूझकर कोई रोल पिकर नहीं है: साइन इन पर आपका रोल आपके खाते से तय होता है, हाथ से नहीं चुना जाता। मरीज़ फ़ोन OTP विज़ार्ड से साइन इन करते हैं।",
+        interimNote: "Phase 5 तक अंतरिम स्टाफ प्रवेश उपलब्ध रहेगा:",
+        chooseRoleLink: "रोल चुनें",
+        emailInvalid: "एक सही ईमेल पता दर्ज करें।",
+        passwordRequired: "अपना पासवर्ड दर्ज करें।",
+        summaryTitle: (n) => `आगे बढ़ने से पहले ${n} फ़ील्ड में ध्यान देना है।`,
+        phase5Notice:
+          "साइन-इन अभी जुड़ा नहीं है: स्टाफ प्रमाणीकरण Phase 5 में आएगा। अभी कुछ भेजा या सहेजा नहीं गया।",
+        invalidCredentials: "ईमेल या पासवर्ड गलत है।",
+        accountLocked:
+          "बार-बार विफल प्रयासों के बाद यह खाता अस्थायी रूप से लॉक है। लगभग 15 मिनट बाद फिर कोशिश करें या पासवर्ड रीसेट करें।",
+        genericError:
+          "कुछ गड़बड़ हुई, कृपया अपनी साख़ीयाँ जाँचें और फिर से कोशिश करें।",
+        invalidOperatorCode: "अमान्य प्रमाणीकरण कोड। कृपया फिर से कोशिश करें।",
+        getCode: "वेरिफिकेशन कोड पाएँ",
+        codeStepTitle: "वेरिफिकेशन कोड दर्ज करें",
+        codeLabel: "वेरिफिकेशन कोड",
+        codeHint: "SMS से भेजा गया 6 अंकों का कोड",
+        codeExpires: "कोड समाप्त होने में",
+        resend: "कोड फिर से भेजें",
+        backToEdit: "नंबर बदलें",
+        resendIn: (s) => `${s}s में फिर से भेजें`,
+        attemptsLeft: (n) => `${n} प्रयास शेष`,
+        noAttempts: "कोई प्रयास नहीं बचा। नया कोड माँगें।",
+        wrongCode: (n) => `गलत कोड। ${n} प्रयास शेष।`,
+        shortCode: "पूरा 6 अंकों का कोड दर्ज करें।",
+        lockout: (m) => `बहुत अधिक गलत प्रयास। ${m} मिनट के लिए लॉक किया गया।`,
+        resendEarly: (s) => `कूलडाउन सक्रिय। ${s}s में फिर से भेजें।`,
+        expiredOrUsed: "यह कोड समाप्त या उपयोग हो चुका है। नया कोड माँगें।",
+        latestWins: "नया कोड भेजा गया। पुराना कोड अब मान्य नहीं है।",
+        suspendedNotice: "यह खाता निलंबित है। सहायता के लिए संपर्क करें।",
+        noAccount:
+          "इस नंबर के लिए कोई डॉक्टर, लैब या केमिस्ट खाता नहीं मिला। शुरू करने के लिए अपनी प्रैक्टिस या व्यवसाय रजिस्टर करें।",
+        networkError: "सर्वर से संपर्क नहीं हो सका। अपना कनेक्शन जाँचें।",
+        smsFailed: "कोड भेजा नहीं जा सका। कुछ देर में फिर कोशिश करें।",
+        demoOtp: (code) => `डेमो OTP: ${code}`,
+        verifiedTitle: "पहचान सत्यापित",
+        verifiedBody: "आपकी प्रैक्टिस सत्यापित है और आपका कंसोल तैयार है।",
+        verifiedSubmit: "जारी रखें",
+      },
+      pending: {
+        badge: "जाँच प्रक्रिया में",
+        headerTitle: "आवेदन की स्थिति",
+        title: "आपका आवेदन जाँचा जा रहा है",
+        submittedLabel: "जमा किया गया",
+        applicationLabel: "आवेदन",
+        verifyingLabel: "जिसकी जाँच हो रही है",
+        windowLabel: "समीक्षा अपेक्षित अवधि",
+        detailPlaceholder: "स्टाफ खाते लाइव होने पर दिखेगा (Phase 5)",
+        windowValue: "48 घंटे के भीतर",
+        infoBanner:
+          "सक्रिय होने तक आप सार्वजनिक रूप से सूचीबद्ध नहीं होंगे। यदि कुछ और चाहिए तो हम आपको कॉल या संदेश भेजेंगे।",
+        helpCta: "सहायता: CareSetu टीम से संपर्क करें",
+        loadError:
+          "आपकी आवेदन स्थिति लोड नहीं हो सकी। कृपया अपना कनेक्शन जाँचें और फिर से प्रयास करें।",
+      },
+      rejected: {
+        badge: "अस्वीकृत",
+        headerTitle: "आवेदन की स्थिति",
+        title: "हम आपका आवेदन सत्यापित नहीं कर सके",
+        reasonHeading: "कारण:",
+        reasonPlaceholder:
+          "ऑपरेटर समीक्षा लाइव होने पर विशिष्ट कारण यहाँ दिखेगा (Phase 5)।",
+        fixNote:
+          "समस्या ठीक करें और फिर से जमा करें - आपका संशोधित अपलोड सीधे जाँच में वापस चला जाएगा; आप शुरुआत से नहीं करते।",
+        resubmitCta: "दोबारा अपलोड करें और जमा करें",
+        resubmitStubNotice:
+          "दोबारा जमा करना Phase 5 के साथ खुलेगा - अभी कुछ भी दोबारा जमा नहीं हुआ।",
+        helpCta: "सहायता: CareSetu टीम से संपर्क करें",
+        loadError:
+          "आपकी अस्वीकृति विवरण लोड नहीं हो सका। कृपया अपना कनेक्शन जाँचें और फिर से प्रयास करें।",
+        appealProcessing: "आपकी अपील जमा हो रही है...",
+        appealSuccess: "अपील जमा हो गई। आप फिर से सत्यापन कतार में हैं।",
+      },
+      picker: {
+        title: "जारी रखने के लिए एक रोल चुनें",
+        sub: "इस खाते में एक से अधिक स्टाफ रोल हैं। कौन-सा कंसोल खोलना है चुनें - बाद में ऊपरी बार से बदल सकते हैं।",
+        doctorDesc: "कतार, केस, मरीज़, प्रोफ़ाइल",
+        partnerDesc: "ऑर्डर, इतिहास, सेटलमेंट, प्रोफ़ाइल",
+        operatorDesc: "सत्यापन, विवाद, ऑडिट",
+      },
+
+      register: {
+        subtitle:
+          "अभी आवेदन करें - लिस्ट होने से पहले हमारी टीम हर दस्तावेज़ जाँचती है।",
+        stepperLabel: "पंजीकरण चरण",
+        steps: [
+          "खाते की मूल जानकारी",
+          "पहचान",
+          "दस्तावेज़",
+          "समीक्षा और घोषणाएँ",
+        ],
+        typeBadge: {
+          doctor: "डॉक्टर आवेदन",
+          lab: "लैब आवेदन",
+          chemist: "केमिस्ट आवेदन",
+        },
+        typeLabels: { doctor: "डॉक्टर", lab: "लैब", chemist: "केमिस्ट" },
+        back: "वापस",
+        continueCta: "आगे बढ़ें",
+        submitApplication: "आवेदन जमा करें",
+        phoneConfirm: {
+          title: "अपना फ़ोन सत्यापित करें",
+          helper:
+            "आपके नियंत्रण वाले फ़ोन से आवेदन जुड़ा रहे, इसके लिए इस नंबर पर 6 अंकों का कोड SMS से भेजा गया है। खत्म करने के लिए कोड दर्ज करें - आपकी जानकारी सहेजी हुई है।",
+          confirmCode: "कोड की पुष्टि करें",
+        },
+        summaryTitle: (n) => `जारी रखने से पहले ${n} फ़ील्ड में ध्यान देना है।`,
+        accountTitle: "खाते की मूल जानकारी",
+        identityTitleDoctor: "प्रोफ़ेशनल पहचान",
+        identityTitlePartner: "व्यवसाय की पहचान",
+        credentialsTitle: "दस्तावेज़ अपलोड",
+        credentialsNote:
+          "फ़ोटो या PDF। फ़ाइलें हमारी टीम जाँचती है; सक्रिय होने तक कुछ भी सार्वजनिक रूप से नहीं दिखता।",
+        reviewTitle: "समीक्षा और घोषणाएँ",
+        fields: {
+          fullName: "पूरा नाम",
+          fullNamePlaceholder: "जैसे डॉ. आशा कुमार",
+          email: "ईमेल",
+          emailPlaceholder: "you@example.com",
+          password: "पासवर्ड",
+          passwordHelp:
+            "मज़बूती: 12+ अक्षरों में एक अंक और एक प्रतीक के साथ बनाएँ।",
+          mobile: "सूचनाओं के लिए मोबाइल",
+          mobilePlaceholder: "10 अंकों का मोबाइल नंबर",
+          degreeName: "डिग्री के अनुसार नाम",
+          degreeNamePlaceholder: "प्रमाणपत्र पर जैसा छपा है वैसा ही",
+          council: "राज्य मेडिकल काउंसिल",
+          councilPlaceholder: "अपनी काउंसिल चुनें",
+          city: "शहर",
+          cityPlaceholder: "जैसे डालटनगंज",
+          languages: "बोली जाने वाली भाषाएँ",
+          languagesPlaceholder: "जैसे हिंदी, English",
+          businessName: "व्यवसाय का नाम",
+          address: "पता",
+          serviceArea: "सेवा क्षेत्र",
+          serviceAreaPlaceholder: "जैसे डालटनगंज + 15 किमी",
+          ownerContact: "मालिक का संपर्क",
+        },
+        optionalSuffix: "(वैकल्पिक)",
+        mobilePrefix: "+91",
+        councils: [
+          "झारखंड राज्य मेडिकल काउंसिल",
+          "बिहार राज्य मेडिकल काउंसिल",
+          "अन्य",
+        ],
+        slots: {
+          councilCert: {
+            label: "राज्य मेडिकल काउंसिल पंजीकरण प्रमाणपत्र",
+            hint: "फ़ोटो/PDF अपलोड करें",
+          },
+          degrees: {
+            label: "डिग्री प्रमाणपत्र (MBBS / MD)",
+            hint: "फ़ोटो/PDF अपलोड करें",
+          },
+          photoId: { label: "सरकारी फ़ोटो ID", hint: "आधार / पैन / DL" },
+          businessReg: {
+            label: "व्यवसाय पंजीकरण",
+            hint: "GST / ट्रेड लाइसेंस",
+          },
+          accreditations: { label: "मान्यताएँ", hint: "NABL / ISO हो तो" },
+          kyc: { label: "मालिक का KYC", hint: "सरकारी फ़ोटो ID" },
+          drugLicense: {
+            label: "ड्रग लाइसेंस (फ़ॉर्म 20/21)",
+            hint: "फ़ोटो/PDF अपलोड करें",
+          },
+          shopLicense: {
+            label: "दुकान लाइसेंस",
+            hint: "नगर पालिका ट्रेड लाइसेंस",
+          },
+        },
+        uploadPrompt: "फ़ोटो/PDF अपलोड करें",
+        removeFile: "हटाएँ",
+        review: {
+          applicant: "आवेदक",
+          email: "ईमेल",
+          mobile: "सूचनाओं के लिए मोबाइल",
+          notProvided: "नहीं दिया गया",
+          type: "प्रकार",
+          credentialsAttached: "संलग्न दस्तावेज़",
+          fileCount: (n) => `${n} ${n === 1 ? "फ़ाइल" : "फ़ाइलें"}`,
+          noFile: "कुछ संलग्न नहीं",
+        },
+        declarations: {
+          truth:
+            "मैं घोषणा करता/करती हूँ कि दी गई जानकारी और दस्तावेज़ सही हैं।",
+          consent:
+            "मैं CareSetu द्वारा दस्तावेज़ सत्यापन की सहमति देता/देती हूँ।",
+          terms: "मैं सेवा की शर्तें स्वीकार करता/करती हूँ।",
+        },
+        errors: {
+          fullNameRequired: "अपना पूरा नाम दर्ज करें।",
+          emailInvalid: "एक सही ईमेल पता दर्ज करें।",
+          passwordWeak:
+            "कम से कम 12 अक्षर, जिसमें एक अंक और एक प्रतीक हो, इस्तेमाल करें।",
+          mobileRequired: "अपना मोबाइल नंबर दर्ज करें।",
+          mobileInvalid: "सही 10 अंकों का भारतीय मोबाइल नंबर दर्ज करें।",
+          degreeNameRequired: "डिग्री के अनुसार नाम दर्ज करें।",
+          councilRequired: "अपनी राज्य मेडिकल काउंसिल चुनें।",
+          cityRequired: "अपना शहर दर्ज करें।",
+          languagesRequired: "मरीज़ों से बोली जाने वाली भाषाएँ दर्ज करें।",
+          businessNameRequired: "व्यवसाय का नाम दर्ज करें।",
+          addressRequired: "व्यवसाय का पता दर्ज करें।",
+          serviceAreaRequired: "अपना सेवा क्षेत्र दर्ज करें।",
+          ownerContactInvalid:
+            "मालिक का सही 10 अंकों का भारतीय मोबाइल नंबर दर्ज करें।",
+          uploadRequired: "जारी रखने के लिए यह दस्तावेज़ संलग्न करें।",
+          uploadWrongType:
+            "यहाँ केवल फ़ोटो (JPEG, PNG, WebP) या PDF फ़ाइलें चलेंगी।",
+          uploadTooLarge: "फ़ाइलें 10 MB या उससे छोटी होनी चाहिए।",
+          declarationRequired: "आगे बढ़ने के लिए यह घोषणा टिक करें।",
+        },
+        phase5Notice:
+          "जमा करना अभी जुड़ा नहीं है: आवेदन Phase 5 में आएँगे। अभी कुछ भेजा या सहेजा नहीं गया।",
+        submitting: "जमा हो रहा है...",
+        traceWithId: (traceId) => `ट्रेस: ${traceId}`,
+        errorsSubmitLocationRequired:
+          "आपका स्थान निर्धारित नहीं हो सका। कृपया स्थान की अनुमति दें और फिर से प्रयास करें।",
+        errorsSubmitUnexpected:
+          "अप्रत्याशित त्रुटि हुई। कृपया फिर से प्रयास करें।",
+      },
+    },
+    doctor: {
+      welcome: (displayName) => `स्वागत है, ${displayName}`,
+      doctorLabel: "डॉक्टर",
+      doctorWithPhone: (phone) => `डॉक्टर (${phone})`,
+      workspaceActive: "आपका डॉक्टर वर्कस्पेस सक्रिय है।",
+      statusHeading: "स्थिति",
+      profileActive:
+        "आपकी प्रोफ़ाइल सक्रिय और सत्यापित है। आप परामर्श स्वीकार करना शुरू कर सकते हैं।",
+      nextStepsHeading: "अगले कदम",
+      nextSteps: [
+        "- अपनी पेशेवर प्रोफ़ाइल पूरी करें (जल्द आ रही है)",
+        "- मरीज़ निर्देशिका ब्राउज़ करें (Phase 6)",
+        "- किसी मरीज़ के रिकॉर्ड से परामर्श शुरू करें",
+      ],
+    },
+    consent: {
+      title: "साझा करने की अनुमति",
+      whoLabel: "कौन पूछ रहा है",
+      whatLabel: "वे क्या देखेंगे",
+      howLongLabel: "कितने समय के लिए",
+      verifiedBadge: "सत्यापित",
+      allow: "अनुमति दें",
+      deny: "अभी नहीं",
+      logLink: "सभी अनुमतियाँ देखें",
+      grantedNote: "अनुमति मिल गई - आपके अनुमति लॉग में दर्ज हुई।",
+      deniedNote:
+        "कोई बात नहीं। अनुमति के बिना लैब आपका इतिहास इस बुकिंग से नहीं जोड़ पाएगा - बुकिंग फिर भी हो सकती है, बस रिकॉर्ड साझा नहीं होगा।",
+      demo: {
+        badge: "डेमो केयर एक्शन",
+        cardTitle: "लैब टेस्ट बुक करें",
+        cardBody:
+          "यह बुकिंग आपका हाल का रिकॉर्ड जोड़ना चाहती है ताकि डॉक्टर को संदर्भ मिले। आपकी अनुमति के बिना कुछ साझा नहीं होता।",
+        cta: "बुकिंग जारी रखें",
+        requesterName: "सहयोग पैथ लैब",
+        requesterContext: "आपकी बुकिंग के माध्यम से · डॉ. ए. कुमार का रेफ़रंस",
+        scope: "आपकी पिछले 3 महीने की प्रिस्क्रिप्शन",
+        validity:
+          "सिर्फ़ इसी बुकिंग के लिए। आप मेरा रिकॉर्ड → अनुमति लॉग से कभी भी वापस ले सकते हैं।",
+        allowedProceed: "आपकी बुकिंग जारी है - आपका रिकॉर्ड जुड़ गया।",
+        standingDenial: "आपने पहले 'अभी नहीं' चुना था - कुछ भी साझा नहीं हुआ।",
+      },
+    },
+    profile: {
+      title: "स्वागत है! प्रोफ़ाइल पूरी करें",
+      sub: "तीन छोटे कदम। ज़रूरी नहीं वाले कदम छोड़ भी सकते हैं।",
+      pageTitle: "अपनी प्रोफ़ाइल पूरी करें",
+      steps: ["ज़रूरी", "वैकल्पिक", "वैकल्पिक"],
+      s1: "आपके बारे में",
+      s2: "हेल्थ ट्रैकिंग (ऐच्छिक)",
+      s2sub:
+        "ब्लड प्रेशर या शुगर की रोज़ एंट्री चालू करें - हम धीरे-धीरे याद दिलाएँगे।",
+      s3: "संपर्क और फ़ोटो (ऐच्छिक)",
+      name: "पूरा नाम",
+      namePlaceholder: "जैसे आशा देवी",
+      age: "उम्र",
+      agePlaceholder: "साल",
+      gender: "लिंग",
+      genderPlaceholder: "चुनें",
+      genders: { female: "महिला", male: "पुरुष", other: "अन्य" },
+      langLabel: "भाषा पसंद",
+      bp: "ब्लड प्रेशर",
+      sugar: "ब्लड शुगर",
+      photo: "प्रोफ़ाइल फ़ोटो",
+      photoPrompt: "फ़ोटो अपलोड करें",
+      area: "इलाक़ा / पता",
+      areaPlaceholder: "वार्ड, मोहल्ला, पहचान",
+      ec: "आपातकालीन संपर्क",
+      ecPlaceholder: "+91",
+      skip: "अभी नहीं",
+      continueCta: "आगे बढ़ें",
+      finish: "पूरा करें",
+      meterLabel: "प्रोफ़ाइल पूरी",
+      errors: {
+        nameRequired: "अपना पूरा नाम दर्ज करें।",
+        ageRequired: "अपनी उम्र दर्ज करें।",
+        ageInvalid: "पूरी संख्या में 1 से 120 के बीच उम्र दर्ज करें।",
+        genderRequired: "अपना लिंग चुनें।",
+      },
+      nudges: {
+        basicsTitle: "विज़िट शुरू करने के लिए नाम जोड़ें",
+        basicsBody:
+          "इलाज से जुड़े कामों के लिए नाम वाला रिकॉर्ड ज़रूरी है - एक मिनट लगेगा।",
+        trackingTitle: "हेल्थ ट्रैकिंग चालू करें",
+        trackingBody:
+          "ब्लड प्रेशर या शुगर की रोज़ एंट्री से धीमे-धीमे याद-दिलाने वाले कार्ड मिलेंगे।",
+        photoTitle: "प्रोफ़ाइल फ़ोटो जोड़ें",
+        photoBody:
+          "इससे प्रोवाइडर पक्का कर पाते हैं कि वे सही व्यक्ति का इलाज कर रहे हैं।",
+        areaTitle: "दवाई डिलीवरी के लिए अपना इलाक़ा जोड़ें",
+        areaBody: "डिलीवरी चेकआउट के लिए इलाक़ा या पता ज़रूरी है।",
+        emergencyTitle: "आपातकालीन संपर्क जोड़ें",
+        emergencyBody:
+          "एक फ़ोन नंबर जिससे हम किसी आपात स्थिति में संपर्क कर सकें।",
+        dismiss: "हटाएँ",
+        completeCta: "प्रोफ़ाइल पूरी करें",
+      },
+      gate: {
+        basicsExplain:
+          "इलाज से जुड़े कामों के लिए नाम वाला रिकॉर्ड (नाम, उम्र, लिंग) ज़रूरी है - जारी रखने के लिए यहाँ जोड़ें।",
+        areaExplain:
+          "दवाई डिलीवरी के लिए आपका इलाक़ा या पता ज़रूरी है - जारी रखने के लिए यहाँ जोड़ें।",
+      },
+      save: {
+        saving: "आपकी प्रोफ़ाइल सेव हो रही है...",
+        saved: "प्रोफ़ाइल सेव हो गई",
+        error:
+          "आपकी प्रोफ़ाइल सेव नहीं हो सकी। कृपया अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      },
+      settings: {
+        title: "प्रोफ़ाइल और सेटिंग",
+        sub: "आपका नाम, उम्र और लिंग हमें आपके इलाज के रिकॉर्ड सही रखने में मदद करते हैं।",
+        basics: "व्यक्तिगत विवरण",
+        save: "परिवर्तन सेव करें",
+        blocked: "अपना नाम, उम्र और लिंग दर्ज करें ताकि प्रोफ़ाइल सेव हो सके।",
+      },
+      demo: {
+        badge: "डेमो केयर एक्शन",
+        title: "केयर-एक्शन गेटिंग",
+        body: "Find Care और My Record देखना कभी गेट नहीं होता। केयर एक्शन पर आपकी प्रोफ़ाइल उसी समय जाँची जाती है:",
+        intake: "विज़िट शुरू करें (इंटेक)",
+        booking: "अपॉइंटमेंट बुक करें",
+        checkout: "दवाई डिलीवरी - चेकआउट पर जाएँ",
+        proceedNote:
+          "यह एक्शन गेटिंग पार करता है - असली इंटेक/बुकिंग/चेकआउट फ़्लो अपने बिल्ड फ़ेज़ में आएँगे।",
+      },
+    },
+
+    // profileZones.* - the three-zone patient profile page (#548). See the en
+    // block for the "coming soon" rule and the placeholder-zone convention.
+    profileZones: {
+      identityHeading: "पहचान",
+      identitySub:
+        "आपके इलाज के रिकॉर्ड में और आपके प्रोवाइडर के सामने आप कैसे दिखते हैं",
+      photoHeading: "प्रोफ़ाइल फ़ोटो",
+      photoHelp:
+        "JPEG, PNG या WebP, 5MB तक। सिर्फ़ उन्हीं प्रोवाइडर को दिखती है जिनकी आप सहमति देते हैं।",
+      photoUpload: "फ़ोटो अपलोड करें",
+      photoReplace: "फ़ोटो बदलें",
+      photoRemove: "फ़ोटो हटाएँ",
+      photoFailed: "आपकी फ़ोटो अपडेट नहीं हो सकी। कृपया फिर से कोशिश करें।",
+      healthHeading: "स्वास्थ्य पृष्ठभूमि",
+      healthSub:
+        "इलाज शुरू करने से पहले आपके प्रोवाइडर को आपके बारे में क्या जानना चाहिए",
+      healthPending:
+        "आपने अभी तक स्वास्थ्य पृष्ठभूमि नहीं जोड़ी है। नीचे अपनी एलर्जी, बीमारियाँ और वर्तमान दवाइयाँ जोड़ें।",
+      healthLoading: "आपकी स्वास्थ्य पृष्ठभूमि लोड हो रही है...",
+      healthLoadFailed: "आपकी स्वास्थ्य पृष्ठभूमि लोड नहीं हो सकी।",
+      healthRetry: "फिर से कोशिश करें",
+      bloodGroupLabel: "ब्लड ग्रुप",
+      bloodGroupPlaceholder: "उदाहरण के लिए, B+",
+      listHint: "हर आइटम अलग लाइन में लिखें।",
+      conditionsLabel: "बीमारियाँ",
+      conditionsPlaceholder: "उदाहरण के लिए, अस्थमा",
+      allergiesLabel: "एलर्जी",
+      allergiesPlaceholder: "उदाहरण के लिए, पेनिसिलिन",
+      medicationsLabel: "वर्तमान दवाइयाँ",
+      medicationsPlaceholder: "उदाहरण के लिए, सालबुटामोल इनहेलर",
+      immunizationsLabel: "टीकाकरण",
+      immunizationsPlaceholder: "उदाहरण के लिए, 2024 में टिटनेस",
+      familyHistoryLabel: "पारिवारिक इतिहास",
+      familyHistoryPlaceholder: "उदाहरण के लिए, पिता - मधुमेह",
+      snapshotSave: "स्वास्थ्य पृष्ठभूमि सहेजें",
+      snapshotSaved: "स्वास्थ्य पृष्ठभूमि सहेजी गई।",
+      snapshotSaveFailed:
+        "आपकी स्वास्थ्य पृष्ठभूमि सहेजी नहीं जा सकी। कृपया फिर से कोशिश करें।",
+      snapshotSharedNote:
+        "आपसे जुड़े सक्रिय रिश्ते वाले आपके डॉक्टर यह स्वास्थ्य पृष्ठभूमि देख सकते हैं।",
+      metricsHeading: "ऊँचाई और वज़न",
+      metricsSub: "आपके माप, सबसे नए पहले।",
+      metricsEmpty: "आपने अभी तक कोई ऊँचाई या वज़न दर्ज नहीं किया है।",
+      metricsLoading: "आपके माप लोड हो रहे हैं...",
+      metricsLoadFailed: "आपके माप लोड नहीं हो सके।",
+      metricsLoadMore: "पुराने माप दिखाएँ",
+      metricsLoadingMore: "पुराने माप लोड हो रहे हैं...",
+      metricsMoreFailed: "पुराने माप लोड नहीं हो सके।",
+      heightLabel: "ऊँचाई (सेमी)",
+      weightLabel: "वज़न (किलो)",
+      heightUnit: "सेमी",
+      weightUnit: "किलो",
+      recordedAtLabel: "कब मापा",
+      metricAdd: "माप जोड़ें",
+      metricAdded: "माप जोड़ दिया गया।",
+      metricAddFailed: "यह माप जोड़ा नहीं जा सका। कृपया फिर से कोशिश करें।",
+      metricNotRecorded: "दर्ज नहीं",
+      metricValueRequired: "ऊँचाई, वज़न, या दोनों में से कुछ दर्ज करें।",
+      metricValueNotANumber: "केवल अंक लिखें, जैसे 170 या 68.5।",
+      metricHeightRange: (min: number, max: number) =>
+        `${min} से ${max} सेमी के बीच ऊँचाई दर्ज करें।`,
+      metricWeightRange: (min: number, max: number) =>
+        `${min} से ${max} किलो के बीच वज़न दर्ज करें।`,
+      metricRecordedAtRequired: "यह कब मापा गया, यह बताएँ।",
+      metricDateInvalid: "यह तारीख पढ़ी नहीं जा सकी। कृपया दोबारा चुनें।",
+      healthConsentTitle: "अपनी स्वास्थ्य पृष्ठभूमि साझा करें?",
+      healthConsentBody:
+        "पहली बार अपनी स्वास्थ्य पृष्ठभूमि सहेजने पर यह उन डॉक्टरों को दिखने लगेगी जिनका आपसे सक्रिय रिश्ता है। वे आपका ब्लड ग्रुप, बीमारियाँ, एलर्जी, वर्तमान दवाइयाँ, टीकाकरण और पारिवारिक इतिहास देख पाएँगे।",
+      healthConsentRecall:
+        "यह एक्सेस आप कभी भी नीचे दिए गए 'आपका रिकॉर्ड कौन देख सकता है' से वापस ले सकते हैं।",
+      healthConsentConfirm: "सहेजें और साझा करें",
+      healthConsentCancel: "अभी नहीं",
+      settingsHeading: "सेटिंग",
+      notificationsHeading: "नोटिफ़िकेशन",
+      notificationsHelp:
+        "चुनें कि CareSetu आपको किन याद दिलाव भेजे। अगली रिलीज़ के साथ आ रहा है।",
+      notificationsSoon: "जल्द आ रहा है",
+      notificationLabels: {
+        appointment_reminders: "अपॉइंटमेंट याद दिलाव",
+        prescription_updates: "पर्चे अपडेट",
+        report_ready: "रिपोर्ट तैयार",
+        care_messages: "आपके प्रोवाइडर के संदेश",
+      },
+      languageHeading: "डिफ़ॉल्ट भाषा",
+      languageHelp:
+        "आपके इलाज के रिकॉर्ड की भाषा। आप इसे ऊपर पहचान में बदल सकते हैं।",
+      consentHeading: "आपका रिकॉर्ड कौन देख सकता है",
+      consentSub:
+        "आपने जो हर अनुमति दी है। इसे वापस लेने पर उस प्रोवाइडर को आगे का एक्सेस नहीं मिलेगा।",
+      consentEmpty: "आपने अभी तक अपना रिकॉर्ड किसी के साथ साझा नहीं किया है।",
+      consentLoading: "आपकी सहमति लोड हो रही है...",
+      consentLoadFailed: "आपकी सहमति लोड नहीं हो सकी।",
+      consentRetry: "फिर से कोशिश करें",
+      consentRevoke: "एक्सेस वापस लें",
+      consentRevokeTitle: "एक्सेस वापस लें?",
+      consentRevokeBody: (name: string) =>
+        `${name} अब आपका रिकॉर्ड नहीं देख पाएँगे। पहले किया गया एक्सेस आपके एक्सेस हिस्ट्री में रहेगा।`,
+      consentRevokeConfirm: "वापस लें",
+      consentRevokeCancel: "एक्सेस बनाए रखें",
+      consentRevokeDone: "एक्सेस वापस ले लिया गया।",
+      consentRevokeFailed:
+        "यह एक्सेस वापस नहीं लिया जा सका। कृपया फिर से कोशिश करें।",
+      dataHeading: "आपका डेटा",
+      dataExport: "मेरे डेटा की एक कॉपी डाउनलोड करें",
+      dataExportHelp: "आपके बारे में हमारे पास जो कुछ है, एक फ़ाइल के रूप में।",
+      dataDelete: "मेरा अकाउंट और डेटा मिटाएँ",
+      dataDeleteHelp: "आपका अकाउंट और इलाज के रिकॉर्ड हमेशा के लिए हटाएँ।",
+      dataSoon: "जल्द आ रहा है",
+      scopeLabels: {
+        consultations: "परामर्श",
+        prescriptions: "पर्चे",
+        lab_results: "लैब परिणाम",
+        metrics: "मेट्रिक्स",
+        health_background: "स्वास्थ्य पृष्ठभूमि",
+        full_record: "पूरा रिकॉर्ड",
+      },
+      consentScopeOther: "आपके रिकॉर्ड के अन्य हिस्से",
+    },
+
+    nav: {
+      home: "होम",
+      find: "खोजें",
+      start: "शुरू करें",
+      record: "मेरा रिकॉर्ड",
+      inbox: "इनबॉक्स",
+      bookings: "बुकिंग और ऑर्डर",
+      profileSettings: "प्रोफ़ाइल और सेटिंग",
+      more: "और",
+      logOut: "लॉग आउट",
+      // #604: replaces "कतार". Spelled without a nukta it is also how the
+      // country name is written, so as console chrome a doctor's nav could
+      // read "Qatar" - it belongs to no such thing on this screen. "डैशबोर्ड"
+      // is the Hindi this dictionary already uses for Dashboard
+      // (openingDashboard, goToDashboard, home.authButton.dashboard), so the
+      // landing label matches it.
+      queue: "डैशबोर्ड",
+      cases: "केस",
+      patients: "मरीज़",
+      orders: "ऑर्डर",
+      history: "इतिहास",
+      settlements: "सेटलमेंट",
+      profile: "प्रोफ़ाइल",
+      verifications: "सत्यापन",
+      disputes: "विवाद",
+      audit: "ऑडिट",
+      sections: {
+        work: "कार्य",
+        account: "खाता",
+      },
+      // #574: the sidebar's collapse control, action-named like the English
+      // pair above. Blueprint §9.2 line 578: neither locale ships alone.
+      collapseSidebar: "साइडबार संकुचित करें",
+      expandSidebar: "साइडबार विस्तार करें",
+    },
+    accountMenu: {
+      trigger: "अकाउंट मेन्यू",
+      completeProfile: "अपनी प्रोफ़ाइल पूरी करें",
+      // #604: this namespace's own Profile row label, replacing the borrowed
+      // nav.profile. Same Hindi the patient popup row already renders from
+      // nav.profileSettings above.
+      profileSettings: "प्रोफ़ाइल और सेटिंग",
+      switchRole: (roleLabel: string) => `${roleLabel} पर स्विच करें`,
+    },
+    home: {
+      nav: {
+        doctors: "डॉक्टर",
+        labs: "लैब",
+        chemists: "केमिस्ट",
+      },
+      authButton: {
+        login: "लॉगिन",
+        dashboard: "डैशबोर्ड",
+      },
+      hero: {
+        h1: "अपने आसपास भरोसेमंद डॉक्टर, लैब और केमिस्ट खोजें",
+        sub: "अपॉइंटमेंट लें, रिपोर्ट साझा करें और हर रिकॉर्ड एक जगह रखें - सिर्फ़ आपकी सहमति से।",
+        typeLabel: "प्रोवाइडर प्रकार",
+        typeDoctor: "डॉक्टर",
+        typeLab: "लैब",
+        typeChemist: "केमिस्ट",
+        searchPlaceholder: "नाम, विशेषज्ञता या जाँच से खोजें",
+        locationLabel: "स्थान",
+        cta: "खोजें",
+        getStarted: "शुरू करें",
+      },
+      chips: {
+        title: "आम ज़रूरतें",
+        generalPhysician: "जनरल फ़िज़िशियन",
+        pediatrician: "बाल रोग विशेषज्ञ",
+        gynecologist: "स्त्री रोग विशेषज्ञ",
+        dentist: "दंत चिकित्सक",
+        bloodTest: "खून जाँच",
+        xRay: "एक्स-रे",
+        fullBodyCheckup: "फुल बॉडी चेकअप",
+        medicineDelivery: "दवाई डिलीवरी",
+      },
+      tiles: {
+        title: "श्रेणी से खोजें",
+        doctorsSub: "जनरल फ़िज़िशियन, बाल रोग, स्त्री रोग, दंत",
+        labsSub: "खून जाँच, एक्स-रे, फुल बॉडी चेकअप",
+        chemistsSub: "ई-प्रिस्क्रिप्शन से दवाई डिलीवरी",
+      },
+      featured: {
+        title: "चुनिंदा डॉक्टर",
+        viewAll: "सभी डॉक्टर देखें",
+        verified: "सत्यापित",
+        emptyTitle: "डालटनगंज में डायरेक्टरी जल्द आ रही है",
+        emptyBody:
+          "लिस्ट होने से पहले हम हर प्रोवाइडर की जाँच करते हैं। जाँच पूरी होने तक कोई डॉक्टर नहीं दिखता।",
+        emptyCta: "मरीज़ के तौर पर शुरू करें",
+      },
+      how: {
+        title: "CareSetu कैसे काम करता है",
+        s1t: "प्रोवाइडर खोजें",
+        s1b: "आसपास के जाँचे-परखे डॉक्टर, लैब और केमिस्ट खोजें।",
+        s2t: "आवाज़ में बताएँ तकलीफ़",
+        s2b: "AI एक ड्राफ़्ट सारांश बनाता है - आगे बढ़ने से पहले आपका डॉक्टर हमेशा उसे जाँचता है।",
+        s3t: "सब एक जगह रहता है",
+        s3b: "प्रिस्क्रिप्शन, रिपोर्ट और रिकॉर्ड आपके हेल्थ रिकॉर्ड में - सिर्फ़ आपकी सहमति से साझा।",
+      },
+      trust: {
+        t1: "लिस्टिंग से पहले दस्तावेज़ जाँचे जाते हैं",
+        t2: "आपकी सहमति के बिना कुछ साझा नहीं होता",
+        t3: "आपके रिकॉर्ड, आपका नियंत्रण - कभी भी वापस ले सकते हैं",
+        privacy: "प्राइवेसी और शर्तें",
+      },
+      providers: {
+        title: "क्या आप प्रोवाइडर हैं?",
+        sub: "अभी रजिस्टर करें - लिस्ट होने से पहले हमारी टीम जाँच करती है।",
+        doctorT: "आप डॉक्टर हैं?",
+        doctorB:
+          "अपने शहर में जाँचे-परखे इलाज की तलाश करने वाले मरीज़ों तक पहुँचें।",
+        labT: "लैब चलाते हैं?",
+        labB: "बुक किए गए टेस्ट ऑर्डर पाएँ और रिपोर्ट डिजिटल तरीके से भेजें।",
+        chemistT: "केमिस्ट की दुकान है?",
+        chemistB: "मंज़ूर ई-प्रिस्क्रिप्शन भरें और अपनी दुकान बढ़ाएँ।",
+        register: "रजिस्टर करें",
+      },
+      finalCta: {
+        title: "अपने हेल्थ रिकॉर्ड से शुरू करें",
+        sub: "एक मुफ़्त खाता रिकॉर्ड, बुकिंग और ऑर्डर सब एक साथ रखता है।",
+      },
+      footer: {
+        patients: "मरीज़",
+        providersCol: "प्रोवाइडर",
+        companyLegal: "कंपनी और कानूनी",
+        findDoctors: "डॉक्टर खोजें",
+        findLabs: "लैब खोजें",
+        findChemists: "केमिस्ट खोजें",
+        howItWorks: "यह कैसे काम करता है",
+        regDoctor: "डॉक्टर के रूप में रजिस्टर",
+        regLab: "लैब के रूप में रजिस्टर",
+        regChemist: "केमिस्ट के रूप में रजिस्टर",
+        staffLogin: "स्टाफ लॉगिन",
+        about: "हमारे बारे में",
+        privacy: "प्राइवेसी",
+        terms: "शर्तें",
+        contact: "संपर्क",
+        meta: "\u00a9 CareSetu - डालटनगंज और आसपास के इलाक़ों में",
+        operatorConsole: "ऑपरेटर कंसोल",
+      },
+    },
+
+    // patientHome.* surface - PHASE-2.7 T1 (#499). See the en block for the
+    // greeting rules; parity is compile-checked via Dictionary. #500 adds the
+    // profile-banner copy (marked banner/bannerCta/bannerDismiss) to this same
+    // surface.
+    patientHome: {
+      welcome: (firstName: string) => `नमस्ते, ${firstName}`,
+      welcomeGuest: "नमस्ते",
+      greetSub: "आपको देखकर अच्छा लगा। आज आप क्या करना चाहेंगे?",
+      banner: "विज़िट शुरू करने के लिए अपना नाम, उम्र और लिंग जोड़ें",
+      bannerCta: "प्रोफ़ाइल पूरी करें",
+      bannerDismiss: "प्रोफ़ाइल अनुस्मारक बंद करें",
+    },
+
+    // loc.* surface - #501. See the en block for the single-city picker rules.
+    loc: {
+      aria: "मेरा स्थान बदलें",
+      title: "मेरा स्थान",
+      desc: "पास की सेवाएं खोजने और आपकी प्रोफ़ाइल में सहेजने के लिए उपयोग होता है। खोजें और दवाई चेकआउट इसे मानते हैं।",
+      cities: {
+        Daltonganj: "डालटनगंज",
+      },
+      citySub: "डालटनगंज और आस-पास",
+      more: "और शहर जल्द आ रहे हैं",
+      apply: "स्थान लागू करें",
+    },
+
+    // search.* surface - #502. See the en block; parity compile-checked via
+    // Dictionary (`search.*` keys must exist in both locales).
+    search: {
+      scopeAria: "खोज का दायरा",
+      doctor: "डॉक्टर",
+      lab: "लैब",
+      chemist: "केमिस्ट",
+      placeholder: "डॉक्टर, लैब, टेस्ट या दवा",
+      aria: "अपने आसपास देखभाल खोजें",
+      go: "खोजें",
+      seeAll: "सभी देखें",
+    },
+
+    // rec.* surface - #503. See the en block; parity compile-checked via
+    // Dictionary (`rec.*` keys must exist in both locales).
+    rec: {
+      title: "आपके आस-पास सुझाया गया",
+      aria: "आपके आस-पास सुझाई गई देखभाल",
+      loading: "आपके आस-पास देखभाल ढूँढी जा रही है...",
+      emptyTitle: "आस-पास अभी कोई सत्यापित प्रोवाइडर नहीं",
+      emptyBody: "डालटनगंज के प्रोवाइडर सत्यापित होते ही वे यहाँ दिखेंगे।",
+      providerFallback: "CareSetu प्रोवाइडर",
+    },
+
+    // services.* surface - #504. See the en block; parity compile-checked via
+    // Dictionary (`services.*` keys must exist in both locales).
+    services: {
+      title: "सेवाएं",
+      doctor: "डॉक्टर से परामर्श लें",
+      lab: "लैब टेस्ट बुक करें",
+      chemist: "दवाई मंगवाएं",
+      start: "विज़िट शुरू करें",
+      soon: "जल्द",
+    },
+
+    // actions.* surface - #505. See the en block; parity compile-checked via
+    // Dictionary (`actions.*` keys must exist in both locales).
+    actions: {
+      title: "कार्रवाई आवश्यक",
+      consentBadge: "सहमति",
+      consentRequest: (name: string, scope: string) =>
+        `${name} ने आपके ${scope} तक पहुँच का अनुरोध किया।`,
+      allow: "अनुमति दें",
+      deny: "अभी नहीं",
+      actionFailed: "अपडेट नहीं हो सका। फिर कोशिश करें।",
+    },
+
+    // recent.* surface - #506. See the en block; parity compile-checked via
+    // Dictionary (`recent.*` keys must exist in both locales).
+    recent: {
+      title: "हाल की गतिविधि",
+      all: "सभी देखें",
+      loading: "आपकी हाल की गतिविधि लोड हो रही है...",
+      empty: "आपकी गतिविधि यहाँ दिखाई देगी",
+      emptyBody:
+        "पहली विज़िट के बाद पूरी हुई विज़िट, रिपोर्ट और लॉग यहाँ दिखेंगे। शुरू करने के लिए नीचे डॉक्टर खोजें।",
+    },
+
+    // health.* surface - #507. See the en block; parity compile-checked via
+    // Dictionary (`health.*` keys must exist in both locales).
+    health: {
+      title: "स्वास्थ्य झलक",
+      metricLabel: "आख़िरी दर्ज मेट्रिक",
+      trackSoon: "स्वास्थ्य ट्रैकिंग",
+      teaser: "अपना BP और शुगर ट्रैक करें",
+      teaserBody:
+        "रोज़ की एंट्री और रुझान हेल्थ ट्रैकिंग के साथ आते हैं। आपका डेटा आपकी सहमति के नियंत्रण में रहता है।",
+      reportsTitle: "रिपोर्ट्स",
+      reportSoon: "लैब रिपोर्ट उपलब्ध होने पर यहाँ दिखेंगी",
+      soon: "जल्द",
+      loading: "आपका स्वास्थ्य स्नैपशॉट लोड हो रहा है...",
+    },
+
+    directory: {
+      heading: {
+        all: "अपने आसपास जाँची-परखी देखभाल खोजें",
+        doctor: "अपने आसपास डॉक्टर खोजें",
+        lab: "अपने आसपास लैब खोजें",
+        chemist: "अपने आसपास केमिस्ट खोजें",
+      },
+      subtitle:
+        "केवल सक्रिय और वैध प्रमाण वाले प्रोवाइडर ही सूचीबद्ध होते हैं, दूरी के हिसाब से।",
+      searchLabel: "प्रोवाइडर खोजें",
+      searchPlaceholder: "नाम या विशेषज्ञता से खोजें",
+      searchCta: "खोजें",
+      filtersLabel: "प्रोवाइडर प्रकार और विशेषज्ञता से छाँटें",
+      typeAll: "सभी",
+      typeDoctor: "डॉक्टर",
+      typeLab: "लैब",
+      typeChemist: "केमिस्ट",
+      verified: "सत्यापित",
+      locationDaltonganj: "डालटनगंज",
+      distanceKm: (km: string) => `${km} किमी`,
+      resultsCount: (n: number) => `${n} प्रोवाइडर मिले`,
+      loading: "प्रोवाइडर खोजे जा रहे हैं...",
+      emptyTitle: "इस खोज के लिए कोई प्रोवाइडर नहीं मिला",
+      emptyBody: "अपनी खोज को और व्यापक बनाएँ या आस-पास के इलाक़े देखें।",
+      clearSearch: "खोज साफ़ करें",
+      outsideAreaLabel: "आपके इलाक़े के बाहर के प्रोवाइडर दिखाए जा रहे हैं",
+      outsideAreaBody:
+        "आपके चुने गए फ़िल्टर से आपके इलाक़े में कुछ नहीं मिला, इसलिए नज़दीकी उपलब्ध प्रोवाइडर दिखाए गए हैं। आपके फ़िल्टर वही रखे गए हैं।",
+      errorTitle: "डायरेक्टरी लोड नहीं हो सकी",
+      errorBody: "अपना कनेक्शन जाँचें और फिर कोशिश करें।",
+      retry: "फिर कोशिश करें",
+    },
+
+    providerProfile: {
+      verifiedByCareSetu: "CareSetu द्वारा सत्यापित",
+      verified: "सत्यापित",
+      active: "सक्रिय",
+      credentialsHeading: "प्रमाण",
+      credentialsAndLicensesHeading: "प्रमाण और लाइसेंस",
+      practiceDetailsHeading: "अभ्यास विवरण",
+      detailsHeading: "विवरण",
+      typeLabel: "प्रकार",
+      // #619: `specialtyLabel` and `areaLabel` are GONE from this namespace. The
+      // singular specialty now reads through the hero subtitle and the whole
+      // selection through the declared band, and `area` IS the declared locality -
+      // so the band owns both. A string with no reader is a string nobody can
+      // reword, and one more of them is one more place for the two locales to
+      // drift apart.
+      declaredHeading: "प्रोवाइडर द्वारा घोषित",
+      declaredNote:
+        "यह प्रोवाइडर के अपने विवरण हैं। CareSetu ने इनकी जाँच नहीं की है - केवल ऊपर दिए गए प्रमाण सत्यापित हैं।",
+      declaredPracticeHeading: "क्लिनिक",
+      declaredAddressHeading: "पता",
+      declaredConsultingHeading: "परामर्श",
+      declaredAboutHeading: "परिचय",
+      clinicNameLabel: "क्लिनिक का नाम",
+      specialtiesLabel: "विशेषज्ञताएँ",
+      languagesLabel: "भाषाएँ",
+      consultingDaysLabel: "परामर्श के दिन",
+      consultingHoursLabel: "परामर्श का समय",
+      declaredLandmarkLabel: "पहचान की जगह",
+      yearsOfExperience: (years: number) =>
+        years === 1 ? "1 वर्ष का अनुभव" : `${years} वर्ष का अनुभव`,
+      experienceLabel: "अनुभव",
+      expiresOn: (date: string) => `${date} तक वैध`,
+      credentialTypes: {
+        medical_registration: "मेडिकल पंजीकरण",
+        qualification_certificate: "योग्यता प्रमाणपत्र",
+        lab_license: "लैब लाइसेंस",
+        accreditation: "मान्यता",
+        drug_license: "दवा लाइसेंस",
+        pharmacist_registration: "फार्मासिस्ट पंजीकरण",
+      },
+      typeDoctor: "डॉक्टर",
+      typeLab: "प्रयोगशाला",
+      typeChemist: "केमिस्ट",
+      breadcrumbDirectory: "डायरेक्टरी",
+      loadingProfile: "प्रोफ़ाइल लोड हो रही है",
+      comingSoon: "जल्द आ रहा है",
+      comingSoonBody: "बुकिंग और ऑर्डर एक भविष्य के चरण में उपलब्ध होंगे।",
+      notFoundTitle: "प्रोवाइडर नहीं मिला",
+      notFoundBody:
+        "यह प्रोवाइडर डायरेक्टरी में सूचीबद्ध नहीं है या अब सक्रिय नहीं है। केवल सक्रिय और सत्यापित प्रोवाइडर ही यहाँ दिखाए जाते हैं।",
+      notFoundCta: "डायरेक्टरी देखें",
+      loadError: "यह प्रोवाइडर प्रोफ़ाइल लोड नहीं हो सकी।",
+      retry: "फिर कोशिश करें",
+    },
+
+    record: {
+      title: "मेरा हेल्थ रिकॉर्ड",
+      description:
+        "आपकी सेहत की पूरी कहानी एक जगह - परामर्श, प्रिस्क्रिप्शन, लैब रिपोर्ट और रोज़ की मेट्रिक्स।",
+      summaryLabel: "एक नज़र में",
+      today: "आज",
+      yesterday: "कल",
+      snapshot: {
+        all: "सब कुछ",
+      },
+      snapshotIssued: (count: number) => `${count} जारी`,
+      snapshotFlagged: (count: number) => `${count} ध्यान देने वाला`,
+      outOfRange: {
+        above: "आम रेंज से ऊपर",
+        below: "आम रेंज से नीचे",
+        footnote: (count: number) =>
+          `${count} मान आपकी आम रेंज से बाहर - विवरण के लिए रिपोर्ट खोलें।`,
+      },
+      accessAccordionHint:
+        "नवीनतम 5 एक्सेस देखने के लिए विस्तार करें - पूरा ऑडिट आपके अनुमति लॉग में है।",
+      openConsentLog: "अनुमति लॉग खोलें",
+      filterGroupLabel: "रिकॉर्ड एंट्री फ़िल्टर करें",
+      moreMenuLabel: "और फ़िल्टर",
+      filter: {
+        all: "सभी",
+        consultation: "परामर्श",
+        prescription: "प्रिस्क्रिप्शन",
+        labReport: "लैब रिपोर्ट",
+        metric: "मेट्रिक्स",
+        more: "और",
+      },
+      badge: {
+        consultation: "परामर्श",
+        prescription: "प्रिस्क्रिप्शन",
+        labReport: "लैब रिपोर्ट",
+        metric: "मेट्रिक",
+        settlement: "सेटलमेंट",
+        issued: "जारी हुई",
+        active: "सक्रिय",
+        delivered: "पहुँच गई",
+      },
+      filedFromBooking: "बुकिंग से दर्ज",
+      issuedBy: (doctor: string) => `${doctor} द्वारा जारी`,
+      issuedByNeutral: "आपकी देखभाल टीम द्वारा जारी",
+      prescribedBy: "डॉक्टर द्वारा लिखा गया",
+      moreItems: (count: number) => `+${count} और`,
+      empty: {
+        title: "अभी कोई एंट्री नहीं",
+        body: "आपके परामर्श, प्रिस्क्रिप्शन, लैब रिपोर्ट और मेट्रिक्स यहाँ दिखेंगे जैसे-जैसे आपकी देखभाल होगी।",
+      },
+      loadError: "आपका रिकॉर्ड लोड नहीं हो सका।",
+      accessHistory: {
+        heading: "रिकॉर्ड किसने देखा",
+        loadError: "एक्सेस इतिहास लोड नहीं हो सका।",
+        emptyTitle: "अभी कोई एक्सेस नहीं",
+        emptyBody:
+          "जब कोई डॉक्टर, लैब या केमिस्ट आपका रिकॉर्ड देखता है, तो वह यहाँ दिखेगा।",
+        scopePrefix: "अनुमति का दायरा: ",
+        deniedLabel: "अस्वीकृत",
+        deniedReasonPrefix: "कारण: ",
+      },
+      detail: {
+        loadError: "यह एंट्री लोड नहीं हो सकी।",
+        notFound: "एंट्री नहीं मिली।",
+        filedOn: "दर्ज हुई",
+        bookingRef: "बुकिंग",
+        sourceHeading: "स्रोत",
+        verified: "सत्यापित",
+        consentHeading: "अनुमति का हवाला",
+        consentLine: (lineageRef: string, version: number, date: string) =>
+          `यह रिपोर्ट अनुमति #${lineageRef} v${version} के तहत आपके रिकॉर्ड में आई, अनुमति मिली ${date}।`,
+        consentLink: "यह अनुमति अनुमति लॉग में देखें",
+        resultsHeading: "नतीजे",
+        resultsThTest: "जाँच",
+        resultsThValue: "मान",
+        resultsThRange: "आम रेंज",
+        resultsThStatus: "स्थिति",
+        resultsNote:
+          "मान वैसे ही दिखाए जाते हैं जैसे लैब ने दर्ज किए। आपका डॉक्टर पूरे संदर्भ में पढ़ता है - ऐप नतीजों की स्वयं व्याख्या नहीं करता।",
+        resultsStatusInRange: "रेंज में",
+        resultsStatusBelowRange: "रेंज से कम",
+        resultsStatusAboveRange: "रेंज से ज़्यादा",
+        egressHeading: "इस एंट्री को किसने देखा",
+        shareEntry: "यह एंट्री साझा करें",
+        downloadPdf: "PDF डाउनलोड करें",
+      },
+    },
+    consentLog: {
+      title: "अनुमति लॉग",
+      description: "आपने जो अनुमति दी या वापस ली - हर एक की अपनी रसीद।",
+      pendingHeading: "आपके जवाब की ज़रूरत",
+      historyHeading: "पहले की अनुमतियाँ",
+      badge: {
+        requested: "अनुरोध आया",
+        active: "सक्रिय",
+        revoked: "वापस ली",
+      },
+      viewReceipt: "रसीद देखें",
+      metaRequested: "अनुरोध",
+      metaGranted: "अनुमति मिली",
+      receiptRequested: "{date} पर अनुरोध किया गया।",
+      receiptGranted: "{date} पर अनुमति दी गई।",
+      receiptRevoked:
+        "{date} को वापस ले ली गई - आगे का कोई इस्तेमाल तुरंत रुक गया।",
+      allow: "अनुमति दें",
+      decline: "अभी नहीं",
+      revoke: "वापस लें",
+      stopForward:
+        "वापसी से पहले देखी गई जानकारी मिटती नहीं। इस अनुमति के तहत जो डेटा इस पार्टनर को मिला, वह उनके पास रहता है।",
+      revokeConfirm: {
+        title: "यह अनुमति वापस लेनी है?",
+        body: "साझा करना तुरंत रुक जाएगा - पार्टनर की आगे की पहुँच बंद। जो पहले देखा या भेजा जा चुका है, वह उनकी रिटेंशन ज़िम्मेदारी के तहत उनके पास रहेगा। आप बाद में ऐसी अनुमति फिर दे सकते हैं (वह नए वर्ज़न के रूप में दर्ज होगी)।",
+        confirm: "हाँ, वापस लें",
+        cancel: "रहने दें",
+        done: "अनुमति वापस ले ली गई - आगे की साझेदारी बंद।",
+      },
+      egress: {
+        heading: "आपके रिकॉर्ड से क्या निकला",
+        description:
+          "जब भी आपके रिकॉर्ड की कोई चीज़ पढ़ी या भेजी गई, यहाँ दर्ज है - कौन, कब, किस अनुमति में।",
+        th: {
+          when: "कब",
+          what: "क्या",
+          to: "किसे",
+          via: "किस अनुमति में",
+        },
+      },
+      empty: {
+        title: "अभी कोई अनुमति इतिहास नहीं",
+        body: "जैसे-जैसे आप अपने रिकॉर्ड की पहुँच साझा या प्रतिबंधित करेंगे, अनुमति इंटरैक्शन यहाँ दिखेंगे।",
+      },
+      loadError: "आपका अनुमति लॉग लोड नहीं हो सका।",
+    },
+
+    intake: {
+      breadcrumb: "विज़िट शुरू करें",
+      title: "बताइए, आपको क्या परेशानी है",
+      reassure: "न फ़ॉर्म, न टाइपिंग। इससे डॉक्टर आपको जल्दी समझ पाएँगे।",
+      modeVoice: "बोलिए",
+      modeVoiceSub: "हिंदी या अंग्रेज़ी में रिकॉर्ड करें",
+      modeText: "लिखिए",
+      modeTextSub: "अपने लक्षण लिखें",
+
+      voice: {
+        title: "अपने लक्षण रिकॉर्ड करें",
+        breadcrumb: "वॉइस इंटेक",
+        reassure: "सीधे-सीधे बोलिए - हिंदी या अंग्रेज़ी, दोनों चल जाएँगी।",
+        statusIdle: "माइक दबाएँ और बताइए आपको क्या परेशानी है",
+        statusRecording: "रिकॉर्ड हो रहा है… रोकने के लिए दबाएँ",
+        statusPaused: "रुका हुआ - जारी रखने के लिए दबाएँ",
+        statusPreview: "अपनी रिकॉर्डिंग सुनें",
+        statusPending: "स्ट्रक्चरिंग… कृपया प्रतीक्षा करें",
+        statusDone: "रिकॉर्डिंग ले ली गई",
+        statusPoor: "साफ़ सुनाई नहीं दिया",
+        pause: "विराम",
+        resume: "फिर से शुरू",
+        stop: "रोकें",
+        play: "प्रीव्यू सुनें",
+        stopPreview: "प्रीव्यू रोकें",
+        recordAgain: "फिर से रिकॉर्ड करें",
+        submit: "जमा करें",
+        submitting: "स्ट्रक्चरिंग…",
+        poorTitle: "हमें साफ़ सुनाई नहीं दिया",
+        poorBody:
+          "हम ठीक से सुन नहीं पाए। कृपया फिर से रिकॉर्ड करें या टाइप करें।",
+        poorRetry: "फिर कोशिश करें",
+        poorType: "टाइप करें",
+        attemptsExhausted:
+          "आपने 3 वॉइस सीमा पूरी कर ली है। कृपया अपने लक्षण टाइप करें।",
+        doneBody: "ले ली गई। आपका प्री-सारांश तैयार हो रहा है।",
+        next: "अपना प्री-सारांश देखें",
+        uploadErrorTitle: "हम आपकी रिकॉर्डिंग नहीं भेज पाए",
+        uploadErrorBody:
+          "आपकी रिकॉर्डिंग सुरक्षित है। कनेक्शन जाँचकर फिर कोशिश करें।",
+        micUnavailableTitle: "हम आपके माइक तक नहीं पहुँच पाए",
+        micUnavailableBody: "माइक की अनुमति जाँचकर फिर कोशिश करें।",
+      },
+      text: {
+        title: "अपने लक्षण लिखें",
+        breadcrumb: "टेक्स्ट इंटेक",
+        reassure:
+          "अपने शब्दों में बताइए आपको क्या परेशानी है - हिंदी या अंग्रेज़ी।",
+        placeholder: "जैसे- बुख़ार 2 दिन से, सूखी खाँसी, शरीर में दर्द...",
+        langHint: "हिंदी और अंग्रेज़ी दोनों चलते हैं",
+        emptyTitle: "आगे बढ़ने के लिए लक्षण लिखें",
+        emptyBody: "कृपया सबमिट करने से पहले बताइए क्या परेशानी है।",
+        voiceAttach: "वॉइस नोट जोड़ें",
+        voiceAttachHint:
+          "वैकल्पिक - अपने टेक्स्ट के साथ एक वॉइस रिकॉर्डिंग जोड़ें",
+        voiceRecording: "रिकॉर्ड हो रहा है… रोकने के लिए दबाएँ",
+        voiceStop: "रोकें",
+        voicePreview: "वॉइस नोट जुड़ गया",
+        voiceTooShortTitle: "आपका वॉइस नोट बहुत छोटा है",
+        voiceTooShortBody:
+          "नोट को 3 सेकंड से अधिक रखें, हटाएँ, या इसके बजाय अपने लक्षण टाइप करें।",
+        voiceRemove: "हटाएँ",
+        submit: "जमा करें",
+        submitting: "स्ट्रक्चरिंग…",
+        doneBody: "ले लिए गए। आपका प्री-सारांश तैयार हो रहा है।",
+        next: "अपना प्री-सारांश देखें",
+        uploadErrorTitle: "हम आपकी रिकॉर्डिंग नहीं भेज पाए",
+        uploadErrorBody:
+          "आपकी रिकॉर्डिंग सुरक्षित है। कनेक्शन जाँचकर फिर कोशिश करें।",
+        micUnavailableTitle: "हम आपके माइक तक नहीं पहुँच पाए",
+        micUnavailableBody: "माइक की अनुमति जाँचकर फिर कोशिश करें।",
+      },
+
+      // T18 (#362): प्री-सारांश रिव्यू पेज - ईमानदारी बैनर "AI ड्राफ़्ट -
+      // डॉक्टर पुष्टि करेंगे" (ADR-0001), स्ट्रक्चरिंग विश्वास स्तर + संकेतक,
+      // और कम-विश्वास ड्राफ़्ट के लिए शांत एम्बर (चेतावनी, लाल नहीं) डॉक्टर
+      // जाँच अनिवार्य नोटिस। फ़ील्ड संपादन save-edits रूट से सहेजे जाते हैं
+      // और सुधार के रूप में दिखते हैं। परामर्श बुकिंग की ओर जारी रखने का CTA।
+      preSummary: {
+        breadcrumb: "प्री-सारांश",
+        title: "आपका प्री-सारांश",
+        description: "हमने जो समझा उस पर एक नज़र। आप कुछ भी सुधार सकते हैं।",
+        bannerLine1: "AI ड्राफ़्ट - आपका डॉक्टर इसकी पुष्टि करेगा",
+        bannerLine2: "यह निदान नहीं है। आपका डॉक्टर इसकी पुष्टि करेगा।",
+        lowBannerLine1: "AI को पूरा भरोसा नहीं है",
+        lowBannerLine2: "इस्तेमाल से पहले डॉक्टर को यह जाँचना होगा।",
+        lowVerifyLine:
+          "यह प्री-सारांश किसी भी नुस्खे से पहले डॉक्टर की जाँच अनिवार्य करेगा।",
+        confidence: "स्ट्रक्चरिंग विश्वास स्तर",
+        lowTag: "कम विश्वास",
+        groupTitle: "हमने जो समझा",
+        editBtn: "इस सारांश को संपादित करें",
+        confirmBtn: "पुष्टि करें और आगे बढ़ें",
+        confirmBtnLow: "परामर्श जारी रखें",
+        editNote: "आपके संपादन डॉक्टर को बेहतर समझने में मदद करते हैं।",
+        cancelEdit: "रद्द करें",
+        saveEdit: "संपादन सहेजें",
+        savingEdit: "सहेजा जा रहा है…",
+        correctionsTag: "सुधारा गया",
+        doneClean: "ऐसे ही उपयोग करें",
+        doneLow: "सारांश तैयार। डॉक्टर पुष्टि करेंगे।",
+        bookTitle: "इस सारांश के साथ परामर्श बुक करें",
+        bookSub: "एक डॉक्टर खोजें जो आपके प्री-सारांश की जाँच कर सके।",
+        bookSubLow: "नुस्खे से पहले आपका डॉक्टर इस प्री-सारांश की जाँच करेगा।",
+        loading: "आपका प्री-सारांश देखा जा रहा है…",
+        emptyTitle: "आपका प्री-सारांश अभी तैयार नहीं है",
+        emptyBody:
+          "थोड़ी देर बाद फिर देखें - डॉक्टर आपके लक्षणों की समीक्षा करेंगे।",
+        loadFailedTitle: "हम आपका प्री-सारांश लोड नहीं कर पाए",
+        loadFailedBody: "कनेक्शन जाँचकर फिर कोशिश करें।",
+        processingTitle: "आपका सारांश अभी तैयार हो रहा है",
+        processingBody:
+          "एआई आपका सारांश बना रहा है। इसमें आम तौर पर कुछ सेकंड लगते हैं।",
+        processingFailedTitle: "आपका सारांश तैयार होने में बहुत समय लग गया",
+        processingFailedBody:
+          "हमें आपका प्री-सारांश नहीं मिला। कृपया वापस जाकर फिर से कोशिश करें।",
+        degradedTitle: "आपका डॉक्टर इसे सीधे देखेंगे",
+        degradedEvidenceTitle: "डॉक्टर क्या देखेंगे",
+        degradedVoiceNote: "आपकी रिकॉर्डिंग डॉक्टर के साथ साझा कर दी गई है।",
+        degradedBody:
+          "इस विज़िट के लिए कोई AI प्री-सारांश नहीं है। आपका डॉक्टर आपके लक्षणों की सीधे समीक्षा करेगा।",
+        degradedRefresh:
+          "डॉक्टर की कार्रवाई होने पर यह पेज अपने आप अपडेट होगा।",
+        degradedStatusLink: "इंटेक स्थिति पर वापस जाएँ",
+        saveFailedTitle: "हम आपके संपादन सहेज नहीं पाए",
+        saveFailedBody: "कनेक्शन जाँचकर फिर कोशिश करें।",
+        fields: {
+          chief_complaints: "मुख्य शिकायतें",
+          symptoms: "लक्षण",
+          duration: "अवधि",
+        },
+      },
+
+      // T19 (#363): इंटेक स्थिति सूची - चार स्थितियाँ: सहेजा गया /
+      // व्यवस्थित हो रहा है / जाँच के लिए तैयार / फिर से रिकॉर्ड करें,
+      // बैकएंड मशीन स्थिति मानों पर 1:1 मैप (T02)। बैकएंड से ताज़ा
+      // (get_intake / get_pre_summary)। तैयार प्री-सारांश पर जारी रखने का CTA।
+      status: {
+        breadcrumb: "स्थिति",
+        title: "आपकी इंटेक स्थिति",
+        description: "देखें आपकी जानकारी कहाँ तक पहुँची",
+        refresh: "ताज़ा करें",
+        refreshing: "जाँच हो रही है\u2026",
+        captured: "सहेजा गया",
+        capturedDesc: "आपके लक्षण दर्ज हो गए हैं।",
+        structuring: "व्यवस्थित हो रहा है",
+        structuringDesc:
+          "AI आपकी जानकारी को डॉक्टर के लिए व्यवस्थित कर रहा है।",
+        readyForReview: "जाँच के लिए तैयार",
+        readyForReviewDesc: "आपकी जानकारी डॉक्टर द्वारा जाँच के लिए तैयार है।",
+        rawReviewNote:
+          "इस विज़िट के लिए कोई AI प्री-सारांश नहीं है। आपका डॉक्टर आपकी दी गई जानकारी की सीधे समीक्षा करेगा।",
+        reRecord: "फिर से रिकॉर्ड करें",
+        reRecordDesc:
+          "हम आपकी रिकॉर्डिंग ठीक से समझ नहीं पाए। कृपया फिर से रिकॉर्ड करें या लक्षण टाइप करें।",
+        failed: "कुछ गड़बड़ हो गई",
+        failedDesc:
+          "हम आपकी जानकारी प्रोसेस नहीं कर पाए। कृपया नई विज़िट शुरू करें।",
+        continue: "परामर्श जारी रखें",
+        reRecordAction: "फिर से रिकॉर्ड करें",
+        typeInstead: "टाइप करें",
+        loading: "आपकी इंटेक स्थिति लोड हो रही है\u2026",
+        loadFailedTitle: "हम आपकी स्थिति लोड नहीं कर पाए",
+        loadFailedBody: "कनेक्शन जाँचकर फिर कोशिश करें।",
+      },
+    },
+
+    // doctorConsole.* सतह - PHASE-8.1 T12 (#450): डॉक्टर कंसोल लैंडिंग पेज।
+    // तीन सतहें: लाइव Patients और Profile पेजों के प्रवेश कार्ड, संक्षिप्त
+    // परामर्श-शुल्क सारांश (संपादक #543 से प्रोफ़ाइल पर है), और समीक्षा कतार
+    // (कम विश्वास पहले, पुराने पहले) साथ ही खुले केयर केस, लोड विफलता पर
+    // पुनः प्रयास। #544 ने आने वाले मरीज़/प्रोफ़ाइल प्लेसहोल्डरों को वास्तविक
+    // प्रवेश कार्डों से बदल दिया। सभी कॉपी द्विभाषी en/hi (REQ-006)।
+    doctorConsole: {
+      title: "डॉक्टर कंसोल",
+      consoleDescription: "आपकी समीक्षा कतार, खुले मामले और प्रोफ़ाइल",
+      entryHeading: "यहाँ जाएँ",
+      patientsEntryBody: "जिन्होंने आपके साथ रिकॉर्ड साझा किया है",
+      profileEntryBody: "प्रैक्टिस की जानकारी, फोटो और परामर्श शुल्क",
+      feeHeading: "परामर्श शुल्क",
+      feeUnset: "तय नहीं",
+      feeUnsetHelp: "मरीज़ आपको बुक कर सकें, इसके लिए शुल्क तय करें।",
+      feeEditAction: "प्रोफ़ाइल में बदलें",
+      feeLoadFailed: "आपका परामर्श शुल्क लोड नहीं हो सका।",
+      queueHeading: "समीक्षा कतार",
+      queueEmpty: "समीक्षा के लिए कोई प्री-सारांश नहीं",
+      queueEmptyBody: "मरीज़ के विज़िट सबमिट करने पर प्री-सारांश यहाँ आते हैं।",
+      patientFallback: "मरीज़",
+      patientAge: (age: number) => `${age} वर्ष`,
+      sectionsCount: (n: number) => `${n} अनुभाग`,
+      queueItemMeta: (id: number) => `इनटेक #${id}`,
+      caseItemMeta: (id: number) => `केस #${id}`,
+      verifyChip: "जाँचें",
+      confidenceLabel: "विश्वास",
+      waitingFor: (time: string) => `${time} से प्रतीक्षा`,
+      reviewAction: "समीक्षा करें",
+      casesHeading: "खुले मामले",
+      casesEmpty: "कोई खुला केयर केस नहीं",
+      casesEmptyBody: "आपकी सलाह शुरू करते ही एक केस खुलता है।",
+      casesIndexTitle: "मेरे मामले",
+      casesIndexDescription: "आपके खुले केयर मामले",
+      stagePreSummary: "प्री-सारांश",
+      stagePrescriptionPending: "नुस्ख़ा लंबित",
+      stageClosed: "बंद",
+      openCaseAction: "खोलें",
+      loadFailed: "कंसोल लोड नहीं हो सका।",
+      retry: "फिर से कोशिश करें",
+    },
+
+    // doctorProfile.* सतह - PHASE-8.1 (#543): डॉक्टर कंसोल का प्रोफ़ाइल
+    // पेज, अन-सून किए गए Profile नेव प्रविष्टि के पीछे का जीवंत पृष्ठ।
+    // #542 का निजी प्रोजेक्शन दिखाता और बदलता है - फोटो अपलोड/प्रीव्यू/
+    // हटाना, प्रैक्टिस विवरण, अनुभव, भाषाएँ, परिचय, उपलब्धता, प्रमाण
+    // स्थिति, सूचना टॉगल - और लैंडिंग से यहाँ आया परामर्श शुल्क संपादक
+    // (सेव अब भी अपरिवर्तित PATCH रूट से होता है)। सार्वजनिक डायरेक्टरी
+    // प्रविष्टि केवल-पढ़ने का पूर्वावलोकन लिंक रहती है। सभी कॉपी द्विभाषी
+    // en/hi (REQ-006)।
+    doctorProfile: {
+      title: "मेरी प्रोफ़ाइल",
+      description: "आपकी प्रैक्टिस की जानकारी, फोटो और परामर्श शुल्क",
+      loadFailed: "आपकी प्रोफ़ाइल लोड नहीं हो सकी।",
+      photoHeading: "प्रोफ़ाइल फोटो",
+      photoHelp: "JPG, PNG या WebP। आपकी फोटो इसी पेज पर निजी रहती है।",
+      photoUpload: "फोटो अपलोड करें",
+      photoReplace: "फोटो बदलें",
+      photoRemove: "फोटो हटाएँ",
+      photoFailed: "आपकी फोटो अपडेट नहीं हो सकी।",
+      // #615: पहचान बैंड। `photoHeading` अब अपने किसी कार्ड का शीर्षक नहीं है -
+      // पिकर बैंड में चला गया है - इसलिए यह नियंत्रण समूह का नाम देता है।
+
+      // #615: पहचान बैंड की चिप पंक्ति को नाम देता है, जो अब दो अलग चीज़ें
+      // रखती है - सत्यापन का निर्णय और विशेषज्ञता का चयन। कोई भी मौजूदा
+      // लेबल नहीं बैठता: अकेला "विशेषज्ञताएँ" सहायक तकनीकी से निर्णय छिपा
+      // देता, और निर्णय का लेबल चयन छिपा देता।
+      //
+      // यहाँ `clinicNameLabel` इरादे से नहीं है। पहचान बैंड क्लिनिक को डॉक्टर
+      // के नाम के ठीक नीचे दिखाता है और वह अब किसी लेबल वाली पंक्ति नहीं
+      // है, इसलिए अलग लेबल के पास रखने को कुछ नहीं बचता। इस प्रोजेक्शन पर
+      // `practice_name` डॉक्टर का अपना नाम है, इसलिए यह फ़ील्ड यही कहता है।
+      identityChipsLabel: "प्रोफ़ाइल की स्थिति और विशेषज्ञताएँ",
+      noSpecialtiesYet: "अभी कोई विशेषज्ञता नहीं जोड़ी गई",
+      verified: "सत्यापित",
+      notVerified: "सत्यापित नहीं",
+      // #615: दो ट्रस्ट बैंड। सत्यापित बैंड वह है जो प्लेटफ़ॉर्म ने स्वयं
+      // निकाला और जाँचा है; घोषित बैंड वह है जो डॉक्टर ने स्वयं लिखा है, और
+      // वह इसे शब्दों में कहता है, न कि अंतर केवल रंग पर छोड़ता है
+      // (ui-blueprint §1.6, §9.4)।
+      // अवस्था-निष्पक्ष इरादे से। यह CareSetu द्वारा जाँची गई चीज़ों के बैंड का
+      // शीर्षक है; यह परिणाम नहीं दावा करता, क्योंकि जिस डॉक्टर का फ़्लैग
+      // `false` है वह "CareSetu द्वारा सत्यापित" पढ़कर वही समझेगा जो बैकएंड
+      // नहीं कह रहा। परिणाम नीचे एक पंक्ति का काम है, और वही फ़्लैग पढ़ती है
+      // जो टिक पढ़ता है - इसलिए शीर्षक अपने ही बच्चे के विरुद्ध कोई दावा नहीं
+      // कर सकता।
+      verifiedBandTitle: "CareSetu द्वारा जाँची गई",
+      verifiedBandHelp:
+        "CareSetu आपके प्रमाणों और आपकी सक्रियता स्थिति की जाँच करता है।",
+      // #623: the row is labelled by what it renders. It used to read
+      // "Activation state" (सक्रियता स्थिति) over the value `verified`, which
+      // is a composite of activation state AND every credential's dates - so an
+      // Active doctor with one lapsed credential was told their activation state
+      // was "Not verified", a claim about activation that was simply false.
+      // सत्यापन स्थिति is the honest name for the flag the row actually shows.
+      verificationStateLabel: "सत्यापन स्थिति",
+      // टिक का अपना सुलभ नाम।
+      verifiedTickLabel: "CareSetu ने यह प्रोफ़ाइल सत्यापित किया",
+      declaredBandTitle: "आपकी जानकारी",
+      declaredBandHelp:
+        "ये वही जानकारी है जो आपने लिखी है। CareSetu ने इनकी जाँच नहीं की है।",
+      // स्टिकी एंकर-चिप सूचक: लैंडमार्क का सुलभ नाम, साथ ही वे अनुभाग
+      // शीर्षक जिनके बीच यह कूदता है और जिन्हें वे अनुभाग दोबारा उपयोग करते हैं।
+      sectionIndexLabel: "अनुभाग",
+      practiceSectionTitle: "प्रैक्टिस",
+      addressSectionTitle: "पता",
+      aboutSectionTitle: "परिचय",
       credentialsHeading: "प्रमाण",
       credentialsEmpty: "कोई प्रमाण दर्ज नहीं",
       credentialExpires: (date: string) => `${date} तक वैध`,
@@ -1974,7 +3597,15 @@ const en = {
       publicPreviewHelp:
         "मरीज़ आपको डायरेक्टरी में इसी तरह देखते हैं। यहाँ यह केवल-पढ़ने के लिए है।",
       publicPreviewAction: "सार्वजनिक प्रोफ़ाइल देखें",
- origin/main
+      // #618: the live preview's own copy. The bilingual parity rule (§9.2) means
+      // these ship in Hindi in the same commit - a doctor flipping the language
+      // must not meet an English sentence inside the thing showing them what a
+      // patient reads.
+      livePreviewHeading: "तत्काल पूर्वावलोकन",
+      livePreviewHelp:
+        "आपके लिखते ही यह बदलता है। यह टिक CareSetu का है, आपके द्वारा नहीं।",
+      livePreviewShow: "दिखाएँ",
+      livePreviewHide: "छिपाएँ",
       feeHeading: "परामर्श शुल्क",
       feeHelp:
         "वह शुल्क सेट करें जो मरीज़ आपको चुनने पर देखें। सेट न होने तक खाली रहेगा।",

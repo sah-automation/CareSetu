@@ -100,7 +100,80 @@ from uuid import UUID
 
 from cryptography.exceptions import InvalidTag
 from pydantic import TypeAdapter, ValidationError
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from modules.audit.facade import AuditFacade
+from modules.iam.facade import IamFacade, PhotoContent
+from modules.partner import credential_validity as credential_validity_module
+from modules.partner import directory_cache as directory_cache_module
+from modules.partner.adapters.artifact_store import CredentialArtifactStore
+from modules.partner.credential_intake_facade import (
+    CredentialIntakeFacade as CredentialIntakeFacade,
+)
+from modules.partner.credential_intake_models import (
+    CredentialSubmission as CredentialSubmission,
+)
+from modules.partner.credential_intake_models import (
+    CredentialSubmissionResult as CredentialSubmissionResult,
+)
+from modules.partner.credential_intake_models import (
+    PartnerVerificationStatusView as PartnerVerificationStatusView,
+)
+from modules.partner.credential_intake_models import (
+    RejectionReasonView as RejectionReasonView,
+)
+from modules.partner.credential_validity import (
+    CloseOutCredential,
+)
+from modules.partner.directory_facade import (
+    DALTONGANJ_LATITUDE as DALTONGANJ_LATITUDE,
+)
+from modules.partner.directory_facade import (
+    DALTONGANJ_LONGITUDE as DALTONGANJ_LONGITUDE,
+)
+from modules.partner.directory_facade import (
+    PERI_URBAN_RADIUS_KM as PERI_URBAN_RADIUS_KM,
+)
+from modules.partner.directory_facade import (
+    DirectoryEntry as DirectoryEntry,
+)
+from modules.partner.directory_facade import (
+    DirectoryFacade as DirectoryFacade,
+)
+from modules.partner.directory_facade import (
+    DirectorySearchView as DirectorySearchView,
+)
+from modules.partner.directory_facade import (
+    ProviderCredential as ProviderCredential,
+)
+from modules.partner.directory_facade import (
+    ProviderProfileView as ProviderProfileView,
+)
+from modules.partner.doctor_profile_models import (
+    DoctorCredentialStatus as DoctorCredentialStatus,
+)
+from modules.partner.doctor_profile_models import (
+    DoctorProfileAboutUpdate as DoctorProfileAboutUpdate,
+)
+from modules.partner.doctor_profile_models import (
+    DoctorProfileAddressUpdate as DoctorProfileAddressUpdate,
+)
+from modules.partner.doctor_profile_models import (
+    DoctorProfileAddressView as DoctorProfileAddressView,
+)
+from modules.partner.doctor_profile_models import (
+    DoctorProfileCredential as DoctorProfileCredential,
+)
+from modules.partner.doctor_profile_models import (
+    DoctorProfileNotificationUpdate as DoctorProfileNotificationUpdate,
+)
+from modules.partner.doctor_profile_models import (
+    DoctorProfilePhotoView as DoctorProfilePhotoView,
+)
+from modules.partner.doctor_profile_models import (
+    DoctorProfilePracticeUpdate as DoctorProfilePracticeUpdate,
+)
 from modules.partner.doctor_profile_models import (
     DoctorProfileView as DoctorProfileView,
 )
@@ -204,7 +277,6 @@ from modules.partner.registration_models import (
 from modules.partner.schema.models import (
     partner_credentials,
     partner_pin_centroids,
-
     partner_profiles,
     partner_service_areas,
 )
@@ -229,6 +301,258 @@ from modules.partner.shared import (
 from modules.partner.shared import (
     selection_members as _selection_members,
 )
+from modules.profile_media.facade import (
+    DOCTOR_PREFIX,
+    ProfileMediaStore,
+    ProfileMediaStoreError,
+)
+
+logger = logging.getLogger(__name__)
+
+# The Phase-5 launch service area (REQ-008): a partner that does not declare a
+# ``service_area_id`` defaults to this vocabulary row (seeded by migration
+# v5.4). An unknown explicitly-declared ``service_area_id`` is rejected at the
+# facade (mapped to a 422) so a partner is never attached to a nonexistent area.
+
+# The re-submission throttle policy lives in the domain core
+# (:mod:`modules.partner.domain.rejection`): a rejected partner may open at most
+# ``MAX_RE_SUBMISSIONS`` re-submission rounds before a cooldown protects the
+# operator queue (NFR-001 headcount, ADR-0008, PHASE-5 T09). Business rule -
+# never enforced via an iam/Redis limiter, which is not this module's seam.
+
+# The iam-side signal for "this partner's whole self-service surface is closed"
+# (F014-T06 #466). Suspension exists only on the iam side - the partner profile
+# has no ``Suspended`` status (``PartnerStatus`` enumerates lifecycle states only),
+# so the gate reads the existing ``partner_role_status`` facade seam and compares
+# against this literal. Deliberately NOT ``iam.domain.verify.IDENTITY_SUSPENDED``:
+# cross-module imports are capped at the facade (coding-standards §6 module
+# isolation).
+_IAM_SUSPENDED = "Suspended"
+_ALLOWED_DOCTOR_PROFILE_PHOTO_TYPES = frozenset({"image/jpeg", "image/png", "image/webp"})
+
+
+def _canonical_doctor_profile_media_type(
+    media_type: str | None,
+    data: bytes,
+    *,
+    max_bytes: int,
+) -> str:
+    normalized = (media_type or "").split(";", 1)[0].strip().lower()
+    if normalized not in _ALLOWED_DOCTOR_PROFILE_PHOTO_TYPES:
+        raise DoctorProfilePhotoValidationError("doctor profile photo must be JPEG, PNG, or WebP")
+    if len(data) > max_bytes:
+        raise DoctorProfilePhotoValidationError(
+            "doctor profile photo exceeds the configured size limit"
+        )
+    signature_matches = {
+        "image/jpeg": data.startswith(b"\xff\xd8\xff"),
+        "image/png": data.startswith(b"\x89PNG\r\n\x1a\n"),
+        "image/webp": data.startswith(b"RIFF") and data[8:12] == b"WEBP",
+    }
+    if not signature_matches[normalized]:
+        raise DoctorProfilePhotoValidationError(
+            "doctor profile photo content does not match its media type"
+        )
+    return normalized
+
+
+def _sniff_doctor_profile_media_type(data: bytes) -> str:
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "application/octet-stream"
+
+
+def _require_active_doctor(
+    *,
+    partner_id: int,
+    partner_type: str,
+    status: str,
+) -> None:
+    if partner_type != "doctor" or status != PartnerStatus.ACTIVE.value:
+        raise DoctorProfileNotAllowedError(partner_id, partner_type, status)
+
+
+async def _lock_active_doctor_profile(
+    connection: AsyncConnection,
+    doctor_id: int,
+) -> None:
+    """Re-read ``partner_type``/``status`` under ``SELECT ... FOR UPDATE`` and refuse.
+
+    The first half of every private profile write, split out from
+    :func:`_update_active_doctor_profile` because the address write (#609) cannot
+    compose its ``UPDATE`` until its PIN has resolved, and the resolution is a read
+    of the centroid table that must happen **after** the recheck and **before** any
+    write. Refusing first is not only a matter of tidiness: a partner who is not an
+    ``[Active]`` doctor learns nothing about the centroid dataset, and no lock is
+    held across a decision that was never made.
+
+    The row lock is what makes the re-check worth doing at all: the edge guard
+    resolved this same partner in a different transaction, so without it a
+    deactivation landing between the two would let the save through. A doctor
+    removed outright is a ``PartnerNotFoundError`` here rather than a write against
+    no row.
+    """
+    row = (
+        await connection.execute(
+            select(
+                partner_profiles.c.partner_type,
+                partner_profiles.c.status,
+            )
+            .where(partner_profiles.c.id == doctor_id)
+            .with_for_update()
+        )
+    ).first()
+    if row is None:
+        raise PartnerNotFoundError(doctor_id)
+    _require_active_doctor(
+        partner_id=doctor_id,
+        partner_type=row.partner_type,
+        status=row.status,
+    )
+
+
+async def _update_active_doctor_profile(
+    connection: AsyncConnection,
+    doctor_id: int,
+    values: dict[str, object],
+) -> None:
+    """Write one profile section's columns, after a row-locked active-doctor recheck.
+
+    The shape a section write that has nothing to read first shares: re-check under
+    ``SELECT ... FOR UPDATE``, refuse anything that is not an ``[Active]`` doctor,
+    then issue the ``UPDATE`` with exactly the columns the caller passed plus
+    ``updated_at``. ``values`` is the section's own field set and nothing is merged
+    into it, so a section write can only ever move the columns its own card declares.
+
+    The two halves are separately callable because #609 cannot build its ``values``
+    until its PIN has resolved - a read of the centroid table that must happen after
+    the recheck and before any write. That write calls
+    :func:`_lock_active_doctor_profile` and :func:`_write_active_doctor_profile`
+    itself with a decision between them; every other section write calls this, which
+    is why the lock cannot be forgotten at one call site and skipped at another.
+    """
+    await _lock_active_doctor_profile(connection, doctor_id)
+    await _write_active_doctor_profile(connection, doctor_id, values)
+
+
+async def _write_active_doctor_profile(
+    connection: AsyncConnection,
+    doctor_id: int,
+    values: dict[str, object],
+) -> None:
+    """Issue the section's ``UPDATE``, assuming the row lock is already held.
+
+    Split from the recheck so #609 can resolve the declared PIN between the two: the
+    lock is taken and the partner refused before the centroid table is read, and the
+    ``UPDATE`` is issued only once a position exists to write. Every other section
+    write goes through :func:`_update_active_doctor_profile`, which calls this
+    immediately after the recheck and so cannot forget the lock.
+    """
+    await connection.execute(
+        partner_profiles.update()
+        .where(partner_profiles.c.id == doctor_id)
+        .values(**values, updated_at=func.now())
+    )
+
+
+async def _load_pin_centroid(
+    connection: AsyncConnection,
+    pin_code: str,
+) -> PinCentroid | None:
+    """Look the declared PIN code up in the bundled centroid table (#601, #609).
+
+    One exact primary-key hit in the ``partner`` schema this module already owns -
+    no join, no cross-schema read, no foreign key (ADR-0003). It selects the three
+    columns the resolution decision needs and nothing else off the reference row,
+    and returns ``None`` when the code is absent, which is the "unknown" input
+    :func:`~modules.partner.domain.practice_position.resolve_pin_code` is told
+    about rather than the refusal itself: the decision owns what a missing centroid
+    MEANS (coding-standards §4).
+
+    ``Numeric`` coordinates arrive from the driver as ``Decimal``, so they are
+    converted to ``float`` here, at the boundary this function owns - which is what
+    lets the domain type stay a plain ``float``.
+
+    The lookup is issued for a malformed code too, where it misses by
+    construction. That is one wasted indexed hit on the error path, paid for a
+    single code path: deciding whether to skip it would mean re-deriving the
+    format rule here, and a second copy of "what is a PIN code" is exactly the
+    drift :func:`~modules.partner.domain.practice_position.resolve_pin_code`
+    exists to prevent.
+    """
+    row = (
+        await connection.execute(
+            select(
+                partner_pin_centroids.c.pin,
+                partner_pin_centroids.c.latitude,
+                partner_pin_centroids.c.longitude,
+            ).where(partner_pin_centroids.c.pin == pin_code)
+        )
+    ).first()
+    if row is None:
+        return None
+    return PinCentroid(
+        pin_code=str(row.pin),
+        latitude=float(row.latitude),
+        longitude=float(row.longitude),
+    )
+
+
+def _renderable_notification_preferences(
+    stored: object,
+) -> dict[str, bool]:
+    """Narrow the stored preferences column into the view's ``dict[str, bool]``.
+
+    The column is a JSON blob and
+    :func:`~modules.partner.domain.vocabularies.merge_notification_preferences`
+    deliberately carries a stored key the closed vocabulary does not name,
+    **verbatim**, rather than dropping or refusing it. That promise has a
+    consequence this function exists to honour: the read projection must not be
+    the place where an odd stored value becomes a failure.
+
+    Without it, a row holding ``{"sms": "banana"}`` raises ``bool_parsing`` inside
+    the view's own validation and the doctor's ENTIRE profile - name, address,
+    credentials, every card - fails to render, because one unrenderable entry in
+    a notification dict took down the page. A toggle the value cannot be read as
+    is not a toggle, so the entry is dropped from the VIEW and only from the
+    view: the row still holds it, and the merge still carries it on the next
+    save, so nothing is lost and nothing is refused. The doctor sees the five
+    switches they can actually read.
+
+    The coercion is deliberately the same one the write model's validator uses,
+    so a value a save would have accepted as ``False`` reads as ``False`` on the
+    way out too: ``{"sms": "false"}`` is a hand-repaired row meaning OFF, and
+    ``bool("false")`` would read as ON. Truthiness is not a reading - the domain
+    docstring says so about the write path and it holds here.
+
+    Logged, not silent (coding-standards S3): a key name and a value TYPE are
+    not PHI, and a row that needs hand-repair is a data problem somebody has to
+    be able to find.
+    """
+    if not isinstance(stored, dict):
+        logger.warning(
+            "doctor_profile_notification_preferences_not_a_mapping",
+            extra={"value_type": type(stored).__name__},
+        )
+        return {}
+    renderable: dict[str, bool] = {}
+    unreadable: list[str] = []
+    for key, value in stored.items():
+        try:
+            renderable[key] = TypeAdapter(bool).validate_python(value)
+        except ValidationError:
+            unreadable.append(key)
+    if unreadable:
+        logger.warning(
+            "doctor_profile_notification_preferences_unreadable_values_dropped",
+            extra={"dropped_key_count": len(unreadable)},
+        )
+    return renderable
+
 
 async def _delete_doctor_profile_media(
     media_store: ProfileMediaStore,
@@ -920,7 +1244,6 @@ class PartnerFacade:
                         partner_profiles.c.address_locality,
                         partner_profiles.c.address_city,
                         partner_profiles.c.address_pin,
-
                         partner_profiles.c.practice_latitude,
                         partner_profiles.c.practice_longitude,
                         partner_service_areas.c.name.label("area_name"),
@@ -937,17 +1260,10 @@ class PartnerFacade:
                         # than not rendering one.
                         partner_profiles.c.consulting_days,
                         partner_profiles.c.consulting_hours,
-
                         partner_profiles.c.notification_preferences,
                     )
                     .select_from(partner_profiles)
                     .outerjoin(
-=======
-                        partner_directory_index,
-                        partner_directory_index.c.partner_id == partner_profiles.c.id,
-                    )
-                    .outerjoin(
->>>>>>> origin/main
                         partner_service_areas,
                         partner_service_areas.c.id == partner_profiles.c.service_area_id,
                     )
@@ -1005,7 +1321,6 @@ class PartnerFacade:
             practice_latitude=float(row.practice_latitude),
             practice_longitude=float(row.practice_longitude),
             area=str(row.area_name) if row.area_name is not None else DEFAULT_SERVICE_AREA_NAME,
-
             experience_years=(
                 int(row.experience_years) if row.experience_years is not None else None
             ),
@@ -1022,7 +1337,6 @@ class PartnerFacade:
             languages=_selection_members(row.languages),
             consulting_days=_selection_members(row.consulting_days),
             consulting_hours=row.consulting_hours,
-
             credentials=[
                 DoctorProfileCredential(
                     credential_type=str(credential.credential_type),
@@ -1331,7 +1645,6 @@ class PartnerFacade:
                     )
                 },
             )
-
         return await self.get_doctor_profile(doctor_id)
 
     async def update_doctor_photo(

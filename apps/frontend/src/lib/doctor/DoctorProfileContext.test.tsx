@@ -1,4 +1,69 @@
 // PRD trace: FEAT-005 (Provider Profiles and Credential Display).
+// #583: provider suite for the doctor console's shared profile source. The
+// doctor client is mocked at the module boundary, so what is pinned here is the
+// discipline the read itself has to keep now that the chrome and the Profile page
+// both render from it: one read per visit, an identity-scoped state, an explicit
+// retry, a degrade that is silent to the chrome but carries the trace id to the
+// page, and one adopt seam that takes a whole projection.
+//
+// The surfaces' own rendering is not re-tested here - the chrome's suite covers
+// the disc, the page's covers the form, and the cross-surface suite covers the
+// two agreeing on one read. What no surface can see is this file.
+
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import {
+  DoctorProfileProvider,
+  useDoctorProfile,
+  useOptionalDoctorProfile,
+} from "./DoctorProfileContext";
+import { ApiError } from "@/lib/api-errors";
+import type { DoctorProfileView } from "./api";
+
+const state = vi.hoisted<{
+  getProfile: ReturnType<typeof vi.fn>;
+  user: { id: number; phone: string; roles: string[] } | null;
+}>(() => ({
+  getProfile: vi.fn(),
+  user: { id: 7, phone: "+911234567890", roles: ["partner"] },
+}));
+
+vi.mock("./api", () => ({ fetchDoctorProfile: state.getProfile }));
+
+vi.mock("@/lib/auth/AuthContext", () => ({
+  useAuth: () => ({
+    user: state.user,
+    selectedRole: state.user === null ? null : "partner",
+    switchRole: vi.fn(),
+    logout: vi.fn(),
+    isAuthenticated: state.user !== null,
+    isLoading: false,
+  }),
+}));
+
+function view(overrides: Partial<DoctorProfileView> = {}): DoctorProfileView {
+  return {
+    partner_id: 7,
+    photo_ref: "doctor/7/photo-1.enc",
+    practice_name: "Sunrise Clinic",
+    clinic_name: null,
+    specialties: ["General Physician"],
+    verified: true,
+    practice_address: "Main Road, Daltonganj",
+    address_line: "Main Road, Daltonganj",
+    landmark: null,
+    locality: "Daltonganj",
+    city: "Daltonganj",
+    pin_code: "822001",
     practice_latitude: 24.1957,
     practice_longitude: 85.3656,
     area: "Daltonganj",
