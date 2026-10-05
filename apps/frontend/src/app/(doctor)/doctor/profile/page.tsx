@@ -163,7 +163,6 @@ function LoadingSkeleton() {
   );
 }
 
-=======
 const inputClassName =
   "h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt placeholder:text-txt-muted focus:border-accent-border focus:outline-none";
 const labelClassName = "text-xs font-medium text-txt-muted";
@@ -771,7 +770,6 @@ function FeeEditor({ feePaise, onFeeSaved }: FeeEditorProps) {
   );
 }
 
->>>>>>> origin/main
 export default function DoctorProfilePage() {
   const { lang } = useLang();
   const t = STRINGS[lang].doctorProfile;
