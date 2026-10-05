@@ -606,8 +606,22 @@ describe("Profile page photo (#548)", () => {
     await waitFor(() =>
       expect(screen.getByTestId("ps-photo-remove")).toBeInTheDocument(),
     );
-    expect(mockFetchPhoto).toHaveBeenCalled();
-    expect(screen.getByTestId("ps-photo")).toBeInTheDocument();
+    // "Remove" appears off the ref alone, but the bytes only arrive in a passive
+    // effect after that render commits, so the read is awaited instead of
+    // assumed. Asserting it bare raced the effect flush and failed under CI load.
+    await waitFor(() => expect(mockFetchPhoto).toHaveBeenCalled());
+    // The preview proves the claim resolved to renderable bytes: the opaque ref
+    // is not a displayable source, so only the read object URL reaches the img.
+    const preview = await screen.findByTestId("ps-photo-preview");
+    await waitFor(() =>
+      expect(preview.querySelector("img")).toHaveAttribute(
+        "src",
+        expect.stringMatching(/^blob:/),
+      ),
+    );
+    expect(preview.querySelector("img")?.getAttribute("src")).not.toBe(
+      savedProfile.photo_ref,
+    );
   });
 
   it("uploads a picked photo and keeps it attached to the next save", async () => {

@@ -702,6 +702,10 @@ describe("PatientAuthWizard - success and session", () => {
     const release = await startOtpFlowWithHeldResume();
 
     expect(await screen.findByText("Identity verified")).toBeInTheDocument();
+    // The seam is started by the done stage's effect, which commits after the
+    // text is on screen; `flush` drains that effect so the assertion below
+    // cannot lose that race (the header's rule is about waits, not about this).
+    await flush();
     expect(state.resumeSession).toHaveBeenCalled();
 
     fakeHandoffClock();
@@ -786,6 +790,10 @@ describe("PatientAuthWizard - success and session", () => {
     const release = await startOtpFlowWithHeldResume();
 
     expect(await screen.findByText("Identity verified")).toBeInTheDocument();
+    // The seam is started by the done stage's effect, which commits after the
+    // text is on screen; `flush` drains that effect so the assertion below
+    // cannot lose that race (the header's rule is about waits, not about this).
+    await flush();
     expect(state.resumeSession).toHaveBeenCalled();
     expect(
       mockReplace,
