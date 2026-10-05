@@ -2,10 +2,15 @@ name: CI
 
 on:
   pull_request:
+    # NOTE: workflow files are deliberately NOT ignored here. They used to be
+    # (backup-drill.yml was listed), which meant a PR touching only a workflow
+    # triggered no CI run at all - and since main requires six status checks to
+    # merge, such a PR could never satisfy the gate and was unmergeable through
+    # normal means. The gate has to be able to see the thing that gates it.
+    # Keep this list to files that cannot affect the build or its gate.
     paths-ignore:
       - "docs/**"
       - "**/*.md"
-      - ".github/workflows/backup-drill.yml"
       - "deploy/**"
   # Reused by deploy.yml as its gate: CD runs only on green CI. There is no
   # standalone push-to-main trigger on purpose - deploy.yml calls this same

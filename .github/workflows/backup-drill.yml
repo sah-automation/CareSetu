@@ -147,11 +147,48 @@ jobs:
             -in "$RUNNER_TEMP/caresetu-drill.enc" \
             -out "$RUNNER_TEMP/caresetu-drill.plain"
           createdb -h localhost -U caresetu caresetu_drill_restore
-          # Supabase-internal objects (roles, auth extensions) warn on a stock
-          # image; --exit-on-error is deliberately NOT set - the round-trip
-          # asserts are the real gate.
+          # A live Supabase dump carries ACL/OWNER statements naming roles that
+          # exist only on Supabase (supabase_admin, anon, service_role, ...),
+          # so on a stock image every GRANT and ALTER OWNER fails and pg_restore
+          # exits non-zero before the round-trip asserts ever run. Dropping the
+          # ownership and privilege statements is what a restore into a
+          # differently-roled environment is FOR: the data and DDL still land,
+          # and the rows are readable as the connecting user, which is all the
+          # round-trip assert measures.
+          #
+          # --exit-on-error stays off and so does the residual noise: the vault
+          # extension is genuinely unavailable here, and the table-list diff plus
+          # per-table row counts in the next step are the real gate over exactly
+          # the app schemas this project owns.
           pg_restore -h localhost -U caresetu -d caresetu_drill_restore \
-            "$RUNNER_TEMP/caresetu-drill.plain"
+            --no-owner --no-privileges \
+            "$RUNNER_TEMP/caresetu-drill.plain" \
+            2> >(tee "$RUNNER_TEMP/restore.err" | grep -E 'ERROR|FATAL' | sort -u | head -20 >&2) || true
+          # An error naming an object in one of THIS project's schemas is a real
+          # restorability defect. Supabase-internal roles and the vault extension
+          # are the only tolerated classes; anything else must fail the drill.
+          if grep -E 'ERROR|FATAL' "$RUNNER_TEMP/restore.err" \
+            | grep -vE '"(supabase_admin|supabase_auth_admin|supabase_storage_admin|supabase_realtime_admin|postgres|anon|authenticator|service_role|dashboard_user|pgbouncer|supabase_storage_user)" does not exist' \
+            | grep -vE 'supabase_vault|vault\.' \
+            | grep -qE 'ERROR|FATAL'; then
+            echo "backup drill FAILED: pg_restore hit errors outside the tolerated Supabase-internal classes:" >&2
+            grep -E 'ERROR|FATAL' "$RUNNER_TEMP/restore.err" \
+              | grep -vE '"(supabase_admin|supabase_auth_admin|supabase_storage_admin|supabase_realtime_admin|postgres|anon|authenticator|service_role|dashboard_user|pgbouncer|supabase_storage_user)" does not exist' \
+              | grep -vE 'supabase_vault|vault\.' \
+              | sort -u >&2
+            exit 1
+          fi
+          # The app's own schemas must restore cleanly. Anything failing here is a
+          # real restorability defect, not Supabase scaffolding, so it is not
+          # tolerated the way vault is.
+          if psql -h localhost -U caresetu -d caresetu_drill_restore -tAc \
+            "SELECT count(*) FROM information_schema.schemata WHERE schema_name IN ('iam','partner','health','consent','intake','care','diagnostics','fulfillment','settlement','notify','audit')" \
+            | grep -qx 11; then
+            echo "restore OK: all 11 app schemas present in the throwaway DB"
+          else
+            echo "backup drill FAILED: app schemas did not restore into the throwaway DB" >&2
+            exit 1
+          fi
       - name: round-trip assert - demo identity + row-count checksum
         run: |
           set -euo pipefail
