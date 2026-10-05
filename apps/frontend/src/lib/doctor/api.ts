@@ -18,26 +18,6 @@
 // from the consent-gated photo route. The doctor's own profile DTOs further down
 // are a different thing - they describe the doctor's own media - and keep
 // `photo_ref` deliberately.
-
-import { IDEMPOTENCY_KEY_HEADER, idempotencyKey } from "@/lib/idempotency";
-import { guardShape, request, requestBlob, requestVoid } from "@/lib/request";
-import type { RecordTimeline } from "@/lib/record/api";
-
-export type DoctorPatientBucket = "current" | "past";
-
-export type RecordScope =
-  | "consultations"
-  | "prescriptions"
-  | "lab_results"
-  | "metrics"
-  | "health_background"
-  | "full_record";
-
-export interface DoctorPatientRow {
-  patient_id: number;
-  name: string | null;
-  age: number | null;
-  has_photo: boolean;
   bucket: DoctorPatientBucket;
   granted_scopes: RecordScope[];
   latest_case_stage: string | null;
@@ -322,10 +302,30 @@ export interface DoctorProfileView {
   notification_preferences: Record<string, boolean>;
 }
 
+=======
+/**
+ * The editable body of the private profile. It is a whole-form PUT, not a
+ * patch: the backend requires the practice address and coordinates on every
+ * call, so a caller always sends the complete editable projection.
+ */
+export interface DoctorProfileUpdate {
+  practice_name: string | null;
+  practice_address: string;
+  practice_latitude: number;
+  practice_longitude: number;
+  experience_years: number | null;
+  languages: string[];
+  about: string | null;
+  availability: string | null;
+  notification_preferences: Record<string, boolean>;
+}
+
+>>>>>>> origin/main
 export interface DoctorProfilePhotoRef {
   photo_ref: string;
 }
 
+<<<<<<< HEAD
 /**
  * The Address section write's body (#609), mirroring
  * `DoctorProfileAddressUpdate`.
@@ -438,45 +438,6 @@ export interface DoctorProfileNotificationUpdate {
   notification_preferences: Record<string, boolean>;
 }
 
-const CREDENTIAL_STATUSES: readonly string[] = [
-  "pending",
-  "verified",
-  "expired",
-  "revoked",
-  "reverification_failed",
-];
-
-function isDoctorProfileCredential(
-  value: unknown,
-): value is DoctorProfileCredential {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "credential_type" in value &&
-    "status" in value &&
-    "expires_at" in value &&
-    CREDENTIAL_STATUSES.includes(
-      (value as DoctorProfileCredential).status as string,
-    )
-  );
-}
-
-function isDoctorProfileView(value: unknown): value is DoctorProfileView {
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    !("partner_id" in value) ||
-    !("photo_ref" in value) ||
-    !("practice_name" in value) ||
-    !("clinic_name" in value) ||
-    !("specialties" in value) ||
-    !("verified" in value) ||
-    !("practice_address" in value) ||
-    !("address_line" in value) ||
-    !("landmark" in value) ||
-    !("locality" in value) ||
-    !("city" in value) ||
-    !("pin_code" in value) ||
     !("practice_latitude" in value) ||
     !("practice_longitude" in value) ||
     !("area" in value) ||
@@ -532,128 +493,6 @@ function isDoctorProfileAddressView(
   );
 }
 
-/** Read the calling active doctor's private profile projection. */
-export async function fetchDoctorProfile(): Promise<DoctorProfileView> {
-  const data = await request<unknown>("/v1/doctor/profile");
-  return guardShape(
-    data,
-    isDoctorProfileView,
-    "The API returned an unexpected doctor profile shape",
-  );
-}
-
-/**
- * Save the calling active doctor's practice address through the section write
- * (#609), on its own path rather than on `/profile`.
- *
- * Its own path is load-bearing: the backend namespaces its stored idempotency
- * result per route, so a key issued against another write would otherwise be
- * served this write's response.
- *
- * `retryKey` carries the per-attempt discipline (api-standards §5): a retry of
- * the same attempt passes the failed attempt's key back, so a lost response
- * cannot write the address twice, while a fresh edit mints a new one. Nothing in
- * here mints a key - `idempotencyKey` is the shared module's, and the caller
- * owns the attempt.
- */
-export async function updateDoctorProfileAddress(
-  update: DoctorProfileAddressUpdate,
-  retryKey?: string,
-): Promise<DoctorProfileAddressView> {
-  const data = await request<unknown>("/v1/doctor/profile/address", {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      [IDEMPOTENCY_KEY_HEADER]: idempotencyKey(retryKey),
-    },
-    body: JSON.stringify(update),
-  });
-  return guardShape(
-    data,
-    isDoctorProfileAddressView,
-    "The API returned an unexpected doctor address shape",
-  );
-}
-
-/**
- * Save the Practice card through the section write (#608), on its own path
- * rather than on `/profile`.
- *
- * The per-route path and the per-attempt `retryKey` are the Address write's
- * discipline verbatim, and for the same two reasons: the backend namespaces its
- * stored idempotency result per route, and a retry of one attempt must reuse that
- * attempt's key while a fresh edit mints a new one.
- *
- * The answer is the plain `DoctorProfileView`, not the address write's extended
- * one: the belt warning is that write's own product and this write does not
- * evaluate it (see `DoctorProfileAddressView`). So the card has no warning to
- * render and this function does not pretend to have one.
- */
-export async function updateDoctorProfilePractice(
-  update: DoctorProfilePracticeUpdate,
-  retryKey?: string,
-): Promise<DoctorProfileView> {
-  const data = await request<unknown>("/v1/doctor/profile/practice", {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      [IDEMPOTENCY_KEY_HEADER]: idempotencyKey(retryKey),
-    },
-    body: JSON.stringify(update),
-  });
-  return guardShape(
-    data,
-    isDoctorProfileView,
-    "The API returned an unexpected doctor profile shape",
-  );
-}
-
-/**
- * Save the About card through the section write (#610): the doctor's own words,
- * the languages they consult in, the days they consult on, and the consulting
- * hours as prose.
- *
- * Same per-route path and same per-attempt key as its two siblings. The hours
- * cross this boundary as a string and nothing more - no weekly template, no
- * per-day ranges, no slots - because the platform has no booking system, so a
- * shape that invited one would be a promise the server cannot keep.
- */
-export async function updateDoctorProfileAbout(
-  update: DoctorProfileAboutUpdate,
-  retryKey?: string,
-): Promise<DoctorProfileView> {
-  const data = await request<unknown>("/v1/doctor/profile/about", {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      [IDEMPOTENCY_KEY_HEADER]: idempotencyKey(retryKey),
-    },
-    body: JSON.stringify(update),
-  });
-  return guardShape(
-    data,
-    isDoctorProfileView,
-    "The API returned an unexpected doctor profile shape",
-  );
-}
-
-/**
- * Save the Notification card through the section write (#610): one field, and a
- * card the doctor can flip a single switch on without half-saving their about
- * text.
- *
- * Same per-route path and same per-attempt key as its siblings. The answer is the
- * plain profile projection, whose `notification_preferences` the backend MERGED -
- * so a stored key outside the five is still in there afterwards, and the card
- * re-seeds from the merge rather than from what it submitted. That is the promise
- * #602's merge took over from the client, and this function is the seam it moved
- * across.
- */
-export async function updateDoctorProfileNotifications(
-  update: DoctorProfileNotificationUpdate,
-  retryKey?: string,
-): Promise<DoctorProfileView> {
-  const data = await request<unknown>("/v1/doctor/profile/notifications", {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",

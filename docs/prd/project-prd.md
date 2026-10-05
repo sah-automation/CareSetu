@@ -276,12 +276,7 @@ _Traceability: `REQ-001`, `REQ-008`, `REQ-022`, `REQ-005`, `GAP-009`_
 - Every profile photo lives in one private, encrypted object store (`profile-media`, ADR-0020) under a role-prefixed key, with only the object key held in SQL. Photos are never publicly addressable and are always streamed decrypted through the backend - a doctor's read of a patient photo passes the consent gate first.
 - Uploads are validated before any write (JPEG/PNG/WebP, ≤ 5 MB, GIF refused) and go through a bounded retry so a flaky store fails loudly instead of silently dropping the photo.
 
-**Delivery Notes (batch #599):**
-
-- The doctor profile's public field set now includes clinic name, specialties, languages, consulting days and hours, about text, years of experience, and structured address parts (locality, street/building, PIN). Each new public field renders in the declared band, never the verified band.
-- The practice address saves update the directory's derived practice position (ADR-0021); the position is a PIN centroid derived from the declared PIN (ADR-0022), with no new external integration created.
-
----
+## origin/main
 
 ### 4.3 [EPIC-03]: Symptom Intake & AI Clinical Pre-Summary
 
