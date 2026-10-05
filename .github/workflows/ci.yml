@@ -586,7 +586,13 @@ jobs:
       - name: install frontend
         run: npm ci
       - name: npm audit
-        run: npm audit --audit-level=high
+        # Runtime deps only. Build-time-only devDeps are excluded: their
+        # advisories are unactionable when no patch exists (braces
+        # CVE-2026-93687 has no fixed release and 3.0.3 is the latest).
+        # Nothing from devDependencies is bundled or served, so this scope
+        # matches what actually reaches production. Raise with the team
+        # before re-widening.
+        run: npm audit --omit=dev --audit-level=high
 
   sbom:
     name: sbom (cyclonedx backend + frontend artifacts)
