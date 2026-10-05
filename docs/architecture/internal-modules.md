@@ -288,6 +288,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 
 - **Consent machine:** `[Requested] → [Granted] → [Revoked]`; revocation stops all future sharing with the counterparty and is recorded (`FEAT-002` Rule / `NFR-COMP-002`); re-grant creates a new version (`NFR-D02` versioning, open `GAP-005`/`GAP-013`).
 - **Egress rule:** `check_consent()` is evaluated on every share and every LLM egress; a denial short-circuits the requesting module.
+- **Counterparty display names:** `ConsentView` and `EgressLogEntry` each carry an optional, nullable `counterparty_display_name` beside the unchanged `counterparty_id` (#648). It is enrichment of an id, never the authorization - an unbound seam, a raising seam, and an unresolvable counterparty all leave it null, and the id stays on the wire so a receipt keeps its precision. Resolution is an optional keyword-only resolver callable bound at the composition root, never a cross-module import, so this module stays ignorant of the module that owns the names.
 
 #### 4. High-Level Tech Stack & Framework Constraints
 
