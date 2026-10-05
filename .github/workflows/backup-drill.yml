@@ -48,7 +48,10 @@ jobs:
       PGPASSWORD: caresetu
     services:
       postgres:
-        image: postgres:16-alpine
+        # Must match the live Supabase server major: pg_restore refuses to load an
+        # archive written by a newer server, so a 16 container could not prove a
+        # 17 dump is restorable.
+        image: postgres:17-alpine
         env:
           POSTGRES_USER: caresetu
           POSTGRES_PASSWORD: caresetu
@@ -62,8 +65,26 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v4
-      - name: install postgres client
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: install postgres client (pinned to the live server major)
+        env:
+          PG_MAJOR: "17"
+        run: |
+          set -euo pipefail
+          # ubuntu-latest's default `postgresql-client` is one major BEHIND the
+          # Supabase server, and pg_dump refuses to dump a NEWER server with an
+          # OLDER client ("server version mismatch"). Take the client from PGDG
+          # instead, pinned to the server major, and put its bin dir first on
+          # PATH so the pg_wrapper symlink cannot resolve back to the older one.
+          # Bump PG_MAJOR and the service image together when Supabase moves.
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${codename}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "postgresql-client-${PG_MAJOR}"
+          echo "/usr/lib/postgresql/${PG_MAJOR}/bin" >> "$GITHUB_PATH"
       - name: assert the secrets are set
         run: |
           test -n "$DATABASE_URL" || {
@@ -84,6 +105,18 @@ jobs:
             exit 1
           fi
           echo "preflight OK: Supabase database reachable at $HOST_PORT"
+      - name: assert the client major matches the live server major
+        run: |
+          set -euo pipefail
+          PGDUMP_URL="$(printf '%s' "$DATABASE_URL" | sed 's/^postgresql+asyncpg:/postgresql:/')"
+          client_major="$(pg_dump --version | awk '{print $3}' | cut -d. -f1)"
+          server_major="$(psql -Atc 'SHOW server_version' "$PGDUMP_URL" | cut -d. -f1)"
+          if [ "$client_major" != "$server_major" ]; then
+            echo "backup drill FAILED: pg_dump major ($client_major) != Supabase server major ($server_major)." >&2
+            echo "pg_dump refuses to dump a newer server with an older client; bump PG_MAJOR and the postgres service image." >&2
+            exit 1
+          fi
+          echo "version OK: pg_dump major $client_major matches Supabase server major $server_major"
       - name: live pg_dump + AES-256-encrypt at rest
         run: |
           set -euo pipefail
