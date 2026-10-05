@@ -1,3 +1,4 @@
+// PRD trace: FEAT-005 (Provider Profiles and Credential Display).
 // PHASE-8.1 T12 (#450): doctor console landing page suite. Covers the review
 // queue (ranked low-confidence first with the amber Verify chip and a
 // confidence flag, US-11/12), the open care-cases section with stage chips
@@ -117,9 +118,15 @@ function doctorProfile(
     partner_id: 7,
     photo_ref: null,
     practice_name: "Kumar Clinic",
-    specialty: "General physician",
+    clinic_name: null,
+    specialties: ["General physician"],
     verified: true,
     practice_address: "12 MG Road",
+    address_line: null,
+    landmark: null,
+    locality: "Indiranagar",
+    city: "Bengaluru",
+    pin_code: null,
     practice_latitude: 12.9716,
     practice_longitude: 77.5946,
     area: "Indiranagar",
@@ -127,7 +134,8 @@ function doctorProfile(
     experience_years: 9,
     about: null,
     consultation_fee: 50000,
-    availability: null,
+    consulting_days: [],
+    consulting_hours: null,
     credentials: [],
     notification_preferences: {},
     ...overrides,

@@ -1,0 +1,343 @@
+{
+  "schemas": {
+    "CaseWorkspaceLink": {
+      "properties": {
+        "case_id": {
+          "type": "integer"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": ["case_id", "stage"],
+      "type": "object"
+    },
+    "ContactSection": {
+      "properties": {
+        "age": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "area": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "emergency_contact": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gender": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "has_photo": {
+          "default": false,
+          "type": "boolean"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "DoctorPatientDetailView": {
+      "properties": {
+        "bucket": {
+          "enum": ["current", "past"],
+          "type": "string"
+        },
+        "case_workspace": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/CaseWorkspaceLink"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "consultation_history": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/RecordTimeline"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "contact": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/ContactSection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "granted_scopes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "health_background": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/HealthBackgroundView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "latest_case_stage": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "patient_id": {
+          "type": "integer"
+        }
+      },
+      "required": ["patient_id", "bucket"],
+      "type": "object"
+    },
+    "DoctorPatientRow": {
+      "properties": {
+        "age": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bucket": {
+          "enum": ["current", "past"],
+          "type": "string"
+        },
+        "granted_scopes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "has_photo": {
+          "default": false,
+          "type": "boolean"
+        },
+        "latest_case_stage": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "patient_id": {
+          "type": "integer"
+        }
+      },
+      "required": ["patient_id", "bucket"],
+      "type": "object"
+    },
+    "HealthBackground": {
+      "additionalProperties": false,
+      "properties": {
+        "allergies": {
+          "items": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        "blood_group": {
+          "anyOf": [
+            {
+              "maxLength": 16,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "conditions": {
+          "items": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        "family_history": {
+          "items": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        "immunizations": {
+          "items": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        "medications": {
+          "items": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "maxItems": 50,
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "HealthBackgroundView": {
+      "properties": {
+        "acknowledged": {
+          "type": "boolean"
+        },
+        "background": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/HealthBackground"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "set": {
+          "type": "boolean"
+        }
+      },
+      "required": ["set", "acknowledged"],
+      "type": "object"
+    },
+    "PatientsListView": {
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/components/schemas/DoctorPatientRow"
+          },
+          "type": "array"
+        },
+        "total": {
+          "type": "integer"
+        }
+      },
+      "required": ["items", "total"],
+      "type": "object"
+    },
+    "RecordEntryView": {
+      "properties": {
+        "created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "entry_id": {
+          "type": "integer"
+        },
+        "entry_type": {
+          "type": "string"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "required": [
+        "entry_id",
+        "entry_type",
+        "payload",
+        "occurred_at",
+        "created_at"
+      ],
+      "type": "object"
+    },
+    "RecordTimeline": {
+      "properties": {
+        "created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/components/schemas/RecordEntryView"
+          },
+          "type": "array"
+        },
+        "patient_id": {
+          "type": "integer"
+        },
+        "record_id": {
+          "type": "integer"
+        }
+      },
+      "required": ["record_id", "patient_id", "created_at", "entries"],
+      "type": "object"
+    }
+  }
+}

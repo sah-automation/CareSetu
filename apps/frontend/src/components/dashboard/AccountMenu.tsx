@@ -378,13 +378,18 @@ export function AccountMenu({ shellRole }: { shellRole: Role }) {
               badge={roleBadgeFor(shellRole)}
             />
             {/* #543: the doctor's own Profile page, one click from the avatar
-                dropdown, now a full-size row like every other one here. */}
+                dropdown, now a full-size row like every other one here. #604:
+                the label comes from this namespace's own profileSettings key -
+                it used to borrow nav.profile, the sidebar's label key, which
+                pinned the popup row to the sidebar's word for the same
+                destination. The sidebar and tab-bar entries keep nav.profile,
+                and the patient row keeps nav.profileSettings, unchanged. */}
             <DropdownMenuItem
               asChild
               data-testid="account-menu-doctor-profile"
               className={menuRowClass}
             >
-              <Link href="/doctor/profile">{strings.profile}</Link>
+              <Link href="/doctor/profile">{menuStrings.profileSettings}</Link>
             </DropdownMenuItem>
             {roleSwitchItems}
             <DropdownMenuSeparator />

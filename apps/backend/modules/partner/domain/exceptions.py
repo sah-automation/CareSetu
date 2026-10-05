@@ -6,6 +6,22 @@ with the tickets that introduce real validation.
 
 from __future__ import annotations
 
+from enum import StrEnum
+
+from modules.partner.domain.practice_position import PinResolutionReason
+
+
+class VocabularyRejectionReason(StrEnum):
+    """Why a value was refused by a multi-valued closed vocabulary (#602).
+
+    A closed list refuses a value for exactly two member-level reasons, and both
+    are reported on the raised error so the message names the rule the member
+    broke rather than blaming the whole selection.
+    """
+
+    UNKNOWN = "unknown"
+    REPEATED = "repeated"
+
 
 class PartnerError(Exception):
     """Base error for the partner module."""
@@ -214,3 +230,138 @@ class ReSubmissionThrottledError(PartnerError):
         super().__init__(message)
         self.partner_id = partner_id
         self.retry_at = retry_at
+
+
+class InvalidSpecialtyError(PartnerError):
+    """The submitted specialty breaks the closed pick-list rule (#602).
+
+    Raised by ``require_specialty`` and ``require_specialties``, the two
+    validation entry points for the doctor specialty pick-list (FEAT-004,
+    glossary). The field is never free-form, so a value outside the list is an
+    explicit rejection (422) rather than a value that persists and can never be
+    filtered on.
+
+    ``value`` is typed ``object`` because a malformed submission is not
+    necessarily a string - the entry point refuses a non-string as readily as an
+    unknown string. ``position`` and ``reason`` are carried only when a member of
+    a multi-valued selection broke a rule, so the single-valued field keeps a
+    plain ``"unknown specialty"`` message.
+    """
+
+    def __init__(
+        self,
+        value: object,
+        position: int | None = None,
+        reason: VocabularyRejectionReason = VocabularyRejectionReason.UNKNOWN,
+    ) -> None:
+        if position is None:
+            super().__init__(f"{reason} specialty: {value!r}")
+        else:
+            super().__init__(f"{reason} specialty at position {position}: {value!r}")
+        self.value = value
+        self.position = position
+        self.reason = reason
+
+
+class PracticePinUnresolvedError(PartnerError):
+    """A declared practice PIN code does not resolve to a position (#609).
+
+    Raised by the address section write when ``resolve_pin_code`` (#603) answers
+    with anything but a position. It is an **expected 4xx**, not an operational
+    failure (error taxonomy): the doctor typed something this platform cannot
+    place, the save is refused, and every other edit on their profile is untouched.
+    The partner adapter encodes it as a 422 whose ``details.errors[].path`` is the
+    PIN field, which is what lets the client render the problem under that input
+    instead of guessing which one failed.
+
+    **Both refusals are the same error to the caller.** ``reason`` distinguishes
+    them for the machine - ``MALFORMED`` means "fix this field", ``UNKNOWN`` means
+    "this well-formed PIN code is not one we can place yet" - but the doctor cannot
+    tell a length failure from a character-class failure, so the message never
+    claims to. The data gap behind ``UNKNOWN`` is a follow-up, not something this
+    write works around: there is no support-request surface in the repo to route it
+    to, so the field-level error is genuinely all the doctor gets, and inventing a
+    fallback position would be worse than the refusal.
+
+    ``pin_code`` is the declared value, carried so a caller can report which value
+    it refused. It is never echoed into the response body or the log line.
+    """
+
+    def __init__(self, pin_code: str, reason: PinResolutionReason) -> None:
+        if reason is PinResolutionReason.MALFORMED:
+            message = "the PIN code must be six digits"
+        else:
+            message = "this PIN code is not one we can place yet"
+        super().__init__(message)
+        self.pin_code = pin_code
+        self.reason = reason
+
+
+class InvalidConsultLanguageError(PartnerError):
+    """A submitted consulting language breaks the closed-list rule (#602).
+
+    Raised by ``require_consult_languages``, which validates a multi-valued
+    selection member by member. ``position`` is the index of the offending
+    member, and ``reason`` says which of the two member-level rules it broke,
+    so the message points at the member instead of blaming the whole selection.
+    """
+
+    def __init__(self, value: object, position: int, reason: VocabularyRejectionReason) -> None:
+        super().__init__(f"{reason} consulting language at position {position}: {value!r}")
+        self.value = value
+        self.position = position
+        self.reason = reason
+
+
+class InvalidConsultingDayError(PartnerError):
+    """A submitted consulting day breaks the closed seven-day rule (#602).
+
+    The consulting-day counterpart of :class:`InvalidConsultLanguageError`:
+    raised by ``require_consulting_days`` with the same ``value`` / ``position``
+    / ``reason`` shape.
+    """
+
+    def __init__(self, value: object, position: int, reason: VocabularyRejectionReason) -> None:
+        super().__init__(f"{reason} consulting day at position {position}: {value!r}")
+        self.value = value
+        self.position = position
+        self.reason = reason
+
+
+class InvalidSelectionError(PartnerError):
+    """A multi-valued field was submitted as one bare value instead of a selection.
+
+    A ``str`` is itself iterable, so ``require_consulting_days("Monday")`` would
+    otherwise walk one character at a time and reject the letter ``M`` - a
+    legitimate single-day submission reported as nonsense. One day is a
+    one-member selection, so the caller sends a list; this error says exactly
+    that instead of blaming a character (coding-standards §3: type everything,
+    but ``Iterable`` cannot exclude ``str``, so the check is at runtime).
+    """
+
+    def __init__(self, value: object) -> None:
+        super().__init__(f"expected a selection of values, not a single value: {value!r}")
+        self.value = value
+
+
+class InvalidNotificationKeyError(PartnerError):
+    """A submitted notification preference key is not one of the five (#610).
+
+    Raised by ``require_notification_preferences`` and
+    :func:`~modules.partner.domain.vocabularies.merge_notification_preferences`
+    when the save carries a key outside ``NotificationPreferenceKey``. It is an
+    **expected 4xx**, encoded by the partner adapter as a 422 whose
+    ``details.errors[].path`` is ``notification_preferences``, so the client
+    renders it against the card rather than guessing which toggle failed.
+
+    No ``position`` and no ``reason``, unlike the three multi-valued pick-lists:
+    a preference is a **dict**, so there is no member order to point into and
+    only one member-level rule to break - a key that is not on the list. The key
+    itself is the whole answer, and it is carried so a caller can report which
+    one was refused. ``str(err)`` quotes the submitted key back, which is a
+    machine-readable identifier and never free text a doctor typed.
+    """
+
+    def __init__(self, key: object) -> None:
+        super().__init__(f"unknown notification preference key: {key!r}")
+        self.key = key

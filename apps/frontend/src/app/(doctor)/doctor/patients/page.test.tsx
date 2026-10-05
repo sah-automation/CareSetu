@@ -56,7 +56,7 @@ function row(
     patient_id: id,
     name: `Patient ${id}`,
     age: 40,
-    photo_ref: null,
+    has_photo: false,
     bucket: "current",
     granted_scopes: ["consultations", "prescriptions"],
     latest_case_stage: "pre_summary",

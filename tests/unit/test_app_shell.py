@@ -197,6 +197,14 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/doctor/patients/{patient_id}/photo",
         "/v1/doctor/profile",
         "/v1/doctor/profile/photo",
+        # #608-#610: all four Practice/Address/About/Notification section writes.
+        # Each takes its own path under the profile prefix rather than a second
+        # verb on /v1/doctor/profile, so a replayed Idempotency-Key issued
+        # against one write can never be served another's stored result.
+        "/v1/doctor/profile/practice",
+        "/v1/doctor/profile/address",
+        "/v1/doctor/profile/about",
+        "/v1/doctor/profile/notifications",
     }
 
 

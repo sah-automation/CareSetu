@@ -43,7 +43,8 @@ Methods (delegated to the directory sub-facade - WI-2 p2b #337):
   analytics event; Redis-accelerated with lazy validity re-derivation
   (PHASE-6 T02b, #314).
 - ``get_provider_profile`` is the public provider profile (FEAT-005): the
-  verified-safe profile, hidden exactly when search hides the card.
+  verified credential band plus the practice details the doctor declared
+  (#613), hidden exactly when search hides the card.
 - ``record_partner_selected`` records one ``partner.selected`` analytics pick.
 
 Methods (delegated to the credential-intake sub-facade - WI-2 p2c #338):
@@ -98,6 +99,7 @@ from datetime import datetime
 from uuid import UUID
 
 from cryptography.exceptions import InvalidTag
+from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
@@ -131,6 +133,9 @@ from modules.partner.directory_facade import (
     DALTONGANJ_LONGITUDE as DALTONGANJ_LONGITUDE,
 )
 from modules.partner.directory_facade import (
+    PERI_URBAN_RADIUS_KM as PERI_URBAN_RADIUS_KM,
+)
+from modules.partner.directory_facade import (
     DirectoryEntry as DirectoryEntry,
 )
 from modules.partner.directory_facade import (
@@ -149,13 +154,25 @@ from modules.partner.doctor_profile_models import (
     DoctorCredentialStatus as DoctorCredentialStatus,
 )
 from modules.partner.doctor_profile_models import (
+    DoctorProfileAboutUpdate as DoctorProfileAboutUpdate,
+)
+from modules.partner.doctor_profile_models import (
+    DoctorProfileAddressUpdate as DoctorProfileAddressUpdate,
+)
+from modules.partner.doctor_profile_models import (
+    DoctorProfileAddressView as DoctorProfileAddressView,
+)
+from modules.partner.doctor_profile_models import (
     DoctorProfileCredential as DoctorProfileCredential,
+)
+from modules.partner.doctor_profile_models import (
+    DoctorProfileNotificationUpdate as DoctorProfileNotificationUpdate,
 )
 from modules.partner.doctor_profile_models import (
     DoctorProfilePhotoView as DoctorProfilePhotoView,
 )
 from modules.partner.doctor_profile_models import (
-    DoctorProfileUpdate as DoctorProfileUpdate,
+    DoctorProfilePracticeUpdate as DoctorProfilePracticeUpdate,
 )
 from modules.partner.doctor_profile_models import (
     DoctorProfileView as DoctorProfileView,
@@ -202,13 +219,27 @@ from modules.partner.domain.exceptions import (
     PartnerSuspendedError as PartnerSuspendedError,
 )
 from modules.partner.domain.exceptions import (
+    PracticePinUnresolvedError as PracticePinUnresolvedError,
+)
+from modules.partner.domain.exceptions import (
     ProviderProfileNotFoundError as ProviderProfileNotFoundError,
 )
 from modules.partner.domain.exceptions import (
     ReSubmissionThrottledError as ReSubmissionThrottledError,
 )
+from modules.partner.domain.practice_position import (
+    AddressParts,
+    PinCentroid,
+    PracticePosition,
+    evaluate_peri_urban_belt,
+    format_display_address,
+    resolve_pin_code,
+)
 from modules.partner.domain.state_machine import (
     PartnerStatus,
+)
+from modules.partner.domain.vocabularies import (
+    merge_notification_preferences,
 )
 from modules.partner.operator_gate_facade import (
     OperatorGateFacade as OperatorGateFacade,
@@ -245,7 +276,7 @@ from modules.partner.registration_models import (
 )
 from modules.partner.schema.models import (
     partner_credentials,
-    partner_directory_index,
+    partner_pin_centroids,
     partner_profiles,
     partner_service_areas,
 )
@@ -266,6 +297,9 @@ from modules.partner.shared import (
 )
 from modules.partner.shared import (
     load_profile_by_identity as _load_profile_by_identity,
+)
+from modules.partner.shared import (
+    selection_members as _selection_members,
 )
 from modules.profile_media.facade import (
     DOCTOR_PREFIX,
@@ -340,6 +374,184 @@ def _require_active_doctor(
 ) -> None:
     if partner_type != "doctor" or status != PartnerStatus.ACTIVE.value:
         raise DoctorProfileNotAllowedError(partner_id, partner_type, status)
+
+
+async def _lock_active_doctor_profile(
+    connection: AsyncConnection,
+    doctor_id: int,
+) -> None:
+    """Re-read ``partner_type``/``status`` under ``SELECT ... FOR UPDATE`` and refuse.
+
+    The first half of every private profile write, split out from
+    :func:`_update_active_doctor_profile` because the address write (#609) cannot
+    compose its ``UPDATE`` until its PIN has resolved, and the resolution is a read
+    of the centroid table that must happen **after** the recheck and **before** any
+    write. Refusing first is not only a matter of tidiness: a partner who is not an
+    ``[Active]`` doctor learns nothing about the centroid dataset, and no lock is
+    held across a decision that was never made.
+
+    The row lock is what makes the re-check worth doing at all: the edge guard
+    resolved this same partner in a different transaction, so without it a
+    deactivation landing between the two would let the save through. A doctor
+    removed outright is a ``PartnerNotFoundError`` here rather than a write against
+    no row.
+    """
+    row = (
+        await connection.execute(
+            select(
+                partner_profiles.c.partner_type,
+                partner_profiles.c.status,
+            )
+            .where(partner_profiles.c.id == doctor_id)
+            .with_for_update()
+        )
+    ).first()
+    if row is None:
+        raise PartnerNotFoundError(doctor_id)
+    _require_active_doctor(
+        partner_id=doctor_id,
+        partner_type=row.partner_type,
+        status=row.status,
+    )
+
+
+async def _update_active_doctor_profile(
+    connection: AsyncConnection,
+    doctor_id: int,
+    values: dict[str, object],
+) -> None:
+    """Write one profile section's columns, after a row-locked active-doctor recheck.
+
+    The shape a section write that has nothing to read first shares: re-check under
+    ``SELECT ... FOR UPDATE``, refuse anything that is not an ``[Active]`` doctor,
+    then issue the ``UPDATE`` with exactly the columns the caller passed plus
+    ``updated_at``. ``values`` is the section's own field set and nothing is merged
+    into it, so a section write can only ever move the columns its own card declares.
+
+    The two halves are separately callable because #609 cannot build its ``values``
+    until its PIN has resolved - a read of the centroid table that must happen after
+    the recheck and before any write. That write calls
+    :func:`_lock_active_doctor_profile` and :func:`_write_active_doctor_profile`
+    itself with a decision between them; every other section write calls this, which
+    is why the lock cannot be forgotten at one call site and skipped at another.
+    """
+    await _lock_active_doctor_profile(connection, doctor_id)
+    await _write_active_doctor_profile(connection, doctor_id, values)
+
+
+async def _write_active_doctor_profile(
+    connection: AsyncConnection,
+    doctor_id: int,
+    values: dict[str, object],
+) -> None:
+    """Issue the section's ``UPDATE``, assuming the row lock is already held.
+
+    Split from the recheck so #609 can resolve the declared PIN between the two: the
+    lock is taken and the partner refused before the centroid table is read, and the
+    ``UPDATE`` is issued only once a position exists to write. Every other section
+    write goes through :func:`_update_active_doctor_profile`, which calls this
+    immediately after the recheck and so cannot forget the lock.
+    """
+    await connection.execute(
+        partner_profiles.update()
+        .where(partner_profiles.c.id == doctor_id)
+        .values(**values, updated_at=func.now())
+    )
+
+
+async def _load_pin_centroid(
+    connection: AsyncConnection,
+    pin_code: str,
+) -> PinCentroid | None:
+    """Look the declared PIN code up in the bundled centroid table (#601, #609).
+
+    One exact primary-key hit in the ``partner`` schema this module already owns -
+    no join, no cross-schema read, no foreign key (ADR-0003). It selects the three
+    columns the resolution decision needs and nothing else off the reference row,
+    and returns ``None`` when the code is absent, which is the "unknown" input
+    :func:`~modules.partner.domain.practice_position.resolve_pin_code` is told
+    about rather than the refusal itself: the decision owns what a missing centroid
+    MEANS (coding-standards §4).
+
+    ``Numeric`` coordinates arrive from the driver as ``Decimal``, so they are
+    converted to ``float`` here, at the boundary this function owns - which is what
+    lets the domain type stay a plain ``float``.
+
+    The lookup is issued for a malformed code too, where it misses by
+    construction. That is one wasted indexed hit on the error path, paid for a
+    single code path: deciding whether to skip it would mean re-deriving the
+    format rule here, and a second copy of "what is a PIN code" is exactly the
+    drift :func:`~modules.partner.domain.practice_position.resolve_pin_code`
+    exists to prevent.
+    """
+    row = (
+        await connection.execute(
+            select(
+                partner_pin_centroids.c.pin,
+                partner_pin_centroids.c.latitude,
+                partner_pin_centroids.c.longitude,
+            ).where(partner_pin_centroids.c.pin == pin_code)
+        )
+    ).first()
+    if row is None:
+        return None
+    return PinCentroid(
+        pin_code=str(row.pin),
+        latitude=float(row.latitude),
+        longitude=float(row.longitude),
+    )
+
+
+def _renderable_notification_preferences(
+    stored: object,
+) -> dict[str, bool]:
+    """Narrow the stored preferences column into the view's ``dict[str, bool]``.
+
+    The column is a JSON blob and
+    :func:`~modules.partner.domain.vocabularies.merge_notification_preferences`
+    deliberately carries a stored key the closed vocabulary does not name,
+    **verbatim**, rather than dropping or refusing it. That promise has a
+    consequence this function exists to honour: the read projection must not be
+    the place where an odd stored value becomes a failure.
+
+    Without it, a row holding ``{"sms": "banana"}`` raises ``bool_parsing`` inside
+    the view's own validation and the doctor's ENTIRE profile - name, address,
+    credentials, every card - fails to render, because one unrenderable entry in
+    a notification dict took down the page. A toggle the value cannot be read as
+    is not a toggle, so the entry is dropped from the VIEW and only from the
+    view: the row still holds it, and the merge still carries it on the next
+    save, so nothing is lost and nothing is refused. The doctor sees the five
+    switches they can actually read.
+
+    The coercion is deliberately the same one the write model's validator uses,
+    so a value a save would have accepted as ``False`` reads as ``False`` on the
+    way out too: ``{"sms": "false"}`` is a hand-repaired row meaning OFF, and
+    ``bool("false")`` would read as ON. Truthiness is not a reading - the domain
+    docstring says so about the write path and it holds here.
+
+    Logged, not silent (coding-standards S3): a key name and a value TYPE are
+    not PHI, and a row that needs hand-repair is a data problem somebody has to
+    be able to find.
+    """
+    if not isinstance(stored, dict):
+        logger.warning(
+            "doctor_profile_notification_preferences_not_a_mapping",
+            extra={"value_type": type(stored).__name__},
+        )
+        return {}
+    renderable: dict[str, bool] = {}
+    unreadable: list[str] = []
+    for key, value in stored.items():
+        try:
+            renderable[key] = TypeAdapter(bool).validate_python(value)
+        except ValidationError:
+            unreadable.append(key)
+    if unreadable:
+        logger.warning(
+            "doctor_profile_notification_preferences_unreadable_values_dropped",
+            extra={"dropped_key_count": len(unreadable)},
+        )
+    return renderable
 
 
 async def _delete_doctor_profile_media(
@@ -950,15 +1162,18 @@ class PartnerFacade:
         )
 
     async def get_provider_profile(self, partner_id: int) -> ProviderProfileView:
-        """Public provider profile (MOD-002, FEAT-005, PHASE-6 T03 #309).
+        """Public provider profile (MOD-002, FEAT-005, PHASE-6 T03 #309, #613).
 
         Delegated to the directory sub-facade (ADR-0006, WI-2 p2b #337): the
-        verified-safe profile of an ``[Active]`` partner with a
-        ``directory_index`` entry and valid (verified, unexpired, unrevoked)
-        credentials. The visibility gate matches search exactly - the profile
-        is hidden (``ProviderProfileNotFoundError``, mapped to a 404) exactly
-        when search hides the card (ADR-0011 "tick gone = card gone"). Never
-        exposed: artifact refs, emails, phones, PHI.
+        profile of an ``[Active]`` partner with a ``directory_index`` entry and
+        valid (verified, unexpired, unrevoked) credentials - the credential band
+        the platform checked plus the practice details the doctor declared. The
+        visibility gate matches search exactly - the profile is hidden
+        (``ProviderProfileNotFoundError``, mapped to a 404) exactly when search
+        hides the card (ADR-0011 "tick gone = card gone"), and widening the
+        payload to the declared fields widened nothing about it. Never exposed:
+        artifact refs, the practice's coordinates, emails, phones, the partner's
+        identity id, notification preferences, PHI.
         """
         return await self._directory.get_provider_profile(partner_id)
 
@@ -1008,8 +1223,27 @@ class PartnerFacade:
                         partner_profiles.c.status,
                         partner_profiles.c.photo_ref,
                         partner_profiles.c.practice_name,
-                        partner_directory_index.c.specialty,
+                        partner_profiles.c.clinic_name,
+                        # The specialty selection comes from the PROFILE ROW, not
+                        # from the directory entry this read used to outer-join
+                        # (#608). The profile row is the source of truth - it is
+                        # the column the practice section write lands on - and the
+                        # directory entry only receives a copy from the shared
+                        # refresh (#607). Joining instead would let this read
+                        # disagree with the row that was just written whenever the
+                        # write and the refresh are not in one transaction, which
+                        # is the normal case.
+                        partner_profiles.c.specialties,
                         partner_profiles.c.practice_address,
+                        # The structured address parts, which is what the address
+                        # card edits and seeds from (#609). Read here beside the
+                        # display projection so a client never has to parse an
+                        # assembled string back into the fields it declared.
+                        partner_profiles.c.address_line,
+                        partner_profiles.c.address_landmark,
+                        partner_profiles.c.address_locality,
+                        partner_profiles.c.address_city,
+                        partner_profiles.c.address_pin,
                         partner_profiles.c.practice_latitude,
                         partner_profiles.c.practice_longitude,
                         partner_service_areas.c.name.label("area_name"),
@@ -1017,14 +1251,18 @@ class PartnerFacade:
                         partner_profiles.c.experience_years,
                         partner_profiles.c.about,
                         partner_profiles.c.consultation_fee_paise,
-                        partner_profiles.c.availability,
+                        # #610: the availability split. ``consulting_days`` is the
+                        # closed seven-day selection the about write lands on, and
+                        # ``consulting_hours`` is the prose that replaces the
+                        # ``availability`` blob this projection used to serve. The
+                        # retired column is no longer selected: it is inert (#606)
+                        # and rendering an availability no card can edit is worse
+                        # than not rendering one.
+                        partner_profiles.c.consulting_days,
+                        partner_profiles.c.consulting_hours,
                         partner_profiles.c.notification_preferences,
                     )
                     .select_from(partner_profiles)
-                    .outerjoin(
-                        partner_directory_index,
-                        partner_directory_index.c.partner_id == partner_profiles.c.id,
-                    )
                     .outerjoin(
                         partner_service_areas,
                         partner_service_areas.c.id == partner_profiles.c.service_area_id,
@@ -1072,13 +1310,17 @@ class PartnerFacade:
             partner_id=int(row.partner_id),
             photo_ref=row.photo_ref,
             practice_name=row.practice_name,
-            specialty=row.specialty,
+            clinic_name=row.clinic_name,
             verified=eligibility.has_any and not eligibility.has_invalid,
             practice_address=str(row.practice_address),
+            address_line=row.address_line,
+            landmark=row.address_landmark,
+            locality=row.address_locality,
+            city=row.address_city,
+            pin_code=row.address_pin,
             practice_latitude=float(row.practice_latitude),
             practice_longitude=float(row.practice_longitude),
             area=str(row.area_name) if row.area_name is not None else DEFAULT_SERVICE_AREA_NAME,
-            languages=list(row.languages or []),
             experience_years=(
                 int(row.experience_years) if row.experience_years is not None else None
             ),
@@ -1086,7 +1328,15 @@ class PartnerFacade:
             consultation_fee=(
                 int(row.consultation_fee_paise) if row.consultation_fee_paise is not None else None
             ),
-            availability=row.availability,
+            # All THREE selections this view serves, through one defensive
+            # projection: a junk member reads as an absent one rather than failing
+            # the response model. The two the about write owns join the specialty
+            # selection #608 landed, so the three cannot drift apart on how a
+            # stored JSONB array becomes a wire list.
+            specialties=_selection_members(row.specialties),
+            languages=_selection_members(row.languages),
+            consulting_days=_selection_members(row.consulting_days),
+            consulting_hours=row.consulting_hours,
             credentials=[
                 DoctorProfileCredential(
                     credential_type=str(credential.credential_type),
@@ -1099,44 +1349,302 @@ class PartnerFacade:
                     strict=True,
                 )
             ],
-            notification_preferences=dict(row.notification_preferences or {}),
+            notification_preferences=_renderable_notification_preferences(
+                row.notification_preferences,
+            ),
         )
 
-    async def update_doctor_profile(
+    async def update_doctor_practice(
         self,
         doctor_id: int,
-        update: DoctorProfileUpdate,
+        update: DoctorProfilePracticeUpdate,
     ) -> DoctorProfileView:
+        """Save the Practice card: the doctor's name, clinic, specialties, experience (#608).
+
+        The first of the four section writes that replaced the retired whole-form
+        profile write (#611). It touches ONLY this card's columns - the doctor's
+        ``practice_name``, the ``clinic_name`` building, the ``specialties``
+        selection and ``experience_years`` - and never the address, the languages,
+        the about text, the availability or the notification preferences. That is
+        the whole point of the split: a save of one card cannot move a field no
+        card on the screen is editing, so two doctors editing their profile
+        concurrently lose nothing but the field they were both typing in.
+
+        The refusal and the lock are the retired whole-form write's, deliberately
+        unchanged and now shared rather than copied:
+        ``_update_active_doctor_profile`` owns the ``SELECT ... FOR UPDATE``
+        recheck, the ``[Active]``-doctor refusal and the update itself
+        (api-standards §6: every authorization is re-checked in the facade, not
+        only at the edge). #609 and #610 call the same helper, so all four section
+        writes share one lock shape rather than four.
+
+        The wire field ``full_name`` maps to the ``practice_name`` column here -
+        see ``DoctorProfilePracticeUpdate`` for why the rename is on the wire and
+        not the column. Everything else is name-for-name, so this write's
+        ``.values()`` payload is the model's ``model_dump()`` with that one key
+        moved.
+
+        Nothing about credentials is touched: profile fields are DECLARED,
+        credentials are VERIFIED (ADR-0011), so the derived ``verified`` flag in
+        the read-back is unaffected by what this writes. Nor is the directory
+        entry's listed flag: this write reaches the entry only through the shared
+        refresh (#607), which copies the position and the specialties and never a
+        listed flag or any verified derivation, so a doctor cannot list themselves
+        by editing their own practice card (ADR-0008).
+        """
+        values = update.model_dump()
+        # The one wire-to-column rename, applied once here rather than by every
+        # caller - see the model docstring. ``pop`` so the dictionary never holds
+        # both keys and the column set cannot drift with the field name.
+        values["practice_name"] = values.pop("full_name")
+        async with self._engine.begin() as connection:
+            await _update_active_doctor_profile(connection, doctor_id, values)
+            # This card is one of the two writers of the ``specialties`` selection,
+            # so it is one of the two callers of the shared refresh (#607). Without
+            # it a doctor who saved only the Practice card would carry their
+            # specialties on their public profile (which reads the profile row)
+            # while directory search kept filtering on the stale index value - two
+            # public surfaces disagreeing about the same doctor. The refresh writes
+            # only the entry's position and specialties, so the caller's row lock
+            # and the [Active] recheck already decided everything it touches.
+            await self._credential_validity.refresh_directory_entry(connection, doctor_id)
+        # Every section write answers with the profile the doctor's next GET would
+        # serve, so the card re-renders from one call.
+        return await self.get_doctor_profile(doctor_id)
+
+    async def update_doctor_address(
+        self,
+        doctor_id: int,
+        update: DoctorProfileAddressUpdate,
+    ) -> DoctorProfileAddressView:
+        """Save the Address card: where the practice is (#609).
+
+        The heart of the defect fix. The doctor declares an address and the backend
+        DERIVES the practice position from the declared PIN code - never from a
+        coordinate the client sent, which this write's model does not declare at
+        all. That is what lets a doctor who signed up with a wrong PIN actually
+        correct it, and it is why the position columns stay ``NOT NULL`` while no
+        update schema carries them (#606).
+
+        **The order inside one transaction is the correctness argument.**
+
+        1. Lock the row and re-check the partner is an ``[Active]`` doctor
+           (:func:`_lock_active_doctor_profile`) - before the centroid table is
+           read, so a refused partner learns nothing and nothing is written.
+        2. Look the declared code up (:func:`_load_pin_centroid`) and hand the row
+           to the pure decision. A PIN that cannot be placed raises
+           ``PracticePinUnresolvedError`` here, which is a 422 keyed to the PIN
+           field - and it raises BEFORE the ``UPDATE``, so an unresolvable PIN
+           leaves every column and the directory entry untouched. There is no
+           fallback position and no queue row to compensate: the unlisted-PIN data
+           gap is a follow-up, not something to work around.
+        3. Evaluate the peri-urban belt against the resolved point. This is a
+           WARNING, never a refusal: the belt boundary is passed in from the
+           directory sub-facade's own ``PERI_URBAN_RADIUS_KM`` so the warning and
+           the search clamp are one boundary rather than two (#603), and a doctor in
+           a real but outlying town is never blocked from correcting their address.
+        4. Write the declared parts, the assembled display string and the derived
+           position.
+        5. Re-derive the directory entry through the shared refresh (#607), in this
+           same transaction. The refresh is an ``INSERT ... FROM SELECT`` that reads
+           the profile row, so the position written in step 4 is what lands in the
+           entry - that is why the two cannot be separate transactions, and why
+           ``search_directory`` returns the doctor at the new position immediately
+           afterwards. The refresh also flushes the directory-search namespace
+           itself, so this method does not: exactly one flush, inside the operation
+           that owns it.
+
+        Nothing about credentials is touched. Profile fields are DECLARED,
+        credentials are VERIFIED (ADR-0011), and the refresh cannot write the
+        listed flag - so a doctor cannot activate themselves by editing their
+        address, which is the invariant #607 already asserts for the operator path.
+
+        Returns :class:`DoctorProfileAddressView`, not the plain read projection:
+        the belt warning is this write's answer and no other read's, so it is a
+        field on this response rather than a nullable one every GET would carry.
+        """
+        # One strip, applied where the database needs it: the ``address_pin`` CHECK
+        # is ``^[0-9]{6}$`` and the column is ``String(6)``, so the stored form has
+        # to be the six digits themselves and the declared value is stripped once
+        # here for that reason. It is the SAME normalisation
+        # ``resolve_pin_code`` applies - the point is not a second copy of the rule
+        # but that the value written is the value the decision accepted.
+        # ``AddressParts`` keeps the raw declared value and lets
+        # ``format_display_address`` normalise it for display, exactly as it does
+        # for every other absent-or-blank part.
+        declared_pin = update.pin_code.strip()
+        parts = AddressParts(
+            address_line=update.address_line,
+            landmark=update.landmark,
+            locality=update.locality,
+            city=update.city,
+            pin_code=update.pin_code,
+        )
+        async with self._engine.begin() as connection:
+            await _lock_active_doctor_profile(connection, doctor_id)
+            resolution = resolve_pin_code(
+                declared_pin,
+                await _load_pin_centroid(connection, declared_pin),
+            )
+            position = resolution.position
+            if position is None:
+                raise PracticePinUnresolvedError(declared_pin, resolution.reason)
+            belt = evaluate_peri_urban_belt(
+                position,
+                centre=PracticePosition(
+                    latitude=DALTONGANJ_LATITUDE,
+                    longitude=DALTONGANJ_LONGITUDE,
+                ),
+                radius_km=PERI_URBAN_RADIUS_KM,
+            )
+            await _write_active_doctor_profile(
+                connection,
+                doctor_id,
+                {
+                    # The declared parts and the derived position, in one dictionary
+                    # built from ``parts`` so the display string and the columns
+                    # cannot be assembled from two different readings of the body.
+                    # Four of the five wire-to-column moves are a rename onto the
+                    # ``address_`` prefix the columns carry, because the wire field
+                    # says what the field MEANS and the column keeps the name its
+                    # other readers already use.
+                    "address_line": parts.address_line,
+                    "address_landmark": parts.landmark,
+                    "address_locality": parts.locality,
+                    "address_city": parts.city,
+                    "address_pin": declared_pin,
+                    # The retained display column is a backend-assembled projection
+                    # of exactly these parts (#603), rewritten here so the column,
+                    # the write and every renderer cannot disagree.
+                    "practice_address": format_display_address(parts),
+                    "practice_latitude": position.latitude,
+                    "practice_longitude": position.longitude,
+                },
+            )
+            await self._credential_validity.refresh_directory_entry(connection, doctor_id)
+        profile = await self.get_doctor_profile(doctor_id)
+        return DoctorProfileAddressView(
+            **profile.model_dump(),
+            outside_peri_urban_belt=not belt.within_belt,
+            distance_from_belt_centre_km=belt.distance_km,
+        )
+
+    async def update_doctor_about(
+        self,
+        doctor_id: int,
+        update: DoctorProfileAboutUpdate,
+    ) -> DoctorProfileView:
+        """Save the About card: about text, languages, consulting days, hours (#610).
+
+        The third of the four section writes, and the one that splits a field
+        rather than moving it: the old ``availability`` blob becomes a closed
+        seven-day SELECTION plus a free-prose hours string. The two halves go to
+        two columns (``consulting_days``, ``consulting_hours``) and the old column
+        is not written at all - it has been inert since #606, and #611 retired the
+        whole-form write that last addressed it, so nothing writes it at all now.
+        Nothing parses an existing ``availability`` value into the two new
+        columns: recovering chips from hand-typed free text is guesswork, and a
+        wrong guess is worse than an empty prompt.
+
+        It touches ONLY this card's columns - ``about``, the ``languages``
+        selection, ``consulting_days`` and ``consulting_hours`` - and never the
+        doctor's name, the specialties, the address or the notification
+        preferences. The ``.values()`` payload is the model's ``model_dump()``
+        verbatim: every field is name-for-name with its column, and the two closed
+        lists arrive as the resolved members rather than the submitted strings,
+        because the model's validators ran before this was reached.
+
+        The refusal and the lock are the other section writes', unchanged and
+        shared rather than copied: :func:`_update_active_doctor_profile` owns the
+        ``SELECT ... FOR UPDATE`` recheck, the ``[Active]``-doctor refusal and the
+        update itself (api-standards §6).
+
+        **No directory entry is refreshed and no cache is flushed**, and that is
+        the point: these four columns are DECLARED prose and selections, none of
+        them a search filter or a positioning input. The one filterable field a
+        doctor would expect to move here - the specialty - is the practice card's
+        (#608), and the address write (#609) is the only one that calls the shared
+        refresh.
+
+        Nothing about credentials is touched: profile fields are DECLARED,
+        credentials are VERIFIED (ADR-0011), so the derived ``verified`` flag in
+        the read-back is unaffected by what this writes.
+        """
         values = update.model_dump()
         async with self._engine.begin() as connection:
-            row = (
+            await _update_active_doctor_profile(connection, doctor_id, values)
+        return await self.get_doctor_profile(doctor_id)
+
+    async def update_doctor_notification(
+        self,
+        doctor_id: int,
+        update: DoctorProfileNotificationUpdate,
+    ) -> DoctorProfileView:
+        """Save the Notification card: which of the five things to be told about (#610).
+
+        The fourth and last section write, and the only **single-column** write in
+        the module outside the consultation-fee editor. The acceptance criterion
+        that it touches only its own column is therefore cheap to state and cheap
+        to hold: the ``.values()`` payload is exactly one key plus the
+        ``updated_at`` touch, so no other field on this profile can move because of
+        a switch the doctor flipped.
+
+        The payload is NOT the submitted dict, though, and that is the only thing
+        worth reading here. The row is read under the lock the other section writes
+        take, its stored preferences are merged with the submission through
+        :func:`~modules.partner.domain.vocabularies.merge_notification_preferences`,
+        and the merge is what gets written. So:
+
+        - a key the five do not name and the row already holds is **carried
+          through untouched**, which is the promise the doctor Profile page used to
+          keep client-side and the server now keeps for every client;
+        - a key the five do not name and the row does not hold is **refused**,
+          because carrying is not the same as being able to write one;
+        - a key the five DO name and the submission omits is **dropped**, so a save
+          means "these are my five toggles" and a doctor can turn them all off.
+
+        That read is a third statement inside the write's transaction, not a fourth
+        card's worth of work: the row is already locked by the recheck, so the
+        stored preferences come off the SAME row rather than from a second query
+        that could see a different state than the one being written over.
+
+        The refusal and the lock are the other section writes', unchanged and
+        shared: :func:`_lock_active_doctor_profile` then
+        :func:`_write_active_doctor_profile`, which is #609's split - the lock is
+        taken and the partner refused before the stored preferences are read, so a
+        partner who is not an ``[Active]`` doctor writes nothing and learns nothing
+        about their own row.
+
+        Nothing about credentials is touched (ADR-0011), and no notification is
+        actually sent: this records which of the five a doctor wants, and the
+        delivery side is a separate concern from a preference a doctor declared.
+        """
+        async with self._engine.begin() as connection:
+            await _lock_active_doctor_profile(connection, doctor_id)
+            # The row is locked, so this is the row the write is about to replace -
+            # not a second look that could disagree with it. ``notification_preferences``
+            # is NOT NULL with a ``{}`` default, so a legacy row is a dict here and
+            # a hand-repaired non-dict degrades to nothing stored rather than 500ing
+            # a doctor's save - an ``isinstance`` check, not a truthiness test, since
+            # a truthy non-dict would still reach ``.items()`` and raise.
+            stored = (
                 await connection.execute(
-                    select(
-                        partner_profiles.c.partner_type,
-                        partner_profiles.c.status,
+                    select(partner_profiles.c.notification_preferences).where(
+                        partner_profiles.c.id == doctor_id
                     )
-                    .where(partner_profiles.c.id == doctor_id)
-                    .with_for_update()
                 )
             ).first()
-            if row is None:
-                raise PartnerNotFoundError(doctor_id)
-            _require_active_doctor(
-                partner_id=doctor_id,
-                partner_type=row.partner_type,
-                status=row.status,
+            stored_preferences = getattr(stored, "notification_preferences", None)
+            await _write_active_doctor_profile(
+                connection,
+                doctor_id,
+                {
+                    "notification_preferences": merge_notification_preferences(
+                        submitted=update.notification_preferences,
+                        stored=(stored_preferences if isinstance(stored_preferences, dict) else {}),
+                    )
+                },
             )
-            await connection.execute(
-                partner_profiles.update()
-                .where(partner_profiles.c.id == doctor_id)
-                .values(**values, updated_at=func.now())
-            )
-        # The public directory projection is NOT written here: this batch leaves
-        # the public entry read-only to the doctor (a preview, not an editor,
-        # #542), so a private profile save must not move the practice pin the
-        # public ``search_directory`` orders by. The practice geo the private
-        # projection serves lives on ``partner_profiles`` (written above) and
-        # only the partner-approval path re-derives the directory row.
         return await self.get_doctor_profile(doctor_id)
 
     async def update_doctor_photo(

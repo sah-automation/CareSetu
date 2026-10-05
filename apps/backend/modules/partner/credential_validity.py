@@ -18,13 +18,20 @@ deep module that owns:
   revocation, credential expiry close-out, credential purge) converge on this
   module so a change to credential-expiry semantics (ADR-0011) is defined once
   and all paths emit an identical outcome.
+- **A single directory-entry refresh** (``refresh_directory_entry``) - the one
+  writer of the read-side entry's declared fields, shared by the operator
+  approval path and the doctor's own address save (#607). It copies the
+  position and the specialties off the profile row and nothing else: the listed
+  flag stays activation-owned and no credential row is read or written, so a
+  doctor-triggered call can move a listing but can neither list its caller nor
+  vouch for its caller's credentials.
 - **A single activate transition** (``activate_partner``) - the symmetric
   counterpart of the close-out (#456): operator approval stamps the current
-  round's ``partner_credentials`` rows verified and upserts/refreshes the
-  partner's ``partner_directory_index`` entry. Both directions of visibility
-  change (activate on approve, deindex on close-out) travel through this
-  module, so the state bookkeeping agrees with the read-side predicates by
-  construction.
+  round's ``partner_credentials`` rows verified, refreshes the partner's
+  ``partner_directory_index`` entry through the shared refresh, and flips that
+  entry's listed flag. Both directions of visibility change (activate on
+  approve, deindex on close-out) travel through this module, so the state
+  bookkeeping agrees with the read-side predicates by construction.
 
 ADR-0011 semantics are absorbed unchanged: lazy read-hide (an expired
 credential is never displayed even minutes after the date passes) and the
@@ -41,7 +48,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import and_, func, literal, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -295,6 +302,119 @@ async def close_out_credentials(
 
 
 # ---------------------------------------------------------------------------
+# Single directory-entry refresh (shared by activation and the doctor's own
+# address save)
+# ---------------------------------------------------------------------------
+
+
+async def refresh_directory_entry(
+    connection: AsyncConnection,
+    partner_id: int,
+) -> None:
+    """Re-derive the read-side directory entry from the partner's live profile.
+
+    The ONE writer of ``partner_directory_index``'s declared fields (#607), and
+    the second writer of the entry itself since the activation seam stopped
+    being its only one. Called by the operator approval path, through
+    :func:`activate_partner`; the doctor's own address save (#609) is its second
+    caller. A doctor who corrects a wrong sign-up PIN moves their listing;
+    nothing else about them moves.
+
+    **What it writes.** The practice position
+    (``practice_latitude``/``practice_longitude``) and the specialties (the
+    profile's declared selection - #602's closed vocabulary in #606's
+    multi-valued storage). The third declared part of the address, the locality,
+    lives on the profile row this reads and is persisted by the caller's own
+    profile write in the same transaction; the entry carries no locality column,
+    so there is nothing for this statement to write there.
+
+    **What it structurally cannot write.** It takes no values at all: every
+    refreshed column is read off the profile row by an ``INSERT ... FROM
+    SELECT`` (the shape the activation seam already used), so there is no
+    parameter a caller could supply, and no route by which a doctor reaches a
+    column that is not theirs to set.
+
+    - The listed flag (``is_active``) is named nowhere in this statement, and a
+      doctor-triggered call cannot create a row that would take the column's
+      server default either, because the write is scoped to a partner whose
+      recorded status is ``[Active]`` - the same clause ``provider_visible``
+      ANDs with the flag. A profile save can therefore only ever touch a row
+      that activation already created, and only move where that row is found.
+      Activation owns the flag and sets it explicitly
+      (:func:`activate_partner`).
+    - No ``partner_credentials`` row is read or written. The ``verified`` stamp
+      is round-scoped bookkeeping the activate transition owns, and every clause
+      of the verified derivation reads activation state and recorded credential
+      dates rather than the entry, so refreshing the entry cannot reach it.
+    - ``partner_type`` is a registration-time declared attribute, not a
+      doctor-editable field, so an existing entry's value is never re-derived.
+      It is in the insert's column list only because the column is NOT NULL and a
+      row that does not exist yet has no other source for it.
+
+    **Idempotent by construction.** The conflict target is ``partner_id``
+    (ADR-0012: one entry per partner), so re-running refreshes the row that is
+    already there instead of inserting a second one. That is not tidiness: a
+    doctor indexed before this writer existed carries an entry with no
+    specialties on it, and the conflict path is the only thing that can ever
+    fill them in.
+
+    **In the caller's transaction.** It takes the caller's connection and opens
+    no transaction of its own (ADR-0002 §1), which is what lets the address save
+    write the profile and re-derive the entry atomically, or roll both back
+    together. Nothing here rolls back on its own either.
+
+    **Flushes the directory search cache.** A cached search row carries the
+    doctor's distance as it stood when the row was written, and the cache key
+    holds the CALLER's geo point, so no single partner can be addressed by key -
+    a moved doctor keeps serving the old distance until the whole namespace is
+    flushed. The flush lives inside the operation rather than in each caller
+    precisely so that a second caller cannot forget it: the operator approval
+    path flushes again after its activation event (both are best-effort
+    namespace flushes, cheap and idempotent), and the address save flushes
+    exactly once, here. The failure mode if Redis is unavailable is a stale
+    distance for one TTL, never a visibility leak (ADR-0011).
+    """
+    index_stmt = postgresql_insert(partner_directory_index)
+    await connection.execute(
+        index_stmt.from_select(
+            [
+                partner_directory_index.c.partner_id,
+                partner_directory_index.c.practice_latitude,
+                partner_directory_index.c.practice_longitude,
+                partner_directory_index.c.partner_type,
+                partner_directory_index.c.specialty,
+            ],
+            select(
+                partner_profiles.c.id,
+                partner_profiles.c.practice_latitude,
+                partner_profiles.c.practice_longitude,
+                partner_profiles.c.partner_type,
+                partner_profiles.c.specialties,
+            ).where(
+                partner_profiles.c.id == partner_id,
+                # The entry exists for [Active] partners (glossary: one
+                # directory entry per [Active] partner), so a profile save for a
+                # partner no operator has approved writes nothing at all - it
+                # cannot bring an entry row into existence, let alone a listed
+                # one. The status is READ here and written by nobody: it is the
+                # activation transition's, and the same recorded value
+                # ``provider_visible`` derives visibility from.
+                partner_profiles.c.status == "Active",
+            ),
+        ).on_conflict_do_update(
+            index_elements=["partner_id"],
+            set_={
+                "practice_latitude": index_stmt.excluded.practice_latitude,
+                "practice_longitude": index_stmt.excluded.practice_longitude,
+                "specialty": index_stmt.excluded.specialty,
+                "updated_at": func.now(),
+            },
+        )
+    )
+    await directory_visibility_changed()
+
+
+# ---------------------------------------------------------------------------
 # Single activate transition (convergent on operator approval)
 # ---------------------------------------------------------------------------
 
@@ -315,18 +435,30 @@ async def activate_partner(
     - stamps the current round's ``partner_credentials`` rows ``verified =
       true`` (round-scoped so a re-approval of a re-verification round never
       touches the already-approved round's history; revoked rows are left
-      alone - a revoked credential stays invisible regardless), and
-    - upserts/refreshes the partner's ``partner_directory_index`` row from the
-      live profile (practice location, partner type, specialty (currently NULL
-      - no specialty data in ``partner_profiles`` yet), ``is_active = true``),
-      so an existing entry is refreshed, never duplicated - idempotent.
+      alone - a revoked credential stays invisible regardless),
+    - refreshes the partner's ``partner_directory_index`` row through
+      :func:`refresh_directory_entry`, the shared projection write the doctor's
+      own address save also calls, so the two paths can never disagree about
+      which position and specialties the entry carries (the refresh writes only
+      for a partner whose recorded status is ``[Active]``, which the status flip
+      above has just made true in this same transaction), and
+    - flips that entry's listed flag to true.
+
+    The listed flag is the one index column that does NOT move into the shared
+    refresh, and the separation is deliberate (#607): the refresh is reachable
+    from a doctor's own profile save, and ``is_active`` is one of the four
+    AND-ed clauses of ``provider_visible``. It stays here, behind the only path
+    to ``[Active]`` that exists (ADR-0008), so a doctor cannot list themselves by
+    editing their own profile. The row this transition creates takes the
+    column's server default on insert; the statement below is what makes an
+    already-deindexed entry listed again on re-approval.
 
     All writes happen inside the caller's transaction (ADR-0002 §1), matching
     ``close_out_credentials``. The caller (the operator-gate approve path)
     still owns the status flip, the verification decision row and the
     ``partner.activated`` event; this transition owns the credential-verified
-    stamp and the index bookkeeping that the read-side ``provider_visible``
-    predicate and the directory projection depend on.
+    stamp, the listed flag, and the entry bookkeeping that the read-side
+    ``provider_visible`` predicate and the directory projection depend on.
     """
     await connection.execute(
         partner_credentials.update()
@@ -337,33 +469,9 @@ async def activate_partner(
         )
         .values(verified=True, updated_at=func.now())
     )
-    index_stmt = postgresql_insert(partner_directory_index)
+    await refresh_directory_entry(connection, partner_id)
     await connection.execute(
-        index_stmt.from_select(
-            [
-                partner_directory_index.c.partner_id,
-                partner_directory_index.c.practice_latitude,
-                partner_directory_index.c.practice_longitude,
-                partner_directory_index.c.partner_type,
-                partner_directory_index.c.specialty,
-                partner_directory_index.c.is_active,
-            ],
-            select(
-                partner_profiles.c.id,
-                partner_profiles.c.practice_latitude,
-                partner_profiles.c.practice_longitude,
-                partner_profiles.c.partner_type,
-                literal(None),
-                literal(True),
-            ).where(partner_profiles.c.id == partner_id),
-        ).on_conflict_do_update(
-            index_elements=["partner_id"],
-            set_={
-                "practice_latitude": index_stmt.excluded.practice_latitude,
-                "practice_longitude": index_stmt.excluded.practice_longitude,
-                "partner_type": index_stmt.excluded.partner_type,
-                "is_active": True,
-                "updated_at": func.now(),
-            },
-        )
+        partner_directory_index.update()
+        .where(partner_directory_index.c.partner_id == partner_id)
+        .values(is_active=True, updated_at=func.now())
     )

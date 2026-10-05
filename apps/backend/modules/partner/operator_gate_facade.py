@@ -233,11 +233,15 @@ class OperatorGateFacade:
                 # The activation seam (#456): approval is the ONLY path that
                 # makes a partner directory-visible, so it routes through the
                 # credential-validity deep module's single activate transition
-                # - the round's credentials are stamped verified and the
-                # directory-index row upserted here, in the same transaction as
-                # the status flip/decision/event (ADR-0002 §1), mirroring how
-                # the reject of an ``[Active]`` partner routes close-out
-                # (WI-1, #331): never local choreography.
+                # - the round's credentials are stamped verified, the
+                # directory-entry refresh runs (the same shared operation the
+                # doctor's own address save calls, #607) and the entry's listed
+                # flag is flipped here, all in the same transaction as the
+                # status flip/decision/event (ADR-0002 §1), mirroring how the
+                # reject of an ``[Active]`` partner routes close-out (WI-1,
+                # #331): never local choreography. The listed flag stays on
+                # this side of the seam precisely because this is the only path
+                # that can set it.
                 await self._credential_validity.activate_partner(
                     connection,
                     partner_id,
@@ -253,6 +257,11 @@ class OperatorGateFacade:
                 # directory search can return, so every cached search result is
                 # now potentially stale. Flush the namespace (best-effort Redis
                 # op - failure silently degrades to the lazy-correct read path).
+                # The refresh inside the transition already flushed one, and
+                # deliberately so: it owns the position it just moved, and a
+                # second caller (#609) must not be trusted to remember. Two
+                # idempotent best-effort flushes on a rare operator action cost
+                # less than a missed one.
                 await self._directory_cache.directory_visibility_changed()
             else:
                 await write_outbox(

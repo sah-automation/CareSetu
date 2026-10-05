@@ -397,8 +397,13 @@ export default function DoctorPatientDetailPage() {
   // URL. A missing or denied photo degrades to the avatar fallback, never an
   // error surface. The object URL is revoked on teardown so a stale URL is
   // never left alive after navigating away.
+  //
+  // `has_photo` is a boolean presence flag, not a nullable ref (S2: the console
+  // never learns where the photo is stored), so "no photo" is `false` rather
+  // than `null` - the fetch keys off the same flag the detail body carried.
   useEffect(() => {
-    if (detail?.contact?.photo_ref == null) {
+    const hasPhoto = detail?.contact?.has_photo ?? false;
+    if (!hasPhoto) {
       setPhotoUrl(null);
       return;
     }
@@ -422,7 +427,7 @@ export default function DoctorPatientDetailPage() {
         URL.revokeObjectURL(objectUrl);
       }
     };
-  }, [detail?.contact?.photo_ref, patientId]);
+  }, [detail?.contact?.has_photo, patientId]);
 
   const ready = loadStatus === "ready" && detail != null;
   const lookup: Lookup = { t, consoleT, recordT, lang };

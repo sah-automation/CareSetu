@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Protocol
+from enum import StrEnum
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
@@ -47,9 +48,20 @@ PARTNER_SCHEMA = "partner"
 class CredentialValidityPort(Protocol):
     """Surface the credential-validity deep module exposes to sub-facades.
 
-    Captures the 3 SQL predicates, the single close-out transition and the
-    single activate transition so sub-facades depend on a typed seam rather
-    than ``Any`` or ``ModuleType`` (coding-standards S3).
+    Captures the 3 SQL predicates, the single close-out transition, the single
+    activate transition and the shared directory-entry refresh so sub-facades
+    depend on a typed seam rather than ``Any`` or ``ModuleType``
+    (coding-standards S3).
+
+    ``refresh_directory_entry`` sits here rather than in a second one-method
+    port, and the reason is worth stating because the fit is imperfect: it is a
+    read-side projection write owned by the same module as the predicates that
+    read it, and the doctor's own address save (#609) reaches it through this
+    seam even though the write is not about credential validity. A second port
+    with one method would be a thinner abstraction, not a clearer one - and
+    whoever opens this file next is exactly the person who must not read a
+    doctor-triggered call as a privilege escalation, so the operation's name and
+    this note carry that.
     """
 
     def provider_visible(self, column: ColumnElement[Any]) -> ColumnElement[bool]: ...
@@ -66,6 +78,11 @@ class CredentialValidityPort(Protocol):
         partner_id: int,
         *,
         round: int,
+    ) -> None: ...
+    async def refresh_directory_entry(
+        self,
+        connection: AsyncConnection,
+        partner_id: int,
     ) -> None: ...
 
 
@@ -107,6 +124,98 @@ class DirectoryCachePort(Protocol):
 # v5.4). An unknown explicitly-declared ``service_area_id`` is rejected at the
 # facade (mapped to a 422) so a partner is never attached to a nonexistent area.
 DEFAULT_SERVICE_AREA_NAME = "Daltonganj"
+
+
+def representative_specialty(raw: object) -> str | None:
+    """Project a multi-valued specialty selection onto one representative value.
+
+    The directory entry's ``specialty`` column became a multi-valued selection in
+    #606, because a doctor practises more than one kind of care and the overlap
+    search (#612) matches on membership. One projection still declares the field
+    as a single nullable string - the directory browse entry - and #612 decided
+    whether it widens, which it does not. The public provider profile is no
+    longer one of them: #613 widened its declared band to carry the whole
+    selection in ``specialties`` and derives the singular ``specialty`` label
+    from that same validated list, so it does not read the entry's copy and the
+    two spellings cannot disagree. The private doctor profile view is likewise
+    no longer one of them - #608 sources it from the profile row and returns the
+    whole selection, which is :func:`selection_members` below.
+
+    Until the browse projection widens this is the one place its readers agree on
+    what a selection projects to: the FIRST member, or ``None`` for an empty
+    selection and for a lab or chemist row, whose directory entry carries no
+    specialty at all. Order is the selection's own, so the value is the doctor's
+    first declared specialty rather than an alphabetical or arbitrary one.
+
+    Defensive by design, because the value arrives off the driver as whatever
+    asyncpg decoded: a JSONB array arrives as a list, ``NULL`` as ``None``, and a
+    non-array JSONB scalar - which nothing writes, but a hand-repaired row might -
+    is not silently rendered as its own text repr. The first member that is a
+    non-empty string wins, so a junk member cannot swallow a real one and hide a
+    doctor from their own specialty search; a value that is not a list or tuple,
+    or a list with no usable member, projects to ``None``, so a malformed row
+    reads as "no specialty" rather than leaking a Python ``repr`` into a response
+    field.
+    """
+    members = selection_members(raw)
+    return members[0] if members else None
+
+
+def selection_members(raw: object) -> list[str]:
+    """Project a stored multi-valued selection column onto the strings it holds.
+
+    The read-side counterpart of the domain's ``require_*`` walks
+    (``domain/vocabularies.py``): a write is checked member by member against a
+    closed list, and this is what the reader gets back off the column. The private
+    doctor profile view returns the doctor's declared selection rather than one of
+    its members, because that is what the row holds and what the doctor just
+    wrote - it now serves three such columns, ``specialties``, ``languages`` and
+    ``consulting_days``, which is why the name is about the shape rather than the
+    one field that landed it (#608, then #610).
+
+    Equally defensive, for the same reason and with the same driver-shaped inputs
+    - a JSONB array arrives as a list, ``NULL`` as ``None``, and a hand-repaired
+    row could hold a scalar: a non-list reads as the empty selection rather than
+    as a Python ``repr``. Non-string and empty-string members are DROPPED rather
+    than rendered, because the view is declared ``extra="forbid"`` with a
+    ``list[str]`` field and a junk member would otherwise surface as a 500 from
+    the response model instead of a readable profile. Order is the stored
+    selection's own, so the doctor sees their declared order, which is what the
+    overlap search (#612) matches against.
+    """
+    if isinstance(raw, (str, bytes)) or not isinstance(raw, (list, tuple)):
+        return []
+    return [member for member in raw if isinstance(member, str) and member]
+
+
+_VocabularyT = TypeVar("_VocabularyT", bound=StrEnum)
+
+
+def known_selection(raw: object, vocabulary: type[_VocabularyT]) -> list[str]:
+    """Project a stored selection down to the members its vocabulary owns.
+
+    :func:`selection_members` answers "what does the column hold"; this answers
+    "what may we publish", and the difference matters only on the PUBLIC read.
+    A closed list is enforced at the application layer - no CHECK constraint
+    carries it - so a row is one hand-repair away from holding a value outside
+    the list, and the private doctor view can afford to show a doctor exactly
+    what they declared while a profile a stranger reads cannot.
+
+    So this composes the two rules rather than re-deriving either: the driver's
+    shape defence is :func:`selection_members` (a non-list reads as the empty
+    selection, junk members drop), and the vocabulary is ``vocabulary`` itself -
+    the :mod:`domain.vocabularies` enum the write validates against, passed in
+    rather than named here, so no list is restated at a third site. A member the
+    vocabulary does not own is DROPPED, exactly as a junk member is, and the
+    declared order of the members that survive is preserved.
+
+    Dropping rather than raising is the point: a public read that raised on a
+    junk member would turn one hand-repaired row into a 404-shaped hole on a
+    page a patient is reading, which is the wrong answer to a value nobody
+    checked. An unknown member simply is not part of the declared selection.
+    """
+    known = {member.value for member in vocabulary}
+    return [member for member in selection_members(raw) if member in known]
 
 
 @dataclass(frozen=True)

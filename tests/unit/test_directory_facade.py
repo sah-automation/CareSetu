@@ -1,4 +1,7 @@
-"""DirectoryFacade direct-seam suite (ADR-0006, WI-2 p2b #337).
+"""
+
+Trace: FEAT-004 (Provider Directory and Search).
+DirectoryFacade direct-seam suite (ADR-0006, WI-2 p2b #337).
 
 Drives the directory sub-facade through a mocked engine, mirroring the iam MFA
 facade direct-seam suite and the registration/operator-gate sub-facade suites:
@@ -10,15 +13,22 @@ suite's job.
 
 Pins:
 
-- ``search_directory`` projects SQL rows into a ``DirectorySearchView`` (area
-  fallback, ``verified`` tick), applies the wider-area fallback with the honest
-  ``fell_back`` flag, and writes the ``directory.search`` analytics envelope in
-  the same transaction.
+- ``search_directory`` projects SQL rows into a ``DirectorySearchView``
+  (``area`` from the doctor-declared locality, null when none, ``verified`` tick),
+  applies the wider-area fallback with the honest ``fell_back`` flag, and writes
+  the ``directory.search`` analytics envelope in the same transaction. That the
+  projected area comes from ``address_locality`` and NOT from
+  ``partner_service_areas`` is a DB-backed property - only a real query can show a
+  doctor whose recorded service area disagrees with their declared locality - so it
+  is the integration suite's pin
+  (``tests/integration/test_directory_search.py``, #612), not this one's.
 - The cached-search accelerator (PHASE-6 T02b, #314): a valid cache hit is
   served without re-scanning; a hit whose cached ids no longer pass validity is
   rejected and fresh SQL replaces the stale row (ADR-0011 lazy correctness).
-- ``get_provider_profile`` projects the verified-safe payload, or raises
-  ``ProviderProfileNotFoundError`` when the partner is hidden.
+- ``get_provider_profile`` projects the credential band the platform checked and
+  the declared band the doctor wrote (#613) - the closed-vocabulary selections
+  filtered on read - or raises ``ProviderProfileNotFoundError`` when the
+  partner is hidden.
 - ``record_partner_selected`` writes the analytics pick, nothing else.
 """
 
@@ -32,8 +42,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.sql.dml import Insert
 
 from modules.partner.directory_facade import DirectoryFacade
+from modules.partner.directory_models import ProviderProfileView
 from modules.partner.domain.exceptions import ProviderProfileNotFoundError
-from modules.partner.facade import DEFAULT_SERVICE_AREA_NAME
 
 
 class _FakeValidity:
@@ -125,13 +135,19 @@ def _facade(
     )
 
 
-def _entry_row(*, partner_id: int, area_name: Any = None) -> _Row:
+def _entry_row(*, partner_id: int, locality: Any = None) -> _Row:
     return _Row(
         partner_id=partner_id,
         practice_name=f"Practice {partner_id}",
         partner_type="doctor",
-        specialty="General Physician" if partner_id % 2 else None,
-        area_name=area_name,
+        # A JSONB array, as the widened multi-valued column decodes (#606), and
+        # NULL for an even partner - the shape that still says "carries no
+        # specialty", which is what a lab/chemist entry carries.
+        specialty=["General Physician"] if partner_id % 2 else None,
+        # The doctor-declared locality column (#612), and NULL for a doctor who
+        # declared none - which projects to a null area, not a substituted
+        # vocabulary row.
+        declared_locality=locality,
         distance_km=3.5,
     )
 
@@ -157,14 +173,14 @@ def _cached_entry(partner_id: int) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_search_directory_projects_rows_with_the_area_fallback() -> None:
-    """SQL rows project into entries; a missing recorded area falls back to the launch default."""
+async def test_search_directory_projects_rows_with_the_declared_locality() -> None:
+    """SQL rows project into entries; ``area`` is the declared locality, null when none (#612)."""
     connection = _connection(
         [
             _FakeResult(
                 rows=[
                     _entry_row(partner_id=1),
-                    _entry_row(partner_id=2, area_name="Med"),
+                    _entry_row(partner_id=2, locality="Medininagar"),
                 ]
             ),
             _FakeResult(),  # directory.search analytics outbox write
@@ -177,9 +193,12 @@ async def test_search_directory_projects_rows_with_the_area_fallback() -> None:
     assert view.fell_back is False
     assert [entry.partner_id for entry in view.items] == [1, 2]
     first, second = view.items
-    assert first.area == DEFAULT_SERVICE_AREA_NAME
+    # No declared locality means NO area. The pre-#612 projection substituted the
+    # launch service-area name here, which rendered every doctor in the directory
+    # as Daltonganj - a platform default the doctor never declared.
+    assert first.area is None
     assert first.verified is True
-    assert second.area == "Med"
+    assert second.area == "Medininagar"
     assert isinstance(first.partner_id, int)
     assert isinstance(first.distance_km, float)
     # The analytics envelope is written in the same transaction as the read.
@@ -268,17 +287,47 @@ async def test_search_directory_replaces_a_stale_cache_hit_with_fresh_sql() -> N
     assert view.items[0].specialty == "General Physician"
 
 
+def _profile_row(**overrides: Any) -> _Row:
+    """A profile SELECT row for a doctor who has filled the whole declared band in.
+
+    Every column the profile SELECT reads since #613, so a test that constructs
+    its row from here cannot drift out of step with the projection and fail with
+    a bare ``AttributeError`` instead of an assertion about behaviour.
+    """
+    values: dict[str, Any] = {
+        "partner_id": 3,
+        "practice_name": "Dr. Asha Verma",
+        "partner_type": "doctor",
+        "clinic_name": "Shanti Clinic",
+        "specialties": ["General Physician", "Pediatrician"],
+        "languages": ["Hindi", "English"],
+        "consulting_days": ["Monday", "Saturday"],
+        "consulting_hours": "Mon-Sat, 9am-1pm",
+        "about": "Twenty years of neighbourhood practice.",
+        "experience_years": 20,
+        "address_line": "12, Nehru Road",
+        "address_landmark": "Near the water tank",
+        "address_locality": "Sadar",
+        "address_city": "Daltonganj",
+        "address_pin": "827101",
+    }
+    values.update(overrides)
+    return _Row(**values)
+
+
+async def _profile_for(row: _Row) -> ProviderProfileView:
+    facade = _facade(_connection([_FakeResult(row=row), _FakeResult(rows=[])]))
+    return await facade.get_provider_profile(3)
+
+
 @pytest.mark.asyncio
-async def test_get_provider_profile_projects_the_verified_safe_payload() -> None:
+async def test_get_provider_profile_projects_the_credential_band() -> None:
+    """The band the platform checked is unchanged by the #613 widening."""
     connection = _connection(
         [
             _FakeResult(
-                row=_Row(
-                    partner_id=3,
+                row=_profile_row(
                     practice_name="Healing Hands",
-                    partner_type="doctor",
-                    specialty="Dentist",
-                    area_name="DALTONGANJ",
                 )
             ),
             _FakeResult(
@@ -296,13 +345,137 @@ async def test_get_provider_profile_projects_the_verified_safe_payload() -> None
     assert profile.partner_id == 3
     assert profile.practice_name == "Healing Hands"
     assert profile.partner_type == "doctor"
-    assert profile.specialty == "Dentist"
     assert profile.verified is True
     assert [credential.credential_type for credential in profile.credentials] == [
         "degree_certificate",
         "registration_certificate",
     ]
     assert all(credential.status == "verified" for credential in profile.credentials)
+
+
+@pytest.mark.asyncio
+async def test_get_provider_profile_derives_the_specialty_label_from_the_selection() -> None:
+    """The singular label is the FIRST member of the same list it publishes.
+
+    The narrow surfaces render one label, and #613 added the whole selection
+    beside it. Reading the two from different columns would let one payload report
+    a label its own ``specialties`` list does not contain, so the label is derived
+    from the filtered selection and cannot drift from it - including when the first
+    declared member is one the vocabulary does not own and is therefore dropped.
+    """
+    profile = await _profile_for(
+        _profile_row(specialties=["Homeopathician", "Dentist", "Pediatrician"])
+    )
+
+    assert profile.specialties == ["Dentist", "Pediatrician"]
+    assert profile.specialty == profile.specialties[0]
+
+    empty = await _profile_for(_profile_row(specialties=[]))
+
+    assert empty.specialties == []
+    assert empty.specialty is None
+
+
+@pytest.mark.asyncio
+async def test_get_provider_profile_area_reads_the_declared_locality() -> None:
+    """#613 closes the half #612 left: ``area`` is the DECLARED locality.
+
+    #612 moved the search card onto ``address_locality`` and named this read as
+    the half it did not touch, so a card and the profile behind it could name two
+    different places - or the profile could name a platform vocabulary row. The
+    read no longer joins the service-area vocabulary at all, so an undeclared
+    locality is ``None`` rather than a substituted default.
+    """
+    declared = await _profile_for(_profile_row(address_locality="Medininagar"))
+
+    assert declared.area == "Medininagar"
+    assert declared.area == declared.locality
+
+    undeclared = await _profile_for(_profile_row(address_locality=None))
+
+    assert undeclared.area is None
+
+
+@pytest.mark.asyncio
+async def test_get_provider_profile_carries_the_declared_fields() -> None:
+    """#613: the widened payload projects the profile row's declared columns.
+
+    The fields are read off the PROFILE ROW, not off the directory entry this
+    read already joined - the profile row is what the four section writes land
+    on, so this is the only source that cannot lag the doctor's last save.
+    """
+    profile = await _profile_for(_profile_row())
+
+    assert profile.clinic_name == "Shanti Clinic"
+    assert profile.specialties == ["General Physician", "Pediatrician"]
+    assert profile.languages == ["Hindi", "English"]
+    assert profile.consulting_days == ["Monday", "Saturday"]
+    assert profile.consulting_hours == "Mon-Sat, 9am-1pm"
+    assert profile.about == "Twenty years of neighbourhood practice."
+    assert profile.experience_years == 20
+    assert profile.address_line == "12, Nehru Road"
+    assert profile.landmark == "Near the water tank"
+    assert profile.locality == "Sadar"
+    assert profile.city == "Daltonganj"
+    assert profile.pin_code == "827101"
+    # AC 4: none of that reached the indicator.
+    assert profile.verified is True
+
+
+@pytest.mark.asyncio
+async def test_get_provider_profile_drops_a_selection_member_the_vocabulary_does_not_own() -> None:
+    """A closed list is enforced at the application layer, so the PUBLIC read filters it.
+
+    No CHECK constraint carries ``Specialty`` / ``ConsultLanguage`` /
+    ``ConsultingDay``, so a hand-repaired row is the one way a value outside the
+    list reaches the column. It must not reach a patient - and it must not fail
+    the read either, which is why the member drops instead of raising.
+    """
+    profile = await _profile_for(
+        _profile_row(
+            specialties=["General Physician", "Homeopathician", "Dentist"],
+            languages=["Hindi", "Klingon"],
+            consulting_days=["Monday", "Caturday"],
+        )
+    )
+
+    assert profile.specialties == ["General Physician", "Dentist"]
+    assert profile.languages == ["Hindi"]
+    assert profile.consulting_days == ["Monday"]
+
+
+@pytest.mark.asyncio
+async def test_get_provider_profile_reads_an_undeclared_band_as_nulls_and_empty_lists() -> None:
+    """A doctor who has declared nothing still resolves a 200-shaped profile."""
+    profile = await _profile_for(
+        _profile_row(
+            clinic_name=None,
+            specialties=[],
+            languages=[],
+            consulting_days=[],
+            consulting_hours=None,
+            about=None,
+            experience_years=None,
+            address_line=None,
+            address_landmark=None,
+            address_locality=None,
+            address_city=None,
+            address_pin=None,
+        )
+    )
+
+    assert profile.clinic_name is None
+    assert profile.specialties == []
+    assert profile.languages == []
+    assert profile.consulting_days == []
+    assert profile.consulting_hours is None
+    assert profile.about is None
+    assert profile.experience_years is None
+    assert profile.address_line is None
+    assert profile.landmark is None
+    assert profile.locality is None
+    assert profile.city is None
+    assert profile.pin_code is None
 
 
 @pytest.mark.asyncio

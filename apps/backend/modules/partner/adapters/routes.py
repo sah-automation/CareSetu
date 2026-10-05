@@ -29,7 +29,7 @@ from app.gateway.errors import emit_access_denial, error_response
 from app.gateway.idempotency import run_idempotent
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_operator, require_partner
-from modules.partner.domain.credentials import CredentialType, Specialty
+from modules.partner.domain.credentials import CredentialType
 from modules.partner.domain.events import PartnerType
 from modules.partner.domain.exceptions import (
     AppealAlreadyUsedError,
@@ -40,17 +40,23 @@ from modules.partner.domain.exceptions import (
     DoctorProfilePhotoTransferError,
     DoctorProfilePhotoValidationError,
     IllegalPartnerTransitionError,
+    InvalidConsultingDayError,
+    InvalidConsultLanguageError,
+    InvalidNotificationKeyError,
     InvalidQueueSortError,
     InvalidQueueStatusError,
+    InvalidSpecialtyError,
     PartnerError,
     PartnerNotActiveError,
     PartnerNotRejectedError,
     PartnerSuspendedError,
+    PracticePinUnresolvedError,
     ProviderProfileNotFoundError,
     RejectionReasonRequiredError,
     ReSubmissionThrottledError,
     ServiceAreaNotFoundError,
 )
+from modules.partner.domain.vocabularies import Specialty
 from modules.partner.facade import (
     CredentialSubmission,
     CredentialSubmissionResult,
@@ -123,16 +129,20 @@ async def public_provider_profile(
     request: Request,
     partner_id: int,
 ) -> ProviderProfileView:
-    """Public provider profile (FEAT-005, PHASE-6 T03 #309).
+    """Public provider profile (FEAT-005, PHASE-6 T03 #309, widened by #613).
 
-    Thin unauthenticated adapter over the ``MOD-002`` profile facade:
-    patients view a provider's verified credentials (type + status labels,
-    expiry date), service area and a truthful ``verified`` indicator.
+    Thin unauthenticated adapter over the ``MOD-002`` profile facade: patients
+    view a provider's verified credentials (type + status labels, expiry date)
+    and a truthful ``verified`` indicator, alongside the practice details the
+    doctor declared (clinic, specialties, languages, consulting days and hours,
+    about, experience, structured address parts, and the declared locality as
+    ``area``). Which of those fields a patient may believe is told by the field
+    itself, not by a flag - ``verified`` covers the credential band only.
     ``partner_id`` is the path parameter. The facade owns the visibility gate:
     not ``[Active]``, no index row, no credentials or any invalid credential
-    raises :class:`ProviderProfileNotFoundError` mapped to the 404 envelope.
-    The route carries no business logic - visibility derivation, credential
-    display, and the service-area default live in the facade.
+    raises :class:`ProviderProfileNotFoundError` mapped to the 404 envelope. The
+    route carries no business logic - visibility derivation, credential display
+    and the declared-field projections live in the facade.
     """
     facade = cast(PartnerFacade, request.app.state.partner_facade)
     return await facade.get_provider_profile(partner_id)
@@ -836,6 +846,130 @@ def register_error_handlers(app: FastAPI) -> None:
             request=request,
         )
 
+    # A specialty outside the closed pick-list is an expected 4xx, not a 500:
+    # the field is never free-form, so an unknown value can never persist and be
+    # unfilterable later. ``InvalidSpecialtyError`` escapes the request model's
+    # validator on purpose - a ``ValueError`` there would be swallowed into
+    # Pydantic's generic 422 and lose this envelope - and the handler below is
+    # what turns it into the standard field-level ``details.errors`` shape.
+    #
+    # ``path`` is the wire name of the field the doctor submitted, which is the
+    # practice card's multi-valued ``specialties`` (#608). The single-valued
+    # ``require_specialty`` entry point raises the same error but has no HTTP
+    # surface today; if one lands it registers its own handler rather than having
+    # this one report a field the request never carried.
+    def _field_rejection(
+        request: Request,
+        exc: Exception,
+        *,
+        code: str,
+        message: str,
+        path: str,
+    ) -> JSONResponse:
+        """Encode a domain pre-condition refusal as a FIELD-level validation error.
+
+        The one shape every closed-list refusal on this router takes: 422, the
+        domain's own code, and ``details.errors[0].path`` naming the field so the
+        doctor's card can point at the input that was refused. Four closed lists
+        are pinned here (#602's specialties, languages and days, plus #610's
+        notification keys) and each needs its own ``code`` and ``path``, which is why
+        they stay four registrations - but the encoding is written once, so a fifth
+        list cannot arrive with a subtly different envelope.
+        """
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            code,
+            message,
+            log_tag="doctor_profile",
+            request=request,
+            details={"errors": [{"path": path, "reason": str(exc)}]},
+        )
+
+    async def _invalid_specialty(request: Request, exc: Exception) -> JSONResponse:
+        invalid = cast(InvalidSpecialtyError, exc)
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            # Namespaced by module (api-standards: every code is ``SCREAMING_SNAKE``
+            # namespaced by module), matching the ``DOCTOR_PROFILE_*`` prefix the
+            # two refusals above already carry. A bare ``INVALID_SPECIALTY`` reads
+            # as a property of the vocabulary rather than of this console, and would
+            # collide the moment a second surface rejects a specialty.
+            "DOCTOR_PROFILE_INVALID_SPECIALTY",
+            "specialty must be a value from the closed specialty pick-list, "
+            "and must not repeat within the selection",
+            log_tag="doctor_profile",
+            request=request,
+            details={"errors": [{"path": "specialties", "reason": str(invalid)}]},
+        )
+
+    async def _practice_pin_unresolved(request: Request, exc: Exception) -> JSONResponse:
+        unresolved = cast(PracticePinUnresolvedError, exc)
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "DOCTOR_PROFILE_ADDRESS_PIN_UNRESOLVED",
+            "the declared PIN code does not resolve to a practice position",
+            log_tag="doctor_profile",
+            request=request,
+            # ``path`` is the wire name of the PIN field, and it is the reason this
+            # handler exists in the shape it does: the client renders the detail
+            # under that input rather than guessing which one failed. The detail is
+            # exactly ``path`` + ``reason`` like the specialty and photo refusals -
+            # no second machine key - because ``PinResolutionReason`` states that
+            # both refusals get the same actionable message anyway; what differs
+            # between them is only which sentence that message is.
+            #
+            # ``str(unresolved)`` never quotes the submitted code back.
+            details={"errors": [{"path": "pin_code", "reason": str(unresolved)}]},
+        )
+
+    # The two closed lists the About card draws on (#610), plus the notification
+    # keys. All three are the ``_invalid_specialty`` argument above applied three
+    # more times: the domain raises a typed error out of the request model's
+    # validator, and the handler is what turns it into the standard field-level
+    # ``details.errors`` shape instead of Pydantic swallowing it into a generic
+    # 422 the client cannot render under the offending input.
+    #
+    # Three handlers rather than one, because the three ``path`` values are the
+    # whole point: the client renders the detail under the language chips, under
+    # the day chips, or under the notification switches, and a shared handler
+    # reporting one field for all of them would put two of the three errors in the
+    # wrong place. The messages are user-safe and carry no PHI - a language or a
+    # day is a pick-list value, and a notification key is a machine identifier.
+    async def _invalid_consult_language(request: Request, exc: Exception) -> JSONResponse:
+        invalid = cast(InvalidConsultLanguageError, exc)
+        return _field_rejection(
+            request,
+            invalid,
+            code="DOCTOR_PROFILE_INVALID_CONSULT_LANGUAGE",
+            message="each language must be a value from the scheduled-languages list, "
+            "and must not repeat within the selection",
+            path="languages",
+        )
+
+    async def _invalid_consulting_day(request: Request, exc: Exception) -> JSONResponse:
+        invalid = cast(InvalidConsultingDayError, exc)
+        return _field_rejection(
+            request,
+            invalid,
+            code="DOCTOR_PROFILE_INVALID_CONSULTING_DAY",
+            message="each consulting day must be a value from the seven-day list, "
+            "and must not repeat within the selection",
+            path="consulting_days",
+        )
+
+    async def _invalid_notification_key(request: Request, exc: Exception) -> JSONResponse:
+        invalid = cast(InvalidNotificationKeyError, exc)
+        # No "must not repeat" clause, unlike the three pick-lists: a JSON object
+        # cannot hold the same key twice, so repeating is not a mistake this field
+        # can express.
+        return _field_rejection(
+            request,
+            invalid,
+            code="DOCTOR_PROFILE_INVALID_NOTIFICATION_KEY",
+            message="each notification preference must be one of the keys this console offers",
+            path="notification_preferences",
+        )
+
     async def _provider_profile_not_found(request: Request, exc: Exception) -> JSONResponse:
         del exc
         return error_response(
@@ -867,5 +1001,10 @@ def register_error_handlers(app: FastAPI) -> None:
         DoctorProfilePhotoStoreUnavailableError,
         _doctor_profile_photo_store_unavailable,
     )
+    app.add_exception_handler(InvalidSpecialtyError, _invalid_specialty)
+    app.add_exception_handler(InvalidConsultLanguageError, _invalid_consult_language)
+    app.add_exception_handler(InvalidConsultingDayError, _invalid_consulting_day)
+    app.add_exception_handler(InvalidNotificationKeyError, _invalid_notification_key)
+    app.add_exception_handler(PracticePinUnresolvedError, _practice_pin_unresolved)
     app.add_exception_handler(ProviderProfileNotFoundError, _provider_profile_not_found)
     app.add_exception_handler(PartnerError, _partner_failed)

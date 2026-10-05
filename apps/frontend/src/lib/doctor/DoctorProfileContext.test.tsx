@@ -1,3 +1,4 @@
+// PRD trace: FEAT-005 (Provider Profiles and Credential Display).
 // #583: provider suite for the doctor console's shared profile source. The
 // doctor client is mocked at the module boundary, so what is pinned here is the
 // discipline the read itself has to keep now that the chrome and the Profile page
@@ -54,9 +55,15 @@ function view(overrides: Partial<DoctorProfileView> = {}): DoctorProfileView {
     partner_id: 7,
     photo_ref: "doctor/7/photo-1.enc",
     practice_name: "Sunrise Clinic",
-    specialty: "General Physician",
+    clinic_name: null,
+    specialties: ["General Physician"],
     verified: true,
     practice_address: "Main Road, Daltonganj",
+    address_line: "Main Road, Daltonganj",
+    landmark: null,
+    locality: "Daltonganj",
+    city: "Daltonganj",
+    pin_code: "822001",
     practice_latitude: 24.1957,
     practice_longitude: 85.3656,
     area: "Daltonganj",
@@ -64,7 +71,8 @@ function view(overrides: Partial<DoctorProfileView> = {}): DoctorProfileView {
     experience_years: 12,
     about: "Twelve years of primary care.",
     consultation_fee: 40000,
-    availability: "Mon-Sat, 9am-1pm",
+    consulting_days: ["mon", "tue", "wed", "thu", "fri", "sat"],
+    consulting_hours: "Mon-Sat, 9am-1pm",
     credentials: [
       {
         credential_type: "medical_registration",

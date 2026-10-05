@@ -40,8 +40,12 @@ from modules.doctor.domain.exceptions import (
 )
 from modules.doctor.facade import DoctorConsoleFacade
 from modules.partner.facade import (
+    DoctorProfileAboutUpdate,
+    DoctorProfileAddressUpdate,
+    DoctorProfileAddressView,
+    DoctorProfileNotificationUpdate,
     DoctorProfilePhotoView,
-    DoctorProfileUpdate,
+    DoctorProfilePracticeUpdate,
     DoctorProfileView,
     PartnerFacade,
 )
@@ -108,21 +112,144 @@ async def get_doctor_profile(
 
 
 @router.put(
-    "/profile",
+    "/profile/practice",
     response_model=DoctorProfileView,
     status_code=status.HTTP_200_OK,
-    summary="Update the calling active doctor's private profile",
+    summary="Save the calling active doctor's practice details",
 )
-async def update_doctor_profile(
+async def update_doctor_profile_practice(
     request: Request,
     account: Annotated[Principal, Depends(require_partner)],
-    body: DoctorProfileUpdate,
+    body: DoctorProfilePracticeUpdate,
 ) -> DoctorProfileView:
+    """Save the Practice card on its own path, not on ``/profile`` (#608).
+
+    The first of the four section writes that replaced the retired whole-form
+    profile ``PUT`` (#611); #609/#610 added the other three. Each gets its OWN
+    path under the profile prefix rather than a second verb on ``/profile``,
+    because ``run_idempotent`` keys its stored result on the route and the
+    namespace: a client replaying an ``Idempotency-Key`` issued against the
+    whole-form write would otherwise be served this write's stored response.
+    The scoping itself is unchanged - per doctor, as on every other write here.
+    """
     facade = cast(PartnerFacade, request.app.state.partner_facade)
     doctor_id = await _require_doctor(request, account)
 
     async def _call() -> DoctorProfileView:
-        return await facade.update_doctor_profile(doctor_id, body)
+        return await facade.update_doctor_practice(doctor_id, body)
+
+    return await run_idempotent(request, _call, namespace=f"doctor:{doctor_id}")
+
+
+@router.put(
+    "/profile/address",
+    response_model=DoctorProfileAddressView,
+    status_code=status.HTTP_200_OK,
+    summary="Save the calling active doctor's practice address",
+)
+async def update_doctor_profile_address(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+    body: DoctorProfileAddressUpdate,
+) -> DoctorProfileAddressView:
+    """Save the Address card on its own path, not on ``/profile`` (#609).
+
+    The second of the four section writes, and the one that moves something public:
+    the backend resolves the declared PIN code and derives the position from it, so
+    correcting a wrong sign-up PIN moves the doctor's directory listing. The route
+    is otherwise #608 exactly - its own path under the profile prefix, the same
+    doctor guard, the same per-doctor ``run_idempotent`` namespace, the same facade
+    read-back shape.
+
+    The response model is the write's own rather than ``DoctorProfileView`` because
+    the outside-the-belt warning is this write's answer alone; a plain profile read
+    never evaluates the belt and carries no such field.
+
+    The request model declares no coordinate field, so ``extra="forbid"`` makes a
+    client-supplied position a 422 rather than a silently discarded one, and an
+    unresolvable PIN reaches the client as a 422 whose ``details.errors[].path``
+    names the PIN field - rendered under that input, leaving every other card's
+    unsaved edit untouched.
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    doctor_id = await _require_doctor(request, account)
+
+    async def _call() -> DoctorProfileAddressView:
+        return await facade.update_doctor_address(doctor_id, body)
+
+    return await run_idempotent(request, _call, namespace=f"doctor:{doctor_id}")
+
+
+@router.put(
+    "/profile/about",
+    response_model=DoctorProfileView,
+    status_code=status.HTTP_200_OK,
+    summary="Save the calling active doctor's about text and consulting availability",
+)
+async def update_doctor_profile_about(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+    body: DoctorProfileAboutUpdate,
+) -> DoctorProfileView:
+    """Save the About card on its own path, not on ``/profile`` (#610).
+
+    The third of the four section writes, and the one that splits a field rather
+    than moving it: a multi-valued language selection and a multi-valued consulting-day
+    selection, both checked against the closed vocabularies #602 owns, beside the
+    about text and the consulting hours. The route is otherwise #608 and #609
+    exactly - its own path under the profile prefix, the same doctor guard, the same
+    per-doctor ``run_idempotent`` namespace, the same facade read-back shape.
+
+    **Consulting hours cross this boundary as prose and nothing more.** No weekly
+    template, no per-day ranges, no slots: the platform has no booking system, so a
+    request shaped like one would be a promise the server cannot keep. A value like
+    "Mon-Sat mornings, Sat evening clinic after 5" is stored and served back
+    unchanged, which is the only thing this field promises.
+
+    A language or a day outside its closed list is a 422 whose
+    ``details.errors[].path`` names the offending field, so the card renders the
+    problem under the chips the doctor tapped rather than as a whole-card failure
+    that discards every other unsaved edit on the page.
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    doctor_id = await _require_doctor(request, account)
+
+    async def _call() -> DoctorProfileView:
+        return await facade.update_doctor_about(doctor_id, body)
+
+    return await run_idempotent(request, _call, namespace=f"doctor:{doctor_id}")
+
+
+@router.put(
+    "/profile/notifications",
+    response_model=DoctorProfileView,
+    status_code=status.HTTP_200_OK,
+    summary="Save the calling active doctor's notification preferences",
+)
+async def update_doctor_profile_notifications(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+    body: DoctorProfileNotificationUpdate,
+) -> DoctorProfileView:
+    """Save the Notification card on its own path, not on ``/profile`` (#610).
+
+    The fourth and last section write, and the smallest: one field, so a doctor
+    flipping one switch cannot half-save their about text and a doctor rewriting
+    their about text cannot flip a switch they never saw. Same registration shape
+    as its three siblings - own path under the profile prefix, same doctor guard,
+    same per-doctor ``run_idempotent`` namespace, same facade read-back.
+
+    The body carries the five known keys and nothing else; a sixth is a 422 whose
+    ``details.errors[].path`` is ``notification_preferences``. A key the server
+    already holds that the five do not name is preserved by the facade's merge
+    rather than dropped by this write - the promise the Profile page used to keep
+    client-side, now kept where every client gets it.
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    doctor_id = await _require_doctor(request, account)
+
+    async def _call() -> DoctorProfileView:
+        return await facade.update_doctor_notification(doctor_id, body)
 
     return await run_idempotent(request, _call, namespace=f"doctor:{doctor_id}")
 

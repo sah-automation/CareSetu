@@ -18,8 +18,10 @@ layout); the only tables they may hold are the five ``iam`` tables added
       (``v7.0__init_intake``) and the doctor-review attribution column
       (``v7.1__intake_reviewed_by``, #353).
       Phase 8 adds the MOD-006 care schema storage foundation
-      (``v8.0__init_care``) and the patient-profile-completion table
-      (``v8.8__iam_patient_profiles``).
+      (``v8.0__init_care``), the patient-profile-completion table
+      (``v8.8__iam_patient_profiles``) and the PIN centroid reference dataset
+      the doctor profile's practice position resolves against
+      (``v8.16__pin_centroid_table_and_seed``, #601).
   2. The outbox/``consumed_events`` DDL template materializes into a throwaway
      schema with the documented row contract (issue #16), so the round-trip
      harness (T2c) can build on it.
@@ -99,6 +101,7 @@ EXPECTED_PARTNER_TABLES = {
     "partner.partner_verifications",
     "partner.partner_service_areas",
     "partner.partner_directory_index",
+    "partner.partner_pin_centroids",
     "partner.partner_outbox",
     "partner.consumed_events",
 }

@@ -1,4 +1,7 @@
-"""PHASE-5 T08: the operator verification console facade seams (ticket #252).
+"""
+
+Trace: FEAT-015 (Operator Console - Verification and Moderation).
+PHASE-5 T08: the operator verification console facade seams (ticket #252).
 
 Pins the DB-backed queue/detail/decision behavior against a mocked engine -
 the HTTP surface and RBAC are covered by ``test_partner_verification_route``
@@ -149,7 +152,8 @@ async def test_operator_approve_records_decision_and_emits_activated() -> None:
             _FakeResult(),  # profile update
             _FakeResult(),  # verification update
             _FakeResult(),  # credential verified stamp (activation seam #456)
-            _FakeResult(),  # directory-index upsert (activation seam #456)
+            _FakeResult(),  # directory-entry refresh (activation seam #456)
+            _FakeResult(),  # listed-flag flip (activation seam #456)
             _FakeResult(),  # partner.activated outbox insert
         ]
     )

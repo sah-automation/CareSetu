@@ -38,21 +38,12 @@ import {
 } from "@/lib/directory/search";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
+import { specialtyLabel } from "@/lib/directory/specialtyLabel";
 import { fetchPreSummary } from "@/lib/intake/api";
 import type { PickDoctorResult } from "@/lib/pick/api";
 import { deriveSpecialtyFromSymptoms } from "@/lib/pick/suggest";
 
 type LoadState = "loading" | "loaded" | "error";
-
-const SPECIALTY_LABEL_KEY: Record<
-  string,
-  keyof (typeof STRINGS)["en"]["directory"]["specialties"]
-> = {
-  "General Physician": "generalPhysician",
-  Pediatrician: "pediatrician",
-  Gynecologist: "gynecologist",
-  Dentist: "dentist",
-};
 
 const chipClass = (active: boolean) =>
   `rounded-full border px-3 py-1.5 text-sm shadow-sm transition-colors hover:border-accent-border hover:bg-accent-soft hover:text-accent-strong ${
@@ -287,7 +278,7 @@ export default function PickDoctorPage() {
                     onClick={() => setFilter(active ? null : specialty)}
                     className={chipClass(active)}
                   >
-                    {directory.specialties[SPECIALTY_LABEL_KEY[specialty]]}
+                    {specialtyLabel(lang, specialty)}
                   </button>
                 );
               })}
@@ -374,10 +365,7 @@ export default function PickDoctorPage() {
                     typeLabel={directory.typeDoctor}
                     specialtyLabel={
                       entry.specialty
-                        ? directory.specialties[
-                            SPECIALTY_LABEL_KEY[entry.specialty] ??
-                              "generalPhysician"
-                          ]
+                        ? specialtyLabel(lang, entry.specialty)
                         : null
                     }
                     verifiedLabel={directory.verified}

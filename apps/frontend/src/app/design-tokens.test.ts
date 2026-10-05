@@ -91,26 +91,42 @@ const RADIUS_TOKEN_PATHS = new Set(
 );
 
 describe("resolved brand palette (#193)", () => {
-  it("defines every resolved brand hex exactly once, in tokens.css", () => {
-    for (const [role, hex] of Object.entries(BRAND_HEXES)) {
-      expect(tokensCss, `missing ${role} ${hex}`).toContain(hex);
-      expect(
-        tokensCss.match(new RegExp(hex, "gi"))?.length ?? 0,
-        `${hex} duplicated inside tokens.css`,
-      ).toBe(1);
-    }
-    expect(tokensCss).toContain("--warn-soft: #fef3c7");
-    expect(tokensCss).toContain("--warn-text: #92400e");
-  });
+  // The cases below walk the whole source tree with synchronous file reads, so
+  // their runtime is a property of how many files the app has, not of what they
+  // assert. Left on vitest's 5s default they flake: #623 caught one spending 8018ms
+  // under full-suite CPU contention while passing in 3.2s alone, which reports as
+  // a palette failure with no palette defect in it. The timeout is set well above
+  // the observed worst case so a genuine regression still fails.
+  const SCAN_TIMEOUT_MS = 60_000;
 
-  it("leaves the old seeded cyan accent nowhere in the app", () => {
-    for (const file of allSourceFiles()) {
-      const content = readFileSync(file, "utf8");
-      for (const hex of SEEDED_CYAN_HEXES) {
-        expect(content, `${file} still defines ${hex}`).not.toContain(hex);
+  it(
+    "defines every resolved brand hex exactly once, in tokens.css",
+    () => {
+      for (const [role, hex] of Object.entries(BRAND_HEXES)) {
+        expect(tokensCss, `missing ${role} ${hex}`).toContain(hex);
+        expect(
+          tokensCss.match(new RegExp(hex, "gi"))?.length ?? 0,
+          `${hex} duplicated inside tokens.css`,
+        ).toBe(1);
       }
-    }
-  });
+      expect(tokensCss).toContain("--warn-soft: #fef3c7");
+      expect(tokensCss).toContain("--warn-text: #92400e");
+    },
+    SCAN_TIMEOUT_MS,
+  );
+
+  it(
+    "leaves the old seeded cyan accent nowhere in the app",
+    () => {
+      for (const file of allSourceFiles()) {
+        const content = readFileSync(file, "utf8");
+        for (const hex of SEEDED_CYAN_HEXES) {
+          expect(content, `${file} still defines ${hex}`).not.toContain(hex);
+        }
+      }
+    },
+    SCAN_TIMEOUT_MS,
+  );
 });
 
 describe("single palette source (#193)", () => {

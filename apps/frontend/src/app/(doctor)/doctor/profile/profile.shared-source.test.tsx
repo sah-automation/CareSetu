@@ -1,3 +1,4 @@
+// PRD trace: FEAT-005 (Provider Profiles and Credential Display).
 // #583: the cross-surface seam for the doctor profile source.
 //
 // Every doctor-avatar test that existed before this ticket passes with the
@@ -49,7 +50,7 @@ import {
   deleteDoctorProfilePhoto,
   fetchDoctorProfile,
   fetchDoctorProfilePhoto,
-  updateDoctorProfile,
+  updateDoctorProfilePractice,
   uploadDoctorProfilePhoto,
   type DoctorProfileView,
 } from "@/lib/doctor/api";
@@ -106,7 +107,11 @@ vi.mock("@/lib/care/api", () => ({
 
 vi.mock("@/lib/doctor/api", () => ({
   fetchDoctorProfile: vi.fn(),
-  updateDoctorProfile: vi.fn(),
+  // #617, #623: the practice write the practice card makes, and the only one this
+  // suite exercises. The whole-form PUT used to sit above it mocked and unused - a
+  // fake standing in for a route that 405s. #623 deleted it with the client export
+  // it stood in for, so this suite now mocks exactly what it calls.
+  updateDoctorProfilePractice: vi.fn(),
   uploadDoctorProfilePhoto: vi.fn(),
   fetchDoctorProfilePhoto: vi.fn(),
   deleteDoctorProfilePhoto: vi.fn(),
@@ -118,7 +123,10 @@ vi.mock("@/lib/partner/api", () => ({
 }));
 
 const getProfile = vi.mocked(fetchDoctorProfile);
-const saveProfile = vi.mocked(updateDoctorProfile);
+// #623: the whole-form `saveProfile` mock went with the export it stubbed; #611
+// removed the route and every section writes its own. What is left is the
+// practice-section writer, which is the only one this suite exercises.
+const savePractice = vi.mocked(updateDoctorProfilePractice);
 const uploadPhoto = vi.mocked(uploadDoctorProfilePhoto);
 const getPhoto = vi.mocked(fetchDoctorProfilePhoto);
 const deletePhoto = vi.mocked(deleteDoctorProfilePhoto);
@@ -139,9 +147,15 @@ function profile(
     partner_id: 7,
     photo_ref: STORED_REF,
     practice_name: "Sunrise Clinic",
-    specialty: "General Physician",
+    clinic_name: "Sunrise Clinic",
+    specialties: ["General Physician"],
     verified: true,
     practice_address: "Main Road, Daltonganj",
+    address_line: "Main Road, Daltonganj",
+    landmark: null,
+    locality: "Daltonganj",
+    city: "Daltonganj",
+    pin_code: "822001",
     practice_latitude: 24.1957,
     practice_longitude: 85.3656,
     area: "Daltonganj",
@@ -149,24 +163,30 @@ function profile(
     experience_years: 12,
     about: "Twelve years of primary care.",
     consultation_fee: 40000,
-    availability: "Mon-Sat, 9am-1pm",
+    consulting_days: ["mon", "tue"],
+    consulting_hours: "Mon-Sat, 9am-1pm",
     credentials: [],
     notification_preferences: {},
     ...overrides,
   };
 }
 
-// The private PUT writes only the fields its model declares, and the reply is
-// the whole projection with everything the write did not touch carried through -
-// including the photo ref, which the write body cannot even mention.
+// A section write touches only its own columns, and the reply is the whole
+// projection with everything the write did not touch carried through - including
+// the photo ref, which no section write body can even mention. The projection
+// names the doctor's practice as `practice_name` while the practice write names
+// the column it owns `full_name`, so the rename happens here rather than by
+// spreading a body whose keys are not the projection's.
 function saveEchoesTheStoredRef() {
-  saveProfile.mockImplementation(async (update) => {
+  savePractice.mockImplementation(async (update) => {
     const current = getStored();
     return {
       ...current,
-      ...update,
+      practice_name: update.full_name,
+      clinic_name: update.clinic_name,
+      specialties: update.specialties,
+      experience_years: update.experience_years,
       photo_ref: current.photo_ref,
-      specialty: current.specialty,
       verified: current.verified,
       area: current.area,
       credentials: current.credentials,
@@ -204,7 +224,7 @@ async function renderBothSurfaces(view: DoctorProfileView = profile()) {
   const result = renderConsoleAndProfilePage();
   // The page is the page's own readiness signal, so waiting on it is waiting
   // on the shared read having answered.
-  await waitFor(() => screen.getByTestId("profile-details-form"));
+  await waitFor(() => screen.getByTestId("profile-declared-band"));
   return result;
 }
 
@@ -277,7 +297,7 @@ beforeEach(() => {
   getOpenCases.mockReset();
   getOpenCases.mockResolvedValue([]);
   getProfile.mockReset();
-  saveProfile.mockReset();
+  savePractice.mockReset();
   uploadPhoto.mockReset();
   getPhoto.mockReset();
   deletePhoto.mockReset();
@@ -320,8 +340,9 @@ describe("the doctor account menu and the doctor Profile page share one profile 
     uploadPhoto.mockResolvedValue({ photo_ref: UPLOADED_REF });
     pickPhoto("me.jpg");
 
-    // The page's own preview lands first...
-    const pageImg = await imageIn(screen.getByTestId("profile-photo"));
+    // The page's own preview lands first, in the identity band's avatar (#615
+    // moved the picker into the band, so the avatar is the page's surface)...
+    const pageImg = await imageIn(screen.getByTestId("profile-identity"));
     // ...and so does the chrome's account avatar, off the same source. No
     // reload, no second read of the projection, no second read of the bytes.
     const triggerImg = await imageIn(trigger);
@@ -378,7 +399,7 @@ describe("the doctor account menu and the doctor Profile page share one profile 
     expect(accountTrigger().querySelector("svg")).not.toBeNull();
     await waitFor(() =>
       expect(
-        screen.getByTestId("profile-photo").querySelector("img"),
+        screen.getByTestId("profile-identity").querySelector("img"),
       ).toBeNull(),
     );
     // The identity header's avatar agrees with the trigger rather than keeping
@@ -419,9 +440,11 @@ describe("the doctor account menu and the doctor Profile page share one profile 
     fireEvent.change(screen.getByTestId("profile-practice-name"), {
       target: { value: "Sunrise Clinic 2" },
     });
-    fireEvent.click(screen.getByTestId("profile-save"));
+    fireEvent.click(screen.getByTestId("profile-practice-save"));
     await waitFor(() =>
-      expect(screen.getByTestId("profile-saved")).toHaveTextContent(t.saved),
+      expect(screen.getByTestId("profile-practice-saved")).toHaveTextContent(
+        t.practiceSaved,
+      ),
     );
 
     // The dropdown's identity header is the ONLY place anywhere in the doctor
@@ -432,9 +455,9 @@ describe("the doctor account menu and the doctor Profile page share one profile 
       "Sunrise Clinic 2",
     );
     await closeIdentityHeader();
-    // The save declared no photo ref, so it could not have detached the stored
-    // photo; the reply carried it through and the chrome still shows it.
-    expect(saveProfile.mock.calls[0][0]).not.toHaveProperty("photo_ref");
+    // The practice write declared no photo ref, so it could not have detached the
+    // stored photo; the reply carried it through and the chrome still shows it.
+    expect(savePractice.mock.calls[0][0]).not.toHaveProperty("photo_ref");
     expect((await imageIn(accountTrigger())).getAttribute("src")).toMatch(
       /^blob:/,
     );
@@ -457,7 +480,7 @@ describe("the doctor account menu and the doctor Profile page share one profile 
         </AppShell>
       </DoctorProfileProvider>,
     );
-    await waitFor(() => screen.getByTestId("profile-details-form"));
+    await waitFor(() => screen.getByTestId("profile-declared-band"));
     expect(getProfile).toHaveBeenCalledTimes(1);
 
     // And the account menu makes no request of its own: opening it is instant.
@@ -489,7 +512,7 @@ describe("the doctor account menu and the doctor Profile page share one profile 
     await act(async () => {
       fireEvent.click(screen.getByTestId("error-banner-retry"));
     });
-    await waitFor(() => screen.getByTestId("profile-details-form"));
+    await waitFor(() => screen.getByTestId("profile-declared-band"));
     expect(getProfile).toHaveBeenCalledTimes(2);
     const triggerImg = await imageIn(accountTrigger());
     expect(triggerImg.getAttribute("src")).not.toContain(STORED_REF);

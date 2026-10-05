@@ -186,11 +186,13 @@ async def invalidate_directory_cache() -> None:
     """Invalidate ALL directory search cache rows.
 
     Fired on ``partner.activated`` and ``credential.invalidated`` (the two
-    events that can change which partners a cached search would return). Because
-    search results are sets of partners and the key buckets query/filters/geo,
-    no single partner can be addressed by key - the whole namespace is flushed.
-    Best-effort: Redis down is a no-op, and lazy correctness on the read path
-    keeps correctness regardless.
+    events that can change which partners a cached search would return), and on
+    a directory-entry refresh (which moves a partner's geo point, and a cached
+    row carries the ``distance_km`` computed from the position the entry had when
+    the row was written). Because search results are sets of partners and the key
+    buckets query/filters/geo, no single partner can be addressed by key - the
+    whole namespace is flushed. Best-effort: Redis down is a no-op, and lazy
+    correctness on the read path keeps correctness regardless.
     """
     client = get_directory_redis_client()
     if client is None:
@@ -207,13 +209,23 @@ async def invalidate_directory_cache() -> None:
 
 
 async def directory_visibility_changed() -> None:
-    """Flush the directory cache after any mutation that changes directory visibility.
+    """Flush the directory cache after any mutation that changes a cached search.
 
-    The single flush point every directory-visibility mutation (partner
-    activation, credential invalidation on re-verification failure, immediate
-    revocation, the daily expiry close-out pass, and the permanent-rejection
-    purge) funnels through - a visibility change can never be forgotten at one
-    spot. Wraps :func:`invalidate_directory_cache` unchanged: best-effort
-    namespace flush, silent on Redis absence or failure.
+    The single flush point every mutation that can change what a cached search
+    would return funnels through - partner activation, credential invalidation
+    on re-verification failure, immediate revocation, the daily expiry close-out
+    pass, the permanent-rejection purge, and the directory-entry refresh
+    (#607) - so a stale cached search can never be forgotten at one spot. Wraps
+    :func:`invalidate_directory_cache` unchanged: best-effort namespace flush,
+    silent on Redis absence or failure.
+
+    The name is now a slight under-statement: since #607 a flush also fires for
+    a change that moves no partner in or out of the directory, only where one is
+    found. The distinction is deliberate rather than accidental - the cached
+    distance is derived from the doctor's own position, so a moved doctor is
+    wrong in a cached row until the namespace goes, exactly as a deindexed one is
+    - and the alternative, a narrower per-partner invalidation, does not exist:
+    the cache key holds the searching patient's geo point, so there is no key
+    that names the partner whose entry changed.
     """
     await invalidate_directory_cache()

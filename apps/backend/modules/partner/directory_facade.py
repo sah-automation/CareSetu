@@ -13,8 +13,9 @@ The sub-facade owns the patient-facing read surface:
   verified, unexpired and unrevoked, nearest-first by great-circle distance,
   with the wider-area fallback and the ``directory.search`` analytics event.
 - ``get_provider_profile`` is the public provider profile (FEAT-005, PHASE-6
-  T03 #309): the verified-safe profile, hidden exactly when search hides the
-  card.
+  T03 #309, widened by #613 with the doctor's declared fields): the verified
+  credential band plus the band the doctor declared, hidden exactly when
+  search hides the card.
 - ``record_partner_selected`` records one ``partner.selected`` analytics pick
   (PHASE-6 T4 #326).
 - ``_cached_search_view`` / ``_cached_ids_still_valid`` are the cached-search
@@ -35,7 +36,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import Text, cast, func, literal, or_, select
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from bus.outbox_writer import write_outbox
@@ -56,18 +58,24 @@ from modules.partner.domain.events import (
     partner_selected_envelope,
 )
 from modules.partner.domain.exceptions import ProviderProfileNotFoundError
+from modules.partner.domain.practice_position import EARTH_MEAN_RADIUS_KM
+from modules.partner.domain.vocabularies import (
+    ConsultingDay,
+    ConsultLanguage,
+    Specialty,
+)
 from modules.partner.outbox import PARTNER_OUTBOX_TABLE
 from modules.partner.schema.models import (
     partner_credentials,
     partner_directory_index,
     partner_profiles,
-    partner_service_areas,
 )
 from modules.partner.shared import (
-    DEFAULT_SERVICE_AREA_NAME,
     PARTNER_SCHEMA,
     CredentialValidityPort,
     DirectoryCachePort,
+    known_selection,
+    representative_specialty,
 )
 
 # The peri-urban scope of the Phase-6 launch directory (FEAT-004, REQ-008):
@@ -106,7 +114,9 @@ def _haversine_km(latitude: float, longitude: float) -> Any:
     Computed in SQL over ``practice_latitude``/``practice_longitude`` so the
     peri-urban range clamp and the nearest-first sort both stay in the
     database (FEAT-004 geo via SQL range; PostGIS optional at the cost floor,
-    MOD-002 §4). Returns the SQL expression - 6371 km mean Earth radius.
+    MOD-002 §4). Returns the SQL expression - 6371 km mean Earth radius, the
+    same ``EARTH_MEAN_RADIUS_KM`` the pure ``great_circle_km`` decision uses, so
+    the expression and the Python calculation cannot drift apart (#603).
     """
     rad_lat_me = func.radians(latitude)
     rad_lng_me = func.radians(longitude)
@@ -117,7 +127,7 @@ def _haversine_km(latitude: float, longitude: float) -> Any:
     a = func.power(func.sin(dlat / 2), 2) + func.cos(rad_lat_me) * func.cos(
         rad_lat_row
     ) * func.power(func.sin(dlon / 2), 2)
-    return 6371.0 * 2.0 * func.asin(func.sqrt(a))
+    return EARTH_MEAN_RADIUS_KM * 2.0 * func.asin(func.sqrt(a))
 
 
 class DirectoryFacade:
@@ -171,12 +181,18 @@ class DirectoryFacade:
         unexpired and unrevoked (the "provider" visibility rule - REQ-028 +
         ADR-0011, both derived on read, never cached), nearest-first by
         great-circle distance from the caller's geo point. ``partner_type``
-        filters on the closed doctor/lab/chemist enum; ``specialty`` applies the
-        closed pick-list and is doctors-only (a non-doctor type with a specialty
-        matches nothing); ``query`` is free-text over the practice name. A
-        missing geo point anchors the sort on the Daltonganj centre - the
-        launch-geography default the callers rely on (REQ-008 decision record;
-        the adapters stay geography-agnostic and let the domain own its default).
+        filters on the closed doctor/lab/chemist enum; ``specialty`` names ONE
+        closed-pick-list value and OVERLAPS it against the doctor's whole declared
+        selection (#606), and is doctors-only, so a lab matches nothing when one is
+        asked for; ``query`` is free-text over the practice name. A missing geo point
+        anchors the sort on the Daltonganj centre - the launch-geography default the
+        callers rely on (REQ-008 decision record; the adapters stay
+        geography-agnostic and let the domain own its default).
+
+        ``area`` on each entry is the doctor's own DECLARED locality and is ``None``
+        when they declared none (#612). It is not the service-area vocabulary, which
+        is a registration default rather than something a patient should read as
+        where the practice is.
 
         The wider-area fallback (glossary): when no entry matches within the
         peri-urban scope, the location constraint alone is relaxed (type,
@@ -220,10 +236,39 @@ class DirectoryFacade:
             if partner_type is not None:
                 conditions.append(partner_directory_index.c.partner_type == partner_type)
             if specialty is not None:
-                # Specialty is doctors-only (closed pick-list, glossary); a
-                # lab/chemist row never carries one, so pin the type too.
+                # Specialty is doctors-only (closed pick-list, glossary), so the type
+                # is pinned too. The pin is load-bearing rather than a nicety: since
+                # #606 the column is a multi-valued selection with no CHECK
+                # constraint, so a lab or chemist row could physically carry an
+                # array, and "non-doctors carry no specialty" is no longer a database
+                # guarantee. This explicit condition is the mechanism, and it is an
+                # AND with ``partner_type`` above rather than a replacement for it -
+                # a request naming a lab AND a specialty matches nothing either way.
                 conditions.append(partner_directory_index.c.partner_type == "doctor")
-                conditions.append(partner_directory_index.c.specialty == specialty)
+                # The column is a multi-valued selection (#606), so an equality
+                # comparison against a JSONB column would ask PostgreSQL an operator
+                # question it answers "no operator". ``?|`` is the JSONB membership
+                # test, so the OVERLAP is on the STORED side: the requested value is
+                # one member, the column holds the doctor's whole declared set, and
+                # the row matches when the requested value is one of them. NULL and
+                # ``[]`` both fail, which is the same answer the pre-#606 equality
+                # gave for an unset column - and it fails only the specialty FILTER,
+                # so a doctor who declared none is still found by an unfiltered search.
+                #
+                # #612 decided the request side stays a SCALAR. The caller asks for
+                # one specialty (the route adapter types it as one closed-list
+                # ``Specialty``; the homepage chips, the browse facets and the
+                # wider-area fallback all speak in one value), which is why the
+                # predicate casts a one-element array rather than using the value
+                # directly. Widening the request to a list is NOT free: ``literal``
+                # would wrap a list inside the array and match nothing, so a caller
+                # that sent several values would need this cast and the route adapter
+                # widened together - a deliberate change, not a no-op.
+                conditions.append(
+                    partner_directory_index.c.specialty.op("?|")(
+                        cast(literal([specialty]), ARRAY(Text))
+                    )
+                )
             if query and query.strip():
                 conditions.append(partner_profiles.c.practice_name.ilike(f"%{query.strip()}%"))
             if peri_urban_only:
@@ -231,24 +276,36 @@ class DirectoryFacade:
             return conditions
 
         async with self._engine.begin() as connection:
-            base = (
-                select(
-                    partner_directory_index.c.partner_id,
-                    partner_directory_index.c.partner_type,
-                    partner_directory_index.c.specialty,
-                    partner_profiles.c.practice_name,
-                    partner_service_areas.c.name.label("area_name"),
-                    partner_profiles.c.consultation_fee_paise.label("consultation_fee"),
-                    distance_km.label("distance_km"),
-                )
-                .join(
-                    partner_profiles,
-                    partner_profiles.c.id == partner_directory_index.c.partner_id,
-                )
-                .outerjoin(
-                    partner_service_areas,
-                    partner_service_areas.c.id == partner_profiles.c.service_area_id,
-                )
+            base = select(
+                partner_directory_index.c.partner_id,
+                partner_directory_index.c.partner_type,
+                partner_directory_index.c.specialty,
+                partner_profiles.c.practice_name,
+                # #612: the area a patient reads is the locality the doctor
+                # DECLARED, which is a column on the profile this query already
+                # joins. It used to come from ``partner_service_areas`` - the
+                # platform's service-area vocabulary, which every profile resolves
+                # into at registration whether or not the doctor lives there - so
+                # every result in the launch directory rendered as Daltonganj. The
+                # vocabulary, its seeded row and ``partner_profiles.service_area_id``
+                # all STAY (AC4): registration still resolves them, and the private
+                # doctor profile and the operator views still read them. Only the
+                # patient-facing search result stops rendering it, so the join goes
+                # with it (ADR-0003: two same-schema tables, so dropping a join is a
+                # read change, not a schema one).
+                #
+                # KNOWN, DELIBERATE: ``get_provider_profile`` is also patient-facing
+                # (no login) and still projects the vocabulary default with its
+                # Daltonganj fallback, so for now a card reads the doctor's locality
+                # and the public profile behind it reads the service area. #613 owns
+                # the public profile and is where the two are reconciled; this ticket
+                # does not widen it.
+                partner_profiles.c.address_locality.label("declared_locality"),
+                partner_profiles.c.consultation_fee_paise.label("consultation_fee"),
+                distance_km.label("distance_km"),
+            ).join(
+                partner_profiles,
+                partner_profiles.c.id == partner_directory_index.c.partner_id,
             )
 
             async def _rows(peri_urban_only: bool) -> list[Any]:
@@ -291,11 +348,19 @@ class DirectoryFacade:
                         str(row.practice_name) if row.practice_name is not None else None
                     ),
                     partner_type=str(row.partner_type),
-                    specialty=str(row.specialty) if row.specialty is not None else None,
+                    specialty=representative_specialty(row.specialty),
+                    # #612: a doctor who declared no locality gets NO area, not a
+                    # substituted vocabulary row. A null area is already a shape the
+                    # frontend card handles (its ``DirectoryEntry.area`` is
+                    # ``string | null`` and the card joins non-null meta only), and
+                    # inventing a locality the doctor never declared is the same
+                    # dishonesty as the Daltonganj default this replaces, just with
+                    # a different string. Until the address-section save (#609) has
+                    # run, ``address_locality`` is NULL for a freshly registered
+                    # doctor - so this is the DEFAULT a new practice renders, and it
+                    # is an honest one.
                     area=(
-                        str(row.area_name)
-                        if row.area_name is not None
-                        else DEFAULT_SERVICE_AREA_NAME
+                        str(row.declared_locality) if row.declared_locality is not None else None
                     ),
                     distance_km=float(row.distance_km),
                     verified=True,
@@ -351,9 +416,9 @@ class DirectoryFacade:
             )
 
     async def get_provider_profile(self, partner_id: int) -> ProviderProfileView:
-        """Public provider profile (MOD-002, FEAT-005, PHASE-6 T03 #309).
+        """Public provider profile (MOD-002, FEAT-005, PHASE-6 T03 #309, #613).
 
-        Returns the verified-safe profile of an ``[Active]`` partner that has a
+        Returns the profile of an ``[Active]`` partner that has a
         ``directory_index`` entry and valid (verified, unexpired, unrevoked)
         credentials. The four-condition visibility gate matches search exactly
         (ADR-0011 "tick gone = card gone"): not ``[Active]``, no index row, no
@@ -362,11 +427,23 @@ class DirectoryFacade:
         is hidden exactly when search hides the card, so the indicator can
         never drift.
 
-        Payload carries only verified-safe fields: display name
-        (``practice_name``), partner type, specialty (doctors only), service
-        area, the ``verified`` indicator (always True for a reachable profile)
-        and per-credential type + status label + expiry date. Never exposed:
-        artifact refs, emails, phones, PHI.
+        The payload carries two bands, and the gate above is what separates them
+        for a reader. The **verified** band - display name
+        (``practice_name``), partner type, the ``verified`` indicator (always
+        True for a reachable profile) and the per-credential type + status label
+        + expiry date - is what the platform checked. The **declared** band -
+        ``clinic_name``, the ``specialties`` SELECTION and the singular
+        ``specialty`` label derived from it, ``languages``, ``consulting_days``,
+        ``consulting_hours``, ``about``, ``experience_years``, the structured
+        address parts and the ``area`` label - is what the doctor wrote, and
+        widening it to those does not widen ``verified``: reaching the profile
+        still proves exactly the four gate conditions and not one declared field
+        among them.
+
+        Never exposed, before or after the widening: artifact refs (photo and
+        credential bytes stay in private object storage, ADR-0020), the
+        practice's coordinates, emails, phones, the partner's identity id,
+        notification preferences, and PHI.
         """
         async with self._engine.begin() as connection:
             row = (
@@ -376,16 +453,33 @@ class DirectoryFacade:
                         partner_directory_index.c.partner_type,
                         partner_directory_index.c.specialty,
                         partner_profiles.c.practice_name,
-                        partner_service_areas.c.name.label("area_name"),
                         partner_profiles.c.consultation_fee_paise.label("consultation_fee"),
+                        # The declared band (#613), all off the PROFILE ROW. The
+                        # profile row is the source of truth for every one of
+                        # these - it is what the four section writes land on -
+                        # so reading them here cannot disagree with what the
+                        # doctor last saved the way a directory-entry copy could.
+                        partner_profiles.c.clinic_name,
+                        partner_profiles.c.specialties,
+                        partner_profiles.c.languages,
+                        partner_profiles.c.consulting_days,
+                        partner_profiles.c.consulting_hours,
+                        partner_profiles.c.about,
+                        partner_profiles.c.experience_years,
+                        # The structured address parts rather than the
+                        # ``practice_address`` display string, which is a
+                        # denormalised registration-era projection of these
+                        # (#606) and stays private to the console and the
+                        # operator queue.
+                        partner_profiles.c.address_line,
+                        partner_profiles.c.address_landmark,
+                        partner_profiles.c.address_locality,
+                        partner_profiles.c.address_city,
+                        partner_profiles.c.address_pin,
                     )
                     .join(
                         partner_profiles,
                         partner_profiles.c.id == partner_directory_index.c.partner_id,
-                    )
-                    .outerjoin(
-                        partner_service_areas,
-                        partner_service_areas.c.id == partner_profiles.c.service_area_id,
                     )
                     .where(
                         partner_directory_index.c.partner_id == partner_id,
@@ -406,19 +500,78 @@ class DirectoryFacade:
                     )
                     .where(
                         partner_credentials.c.profile_id == partner_id,
+                        # #623 (B3): the label below is the literal "verified",
+                        # so this query has to make it true rather than assume it.
+                        # The reachability gate that got us here does NOT cover
+                        # every row: `has_invalid_credential` is scoped to
+                        # `verified IS TRUE`, which is what keeps a pending
+                        # re-verification round from de-listing an [Active]
+                        # partner (ADR-0011's grace window). A partner mid-round is
+                        # therefore reachable WITH their pending rows, and those
+                        # rows were being labelled "verified" on a patient-facing
+                        # profile - the one field that can drive the trust cue the
+                        # whole band exists to carry.
+                        #
+                        # The same scoping the gate uses is applied here, so the
+                        # set that survives is exactly the set the gate called
+                        # valid. Revoked and expired approved-round rows cannot
+                        # reach this query at all (the gate already excluded the
+                        # partner), and pending rows are now excluded rather than
+                        # mislabelled - the same choice `has_invalid_credential`
+                        # makes, so the two agree by construction.
+                        partner_credentials.c.verified.is_(True),
+                        partner_credentials.c.revoked_at.is_(None),
+                        or_(
+                            partner_credentials.c.expires_at.is_(None),
+                            partner_credentials.c.expires_at > func.now(),
+                        ),
                     )
                     .order_by(partner_credentials.c.credential_type)
                 )
             ).all()
 
+        # The three selections go through the closed vocabularies that own them
+        # (#602), not through a copy of a list restated here: a value outside
+        # ``Specialty`` / ``ConsultLanguage`` / ``ConsultingDay`` cannot reach a
+        # patient even off a hand-repaired row.
+        specialties = known_selection(row.specialties, Specialty)
         return ProviderProfileView(
             partner_id=int(row.partner_id),
             practice_name=(str(row.practice_name) if row.practice_name is not None else None),
             partner_type=str(row.partner_type),
-            specialty=(str(row.specialty) if row.specialty is not None else None),
-            area=(str(row.area_name) if row.area_name is not None else DEFAULT_SERVICE_AREA_NAME),
+            # The representative label is the FIRST member of the same filtered
+            # selection that ``specialties`` publishes, so one payload cannot
+            # report a label the list does not contain. That is also why it reads
+            # the profile row rather than the directory entry's copy (#606 kept
+            # both in step; the profile row is the one that is written).
+            specialty=(specialties[0] if specialties else None),
+            # The DECLARED locality, which is what search now reads for the
+            # card (#612), rather than the ``partner_service_areas`` vocabulary
+            # with its launch-default fallback - #612 named this the half it
+            # left, and a patient who compares the card with the profile behind
+            # it was reading two different places. Undeclared locality stays
+            # ``None``, the honest answer and the DEFAULT for a practice whose
+            # address section has not been saved yet.
+            area=row.address_locality,
+            # Reachability already proved all four gate conditions, so this is a
+            # derivation rather than a stored flag - and it stays that narrow: it
+            # covers the credential band, never a declared field.
             verified=True,
             consultation_fee=_row_fee_paise(row),
+            specialties=specialties,
+            languages=known_selection(row.languages, ConsultLanguage),
+            consulting_days=known_selection(row.consulting_days, ConsultingDay),
+            clinic_name=(str(row.clinic_name) if row.clinic_name is not None else None),
+            consulting_hours=row.consulting_hours,
+            about=row.about,
+            experience_years=(
+                int(row.experience_years) if row.experience_years is not None else None
+            ),
+            address_line=row.address_line,
+            landmark=row.address_landmark,
+            locality=row.address_locality,
+            city=row.address_city,
+            pin_code=row.address_pin,
             credentials=[
                 ProviderCredential(
                     credential_type=str(c.credential_type),

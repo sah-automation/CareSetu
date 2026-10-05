@@ -26,9 +26,14 @@
 //   - mock AI (default in test) yields a clean 0.8-confidence pre-summary, so
 //     the review is not forced and the workspace renders.
 //
+// The fourth link (#621) rides the same activated doctor: it drives the profile
+// page's own per-section writes (FEAT-005) and then reads the PUBLIC provider
+// profile, so the declared fields are asserted on the surface a patient sees
+// rather than on the console that wrote them.
+//
 // Prior art: tests/e2e/auth-loop.spec.ts (partner wizard + staff login legs,
 // mock-OTP read-back), tests/e2e/patient-journey.spec.ts (live backend API).
-// Serial mode: the three tests share one doctor phone, one patient phone, one
+// Serial mode: the four tests share one doctor phone, one patient phone, one
 // intake and one capture of the doctor's partner id; each test gets its own
 // browser context so sessions do not leak.
 
@@ -525,4 +530,257 @@ test("the active doctor lands on /doctor and the review workspace renders with i
     nanRequests,
     "a hard refresh must not mint NaN requests either",
   ).toEqual([]);
+});
+
+// ---- Test 4: the doctor declares their address; the public profile shows it ----
+
+// FEAT-005 (#621): the profile flow, end to end, on the real runtime.
+//
+// The three links above leave an `[Active]` doctor with a verified credential and a
+// listed directory entry - which is exactly the visibility gate the PUBLIC provider
+// profile enforces (ADR-0011 "tick gone = card gone"). So this link needs no new
+// setup: it logs the same doctor back in and drives the profile page's own per-
+// section writes, then reads the result on the patient-facing route.
+//
+// What it proves:
+//   1. an active doctor lands on /doctor/profile and the page renders its sections
+//      - with no coordinate input anywhere to declare instead;
+//   2. the practice section saves the clinic name and the specialty selection;
+//   3. the structured address saves, and the save says so;
+//   4. an unplaceable PIN reports under the PIN input, and the refusal does not
+//      poison the page - a DIFFERENT section still saves;
+//   5. the public profile then shows what the doctor just declared.
+//
+// Two PINs, chosen so the test exercises the branch it means to. `RESOLVABLE_PIN` is
+// in the bundled centroid dataset (`apps/backend/alembic/versions/pin_centroids.csv.gz`,
+// a Palamu delivery office), which is the only table that decides "placeable".
+// `UNRESOLVABLE_PIN` is well formed - six ASCII digits, so the CLIENT's
+// `PIN_CODE_PATTERN` accepts it and the refusal has to be the server's to give - and
+// absent from that same dataset, so it fails as "cannot be placed" rather than as
+// malformed. A malformed value would pass this test while proving nothing about the
+// centroid lookup. Both are read off the committed dataset rather than guessed: a
+// merely plausible PIN may not resolve, and the first save then fails for a reason
+// that has nothing to do with this test.
+const RESOLVABLE_PIN = "822101";
+const UNRESOLVABLE_PIN = "822002";
+const CLINIC_NAME = "E2E Riverside Clinic";
+const ADDRESS_LINE = "12 Baghdar Road";
+const LANDMARK = "Near the old post office";
+const LOCALITY = "Baghdar";
+const CITY = "Daltonganj";
+const ABOUT =
+  "I have run a small neighbourhood practice for twelve years and I still see every " +
+  "patient myself.";
+
+test("the doctor declares their address and the public profile shows what they declared", async ({
+  page,
+  request,
+  browser,
+}, testInfo) => {
+  expect(
+    doctorPartnerId,
+    "the first test must have registered the doctor this link reads back",
+  ).not.toBeNull();
+
+  // The file-wide 180 s budget does not fit this link. The chain shares ONE phone
+  // number across its four links, so this login can land inside the previous link's
+  // 60 s SMS resend cooldown, and `activeDoctorLogin`'s cold path spends ~107 s
+  // waiting that window out before the code is even readable. Raised here rather
+  // than file-wide so the three links above keep the budget they already pass in.
+  testInfo.setTimeout(300_000);
+
+  // Log in FIRST. `proxy` matches `/doctor/:path*` and bounces any hit whose
+  // `caresetu_authed` presence hint is missing or empty to the staff login, keeping
+  // the original path in the return param - so a `goto("/doctor/profile")` before
+  // the login lands would silently put every later locator on the wrong page.
+  await activeDoctorLogin(page, request, doctorPhone);
+
+  // --- AC 1: the profile page renders its sections ----------------------------
+  await page.goto("/doctor/profile");
+  // Assert the destination before the page's contents. A guard bounce lands on the
+  // staff login with `/doctor/profile` in the return param, and every locator below
+  // is built out of this page's own test ids - so without this, a bounce fails on
+  // the first section assertion with a message about a section rather than about
+  // never having arrived. Naming the URL turns the likeliest silent failure in this
+  // link into the failure it actually is.
+  await expect(page).toHaveURL(`${FRONTEND}/doctor/profile`);
+  for (const section of [
+    "profile-identity",
+    "profile-section-index",
+    "profile-verified-band",
+    "profile-declared-band",
+    "profile-practice-card",
+    "profile-address-card",
+    "profile-about-card",
+    "profile-notification-card",
+    "fee-editor",
+    "profile-live-preview",
+  ]) {
+    await expect(
+      page.getByTestId(section),
+      `the profile page must render ${section}`,
+    ).toBeVisible({ timeout: 60_000 });
+  }
+
+  // --- AC 5: no coordinate inputs --------------------------------------------
+  // Count assertions on named locators rather than an absence check on a container,
+  // so these cannot pass because the page failed to render - the card that owns the
+  // address is asserted visible immediately above, and is used again below. Both the
+  // retired test ids AND the accessible names are asserted, because the redesign
+  // (#606/#616) removed the inputs and renamed what is left: an id this test
+  // remembers is the weaker half of the pair, and the label is what would survive a
+  // future rename of the ids.
+  await expect(page.getByTestId("profile-latitude")).toHaveCount(0);
+  await expect(page.getByTestId("profile-longitude")).toHaveCount(0);
+  await expect(page.getByLabel(/latitude/i)).toHaveCount(0);
+  await expect(page.getByLabel(/longitude/i)).toHaveCount(0);
+  // And the card that owns the address carries no coordinate input at all, which is
+  // where they used to live: the position is derived from the PIN (#603/#606), so a
+  // coordinate input here would be a second, unsourced way to place the practice.
+  await expect(
+    page
+      .getByTestId("profile-address-card")
+      .locator('input[id*="latitude" i], input[id*="longitude" i]'),
+  ).toHaveCount(0);
+
+  // --- The practice section: clinic name + the specialty selection -------------
+  // A section save declares its WHOLE card, and `full_name` is `min_length=1`, so
+  // the registered name has to be standing in this input before the card can save.
+  await expect(page.getByTestId("profile-practice-name")).not.toHaveValue("");
+
+  await page.getByTestId("profile-practice-clinic").fill(CLINIC_NAME);
+  // Chips are found by the SLUG of the machine value, not by their label: the label
+  // is copy and differs per locale, while the slug is derived from the wire value.
+  await page
+    .getByTestId("profile-practice-specialties-general-physician")
+    .click();
+  await page.getByTestId("profile-practice-specialties-pediatrician").click();
+  await page.getByTestId("profile-practice-save").click();
+  await expect(page.getByTestId("profile-practice-saved")).toBeVisible({
+    timeout: 30_000,
+  });
+
+  // --- AC 2: the structured address saves -------------------------------------
+  for (const [testId, value] of [
+    ["profile-address-line", ADDRESS_LINE],
+    ["profile-address-landmark", LANDMARK],
+    ["profile-address-locality", LOCALITY],
+    ["profile-address-city", CITY],
+    ["profile-address-pin", RESOLVABLE_PIN],
+  ] as const) {
+    await page.getByTestId(testId).fill(value);
+  }
+  await page.getByTestId("profile-address-save").click();
+  await expect(page.getByTestId("profile-address-saved")).toBeVisible({
+    timeout: 30_000,
+  });
+
+  // --- AC 3a: an unplaceable PIN reports under the PIN input ------------------
+  await page.getByTestId("profile-address-pin").fill(UNRESOLVABLE_PIN);
+  await page.getByTestId("profile-address-save").click();
+
+  // Scoped to the address card: `profile-address-pin-error` is the line wired to
+  // the input by `aria-describedby`, so "under the PIN input" is asserted as
+  // (a) the card owns the line, (b) the input is flagged invalid, and (c) the input
+  // is what describes itself with it.
+  const addressCard = page.getByTestId("profile-address-card");
+  const pinError = addressCard.getByTestId("profile-address-pin-error");
+  await expect(
+    pinError,
+    "an unplaceable PIN must report under the PIN input",
+  ).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("profile-address-pin")).toHaveAttribute(
+    "aria-invalid",
+    "true",
+  );
+  await expect(page.getByTestId("profile-address-pin")).toHaveAttribute(
+    "aria-describedby",
+    /profile-address-pin-error/,
+  );
+  // And the card must NOT claim it saved: a refused attempt is not a save.
+  await expect(page.getByTestId("profile-address-saved")).toHaveCount(0);
+  await expect(page.getByTestId("profile-address-unsaved")).toBeVisible();
+
+  // --- AC 3b: a different section still saves afterwards ----------------------
+  // The end-to-end counterpart of #605's per-section buffer rule, and the assertion
+  // most likely to regress: a page-level buffer that had collapsed back into one
+  // would strand the About card's edits behind the Address card's refusal.
+  await page.getByTestId("profile-about").fill(ABOUT);
+  await page.getByTestId("profile-about-save").click();
+  await expect(page.getByTestId("profile-about-saved")).toBeVisible({
+    timeout: 30_000,
+  });
+  // The refused card keeps its own unsaved edit, and the two sections report
+  // independently - one refusal, one success, neither overwriting the other.
+  await expect(page.getByTestId("profile-address-unsaved")).toBeVisible();
+  await expect(page.getByTestId("profile-practice-saved")).toBeVisible();
+
+  // --- AC 4: the PUBLIC profile shows what the doctor just declared -----------
+  // A FRESH context, and that is the assertion, not an implementation detail: the
+  // declared band is on the patient-facing page, so it has to be readable by a
+  // context that never signed in and holds no session cookie at all. It also keeps
+  // the dirty Address card's `beforeunload` guard out of the navigation - the
+  // console page is left open rather than navigated away from.
+  const patientContext = await browser.newContext();
+  try {
+    const patient = await patientContext.newPage();
+    await patient.goto(`${FRONTEND}/providers/${doctorPartnerId}`);
+
+    // The band #619 renders, and NOT the not-found / error states - the four gate
+    // conditions the previous links earned by approving the doctor.
+    await expect(patient.getByTestId("profile-not-found")).toHaveCount(0);
+    await expect(patient.getByTestId("profile-error")).toHaveCount(0);
+    const declaredBand = patient.getByTestId("profile-declared");
+    await expect(declaredBand).toBeVisible({ timeout: 30_000 });
+
+    // Scoped to the band: `profile-declared-clinic-name` and
+    // `profile-declared-specialties` are the #619 locators, and reading them inside
+    // the band says which surface this is rather than leaving it implied.
+    await expect(
+      declaredBand.getByTestId("profile-declared-clinic-name"),
+    ).toHaveText(CLINIC_NAME, { timeout: 30_000 });
+
+    const declaredSpecialties = declaredBand.getByTestId(
+      "profile-declared-specialties",
+    );
+    await expect(declaredSpecialties).toContainText("General Physician", {
+      timeout: 30_000,
+    });
+    await expect(declaredSpecialties).toContainText("Pediatrician", {
+      timeout: 30_000,
+    });
+
+    // The address, part by part. The PIN that landed is the resolvable one: the
+    // refused PIN never reached a column, so what the public page shows proves the
+    // refusal wrote nothing. These ids are `profile-declared-address-` plus the
+    // band's own FIELD name, and the field name is the address part's own name -
+    // hence the doubled word in the line. Spelled out rather than composed, so the
+    // doubling reads as deliberate instead of getting "fixed" into a locator that
+    // matches nothing.
+    const declaredAddress = declaredBand.getByTestId(
+      "profile-declared-address",
+    );
+    await expect(declaredAddress).toBeVisible({ timeout: 30_000 });
+    for (const [testId, value] of [
+      ["profile-declared-address-address-line", ADDRESS_LINE],
+      ["profile-declared-address-landmark", LANDMARK],
+      ["profile-declared-address-locality", LOCALITY],
+      ["profile-declared-address-city", CITY],
+      ["profile-declared-address-pin-code", RESOLVABLE_PIN],
+    ] as const) {
+      await expect(declaredAddress.getByTestId(testId)).toHaveText(value, {
+        timeout: 30_000,
+      });
+    }
+
+    // And the About card's own words, which is the save the refused PIN was
+    // supposed to be unable to block: prose the doctor typed reaches a patient
+    // verbatim.
+    await expect(declaredBand.getByTestId("profile-declared-about")).toHaveText(
+      ABOUT,
+      { timeout: 30_000 },
+    );
+  } finally {
+    await patientContext.close();
+  }
 });

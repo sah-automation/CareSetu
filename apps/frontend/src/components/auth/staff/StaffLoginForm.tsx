@@ -100,7 +100,14 @@ interface DoctorLanding {
   /** The post-login destination the single exit from the handoff routes to. */
   target: string;
   practiceName: string | null;
-  specialty: string | null;
+  /**
+   * The declared specialty SELECTION (#608 widened this projection from one
+   * nullable string to a list, because a doctor may practise more than one kind
+   * of care). The handoff joins it into its one fact row rather than picking one
+   * of them: showing the first would name a specialty the doctor may not lead
+   * with, and this surface is the first thing they read after signing in.
+   */
+  specialties: string[];
 }
 
 // The handoff's practice facts come from the private doctor-profile projection
@@ -110,20 +117,20 @@ interface DoctorLanding {
 // login on a blank card.
 async function readPracticeIdentity(): Promise<{
   practiceName: string | null;
-  specialty: string | null;
+  specialties: string[];
 }> {
   try {
     const profile = await fetchDoctorProfile();
     return {
       practiceName: profile.practice_name,
-      specialty: profile.specialty,
+      specialties: profile.specialties,
     };
   } catch (error) {
     console.error(
       "[staff-login] practice details unreadable; handoff without them",
       error,
     );
-    return { practiceName: null, specialty: null };
+    return { practiceName: null, specialties: [] };
   }
 }
 
@@ -526,10 +533,10 @@ export function StaffLoginForm({
         value: landing.practiceName,
       });
     }
-    if (landing.specialty) {
+    if (landing.specialties.length > 0) {
       landingFacts.push({
         label: doneScreenT.specialtyLabel,
-        value: landing.specialty,
+        value: landing.specialties.join(", "),
       });
     }
     landingFacts.push({

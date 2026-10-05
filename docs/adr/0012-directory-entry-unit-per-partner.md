@@ -1,8 +1,18 @@
 # ADR-0012: Directory indexed per partner, one geo point - multi-location deferred
 
-**Status:** accepted
+**Status:** accepted, amended
 **Date:** 2026-09-05
 **Traceability:** `FEAT-004`, `FEAT-005`, `MOD-002`, `REQ-008`.
+
+> **Amended by ADR-0021 and ADR-0022** (`batch #599`, 2026-09-30). The rule below
+> stands except for the phrases "as recorded at registration" and "A partner has
+> one address": the directory's single geo point is now **derived from the
+> address the doctor declares and saves**, not frozen at registration, and it is
+> **correctable** afterwards. Read this ADR together with those two - a reader who
+> takes "as recorded at registration" as current today would conclude that a
+> doctor cannot move their practice, which is exactly what the redesign removed.
+> Everything else here is unchanged and remains in force: one entry per `[Active]`
+> partner, keyed by `partner_id`, one geo point.
 
 ## Context
 

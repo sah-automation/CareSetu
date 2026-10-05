@@ -13,6 +13,14 @@ The transactional outbox mirrors the shared ``bus/outbox_ddl.py`` shape
 lives in the same schema but is materialized only by the migration and
 addressed through ``bus.outbox_ddl.consumed_events_table``, never this
 metadata (its name carries no module prefix by shared contract).
+PHASE-8 #601 adds the ``partner_pin_centroids`` reference dataset the doctor
+profile's practice position resolves against: an all-India PIN-code vocabulary
+with its centroid coordinates, seeded by migration, keyed by no row of ours.
+PHASE-8 #606 (#599) gives ``partner_profiles`` the shape the profile redesign
+writes into - a clinic name, a multi-valued specialty selection, the structured
+address parts, multi-valued consulting days and consulting hours as prose - and
+widens the directory entry's specialty to the same multi-valued shape, dropping
+the CHECK constraint that could not hold a twenty-value vocabulary.
 """
 
 from __future__ import annotations
@@ -65,10 +73,48 @@ partner_profiles = Table(
     Column("partner_type", String(20), nullable=False),
     Column("status", String(30), nullable=False, server_default=text("'Registered'")),
     Column("practice_name", String(120), nullable=True),
+    # The building the practice is in, distinct from ``practice_name``, which is
+    # the doctor's own name and stays the only patient-searchable name (#608
+    # writes both).
+    Column("clinic_name", String(120), nullable=True),
+    # A DENORMALISED DISPLAY PROJECTION of the structured ``address_*`` parts
+    # below, not a source of truth - and that is why it must never be edited by
+    # hand. Three projections still read it: the private doctor profile view, the
+    # operator verification queue row, and the operator per-partner detail row.
+    # It has TWO writers: registration (``insert_registered_profile``) still
+    # writes the pre-structured value it captured at sign-up, unchanged, and the
+    # address section write (#609) rewrites it from the structured parts via
+    # ``format_display_address``. ``NOT NULL`` for as long as registration is a
+    # writer, which is why the column keeps its name, type and nullability
+    # through #606 rather than being replaced.
+    #
     # Practice location/geo is mandatory for every partner type (FEAT-014).
     Column("practice_address", Text, nullable=False),
+    # The practice POSITION, not the practice address. SERVER-WRITTEN ONLY since
+    # #606: no update schema accepts coordinates, so a client cannot place its own
+    # pin, and #609 derives this from the declared ``address_pin`` against the
+    # PIN centroids (#601). Deliberately not nullable - registration must write
+    # it, and a partner whose position cannot be resolved is a gap in the PIN
+    # dataset, not a column that should hold NULL.
     Column("practice_latitude", Numeric(9, 6), nullable=False),
     Column("practice_longitude", Numeric(9, 6), nullable=False),
+    # The structured address, as declared by the doctor (#606). Five optional
+    # parts mirroring ``AddressParts`` in ``domain/practice_position.py`` (#603);
+    # every one is nullable because a half-finished address is a state a doctor
+    # can hold. The display column above is what readers see.
+    #
+    # ``address_pin`` is deliberately NOT a foreign key to
+    # ``partner_pin_centroids``, for the same reason ``service_area_id`` carries
+    # none: it is a same-schema value the write resolves through the domain, so a
+    # PIN that is malformed or absent from the dataset returns a field-level
+    # error rather than failing the save on a data reason. The six-digit format
+    # CHECK below is a format rule, not a vocabulary the domain has to own, and
+    # it holds without a foreign key.
+    Column("address_line", String(200), nullable=True),
+    Column("address_landmark", String(200), nullable=True),
+    Column("address_locality", String(120), nullable=True),
+    Column("address_city", String(120), nullable=True),
+    Column("address_pin", String(6), nullable=True),
     # Optional service area, defaulting to Daltonganj (launch scope) when the
     # partner does not declare one; decided at the application layer.
     Column("service_area_id", BigInteger, nullable=True),
@@ -88,9 +134,41 @@ partner_profiles = Table(
     ),
     Column("photo_ref", String(255), nullable=True),
     Column("experience_years", Integer, nullable=True),
+    # The kind of care this doctor offers, as a SELECTION rather than one label:
+    # a district practice spans more than one, and the overlap search (#612)
+    # matches on membership (#608 writes this column). Same multi-valued storage
+    # shape as ``consulting_days`` and ``languages`` because that is the only
+    # shape a closed-list validator can walk member by member. Validated against
+    # ``Specialty`` in ``domain/vocabularies.py`` (#602), which owns roughly
+    # twenty values - application-level, never a CHECK constraint, which is why
+    # the column carries none.
+    Column("specialties", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    # The languages this doctor consults in, validated against ``ConsultLanguage``
+    # (#602). The column shape has not changed since #449; only its contents
+    # have, from hand-typed free text ("Separate with commas") to selections of a
+    # closed list. A pre-#606 row's hand-typed values were reset to the empty
+    # array by migration #606 and never parsed.
     Column("languages", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
     Column("about", Text, nullable=True),
+    # SUPERSEDED by ``consulting_hours`` (#606), retained rather than dropped.
+    # It was a single free-text blob typed against a placeholder reading "e.g.
+    # Mon-Sat, 9am-1pm"; splitting it into a closed day selection plus hours as
+    # prose is what #610 writes. Nothing new writes this column and nothing does
+    # now: #611 retired the whole-form write that last addressed it, so it is
+    # inert rather than gone - kept until a migration of its own drops it (#606
+    # deferred that deliberately). Its existing values are NOT parsed into the
+    # two new columns - recovering chips from hand-typed free text is guesswork,
+    # and a wrong guess is worse than an empty prompt.
     Column("availability", Text, nullable=True),
+    # The days this doctor consults on, as a selection against ``ConsultingDay``
+    # (#602), written by #610. "A week, not a working week" - the closed list
+    # carries Saturday and Sunday because a weekend clinic is ordinary practice.
+    Column("consulting_days", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    # The hours this doctor consults in, as PROSE (#610). Deliberately not
+    # structured: no weekly template, no per-day slots, nothing that implies a
+    # booking system the platform does not have. It is the half of the old
+    # ``availability`` blob that is genuinely the doctor's own words.
+    Column("consulting_hours", Text, nullable=True),
     Column(
         "notification_preferences",
         JSONB,
@@ -119,9 +197,27 @@ partner_profiles = Table(
         "consultation_fee_paise IS NULL OR consultation_fee_paise >= 0",
         name="ck_partner_profiles_consultation_fee",
     ),
+    # Years of experience, a real range and not a sanity bound (#606, tightening
+    # the pre-existing 0..100). 100 is not a value a practising doctor can hold:
+    # medical entry in India is around 22-24, so the oldest plausible first
+    # registration puts the ceiling near 60, and 60 leaves headroom over it. The
+    # bound matters most at the TOP of the range - the field exists for the
+    # longest-career doctors, so it must not refuse a legitimate value - which is
+    # why the ceiling is 60 and not something tighter. Four places carry it and
+    # they move together: this CHECK, the migration, and the ``Field`` bounds on
+    # the update and view models. The profile page's own client-side LIMITS stays
+    # 0..100, a superset that never refuses a legitimate value; #608/#611 own it.
     CheckConstraint(
-        "experience_years IS NULL OR experience_years BETWEEN 0 AND 100",
+        "experience_years IS NULL OR experience_years BETWEEN 0 AND 60",
         name="ck_partner_profiles_experience_years",
+    ),
+    # A format rule, not a vocabulary: the domain resolves whether a declared PIN
+    # exists and what position it carries (#601's centroids, #603's
+    # ``resolve_pin_code``), which no CHECK can express. Mirrors the centroid
+    # table's own key CHECK.
+    CheckConstraint(
+        "address_pin IS NULL OR address_pin ~ '^[0-9]{6}$'",
+        name="ck_partner_profiles_address_pin",
     ),
 )
 
@@ -269,10 +365,31 @@ partner_directory_index = Table(
     Column("practice_latitude", Numeric(9, 6), nullable=False),
     Column("practice_longitude", Numeric(9, 6), nullable=False),
     Column("partner_type", String(20), nullable=False),
-    # Closed pick-list, doctors only (ADR-0012, glossary). Labs and chemists
-    # carry NULL - the field is never free-form. Kept in lockstep with the
-    # Specialty vocabulary (domain credentials.py).
-    Column("specialty", String(40), nullable=True),
+    # The doctor's declared specialty selection, copied from
+    # ``partner_profiles.specialties`` at index time. MULTI-VALUED and nullable
+    # since #606: a doctor practises more than one kind of care, the overlap
+    # search (#612) matches on membership, and the column holds the same
+    # JSONB-array shape the profile does.
+    #
+    # NULLABLE on purpose, unlike the profile's own ``specialties``. The value
+    # is that selection copied verbatim by ``refresh_directory_entry`` (#607) -
+    # the entry is a projection of the profile row and holds no vocabulary rule
+    # of its own - so a doctor who has declared an empty selection carries
+    # ``[]``. NULL is what every row written before #606 carries, and the
+    # readers treat the two alike: the search's membership predicate fails
+    # both, and ``representative_specialty`` projects both to no specialty.
+    #
+    # VALIDATION IS APPLICATION-LEVEL, and deliberately so. The retired
+    # ``ck_partner_directory_index_specialty`` CHECK hard-coded the original four
+    # values and could not follow #602's twenty-value pick-list, which is the
+    # lockstep this comment used to describe. A CHECK cannot express "every
+    # member is one of twenty values, and a non-doctor carries none" as readably
+    # as the domain can: ``require_specialty``/``require_specialties`` in
+    # ``domain/vocabularies.py`` validate a submitted value member by member, and
+    # the search keeps its explicit ``partner_type = 'doctor'`` pin rather than
+    # relying on "labs carry no specialty". The trade is that the database no
+    # longer enforces the vocabulary; see ADR-0012, whose decision this amends.
+    Column("specialty", JSONB, nullable=True),
     # Read-side active flag derived from partner status (de-index on activation
     # loss / credential invalidation). True when the partner is [Active].
     Column("is_active", Boolean, nullable=False, server_default=text("true")),
@@ -282,15 +399,9 @@ partner_directory_index = Table(
         "partner_type IN ('doctor', 'lab', 'chemist')",
         name="ck_partner_directory_index_partner_type",
     ),
-    # Specialty only from the closed list, and only for doctors (ADR-0012,
-    # glossary). Labs and chemists must always carry NULL - the field is never
-    # free-form. Kept in lockstep with the Specialty vocabulary (domain
-    # credentials.py).
-    CheckConstraint(
-        "specialty IS NULL OR (partner_type = 'doctor' AND specialty IN "
-        "('General Physician', 'Pediatrician', 'Gynecologist', 'Dentist'))",
-        name="ck_partner_directory_index_specialty",
-    ),
+    # The specialty CHECK constraint is GONE (#606) - see the column comment for
+    # why application-level validation against the domain vocabulary replaced it
+    # and what was given up. Nothing else on this table changed.
     CheckConstraint(
         "practice_longitude BETWEEN -180 AND 180",
         name="ck_partner_directory_index_longitude",
@@ -302,6 +413,67 @@ partner_directory_index = Table(
     # Search filters by partner type, then geo distance; avoid paying an extra
     # seq scan when filtering by a type. Active-only reads are the common case.
     Index("ix_partner_directory_index_type_active", "partner_type", "is_active"),
+)
+
+
+partner_pin_centroids = Table(
+    "partner_pin_centroids",
+    MODULE_METADATA,
+    # PHASE-8 #601: the all-India PIN centroid reference dataset the doctor
+    # profile's practice position is resolved against. A vocabulary, not an
+    # entity: the PIN is the natural key and there is no row of ours to point
+    # at, so this table carries no foreign key (ADR-0003 also forbids the
+    # cross-schema reference a FK would imply).
+    #
+    # The PIN is a fixed-width 6-character code and is stored as text, never as
+    # an integer, so the value is never numerically reinterpreted. The
+    # coordinate columns match the profile's practice position precision
+    # (Numeric(9, 6)) so a resolved centroid drops straight into the
+    # derived-position write.
+    #
+    # ``district`` and ``region`` are the administrative labels the source
+    # publishes alongside the coordinates. They are stored as published and need
+    # no translation table on the read side.
+    #
+    # ``region`` is India Post's ``RegionName``, which is NOT a state and must
+    # never be rendered as one: across the 19,258 committed rows it holds 48
+    # distinct values, of which ``DivReportingCircle`` is a literal placeholder
+    # covering 4,087 PINs in single-region circles and the rest are postal CIRCLE
+    # names ("South Karnataka Region", "Kochi Region"). This dataset therefore
+    # contains no state for any PIN, which is why the doctor console's read-only
+    # State row has no source to read from and states so on the page rather than
+    # showing a circle name or the placeholder as a doctor's state.
+    #
+    # Neither column is read by any projection today, and that is a recorded
+    # decision rather than an oversight. #603's ``PinCentroid`` carries only the
+    # position because the resolution decision needs only the position, and the
+    # address card's two derived rows stay empty for the same reason. Delivering
+    # them needs a source of truth for the doctor profile's own reads - either a
+    # centroid lookup on the GET path (rejected in ``DoctorProfileAddressView``,
+    # which declines to put a lookup on a read no reader asked for) or new
+    # columns on the profile row (a migration that would turn a DERIVED label
+    # into a doctor-editable declared one, the exact thing the four-way section
+    # split exists to prevent). Correcting a false claim in this comment is the
+    # honest fix; shipping one of the two rows and not the other would imply the
+    # missing one was unavailable for some other reason.
+    Column("pin", String(6), primary_key=True),
+    # The post office serving this PIN. A PIN is served by several offices and
+    # the key admits one, so this is a representative office name, not a claim
+    # that the PIN has a single office.
+    Column("office_name", String(80), nullable=False),
+    Column("district", String(80), nullable=False),
+    Column("region", String(80), nullable=False),
+    Column("latitude", Numeric(9, 6), nullable=False),
+    Column("longitude", Numeric(9, 6), nullable=False),
+    CheckConstraint("pin ~ '^[0-9]{6}$'", name="ck_partner_pin_centroids_pin_format"),
+    CheckConstraint(
+        "latitude BETWEEN -90 AND 90",
+        name="ck_partner_pin_centroids_latitude",
+    ),
+    CheckConstraint(
+        "longitude BETWEEN -180 AND 180",
+        name="ck_partner_pin_centroids_longitude",
+    ),
 )
 
 

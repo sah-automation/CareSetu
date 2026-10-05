@@ -205,16 +205,28 @@ _Avoid_: audit trail, disclosure log (that is the `egress log`)
 Not a domain term. The patient-facing display word for an `[Active]` partner - legal in UI copy and the public profile route, never in schema, events, model, or lifecycle language. A provider stops existing the moment its partner leaves `[Active]`.
 _Avoid_: using "provider" where the entity/status/lifecycle is meant - say partner
 
+**locality**:
+The neighbourhood a practice sits in. Distinct from the broader service area.
+_Avoid_: area, sector, colony
+
+**service area**:
+DEMOTED, deliberately (`batch #599`). The table, its seeded Daltonganj row and the `service_area_id` column all still exist and registration still resolves them, but no user-visible surface renders the name any more - search has always used the 25 km peri-urban radius as its real constraint, so the vocabulary was a second, unrepresented notion of "where". The terms and column are **kept, not deleted**: removing them is separate cleanup and is explicitly out of scope. If you grep for "service area" and find it still wired up, that is this decision standing, not work someone forgot.
+_Avoid_: using it in patient- or doctor-facing copy; treating the seeded row as the search radius
+
+**clinic name**:
+The optional clinic or hospital name for a practice; distinct from the doctor's own name. Not treated as the display name for the doctor.
+_Avoid_: treating it as the display name, practice name (when conflated with the doctor name)
+
 **directory entry**:
-The single read-side row per `[Active]` partner that makes them discoverable in search: one entry per partner identity, one geo point (the practice location), the partner type, specialty (doctors only), and the verified indicator. One partner = one entry; multiple practice locations are a future extension, never a Phase 6 shape.
+The single read-side row per `[Active]` partner that makes them discoverable in search: one entry per partner identity, one geo point (the derived practice position, written whenever the declared address is saved, rather than frozen at activation), the partner type, specialty (doctors only), and the verified indicator. One partner = one entry; multiple practice locations are a future extension, never a Phase 6 shape.
 _Avoid_: provider record, listing
 
 **specialty**:
-The label from a closed pick-list (doctors only) of the kind of care an `[Active]` doctor offers - e.g. `General Physician | Pediatrician | Gynecologist | Dentist`. Labs and chemists carry no specialty; the field is never free-form. Homepage chips pre-seed the search filter over it.
-_Avoid_: consultation type (that PRD phrase was dropped - it is not a field), expertise
+The label from a closed pick-list (doctors only) of values of the kind of care an `[Active]` doctor offers. Doctors may hold one or more specialty values from this closed list; the list is not null. Labs and chemists carry no specialty; the field is never free-form. Homepage chips pre-seed the search filter over it.
+_Avoid_: consultation type, expertise
 
 **verified**:
-The derived indicator on a directory entry: true iff the partner is `[Active]` AND every required credential is unexpired and unrevoked. Never stored - computed from activation state + credential dates, always agreeing with search visibility: if the tick is gone, the card is gone.
+The derived indicator on a directory entry: true iff the partner is `[Active]` AND every required credential is unexpired and unrevoked. Never stored - computed from activation state + credential dates, always agreeing with search visibility: if the tick is gone, the card is gone. Credentials are verified; profile detail is declared, and verified gains no coverage of the declared fields.
 _Avoid_: verification badge (when meaning a stored flag), approved
 
 **credential expiry**:

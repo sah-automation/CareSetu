@@ -19,6 +19,17 @@
     line-height: 1.25;
   }
 
+  /* #615: the doctor profile page's sticky anchor-chip index. Without a scroll
+     margin a jumped-to section lands with its own heading UNDER the sticky
+     console chrome and the index - the jump would hide the very heading the
+     reader asked to see. The offset is the chrome's header plus the index row.
+     Scoped to the profile anchor vocabulary rather than to every id on the app,
+     because a page that scrolls to a generic element must not inherit a
+     profile-specific offset. */
+  [id^="profile-section-"] {
+    scroll-margin-top: 6rem;
+  }
+
   /* Reduced-motion floor (user story 33): kills skeleton pulse and every
      animation/transition app-wide. Base-layer contract - future skeletons
      inherit it automatically; !important inside base beats layered overrides. */

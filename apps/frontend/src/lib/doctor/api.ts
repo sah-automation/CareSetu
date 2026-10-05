@@ -11,6 +11,13 @@
 // consultations | prescriptions | lab_results | metrics | health_background |
 // full_record; a section the doctor is not granted is null, which the UI
 // renders as a calm "not shared" state.
+//
+// Patient photos are a presence flag here, never a ref: `has_photo` is the only
+// photo field a patient DTO carries, because the private storage key must never
+// cross to the client (security-phii-standards S2, ADR-0020) and the bytes come
+// from the consent-gated photo route. The doctor's own profile DTOs further down
+// are a different thing - they describe the doctor's own media - and keep
+// `photo_ref` deliberately.
 
 import { IDEMPOTENCY_KEY_HEADER, idempotencyKey } from "@/lib/idempotency";
 import { guardShape, request, requestBlob, requestVoid } from "@/lib/request";
@@ -30,7 +37,7 @@ export interface DoctorPatientRow {
   patient_id: number;
   name: string | null;
   age: number | null;
-  photo_ref: string | null;
+  has_photo: boolean;
   bucket: DoctorPatientBucket;
   granted_scopes: RecordScope[];
   latest_case_stage: string | null;
@@ -47,7 +54,7 @@ export interface ContactSection {
   gender: string | null;
   area: string | null;
   emergency_contact: string | null;
-  photo_ref: string | null;
+  has_photo: boolean;
 }
 
 export interface CaseWorkspaceLink {
@@ -88,7 +95,8 @@ function isDoctorPatientRow(value: unknown): value is DoctorPatientRow {
     "patient_id" in value &&
     "name" in value &&
     "age" in value &&
-    "photo_ref" in value &&
+    "has_photo" in value &&
+    typeof (value as DoctorPatientRow).has_photo === "boolean" &&
     "bucket" in value &&
     "granted_scopes" in value &&
     "latest_case_stage" in value
@@ -104,7 +112,8 @@ function isContactSection(value: unknown): value is ContactSection {
     "gender" in value &&
     "area" in value &&
     "emergency_contact" in value &&
-    "photo_ref" in value
+    "has_photo" in value &&
+    typeof (value as ContactSection).has_photo === "boolean"
   );
 }
 
@@ -254,40 +263,179 @@ export interface DoctorProfileView {
   partner_id: number;
   photo_ref: string | null;
   practice_name: string | null;
-  specialty: string | null;
+  /**
+   * The building the doctor practises in, distinct from `practice_name`, which is
+   * the doctor's own name. Nullable: a doctor can name who they are before they
+   * have named the building they see patients in.
+   */
+  clinic_name: string | null;
+  /**
+   * The declared specialty SELECTION, not one value: a doctor may practise more
+   * than one kind of care. The values are the closed pick-list's own
+   * display-ready strings, so the chip row renders them verbatim.
+   */
+  specialties: string[];
+  /**
+   * The stored verification indicator, derived server-side from activation state
+   * plus credential dates and never recomputed here. Both the identity band's
+   * tick and the verified band's own tick read this one flag, so they cannot
+   * disagree about the same doctor.
+   */
   verified: boolean;
+  /**
+   * A DENORMALISED display projection of the structured address parts below,
+   * read-only on the client. Served beside the parts rather than instead of them:
+   * it is assembled from them, so parsing it back into fields would be guessing
+   * at a format this client does not own.
+   */
   practice_address: string;
+  address_line: string | null;
+  landmark: string | null;
+  locality: string | null;
+  city: string | null;
+  pin_code: string | null;
+  /**
+   * Server-written and never client-written: the practice position is derived
+   * from the declared PIN code, so the doctor is never asked a question only a map
+   * could answer. Still served because the band reads it back as a confirmation.
+   */
   practice_latitude: number;
   practice_longitude: number;
+  /**
+   * The platform's service-area vocabulary name. Deliberately NOT rendered to
+   * the doctor: the concept was demoted to non-user-facing because it is a
+   * platform seed, not the neighbourhood a practice sits in (`locality` is).
+   */
   area: string | null;
   languages: string[];
   experience_years: number | null;
   about: string | null;
   consultation_fee: number | null;
-  availability: string | null;
+  /**
+   * The declared consulting-day SELECTION, closed over the seven days of the
+   * week, replacing the retired free-text `availability` blob whose days and
+   * hours were one string. The hours survive separately as prose.
+   */
+  consulting_days: string[];
+  consulting_hours: string | null;
   credentials: DoctorProfileCredential[];
-  notification_preferences: Record<string, boolean>;
-}
-
-/**
- * The editable body of the private profile. It is a whole-form PUT, not a
- * patch: the backend requires the practice address and coordinates on every
- * call, so a caller always sends the complete editable projection.
- */
-export interface DoctorProfileUpdate {
-  practice_name: string | null;
-  practice_address: string;
-  practice_latitude: number;
-  practice_longitude: number;
-  experience_years: number | null;
-  languages: string[];
-  about: string | null;
-  availability: string | null;
   notification_preferences: Record<string, boolean>;
 }
 
 export interface DoctorProfilePhotoRef {
   photo_ref: string;
+}
+
+/**
+ * The Address section write's body (#609), mirroring
+ * `DoctorProfileAddressUpdate`.
+ *
+ * **No coordinate field, and that is the guarantee rather than an omission.**
+ * The backend model sets `extra="forbid"`, so a body still carrying
+ * `practice_latitude` or `practice_longitude` is a 422 rather than a silently
+ * discarded one - accepting it would tell a doctor their coordinates saved when
+ * they did not. The practice position is derived from `pin_code` by the server
+ * (ADR-0022), so the doctor is never asked the question only a map could answer.
+ *
+ * `pin_code` is the only required part because it is the only one the position is
+ * derived from. Deliberately **no** pattern or length bound here either: the
+ * backend's domain decision (#603) owns that rule and reports malformed and
+ * unlisted as two machine reasons inside one PIN-keyed envelope, so a bound
+ * checked here would refuse the value before the rule that explains it ever
+ * runs. The client's mirror of that rule is the card's validation pass, which
+ * refuses a submission rather than rewriting the value.
+ */
+export interface DoctorProfileAddressUpdate {
+  address_line: string | null;
+  landmark: string | null;
+  locality: string | null;
+  city: string | null;
+  pin_code: string;
+}
+
+/**
+ * The Address section write's answer (#609): the profile projection plus the
+ * outside-the-belt warning.
+ *
+ * A separate type rather than two nullable fields on `DoctorProfileView`,
+ * because **only this write evaluates the belt** - the decision needs the PIN's
+ * resolved centroid, which exists only inside this write's transaction. So a
+ * plain profile read carries no belt field at all rather than carrying one whose
+ * meaning depends on which endpoint produced it, and the card has nothing to
+ * render a notice from before its first save. That is the honest state: absent,
+ * not a spinner and not a promise.
+ *
+ * It is a warning, never a refusal. The position is written either way and the
+ * save succeeds; only this doctor's own listing surfaces as an outside-your-area
+ * result (the wider-area fallback, glossary).
+ */
+export interface DoctorProfileAddressView extends DoctorProfileView {
+  outside_peri_urban_belt: boolean;
+  /** Carried so the notice can say how far out the practice sits, not only that it is. */
+  distance_from_belt_centre_km: number;
+}
+
+/**
+ * The Practice section write's body (#608), mirroring
+ * `DoctorProfilePracticeUpdate`.
+ *
+ * `full_name` is the doctor's own name on the wire even though the column it
+ * writes is the registration-era `practice_name`: a doctor names themselves, they
+ * do not name a practice, and the field name is what says which one this is.
+ *
+ * `specialties` and (on the About body) the other two selections are `string[]`
+ * rather than closed unions on purpose. This module is the transport: it guards
+ * the SHAPE of an answer, not the vocabulary, and the vocabulary's owning home is
+ * `components/doctor/profile/profileVocabularies.ts` - the one client reads. A
+ * union here would be a second list to keep in step, and a closed list the
+ * transport re-declares is a closed list that can drift from the one that refuses
+ * the value.
+ *
+ * No length bound on `specialties` either, mirroring the backend: a cap is
+ * checked before the closed-list walk runs, so it would refuse an oversized
+ * selection as a bare `too_long` naming no member and shadow the one rule the
+ * field has. The closed list is already the bound.
+ */
+export interface DoctorProfilePracticeUpdate {
+  full_name: string;
+  clinic_name: string | null;
+  specialties: string[];
+  experience_years: number | null;
+}
+
+/**
+ * The About section write's body (#610), mirroring `DoctorProfileAboutUpdate`.
+ *
+ * **Every field is required, including the nullable ones.** That is the model's
+ * statement and this is its mirror: a section save declares the whole card, so a
+ * client which omitted a field would silently CLEAR that column - an omitted
+ * `about` would erase the doctor's own words and the save would report success.
+ * Nullable is still meaningful (`about: null` clears it deliberately); it just
+ * has to be said out loud, which is why there is no `?` on these keys.
+ */
+export interface DoctorProfileAboutUpdate {
+  about: string | null;
+  languages: string[];
+  consulting_days: string[];
+  consulting_hours: string | null;
+}
+
+/**
+ * The Notification section write's body (#610), mirroring
+ * `DoctorProfileNotificationUpdate`: one field, because notification preferences
+ * are one column and one card.
+ *
+ * The value is a plain `Record<string, boolean>` and NOT a five-key map, because
+ * the five keys are a domain vocabulary (#602's
+ * `NotificationPreferenceKey`) rather than a transport fact - the same reasoning
+ * as the selections above. What the body MUST NOT carry is a key the vocabulary
+ * does not name: `require_notification_preferences` refuses it, so a client that
+ * echoed back a stored key it did not recognise would turn every save into a 422.
+ * A stored key outside the five is preserved by the SERVER's merge, which is the
+ * right home for that promise - see `merge_notification_preferences`.
+ */
+export interface DoctorProfileNotificationUpdate {
+  notification_preferences: Record<string, boolean>;
 }
 
 const CREDENTIAL_STATUSES: readonly string[] = [
@@ -320,9 +468,15 @@ function isDoctorProfileView(value: unknown): value is DoctorProfileView {
     !("partner_id" in value) ||
     !("photo_ref" in value) ||
     !("practice_name" in value) ||
-    !("specialty" in value) ||
+    !("clinic_name" in value) ||
+    !("specialties" in value) ||
     !("verified" in value) ||
     !("practice_address" in value) ||
+    !("address_line" in value) ||
+    !("landmark" in value) ||
+    !("locality" in value) ||
+    !("city" in value) ||
+    !("pin_code" in value) ||
     !("practice_latitude" in value) ||
     !("practice_longitude" in value) ||
     !("area" in value) ||
@@ -330,7 +484,8 @@ function isDoctorProfileView(value: unknown): value is DoctorProfileView {
     !("experience_years" in value) ||
     !("about" in value) ||
     !("consultation_fee" in value) ||
-    !("availability" in value) ||
+    !("consulting_days" in value) ||
+    !("consulting_hours" in value) ||
     !("credentials" in value) ||
     !("notification_preferences" in value)
   ) {
@@ -338,7 +493,9 @@ function isDoctorProfileView(value: unknown): value is DoctorProfileView {
   }
   const view = value as DoctorProfileView;
   return (
+    Array.isArray(view.specialties) &&
     Array.isArray(view.languages) &&
+    Array.isArray(view.consulting_days) &&
     Array.isArray(view.credentials) &&
     view.credentials.every(isDoctorProfileCredential) &&
     typeof view.notification_preferences === "object" &&
@@ -357,6 +514,24 @@ function isDoctorProfilePhotoRef(
   );
 }
 
+function isDoctorProfileAddressView(
+  value: unknown,
+): value is DoctorProfileAddressView {
+  // The profile guard first: the write's answer IS the profile projection, plus
+  // the two fields only this write produces. Guarding them separately is what
+  // makes a backend that quietly dropped the belt warning fail loudly here
+  // rather than leave the card rendering nothing and saying nothing.
+  if (!isDoctorProfileView(value)) return false;
+  // Read off a widened local rather than off the narrowed value: the profile
+  // guard's whole point is that those two fields are NOT on the projection, so
+  // asking the narrowed type for them is the type error, not a runtime concern.
+  const answer = value as Partial<DoctorProfileAddressView>;
+  return (
+    typeof answer.outside_peri_urban_belt === "boolean" &&
+    typeof answer.distance_from_belt_centre_km === "number"
+  );
+}
+
 /** Read the calling active doctor's private profile projection. */
 export async function fetchDoctorProfile(): Promise<DoctorProfileView> {
   const data = await request<unknown>("/v1/doctor/profile");
@@ -367,12 +542,118 @@ export async function fetchDoctorProfile(): Promise<DoctorProfileView> {
   );
 }
 
-/** Write the editable profile fields; the fee and photo keep their own routes. */
-export async function updateDoctorProfile(
-  update: DoctorProfileUpdate,
+/**
+ * Save the calling active doctor's practice address through the section write
+ * (#609), on its own path rather than on `/profile`.
+ *
+ * Its own path is load-bearing: the backend namespaces its stored idempotency
+ * result per route, so a key issued against another write would otherwise be
+ * served this write's response.
+ *
+ * `retryKey` carries the per-attempt discipline (api-standards §5): a retry of
+ * the same attempt passes the failed attempt's key back, so a lost response
+ * cannot write the address twice, while a fresh edit mints a new one. Nothing in
+ * here mints a key - `idempotencyKey` is the shared module's, and the caller
+ * owns the attempt.
+ */
+export async function updateDoctorProfileAddress(
+  update: DoctorProfileAddressUpdate,
+  retryKey?: string,
+): Promise<DoctorProfileAddressView> {
+  const data = await request<unknown>("/v1/doctor/profile/address", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      [IDEMPOTENCY_KEY_HEADER]: idempotencyKey(retryKey),
+    },
+    body: JSON.stringify(update),
+  });
+  return guardShape(
+    data,
+    isDoctorProfileAddressView,
+    "The API returned an unexpected doctor address shape",
+  );
+}
+
+/**
+ * Save the Practice card through the section write (#608), on its own path
+ * rather than on `/profile`.
+ *
+ * The per-route path and the per-attempt `retryKey` are the Address write's
+ * discipline verbatim, and for the same two reasons: the backend namespaces its
+ * stored idempotency result per route, and a retry of one attempt must reuse that
+ * attempt's key while a fresh edit mints a new one.
+ *
+ * The answer is the plain `DoctorProfileView`, not the address write's extended
+ * one: the belt warning is that write's own product and this write does not
+ * evaluate it (see `DoctorProfileAddressView`). So the card has no warning to
+ * render and this function does not pretend to have one.
+ */
+export async function updateDoctorProfilePractice(
+  update: DoctorProfilePracticeUpdate,
   retryKey?: string,
 ): Promise<DoctorProfileView> {
-  const data = await request<unknown>("/v1/doctor/profile", {
+  const data = await request<unknown>("/v1/doctor/profile/practice", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      [IDEMPOTENCY_KEY_HEADER]: idempotencyKey(retryKey),
+    },
+    body: JSON.stringify(update),
+  });
+  return guardShape(
+    data,
+    isDoctorProfileView,
+    "The API returned an unexpected doctor profile shape",
+  );
+}
+
+/**
+ * Save the About card through the section write (#610): the doctor's own words,
+ * the languages they consult in, the days they consult on, and the consulting
+ * hours as prose.
+ *
+ * Same per-route path and same per-attempt key as its two siblings. The hours
+ * cross this boundary as a string and nothing more - no weekly template, no
+ * per-day ranges, no slots - because the platform has no booking system, so a
+ * shape that invited one would be a promise the server cannot keep.
+ */
+export async function updateDoctorProfileAbout(
+  update: DoctorProfileAboutUpdate,
+  retryKey?: string,
+): Promise<DoctorProfileView> {
+  const data = await request<unknown>("/v1/doctor/profile/about", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      [IDEMPOTENCY_KEY_HEADER]: idempotencyKey(retryKey),
+    },
+    body: JSON.stringify(update),
+  });
+  return guardShape(
+    data,
+    isDoctorProfileView,
+    "The API returned an unexpected doctor profile shape",
+  );
+}
+
+/**
+ * Save the Notification card through the section write (#610): one field, and a
+ * card the doctor can flip a single switch on without half-saving their about
+ * text.
+ *
+ * Same per-route path and same per-attempt key as its siblings. The answer is the
+ * plain profile projection, whose `notification_preferences` the backend MERGED -
+ * so a stored key outside the five is still in there afterwards, and the card
+ * re-seeds from the merge rather than from what it submitted. That is the promise
+ * #602's merge took over from the client, and this function is the seam it moved
+ * across.
+ */
+export async function updateDoctorProfileNotifications(
+  update: DoctorProfileNotificationUpdate,
+  retryKey?: string,
+): Promise<DoctorProfileView> {
+  const data = await request<unknown>("/v1/doctor/profile/notifications", {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",

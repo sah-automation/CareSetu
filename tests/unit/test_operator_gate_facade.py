@@ -1,4 +1,7 @@
-"""WI-2 p2a (#334): OperatorGateFacade direct-seam unit suite.
+"""
+
+Trace: FEAT-015 (Operator Console - Verification and Moderation).
+WI-2 p2a (#334): OperatorGateFacade direct-seam unit suite.
 
 Drives the operator-gate sub-facade (:mod:`modules.partner.operator_gate_facade`)
 through a mocked engine, mirroring the iam MFA facade direct-seam suite - no
@@ -34,6 +37,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.sql.dml import Insert, Update
 
@@ -178,6 +182,22 @@ def _bound_value(value: object) -> object:
     return value.value if hasattr(value, "value") else value
 
 
+#: Prefix of the one directory-entry statement in the module (#607). Asserted
+#: against the compiled SQL rather than SQLAlchemy's private clause attributes:
+#: the property under test is which columns the statement NAMES, so the emitted
+#: SQL is the honest surface for it.
+_INDEX_INSERT = "INSERT INTO partner.partner_directory_index ("
+_INDEX_CONFLICT = "ON CONFLICT (partner_id) DO UPDATE SET "
+
+
+def _compiled(statement: Any) -> str:
+    return str(statement.compile(dialect=postgresql.dialect()))
+
+
+def _index_writes(connection: AsyncMock) -> list[Any]:
+    return [w for w in _writes(connection) if w.table.name == partner_directory_index.name]
+
+
 # ---------------------------------------------------------------------------
 # operator_decision
 # ---------------------------------------------------------------------------
@@ -192,7 +212,8 @@ async def test_operator_approve_records_decision_and_emits_activated() -> None:
             _FakeResult(),  # profile update
             _FakeResult(),  # verification update
             _FakeResult(),  # credential verified stamp (activation seam #456)
-            _FakeResult(),  # directory-index upsert (activation seam #456)
+            _FakeResult(),  # directory-entry refresh (activation seam #456)
+            _FakeResult(),  # listed-flag flip (activation seam #456)
             _FakeResult(),  # partner.activated outbox insert
         ]
     )
@@ -228,6 +249,7 @@ async def test_operator_approve_flushes_the_directory_cache_seam() -> None:
             _FakeResult(),
             _FakeResult(),
             _FakeResult(),
+            _FakeResult(),
         ]
     )
     facade = _facade(connection, directory_cache=cache)
@@ -250,7 +272,8 @@ async def test_operator_approve_stamps_round_credentials_and_upserts_directory_i
             _FakeResult(),  # profile update
             _FakeResult(),  # verification update
             _FakeResult(),  # credential verified stamp
-            _FakeResult(),  # directory-index upsert
+            _FakeResult(),  # directory-entry refresh (the shared upsert)
+            _FakeResult(),  # listed-flag flip, activation-owned
             _FakeResult(),  # partner.activated outbox insert
         ]
     )
@@ -271,6 +294,89 @@ async def test_operator_approve_stamps_round_credentials_and_upserts_directory_i
     )
     assert index_write.table.name == partner_directory_index.name
     assert index_write.select is not None
+
+
+@pytest.mark.asyncio
+async def test_operator_approve_refreshes_only_the_declared_columns_of_the_entry() -> None:
+    """#607: the shared directory-entry refresh writes the position and the
+    specialties - the locality lives on the profile row it reads - and nothing
+    else a doctor could reach.
+
+    The listed flag is one of the four AND-ed clauses of ``provider_visible`` and
+    the credential ``verified`` stamp is the round-scoped half of the verified
+    derivation, so both are asserted ABSENT from the shared statement rather than
+    merely absent from the test: a doctor-triggered call (the address save, #609)
+    reaches this statement, and the property that makes that safe is that the
+    statement has no way to write either, nor to bring a row into existence that
+    would take the listed flag's server default. The same property is asserted
+    against a real database in
+    ``tests/integration/test_directory_entry_refresh.py``.
+    """
+    connection = _connection(
+        [
+            _FakeResult(first=_profile_row()),
+            _FakeResult(scalar=1),
+            _FakeResult(),
+            _FakeResult(),
+            _FakeResult(),
+            _FakeResult(),
+            _FakeResult(),
+            _FakeResult(),
+        ]
+    )
+    facade = _facade(connection)
+
+    await facade.operator_decision(3, decision_by=77, approve=True)
+
+    upserts = [w for w in _index_writes(connection) if isinstance(w, Insert)]
+    assert len(upserts) == 1
+    sql = _compiled(upserts[0])
+    assert sql.startswith(_INDEX_INSERT)
+    # Inserted columns: the profile-sourced ones plus the NOT NULL declared
+    # partner type, which a not-yet-created row has no other source for. The
+    # listed flag is not among them.
+    assert sorted(sql[len(_INDEX_INSERT) :].split(") SELECT")[0].split(", ")) == sorted(
+        [
+            "partner_id",
+            "practice_latitude",
+            "practice_longitude",
+            "partner_type",
+            "specialty",
+        ]
+    )
+    # Refreshed columns: position, specialties, the bookkeeping timestamp. No
+    # listed flag, no partner type, no credential column anywhere in it.
+    assert sorted(sql.split(_INDEX_CONFLICT)[1].split(", ")) == sorted(
+        [
+            "practice_latitude = excluded.practice_latitude",
+            "practice_longitude = excluded.practice_longitude",
+            "specialty = excluded.specialty",
+            "updated_at = now()",
+        ]
+    )
+    assert "is_active" not in sql
+    assert "partner_credentials" not in sql
+    # The values are READ off the profile row, never passed in: the profile's
+    # declared selection is the specialty source, which is what lets the
+    # address save write the profile and re-derive the entry in one transaction.
+    assert "partner_profiles.specialties" in sql
+    # And the statement writes only for a partner the recorded status says is
+    # [Active], so a profile save can never bring a row (listed or otherwise)
+    # into existence for a partner no operator approved. The status is READ here;
+    # the profile update above is what wrote it, on the operator's behalf.
+    assert "partner_profiles.status" in sql
+    assert "Active" in upserts[0].compile(dialect=postgresql.dialect()).params.values()
+    # The listed flag is written by the activate transition alone, as a separate
+    # statement - a deindexed entry is re-listed on approval, and nothing else.
+    flag_writes = [w for w in _index_writes(connection) if isinstance(w, Update)]
+    assert len(flag_writes) == 1
+    assert sorted(flag_writes[0]._values) == ["is_active", "updated_at"]
+    assert _bound_value(flag_writes[0]._values["is_active"]) is True
+    # And the credential stamp stays exactly where it was: the only credential
+    # write in the whole path is the round-scoped verified stamp.
+    credential_writes = [w for w in _writes(connection) if w.table.name == partner_credentials.name]
+    assert len(credential_writes) == 1
+    assert sorted(credential_writes[0]._values) == ["updated_at", "verified"]
 
 
 @pytest.mark.asyncio

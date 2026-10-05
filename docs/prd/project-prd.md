@@ -235,6 +235,10 @@ _Traceability: `REQ-001`, `REQ-008`, `REQ-022`, `REQ-005`, `GAP-009`_
 - `directory_search`: `patient_id`, `query`, `filters`, `result_count`, `timestamp`
 - `provider_selected`: `patient_id`, `provider_id`, `provider_type`, `timestamp`
 
+**Delivery Notes (batch #599):**
+
+- Specialty search is now live. It returns nothing today because nothing ever writes a specialty; this is a production defect the batch fixes, not a new capability being announced.
+
 #### Feature 4.2.2: Provider Profiles & Credential Display
 
 - **Feature ID:** `FEAT-005`
@@ -271,6 +275,11 @@ _Traceability: `REQ-001`, `REQ-008`, `REQ-022`, `REQ-005`, `GAP-009`_
 - Profiles are now **private, self-service surfaces** for the subject as well as public projections for others: a patient maintains their own profile photo, and an active doctor has a private profile (photo, practice details, experience, languages, about, availability, notification preferences) plus the consultation-fee editor moved onto it. Delivered by #533 (patient), #542/#543 (doctor).
 - Every profile photo lives in one private, encrypted object store (`profile-media`, ADR-0020) under a role-prefixed key, with only the object key held in SQL. Photos are never publicly addressable and are always streamed decrypted through the backend - a doctor's read of a patient photo passes the consent gate first.
 - Uploads are validated before any write (JPEG/PNG/WebP, ≤ 5 MB, GIF refused) and go through a bounded retry so a flaky store fails loudly instead of silently dropping the photo.
+
+**Delivery Notes (batch #599):**
+
+- The doctor profile's public field set now includes clinic name, specialties, languages, consulting days and hours, about text, years of experience, and structured address parts (locality, street/building, PIN). Each new public field renders in the declared band, never the verified band.
+- The practice address saves update the directory's derived practice position (ADR-0021); the position is a PIN centroid derived from the declared PIN (ADR-0022), with no new external integration created.
 
 ---
 

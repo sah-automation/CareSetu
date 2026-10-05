@@ -372,13 +372,13 @@ Fixed inputs: §2 shell conventions and Persona-002 (time-constrained local phys
 
 Bottom tabs / sidebar entries: **Queue | Cases | Patients | Profile**
 
-- **Queue (`/doctor`)** - the landing area. Two stacked sections:
+- **Queue (`/doctor`)** - the landing area (labeled **Dashboard**; route and test identifiers remain stable). Two stacked sections:
   - Needs review: pre-summary cards awaiting verification, oldest-first; low_confidence cases carry an amber "Verify" chip and sort above clean ones. Each card: patient name/age, intake snippet, waiting time, one-tap "Review" deep-linking into the case's pre-summary tab.
   - Today: booked consults for today with stage chips; tap opens the case.
   - Empty state: "Sab clear hai / All caught up."
 - **Cases (`/doctor/cases`)** - all active cases as a filterable list (stage chips: Pre-Summary / Consult Complete / Prescription Pending / Issued). Case detail is the workspace (§6.2).
 - **Patients (`/doctor/patients`)** - consented-history directory: search over patients who have granted this doctor access; each opens a read-only history timeline. No consent = not listed here (and greyed in search).
-- **Profile (`/doctor/profile`)** - public-profile preview toggle (exactly what Find Care shows patients), credential & activation status chip (Active / Under Verification), consultation fee, languages, availability sketch.
+- **Profile (`/doctor/profile`)** - carries the new structure: identity band, verified band, declared band (clinic name, specialties, languages, consulting days and hours, about text, years of experience, structured address parts including locality and PIN), per-section saves, sticky anchor index, live preview. No latitude/longitude inputs exist. Public-profile preview toggle shows exactly what Find Care shows patients. Credential & activation status chip (Active / Under Verification), consultation fee, availability sketch.
 
 Breadcrumbs inside cases: `Cases / <patient> / Prescription`.
 
@@ -511,6 +511,8 @@ On the §2 full shell (collapsible sidebar + topbar desktop, bottom tabs below `
 
 Access-history queries are not their own area: record-access events already live in the append-only audit store (FEAT-020 Rule 1), so access history is a purpose-built query lens inside Audit (§8.5). Four entries keep the mobile 5-tab rule comfortable and leave room for a future Partners lookup entry.
 
+**Note (batch #599):** The doctor surface (Profile in the doctor console) carries the new structure: identity band, verified band, declared band, per-section saves, a sticky anchor index, and a live preview. No latitude/longitude inputs exist on that surface. The landing label "Profile" in the doctor console navigation is contextual; the Dashboard label applies to the landing area as defined in §6.1.
+
 ### 8.2 Home - task-first
 
 Two action cards dominate above the fold; no vanity metrics:
@@ -634,6 +636,8 @@ Carried verbatim from the resolutions so downstream phase planning cannot lose t
 | G11 | `<html lang>` hardcoded `"en"` in the current shell - flagged for PHASE-2.6 fix (§9.2).                                                                                                                                                                                                                                                                                                                                                                           | #188       |
 
 Event-name spelling note: this blueprint carries event spellings verbatim from the resolution comments (`consult_marked_complete`, `prescription_approved`, `sample_collected`, `report_matched`, `consent_granted`, ...), which use snake_case. The canonical registry in `docs/architecture/internal-modules.md` §4.2 uses dot-notation; when these events are registered (G6/G7 and Phase 5 planning), reconcile to the registry spelling - the blueprint invents no new names and defers to §4.2 as the source of truth.
+
+**Note (batch #599):** §6.1's navigation label for the landing area is "Dashboard" (only the dictionary value changed; route and test identifiers remain stable). The doctor console's Profile surface structure is updated as described in §8.1 note above. No latitude/longitude inputs exist on the doctor profile surface. The new profile structure includes identity band, verified band, declared band, per-section saves, sticky anchor index, and live preview.
 
 ---
 

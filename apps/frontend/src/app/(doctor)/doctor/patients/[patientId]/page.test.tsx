@@ -118,7 +118,7 @@ function detail(
       gender: "female",
       area: "Daltonganj",
       emergency_contact: "+911234567890",
-      photo_ref: "me.jpg",
+      has_photo: true,
     },
     consultation_history: timeline(),
     health_background: healthBackground(),
@@ -178,7 +178,7 @@ describe("DoctorPatientDetailPage", () => {
 
   it("falls back to the avatar when the patient has no photo", async () => {
     getDetail.mockResolvedValue(
-      detail({ contact: { ...detail().contact!, photo_ref: null } }),
+      detail({ contact: { ...detail().contact!, has_photo: false } }),
     );
     render(<DoctorPatientDetailPage />);
 

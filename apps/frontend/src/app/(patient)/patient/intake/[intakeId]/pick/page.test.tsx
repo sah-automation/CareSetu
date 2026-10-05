@@ -50,6 +50,32 @@ vi.mock("@/lib/intake/api", () => ({
 
 const { searchDirectory } = vi.hoisted(() => ({ searchDirectory: vi.fn() }));
 
+// #612 AC5, reviewed and recorded: this mock is a CORRECT test of the page's
+// argument and a VACUOUS test of the filter, and that is why it stayed green while
+// production returned nothing. Concretely:
+//
+//   - The whole `@/lib/directory/search` module's `searchDirectory` is replaced with
+//     a bare `vi.fn()`, so the real client - the one that puts `specialty` on the
+//     query string and lets the backend predicate run - never executes here.
+//   - The mock resolves the same hand-built doctor list for EVERY argument, so the
+//     suite proves nothing about which doctors the request returns.
+//   - The assertions are `expect(search).toHaveBeenLastCalledWith({ specialty })`:
+//     they check that the page derived "Pediatrician" from "child has fever" and
+//     passed it on. That is the page's half of the contract, and it is genuinely
+//     worth having. The backend half - that one requested specialty overlaps the
+//     doctor's multi-valued selection rather than matching it by equality - is
+//     invisible from here by construction.
+//
+// Deliberately NOT fixed in #612. Rewiring this suite to exercise the real query
+// would mean a live HTTP round-trip in a component test, which is the integration
+// tier's job, and the honest proof is a backend integration test asserting the
+// overlap predicate against Postgres:
+// tests/integration/test_directory_search.py::
+// `test_specialty_filter_matches_any_member_of_a_multi_valued_column`. If the
+// frontend suite is ever tightened, tighten it by asserting the QUERY STRING the
+// client builds (a unit test over `searchDirectory` itself), not by asserting on a
+// mocked-out client - and add a case that a request naming a specialty the doctor
+// does not declare renders no cards, which this mock can never distinguish.
 vi.mock("@/lib/directory/search", async (importOriginal) => {
   const original =
     await importOriginal<typeof import("@/lib/directory/search")>();
@@ -220,6 +246,67 @@ describe("PickDoctorPage suggested specialty", () => {
         partnerType: "doctor",
         specialty: "General Physician",
       }),
+    );
+  });
+});
+
+// #623 (FEAT-005): a specialty outside the four the old private label map
+// covered used to render as "General Physician" - the pick page's `??`
+// fallback. A cardiologist was therefore shown to a patient as a general
+// physician, which is not a missing translation but a wrong clinical claim on
+// a screen whose whole purpose is choosing between doctors.
+describe("PickDoctorPage labels every declared specialty truthfully (#623)", () => {
+  it("renders a specialty outside the legacy four as itself, not as General Physician", async () => {
+    await renderWithCards([
+      doctor(1, "Dr A. Rao", { specialty: "Cardiologist" }),
+      doctor(2, "Dr B. Sen", { specialty: "Nephrologist" }),
+    ]);
+
+    const meta = screen
+      .getAllByTestId("pick-doctor-card")
+      .map((card) => card.textContent ?? "");
+    expect(meta.some((text) => text.includes("Cardiologist"))).toBe(true);
+    expect(meta.some((text) => text.includes("Nephrologist"))).toBe(true);
+    // The clinical claim is the point: a cardiologist must never read as a
+    // general physician.
+    for (const text of meta) {
+      expect(text.startsWith("General Physician")).toBe(false);
+    }
+  });
+
+  it("translates a declared specialty in the Hindi locale", async () => {
+    getPreSummary.mockResolvedValue(preSummary());
+    search.mockResolvedValue({
+      items: [doctor(1, "Dr A. Rao", { specialty: "Cardiologist" })],
+      fell_back: false,
+    });
+
+    function LangFlipHost() {
+      const { lang, setLang } = useLang();
+      return (
+        <>
+          <button
+            type="button"
+            onClick={() => setLang(lang === "en" ? "hi" : "en")}
+          >
+            flip-lang
+          </button>
+          <PickDoctorPage />
+        </>
+      );
+    }
+
+    render(<LangFlipHost />);
+    await waitFor(() => screen.getByTestId("pick-cards"));
+    expect(screen.getByTestId("pick-doctor-card")).toHaveTextContent(
+      "Cardiologist",
+    );
+
+    fireEvent.click(screen.getByText("flip-lang"));
+    await waitFor(() =>
+      expect(screen.getByTestId("pick-doctor-card")).toHaveTextContent(
+        "\u0939\u0943\u0926\u092f \u0935\u093f\u0936\u0947\u0937\u091c\u094d\u091e",
+      ),
     );
   });
 });

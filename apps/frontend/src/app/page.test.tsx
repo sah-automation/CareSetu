@@ -112,6 +112,54 @@ describe("homepage ten ordered sections (blueprint \u00a73.1)", () => {
   });
 });
 
+// #623 (FEAT-004): a doctor chip is a MEMBERSHIP filter, a lab or chemist chip
+// is free text. They used to share one positional parameter, so all four doctor
+// chips went out as `q=General Physician` and the directory answered a
+// full-text question ("does any name or area contain these words?") while
+// showing the patient a directory with no specialty filter applied.
+describe("homepage specialty chips seed the right filter (#623, FEAT-004)", () => {
+  function chipParams(): URLSearchParams[] {
+    const section = screen.getByTestId("section-chips");
+    return [...section.querySelectorAll("a")].map((anchor) => {
+      const href = anchor.getAttribute("href") ?? "";
+      expect(href.startsWith("/directory?")).toBe(true);
+      return new URLSearchParams(href.split("?")[1] ?? "");
+    });
+  }
+
+  it("sends every doctor chip as the specialty filter, with no free text", () => {
+    renderHomepage();
+
+    const doctorChips = chipParams().filter(
+      (params) => params.get("type") === "doctor",
+    );
+    expect(doctorChips).toHaveLength(4);
+    for (const params of doctorChips) {
+      expect(params.get("specialty")).not.toBeNull();
+      expect(params.get("q")).toBeNull();
+    }
+    expect(doctorChips.map((params) => params.get("specialty"))).toEqual([
+      "General Physician",
+      "Pediatrician",
+      "Gynecologist",
+      "Dentist",
+    ]);
+  });
+
+  it("sends lab and chemist chips as free text, not as specialties", () => {
+    renderHomepage();
+
+    const serviceChips = chipParams().filter((params) =>
+      ["lab", "chemist"].includes(params.get("type") ?? ""),
+    );
+    expect(serviceChips).toHaveLength(4);
+    for (const params of serviceChips) {
+      expect(params.get("q")).not.toBeNull();
+      expect(params.get("specialty")).toBeNull();
+    }
+  });
+});
+
 describe("G1 copy rule - no disease-program promises", () => {
   function collectStrings(value: unknown): string[] {
     if (typeof value === "string") return [value];
