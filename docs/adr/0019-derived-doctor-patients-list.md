@@ -3,7 +3,7 @@
 **Status:** accepted
 **Date:** 2026-09-24
 **Decides:** US-11/12/13 of the parent spec (#529) - how the doctor gets a Current/Past patient list without inventing a stored patient-relationship table. Current = live standing grant (any record scope) or an open care case; Past = closed care cases only with no live grant. The list is the care-loop anchor: a patient stays listed until the last grant is revoked.
-**Traceability:** `FEAT-002`, `FEAT-003`, `FEAT-008`, `MOD-001`, `MOD-003`, `MOD-004`, `MOD-006`, `MOD-012` (Doctor Console seam), `ADR-0018`. Implemented by #539 (list), #540 (detail + photo), #541 (the live Patients page).
+**Traceability:** `FEAT-002`, `FEAT-003`, `FEAT-008`, `MOD-001`, `MOD-003`, `MOD-004`, `MOD-006`, `MOD-012` (Doctor Console seam), `ADR-0018`. Implemented by #539 (list), #540 (detail + photo), #541 (the live Patients page). D3's per-row ledger discipline is carried onto a second read surface by #646 (parent #645), which adds the doctor's open-cases list under its own `doctor_cases_list` marker - the same derivation rule and the same fail-closed egress rule, one more marker, no amendment to the decision.
 
 ## Context
 
@@ -29,6 +29,8 @@ The detail read is section-gated on consent, each section on the scope that gove
 ### D3 - Every served row is access-logged
 
 Each row actually returned to the doctor is recorded through the `MOD-003` access-history ledger (plus its `record.accessed` outbox envelope) in one transaction per row, using the caller-supplied scope marker `doctor_patients_list` (MOD-012 logs no scope of its own - the marker names the list surface, not a record entry, so revoking the underlying consent never rewinds the historical "viewed where" signal). The detail and photo reads carry the sibling marker `doctor_patient_detail` under the same discipline. Only rows in the returned page are logged: a read with no matches reveals nothing and logs nothing. Pagination (api-standards §4) bounds the ledger writes per request at the page size.
+
+That bound is a property of the Patients list's pagination, not of the discipline itself, and it does **not** carry to an unpaginated read. The doctor's open-cases list (#646) logs every served row and writes one ledger transaction per row with nothing to cap it at, so its cost scales with the doctor's open caseload; pagination on that list is deferred, and this is the reason to revisit it if a large caseload ever makes the write cost matter.
 
 One asymmetry is deliberate: the entry-keyed consented reads (`read_consented_history`, `read_consented_health_background`) self-ledger both the allowed and the denied attempt, while a doctor with **no** live grant for the photo route is a boundary refusal - the same 403 shape as an RBAC denial, with no byte read and no ledger row, because nothing was disclosed.
 
