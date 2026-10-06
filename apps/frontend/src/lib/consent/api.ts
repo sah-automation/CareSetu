@@ -25,6 +25,7 @@ export interface ConsentView {
   patient_id: number;
   counterparty_type: string;
   counterparty_id: string;
+  counterparty_display_name?: string | null;
   record_scope: string;
   status: string;
   version: number;
@@ -45,6 +46,7 @@ export interface EgressLogEntry {
   version: number;
   counterparty_type: string;
   counterparty_id: string;
+  counterparty_display_name?: string | null;
   record_scope: string;
   disclosed_entry_ids: number[];
   disclosed_at: string;
