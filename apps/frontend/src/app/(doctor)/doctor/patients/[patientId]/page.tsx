@@ -12,7 +12,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 
 import { ApiError } from "@/lib/api-errors";
 import {
@@ -29,7 +29,15 @@ import { ErrorBanner } from "@/components/layout/ErrorBanner";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Avatar } from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
 import { NotSharedCard } from "@/components/doctor/NotSharedCard";
+
+// #659 (US-56/57): the accent chip tone the header band and the health
+// background share - the same soft-accent pill the scope badges and the
+// shared doctor card render, so every read-only chip on the doctor surface
+// looks like one family. A chip is a Badge, never a button: these are
+// read-only facts about a patient, with no remove affordance.
+const CHIP_TONE = "bg-accent-soft text-accent-strong";
 
 type LoadStatus = "loading" | "ready" | "error";
 
@@ -114,6 +122,8 @@ interface Lookup {
   consoleT: Dictionary["doctorConsole"];
   recordT: Dictionary["record"];
   lang: "en" | "hi";
+  /** Shared bilingual gender vocabulary, resolved once where lookup is built. */
+  genders: Record<string, string>;
 }
 
 function ContactBlock({
@@ -125,40 +135,62 @@ function ContactBlock({
   photoUrl: string | null;
   lookup: Lookup;
 }) {
-  const { t, consoleT } = lookup;
+  const { t, consoleT, genders } = lookup;
   const contact = detail.contact;
   if (contact == null) {
     return <NotSharedCard title={t.notSharedTitle} body={t.notSharedBody} />;
   }
+  // #659 (US-56/57): the header reads as one band - large avatar and name
+  // lead, age and gender follow as inline chips rather than stacked form
+  // rows. The gender enum renders through the shared bilingual vocabulary so
+  // the chip ships in both locales; an unrecognised value falls back to the
+  // raw token rather than silently vanishing.
+  const ageText = contact.age != null ? String(contact.age) : t.notRecorded;
+  const genderText =
+    contact.gender != null
+      ? genders[contact.gender] ?? contact.gender
+      : t.notRecorded;
   return (
     <div className="rounded-lg border border-hairline bg-surface p-4">
-      <div className="mb-4 flex items-center gap-3">
+      <div
+        className="flex items-center gap-4"
+        data-testid="patient-header-band"
+      >
         {photoUrl ? (
           <img
             src={photoUrl}
             alt={t.photoAlt(contact.name ?? consoleT.patientFallback)}
             data-testid="patient-photo"
-            className="h-14 w-14 rounded-full object-cover"
+            className="h-20 w-20 shrink-0 rounded-full object-cover"
           />
         ) : (
           <Avatar
             name={contact.name}
-            className="h-14 w-14 shrink-0 bg-accent-soft text-accent-strong"
+            className="h-20 w-20 shrink-0 bg-accent-soft text-2xl font-semibold text-accent-strong"
             data-testid="patient-photo-fallback"
           />
         )}
         <div className="min-w-0">
-          <p className="font-medium text-txt" data-testid="patient-detail-name">
+          <p
+            className="text-lg font-semibold break-words text-txt"
+            data-testid="patient-detail-name"
+          >
             {contact.name ?? t.notRecorded}
           </p>
+          <div
+            className="mt-2 flex flex-wrap items-center gap-1.5"
+            data-testid="patient-header-chips"
+          >
+            <Badge data-testid="patient-age-chip" className={CHIP_TONE}>
+              {`${t.ageLabel}: ${ageText}`}
+            </Badge>
+            <Badge data-testid="patient-gender-chip" className={CHIP_TONE}>
+              {`${t.genderLabel}: ${genderText}`}
+            </Badge>
+          </div>
         </div>
       </div>
-      <dl className="space-y-2">
-        <Field
-          label={t.ageLabel}
-          value={contact.age != null ? String(contact.age) : t.notRecorded}
-        />
-        <Field label={t.genderLabel} value={contact.gender ?? t.notRecorded} />
+      <dl className="mt-4 space-y-2">
         <Field label={t.areaLabel} value={contact.area ?? t.notRecorded} />
         <Field
           label={t.emergencyContactLabel}
@@ -217,6 +249,31 @@ function ConsultationHistoryBlock({
   );
 }
 
+// One health-background row: a wrap-safe label above its value. The label
+// may wrap (break-words, no fixed-width column), so a long Devanagari label
+// never collides with the chips on the line below (#659 / US-59).
+function HealthRow({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <dt
+        className="break-words text-xs font-medium uppercase tracking-wide text-txt-muted"
+        data-testid="health-area-label"
+      >
+        {label}
+      </dt>
+      <dd className="min-w-0" data-testid="detail-field-value">
+        {children}
+      </dd>
+    </div>
+  );
+}
+
 function HealthBackgroundBlock({
   detail,
   lookup,
@@ -248,27 +305,42 @@ function HealthBackgroundBlock({
     { label: t.familyHistoryLabel, values: bg.family_history },
   ];
   return (
+    // #659 (US-58/59): each area renders as its own label + chip row instead
+    // of one comma-joined run-on. The label sits above its value with
+    // `break-words` and no fixed-width column, so a long Devanagari label
+    // ("पारिवारिक इतिहास") wraps onto its own line rather than colliding
+    // with the chips beside it. The chip container wraps (`flex-wrap`), so a
+    // long allergy list becomes more rows, never a horizontal overflow - the
+    // same rule the case grid obeys. An empty granted area keeps its plain
+    // "None recorded" text so "no conditions" stays visually distinct from
+    // chips and from a locked section.
     <dl
       data-testid="health-background-set"
-      className="space-y-3 rounded-lg border border-hairline bg-surface p-4"
+      className="space-y-4 rounded-lg border border-hairline bg-surface p-4"
     >
-      <div className="flex items-center gap-3">
-        <dt className="w-40 shrink-0 text-xs font-medium uppercase tracking-wide text-txt-muted sm:w-48">
-          {t.bloodGroupLabel}
-        </dt>
-        <dd className="text-sm text-txt" data-testid="detail-field-value">
+      <HealthRow label={t.bloodGroupLabel}>
+        <span className="text-sm text-txt">
           {bg.blood_group ?? t.noneRecorded}
-        </dd>
-      </div>
+        </span>
+      </HealthRow>
       {areas.map((area) => (
-        <div key={area.label} className="flex items-center gap-3">
-          <dt className="w-40 shrink-0 text-xs font-medium uppercase tracking-wide text-txt-muted sm:w-48">
-            {area.label}
-          </dt>
-          <dd className="text-sm text-txt" data-testid="detail-field-value">
-            {area.values.length > 0 ? area.values.join(", ") : t.noneRecorded}
-          </dd>
-        </div>
+        <HealthRow key={area.label} label={area.label}>
+          {area.values.length > 0 ? (
+            <div className="flex flex-wrap items-center gap-1.5">
+              {area.values.map((value, index) => (
+                <Badge
+                  key={`${area.label}-${index}`}
+                  data-testid="health-chip"
+                  className={CHIP_TONE}
+                >
+                  {value}
+                </Badge>
+              ))}
+            </div>
+          ) : (
+            <span className="text-sm text-txt">{t.noneRecorded}</span>
+          )}
+        </HealthRow>
       ))}
     </dl>
   );
@@ -326,7 +398,7 @@ function DetailSkeleton() {
   return (
     <div className="space-y-3" data-testid="patient-detail-skeleton">
       <div className="flex items-center gap-3">
-        <Skeleton className="h-14 w-14 rounded-full" />
+        <Skeleton className="h-20 w-20 rounded-full" />
         <div className="space-y-2">
           <Skeleton className="h-4 w-32" />
           <Skeleton className="h-4 w-24" />
@@ -412,7 +484,13 @@ export default function DoctorPatientDetailPage() {
   }, [detail?.contact?.has_photo, patientId]);
 
   const ready = loadStatus === "ready" && detail != null;
-  const lookup: Lookup = { t, consoleT, recordT, lang };
+  const lookup: Lookup = {
+    t,
+    consoleT,
+    recordT,
+    lang,
+    genders: STRINGS[lang].profile.genders,
+  };
 
   // A non-numeric route segment is a malformed URL (the app only emits
   // numeric patient ids), so bail out early instead of calling the API with a
