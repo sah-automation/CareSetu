@@ -12,6 +12,72 @@
       "required": ["case_id", "stage"],
       "type": "object"
     },
+    "ConsentView": {
+      "properties": {
+        "consent_id": {
+          "type": "integer"
+        },
+        "counterparty_display_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "counterparty_id": {
+          "type": "string"
+        },
+        "counterparty_type": {
+          "type": "string"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "events": {
+          "items": {
+            "$ref": "#/components/schemas/ConsentEventView"
+          },
+          "type": "array"
+        },
+        "lineage_ref": {
+          "type": "string"
+        },
+        "patient_id": {
+          "type": "integer"
+        },
+        "record_scope": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "version": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "consent_id",
+        "lineage_ref",
+        "patient_id",
+        "counterparty_type",
+        "counterparty_id",
+        "record_scope",
+        "status",
+        "version",
+        "created_at",
+        "updated_at",
+        "events"
+      ],
+      "type": "object"
+    },
     "ContactSection": {
       "properties": {
         "age": {
@@ -69,6 +135,75 @@
           ]
         }
       },
+      "type": "object"
+    },
+    "DoctorCaseRow": {
+      "properties": {
+        "case_id": {
+          "type": "integer"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "forced_review": {
+          "default": false,
+          "type": "boolean"
+        },
+        "has_photo": {
+          "default": false,
+          "type": "boolean"
+        },
+        "patient_age": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "patient_id": {
+          "type": "integer"
+        },
+        "patient_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stage": {
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "case_id",
+        "stage",
+        "created_at",
+        "updated_at",
+        "patient_id"
+      ],
+      "type": "object"
+    },
+    "DoctorCasesListView": {
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/components/schemas/DoctorCaseRow"
+          },
+          "type": "array"
+        }
+      },
+      "required": ["items"],
       "type": "object"
     },
     "DoctorPatientDetailView": {
@@ -191,6 +326,74 @@
         }
       },
       "required": ["patient_id", "bucket"],
+      "type": "object"
+    },
+    "EgressLogEntry": {
+      "properties": {
+        "consent_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "counterparty_display_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "counterparty_id": {
+          "type": "string"
+        },
+        "counterparty_type": {
+          "type": "string"
+        },
+        "disclosed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "disclosed_entry_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "egress_id": {
+          "type": "integer"
+        },
+        "lineage_ref": {
+          "type": "string"
+        },
+        "patient_id": {
+          "type": "integer"
+        },
+        "record_scope": {
+          "type": "string"
+        },
+        "version": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "egress_id",
+        "patient_id",
+        "consent_id",
+        "lineage_ref",
+        "version",
+        "counterparty_type",
+        "counterparty_id",
+        "record_scope",
+        "disclosed_entry_ids",
+        "disclosed_at"
+      ],
       "type": "object"
     },
     "HealthBackground": {
