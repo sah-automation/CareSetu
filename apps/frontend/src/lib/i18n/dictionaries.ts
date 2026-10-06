@@ -2018,6 +2018,13 @@ const en = {
     rxDurationLabel: "Duration",
     rxFrequencyLabel: "Frequency",
     rxEmptyItems: "No items yet. Add the first one below.",
+    // #657: the bare-number refusal - which field, and why. Each sentence
+    // names its own field and carries the unit it is asking for. The medicine
+    // name has no rule at all: real product names contain numbers.
+    rxDoseBareNumber: "Dose must include a unit, such as 500 mg.",
+    rxFrequencyBareNumber:
+      "Frequency must include a unit, such as 3 times daily.",
+    rxDurationBareNumber: "Duration must include a unit, such as 5 days.",
     addItemAction: "Add item",
     removeItemAction: "Remove",
     saveRevisionAction: "Save revision",
@@ -3858,6 +3865,10 @@ export const STRINGS: Record<Lang, Dictionary> = {
       rxDurationLabel: "अवधि",
       rxFrequencyLabel: "आवृत्ति",
       rxEmptyItems: "अभी कोई वस्तु नहीं। नीचे पहली वस्तु जोड़ें।",
+      // #657: शून्य-संख्या अस्वीकृति - कौन सा क्षेत्र और क्यों।
+      rxDoseBareNumber: "मात्रा में इकाई होनी चाहिए, जैसे 500 मिग्रा।",
+      rxFrequencyBareNumber: "आवृत्ति में इकाई होनी चाहिए, जैसे दिन में 3 बार।",
+      rxDurationBareNumber: "अवधि में इकाई होनी चाहिए, जैसे 5 दिन।",
       addItemAction: "वस्तु जोड़ें",
       removeItemAction: "हटाएँ",
       saveRevisionAction: "रिवीज़न सहेजें",

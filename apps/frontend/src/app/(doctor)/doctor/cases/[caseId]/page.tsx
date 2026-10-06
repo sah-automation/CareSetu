@@ -25,7 +25,7 @@
 import type { ChangeEvent, FormEvent, KeyboardEvent } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ConsentedHistory } from "@/components/case/ConsentedHistory";
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
@@ -81,6 +81,123 @@ function toEditorItems(items: RxItemView[]): EditorRxItem[] {
     duration: i.duration ?? "",
     frequency: i.frequency ?? "",
   }));
+}
+
+// #657: the three instruction fields the editor refuses to issue unreadable.
+// A value that is ONLY digits, decimals and whitespace is a bare number with
+// no unit ("9", "0.5", "9 3 3") and is refused at save time; "9 mg",
+// "2 tablets", "BD" and "9/3/3" all pass, because the rule is narrow on
+// purpose - a validator that rejects "2 tablets" would reject real
+// prescriptions. The medicine name is deliberately absent from this union:
+// real product names carry numbers ("Zinc 20", "Vitamin D3 60k"), so a
+// numeric rule on the name would refuse legitimate medicines. A refusal,
+// never a rewrite: the pass only reports WHICH field and why it is
+// unreadable; nothing is corrected on the doctor's behalf and no row is
+// dropped. DOM order (dose, frequency, duration) so the focus walk reads the
+// row the way the doctor sees it. The union is derived from the one list
+// below, so a field can never be validated without also being declared there.
+const RX_INSTRUCTION_FIELDS = ["dose", "frequency", "duration"] as const;
+type RxItemField = (typeof RX_INSTRUCTION_FIELDS)[number];
+
+interface RxItemProblem {
+  row: number;
+  field: RxItemField;
+}
+
+function invalidRxItemFields(items: EditorRxItem[]): RxItemProblem[] {
+  const invalid: RxItemProblem[] = [];
+  items.forEach((row, idx) => {
+    for (const field of RX_INSTRUCTION_FIELDS) {
+      const value = row[field].trim();
+      if (value !== "" && /^[\d.\s]+$/.test(value)) {
+        invalid.push({ row: idx, field });
+      }
+    }
+  });
+  return invalid;
+}
+
+/** The focus-walk / ref map key for one instruction field. */
+function rxFieldKey(row: number, field: RxItemField): string {
+  return `${row}:${field}`;
+}
+
+/** The id a refused input points at with `aria-describedby`. */
+function rxErrorId(row: number, field: RxItemField): string {
+  return `rx-item-${field}-error-${row}`;
+}
+
+/** The label and the bare-number message for one instruction field. */
+function rxFieldCopy(
+  t: Dictionary["caseWorkspace"],
+  field: RxItemField,
+): { label: string; message: string } {
+  switch (field) {
+    case "dose":
+      return { label: t.rxDoseLabel, message: t.rxDoseBareNumber };
+    case "frequency":
+      return { label: t.rxFrequencyLabel, message: t.rxFrequencyBareNumber };
+    case "duration":
+      return { label: t.rxDurationLabel, message: t.rxDurationBareNumber };
+  }
+}
+
+interface RxInstructionFieldProps {
+  row: number;
+  field: RxItemField;
+  label: string;
+  message: string;
+  value: string;
+  refused: boolean;
+  onChange: (value: string) => void;
+  inputRef: (el: HTMLInputElement | null) => void;
+}
+
+/** One instruction field of the rx-item editor (#657): a dose, frequency or
+    duration input whose refusal message is wired to it via
+    `aria-describedby`. Presentational and per-field rather than per-row, so
+    the three fields cannot drift apart in their aria wiring. */
+function RxInstructionField({
+  row,
+  field,
+  label,
+  message,
+  value,
+  refused,
+  onChange,
+  inputRef,
+}: RxInstructionFieldProps) {
+  const errorId = rxErrorId(row, field);
+  return (
+    <div className="flex-1 min-w-28">
+      <label className="block">
+        <span className="sr-only">
+          {label}: {row + 1}
+        </span>
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={label}
+          aria-invalid={refused}
+          aria-describedby={refused ? errorId : undefined}
+          className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+          ref={inputRef}
+          data-testid={`rx-item-${field}-${row}`}
+        />
+      </label>
+      {refused && (
+        <p
+          id={errorId}
+          className="mt-1 text-xs text-danger"
+          role="alert"
+          data-testid={errorId}
+        >
+          {message}
+        </p>
+      )}
+    </div>
+  );
 }
 
 function snapshotField(value: unknown): unknown {
@@ -503,6 +620,25 @@ export default function CaseWorkspacePage() {
   const [addendumText, setAddendumText] = useState("");
   const [manualMode, setManualMode] = useState(false);
 
+  // #657: the bare-number refusal. Save is disabled while the pass reports
+  // anything, so the refusal has to explain itself WITHOUT a submit - a
+  // silent disabled button would tell a keyboard or screen-reader user
+  // nothing about why (unlike the address card, whose enabled button can be
+  // pressed to elicit the message). The message is therefore live: the pass
+  // derives from `rxItems` every render, so a bare number names its field and
+  // reason the moment it is typed and a usable value clears it at once. One
+  // message per field means continuous typing does not re-announce.
+  const invalidRxFields = invalidRxItemFields(rxItems);
+  // The focus-walk targets, keyed `row:field`.
+  const rxInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+
+  /** The pass refuses this field right now, so its message shows. */
+  function rxRefuses(row: number, field: RxItemField): boolean {
+    return invalidRxFields.some(
+      (problem) => problem.row === row && problem.field === field,
+    );
+  }
+
   // Issuance + closure state (US-19..22, #453). The approve request is only
   // ever sent once the doctor ticks both verification declarations; rejection
   // carries a plain-language reason; close-without-prescription ends the case.
@@ -710,6 +846,16 @@ export default function CaseWorkspacePage() {
   async function handleSaveRevision(e: FormEvent) {
     e.preventDefault();
     if (!careCase) return;
+    // #657: the refusal. The save button is already disabled while the pass
+    // reports a bare number, so this is the belt to that button's braces (an
+    // implicit form submit). The refused messages are already on screen, so
+    // the focus walk (ui-blueprint §9.4) simply lands the doctor on the first
+    // refusal they can act on.
+    if (invalidRxFields.length > 0) {
+      const first = invalidRxFields[0];
+      rxInputRefs.current[rxFieldKey(first.row, first.field)]?.focus();
+      return;
+    }
     const items: RxItemInput[] = rxItems
       .map((r) => ({
         name: r.name.trim(),
@@ -1763,100 +1909,84 @@ export default function CaseWorkspacePage() {
                                   </p>
                                 ) : (
                                   <ul className="mt-2 space-y-2">
-                                    {rxItems.map((row, idx) => (
-                                      <li
-                                        key={idx}
-                                        className="flex flex-wrap items-center gap-2"
-                                        data-testid="rx-item-row"
-                                      >
-                                        <label className="flex-1 min-w-40">
-                                          <span className="sr-only">
-                                            {t.rxNameLabel}: {idx + 1}
-                                          </span>
-                                          <input
-                                            type="text"
-                                            value={row.name}
-                                            onChange={(e) =>
-                                              updateRxItem(
-                                                idx,
-                                                "name",
-                                                e.target.value,
-                                              )
-                                            }
-                                            placeholder={t.rxNameLabel}
-                                            className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-                                            data-testid={`rx-item-name-${idx}`}
-                                          />
-                                        </label>
-                                        <label className="flex-1 min-w-28">
-                                          <span className="sr-only">
-                                            {t.rxDoseLabel}: {idx + 1}
-                                          </span>
-                                          <input
-                                            type="text"
-                                            value={row.dose}
-                                            onChange={(e) =>
-                                              updateRxItem(
-                                                idx,
-                                                "dose",
-                                                e.target.value,
-                                              )
-                                            }
-                                            placeholder={t.rxDoseLabel}
-                                            className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-                                            data-testid={`rx-item-dose-${idx}`}
-                                          />
-                                        </label>
-                                        <label className="flex-1 min-w-28">
-                                          <span className="sr-only">
-                                            {t.rxFrequencyLabel}: {idx + 1}
-                                          </span>
-                                          <input
-                                            type="text"
-                                            value={row.frequency}
-                                            onChange={(e) =>
-                                              updateRxItem(
-                                                idx,
-                                                "frequency",
-                                                e.target.value,
-                                              )
-                                            }
-                                            placeholder={t.rxFrequencyLabel}
-                                            className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-                                            data-testid={`rx-item-frequency-${idx}`}
-                                          />
-                                        </label>
-                                        <label className="flex-1 min-w-28">
-                                          <span className="sr-only">
-                                            {t.rxDurationLabel}: {idx + 1}
-                                          </span>
-                                          <input
-                                            type="text"
-                                            value={row.duration}
-                                            onChange={(e) =>
-                                              updateRxItem(
-                                                idx,
-                                                "duration",
-                                                e.target.value,
-                                              )
-                                            }
-                                            placeholder={t.rxDurationLabel}
-                                            className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-                                            data-testid={`rx-item-duration-${idx}`}
-                                          />
-                                        </label>
-                                        <Button
-                                          type="button"
-                                          size="sm"
-                                          variant="ghost"
-                                          disabled={rxItems.length <= 1}
-                                          onClick={() => removeRxItem(idx)}
-                                          data-testid={`rx-item-remove-${idx}`}
+                                    {rxItems.map((row, idx) => {
+                                      return (
+                                        <li
+                                          key={idx}
+                                          className="flex flex-wrap items-center gap-2"
+                                          data-testid="rx-item-row"
                                         >
-                                          {t.removeItemAction}
-                                        </Button>
-                                      </li>
-                                    ))}
+                                          <label className="flex-1 min-w-40">
+                                            <span className="sr-only">
+                                              {t.rxNameLabel}: {idx + 1}
+                                            </span>
+                                            <input
+                                              type="text"
+                                              value={row.name}
+                                              onChange={(e) =>
+                                                updateRxItem(
+                                                  idx,
+                                                  "name",
+                                                  e.target.value,
+                                                )
+                                              }
+                                              placeholder={t.rxNameLabel}
+                                              className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                                              data-testid={`rx-item-name-${idx}`}
+                                            />
+                                          </label>
+                                          {/* The name is free text with no rule
+                                              (#657): real product names carry
+                                              digits. The three instruction
+                                              fields each refuse a bare number
+                                              through the shared field below. */}
+                                          {RX_INSTRUCTION_FIELDS.map(
+                                            (field) => {
+                                              const copy = rxFieldCopy(
+                                                t,
+                                                field,
+                                              );
+                                              return (
+                                                <RxInstructionField
+                                                  key={field}
+                                                  row={idx}
+                                                  field={field}
+                                                  label={copy.label}
+                                                  message={copy.message}
+                                                  value={row[field]}
+                                                  refused={rxRefuses(
+                                                    idx,
+                                                    field,
+                                                  )}
+                                                  onChange={(value) =>
+                                                    updateRxItem(
+                                                      idx,
+                                                      field,
+                                                      value,
+                                                    )
+                                                  }
+                                                  inputRef={(el) => {
+                                                    rxInputRefs.current[
+                                                      rxFieldKey(idx, field)
+                                                    ] = el;
+                                                  }}
+                                                />
+                                              );
+                                            },
+                                          )}
+                                          <Button
+                                            type="button"
+                                            size="sm"
+                                            variant="ghost"
+                                            disabled={rxItems.length <= 1}
+                                            onClick={() => removeRxItem(idx)}
+                                            data-testid={`rx-item-remove-${idx}`}
+                                          >
+                                            {t.removeItemAction}
+                                          </Button>
+                                        </li>
+                                      );
+                                    })}
                                   </ul>
                                 )}
 
@@ -1875,7 +2005,14 @@ export default function CaseWorkspacePage() {
                                   <Button
                                     type="submit"
                                     size="sm"
-                                    disabled={saving}
+                                    // #657: disabled while any row holds a
+                                    // bare number, so an invalid revision is
+                                    // never submitted - and never silently:
+                                    // each refused field states why beside its
+                                    // own input.
+                                    disabled={
+                                      saving || invalidRxFields.length > 0
+                                    }
                                     loading={saving}
                                     data-testid="save-revision-action"
                                   >
