@@ -44,7 +44,7 @@ from modules.consent.adapters.routes import (
     register_error_handlers as register_consent_error_handlers,
 )
 from modules.consent.adapters.routes import router as consent_router
-from modules.consent.facade import ConsentFacade
+from modules.consent.facade import ConsentFacade, CounterpartyDisplayNameResolver
 from modules.consent.redis_cache import close_redis_client, init_redis_client
 from modules.doctor.adapters.routes import (
     register_error_handlers as register_doctor_error_handlers,
@@ -58,6 +58,7 @@ from modules.iam.adapters.routes import register_error_handlers
 from modules.iam.adapters.routes import router as iam_router
 from modules.iam.adapters.sms import MockSmsAdapter, build_sms_adapter
 from modules.iam.facade import IamFacade, PatientProfile
+from modules.intake.adapters import AI_EGRESS_COUNTERPARTY_ID
 from modules.intake.adapters.media_store import build_media_store
 from modules.intake.adapters.routes import (
     register_error_handlers as register_intake_error_handlers,
@@ -182,6 +183,76 @@ async def _run_in_process_dispatcher(
                 await asyncio.wait_for(stop_event.wait(), timeout=restart_delay_seconds)
 
 
+# MOD-004 + composition root (#649): what a consent row's counterparty DISPLAY
+# NAME says about the AI intake pseudo-counterparty. It is a service name, not a
+# person's name - it must read as a machine having read the intake, because the
+# AI egress path records this id under the doctor counterparty type and the
+# patient is shown the resolved name. #653's frontend fallback recognises the
+# same id and must say the same thing.
+AI_INTAKE_COUNTERPARTY_DISPLAY_NAME = "CareSetu AI Intake Assistant"
+
+
+def _build_counterparty_display_name_resolver(app: FastAPI) -> CounterpartyDisplayNameResolver:
+    """Build the consent facade's counterparty-name resolver (#649).
+
+    The composition root is the one place allowed to know more than one module,
+    so the resolution rules live here and ``modules.consent`` learns a doctor's
+    practice name without importing partner - the same boundary the issued-rx
+    attribution resolver below already owns, and the same degrade-to-null shape.
+
+    The order of the branches IS the rule:
+
+    1. ``intake-ai`` answers the branded service label. It is recorded under
+       the DOCTOR type by the AI egress path, so the id check runs before any
+       type parse - otherwise a machine's disclosure renders as a clinician's.
+    2. A doctor counterparty whose id parses as a partner id resolves through
+       the partner facade's public provider-profile seam and answers the
+       practice name.
+    3. Lab and chemist counterparties answer null: those partner phases have not
+       landed, and null is the honest answer the frontend's type-derived step
+       turns into words. Adding them later is a change to THIS resolver, not a
+       model change.
+
+    The partner facade is read from ``app.state`` when the resolver is CALLED,
+    never when it is built, so binding it before the partner facade exists is
+    safe. Every failure path answers None so the consent log - the one surface
+    that proves what was shared - never goes blank on a partner outage. Both
+    warnings name the counterparty type only: never the counterparty id, never
+    PHI, never the exception payload (error-handling-observability §2).
+    """
+
+    async def _resolve(counterparty_type: str, counterparty_id: str) -> str | None:
+        if counterparty_id == AI_EGRESS_COUNTERPARTY_ID:
+            return AI_INTAKE_COUNTERPARTY_DISPLAY_NAME
+        # Only a doctor counterparty addresses a partner profile; lab and
+        # chemist stay null until those partner phases land.
+        if counterparty_type != "doctor":
+            return None
+        try:
+            # An id that is not a partner id answers null too - the parse and
+            # the profile read share the catch-all, so a bad id degrades exactly
+            # like a missing profile instead of raising at the read.
+            profile = await cast(PartnerFacade, app.state.partner_facade).get_provider_profile(
+                int(counterparty_id)
+            )
+        except ProviderProfileNotFoundError:
+            logger.warning(
+                "consent counterparty display name unresolved for type %s; degrading to no name",
+                counterparty_type,
+            )
+            return None
+        except Exception:
+            logger.warning(
+                "consent counterparty display-name resolution failed for type %s; "
+                "degrading to no name",
+                counterparty_type,
+            )
+            return None
+        return profile.practice_name
+
+    return _resolve
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Create the FastAPI application, resolving config when none is given.
 
@@ -287,7 +358,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # MOD-004 (PHASE-3 T3, #212): the consent facade shares the same settled
     # engine and app-state pattern - routes read one resolved object and unit
     # tests stub it on state.
-    app.state.consent_facade = ConsentFacade(engine=engine)
+    app.state.consent_facade = ConsentFacade(
+        engine=engine,
+        # MOD-004 + composition root (#649): the consent module holds no
+        # knowledge of the modules that own counterparty names, so the
+        # resolver and its ordered rules are bound here. Built before the
+        # partner facade exists on purpose - the closure reads
+        # ``app.state.partner_facade`` only when called.
+        counterparty_display_name_resolver=_build_counterparty_display_name_resolver(app),
+    )
     # MOD-005 (PHASE-7 T12, #356): the intake facade shares the settled engine
     # and is stored on state so the patient intake routes read one resolved
     # instance and unit tests can stub it. MOD-006 (PHASE-7 T08, #373; #385):
