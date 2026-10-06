@@ -13,6 +13,13 @@ import type { Dictionary } from "@/lib/i18n/dictionaries";
 /** Unknown stages and the closed stage read as quiet metadata, never accent. */
 const MUTED_TONE = "bg-hairline-soft text-txt-muted";
 
+/**
+ * The amber/warn tone. Shared by the pre-summary stage and the forced-review
+ * Verify chip (#652): both mean "look here before you act", so a token change
+ * moves them together rather than leaving two copies to drift apart.
+ */
+export const WARN_TONE = "bg-warn-soft text-warn-text";
+
 export interface StageChip {
   /** Tailwind classes for the chip tone. */
   readonly tone: string;
@@ -34,7 +41,7 @@ export interface StageChipView {
 
 export const STAGE_CHIPS: Record<string, StageChip> = {
   pre_summary: {
-    tone: "bg-warn-soft text-warn-text",
+    tone: WARN_TONE,
     labelKey: "stagePreSummary",
   },
   prescription_pending: {
