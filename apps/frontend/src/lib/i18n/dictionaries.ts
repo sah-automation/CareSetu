@@ -1470,6 +1470,17 @@ const en = {
     stagePrescriptionPending: "Prescription pending",
     stageClosed: "Closed",
     openCaseAction: "Open",
+    // #652: the case card. The accessible name must include the patient
+    // (US-66) because the whole card is one overlay link, and the meta line
+    // dates the case so triage runs on staleness rather than memory (US-6).
+    // The unit words live here too: "ago" wraps differently per locale, so
+    // one wrapper + three granularities keeps the whole string translatable.
+    caseCardA11y: (name: string) => `Open case for ${name}`,
+    caseUpdatedAgo: (time: string) => `Updated ${time} ago`,
+    caseUpdatedJustNow: "Updated just now",
+    timeAgoMinutes: (n: number) => `${n} min`,
+    timeAgoHours: (n: number) => `${n} hr`,
+    timeAgoDays: (n: number) => `${n} d`,
     loadFailed: "Could not load the console.",
     retry: "Try again",
   },
@@ -3340,6 +3351,17 @@ export const STRINGS: Record<Lang, Dictionary> = {
       stagePrescriptionPending: "नुस्ख़ा लंबित",
       stageClosed: "बंद",
       openCaseAction: "खोलें",
+      // #652: केस कार्ड। सुलभ नाम में मरीज़ का नाम होना चाहिए (US-66), क्योंकि
+      // पूरा कार्ड ही एक लिंक है, और मेटा लाइन केस की तारीख बताती है ताकि
+      // प्राथमिकता ताज़गी से तय हो (US-6)। समय के शब्द भी यहीं हैं: "पहले"
+      // हर भाषा में अलग जुड़ता है, इसलिए एक व्रौपर + तीन इकाइयाँ पूरे वाक्य
+      // को अनुवाद-योग्य रखती हैं।
+      caseCardA11y: (name: string) => `${name} का केस खोलें`,
+      caseUpdatedAgo: (time: string) => `${time} पहले अपडेट किया गया`,
+      caseUpdatedJustNow: "अभी अपडेट किया गया",
+      timeAgoMinutes: (n: number) => `${n} मिनट`,
+      timeAgoHours: (n: number) => `${n} घंटे`,
+      timeAgoDays: (n: number) => `${n} दिन`,
       loadFailed: "कंसोल लोड नहीं हो सका।",
       retry: "फिर से कोशिश करें",
     },
