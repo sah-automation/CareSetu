@@ -1157,9 +1157,12 @@ describe("recent activity card (#506)", () => {
     renderHome();
 
     const row = await screen.findByTestId("recent-entry-2");
-    // #516: professional prescription copy from the shared describe output -
-    // medicine-name title, dose line, issued-by attribution - plus the
-    // per-type pill in place of the timeline's status pill.
+    // #655: the preview reads the same describe seam as My Record, so the
+    // row carries the record-type title (here: type pill + titled card) and
+    // the medicine leads the subtitle - dose line, issued-by attribution.
+    expect(
+      within(row).getAllByText(STRINGS.en.record.badge.prescription),
+    ).toHaveLength(2);
     expect(row).toHaveTextContent("Amlodipine");
     expect(row).toHaveTextContent("5 mg · once daily · 30 tablets");
     expect(row).toHaveTextContent(STRINGS.en.record.issuedBy("Dr. A. Kumar"));
@@ -1237,8 +1240,11 @@ describe("recent activity card (#506)", () => {
       STRINGS.hi.recent.all,
     );
     const row = screen.getByTestId("recent-entry-2");
-    // #516: the hi surface carries the same professional anatomy - the pill
-    // labels the type and the prescription copy localizes the issued-by line.
+    // #655: the hi surface carries the same anatomy - record-type title,
+    // medicine-led subtitle, and the issued-by line localized.
+    expect(
+      within(row).getAllByText(STRINGS.hi.record.badge.prescription),
+    ).toHaveLength(2);
     expect(row).toHaveTextContent("Amlodipine");
     expect(row).toHaveTextContent(STRINGS.hi.record.issuedBy("Dr. A. Kumar"));
     const pill = screen.getByTestId("recent-type-2");
