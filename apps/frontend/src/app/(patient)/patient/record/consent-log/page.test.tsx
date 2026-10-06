@@ -156,12 +156,13 @@ const CONSENT_LOG: ConsentLog = {
         },
       ],
     }),
-    // Active grant
+    // Active grant - carries a resolved counterparty name (#654)
     consent({
       consent_id: 1,
       lineage_ref: "C-2026-014",
       counterparty_type: "lab",
       counterparty_id: "sahyog-path-lab",
+      counterparty_display_name: "Sahyog Diagnostics",
       record_scope: "Filing your CBC panel report for booking #CS-1042",
       status: "granted",
       created_at: "2026-08-21T04:35:00Z",
@@ -181,12 +182,13 @@ const CONSENT_LOG: ConsentLog = {
         },
       ],
     }),
-    // Revoked grant (older updated_at, should sort below active)
+    // Revoked grant (older updated_at, should sort below active) - resolved name
     consent({
       consent_id: 2,
       lineage_ref: "C-2026-011",
       counterparty_type: "doctor",
       counterparty_id: "dr-kumar",
+      counterparty_display_name: "Dr Anil Kumar",
       record_scope:
         "Reading your last 3 months of history during the consultation",
       status: "revoked",
@@ -222,7 +224,9 @@ const EGRESS_LOG: EgressLog = {
       egress_id: 1,
       consent_id: 2,
       lineage_ref: "C-2026-011",
+      counterparty_type: "doctor",
       counterparty_id: "dr-kumar",
+      counterparty_display_name: "Dr Anil Kumar",
       record_scope: "Visit history, last 3 months",
       disclosed_at: "2026-08-19T12:30:00Z",
     }),
@@ -230,7 +234,9 @@ const EGRESS_LOG: EgressLog = {
       egress_id: 2,
       consent_id: 1,
       lineage_ref: "C-2026-014",
+      counterparty_type: "lab",
       counterparty_id: "sahyog-path-lab",
+      counterparty_display_name: "Sahyog Diagnostics",
       record_scope: "CBC panel report (filing)",
       disclosed_at: "2026-08-21T05:03:00Z",
     }),
@@ -566,6 +572,153 @@ describe("Egress slice", () => {
 
     const rows = table.querySelectorAll("tbody tr");
     expect(rows).toHaveLength(2);
+  });
+});
+
+describe("Counterparty names on the consent surfaces (#654)", () => {
+  it("shows a resolved counterparty name with the role in words on the card", async () => {
+    render(<ConsentLogPage />);
+    await waitForLog();
+
+    const card = screen.getByTestId("consent-2");
+    expect(card).toHaveTextContent("Dr Anil Kumar");
+    expect(card).toHaveTextContent(STRINGS.en.consentLog.counterparty.doctor);
+    expect(card).not.toHaveTextContent("dr-kumar");
+  });
+
+  it("says the type word rather than a bare number when nothing resolves the counterparty", async () => {
+    resolveWith(
+      {
+        items: [
+          consent({
+            consent_id: 9,
+            counterparty_type: "chemist",
+            counterparty_id: "9918",
+            counterparty_display_name: null,
+          }),
+        ],
+      },
+      {
+        items: [
+          egressEntry({
+            egress_id: 9,
+            counterparty_type: "chemist",
+            counterparty_id: "9918",
+            counterparty_display_name: null,
+          }),
+        ],
+      },
+    );
+    render(<ConsentLogPage />);
+    await waitForLog();
+
+    const card = screen.getByTestId("consent-9");
+    expect(card).toHaveTextContent(STRINGS.en.consentLog.counterparty.chemist);
+    expect(card).not.toHaveTextContent("9918");
+    // The label carries the word, so the role field must not repeat it.
+    const chemistWord = STRINGS.en.consentLog.counterparty.chemist;
+    const seen = (card.textContent ?? "").split(chemistWord).length - 1;
+    expect(seen).toBe(1);
+
+    const rows = screen
+      .getByTestId("egress-table")
+      .querySelectorAll("tbody tr");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent(
+      STRINGS.en.consentLog.counterparty.chemist,
+    );
+    expect(rows[0]).not.toHaveTextContent("9918");
+  });
+
+  it("reads the AI intake counterparty as the AI on the card and the To whom row", async () => {
+    resolveWith(
+      {
+        items: [
+          consent({
+            consent_id: 7,
+            counterparty_type: "doctor",
+            counterparty_id: "intake-ai",
+            counterparty_display_name: null,
+          }),
+        ],
+      },
+      {
+        items: [
+          egressEntry({
+            egress_id: 7,
+            counterparty_type: "doctor",
+            counterparty_id: "intake-ai",
+            counterparty_display_name: null,
+          }),
+        ],
+      },
+    );
+    render(<ConsentLogPage />);
+    await waitForLog();
+
+    const en = STRINGS.en.consentLog.counterparty;
+    const card = screen.getByTestId("consent-7");
+    expect(card).toHaveTextContent(en.aiService);
+    expect(card).toHaveTextContent(en.aiRole);
+    expect(card).not.toHaveTextContent("intake-ai");
+    expect(card).not.toHaveTextContent(en.doctor);
+
+    const rows = screen
+      .getByTestId("egress-table")
+      .querySelectorAll("tbody tr");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent(en.aiService);
+    expect(rows[0]).not.toHaveTextContent("intake-ai");
+    expect(rows[0]).not.toHaveTextContent(en.doctor);
+  });
+
+  it("shows resolved names in the To whom column instead of the ids", async () => {
+    render(<ConsentLogPage />);
+    await waitForLog();
+
+    const rows = screen
+      .getByTestId("egress-table")
+      .querySelectorAll("tbody tr");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent("Dr Anil Kumar");
+    expect(rows[0]).not.toHaveTextContent("dr-kumar");
+    expect(rows[1]).toHaveTextContent("Sahyog Diagnostics");
+    expect(rows[1]).not.toHaveTextContent("sahyog-path-lab");
+  });
+
+  it("names the AI counterparty in Hindi too when the language flips", async () => {
+    function LangFlipHost() {
+      return (
+        <>
+          {langFlip()}
+          <ConsentLogPage />
+        </>
+      );
+    }
+
+    resolveWith(
+      {
+        items: [
+          consent({
+            consent_id: 7,
+            counterparty_type: "doctor",
+            counterparty_id: "intake-ai",
+            counterparty_display_name: null,
+          }),
+        ],
+      },
+      { items: [] },
+    );
+    render(<LangFlipHost />);
+    await waitForLog();
+
+    fireEvent.click(screen.getByText("flip-lang"));
+
+    const card = screen.getByTestId("consent-7");
+    expect(card).toHaveTextContent(
+      STRINGS.hi.consentLog.counterparty.aiService,
+    );
+    expect(card).toHaveTextContent(STRINGS.hi.consentLog.counterparty.aiRole);
   });
 });
 

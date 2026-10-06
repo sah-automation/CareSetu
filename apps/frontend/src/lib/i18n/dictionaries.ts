@@ -1226,11 +1226,14 @@ const en = {
     // counterparty type, plus the branded name for the AI intake pseudo-
     // counterparty (the frontend's copy of the backend's
     // AI_INTAKE_COUNTERPARTY_DISPLAY_NAME, so both ends say the same thing).
+    // #654: aiRole is the role in words the consent card prints beside a
+    // resolved name - a field of its own, never concatenated into the name.
     counterparty: {
       doctor: "Doctor",
       lab: "Lab",
       chemist: "Pharmacy",
       aiService: "CareSetu AI Intake Assistant",
+      aiRole: "AI intake service",
     },
     empty: {
       title: "No consent history yet",
@@ -3151,11 +3154,13 @@ export const STRINGS: Record<Lang, Dictionary> = {
       },
       // #653: counterparty-label fallback के दूरे चरण के शब्द - डॉक्टर, लैब,
       // फ़ार्मेसी - और AI इंटेक की ब्रांडेड सेवा का नाम।
+      // #654: aiRole कार्ड पर नाम के साथ दिखने वाली भूमिका का शब्द है।
       counterparty: {
         doctor: "डॉक्टर",
         lab: "लैब",
         chemist: "फ़ार्मेसी",
         aiService: "CareSetu AI इंटेक सहायक",
+        aiRole: "AI इंटेक सेवा",
       },
       empty: {
         title: "अभी कोई अनुमति इतिहास नहीं",

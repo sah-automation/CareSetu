@@ -34,6 +34,7 @@ import {
   prescriptionItems,
 } from "@/lib/record/timelineView";
 import { fetchEgressLog, type EgressLogEntry } from "@/lib/consent/api";
+import { counterpartyLabel } from "@/lib/consent/consentView";
 
 type LoadStatus = "loading" | "ready" | "error" | "not-found";
 
@@ -395,15 +396,18 @@ export default function EntryDetailPage() {
                       &#128065;
                     </span>
                     <span>
-                      {item.counterparty_type}{" "}
+                      {counterpartyLabel(
+                        item.counterparty_type,
+                        item.counterparty_id,
+                        item.counterparty_display_name,
+                        lang,
+                      )}{" "}
                       <span className="text-txt-muted">
-                        \u00b7 {item.counterparty_id}
+                        {"\u00b7 "}
+                        {formatOccurredAt(item.disclosed_at, lang)}
                       </span>{" "}
                       <span className="text-txt-muted">
-                        \u00b7 {formatOccurredAt(item.disclosed_at, lang)}
-                      </span>{" "}
-                      <span className="text-txt-muted">
-                        \u00b7 #{item.lineage_ref} v{item.version}
+                        {"\u00b7 "}#{item.lineage_ref} v{item.version}
                       </span>
                     </span>
                   </li>
