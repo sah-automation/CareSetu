@@ -379,6 +379,8 @@ describe("ConsentGrantsPanel", () => {
     fireEvent.click(screen.getByTestId("ps-consent-revoke-1"));
 
     const sheet = await screen.findByTestId("ps-consent-sheet");
-    expect(sheet).toHaveTextContent(t.consentRevokeBody("dr-kumar"));
+    expect(sheet).toHaveTextContent(
+      t.consentRevokeBody(STRINGS.en.consentLog.counterparty.doctor),
+    );
   });
 });

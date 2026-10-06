@@ -964,6 +964,7 @@ describe("action required card (#505)", () => {
         }),
         consentView({
           consent_id: 2,
+          counterparty_type: "lab",
           counterparty_id: "lab-9",
           record_scope: "lab_results",
         }),
@@ -979,10 +980,16 @@ describe("action required card (#505)", () => {
     const items = screen.getAllByTestId("action-required-item");
     expect(items).toHaveLength(2);
     expect(items[0]).toHaveTextContent(
-      STRINGS.en.actions.consentRequest("dr-77", "consultations"),
+      STRINGS.en.actions.consentRequest(
+        STRINGS.en.consentLog.counterparty.doctor,
+        "consultations",
+      ),
     );
     expect(items[1]).toHaveTextContent(
-      STRINGS.en.actions.consentRequest("lab-9", "lab_results"),
+      STRINGS.en.actions.consentRequest(
+        STRINGS.en.consentLog.counterparty.lab,
+        "lab_results",
+      ),
     );
     expect(screen.getAllByTestId("action-allow")).toHaveLength(2);
     expect(screen.getAllByTestId("action-deny")).toHaveLength(2);
@@ -1049,7 +1056,10 @@ describe("action required card (#505)", () => {
       ),
     );
     expect(screen.getByTestId("action-required")).toHaveTextContent(
-      STRINGS.hi.actions.consentRequest("dr-77", "consultations"),
+      STRINGS.hi.actions.consentRequest(
+        STRINGS.en.consentLog.counterparty.doctor,
+        "consultations",
+      ),
     );
     expect(screen.getByTestId("action-allow")).toHaveTextContent(
       STRINGS.hi.actions.allow,

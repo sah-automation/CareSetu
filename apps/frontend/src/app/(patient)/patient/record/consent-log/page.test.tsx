@@ -335,12 +335,16 @@ describe("Pending-first ordering", () => {
     ).toBeTruthy();
 
     // Pending should contain the requested consent
-    expect(pending).toHaveTextContent("sharma-chemist");
+    expect(pending).toHaveTextContent(
+      STRINGS.en.consentLog.counterparty.chemist,
+    );
     expect(pending).toHaveTextContent("Requested");
 
     // History should contain active and revoked
-    expect(history).toHaveTextContent("sahyog-path-lab");
-    expect(history).toHaveTextContent("dr-kumar");
+    expect(history).toHaveTextContent(STRINGS.en.consentLog.counterparty.lab);
+    expect(history).toHaveTextContent(
+      STRINGS.en.consentLog.counterparty.doctor,
+    );
   });
 });
 
