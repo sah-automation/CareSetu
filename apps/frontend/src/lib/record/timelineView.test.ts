@@ -20,6 +20,7 @@ import {
   groupTimeline,
   isDeliveredPrescription,
   issuedPrescriptionCount,
+  medicineFields,
   sortTimelineDesc,
 } from "./timelineView";
 
@@ -347,6 +348,116 @@ describe("describeEntry", () => {
     expect(formatOccurredAt("2026-08-22T08:00:00Z", "hi")).not.toBe(
       formatOccurredAt("2026-08-22T08:00:00Z", "en"),
     );
+  });
+});
+
+// #656: the entry-detail medicine block renders dose/frequency/duration as
+// term/definition pairs through this helper. Pinned directly because the
+// omission rules are the whole ticket: a field with no value must vanish with
+// its label (no stray separator), a blank string must behave exactly like
+// null, and a malformed value must pass through verbatim so a bare number
+// reads as a data-entry problem under its label rather than being repaired.
+describe("medicineFields", () => {
+  const labels = STRINGS.en.record.detail.medicine;
+
+  it("returns every field in order when all are present", () => {
+    expect(
+      medicineFields(
+        {
+          name: "Amlodipine",
+          dose: "5 mg",
+          frequency: "once daily",
+          duration: "30 days",
+        },
+        labels,
+      ),
+    ).toEqual([
+      { label: "Dose", value: "5 mg" },
+      { label: "Frequency", value: "once daily" },
+      { label: "Duration", value: "30 days" },
+    ]);
+  });
+
+  it("omits only the field that has no value, keeping the rest in order", () => {
+    expect(
+      medicineFields(
+        {
+          name: "Metformin",
+          dose: null,
+          frequency: "twice daily",
+          duration: "7 days",
+        },
+        labels,
+      ),
+    ).toEqual([
+      { label: "Frequency", value: "twice daily" },
+      { label: "Duration", value: "7 days" },
+    ]);
+    expect(
+      medicineFields(
+        {
+          name: "Metformin",
+          dose: "500 mg",
+          frequency: null,
+          duration: "7 days",
+        },
+        labels,
+      ),
+    ).toEqual([
+      { label: "Dose", value: "500 mg" },
+      { label: "Duration", value: "7 days" },
+    ]);
+    expect(
+      medicineFields(
+        {
+          name: "Metformin",
+          dose: "500 mg",
+          frequency: "twice daily",
+          duration: null,
+        },
+        labels,
+      ),
+    ).toEqual([
+      { label: "Dose", value: "500 mg" },
+      { label: "Frequency", value: "twice daily" },
+    ]);
+  });
+
+  it("returns nothing when every field is absent, so no empty list renders", () => {
+    expect(
+      medicineFields(
+        { name: "Amlodipine", dose: null, frequency: null, duration: null },
+        labels,
+      ),
+    ).toEqual([]);
+  });
+
+  it("treats blank-string values as absent, exactly like null", () => {
+    expect(
+      medicineFields(
+        { name: "Amlodipine", dose: "", frequency: "   ", duration: null },
+        labels,
+      ),
+    ).toEqual([]);
+    expect(
+      medicineFields(
+        { name: "Amlodipine", dose: "", frequency: "once daily", duration: "" },
+        labels,
+      ),
+    ).toEqual([{ label: "Frequency", value: "once daily" }]);
+  });
+
+  it("passes a bare number through verbatim under its label", () => {
+    expect(
+      medicineFields(
+        { name: "Amlodipine", dose: "9", frequency: "3", duration: "3" },
+        labels,
+      ),
+    ).toEqual([
+      { label: "Dose", value: "9" },
+      { label: "Frequency", value: "3" },
+      { label: "Duration", value: "3" },
+    ]);
   });
 });
 

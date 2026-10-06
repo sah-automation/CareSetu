@@ -1177,6 +1177,14 @@ const en = {
       resultsStatusInRange: "In range",
       resultsStatusBelowRange: "Below range",
       resultsStatusAboveRange: "Above range",
+      // #656: the entry-detail medicine block's term labels - one per field,
+      // rendered as <dt>/<dd> pairs; a field with no value omits itself along
+      // with its label, so the labels are only ever shown with their value.
+      medicine: {
+        dose: "Dose",
+        frequency: "Frequency",
+        duration: "Duration",
+      },
       egressHeading: "Who has seen this entry",
       shareEntry: "Share this entry",
       downloadPdf: "Download PDF",
@@ -3107,6 +3115,11 @@ export const STRINGS: Record<Lang, Dictionary> = {
         resultsStatusInRange: "रेंज में",
         resultsStatusBelowRange: "रेंज से कम",
         resultsStatusAboveRange: "रेंज से ज़्यादा",
+        medicine: {
+          dose: "मात्रा",
+          frequency: "आवृत्ति",
+          duration: "अवधि",
+        },
         egressHeading: "इस एंट्री को किसने देखा",
         shareEntry: "यह एंट्री साझा करें",
         downloadPdf: "PDF डाउनलोड करें",
