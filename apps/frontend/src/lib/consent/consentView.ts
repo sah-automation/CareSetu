@@ -4,6 +4,8 @@
 //
 // #653: counterpartyLabel is the one three-step fallback chain that keeps an
 // opaque counterparty id from ever being the only thing a patient is shown.
+// #654: counterpartyRole is the role in words printed beside that label on a
+// consent card - a separate bilingual field, never concatenated into the name.
 
 import { STRINGS, type Lang } from "@/lib/i18n/dictionaries";
 
@@ -61,4 +63,25 @@ export function counterpartyInitials(label: string): string {
   if (parts.length === 0) return "?";
   if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
   return (parts[0][0] + parts[1][0]).toUpperCase();
+}
+
+/**
+ * #654: the role in words a consent card prints beside the resolved name -
+ * "Dr A Kumar" plus "Doctor" reads better than a parenthesised concatenation,
+ * and a paren reads worse still in Hindi. Two separate fields, both bilingual.
+ *
+ * The AI intake pseudo-counterparty gets its own role rather than the doctor
+ * word its recorded type would imply, so a machine disclosure never reads as a
+ * clinician's. Returns null for a counterparty type the product records no
+ * word for, so a surface renders no role segment rather than a wrong one.
+ */
+export function counterpartyRole(
+  counterpartyType: string,
+  counterpartyId: string,
+  lang: Lang = "en",
+): string | null {
+  const t = STRINGS[lang].consentLog.counterparty;
+  if (counterpartyId === AI_EGRESS_COUNTERPARTY_ID) return t.aiRole;
+  const typeKey = TYPE_LABEL_KEYS[counterpartyType];
+  return typeKey ? t[typeKey] : null;
 }

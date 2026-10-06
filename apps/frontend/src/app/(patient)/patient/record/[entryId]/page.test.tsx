@@ -153,8 +153,9 @@ const EGRESS_LOG: EgressLog = {
       consent_id: 11,
       lineage_ref: "C-2026-011",
       version: 1,
-      counterparty_type: "provider",
-      counterparty_id: "Dr. A. Kumar",
+      counterparty_type: "doctor",
+      counterparty_id: "dr-kumar",
+      counterparty_display_name: "Dr Anil Kumar",
       record_scope: "lab_report",
       disclosed_entry_ids: [26],
       disclosed_at: "2026-08-19T09:00:00Z",
@@ -522,9 +523,78 @@ describe("EntryDetailPage egress trail", () => {
 
     expect(screen.getByTestId("entry-egress-trail")).toBeInTheDocument();
     expect(screen.getByText("Who has seen this entry")).toBeInTheDocument();
-    expect(screen.getByTestId("egress-entry-1")).toHaveTextContent("provider");
     expect(screen.getByTestId("egress-entry-1")).toHaveTextContent(
-      "Dr. A. Kumar",
+      "Dr Anil Kumar",
+    );
+    expect(screen.getByTestId("egress-entry-1")).not.toHaveTextContent(
+      "dr-kumar",
+    );
+  });
+
+  it("says the type word rather than a bare number when nothing resolves the counterparty", async () => {
+    const unresolvedEgress: EgressLog = {
+      items: [
+        {
+          egress_id: 3,
+          patient_id: 7,
+          consent_id: 13,
+          lineage_ref: "C-2026-013",
+          version: 1,
+          counterparty_type: "chemist",
+          counterparty_id: "9918",
+          record_scope: "prescription",
+          disclosed_entry_ids: [26],
+          disclosed_at: "2026-08-20T08:00:00Z",
+        },
+      ],
+    };
+    resolveWith(TIMELINE, unresolvedEgress);
+    render(<EntryDetailPage />);
+
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("entry-detail-loading"),
+      ).not.toBeInTheDocument(),
+    );
+
+    const trail = screen.getByTestId("entry-egress-trail");
+    expect(trail).toHaveTextContent(STRINGS.en.consentLog.counterparty.chemist);
+    expect(trail).not.toHaveTextContent("9918");
+  });
+
+  it("reads the AI intake counterparty as the AI", async () => {
+    const aiEgress: EgressLog = {
+      items: [
+        {
+          egress_id: 4,
+          patient_id: 7,
+          consent_id: 14,
+          lineage_ref: "C-2026-014",
+          version: 1,
+          counterparty_type: "doctor",
+          counterparty_id: "intake-ai",
+          record_scope: "lab_report",
+          disclosed_entry_ids: [26],
+          disclosed_at: "2026-08-20T09:00:00Z",
+        },
+      ],
+    };
+    resolveWith(TIMELINE, aiEgress);
+    render(<EntryDetailPage />);
+
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("entry-detail-loading"),
+      ).not.toBeInTheDocument(),
+    );
+
+    const trail = screen.getByTestId("entry-egress-trail");
+    expect(trail).toHaveTextContent(
+      STRINGS.en.consentLog.counterparty.aiService,
+    );
+    expect(trail).not.toHaveTextContent("intake-ai");
+    expect(trail).not.toHaveTextContent(
+      STRINGS.en.consentLog.counterparty.doctor,
     );
   });
 
