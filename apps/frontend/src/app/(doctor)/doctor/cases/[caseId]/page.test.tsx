@@ -1,7 +1,9 @@
 // PHASE-8.1 T13/T14/T15 (#451/#452/#453): case workspace route
 // (/doctor/cases/[caseId]) suite. Covers: the stage chip for open stages
 // (US-15), the forced-review requirement when the case demands one, the
-// consented health history, the consult-complete handshake for pre_summary-
+// patient history (#658: one read - the console detail projection's
+// consultation history, with the consented read kept as its fallback), the
+// consult-complete handshake for pre_summary-
 // stage cases (US-24), the closed terminal state, prescription drafting
 // (US-18/#452: request AI draft, edit items, save revision, refresh-reload
 // from the working-rx read, drafting-cap error), approval/rejection/closure
@@ -52,6 +54,10 @@ import {
   type PreSummaryView,
 } from "@/lib/intake/api";
 import { fetchPartnerMe, type PartnerMeView } from "@/lib/partner/api";
+import {
+  fetchDoctorPatientDetail,
+  type DoctorPatientDetailView,
+} from "@/lib/doctor/api";
 import { readConsentedHistory, type RecordTimeline } from "@/lib/record/api";
 
 vi.mock("next/navigation", () => ({
@@ -96,6 +102,11 @@ vi.mock("@/lib/partner/api", async (importOriginal) => {
   return { ...mod, fetchPartnerMe: vi.fn() };
 });
 
+vi.mock("@/lib/doctor/api", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("@/lib/doctor/api")>();
+  return { ...mod, fetchDoctorPatientDetail: vi.fn() };
+});
+
 vi.mock("@/lib/intake/api", async (importOriginal) => {
   const mod = await importOriginal<typeof import("@/lib/intake/api")>();
   return {
@@ -118,6 +129,7 @@ const hiT = STRINGS.hi.caseWorkspace;
 const getCase = vi.mocked(fetchCareCase);
 const doHandshake = vi.mocked(markConsultComplete);
 const getMe = vi.mocked(fetchPartnerMe);
+const getPatientDetail = vi.mocked(fetchDoctorPatientDetail);
 const getHistory = vi.mocked(readConsentedHistory);
 const getWorkingRx = vi.mocked(fetchWorkingPrescription);
 const doDraft = vi.mocked(createRxDraft);
@@ -158,6 +170,25 @@ function me(): PartnerMeView {
     status: "Active",
     partner_type: "doctor",
     round: 0,
+  };
+}
+
+// The console detail projection (#658) - the same read the patient profile
+// renders. Its consultation_history is what the workspace History tab passes
+// down, so the fixture defaults to the shared timeline.
+function patientDetail(
+  overrides: Partial<DoctorPatientDetailView> = {},
+): DoctorPatientDetailView {
+  return {
+    patient_id: 3,
+    bucket: "current",
+    granted_scopes: ["consultations"],
+    latest_case_stage: "pre_summary",
+    case_workspace: { case_id: 11, stage: "pre_summary" },
+    contact: null,
+    consultation_history: timeline(),
+    health_background: null,
+    ...overrides,
   };
 }
 
@@ -316,6 +347,7 @@ function preSummary(overrides: Partial<PreSummaryView> = {}): PreSummaryView {
 function resolveLoaded() {
   getCase.mockResolvedValue(caseItem(11));
   getMe.mockResolvedValue(me());
+  getPatientDetail.mockResolvedValue(patientDetail());
   getHistory.mockResolvedValue(timeline());
   getWorkingRx.mockResolvedValue(prescription());
   getIntakeDetail.mockResolvedValue(intakeDetail());
@@ -382,8 +414,51 @@ describe("CaseWorkspacePage stage + forced review (US-15)", () => {
   });
 });
 
-describe("CaseWorkspacePage consented history", () => {
-  it("reads the consented history for the case patient", async () => {
+describe("CaseWorkspacePage history single read (#658)", () => {
+  it("renders the console detail projection's consultation history", async () => {
+    render(<CaseWorkspacePage />);
+    await waitFor(() => screen.getByTestId("history-list"));
+
+    expect(getPatientDetail).toHaveBeenCalledWith(3);
+    expect(getHistory).not.toHaveBeenCalled();
+    const entry = within(screen.getByTestId("case-history")).getByTestId(
+      "history-entry",
+    );
+    expect(entry).toHaveTextContent("Prescription");
+    // Same information density as the patient profile (US-64): the entry
+    // carries its accent badge and its date, nothing fewer.
+    expect(within(entry).getByTestId("history-entry-type")).toHaveClass(
+      "bg-accent-soft",
+    );
+    expect(entry).toHaveTextContent(/2026/);
+  });
+
+  it("renders the calm not-shared note when the projection denies the section", async () => {
+    getPatientDetail.mockResolvedValue(
+      patientDetail({ consultation_history: null }),
+    );
+
+    render(<CaseWorkspacePage />);
+    await waitFor(() => screen.getByTestId("locked-section"));
+
+    expect(screen.getByTestId("locked-section")).toHaveTextContent(
+      STRINGS.en.doctorPatients.notSharedTitle,
+    );
+    expect(screen.queryByTestId("history-error")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("history-retry")).not.toBeInTheDocument();
+    expect(getHistory).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the consented read when the projection read fails", async () => {
+    getPatientDetail.mockRejectedValue(
+      new ApiError({
+        code: "UNEXPECTED_ERROR",
+        message: "projection down",
+        trace_id: "t-proj",
+        details: {},
+      }),
+    );
+
     render(<CaseWorkspacePage />);
     await waitFor(() => screen.getByTestId("history-list"));
 
@@ -398,17 +473,23 @@ describe("CaseWorkspacePage consented history", () => {
     ).toBeTruthy();
   });
 
-  it("shows a denial-safe empty state when consent yields no history", async () => {
-    getHistory.mockResolvedValue({
-      record_id: 1,
-      patient_id: 3,
-      created_at: "2026-01-01T00:00:00Z",
-      entries: [],
-    });
+  it("shows a denial-safe empty state when the projection reports no history", async () => {
+    getPatientDetail.mockResolvedValue(
+      patientDetail({
+        consultation_history: {
+          record_id: 1,
+          patient_id: 3,
+          created_at: "2026-01-01T00:00:00Z",
+          entries: [],
+        },
+      }),
+    );
+
     render(<CaseWorkspacePage />);
     await waitFor(() => screen.getByText(t.historyEmpty));
 
     expect(screen.queryByTestId("history-list")).not.toBeInTheDocument();
+    expect(getHistory).not.toHaveBeenCalled();
   });
 });
 

@@ -61,6 +61,8 @@ import {
   type RxItemView,
 } from "@/lib/care/api";
 import { fetchPartnerMe, type PartnerMeView } from "@/lib/partner/api";
+import { fetchDoctorPatientDetail } from "@/lib/doctor/api";
+import { type RecordTimeline } from "@/lib/record/api";
 import { STRINGS, type Dictionary } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 
@@ -556,6 +558,29 @@ function LoadingSkeleton() {
   );
 }
 
+// #658 (one history read, #645 US-62): the console detail projection's
+// consultation history for the case patient - the very read the patient
+// profile renders, so the two doctor surfaces cannot disagree. Best-effort by
+// design: a failed projection read answers undefined instead of throwing, so
+// the workspace still opens and the history tab keeps the consented-history
+// component's own fail-closed consented read as its fallback. The degradation
+// is logged (error-handling-observability: a denied read is a calm lock, a
+// failed read is a logged warning - never a page failure).
+async function readConsoleConsultationHistory(
+  patientId: number,
+): Promise<RecordTimeline | null | undefined> {
+  try {
+    const detail = await fetchDoctorPatientDetail(patientId);
+    return detail.consultation_history;
+  } catch (err) {
+    console.warn(
+      "[case-workspace] console detail projection read failed:",
+      err,
+    );
+    return undefined;
+  }
+}
+
 export default function CaseWorkspacePage() {
   const params = useParams<{ caseId: string }>();
   const caseId = Number(params.caseId);
@@ -571,6 +596,23 @@ export default function CaseWorkspacePage() {
 
   const [careCase, setCareCase] = useState<CaseDetailView | null>(null);
   const [doctorMe, setDoctorMe] = useState<PartnerMeView | null>(null);
+
+  // #658 (one history read, #645 US-62): the History tab renders the console
+  // detail projection's consultation history - the same read the patient
+  // profile renders - rather than a second, separately scoped view of the
+  // same patient. The read is best-effort and never gates the workspace:
+  // `patientHistory` holds the answer once `historyLoadState` settles - an
+  // array is the projection's answer, null is its denied section, and
+  // undefined means the projection read failed, leaving the
+  // consented-history component to its fail-closed consented read as the
+  // fallback. The tab mounts the component only once the read has settled,
+  // so the component's three-state contract is never raced by a live read.
+  const [patientHistory, setPatientHistory] = useState<
+    RecordTimeline | null | undefined
+  >(undefined);
+  const [historyLoadState, setHistoryLoadState] = useState<
+    "idle" | "loading" | "ready"
+  >("idle");
 
   // Workspace inner tabs (US-14, #484). A prescription-pending case opens on
   // the Prescription tab so the doctor lands where the work is; everything
@@ -707,10 +749,25 @@ export default function CaseWorkspacePage() {
     }
   }, []);
 
+  // #658: the one history source for both doctor surfaces. Best-effort and
+  // fire-and-forget like the other side reads - a slow or failed projection
+  // read must never hold the workspace open. The History tab gates on
+  // `historyLoadState` settling before it mounts the consented-history
+  // component, so a denied (null) or failed (undefined) answer is already the
+  // component's settled prop and never a mid-flight race.
+  const loadPatientHistory = useCallback(async (patientId: number) => {
+    setHistoryLoadState("loading");
+    const history = await readConsoleConsultationHistory(patientId);
+    setPatientHistory(history);
+    setHistoryLoadState("ready");
+  }, []);
+
   const load = useCallback(() => {
     setLoadStatus("loading");
     setBannerOpen(false);
     setHandshakeError(false);
+    setPatientHistory(undefined);
+    setHistoryLoadState("idle");
 
     Promise.all([fetchCareCase(caseId), fetchPartnerMe()])
       .then(([c, me]) => {
@@ -727,19 +784,22 @@ export default function CaseWorkspacePage() {
         setActiveTab(
           c.stage === "prescription_pending" ? "prescription" : "pre_summary",
         );
+        // Best-effort side reads fire after ready so none of them gate the
+        // workspace's availability.
         if (c.pre_summary_id != null) {
           void loadIntakeDetail(c.pre_summary_id);
         }
         if (c.stage === "prescription_pending") {
           void loadWorkingRx();
         }
+        void loadPatientHistory(c.patient_id);
       })
       .catch((err: unknown) => {
         setErrorTraceId(err instanceof ApiError ? err.traceId : undefined);
         setLoadStatus("error");
         setBannerOpen(true);
       });
-  }, [caseId, loadWorkingRx, loadIntakeDetail]);
+  }, [caseId, loadWorkingRx, loadIntakeDetail, loadPatientHistory]);
 
   useEffect(() => {
     load();
@@ -1504,7 +1564,11 @@ export default function CaseWorkspacePage() {
             className="space-y-6"
             data-testid="tab-panel-history"
           >
-            {doctorMe != null && (
+            {/* The card mounts only once the projection read has settled
+                (#658): the component's three-state prop contract is fed a
+                finished answer - array, denied null, or failed undefined -
+                never a mid-flight read it would have to race. */}
+            {doctorMe != null && historyLoadState === "ready" && (
               <section
                 className="rounded-lg border border-hairline bg-surface p-4"
                 data-testid="case-history"
@@ -1519,6 +1583,7 @@ export default function CaseWorkspacePage() {
                   <ConsentedHistory
                     patientId={careCase.patient_id}
                     partnerId={doctorMe.partner_id}
+                    timeline={patientHistory}
                   />
                 </div>
               </section>

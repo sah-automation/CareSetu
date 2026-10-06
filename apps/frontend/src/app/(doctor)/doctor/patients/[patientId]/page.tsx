@@ -13,7 +13,6 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
-import { Lock } from "lucide-react";
 
 import { ApiError } from "@/lib/api-errors";
 import {
@@ -30,6 +29,7 @@ import { ErrorBanner } from "@/components/layout/ErrorBanner";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Avatar } from "@/components/ui/avatar";
+import { NotSharedCard } from "@/components/doctor/NotSharedCard";
 
 type LoadStatus = "loading" | "ready" | "error";
 
@@ -63,24 +63,6 @@ function SectionHeading({ title }: { title: string }) {
     <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-txt-muted">
       {title}
     </h2>
-  );
-}
-
-function NotSharedCard({ title, body }: { title: string; body: string }) {
-  return (
-    <div
-      data-testid="locked-section"
-      className="flex items-start gap-3 rounded-lg border border-hairline bg-surface px-4 py-4"
-    >
-      <Lock
-        className="mt-0.5 h-4 w-4 shrink-0 text-txt-muted"
-        aria-hidden="true"
-      />
-      <div>
-        <p className="text-sm font-medium text-txt">{title}</p>
-        <p className="mt-0.5 text-sm text-txt-muted">{body}</p>
-      </div>
-    </div>
   );
 }
 
