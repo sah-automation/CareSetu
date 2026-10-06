@@ -134,7 +134,34 @@ describe("describeEntry", () => {
     expect(card.subtitle).toContain("Rx #12");
   });
 
-  it("shapes an issued enriched prescription with an Active success badge", () => {
+  it("titles an enriched prescription by record type and moves the medicine into the subtitle", () => {
+    const card = describeEntry(
+      entry({
+        entry_type: "prescription",
+        payload: {
+          prescription_id: 12,
+          status: "issued",
+          items: [
+            { name: "Amlodipine", dose: "5 mg", frequency: "once daily" },
+          ],
+          attributed_doctor_name: "Dr. A. Kumar",
+        },
+        occurred_at: "2026-08-22T08:00:00Z",
+      }),
+      t,
+      "en",
+    );
+    expect(card.badge).toEqual({ label: "Active", tone: "success" });
+    expect(card.title).toBe("Prescription");
+    expect(card.subtitle).toContain("Amlodipine");
+    expect(card.subtitle).toContain("5 mg · once daily");
+    expect(card.subtitle).toContain("issued by Dr. A. Kumar");
+    expect(card.subtitle).toContain(
+      formatOccurredAt("2026-08-22T08:00:00Z", "en"),
+    );
+  });
+
+  it("carries the record-type title and medicine subtitle in hi too", () => {
     const card = describeEntry(
       entry({
         entry_type: "prescription",
@@ -147,13 +174,13 @@ describe("describeEntry", () => {
           attributed_doctor_name: "Dr. A. Kumar",
         },
       }),
-      t,
-      "en",
+      STRINGS.hi.record,
+      "hi",
     );
-    expect(card.badge).toEqual({ label: "Active", tone: "success" });
-    expect(card.title).toBe("Amlodipine");
+    expect(card.title).toBe(STRINGS.hi.record.badge.prescription);
+    expect(card.subtitle).toContain("Amlodipine");
     expect(card.subtitle).toContain("5 mg · once daily");
-    expect(card.subtitle).toContain("issued by Dr. A. Kumar");
+    expect(card.subtitle).toContain(STRINGS.hi.record.issuedBy("Dr. A. Kumar"));
   });
 
   it("renders the full dose line and neutral attribution when the doctor name is null", () => {
@@ -177,7 +204,8 @@ describe("describeEntry", () => {
       t,
       "en",
     );
-    expect(card.title).toBe("Telmisartan");
+    expect(card.title).toBe("Prescription");
+    expect(card.subtitle).toContain("Telmisartan");
     expect(card.subtitle).toContain("40 mg · once daily · 30 tablets");
     expect(card.subtitle).toContain(t.issuedByNeutral);
     expect(card.subtitle).not.toContain("issued by Dr.");
@@ -199,7 +227,8 @@ describe("describeEntry", () => {
       "en",
     );
     expect(withChemist.badge).toEqual({ label: "Delivered", tone: "success" });
-    expect(withChemist.title).toBe("Amlodipine");
+    expect(withChemist.title).toBe("Prescription");
+    expect(withChemist.subtitle).toContain("Amlodipine");
     expect(withChemist.subtitle).toContain("Ramesh Medical Store");
 
     const withoutChemist = describeEntry(
@@ -234,7 +263,8 @@ describe("describeEntry", () => {
       t,
       "en",
     );
-    expect(enCard.title).toBe("Amlodipine");
+    expect(enCard.title).toBe("Prescription");
+    expect(enCard.subtitle).toContain("Amlodipine");
     expect(enCard.subtitle).toContain(STRINGS.en.record.moreItems(2));
 
     const hiCard = describeEntry(
@@ -252,7 +282,8 @@ describe("describeEntry", () => {
       STRINGS.hi.record,
       "hi",
     );
-    expect(hiCard.title).toBe("Amlodipine");
+    expect(hiCard.title).toBe(STRINGS.hi.record.badge.prescription);
+    expect(hiCard.subtitle).toContain("Amlodipine");
     expect(hiCard.subtitle).toContain(STRINGS.hi.record.moreItems(1));
   });
 

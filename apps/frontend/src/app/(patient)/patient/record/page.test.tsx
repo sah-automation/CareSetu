@@ -775,7 +775,7 @@ describe("RecordPage PROTO-3.1 professional prescription cards (#515)", () => {
     });
   }
 
-  it("renders an enriched issued prescription with medicine title, dose, doctor and Active pill", async () => {
+  it("renders an enriched issued prescription titled by record type with the medicine in the subtitle", async () => {
     resolveRx({
       prescription_id: 12,
       status: "issued",
@@ -793,6 +793,7 @@ describe("RecordPage PROTO-3.1 professional prescription cards (#515)", () => {
     await waitForTimeline();
 
     const card = screen.getByTestId("entry-50");
+    expect(card).toHaveTextContent(STRINGS.en.record.badge.prescription);
     expect(card).toHaveTextContent("Amlodipine");
     expect(card).toHaveTextContent("5 mg · once daily · 30 tablets");
     expect(card).toHaveTextContent("issued by Dr. A. Kumar");

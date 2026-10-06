@@ -432,14 +432,18 @@ export function describeEntry(
         : { label: t.badge.active, tone: "success" };
       const icon = "\u{1F48A}";
       const items = prescriptionItems(entry);
-      // #515 enriched payload: the medicine name leads as the title and the
-      // subtitle carries the dose line, `issued by <doctor>` attribution, the
-      // chemist when the payload names one, and a "+N more" tally for
-      // multi-item prescriptions. Pre-enrichment payloads without `items`
-      // keep the lean `Rx #<id> · date` form - cards render only what the
-      // payload documents.
+      // #655: the card is titled by record type (`badge.prescription`), so a
+      // patient reads what kind of record it is without inferring it from a
+      // drug name. The medicine name moves into the subtitle and leads it -
+      // together with the dose line, `issued by <doctor>` attribution, the
+      // chemist when the payload names one, the date, and a "+N more" tally
+      // for multi-item prescriptions the card answers what/how much/by whom/
+      // when at a glance. Pre-enrichment payloads without `items` keep the
+      // lean `Rx #<id> · date` form - cards render only what the payload
+      // documents.
       if (items.length > 0) {
         const first = items[0];
+        parts.push(first.name);
         const doseLine = joinMedicineLine([
           first.dose,
           first.frequency,
@@ -454,7 +458,7 @@ export function describeEntry(
         if (items.length > 1) parts.push(t.moreItems(items.length - 1));
         return {
           icon,
-          title: first.name,
+          title: t.badge.prescription,
           subtitle: parts.join(" \u00b7 ") || null,
           badge,
         };
