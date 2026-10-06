@@ -437,9 +437,9 @@ export function describeEntry(
       // drug name. The medicine name moves into the subtitle and leads it -
       // together with the dose line, `issued by <doctor>` attribution, the
       // chemist when the payload names one, the date, and a "+N more" tally
-      // for multi-item prescriptions the card answers what/how much/by whom/
-      // when at a glance. Pre-enrichment payloads without `items` keep the
-      // lean `Rx #<id> · date` form - cards render only what the payload
+      // for multi-item prescriptions - so the card answers what/how much/by
+      // whom/when at a glance. Pre-enrichment payloads without `items` keep
+      // the lean `Rx #<id> · date` form: cards render only what the payload
       // documents.
       if (items.length > 0) {
         const first = items[0];
@@ -456,15 +456,10 @@ export function describeEntry(
         const chemist = chemistName(entry);
         if (chemist !== null) parts.push(chemist);
         if (items.length > 1) parts.push(t.moreItems(items.length - 1));
-        return {
-          icon,
-          title: t.badge.prescription,
-          subtitle: parts.join(" \u00b7 ") || null,
-          badge,
-        };
+      } else {
+        if (prescriptionId !== null) parts.push(`Rx #${prescriptionId}`);
+        if (!omitOccurredAt) parts.push(date);
       }
-      if (prescriptionId !== null) parts.push(`Rx #${prescriptionId}`);
-      if (!omitOccurredAt) parts.push(date);
       return {
         icon,
         title: t.badge.prescription,
