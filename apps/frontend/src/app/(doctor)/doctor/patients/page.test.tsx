@@ -1,8 +1,11 @@
-// PHASE-8.1 (#541): doctor console Patients index suite. Renders the derived
-// Current/Past patient groups from the consent-gated list API (#539), with
-// granted-scope badges and latest-case-stage chips, a light name search/filter,
-// deep links into the per-patient detail view, empty/loading/error states, and
-// bilingual EN/HI parity (REQ-006). Mirrors the Cases index suite (#483).
+// PHASE-8.1 (#541): doctor console Patients index suite (FEAT-008, MOD-012).
+// Renders the derived Current/Past patient groups from the consent-gated list
+// API (#539), with granted-scope badges and latest-case-stage chips, a light
+// name search/filter, deep links into the per-patient detail view,
+// empty/loading/error states, and bilingual EN/HI parity (REQ-006). Mirrors
+// the Cases index suite (#483). #651: rows are the shared DoctorListCard -
+// card grid per bucket, worded no-open-case state, patient-bearing accessible
+// name, single focus stop.
 
 import {
   cleanup,
@@ -128,10 +131,13 @@ describe("DoctorPatientsIndexPage", () => {
       screen.getByTestId("patient-row-scope-prescriptions"),
     ).toHaveTextContent(t.scopeBadge.prescriptions);
 
-    // Latest case stage chips (labels from the doctorConsole block).
+    // Latest case stage chips (labels from the doctorConsole block), each on
+    // the shared map's tone so a stage reads the same as on the cases list.
     const stageChips = screen.getAllByTestId("patient-row-stage");
     expect(stageChips[0]).toHaveTextContent(consoleT.stagePreSummary);
+    expect(stageChips[0].className).toContain("bg-warn-soft");
     expect(stageChips[1]).toHaveTextContent(consoleT.stageClosed);
+    expect(stageChips[1].className).toContain("bg-hairline-soft");
   });
 
   it("shows the age in the row meta", async () => {
@@ -280,5 +286,71 @@ describe("DoctorPatientsIndexPage", () => {
       expect(screen.getByText(hiT.title)).toBeInTheDocument(),
     );
     expect(screen.getByText(hiT.scopeBadge.consultations)).toBeInTheDocument();
+    expect(
+      screen.getByLabelText(hiT.openPatientNamed("Patient 11")),
+    ).toBeInTheDocument();
+  });
+
+  // FEAT-008 / #651 AC-3: cards per bucket on a grid that is multi-column at
+  // the large breakpoint and single-column below. No horizontal scroll rests
+  // on the blueprint's mechanism - every grid child keeps min-width:0, so
+  // intrinsic widths can never push the page wider than the viewport.
+  it("renders each bucket as a card grid that is single-column below the large breakpoint", async () => {
+    getPatients.mockResolvedValue({
+      items: [row(11), row(12, { bucket: "past" })],
+      total: 2,
+    });
+    render(<DoctorPatientsIndexPage />);
+
+    await waitFor(() => screen.getByTestId("patient-list-current"));
+
+    for (const testId of ["patient-list-current", "patient-list-past"]) {
+      const listClass = screen.getByTestId(testId).className;
+      expect(listClass).toContain("grid");
+      expect(listClass).toContain("grid-cols-1");
+      expect(listClass).toContain("lg:grid-cols-2");
+    }
+    for (const rowEl of screen.getAllByTestId("patient-row")) {
+      expect(rowEl.className).toContain("min-w-0");
+    }
+    expect(screen.getAllByTestId("patient-row").length).toBe(2);
+  });
+
+  // FEAT-008 / #651 AC-6 (US-18): an absent stage reads as words, never as an
+  // empty chip that could be mistaken for an unknown stage.
+  it("says in words when a patient has no open case instead of an empty chip", async () => {
+    getPatients.mockResolvedValue({
+      items: [row(11, { latest_case_stage: null })],
+      total: 1,
+    });
+    render(<DoctorPatientsIndexPage />);
+
+    await waitFor(() => screen.getByTestId("patient-row-stage"));
+
+    const stage = screen.getByTestId("patient-row-stage");
+    expect(stage).toHaveTextContent(t.noCaseStage);
+    expect(stage.textContent?.trim()).not.toBe("");
+  });
+
+  // FEAT-008 / #651 AC-1/AC-2: one whole-card link per row, its accessible
+  // name carrying the patient (US-66), so a list of cards is one stop each.
+  it("carries the patient in each card link's accessible name as one focus stop", async () => {
+    getPatients.mockResolvedValue({
+      items: [row(11, { name: "Asha Devi" })],
+      total: 1,
+    });
+    render(<DoctorPatientsIndexPage />);
+
+    await waitFor(() => screen.getByTestId("patient-row-open"));
+
+    expect(screen.getByTestId("patient-row-open")).toHaveAttribute(
+      "aria-label",
+      t.openPatientNamed("Asha Devi"),
+    );
+    const cardRoot = screen.getByTestId("patient-row");
+    const focusables = cardRoot.querySelectorAll(
+      "a[href], button, input, select, textarea, [tabindex]",
+    );
+    expect(focusables).toHaveLength(1);
   });
 });
