@@ -1122,6 +1122,239 @@ describe("CaseWorkspacePage prescription drafting (US-18/#452)", () => {
   });
 });
 
+describe("CaseWorkspacePage rx-item bare-number refusal (#657)", () => {
+  // The save-refusal prior art is the profile address card: a pure pass over
+  // the live values, aria-invalid + aria-describedby on the offending input,
+  // role="alert" for the announcement, and a focus walk on a declined save.
+  // Unlike the card, the refusal here is live rather than blur-gated, because
+  // the save button is disabled (the card's is not): a silent disabled button
+  // would tell the doctor nothing, so the message is on screen the moment the
+  // value is unreadable. Nothing rewrites what the doctor typed.
+  async function renderEditor(
+    items: PrescriptionDetailView["items"] = [
+      rxItem(31, { dose: "500 mg", frequency: "BD", duration: "5 days" }),
+    ],
+  ) {
+    getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
+    getWorkingRx.mockResolvedValue(prescription({ items }));
+    doSaveRevision.mockResolvedValue(prescription({ items }));
+    render(<CaseWorkspacePage />);
+    await waitFor(() => screen.getByTestId("prescription-editor"));
+  }
+
+  it("refuses a bare-number dose and clears it once the value carries a unit", async () => {
+    await renderEditor();
+
+    const dose = screen.getByTestId("rx-item-dose-0");
+    fireEvent.change(dose, { target: { value: "9" } });
+
+    // Refused and announced the moment the value is unreadable - no blur, no
+    // submit - so the disabled save is explained on screen, not silent.
+    const message = await screen.findByTestId("rx-item-dose-error-0");
+    expect(message).toHaveTextContent(t.rxDoseBareNumber);
+    expect(message).toHaveAttribute("role", "alert");
+    expect(dose).toHaveAttribute("aria-invalid", "true");
+    expect(dose).toHaveAttribute("aria-describedby", "rx-item-dose-error-0");
+    expect(screen.getByTestId("save-revision-action")).toBeDisabled();
+
+    fireEvent.change(dose, { target: { value: "9 mg" } });
+    // The message never outlives the state it described, and the refusal is
+    // never a rewrite: the doctor's own fix is what clears it.
+    expect(screen.queryByTestId("rx-item-dose-error-0")).toBeNull();
+    expect(dose).toHaveAttribute("aria-invalid", "false");
+    expect(screen.getByTestId("save-revision-action")).toBeEnabled();
+  });
+
+  it("refuses a bare-number frequency and names only that field", async () => {
+    await renderEditor();
+
+    const frequency = screen.getByTestId("rx-item-frequency-0");
+    fireEvent.change(frequency, { target: { value: "2" } });
+
+    const message = await screen.findByTestId("rx-item-frequency-error-0");
+    expect(message).toHaveTextContent(t.rxFrequencyBareNumber);
+    expect(message).toHaveAttribute("role", "alert");
+    expect(frequency).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByTestId("save-revision-action")).toBeDisabled();
+    // WHICH field, so the doctor fixes rather than guesses: the well-formed
+    // neighbours stay silent.
+    expect(screen.queryByTestId("rx-item-dose-error-0")).toBeNull();
+    expect(screen.queryByTestId("rx-item-duration-error-0")).toBeNull();
+  });
+
+  it("refuses a bare-number duration", async () => {
+    await renderEditor();
+
+    const duration = screen.getByTestId("rx-item-duration-0");
+    fireEvent.change(duration, { target: { value: "0.5" } });
+
+    const message = await screen.findByTestId("rx-item-duration-error-0");
+    expect(message).toHaveTextContent(t.rxDurationBareNumber);
+    expect(message).toHaveAttribute("role", "alert");
+    expect(duration).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByTestId("save-revision-action")).toBeDisabled();
+  });
+
+  it("keeps the medicine name free text, digits and all", async () => {
+    await renderEditor();
+
+    fireEvent.change(screen.getByTestId("rx-item-name-0"), {
+      target: { value: "Vitamin D3 60k" },
+    });
+
+    // No rule has the name: a real product name is never refused by an
+    // over-eager validator, and save stays open for it.
+    expect(screen.queryByTestId(/rx-item-.*-error/)).toBeNull();
+    expect(screen.getByTestId("save-revision-action")).toBeEnabled();
+  });
+
+  it("disables save while any row holds a bare number", async () => {
+    await renderEditor();
+
+    fireEvent.click(screen.getByTestId("add-rx-item"));
+    fireEvent.change(screen.getByTestId("rx-item-name-1"), {
+      target: { value: "ORS" },
+    });
+    fireEvent.change(screen.getByTestId("rx-item-duration-1"), {
+      target: { value: "5" },
+    });
+
+    expect(screen.getByTestId("save-revision-action")).toBeDisabled();
+    expect(
+      await screen.findByTestId("rx-item-duration-error-1"),
+    ).toBeInTheDocument();
+
+    fireEvent.change(screen.getByTestId("rx-item-duration-1"), {
+      target: { value: "5 days" },
+    });
+    expect(screen.getByTestId("save-revision-action")).toBeEnabled();
+  });
+
+  it("announces a declined save and takes focus to the first refused input", async () => {
+    await renderEditor();
+
+    fireEvent.change(screen.getByTestId("rx-item-dose-0"), {
+      target: { value: "9" },
+    });
+    // The guard behind the disabled button (an implicit form submit): the
+    // attempt is declined outright and nothing reaches the API...
+    fireEvent.submit(screen.getByTestId("prescription-editor"));
+
+    const message = await screen.findByTestId("rx-item-dose-error-0");
+    expect(message).toHaveAttribute("role", "alert");
+    expect(message).toHaveTextContent(t.rxDoseBareNumber);
+    expect(screen.getByTestId("rx-item-dose-0")).toHaveAttribute(
+      "aria-invalid",
+      "true",
+    );
+    // ...and focus lands on the offending input (ui-blueprint §9.4), so the
+    // message aria-describedby points at is what gets read next.
+    await waitFor(() =>
+      expect(screen.getByTestId("rx-item-dose-0")).toHaveFocus(),
+    );
+    expect(doSaveRevision).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("revision-saved")).toBeNull();
+  });
+
+  it("does not pull focus back to the first refusal while another is fixed", async () => {
+    await renderEditor();
+
+    fireEvent.change(screen.getByTestId("rx-item-dose-0"), {
+      target: { value: "9" },
+    });
+    fireEvent.change(screen.getByTestId("rx-item-frequency-0"), {
+      target: { value: "2" },
+    });
+    // A declined save walks focus to the FIRST refusal (dose)...
+    fireEvent.submit(screen.getByTestId("prescription-editor"));
+    await waitFor(() =>
+      expect(screen.getByTestId("rx-item-dose-0")).toHaveFocus(),
+    );
+
+    // ...but the walk is a one-shot, not a standing directive: typing the fix
+    // for the SECOND refusal must not keep dragging focus back to the first.
+    const frequency = screen.getByTestId("rx-item-frequency-0");
+    frequency.focus();
+    fireEvent.change(frequency, { target: { value: "2 times" } });
+    expect(frequency).toHaveFocus();
+  });
+
+  it("saves a well-formed row the narrow rule never touches", async () => {
+    await renderEditor();
+
+    fireEvent.change(screen.getByTestId("rx-item-dose-0"), {
+      target: { value: "9 mg" },
+    });
+    fireEvent.change(screen.getByTestId("rx-item-frequency-0"), {
+      target: { value: "9/3/3" },
+    });
+    fireEvent.change(screen.getByTestId("rx-item-duration-0"), {
+      target: { value: "5 days" },
+    });
+
+    // The rule is narrow on purpose: anything carrying more than digits,
+    // decimals and whitespace passes untouched, so real prescriptions are
+    // never refused.
+    expect(screen.getByTestId("save-revision-action")).toBeEnabled();
+    fireEvent.click(screen.getByTestId("save-revision-action"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("revision-saved")).toBeInTheDocument(),
+    );
+    expect(doSaveRevision).toHaveBeenCalledWith(11, 21, {
+      rx_items: [
+        {
+          name: "Paracetamol",
+          dose: "9 mg",
+          duration: "5 days",
+          frequency: "9/3/3",
+        },
+      ],
+    });
+  });
+
+  it("lets an AI-drafted bare number be edited into a valid state and saved", async () => {
+    getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
+    getWorkingRx.mockResolvedValue(
+      prescription({ items: [rxItem(31, { dose: "9" })] }),
+    );
+    doSaveRevision.mockResolvedValue(prescription());
+    render(<CaseWorkspacePage />);
+    await waitFor(() => screen.getByTestId("prescription-editor"));
+
+    // The refusal applies to the values, never to the draft's origin: the
+    // draft loads editable and simply will not save while the bare number
+    // stands - a bad draft is fixable, not a dead end. And because save is
+    // disabled, the reason is on screen from the load, not hidden behind a
+    // blur the doctor may never make.
+    expect(screen.getByTestId("rx-source")).toHaveTextContent(t.sourceAiDraft);
+    expect(screen.getByTestId("save-revision-action")).toBeDisabled();
+    expect(screen.getByTestId("rx-item-dose-error-0")).toHaveTextContent(
+      t.rxDoseBareNumber,
+    );
+
+    fireEvent.change(screen.getByTestId("rx-item-dose-0"), {
+      target: { value: "9 mg" },
+    });
+    expect(screen.getByTestId("save-revision-action")).toBeEnabled();
+    fireEvent.click(screen.getByTestId("save-revision-action"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("revision-saved")).toBeInTheDocument(),
+    );
+    expect(doSaveRevision).toHaveBeenCalledWith(11, 21, {
+      rx_items: [
+        {
+          name: "Paracetamol",
+          dose: "9 mg",
+          duration: "3 days",
+          frequency: "3 times daily",
+        },
+      ],
+    });
+  });
+});
+
 describe("CaseWorkspacePage approval, rejection, close (#453, US-19..22)", () => {
   it("blocks approval until the verification declaration is ticked", async () => {
     getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
@@ -1635,6 +1868,27 @@ describe("CaseWorkspacePage bilingual parity (REQ-006)", () => {
     expect(screen.getByTestId("save-revision-action")).toHaveTextContent(
       hiT.saveRevisionAction,
     );
+  });
+
+  it("renders the bare-number refusal copy in Hindi", async () => {
+    getCase.mockResolvedValue(caseItem(11, { stage: "prescription_pending" }));
+    getWorkingRx.mockResolvedValue(prescription());
+    render(<LangFlipHost />);
+
+    await waitFor(() => screen.getByTestId("prescription-editor"));
+    fireEvent.click(screen.getByText("flip-lang"));
+    await waitFor(() =>
+      expect(screen.getByTestId("save-revision-action")).toHaveTextContent(
+        hiT.saveRevisionAction,
+      ),
+    );
+
+    const dose = screen.getByTestId("rx-item-dose-0");
+    fireEvent.change(dose, { target: { value: "9" } });
+
+    const message = await screen.findByTestId("rx-item-dose-error-0");
+    expect(message).toHaveTextContent(hiT.rxDoseBareNumber);
+    expect(message).not.toHaveTextContent(t.rxDoseBareNumber);
   });
 
   it("renders the doctor-input capture copy in Hindi", async () => {
