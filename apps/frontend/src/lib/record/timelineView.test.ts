@@ -134,18 +134,17 @@ describe("describeEntry", () => {
     expect(card.subtitle).toContain("Rx #12");
   });
 
-  it("titles an enriched prescription by record type and moves the medicine into the subtitle", () => {
+  it("titles an enriched prescription by record type and moves the medicine into the subtitle, in both locales", () => {
+    const payload = {
+      prescription_id: 12,
+      status: "issued",
+      items: [{ name: "Amlodipine", dose: "5 mg", frequency: "once daily" }],
+      attributed_doctor_name: "Dr. A. Kumar",
+    };
     const card = describeEntry(
       entry({
         entry_type: "prescription",
-        payload: {
-          prescription_id: 12,
-          status: "issued",
-          items: [
-            { name: "Amlodipine", dose: "5 mg", frequency: "once daily" },
-          ],
-          attributed_doctor_name: "Dr. A. Kumar",
-        },
+        payload,
         occurred_at: "2026-08-22T08:00:00Z",
       }),
       t,
@@ -159,28 +158,18 @@ describe("describeEntry", () => {
     expect(card.subtitle).toContain(
       formatOccurredAt("2026-08-22T08:00:00Z", "en"),
     );
-  });
 
-  it("carries the record-type title and medicine subtitle in hi too", () => {
-    const card = describeEntry(
-      entry({
-        entry_type: "prescription",
-        payload: {
-          prescription_id: 12,
-          status: "issued",
-          items: [
-            { name: "Amlodipine", dose: "5 mg", frequency: "once daily" },
-          ],
-          attributed_doctor_name: "Dr. A. Kumar",
-        },
-      }),
+    const hiCard = describeEntry(
+      entry({ entry_type: "prescription", payload }),
       STRINGS.hi.record,
       "hi",
     );
-    expect(card.title).toBe(STRINGS.hi.record.badge.prescription);
-    expect(card.subtitle).toContain("Amlodipine");
-    expect(card.subtitle).toContain("5 mg · once daily");
-    expect(card.subtitle).toContain(STRINGS.hi.record.issuedBy("Dr. A. Kumar"));
+    expect(hiCard.title).toBe(STRINGS.hi.record.badge.prescription);
+    expect(hiCard.subtitle).toContain("Amlodipine");
+    expect(hiCard.subtitle).toContain("5 mg · once daily");
+    expect(hiCard.subtitle).toContain(
+      STRINGS.hi.record.issuedBy("Dr. A. Kumar"),
+    );
   });
 
   it("renders the full dose line and neutral attribution when the doctor name is null", () => {
