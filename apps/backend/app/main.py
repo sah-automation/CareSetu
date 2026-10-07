@@ -847,6 +847,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         from bus.envelope import Envelope
         from bus.outbox_writer import write_outbox
         from modules.care.domain.events import (
+            PrescriptionIssuedItem as CarePrescriptionIssuedItem,
+        )
+        from modules.care.domain.events import (
             PrescriptionIssuedPayload as CarePrescriptionIssuedPayload,
         )
         from modules.health.domain.events import ReportFiledPayload
@@ -880,7 +883,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # so a health-mirror-shaped payload would fail validation every poll and
         # strand the row. The health mirror tolerates the extra case_id and
         # doctor_id fields (pydantic ignores unknown keys), and its lean
-        # consumer leniently renders the entry either way.
+        # consumer leniently renders the entry either way. Exactly one
+        # medicine line (#660): the entry detail's labelled medicine block
+        # only renders with a non-empty item list, and one row keeps the e2e
+        # strict-mode label lookups (``Dose:``, ``Frequency:``, ``Duration:``)
+        # unique.
         rx_envelope = Envelope[CarePrescriptionIssuedPayload](
             event_id=uuid4(),
             event_type="prescription.issued",
@@ -892,6 +899,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 patient_id=patient_id,
                 doctor_id=5555,
                 occurred_at=now.isoformat(),
+                items=[
+                    CarePrescriptionIssuedItem(
+                        name="Amlodipine",
+                        dose="5 mg",
+                        frequency="once daily",
+                        duration="30 days",
+                    )
+                ],
             ),
         )
 

@@ -1,4 +1,4 @@
-"""#649: the composition root's counterparty-name resolver for the consent log.
+"""#649 (FEAT-002): the composition root's counterparty-name resolver for the consent log.
 
 ``ConsentFacade`` owns a seam, not the rules (#648): this file pins the rules
 the composition root binds into it, and the ORDER they run in.
@@ -79,6 +79,11 @@ async def test_the_ai_pseudo_counterparty_names_a_service_before_any_type_parse(
     name = await resolve("doctor", AI_EGRESS_COUNTERPARTY_ID)
 
     assert name == AI_INTAKE_COUNTERPARTY_DISPLAY_NAME
+    # The literal itself: the equality above is self-referential and would
+    # still pass if the constant were edited. The frontend's English
+    # dictionary ships the same brand string (#653 parity), so this pins the
+    # cross-tier contract from the backend side.
+    assert AI_INTAKE_COUNTERPARTY_DISPLAY_NAME == "CareSetu AI Intake Assistant"
     assert stub.requested == []
 
 

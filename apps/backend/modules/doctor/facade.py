@@ -304,9 +304,11 @@ class DoctorConsoleFacade:
                 if profile is not None:
                     profiles[patient_id] = profile
         except Exception:
+            # No ``exc_info``: a traceback frame or exception message can
+            # carry the patient id (error-handling-observability §2, the
+            # docstring contract above).
             logger.warning(
                 "doctor-console profile resolution failed; degrading to anonymous rows",
-                exc_info=True,
             )
             profiles = {}
         return profiles
@@ -529,9 +531,11 @@ class DoctorConsoleFacade:
         try:
             return await self._iam_facade.get_patient_profile(patient_id)
         except Exception:
+            # No ``exc_info``: the docstring contract forbids a patient id or
+            # PHI in the log line, and an exception message can carry either
+            # (error-handling-observability §2).
             logger.warning(
                 "doctor-console profile resolution failed; degrading to empty contact",
-                exc_info=True,
             )
             return None
 

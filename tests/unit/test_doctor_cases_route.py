@@ -1,4 +1,4 @@
-"""GET /v1/doctor/cases doctor route (ticket #647).
+"""GET /v1/doctor/cases doctor route (ticket #647, FEAT-008).
 
 The route is a thin adapter: resolve the partner principal through the same
 helper the patients routes use, refuse any non-doctor partner and any
