@@ -318,4 +318,35 @@ test("patient journey: record -> filter -> seed consent -> revoke -> revoked rec
   await expect(page.getByRole("heading", { name: "Consent log" })).toBeVisible({
     timeout: 5_000,
   });
+
+  // 17. Consent log shows a resolved name rather than an id (#660)
+  const consentCardText = await grantedCard.textContent();
+  expect(consentCardText).toBeTruthy();
+  if (consentCardText) {
+    expect(consentCardText).not.toContain("e2e-journey-consent");
+  }
+
+  // 18. Visit a prescription record entry and assert the labelled medicine block renders (#660)
+  await page.goto("/patient/record");
+  await waitForIdentityResolved(page);
+  await expect(page.getByTestId("record-timeline")).toBeVisible({
+    timeout: 30_000,
+  });
+  const prescriptionEntry = page
+    .locator('li[data-testid^="entry-"]')
+    .filter({ hasText: /Prescription|prescription/i })
+    .first();
+  await expect(prescriptionEntry).toBeVisible();
+  const entryLink = prescriptionEntry
+    .locator('[data-testid^="entry-link-"]')
+    .first();
+  await expect(entryLink).toBeVisible();
+  await entryLink.click();
+  await page.waitForURL(/\/patient\/record\/\d+/);
+  await expect(page.getByTestId("entry-medicine-block")).toBeVisible({
+    timeout: 30_000,
+  });
+  await expect(page.getByText("Dose:")).toBeVisible();
+  await expect(page.getByText("Frequency:")).toBeVisible();
+  await expect(page.getByText("Duration:")).toBeVisible();
 });
