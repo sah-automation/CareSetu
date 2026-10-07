@@ -1,4 +1,4 @@
-"""#646: DoctorConsoleFacade open-cases projection for the doctor console.
+"""#646 (FEAT-008): DoctorConsoleFacade open-cases projection for the doctor console.
 
 Drives the cases-list read through stubbed consent/care/iam/health/partner
 facades - no engine, the seam composes reads only. The read is the console
