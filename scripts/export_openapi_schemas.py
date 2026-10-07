@@ -49,6 +49,7 @@ REF_PREFIX = "#/components/schemas/"
 # side makes the export fail loudly.
 EXPORTED_SCHEMAS: tuple[str, ...] = (
     "CaseWorkspaceLink",
+    "ConsentEventView",
     "ConsentView",
     "ContactSection",
     "DoctorCaseRow",
