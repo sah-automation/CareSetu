@@ -31,9 +31,14 @@
 // profile, so the declared fields are asserted on the surface a patient sees
 // rather than on the console that wrote them.
 //
+// The fifth link (#661) closes the review's e2e gap on the corrected doctor
+// lists: /doctor/patients and /doctor/cases each render a real card from the
+// live list APIs (FEAT-008, spec #645), and each card navigates to its detail
+// surface - the row->detail journey no page suite can prove.
+//
 // Prior art: tests/e2e/auth-loop.spec.ts (partner wizard + staff login legs,
 // mock-OTP read-back), tests/e2e/patient-journey.spec.ts (live backend API).
-// Serial mode: the four tests share one doctor phone, one patient phone, one
+// Serial mode: the five tests share one doctor phone, one patient phone, one
 // intake and one capture of the doctor's partner id; each test gets its own
 // browser context so sessions do not leak.
 
@@ -783,4 +788,79 @@ test("the doctor declares their address and the public profile shows what they d
   } finally {
     await patientContext.close();
   }
+});
+
+// ---- Test 5: the corrected doctor lists render their grids and navigate ----
+
+// FEAT-008 (#651/#652/#655/#660, spec #645): the two lists the correction
+// rebuilt on the shared card have no journey coverage - the links above ride
+// the review workspace and the profile, never the grids themselves. This link
+// proves, on the real backend:
+//   1. /doctor/patients renders the patient who picked this doctor as a card -
+//      worded name fallback, a real worded stage (the assigned case behind it),
+//      and no NaN ids;
+//   2. the card navigates to that patient's detail page;
+//   3. /doctor/cases renders the care case born from the same intake, with the
+//      server-assigned case id in the card's meta;
+//   4. the case card navigates to the case workspace.
+test("the doctor's patients and cases grids render and navigate to their detail pages", async ({
+  page,
+  request,
+}) => {
+  expect(
+    intakeId,
+    "the earlier links must have submitted, assigned and structured the intake",
+  ).not.toBeNull();
+
+  await activeDoctorLogin(page, request, doctorPhone);
+
+  // ---- Patients grid ----
+  await page.goto("/doctor/patients");
+  const patientRow = page.getByTestId("patient-row").first();
+  await expect(patientRow).toBeVisible({ timeout: 30_000 });
+
+  // The journey's patient registered by phone only, so the row falls back to
+  // the worded default - never a blank label and never a raw id (#660).
+  await expect(page.getByTestId("patient-row-name").first()).toHaveText(
+    "Patient",
+  );
+
+  // This patient has an assigned care case, so the stage chip must read a real
+  // worded stage; "No open case" here would mean the case-to-patient link that
+  // also drives the list's presence broke.
+  const patientStage = page.getByTestId("patient-row-stage").first();
+  await expect(patientStage).toBeVisible();
+  await expect(patientStage).not.toHaveText("No open case");
+
+  const patientOpen = page.getByTestId("patient-row-open").first();
+  await expect(patientOpen).toHaveAttribute(
+    "href",
+    /^\/doctor\/patients\/\d+$/,
+  );
+  await patientOpen.click();
+  await page.waitForURL(/\/doctor\/patients\/\d+/, { timeout: 30_000 });
+  await expect(page.getByTestId("patient-header-band")).toBeVisible({
+    timeout: 30_000,
+  });
+  await expect(page.getByTestId("patient-detail-name")).toContainText(
+    "Patient",
+  );
+
+  // ---- Cases grid ----
+  await page.goto("/doctor/cases");
+  const caseRow = page.getByTestId("case-item").first();
+  await expect(caseRow).toBeVisible({ timeout: 30_000 });
+
+  // The card's meta carries the server-assigned case id ("Case #<n>").
+  await expect(page.getByTestId("case-item-id").first()).toContainText(
+    "Case #",
+  );
+
+  const caseOpen = page.getByTestId("case-item-open").first();
+  await expect(caseOpen).toHaveAttribute("href", /^\/doctor\/cases\/\d+$/);
+  await caseOpen.click();
+  await page.waitForURL(/\/doctor\/cases\/\d+/, { timeout: 30_000 });
+  await expect(page.getByTestId("case-content")).toBeVisible({
+    timeout: 60_000,
+  });
 });
