@@ -920,6 +920,7 @@ describe("action required card (#505)", () => {
       patient_id: 7,
       counterparty_type: "doctor",
       counterparty_id: "dr-77",
+      counterparty_display_name: null,
       record_scope: "consultations",
       status: "requested",
       version: 0,
@@ -1035,6 +1036,30 @@ describe("action required card (#505)", () => {
     );
   });
 
+  // FEAT-002 (#661): the action moment names the requester from the label
+  // seam's display-name step, not the generic type word.
+  it("names the requester with the resolved display name when the backend sent one", async () => {
+    consentApi.fetchConsentLog.mockResolvedValue({
+      items: [
+        consentView({
+          consent_id: 42,
+          counterparty_id: "dr-77",
+          counterparty_display_name: "Dr A Kumar",
+          record_scope: "consultations",
+        }),
+      ],
+    });
+    renderHome();
+
+    await screen.findByTestId("action-required");
+    expect(screen.getByTestId("action-required")).toHaveTextContent(
+      STRINGS.en.actions.consentRequest("Dr A Kumar", "consultations"),
+    );
+    expect(screen.getByTestId("action-required")).not.toHaveTextContent(
+      STRINGS.en.consentLog.counterparty.doctor,
+    );
+  });
+
   it("serves the card copy in hi from the actions surface", async () => {
     consentApi.fetchConsentLog.mockResolvedValue({
       items: [
@@ -1057,7 +1082,7 @@ describe("action required card (#505)", () => {
     );
     expect(screen.getByTestId("action-required")).toHaveTextContent(
       STRINGS.hi.actions.consentRequest(
-        STRINGS.en.consentLog.counterparty.doctor,
+        STRINGS.hi.consentLog.counterparty.doctor,
         "consultations",
       ),
     );
