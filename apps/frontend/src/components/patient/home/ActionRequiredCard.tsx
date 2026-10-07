@@ -131,6 +131,8 @@ export function ActionRequiredCard() {
                     counterpartyLabel(
                       consent.counterparty_type,
                       consent.counterparty_id,
+                      consent.counterparty_display_name,
+                      lang,
                     ),
                     consent.record_scope,
                   )}

@@ -26,14 +26,24 @@ const TYPE_LABEL_KEYS: Record<string, "doctor" | "lab" | "chemist"> = {
 };
 
 /**
- * Resolve the label a patient sees for one consent counterparty, in three
- * steps:
+ * Resolve the label a patient sees for one consent counterparty.
+ *
+ * The AI intake pseudo-counterparty id is checked before everything else,
+ * ahead of even the resolved display name: the composition root resolves that
+ * id to the English brand string (#649), and this dictionary is the only
+ * locale-aware carrier of the same brand - so an id-first check is what keeps
+ * the brand bilingual (#653, #661). The English output is byte-identical
+ * either way; the cross-tier equality (wire value == English dictionary
+ * entry) is pinned by test. The spec's guard is unchanged: intake-ai must
+ * never render as a doctor, whatever type it was recorded under.
+ *
+ * For every other counterparty the label falls through in three steps:
  *
  * 1. the display name the backend resolved - an enrichment of the id, absent
  *    when nothing could name the counterparty;
- * 2. a type-derived word (Doctor / Lab / Pharmacy), guarded by the AI intake
- *    id check above so the pseudo-counterparty reads as the branded service it
- *    is instead of as a doctor;
+ * 2. a type-derived word (Doctor / Lab / Pharmacy) for the types the product
+ *    records, so an unresolvable counterparty reads as its kind rather than
+ *    as an internal identifier;
  * 3. the raw id, only when both are absent - a last resort kept so a
  *    counterparty never renders as a blank avatar and a blank name, and
  *    unreachable in practice for every counterparty type the product records.
@@ -47,9 +57,9 @@ export function counterpartyLabel(
   counterpartyDisplayName?: string | null,
   lang: Lang = "en",
 ): string {
-  if (counterpartyDisplayName) return counterpartyDisplayName;
   const t = STRINGS[lang].consentLog.counterparty;
   if (counterpartyId === AI_EGRESS_COUNTERPARTY_ID) return t.aiService;
+  if (counterpartyDisplayName) return counterpartyDisplayName;
   const typeKey = TYPE_LABEL_KEYS[counterpartyType];
   if (typeKey) return t[typeKey];
   return counterpartyId || counterpartyType;

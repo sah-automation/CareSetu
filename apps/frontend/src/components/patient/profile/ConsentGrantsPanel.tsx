@@ -115,7 +115,12 @@ export function ConsentGrantsPanel() {
   const targetName =
     target === null
       ? ""
-      : counterpartyLabel(target.counterparty_type, target.counterparty_id);
+      : counterpartyLabel(
+          target.counterparty_type,
+          target.counterparty_id,
+          target.counterparty_display_name,
+          lang,
+        );
 
   return (
     <div data-testid="ps-consents">
@@ -170,6 +175,8 @@ export function ConsentGrantsPanel() {
           const name = counterpartyLabel(
             grant.counterparty_type,
             grant.counterparty_id,
+            grant.counterparty_display_name,
+            lang,
           );
           const labels = t.scopeLabels as Record<string, string | undefined>;
           const scope = labels[grant.record_scope] ?? t.consentScopeOther;

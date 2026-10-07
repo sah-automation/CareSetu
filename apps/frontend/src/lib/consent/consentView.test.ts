@@ -32,10 +32,34 @@ describe("counterpartyLabel - step one: the resolved display name", () => {
     );
   });
 
-  it("stays ahead of the AI pseudo-counterparty check too", () => {
+  // FEAT-002 (#653/#661): the AI id check ahead of the display name is what
+  // makes the backend's English brand render bilingually.
+  it("keeps the AI pseudo-counterparty on the dictionary brand, whatever display name is attached", () => {
+    // The backend resolves intake-ai to the ENGLISH brand (#649); the id
+    // check ahead of the display name is what makes that brand bilingual.
+    // EN output is identical either way because the wire value equals the
+    // English dictionary entry - pinned by the parity test below.
     expect(
       counterpartyLabel("doctor", AI_EGRESS_COUNTERPARTY_ID, "Dr A Kumar"),
-    ).toBe("Dr A Kumar");
+    ).toBe(en.aiService);
+    expect(
+      counterpartyLabel(
+        "doctor",
+        AI_EGRESS_COUNTERPARTY_ID,
+        "CareSetu AI Intake Assistant",
+        "hi",
+      ),
+    ).toBe(hi.aiService);
+  });
+
+  // FEAT-002: the brand ships in both locales pinned to literals, so the
+  // EN+HI requirement cannot regress to a key-presence check alone.
+  it("ships the brand identical to the backend wire value, in EN and HI", () => {
+    // Cross-tier parity (#661): app.main's AI_INTAKE_COUNTERPARTY_DISPLAY_NAME
+    // is pinned to this literal in the backend binding test, so equality here
+    // holds both tiers to one brand string.
+    expect(en.aiService).toBe("CareSetu AI Intake Assistant");
+    expect(hi.aiService).toBe("CareSetu AI इंटेक सहायक");
   });
 
   it("falls through to step two when the name is absent or empty", () => {
