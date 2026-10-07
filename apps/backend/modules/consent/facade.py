@@ -514,15 +514,16 @@ class ConsentFacade:
             return None
         try:
             return await resolver(counterparty_type, counterparty_id)
-        except Exception as exc:
+        except Exception:
             # No ``exc_info``: the bound resolver's exception text can carry the
             # counterparty id and whatever the owning module's query put in it.
-            # The exception *class* names the fault without leaking its payload.
+            # Not even the exception class: this warning keeps the docstring's
+            # "type only" contract, the same rule the main.py resolver warning
+            # follows (test_consent_counterparty_display_name_binding).
             logger.warning(
-                "consent counterparty display-name resolution failed for type %s (%s); "
+                "consent counterparty display-name resolution failed for type %s; "
                 "degrading to no name",
                 counterparty_type,
-                type(exc).__name__,
             )
             return None
 
