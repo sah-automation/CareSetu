@@ -12,6 +12,25 @@
       "required": ["case_id", "stage"],
       "type": "object"
     },
+    "ConsentEventView": {
+      "properties": {
+        "actor_patient_id": {
+          "type": "integer"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "version": {
+          "type": "integer"
+        }
+      },
+      "required": ["kind", "version", "actor_patient_id", "occurred_at"],
+      "type": "object"
+    },
     "ConsentView": {
       "properties": {
         "consent_id": {

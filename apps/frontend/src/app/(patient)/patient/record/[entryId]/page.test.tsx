@@ -623,6 +623,7 @@ describe("EntryDetailPage egress trail", () => {
           version: 1,
           counterparty_type: "chemist",
           counterparty_id: "9918",
+          counterparty_display_name: null,
           record_scope: "prescription",
           disclosed_entry_ids: [26],
           disclosed_at: "2026-08-20T08:00:00Z",
@@ -654,6 +655,10 @@ describe("EntryDetailPage egress trail", () => {
           version: 1,
           counterparty_type: "doctor",
           counterparty_id: "intake-ai",
+          // The composition root resolves intake-ai to the brand on every
+          // read (#649); the label still comes from the dictionary, so the
+          // English text is identical and the id never shows (#661).
+          counterparty_display_name: "CareSetu AI Intake Assistant",
           record_scope: "lab_report",
           disclosed_entry_ids: [26],
           disclosed_at: "2026-08-20T09:00:00Z",
@@ -691,6 +696,7 @@ describe("EntryDetailPage egress trail", () => {
           version: 1,
           counterparty_type: "provider",
           counterparty_id: "Dr. B",
+          counterparty_display_name: null,
           record_scope: "consultation",
           disclosed_entry_ids: [28],
           disclosed_at: "2026-08-20T10:00:00Z",

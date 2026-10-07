@@ -25,7 +25,7 @@ export interface ConsentView {
   patient_id: number;
   counterparty_type: string;
   counterparty_id: string;
-  counterparty_display_name?: string | null;
+  counterparty_display_name: string | null;
   record_scope: string;
   status: string;
   version: number;
@@ -46,7 +46,7 @@ export interface EgressLogEntry {
   version: number;
   counterparty_type: string;
   counterparty_id: string;
-  counterparty_display_name?: string | null;
+  counterparty_display_name: string | null;
   record_scope: string;
   disclosed_entry_ids: number[];
   disclosed_at: string;
@@ -68,14 +68,29 @@ function isConsentEventView(value: unknown): value is ConsentEventView {
 }
 
 function isConsentView(value: unknown): value is ConsentView {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as ConsentView;
   return (
-    typeof value === "object" &&
-    value !== null &&
     "consent_id" in value &&
+    "lineage_ref" in value &&
+    "patient_id" in value &&
+    "counterparty_type" in value &&
+    "counterparty_id" in value &&
+    // The display name is an enrichment of the id (#648), but once declared it
+    // is on the wire for every row: a missing key is backend drift, and a
+    // non-string would render as a label. Both fail loudly here rather than
+    // the surface rendering nothing (#661).
+    "counterparty_display_name" in value &&
+    (typeof v.counterparty_display_name === "string" ||
+      v.counterparty_display_name === null) &&
+    "record_scope" in value &&
     "status" in value &&
+    "version" in value &&
+    "created_at" in value &&
+    "updated_at" in value &&
     "events" in value &&
-    Array.isArray((value as ConsentView).events) &&
-    (value as ConsentView).events.every(isConsentEventView)
+    Array.isArray(v.events) &&
+    v.events.every(isConsentEventView)
   );
 }
 
@@ -90,12 +105,25 @@ function isConsentLog(value: unknown): value is ConsentLog {
 }
 
 function isEgressLogEntry(value: unknown): value is EgressLogEntry {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as EgressLogEntry;
   return (
-    typeof value === "object" &&
-    value !== null &&
     "egress_id" in value &&
+    "patient_id" in value &&
+    "consent_id" in value &&
+    "lineage_ref" in value &&
+    "version" in value &&
+    "counterparty_type" in value &&
+    "counterparty_id" in value &&
+    // Same rule as the consent row: declared means present and name-shaped
+    // (string or null), never a missing key or an arbitrary value (#661).
+    "counterparty_display_name" in value &&
+    (typeof v.counterparty_display_name === "string" ||
+      v.counterparty_display_name === null) &&
+    "record_scope" in value &&
     "disclosed_entry_ids" in value &&
-    Array.isArray((value as EgressLogEntry).disclosed_entry_ids)
+    Array.isArray(v.disclosed_entry_ids) &&
+    "disclosed_at" in value
   );
 }
 
@@ -104,7 +132,8 @@ function isEgressLog(value: unknown): value is EgressLog {
     typeof value === "object" &&
     value !== null &&
     "items" in value &&
-    Array.isArray((value as EgressLog).items)
+    Array.isArray((value as EgressLog).items) &&
+    (value as EgressLog).items.every(isEgressLogEntry)
   );
 }
 
