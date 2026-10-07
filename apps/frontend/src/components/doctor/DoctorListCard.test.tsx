@@ -77,10 +77,12 @@ describe("DoctorListCard", () => {
   });
 
   it("is a single focus stop whose accessible name includes the patient (#651 AC-2)", () => {
-    render(card());
+    const { container } = render(card());
 
-    const cardRoot = screen.getByTestId("card-open").parentElement;
-    const focusables = cardRoot!.querySelectorAll(
+    // Scope to the card's own root, not a reach-through from the link: what is
+    // pinned is "everything inside the card contributes one focus stop".
+    const cardRoot = container.firstElementChild!;
+    const focusables = cardRoot.querySelectorAll(
       "a[href], button, input, select, textarea, [tabindex]",
     );
     expect(focusables).toHaveLength(1);
@@ -104,17 +106,23 @@ describe("DoctorListCard", () => {
     expect(stage.className).toContain("bg-surface");
   });
 
-  it("uses the Badge primitive for chips and the Card primitive for the shell", () => {
-    render(card());
+  it("renders the shared treatment tokens on the chip and the shell (#651 US-71)", () => {
+    // Exact and load-bearing (#565's rationale): this environment loads no
+    // stylesheet, so a colour or elevation utility naming a token that does
+    // not exist emits no CSS and no rendered-surface or axe assertion can see
+    // it. The class list is the only observable a unit test has for a
+    // treatment decision, and it is what pins this card to the shared Badge
+    // and Card tokens instead of hand-rolled markup. Tag names and nesting
+    // are deliberately not asserted - those are the primitives' own suites.
+    const { container } = render(card());
 
     const chip = screen.getByTestId("scope-a");
-    expect(chip.tagName).toBe("DIV");
     expect(chip.className).toContain("rounded-full");
     expect(chip.className).toContain("bg-accent-soft");
 
-    const shell = screen.getByTestId("card-open").parentElement;
-    expect(shell?.className).toContain("rounded-lg");
-    expect(shell?.className).toContain("shadow-card");
-    expect(shell?.className).toContain("bg-surface");
+    const shell = container.firstElementChild as HTMLElement;
+    expect(shell.className).toContain("rounded-lg");
+    expect(shell.className).toContain("shadow-card");
+    expect(shell.className).toContain("bg-surface");
   });
 });
