@@ -11,6 +11,11 @@ mirroring ``test_care_facade_consult.py``:
   doctor (the pick seam).
 - Assigned-case reachability stays scoped: an unclaimed case assigned to a
   DIFFERENT doctor never leaks into the feed.
+
+#661 adds the mirror seam: ``list_doctor_cases`` (the OPEN grid's feed) must
+keep its non-closed filter on both branches, because Past history is derived
+through ``list_doctor_all_cases`` and a closed case on /doctor/cases would
+present a completed relationship as still open.
 """
 
 from __future__ import annotations
@@ -212,8 +217,56 @@ async def test_list_doctor_all_cases_uses_no_stage_filter() -> None:
 
     claimed_params = dict(claimed_stmt.compile().params)
 
+    # The claimed branch is scoped to this doctor, and the all-cases feed
+    # carries no stage filter at all.
     assert 42 in claimed_params.values()
     assert "closed" not in claimed_params.values()
     assert "IS NULL" in str(unclaimed_stmt.compile()).upper()
     assert "ORDER BY" in str(unclaimed_stmt.compile()).upper()
+    assert not intake_conn.execute.await_args_list
+
+
+# ---------------------------------------------------------------------------
+# list_doctor_cases (the open grid's seam: closed must never appear)
+# ---------------------------------------------------------------------------
+
+
+def _mentions_closed(stmt: ClauseElement) -> bool:
+    """Whether the compiled statement carries the non-closed filter.
+
+    Whichever way SQLAlchemy renders ``stage != CaseStage.CLOSED.value`` - a
+    bound parameter or an inlined literal - the value has to be in one of the
+    two places for the filter to be there at all.
+    """
+    compiled = stmt.compile()
+    return "CLOSED" in str(compiled).upper() or "closed" in dict(compiled.params).values()
+
+
+@pytest.mark.asyncio
+async def test_list_doctor_cases_keeps_the_non_closed_filter_on_both_branches() -> None:
+    """FEAT-008 / #661: the open grid's feed drops closed cases on BOTH branches.
+
+    Mirror of ``test_list_doctor_all_cases_uses_no_stage_filter``: Past-case
+    history is derived through ``list_doctor_all_cases`` (ADR-0019), so if the
+    open seam lost its filter, a completed case would reappear on
+    /doctor/cases as if it were still open.
+    """
+    connection = _connection([_FakeResult(rows=[]), _FakeResult(rows=[]), _FakeResult(rows=[])])
+    intake_conn = _connection([])
+    facade = _care_facade(connection, _intake_facade(intake_conn))
+
+    await facade.list_doctor_cases(doctor_id=42)
+
+    stmts = _statements(connection)
+    claimed_stmt = stmts[0]
+    unclaimed_stmt = stmts[1]
+
+    claimed_params = dict(claimed_stmt.compile().params)
+
+    # The claimed branch stays scoped to this doctor AND filters closed rows.
+    assert 42 in claimed_params.values()
+    assert _mentions_closed(claimed_stmt)
+    # The born-but-unclaimed merge filters closed rows the same way.
+    assert _mentions_closed(unclaimed_stmt)
+    assert "IS NULL" in str(unclaimed_stmt.compile()).upper()
     assert not intake_conn.execute.await_args_list
