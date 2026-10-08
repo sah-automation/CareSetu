@@ -118,7 +118,7 @@ The private, encrypted object storage for profile photos: one `profile-media` bu
 _Avoid_: avatar URL, public image link, media bucket (that is the intake/`rx_input` media store)
 
 **standing grant**:
-One live consent authorization for one (patient, counterparty, record scope) triple, effective from grant until revoked or superseded by a re-grant. "Per-action" consent means this per-purpose targeting, never a one-shot token. Pick-at-doctor (Phase 8.1) is the deliberate multi-grant moment: it records `consultations` and `prescriptions` standing grants together, atomically in the same transaction as the doctor assignment, so the AI drafting assistant's consent-gated read can pass.
+One live consent authorization for one (patient, counterparty, record scope) triple, effective from grant until revoked or superseded by a re-grant. "Per-action" consent means this per-purpose targeting, never a one-shot token. Pick-at-doctor (Phase 8.1) is the deliberate multi-grant moment: it records `consultations`, `prescriptions`, and `health_background` standing grants together, atomically in the same transaction as the doctor assignment, so the AI drafting assistant's consent-gated read can pass and the picked doctor's health-background section unlocks (#663).
 _Avoid_: per-action token, one-shot consent
 
 **grant lineage**:
