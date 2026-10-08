@@ -1,14 +1,17 @@
-"""PHASE-8.1 T05/T3: IntakeFacade pick_doctor seam (tickets #443, #480).
+"""PHASE-8.1 T05/T3: IntakeFacade pick_doctor seam (tickets #443, #480, #663).
 
 Drives the pick_doctor facade through mocked engine and consent facade,
 picking at the facade-with-fakes seam:
 
 - The pick and the consent grants are in ONE transaction (consent-at-pick,
-  MOD-004): the assigned_partner_id is written and the consultations AND
-  prescriptions consent lineages are minted on the same connection - either
-  both grants or neither (#480), no second gate.
+  MOD-004): the assigned_partner_id is written and the consultations,
+  prescriptions AND health_background consent lineages are minted on the
+  same connection - all three grants or none (#480, widened #663), no
+  second gate.
 - After the transaction commits, the consent cache is invalidated for every
   scope just granted so a later check_consent never answers stale.
+- The pick result contract reports the consultations grant only - the
+  widened grant set never changes the response shape.
 - A grant-leg failure aborts the pick: the transaction exits with the
   exception and nothing (assignment or grant) persists.
 - Exactly-one-doctor: a second pick on an already-assigned intake raises
@@ -126,15 +129,24 @@ def _facade(connection: AsyncMock, consent_facade: AsyncMock | None = None) -> I
 
 @pytest.mark.asyncio
 async def test_pick_doctor_writes_assignment_and_grants_consent_atomically() -> None:
-    """The pick and BOTH consent grants are recorded in one transaction."""
+    """The pick and ALL THREE consent grants are recorded in one transaction."""
     consultations_grant = _consent_view(consent_id=55, record_scope="consultations")
     prescriptions_grant = _consent_view(
         consent_id=56,
         lineage_ref="consent/patient-7/doctor-909/56",
         record_scope="prescriptions",
     )
+    health_background_grant = _consent_view(
+        consent_id=57,
+        lineage_ref="consent/patient-7/doctor-909/57",
+        record_scope="health_background",
+    )
     consent_facade = AsyncMock()
-    consent_facade.grant_consent_on.side_effect = [consultations_grant, prescriptions_grant]
+    consent_facade.grant_consent_on.side_effect = [
+        consultations_grant,
+        prescriptions_grant,
+        health_background_grant,
+    ]
 
     # 1. SELECT FOR UPDATE → intake row (unassigned)
     # 2. UPDATE → set assigned_partner_id
@@ -154,42 +166,50 @@ async def test_pick_doctor_writes_assignment_and_grants_consent_atomically() -> 
     assert result.intake_id == 1
     assert result.assigned_partner_id == 909
     # The response contract is unchanged: it reports the consultations grant,
-    # the scope the pick itself serves.
+    # the scope the pick itself serves - never the widened set.
     assert result.consent_id == 55
     assert result.consent_lineage_ref == "consent/patient-7/doctor-909/55"
     assert result.consent_version == 1
 
-    # Both scopes are minted on the SAME connection, in scope order, inside
-    # the single transaction (consent-at-pick, #480).
+    # All three scopes are minted on the SAME connection, in scope order,
+    # inside the single transaction (consent-at-pick, #480, widened #663).
     assert consent_facade.grant_consent_on.await_args_list == [
         call(connection, 7, "doctor", "909", "consultations"),
         call(connection, 7, "doctor", "909", "prescriptions"),
+        call(connection, 7, "doctor", "909", "health_background"),
     ]
-    # Both grants land before the transaction exits (commits) cleanly.
+    # All three grants land before the transaction exits (commits) cleanly.
     assert engine.begin.return_value.__aexit__.call_args.args[0] is None
 
-    # Both scopes are flushed from the gate cache after the commit.
+    # All three scopes are flushed from the gate cache after the commit.
     assert consent_facade.invalidate_consent_cache.await_args_list == [
         call(7, "doctor", "909", "consultations"),
         call(7, "doctor", "909", "prescriptions"),
+        call(7, "doctor", "909", "health_background"),
     ]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("first_leg_fails", [True, False])
-async def test_pick_doctor_grant_failure_aborts_pick(first_leg_fails: bool) -> None:
-    """A failing grant leg rolls the whole pick back - either both or neither.
+@pytest.mark.parametrize(
+    "failing_scope",
+    ["consultations", "prescriptions", "health_background"],
+)
+async def test_pick_doctor_grant_failure_aborts_pick(failing_scope: str) -> None:
+    """A failing grant leg rolls the whole pick back - all three or none.
 
-    Exercises both legs: the consultations grant failing first and the
-    prescriptions grant failing second.
+    Exercises every leg: the consultations grant failing first, the
+    prescriptions grant failing second, the health_background grant failing
+    third.
     """
+    scopes = ("consultations", "prescriptions", "health_background")
+    failing_leg = scopes.index(failing_scope)
     consent = _consent_view()
-    consent_facade = AsyncMock()
     failure = RuntimeError("grant failed")
-    if first_leg_fails:
-        consent_facade.grant_consent_on.side_effect = [failure, consent]
-    else:
-        consent_facade.grant_consent_on.side_effect = [consent, failure]
+    consent_facade = AsyncMock()
+    consent_facade.grant_consent_on.side_effect = [
+        *(consent for _ in range(failing_leg)),
+        failure,
+    ]
 
     connection = _connection(
         [
@@ -206,12 +226,8 @@ async def test_pick_doctor_grant_failure_aborts_pick(first_leg_fails: bool) -> N
 
     # Every granted leg before the failure was attempted on the open
     # connection, and the failing leg is the last one attempted ...
-    if first_leg_fails:
-        assert consent_facade.grant_consent_on.await_count == 1
-    else:
-        assert consent_facade.grant_consent_on.await_count == 2
-    failed_scope = "consultations" if first_leg_fails else "prescriptions"
-    assert consent_facade.grant_consent_on.await_args_list[-1].args[4] == failed_scope
+    assert consent_facade.grant_consent_on.await_count == failing_leg + 1
+    assert consent_facade.grant_consent_on.await_args_list[-1].args[4] == failing_scope
     # ... and the transaction exited WITH the exception - SQLAlchemy rolls
     # back, so neither the assignment nor any grant persists (no partial pick).
     assert engine.begin.return_value.__aexit__.call_args.args[0] is RuntimeError
@@ -244,9 +260,10 @@ async def test_pick_doctor_invalidates_cache_after_commit() -> None:
         i for i, c in enumerate(consent_facade.method_calls) if c[0] == "invalidate_consent_cache"
     ]
     assert max(grant_idxs) < min(invalidate_idxs)
-    # Cache invalidated once per granted scope (consultations + prescriptions).
-    assert len(grant_idxs) == 2
-    assert len(invalidate_idxs) == 2
+    # Cache invalidated once per granted scope (consultations, prescriptions,
+    # health_background).
+    assert len(grant_idxs) == 3
+    assert len(invalidate_idxs) == 3
 
 
 # ---------------------------------------------------------------------------
