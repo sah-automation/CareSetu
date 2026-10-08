@@ -1,10 +1,11 @@
 """PHASE-4 T7: the patient access-history query (ticket #241, FEAT-003).
 
 Pins the ``query_access_history`` SELECT against a mocked connection - the
-patient-record filter, newest-first ordering, and the mapping of each ledger
-row to an ``AccessHistoryEntry`` (denied concretized from ``outcome``) - plus
-the two facade delegation seams: ``HealthFacade.get_access_history`` through
-its engine and ``AuditFacade.get_access_history`` through the MOD-003 facade
+patient-record filter, the both-columns self-row exclusion predicate (#665),
+newest-first ordering, and the mapping of each ledger row to an
+``AccessHistoryEntry`` (denied concretized from ``outcome``) - plus the two
+facade delegation seams: ``HealthFacade.get_access_history`` through its
+engine and ``AuditFacade.get_access_history`` through the MOD-003 facade
 (coding-standards A2: DB-free unit surface, module isolation rule).
 """
 
@@ -52,12 +53,17 @@ async def test_maps_each_ledger_row_to_an_access_history_entry() -> None:
         [
             _row(outcome="denied", denial_reason="consent check failed"),
             _row(outcome="allowed"),
+            _row(
+                accessor_identity_id=3,
+                actor_type="doctor",
+                scope="doctor_patients_list",
+            ),
         ]
     )
 
     view = await query_access_history(connection, patient_id=7)
 
-    denied, allowed = view.entries
+    denied, allowed, doctor = view.entries
     assert allowed.actor_id == 7
     assert allowed.actor_type == "patient"
     assert allowed.scope == "full_record"
@@ -66,6 +72,10 @@ async def test_maps_each_ledger_row_to_an_access_history_entry() -> None:
     assert allowed.denial_reason is None
     assert denied.denied is True
     assert denied.denial_reason == "consent check failed"
+    assert doctor.actor_id == 3
+    assert doctor.actor_type == "doctor"
+    assert doctor.scope == "doctor_patients_list"
+    assert doctor.denied is False
 
 
 async def test_filters_to_the_patients_own_record_only() -> None:
@@ -78,6 +88,24 @@ async def test_filters_to_the_patients_own_record_only() -> None:
     # The join resolves the patient's record shell; the WHERE binds the patient.
     assert "health_record_access_history JOIN health.health_patient_records" in sql
     assert "health_patient_records.identity_id" in sql
+
+
+async def test_excludes_self_rows_with_the_both_columns_predicate() -> None:
+    """#665: self rows are excluded on BOTH actor type and accessor identity.
+
+    The predicate keys on both columns because doctor rows store partner ids
+    in the same accessor column - a bare accessor comparison would mis-handle
+    id-namespace collisions between a patient id and a partner id.
+    """
+    connection = _connection([])
+
+    await query_access_history(connection, patient_id=7)
+
+    (select_stmt,) = connection.execute.await_args.args
+    sql = str(select_stmt)
+    assert "NOT (" in sql
+    assert "health_record_access_history.actor_type" in sql
+    assert "accessor_identity_id = health.health_patient_records.identity_id" in sql
 
 
 async def test_orders_entries_most_recent_first() -> None:

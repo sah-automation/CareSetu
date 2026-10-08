@@ -6,9 +6,10 @@ longitudinal-record core: ``create_record`` (the idempotent shell creation
 the ``patient.registered`` subscriber calls), and the owner-only record
 reads - ``get_own_record`` resolves the caller's identity,
 ``get_record_as_owner`` reads an addressed record and refuses non-owners.
-Every read attempt - owner or not, allowed or denied - is recorded in the
-``health_record_access_history`` ledger in the same transaction as the read
-(MOD-003 NFR: KPI-006, 100% of record accesses logged). PHASE-3 T5 (#214)
+Every COUNTERPARTY read attempt - partner reads and denied attempts alike -
+is recorded in the ``health_record_access_history`` ledger in the same
+transaction as the read; the owner's own reads write nothing, so the ledger
+answers "who ELSE has seen this record" (#665). PHASE-3 T5 (#214)
 adds ``read_consented_history`` for partner reads gated by MOD-004's
 ``check_consent`` and dual-ledger writes (access history + egress log).
 
@@ -28,7 +29,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, not_, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -228,11 +229,13 @@ class RecordTimeline(BaseModel):
 class AccessHistoryEntry(BaseModel):
     """One read attempt on the patient's record as the trust view answers it.
 
-    Every row of ``health_record_access_history`` becomes one entry: who read
-    (``actor_id`` + ``actor_type``), over which scope, when, and whether the
-    attempt was refused - with the ``denial_reason`` when it was (FEAT-003
-    "who / how / why"). The health ledger is the fast patient-facing source;
-    the hash-chained copy of the same acts lives in MOD-011's ``audit_events``.
+    Every counterparty row of ``health_record_access_history`` becomes one
+    entry: who read (``actor_id`` + ``actor_type``), over which scope, when,
+    and whether the attempt was refused - with the ``denial_reason`` when it
+    was (FEAT-003 "who / how / why"). The owner's own reads never become
+    entries (#665): the view answers "who ELSE has seen this record". The
+    health ledger is the fast patient-facing source; the hash-chained copy of
+    the same acts lives in MOD-011's ``audit_events``.
     """
 
     actor_id: int
@@ -290,10 +293,12 @@ async def _log_access(
 ) -> None:
     """Record one read attempt in BOTH the access-history ledger and the outbox.
 
-    Dual write (FEAT-003, KPI-006) in the caller's transaction: the
-    ``health_record_access_history`` row feeds the fast patient view, and the
-    ``record.accessed`` / ``record.denied`` event drives MOD-011's hash
-    chain. The caller commits or rolls both back together.
+    Dual write (FEAT-003, KPI-006 for counterparty acts) in the caller's
+    transaction: the ``health_record_access_history`` row feeds the fast
+    patient view, and the ``record.accessed`` / ``record.denied`` event drives
+    MOD-011's hash chain. The caller commits or rolls both back together.
+    Owner reads (#665) deliberately do NOT call this helper - the trust view
+    answers "who ELSE has seen this record" (ADR-0023).
     """
     accessed_at = datetime.now(UTC)
     # actor_type / scope / denial_reason persist next to the ledger row too
@@ -410,13 +415,21 @@ async def _load_health_background(
 
 
 async def query_access_history(connection: AsyncConnection, patient_id: int) -> AccessHistoryView:
-    """Read every access-history row for a patient's record, newest first.
+    """Read every counterparty access-history row for a patient's record, newest first.
 
     Resolves the patient's single record shell via ``health_patient_records``
-    and selects every ``health_record_access_history`` row bound to it - owner
-    reads, partner reads, and denied attempts alike - concretizing the
-    ``denied`` flag from the ``outcome`` column. A patient whose record has
-    never been touched answers an empty list. Running inside the caller's
+    and selects every ``health_record_access_history`` row bound to it -
+    counterparty reads and denied attempts - concretizing the ``denied`` flag
+    from the ``outcome`` column. Self rows are excluded at read time by the
+    both-columns predicate (actor is the patient type AND the accessor is the
+    record's owner identity): belt-and-suspenders behind the purge migration
+    (#665), so the view answers "who ELSE has seen this record" even against
+    a database the migration has not touched. The predicate keys on BOTH
+    columns because doctor rows store partner ids in the same accessor
+    column - a bare accessor comparison would mis-handle id-namespace
+    collisions, and a cross-patient denied row (patient-type actor, different
+    accessor) must survive. A patient whose record has never been touched by
+    a counterparty answers an empty list. Running inside the caller's
     connection keeps the read single-transaction and testable without a
     database (same seam shape as MOD-011's ``query_audit_events``).
     """
@@ -437,6 +450,15 @@ async def query_access_history(connection: AsyncConnection, patient_id: int) -> 
                 )
             )
             .where(health_patient_records.c.identity_id == patient_id)
+            .where(
+                not_(
+                    and_(
+                        health_record_access_history.c.actor_type == _ACTOR_TYPE_PATIENT,
+                        health_record_access_history.c.accessor_identity_id
+                        == health_patient_records.c.identity_id,
+                    )
+                )
+            )
             .order_by(
                 health_record_access_history.c.accessed_at.desc(),
                 health_record_access_history.c.id.desc(),
@@ -502,23 +524,17 @@ class HealthFacade:
             return await _ensure_record_shell(connection, patient_id)
 
     async def get_own_record(self, patient_id: int) -> RecordTimeline:
-        """Owner read resolved by identity; records an allowed access.
+        """Owner read resolved by identity; writes nothing to the ledger.
 
         The shell is lazily ensured here as a safety net (a patient registered
         before the subscriber ran, or while its delivery is still in flight),
         so an owner never sees anything but their - possibly empty - timeline.
-        The access lands in the ledger in the same transaction as the read.
+        The trust view answers "who ELSE has seen this record" (#665), so the
+        patient's own read dual-writes neither an access-history row nor an
+        outbox envelope.
         """
         async with self._engine.begin() as connection:
             record_id = await _ensure_record_shell(connection, patient_id)
-            await _log_access(
-                connection,
-                record_id,
-                patient_id,
-                "allowed",
-                actor_type=_ACTOR_TYPE_PATIENT,
-                scope=_OWNER_SCOPE,
-            )
             return await _load_timeline(connection, record_id, patient_id)
 
     async def get_record_as_owner(self, patient_id: int, record_id: int) -> RecordTimeline:
@@ -526,10 +542,13 @@ class HealthFacade:
 
         A caller whose identity does not own the addressed record gets the
         403 envelope (mapped from ``RecordAccessDeniedError`` by the routes)
-        AND a ``denied`` row naming them in the access history. The denial
-        row is COMMITTED first - raising inside the transaction would roll it
-        back - so a refused read is always auditable before the error leaves
-        the facade. An unknown record id answers 404 with nothing to record.
+        AND a ``denied`` row naming them in the access history - another
+        identity's refused attempt is a security event, not self-access
+        (#665). The denial row is COMMITTED first - raising inside the
+        transaction would roll it back - so a refused read is always
+        auditable before the error leaves the facade. The ALLOWED path is an
+        owner read: it writes no history row and no outbox envelope (#665).
+        An unknown record id answers 404 with nothing to record.
         """
         denial_recorded = False
         async with self._engine.begin() as connection:
@@ -555,14 +574,6 @@ class HealthFacade:
                 )
                 denial_recorded = True
             else:
-                await _log_access(
-                    connection,
-                    record_id,
-                    patient_id,
-                    "allowed",
-                    actor_type=_ACTOR_TYPE_PATIENT,
-                    scope=_OWNER_SCOPE,
-                )
                 return await _load_timeline(connection, record_id, patient_id)
         if denial_recorded:
             raise RecordAccessDeniedError("only the record owner may read this record")
@@ -571,11 +582,12 @@ class HealthFacade:
     async def get_access_history(self, patient_id: int) -> AccessHistoryView:
         """Return the patient's record access history, newest first (FEAT-003).
 
-        A pure read of ``health_record_access_history`` for every row keyed to
-        the patient's record - owner reads, partner reads, and denied attempts
-        alike. A record no one has touched yet answers an empty list, not an
-        error. The ledger is a trust read, not a record access itself, so it
-        is not logged back into the ledger.
+        A pure read of ``health_record_access_history`` for every counterparty
+        row keyed to the patient's record - partner reads and denied attempts;
+        the owner's own reads are excluded (#665). A record no counterparty
+        has touched answers an empty list, not an error. The ledger is a trust
+        read, not a record access itself, so it is not logged back into the
+        ledger.
         """
         async with self._engine.begin() as connection:
             return await query_access_history(connection, patient_id)

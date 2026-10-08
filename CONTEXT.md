@@ -196,7 +196,7 @@ The consent-schema ledger of successful, consent-authorized PHI disclosures - wh
 _Avoid_: access log (that is the record access history), audit log (that is the Phase 4 engine)
 
 **record access history**:
-The health-schema ledger of every read attempt on a record - owner reads, partner reads, denied attempts; feeds the patient's trust view (`FEAT-003`, Phase 4). Consent-scoped reads record the record scope; surfaces that are not entry-keyed record a surface marker instead (`doctor_patients_list`, `doctor_patient_detail` for the doctor console), so revoking consent never rewinds the historical "viewed where" signal.
+The health-schema ledger of counterparty read attempts on a record - partner reads and denied attempts, never the owner's own reads (it answers "who ELSE has seen my record"); feeds the patient's trust view (`FEAT-003`, Phase 4). Consent-scoped reads record the record scope; surfaces that are not entry-keyed record a surface marker instead (`doctor_patients_list`, `doctor_patient_detail` for the doctor console), so revoking consent never rewinds the historical "viewed where" signal.
 _Avoid_: audit trail, disclosure log (that is the `egress log`)
 
 ### Provider directory & credential validity (Phase 6)
