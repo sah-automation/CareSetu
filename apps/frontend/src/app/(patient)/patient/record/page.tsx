@@ -473,10 +473,13 @@ export default function RecordPage() {
           ) : (
             <div data-testid="record-timeline">
               {groups.map((group) => (
-                <section key={group.key}>
+                // Spacing lives on the section: every heading is first-child of
+                // its own section, so `first:` on the heading suppressed the
+                // margin for every group (#667).
+                <section key={group.key} className="mt-5 first:mt-0">
                   <h2
                     data-testid={`group-${group.key}`}
-                    className="mt-5 flex items-center gap-2.5 text-[0.75rem] font-semibold uppercase tracking-wide text-txt-muted first:mt-0"
+                    className="flex items-center gap-2.5 text-[0.75rem] font-semibold uppercase tracking-wide text-txt-muted"
                   >
                     <span>{group.label}</span>
                     <span

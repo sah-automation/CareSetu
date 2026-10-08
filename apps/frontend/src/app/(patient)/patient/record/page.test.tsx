@@ -623,6 +623,31 @@ describe("RecordPage PROTO-3.1 timeline date grouping", () => {
     expect(screen.getByTestId("group-count-2026-08")).toHaveTextContent("5");
   });
 
+  // #667: the spacing contract lives on the group section, not the heading.
+  // Two groups so the contract is pinned on every section; jsdom computes no
+  // styles, so the class list is the only observable. `first:mt-0` on the
+  // section - a sibling under the timeline wrapper - suppresses only the very
+  // first group; on the heading (always first-child of its own section) it
+  // suppressed the margin for every group.
+  it("carries the month-divider spacing contract on each group section, not the heading (#667)", async () => {
+    resolveWith({
+      ...TIMELINE,
+      entries: [
+        ...TIMELINE.entries,
+        entry({ entry_id: 20, occurred_at: "2026-07-05T10:00:00Z" }),
+      ],
+    });
+    render(<RecordPage />);
+    await waitForTimeline();
+
+    for (const key of ["2026-08", "2026-07"]) {
+      const heading = screen.getByTestId(`group-${key}`);
+      expect(heading.parentElement).toHaveClass("mt-5", "first:mt-0");
+      expect(heading).not.toHaveClass("mt-5");
+      expect(heading).not.toHaveClass("first:mt-0");
+    }
+  });
+
   it("links every entry card to its detail page", async () => {
     render(<RecordPage />);
     await waitForTimeline();
