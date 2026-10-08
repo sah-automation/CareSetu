@@ -5,8 +5,9 @@ prefixed with ``health_`` and lives in the ``health`` schema. PHASE-3 T2
 (#211) lands the longitudinal-record core: one ``health_patient_records``
 shell per patient identity (created on ``patient.registered``), the clinical
 ``health_record_entries`` attached to it by later phases' events, and the
-``health_record_access_history`` ledger that records EVERY read attempt -
-owner reads included - feeding FEAT-003's trust view. The transactional
+``health_record_access_history`` ledger that records counterparty read
+attempts - partner reads and denied attempts, never the owner's own reads
+(#665) - feeding FEAT-003's trust view. The transactional
 outbox mirrors the shared ``bus/outbox_ddl.py`` shape (single source of
 truth, ADR-0002); the ``consumed_events`` subscriber ledger lives in the
 same schema but is materialized only by the migration and addressed through
