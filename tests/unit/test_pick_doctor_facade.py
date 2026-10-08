@@ -1,4 +1,4 @@
-"""PHASE-8.1 T05/T3: IntakeFacade pick_doctor seam (tickets #443, #480, #663).
+"""PHASE-8.1 T05/T3: IntakeFacade pick_doctor seam (FEAT-002, #443, #480, #663).
 
 Drives the pick_doctor facade through mocked engine and consent facade,
 picking at the facade-with-fakes seam:
