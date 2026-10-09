@@ -1,5 +1,10 @@
 "use client";
 
+// MOD-003 (record timeline) / FEAT-003 (patient trust view): #666/#671 the
+// "At a glance" counts card, extracted from the record page rail (#666) and
+// composed into the homepage rail (#671) so both surfaces render one summary
+// from payload-derived counts - never a second source of truth.
+
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import type { LabFlagSummary, RecordCounts } from "@/lib/record/timelineView";
