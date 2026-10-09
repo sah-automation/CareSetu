@@ -21,7 +21,6 @@ import {
   type DoctorPatientDetailView,
   type RecordScope,
 } from "@/lib/doctor/api";
-import { type RecordEntryType } from "@/lib/record/api";
 import { STRINGS, type Dictionary } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { cn } from "@/lib/utils";
@@ -41,6 +40,12 @@ import {
   CHIP_TONE,
   HealthBackgroundBlock,
 } from "@/components/doctor/HealthBackgroundBlock";
+// #680 (parent #673): the consultation history renders each entry through the
+// shared record-entry renderer (#677) so the patient profile and the case
+// workspace History tab show identical content (US-33). The custom test id
+// keeps the existing `consultation-entry` hook and its `-type` derived id,
+// while the renderer adds `-detail`/`-medicine` for the per-type facts.
+import { RecordEntryItem } from "@/components/record/RecordEntryItem";
 
 type LoadStatus = "loading" | "ready" | "error";
 
@@ -88,36 +93,6 @@ function Field({ label, value }: { label: string; value: string }) {
       </dd>
     </div>
   );
-}
-
-function entryTypeLabel(
-  entryType: string,
-  recordT: Dictionary["record"],
-): string {
-  switch (entryType) {
-    case "consultation":
-      return recordT.badge.consultation;
-    case "prescription":
-      return recordT.badge.prescription;
-    case "lab_report":
-      return recordT.badge.labReport;
-    case "metric":
-      return recordT.badge.metric;
-    case "settlement":
-      return recordT.badge.settlement;
-    default:
-      return entryType;
-  }
-}
-
-function historyDate(occurredAt: string, lang: "en" | "hi"): string {
-  const date = new Date(occurredAt);
-  if (Number.isNaN(date.getTime())) return occurredAt;
-  return date.toLocaleDateString(lang === "hi" ? "hi-IN" : "en-IN", {
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-  });
 }
 
 interface Lookup {
@@ -228,26 +203,15 @@ function ConsultationHistoryBlock({
   }
   return (
     <ul data-testid="consultation-list" className="space-y-2">
-      {history.entries.map((entry, index) => {
-        const entryType = entry.entry_type as RecordEntryType;
-        return (
-          <li
-            key={entry.entry_id ?? index}
-            data-testid="consultation-entry"
-            className="flex items-center justify-between gap-3 rounded-md border border-hairline bg-surface px-3 py-2"
-          >
-            <span
-              data-testid="consultation-entry-type"
-              className="inline-flex items-center rounded-full bg-accent-soft px-2 py-0.5 text-xs font-medium text-accent-strong"
-            >
-              {entryTypeLabel(entryType, recordT)}
-            </span>
-            <span className="text-xs text-txt-muted">
-              {historyDate(entry.occurred_at, lang)}
-            </span>
-          </li>
-        );
-      })}
+      {history.entries.map((entry, index) => (
+        <RecordEntryItem
+          key={entry.entry_id ?? index}
+          entry={entry}
+          labels={recordT}
+          lang={lang}
+          testId="consultation-entry"
+        />
+      ))}
     </ul>
   );
 }
