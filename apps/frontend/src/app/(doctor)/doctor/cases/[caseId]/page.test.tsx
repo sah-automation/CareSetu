@@ -549,6 +549,27 @@ describe("CaseWorkspacePage inner tabs, transcript and audio (US-14, #484)", () 
     );
   });
 
+  // #675: the tab ring is focus-visible-only, so a mouse click leaves no
+  // border while keyboard focus still shows an indicator. The selected
+  // underline (after:bg-accent) is a selected state, untouched by the change.
+  it("rings a tab on keyboard focus only, keeping the selected underline", async () => {
+    render(<CaseWorkspacePage />);
+    await waitFor(() => screen.getByTestId("case-content"));
+
+    const tab = screen.getByRole("tab", { name: t.tabPreSummary });
+    expect(tab.className).toContain("focus-visible:outline-none");
+    expect(tab.className).toContain("focus-visible:ring-1");
+    expect(tab.className).toContain("focus-visible:ring-accent");
+    expect(tab.className).toContain("focus-visible:ring-offset-2");
+    expect(tab.className).not.toContain("focus:outline-none");
+    expect(tab.className).not.toContain("focus:ring-");
+
+    expect(tab.className).toContain("after:bg-accent");
+    expect(
+      screen.getByRole("tab", { name: t.tabHistory }).className,
+    ).not.toContain("after:bg-accent");
+  });
+
   it("shows the original transcript and the finalized summary on the pre-summary tab", async () => {
     render(<CaseWorkspacePage />);
     await waitFor(() => screen.getByTestId("transcript-text"));
@@ -567,6 +588,27 @@ describe("CaseWorkspacePage inner tabs, transcript and audio (US-14, #484)", () 
     expect(
       screen.getByTestId("case-pre-summary-review-state"),
     ).toHaveTextContent(t.reviewStateFinal);
+  });
+
+  // #675: the Confidence row joins the same two-column key/value grid the
+  // Duration and other field rows use, and the low-confidence verify chip
+  // stays in the value cell next to the percentage.
+  it("aligns the confidence row with the Duration key/value layout", async () => {
+    render(<CaseWorkspacePage />);
+    await waitFor(() => screen.getByTestId("case-pre-summary-confidence"));
+
+    const confidence = screen.getByTestId("case-pre-summary-confidence");
+    const durationRow = screen
+      .getByTestId("case-pre-summary-duration")
+      .querySelector(".grid");
+    expect(durationRow).not.toBeNull();
+    expect(confidence.className).toBe(durationRow?.className);
+    expect(confidence).toHaveTextContent(t.confidenceLabel);
+    expect(confidence).toHaveTextContent("44%");
+
+    const chip = screen.getByTestId("case-pre-summary-low-confidence");
+    expect(chip).toHaveTextContent(consoleT.verifyChip);
+    expect(confidence.contains(chip)).toBe(true);
   });
 
   it("shows the transcript empty state when the intake has no transcript", async () => {
