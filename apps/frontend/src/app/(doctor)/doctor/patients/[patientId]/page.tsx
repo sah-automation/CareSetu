@@ -12,7 +12,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { ApiError } from "@/lib/api-errors";
 import {
@@ -31,13 +31,16 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { NotSharedCard } from "@/components/doctor/NotSharedCard";
-
-// #659 (US-56/57): the accent chip tone the header band and the health
-// background share - the same soft-accent pill the scope badges and the
-// shared doctor card render, so every read-only chip on the doctor surface
-// looks like one family. A chip is a Badge, never a button: these are
-// read-only facts about a patient, with no remove affordance.
-const CHIP_TONE = "bg-accent-soft text-accent-strong";
+// #679 (parent #673): the read-only health-background block now lives in a
+// shared presentational component so the case workspace History tab (#682) can
+// render the same facts. CHIP_TONE is the accent chip tone the header band and
+// the health background share - the same soft-accent pill the scope badges and
+// the shared doctor card render, so every read-only chip on the doctor surface
+// looks like one family.
+import {
+  CHIP_TONE,
+  HealthBackgroundBlock,
+} from "@/components/doctor/HealthBackgroundBlock";
 
 type LoadStatus = "loading" | "ready" | "error";
 
@@ -246,103 +249,6 @@ function ConsultationHistoryBlock({
         );
       })}
     </ul>
-  );
-}
-
-// One health-background row: a wrap-safe label above its value. The label
-// may wrap (break-words, no fixed-width column), so a long Devanagari label
-// never collides with the chips on the line below (#659 / US-59).
-function HealthRow({
-  label,
-  children,
-}: {
-  label: string;
-  children: ReactNode;
-}) {
-  return (
-    <div className="space-y-1.5">
-      <dt
-        className="break-words text-xs font-medium uppercase tracking-wide text-txt-muted"
-        data-testid="health-area-label"
-      >
-        {label}
-      </dt>
-      <dd className="min-w-0" data-testid="detail-field-value">
-        {children}
-      </dd>
-    </div>
-  );
-}
-
-function HealthBackgroundBlock({
-  detail,
-  lookup,
-}: {
-  detail: DoctorPatientDetailView;
-  lookup: Lookup;
-}) {
-  const { t } = lookup;
-  const hb = detail.health_background;
-  if (hb == null) {
-    return <NotSharedCard title={t.notSharedTitle} body={t.notSharedBody} />;
-  }
-  const bg = hb.background;
-  if (bg == null) {
-    return (
-      <div
-        data-testid="health-background-empty"
-        className="rounded-lg border border-hairline bg-surface px-4 py-4 text-sm text-txt-muted"
-      >
-        {t.healthBackgroundEmpty}
-      </div>
-    );
-  }
-  const areas: Array<{ label: string; values: string[] }> = [
-    { label: t.conditionsLabel, values: bg.conditions },
-    { label: t.allergiesLabel, values: bg.allergies },
-    { label: t.medicationsLabel, values: bg.medications },
-    { label: t.immunizationsLabel, values: bg.immunizations },
-    { label: t.familyHistoryLabel, values: bg.family_history },
-  ];
-  return (
-    // #659 (US-58/59): each area renders as its own label + chip row instead
-    // of one comma-joined run-on. The label sits above its value with
-    // `break-words` and no fixed-width column, so a long Devanagari label
-    // ("पारिवारिक इतिहास") wraps onto its own line rather than colliding
-    // with the chips beside it. The chip container wraps (`flex-wrap`), so a
-    // long allergy list becomes more rows, never a horizontal overflow - the
-    // same rule the case grid obeys. An empty granted area keeps its plain
-    // "None recorded" text so "no conditions" stays visually distinct from
-    // chips and from a locked section.
-    <dl
-      data-testid="health-background-set"
-      className="space-y-4 rounded-lg border border-hairline bg-surface p-4"
-    >
-      <HealthRow label={t.bloodGroupLabel}>
-        <span className="text-sm text-txt">
-          {bg.blood_group ?? t.noneRecorded}
-        </span>
-      </HealthRow>
-      {areas.map((area) => (
-        <HealthRow key={area.label} label={area.label}>
-          {area.values.length > 0 ? (
-            <div className="flex flex-wrap items-center gap-1.5">
-              {area.values.map((value, index) => (
-                <Badge
-                  key={`${area.label}-${index}`}
-                  data-testid="health-chip"
-                  className={CHIP_TONE}
-                >
-                  {value}
-                </Badge>
-              ))}
-            </div>
-          ) : (
-            <span className="text-sm text-txt">{t.noneRecorded}</span>
-          )}
-        </HealthRow>
-      ))}
-    </dl>
   );
 }
 
@@ -561,7 +467,10 @@ export default function DoctorPatientDetailPage() {
 
           <section className="mt-6" data-testid="detail-health-background">
             <SectionHeading title={t.healthBackgroundHeading} />
-            <HealthBackgroundBlock detail={detail} lookup={lookup} />
+            <HealthBackgroundBlock
+              healthBackground={detail.health_background}
+              labels={lookup.t}
+            />
           </section>
 
           <section className="mt-6" data-testid="detail-case-workspace">
