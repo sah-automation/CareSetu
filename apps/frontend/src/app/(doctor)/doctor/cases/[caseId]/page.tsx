@@ -527,7 +527,7 @@ function WorkspaceTabs({
             onClick={() => onChange(tab)}
             onKeyDown={(e) => handleKeyDown(e, tab)}
             className={cn(
-              "relative py-3 text-sm font-medium transition-colors focus:outline-none focus:ring-1 focus:ring-accent focus:ring-offset-2 rounded-sm",
+              "relative py-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent focus-visible:ring-offset-2 rounded-sm",
               selected ? "text-accent-strong" : "text-txt-muted hover:text-txt",
               selected &&
                 "after:absolute after:bottom-[-1px] after:left-0 after:right-0 after:h-0.5 after:bg-accent",
@@ -1424,27 +1424,28 @@ export default function CaseWorkspacePage() {
                     </div>
                   </div>
 
-                  {/* Confidence + review state - inline */}
-                  <div className="flex items-center gap-4">
-                    <div data-testid="case-pre-summary-confidence">
-                      <span className="text-xs font-medium text-txt-muted">
-                        {t.confidenceLabel}
-                      </span>
-                      <span className="ml-1 text-sm text-txt">
-                        {" "}
-                        {confidencePercent(
-                          preSummaryForReview.structuring_confidence,
-                        )}
-                      </span>
-                    </div>
-                    {preSummaryForReview.low_confidence && (
-                      <span
-                        data-testid="case-pre-summary-low-confidence"
-                        className="inline-flex items-center rounded-full bg-warn-soft px-2 py-0.5 text-xs font-medium text-warn-text"
-                      >
-                        {consoleT.verifyChip}
-                      </span>
-                    )}
+                  {/* Confidence + review state - key/value row matching the
+                      Duration and other field rows so the label-to-value
+                      spacing lines up (#675). The verify chip stays in the
+                      value cell next to the percentage. */}
+                  <div
+                    className="grid grid-cols-[140px_1fr] gap-3 text-sm"
+                    data-testid="case-pre-summary-confidence"
+                  >
+                    <span className="text-txt-muted">{t.confidenceLabel}</span>
+                    <span className="font-medium text-txt">
+                      {confidencePercent(
+                        preSummaryForReview.structuring_confidence,
+                      )}
+                      {preSummaryForReview.low_confidence && (
+                        <span
+                          data-testid="case-pre-summary-low-confidence"
+                          className="ml-2 inline-flex items-center rounded-full bg-warn-soft px-2 py-0.5 text-xs font-medium text-warn-text"
+                        >
+                          {consoleT.verifyChip}
+                        </span>
+                      )}
+                    </span>
                   </div>
 
                   {/* Patient edits - field group */}
