@@ -148,6 +148,21 @@ function resolveLoaded() {
   getProfile.mockResolvedValue(doctorProfile());
 }
 
+function LangFlipHost() {
+  const { lang, setLang } = useLang();
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setLang(lang === "en" ? "hi" : "en")}
+      >
+        flip-lang
+      </button>
+      <DoctorDashboardPage />
+    </>
+  );
+}
+
 beforeEach(() => {
   resolveLoaded();
 });
@@ -505,6 +520,146 @@ describe("DoctorDashboardPage patient-shell restyle (#544)", () => {
   });
 });
 
+describe("DoctorDashboardPage getting-started checklist (#674)", () => {
+  it("appears for a brand-new doctor with no open cases and an empty review queue", async () => {
+    render(<DoctorDashboardPage />);
+
+    await waitFor(() => screen.getByTestId("getting-started"));
+    expect(screen.getByTestId("getting-started")).toHaveTextContent(
+      t.checklistHeading,
+    );
+    expect(screen.getByTestId("getting-started")).toHaveTextContent(
+      t.checklistBody,
+    );
+  });
+
+  it("marks each step done or pending from the same profile fields the profile-status card uses", async () => {
+    // Default fixture: verified, fee set, no about text, no clinic name.
+    render(<DoctorDashboardPage />);
+
+    await waitFor(() => screen.getByTestId("getting-started"));
+
+    expect(
+      within(screen.getByTestId("checklist-step-verified")).getByText(
+        t.checklistDone,
+      ),
+    ).toBeTruthy();
+    expect(
+      within(screen.getByTestId("checklist-step-fee")).getByText(
+        t.checklistDone,
+      ),
+    ).toBeTruthy();
+    expect(
+      within(screen.getByTestId("checklist-step-about")).getByText(
+        t.checklistPending,
+      ),
+    ).toBeTruthy();
+    expect(
+      within(screen.getByTestId("checklist-step-clinic")).getByText(
+        t.checklistPending,
+      ),
+    ).toBeTruthy();
+  });
+
+  it("treats an unverified doctor as pending on the verified step", async () => {
+    getProfile.mockResolvedValue(doctorProfile({ verified: false }));
+    render(<DoctorDashboardPage />);
+
+    await waitFor(() => screen.getByTestId("getting-started"));
+    expect(
+      within(screen.getByTestId("checklist-step-verified")).getByText(
+        t.checklistPending,
+      ),
+    ).toBeTruthy();
+  });
+
+  it("marks every step done when the profile is complete", async () => {
+    getProfile.mockResolvedValue(
+      doctorProfile({
+        verified: true,
+        consultation_fee: 50000,
+        about: "Twelve years of primary care.",
+        clinic_name: "Sunrise Clinic",
+      }),
+    );
+    render(<DoctorDashboardPage />);
+
+    await waitFor(() => screen.getByTestId("getting-started"));
+
+    for (const key of ["verified", "fee", "about", "clinic"]) {
+      expect(
+        within(screen.getByTestId(`checklist-step-${key}`)).getByText(
+          t.checklistDone,
+        ),
+      ).toBeTruthy();
+      expect(screen.getByTestId(`checklist-step-${key}`)).toHaveAttribute(
+        "data-done",
+        "true",
+      );
+    }
+  });
+
+  it("deep-links each step to the profile section where the doctor completes it", async () => {
+    render(<DoctorDashboardPage />);
+
+    await waitFor(() => screen.getByTestId("getting-started"));
+
+    expect(screen.getByTestId("checklist-step-verified")).toHaveAttribute(
+      "href",
+      "/doctor/profile#profile-section-verified",
+    );
+    expect(screen.getByTestId("checklist-step-fee")).toHaveAttribute(
+      "href",
+      "/doctor/profile#profile-section-fee",
+    );
+    expect(screen.getByTestId("checklist-step-about")).toHaveAttribute(
+      "href",
+      "/doctor/profile#profile-section-about",
+    );
+    expect(screen.getByTestId("checklist-step-clinic")).toHaveAttribute(
+      "href",
+      "/doctor/profile#profile-section-practice",
+    );
+  });
+
+  it("is absent once the doctor has an open care case", async () => {
+    getCases.mockResolvedValue([caseItem(11)]);
+    render(<DoctorDashboardPage />);
+
+    await waitFor(() => screen.getByTestId("case-item"));
+    expect(screen.queryByTestId("getting-started")).not.toBeInTheDocument();
+  });
+
+  it("is absent when the review queue is not empty", async () => {
+    getQueue.mockResolvedValue([queueItem()]);
+    render(<DoctorDashboardPage />);
+
+    await waitFor(() => screen.getByTestId("queue-item"));
+    expect(screen.queryByTestId("getting-started")).not.toBeInTheDocument();
+  });
+
+  it("carries the checklist copy into Hindi (REQ-006)", async () => {
+    render(<LangFlipHost />);
+    await waitFor(() => screen.getByTestId("getting-started"));
+
+    fireEvent.click(screen.getByText("flip-lang"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("getting-started")).toHaveTextContent(
+        hiT.checklistHeading,
+      ),
+    );
+    expect(screen.getByText(hiT.checklistStepVerified)).toBeInTheDocument();
+    expect(screen.getByText(hiT.checklistStepFee)).toBeInTheDocument();
+    expect(screen.getByText(hiT.checklistStepAbout)).toBeInTheDocument();
+    expect(screen.getByText(hiT.checklistStepClinic)).toBeInTheDocument();
+    // Two steps are done (verified, fee) and two are pending (about, clinic) in
+    // the default fixture, so each state label appears twice.
+    expect(screen.getAllByText(hiT.checklistDone)).toHaveLength(2);
+    expect(screen.getAllByText(hiT.checklistPending)).toHaveLength(2);
+  });
+});
+
 describe("DoctorDashboardPage failure paths", () => {
   it("shows a retryable error banner when the feeds fail", async () => {
     getQueue.mockRejectedValue(
@@ -542,21 +697,6 @@ describe("DoctorDashboardPage failure paths", () => {
 });
 
 describe("DoctorDashboardPage bilingual parity (REQ-006)", () => {
-  function LangFlipHost() {
-    const { lang, setLang } = useLang();
-    return (
-      <>
-        <button
-          type="button"
-          onClick={() => setLang(lang === "en" ? "hi" : "en")}
-        >
-          flip-lang
-        </button>
-        <DoctorDashboardPage />
-      </>
-    );
-  }
-
   it("renders the console copy in Hindi when the locale flips", async () => {
     getQueue.mockResolvedValue([queueItem({ patient_name: null })]);
     getCases.mockResolvedValue([caseItem(11)]);

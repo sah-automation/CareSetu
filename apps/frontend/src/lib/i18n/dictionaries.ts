@@ -1508,6 +1508,20 @@ const en = {
     timeAgoDays: (n: number) => `${n} d`,
     loadFailed: "Could not load the console.",
     retry: "Try again",
+    // #674: the getting-started checklist shown only to a brand-new doctor with
+    // no open cases and an empty review queue. The step states mirror the
+    // profile-status card's completeness hints (verified / fee / about /
+    // clinic name) so the two surfaces agree on what counts as "done"; each
+    // step deep-links to the profile section where the doctor completes it.
+    checklistHeading: "Getting started",
+    checklistBody:
+      "A few things to finish so patients can find and choose you.",
+    checklistStepVerified: "Get verified",
+    checklistStepFee: "Set your consultation fee",
+    checklistStepAbout: "Write an introduction",
+    checklistStepClinic: "Add your clinic name",
+    checklistDone: "Done",
+    checklistPending: "Pending",
   },
 
   // doctorProfile.* surface - PHASE-8.1 (#543): the doctor console Profile
@@ -3412,6 +3426,20 @@ export const STRINGS: Record<Lang, Dictionary> = {
       timeAgoDays: (n: number) => `${n} दिन`,
       loadFailed: "कंसोल लोड नहीं हो सका।",
       retry: "फिर से कोशिश करें",
+      // #674: नए डॉक्टर के लिए शुरुआत-चेकलिस्ट, जो केवल तब दिखती है जब कोई
+      // खुला केस न हो और समीक्षा कतार खाली हो। कदमों की स्थितियाँ प्रोफ़ाइल-
+      // स्थिति कार्ड के पूर्णता संकेतों (सत्यापित / शुल्क / परिचय / क्लिनिक
+      // नाम) के समान हैं ताकि दोनों सतहें "पूर्ण" के अर्थ पर सहमत हों; हर कदम
+      // उस प्रोफ़ाइल अनुभाग से जुड़ता है जहाँ डॉक्टर इसे पूरा करता है।
+      checklistHeading: "शुरुआत करें",
+      checklistBody:
+        "मरीज़ों के आपको खोजने और चुनने से पहले कुछ चीज़ें पूरी करें।",
+      checklistStepVerified: "सत्यापन करवाएँ",
+      checklistStepFee: "अपना परामर्श शुल्क तय करें",
+      checklistStepAbout: "परिचय लिखें",
+      checklistStepClinic: "अपने क्लिनिक का नाम जोड़ें",
+      checklistDone: "पूर्ण",
+      checklistPending: "लंबित",
     },
 
     // doctorProfile.* सतह - PHASE-8.1 (#543): डॉक्टर कंसोल का प्रोफ़ाइल
