@@ -27,6 +27,7 @@ import { STRINGS } from "@/lib/i18n/dictionaries";
 import type { DirectoryEntry } from "@/lib/directory/search";
 import type { ConsentView } from "@/lib/consent/api";
 import type { RecordEntryView } from "@/lib/record/api";
+import type { AccessHistoryEntry } from "@/lib/audit/api";
 import { RECENT_ACTIVITY_MAX } from "@/components/patient/home/RecentActivityCard";
 
 const state = vi.hoisted(() => ({
@@ -188,6 +189,10 @@ beforeEach(() => {
     entries: [],
   });
   auditApi.fetchAccessHistory.mockReset();
+  // #671: the homepage rail now composes the shared Who-accessed accordion,
+  // which reads access history (rail zone). Default to an empty log so the
+  // accordion renders its empty state unless a test seeds rows.
+  auditApi.fetchAccessHistory.mockResolvedValue({ entries: [] });
   state.getProfile.mockResolvedValue({ set: false, profile: null });
 });
 
@@ -1199,14 +1204,20 @@ describe("recent activity card (#506)", () => {
     expect(row).toHaveTextContent(/2026/);
   });
 
-  it("never mixes access-history reads into recent activity", async () => {
+  it("keeps access-history out of the recent-activity card", async () => {
     seedTimeline([entry(1, "consultation", "2026-09-21T08:00:00.000Z")]);
     renderHome();
 
-    await screen.findByTestId("recent-entry-1");
-    // The audit read is a separate data source - the card must never trigger it.
-    expect(auditApi.fetchAccessHistory).not.toHaveBeenCalled();
-    expect(screen.queryByTestId("access-history")).not.toBeInTheDocument();
+    const card = await screen.findByTestId("recent-activity");
+    // #671: the home now owns an audit read through the rail's Who-accessed
+    // accordion, but the recent-activity card stays fed by the record timeline
+    // only - it never renders access-history content of its own.
+    expect(
+      within(card).queryByTestId("access-history"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(card).queryByTestId("access-history-rail"),
+    ).not.toBeInTheDocument();
   });
 
   it("renders the friendly empty state for a record with no activity yet", async () => {
@@ -1442,5 +1453,116 @@ describe("health snapshot rail (#507)", () => {
     expect(screen.getByTestId("health-report-teaser")).toHaveTextContent(
       STRINGS.hi.health.reportSoon,
     );
+  });
+});
+
+describe("homepage rail parity (#671)", () => {
+  function entry(
+    id: number,
+    entry_type: RecordEntryView["entry_type"],
+    occurred_at: string,
+    payload: Record<string, unknown> = {},
+  ): RecordEntryView {
+    return {
+      entry_id: id,
+      entry_type,
+      payload,
+      occurred_at,
+      created_at: occurred_at,
+    };
+  }
+
+  function seedTimeline(entries: RecordEntryView[]) {
+    recordApi.fetchOwnRecord.mockResolvedValue({
+      record_id: 1,
+      patient_id: 7,
+      created_at: "2026-09-21T10:00:00.000Z",
+      entries,
+    });
+  }
+
+  function accessEntry(overrides: Partial<AccessHistoryEntry> = {}) {
+    return {
+      actor_id: 11,
+      actor_type: "doctor",
+      actor_display_name: "Dr A Kumar",
+      scope: "consultations",
+      accessed_at: "2026-09-21T08:00:00.000Z",
+      denied: false,
+      ...overrides,
+    };
+  }
+
+  it("renders At a glance, health snapshot and Who accessed in that order", async () => {
+    seedTimeline([entry(1, "consultation", "2026-09-21T08:00:00.000Z")]);
+    renderHome();
+
+    const rail = await screen.findByTestId("patient-home-rail");
+    const summary = await within(rail).findByTestId("record-rail-summary");
+    const health = within(rail).getByTestId("health-snapshot");
+    const access = await within(rail).findByTestId("access-history-rail");
+
+    // Reading order is part of the contract: At a glance -> health -> access.
+    expect(summary.compareDocumentPosition(health)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(health.compareDocumentPosition(access)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+  });
+
+  it("carries the record rail's sticky offset and spacing contract", async () => {
+    renderHome();
+
+    const rail = await screen.findByTestId("patient-home-rail");
+    // Mirrors the record rail's `sticky top-[4.5rem] space-y-5` (#671).
+    expect(rail.className).toContain("lg:sticky");
+    expect(rail.className).toContain("lg:top-[4.5rem]");
+    expect(rail.className).toContain("space-y-5");
+  });
+
+  it("shares one own-record read between the two new rail sections", async () => {
+    seedTimeline([
+      entry(1, "consultation", "2026-09-21T08:00:00.000Z"),
+      entry(2, "prescription", "2026-09-20T08:00:00.000Z", {
+        prescription_id: 12,
+        status: "issued",
+      }),
+    ]);
+    renderHome();
+
+    // At a glance is fed by the hook's single response...
+    const summary = await screen.findByTestId("record-rail-summary");
+    expect(summary).toHaveTextContent(STRINGS.en.record.filter.consultation);
+    expect(summary).toHaveTextContent(STRINGS.en.record.snapshotIssued(1));
+    // ...and the accordion reads its audit with the same response's patient id
+    // (not a second own-record fetch).
+    await waitFor(() =>
+      expect(auditApi.fetchAccessHistory).toHaveBeenCalledWith(7),
+    );
+  });
+
+  it("expands to the latest five accesses with the full count badge and consent-log link", async () => {
+    const many = Array.from({ length: 7 }, (_, i) =>
+      accessEntry({
+        actor_id: i + 10,
+        accessed_at: `2026-08-${String(i + 1).padStart(2, "0")}T09:00:00Z`,
+      }),
+    );
+    seedTimeline([]);
+    auditApi.fetchAccessHistory.mockResolvedValue({ entries: many });
+    renderHome();
+
+    const rail = await screen.findByTestId("patient-home-rail");
+    const list = await within(rail).findByTestId("access-history-rail-list");
+    expect(list.querySelectorAll("li")).toHaveLength(5);
+    // The badge reports the full audit count, not the five rendered rows.
+    expect(within(rail).getByTestId("access-history-rail")).toHaveTextContent(
+      "7",
+    );
+    // The "Open consent log" footer link is a live doorway from the home rail.
+    expect(
+      within(rail).getByTestId("access-consent-log-link-rail"),
+    ).toHaveAttribute("href", "/patient/record/consent-log");
   });
 });
