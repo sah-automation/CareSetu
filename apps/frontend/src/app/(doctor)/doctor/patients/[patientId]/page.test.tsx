@@ -303,6 +303,102 @@ describe("DoctorPatientDetailPage", () => {
     expect(types[1]).toHaveTextContent(recordT.badge.prescription);
   });
 
+  it("renders each entry's per-type detail through the shared renderer (#680 AC-1/AC-2)", async () => {
+    getDetail.mockResolvedValue(
+      detail({
+        consultation_history: {
+          ...timeline(),
+          entries: [
+            {
+              entry_id: 11,
+              entry_type: "consultation",
+              payload: {},
+              occurred_at: "2026-09-01T00:00:00Z",
+              created_at: "2026-09-01T00:00:00Z",
+            },
+            {
+              entry_id: 12,
+              entry_type: "prescription",
+              payload: {
+                status: "active",
+                attributed_doctor_name: "Dr. A. Kumar",
+                items: [
+                  {
+                    name: "Amlodipine",
+                    dose: "5 mg",
+                    frequency: "once daily",
+                    duration: "30 days",
+                  },
+                ],
+              },
+              occurred_at: "2026-08-20T00:00:00Z",
+              created_at: "2026-08-20T00:00:00Z",
+            },
+            {
+              entry_id: 13,
+              entry_type: "lab_report",
+              payload: { filename: "cbc-report.pdf", order_id: 42 },
+              occurred_at: "2026-08-10T00:00:00Z",
+              created_at: "2026-08-10T00:00:00Z",
+            },
+            {
+              entry_id: 14,
+              entry_type: "settlement",
+              payload: { amount_paise: 50000, order_ref: "ORD-9" },
+              occurred_at: "2026-08-01T00:00:00Z",
+              created_at: "2026-08-01T00:00:00Z",
+            },
+          ],
+        },
+      }),
+    );
+    render(<DoctorPatientDetailPage />);
+
+    await waitFor(() => screen.getByTestId("consultation-list"));
+
+    const entries = screen.getAllByTestId("consultation-entry");
+    expect(entries).toHaveLength(4);
+
+    // Type tag and date stay on every entry; the payload-less consultation
+    // keeps the scan line only, never a half card (#680 AC-2).
+    const consult = within(entries[0]);
+    expect(consult.getByTestId("consultation-entry-type")).toHaveTextContent(
+      recordT.badge.consultation,
+    );
+    expect(
+      consult.queryByTestId("consultation-entry-detail"),
+    ).not.toBeInTheDocument();
+    expect(entries[0]).toHaveTextContent(/1 Sep/);
+
+    // Prescription: each medicine line plus the attributed doctor (US-33).
+    const rx = within(entries[1]);
+    expect(rx.getByTestId("consultation-entry-type")).toHaveTextContent(
+      recordT.badge.prescription,
+    );
+    const rxDetail = rx.getByTestId("consultation-entry-detail");
+    expect(rxDetail).toHaveTextContent(recordT.prescribedBy);
+    expect(rxDetail).toHaveTextContent("Dr. A. Kumar");
+    expect(rx.getByTestId("consultation-entry-medicine")).toHaveTextContent(
+      "Amlodipine",
+    );
+    expect(rxDetail).toHaveTextContent("Dose: 5 mg");
+
+    // Lab report: file name plus order reference.
+    const lab = within(entries[2]);
+    const labDetail = lab.getByTestId("consultation-entry-detail");
+    expect(labDetail).toHaveTextContent(recordT.history.file);
+    expect(labDetail).toHaveTextContent("cbc-report.pdf");
+    expect(labDetail).toHaveTextContent("#42");
+
+    // Settlement: amount plus order reference.
+    const settlement = within(entries[3]);
+    const settlementDetail = settlement.getByTestId(
+      "consultation-entry-detail",
+    );
+    expect(settlementDetail).toHaveTextContent(recordT.history.amount);
+    expect(settlementDetail).toHaveTextContent("#ORD-9");
+  });
+
   it("shows an empty message for an empty consultation history", async () => {
     getDetail.mockResolvedValue(
       detail({ consultation_history: { ...timeline(), entries: [] } }),
