@@ -1240,6 +1240,10 @@ const en = {
       doctor: "Doctor",
       lab: "Lab",
       chemist: "Pharmacy",
+      // #672 review: a cross-patient denied row in the access history is the
+      // only place a patient-type actor surfaces; the role word keeps its
+      // label off the raw identity id (story 22).
+      patient: "Patient",
       aiService: "CareSetu AI Intake Assistant",
       aiRole: "AI intake service",
     },
@@ -3179,6 +3183,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
         doctor: "डॉक्टर",
         lab: "लैब",
         chemist: "फ़ार्मेसी",
+        patient: "मरीज़",
         aiService: "CareSetu AI इंटेक सहायक",
         aiRole: "AI इंटेक सेवा",
       },

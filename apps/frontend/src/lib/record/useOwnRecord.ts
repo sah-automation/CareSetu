@@ -1,6 +1,7 @@
 "use client";
 
-// #671: one own-record read per homepage visit, shared between the rail's new
+// MOD-003 (record timeline) / FEAT-003 (patient trust view) + FEAT-006 (patient
+// home): #671 one own-record read per homepage visit, shared between the rail's new
 // "At a glance" and "Who accessed my record" sections (story 33) - parity must
 // not multiply the patient's API traffic. Mirrors the AccessHistoryAccordion
 // store pattern: a module-level external store whose single fetch is started on
@@ -66,7 +67,17 @@ class OwnRecordStore {
     this.setState({ status: "loading" });
     fetchOwnRecord()
       .then((timeline) => this.setState({ timeline, status: "ready" }))
-      .catch(() => this.setState({ timeline: null, status: "error" }));
+      .catch((error: unknown) => {
+        // A failed read hides both rail sections rather than claiming the
+        // record is empty; the failure is logged so it stays reproducible
+        // (coding-standards §8) - the same posture HealthSnapshotCard takes
+        // for its own self-fetch.
+        console.warn(
+          "[own-record] record fetch failed, hiding rail sections:",
+          error,
+        );
+        this.setState({ timeline: null, status: "error" });
+      });
   };
 }
 

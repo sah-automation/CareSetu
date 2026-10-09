@@ -488,8 +488,13 @@ describe("RecordPage access history", () => {
     const row = screen.getByTestId("access-entry-0");
     expect(row).toHaveTextContent(STRINGS.en.record.accessHistory.deniedLabel);
     expect(row).toHaveTextContent("no consent");
-    // The intruder's identity is a raw reference, never a resolved name.
+    // The intruder is shown as the generic role word only - never a resolved
+    // name and never their raw identity id (stories 21-22, #672 review).
+    expect(row.querySelector("strong")?.textContent).toBe(
+      STRINGS.en.consentLog.counterparty.patient,
+    );
     expect(row).not.toHaveTextContent("Dr");
+    expect(row.querySelector("strong")?.textContent).not.toBe("9");
   });
 
   it("shows an empty state when there is no access history", async () => {

@@ -108,7 +108,7 @@ async def _insert_history_row(
     record_id: int,
     accessor_identity_id: int,
     outcome: str,
-    actor_type: str,
+    actor_type: str | None,
     scope: str,
     denial_reason: str | None = None,
 ) -> None:
@@ -217,6 +217,48 @@ async def test_a_pre_existing_self_row_is_invisible_at_read_time(
     assert len(view.entries) == 1
     assert view.entries[0].actor_id == _DOCTOR
     assert view.entries[0].actor_type == "doctor"
+
+
+@pytest.mark.asyncio
+async def test_legacy_null_actor_type_keeps_counterparty_rows_and_hides_self_rows(
+    database_url: str, clean_tables: None
+) -> None:
+    """#672 review: NULL ``actor_type`` rows (pre-v3.1) stay correct at read time.
+
+    The read filter is ``NOT (actor_type = 'patient' AND accessor = owner)``.
+    SQL three-valued logic makes this safe for legacy rows: a pre-v3.1
+    counterparty row (accessor != owner) evaluates ``NULL AND FALSE`` -> FALSE
+    -> ``NOT FALSE`` -> TRUE, so it SURVIVES; a pre-v3.1 owner row (accessor ==
+    owner) evaluates ``NULL AND TRUE`` -> NULL -> ``NOT NULL`` -> NULL, so it
+    is HIDDEN. This pins the behavior against a future rewrite to
+    ``IS DISTINCT FROM``, which would leak the legacy self row.
+    """
+    facade = _health_facade(database_url)
+    record_id = await facade.create_record(_IDENTITY)
+    # Legacy counterparty row: written before v3.1, so no actor_type.
+    await _insert_history_row(
+        database_url,
+        record_id=record_id,
+        accessor_identity_id=_DOCTOR,
+        outcome="allowed",
+        actor_type=None,
+        scope="full_record",
+    )
+    # Legacy owner row: a pre-v3.1 self read, also no actor_type.
+    await _insert_history_row(
+        database_url,
+        record_id=record_id,
+        accessor_identity_id=_IDENTITY,
+        outcome="allowed",
+        actor_type=None,
+        scope="full_record",
+    )
+
+    view = await facade.get_access_history(_IDENTITY)
+
+    assert len(view.entries) == 1
+    assert view.entries[0].actor_id == _DOCTOR
+    assert view.entries[0].actor_type is None
 
 
 @pytest.mark.asyncio

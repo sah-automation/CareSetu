@@ -82,6 +82,16 @@ describe("counterpartyLabel - step two: the type-derived word", () => {
     expect(counterpartyLabel("chemist", "ph_1", null, "hi")).toBe(hi.chemist);
   });
 
+  it("names a patient-type actor so a denied cross-patient row never shows its raw id (#672)", () => {
+    // The access-history ledger records a cross-patient denied attempt under
+    // the patient type; the shared fallback must land on the role word, not
+    // step three's raw identity id (story 22).
+    expect(counterpartyLabel("patient", "9")).toBe(en.patient);
+    expect(counterpartyLabel("patient", "9", null, "hi")).toBe(hi.patient);
+    expect(counterpartyLabel("patient", "9")).not.toBe("9");
+    expect(counterpartyRole("patient", "9")).toBe(en.patient);
+  });
+
   it("reads the AI intake pseudo-counterparty as the branded service, never as a doctor", () => {
     expect(counterpartyLabel("doctor", AI_EGRESS_COUNTERPARTY_ID)).toBe(
       en.aiService,

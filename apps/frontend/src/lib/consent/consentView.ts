@@ -18,11 +18,23 @@ import { STRINGS, type Lang } from "@/lib/i18n/dictionaries";
  */
 export const AI_EGRESS_COUNTERPARTY_ID = "intake-ai";
 
-/** The counterparty types that get a word of their own at step two. */
-const TYPE_LABEL_KEYS: Record<string, "doctor" | "lab" | "chemist"> = {
+/**
+ * The actor types that get a word of their own at step two.
+ *
+ * `patient` is here because the access-history ledger records cross-patient
+ * denied attempts under the patient type (#665): without a word, step three
+ * would fall through to the raw identity id and disclose the refused person
+ * on the record owner's behalf (#672 review, story 22). The label stays the
+ * generic role word - never the individual.
+ */
+const TYPE_LABEL_KEYS: Record<
+  string,
+  "doctor" | "lab" | "chemist" | "patient"
+> = {
   doctor: "doctor",
   lab: "lab",
   chemist: "chemist",
+  patient: "patient",
 };
 
 /**
