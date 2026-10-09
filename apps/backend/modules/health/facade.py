@@ -22,6 +22,7 @@ append-only egress audit row (see inline ADR in ``read_consented_history``).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
@@ -60,6 +61,16 @@ if TYPE_CHECKING:
     from modules.consent.facade import ConsentFacade
 
 HEALTH_SCHEMA = "health"
+
+logger = logging.getLogger(__name__)
+
+# The display-name seam (#668): ``(actor_type, actor_id)`` -> nullable name.
+# A resolver is bound at the composition root, never imported - the health
+# module holds no knowledge of the module that owns the names, the same
+# boundary the consent binding established (#649). The resolution RULES (the
+# AI pseudo-counterparty, the doctor-type parse, lab/chemist nulls) are the
+# binder's job, not this module's.
+CounterpartyDisplayNameResolver = Callable[[str, str], Awaitable[str | None]]
 
 # The default page size for the patient's height/weight series list (api-standards
 # §4: default 25, max 100). ONE named constant owned by the module, read by both
@@ -233,13 +244,18 @@ class AccessHistoryEntry(BaseModel):
     entry: who read (``actor_id`` + ``actor_type``), over which scope, when,
     and whether the attempt was refused - with the ``denial_reason`` when it
     was (FEAT-003 "who / how / why"). The owner's own reads never become
-    entries (#665): the view answers "who ELSE has seen this record". The
-    health ledger is the fast patient-facing source; the hash-chained copy of
-    the same acts lives in MOD-011's ``audit_events``.
+    entries (#665): the view answers "who ELSE has seen this record".
+    ``actor_display_name`` is the composition-root-resolved counterparty name
+    (#668), always present and null when unresolvable - never an error, and
+    never a name for a patient-type actor (another person's identity is not
+    disclosed on the patient's behalf). The health ledger is the fast
+    patient-facing source; the hash-chained copy of the same acts lives in
+    MOD-011's ``audit_events``.
     """
 
     actor_id: int
     actor_type: str | None
+    actor_display_name: str | None
     scope: str | None
     accessed_at: datetime
     denied: bool
@@ -414,7 +430,30 @@ async def _load_health_background(
     )
 
 
-async def query_access_history(connection: AsyncConnection, patient_id: int) -> AccessHistoryView:
+async def _resolve_actor_display_name(
+    resolve: CounterpartyDisplayNameResolver | None,
+    actor_type: str | None,
+    actor_id: int,
+) -> str | None:
+    """Resolve one ledger row's counterparty display name (#668).
+
+    Patient-type actors never reach the seam: a cross-patient denied row must
+    not disclose another person's identity on the patient's behalf (stories
+    21-22). An unbound seam and an untyped actor answer null too, so the trust
+    read never fails over a name - the degrade-to-null-on-failure wrapper is
+    ``HealthFacade._display_name``, mirroring the consent seam (#649).
+    """
+    if resolve is None or actor_type is None or actor_type == _ACTOR_TYPE_PATIENT:
+        return None
+    return await resolve(actor_type, str(actor_id))
+
+
+async def query_access_history(
+    connection: AsyncConnection,
+    patient_id: int,
+    *,
+    display_name: CounterpartyDisplayNameResolver | None = None,
+) -> AccessHistoryView:
     """Read every counterparty access-history row for a patient's record, newest first.
 
     Resolves the patient's single record shell via ``health_patient_records``
@@ -428,8 +467,10 @@ async def query_access_history(connection: AsyncConnection, patient_id: int) -> 
     columns because doctor rows store partner ids in the same accessor
     column - a bare accessor comparison would mis-handle id-namespace
     collisions, and a cross-patient denied row (patient-type actor, different
-    accessor) must survive. A patient whose record has never been touched by
-    a counterparty answers an empty list. Running inside the caller's
+    accessor) must survive. Every surviving row's counterparty name is
+    resolved through ``display_name`` (#668); an unbound seam answers null
+    for every row. A patient whose record has never been touched by a
+    counterparty answers an empty list. Running inside the caller's
     connection keeps the read single-transaction and testable without a
     database (same seam shape as MOD-011's ``query_audit_events``).
     """
@@ -470,6 +511,9 @@ async def query_access_history(connection: AsyncConnection, patient_id: int) -> 
             AccessHistoryEntry(
                 actor_id=int(row.accessor_identity_id),
                 actor_type=row.actor_type,
+                actor_display_name=await _resolve_actor_display_name(
+                    display_name, row.actor_type, row.accessor_identity_id
+                ),
                 scope=row.scope,
                 accessed_at=row.accessed_at,
                 denied=row.outcome == "denied",
@@ -501,17 +545,53 @@ def _metric_entry_from_row(row: Row[Any]) -> HealthBackgroundMetricEntry:
 
 
 class HealthFacade:
-    """Typed public facade for the health module's record surface."""
+    """Typed public facade for the health module's record surface.
+
+    ``counterparty_display_name_resolver`` is the display-name seam (#668): an
+    optional callable of ``(actor_type, actor_id)`` answering a nullable name,
+    bound at the composition root - the SAME resolver instance the consent
+    facade owns (#649). It is a seam rather than an import precisely because
+    the names live in other modules: this module imports no partner or intake
+    code, and the resolution rules stay the binder's job (module isolation).
+    Optional so engine-only construction keeps working everywhere it already
+    does; an unbound seam answers null for every row.
+    """
 
     def __init__(
         self,
         engine: AsyncEngine,
         consent_facade: ConsentFacade | None = None,
         care_facade: CaseConsoleFacade | None = None,
+        counterparty_display_name_resolver: CounterpartyDisplayNameResolver | None = None,
     ) -> None:
         self._engine = engine
         self._consent_facade = consent_facade
         self._care_facade = care_facade
+        self._display_name_resolver = counterparty_display_name_resolver
+
+    async def _display_name(self, actor_type: str, actor_id: str) -> str | None:
+        """Resolve one actor's display name, degrading to null on failure.
+
+        The try/except lives here, at the seam, so the access-history read
+        degrades identically - a raising seam answers ``None`` and the trust
+        view still loads. The warning names the actor **type** only: the id
+        and any PHI stay out of the log line (error-handling-observability
+        §2), the same rule the consent seam's wrapper follows (#649).
+        """
+        resolver = self._display_name_resolver
+        if resolver is None:
+            return None
+        try:
+            return await resolver(actor_type, actor_id)
+        except Exception:
+            # No ``exc_info``: the bound resolver's exception text can carry
+            # the actor id and whatever the owning module's query put in it.
+            logger.warning(
+                "health counterparty display-name resolution failed for type %s; "
+                "degrading to no name",
+                actor_type,
+            )
+            return None
 
     async def create_record(self, patient_id: int) -> int:
         """Create the patient's record shell; a no-op returning the existing id.
@@ -584,13 +664,17 @@ class HealthFacade:
 
         A pure read of ``health_record_access_history`` for every counterparty
         row keyed to the patient's record - partner reads and denied attempts;
-        the owner's own reads are excluded (#665). A record no counterparty
+        the owner's own reads are excluded (#665). Every surviving row's
+        counterparty name is resolved through the bound display-name seam
+        (#668), degrading to null on any failure. A record no counterparty
         has touched answers an empty list, not an error. The ledger is a trust
         read, not a record access itself, so it is not logged back into the
         ledger.
         """
         async with self._engine.begin() as connection:
-            return await query_access_history(connection, patient_id)
+            return await query_access_history(
+                connection, patient_id, display_name=self._display_name
+            )
 
     async def log_doctor_patient_view(
         self,
