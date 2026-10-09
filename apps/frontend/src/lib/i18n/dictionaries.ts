@@ -1518,6 +1518,24 @@ const en = {
     timeAgoDays: (n: number) => `${n} d`,
     loadFailed: "Could not load the console.",
     retry: "Try again",
+    // #678: the time-based greeting that opens the dashboard and the
+    // profile-status card beside the fee summary. The greeting uses the
+    // doctor's own name from the same single profile read (honorifics stripped
+    // into the first-name form); while that read is still loading, the greeting
+    // renders a name-free form rather than a blank heading or a skeleton. The
+    // status card reads that same projection and calls out what is missing.
+    greetingMorning: "Good morning",
+    greetingAfternoon: "Good afternoon",
+    greetingEvening: "Good evening",
+    greetingNamed: (greeting: string, name: string) => `${greeting}, ${name}`,
+    statusHeading: "Profile status",
+    statusChipsLabel: "Verified status and specialties",
+    statusHintUnverified: "Your profile is not verified yet.",
+    statusHintNoAbout: "Add an introduction so patients can get to know you.",
+    statusHintNoClinic:
+      "Add your clinic name so patients can find your practice.",
+    statusComplete: "Your profile is complete.",
+    statusProfileAction: "Fix in profile",
     // #674: the getting-started checklist shown only to a brand-new doctor with
     // no open cases and an empty review queue. The step states mirror the
     // profile-status card's completeness hints (verified / fee / about /
@@ -3442,6 +3460,23 @@ export const STRINGS: Record<Lang, Dictionary> = {
       timeAgoDays: (n: number) => `${n} दिन`,
       loadFailed: "कंसोल लोड नहीं हो सका।",
       retry: "फिर से कोशिश करें",
+      // #678: डैशबोर्ड की शुरुआत करने वाला समय-आधारित अभिवादन और शुल्क सारांश
+      // के बगल की प्रोफ़ाइल-स्थिति कार्ड। अभिवादन उसी एक प्रोफ़ाइल रीड से डॉक्टर
+      // का अपना नाम लेता है (उपाधि हटाकर पहला नाम); रीड लोड होने तक अभिवादन
+      // बिना नाम वाला रूप दिखाता है, खाली शीर्षक या स्केलेटन कभी नहीं। स्थिति
+      // कार्ड उसी प्रोजेक्शन को पढ़ता है और जो छूटा है उसे बताता है।
+      greetingMorning: "सुप्रभात",
+      greetingAfternoon: "शुभ दोपहर",
+      greetingEvening: "शुभ संध्या",
+      greetingNamed: (greeting: string, name: string) => `${greeting}, ${name}`,
+      statusHeading: "प्रोफ़ाइल स्थिति",
+      statusChipsLabel: "सत्यापन स्थिति और विशेषज्ञताएँ",
+      statusHintUnverified: "आपकी प्रोफ़ाइल अभी सत्यापित नहीं है।",
+      statusHintNoAbout: "परिचय जोड़ें ताकि मरीज़ आपको जान सकें।",
+      statusHintNoClinic:
+        "अपने क्लिनिक का नाम जोड़ें ताकि मरीज़ आपकी प्रैक्टिस ढूँढ सकें।",
+      statusComplete: "आपकी प्रोफ़ाइल पूरी है।",
+      statusProfileAction: "प्रोफ़ाइल में ठीक करें",
       // #674: नए डॉक्टर के लिए शुरुआत-चेकलिस्ट, जो केवल तब दिखती है जब कोई
       // खुला केस न हो और समीक्षा कतार खाली हो। कदमों की स्थितियाँ प्रोफ़ाइल-
       // स्थिति कार्ड के पूर्णता संकेतों (सत्यापित / शुल्क / परिचय / क्लिनिक
