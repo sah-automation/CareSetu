@@ -183,22 +183,24 @@ async def _run_in_process_dispatcher(
                 await asyncio.wait_for(stop_event.wait(), timeout=restart_delay_seconds)
 
 
-# MOD-004 + composition root (#649): what a consent row's counterparty DISPLAY
-# NAME says about the AI intake pseudo-counterparty. It is a service name, not a
-# person's name - it must read as a machine having read the intake, because the
-# AI egress path records this id under the doctor counterparty type and the
-# patient is shown the resolved name. #653's frontend fallback recognises the
-# same id and must say the same thing.
+# MOD-004 + composition root (#649, shared by #668): what a counterparty
+# DISPLAY NAME says about the AI intake pseudo-counterparty. It is a service
+# name, not a person's name - it must read as a machine having read the intake,
+# because the AI egress path records this id under the doctor counterparty type
+# and the patient is shown the resolved name. #653's frontend fallback
+# recognises the same id and must say the same thing.
 AI_INTAKE_COUNTERPARTY_DISPLAY_NAME = "CareSetu AI Intake Assistant"
 
 
 def _build_counterparty_display_name_resolver(app: FastAPI) -> CounterpartyDisplayNameResolver:
-    """Build the consent facade's counterparty-name resolver (#649).
+    """Build the shared counterparty-name resolver (#649, #668).
 
-    The composition root is the one place allowed to know more than one module,
-    so the resolution rules live here and ``modules.consent`` learns a doctor's
-    practice name without importing partner - the same boundary the issued-rx
-    attribution resolver below already owns, and the same degrade-to-null shape.
+    One resolver serves both the consent facade (#649) and the health facade's
+    access-history read (#668). The composition root is the one place allowed
+    to know more than one module, so the resolution rules live here and
+    ``modules.consent`` / ``modules.health`` learn a doctor's practice name
+    without importing partner - the same boundary the issued-rx attribution
+    resolver below already owns, and the same degrade-to-null shape.
 
     The order of the branches IS the rule:
 
@@ -215,10 +217,11 @@ def _build_counterparty_display_name_resolver(app: FastAPI) -> CounterpartyDispl
 
     The partner facade is read from ``app.state`` when the resolver is CALLED,
     never when it is built, so binding it before the partner facade exists is
-    safe. Every failure path answers None so the consent log - the one surface
-    that proves what was shared - never goes blank on a partner outage. Both
-    warnings name the counterparty type only: never the counterparty id, never
-    PHI, never the exception payload (error-handling-observability §2).
+    safe. Every failure path answers None so the reads that name counterparties
+    - the consent log and the access history - never go blank on a partner
+    outage. Both warnings name the counterparty type only: never the
+    counterparty id, never PHI, never the exception payload
+    (error-handling-observability §2).
     """
 
     async def _resolve(counterparty_type: str, counterparty_id: str) -> str | None:
@@ -237,14 +240,13 @@ def _build_counterparty_display_name_resolver(app: FastAPI) -> CounterpartyDispl
             )
         except ProviderProfileNotFoundError:
             logger.warning(
-                "consent counterparty display name unresolved for type %s; degrading to no name",
+                "counterparty display name unresolved for type %s; degrading to no name",
                 counterparty_type,
             )
             return None
         except Exception:
             logger.warning(
-                "consent counterparty display-name resolution failed for type %s; "
-                "degrading to no name",
+                "counterparty display-name resolution failed for type %s; degrading to no name",
                 counterparty_type,
             )
             return None
@@ -357,15 +359,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.iam_facade = facade
     # MOD-004 (PHASE-3 T3, #212): the consent facade shares the same settled
     # engine and app-state pattern - routes read one resolved object and unit
-    # tests stub it on state.
+    # tests stub it on state. MOD-004 + composition root (#649/#668): the
+    # consent and health modules hold no knowledge of the modules that own
+    # counterparty names, so ONE resolver (with its ordered rules) is built
+    # here and bound into BOTH facades - the same instance, so the two reads
+    # can never drift. Built before the partner facade exists on purpose - the
+    # closure reads ``app.state.partner_facade`` only when called.
+    counterparty_display_name_resolver = _build_counterparty_display_name_resolver(app)
     app.state.consent_facade = ConsentFacade(
         engine=engine,
-        # MOD-004 + composition root (#649): the consent module holds no
-        # knowledge of the modules that own counterparty names, so the
-        # resolver and its ordered rules are bound here. Built before the
-        # partner facade exists on purpose - the closure reads
-        # ``app.state.partner_facade`` only when called.
-        counterparty_display_name_resolver=_build_counterparty_display_name_resolver(app),
+        counterparty_display_name_resolver=counterparty_display_name_resolver,
     )
     # MOD-005 (PHASE-7 T12, #356): the intake facade shares the settled engine
     # and is stored on state so the patient intake routes read one resolved
@@ -413,10 +416,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # health-background first-save auto-grant's live-doctor discovery through
     # the care facade's open-case seam (#534, ADR-0018) - both facades are
     # built above so the health facade can close over the settled instances.
+    # #668: the SAME resolver instance the consent facade owns (#649) is bound
+    # here too - the access-history read answers real counterparty names while
+    # the health module stays name-agnostic behind the identical
+    # composition-root seam. The shared closure was built above.
     app.state.health_facade = HealthFacade(
         engine=engine,
         consent_facade=app.state.consent_facade,
         care_facade=app.state.care_console_facade,
+        counterparty_display_name_resolver=counterparty_display_name_resolver,
     )
     # MOD-011 (PHASE-4 T6, #240): the audit facade shares the settled engine
     # for the operator query surface - stored on state so routes read one
