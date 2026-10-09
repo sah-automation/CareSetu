@@ -1550,6 +1550,18 @@ const en = {
     checklistStepClinic: "Add your clinic name",
     checklistDone: "Done",
     checklistPending: "Pending",
+    // #681: the workload KPI row and the quick-actions row. Three of the four
+    // tile values reuse existing copy (the open-cases and consultation-fee
+    // headings, the unset-fee word), so this block ships the two standby tile
+    // labels with no existing home, the sr-only section heading, the
+    // quick-actions heading, and the My-cases action body. The quick-actions
+    // row supersedes #544's entry cards and adds My cases, whose label reuses
+    // casesIndexTitle.
+    kpiHeading: "At a glance",
+    kpiAwaitingReview: "Awaiting review",
+    kpiCurrentPatients: "Current patients",
+    quickActionsHeading: "Quick actions",
+    casesEntryBody: "Your open care cases",
   },
 
   // doctorProfile.* surface - PHASE-8.1 (#543): the doctor console Profile
@@ -3491,6 +3503,18 @@ export const STRINGS: Record<Lang, Dictionary> = {
       checklistStepClinic: "अपने क्लिनिक का नाम जोड़ें",
       checklistDone: "पूर्ण",
       checklistPending: "लंबित",
+      // #681: कार्यभार KPI पंक्ति और त्वरित-कार्य पंक्ति। चार में से तीन टाइल
+      // मान मौजूदा कॉपी दोबारा इस्तेमाल करते हैं (खुले मामलों और
+      // परामर्श-शुल्क शीर्षक, अनिर्धारित-शुल्क शब्द), इसलिए इस ब्लॉक में केवल
+      // वे दो स्टैंडबाय टाइल लेबल आते हैं जिनका मौजूदा घर नहीं है, sr-only
+      // सेक्शन शीर्षक, त्वरित-कार्य शीर्षक और मेरे-मामले क्रिया बॉडी।
+      // त्वरित-कार्य पंक्ति #544 के प्रवेश कार्डों का स्थान लेती है और "मेरे
+      // मामले" जोड़ती है, जिसका लेबल casesIndexTitle दोबारा इस्तेमाल करता है।
+      kpiHeading: "एक नज़र में",
+      kpiAwaitingReview: "समीक्षा हेतु लंबित",
+      kpiCurrentPatients: "वर्तमान मरीज़",
+      quickActionsHeading: "त्वरित कार्य",
+      casesEntryBody: "आपके खुले केयर मामले",
     },
 
     // doctorProfile.* सतह - PHASE-8.1 (#543): डॉक्टर कंसोल का प्रोफ़ाइल

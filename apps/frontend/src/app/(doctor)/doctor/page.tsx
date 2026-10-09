@@ -21,10 +21,28 @@
 // card anatomy - patient name plus age, verify chip on a forced review, the
 // citable case id + relative time meta line, and one whole-card link whose
 // accessible name includes the patient (US-66/67).
+//
+// #681 (MOD-012 / FEAT-008): the workload KPI row and the quick-actions row.
+// Four tiles - open cases, pre-summaries awaiting review, current patients and
+// the consultation fee - each a whole-card link to the page it summarises; the
+// counts read the same sources as the sections below (the enriched cases feed,
+// the review queue, the shared profile read), so a tile can never disagree with
+// the section it links to. The current-patients count is a best-effort,
+// ledger-writing read (page 1, page size 1, its returned total) that degrades
+// to an em dash on failure rather than failing the page. The quick-actions row
+// carries Patients, My cases and Profile.
 
 import Link from "next/link";
-import { Check, ChevronRight, Circle, Users, User } from "lucide-react";
+import {
+  Check,
+  ChevronRight,
+  Circle,
+  FolderOpen,
+  Users,
+  User,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -38,6 +56,7 @@ import { ApiError } from "@/lib/api-errors";
 import {
   fetchDoctorProfile,
   listDoctorCases,
+  listDoctorPatients,
   type DoctorCaseRow,
   type DoctorProfileView,
 } from "@/lib/doctor/api";
@@ -215,6 +234,121 @@ function FeeSummaryError({ onRetry }: { onRetry: () => void }) {
   );
 }
 
+// #681: the workload KPI row. Four tiles, each a whole-card link to the page it
+// summarises (US-3..7): open care cases, pre-summaries awaiting review, current
+// patients and the consultation fee. The counts read the same state the
+// sections below render - the enriched cases feed, the review queue - and the
+// fee reads the shared profile projection, so a tile cannot disagree with the
+// section it links to. A tile shows a skeleton while its read is in flight and
+// an em dash after the read fails, never a fabricated zero. The current-patients
+// count is best-effort (see the page), so a failed patients read leaves the tile
+// an em dash and the page intact.
+const DASH = "\u2014";
+
+function KpiTile({
+  testId,
+  href,
+  label,
+  value,
+  pending,
+}: {
+  testId: string;
+  href: string;
+  label: string;
+  value: string;
+  pending: boolean;
+}) {
+  return (
+    <Link
+      href={href}
+      data-testid={testId}
+      className="flex flex-col gap-1 rounded-lg border border-hairline bg-surface p-4 transition-[box-shadow,transform] hover:shadow-pop hover:-translate-y-0.5 active:scale-[0.97] active:opacity-90"
+    >
+      {pending ? (
+        <span
+          data-testid={`${testId}-value`}
+          className="h-7 w-12 animate-pulse rounded bg-hairline-soft"
+        />
+      ) : (
+        <span
+          className="text-2xl font-semibold text-txt"
+          data-testid={`${testId}-value`}
+        >
+          {value}
+        </span>
+      )}
+      <span className="text-xs text-txt-muted">{label}</span>
+    </Link>
+  );
+}
+
+function KpiRow({
+  feedStatus,
+  casesCount,
+  queueCount,
+  patientsStatus,
+  patientsCount,
+  feeStatus,
+  feePaise,
+}: {
+  feedStatus: LoadStatus;
+  casesCount: number;
+  queueCount: number;
+  patientsStatus: LoadStatus;
+  patientsCount: number;
+  feeStatus: LoadStatus;
+  feePaise: number | null;
+}) {
+  const { lang } = useLang();
+  const t = STRINGS[lang].doctorConsole;
+
+  const feedValue = (n: number) => (feedStatus === "ready" ? String(n) : DASH);
+  const patientsValue =
+    patientsStatus === "ready" ? String(patientsCount) : DASH;
+  const feeValue =
+    feeStatus === "ready"
+      ? feePaise === null
+        ? t.feeUnset
+        : formatFeePaise(feePaise)
+      : DASH;
+
+  return (
+    <section className="mb-6" data-testid="dashboard-kpis">
+      <h2 className="sr-only">{t.kpiHeading}</h2>
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <KpiTile
+          testId="kpi-open-cases"
+          href="/doctor/cases"
+          label={t.casesHeading}
+          value={feedValue(casesCount)}
+          pending={feedStatus === "loading"}
+        />
+        <KpiTile
+          testId="kpi-awaiting-review"
+          href="/doctor#review-queue"
+          label={t.kpiAwaitingReview}
+          value={feedValue(queueCount)}
+          pending={feedStatus === "loading"}
+        />
+        <KpiTile
+          testId="kpi-current-patients"
+          href="/doctor/patients"
+          label={t.kpiCurrentPatients}
+          value={patientsValue}
+          pending={patientsStatus === "loading"}
+        />
+        <KpiTile
+          testId="kpi-consultation-fee"
+          href="/doctor/profile#fee-editor"
+          label={t.feeHeading}
+          value={feeValue}
+          pending={feeStatus === "loading"}
+        />
+      </div>
+    </section>
+  );
+}
+
 // #678: the time-based greeting that opens the dashboard, replacing the generic
 // console title. The doctor's own name (honorifics stripped into the first-name
 // form) joins the greeting only once the profile read resolves; while it is
@@ -368,60 +502,81 @@ function ProfileStatusCard({ profile }: { profile: DoctorProfileView }) {
   );
 }
 
-function EntryCards() {
+// #681: the quick-actions row - the destinations a doctor reaches most, one tap
+// away (US-8). It supersedes #544's two entry cards, adding My cases and
+// relabelling the row as quick actions. Every card is one whole-card link; the
+// icon, label and one-line body reuse the console's card idiom.
+function QuickActionCard({
+  testId,
+  href,
+  icon,
+  label,
+  body,
+}: {
+  testId: string;
+  href: string;
+  icon: ReactNode;
+  label: string;
+  body: string;
+}) {
+  return (
+    <Link
+      href={href}
+      data-testid={testId}
+      className="flex min-h-24 flex-col items-start gap-2.5 rounded-lg border border-hairline bg-surface p-4 transition-[box-shadow,transform] hover:shadow-pop hover:-translate-y-0.5 active:scale-[0.97] active:opacity-90"
+    >
+      <div className="flex items-center gap-3">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent-strong">
+          {icon}
+        </span>
+        <div className="min-w-0 space-y-0.5">
+          <span className="text-sm font-semibold text-txt">{label}</span>
+          <p className="text-xs text-txt-muted line-clamp-2">{body}</p>
+        </div>
+      </div>
+      <ChevronRight
+        className="h-5 w-5 shrink-0 text-txt-muted"
+        aria-hidden="true"
+      />
+    </Link>
+  );
+}
+
+function QuickActions() {
   const { lang } = useLang();
   const t = STRINGS[lang].doctorConsole;
   const nav = STRINGS[lang].nav;
 
   return (
-    <section className="space-y-3" data-testid="console-entries">
-      <div data-testid="entry-cards" className="grid grid-cols-2 gap-3">
-        <Link
+    <section className="space-y-3" data-testid="quick-actions">
+      <h2 className="text-[1.05rem] font-semibold text-txt">
+        {t.quickActionsHeading}
+      </h2>
+      <div
+        data-testid="quick-action-grid"
+        className="grid grid-cols-2 gap-3 lg:grid-cols-3"
+      >
+        <QuickActionCard
+          testId="quick-action-patients"
           href="/doctor/patients"
-          data-testid="entry-patients"
-          className="flex min-h-24 flex-col items-start gap-2.5 rounded-lg border border-hairline bg-surface p-4 transition-[box-shadow,transform] hover:shadow-pop hover:-translate-y-0.5 active:scale-[0.97] active:opacity-90"
-        >
-          <div className="flex items-center gap-3">
-            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent-strong">
-              <Users size={22} strokeWidth={1.8} aria-hidden="true" />
-            </span>
-            <div className="min-w-0 space-y-0.5">
-              <span className="text-sm font-semibold text-txt">
-                {nav.patients}
-              </span>
-              <p className="text-xs text-txt-muted line-clamp-2">
-                {t.patientsEntryBody}
-              </p>
-            </div>
-          </div>
-          <ChevronRight
-            className="h-5 w-5 shrink-0 text-txt-muted"
-            aria-hidden="true"
-          />
-        </Link>
-        <Link
+          icon={<Users size={22} strokeWidth={1.8} aria-hidden="true" />}
+          label={nav.patients}
+          body={t.patientsEntryBody}
+        />
+        <QuickActionCard
+          testId="quick-action-cases"
+          href="/doctor/cases"
+          icon={<FolderOpen size={22} strokeWidth={1.8} aria-hidden="true" />}
+          label={t.casesIndexTitle}
+          body={t.casesEntryBody}
+        />
+        <QuickActionCard
+          testId="quick-action-profile"
           href="/doctor/profile"
-          data-testid="entry-profile"
-          className="flex min-h-24 flex-col items-start gap-2.5 rounded-lg border border-hairline bg-surface p-4 transition-[box-shadow,transform] hover:shadow-pop hover:-translate-y-0.5 active:scale-[0.97] active:opacity-90"
-        >
-          <div className="flex items-center gap-3">
-            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent-strong">
-              <User size={22} strokeWidth={1.8} aria-hidden="true" />
-            </span>
-            <div className="min-w-0 space-y-0.5">
-              <span className="text-sm font-semibold text-txt">
-                {nav.profile}
-              </span>
-              <p className="text-xs text-txt-muted line-clamp-2">
-                {t.profileEntryBody}
-              </p>
-            </div>
-          </div>
-          <ChevronRight
-            className="h-5 w-5 shrink-0 text-txt-muted"
-            aria-hidden="true"
-          />
-        </Link>
+          icon={<User size={22} strokeWidth={1.8} aria-hidden="true" />}
+          label={nav.profile}
+          body={t.profileEntryBody}
+        />
       </div>
     </section>
   );
@@ -550,6 +705,7 @@ function ReviewQueueCard({
 
   return (
     <section
+      id="review-queue"
       className="rounded-lg border border-hairline bg-surface p-4"
       data-testid="review-queue"
     >
@@ -725,6 +881,13 @@ export default function DoctorDashboardPage() {
   const [profile, setProfile] = useState<DoctorProfileView | null>(null);
   const [feeLoadStatus, setFeeLoadStatus] = useState<LoadStatus>("loading");
 
+  // #681: the current-patients KPI. A best-effort, ledger-writing read (page 1,
+  // page size 1, its returned total), isolated from every other status: while it
+  // is in flight the tile shows a skeleton, and on failure the tile degrades to
+  // an em dash and never touches the page.
+  const [patientsCount, setPatientsCount] = useState(0);
+  const [patientsStatus, setPatientsStatus] = useState<LoadStatus>("loading");
+
   const load = useCallback(() => {
     setLoadStatus("loading");
     setBannerOpen(false);
@@ -761,6 +924,31 @@ export default function DoctorDashboardPage() {
       });
   }, []);
 
+  // #681: best-effort patients-count read. Its failure is deliberately silent to
+  // the user - the tile degrades to an em dash and the console is unaffected
+  // (spec ledger note: enriching a count is not worth failing a page for) - with
+  // a tagged console warning for the developer, matching the read-what-you-render
+  // failure idiom used elsewhere in the app.
+  useEffect(() => {
+    let active = true;
+    listDoctorPatients({ page: 1, perPage: 1 })
+      .then((view) => {
+        if (active) {
+          setPatientsCount(view.total);
+          setPatientsStatus("ready");
+        }
+      })
+      .catch((err: unknown) => {
+        if (active) {
+          setPatientsStatus("error");
+          console.warn("[doctor-console] patients count failed to load:", err);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const sortedQueue = useMemo(() => sortQueue(queue), [queue]);
 
   // #674: the checklist's presence is driven by an empty console - no open
@@ -789,7 +977,17 @@ export default function DoctorDashboardPage() {
         />
       )}
 
-      <EntryCards />
+      <KpiRow
+        feedStatus={loadStatus}
+        casesCount={cases.length}
+        queueCount={sortedQueue.length}
+        patientsStatus={patientsStatus}
+        patientsCount={patientsCount}
+        feeStatus={feeLoadStatus}
+        feePaise={profile?.consultation_fee ?? null}
+      />
+
+      <QuickActions />
 
       {profile !== null && <ProfileStatusCard profile={profile} />}
 
