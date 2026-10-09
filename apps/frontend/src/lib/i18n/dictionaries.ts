@@ -1141,6 +1141,17 @@ const en = {
     issuedByNeutral: "issued by your care team",
     prescribedBy: "Prescribed by",
     moreItems: (count: number) => `+${count} more`,
+    // #677: the shared record-entry renderer's per-type detail labels. Type
+    // tags reuse `badge`, medicine field labels reuse `detail.medicine`, and
+    // `prescribedBy`/`filedFromBooking` are reused too - only the labels that
+    // had no prior home live here, so nothing is re-keyed.
+    history: {
+      status: "Status",
+      medicines: "Medicines",
+      file: "File",
+      order: "Order",
+      amount: "Amount",
+    },
     empty: {
       title: "No entries yet",
       body: "Your consultations, prescriptions, lab results and metrics appear here as your care happens.",
@@ -3103,6 +3114,13 @@ export const STRINGS: Record<Lang, Dictionary> = {
       issuedByNeutral: "आपकी देखभाल टीम द्वारा जारी",
       prescribedBy: "डॉक्टर द्वारा लिखा गया",
       moreItems: (count: number) => `+${count} और`,
+      history: {
+        status: "स्थिति",
+        medicines: "दवाइयाँ",
+        file: "फ़ाइल",
+        order: "ऑर्डर",
+        amount: "राशि",
+      },
       empty: {
         title: "अभी कोई एंट्री नहीं",
         body: "आपके परामर्श, प्रिस्क्रिप्शन, लैब रिपोर्ट और मेट्रिक्स यहाँ दिखेंगे जैसे-जैसे आपकी देखभाल होगी।",
