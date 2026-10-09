@@ -13,25 +13,34 @@
 // #544: the coming-soon Patients/Profile tabs are replaced with real entry
 // cards that deep-link to the live pages, and the whole landing adopts the
 // patient shell's card/chip/empty-state/responsive design language.
+//
+// #676 (MOD-012 / FEAT-008): the open-cases section reads the console's
+// patient-enriched cases feed (listDoctorCases) and renders the shared
+// DoctorListCard the cases list and patients list use, so the dashboard and
+// the cases index show exactly the same non-closed case set with the same
+// card anatomy - patient name plus age, verify chip on a forced review, the
+// citable case id + relative time meta line, and one whole-card link whose
+// accessible name includes the patient (US-66/67).
 
 import Link from "next/link";
 import { Check, ChevronRight, Circle, Users, User } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { DoctorCaseCard } from "@/components/doctor/DoctorCaseCard";
 import { EmptyState } from "@/components/layout/EmptyState";
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { ApiError } from "@/lib/api-errors";
-import { fetchDoctorProfile, type DoctorProfileView } from "@/lib/doctor/api";
-import { fetchReviewQueue, type ReviewQueueItem } from "@/lib/intake/api";
 import {
-  listOpenCases,
-  type CaseDetailView,
-  type CareCaseStage,
-} from "@/lib/care/api";
+  fetchDoctorProfile,
+  listDoctorCases,
+  type DoctorCaseRow,
+  type DoctorProfileView,
+} from "@/lib/doctor/api";
+import { fetchReviewQueue, type ReviewQueueItem } from "@/lib/intake/api";
 import { PROFILE_ANCHORS } from "@/components/doctor/profile/ProfileSectionIndex";
 import { STRINGS, type Dictionary } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
@@ -60,22 +69,6 @@ function confidenceDisplay(
 ): string {
   if (value == null) return "\u2014";
   return `${Math.round(value * 100)}%`;
-}
-
-function stageLabel(
-  stage: CareCaseStage,
-  t: Dictionary["doctorConsole"],
-): string {
-  switch (stage) {
-    case "pre_summary":
-      return t.stagePreSummary;
-    case "prescription_pending":
-      return t.stagePrescriptionPending;
-    case "closed":
-      return t.stageClosed;
-    default:
-      return stage;
-  }
 }
 
 function sortQueue(items: ReviewQueueItem[]): ReviewQueueItem[] {
@@ -503,7 +496,7 @@ function OpenCasesCard({
   cases,
   loadStatus,
 }: {
-  cases: CaseDetailView[];
+  cases: DoctorCaseRow[];
   loadStatus: LoadStatus;
 }) {
   const { lang } = useLang();
@@ -537,43 +530,19 @@ function OpenCasesCard({
       )}
 
       {loadStatus === "ready" && cases.length > 0 && (
-        <ul className="mt-2" data-testid="cases-list">
+        // #676: the open-cases section renders the same case card the cases
+        // index uses (DoctorCaseCard -> the shared DoctorListCard), so the two
+        // surfaces cannot diverge - patient name plus age, verify chip on a
+        // forced review, the citable case id + relative time meta line, and
+        // one whole-card overlay link per card (US-66/67). Same single-column-
+        // below-lg grid.
+        <ul
+          className="mt-2 grid grid-cols-1 items-stretch gap-4 lg:grid-cols-2"
+          data-testid="cases-list"
+        >
           {cases.map((c) => (
-            <li
-              key={c.case_id}
-              data-testid="case-item"
-              className="flex flex-col gap-3 min-[720px]:flex-row min-[720px]:items-center min-[720px]:justify-between border-t border-hairline-soft py-3 first:border-t-0 first:pt-0 last:pb-0"
-            >
-              <div className="min-w-0">
-                <div className="min-w-0">
-                  <span
-                    className="text-sm font-medium text-txt"
-                    data-testid="case-item-id"
-                  >
-                    {t.caseItemMeta(c.case_id)}
-                  </span>
-                  <div className="mt-1">
-                    <span
-                      data-testid="case-item-stage"
-                      className={cn(
-                        "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
-                        c.stage === "pre_summary"
-                          ? "bg-warn-soft text-warn-text"
-                          : "bg-accent-soft text-accent-strong",
-                      )}
-                    >
-                      {stageLabel(c.stage, t)}
-                    </span>
-                  </div>
-                </div>
-                <Link
-                  href={`/doctor/cases/${c.case_id}`}
-                  data-testid="case-item-open"
-                  className="inline-flex shrink-0 items-center justify-center w-full rounded-md border border-hairline bg-surface px-3 py-1.5 text-xs font-medium text-txt-sub transition-colors hover:border-accent-border hover:bg-accent-soft hover:text-accent-strong min-[720px]:w-auto"
-                >
-                  {t.openCaseAction}
-                </Link>
-              </div>
+            <li key={c.case_id} data-testid="case-item" className="min-w-0">
+              <DoctorCaseCard row={c} t={t} />
             </li>
           ))}
         </ul>
@@ -589,7 +558,7 @@ export default function DoctorDashboardPage() {
   const t = STRINGS[lang].doctorConsole;
 
   const [queue, setQueue] = useState<ReviewQueueItem[]>([]);
-  const [cases, setCases] = useState<CaseDetailView[]>([]);
+  const [cases, setCases] = useState<DoctorCaseRow[]>([]);
   const [loadStatus, setLoadStatus] = useState<LoadStatus>("loading");
   const [errorTraceId, setErrorTraceId] = useState<string | undefined>();
   const [bannerOpen, setBannerOpen] = useState(false);
@@ -601,10 +570,10 @@ export default function DoctorDashboardPage() {
   const load = useCallback(() => {
     setLoadStatus("loading");
     setBannerOpen(false);
-    Promise.all([fetchReviewQueue(), listOpenCases()])
+    Promise.all([fetchReviewQueue(), listDoctorCases()])
       .then(([q, c]) => {
         setQueue(q);
-        setCases(c);
+        setCases(c.items);
         setLoadStatus("ready");
       })
       .catch((err: unknown) => {

@@ -17,51 +17,23 @@
 // whole card is one overlay link: one focus stop whose accessible name
 // includes the patient (US-66/67). Reads the doctor cases endpoint through
 // lib/doctor/api (listDoctorCases), whose runtime guards are pinned against
-// the exported OpenAPI slice by patients.contract.test.ts (#624/#652) - the
-// care module's listOpenCases still serves the landing page and stays
-// untouched there.
+// the exported OpenAPI slice by patients.contract.test.ts (#624/#652). The
+// dashboard's open-cases section reads the same feed (#676); the care module's
+// listOpenCases still serves the workspace routes and stays untouched there.
 
 import { useCallback, useEffect, useState } from "react";
 
-import { DoctorListCard } from "@/components/doctor/DoctorListCard";
+import { DoctorCaseCard } from "@/components/doctor/DoctorCaseCard";
 import { EmptyState } from "@/components/layout/EmptyState";
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ApiError } from "@/lib/api-errors";
 import { listDoctorCases, type DoctorCaseRow } from "@/lib/doctor/api";
-import { stageChipView, WARN_TONE } from "@/lib/doctor/stageChip";
-import { STRINGS, type Dictionary } from "@/lib/i18n/dictionaries";
+import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 
 type LoadStatus = "loading" | "ready" | "error";
-
-/** Minutes since `iso`, or null when the timestamp is not a parseable date. */
-function minutesSince(iso: string, now: number): number | null {
-  const then = Date.parse(iso);
-  if (Number.isNaN(then)) return null;
-  return Math.max(0, Math.floor((now - then) / 60_000));
-}
-
-/**
- * "Updated 3 hr ago" in the active language, or null when the timestamp does
- * not parse - a card then drops the line rather than dating a case with a
- * lie. Granularity buckets at minutes/hours/days, coarse enough that a test
- * fixture's fixed clock cannot flip the bucket between renders.
- */
-function caseUpdatedText(
-  iso: string,
-  t: Dictionary["doctorConsole"],
-  now: number = Date.now(),
-): string | null {
-  const minutes = minutesSince(iso, now);
-  if (minutes === null) return null;
-  if (minutes < 1) return t.caseUpdatedJustNow;
-  if (minutes < 60) return t.caseUpdatedAgo(t.timeAgoMinutes(minutes));
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return t.caseUpdatedAgo(t.timeAgoHours(hours));
-  return t.caseUpdatedAgo(t.timeAgoDays(Math.floor(hours / 24)));
-}
 
 // The skeleton mirrors the card grid so the page does not jump when the data
 // arrives (US-10): same grid columns as the ready list, one placeholder per
@@ -170,48 +142,11 @@ export default function DoctorCasesIndexPage() {
             data-testid="cases-list"
             className="grid grid-cols-1 items-stretch gap-4 lg:grid-cols-2"
           >
-            {cases.map((c) => {
-              const patient = c.patient_name ?? t.patientFallback;
-              const updated = caseUpdatedText(c.updated_at, t);
-              return (
-                <li key={c.case_id} data-testid="case-item" className="min-w-0">
-                  <DoctorListCard
-                    href={`/doctor/cases/${c.case_id}`}
-                    name={patient}
-                    ageText={
-                      c.patient_age != null ? t.patientAge(c.patient_age) : null
-                    }
-                    chips={
-                      c.forced_review
-                        ? [
-                            {
-                              key: "verify",
-                              label: t.verifyChip,
-                              tone: WARN_TONE,
-                              testId: "case-item-verify",
-                            },
-                          ]
-                        : []
-                    }
-                    stage={stageChipView(c.stage, t)}
-                    stageTestId="case-item-stage"
-                    meta={
-                      <span className="flex flex-wrap items-center gap-x-2">
-                        <span data-testid="case-item-id">
-                          {t.caseItemMeta(c.case_id)}
-                        </span>
-                        {updated !== null && (
-                          <span data-testid="case-item-updated">{updated}</span>
-                        )}
-                      </span>
-                    }
-                    accessibleName={t.caseCardA11y(patient)}
-                    nameTestId="case-item-patient"
-                    linkTestId="case-item-open"
-                  />
-                </li>
-              );
-            })}
+            {cases.map((c) => (
+              <li key={c.case_id} data-testid="case-item" className="min-w-0">
+                <DoctorCaseCard row={c} t={t} />
+              </li>
+            ))}
           </ul>
         </section>
       )}

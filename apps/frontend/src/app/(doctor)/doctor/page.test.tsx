@@ -11,6 +11,12 @@
 // that deep-link to the live pages, a compact consultation-fee summary card
 // reads the private profile and links into the moved editor, and the whole
 // landing adopts the patient shell's card/chip/responsive language.
+//
+// #676: the open-cases section reads the console's patient-enriched cases feed
+// (listDoctorCases) and renders the shared DoctorListCard the cases index uses
+// - patient name plus age, the amber Verify chip on a forced review, the
+// citable case id + relative "updated" line, and one whole-card link whose
+// accessible name includes the patient (US-66/67).
 
 import {
   cleanup,
@@ -29,11 +35,12 @@ import { STRINGS } from "@/lib/i18n/dictionaries";
 import { __resetLangForTests, useLang } from "@/lib/i18n/LangContext";
 import { fetchReviewQueue, type ReviewQueueItem } from "@/lib/intake/api";
 import {
-  listOpenCases,
-  type CareCaseStage,
-  type CaseDetailView,
-} from "@/lib/care/api";
-import { fetchDoctorProfile, type DoctorProfileView } from "@/lib/doctor/api";
+  fetchDoctorProfile,
+  listDoctorCases,
+  type DoctorCaseRow,
+  type DoctorCasesListView,
+  type DoctorProfileView,
+} from "@/lib/doctor/api";
 
 vi.mock("next/link", () => {
   return {
@@ -57,20 +64,15 @@ vi.mock("@/lib/intake/api", async (importOriginal) => {
   return { ...mod, fetchReviewQueue: vi.fn() };
 });
 
-vi.mock("@/lib/care/api", async (importOriginal) => {
-  const mod = await importOriginal<typeof import("@/lib/care/api")>();
-  return { ...mod, listOpenCases: vi.fn() };
-});
-
 vi.mock("@/lib/doctor/api", async (importOriginal) => {
   const mod = await importOriginal<typeof import("@/lib/doctor/api")>();
-  return { ...mod, fetchDoctorProfile: vi.fn() };
+  return { ...mod, fetchDoctorProfile: vi.fn(), listDoctorCases: vi.fn() };
 });
 
 const t = STRINGS.en.doctorConsole;
 const hiT = STRINGS.hi.doctorConsole;
 const getQueue = vi.mocked(fetchReviewQueue);
-const getCases = vi.mocked(listOpenCases);
+const getCases = vi.mocked(listDoctorCases);
 const getProfile = vi.mocked(fetchDoctorProfile);
 
 function queueItem(overrides: Partial<ReviewQueueItem> = {}): ReviewQueueItem {
@@ -92,23 +94,26 @@ function queueItem(overrides: Partial<ReviewQueueItem> = {}): ReviewQueueItem {
 
 function caseItem(
   id: number,
-  overrides: Partial<CaseDetailView> = {},
-): CaseDetailView {
-  const { stage, ...rest } = overrides;
+  overrides: Partial<DoctorCaseRow> = {},
+): DoctorCaseRow {
   return {
     case_id: id,
-    patient_id: 3,
-    doctor_id: 7,
-    pre_summary_id: 5,
-    stage: (stage ?? "prescription_pending") as CareCaseStage,
-    forced_review: false,
-    has_doctor_input: false,
-    closed_at: null,
-    close_reason: null,
+    stage: "prescription_pending",
     created_at: "2026-09-12T10:00:00Z",
-    updated_at: "2026-09-12T10:00:00Z",
-    ...rest,
+    // Three hours back, so the relative line lands in a fixed bucket no
+    // matter when the suite runs.
+    updated_at: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+    patient_id: 3,
+    patient_age: 45,
+    patient_name: "Asha Verma",
+    forced_review: false,
+    has_photo: true,
+    ...overrides,
   };
+}
+
+function casesView(...rows: DoctorCaseRow[]): DoctorCasesListView {
+  return { items: rows };
 }
 
 function doctorProfile(
@@ -144,7 +149,7 @@ function doctorProfile(
 
 function resolveLoaded() {
   getQueue.mockResolvedValue([]);
-  getCases.mockResolvedValue([]);
+  getCases.mockResolvedValue(casesView());
   getProfile.mockResolvedValue(doctorProfile());
 }
 
@@ -286,7 +291,7 @@ describe("DoctorDashboardPage review queue", () => {
   });
 
   it("shows an empty state when nothing needs review", async () => {
-    getCases.mockResolvedValue([caseItem(11)]);
+    getCases.mockResolvedValue(casesView(caseItem(11)));
     render(<DoctorDashboardPage />);
     await waitFor(() =>
       within(screen.getByTestId("review-queue")).getByTestId("empty-state"),
@@ -299,10 +304,12 @@ describe("DoctorDashboardPage review queue", () => {
 
 describe("DoctorDashboardPage open cases", () => {
   it("renders open care cases with their stage chips (US-15)", async () => {
-    getCases.mockResolvedValue([
-      caseItem(11, { stage: "pre_summary" }),
-      caseItem(12, { stage: "prescription_pending" }),
-    ]);
+    getCases.mockResolvedValue(
+      casesView(
+        caseItem(11, { stage: "pre_summary" }),
+        caseItem(12, { stage: "prescription_pending" }),
+      ),
+    );
     render(<DoctorDashboardPage />);
 
     await waitFor(() => screen.getByTestId("cases-list"));
@@ -314,8 +321,89 @@ describe("DoctorDashboardPage open cases", () => {
     expect(stageChips[1]).toHaveTextContent(t.stagePrescriptionPending);
   });
 
+  it("renders each case as the shared doctor card: patient name and age", async () => {
+    getCases.mockResolvedValue(
+      casesView(
+        caseItem(11, { patient_name: "Asha Verma", patient_age: 45 }),
+        caseItem(12, { patient_name: "Ravi Nair", patient_age: 31 }),
+      ),
+    );
+    render(<DoctorDashboardPage />);
+
+    await waitFor(() => screen.getByTestId("cases-list"));
+
+    expect(screen.getAllByTestId("case-item-patient")[0]).toHaveTextContent(
+      "Asha Verma",
+    );
+    expect(screen.getByText(t.patientAge(45))).toBeInTheDocument();
+    expect(screen.getByText(t.patientAge(31))).toBeInTheDocument();
+  });
+
+  it("falls back to the patient word when the backend cannot name the patient", async () => {
+    getCases.mockResolvedValue(
+      casesView(caseItem(11, { patient_name: null, patient_age: null })),
+    );
+    render(<DoctorDashboardPage />);
+
+    await waitFor(() => screen.getByTestId("cases-list"));
+
+    expect(screen.getByTestId("case-item-patient")).toHaveTextContent(
+      t.patientFallback,
+    );
+    expect(screen.queryByText(t.patientAge(45))).not.toBeInTheDocument();
+  });
+
+  it("shows the amber Verify chip only on a forced-review case", async () => {
+    getCases.mockResolvedValue(
+      casesView(caseItem(11, { forced_review: true }), caseItem(12)),
+    );
+    render(<DoctorDashboardPage />);
+
+    await waitFor(() => screen.getByTestId("cases-list"));
+
+    const verifyChips = screen.getAllByTestId("case-item-verify");
+    expect(verifyChips).toHaveLength(1);
+    expect(verifyChips[0]).toHaveTextContent(t.verifyChip);
+    expect(verifyChips[0].className).toContain("bg-warn-soft");
+    expect(verifyChips[0].className).toContain("text-warn-text");
+  });
+
+  it("shows how long ago the case was last updated", async () => {
+    getCases.mockResolvedValue(casesView(caseItem(11)));
+    render(<DoctorDashboardPage />);
+
+    await waitFor(() => screen.getByTestId("cases-list"));
+
+    expect(screen.getByTestId("case-item-updated")).toHaveTextContent(
+      t.caseUpdatedAgo(t.timeAgoHours(3)),
+    );
+  });
+
+  it("makes each whole card one focus stop whose accessible name includes the patient", async () => {
+    getCases.mockResolvedValue(
+      casesView(
+        caseItem(11, { patient_name: "Asha Verma" }),
+        caseItem(12, { patient_name: "Ravi Nair" }),
+      ),
+    );
+    render(<DoctorDashboardPage />);
+
+    await waitFor(() => screen.getAllByTestId("case-item-open"));
+
+    const links = screen.getAllByTestId("case-item-open");
+    expect(links).toHaveLength(2);
+    expect(links[0]).toHaveAccessibleName(t.caseCardA11y("Asha Verma"));
+    expect(links[1]).toHaveAccessibleName(t.caseCardA11y("Ravi Nair"));
+    // One focus stop per card: the overlay link is the only focusable thing
+    // inside it - no separate "Open" button left to tab past (US-67).
+    for (const card of screen.getAllByTestId("case-item")) {
+      expect(within(card).getAllByRole("link")).toHaveLength(1);
+      expect(within(card).queryByRole("button")).not.toBeInTheDocument();
+    }
+  });
+
   it("deep-links each open case into the case workspace", async () => {
-    getCases.mockResolvedValue([caseItem(11)]);
+    getCases.mockResolvedValue(casesView(caseItem(11)));
     render(<DoctorDashboardPage />);
 
     await waitFor(() => screen.getByTestId("case-item-open"));
@@ -423,7 +511,7 @@ describe("DoctorDashboardPage consultation-fee summary (#544)", () => {
       }),
     );
     getQueue.mockResolvedValue([queueItem()]);
-    getCases.mockResolvedValue([caseItem(11)]);
+    getCases.mockResolvedValue(casesView(caseItem(11)));
     render(<DoctorDashboardPage />);
 
     await waitFor(() => screen.getByTestId("fee-summary-error"));
@@ -455,7 +543,7 @@ describe("DoctorDashboardPage consultation-fee summary (#544)", () => {
 describe("DoctorDashboardPage patient-shell restyle (#544)", () => {
   it("renders the queue and cases sections as surface cards, not bare headings", async () => {
     getQueue.mockResolvedValue([queueItem()]);
-    getCases.mockResolvedValue([caseItem(11)]);
+    getCases.mockResolvedValue(casesView(caseItem(11)));
     render(<DoctorDashboardPage />);
 
     await waitFor(() => screen.getByTestId("queue-item"));
@@ -473,7 +561,9 @@ describe("DoctorDashboardPage patient-shell restyle (#544)", () => {
       queueItem({ pre_summary_id: 1 }),
       queueItem({ pre_summary_id: 2 }),
     ]);
-    getCases.mockResolvedValue([caseItem(11), caseItem(12), caseItem(13)]);
+    getCases.mockResolvedValue(
+      casesView(caseItem(11), caseItem(12), caseItem(13)),
+    );
     render(<DoctorDashboardPage />);
 
     await waitFor(() => screen.getByTestId("queue-count"));
@@ -508,7 +598,7 @@ describe("DoctorDashboardPage patient-shell restyle (#544)", () => {
   });
 
   it("gives each empty state a body so it explains itself", async () => {
-    getCases.mockResolvedValue([caseItem(11)]);
+    getCases.mockResolvedValue(casesView(caseItem(11)));
     render(<DoctorDashboardPage />);
     await waitFor(() =>
       within(screen.getByTestId("review-queue")).getByTestId("empty-state"),
@@ -623,7 +713,7 @@ describe("DoctorDashboardPage getting-started checklist (#674)", () => {
   });
 
   it("is absent once the doctor has an open care case", async () => {
-    getCases.mockResolvedValue([caseItem(11)]);
+    getCases.mockResolvedValue(casesView(caseItem(11)));
     render(<DoctorDashboardPage />);
 
     await waitFor(() => screen.getByTestId("case-item"));
@@ -688,7 +778,7 @@ describe("DoctorDashboardPage failure paths", () => {
     await waitFor(() => screen.getByTestId("error-banner"));
 
     getQueue.mockResolvedValue([queueItem()]);
-    getCases.mockResolvedValue([caseItem(11)]);
+    getCases.mockResolvedValue(casesView(caseItem(11)));
 
     fireEvent.click(screen.getByTestId("error-banner-retry"));
     await waitFor(() => screen.getByTestId("queue-item"));
@@ -699,7 +789,7 @@ describe("DoctorDashboardPage failure paths", () => {
 describe("DoctorDashboardPage bilingual parity (REQ-006)", () => {
   it("renders the console copy in Hindi when the locale flips", async () => {
     getQueue.mockResolvedValue([queueItem({ patient_name: null })]);
-    getCases.mockResolvedValue([caseItem(11)]);
+    getCases.mockResolvedValue(casesView(caseItem(11)));
     getProfile.mockResolvedValue(doctorProfile({ consultation_fee: 50000 }));
     render(<LangFlipHost />);
     await waitFor(() => screen.getByTestId("queue-item"));
@@ -714,6 +804,36 @@ describe("DoctorDashboardPage bilingual parity (REQ-006)", () => {
       hiT.queueItemMeta(42),
     );
     expect(screen.getByText(hiT.title)).toBeInTheDocument();
+  });
+
+  it("#676 carries the case card copy into Hindi", async () => {
+    getCases.mockResolvedValue(
+      casesView(caseItem(11, { forced_review: true })),
+    );
+    render(<LangFlipHost />);
+    await waitFor(() => screen.getByTestId("case-item"));
+
+    fireEvent.click(screen.getByText("flip-lang"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("case-item-patient")).toHaveTextContent(
+        "Asha Verma",
+      ),
+    );
+    // The card's own copy ships in Hindi too: the stage chip, the verify chip,
+    // the accessible name, and the relative "updated" line.
+    expect(screen.getByTestId("case-item-stage")).toHaveTextContent(
+      hiT.stagePrescriptionPending,
+    );
+    expect(screen.getByTestId("case-item-verify")).toHaveTextContent(
+      hiT.verifyChip,
+    );
+    expect(screen.getByTestId("case-item-open")).toHaveAccessibleName(
+      hiT.caseCardA11y("Asha Verma"),
+    );
+    expect(screen.getByTestId("case-item-updated")).toHaveTextContent(
+      hiT.caseUpdatedAgo(hiT.timeAgoHours(3)),
+    );
   });
 
   it("#544 carries the entry cards, fee summary and empty-state bodies into Hindi", async () => {
