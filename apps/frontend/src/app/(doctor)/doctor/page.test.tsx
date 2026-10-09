@@ -33,6 +33,10 @@ import DoctorDashboardPage from "./page";
 import { ApiError } from "@/lib/api-errors";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { __resetLangForTests, useLang } from "@/lib/i18n/LangContext";
+import {
+  formatGreetingDate,
+  greetingTimeText,
+} from "@/lib/doctor/dashboardGreeting";
 import { fetchReviewQueue, type ReviewQueueItem } from "@/lib/intake/api";
 import {
   fetchDoctorProfile,
@@ -750,6 +754,220 @@ describe("DoctorDashboardPage getting-started checklist (#674)", () => {
   });
 });
 
+describe("DoctorDashboardPage greeting (#678)", () => {
+  // One seam for the whole suite: the same `greetingTimeText` the component
+  // renders, applied to "now". The component <-> test contract is the helper's
+  // own boundary tests (dashboardGreeting.test.ts), which drive it with fixed
+  // dates and concrete copy, so this suite only pins that the page uses the
+  // seam and the right day part.
+  const timeGreeting = () => greetingTimeText(t, new Date());
+
+  it("greets the doctor by first name, honorific stripped, with the time of day", async () => {
+    getProfile.mockResolvedValue(
+      doctorProfile({ practice_name: "Dr. Anil Kumar" }),
+    );
+    render(<DoctorDashboardPage />);
+
+    // The profile is still loading at first render: a name-free greeting.
+    expect(screen.getByTestId("dashboard-greeting")).toHaveTextContent(
+      timeGreeting(),
+    );
+    expect(screen.getByTestId("dashboard-greeting")).not.toHaveTextContent(
+      "Anil",
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("dashboard-greeting")).toHaveTextContent(
+        "Anil",
+      ),
+    );
+    expect(screen.getByTestId("dashboard-greeting")).toHaveTextContent(
+      timeGreeting(),
+    );
+    expect(screen.getByTestId("dashboard-greeting")).not.toHaveTextContent(
+      "Dr.",
+    );
+  });
+
+  it("keeps the greeting name-free while the profile read never resolves", () => {
+    getProfile.mockReturnValue(new Promise(() => {}));
+    render(<DoctorDashboardPage />);
+
+    const greeting = screen.getByTestId("dashboard-greeting");
+    expect(greeting).toHaveTextContent(timeGreeting());
+    expect(greeting).not.toHaveTextContent("Anil");
+    expect(greeting).not.toHaveTextContent("Kumar");
+  });
+
+  it("renders today's date beneath the greeting", async () => {
+    render(<DoctorDashboardPage />);
+
+    expect(screen.getByTestId("greeting-date")).toHaveTextContent(
+      formatGreetingDate(new Date(), "en"),
+    );
+  });
+
+  it("uses the name-free greeting when the profile read fails", async () => {
+    getProfile.mockRejectedValue(new Error("offline"));
+    render(<DoctorDashboardPage />);
+    await waitFor(() => screen.getByTestId("fee-summary-error"));
+
+    const greeting = screen.getByTestId("dashboard-greeting");
+    expect(greeting).toHaveTextContent(timeGreeting());
+    expect(greeting).not.toHaveTextContent("Anil");
+  });
+});
+
+describe("DoctorDashboardPage profile-status card (#678)", () => {
+  it("shows the verified verdict, specialty chips and the consultation fee", async () => {
+    getProfile.mockResolvedValue(
+      doctorProfile({
+        practice_name: "Dr. Anil Kumar",
+        specialties: ["General Physician", "Dentist"],
+        consultation_fee: 50000,
+      }),
+    );
+    render(<DoctorDashboardPage />);
+    await waitFor(() => screen.getByTestId("profile-status"));
+
+    const card = screen.getByTestId("profile-status");
+    expect(card).toHaveTextContent(t.statusHeading);
+    expect(screen.getByTestId("profile-status-verified")).toHaveTextContent(
+      STRINGS.en.doctorProfile.verified,
+    );
+    const chips = screen.getAllByTestId("profile-status-specialty");
+    expect(chips).toHaveLength(2);
+    expect(chips[0]).toHaveTextContent("General Physician");
+    expect(chips[1]).toHaveTextContent("Dentist");
+    expect(screen.getByTestId("profile-status-fee")).toHaveTextContent(
+      t.feeHeading,
+    );
+    expect(screen.getByTestId("profile-status-fee")).toHaveTextContent("₹500");
+  });
+
+  it("labels the fee as unset and the verdict as not verified when they are", async () => {
+    getProfile.mockResolvedValue(
+      doctorProfile({ verified: false, specialties: [] }),
+    );
+    render(<DoctorDashboardPage />);
+    await waitFor(() => screen.getByTestId("profile-status"));
+
+    expect(screen.getByTestId("profile-status-verified")).toHaveTextContent(
+      STRINGS.en.doctorProfile.notVerified,
+    );
+    expect(
+      screen.queryByTestId("profile-status-specialty"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("profile-status-specialties-empty"),
+    ).toHaveTextContent(STRINGS.en.doctorProfile.noSpecialtiesYet);
+  });
+
+  it("lists the missing items as hints - no about text, no clinic name", async () => {
+    render(<DoctorDashboardPage />);
+    await waitFor(() => screen.getByTestId("profile-status"));
+
+    expect(screen.getByTestId("profile-status-hints")).toBeInTheDocument();
+    expect(screen.getByTestId("profile-status-hint-about")).toHaveTextContent(
+      t.statusHintNoAbout,
+    );
+    expect(screen.getByTestId("profile-status-hint-clinic")).toHaveTextContent(
+      t.statusHintNoClinic,
+    );
+    expect(
+      screen.queryByTestId("profile-status-hint-unverified"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("profile-status-hint-fee"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hints an unverified profile and a missing fee", async () => {
+    getProfile.mockResolvedValue(
+      doctorProfile({ verified: false, consultation_fee: null }),
+    );
+    render(<DoctorDashboardPage />);
+    await waitFor(() => screen.getByTestId("profile-status"));
+
+    expect(
+      screen.getByTestId("profile-status-hint-unverified"),
+    ).toHaveTextContent(t.statusHintUnverified);
+    expect(screen.getByTestId("profile-status-hint-fee")).toHaveTextContent(
+      t.feeUnsetHelp,
+    );
+  });
+
+  it("shows the complete line when nothing is missing", async () => {
+    getProfile.mockResolvedValue(
+      doctorProfile({
+        verified: true,
+        consultation_fee: 50000,
+        about: "Twelve years of primary care.",
+        clinic_name: "Sunrise Clinic",
+      }),
+    );
+    render(<DoctorDashboardPage />);
+    await waitFor(() => screen.getByTestId("profile-status"));
+
+    expect(screen.getByTestId("profile-status-complete")).toHaveTextContent(
+      t.statusComplete,
+    );
+    expect(
+      screen.queryByTestId("profile-status-hints"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("profile-status-hint-about"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("links to the doctor profile to fix the gaps", async () => {
+    render(<DoctorDashboardPage />);
+    await waitFor(() => screen.getByTestId("profile-status"));
+
+    expect(screen.getByTestId("profile-status-fix")).toHaveAttribute(
+      "href",
+      "/doctor/profile",
+    );
+    expect(screen.getByTestId("profile-status-fix")).toHaveTextContent(
+      t.statusProfileAction,
+    );
+  });
+
+  it("drives the greeting and the card from the dashboard's one profile read", async () => {
+    getProfile.mockResolvedValue(
+      doctorProfile({ practice_name: "Dr. Anil Kumar" }),
+    );
+    render(<DoctorDashboardPage />);
+    await waitFor(() => screen.getByTestId("profile-status"));
+
+    expect(getProfile).toHaveBeenCalledTimes(1);
+  });
+
+  it("carries the greeting and the profile-status copy into Hindi", async () => {
+    getProfile.mockResolvedValue(
+      doctorProfile({ practice_name: "डॉ. अनिल कुमार", verified: false }),
+    );
+    render(<LangFlipHost />);
+    await waitFor(() => screen.getByTestId("profile-status"));
+
+    fireEvent.click(screen.getByText("flip-lang"));
+    await waitFor(() =>
+      expect(screen.getByTestId("profile-status")).toHaveTextContent(
+        hiT.statusHeading,
+      ),
+    );
+
+    // The greeting strips the Hindi honorific into the first name in Hindi.
+    expect(screen.getByTestId("dashboard-greeting")).toHaveTextContent("अनिल");
+    expect(
+      screen.getByTestId("profile-status-hint-unverified"),
+    ).toHaveTextContent(hiT.statusHintUnverified);
+    expect(screen.getByTestId("profile-status-fix")).toHaveTextContent(
+      hiT.statusProfileAction,
+    );
+  });
+});
+
 describe("DoctorDashboardPage failure paths", () => {
   it("shows a retryable error banner when the feeds fail", async () => {
     getQueue.mockRejectedValue(
@@ -803,7 +1021,11 @@ describe("DoctorDashboardPage bilingual parity (REQ-006)", () => {
     expect(screen.getByTestId("queue-item-intake")).toHaveTextContent(
       hiT.queueItemMeta(42),
     );
-    expect(screen.getByText(hiT.title)).toBeInTheDocument();
+    // #678: the generic console title is gone - the greeting is the heading. It
+    // reads today's time-of-day greeting in the active locale.
+    expect(screen.getByTestId("dashboard-greeting")).toHaveTextContent(
+      greetingTimeText(hiT, new Date()),
+    );
   });
 
   it("#676 carries the case card copy into Hindi", async () => {
