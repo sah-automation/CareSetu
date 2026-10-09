@@ -15,7 +15,7 @@
 // patient shell's card/chip/empty-state/responsive design language.
 
 import Link from "next/link";
-import { ChevronRight, Users, User } from "lucide-react";
+import { Check, ChevronRight, Circle, Users, User } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -32,11 +32,16 @@ import {
   type CaseDetailView,
   type CareCaseStage,
 } from "@/lib/care/api";
+import { PROFILE_ANCHORS } from "@/components/doctor/profile/ProfileSectionIndex";
 import { STRINGS, type Dictionary } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { formatFeePaise } from "@/components/pick/DoctorPickCard";
 
 // ---- helpers ----
+
+function hasText(value: string | null): boolean {
+  return value != null && value.trim().length > 0;
+}
 
 type LoadStatus = "loading" | "ready" | "error";
 
@@ -272,6 +277,111 @@ function EntryCards() {
   );
 }
 
+// #674: the getting-started checklist for a brand-new doctor. It renders only
+// when there is nothing else to work on - no open cases, an empty review
+// queue - and its step states mirror the profile-status card's completeness
+// hints (verified / fee / about / clinic name) so the two surfaces agree on
+// what "done" means. Each step deep-links to the profile section where the
+// doctor completes it.
+function GettingStartedChecklist({ profile }: { profile: DoctorProfileView }) {
+  const { lang } = useLang();
+  const t = STRINGS[lang].doctorConsole;
+
+  const steps: Array<{
+    key: string;
+    label: string;
+    href: string;
+    done: boolean;
+  }> = [
+    {
+      key: "verified",
+      label: t.checklistStepVerified,
+      href: `/doctor/profile#${PROFILE_ANCHORS.verified}`,
+      done: profile.verified,
+    },
+    {
+      key: "fee",
+      label: t.checklistStepFee,
+      href: `/doctor/profile#${PROFILE_ANCHORS.fee}`,
+      done: profile.consultation_fee != null,
+    },
+    {
+      key: "about",
+      label: t.checklistStepAbout,
+      href: `/doctor/profile#${PROFILE_ANCHORS.about}`,
+      done: hasText(profile.about),
+    },
+    {
+      key: "clinic",
+      label: t.checklistStepClinic,
+      href: `/doctor/profile#${PROFILE_ANCHORS.practice}`,
+      done: hasText(profile.clinic_name),
+    },
+  ];
+
+  const stateClass = (done: boolean) =>
+    done
+      ? "bg-success-soft text-success-text"
+      : "bg-hairline-soft text-txt-muted";
+
+  return (
+    <section
+      className="mt-6 rounded-lg border border-hairline bg-surface p-4"
+      data-testid="getting-started"
+    >
+      <div className="mb-3">
+        <h2 className="text-[1.05rem] font-semibold text-txt">
+          {t.checklistHeading}
+        </h2>
+        <p className="mt-0.5 text-sm text-txt-muted">{t.checklistBody}</p>
+      </div>
+      <ul className="mt-1" data-testid="checklist-steps">
+        {steps.map((step) => (
+          <li
+            key={step.key}
+            className="border-t border-hairline-soft first:border-t-0"
+          >
+            <Link
+              href={step.href}
+              data-testid={`checklist-step-${step.key}`}
+              data-done={step.done}
+              className="group flex items-center justify-between gap-3 rounded-md py-3 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-border"
+            >
+              <span className="flex min-w-0 items-center gap-2.5">
+                <span
+                  aria-hidden="true"
+                  className={cn(
+                    "flex h-7 w-7 shrink-0 items-center justify-center rounded-full",
+                    stateClass(step.done),
+                  )}
+                >
+                  {step.done ? (
+                    <Check className="h-4 w-4" />
+                  ) : (
+                    <Circle className="h-3.5 w-3.5" />
+                  )}
+                </span>
+                <span className="text-sm font-medium text-txt group-hover:text-accent-strong">
+                  {step.label}
+                </span>
+              </span>
+              <span
+                data-testid="checklist-step-state"
+                className={cn(
+                  "inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium",
+                  stateClass(step.done),
+                )}
+              >
+                {step.done ? t.checklistDone : t.checklistPending}
+              </span>
+            </Link>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 function ReviewQueueCard({
   queue,
   sortedQueue,
@@ -485,7 +595,7 @@ export default function DoctorDashboardPage() {
   const [bannerOpen, setBannerOpen] = useState(false);
 
   // Fee summary state - isolated from the console feeds
-  const [feePaise, setFeePaise] = useState<number | null>(null);
+  const [profile, setProfile] = useState<DoctorProfileView | null>(null);
   const [feeLoadStatus, setFeeLoadStatus] = useState<LoadStatus>("loading");
 
   const load = useCallback(() => {
@@ -508,12 +618,15 @@ export default function DoctorDashboardPage() {
     load();
   }, [load]);
 
-  // Isolated fee read - does not affect console load status
+  // Isolated profile read - does not affect console load status. The full
+  // projection is kept (not just the fee) so the getting-started checklist can
+  // read the same verified/fee/about/clinic-name fields the profile-status
+  // card uses, from the one request (#674).
   useEffect(() => {
     setFeeLoadStatus("loading");
     fetchDoctorProfile()
-      .then((profile: DoctorProfileView) => {
-        setFeePaise(profile.consultation_fee);
+      .then((fetched: DoctorProfileView) => {
+        setProfile(fetched);
         setFeeLoadStatus("ready");
       })
       .catch(() => {
@@ -522,6 +635,17 @@ export default function DoctorDashboardPage() {
   }, []);
 
   const sortedQueue = useMemo(() => sortQueue(queue), [queue]);
+
+  // #674: the checklist's presence is driven by an empty console - no open
+  // cases and an empty review queue. The step states read the profile read
+  // below, so it waits for that projection (whose failures the fee card
+  // already surfaces): without it the card could not truthfully mark a single
+  // step done or pending.
+  const showChecklist =
+    loadStatus === "ready" &&
+    sortedQueue.length === 0 &&
+    cases.length === 0 &&
+    profile !== null;
 
   // ---- render ----
 
@@ -547,16 +671,18 @@ export default function DoctorDashboardPage() {
           onRetry={() => {
             setFeeLoadStatus("loading");
             fetchDoctorProfile()
-              .then((p: DoctorProfileView) => {
-                setFeePaise(p.consultation_fee);
+              .then((fetched: DoctorProfileView) => {
+                setProfile(fetched);
                 setFeeLoadStatus("ready");
               })
               .catch(() => setFeeLoadStatus("error"));
           }}
         />
       ) : (
-        <FeeSummaryCard feePaise={feePaise} />
+        <FeeSummaryCard feePaise={profile?.consultation_fee ?? null} />
       )}
+
+      {showChecklist && <GettingStartedChecklist profile={profile} />}
 
       <ReviewQueueCard
         queue={queue}
