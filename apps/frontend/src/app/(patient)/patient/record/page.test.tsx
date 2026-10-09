@@ -159,6 +159,7 @@ function accessEntry(
 ): AccessHistoryEntry {
   return {
     actor_id: 3,
+    actor_display_name: null,
     accessed_at: "2026-08-15T11:00:00Z",
     denied: false,
     ...overrides,
@@ -167,16 +168,19 @@ function accessEntry(
 
 const ACCESS_HISTORY: AccessHistoryEntry[] = [
   // Deliberately out of order (lab first, doctor second) - the screen must
-  // still render newest-first by accessed_at.
+  // still render newest-first by accessed_at. The doctor has a resolved name;
+  // the lab falls back to its role word (#670).
   accessEntry({
     actor_id: 4,
     actor_type: "lab",
+    actor_display_name: null,
     scope: "lab_results",
     accessed_at: "2026-08-18T07:45:00Z",
   }),
   accessEntry({
     actor_id: 3,
     actor_type: "doctor",
+    actor_display_name: "Dr A Kumar",
     scope: "consultations",
     accessed_at: "2026-08-19T09:00:00Z",
   }),
@@ -413,14 +417,23 @@ describe("RecordPage bilingual EN/HI (REQ-006)", () => {
 });
 
 describe("RecordPage access history", () => {
-  it("renders real entries with identity, scope and timestamp", async () => {
+  it("renders the resolved label, role word, scope and timestamp", async () => {
     render(<RecordPage />);
     await screen.findByTestId("access-history-list");
 
     expect(mockFetchAccessHistory).toHaveBeenCalledWith(7);
-    expect(screen.getByTestId("access-entry-0")).toHaveTextContent("doctor");
+    // Newest row: a doctor with a resolved display name, with the role word as
+    // its own muted line beneath it.
+    expect(screen.getByTestId("access-entry-0")).toHaveTextContent(
+      "Dr A Kumar",
+    );
+    expect(screen.getByTestId("access-entry-0")) //
+      .toHaveTextContent("Doctor");
     expect(screen.getByTestId("access-entry-0")) //
       .toHaveTextContent("consultations");
+    // Older row: no resolved name, so it falls back to the role word.
+    expect(screen.getByTestId("access-entry-1")) //
+      .toHaveTextContent("Lab");
     expect(screen.getByTestId("access-entry-1")) //
       .toHaveTextContent("lab_results");
   });
@@ -432,14 +445,38 @@ describe("RecordPage access history", () => {
     const first = screen.getByTestId("access-entry-0").textContent ?? "";
     const second = screen.getByTestId("access-entry-1").textContent ?? "";
     // Payload ships lab-before-doctor; the screen reorders newest-first.
-    expect(first).toContain("doctor");
-    expect(second).toContain("lab");
+    expect(first).toContain("Dr A Kumar");
+    expect(second).toContain("Lab");
   });
 
-  it("flags denied attempts with the denied label and reason", async () => {
+  it("never shows a resolved name on a denied row", async () => {
+    resolveAccessWith([
+      accessEntry({
+        actor_id: 3,
+        actor_type: "doctor",
+        actor_display_name: "Dr Sneaky",
+        accessed_at: "2026-08-12T02:33:00Z",
+        denied: true,
+        denial_reason: "consent check failed",
+      }),
+    ]);
+    render(<RecordPage />);
+    await screen.findByTestId("access-entry-0");
+
+    const row = screen.getByTestId("access-entry-0");
+    // The refused identity falls back to the role word, never a resolved name.
+    expect(row).not.toHaveTextContent("Dr Sneaky");
+    expect(row).toHaveTextContent("Doctor");
+    expect(row).toHaveTextContent(STRINGS.en.record.accessHistory.deniedLabel);
+    expect(row).toHaveTextContent("consent check failed");
+  });
+
+  it("flags a cross-patient denied attempt with the denied label and reason", async () => {
     resolveAccessWith([
       accessEntry({
         actor_id: 9,
+        actor_type: "patient",
+        actor_display_name: null,
         accessed_at: "2026-08-12T02:33:00Z",
         denied: true,
         denial_reason: "no consent",
@@ -448,10 +485,11 @@ describe("RecordPage access history", () => {
     render(<RecordPage />);
     await screen.findByTestId("access-entry-0");
 
-    expect(screen.getByTestId("access-entry-0")) //
-      .toHaveTextContent(STRINGS.en.record.accessHistory.deniedLabel);
-    expect(screen.getByTestId("access-entry-0")) //
-      .toHaveTextContent("no consent");
+    const row = screen.getByTestId("access-entry-0");
+    expect(row).toHaveTextContent(STRINGS.en.record.accessHistory.deniedLabel);
+    expect(row).toHaveTextContent("no consent");
+    // The intruder's identity is a raw reference, never a resolved name.
+    expect(row).not.toHaveTextContent("Dr");
   });
 
   it("shows an empty state when there is no access history", async () => {
@@ -741,7 +779,7 @@ describe("RecordPage PROTO-3.1 zones", () => {
       within(rail).getByTestId("access-history-rail-list"),
     ).toBeInTheDocument();
     expect(within(rail).getByTestId("access-entry-rail-0")).toHaveTextContent(
-      "doctor",
+      "Dr A Kumar",
     );
   });
 

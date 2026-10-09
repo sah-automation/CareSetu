@@ -23,6 +23,7 @@ import { useMemo, useSyncExternalStore } from "react";
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
 import { ApiError } from "@/lib/api-errors";
 import { fetchAccessHistory, type AccessHistoryEntry } from "@/lib/audit/api";
+import { counterpartyLabel, counterpartyRole } from "@/lib/consent/consentView";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { formatOccurredAt } from "@/lib/record/timelineView";
@@ -260,7 +261,24 @@ export function AccessHistoryAccordion({
               {accessHistory
                 .slice(0, ACCESS_MOST_RECENT_COUNT)
                 .map((entry, index) => {
-                  const identity = entry.actor_type || `ID ${entry.actor_id}`;
+                  // #670: one labeling voice with the consent log - the shared
+                  // three-step fallback (resolved name -> role word -> raw id).
+                  // A denied row never shows a resolved name: the refused
+                  // identity is not disclosed on the record owner's behalf.
+                  const displayName = entry.denied
+                    ? null
+                    : entry.actor_display_name;
+                  const label = counterpartyLabel(
+                    entry.actor_type ?? "",
+                    String(entry.actor_id),
+                    displayName,
+                    lang,
+                  );
+                  const role = counterpartyRole(
+                    entry.actor_type ?? "",
+                    String(entry.actor_id),
+                    lang,
+                  );
                   const scope = entry.scope
                     ? `, ${t.accessHistory.scopePrefix}${entry.scope}`
                     : "";
@@ -272,7 +290,7 @@ export function AccessHistoryAccordion({
                       <div>
                         <span className="flex items-start gap-2">
                           <strong className="text-[0.9375rem] text-txt">
-                            {identity}
+                            {label}
                           </strong>
                           {entry.denied && (
                             <span className="ml-auto shrink-0 rounded-full bg-danger-soft px-2 py-0.5 text-xs font-medium text-danger">
@@ -280,6 +298,13 @@ export function AccessHistoryAccordion({
                             </span>
                           )}
                         </span>
+                        {/* The role word is its own muted line, only when the
+                            label did not already fall back to it (#654/#670). */}
+                        {role !== null && role !== label && (
+                          <p className="mt-0.5 text-xs text-txt-muted">
+                            {role}
+                          </p>
+                        )}
                         <p className="mt-0.5 text-[0.8125rem] text-txt-muted">
                           {formatOccurredAt(entry.accessed_at, lang)}
                           {scope}
