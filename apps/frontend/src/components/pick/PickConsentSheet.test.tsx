@@ -2,7 +2,9 @@
 // records pick + consent atomically through the pick-doctor client (one
 // action, no second gate), reports the backend result to the host page, and
 // "Not now" closes without recording anything. An in-sheet failure keeps the
-// patient in the sheet with a retryable Allow. Bilingual EN/HI.
+// patient in the sheet with a retryable Allow. The scope sentence discloses
+// all three granted record scopes before Allow (FEAT-002, #664). Bilingual
+// EN/HI.
 
 import {
   cleanup,
@@ -117,21 +119,25 @@ describe("PickConsentSheet", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
-  it("states the consultations and prescriptions scopes on the sheet (EN)", async () => {
+  // FEAT-002 (#664): the pre-Allow disclosure names consultations,
+  // prescriptions, and health background in the active locale.
+  it("discloses the three record scopes on the sheet (EN)", async () => {
     setup();
 
     const dialog = await screen.findByRole("dialog");
     expect(dialog).toHaveTextContent("consultations");
     expect(dialog).toHaveTextContent("prescriptions");
+    expect(dialog).toHaveTextContent("health background");
   });
 
-  it("states the consultations and prescriptions scopes on the sheet (HI)", async () => {
+  it("discloses the three record scopes on the sheet (HI)", async () => {
     localStorage.setItem("caresetu.lang", "hi");
     setup();
 
     const dialog = await screen.findByRole("dialog");
     expect(dialog).toHaveTextContent("परामर्श");
     expect(dialog).toHaveTextContent("प्रिस्क्रिप्शन");
+    expect(dialog).toHaveTextContent("स्वास्थ्य पृष्ठभूमि");
   });
 
   it("keeps the patient in the sheet with the error on a failed Allow", async () => {

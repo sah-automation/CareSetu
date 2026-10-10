@@ -153,8 +153,9 @@ const EGRESS_LOG: EgressLog = {
       consent_id: 11,
       lineage_ref: "C-2026-011",
       version: 1,
-      counterparty_type: "provider",
-      counterparty_id: "Dr. A. Kumar",
+      counterparty_type: "doctor",
+      counterparty_id: "dr-kumar",
+      counterparty_display_name: "Dr Anil Kumar",
       record_scope: "lab_report",
       disclosed_entry_ids: [26],
       disclosed_at: "2026-08-19T09:00:00Z",
@@ -439,21 +440,87 @@ describe("EntryDetailPage prescription medicine block", () => {
     );
   }
 
-  it("lists every medicine item with doctor attribution and Rx reference", async () => {
+  it("lists every medicine item as a labelled block with doctor attribution and Rx reference", async () => {
     await renderEntry(PRESCRIPTION_ENTRY);
 
     expect(screen.getByTestId("entry-medicine-block")).toBeInTheDocument();
-    expect(screen.getByTestId("medicine-item-0").textContent).toBe(
-      "Amlodipine \u00b7 5 mg \u00b7 once daily \u00b7 30 days",
-    );
-    expect(screen.getByTestId("medicine-item-1").textContent).toBe(
-      "Metformin \u00b7 500 mg \u00b7 twice daily",
-    );
+    const first = screen.getByTestId("medicine-item-0");
+    expect(
+      within(first).getByRole("heading", { name: "Amlodipine" }),
+    ).toBeInTheDocument();
+    expect(within(first).getByText("Dose:")).toBeInTheDocument();
+    expect(within(first).getByText("5 mg")).toBeInTheDocument();
+    expect(within(first).getByText("Frequency:")).toBeInTheDocument();
+    expect(within(first).getByText("once daily")).toBeInTheDocument();
+    expect(within(first).getByText("Duration:")).toBeInTheDocument();
+    expect(within(first).getByText("30 days")).toBeInTheDocument();
+
+    const second = screen.getByTestId("medicine-item-1");
+    expect(
+      within(second).getByRole("heading", { name: "Metformin" }),
+    ).toBeInTheDocument();
+    expect(within(second).getByText("Dose:")).toBeInTheDocument();
+    expect(within(second).getByText("500 mg")).toBeInTheDocument();
+    expect(within(second).getByText("Frequency:")).toBeInTheDocument();
+    expect(within(second).getByText("twice daily")).toBeInTheDocument();
+    expect(within(second).queryByText("Duration:")).not.toBeInTheDocument();
+    expect(second.textContent).not.toContain("\u00b7");
     expect(screen.queryByTestId("medicine-item-2")).not.toBeInTheDocument();
     expect(screen.getByTestId("medicine-attribution").textContent).toBe(
       `${STRINGS.en.record.prescribedBy} Dr. A. Kumar`,
     );
     expect(screen.getByTestId("medicine-rx-ref").textContent).toBe("Rx #41");
+  });
+
+  it("keeps a bare-number field readable under its label instead of repairing it", async () => {
+    await renderEntry(
+      entry({
+        ...PRESCRIPTION_ENTRY,
+        entry_id: 33,
+        payload: {
+          ...PRESCRIPTION_ENTRY.payload,
+          items: [
+            { name: "Amlodipine", dose: "9", frequency: "3", duration: "3" },
+          ],
+        },
+      }),
+    );
+
+    const item = screen.getByTestId("medicine-item-0");
+    expect(
+      within(item).getByRole("heading", { name: "Amlodipine" }),
+    ).toBeInTheDocument();
+    expect(within(item).getByText("Dose:")).toBeInTheDocument();
+    expect(within(item).getByText("9")).toBeInTheDocument();
+    expect(within(item).getByText("Frequency:")).toBeInTheDocument();
+    expect(within(item).getAllByText("3")).toHaveLength(2);
+  });
+
+  it("omits a blank field entirely, leaving no stray label or separator", async () => {
+    await renderEntry(
+      entry({
+        ...PRESCRIPTION_ENTRY,
+        entry_id: 34,
+        payload: {
+          ...PRESCRIPTION_ENTRY.payload,
+          items: [
+            {
+              name: "Amlodipine",
+              dose: "",
+              frequency: "once daily",
+              duration: null,
+            },
+          ],
+        },
+      }),
+    );
+
+    const item = screen.getByTestId("medicine-item-0");
+    expect(within(item).queryByText("Dose:")).not.toBeInTheDocument();
+    expect(within(item).queryByText("Duration:")).not.toBeInTheDocument();
+    expect(within(item).getByText("Frequency:")).toBeInTheDocument();
+    expect(within(item).getByText("once daily")).toBeInTheDocument();
+    expect(item.textContent).not.toContain("\u00b7");
   });
 
   it("falls back to neutral attribution when the payload names no doctor", async () => {
@@ -499,9 +566,24 @@ describe("EntryDetailPage prescription medicine block", () => {
     fireEvent.click(screen.getByText("flip-lang"));
 
     expect(screen.getByTestId("entry-medicine-block")).toBeInTheDocument();
-    expect(screen.getByTestId("medicine-item-0").textContent).toBe(
-      "Amlodipine \u00b7 5 mg \u00b7 once daily \u00b7 30 days",
-    );
+    const first = screen.getByTestId("medicine-item-0");
+    expect(
+      within(first).getByRole("heading", { name: "Amlodipine" }),
+    ).toBeInTheDocument();
+    expect(
+      within(first).getByText(`${STRINGS.hi.record.detail.medicine.dose}:`),
+    ).toBeInTheDocument();
+    expect(within(first).getByText("5 mg")).toBeInTheDocument();
+    expect(
+      within(first).getByText(
+        `${STRINGS.hi.record.detail.medicine.frequency}:`,
+      ),
+    ).toBeInTheDocument();
+    expect(within(first).getByText("once daily")).toBeInTheDocument();
+    expect(
+      within(first).getByText(`${STRINGS.hi.record.detail.medicine.duration}:`),
+    ).toBeInTheDocument();
+    expect(within(first).getByText("30 days")).toBeInTheDocument();
     expect(screen.getByTestId("medicine-attribution").textContent).toBe(
       `${STRINGS.hi.record.prescribedBy} Dr. A. Kumar`,
     );
@@ -522,9 +604,83 @@ describe("EntryDetailPage egress trail", () => {
 
     expect(screen.getByTestId("entry-egress-trail")).toBeInTheDocument();
     expect(screen.getByText("Who has seen this entry")).toBeInTheDocument();
-    expect(screen.getByTestId("egress-entry-1")).toHaveTextContent("provider");
     expect(screen.getByTestId("egress-entry-1")).toHaveTextContent(
-      "Dr. A. Kumar",
+      "Dr Anil Kumar",
+    );
+    expect(screen.getByTestId("egress-entry-1")).not.toHaveTextContent(
+      "dr-kumar",
+    );
+  });
+
+  it("says the type word rather than a bare number when nothing resolves the counterparty", async () => {
+    const unresolvedEgress: EgressLog = {
+      items: [
+        {
+          egress_id: 3,
+          patient_id: 7,
+          consent_id: 13,
+          lineage_ref: "C-2026-013",
+          version: 1,
+          counterparty_type: "chemist",
+          counterparty_id: "9918",
+          counterparty_display_name: null,
+          record_scope: "prescription",
+          disclosed_entry_ids: [26],
+          disclosed_at: "2026-08-20T08:00:00Z",
+        },
+      ],
+    };
+    resolveWith(TIMELINE, unresolvedEgress);
+    render(<EntryDetailPage />);
+
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("entry-detail-loading"),
+      ).not.toBeInTheDocument(),
+    );
+
+    const trail = screen.getByTestId("entry-egress-trail");
+    expect(trail).toHaveTextContent(STRINGS.en.consentLog.counterparty.chemist);
+    expect(trail).not.toHaveTextContent("9918");
+  });
+
+  it("reads the AI intake counterparty as the AI", async () => {
+    const aiEgress: EgressLog = {
+      items: [
+        {
+          egress_id: 4,
+          patient_id: 7,
+          consent_id: 14,
+          lineage_ref: "C-2026-014",
+          version: 1,
+          counterparty_type: "doctor",
+          counterparty_id: "intake-ai",
+          // The composition root resolves intake-ai to the brand on every
+          // read (#649); the label still comes from the dictionary, so the
+          // English text is identical and the id never shows (#661).
+          counterparty_display_name: "CareSetu AI Intake Assistant",
+          record_scope: "lab_report",
+          disclosed_entry_ids: [26],
+          disclosed_at: "2026-08-20T09:00:00Z",
+        },
+      ],
+    };
+    resolveWith(TIMELINE, aiEgress);
+    render(<EntryDetailPage />);
+
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("entry-detail-loading"),
+      ).not.toBeInTheDocument(),
+    );
+
+    const trail = screen.getByTestId("entry-egress-trail");
+    expect(trail).toHaveTextContent(
+      STRINGS.en.consentLog.counterparty.aiService,
+    );
+    expect(trail).not.toHaveTextContent("intake-ai");
+    expect(trail).not.toHaveTextContent(
+      STRINGS.en.consentLog.counterparty.doctor,
     );
   });
 
@@ -540,6 +696,7 @@ describe("EntryDetailPage egress trail", () => {
           version: 1,
           counterparty_type: "provider",
           counterparty_id: "Dr. B",
+          counterparty_display_name: null,
           record_scope: "consultation",
           disclosed_entry_ids: [28],
           disclosed_at: "2026-08-20T10:00:00Z",

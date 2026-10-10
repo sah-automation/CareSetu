@@ -1,4 +1,4 @@
-"""MOD-012: HTTP adapters for the doctor console Patients list (#539).
+"""MOD-012: HTTP adapters for the doctor console reads (#539, #647).
 
 Thin adapters (api-standards S1): parse the typed query, call the owning
 doctor console facade, return the typed result - route-boundary tests use a
@@ -33,7 +33,11 @@ from app.gateway.errors import (
 from app.gateway.idempotency import run_idempotent
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_partner
-from modules.doctor.doctor_models import DoctorPatientDetailView, PatientsListView
+from modules.doctor.doctor_models import (
+    DoctorCasesListView,
+    DoctorPatientDetailView,
+    PatientsListView,
+)
 from modules.doctor.domain.exceptions import (
     DoctorConsoleAccessDeniedError,
     DoctorConsoleError,
@@ -411,6 +415,49 @@ async def get_patient_photo(
             log_tag=_LOG_TAG,
         )
     return Response(content=photo.data, media_type=photo.media_type)
+
+
+@router.get(
+    "/cases",
+    response_model=DoctorCasesListView,
+    status_code=status.HTTP_200_OK,
+    summary="List the calling doctor's open care cases (doctor only)",
+)
+async def list_cases(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+) -> DoctorCasesListView:
+    """List the doctor's open care cases, one row per case (US-1..6, #647).
+
+    Thin doctor-scoped adapter over ``list_doctor_cases`` (#646), the console
+    seam's derived projection: the case facts the console already reads plus the
+    patient's name and age, resolved through the same degrade-safe identity
+    seam the Patients list uses. A profile read that fails degrades the whole
+    batch to anonymous rows - every name and age null together - and never
+    fails the list.
+
+    Deliberately query-free. Sorting, filtering, and pagination on this list are
+    out of scope by spec, so the read takes no new query parameters - the one
+    filter this module validates (``_MAX_SEARCH_LENGTH``) belongs to
+    ``/patients`` alone. The declared ``response_model`` is what puts the two
+    new DTOs in the served OpenAPI schema, which is the contract the exported
+    slice pins.
+
+    The answer is therefore the unpaginated ``{items}`` envelope rather than the
+    ``{items, total}`` one api-standards §4 asks of a list, and that deviation is
+    recorded rather than silent: ADR-0019 §D3 notes that an unpaginated read
+    bounds nothing about the per-row ledger writes, so this one's write cost
+    scales with the doctor's open caseload and pagination is deferred for
+    exactly that reason.
+
+    No ``run_idempotent``: that wrapper keys a stored result on the route for
+    the *write* routes, and a GET read takes neither a body nor an idempotency
+    key. The access log and consent egress entries the facade writes per
+    served row are the audit trail here, exactly as on the Patients list.
+    """
+    facade = cast(DoctorConsoleFacade, request.app.state.doctor_console_facade)
+    doctor_id = await _require_doctor(request, account)
+    return await facade.list_doctor_cases(doctor_id=doctor_id)
 
 
 def register_error_handlers(app: FastAPI) -> None:

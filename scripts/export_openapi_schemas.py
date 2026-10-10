@@ -14,8 +14,9 @@ still equals a freshly generated one, so a backend field rename fails the
 backend suite instead of silently re-introducing the drift.
 
 The exported slice is deliberately small and explicit - the doctor console
-Patients DTOs and the health DTOs they embed. Widening it is a one-line change
-here, not a new script.
+Patients DTOs, the doctor cases projection, the consent read models, and the
+health DTOs the detail view embeds. Widening it is a one-line change here, not
+a new script.
 
 Usage:
     node scripts/py.cjs scripts/export_openapi_schemas.py
@@ -42,13 +43,20 @@ DEFAULT_OUT = (
 REF_PREFIX = "#/components/schemas/"
 
 # The doctor console Patients DTOs (MOD-012) plus the health DTOs the detail view
-# embeds. Names must match `class` names in modules/doctor/doctor_models.py and
-# modules/health/facade.py; a rename on either side makes the export fail loudly.
+# embeds, the doctor cases projection (#646), and the consent read models (#648).
+# Names must match `class` names in modules/doctor/doctor_models.py,
+# modules/health/facade.py, and modules/consent/facade.py; a rename on either
+# side makes the export fail loudly.
 EXPORTED_SCHEMAS: tuple[str, ...] = (
     "CaseWorkspaceLink",
+    "ConsentEventView",
+    "ConsentView",
     "ContactSection",
+    "DoctorCaseRow",
+    "DoctorCasesListView",
     "DoctorPatientDetailView",
     "DoctorPatientRow",
+    "EgressLogEntry",
     "HealthBackground",
     "HealthBackgroundView",
     "PatientsListView",

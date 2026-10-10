@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, TypeVar
 from modules.doctor.doctor_models import (
     CaseWorkspaceLink,
     ContactSection,
+    DoctorCaseRow,
+    DoctorCasesListView,
     DoctorPatientDetailView,
     DoctorPatientRow,
     PatientsListView,
@@ -66,6 +68,11 @@ _CONTACT_SCOPES = frozenset({_CONSENT_SCOPE_CONSULTATIONS, _RECORD_SCOPE_FULL})
 # grant", but the ledger marker names the surface instead, mirroring the list
 # marker the health facade owns for its own surface.
 _DETAIL_SCOPE_MARKER = "doctor_patient_detail"
+
+# The access-history marker for the console's open-cases list (MOD-012, #646) -
+# a third surface marker beside the two the health facade already carries, so
+# the trust view can answer *which* console list a patient was read through.
+_CASES_SCOPE_MARKER = "doctor_cases_list"
 
 # Payload type of a consented record read funnelled through
 # ``_consent_read_or_none``; keeps the fail-closed helper sound under --strict.
@@ -297,12 +304,98 @@ class DoctorConsoleFacade:
                 if profile is not None:
                     profiles[patient_id] = profile
         except Exception:
+            # No ``exc_info``: a traceback frame or exception message can
+            # carry the patient id (error-handling-observability §2, the
+            # docstring contract above).
             logger.warning(
                 "doctor-console profile resolution failed; degrading to anonymous rows",
-                exc_info=True,
             )
             profiles = {}
         return profiles
+
+    async def list_doctor_cases(self, *, doctor_id: int) -> DoctorCasesListView:
+        """Return the doctor's open care cases as displayable rows (#646).
+
+        The cases list used to answer ``Case #<id>``, so a doctor with several
+        open cases could not tell them apart without opening each one. This
+        projection adds the patient's name, age, and photo presence to the case
+        facts the console already reads.
+
+        Composition order matches ``list_doctor_patients`` exactly:
+        - ``require_active_doctor`` (partner) re-checks the edge-supplied id
+          before anything else - the edge guard is convenience, this is the
+          boundary (api-standards §6);
+        - ``list_doctor_cases`` (care) supplies the doctor's open cases.
+          Deliberately the care module's *own* open-cases read rather than its
+          all-cases feed re-filtered here: the console list and the existing
+          ``GET /v1/care/cases`` route must see the same case set, and a second
+          copy of MOD-006's non-closed filter is exactly how two reads of the
+          same data would come to disagree. ``MOD-006`` still cannot read the
+          identity schema, so the enrichment below still has to happen here at
+          the seam that composes care and identity reads - the care-scoped
+          reads keep their shape and their consumers untouched;
+        - ``_resolve_patient_profiles`` (iam) supplies name/age/photo presence -
+          the *same* degrade-safe resolver the Patients list uses, not a second
+          one, so one failed identity read degrades this batch to anonymous
+          rows with a warning and never fails the list;
+        - ``log_doctor_patient_view`` (health) records every served row under
+          this surface's own marker, and ``record_egress_disclosure``
+          (consent) pins each granted row to the authorizing live grant -
+          serving a case row reveals a patient's existence to their doctor, so
+          it belongs in both ledgers exactly as a Patients row does (ADR-0019
+          D3 discipline, extended to this second read surface).
+
+        Rows are ordered ``created_at`` ascending with a ``case_id`` tie-break,
+        so the order is this read's own and not the feed's. The read is
+        unpaginated and takes no query parameters - which also means, unlike the
+        paginated Patients list, nothing bounds this read's per-row ledger
+        writes but the size of the doctor's open caseload (ADR-0019 D3).
+        """
+        await self._require_active_doctor(doctor_id=doctor_id)
+        grants = await self._live_grants(doctor_id=doctor_id)
+        open_cases = await self._care_facade.list_doctor_cases(doctor_id=doctor_id)
+
+        grants_by_patient: dict[int, list[CounterpartyGrantView]] = {}
+        for grant in grants:
+            grants_by_patient.setdefault(grant.patient_id, []).append(grant)
+
+        profiles = await self._resolve_patient_profiles(
+            sorted({case.patient_id for case in open_cases})
+        )
+
+        rows: list[DoctorCaseRow] = []
+        for case in open_cases:
+            profile = profiles.get(case.patient_id)
+            rows.append(
+                DoctorCaseRow(
+                    case_id=case.case_id,
+                    stage=case.stage,
+                    forced_review=case.forced_review,
+                    created_at=case.created_at,
+                    updated_at=case.updated_at,
+                    patient_id=case.patient_id,
+                    patient_name=profile.name if profile is not None else None,
+                    patient_age=profile.age if profile is not None else None,
+                    has_photo=bool(profile is not None and profile.photo_ref),
+                )
+            )
+        rows.sort(key=lambda row: (row.created_at, row.case_id))
+
+        for row in rows:
+            await self._health_facade.log_doctor_patient_view(
+                patient_id=row.patient_id,
+                doctor_id=doctor_id,
+                scope=_CASES_SCOPE_MARKER,
+            )
+            # Same fail-closed rule as the Patients list: a case row the doctor
+            # reaches without any live standing grant has no consent lineage to
+            # disclose against, so no egress row is fabricated for it. The
+            # access-history row above still records that the row was served.
+            patient_grants = grants_by_patient.get(row.patient_id, [])
+            if patient_grants:
+                await self._disclose_against_grant(patient_grants, row.patient_id, doctor_id)
+
+        return DoctorCasesListView(items=rows)
 
     async def get_doctor_patient_detail(
         self, *, doctor_id: int, patient_id: int
@@ -438,9 +531,11 @@ class DoctorConsoleFacade:
         try:
             return await self._iam_facade.get_patient_profile(patient_id)
         except Exception:
+            # No ``exc_info``: the docstring contract forbids a patient id or
+            # PHI in the log line, and an exception message can carry either
+            # (error-handling-observability §2).
             logger.warning(
                 "doctor-console profile resolution failed; degrading to empty contact",
-                exc_info=True,
             )
             return None
 

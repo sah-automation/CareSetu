@@ -1,5 +1,6 @@
 // MOD-012 doctor console HTTP surface client: the Patients list + detail (#541)
-// and the calling doctor's own private profile (#543). Thin typed wrapper over
+// the Cases list (#647/#652), and the calling doctor's own private profile
+// (#543). Thin typed wrapper over
 // the backend's /v1/doctor doctor routes; the request/response shapes mirror
 // modules/doctor/doctor_models.py and modules/partner/doctor_profile_models.py
 // exactly (guardShape + request from lib/request.ts, session/auth travel via
@@ -236,6 +237,78 @@ export async function fetchDoctorPatientPhoto(
   patientId: number,
 ): Promise<Blob> {
   return requestBlob(`/v1/doctor/patients/${patientId}/photo`);
+}
+
+// ---- the calling doctor's open cases (#647 route, #652 cases index) ----
+//
+// The cases index reads THIS endpoint rather than the care module's
+// `listOpenCases`, because the wire shape here is the open-cases projection's
+// own DTO (DoctorCaseRow, pinned by the exported OpenAPI slice #650): it
+// carries the patient's display name, age, and photo-presence flag the shared
+// card needs, which the care view never had. Row guards check every declared
+// field, so a backend rename or drop fails at this seam (#624) instead of
+// rendering a card with half its anatomy missing.
+
+export interface DoctorCaseRow {
+  case_id: number;
+  stage: string;
+  created_at: string;
+  updated_at: string;
+  patient_id: number;
+  /** Nullable: an age the backend cannot derive still lists the case. */
+  patient_age: number | null;
+  /** Nullable: falls back to the dictionary's patient word, never to nothing. */
+  patient_name: string | null;
+  /** Branch flag for the amber Verify chip - so a truthy "false" string must not pass. */
+  forced_review: boolean;
+  /** Presence flag only, never a storage key (security-phii-standards S2, ADR-0020). */
+  has_photo: boolean;
+}
+
+export interface DoctorCasesListView {
+  items: DoctorCaseRow[];
+}
+
+function isDoctorCaseRow(value: unknown): value is DoctorCaseRow {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "case_id" in value &&
+    "stage" in value &&
+    "created_at" in value &&
+    "updated_at" in value &&
+    "patient_id" in value &&
+    "patient_age" in value &&
+    "patient_name" in value &&
+    "forced_review" in value &&
+    typeof (value as DoctorCaseRow).forced_review === "boolean" &&
+    "has_photo" in value &&
+    typeof (value as DoctorCaseRow).has_photo === "boolean"
+  );
+}
+
+/**
+ * List the calling doctor's open care cases for the cases index (#647).
+ *
+ * No query parameters: the endpoint takes none and answers with the full
+ * derived list, so this client must not invent a filter or a page control.
+ * The list reads unpaginated by deliberate deferral of api-standards §4 on
+ * this surface (spec #645); when pagination lands, it lands as `?cursor=`
+ * plus the `{items, next_cursor, total}` envelope rather than a page number
+ * the spec never promised.
+ */
+export async function listDoctorCases(): Promise<DoctorCasesListView> {
+  const data = await request<unknown>("/v1/doctor/cases");
+  return guardShape(
+    data,
+    (value): value is DoctorCasesListView =>
+      typeof value === "object" &&
+      value !== null &&
+      "items" in value &&
+      Array.isArray((value as DoctorCasesListView).items) &&
+      (value as DoctorCasesListView).items.every(isDoctorCaseRow),
+    "The API returned an unexpected cases list shape",
+  );
 }
 
 // ---- the calling doctor's own private profile (#542, ADR-0020) ----

@@ -97,11 +97,13 @@ afterEach(cleanup);
 describe("per-role route-group scaffold pages", () => {
   // PHASE-2.7 T1 (#499): the patient home greeting is now i18n-driven and
   // name-personalized, so its scaffold heading is pinned by a stable testid
-  // instead of the removed "Welcome, Patient" literal. Other roles keep their
-  // fixed h1 copy.
+  // instead of the removed "Welcome, Patient" literal. The doctor greeting
+  // (#678) is the same story: time-based and name-personalized, so its heading
+  // is pinned by its own testid rather than a fixed h1. The partner and
+  // operator pages keep their fixed h1 copy.
   it.each([
     ["patient", PatientDashboardPage, "testid", "patient-home-greeting"],
-    ["doctor", DoctorDashboardPage, "heading", "Doctor console"],
+    ["doctor", DoctorDashboardPage, "testid", "dashboard-greeting"],
     ["partner", PartnerDashboardPage, "heading", "Welcome, Partner"],
     ["operator", OperatorDashboardPage, "heading", "Verification queue"],
   ] as const)(

@@ -35,6 +35,7 @@ beforeEach(() => {
     patient_id: 1,
     counterparty_type: "lab",
     counterparty_id: "demo-lab-booking",
+    counterparty_display_name: null,
     record_scope: "prescriptions",
     status: "granted",
     version: 1,

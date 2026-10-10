@@ -358,7 +358,7 @@ Triggered by any care action requiring record access (booking with intake attach
 3. How long - per-action validity statement.
 4. Two large buttons: "Allow / Anumati dein" and "Not now / Abhi nahi". Deny blocks the action with a plain explanation of what it unblocks - no dark patterns, no re-prompt spam.
 
-Grant writes `consent_granted`; every sheet links to Record > Consent log; revocation lives there and inline on the originating object. Consent is never bundled: each action names its own access (per FEAT-002). The delivered pick-a-doctor moment (PHASE-8.1, #480) is the deliberate exception - the pick sheet names `consultations` and `prescriptions` together and records both standing grants atomically with the assignment so the AI drafting assistant's consent-gated read can pass (#487); every other action still names its own access. Keyboard/focus behavior of this sheet is bound by §9.4.
+Grant writes `consent_granted`; every sheet links to Record > Consent log; revocation lives there and inline on the originating object. Consent is never bundled: each action names its own access (per FEAT-002). The delivered pick-a-doctor moment (PHASE-8.1, #480, widened #663) is the deliberate exception - the pick sheet names `consultations`, `prescriptions`, and `health_background` together (three-scope disclosure copy, #664) and records all three standing grants atomically with the assignment so the AI drafting assistant's consent-gated read can pass (#487) and the picked doctor's health-background section unlocks; every other action still names its own access. Keyboard/focus behavior of this sheet is bound by §9.4.
 
 ---
 

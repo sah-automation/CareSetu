@@ -21,6 +21,7 @@ beforeEach(() => {
     patient_id: 1,
     counterparty_type: "lab",
     counterparty_id: "lab-123",
+    counterparty_display_name: null,
     record_scope: "prescriptions",
     status: "granted",
     version: 1,

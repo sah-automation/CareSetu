@@ -6,8 +6,10 @@
 // review requirement (if any), and splits the workspace into three inner tabs
 // (US-14, #484): Pre-summary - the original intake transcript + recording
 // playback plus the finalized AI summary and the consult-complete handshake
-// for pre_summary-stage cases; History - the patient's consented health
-// history; Prescription - the drafting/approval/close flow, gated by a stage
+// for pre_summary-stage cases; History - the patient's consented consultation
+// history plus the shared health background (#682), both fed by one console
+// detail projection read; Prescription - the drafting/approval/close flow,
+// gated by a stage
 // lock that names the pending consult-complete step on pre_summary cases and
 // jumps the doctor back to the handshake on the Pre-summary tab. For
 // prescription-pending cases it hosts prescription drafting (US-18): request
@@ -25,9 +27,10 @@
 import type { ChangeEvent, FormEvent, KeyboardEvent } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ConsentedHistory } from "@/components/case/ConsentedHistory";
+import { HealthBackgroundBlock } from "@/components/doctor/HealthBackgroundBlock";
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -61,6 +64,10 @@ import {
   type RxItemView,
 } from "@/lib/care/api";
 import { fetchPartnerMe, type PartnerMeView } from "@/lib/partner/api";
+import {
+  fetchDoctorPatientDetail,
+  type DoctorPatientDetailView,
+} from "@/lib/doctor/api";
 import { STRINGS, type Dictionary } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 
@@ -81,6 +88,123 @@ function toEditorItems(items: RxItemView[]): EditorRxItem[] {
     duration: i.duration ?? "",
     frequency: i.frequency ?? "",
   }));
+}
+
+// #657: the three instruction fields the editor refuses to issue unreadable.
+// A value that is ONLY digits, decimals and whitespace is a bare number with
+// no unit ("9", "0.5", "9 3 3") and is refused at save time; "9 mg",
+// "2 tablets", "BD" and "9/3/3" all pass, because the rule is narrow on
+// purpose - a validator that rejects "2 tablets" would reject real
+// prescriptions. The medicine name is deliberately absent from this union:
+// real product names carry numbers ("Zinc 20", "Vitamin D3 60k"), so a
+// numeric rule on the name would refuse legitimate medicines. A refusal,
+// never a rewrite: the pass only reports WHICH field and why it is
+// unreadable; nothing is corrected on the doctor's behalf and no row is
+// dropped. DOM order (dose, frequency, duration) so the focus walk reads the
+// row the way the doctor sees it. The union is derived from the one list
+// below, so a field can never be validated without also being declared there.
+const RX_INSTRUCTION_FIELDS = ["dose", "frequency", "duration"] as const;
+type RxItemField = (typeof RX_INSTRUCTION_FIELDS)[number];
+
+interface RxItemProblem {
+  row: number;
+  field: RxItemField;
+}
+
+function invalidRxItemFields(items: EditorRxItem[]): RxItemProblem[] {
+  const invalid: RxItemProblem[] = [];
+  items.forEach((row, idx) => {
+    for (const field of RX_INSTRUCTION_FIELDS) {
+      const value = row[field].trim();
+      if (value !== "" && /^[\d.\s]+$/.test(value)) {
+        invalid.push({ row: idx, field });
+      }
+    }
+  });
+  return invalid;
+}
+
+/** The focus-walk / ref map key for one instruction field. */
+function rxFieldKey(row: number, field: RxItemField): string {
+  return `${row}:${field}`;
+}
+
+/** The id a refused input points at with `aria-describedby`. */
+function rxErrorId(row: number, field: RxItemField): string {
+  return `rx-item-${field}-error-${row}`;
+}
+
+/** The label and the bare-number message for one instruction field. */
+function rxFieldCopy(
+  t: Dictionary["caseWorkspace"],
+  field: RxItemField,
+): { label: string; message: string } {
+  switch (field) {
+    case "dose":
+      return { label: t.rxDoseLabel, message: t.rxDoseBareNumber };
+    case "frequency":
+      return { label: t.rxFrequencyLabel, message: t.rxFrequencyBareNumber };
+    case "duration":
+      return { label: t.rxDurationLabel, message: t.rxDurationBareNumber };
+  }
+}
+
+interface RxInstructionFieldProps {
+  row: number;
+  field: RxItemField;
+  label: string;
+  message: string;
+  value: string;
+  refused: boolean;
+  onChange: (value: string) => void;
+  inputRef: (el: HTMLInputElement | null) => void;
+}
+
+/** One instruction field of the rx-item editor (#657): a dose, frequency or
+    duration input whose refusal message is wired to it via
+    `aria-describedby`. Presentational and per-field rather than per-row, so
+    the three fields cannot drift apart in their aria wiring. */
+function RxInstructionField({
+  row,
+  field,
+  label,
+  message,
+  value,
+  refused,
+  onChange,
+  inputRef,
+}: RxInstructionFieldProps) {
+  const errorId = rxErrorId(row, field);
+  return (
+    <div className="flex-1 min-w-28">
+      <label className="block">
+        <span className="sr-only">
+          {label}: {row + 1}
+        </span>
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={label}
+          aria-invalid={refused}
+          aria-describedby={refused ? errorId : undefined}
+          className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+          ref={inputRef}
+          data-testid={`rx-item-${field}-${row}`}
+        />
+      </label>
+      {refused && (
+        <p
+          id={errorId}
+          className="mt-1 text-xs text-danger"
+          role="alert"
+          data-testid={errorId}
+        >
+          {message}
+        </p>
+      )}
+    </div>
+  );
 }
 
 function snapshotField(value: unknown): unknown {
@@ -408,7 +532,7 @@ function WorkspaceTabs({
             onClick={() => onChange(tab)}
             onKeyDown={(e) => handleKeyDown(e, tab)}
             className={cn(
-              "relative py-3 text-sm font-medium transition-colors focus:outline-none focus:ring-1 focus:ring-accent focus:ring-offset-2 rounded-sm",
+              "relative py-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent focus-visible:ring-offset-2 rounded-sm",
               selected ? "text-accent-strong" : "text-txt-muted hover:text-txt",
               selected &&
                 "after:absolute after:bottom-[-1px] after:left-0 after:right-0 after:h-0.5 after:bg-accent",
@@ -439,12 +563,42 @@ function LoadingSkeleton() {
   );
 }
 
+// #658 (one history read, #645 US-62) + #682 (parent #673): the console
+// detail projection for the case patient - the very read the patient-detail
+// page renders, so the two doctor surfaces cannot disagree. Widened in #682
+// from the bare consultation history to the whole projection, because one
+// settled read now feeds both History-tab sections (consultation history and
+// health background) instead of only one. Best-effort by design: a failed
+// projection read answers undefined instead of throwing, so the workspace
+// still opens and the history tab keeps the consented-history component's
+// own fail-closed consented read as its fallback. The degradation is logged
+// (error-handling-observability: a denied read is a calm lock, a failed
+// read is a logged warning - never a page failure).
+async function readConsoleDetailProjection(
+  patientId: number,
+): Promise<DoctorPatientDetailView | undefined> {
+  try {
+    return await fetchDoctorPatientDetail(patientId);
+  } catch (err) {
+    console.warn(
+      "[case-workspace] console detail projection read failed:",
+      err,
+    );
+    return undefined;
+  }
+}
+
 export default function CaseWorkspacePage() {
   const params = useParams<{ caseId: string }>();
   const caseId = Number(params.caseId);
   const { lang } = useLang();
   const t = STRINGS[lang].caseWorkspace;
   const consoleT = STRINGS[lang].doctorConsole;
+  // #682: the health-background section reuses the doctorPatients label
+  // bundle - the same copy the patient-detail page renders, and the same the
+  // shared health-background block expects, so the two surfaces cannot drift
+  // and no new dictionary block is forked (REQ-006 parity holds as-is).
+  const patientsT = STRINGS[lang].doctorPatients;
 
   const [loadStatus, setLoadStatus] = useState<"loading" | "ready" | "error">(
     "loading",
@@ -454,6 +608,26 @@ export default function CaseWorkspacePage() {
 
   const [careCase, setCareCase] = useState<CaseDetailView | null>(null);
   const [doctorMe, setDoctorMe] = useState<PartnerMeView | null>(null);
+
+  // #658 (one history read, #645 US-62) + #682: the History tab renders the
+  // console detail projection - the same read the patient-detail page
+  // renders - rather than a second, separately scoped view of the same
+  // patient. One settled projection feeds both sections: its
+  // `consultation_history` (array / denied null / failed undefined) drives
+  // ConsentedHistory's three-state contract, and its `health_background`
+  // drives the medical-history block. The read is best-effort and never
+  // gates the workspace: undefined means the projection read failed, leaving
+  // the consented-history component to its fail-closed consented read as the
+  // fallback and hiding the health-background section rather than claiming a
+  // denial the patient never gave. The tab mounts the sections only once the
+  // read has settled, so the components' contracts are never raced by a
+  // live read.
+  const [patientDetail, setPatientDetail] = useState<
+    DoctorPatientDetailView | undefined
+  >(undefined);
+  const [detailLoadState, setDetailLoadState] = useState<
+    "idle" | "loading" | "ready"
+  >("idle");
 
   // Workspace inner tabs (US-14, #484). A prescription-pending case opens on
   // the Prescription tab so the doctor lands where the work is; everything
@@ -502,6 +676,25 @@ export default function CaseWorkspacePage() {
   const [inputError, setInputError] = useState<string | null>(null);
   const [addendumText, setAddendumText] = useState("");
   const [manualMode, setManualMode] = useState(false);
+
+  // #657: the bare-number refusal. Save is disabled while the pass reports
+  // anything, so the refusal has to explain itself WITHOUT a submit - a
+  // silent disabled button would tell a keyboard or screen-reader user
+  // nothing about why (unlike the address card, whose enabled button can be
+  // pressed to elicit the message). The message is therefore live: the pass
+  // derives from `rxItems` every render, so a bare number names its field and
+  // reason the moment it is typed and a usable value clears it at once. One
+  // message per field means continuous typing does not re-announce.
+  const invalidRxFields = invalidRxItemFields(rxItems);
+  // The focus-walk targets, keyed `row:field`.
+  const rxInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+
+  /** The pass refuses this field right now, so its message shows. */
+  function rxRefuses(row: number, field: RxItemField): boolean {
+    return invalidRxFields.some(
+      (problem) => problem.row === row && problem.field === field,
+    );
+  }
 
   // Issuance + closure state (US-19..22, #453). The approve request is only
   // ever sent once the doctor ticks both verification declarations; rejection
@@ -571,10 +764,25 @@ export default function CaseWorkspacePage() {
     }
   }, []);
 
+  // #658 + #682: the one projection source for both doctor surfaces. Best-
+  // effort and fire-and-forget like the other side reads - a slow or failed
+  // projection read must never hold the workspace open. The History tab
+  // gates on `detailLoadState` settling before it mounts either section, so
+  // a denied (null) or failed (undefined) answer is already the components'
+  // settled prop and never a mid-flight race.
+  const loadPatientDetail = useCallback(async (patientId: number) => {
+    setDetailLoadState("loading");
+    const detail = await readConsoleDetailProjection(patientId);
+    setPatientDetail(detail);
+    setDetailLoadState("ready");
+  }, []);
+
   const load = useCallback(() => {
     setLoadStatus("loading");
     setBannerOpen(false);
     setHandshakeError(false);
+    setPatientDetail(undefined);
+    setDetailLoadState("idle");
 
     Promise.all([fetchCareCase(caseId), fetchPartnerMe()])
       .then(([c, me]) => {
@@ -591,19 +799,22 @@ export default function CaseWorkspacePage() {
         setActiveTab(
           c.stage === "prescription_pending" ? "prescription" : "pre_summary",
         );
+        // Best-effort side reads fire after ready so none of them gate the
+        // workspace's availability.
         if (c.pre_summary_id != null) {
           void loadIntakeDetail(c.pre_summary_id);
         }
         if (c.stage === "prescription_pending") {
           void loadWorkingRx();
         }
+        void loadPatientDetail(c.patient_id);
       })
       .catch((err: unknown) => {
         setErrorTraceId(err instanceof ApiError ? err.traceId : undefined);
         setLoadStatus("error");
         setBannerOpen(true);
       });
-  }, [caseId, loadWorkingRx, loadIntakeDetail]);
+  }, [caseId, loadWorkingRx, loadIntakeDetail, loadPatientDetail]);
 
   useEffect(() => {
     load();
@@ -710,6 +921,16 @@ export default function CaseWorkspacePage() {
   async function handleSaveRevision(e: FormEvent) {
     e.preventDefault();
     if (!careCase) return;
+    // #657: the refusal. The save button is already disabled while the pass
+    // reports a bare number, so this is the belt to that button's braces (an
+    // implicit form submit). The refused messages are already on screen, so
+    // the focus walk (ui-blueprint §9.4) simply lands the doctor on the first
+    // refusal they can act on.
+    if (invalidRxFields.length > 0) {
+      const first = invalidRxFields[0];
+      rxInputRefs.current[rxFieldKey(first.row, first.field)]?.focus();
+      return;
+    }
     const items: RxItemInput[] = rxItems
       .map((r) => ({
         name: r.name.trim(),
@@ -1218,27 +1439,28 @@ export default function CaseWorkspacePage() {
                     </div>
                   </div>
 
-                  {/* Confidence + review state - inline */}
-                  <div className="flex items-center gap-4">
-                    <div data-testid="case-pre-summary-confidence">
-                      <span className="text-xs font-medium text-txt-muted">
-                        {t.confidenceLabel}
-                      </span>
-                      <span className="ml-1 text-sm text-txt">
-                        {" "}
-                        {confidencePercent(
-                          preSummaryForReview.structuring_confidence,
-                        )}
-                      </span>
-                    </div>
-                    {preSummaryForReview.low_confidence && (
-                      <span
-                        data-testid="case-pre-summary-low-confidence"
-                        className="inline-flex items-center rounded-full bg-warn-soft px-2 py-0.5 text-xs font-medium text-warn-text"
-                      >
-                        {consoleT.verifyChip}
-                      </span>
-                    )}
+                  {/* Confidence + review state - key/value row matching the
+                      Duration and other field rows so the label-to-value
+                      spacing lines up (#675). The verify chip stays in the
+                      value cell next to the percentage. */}
+                  <div
+                    className="grid grid-cols-[140px_1fr] gap-3 text-sm"
+                    data-testid="case-pre-summary-confidence"
+                  >
+                    <span className="text-txt-muted">{t.confidenceLabel}</span>
+                    <span className="font-medium text-txt">
+                      {confidencePercent(
+                        preSummaryForReview.structuring_confidence,
+                      )}
+                      {preSummaryForReview.low_confidence && (
+                        <span
+                          data-testid="case-pre-summary-low-confidence"
+                          className="ml-2 inline-flex items-center rounded-full bg-warn-soft px-2 py-0.5 text-xs font-medium text-warn-text"
+                        >
+                          {consoleT.verifyChip}
+                        </span>
+                      )}
+                    </span>
                   </div>
 
                   {/* Patient edits - field group */}
@@ -1358,24 +1580,58 @@ export default function CaseWorkspacePage() {
             className="space-y-6"
             data-testid="tab-panel-history"
           >
-            {doctorMe != null && (
-              <section
-                className="rounded-lg border border-hairline bg-surface p-4"
-                data-testid="case-history"
-              >
-                <h2 className="text-sm font-semibold text-txt">
-                  {t.historyHeading}
-                </h2>
-                <p className="mt-1 text-xs text-txt-muted">
-                  {t.historyConsentNote}
-                </p>
-                <div className="mt-3">
-                  <ConsentedHistory
-                    patientId={careCase.patient_id}
-                    partnerId={doctorMe.partner_id}
-                  />
-                </div>
-              </section>
+            {/* Both cards mount only once the projection read has settled
+                (#658/#682): each component's contract is fed a finished
+                answer - array, denied null, or failed undefined - never a
+                mid-flight read it would have to race. */}
+            {doctorMe != null && detailLoadState === "ready" && (
+              <>
+                <section
+                  className="rounded-lg border border-hairline bg-surface p-4"
+                  data-testid="case-history"
+                >
+                  <h2 className="text-sm font-semibold text-txt">
+                    {t.historyHeading}
+                  </h2>
+                  <p className="mt-1 text-xs text-txt-muted">
+                    {t.historyConsentNote}
+                  </p>
+                  <div className="mt-3">
+                    <ConsentedHistory
+                      patientId={careCase.patient_id}
+                      partnerId={doctorMe.partner_id}
+                      timeline={patientDetail?.consultation_history}
+                    />
+                  </div>
+                </section>
+                {/* #682: the medical-history section rides the same settled
+                    projection read - one read feeds both sections, so the
+                    patient-detail page and this tab cannot disagree. The
+                    section hides entirely when the projection read failed
+                    (undefined): the workspace has no answer, and painting a
+                    lock would claim a denial the patient never gave. A
+                    settled null is the real not-shared, rendered by the
+                    shared block as its calm locked card. */}
+                {patientDetail !== undefined && (
+                  <section
+                    className="rounded-lg border border-hairline bg-surface p-4"
+                    data-testid="case-health-background"
+                  >
+                    <h2 className="text-sm font-semibold text-txt">
+                      {patientsT.healthBackgroundHeading}
+                    </h2>
+                    <p className="mt-1 text-xs text-txt-muted">
+                      {t.historyConsentNote}
+                    </p>
+                    <div className="mt-3">
+                      <HealthBackgroundBlock
+                        healthBackground={patientDetail.health_background}
+                        labels={patientsT}
+                      />
+                    </div>
+                  </section>
+                )}
+              </>
             )}
           </section>
 
@@ -1763,100 +2019,84 @@ export default function CaseWorkspacePage() {
                                   </p>
                                 ) : (
                                   <ul className="mt-2 space-y-2">
-                                    {rxItems.map((row, idx) => (
-                                      <li
-                                        key={idx}
-                                        className="flex flex-wrap items-center gap-2"
-                                        data-testid="rx-item-row"
-                                      >
-                                        <label className="flex-1 min-w-40">
-                                          <span className="sr-only">
-                                            {t.rxNameLabel}: {idx + 1}
-                                          </span>
-                                          <input
-                                            type="text"
-                                            value={row.name}
-                                            onChange={(e) =>
-                                              updateRxItem(
-                                                idx,
-                                                "name",
-                                                e.target.value,
-                                              )
-                                            }
-                                            placeholder={t.rxNameLabel}
-                                            className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-                                            data-testid={`rx-item-name-${idx}`}
-                                          />
-                                        </label>
-                                        <label className="flex-1 min-w-28">
-                                          <span className="sr-only">
-                                            {t.rxDoseLabel}: {idx + 1}
-                                          </span>
-                                          <input
-                                            type="text"
-                                            value={row.dose}
-                                            onChange={(e) =>
-                                              updateRxItem(
-                                                idx,
-                                                "dose",
-                                                e.target.value,
-                                              )
-                                            }
-                                            placeholder={t.rxDoseLabel}
-                                            className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-                                            data-testid={`rx-item-dose-${idx}`}
-                                          />
-                                        </label>
-                                        <label className="flex-1 min-w-28">
-                                          <span className="sr-only">
-                                            {t.rxFrequencyLabel}: {idx + 1}
-                                          </span>
-                                          <input
-                                            type="text"
-                                            value={row.frequency}
-                                            onChange={(e) =>
-                                              updateRxItem(
-                                                idx,
-                                                "frequency",
-                                                e.target.value,
-                                              )
-                                            }
-                                            placeholder={t.rxFrequencyLabel}
-                                            className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-                                            data-testid={`rx-item-frequency-${idx}`}
-                                          />
-                                        </label>
-                                        <label className="flex-1 min-w-28">
-                                          <span className="sr-only">
-                                            {t.rxDurationLabel}: {idx + 1}
-                                          </span>
-                                          <input
-                                            type="text"
-                                            value={row.duration}
-                                            onChange={(e) =>
-                                              updateRxItem(
-                                                idx,
-                                                "duration",
-                                                e.target.value,
-                                              )
-                                            }
-                                            placeholder={t.rxDurationLabel}
-                                            className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-                                            data-testid={`rx-item-duration-${idx}`}
-                                          />
-                                        </label>
-                                        <Button
-                                          type="button"
-                                          size="sm"
-                                          variant="ghost"
-                                          disabled={rxItems.length <= 1}
-                                          onClick={() => removeRxItem(idx)}
-                                          data-testid={`rx-item-remove-${idx}`}
+                                    {rxItems.map((row, idx) => {
+                                      return (
+                                        <li
+                                          key={idx}
+                                          className="flex flex-wrap items-center gap-2"
+                                          data-testid="rx-item-row"
                                         >
-                                          {t.removeItemAction}
-                                        </Button>
-                                      </li>
-                                    ))}
+                                          <label className="flex-1 min-w-40">
+                                            <span className="sr-only">
+                                              {t.rxNameLabel}: {idx + 1}
+                                            </span>
+                                            <input
+                                              type="text"
+                                              value={row.name}
+                                              onChange={(e) =>
+                                                updateRxItem(
+                                                  idx,
+                                                  "name",
+                                                  e.target.value,
+                                                )
+                                              }
+                                              placeholder={t.rxNameLabel}
+                                              className="h-9 w-full rounded-md border border-hairline bg-surface px-3 text-sm text-txt focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                                              data-testid={`rx-item-name-${idx}`}
+                                            />
+                                          </label>
+                                          {/* The name is free text with no rule
+                                              (#657): real product names carry
+                                              digits. The three instruction
+                                              fields each refuse a bare number
+                                              through the shared field below. */}
+                                          {RX_INSTRUCTION_FIELDS.map(
+                                            (field) => {
+                                              const copy = rxFieldCopy(
+                                                t,
+                                                field,
+                                              );
+                                              return (
+                                                <RxInstructionField
+                                                  key={field}
+                                                  row={idx}
+                                                  field={field}
+                                                  label={copy.label}
+                                                  message={copy.message}
+                                                  value={row[field]}
+                                                  refused={rxRefuses(
+                                                    idx,
+                                                    field,
+                                                  )}
+                                                  onChange={(value) =>
+                                                    updateRxItem(
+                                                      idx,
+                                                      field,
+                                                      value,
+                                                    )
+                                                  }
+                                                  inputRef={(el) => {
+                                                    rxInputRefs.current[
+                                                      rxFieldKey(idx, field)
+                                                    ] = el;
+                                                  }}
+                                                />
+                                              );
+                                            },
+                                          )}
+                                          <Button
+                                            type="button"
+                                            size="sm"
+                                            variant="ghost"
+                                            disabled={rxItems.length <= 1}
+                                            onClick={() => removeRxItem(idx)}
+                                            data-testid={`rx-item-remove-${idx}`}
+                                          >
+                                            {t.removeItemAction}
+                                          </Button>
+                                        </li>
+                                      );
+                                    })}
                                   </ul>
                                 )}
 
@@ -1875,7 +2115,14 @@ export default function CaseWorkspacePage() {
                                   <Button
                                     type="submit"
                                     size="sm"
-                                    disabled={saving}
+                                    // #657: disabled while any row holds a
+                                    // bare number, so an invalid revision is
+                                    // never submitted - and never silently:
+                                    // each refused field states why beside its
+                                    // own input.
+                                    disabled={
+                                      saving || invalidRxFields.length > 0
+                                    }
                                     loading={saving}
                                     data-testid="save-revision-action"
                                   >

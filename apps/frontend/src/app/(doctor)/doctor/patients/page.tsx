@@ -7,8 +7,13 @@
 // each row deep-links into the per-patient detail view (US-11..US-19). Every
 // patient read goes through the gated detail API; the page renders exactly
 // what the backend answers. All copy bilingual en/hi (REQ-006).
+//
+// MOD-012 / FEAT-008 (#645/#651): each row is the shared DoctorListCard - a
+// card grid per bucket (multi-column at the large breakpoint, single column
+// below, US-68) built from the card/badge/avatar primitives, with the stage
+// tone+label from the shared map. Test ids, states, search, and the bounded
+// fetch are unchanged.
 
-import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
 import { ApiError } from "@/lib/api-errors";
@@ -17,9 +22,13 @@ import {
   type DoctorPatientBucket,
   type DoctorPatientRow,
 } from "@/lib/doctor/api";
+import { stageChipView } from "@/lib/doctor/stageChip";
 import { STRINGS, type Dictionary } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
-import { cn } from "@/lib/utils";
+import {
+  DoctorListCard,
+  type DoctorCardChip,
+} from "@/components/doctor/DoctorListCard";
 import { EmptyState } from "@/components/layout/EmptyState";
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -27,34 +36,29 @@ import { Skeleton } from "@/components/ui/skeleton";
 
 type LoadStatus = "loading" | "ready" | "error";
 
-// The row's latest case stage mirrors the care case stage enum (care/api.ts);
-// a stage we do not know renders as itself, like the cases index fallback.
-function stageLabel(stage: string, t: Dictionary["doctorConsole"]): string {
-  switch (stage) {
-    case "pre_summary":
-      return t.stagePreSummary;
-    case "prescription_pending":
-      return t.stagePrescriptionPending;
-    case "closed":
-      return t.stageClosed;
-    default:
-      return stage;
-  }
-}
+// The worded state for a patient with no open case (US-18): quiet surface
+// tone, never an empty chip - an absent stage must not read as an unknown one.
+const NO_CASE_STAGE_TONE = "bg-surface text-txt-muted";
 
 function LoadingSkeleton() {
   return (
-    <div className="space-y-3" data-testid="patients-skeleton">
+    <div
+      className="grid grid-cols-1 gap-4 lg:grid-cols-2"
+      data-testid="patients-skeleton"
+    >
       {Array.from({ length: 4 }).map((_, i) => (
         <div
           key={i}
-          className="flex items-center justify-between gap-3 rounded-lg border border-hairline bg-surface p-4"
+          className="rounded-lg border border-hairline bg-surface p-4"
         >
-          <div className="space-y-2">
-            <Skeleton className="h-4 w-32" />
-            <Skeleton className="h-5 w-24 rounded-full" />
+          <div className="flex items-start gap-3">
+            <Skeleton className="h-9 w-9 rounded-full" />
+            <div className="min-w-0 flex-1 space-y-2">
+              <Skeleton className="h-4 w-32" />
+              <Skeleton className="h-5 w-24 rounded-full" />
+            </div>
           </div>
-          <Skeleton className="h-5 w-16 rounded-full" />
+          <Skeleton className="mt-3 h-4 w-16" />
         </div>
       ))}
     </div>
@@ -67,67 +71,37 @@ interface PatientRowProps {
   consoleT: Dictionary["doctorConsole"];
 }
 
-function scopeBadges(
+function scopeChips(
   scopes: DoctorPatientRow["granted_scopes"],
   t: Dictionary["doctorPatients"],
-) {
-  return scopes.map((scope) => (
-    <span
-      key={scope}
-      data-testid={`patient-row-scope-${scope}`}
-      className="inline-flex items-center rounded-full bg-accent-soft px-2 py-0.5 text-xs font-medium text-accent-strong"
-    >
-      {t.scopeBadge[scope]}
-    </span>
-  ));
+): DoctorCardChip[] {
+  return scopes.map((scope) => ({
+    key: scope,
+    label: t.scopeBadge[scope],
+    testId: `patient-row-scope-${scope}`,
+  }));
 }
 
 function PatientRow({ row, t, consoleT }: PatientRowProps) {
+  const name = row.name ?? consoleT.patientFallback;
+  const stage =
+    row.latest_case_stage == null
+      ? { label: t.noCaseStage, tone: NO_CASE_STAGE_TONE }
+      : stageChipView(row.latest_case_stage, consoleT);
   return (
-    <li
-      data-testid="patient-row"
-      className="flex items-center justify-between gap-3 rounded-lg border border-hairline bg-surface p-4"
-    >
-      <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <span
-            className="text-sm font-medium text-txt"
-            data-testid="patient-row-name"
-          >
-            {row.name ?? consoleT.patientFallback}
-          </span>
-          {row.age != null && (
-            <span className="text-xs text-txt-muted">
-              {consoleT.patientAge(row.age)}
-            </span>
-          )}
-        </div>
-        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-          {row.granted_scopes.length > 0 && scopeBadges(row.granted_scopes, t)}
-          <span
-            data-testid="patient-row-stage"
-            className={cn(
-              "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
-              row.latest_case_stage == null
-                ? "bg-surface text-txt-muted"
-                : row.latest_case_stage === "pre_summary"
-                  ? "bg-warn-soft text-warn-text"
-                  : "bg-accent-soft text-accent-strong",
-            )}
-          >
-            {row.latest_case_stage == null
-              ? t.noCaseStage
-              : stageLabel(row.latest_case_stage, consoleT)}
-          </span>
-        </div>
-      </div>
-      <Link
+    <li data-testid="patient-row" className="min-w-0">
+      <DoctorListCard
         href={`/doctor/patients/${row.patient_id}`}
-        data-testid="patient-row-open"
-        className="inline-flex shrink-0 items-center rounded-md border border-hairline bg-surface px-3 py-1.5 text-xs font-medium text-txt-sub transition-colors hover:border-accent-border hover:bg-accent-soft hover:text-accent-strong"
-      >
-        {t.openPatientAction}
-      </Link>
+        name={name}
+        ageText={row.age != null ? consoleT.patientAge(row.age) : null}
+        chips={scopeChips(row.granted_scopes, t)}
+        stage={stage}
+        meta={t.openPatientAction}
+        accessibleName={t.openPatientNamed(name)}
+        nameTestId="patient-row-name"
+        stageTestId="patient-row-stage"
+        linkTestId="patient-row-open"
+      />
     </li>
   );
 }
@@ -155,7 +129,10 @@ function PatientGroup({ bucket, rows, t, consoleT }: PatientGroupProps) {
       {rows.length === 0 ? (
         <EmptyState title={emptyTitle} />
       ) : (
-        <ul data-testid={`patient-list-${bucket}`} className="space-y-2">
+        <ul
+          data-testid={`patient-list-${bucket}`}
+          className="grid grid-cols-1 items-stretch gap-4 lg:grid-cols-2"
+        >
           {rows.map((row) => (
             <PatientRow
               key={row.patient_id}

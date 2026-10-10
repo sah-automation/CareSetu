@@ -20,7 +20,7 @@ import {
   SheetDescription,
   SheetFooter,
 } from "@/components/ui/sheet";
-import { STRINGS } from "@/lib/i18n/dictionaries";
+import { STRINGS, type Lang } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { cn } from "@/lib/utils";
 import { ApiError } from "@/lib/api-errors";
@@ -34,6 +34,7 @@ import {
 import {
   counterpartyLabel,
   counterpartyInitials,
+  counterpartyRole,
 } from "@/lib/consent/consentView";
 import {
   REVOCATION_NOTICE_CLASS,
@@ -243,6 +244,7 @@ export default function ConsentLogPage() {
                     consent={c}
                     t={t}
                     locale={locale}
+                    lang={lang}
                     onRevoke={setRevokeTarget}
                   />
                 ))}
@@ -266,6 +268,7 @@ export default function ConsentLogPage() {
                     consent={c}
                     t={t}
                     locale={locale}
+                    lang={lang}
                     onRevoke={setRevokeTarget}
                   />
                 ))}
@@ -320,6 +323,8 @@ export default function ConsentLogPage() {
                           {counterpartyLabel(
                             entry.counterparty_type,
                             entry.counterparty_id,
+                            entry.counterparty_display_name,
+                            lang,
                           )}
                         </td>
                         <td className="whitespace-nowrap px-3 py-2 text-txt-muted">
@@ -395,13 +400,21 @@ interface ConsentCardProps {
   consent: ConsentView;
   t: (typeof STRINGS)["en"]["consentLog"];
   locale: string;
+  lang: Lang;
   onRevoke: (consent: ConsentView) => void;
 }
 
-function ConsentCard({ consent, t, locale, onRevoke }: ConsentCardProps) {
+function ConsentCard({ consent, t, locale, lang, onRevoke }: ConsentCardProps) {
   const label = counterpartyLabel(
     consent.counterparty_type,
     consent.counterparty_id,
+    consent.counterparty_display_name,
+    lang,
+  );
+  const role = counterpartyRole(
+    consent.counterparty_type,
+    consent.counterparty_id,
+    lang,
   );
   const initials = counterpartyInitials(label);
   const badgeKey = BADGE_KEY[consent.status] ?? "requested";
@@ -436,6 +449,12 @@ function ConsentCard({ consent, t, locale, onRevoke }: ConsentCardProps) {
         </span>
         <div className="min-w-0 flex-1">
           <strong className="text-base">{label}</strong>
+          {/* #654: the role in words is its own field - when the label itself
+              fell back to that word it is already said, so it stays hidden
+              rather than repeating. */}
+          {role !== null && role !== label && (
+            <p className="text-xs text-txt-muted">{role}</p>
+          )}
         </div>
         <span
           className={cn(
