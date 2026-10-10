@@ -6,6 +6,10 @@
 // `consultations` scope, loading and error states included - trace id and
 // retry affordance first among them, since that is the one path where a
 // retry can actually help.
+//
+// #682 (parent #673): the supplied-entry markup is the shared record-entry
+// renderer, so the per-type detail travels with the entry instead of the old
+// tag-plus-date line.
 
 import {
   cleanup,
@@ -13,6 +17,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -29,6 +34,7 @@ vi.mock("@/lib/record/api", async (importOriginal) => {
 
 const t = STRINGS.en.caseWorkspace;
 const notSharedT = STRINGS.en.doctorPatients;
+const recordT = STRINGS.en.record;
 const getHistory = vi.mocked(readConsentedHistory);
 
 function timeline(overrides: Partial<RecordTimeline> = {}): RecordTimeline {
@@ -40,7 +46,13 @@ function timeline(overrides: Partial<RecordTimeline> = {}): RecordTimeline {
       {
         entry_id: 11,
         entry_type: "prescription",
-        payload: {},
+        // #682: the fixture carries a real payload so the shared renderer's
+        // per-type detail is exercised, not just the fallback scan line.
+        payload: {
+          status: "active",
+          attributed_doctor_name: "Dr. A. Kumar",
+          items: [{ name: "Amlodipine", dose: "5 mg" }],
+        },
         occurred_at: "2026-09-01T00:00:00Z",
         created_at: "2026-09-01T00:00:00Z",
       },
@@ -62,7 +74,7 @@ afterEach(() => {
   __resetLangForTests();
 });
 
-describe("ConsentedHistory supplied timeline (#658)", () => {
+describe("ConsentedHistory supplied timeline (#658, #682)", () => {
   it("renders the supplied entries without a consented read of its own", () => {
     render(
       <ConsentedHistory patientId={3} partnerId={7} timeline={timeline()} />,
@@ -73,6 +85,24 @@ describe("ConsentedHistory supplied timeline (#658)", () => {
     expect(entries[0]).toHaveTextContent("Prescription");
     expect(entries[0]).toHaveTextContent(/\d{1,2} Sep?t? 2026/);
     expect(getHistory).not.toHaveBeenCalled();
+  });
+
+  it("renders the shared per-type detail for a supplied entry", () => {
+    render(
+      <ConsentedHistory patientId={3} partnerId={7} timeline={timeline()} />,
+    );
+
+    // #682 AC: the same renderer the patient-detail page uses, so a supplied
+    // entry carries its status, medicines and attributed doctor - not just a
+    // tag and a date.
+    const entry = screen.getAllByTestId("history-entry")[0];
+    const detail = within(entry).getByTestId("history-entry-detail");
+    expect(detail).toHaveTextContent(recordT.history.status);
+    expect(detail).toHaveTextContent(recordT.prescribedBy);
+    expect(detail).toHaveTextContent("Dr. A. Kumar");
+    expect(
+      within(entry).getByTestId("history-entry-medicine"),
+    ).toHaveTextContent("Amlodipine");
   });
 
   it("renders the empty note for a supplied timeline with no entries", () => {

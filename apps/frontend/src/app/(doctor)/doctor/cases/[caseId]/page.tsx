@@ -6,8 +6,10 @@
 // review requirement (if any), and splits the workspace into three inner tabs
 // (US-14, #484): Pre-summary - the original intake transcript + recording
 // playback plus the finalized AI summary and the consult-complete handshake
-// for pre_summary-stage cases; History - the patient's consented health
-// history; Prescription - the drafting/approval/close flow, gated by a stage
+// for pre_summary-stage cases; History - the patient's consented consultation
+// history plus the shared health background (#682), both fed by one console
+// detail projection read; Prescription - the drafting/approval/close flow,
+// gated by a stage
 // lock that names the pending consult-complete step on pre_summary cases and
 // jumps the doctor back to the handshake on the Pre-summary tab. For
 // prescription-pending cases it hosts prescription drafting (US-18): request
@@ -28,6 +30,7 @@ import { useParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ConsentedHistory } from "@/components/case/ConsentedHistory";
+import { HealthBackgroundBlock } from "@/components/doctor/HealthBackgroundBlock";
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -61,8 +64,10 @@ import {
   type RxItemView,
 } from "@/lib/care/api";
 import { fetchPartnerMe, type PartnerMeView } from "@/lib/partner/api";
-import { fetchDoctorPatientDetail } from "@/lib/doctor/api";
-import { type RecordTimeline } from "@/lib/record/api";
+import {
+  fetchDoctorPatientDetail,
+  type DoctorPatientDetailView,
+} from "@/lib/doctor/api";
 import { STRINGS, type Dictionary } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 
@@ -558,20 +563,22 @@ function LoadingSkeleton() {
   );
 }
 
-// #658 (one history read, #645 US-62): the console detail projection's
-// consultation history for the case patient - the very read the patient
-// profile renders, so the two doctor surfaces cannot disagree. Best-effort by
-// design: a failed projection read answers undefined instead of throwing, so
-// the workspace still opens and the history tab keeps the consented-history
-// component's own fail-closed consented read as its fallback. The degradation
-// is logged (error-handling-observability: a denied read is a calm lock, a
-// failed read is a logged warning - never a page failure).
-async function readConsoleConsultationHistory(
+// #658 (one history read, #645 US-62) + #682 (parent #673): the console
+// detail projection for the case patient - the very read the patient-detail
+// page renders, so the two doctor surfaces cannot disagree. Widened in #682
+// from the bare consultation history to the whole projection, because one
+// settled read now feeds both History-tab sections (consultation history and
+// health background) instead of only one. Best-effort by design: a failed
+// projection read answers undefined instead of throwing, so the workspace
+// still opens and the history tab keeps the consented-history component's
+// own fail-closed consented read as its fallback. The degradation is logged
+// (error-handling-observability: a denied read is a calm lock, a failed
+// read is a logged warning - never a page failure).
+async function readConsoleDetailProjection(
   patientId: number,
-): Promise<RecordTimeline | null | undefined> {
+): Promise<DoctorPatientDetailView | undefined> {
   try {
-    const detail = await fetchDoctorPatientDetail(patientId);
-    return detail.consultation_history;
+    return await fetchDoctorPatientDetail(patientId);
   } catch (err) {
     console.warn(
       "[case-workspace] console detail projection read failed:",
@@ -587,6 +594,11 @@ export default function CaseWorkspacePage() {
   const { lang } = useLang();
   const t = STRINGS[lang].caseWorkspace;
   const consoleT = STRINGS[lang].doctorConsole;
+  // #682: the health-background section reuses the doctorPatients label
+  // bundle - the same copy the patient-detail page renders, and the same the
+  // shared health-background block expects, so the two surfaces cannot drift
+  // and no new dictionary block is forked (REQ-006 parity holds as-is).
+  const patientsT = STRINGS[lang].doctorPatients;
 
   const [loadStatus, setLoadStatus] = useState<"loading" | "ready" | "error">(
     "loading",
@@ -597,20 +609,23 @@ export default function CaseWorkspacePage() {
   const [careCase, setCareCase] = useState<CaseDetailView | null>(null);
   const [doctorMe, setDoctorMe] = useState<PartnerMeView | null>(null);
 
-  // #658 (one history read, #645 US-62): the History tab renders the console
-  // detail projection's consultation history - the same read the patient
-  // profile renders - rather than a second, separately scoped view of the
-  // same patient. The read is best-effort and never gates the workspace:
-  // `patientHistory` holds the answer once `historyLoadState` settles - an
-  // array is the projection's answer, null is its denied section, and
-  // undefined means the projection read failed, leaving the
-  // consented-history component to its fail-closed consented read as the
-  // fallback. The tab mounts the component only once the read has settled,
-  // so the component's three-state contract is never raced by a live read.
-  const [patientHistory, setPatientHistory] = useState<
-    RecordTimeline | null | undefined
+  // #658 (one history read, #645 US-62) + #682: the History tab renders the
+  // console detail projection - the same read the patient-detail page
+  // renders - rather than a second, separately scoped view of the same
+  // patient. One settled projection feeds both sections: its
+  // `consultation_history` (array / denied null / failed undefined) drives
+  // ConsentedHistory's three-state contract, and its `health_background`
+  // drives the medical-history block. The read is best-effort and never
+  // gates the workspace: undefined means the projection read failed, leaving
+  // the consented-history component to its fail-closed consented read as the
+  // fallback and hiding the health-background section rather than claiming a
+  // denial the patient never gave. The tab mounts the sections only once the
+  // read has settled, so the components' contracts are never raced by a
+  // live read.
+  const [patientDetail, setPatientDetail] = useState<
+    DoctorPatientDetailView | undefined
   >(undefined);
-  const [historyLoadState, setHistoryLoadState] = useState<
+  const [detailLoadState, setDetailLoadState] = useState<
     "idle" | "loading" | "ready"
   >("idle");
 
@@ -749,25 +764,25 @@ export default function CaseWorkspacePage() {
     }
   }, []);
 
-  // #658: the one history source for both doctor surfaces. Best-effort and
-  // fire-and-forget like the other side reads - a slow or failed projection
-  // read must never hold the workspace open. The History tab gates on
-  // `historyLoadState` settling before it mounts the consented-history
-  // component, so a denied (null) or failed (undefined) answer is already the
-  // component's settled prop and never a mid-flight race.
-  const loadPatientHistory = useCallback(async (patientId: number) => {
-    setHistoryLoadState("loading");
-    const history = await readConsoleConsultationHistory(patientId);
-    setPatientHistory(history);
-    setHistoryLoadState("ready");
+  // #658 + #682: the one projection source for both doctor surfaces. Best-
+  // effort and fire-and-forget like the other side reads - a slow or failed
+  // projection read must never hold the workspace open. The History tab
+  // gates on `detailLoadState` settling before it mounts either section, so
+  // a denied (null) or failed (undefined) answer is already the components'
+  // settled prop and never a mid-flight race.
+  const loadPatientDetail = useCallback(async (patientId: number) => {
+    setDetailLoadState("loading");
+    const detail = await readConsoleDetailProjection(patientId);
+    setPatientDetail(detail);
+    setDetailLoadState("ready");
   }, []);
 
   const load = useCallback(() => {
     setLoadStatus("loading");
     setBannerOpen(false);
     setHandshakeError(false);
-    setPatientHistory(undefined);
-    setHistoryLoadState("idle");
+    setPatientDetail(undefined);
+    setDetailLoadState("idle");
 
     Promise.all([fetchCareCase(caseId), fetchPartnerMe()])
       .then(([c, me]) => {
@@ -792,14 +807,14 @@ export default function CaseWorkspacePage() {
         if (c.stage === "prescription_pending") {
           void loadWorkingRx();
         }
-        void loadPatientHistory(c.patient_id);
+        void loadPatientDetail(c.patient_id);
       })
       .catch((err: unknown) => {
         setErrorTraceId(err instanceof ApiError ? err.traceId : undefined);
         setLoadStatus("error");
         setBannerOpen(true);
       });
-  }, [caseId, loadWorkingRx, loadIntakeDetail, loadPatientHistory]);
+  }, [caseId, loadWorkingRx, loadIntakeDetail, loadPatientDetail]);
 
   useEffect(() => {
     load();
@@ -1565,29 +1580,58 @@ export default function CaseWorkspacePage() {
             className="space-y-6"
             data-testid="tab-panel-history"
           >
-            {/* The card mounts only once the projection read has settled
-                (#658): the component's three-state prop contract is fed a
-                finished answer - array, denied null, or failed undefined -
-                never a mid-flight read it would have to race. */}
-            {doctorMe != null && historyLoadState === "ready" && (
-              <section
-                className="rounded-lg border border-hairline bg-surface p-4"
-                data-testid="case-history"
-              >
-                <h2 className="text-sm font-semibold text-txt">
-                  {t.historyHeading}
-                </h2>
-                <p className="mt-1 text-xs text-txt-muted">
-                  {t.historyConsentNote}
-                </p>
-                <div className="mt-3">
-                  <ConsentedHistory
-                    patientId={careCase.patient_id}
-                    partnerId={doctorMe.partner_id}
-                    timeline={patientHistory}
-                  />
-                </div>
-              </section>
+            {/* Both cards mount only once the projection read has settled
+                (#658/#682): each component's contract is fed a finished
+                answer - array, denied null, or failed undefined - never a
+                mid-flight read it would have to race. */}
+            {doctorMe != null && detailLoadState === "ready" && (
+              <>
+                <section
+                  className="rounded-lg border border-hairline bg-surface p-4"
+                  data-testid="case-history"
+                >
+                  <h2 className="text-sm font-semibold text-txt">
+                    {t.historyHeading}
+                  </h2>
+                  <p className="mt-1 text-xs text-txt-muted">
+                    {t.historyConsentNote}
+                  </p>
+                  <div className="mt-3">
+                    <ConsentedHistory
+                      patientId={careCase.patient_id}
+                      partnerId={doctorMe.partner_id}
+                      timeline={patientDetail?.consultation_history}
+                    />
+                  </div>
+                </section>
+                {/* #682: the medical-history section rides the same settled
+                    projection read - one read feeds both sections, so the
+                    patient-detail page and this tab cannot disagree. The
+                    section hides entirely when the projection read failed
+                    (undefined): the workspace has no answer, and painting a
+                    lock would claim a denial the patient never gave. A
+                    settled null is the real not-shared, rendered by the
+                    shared block as its calm locked card. */}
+                {patientDetail !== undefined && (
+                  <section
+                    className="rounded-lg border border-hairline bg-surface p-4"
+                    data-testid="case-health-background"
+                  >
+                    <h2 className="text-sm font-semibold text-txt">
+                      {patientsT.healthBackgroundHeading}
+                    </h2>
+                    <p className="mt-1 text-xs text-txt-muted">
+                      {t.historyConsentNote}
+                    </p>
+                    <div className="mt-3">
+                      <HealthBackgroundBlock
+                        healthBackground={patientDetail.health_background}
+                        labels={patientsT}
+                      />
+                    </div>
+                  </section>
+                )}
+              </>
             )}
           </section>
 
