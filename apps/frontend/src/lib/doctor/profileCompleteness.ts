@@ -1,4 +1,5 @@
-// #678: the one spot that decides which profile fields a doctor has filled in.
+// MOD-012 / FEAT-008 (#678): the one spot that decides which profile fields a
+// doctor has filled in.
 // The dashboard's profile-status card (#678) and its getting-started checklist
 // (#674) are complementary views over the same four gaps (verified, fee, about
 // text, clinic name), so both derive their state from this single projection

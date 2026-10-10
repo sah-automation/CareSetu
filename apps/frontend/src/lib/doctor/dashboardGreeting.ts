@@ -1,4 +1,5 @@
-// #678: the greeting helpers for the doctor console landing - which part of the
+// MOD-012 / FEAT-008 (#678): the greeting helpers for the doctor console
+// landing - which part of the
 // day it is, the doctor's own name in first-name form with honorifics stripped,
 // and the localized date line that sits under the greeting.
 //

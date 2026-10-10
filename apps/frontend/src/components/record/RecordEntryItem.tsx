@@ -1,4 +1,5 @@
-// #677 (parent #673): the shared record-entry renderer. One presentational
+// MOD-012 / FEAT-008 (#677, parent #673): the shared record-entry renderer. One
+// presentational
 // <li> that renders a consultation-history entry - its type tag and date, plus
 // the per-type detail carried in the entry payload. The patient-detail
 // consultation history (#680) and the case workspace History tab via

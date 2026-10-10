@@ -209,7 +209,7 @@ function FeeSummaryCard({ feePaise }: { feePaise: number | null }) {
             {formatFeePaise(feePaise)}
           </p>
           <Link
-            href="/doctor/profile#fee-editor"
+            href={`/doctor/profile#${PROFILE_ANCHORS.fee}`}
             data-testid="fee-summary-edit"
             className="inline-flex items-center gap-1.5 rounded-md border border-hairline bg-surface px-3 py-1.5 text-xs font-medium text-txt-sub transition-colors hover:border-accent-border hover:bg-accent-soft hover:text-accent-strong"
           >
@@ -227,7 +227,7 @@ function FeeSummaryCard({ feePaise }: { feePaise: number | null }) {
           </p>
           <p className="text-sm text-txt-muted">{t.feeUnsetHelp}</p>
           <Link
-            href="/doctor/profile#fee-editor"
+            href={`/doctor/profile#${PROFILE_ANCHORS.fee}`}
             data-testid="fee-summary-edit"
             className="inline-flex items-center gap-1.5 rounded-md border border-hairline bg-surface px-3 py-1.5 text-xs font-medium text-txt-sub transition-colors hover:border-accent-border hover:bg-accent-soft hover:text-accent-strong"
           >
@@ -418,7 +418,7 @@ function KpiRow({
         />
         <KpiTile
           testId="kpi-consultation-fee"
-          href="/doctor/profile#fee-editor"
+          href={`/doctor/profile#${PROFILE_ANCHORS.fee}`}
           label={t.feeHeading}
           value={feeValue}
           pending={feeStatus === "loading"}

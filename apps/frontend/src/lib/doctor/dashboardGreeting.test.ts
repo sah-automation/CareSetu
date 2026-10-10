@@ -1,4 +1,4 @@
-// #678: the greeting helpers' focused unit suite. The time-of-day decision and
+// FEAT-008 (#678): the greeting helpers' focused unit suite. The time-of-day decision and
 // the honorific strip are pure, so each is driven with explicit dates and names
 // instead of fake timers at the page seam - the page-level suite only has to
 // assert that the greeting renders a name or does not.

@@ -1,4 +1,4 @@
-// #678: focused unit suite for profileCompleteness, the shared projection
+// FEAT-008 (#678): focused unit suite for profileCompleteness, the shared projection
 // behind the dashboard's profile-status card and getting-started checklist.
 
 import { describe, expect, it } from "vitest";
