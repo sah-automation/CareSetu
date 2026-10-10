@@ -1,8 +1,9 @@
 // PHASE-8.1 T13/T14/T15 (#451/#452/#453): case workspace route
 // (/doctor/cases/[caseId]) suite. Covers: the stage chip for open stages
 // (US-15), the forced-review requirement when the case demands one, the
-// patient history (#658: one read - the console detail projection's
-// consultation history, with the consented read kept as its fallback), the
+// patient history (#658: one read - the console detail projection, with the
+// consented read kept as its fallback; widened in #682 to feed the
+// medical-history section from the same settled read), the
 // consult-complete handshake for pre_summary-
 // stage cases (US-24), the closed terminal state, prescription drafting
 // (US-18/#452: request AI draft, edit items, save revision, refresh-reload
@@ -57,6 +58,7 @@ import { fetchPartnerMe, type PartnerMeView } from "@/lib/partner/api";
 import {
   fetchDoctorPatientDetail,
   type DoctorPatientDetailView,
+  type HealthBackgroundView,
 } from "@/lib/doctor/api";
 import { readConsentedHistory, type RecordTimeline } from "@/lib/record/api";
 
@@ -173,9 +175,10 @@ function me(): PartnerMeView {
   };
 }
 
-// The console detail projection (#658) - the same read the patient profile
-// renders. Its consultation_history is what the workspace History tab passes
-// down, so the fixture defaults to the shared timeline.
+// The console detail projection (#658, widened in #682) - the same read the
+// patient-detail page renders. Its consultation_history and health_background
+// together are what the workspace History tab passes down, so the fixture
+// defaults to the shared timeline and a denied background.
 function patientDetail(
   overrides: Partial<DoctorPatientDetailView> = {},
 ): DoctorPatientDetailView {
@@ -192,6 +195,25 @@ function patientDetail(
   };
 }
 
+// A shared, recorded health background - the block's "set" state (#679).
+function healthBackground(
+  overrides: Partial<HealthBackgroundView> = {},
+): HealthBackgroundView {
+  return {
+    set: true,
+    acknowledged: true,
+    background: {
+      blood_group: "O+",
+      conditions: ["Hypertension"],
+      allergies: ["Penicillin"],
+      medications: ["Amlodipine 5 mg"],
+      immunizations: ["Typhoid"],
+      family_history: ["Diabetes"],
+    },
+    ...overrides,
+  };
+}
+
 function timeline(): RecordTimeline {
   return {
     record_id: 1,
@@ -201,7 +223,21 @@ function timeline(): RecordTimeline {
       {
         entry_id: 11,
         entry_type: "prescription",
-        payload: {},
+        // #682: the shared renderer's per-type detail rides the same entry
+        // the tag-only markup used to render, so the fixture carries a real
+        // payload rather than an empty bag.
+        payload: {
+          status: "active",
+          attributed_doctor_name: "Dr. A. Kumar",
+          items: [
+            {
+              name: "Paracetamol",
+              dose: "500 mg",
+              frequency: "three times daily",
+              duration: "5 days",
+            },
+          ],
+        },
         occurred_at: "2026-09-01T00:00:00Z",
         created_at: "2026-09-01T00:00:00Z",
       },
@@ -414,8 +450,8 @@ describe("CaseWorkspacePage stage + forced review (US-15)", () => {
   });
 });
 
-describe("CaseWorkspacePage history single read (#658)", () => {
-  it("renders the console detail projection's consultation history", async () => {
+describe("CaseWorkspacePage History tab single read (#658, #682)", () => {
+  it("renders the projection's consultation history via the shared renderer", async () => {
     render(<CaseWorkspacePage />);
     await waitFor(() => screen.getByTestId("history-list"));
 
@@ -425,23 +461,41 @@ describe("CaseWorkspacePage history single read (#658)", () => {
       "history-entry",
     );
     expect(entry).toHaveTextContent("Prescription");
-    // Same information density as the patient profile (US-64): the entry
-    // carries its accent badge and its date, nothing fewer.
+    // Same information density as the patient-detail page (US-64, #682 AC-1):
+    // the entry carries its accent badge and its date, plus the shared
+    // renderer's per-type detail the tag-only markup used to drop.
     expect(within(entry).getByTestId("history-entry-type")).toHaveClass(
       "bg-accent-soft",
     );
     expect(entry).toHaveTextContent(/2026/);
+    const detail = within(entry).getByTestId("history-entry-detail");
+    expect(detail).toHaveTextContent(STRINGS.en.record.history.status);
+    expect(detail).toHaveTextContent("Dr. A. Kumar");
+    expect(
+      within(entry).getByTestId("history-entry-medicine"),
+    ).toHaveTextContent("Paracetamol");
   });
 
-  it("renders the calm not-shared note when the projection denies the section", async () => {
+  it("renders the calm not-shared card in both sections when the projection denies them", async () => {
     getPatientDetail.mockResolvedValue(
-      patientDetail({ consultation_history: null }),
+      patientDetail({ consultation_history: null, health_background: null }),
     );
 
     render(<CaseWorkspacePage />);
-    await waitFor(() => screen.getByTestId("locked-section"));
+    // Both sections answer the denial with the same calm card, so wait for
+    // the pair rather than a single getByTestId that would see two.
+    await waitFor(() =>
+      expect(screen.getAllByTestId("locked-section")).toHaveLength(2),
+    );
 
-    expect(screen.getByTestId("locked-section")).toHaveTextContent(
+    const historyCard = within(screen.getByTestId("case-history"));
+    expect(historyCard.getByTestId("locked-section")).toHaveTextContent(
+      STRINGS.en.doctorPatients.notSharedTitle,
+    );
+    // #682 AC-4: a denied health background is the same calm lock in the
+    // medical-history section, never an error and never a leak.
+    const healthCard = within(screen.getByTestId("case-health-background"));
+    expect(healthCard.getByTestId("locked-section")).toHaveTextContent(
       STRINGS.en.doctorPatients.notSharedTitle,
     );
     expect(screen.queryByTestId("history-error")).not.toBeInTheDocument();
@@ -471,6 +525,12 @@ describe("CaseWorkspacePage history single read (#658)", () => {
     expect(
       within(screen.getByTestId("case-history")).getByText("Prescription"),
     ).toBeTruthy();
+    // #682 AC-5: the failed projection hides the medical-history section
+    // entirely - a lock would claim a denial the patient never gave - while
+    // the history section still answers through its fail-closed fallback.
+    expect(
+      screen.queryByTestId("case-health-background"),
+    ).not.toBeInTheDocument();
   });
 
   it("shows a denial-safe empty state when the projection reports no history", async () => {
@@ -490,6 +550,57 @@ describe("CaseWorkspacePage history single read (#658)", () => {
 
     expect(screen.queryByTestId("history-list")).not.toBeInTheDocument();
     expect(getHistory).not.toHaveBeenCalled();
+  });
+
+  it("renders the medical-history section from the same projection read", async () => {
+    getPatientDetail.mockResolvedValue(
+      patientDetail({ health_background: healthBackground() }),
+    );
+
+    render(<CaseWorkspacePage />);
+    await waitFor(() => screen.getByTestId("health-background-set"));
+
+    // #682 AC-2/AC-3: one settled read feeds both sections - no second
+    // fetch, and the consented read is never touched.
+    expect(getPatientDetail).toHaveBeenCalledTimes(1);
+    expect(getHistory).not.toHaveBeenCalled();
+    // The history section still renders from the same answer.
+    expect(screen.getByTestId("history-list")).toBeInTheDocument();
+
+    const section = screen.getByTestId("case-health-background");
+    expect(section).toHaveTextContent(
+      STRINGS.en.doctorPatients.healthBackgroundHeading,
+    );
+    const set = screen.getByTestId("health-background-set");
+    expect(set).toHaveTextContent("O+");
+    expect(set).toHaveTextContent("Hypertension");
+    expect(set).toHaveTextContent("Penicillin");
+  });
+
+  it("renders the quiet empty state for a shared but unrecorded background", async () => {
+    getPatientDetail.mockResolvedValue(
+      patientDetail({
+        health_background: {
+          set: false,
+          acknowledged: false,
+          background: null,
+        },
+      }),
+    );
+
+    render(<CaseWorkspacePage />);
+    await waitFor(() => screen.getByTestId("health-background-empty"));
+
+    // #682 AC-4: shared-but-nothing-recorded is the quiet empty note, kept
+    // distinct from the not-shared lock above it.
+    expect(
+      screen.getByText(STRINGS.en.doctorPatients.healthBackgroundEmpty),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("case-health-background")).queryByTestId(
+        "locked-section",
+      ),
+    ).not.toBeInTheDocument();
   });
 });
 
@@ -1961,6 +2072,11 @@ describe("CaseWorkspacePage bilingual parity (REQ-006)", () => {
     expect(screen.getByText(hiT.title)).toBeInTheDocument();
     expect(screen.getByTestId("case-history")).toHaveTextContent(
       hiT.historyHeading,
+    );
+    // #682: the medical-history section's copy is the shared doctorPatients
+    // bundle, so it flips with the locale like everything around it.
+    expect(screen.getByTestId("case-health-background")).toHaveTextContent(
+      STRINGS.hi.doctorPatients.healthBackgroundHeading,
     );
     // PHASE-8.1 #484: the inner tabs + transcript surface flip langs too.
     expect(screen.getByRole("tab", { name: hiT.tabPreSummary })).toBeTruthy();

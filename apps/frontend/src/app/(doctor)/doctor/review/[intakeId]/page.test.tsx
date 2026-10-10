@@ -174,9 +174,12 @@ function timeline(): RecordTimeline {
         created_at: "2026-09-01T00:00:00Z",
       },
       {
+        // #682: ConsentedHistory now renders through the shared record-entry
+        // renderer, so the review surface gains per-type detail too. The lab
+        // entry carries a real payload to prove it.
         entry_id: 12,
         entry_type: "lab_report",
-        payload: {},
+        payload: { filename: "cbc-panel.pdf", order_id: 1042 },
         occurred_at: "2026-08-15T00:00:00Z",
         created_at: "2026-08-15T00:00:00Z",
       },
@@ -510,6 +513,19 @@ describe("ReviewWorkspacePage consented history", () => {
     expect(screen.getAllByTestId("history-entry")).toHaveLength(2);
     expect(screen.getByText("Consultation")).toBeTruthy();
     expect(screen.getByText("Lab result")).toBeTruthy();
+  });
+
+  it("renders the shared per-type detail the adopted renderer carries", async () => {
+    render(<ReviewWorkspacePage />);
+    await waitFor(() => screen.getByTestId("history-list"));
+
+    // #682: adopting the shared renderer inside ConsentedHistory upgrades
+    // this surface too - the lab entry now shows its file and order, not
+    // just a tag and a date.
+    const detail = screen.getByTestId("history-entry-detail");
+    expect(detail).toHaveTextContent(STRINGS.en.record.history.file);
+    expect(detail).toHaveTextContent("cbc-panel.pdf");
+    expect(detail).toHaveTextContent("#1042");
   });
 
   it("shows a denial-safe empty state when consent yields no history", async () => {

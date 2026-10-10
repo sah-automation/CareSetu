@@ -17,48 +17,25 @@
 //               not-shared note and fetch nothing. Routing null through the
 //               error branch would put a trace id and a retry button on a
 //               screen where retrying cannot help, so it never reaches it.
+//
+// #682 (parent #673): the rendered entries use the shared record-entry
+// renderer (#677) - the same per-type detail the patient-detail page renders
+// - so this component's other consumer (the review workspace) gains the
+// richer history in the same step and the two doctor surfaces cannot drift.
 
 import { useCallback, useEffect, useState } from "react";
 
 import { NotSharedCard } from "@/components/doctor/NotSharedCard";
+import { RecordEntryItem } from "@/components/record/RecordEntryItem";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ApiError } from "@/lib/api-errors";
-import {
-  readConsentedHistory,
-  type RecordEntryType,
-  type RecordTimeline,
-} from "@/lib/record/api";
-import { STRINGS, type Dictionary } from "@/lib/i18n/dictionaries";
+import { readConsentedHistory, type RecordTimeline } from "@/lib/record/api";
+import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 
 export const HISTORY_SCOPE = "consultations";
 
 type HistoryStatus = "idle" | "loading" | "ready" | "error";
-
-function entryBadgeLabel(
-  entryType: string,
-  t: Dictionary["record"]["badge"],
-): string {
-  switch (entryType) {
-    case "consultation":
-    case "prescription":
-    case "metric":
-    case "settlement":
-      return t[entryType];
-    case "lab_report":
-      return t.labReport;
-    default:
-      return entryType;
-  }
-}
-
-export function formatHistoryDate(iso: string, lang: "en" | "hi"): string {
-  return new Intl.DateTimeFormat(lang === "hi" ? "hi-IN" : "en-IN", {
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-  }).format(new Date(iso));
-}
 
 export function ConsentedHistory({
   patientId,
@@ -71,7 +48,7 @@ export function ConsentedHistory({
 }) {
   const { lang } = useLang();
   const t = STRINGS[lang].caseWorkspace;
-  const badgeT = STRINGS[lang].record.badge;
+  const recordT = STRINGS[lang].record;
   const notSharedT = STRINGS[lang].doctorPatients;
 
   const [fetchedTimeline, setFetchedTimeline] = useState<RecordTimeline | null>(
@@ -168,27 +145,21 @@ export function ConsentedHistory({
     );
   }
 
-  // Entry markup mirrors the patient profile's consultation-history block
-  // (#645 US-64): same accent badge, same date, same fields per entry, so
-  // moving between the two doctor surfaces teaches nothing new.
+  // Entries render through the shared record-entry renderer (#677/#682):
+  // same accent badge, same date, plus the per-type detail the patient
+  // profile renders, so moving between the two doctor surfaces teaches
+  // nothing new. The `history-entry` test id and its `-type` derivative are
+  // the pre-existing hooks, now supplied via the renderer's `testId`.
   return (
     <ul className="space-y-2" data-testid="history-list">
       {shown.entries.map((entry, index) => (
-        <li
+        <RecordEntryItem
           key={entry.entry_id ?? index}
-          data-testid="history-entry"
-          className="flex items-center justify-between gap-3 rounded-md border border-hairline bg-surface px-3 py-2"
-        >
-          <span
-            data-testid="history-entry-type"
-            className="inline-flex items-center rounded-full bg-accent-soft px-2 py-0.5 text-xs font-medium text-accent-strong"
-          >
-            {entryBadgeLabel(entry.entry_type as RecordEntryType, badgeT)}
-          </span>
-          <span className="text-xs text-txt-muted">
-            {formatHistoryDate(entry.occurred_at, lang)}
-          </span>
-        </li>
+          entry={entry}
+          labels={recordT}
+          lang={lang}
+          testId="history-entry"
+        />
       ))}
     </ul>
   );
