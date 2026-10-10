@@ -1,4 +1,4 @@
-// #677 (parent #673): the shared record-entry renderer. These tests pin the
+// FEAT-008 (#677, parent #673): the shared record-entry renderer. These tests pin the
 // presentational contract: the scan line (type tag + date) every entry keeps,
 // the per-type detail for prescription/lab_report/settlement, the defensive
 // fallback for consultation/metric/unknown/empty payloads, and the absence of

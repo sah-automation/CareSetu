@@ -1,4 +1,5 @@
-// #679 (parent #673): the read-only health-background block both doctor
+// MOD-012 / FEAT-008 (#679, parent #673): the read-only health-background block
+// both doctor
 // surfaces render - the patient-detail profile and (from #682) the case
 // workspace History tab. One presentational component means the two surfaces
 // cannot drift into different renderings of the same facts. It takes the

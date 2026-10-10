@@ -1,4 +1,4 @@
-// #676 / #652: the shared relative "updated" line. One helper for the cases
+// FEAT-008 (#676 / #652): the shared relative "updated" line. One helper for the cases
 // index and the dashboard's open-cases section, so the two surfaces date the
 // same case the same way. Pins every granularity bucket, the sub-minute case,
 // an unparseable timestamp (drops the line rather than lying), and Hindi.

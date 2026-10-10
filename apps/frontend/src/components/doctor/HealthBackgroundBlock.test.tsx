@@ -1,4 +1,4 @@
-// #679 (parent #673): the shared read-only health-background block. Pins the
+// FEAT-008 (#679, parent #673): the shared read-only health-background block. Pins the
 // three states - populated (blood group plus five chip areas, empty granted
 // areas rendering the plain "None recorded" text), shared-but-empty (the quiet
 // "No health background shared yet." note), and not-shared (the calm locked

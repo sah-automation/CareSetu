@@ -550,7 +550,7 @@ describe("DoctorDashboardPage workload KPI row (#681)", () => {
     );
     expect(screen.getByTestId("kpi-consultation-fee")).toHaveAttribute(
       "href",
-      "/doctor/profile#fee-editor",
+      "/doctor/profile#profile-section-fee",
     );
   });
 
@@ -668,7 +668,7 @@ describe("DoctorDashboardPage consultation-fee summary (#544)", () => {
     expect(screen.getByTestId("fee-summary-value")).toHaveTextContent("₹500");
     expect(screen.getByTestId("fee-summary-edit")).toHaveAttribute(
       "href",
-      "/doctor/profile#fee-editor",
+      "/doctor/profile#profile-section-fee",
     );
     expect(screen.getByTestId("fee-summary")).toHaveTextContent(t.feeHeading);
   });
