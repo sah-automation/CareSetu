@@ -647,7 +647,7 @@ describe("DoctorDashboardPage workload KPI row (#681)", () => {
     getCases.mockRejectedValue(new Error("boom"));
     render(<DoctorDashboardPage />);
 
-    await waitFor(() => screen.getByTestId("error-banner"));
+    await waitFor(() => screen.getByTestId("queue-error"));
 
     expect(screen.getByTestId("kpi-open-cases-value")).toHaveTextContent(
       "\u2014",
@@ -1153,39 +1153,88 @@ describe("DoctorDashboardPage profile-status card (#678)", () => {
   });
 });
 
-describe("DoctorDashboardPage failure paths", () => {
-  it("shows a retryable error banner when the feeds fail", async () => {
-    getQueue.mockRejectedValue(
-      new ApiError({
-        code: "INTERNAL_ERROR",
-        message: "boom",
-        trace_id: "trace-st999001",
-        details: {},
-      }),
-    );
+describe("DoctorDashboardPage per-section resilient loading (#683)", () => {
+  it("shows a skeleton in each section while its read is in flight", () => {
+    getQueue.mockReturnValue(new Promise(() => {}));
+    getCases.mockReturnValue(new Promise(() => {}));
     render(<DoctorDashboardPage />);
-    await waitFor(() => screen.getByTestId("error-banner"));
-    expect(screen.getByText(t.loadFailed)).toBeTruthy();
+
+    expect(screen.getByTestId("queue-skeleton")).toBeInTheDocument();
+    expect(screen.getByTestId("cases-skeleton")).toBeInTheDocument();
   });
 
-  it("retries both feeds from the error state", async () => {
-    getQueue.mockRejectedValueOnce(
-      new ApiError({
-        code: "INTERNAL_ERROR",
-        message: "boom",
-        trace_id: "t",
-        details: {},
-      }),
-    );
+  it("degrades only the failed feed's section, never blanking the page", async () => {
+    getQueue.mockRejectedValue(new Error("boom"));
     render(<DoctorDashboardPage />);
-    await waitFor(() => screen.getByTestId("error-banner"));
+
+    await waitFor(() => screen.getByTestId("queue-error"));
+    expect(screen.getByTestId("queue-error")).toHaveTextContent(
+      t.queueLoadFailed,
+    );
+    // The healthy open-cases section still renders and no page banner appears.
+    expect(
+      within(screen.getByTestId("open-cases")).getByTestId("empty-state"),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("error-banner")).not.toBeInTheDocument();
+  });
+
+  it("keeps the review queue when only the cases read fails", async () => {
+    getCases.mockRejectedValue(new Error("boom"));
+    getQueue.mockResolvedValue([queueItem()]);
+    render(<DoctorDashboardPage />);
+
+    await waitFor(() => screen.getByTestId("cases-error"));
+    expect(screen.getByTestId("cases-error")).toHaveTextContent(
+      t.casesLoadFailed,
+    );
+    expect(screen.getByTestId("queue-item")).toBeInTheDocument();
+    expect(screen.queryByTestId("error-banner")).not.toBeInTheDocument();
+  });
+
+  it("retries only the failed section from its own fallback", async () => {
+    getCases.mockRejectedValueOnce(new Error("offline"));
+    render(<DoctorDashboardPage />);
+    await waitFor(() => screen.getByTestId("cases-error"));
+
+    getCases.mockResolvedValue(casesView(caseItem(11)));
+    fireEvent.click(screen.getByTestId("cases-retry"));
+
+    await waitFor(() => screen.getByTestId("case-item"));
+    expect(getCases).toHaveBeenCalledTimes(2);
+    // The scoped retry leaves the healthy queue read alone.
+    expect(getQueue).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries the review queue from its own fallback", async () => {
+    getQueue.mockRejectedValueOnce(new Error("offline"));
+    render(<DoctorDashboardPage />);
+    await waitFor(() => screen.getByTestId("queue-error"));
 
     getQueue.mockResolvedValue([queueItem()]);
-    getCases.mockResolvedValue(casesView(caseItem(11)));
+    fireEvent.click(screen.getByTestId("queue-retry"));
 
-    fireEvent.click(screen.getByTestId("error-banner-retry"));
     await waitFor(() => screen.getByTestId("queue-item"));
     expect(getQueue).toHaveBeenCalledTimes(2);
+    // The scoped retry leaves the healthy cases read alone.
+    expect(getCases).toHaveBeenCalledTimes(1);
+  });
+
+  it("carries the per-section failure copy into Hindi (REQ-006)", async () => {
+    getQueue.mockRejectedValue(new Error("offline"));
+    getCases.mockRejectedValue(new Error("offline"));
+    render(<LangFlipHost />);
+    await waitFor(() => screen.getByTestId("queue-error"));
+
+    fireEvent.click(screen.getByText("flip-lang"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("queue-error")).toHaveTextContent(
+        hiT.queueLoadFailed,
+      ),
+    );
+    expect(screen.getByTestId("cases-error")).toHaveTextContent(
+      hiT.casesLoadFailed,
+    );
   });
 });
 

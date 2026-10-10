@@ -31,6 +31,14 @@
 // ledger-writing read (page 1, page size 1, its returned total) that degrades
 // to an em dash on failure rather than failing the page. The quick-actions row
 // carries Patients, My cases and Profile.
+//
+// #683 (MOD-012 / FEAT-008): the review queue and open-cases sections are
+// restyled onto the same card/badge idioms as the rest of the landing (shared
+// Badge chips, the WARN_TONE verify chip, `mt-6` section rhythm). The two feed
+// reads are also split apart: each section owns its own loading/ready/error
+// status and retry (the isolated fee read's pattern), so a failure degrades
+// only that section - the page-wide feed banner is gone and a partial outage
+// never blanks the whole page (US-19).
 
 import Link from "next/link";
 import {
@@ -49,10 +57,8 @@ import { Button } from "@/components/ui/button";
 import { DoctorCaseCard } from "@/components/doctor/DoctorCaseCard";
 import { VerifiedBadge } from "@/components/doctor/profile/VerifiedBadge";
 import { EmptyState } from "@/components/layout/EmptyState";
-import { ErrorBanner } from "@/components/layout/ErrorBanner";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
-import { ApiError } from "@/lib/api-errors";
 import {
   fetchDoctorProfile,
   listDoctorCases,
@@ -66,6 +72,7 @@ import {
   greetingTimeText,
 } from "@/lib/doctor/dashboardGreeting";
 import { profileCompleteness } from "@/lib/doctor/profileCompleteness";
+import { WARN_TONE } from "@/lib/doctor/stageChip";
 import { specialtyLabel } from "@/lib/directory/specialtyLabel";
 import { fetchReviewQueue, type ReviewQueueItem } from "@/lib/intake/api";
 import { PROFILE_ANCHORS } from "@/components/doctor/profile/ProfileSectionIndex";
@@ -105,19 +112,49 @@ function sortQueue(items: ReviewQueueItem[]): ReviewQueueItem[] {
 
 // ---- sub-components ----
 
-function LoadingSkeleton() {
+// #683: per-section skeletons. Each mirrors the section it stands in for so the
+// page does not jump when the read settles - the review queue is a stacked list
+// of triage rows, the open-cases section is the same single-column-below-lg
+// grid of case cards the ready state renders.
+function QueueSkeleton() {
   return (
-    <div className="space-y-3" data-testid="queue-skeleton">
+    <div className="mt-2 space-y-3" data-testid="queue-skeleton">
       {Array.from({ length: 3 }).map((_, i) => (
         <div
           key={i}
-          className="flex items-center justify-between gap-3 rounded-lg border border-hairline bg-surface p-4"
+          className="flex items-center justify-between gap-3 rounded-lg border border-hairline-soft p-4"
         >
           <div className="space-y-2">
             <Skeleton className="h-4 w-32" />
             <Skeleton className="h-5 w-24 rounded-full" />
           </div>
           <Skeleton className="h-5 w-16 rounded-full" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function CasesSkeleton() {
+  return (
+    <div
+      className="mt-2 grid grid-cols-1 items-stretch gap-4 lg:grid-cols-2"
+      data-testid="cases-skeleton"
+    >
+      {Array.from({ length: 2 }).map((_, i) => (
+        <div
+          key={i}
+          data-testid="cases-skeleton-card"
+          className="rounded-lg border border-hairline bg-surface p-4"
+        >
+          <div className="flex items-start gap-3">
+            <Skeleton className="h-9 w-9 shrink-0 rounded-full" />
+            <div className="min-w-0 flex-1 space-y-2">
+              <Skeleton className="h-4 w-1/2" />
+              <Skeleton className="h-4 w-1/3" />
+              <Skeleton className="h-3 w-2/3" />
+            </div>
+          </div>
         </div>
       ))}
     </div>
@@ -234,6 +271,45 @@ function FeeSummaryError({ onRetry }: { onRetry: () => void }) {
   );
 }
 
+// #683: the per-section fallback for a failed feed read. Modelled on the fee
+// card's error state, but rendered inside a section rather than as its own
+// card: the section keeps its heading, and only the body swaps to this message
+// plus a retry scoped to that one read. A failed read therefore never blanks
+// its section, and never touches a healthy sibling section.
+function SectionError({
+  message,
+  onRetry,
+  testId,
+  retryTestId,
+}: {
+  message: string;
+  onRetry: () => void;
+  testId: string;
+  retryTestId: string;
+}) {
+  const { lang } = useLang();
+  const t = STRINGS[lang].doctorConsole;
+
+  return (
+    <div
+      className="mt-3 flex items-center justify-between gap-3"
+      data-testid={testId}
+    >
+      <p className="text-sm text-danger" role="alert">
+        {message}
+      </p>
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={onRetry}
+        data-testid={retryTestId}
+      >
+        {t.retry}
+      </Button>
+    </div>
+  );
+}
+
 // #681: the workload KPI row. Four tiles, each a whole-card link to the page it
 // summarises (US-3..7): open care cases, pre-summaries awaiting review, current
 // patients and the consultation fee. The counts read the same state the
@@ -283,16 +359,18 @@ function KpiTile({
 }
 
 function KpiRow({
-  feedStatus,
+  casesStatus,
   casesCount,
+  queueStatus,
   queueCount,
   patientsStatus,
   patientsCount,
   feeStatus,
   feePaise,
 }: {
-  feedStatus: LoadStatus;
+  casesStatus: LoadStatus;
   casesCount: number;
+  queueStatus: LoadStatus;
   queueCount: number;
   patientsStatus: LoadStatus;
   patientsCount: number;
@@ -302,7 +380,8 @@ function KpiRow({
   const { lang } = useLang();
   const t = STRINGS[lang].doctorConsole;
 
-  const feedValue = (n: number) => (feedStatus === "ready" ? String(n) : DASH);
+  const feedValue = (status: LoadStatus, n: number) =>
+    status === "ready" ? String(n) : DASH;
   const patientsValue =
     patientsStatus === "ready" ? String(patientsCount) : DASH;
   const feeValue =
@@ -320,15 +399,15 @@ function KpiRow({
           testId="kpi-open-cases"
           href="/doctor/cases"
           label={t.casesHeading}
-          value={feedValue(casesCount)}
-          pending={feedStatus === "loading"}
+          value={feedValue(casesStatus, casesCount)}
+          pending={casesStatus === "loading"}
         />
         <KpiTile
           testId="kpi-awaiting-review"
           href="/doctor#review-queue"
           label={t.kpiAwaitingReview}
-          value={feedValue(queueCount)}
-          pending={feedStatus === "loading"}
+          value={feedValue(queueStatus, queueCount)}
+          pending={queueStatus === "loading"}
         />
         <KpiTile
           testId="kpi-current-patients"
@@ -689,24 +768,24 @@ function GettingStartedChecklist({ profile }: { profile: DoctorProfileView }) {
 }
 
 function ReviewQueueCard({
-  queue,
   sortedQueue,
-  loadStatus,
+  status,
+  onRetry,
 }: {
-  queue: ReviewQueueItem[];
   sortedQueue: ReviewQueueItem[];
-  loadStatus: LoadStatus;
+  status: LoadStatus;
+  onRetry: () => void;
 }) {
   const { lang } = useLang();
   const t = STRINGS[lang].doctorConsole;
 
-  const queueReady = loadStatus === "ready";
+  const queueReady = status === "ready";
   const queueEmpty = queueReady && sortedQueue.length === 0;
 
   return (
     <section
       id="review-queue"
-      className="rounded-lg border border-hairline bg-surface p-4"
+      className="mt-6 rounded-lg border border-hairline bg-surface p-4"
       data-testid="review-queue"
     >
       <div className="mb-2 flex items-center justify-between gap-2">
@@ -714,16 +793,25 @@ function ReviewQueueCard({
           {t.queueHeading}
         </h2>
         {queueReady && sortedQueue.length > 0 && (
-          <span
+          <Badge
             data-testid="queue-count"
-            className="inline-flex items-center rounded-full bg-accent-soft px-2 py-0.5 text-xs font-medium text-accent-strong"
+            className="bg-accent-soft text-accent-strong"
           >
             {sortedQueue.length}
-          </span>
+          </Badge>
         )}
       </div>
 
-      {loadStatus === "loading" && <LoadingSkeleton />}
+      {status === "loading" && <QueueSkeleton />}
+
+      {status === "error" && (
+        <SectionError
+          message={t.queueLoadFailed}
+          onRetry={onRetry}
+          testId="queue-error"
+          retryTestId="queue-retry"
+        />
+      )}
 
       {queueEmpty && (
         <EmptyState title={t.queueEmpty} body={t.queueEmptyBody} />
@@ -738,66 +826,64 @@ function ReviewQueueCard({
               className="flex flex-col gap-3 min-[720px]:flex-row min-[720px]:items-center min-[720px]:justify-between border-t border-hairline-soft py-3 first:border-t-0 first:pt-0 last:pb-0"
             >
               <div className="min-w-0 flex-1 space-y-1">
-                <div className="min-w-0 flex-1 space-y-1">
-                  <div className="flex flex-wrap items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span
+                    className="text-sm font-medium text-txt"
+                    data-testid="queue-item-title"
+                  >
+                    {item.patient_name ?? t.patientFallback}
+                  </span>
+                  {item.patient_age != null && (
                     <span
-                      className="text-sm font-medium text-txt"
-                      data-testid="queue-item-title"
+                      className="text-xs text-txt-muted"
+                      data-testid="queue-item-age"
                     >
-                      {item.patient_name ?? t.patientFallback}
+                      {t.patientAge(item.patient_age)}
                     </span>
-                    {item.patient_age != null && (
-                      <span
-                        className="text-xs text-txt-muted"
-                        data-testid="queue-item-age"
-                      >
-                        {t.patientAge(item.patient_age)}
-                      </span>
-                    )}
-                    {item.low_confidence && (
-                      <span
-                        data-testid="queue-item-verify"
-                        className="inline-flex items-center rounded-full bg-warn-soft px-2 py-0.5 text-xs font-medium text-warn-text"
-                      >
-                        {t.verifyChip}
-                      </span>
-                    )}
-                    <span
-                      data-testid="queue-item-sections"
-                      className="inline-flex items-center rounded-full bg-accent-soft px-2 py-0.5 text-xs font-medium text-accent-strong"
-                    >
-                      {t.sectionsCount(item.section_count)}
-                    </span>
-                  </div>
-                  {item.snippet != null && item.snippet.length > 0 && (
-                    <p
-                      data-testid="queue-item-snippet"
-                      className="line-clamp-2 text-xs text-txt-muted"
-                    >
-                      {item.snippet}
-                    </p>
                   )}
-                  <div className="flex flex-wrap items-center gap-3 text-xs text-txt-muted">
-                    <span data-testid="queue-item-intake">
-                      {t.queueItemMeta(item.intake_id)}
-                    </span>
-                    <span data-testid="queue-item-confidence">
-                      {t.confidenceLabel}:{" "}
-                      {confidenceDisplay(item.structuring_confidence, t)}
-                    </span>
-                    <span data-testid="queue-item-waiting">
-                      {t.waitingFor(waitingSince(item.created_at))}
-                    </span>
-                  </div>
+                  {item.low_confidence && (
+                    <Badge
+                      data-testid="queue-item-verify"
+                      className={WARN_TONE}
+                    >
+                      {t.verifyChip}
+                    </Badge>
+                  )}
+                  <Badge
+                    data-testid="queue-item-sections"
+                    className="bg-accent-soft text-accent-strong"
+                  >
+                    {t.sectionsCount(item.section_count)}
+                  </Badge>
                 </div>
-                <Link
-                  href={`/doctor/review/${item.intake_id}`}
-                  data-testid="queue-item-review"
-                  className="inline-flex shrink-0 items-center justify-center w-full rounded-md border border-hairline bg-surface px-3 py-1.5 text-xs font-medium text-txt-sub transition-colors hover:border-accent-border hover:bg-accent-soft hover:text-accent-strong min-[720px]:w-auto"
-                >
-                  {t.reviewAction}
-                </Link>
+                {item.snippet != null && item.snippet.length > 0 && (
+                  <p
+                    data-testid="queue-item-snippet"
+                    className="line-clamp-2 text-xs text-txt-muted"
+                  >
+                    {item.snippet}
+                  </p>
+                )}
+                <div className="flex flex-wrap items-center gap-3 text-xs text-txt-muted">
+                  <span data-testid="queue-item-intake">
+                    {t.queueItemMeta(item.intake_id)}
+                  </span>
+                  <span data-testid="queue-item-confidence">
+                    {t.confidenceLabel}:{" "}
+                    {confidenceDisplay(item.structuring_confidence, t)}
+                  </span>
+                  <span data-testid="queue-item-waiting">
+                    {t.waitingFor(waitingSince(item.created_at))}
+                  </span>
+                </div>
               </div>
+              <Link
+                href={`/doctor/review/${item.intake_id}`}
+                data-testid="queue-item-review"
+                className="inline-flex shrink-0 items-center justify-center w-full rounded-md border border-hairline bg-surface px-3 py-1.5 text-xs font-medium text-txt-sub transition-colors hover:border-accent-border hover:bg-accent-soft hover:text-accent-strong min-[720px]:w-auto"
+              >
+                {t.reviewAction}
+              </Link>
             </li>
           ))}
         </ul>
@@ -808,15 +894,17 @@ function ReviewQueueCard({
 
 function OpenCasesCard({
   cases,
-  loadStatus,
+  status,
+  onRetry,
 }: {
   cases: DoctorCaseRow[];
-  loadStatus: LoadStatus;
+  status: LoadStatus;
+  onRetry: () => void;
 }) {
   const { lang } = useLang();
   const t = STRINGS[lang].doctorConsole;
 
-  const casesEmpty = loadStatus === "ready" && cases.length === 0;
+  const casesEmpty = status === "ready" && cases.length === 0;
 
   return (
     <section
@@ -827,23 +915,32 @@ function OpenCasesCard({
         <h2 className="text-[1.05rem] font-semibold text-txt">
           {t.casesHeading}
         </h2>
-        {loadStatus === "ready" && cases.length > 0 && (
-          <span
+        {status === "ready" && cases.length > 0 && (
+          <Badge
             data-testid="cases-count"
-            className="inline-flex items-center rounded-full bg-accent-soft px-2 py-0.5 text-xs font-medium text-accent-strong"
+            className="bg-accent-soft text-accent-strong"
           >
             {cases.length}
-          </span>
+          </Badge>
         )}
       </div>
 
-      {loadStatus === "loading" && <LoadingSkeleton />}
+      {status === "loading" && <CasesSkeleton />}
+
+      {status === "error" && (
+        <SectionError
+          message={t.casesLoadFailed}
+          onRetry={onRetry}
+          testId="cases-error"
+          retryTestId="cases-retry"
+        />
+      )}
 
       {casesEmpty && (
         <EmptyState title={t.casesEmpty} body={t.casesEmptyBody} />
       )}
 
-      {loadStatus === "ready" && cases.length > 0 && (
+      {status === "ready" && cases.length > 0 && (
         // #676: the open-cases section renders the same case card the cases
         // index uses (DoctorCaseCard -> the shared DoctorListCard), so the two
         // surfaces cannot diverge - patient name plus age, verify chip on a
@@ -868,14 +965,10 @@ function OpenCasesCard({
 // ---- main page ----
 
 export default function DoctorDashboardPage() {
-  const { lang } = useLang();
-  const t = STRINGS[lang].doctorConsole;
-
   const [queue, setQueue] = useState<ReviewQueueItem[]>([]);
+  const [queueStatus, setQueueStatus] = useState<LoadStatus>("loading");
   const [cases, setCases] = useState<DoctorCaseRow[]>([]);
-  const [loadStatus, setLoadStatus] = useState<LoadStatus>("loading");
-  const [errorTraceId, setErrorTraceId] = useState<string | undefined>();
-  const [bannerOpen, setBannerOpen] = useState(false);
+  const [casesStatus, setCasesStatus] = useState<LoadStatus>("loading");
 
   // Fee summary state - isolated from the console feeds
   const [profile, setProfile] = useState<DoctorProfileView | null>(null);
@@ -888,25 +981,44 @@ export default function DoctorDashboardPage() {
   const [patientsCount, setPatientsCount] = useState(0);
   const [patientsStatus, setPatientsStatus] = useState<LoadStatus>("loading");
 
-  const load = useCallback(() => {
-    setLoadStatus("loading");
-    setBannerOpen(false);
-    Promise.all([fetchReviewQueue(), listDoctorCases()])
-      .then(([q, c]) => {
+  // #683: the two feed reads are independent, each owning its own status and
+  // retry (the isolated fee read's pattern). A failure degrades only its own
+  // section, so a partial outage never blanks the whole page. The error is still
+  // logged with its trace id (never silently swallowed), matching the
+  // best-effort patients read below.
+  const loadQueue = useCallback(() => {
+    setQueueStatus("loading");
+    fetchReviewQueue()
+      .then((q) => {
         setQueue(q);
-        setCases(c.items);
-        setLoadStatus("ready");
+        setQueueStatus("ready");
       })
       .catch((err: unknown) => {
-        setErrorTraceId(err instanceof ApiError ? err.traceId : undefined);
-        setLoadStatus("error");
-        setBannerOpen(true);
+        setQueueStatus("error");
+        console.warn("[doctor-console] review queue failed to load:", err);
+      });
+  }, []);
+
+  const loadCases = useCallback(() => {
+    setCasesStatus("loading");
+    listDoctorCases()
+      .then(({ items }) => {
+        setCases(items);
+        setCasesStatus("ready");
+      })
+      .catch((err: unknown) => {
+        setCasesStatus("error");
+        console.warn("[doctor-console] open cases failed to load:", err);
       });
   }, []);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    loadQueue();
+  }, [loadQueue]);
+
+  useEffect(() => {
+    loadCases();
+  }, [loadCases]);
 
   // Isolated profile read - does not affect console load status. The full
   // projection is kept (not just the fee) so the getting-started checklist can
@@ -955,9 +1067,11 @@ export default function DoctorDashboardPage() {
   // cases and an empty review queue. The step states read the profile read
   // below, so it waits for that projection (whose failures the fee card
   // already surfaces): without it the card could not truthfully mark a single
-  // step done or pending.
+  // step done or pending. #683: both feeds must be ready - an unfinished or
+  // failed read cannot vouch for an empty console.
   const showChecklist =
-    loadStatus === "ready" &&
+    queueStatus === "ready" &&
+    casesStatus === "ready" &&
     sortedQueue.length === 0 &&
     cases.length === 0 &&
     profile !== null;
@@ -968,18 +1082,10 @@ export default function DoctorDashboardPage() {
     <>
       <GreetingHeader profile={profile} />
 
-      {loadStatus === "error" && bannerOpen && (
-        <ErrorBanner
-          message={t.loadFailed}
-          traceId={errorTraceId}
-          onRetry={load}
-          onDismiss={() => setBannerOpen(false)}
-        />
-      )}
-
       <KpiRow
-        feedStatus={loadStatus}
+        casesStatus={casesStatus}
         casesCount={cases.length}
+        queueStatus={queueStatus}
         queueCount={sortedQueue.length}
         patientsStatus={patientsStatus}
         patientsCount={patientsCount}
@@ -1012,12 +1118,12 @@ export default function DoctorDashboardPage() {
       {showChecklist && <GettingStartedChecklist profile={profile} />}
 
       <ReviewQueueCard
-        queue={queue}
         sortedQueue={sortedQueue}
-        loadStatus={loadStatus}
+        status={queueStatus}
+        onRetry={loadQueue}
       />
 
-      <OpenCasesCard cases={cases} loadStatus={loadStatus} />
+      <OpenCasesCard cases={cases} status={casesStatus} onRetry={loadCases} />
     </>
   );
 }
