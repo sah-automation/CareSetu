@@ -1500,6 +1500,11 @@ const en = {
     casesHeading: "Open cases",
     casesEmpty: "No open care cases",
     casesEmptyBody: "A case opens as soon as you start a consultation.",
+    // #683: per-section read failures. Each section owns its message and retry,
+    // so a partial outage reads as "this section could not load" rather than a
+    // page-wide "the console could not load".
+    queueLoadFailed: "Could not load the review queue.",
+    casesLoadFailed: "Could not load open cases.",
     casesIndexTitle: "My cases",
     casesIndexDescription: "Your open care cases",
     stagePreSummary: "Pre-summary",
@@ -3454,6 +3459,11 @@ export const STRINGS: Record<Lang, Dictionary> = {
       casesHeading: "खुले मामले",
       casesEmpty: "कोई खुला केयर केस नहीं",
       casesEmptyBody: "आपकी सलाह शुरू करते ही एक केस खुलता है।",
+      // #683: प्रति-अनुभाग रीड विफलताएँ। हर अनुभाग का संदेश और पुनःप्रयास
+      // अलग है, इसलिए आंशिक व्यवधान "यह अनुभाग लोड नहीं हो सका" पढ़ता है,
+      // पूरे पेज का "कंसोल लोड नहीं हो सका" नहीं।
+      queueLoadFailed: "समीक्षा कतार लोड नहीं हो सकी।",
+      casesLoadFailed: "खुले मामले लोड नहीं हो सके।",
       casesIndexTitle: "मेरे मामले",
       casesIndexDescription: "आपके खुले केयर मामले",
       stagePreSummary: "प्री-सारांश",
