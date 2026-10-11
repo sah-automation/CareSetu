@@ -547,10 +547,12 @@ test("the homepage, consent overlay, auth wizard and patient page pass the axe a
   // the patient subtree remounts asynchronously once AuthContext re-resolves
   // identity, and touching the revoke targets before that remount finishes
   // races against the unmount. Wait for the trigger's data-session-resolved
-  // flag before interacting.
+  // flag before interacting. #496: a cold Next-dev compile of this route can
+  // outlast the 5 s expect default, so wait the same 15 s the guard helper uses.
   await expect(page.getByTestId("account-menu")).toHaveAttribute(
     "data-session-resolved",
     "true",
+    { timeout: 15_000 },
   );
   await expect(page.getByTestId("history-section")).toBeVisible({
     timeout: 30_000,
@@ -568,6 +570,7 @@ test("the homepage, consent overlay, auth wizard and patient page pass the axe a
   await expect(page.getByTestId("account-menu")).toHaveAttribute(
     "data-session-resolved",
     "true",
+    { timeout: 15_000 },
   );
   await page.reload();
   await expect(page.getByTestId("patient-home-greeting")).toBeVisible();
