@@ -69,13 +69,17 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: "3.13"
       - name: cache Python venv
         id: venv-cache
         uses: actions/cache@v4
         with:
           path: apps/backend/.venv
-          key: backend-venv-${{ runner.os }}-${{ hashFiles('apps/backend/uv.lock') }}
-          restore-keys: backend-venv-${{ runner.os }}-
+          key: backend-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-${{ hashFiles('apps/backend/uv.lock') }}
+          restore-keys: backend-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-
       - uses: ./.github/actions/setup-backend
         with:
           install: ${{ steps.venv-cache.outputs.cache-hit != 'true' }}
@@ -96,13 +100,17 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: "3.13"
       - name: cache Python venv
         id: venv-cache
         uses: actions/cache@v4
         with:
           path: apps/backend/.venv
-          key: backend-venv-${{ runner.os }}-${{ hashFiles('apps/backend/uv.lock') }}
-          restore-keys: backend-venv-${{ runner.os }}-
+          key: backend-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-${{ hashFiles('apps/backend/uv.lock') }}
+          restore-keys: backend-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-
       - uses: ./.github/actions/setup-backend
         with:
           install: ${{ steps.venv-cache.outputs.cache-hit != 'true' }}
@@ -175,13 +183,17 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: "3.13"
       - name: cache Python venv
         id: venv-cache
         uses: actions/cache@v4
         with:
           path: apps/backend/.venv
-          key: backend-venv-${{ runner.os }}-${{ hashFiles('apps/backend/uv.lock') }}
-          restore-keys: backend-venv-${{ runner.os }}-
+          key: backend-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-${{ hashFiles('apps/backend/uv.lock') }}
+          restore-keys: backend-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-
       - uses: ./.github/actions/setup-backend
         with:
           install: ${{ steps.venv-cache.outputs.cache-hit != 'true' }}
@@ -212,13 +224,17 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: "3.13"
       - name: cache Python venv
         id: venv-cache
         uses: actions/cache@v4
         with:
           path: apps/backend/.venv
-          key: backend-venv-${{ runner.os }}-${{ hashFiles('apps/backend/uv.lock') }}
-          restore-keys: backend-venv-${{ runner.os }}-
+          key: backend-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-${{ hashFiles('apps/backend/uv.lock') }}
+          restore-keys: backend-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-
       - uses: ./.github/actions/setup-backend
         with:
           install: ${{ steps.venv-cache.outputs.cache-hit != 'true' }}
@@ -271,13 +287,17 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: "3.13"
       - name: cache Python venv
         id: venv-cache
         uses: actions/cache@v4
         with:
           path: apps/backend/.venv
-          key: backend-venv-${{ runner.os }}-${{ hashFiles('apps/backend/uv.lock') }}
-          restore-keys: backend-venv-${{ runner.os }}-
+          key: backend-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-${{ hashFiles('apps/backend/uv.lock') }}
+          restore-keys: backend-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-
       - uses: ./.github/actions/setup-backend
         with:
           install: ${{ steps.venv-cache.outputs.cache-hit != 'true' }}
@@ -373,13 +393,17 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: "3.13"
       - name: cache Python venv
         id: venv-cache
         uses: actions/cache@v4
         with:
           path: apps/backend/.venv
-          key: backend-venv-${{ runner.os }}-${{ hashFiles('apps/backend/uv.lock') }}
-          restore-keys: backend-venv-${{ runner.os }}-
+          key: backend-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-${{ hashFiles('apps/backend/uv.lock') }}
+          restore-keys: backend-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-
       - uses: ./.github/actions/setup-backend
         with:
           install: ${{ steps.venv-cache.outputs.cache-hit != 'true' }}
@@ -433,13 +457,17 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: "3.13"
       - name: cache Python venv
         id: venv-cache
         uses: actions/cache@v4
         with:
           path: apps/backend/.venv
-          key: backend-venv-${{ runner.os }}-${{ hashFiles('apps/backend/uv.lock') }}
-          restore-keys: backend-venv-${{ runner.os }}-
+          key: backend-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-${{ hashFiles('apps/backend/uv.lock') }}
+          restore-keys: backend-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-
       - uses: ./.github/actions/setup-backend
         with:
           install: ${{ steps.venv-cache.outputs.cache-hit != 'true' }}
@@ -477,13 +505,17 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: "3.13"
       - name: cache Python venv
         id: venv-cache
         uses: actions/cache@v4
         with:
           path: apps/backend/.venv
-          key: backend-venv-${{ runner.os }}-${{ hashFiles('apps/backend/uv.lock') }}
-          restore-keys: backend-venv-${{ runner.os }}-
+          key: backend-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-${{ hashFiles('apps/backend/uv.lock') }}
+          restore-keys: backend-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-
       - uses: ./.github/actions/setup-backend
         with:
           install: ${{ steps.venv-cache.outputs.cache-hit != 'true' }}
@@ -590,13 +622,17 @@ jobs:
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: "3.13"
       - name: cache Python venv
         id: venv-cache
         uses: actions/cache@v4
         with:
           path: apps/backend/.venv
-          key: backend-venv-${{ runner.os }}-${{ hashFiles('apps/backend/uv.lock') }}
-          restore-keys: backend-venv-${{ runner.os }}-
+          key: backend-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-${{ hashFiles('apps/backend/uv.lock') }}
+          restore-keys: backend-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-
       - uses: ./.github/actions/setup-backend
         with:
           install: ${{ steps.venv-cache.outputs.cache-hit != 'true' }}
@@ -626,13 +662,17 @@ jobs:
     if: github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: "3.13"
       - name: cache Python venv
         id: venv-cache
         uses: actions/cache@v4
         with:
           path: apps/backend/.venv
-          key: backend-venv-${{ runner.os }}-${{ hashFiles('apps/backend/uv.lock') }}
-          restore-keys: backend-venv-${{ runner.os }}-
+          key: backend-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-${{ hashFiles('apps/backend/uv.lock') }}
+          restore-keys: backend-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-
       - uses: ./.github/actions/setup-backend
         with:
           install: ${{ steps.venv-cache.outputs.cache-hit != 'true' }}
