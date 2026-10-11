@@ -153,7 +153,7 @@ function ContactBlock({
             className="text-lg font-semibold break-words text-txt"
             data-testid="patient-detail-name"
           >
-            {contact.name ?? t.notRecorded}
+            {contact.name ?? consoleT.patientFallback}
           </p>
           <div
             className="mt-2 flex flex-wrap items-center gap-1.5"
