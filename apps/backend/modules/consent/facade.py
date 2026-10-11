@@ -14,6 +14,11 @@ its expandable version history. ``list_counterparty_grants`` is the
 reverse lookup the doctor console seam derives the Patients list from
 (ADR-0019): live grants keyed by counterparty instead of patient.
 
+``ConsentView`` and ``EgressLogEntry`` each carry an optional, nullable
+``counterparty_display_name`` resolved through an injected keyword-only seam
+(#648), so the module names counterparties without importing the modules that
+own those names; the binding lives at the composition root.
+
 Every mutating action appends its ``consent_events`` ledger row and writes
 its bus envelopes (``consent.requested/granted/revoked`` plus the generic
 ``audit.event``, KPI-006) into ``consent.consent_outbox`` in the SAME
@@ -23,6 +28,8 @@ pure :mod:`modules.consent.domain.state_machine`; this layer only persists.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, Literal, cast
@@ -67,7 +74,14 @@ from modules.consent.schema.models import consent_consents, consent_egress_log, 
 
 CONSENT_SCHEMA = "consent"
 
+logger = logging.getLogger(__name__)
+
 CounterpartyTypeLiteral = Literal["doctor", "lab", "chemist"]
+
+# The display-name seam (#648): ``(counterparty_type, counterparty_id)`` ->
+# nullable name. A resolver is bound at the composition root, never imported -
+# the consent module holds no knowledge of the module that owns the names.
+CounterpartyDisplayNameResolver = Callable[[str, str], Awaitable[str | None]]
 
 
 class ConsentDecision(BaseModel):
@@ -112,6 +126,12 @@ class ConsentView(BaseModel):
     ``status`` + ``version`` are the live state; ``events`` is the lineage's
     full immutable history, so a revoked grant stays listed with exactly the
     receipts the audit trail cites.
+
+    ``counterparty_display_name`` is enrichment of an id, never the
+    authorization (#648): optional because the caller may omit it on the wire,
+    nullable because an unbound seam, a raising seam, or an unresolvable
+    counterparty all leave it null. ``counterparty_id`` stays on the model so
+    the receipt keeps its precision whatever the name resolves to.
     """
 
     consent_id: int
@@ -119,6 +139,7 @@ class ConsentView(BaseModel):
     patient_id: int
     counterparty_type: str
     counterparty_id: str
+    counterparty_display_name: str | None = None
     record_scope: str
     status: str
     version: int
@@ -148,7 +169,12 @@ class CounterpartyGrantView(BaseModel):
 
 
 class EgressLogEntry(BaseModel):
-    """One egress log row: what left the record, when, to whom, and under which consent version."""
+    """One egress log row: what left the record, when, to whom, and under which consent version.
+
+    ``counterparty_display_name`` is the same enrichment of the id as on
+    ``ConsentView`` (#648) - optional, nullable, resolved off the injected
+    seam, and never load-bearing for the disclosure it cites.
+    """
 
     egress_id: int
     patient_id: int
@@ -157,6 +183,7 @@ class EgressLogEntry(BaseModel):
     version: int
     counterparty_type: str
     counterparty_id: str
+    counterparty_display_name: str | None = None
     record_scope: str
     disclosed_entry_ids: list[int]
     disclosed_at: datetime
@@ -430,13 +457,18 @@ async def _load_history(
     return grouped
 
 
-def _to_view(lineage: _Lineage, history: list[ConsentEventView]) -> ConsentView:
+def _to_view(
+    lineage: _Lineage,
+    history: list[ConsentEventView],
+    counterparty_display_name: str | None,
+) -> ConsentView:
     return ConsentView(
         consent_id=lineage.consent_id,
         lineage_ref=lineage.lineage_ref,
         patient_id=lineage.patient_id,
         counterparty_type=lineage.counterparty_type,
         counterparty_id=lineage.counterparty_id,
+        counterparty_display_name=counterparty_display_name,
         record_scope=lineage.record_scope,
         status=lineage.status,
         version=lineage.version,
@@ -446,23 +478,75 @@ def _to_view(lineage: _Lineage, history: list[ConsentEventView]) -> ConsentView:
     )
 
 
-async def _view_after_write(connection: AsyncConnection, lineage: _Lineage) -> ConsentView:
-    """Reload the post-transition lineage and answer its typed view."""
-    row = (
-        await connection.execute(
-            select(*_LINEAGE_COLUMNS).where(consent_consents.c.id == lineage.consent_id)
-        )
-    ).one()
-    fresh = _to_lineage(row)
-    history = await _load_history(connection, [fresh.consent_id])
-    return _to_view(fresh, history.get(fresh.consent_id, []))
-
-
 class ConsentFacade:
-    """Typed public facade for the consent module's lifecycle surface."""
+    """Typed public facade for the consent module's lifecycle surface.
 
-    def __init__(self, engine: AsyncEngine) -> None:
+    ``counterparty_display_name_resolver`` is the display-name seam (#648): an
+    optional, keyword-only callable of ``(counterparty_type, counterparty_id)``
+    answering a nullable name. It is a seam rather than an import precisely
+    because the names live in other modules - the consent module imports no
+    partner or intake code, and the composition root binds the real resolver.
+    Optional so engine-only construction keeps working everywhere it already
+    does; the resolution *rules* (the AI pseudo-counterparty, the doctor-type
+    parse, lab/chemist nulls) are the binder's job, not this module's.
+    """
+
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        *,
+        counterparty_display_name_resolver: CounterpartyDisplayNameResolver | None = None,
+    ) -> None:
         self._engine = engine
+        self._display_name_resolver = counterparty_display_name_resolver
+
+    async def _display_name(self, counterparty_type: str, counterparty_id: str) -> str | None:
+        """Resolve one counterparty's display name, degrading to null on failure.
+
+        The try/except lives here, at the seam, so every read path degrades
+        identically - an unbound seam, a raising seam, and an unresolvable
+        counterparty all answer ``None`` and the read still succeeds. The
+        warning names the counterparty **type** only: the id and any PHI stay
+        out of the log line (error-handling-observability §2).
+        """
+        resolver = self._display_name_resolver
+        if resolver is None:
+            return None
+        try:
+            return await resolver(counterparty_type, counterparty_id)
+        except Exception:
+            # No ``exc_info``: the bound resolver's exception text can carry the
+            # counterparty id and whatever the owning module's query put in it.
+            # Not even the exception class: this warning keeps the docstring's
+            # "type only" contract, the same rule the main.py resolver warning
+            # follows (test_consent_counterparty_display_name_binding).
+            logger.warning(
+                "consent counterparty display-name resolution failed for type %s; "
+                "degrading to no name",
+                counterparty_type,
+            )
+            return None
+
+    async def _view_after_write(
+        self, connection: AsyncConnection, lineage: _Lineage
+    ) -> ConsentView:
+        """Reload the post-transition lineage and answer its typed view."""
+        row = (
+            await connection.execute(
+                select(*_LINEAGE_COLUMNS).where(consent_consents.c.id == lineage.consent_id)
+            )
+        ).one()
+        fresh = _to_lineage(row)
+        history = await _load_history(connection, [fresh.consent_id])
+        return await self._view(fresh, history.get(fresh.consent_id, []))
+
+    async def _view(self, lineage: _Lineage, history: list[ConsentEventView]) -> ConsentView:
+        """Answer one lineage's typed view, naming its counterparty via the seam."""
+        return _to_view(
+            lineage,
+            history,
+            await self._display_name(lineage.counterparty_type, lineage.counterparty_id),
+        )
 
     async def request_consent(
         self,
@@ -521,7 +605,7 @@ class ConsentFacade:
                     version=REQUESTED.version,
                 ),
             )
-            return await _view_after_write(connection, lineage)
+            return await self._view_after_write(connection, lineage)
 
     async def _grant_on_connection(
         self,
@@ -541,7 +625,7 @@ class ConsentFacade:
             connection, patient_id, counterparty_type, counterparty_id, record_scope
         )
         await _persist_transition(connection, lineage, ConsentAction.GRANT)
-        return await _view_after_write(connection, lineage)
+        return await self._view_after_write(connection, lineage)
 
     async def grant_consent(
         self,
@@ -611,7 +695,7 @@ class ConsentFacade:
             counterparty_id = lineage.counterparty_id
             record_scope = lineage.record_scope
             await _persist_transition(connection, lineage, ConsentAction.GRANT)
-            view = await _view_after_write(connection, lineage)
+            view = await self._view_after_write(connection, lineage)
         # Invalidate cache after commit (outside transaction)
         await self._invalidate_cache(patient_id, counterparty_type, counterparty_id, record_scope)
         return view
@@ -629,7 +713,7 @@ class ConsentFacade:
             counterparty_id = lineage.counterparty_id
             record_scope = lineage.record_scope
             await _persist_transition(connection, lineage, ConsentAction.REVOKE)
-            view = await _view_after_write(connection, lineage)
+            view = await self._view_after_write(connection, lineage)
         # Invalidate cache after commit (outside transaction)
         await self._invalidate_cache(patient_id, counterparty_type, counterparty_id, record_scope)
         return view
@@ -639,7 +723,7 @@ class ConsentFacade:
         async with self._engine.begin() as connection:
             lineage = await _lock_by_id(connection, patient_id, consent_id)
             await _persist_transition(connection, lineage, ConsentAction.DECLINE)
-            return await _view_after_write(connection, lineage)
+            return await self._view_after_write(connection, lineage)
 
     async def list_consents(self, patient_id: int) -> ConsentLog:
         """Answer the patient's log: pending first, then most-recent activity."""
@@ -657,11 +741,11 @@ class ConsentFacade:
             ).all()
             lineages = [_to_lineage(row) for row in rows]
             history = await _load_history(connection, [lineage.consent_id for lineage in lineages])
-            return ConsentLog(
-                items=[
-                    _to_view(lineage, history.get(lineage.consent_id, [])) for lineage in lineages
-                ]
-            )
+            items = [
+                await self._view(lineage, history.get(lineage.consent_id, []))
+                for lineage in lineages
+            ]
+            return ConsentLog(items=items)
 
     async def list_counterparty_grants(
         self, *, counterparty_type: str, counterparty_id: str
@@ -739,6 +823,9 @@ class ConsentFacade:
                         version=int(row.version),
                         counterparty_type=str(row.counterparty_type),
                         counterparty_id=str(row.counterparty_id),
+                        counterparty_display_name=await self._display_name(
+                            str(row.counterparty_type), str(row.counterparty_id)
+                        ),
                         record_scope=str(row.record_scope),
                         disclosed_entry_ids=list(row.disclosed_entry_ids)
                         if row.disclosed_entry_ids

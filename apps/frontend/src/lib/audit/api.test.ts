@@ -25,6 +25,7 @@ describe("fetchAccessHistory", () => {
           {
             actor_id: 3,
             actor_type: "doctor",
+            actor_display_name: "Dr A Kumar",
             scope: "consultations",
             accessed_at: "2026-09-01T00:00:00Z",
             denied: false,
@@ -40,6 +41,7 @@ describe("fetchAccessHistory", () => {
         {
           actor_id: 3,
           actor_type: "doctor",
+          actor_display_name: "Dr A Kumar",
           scope: "consultations",
           accessed_at: "2026-09-01T00:00:00Z",
           denied: false,
@@ -94,6 +96,49 @@ describe("fetchAccessHistory", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(jsonResponse({ entries: "nope" })),
+    );
+    await expect(fetchAccessHistory(7)).rejects.toBeInstanceOf(ApiError);
+  });
+
+  // #670: the display name is declared, so a missing key is backend drift and a
+  // non-string would render as a label - both fail loudly, as the consent
+  // client pins (#661).
+  it("rejects a row whose declared display name is missing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          entries: [
+            {
+              actor_id: 3,
+              actor_type: "doctor",
+              scope: "consultations",
+              accessed_at: "2026-09-01T00:00:00Z",
+              denied: false,
+            },
+          ],
+        }),
+      ),
+    );
+    await expect(fetchAccessHistory(7)).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it("rejects a row whose display name is neither string nor null", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          entries: [
+            {
+              actor_id: 3,
+              actor_type: "doctor",
+              actor_display_name: 42,
+              accessed_at: "2026-09-01T00:00:00Z",
+              denied: false,
+            },
+          ],
+        }),
+      ),
     );
     await expect(fetchAccessHistory(7)).rejects.toBeInstanceOf(ApiError);
   });

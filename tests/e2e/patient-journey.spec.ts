@@ -175,6 +175,28 @@ async function seedConsentGrant(
   expect(response.status(), "POST /v1/consents should succeed").toBe(201);
 }
 
+// #661: the AI egress grant the intake pipeline mints. The label contract
+// (spec #645 L165) pins this exact brand string for counterparty id
+// `intake-ai`, with the id check ahead of the type-parse check so the card
+// can never fall through to a generic role word.
+async function seedAiConsentGrant(
+  request: APIRequestContext,
+  jwt: string,
+): Promise<void> {
+  const response = await request.post(`${BACKEND}/v1/consents`, {
+    headers: { Authorization: `Bearer ${jwt}` },
+    data: {
+      counterparty_type: "doctor",
+      counterparty_id: "intake-ai",
+      record_scope: "consultations",
+    },
+  });
+  expect(
+    response.status(),
+    "POST /v1/consents should mint the intake-ai grant",
+  ).toBe(201);
+}
+
 // ---- Tests ----
 
 test("patient journey: record -> filter -> seed consent -> revoke -> revoked receipts + egress slice", async ({
@@ -318,4 +340,54 @@ test("patient journey: record -> filter -> seed consent -> revoke -> revoked rec
   await expect(page.getByRole("heading", { name: "Consent log" })).toBeVisible({
     timeout: 5_000,
   });
+
+  // 17. Consent log shows a resolved name rather than an id (#660)
+  const consentCardText = await grantedCard.textContent();
+  expect(consentCardText).toBeTruthy();
+  if (consentCardText) {
+    expect(consentCardText).not.toContain("e2e-journey-consent");
+  }
+
+  // 18. The intake-ai counterparty renders the pinned AI brand - never the raw
+  //     id, and never a generic role word (#660/#661: display name first, id
+  //     check before type-parse).
+  await seedAiConsentGrant(request, jwt);
+  await page.goto("/patient/record/consent-log");
+  await expect(page.getByTestId("history-section")).toBeVisible({
+    timeout: 30_000,
+  });
+  const aiConsentCard = page
+    .locator('[data-testid^="consent-"]')
+    .filter({ hasText: "CareSetu AI Intake Assistant" })
+    .first();
+  await expect(aiConsentCard).toBeVisible({ timeout: 30_000 });
+  const aiCardText = await aiConsentCard.textContent();
+  expect(aiCardText).toBeTruthy();
+  if (aiCardText) {
+    expect(aiCardText).not.toContain("intake-ai");
+  }
+
+  // 19. Visit a prescription record entry and assert the labelled medicine block renders (#660)
+  await page.goto("/patient/record");
+  await waitForIdentityResolved(page);
+  await expect(page.getByTestId("record-timeline")).toBeVisible({
+    timeout: 30_000,
+  });
+  const prescriptionEntry = page
+    .locator('li[data-testid^="entry-"]')
+    .filter({ hasText: /Prescription|prescription/i })
+    .first();
+  await expect(prescriptionEntry).toBeVisible();
+  const entryLink = prescriptionEntry
+    .locator('[data-testid^="entry-link-"]')
+    .first();
+  await expect(entryLink).toBeVisible();
+  await entryLink.click();
+  await page.waitForURL(/\/patient\/record\/\d+/);
+  await expect(page.getByTestId("entry-medicine-block")).toBeVisible({
+    timeout: 30_000,
+  });
+  await expect(page.getByText("Dose:")).toBeVisible();
+  await expect(page.getByText("Frequency:")).toBeVisible();
+  await expect(page.getByText("Duration:")).toBeVisible();
 });

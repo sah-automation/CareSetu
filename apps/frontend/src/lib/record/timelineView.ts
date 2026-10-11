@@ -238,13 +238,48 @@ function nullableText(
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-// #515/#517: the shared " · " join for one medicine line - the card's dose
-// line (dose · frequency · duration) and the entry-detail item lines (name ·
-// dose · frequency · duration) both render through it, so the separator can
-// never drift between the timeline card and the detail page.
+// #515/#517: the " · " join for one medicine line - the timeline card's dose
+// line (dose · frequency · duration). #656 narrowed this to card-subtitle-only:
+// the entry-detail medicine block renders labelled term/definition pairs
+// through `medicineFields` instead, so this joiner's one consumer is the card
+// subtitle. It stays because that consumer still needs it - deleting a shared
+// helper is a cross-ticket change.
 export function joinMedicineLine(parts: Array<string | null>): string | null {
   const present = parts.filter((part): part is string => part !== null);
   return present.length > 0 ? present.join(" \u00b7 ") : null;
+}
+
+// #656: the entry-detail medicine block's labelling seam. Returns one
+// { label, value } pair per field that has a value, in dose/frequency/duration
+// order; a field whose value is null, missing, or blank omits itself entirely,
+// so an empty dose leaves no stray label behind. Values pass through verbatim -
+// the labelled layout exists to make a bare `9` readable as a data-entry
+// problem, never to repair it. Labels arrive from the bilingual dictionary, so
+// this stays a pure view-model helper.
+export interface MedicineFieldLabels {
+  dose: string;
+  frequency: string;
+  duration: string;
+}
+
+export interface MedicineField {
+  label: string;
+  value: string;
+}
+
+export function medicineFields(
+  item: PrescriptionItem,
+  labels: MedicineFieldLabels,
+): MedicineField[] {
+  const candidates: Array<{ label: string; value: string | null }> = [
+    { label: labels.dose, value: item.dose },
+    { label: labels.frequency, value: item.frequency },
+    { label: labels.duration, value: item.duration },
+  ];
+  return candidates.filter(
+    (field): field is MedicineField =>
+      typeof field.value === "string" && field.value.trim().length > 0,
+  );
 }
 
 export function prescriptionItems(entry: RecordEntryView): PrescriptionItem[] {
@@ -432,14 +467,18 @@ export function describeEntry(
         : { label: t.badge.active, tone: "success" };
       const icon = "\u{1F48A}";
       const items = prescriptionItems(entry);
-      // #515 enriched payload: the medicine name leads as the title and the
-      // subtitle carries the dose line, `issued by <doctor>` attribution, the
-      // chemist when the payload names one, and a "+N more" tally for
-      // multi-item prescriptions. Pre-enrichment payloads without `items`
-      // keep the lean `Rx #<id> · date` form - cards render only what the
-      // payload documents.
+      // #655: the card is titled by record type (`badge.prescription`), so a
+      // patient reads what kind of record it is without inferring it from a
+      // drug name. The medicine name moves into the subtitle and leads it -
+      // together with the dose line, `issued by <doctor>` attribution, the
+      // chemist when the payload names one, the date, and a "+N more" tally
+      // for multi-item prescriptions - so the card answers what/how much/by
+      // whom/when at a glance. Pre-enrichment payloads without `items` keep
+      // the lean `Rx #<id> · date` form: cards render only what the payload
+      // documents.
       if (items.length > 0) {
         const first = items[0];
+        parts.push(first.name);
         const doseLine = joinMedicineLine([
           first.dose,
           first.frequency,
@@ -452,15 +491,10 @@ export function describeEntry(
         const chemist = chemistName(entry);
         if (chemist !== null) parts.push(chemist);
         if (items.length > 1) parts.push(t.moreItems(items.length - 1));
-        return {
-          icon,
-          title: first.name,
-          subtitle: parts.join(" \u00b7 ") || null,
-          badge,
-        };
+      } else {
+        if (prescriptionId !== null) parts.push(`Rx #${prescriptionId}`);
+        if (!omitOccurredAt) parts.push(date);
       }
-      if (prescriptionId !== null) parts.push(`Rx #${prescriptionId}`);
-      if (!omitOccurredAt) parts.push(date);
       return {
         icon,
         title: t.badge.prescription,

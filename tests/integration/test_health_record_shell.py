@@ -9,9 +9,10 @@ Proves the ticket's acceptance criteria on the native database:
    ledger row; replaying the same ``event_id`` is a no-op (coding-standards
    §6 idempotency rule for every outbox consumer).
 2. Facade-over-schema behaviour: idempotent ``create_record``, owner reads
-   returning the documented typed timeline (empty on day zero), EVERY read
-   attempt recorded in ``health_record_access_history`` - allowed and denied -
-   and reverse-chronological entry ordering.
+   returning the documented typed timeline (empty on day zero) while writing
+   NOTHING to the ledger or outbox (#665 - the trust view answers "who ELSE
+   has seen this record"), the addressed read's DENIED path leaving its named
+   row, and reverse-chronological entry ordering.
 
 Requires the native PostgreSQL; the suite skips cleanly when it is
 unreachable, migrates to head for the module and downgrades afterwards,
@@ -231,10 +232,14 @@ async def test_create_record_is_idempotent(database_url: str, clean_tables: None
 
 
 @pytest.mark.asyncio
-async def test_owner_read_returns_empty_timeline_and_records_the_read(
+async def test_owner_read_returns_empty_timeline_and_records_nothing(
     database_url: str, clean_tables: None
 ) -> None:
-    """AC2: owner read of an empty timeline answers the documented contract."""
+    """AC2: owner read of an empty timeline answers the documented contract.
+
+    #665: the owner's own reads write neither an access-history row nor an
+    outbox envelope - the ledger answers "who ELSE has seen this record".
+    """
     facade = HealthFacade(create_async_engine(database_url, poolclass=NullPool))
     record_id = await facade.create_record(_IDENTITY)
 
@@ -244,15 +249,11 @@ async def test_owner_read_returns_empty_timeline_and_records_the_read(
     assert timeline.record_id == record_id
     assert timeline.patient_id == _IDENTITY
     assert timeline.entries == []
-    # KPI-006 here: every read attempt lands in the ledger.
     accesses = await _query(
         database_url,
         "SELECT outcome, accessor_identity_id FROM health.health_record_access_history",
     )
-    assert accesses == [
-        {"outcome": "allowed", "accessor_identity_id": _IDENTITY},
-        {"outcome": "allowed", "accessor_identity_id": _IDENTITY},
-    ]
+    assert accesses == []
     assert again.entries == []
 
 

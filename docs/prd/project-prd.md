@@ -195,7 +195,7 @@ _Traceability: `REQ-021`, `REQ-003`, `NFR-002`, `GAP-001`, `GAP-005`, `GAP-013`,
 
 **Delivery Notes (batch #529):**
 
-- The access history now also records surface-level reads that are not tied to a single record entry: serving a row of the doctor's derived Patients list and reading a patient's detail or photo each append an entry under a surface marker (`doctor_patients_list`, `doctor_patient_detail`) alongside the existing owner, partner, and denied-attempt rows. This is what lets the trust view answer "who has seen this" for the doctor console as well as for the record timeline. Delivered by #539/#540.
+- The access history now also records surface-level reads that are not tied to a single record entry: serving a row of the doctor's derived Patients list, serving a row of the doctor's open-cases list, and reading a patient's detail or photo each append an entry under a surface marker (`doctor_patients_list`, `doctor_cases_list`, `doctor_patient_detail`) alongside the existing owner, partner, and denied-attempt rows. This is what lets the trust view answer "who has seen this" for the doctor console as well as for the record timeline. Delivered by #539/#540, widened by #646.
 
 ---
 
@@ -841,7 +841,7 @@ _Traceability: `REQ-005`, `NFR-002`, `GAP-011`, `GAP-013`_
 **Delivery Notes (batch #529):**
 
 - Consent lifecycle coverage is now complete against the delivered scope set: a patient's first health-background save records its grant, and the patient can later revoke any scope - including the new independent `health_background` scope - from Settings, exactly as for any other scope (ADR-0018). The grant is a normal, versioned, revocable consent, so the audit trail records it with no special case.
-- Every consent-authorized disclosure made by the doctor console writes an egress row pinned to the authorizing consent id + version, and every served read writes an access-history entry - so the "complete trail of regulated acts" above now includes the doctor Patients list, the patient-detail sections, and the patient photo read. No new event vocabulary was introduced: these ride the existing `audit.event`, `record.accessed`, and `consent.*` lifecycle.
+- Every consent-authorized disclosure made by the doctor console writes an egress row pinned to the authorizing consent id + version, and every served read writes an access-history entry - so the "complete trail of regulated acts" above now includes the doctor Patients list, the doctor open-cases list, the patient-detail sections, and the patient photo read. No new event vocabulary was introduced: these ride the existing `audit.event`, `record.accessed`, and `consent.*` lifecycle.
 
 ---
 

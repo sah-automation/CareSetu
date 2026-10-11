@@ -6,14 +6,15 @@
 // trail from real consent data), and - when disclosed - the consent lineage
 // + version that authorized the disclosure. Lab-result entries render as a
 // plain value table with block-level horizontal scroll on phones, and
-// prescription entries render a medicine-item block (#517) - one line per
-// item (name · dose · frequency · duration), the prescribing doctor, and the
-// Rx reference; payloads without `items` skip the block. All copy is fully
-// bilingual EN/HI via the record.detail dictionary surface.
+// prescription entries render a medicine-item block (#517) - one labelled
+// block per item with the name as a heading and dose/frequency/duration as
+// term/definition pairs (#656), the prescribing doctor beneath the list, and
+// the Rx reference; payloads without `items` skip the block. All copy is
+// fully bilingual EN/HI via the record.detail dictionary surface.
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 
 import { PageHeader } from "@/components/layout/PageHeader";
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
@@ -30,10 +31,11 @@ import {
   attributedDoctorName,
   describeEntry,
   formatOccurredAt,
-  joinMedicineLine,
+  medicineFields,
   prescriptionItems,
 } from "@/lib/record/timelineView";
 import { fetchEgressLog, type EgressLogEntry } from "@/lib/consent/api";
+import { counterpartyLabel } from "@/lib/consent/consentView";
 
 type LoadStatus = "loading" | "ready" | "error" | "not-found";
 
@@ -342,19 +344,26 @@ export default function EntryDetailPage() {
               className="mt-3 rounded-lg border border-hairline bg-surface p-4 shadow-card"
               data-testid="entry-medicine-block"
             >
-              <ul className="space-y-1.5" data-testid="medicine-items">
+              <ul className="space-y-4" data-testid="medicine-items">
                 {medicineItems.map((item, idx) => (
                   <li
                     key={idx}
                     className="text-sm text-txt"
                     data-testid={`medicine-item-${idx}`}
                   >
-                    {joinMedicineLine([
-                      item.name,
-                      item.dose,
-                      item.frequency,
-                      item.duration,
-                    ])}
+                    <h2 className="text-sm font-semibold text-txt">
+                      {item.name}
+                    </h2>
+                    <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
+                      {medicineFields(item, td.medicine).map((field) => (
+                        <Fragment key={field.label}>
+                          <dt className="text-txt-muted">{field.label}:</dt>
+                          <dd className="font-medium text-txt">
+                            {field.value}
+                          </dd>
+                        </Fragment>
+                      ))}
+                    </dl>
                   </li>
                 ))}
               </ul>
@@ -395,15 +404,18 @@ export default function EntryDetailPage() {
                       &#128065;
                     </span>
                     <span>
-                      {item.counterparty_type}{" "}
+                      {counterpartyLabel(
+                        item.counterparty_type,
+                        item.counterparty_id,
+                        item.counterparty_display_name,
+                        lang,
+                      )}{" "}
                       <span className="text-txt-muted">
-                        \u00b7 {item.counterparty_id}
+                        {"\u00b7 "}
+                        {formatOccurredAt(item.disclosed_at, lang)}
                       </span>{" "}
                       <span className="text-txt-muted">
-                        \u00b7 {formatOccurredAt(item.disclosed_at, lang)}
-                      </span>{" "}
-                      <span className="text-txt-muted">
-                        \u00b7 #{item.lineage_ref} v{item.version}
+                        {"\u00b7 "}#{item.lineage_ref} v{item.version}
                       </span>
                     </span>
                   </li>

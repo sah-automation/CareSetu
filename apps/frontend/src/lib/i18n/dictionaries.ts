@@ -1141,6 +1141,17 @@ const en = {
     issuedByNeutral: "issued by your care team",
     prescribedBy: "Prescribed by",
     moreItems: (count: number) => `+${count} more`,
+    // #677: the shared record-entry renderer's per-type detail labels. Type
+    // tags reuse `badge`, medicine field labels reuse `detail.medicine`, and
+    // `prescribedBy`/`filedFromBooking` are reused too - only the labels that
+    // had no prior home live here, so nothing is re-keyed.
+    history: {
+      status: "Status",
+      medicines: "Medicines",
+      file: "File",
+      order: "Order",
+      amount: "Amount",
+    },
     empty: {
       title: "No entries yet",
       body: "Your consultations, prescriptions, lab results and metrics appear here as your care happens.",
@@ -1177,6 +1188,14 @@ const en = {
       resultsStatusInRange: "In range",
       resultsStatusBelowRange: "Below range",
       resultsStatusAboveRange: "Above range",
+      // #656: the entry-detail medicine block's term labels - one per field,
+      // rendered as <dt>/<dd> pairs; a field with no value omits itself along
+      // with its label, so the labels are only ever shown with their value.
+      medicine: {
+        dose: "Dose",
+        frequency: "Frequency",
+        duration: "Duration",
+      },
       egressHeading: "Who has seen this entry",
       shareEntry: "Share this entry",
       downloadPdf: "Download PDF",
@@ -1221,6 +1240,23 @@ const en = {
         to: "To whom",
         via: "Under which permission",
       },
+    },
+    // #653: step two of the counterparty-label fallback - a word for the
+    // counterparty type, plus the branded name for the AI intake pseudo-
+    // counterparty (the frontend's copy of the backend's
+    // AI_INTAKE_COUNTERPARTY_DISPLAY_NAME, so both ends say the same thing).
+    // #654: aiRole is the role in words the consent card prints beside a
+    // resolved name - a field of its own, never concatenated into the name.
+    counterparty: {
+      doctor: "Doctor",
+      lab: "Lab",
+      chemist: "Pharmacy",
+      // #672 review: a cross-patient denied row in the access history is the
+      // only place a patient-type actor surfaces; the role word keeps its
+      // label off the raw identity id (story 22).
+      patient: "Patient",
+      aiService: "CareSetu AI Intake Assistant",
+      aiRole: "AI intake service",
     },
     empty: {
       title: "No consent history yet",
@@ -1464,14 +1500,73 @@ const en = {
     casesHeading: "Open cases",
     casesEmpty: "No open care cases",
     casesEmptyBody: "A case opens as soon as you start a consultation.",
+    // #683: per-section read failures. Each section owns its message and retry,
+    // so a partial outage reads as "this section could not load" rather than a
+    // page-wide "the console could not load".
+    queueLoadFailed: "Could not load the review queue.",
+    casesLoadFailed: "Could not load open cases.",
     casesIndexTitle: "My cases",
     casesIndexDescription: "Your open care cases",
     stagePreSummary: "Pre-summary",
     stagePrescriptionPending: "Prescription pending",
     stageClosed: "Closed",
-    openCaseAction: "Open",
+    // #652: the case card. The accessible name must include the patient
+    // (US-66) because the whole card is one overlay link, and the meta line
+    // dates the case so triage runs on staleness rather than memory (US-6).
+    // The unit words live here too: "ago" wraps differently per locale, so
+    // one wrapper + three granularities keeps the whole string translatable.
+    caseCardA11y: (name: string) => `Open case for ${name}`,
+    caseUpdatedAgo: (time: string) => `Updated ${time} ago`,
+    caseUpdatedJustNow: "Updated just now",
+    timeAgoMinutes: (n: number) => `${n} min`,
+    timeAgoHours: (n: number) => `${n} hr`,
+    timeAgoDays: (n: number) => `${n} d`,
     loadFailed: "Could not load the console.",
     retry: "Try again",
+    // #678: the time-based greeting that opens the dashboard and the
+    // profile-status card beside the fee summary. The greeting uses the
+    // doctor's own name from the same single profile read (honorifics stripped
+    // into the first-name form); while that read is still loading, the greeting
+    // renders a name-free form rather than a blank heading or a skeleton. The
+    // status card reads that same projection and calls out what is missing.
+    greetingMorning: "Good morning",
+    greetingAfternoon: "Good afternoon",
+    greetingEvening: "Good evening",
+    greetingNamed: (greeting: string, name: string) => `${greeting}, ${name}`,
+    statusHeading: "Profile status",
+    statusChipsLabel: "Verified status and specialties",
+    statusHintUnverified: "Your profile is not verified yet.",
+    statusHintNoAbout: "Add an introduction so patients can get to know you.",
+    statusHintNoClinic:
+      "Add your clinic name so patients can find your practice.",
+    statusComplete: "Your profile is complete.",
+    statusProfileAction: "Fix in profile",
+    // #674: the getting-started checklist shown only to a brand-new doctor with
+    // no open cases and an empty review queue. The step states mirror the
+    // profile-status card's completeness hints (verified / fee / about /
+    // clinic name) so the two surfaces agree on what counts as "done"; each
+    // step deep-links to the profile section where the doctor completes it.
+    checklistHeading: "Getting started",
+    checklistBody:
+      "A few things to finish so patients can find and choose you.",
+    checklistStepVerified: "Get verified",
+    checklistStepFee: "Set your consultation fee",
+    checklistStepAbout: "Write an introduction",
+    checklistStepClinic: "Add your clinic name",
+    checklistDone: "Done",
+    checklistPending: "Pending",
+    // #681: the workload KPI row and the quick-actions row. Three of the four
+    // tile values reuse existing copy (the open-cases and consultation-fee
+    // headings, the unset-fee word), so this block ships the two standby tile
+    // labels with no existing home, the sr-only section heading, the
+    // quick-actions heading, and the My-cases action body. The quick-actions
+    // row supersedes #544's entry cards and adds My cases, whose label reuses
+    // casesIndexTitle.
+    kpiHeading: "At a glance",
+    kpiAwaitingReview: "Awaiting review",
+    kpiCurrentPatients: "Current patients",
+    quickActionsHeading: "Quick actions",
+    casesEntryBody: "Your open care cases",
   },
 
   // doctorProfile.* surface - PHASE-8.1 (#543): the doctor console Profile
@@ -1818,6 +1913,7 @@ const en = {
     noResultsBody: "No patient name matches your search.",
     noCaseStage: "No open case",
     openPatientAction: "Open",
+    openPatientNamed: (name: string) => `Open ${name}`,
     loadFailed: "Could not load your patients.",
     retry: "Try again",
     backToPatients: "Back to patients",
@@ -1985,6 +2081,13 @@ const en = {
     rxDurationLabel: "Duration",
     rxFrequencyLabel: "Frequency",
     rxEmptyItems: "No items yet. Add the first one below.",
+    // #657: the bare-number refusal - which field, and why. Each sentence
+    // names its own field and carries the unit it is asking for. The medicine
+    // name has no rule at all: real product names contain numbers.
+    rxDoseBareNumber: "Dose must include a unit, such as 500 mg.",
+    rxFrequencyBareNumber:
+      "Frequency must include a unit, such as 3 times daily.",
+    rxDurationBareNumber: "Duration must include a unit, such as 5 days.",
     addItemAction: "Add item",
     removeItemAction: "Remove",
     saveRevisionAction: "Save revision",
@@ -2074,7 +2177,7 @@ const en = {
     allow: "Allow",
     consentTitle: "Sharing your pre-summary",
     consentScope:
-      "This doctor will see your symptoms summary and may consult your consultations and prescriptions records while drafting your care.",
+      "This doctor will see your symptoms summary and may consult your consultations, prescriptions, and health background records while drafting your care.",
     consentValidity: "This access lasts until you revoke it.",
     confirmTitle: "Doctor chosen",
     confirmBody: "Your pre-summary is now visible to this doctor only.",
@@ -3046,6 +3149,13 @@ export const STRINGS: Record<Lang, Dictionary> = {
       issuedByNeutral: "आपकी देखभाल टीम द्वारा जारी",
       prescribedBy: "डॉक्टर द्वारा लिखा गया",
       moreItems: (count: number) => `+${count} और`,
+      history: {
+        status: "स्थिति",
+        medicines: "दवाइयाँ",
+        file: "फ़ाइल",
+        order: "ऑर्डर",
+        amount: "राशि",
+      },
       empty: {
         title: "अभी कोई एंट्री नहीं",
         body: "आपके परामर्श, प्रिस्क्रिप्शन, लैब रिपोर्ट और मेट्रिक्स यहाँ दिखेंगे जैसे-जैसे आपकी देखभाल होगी।",
@@ -3082,6 +3192,11 @@ export const STRINGS: Record<Lang, Dictionary> = {
         resultsStatusInRange: "रेंज में",
         resultsStatusBelowRange: "रेंज से कम",
         resultsStatusAboveRange: "रेंज से ज़्यादा",
+        medicine: {
+          dose: "मात्रा",
+          frequency: "आवृत्ति",
+          duration: "अवधि",
+        },
         egressHeading: "इस एंट्री को किसने देखा",
         shareEntry: "यह एंट्री साझा करें",
         downloadPdf: "PDF डाउनलोड करें",
@@ -3126,6 +3241,17 @@ export const STRINGS: Record<Lang, Dictionary> = {
           to: "किसे",
           via: "किस अनुमति में",
         },
+      },
+      // #653: counterparty-label fallback के दूरे चरण के शब्द - डॉक्टर, लैब,
+      // फ़ार्मेसी - और AI इंटेक की ब्रांडेड सेवा का नाम।
+      // #654: aiRole कार्ड पर नाम के साथ दिखने वाली भूमिका का शब्द है।
+      counterparty: {
+        doctor: "डॉक्टर",
+        lab: "लैब",
+        chemist: "फ़ार्मेसी",
+        patient: "मरीज़",
+        aiService: "CareSetu AI इंटेक सहायक",
+        aiRole: "AI इंटेक सेवा",
       },
       empty: {
         title: "अभी कोई अनुमति इतिहास नहीं",
@@ -3333,14 +3459,72 @@ export const STRINGS: Record<Lang, Dictionary> = {
       casesHeading: "खुले मामले",
       casesEmpty: "कोई खुला केयर केस नहीं",
       casesEmptyBody: "आपकी सलाह शुरू करते ही एक केस खुलता है।",
+      // #683: प्रति-अनुभाग रीड विफलताएँ। हर अनुभाग का संदेश और पुनःप्रयास
+      // अलग है, इसलिए आंशिक व्यवधान "यह अनुभाग लोड नहीं हो सका" पढ़ता है,
+      // पूरे पेज का "कंसोल लोड नहीं हो सका" नहीं।
+      queueLoadFailed: "समीक्षा कतार लोड नहीं हो सकी।",
+      casesLoadFailed: "खुले मामले लोड नहीं हो सके।",
       casesIndexTitle: "मेरे मामले",
       casesIndexDescription: "आपके खुले केयर मामले",
       stagePreSummary: "प्री-सारांश",
       stagePrescriptionPending: "नुस्ख़ा लंबित",
       stageClosed: "बंद",
-      openCaseAction: "खोलें",
+      // #652: केस कार्ड। सुलभ नाम में मरीज़ का नाम होना चाहिए (US-66), क्योंकि
+      // पूरा कार्ड ही एक लिंक है, और मेटा लाइन केस की तारीख बताती है ताकि
+      // प्राथमिकता ताज़गी से तय हो (US-6)। समय के शब्द भी यहीं हैं: "पहले"
+      // हर भाषा में अलग जुड़ता है, इसलिए एक व्रौपर + तीन इकाइयाँ पूरे वाक्य
+      // को अनुवाद-योग्य रखती हैं।
+      caseCardA11y: (name: string) => `${name} का केस खोलें`,
+      caseUpdatedAgo: (time: string) => `${time} पहले अपडेट किया गया`,
+      caseUpdatedJustNow: "अभी अपडेट किया गया",
+      timeAgoMinutes: (n: number) => `${n} मिनट`,
+      timeAgoHours: (n: number) => `${n} घंटे`,
+      timeAgoDays: (n: number) => `${n} दिन`,
       loadFailed: "कंसोल लोड नहीं हो सका।",
       retry: "फिर से कोशिश करें",
+      // #678: डैशबोर्ड की शुरुआत करने वाला समय-आधारित अभिवादन और शुल्क सारांश
+      // के बगल की प्रोफ़ाइल-स्थिति कार्ड। अभिवादन उसी एक प्रोफ़ाइल रीड से डॉक्टर
+      // का अपना नाम लेता है (उपाधि हटाकर पहला नाम); रीड लोड होने तक अभिवादन
+      // बिना नाम वाला रूप दिखाता है, खाली शीर्षक या स्केलेटन कभी नहीं। स्थिति
+      // कार्ड उसी प्रोजेक्शन को पढ़ता है और जो छूटा है उसे बताता है।
+      greetingMorning: "सुप्रभात",
+      greetingAfternoon: "शुभ दोपहर",
+      greetingEvening: "शुभ संध्या",
+      greetingNamed: (greeting: string, name: string) => `${greeting}, ${name}`,
+      statusHeading: "प्रोफ़ाइल स्थिति",
+      statusChipsLabel: "सत्यापन स्थिति और विशेषज्ञताएँ",
+      statusHintUnverified: "आपकी प्रोफ़ाइल अभी सत्यापित नहीं है।",
+      statusHintNoAbout: "परिचय जोड़ें ताकि मरीज़ आपको जान सकें।",
+      statusHintNoClinic:
+        "अपने क्लिनिक का नाम जोड़ें ताकि मरीज़ आपकी प्रैक्टिस ढूँढ सकें।",
+      statusComplete: "आपकी प्रोफ़ाइल पूरी है।",
+      statusProfileAction: "प्रोफ़ाइल में ठीक करें",
+      // #674: नए डॉक्टर के लिए शुरुआत-चेकलिस्ट, जो केवल तब दिखती है जब कोई
+      // खुला केस न हो और समीक्षा कतार खाली हो। कदमों की स्थितियाँ प्रोफ़ाइल-
+      // स्थिति कार्ड के पूर्णता संकेतों (सत्यापित / शुल्क / परिचय / क्लिनिक
+      // नाम) के समान हैं ताकि दोनों सतहें "पूर्ण" के अर्थ पर सहमत हों; हर कदम
+      // उस प्रोफ़ाइल अनुभाग से जुड़ता है जहाँ डॉक्टर इसे पूरा करता है।
+      checklistHeading: "शुरुआत करें",
+      checklistBody:
+        "मरीज़ों के आपको खोजने और चुनने से पहले कुछ चीज़ें पूरी करें।",
+      checklistStepVerified: "सत्यापन करवाएँ",
+      checklistStepFee: "अपना परामर्श शुल्क तय करें",
+      checklistStepAbout: "परिचय लिखें",
+      checklistStepClinic: "अपने क्लिनिक का नाम जोड़ें",
+      checklistDone: "पूर्ण",
+      checklistPending: "लंबित",
+      // #681: कार्यभार KPI पंक्ति और त्वरित-कार्य पंक्ति। चार में से तीन टाइल
+      // मान मौजूदा कॉपी दोबारा इस्तेमाल करते हैं (खुले मामलों और
+      // परामर्श-शुल्क शीर्षक, अनिर्धारित-शुल्क शब्द), इसलिए इस ब्लॉक में केवल
+      // वे दो स्टैंडबाय टाइल लेबल आते हैं जिनका मौजूदा घर नहीं है, sr-only
+      // सेक्शन शीर्षक, त्वरित-कार्य शीर्षक और मेरे-मामले क्रिया बॉडी।
+      // त्वरित-कार्य पंक्ति #544 के प्रवेश कार्डों का स्थान लेती है और "मेरे
+      // मामले" जोड़ती है, जिसका लेबल casesIndexTitle दोबारा इस्तेमाल करता है।
+      kpiHeading: "एक नज़र में",
+      kpiAwaitingReview: "समीक्षा हेतु लंबित",
+      kpiCurrentPatients: "वर्तमान मरीज़",
+      quickActionsHeading: "त्वरित कार्य",
+      casesEntryBody: "आपके खुले केयर मामले",
     },
 
     // doctorProfile.* सतह - PHASE-8.1 (#543): डॉक्टर कंसोल का प्रोफ़ाइल
@@ -3638,6 +3822,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
       noResultsBody: "आपकी खोज से मेल खाता कोई मरीज़ नाम नहीं है।",
       noCaseStage: "कोई खुला मामला नहीं",
       openPatientAction: "खोलें",
+      openPatientNamed: (name: string) => `${name} खोलें`,
       loadFailed: "आपके मरीज़ लोड नहीं हो सके।",
       retry: "फिर से कोशिश करें",
       backToPatients: "मरीज़ों पर वापस",
@@ -3798,6 +3983,10 @@ export const STRINGS: Record<Lang, Dictionary> = {
       rxDurationLabel: "अवधि",
       rxFrequencyLabel: "आवृत्ति",
       rxEmptyItems: "अभी कोई वस्तु नहीं। नीचे पहली वस्तु जोड़ें।",
+      // #657: शून्य-संख्या अस्वीकृति - कौन सा क्षेत्र और क्यों।
+      rxDoseBareNumber: "मात्रा में इकाई होनी चाहिए, जैसे 500 मिग्रा।",
+      rxFrequencyBareNumber: "आवृत्ति में इकाई होनी चाहिए, जैसे दिन में 3 बार।",
+      rxDurationBareNumber: "अवधि में इकाई होनी चाहिए, जैसे 5 दिन।",
       addItemAction: "वस्तु जोड़ें",
       removeItemAction: "हटाएँ",
       saveRevisionAction: "रिवीज़न सहेजें",
@@ -3885,7 +4074,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
       allow: "मंज़ूर करें",
       consentTitle: "अपना प्री-सारांश साझा करना",
       consentScope:
-        "यह डॉक्टर आपके लक्षणों का सारांश देखेगा और आपकी देखभाल का मसौदा बनाते समय आपके परामर्श तथा प्रिस्क्रिप्शन रिकॉर्ड देख सकता है।",
+        "यह डॉक्टर आपके लक्षणों का सारांश देखेगा और आपकी देखभाल का मसौदा बनाते समय आपके परामर्श, प्रिस्क्रिप्शन तथा स्वास्थ्य पृष्ठभूमि रिकॉर्ड देख सकता है।",
       consentValidity: "यह पहुँच तब तक मान्य है जब तक आप इसे रद्द नहीं करते।",
       confirmTitle: "डॉक्टर चुन लिया गया",
       confirmBody: "अब आपका प्री-सारांश केवल इसी डॉक्टर को दिखेगा।",

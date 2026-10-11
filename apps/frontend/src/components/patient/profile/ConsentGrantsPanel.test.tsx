@@ -66,6 +66,7 @@ function consent(overrides: Partial<ConsentView> = {}): ConsentView {
     patient_id: 7,
     counterparty_type: "doctor",
     counterparty_id: "dr-kumar",
+    counterparty_display_name: null,
     record_scope: "consultations",
     status: "granted",
     version: 1,
@@ -379,6 +380,48 @@ describe("ConsentGrantsPanel", () => {
     fireEvent.click(screen.getByTestId("ps-consent-revoke-1"));
 
     const sheet = await screen.findByTestId("ps-consent-sheet");
-    expect(sheet).toHaveTextContent(t.consentRevokeBody("dr-kumar"));
+    expect(sheet).toHaveTextContent(
+      t.consentRevokeBody(STRINGS.en.consentLog.counterparty.doctor),
+    );
+  });
+
+  // FEAT-002 (#661): the label seam's display-name step, on both surfaces.
+  it("shows the resolved display name over the type word, in the row and the confirm step", async () => {
+    mockFetchConsentLog.mockResolvedValue({
+      items: [consent({ counterparty_display_name: "Dr A Kumar" })],
+    });
+    render(<ConsentGrantsPanel />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("ps-consent-1")).toBeTruthy(),
+    );
+    const row = screen.getByTestId("ps-consent-1");
+    expect(row).toHaveTextContent("Dr A Kumar");
+    expect(row).not.toHaveTextContent(
+      STRINGS.en.consentLog.counterparty.doctor,
+    );
+
+    fireEvent.click(screen.getByTestId("ps-consent-revoke-1"));
+    const sheet = await screen.findByTestId("ps-consent-sheet");
+    expect(sheet).toHaveTextContent(t.consentRevokeBody("Dr A Kumar"));
+  });
+
+  // FEAT-002 (#661): the hi locale ships the hi word, never the EN default.
+  it("serves the counterparty word in hi, not the English default", async () => {
+    window.localStorage.setItem("caresetu.lang", "hi");
+    mockFetchConsentLog.mockResolvedValue({ items: [consent()] });
+    render(<ConsentGrantsPanel />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("ps-consent-1")).toBeTruthy(),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("ps-consent-1")).toHaveTextContent(
+        STRINGS.hi.consentLog.counterparty.doctor,
+      ),
+    );
+    expect(screen.getByTestId("ps-consent-1")).not.toHaveTextContent(
+      STRINGS.en.consentLog.counterparty.doctor,
+    );
   });
 });

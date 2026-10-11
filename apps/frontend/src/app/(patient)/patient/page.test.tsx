@@ -27,6 +27,7 @@ import { STRINGS } from "@/lib/i18n/dictionaries";
 import type { DirectoryEntry } from "@/lib/directory/search";
 import type { ConsentView } from "@/lib/consent/api";
 import type { RecordEntryView } from "@/lib/record/api";
+import type { AccessHistoryEntry } from "@/lib/audit/api";
 import { RECENT_ACTIVITY_MAX } from "@/components/patient/home/RecentActivityCard";
 
 const state = vi.hoisted(() => ({
@@ -188,6 +189,10 @@ beforeEach(() => {
     entries: [],
   });
   auditApi.fetchAccessHistory.mockReset();
+  // #671: the homepage rail now composes the shared Who-accessed accordion,
+  // which reads access history (rail zone). Default to an empty log so the
+  // accordion renders its empty state unless a test seeds rows.
+  auditApi.fetchAccessHistory.mockResolvedValue({ entries: [] });
   state.getProfile.mockResolvedValue({ set: false, profile: null });
 });
 
@@ -920,6 +925,7 @@ describe("action required card (#505)", () => {
       patient_id: 7,
       counterparty_type: "doctor",
       counterparty_id: "dr-77",
+      counterparty_display_name: null,
       record_scope: "consultations",
       status: "requested",
       version: 0,
@@ -964,6 +970,7 @@ describe("action required card (#505)", () => {
         }),
         consentView({
           consent_id: 2,
+          counterparty_type: "lab",
           counterparty_id: "lab-9",
           record_scope: "lab_results",
         }),
@@ -979,10 +986,16 @@ describe("action required card (#505)", () => {
     const items = screen.getAllByTestId("action-required-item");
     expect(items).toHaveLength(2);
     expect(items[0]).toHaveTextContent(
-      STRINGS.en.actions.consentRequest("dr-77", "consultations"),
+      STRINGS.en.actions.consentRequest(
+        STRINGS.en.consentLog.counterparty.doctor,
+        "consultations",
+      ),
     );
     expect(items[1]).toHaveTextContent(
-      STRINGS.en.actions.consentRequest("lab-9", "lab_results"),
+      STRINGS.en.actions.consentRequest(
+        STRINGS.en.consentLog.counterparty.lab,
+        "lab_results",
+      ),
     );
     expect(screen.getAllByTestId("action-allow")).toHaveLength(2);
     expect(screen.getAllByTestId("action-deny")).toHaveLength(2);
@@ -1028,6 +1041,30 @@ describe("action required card (#505)", () => {
     );
   });
 
+  // FEAT-002 (#661): the action moment names the requester from the label
+  // seam's display-name step, not the generic type word.
+  it("names the requester with the resolved display name when the backend sent one", async () => {
+    consentApi.fetchConsentLog.mockResolvedValue({
+      items: [
+        consentView({
+          consent_id: 42,
+          counterparty_id: "dr-77",
+          counterparty_display_name: "Dr A Kumar",
+          record_scope: "consultations",
+        }),
+      ],
+    });
+    renderHome();
+
+    await screen.findByTestId("action-required");
+    expect(screen.getByTestId("action-required")).toHaveTextContent(
+      STRINGS.en.actions.consentRequest("Dr A Kumar", "consultations"),
+    );
+    expect(screen.getByTestId("action-required")).not.toHaveTextContent(
+      STRINGS.en.consentLog.counterparty.doctor,
+    );
+  });
+
   it("serves the card copy in hi from the actions surface", async () => {
     consentApi.fetchConsentLog.mockResolvedValue({
       items: [
@@ -1049,7 +1086,10 @@ describe("action required card (#505)", () => {
       ),
     );
     expect(screen.getByTestId("action-required")).toHaveTextContent(
-      STRINGS.hi.actions.consentRequest("dr-77", "consultations"),
+      STRINGS.hi.actions.consentRequest(
+        STRINGS.hi.consentLog.counterparty.doctor,
+        "consultations",
+      ),
     );
     expect(screen.getByTestId("action-allow")).toHaveTextContent(
       STRINGS.hi.actions.allow,
@@ -1147,9 +1187,12 @@ describe("recent activity card (#506)", () => {
     renderHome();
 
     const row = await screen.findByTestId("recent-entry-2");
-    // #516: professional prescription copy from the shared describe output -
-    // medicine-name title, dose line, issued-by attribution - plus the
-    // per-type pill in place of the timeline's status pill.
+    // #655: the preview reads the same describe seam as My Record, so the
+    // row carries the record-type title (here: type pill + titled card) and
+    // the medicine leads the subtitle - dose line, issued-by attribution.
+    expect(
+      within(row).getAllByText(STRINGS.en.record.badge.prescription),
+    ).toHaveLength(2);
     expect(row).toHaveTextContent("Amlodipine");
     expect(row).toHaveTextContent("5 mg · once daily · 30 tablets");
     expect(row).toHaveTextContent(STRINGS.en.record.issuedBy("Dr. A. Kumar"));
@@ -1161,14 +1204,20 @@ describe("recent activity card (#506)", () => {
     expect(row).toHaveTextContent(/2026/);
   });
 
-  it("never mixes access-history reads into recent activity", async () => {
+  it("keeps access-history out of the recent-activity card", async () => {
     seedTimeline([entry(1, "consultation", "2026-09-21T08:00:00.000Z")]);
     renderHome();
 
-    await screen.findByTestId("recent-entry-1");
-    // The audit read is a separate data source - the card must never trigger it.
-    expect(auditApi.fetchAccessHistory).not.toHaveBeenCalled();
-    expect(screen.queryByTestId("access-history")).not.toBeInTheDocument();
+    const card = await screen.findByTestId("recent-activity");
+    // #671: the home now owns an audit read through the rail's Who-accessed
+    // accordion, but the recent-activity card stays fed by the record timeline
+    // only - it never renders access-history content of its own.
+    expect(
+      within(card).queryByTestId("access-history"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(card).queryByTestId("access-history-rail"),
+    ).not.toBeInTheDocument();
   });
 
   it("renders the friendly empty state for a record with no activity yet", async () => {
@@ -1227,8 +1276,11 @@ describe("recent activity card (#506)", () => {
       STRINGS.hi.recent.all,
     );
     const row = screen.getByTestId("recent-entry-2");
-    // #516: the hi surface carries the same professional anatomy - the pill
-    // labels the type and the prescription copy localizes the issued-by line.
+    // #655: the hi surface carries the same anatomy - record-type title,
+    // medicine-led subtitle, and the issued-by line localized.
+    expect(
+      within(row).getAllByText(STRINGS.hi.record.badge.prescription),
+    ).toHaveLength(2);
     expect(row).toHaveTextContent("Amlodipine");
     expect(row).toHaveTextContent(STRINGS.hi.record.issuedBy("Dr. A. Kumar"));
     const pill = screen.getByTestId("recent-type-2");
@@ -1401,5 +1453,116 @@ describe("health snapshot rail (#507)", () => {
     expect(screen.getByTestId("health-report-teaser")).toHaveTextContent(
       STRINGS.hi.health.reportSoon,
     );
+  });
+});
+
+describe("homepage rail parity (#671)", () => {
+  function entry(
+    id: number,
+    entry_type: RecordEntryView["entry_type"],
+    occurred_at: string,
+    payload: Record<string, unknown> = {},
+  ): RecordEntryView {
+    return {
+      entry_id: id,
+      entry_type,
+      payload,
+      occurred_at,
+      created_at: occurred_at,
+    };
+  }
+
+  function seedTimeline(entries: RecordEntryView[]) {
+    recordApi.fetchOwnRecord.mockResolvedValue({
+      record_id: 1,
+      patient_id: 7,
+      created_at: "2026-09-21T10:00:00.000Z",
+      entries,
+    });
+  }
+
+  function accessEntry(overrides: Partial<AccessHistoryEntry> = {}) {
+    return {
+      actor_id: 11,
+      actor_type: "doctor",
+      actor_display_name: "Dr A Kumar",
+      scope: "consultations",
+      accessed_at: "2026-09-21T08:00:00.000Z",
+      denied: false,
+      ...overrides,
+    };
+  }
+
+  it("renders At a glance, health snapshot and Who accessed in that order", async () => {
+    seedTimeline([entry(1, "consultation", "2026-09-21T08:00:00.000Z")]);
+    renderHome();
+
+    const rail = await screen.findByTestId("patient-home-rail");
+    const summary = await within(rail).findByTestId("record-rail-summary");
+    const health = within(rail).getByTestId("health-snapshot");
+    const access = await within(rail).findByTestId("access-history-rail");
+
+    // Reading order is part of the contract: At a glance -> health -> access.
+    expect(summary.compareDocumentPosition(health)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(health.compareDocumentPosition(access)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+  });
+
+  it("carries the record rail's sticky offset and spacing contract", async () => {
+    renderHome();
+
+    const rail = await screen.findByTestId("patient-home-rail");
+    // Mirrors the record rail's `sticky top-[4.5rem] space-y-5` (#671).
+    expect(rail.className).toContain("lg:sticky");
+    expect(rail.className).toContain("lg:top-[4.5rem]");
+    expect(rail.className).toContain("space-y-5");
+  });
+
+  it("shares one own-record read between the two new rail sections", async () => {
+    seedTimeline([
+      entry(1, "consultation", "2026-09-21T08:00:00.000Z"),
+      entry(2, "prescription", "2026-09-20T08:00:00.000Z", {
+        prescription_id: 12,
+        status: "issued",
+      }),
+    ]);
+    renderHome();
+
+    // At a glance is fed by the hook's single response...
+    const summary = await screen.findByTestId("record-rail-summary");
+    expect(summary).toHaveTextContent(STRINGS.en.record.filter.consultation);
+    expect(summary).toHaveTextContent(STRINGS.en.record.snapshotIssued(1));
+    // ...and the accordion reads its audit with the same response's patient id
+    // (not a second own-record fetch).
+    await waitFor(() =>
+      expect(auditApi.fetchAccessHistory).toHaveBeenCalledWith(7),
+    );
+  });
+
+  it("expands to the latest five accesses with the full count badge and consent-log link", async () => {
+    const many = Array.from({ length: 7 }, (_, i) =>
+      accessEntry({
+        actor_id: i + 10,
+        accessed_at: `2026-08-${String(i + 1).padStart(2, "0")}T09:00:00Z`,
+      }),
+    );
+    seedTimeline([]);
+    auditApi.fetchAccessHistory.mockResolvedValue({ entries: many });
+    renderHome();
+
+    const rail = await screen.findByTestId("patient-home-rail");
+    const list = await within(rail).findByTestId("access-history-rail-list");
+    expect(list.querySelectorAll("li")).toHaveLength(5);
+    // The badge reports the full audit count, not the five rendered rows.
+    expect(within(rail).getByTestId("access-history-rail")).toHaveTextContent(
+      "7",
+    );
+    // The "Open consent log" footer link is a live doorway from the home rail.
+    expect(
+      within(rail).getByTestId("access-consent-log-link-rail"),
+    ).toHaveAttribute("href", "/patient/record/consent-log");
   });
 });

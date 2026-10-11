@@ -22,9 +22,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { EmptyState } from "@/components/layout/EmptyState";
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
+import { AccessHistoryAccordion } from "@/components/patient/AccessHistoryAccordion";
+import { AtAGlanceCard } from "@/components/patient/AtAGlanceCard";
 import { HealthSnapshotCard } from "@/components/patient/home/HealthSnapshotCard";
-import { ApiError } from "@/lib/api-errors";
-import { fetchAccessHistory, type AccessHistoryEntry } from "@/lib/audit/api";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -50,7 +50,6 @@ import {
   describeEntry,
   entryFlagRows,
   flaggedValues,
-  formatOccurredAt,
   groupTimeline,
   issuedPrescriptionCount,
   sortTimelineDesc,
@@ -234,44 +233,6 @@ export default function RecordPage() {
     load();
   }, [load]);
 
-  // Access history is a secondary section that needs the record's patient id,
-  // so it fetches only once the timeline has resolved.
-  const [accessHistory, setAccessHistory] = useState<
-    AccessHistoryEntry[] | null
-  >(null);
-  const [accessStatus, setAccessStatus] = useState<LoadStatus>("loading");
-  const [accessTraceId, setAccessTraceId] = useState<string | undefined>(
-    undefined,
-  );
-  const [accessBannerOpen, setAccessBannerOpen] = useState(false);
-
-  const loadAccessHistory = useCallback((patientId: number) => {
-    setAccessStatus("loading");
-    fetchAccessHistory(patientId)
-      .then((data) => {
-        // Newest-first by accessed_at for a stable reading order.
-        const sorted = [...data.entries].sort(
-          (a, b) =>
-            new Date(b.accessed_at).getTime() -
-            new Date(a.accessed_at).getTime(),
-        );
-        setAccessHistory(sorted);
-        setAccessStatus("ready");
-        setAccessBannerOpen(false);
-      })
-      .catch((error: unknown) => {
-        setAccessTraceId(error instanceof ApiError ? error.traceId : undefined);
-        setAccessStatus("error");
-        setAccessBannerOpen(true);
-      });
-  }, []);
-
-  useEffect(() => {
-    if (status === "ready" && timeline?.patient_id) {
-      loadAccessHistory(timeline.patient_id);
-    }
-  }, [status, timeline, loadAccessHistory]);
-
   const sorted = useMemo(
     () => sortTimelineDesc(timeline?.entries ?? []),
     [timeline],
@@ -319,19 +280,6 @@ export default function RecordPage() {
   };
 
   const snapshotReady = status === "ready";
-
-  // Shared props for both zone copies of the who-accessed section, so the
-  // mobile card and the desktop rail can never drift apart on fetch state.
-  const accessProps = {
-    accessStatus,
-    accessHistory,
-    accessBannerOpen,
-    accessTraceId,
-    onRetry: () => {
-      if (timeline?.patient_id) loadAccessHistory(timeline.patient_id);
-    },
-    onDismiss: () => setAccessBannerOpen(false),
-  };
 
   return (
     <>
@@ -472,10 +420,13 @@ export default function RecordPage() {
           ) : (
             <div data-testid="record-timeline">
               {groups.map((group) => (
-                <section key={group.key}>
+                // Spacing lives on the section: every heading is first-child of
+                // its own section, so `first:` on the heading suppressed the
+                // margin for every group (#667).
+                <section key={group.key} className="mt-5 first:mt-0">
                   <h2
                     data-testid={`group-${group.key}`}
-                    className="mt-5 flex items-center gap-2.5 text-[0.75rem] font-semibold uppercase tracking-wide text-txt-muted first:mt-0"
+                    className="flex items-center gap-2.5 text-[0.75rem] font-semibold uppercase tracking-wide text-txt-muted"
                   >
                     <span>{group.label}</span>
                     <span
@@ -500,97 +451,40 @@ export default function RecordPage() {
           {/* Mobile-only privacy section below the feed (lg:hidden): the home
               health-snapshot card, then who-accessed with its consent-log
               entry point. */}
-          {snapshotReady && (
+          {snapshotReady && timeline && (
             <div
               className="mt-8 space-y-4 lg:hidden"
               data-testid="record-privacy-mobile"
             >
               <HealthSnapshotCard />
-              {renderAccessSection({
-                zone: "mobile",
-                ...accessProps,
-                t,
-                lang,
-              })}
+              <AccessHistoryAccordion
+                patientId={timeline.patient_id}
+                zone="mobile"
+              />
             </div>
           )}
         </div>
 
         {/* ============ DESKTOP RAIL ============ */}
-        {snapshotReady && (
+        {snapshotReady && timeline && (
           <aside
             className="hidden lg:block"
             data-testid="record-rail"
             aria-label={t.summaryLabel}
           >
             <div className="sticky top-[4.5rem] space-y-5">
-              <section
-                className="rounded-lg border border-hairline bg-surface p-4 shadow-card"
-                data-testid="record-rail-summary"
-              >
-                <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-txt-muted">
-                  {t.summaryLabel}
-                </h2>
-                <ul className="flex flex-col gap-1">
-                  {[
-                    {
-                      label: t.filter.consultation,
-                      value: counts.consultation,
-                      sub: null as null | string,
-                    },
-                    {
-                      label: t.filter.prescription,
-                      value: counts.prescription,
-                      sub: t.snapshotIssued(issuedCount),
-                    },
-                    {
-                      label: t.filter.labReport,
-                      value: counts.lab_report,
-                      sub:
-                        flagged.entries > 0
-                          ? t.snapshotFlagged(flagged.entries)
-                          : null,
-                    },
-                    {
-                      label: t.filter.metric,
-                      value: counts.metric,
-                      sub: null,
-                    },
-                  ].map((row) => (
-                    <li
-                      key={row.label}
-                      className="flex items-center justify-between gap-2 border-b border-hairline-soft py-2 text-[0.9375rem] text-txt-sub last:border-0"
-                    >
-                      <span>{row.label}</span>
-                      <span className="flex items-center gap-2 text-[1.125rem] font-bold text-txt">
-                        {row.value}
-                        {row.sub && (
-                          <span className="text-[0.8125rem] font-medium text-txt-muted">
-                            {row.sub}
-                          </span>
-                        )}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-                {flagged.values > 0 && (
-                  <p
-                    className="mt-3 text-xs text-txt-muted"
-                    data-testid="record-rail-flag-footnote"
-                  >
-                    {t.outOfRange.footnote(flagged.values)}
-                  </p>
-                )}
-              </section>
+              <AtAGlanceCard
+                counts={counts}
+                issuedCount={issuedCount}
+                flagged={flagged}
+              />
 
               <HealthSnapshotCard />
 
-              {renderAccessSection({
-                zone: "rail",
-                ...accessProps,
-                t,
-                lang,
-              })}
+              <AccessHistoryAccordion
+                patientId={timeline.patient_id}
+                zone="rail"
+              />
             </div>
           </aside>
         )}
@@ -670,185 +564,5 @@ function renderEntry(item: RecordEntryView, t: RecordStrings, lang: Lang) {
         </div>
       </Link>
     </li>
-  );
-}
-
-// Who-accessed accordion, reused per responsive zone with its own testid set
-// so a test can scope copy to the mobile card or the desktop rail. The error
-// banner lives in the mobile card only (ErrorBanner owns `error-banner`); the
-// rail shows a lighter inline error so desktop users still get Retry without
-// duplicating testids across the two zones.
-// PROTO-3.1 (#511): only the 5 most recent rows render inline; the badge shows
-// the full count and the consent-log link routes to the complete audit.
-const ACCESS_MOST_RECENT_COUNT = 5;
-
-interface AccessSectionProps {
-  zone: "mobile" | "rail";
-  accessStatus: LoadStatus;
-  accessHistory: AccessHistoryEntry[] | null;
-  accessBannerOpen: boolean;
-  accessTraceId: string | undefined;
-  onRetry: () => void;
-  onDismiss: () => void;
-  t: RecordStrings;
-  lang: Lang;
-}
-
-function renderAccessSection({
-  zone,
-  accessStatus,
-  accessHistory,
-  accessBannerOpen,
-  accessTraceId,
-  onRetry,
-  onDismiss,
-  t,
-  lang,
-}: AccessSectionProps) {
-  const isMobile = zone === "mobile";
-  const listId = isMobile ? "access-history-list" : "access-history-rail-list";
-  const loadingId = isMobile ? "access-loading" : "access-loading-rail";
-  const entryPrefix = isMobile ? "access-entry-" : "access-entry-rail-";
-  const keyPrefix = isMobile ? "entry" : "rail";
-  const consentLinkId = isMobile
-    ? "access-consent-log-link"
-    : "access-consent-log-link-rail";
-  const hasEntries =
-    accessStatus === "ready" && !!accessHistory && accessHistory.length > 0;
-
-  return (
-    <section
-      data-testid={isMobile ? "access-history" : "access-history-rail"}
-      className="rounded-lg border border-hairline bg-surface p-4 shadow-card"
-    >
-      <div className="flex items-center justify-between gap-2">
-        {/* <h2> keeps the existing heading role on mobile; the rail uses a
-              <strong> so the two zone copies never duplicate a heading
-              level. */}
-        {isMobile ? (
-          <h2 className="text-base font-semibold text-txt">
-            {t.accessHistory.heading}
-          </h2>
-        ) : (
-          <strong className="text-base font-semibold text-txt">
-            {t.accessHistory.heading}
-          </strong>
-        )}
-        {hasEntries && (
-          <span className="rounded-full bg-hairline-soft px-2 py-0.5 text-xs font-medium text-txt-muted">
-            {accessHistory.length}
-          </span>
-        )}
-      </div>
-      <details className="mt-2">
-        <summary className="cursor-pointer list-none text-sm text-txt-muted">
-          <span className="flex items-center justify-between gap-2">
-            {t.accessAccordionHint}
-            <span aria-hidden="true" className="text-txt-muted">
-              ▾
-            </span>
-          </span>
-        </summary>
-        <div className="mt-3">
-          {accessBannerOpen &&
-            (isMobile ? (
-              <ErrorBanner
-                message={t.accessHistory.loadError}
-                traceId={accessTraceId}
-                onRetry={onRetry}
-                onDismiss={onDismiss}
-              />
-            ) : (
-              <p
-                className="mb-2 flex items-center justify-between gap-2 text-sm text-danger"
-                data-testid="access-rail-error"
-              >
-                <span>{t.accessHistory.loadError}</span>
-                <button
-                  type="button"
-                  onClick={onRetry}
-                  data-testid="access-rail-retry"
-                  className="shrink-0 rounded-md border border-danger-border px-2 py-1 text-xs font-medium text-danger hover:bg-danger-soft/60"
-                >
-                  Retry
-                </button>
-              </p>
-            ))}
-          {accessStatus === "loading" ? (
-            <ul className="space-y-2" data-testid={loadingId}>
-              {[0, 1, 2].map((row) => (
-                <li
-                  key={row}
-                  className="h-10 animate-pulse rounded-lg border border-hairline bg-hairline-soft/60"
-                />
-              ))}
-            </ul>
-          ) : accessStatus === "error" ||
-            accessHistory === null ? null : accessHistory.length === 0 ? (
-            <div className="space-y-1">
-              <p className="text-sm font-medium text-txt">
-                {t.accessHistory.emptyTitle}
-              </p>
-              <p className="text-sm text-txt-muted">
-                {t.accessHistory.emptyBody}
-              </p>
-            </div>
-          ) : (
-            <ul className="space-y-2" data-testid={listId}>
-              {accessHistory
-                .slice(0, ACCESS_MOST_RECENT_COUNT)
-                .map((entry, index) => {
-                  const identity = entry.actor_type || `ID ${entry.actor_id}`;
-                  const scope = entry.scope
-                    ? `, ${t.accessHistory.scopePrefix}${entry.scope}`
-                    : "";
-                  return (
-                    <li
-                      key={`${keyPrefix}-${entry.actor_id}-${entry.accessed_at}-${index}`}
-                      data-testid={`${entryPrefix}${index}`}
-                    >
-                      <div>
-                        <span className="flex items-start gap-2">
-                          <strong className="text-[0.9375rem] text-txt">
-                            {identity}
-                          </strong>
-                          {entry.denied && (
-                            <span className="ml-auto shrink-0 rounded-full bg-danger-soft px-2 py-0.5 text-xs font-medium text-danger">
-                              {t.accessHistory.deniedLabel}
-                            </span>
-                          )}
-                        </span>
-                        <p className="mt-0.5 text-[0.8125rem] text-txt-muted">
-                          {formatOccurredAt(entry.accessed_at, lang)}
-                          {scope}
-                        </p>
-                        {entry.denied && entry.denial_reason ? (
-                          <p className="mt-0.5 text-xs text-txt-muted">
-                            {t.accessHistory.deniedReasonPrefix}
-                            {entry.denial_reason}
-                          </p>
-                        ) : null}
-                      </div>
-                    </li>
-                  );
-                })}
-            </ul>
-          )}
-        </div>
-      </details>
-
-      {/* "Open consent log" is a permanent entry point at the bottom of the
-          section, visible without expanding the audit (prototype posture). */}
-      <footer className="mt-3">
-        <Link
-          href="/patient/record/consent-log"
-          data-testid={consentLinkId}
-          className="inline-flex items-center gap-1 text-xs font-medium tracking-wide text-accent-strong hover:underline"
-        >
-          {t.openConsentLog}
-          <ChevronRight size={14} aria-hidden="true" />
-        </Link>
-      </footer>
-    </section>
   );
 }

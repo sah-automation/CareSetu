@@ -118,7 +118,7 @@ The private, encrypted object storage for profile photos: one `profile-media` bu
 _Avoid_: avatar URL, public image link, media bucket (that is the intake/`rx_input` media store)
 
 **standing grant**:
-One live consent authorization for one (patient, counterparty, record scope) triple, effective from grant until revoked or superseded by a re-grant. "Per-action" consent means this per-purpose targeting, never a one-shot token. Pick-at-doctor (Phase 8.1) is the deliberate multi-grant moment: it records `consultations` and `prescriptions` standing grants together, atomically in the same transaction as the doctor assignment, so the AI drafting assistant's consent-gated read can pass.
+One live consent authorization for one (patient, counterparty, record scope) triple, effective from grant until revoked or superseded by a re-grant. "Per-action" consent means this per-purpose targeting, never a one-shot token. Pick-at-doctor (Phase 8.1) is the deliberate multi-grant moment: it records `consultations`, `prescriptions`, and `health_background` standing grants together, atomically in the same transaction as the doctor assignment, so the AI drafting assistant's consent-gated read can pass and the picked doctor's health-background section unlocks (#663).
 _Avoid_: per-action token, one-shot consent
 
 **grant lineage**:
@@ -196,7 +196,7 @@ The consent-schema ledger of successful, consent-authorized PHI disclosures - wh
 _Avoid_: access log (that is the record access history), audit log (that is the Phase 4 engine)
 
 **record access history**:
-The health-schema ledger of every read attempt on a record - owner reads, partner reads, denied attempts; feeds the patient's trust view (`FEAT-003`, Phase 4). Consent-scoped reads record the record scope; surfaces that are not entry-keyed record a surface marker instead (`doctor_patients_list`, `doctor_patient_detail` for the doctor console), so revoking consent never rewinds the historical "viewed where" signal.
+The health-schema ledger of counterparty read attempts on a record - partner reads and denied attempts, never the owner's own reads (it answers "who ELSE has seen my record"); feeds the patient's trust view (`FEAT-003`, Phase 4). Consent-scoped reads record the record scope; surfaces that are not entry-keyed record a surface marker instead (`doctor_patients_list`, `doctor_patient_detail` for the doctor console), so revoking consent never rewinds the historical "viewed where" signal.
 _Avoid_: audit trail, disclosure log (that is the `egress log`)
 
 ### Provider directory & credential validity (Phase 6)

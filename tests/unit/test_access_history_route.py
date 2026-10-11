@@ -31,6 +31,7 @@ _VIEW = AccessHistoryView(
         AccessHistoryEntry(
             actor_id=3,
             actor_type="doctor",
+            actor_display_name="Sunrise Clinic",
             scope="consultations",
             accessed_at=_NOW,
             denied=False,
@@ -39,6 +40,7 @@ _VIEW = AccessHistoryView(
         AccessHistoryEntry(
             actor_id=7,
             actor_type="patient",
+            actor_display_name=None,
             scope="full_record",
             accessed_at=_NOW,
             denied=False,

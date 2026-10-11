@@ -1295,16 +1295,19 @@ class IntakeFacade:
         Consent-at-pick (MOD-004): the pick IS the consent moment. The chosen
         doctor's partner identity is written to ``intake_intakes``
         (``assigned_partner_id``) and the standing grants for the
-        (patient, doctor, consultations) and (patient, doctor, prescriptions)
-        triples are recorded in the SAME transaction via
-        ``ConsentFacade.grant_consent_on`` - either both grants exist or
-        neither, one atomic write, no second gate (#480). The second scope is
-        the one the AI draft's consent-gated past-prescription read (ticket
-        #487) needs to pass; the response still reports the consultations
-        grant so ``PickDoctorResult`` consumers behave identically. From this
-        moment the pre-summary is assigned to that doctor: doctor-facing reads
-        (``get_intake_media`` here, the review-queue and pre-summary reads
-        #447/#448) are scoped to the assigned partner.
+        (patient, doctor, consultations), (patient, doctor, prescriptions)
+        and (patient, doctor, health_background) triples are recorded in the
+        SAME transaction via ``ConsentFacade.grant_consent_on`` - all three
+        grants exist or none, one atomic write, no second gate (#480,
+        widened #663). The prescriptions scope is the one the AI draft's
+        consent-gated past-prescription read (ticket #487) needs to pass, and
+        the health_background scope makes the pick order-independent against
+        the first-save acknowledgment (ADR-0018); the response still reports
+        the consultations grant so ``PickDoctorResult`` consumers behave
+        identically. From this moment the pre-summary is assigned to that
+        doctor: doctor-facing reads (``get_intake_media`` here, the
+        review-queue and pre-summary reads #447/#448) are scoped to the
+        assigned partner.
 
         The write is patient-scoped: the intake must belong to ``patient_id`` or
         :class:`IntakeNotFoundError` is raised (404, mirroring the ownership
@@ -1329,11 +1332,14 @@ class IntakeFacade:
 
         counterparty_type: Literal["doctor", "lab", "chemist"] = "doctor"
         counterparty_id = str(partner_id)
-        # Consent-at-pick grants BOTH record scopes the doctor's drafting work
-        # touches: the consultations record and the prescriptions record (the
-        # AI-draft past-prescription read, #487). Minted on the same open
-        # connection inside the single transaction below - both or neither.
-        record_scopes = ("consultations", "prescriptions")
+        # Consent-at-pick grants ALL THREE record scopes the doctor's care
+        # work touches: the consultations record, the prescriptions record
+        # (the AI-draft past-prescription read, #487), and the patient's own
+        # health background (#663 - the pick is the deliberate multi-grant
+        # moment, so both pick-then-save and save-then-pick orderings leave
+        # the picked doctor unlocked). Minted on the same open connection
+        # inside the single transaction below - all three or none.
+        record_scopes = ("consultations", "prescriptions", "health_background")
 
         async with self._engine.begin() as connection:
             row = (

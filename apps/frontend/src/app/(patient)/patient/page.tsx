@@ -45,14 +45,25 @@
 // exist, honest Soon teasers (P12 metrics, P9 reports) when either is absent.
 // The rail keeps its 300px / >=1024px sticky shell from #499; it just gains
 // its content here.
+//
+// #671: the rail reaches record-page parity - an aside stacking "At a glance",
+// the health snapshot, and "Who accessed my record", in that order, with the
+// record rail's sticky offset and spacing. The two new sections render the
+// shared components extracted in #666/#669 and are fed from ONE own-record read
+// via the shared useOwnRecord hook (story 33); HealthSnapshotCard keeps its own
+// self-fetch, and the record page keeps passing its loaded timeline down. On
+// small screens the aside stacks after the main cards in the same order.
 
 import { useState } from "react";
 
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { useProfile } from "@/lib/profile/ProfileContext";
+import { useOwnRecord } from "@/lib/record/useOwnRecord";
 import { LocationChip } from "@/components/patient/location/LocationChip";
 import { ProfileCompletenessBanner } from "@/components/patient/profile/ProfileCompletenessBanner";
+import { AccessHistoryAccordion } from "@/components/patient/AccessHistoryAccordion";
+import { AtAGlanceCard } from "@/components/patient/AtAGlanceCard";
 import { ActionRequiredCard } from "@/components/patient/home/ActionRequiredCard";
 import { HealthSnapshotCard } from "@/components/patient/home/HealthSnapshotCard";
 import { RecommendedRail } from "@/components/patient/home/RecommendedRail";
@@ -68,6 +79,11 @@ export default function PatientDashboardPage() {
   // #502: the home search scope is display-driven and shared with the Search /
   // See-all destinations here and the Recommended rail (#503) - one source.
   const [searchScope, setSearchScope] = useState<ProviderType>("doctor");
+
+  // #671: one own-record read for the two new rail sections (story 33) - the
+  // summary counts and the accordion's patient id share this single response.
+  const ownRecord = useOwnRecord();
+  const railReady = ownRecord.status === "ready";
 
   const firstName = draft.name.trim().split(/\s+/)[0];
 
@@ -114,12 +130,28 @@ export default function PatientDashboardPage() {
           <RecentActivityCard />
         </div>
         <aside
-          className="min-w-0 lg:sticky lg:top-[4.5rem]"
+          className="min-w-0 space-y-5 lg:sticky lg:top-[4.5rem]"
           data-testid="patient-home-rail"
         >
+          {/* #671: record-page parity order - At a glance, health snapshot,
+              Who accessed. The first and last are fed by the shared own-record
+              hook; the middle keeps its #507 self-fetch. */}
+          {railReady && ownRecord.counts && (
+            <AtAGlanceCard
+              counts={ownRecord.counts}
+              issuedCount={ownRecord.issuedCount}
+              flagged={ownRecord.flagged}
+            />
+          )}
           {/* #507: the sticky health snapshot - last metric + latest report
               derived from the record timeline, Soon teasers when absent. */}
           <HealthSnapshotCard />
+          {railReady && ownRecord.patientId !== null && (
+            <AccessHistoryAccordion
+              patientId={ownRecord.patientId}
+              zone="rail"
+            />
+          )}
         </aside>
       </div>
     </>
