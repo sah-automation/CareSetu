@@ -15,6 +15,7 @@ construction, that only the intake context was in it.
 
 from __future__ import annotations
 
+import time
 from typing import Literal
 
 from langfuse import observe
@@ -29,6 +30,7 @@ from modules.intake.adapters.ai_gateway import (
     TranscribeRequest,
     TranscribeResult,
 )
+from observability.langfuse_span import set_span_metadata
 
 MOCK_CONFIDENCE_CLEAN = 0.8
 MOCK_CONFIDENCE_LOW = 0.5
@@ -81,21 +83,44 @@ class MockAiProvider:
         """Every request this mock has received (for test assertions)."""
         return list(self._calls)
 
-    @observe
+    def _record_span(self, task_type: str, *, started: float) -> None:
+        """Attach the allow-listed span metadata for a mock call (PHASE-14A B2).
+
+        The mock reports zero tokens and its canned confidence; the call goes
+        through the same allow-list seam as the real adapter so the PHI-free
+        contract is identical. A no-op when Langfuse is off, and never raises.
+        """
+        set_span_metadata(
+            task_type=task_type,
+            provider=self.effective_provider,
+            model=self.effective_model,
+            input_tokens=0,
+            output_tokens=0,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            cost_paise=0,
+            confidence=self._confidence,
+            status="success",
+        )
+
+    @observe(name="ai_transcribe", capture_input=False, capture_output=False)
     async def transcribe(self, request: TranscribeRequest) -> TranscribeResult:
+        started = time.monotonic()
         self._calls.append(request)
-        return TranscribeResult(
+        result = TranscribeResult(
             transcript="mock transcript",
             confidence=self._confidence,
             language=request.context.language,
             input_tokens=0,
             output_tokens=0,
         )
+        self._record_span("transcribe", started=started)
+        return result
 
-    @observe
+    @observe(name="ai_structure", capture_input=False, capture_output=False)
     async def structure(self, request: StructureRequest) -> StructureResult:
+        started = time.monotonic()
         self._calls.append(request)
-        return StructureResult(
+        result = StructureResult(
             chief_complaints=["mock chief complaint"],
             symptoms=["mock symptom"],
             duration="1 week",
@@ -103,11 +128,14 @@ class MockAiProvider:
             input_tokens=0,
             output_tokens=0,
         )
+        self._record_span("structure", started=started)
+        return result
 
-    @observe
+    @observe(name="ai_draft_rx", capture_input=False, capture_output=False)
     async def draft_rx(self, request: DraftRxRequest) -> DraftRxResult:
+        started = time.monotonic()
         self._calls.append(request)
-        return DraftRxResult(
+        result = DraftRxResult(
             rx_items=[
                 RxItem(
                     name="mock medication",
@@ -120,6 +148,8 @@ class MockAiProvider:
             input_tokens=0,
             output_tokens=0,
         )
+        self._record_span("draft_rx", started=started)
+        return result
 
 
 def build_mock_ai_gateway(

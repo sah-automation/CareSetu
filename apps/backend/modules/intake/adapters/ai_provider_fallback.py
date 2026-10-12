@@ -38,6 +38,7 @@ from modules.intake.adapters.ai_gateway import (
     TranscribeRequest,
     TranscribeResult,
 )
+from observability.langfuse_span import set_span_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -129,26 +130,58 @@ class FallbackAiGateway:
         self._last_effective = self._secondary_meta
         return result
 
-    @observe
+    def _record_span(self, task_type: str, *, status: str) -> None:
+        """Best-effort attach the allow-listed span metadata (PHASE-14A B2, #700).
+
+        Labels the serving provider/model of the last success (falling back to
+        the primary when both legs failed). Called from inside the public
+        ``@observe`` span; never raises and is a no-op when Langfuse is off.
+        """
+        set_span_metadata(
+            task_type=task_type,
+            provider=self.last_effective_provider or self._primary_meta.provider,
+            model=self.last_effective_model or self._primary_meta.model,
+            status=status,
+        )
+
+    @observe(name="ai_structure", capture_input=False, capture_output=False)
     async def structure(self, request: StructureRequest) -> StructureResult:
-        return await self._route(
-            lambda: self._primary.structure(request),
-            lambda: self._secondary.structure(request),
-        )
+        try:
+            result = await self._route(
+                lambda: self._primary.structure(request),
+                lambda: self._secondary.structure(request),
+            )
+        except Ext002CallError:
+            self._record_span("structure", status="failed")
+            raise
+        self._record_span("structure", status="success")
+        return result
 
-    @observe
+    @observe(name="ai_transcribe", capture_input=False, capture_output=False)
     async def transcribe(self, request: TranscribeRequest) -> TranscribeResult:
-        return await self._route(
-            lambda: self._primary.transcribe(request),
-            lambda: self._secondary.transcribe(request),
-        )
+        try:
+            result = await self._route(
+                lambda: self._primary.transcribe(request),
+                lambda: self._secondary.transcribe(request),
+            )
+        except Ext002CallError:
+            self._record_span("transcribe", status="failed")
+            raise
+        self._record_span("transcribe", status="success")
+        return result
 
-    @observe
+    @observe(name="ai_draft_rx", capture_input=False, capture_output=False)
     async def draft_rx(self, request: DraftRxRequest) -> DraftRxResult:
-        return await self._route(
-            lambda: self._primary.draft_rx(request),
-            lambda: self._secondary.draft_rx(request),
-        )
+        try:
+            result = await self._route(
+                lambda: self._primary.draft_rx(request),
+                lambda: self._secondary.draft_rx(request),
+            )
+        except Ext002CallError:
+            self._record_span("draft_rx", status="failed")
+            raise
+        self._record_span("draft_rx", status="success")
+        return result
 
 
 __all__ = [

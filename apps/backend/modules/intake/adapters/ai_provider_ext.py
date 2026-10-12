@@ -50,6 +50,7 @@ from modules.intake.adapters.ai_gateway import (
 from modules.intake.adapters.ai_provider_fallback import AiGatewayMeta, FallbackAiGateway
 from modules.intake.adapters.ai_provider_mock import build_mock_ai_gateway
 from modules.intake.adapters.ai_provider_openai_compatible import OpenAiCompatibleAdapter
+from observability.langfuse_span import set_span_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,7 @@ class CircuitBreakerAiGateway:
 
     async def _run_with_breaker(self, name: str, fn: Awaitable[_R]) -> _R:
         if not self._allow():
+            self._record_span(name, status="failed")
             raise Ext002CallError(
                 "EXT-002 circuit breaker is open; call refused without the provider",
                 retries_exhausted=True,
@@ -129,19 +131,35 @@ class CircuitBreakerAiGateway:
         except Ext002CallError as exc:
             if exc.retries_exhausted:
                 self._record(ok=False)
+                self._record_span(name, status="failed")
             raise
         self._record(ok=True)
+        self._record_span(name, status="success")
         return result
 
-    @observe
+    def _record_span(self, task_type: str, *, status: str) -> None:
+        """Best-effort attach the allow-listed span metadata (PHASE-14A B2, #700).
+
+        Runs inside the public ``@observe`` method's span (``_run_with_breaker``
+        is called from it), so a breaker fast-fail or an outage is visible on
+        the span as ``status=failed``. Never raises; a no-op when Langfuse is off.
+        """
+        set_span_metadata(
+            task_type=task_type,
+            provider=self.effective_provider,
+            model=self.effective_model,
+            status=status,
+        )
+
+    @observe(name="ai_transcribe", capture_input=False, capture_output=False)
     async def transcribe(self, request: TranscribeRequest) -> TranscribeResult:
         return await self._run_with_breaker("transcribe", self._adapter.transcribe(request))
 
-    @observe
+    @observe(name="ai_structure", capture_input=False, capture_output=False)
     async def structure(self, request: StructureRequest) -> StructureResult:
         return await self._run_with_breaker("structure", self._adapter.structure(request))
 
-    @observe
+    @observe(name="ai_draft_rx", capture_input=False, capture_output=False)
     async def draft_rx(self, request: DraftRxRequest) -> DraftRxResult:
         return await self._run_with_breaker("draft_rx", self._adapter.draft_rx(request))
 

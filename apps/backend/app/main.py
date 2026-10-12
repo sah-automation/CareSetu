@@ -78,6 +78,7 @@ from modules.partner.directory_cache import (
 from modules.partner.facade import PartnerFacade, ProviderProfileNotFoundError
 from modules.profile_media.adapters.media_store import build_profile_media_store
 from modules.profile_media.facade import ProfileMediaRetryPolicy
+from observability.langfuse_client import flush_langfuse, get_langfuse_client
 from observability.logging import SERVICE_API, configure_logging
 from observability.otel import flush_otel, init_otel
 from observability.sentry import flush_sentry, init_sentry
@@ -276,6 +277,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # composition root when SENTRY_DSN is set; a no-op when it is empty and
         # never a boot failure (init failures are logged and swallowed).
         init_sentry(resolved_settings)
+        # PHASE-14A B2 (#700): wire the Langfuse client explicitly at boot so AI
+        # tracing is intentional rather than an accident of the SDK's env-global
+        # client. A no-op (returns None, SDK never imported) when the keys are
+        # absent, so boot is byte-for-byte unchanged when Langfuse is off.
+        get_langfuse_client(
+            resolved_settings.langfuse_public_key,
+            resolved_settings.langfuse_secret_key,
+            resolved_settings.langfuse_host,
+        )
         # Initialize Redis clients for the consent-status and directory-search
         # caches (both degrade to SQL when absent/unhealthy)
         await init_redis_client(resolved_settings)
@@ -317,6 +327,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # PHASE-14A A3a (#697): force-flush the OTel exporter on shutdown so
             # a Render spin-down does not drop buffered spans; no-op when off.
             flush_otel()
+            # PHASE-14A B2 (#700): force-flush buffered Langfuse AI spans on
+            # shutdown; no-op when Langfuse is unconfigured.
+            flush_langfuse()
 
     app = FastAPI(title="CareSetu API", version=APP_VERSION, lifespan=lifespan)
     app.state.settings = resolved_settings

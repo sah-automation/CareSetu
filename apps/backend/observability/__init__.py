@@ -9,7 +9,17 @@ request-path bootstrap (A3a, #697). Lives at the top level alongside ``bus``
 ``modules``.
 """
 
-from observability.langfuse_client import get_langfuse_client
+from observability.langfuse_client import (
+    flush_langfuse,
+    get_configured_client,
+    get_langfuse_client,
+)
+from observability.langfuse_span import (
+    ALLOWED_SPAN_METADATA_KEYS,
+    SpanMetadataError,
+    build_span_metadata,
+    set_span_metadata,
+)
 from observability.logging import (
     REDACTED_VALUE,
     REDACTION_KEY_FRAGMENTS,
@@ -49,6 +59,7 @@ from observability.sentry import (
 
 __all__ = [
     "ALLOWED_SPAN_ATTRIBUTES",
+    "ALLOWED_SPAN_METADATA_KEYS",
     "METER_NAME",
     "REDACTED_VALUE",
     "REDACTION_KEY_FRAGMENTS",
@@ -56,10 +67,14 @@ __all__ = [
     "SERVICE_WORKER",
     "TRACER_NAME",
     "AllowListSpanProcessor",
+    "SpanMetadataError",
     "apply_span_allow_list",
+    "build_span_metadata",
     "configure_logging",
+    "flush_langfuse",
     "flush_otel",
     "flush_sentry",
+    "get_configured_client",
     "get_langfuse_client",
     "get_meter",
     "get_trace_id",
@@ -77,6 +92,7 @@ __all__ = [
     "reset_trace_id",
     "resolve_release",
     "scrub_event",
+    "set_span_metadata",
     "set_trace_id",
     "start_span",
 ]

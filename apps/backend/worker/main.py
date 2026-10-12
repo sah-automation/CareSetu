@@ -57,6 +57,7 @@ from modules.notify.adapters import register_handlers as notify_register_handler
 from modules.partner.adapters import register_handlers as partner_register_handlers
 from modules.partner.facade import PartnerFacade
 from modules.settlement.adapters import register_handlers as settlement_register_handlers
+from observability.langfuse_client import flush_langfuse, get_langfuse_client
 from observability.logging import SERVICE_WORKER, configure_logging
 from observability.otel import flush_otel, init_otel, start_span
 from observability.sentry import flush_sentry, init_sentry
@@ -225,6 +226,14 @@ async def run_worker_until_stopped(
     # composition root when SENTRY_DSN is set; a no-op when empty and never a
     # boot failure (init failures are logged and swallowed).
     init_sentry(resolved_settings)
+    # PHASE-14A B2 (#700): wire the Langfuse client explicitly at the worker
+    # composition root so AI spans raised in this process enrich and export.
+    # A no-op (returns None, SDK never imported) when the keys are absent.
+    get_langfuse_client(
+        resolved_settings.langfuse_public_key,
+        resolved_settings.langfuse_secret_key,
+        resolved_settings.langfuse_host,
+    )
     registry = build_registry()
     engine = create_async_engine(resolved_settings.database_url)
     # PHASE-14A A3a (#697): wire the OTel SDK at the worker composition root and
@@ -253,6 +262,9 @@ async def run_worker_until_stopped(
         # PHASE-14A A3a (#697): force-flush the OTel exporter on shutdown so a
         # Render spin-down does not drop buffered spans; no-op when off.
         flush_otel()
+        # PHASE-14A B2 (#700): force-flush buffered Langfuse AI spans on
+        # shutdown; no-op when Langfuse is unconfigured.
+        flush_langfuse()
 
 
 def install_signal_handlers(
