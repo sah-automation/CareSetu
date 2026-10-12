@@ -40,6 +40,12 @@ dependencies = [
     # console line for dev - and a redaction processor strips PHI/secrets by key
     # before emit. No-op-safe when setup fails (mirrors the Langfuse pattern).
     "structlog>=24.1",
+    # Sentry SDK for exception tracking (PHASE-14A A4, #696; plan-phase14 §4):
+    # initialised at both composition roots only when ``SENTRY_DSN`` is set;
+    # events carry release = git SHA and a request ``trace_id``, and a
+    # ``before_send`` hook reuses A1's key denylist to scrub PHI/secrets before
+    # an event leaves the process. A no-op when unset - never blocks boot.
+    "sentry-sdk>=2.0",
 ]
 
 [dependency-groups]

@@ -194,6 +194,16 @@ def _redact(value: Any) -> Any:
     return value
 
 
+def redact_value(value: Any) -> Any:
+    """Recursively redact denied-key values in an arbitrary structure.
+
+    Public entry point for the same rule :func:`redact_processor` applies to a
+    log event; the Sentry ``before_send`` scrub (A4, #696) walks its event
+    payload with this so both surfaces share the one documented denylist.
+    """
+    return _redact(value)
+
+
 def redact_processor(logger: Any, method_name: str, event_dict: EventDict) -> EventDict:
     """Strip PHI/secrets from top-level keys and nested structures before emit.
 

@@ -11,6 +11,11 @@ from dataclasses import dataclass
 
 DEFAULT_DATABASE_URL = "postgresql+asyncpg://caresetu:caresetu@localhost:5432/caresetu"
 DEFAULT_APP_ENVIRONMENT = "production"
+# The app's human-maintained version (PHASE-14A A4, #696): the default Sentry
+# ``release`` when ``OTEL_SERVICE_VERSION`` is unset, also handed to FastAPI.
+# The deploy pipeline sets ``OTEL_SERVICE_VERSION`` to the git SHA so production
+# releases are SHA-tagged; never hardcode a SHA here.
+APP_VERSION = "0.1.0"
 DEFAULT_SMS_PROVIDER = "mock"
 DEFAULT_SMS_TIMEOUT_SECONDS = 10.0
 DEFAULT_SMS_MAX_RETRIES = 3

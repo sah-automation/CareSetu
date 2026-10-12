@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-from app.config import Settings, get_settings
+from app.config import APP_VERSION, Settings, get_settings
 from app.gateway.errors import ErrorEnvelope, error_response, register_gateway_error_handlers
 from app.gateway.idempotency import IdempotencyStore, run_idempotent
 from app.gateway.jwt_verify import JWTVerifyMiddleware
@@ -79,6 +79,7 @@ from modules.partner.facade import PartnerFacade, ProviderProfileNotFoundError
 from modules.profile_media.adapters.media_store import build_profile_media_store
 from modules.profile_media.facade import ProfileMediaRetryPolicy
 from observability.logging import SERVICE_API, configure_logging
+from observability.sentry import flush_sentry, init_sentry
 from worker.main import run_worker_until_stopped
 
 logger = logging.getLogger(__name__)
@@ -270,6 +271,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # PHASE-14A A4 (#696): initialise Sentry error tracking at the app
+        # composition root when SENTRY_DSN is set; a no-op when it is empty and
+        # never a boot failure (init failures are logged and swallowed).
+        init_sentry(resolved_settings)
         # Initialize Redis clients for the consent-status and directory-search
         # caches (both degrade to SQL when absent/unhealthy)
         await init_redis_client(resolved_settings)
@@ -305,8 +310,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # Close Redis clients on shutdown
             await close_directory_redis_client()
             await close_redis_client()
+            # PHASE-14A A4 (#696): flush queued Sentry events on shutdown so a
+            # Render spin-down does not drop them; no-op when Sentry is off.
+            flush_sentry()
 
-    app = FastAPI(title="CareSetu API", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="CareSetu API", version=APP_VERSION, lifespan=lifespan)
     app.state.settings = resolved_settings
 
     # MOD-001 (PHASE-2 T3, #54): one resolved iam facade instance behind the

@@ -58,6 +58,7 @@ from modules.partner.adapters import register_handlers as partner_register_handl
 from modules.partner.facade import PartnerFacade
 from modules.settlement.adapters import register_handlers as settlement_register_handlers
 from observability.logging import SERVICE_WORKER, configure_logging
+from observability.sentry import flush_sentry, init_sentry
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +212,10 @@ async def run_worker_until_stopped(
     # composition root so the dispatcher's lines are JSON/console-rendered and
     # carry the service identity + trace id. Never raises.
     configure_logging(resolved_settings, service=SERVICE_WORKER)
+    # PHASE-14A A4 (#696): initialise Sentry error tracking at the worker
+    # composition root when SENTRY_DSN is set; a no-op when empty and never a
+    # boot failure (init failures are logged and swallowed).
+    init_sentry(resolved_settings)
     registry = build_registry()
     engine = create_async_engine(resolved_settings.database_url)
     scheduler = build_scheduler(resolved_settings)
@@ -229,6 +234,9 @@ async def run_worker_until_stopped(
             scheduler.shutdown(wait=False)
     finally:
         await engine.dispose()
+        # PHASE-14A A4 (#696): flush queued Sentry events on shutdown; no-op
+        # when Sentry is off.
+        flush_sentry()
 
 
 def install_signal_handlers(

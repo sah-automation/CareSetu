@@ -15,8 +15,15 @@ from observability.logging import (
     SERVICE_WORKER,
     configure_logging,
     get_trace_id,
+    redact_value,
     reset_trace_id,
     set_trace_id,
+)
+from observability.sentry import (
+    flush_sentry,
+    init_sentry,
+    resolve_release,
+    scrub_event,
 )
 
 __all__ = [
@@ -25,8 +32,13 @@ __all__ = [
     "SERVICE_API",
     "SERVICE_WORKER",
     "configure_logging",
+    "flush_sentry",
     "get_langfuse_client",
     "get_trace_id",
+    "init_sentry",
+    "redact_value",
     "reset_trace_id",
+    "resolve_release",
+    "scrub_event",
     "set_trace_id",
 ]
