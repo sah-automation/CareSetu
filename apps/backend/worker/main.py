@@ -57,6 +57,7 @@ from modules.notify.adapters import register_handlers as notify_register_handler
 from modules.partner.adapters import register_handlers as partner_register_handlers
 from modules.partner.facade import PartnerFacade
 from modules.settlement.adapters import register_handlers as settlement_register_handlers
+from observability.logging import SERVICE_WORKER, configure_logging
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +207,10 @@ async def run_worker_until_stopped(
     and scheduler are always disposed.
     """
     resolved_settings = settings if settings is not None else get_settings()
+    # PHASE-14A A1 (#694): configure structured logging once at the worker
+    # composition root so the dispatcher's lines are JSON/console-rendered and
+    # carry the service identity + trace id. Never raises.
+    configure_logging(resolved_settings, service=SERVICE_WORKER)
     registry = build_registry()
     engine = create_async_engine(resolved_settings.database_url)
     scheduler = build_scheduler(resolved_settings)

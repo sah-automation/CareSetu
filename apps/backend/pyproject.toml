@@ -34,6 +34,12 @@ dependencies = [
     # multipart/form-data parsing for the patient intake audio upload surface
     # (PHASE-7 T12, #356): FastAPI's UploadFile/File requires python-multipart.
     "python-multipart>=0.0.9",
+    # Structured logging (PHASE-14A A1, #694; plan-phase14 §4): one logging
+    # configuration shared by the API, the worker, and the outbox dispatcher.
+    # ``LOG_FORMAT`` selects the renderer - JSON for production, a readable
+    # console line for dev - and a redaction processor strips PHI/secrets by key
+    # before emit. No-op-safe when setup fails (mirrors the Langfuse pattern).
+    "structlog>=24.1",
 ]
 
 [dependency-groups]

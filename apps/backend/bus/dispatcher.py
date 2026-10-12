@@ -68,6 +68,7 @@ from bus.outbox_ddl import (
     outbox_table,
 )
 from bus.registry import HandlerRegistry, PayloadModel
+from observability.logging import reset_trace_id, set_trace_id
 
 logger = logging.getLogger(__name__)
 
@@ -373,64 +374,72 @@ async def process_outbox_table(
     retried = 0
     dead_lettered = 0
     for row in claimed_rows:
-        payload_model = registry.payload_model_for(row.event_type)
-        if payload_model is None:
-            logger.error(
-                "no payload model registered for event_type %r; leaving outbox row %s for reclaim",
-                row.event_type,
-                row.event_id,
-            )
-            continue
+        # PHASE-14A A1 (#694): the outbox event id is the consumer-correlation
+        # key (error-handling-observability §3); bind it so every line this
+        # fan-out emits carries a trace_id, then restore the previous context.
+        trace_token = set_trace_id(str(row.event_id))
         try:
-            envelope = envelope_from_row(row, table.schema, payload_model)
-            result = await dispatch(registry, envelope)
-        except Exception:
-            logger.exception(
-                "fan-out raised for outbox row %s (%s); leaving it for reclaim",
-                row.event_id,
-                row.event_type,
-            )
-            continue
-        fanned_out += 1
-        if not result.outcomes:
-            logger.error(
-                "no handlers registered for event_type %r; leaving outbox row %s for reclaim",
-                row.event_type,
-                row.event_id,
-            )
-        elif result.all_succeeded:
-            async with engine.begin() as connection:
-                if await delete_outbox_row(connection, target, row.id, row.next_attempt_at):
-                    deleted += 1
+            payload_model = registry.payload_model_for(row.event_type)
+            if payload_model is None:
+                logger.error(
+                    "no payload model registered for event_type %r; "
+                    "leaving outbox row %s for reclaim",
+                    row.event_type,
+                    row.event_id,
+                )
+                continue
+            try:
+                envelope = envelope_from_row(row, table.schema, payload_model)
+                result = await dispatch(registry, envelope)
+            except Exception:
+                logger.exception(
+                    "fan-out raised for outbox row %s (%s); leaving it for reclaim",
+                    row.event_id,
+                    row.event_type,
+                )
+                continue
+            fanned_out += 1
+            if not result.outcomes:
+                logger.error(
+                    "no handlers registered for event_type %r; leaving outbox row %s for reclaim",
+                    row.event_type,
+                    row.event_id,
+                )
+            elif result.all_succeeded:
+                async with engine.begin() as connection:
+                    if await delete_outbox_row(connection, target, row.id, row.next_attempt_at):
+                        deleted += 1
+                    else:
+                        logger.info(
+                            "outbox row %s was re-claimed by another worker; not deleting",
+                            row.event_id,
+                        )
+            else:
+                async with engine.begin() as connection:
+                    outcome = await record_failed_attempt(connection, target, row, config)
+                if outcome == OUTBOX_STATUS_DEAD_LETTER:
+                    dead_lettered += 1
+                    logger.error(
+                        "outbox row %s (%s) dead-lettered after %d attempts",
+                        row.event_id,
+                        row.event_type,
+                        row.attempts + 1,
+                    )
+                elif outcome == OUTBOX_STATUS_PENDING:
+                    retried += 1
+                    logger.warning(
+                        "fan-out incomplete for outbox row %s (%s); retrying in %.1fs",
+                        row.event_id,
+                        row.event_type,
+                        backoff_delay(row.attempts + 1, config).total_seconds(),
+                    )
                 else:
                     logger.info(
-                        "outbox row %s was re-claimed by another worker; not deleting",
+                        "outbox row %s was re-claimed by another worker; not recording failure",
                         row.event_id,
                     )
-        else:
-            async with engine.begin() as connection:
-                outcome = await record_failed_attempt(connection, target, row, config)
-            if outcome == OUTBOX_STATUS_DEAD_LETTER:
-                dead_lettered += 1
-                logger.error(
-                    "outbox row %s (%s) dead-lettered after %d attempts",
-                    row.event_id,
-                    row.event_type,
-                    row.attempts + 1,
-                )
-            elif outcome == OUTBOX_STATUS_PENDING:
-                retried += 1
-                logger.warning(
-                    "fan-out incomplete for outbox row %s (%s); retrying in %.1fs",
-                    row.event_id,
-                    row.event_type,
-                    backoff_delay(row.attempts + 1, config).total_seconds(),
-                )
-            else:
-                logger.info(
-                    "outbox row %s was re-claimed by another worker; not recording failure",
-                    row.event_id,
-                )
+        finally:
+            reset_trace_id(trace_token)
 
     return TablePollResult(
         table=table,

@@ -16,6 +16,8 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.requests import Request
 from starlette.responses import Response
 
+from observability.logging import reset_trace_id, set_trace_id
+
 _TRACE_HEADER = "x-request-id"
 _TRACE_STATE_ATTR = "trace_id"
 _MAX_TRACE_ID_LENGTH = 128
@@ -63,6 +65,11 @@ class TraceMiddleware(BaseHTTPMiddleware):
             candidate = client_trace_id.strip()
             if _is_safe_trace_id(candidate):
                 request.state.trace_id = candidate
-                return await call_next(request)
-        resolve_trace_id(request)
-        return await call_next(request)
+        # PHASE-14A A1 (#694): bind the one request-scoped id into the logging
+        # context so every log line emitted while this request is in flight -
+        # across the gateway, routes, and module facades - carries it.
+        token = set_trace_id(resolve_trace_id(request))
+        try:
+            return await call_next(request)
+        finally:
+            reset_trace_id(token)

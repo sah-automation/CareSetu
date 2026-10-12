@@ -78,6 +78,7 @@ from modules.partner.directory_cache import (
 from modules.partner.facade import PartnerFacade, ProviderProfileNotFoundError
 from modules.profile_media.adapters.media_store import build_profile_media_store
 from modules.profile_media.facade import ProfileMediaRetryPolicy
+from observability.logging import SERVICE_API, configure_logging
 from worker.main import run_worker_until_stopped
 
 logger = logging.getLogger(__name__)
@@ -262,6 +263,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     worker (#30) can read the same resolved config from the app instance.
     """
     resolved_settings = settings if settings is not None else get_settings()
+    # PHASE-14A A1 (#694): configure structured logging once at the composition
+    # root, before any route/middleware can emit a line. Never raises - a
+    # logging setup failure degrades to stdlib defaults instead of blocking boot.
+    configure_logging(resolved_settings, service=SERVICE_API)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
