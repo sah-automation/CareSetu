@@ -23,6 +23,7 @@ EXPECTED_MODULE_SCHEMAS = (
     "settlement",
     "notify",
     "audit",
+    "observability",
 )
 
 

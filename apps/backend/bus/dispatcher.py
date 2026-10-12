@@ -148,7 +148,7 @@ async def discover_outbox_tables(
 
     Reads ``information_schema`` for base tables whose name ends in the outbox
     naming pattern (``<module>_outbox``), so the loop's table list is discovered
-    rather than hardcoded per module. The 11 module schemas are the canonical
+    rather than hardcoded per module. The module schemas are the canonical
     starting point (``bus.bootstrap.MODULE_SCHEMAS``); the worker may extend the
     list with any additional schema.
     """

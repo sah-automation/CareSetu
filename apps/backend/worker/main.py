@@ -54,6 +54,7 @@ from modules.health.adapters import register_handlers as health_register_handler
 from modules.iam.adapters import register_handlers as iam_register_handlers
 from modules.intake.adapters import register_handlers as intake_register_handlers
 from modules.notify.adapters import register_handlers as notify_register_handlers
+from modules.observability.adapters import register_handlers as observability_register_handlers
 from modules.partner.adapters import register_handlers as partner_register_handlers
 from modules.partner.facade import PartnerFacade
 from modules.settlement.adapters import register_handlers as settlement_register_handlers
@@ -79,6 +80,7 @@ _MODULE_REGISTERS: tuple[Callable[[HandlerRegistry], None], ...] = (
     settlement_register_handlers,
     notify_register_handlers,
     audit_register_handlers,
+    observability_register_handlers,
 )
 
 

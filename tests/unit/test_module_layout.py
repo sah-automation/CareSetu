@@ -1,7 +1,7 @@
 """PHASE-1 T5a/T5b: module scaffold - hexagonal layout + namespace prefixes (#24, #25).
 
 Asserts the generator can emit a module package into a throwaway directory and
-that all eleven modules are scaffolded under ``apps/backend/modules/`` with the
+that all twelve modules are scaffolded under ``apps/backend/modules/`` with the
 hexagonal layout from coding-standards §2 (``domain/``, ``adapters/``,
 ``schema/``, ``facade.py``, ``outbox.py``). Also guards the table namespace
 prefix rule (every table starts with ``<module>_``, e.g. ``consent_consents``)

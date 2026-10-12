@@ -40,6 +40,7 @@ _MODULE_SPEC_TUPLES: Sequence[tuple[str, str]] = (
     ("Settlement and payments", "MOD-009"),
     ("Notifications", "MOD-010"),
     ("Audit", "MOD-011"),
+    ("Observability", "MOD-013"),
 )
 
 
