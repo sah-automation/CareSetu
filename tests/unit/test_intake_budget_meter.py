@@ -36,6 +36,7 @@ from modules.intake.budget_meter import (
     BudgetMeter,
     BudgetMeterResult,
 )
+from modules.intake.pricing import compute_cost_paise
 
 
 class _FakeResult:
@@ -151,3 +152,24 @@ async def test_spend_exactly_at_budget_is_exhausted_advisory() -> None:
     assert result.exhausted is True
     assert result.remaining_paise == 0
     assert await meter.allows_ai_call() is False
+
+
+@pytest.mark.asyncio
+async def test_known_model_cost_flows_into_non_zero_meter_spend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B1 (#699): with a real rate configured a known model's call prices into a
+    non-zero ``cost_paise``, and the budget meter's SQL aggregate reads that
+    priced row as non-zero spend - the fix-cost-0 signal reaches the meter."""
+    monkeypatch.setenv("AI_PRICING_TABLE", "paid-structurer:0.02:0.06,mock-model:0:0")
+
+    cost = compute_cost_paise("paid-structurer", input_tokens=800, output_tokens=200)
+
+    assert cost == 28
+    meter = BudgetMeter(
+        engine=_engine(spend_aggregate=cost),
+        monthly_budget_paise=DEFAULT_MONTHLY_BUDGET_PAISE,
+    )
+    result = await meter.meter()
+    assert result.spend_paise == 28
+    assert result.remaining_paise == DEFAULT_MONTHLY_BUDGET_PAISE - 28

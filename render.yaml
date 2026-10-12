@@ -159,6 +159,12 @@ services:
       # ASR model for the /audio/transcriptions leg (#387) - dashboard-managed.
       - key: AI_ASR_MODEL
         sync: false
+      # Per-model AI pricing (B1, #699): "model:price_in:price_out" paise-per-token
+      # rates the meter prices completed AI calls off. Dashboard-managed: the
+      # production serving model MUST carry an entry or it prices 0 and is logged
+      # as unknown. Default (unset) keeps the free mock as a known-free model.
+      - key: AI_PRICING_TABLE
+        sync: false
       # Fallback provider chain (all-or-none, T04 #381): dashboard-managed.
       - key: AI_FALLBACK_PROVIDER
         sync: false

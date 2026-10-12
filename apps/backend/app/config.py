@@ -8,6 +8,7 @@ dependency beyond the declared stack (cost floor ``NFR-001``).
 import math
 import os
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 
 DEFAULT_DATABASE_URL = "postgresql+asyncpg://caresetu:caresetu@localhost:5432/caresetu"
 DEFAULT_APP_ENVIRONMENT = "production"
@@ -146,6 +147,15 @@ DEFAULT_AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 30.0
 # meter never blocks: the knob stays so a hard cap can be reintroduced later
 # without a rewrite. Rs 2,000 / month = 200,000 paise.
 DEFAULT_AI_MONTHLY_BUDGET_PAISE = 200_000
+# Per-model AI pricing (PHASE-14A B1, #699): the metered cost of a completed AI
+# call is ``input_tokens * price_in + output_tokens * price_out`` in paise per
+# token, looked up by the serving model. It is a comma-separated list of
+# ``model:price_in_paise:price_out_paise`` entries - deployment configuration,
+# never hardcoded (coding-standards §9.1), because a model's rate tracks the
+# provider and tier. The default prices the free mock at an explicit 0 so it is
+# a KNOWN free model (never flagged); a model absent from the table is UNKNOWN,
+# so its 0 cost is logged (visible, not hidden) until its rate is configured.
+DEFAULT_AI_PRICING_TABLE = "mock-model:0:0"
 DEFAULT_AI_FALLBACK_PROVIDER = ""
 DEFAULT_AI_FALLBACK_BASE_URL = ""
 DEFAULT_AI_FALLBACK_API_KEY = ""
@@ -312,6 +322,11 @@ class Settings:
     ai_circuit_breaker_threshold: int = DEFAULT_AI_CIRCUIT_BREAKER_THRESHOLD
     ai_circuit_breaker_cooldown_seconds: float = DEFAULT_AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS
     ai_monthly_budget_paise: int = DEFAULT_AI_MONTHLY_BUDGET_PAISE
+    # Per-model pricing table (PHASE-14A B1, #699): ``model:price_in:price_out``
+    # entries in paise per token, parsed by :func:`parse_ai_pricing_table`. The
+    # default prices the free mock at 0; a paid deployment sets its serving
+    # model's rate here or in the environment.
+    ai_pricing_table: str = DEFAULT_AI_PRICING_TABLE
     ai_fallback_provider: str = DEFAULT_AI_FALLBACK_PROVIDER
     ai_fallback_base_url: str = DEFAULT_AI_FALLBACK_BASE_URL
     ai_fallback_api_key: str = DEFAULT_AI_FALLBACK_API_KEY
@@ -468,6 +483,7 @@ class Settings:
             raise ValueError("ai_circuit_breaker_threshold must be positive")
         if self.ai_monthly_budget_paise <= 0:
             raise ValueError("ai_monthly_budget_paise must be positive")
+        parse_ai_pricing_table(self.ai_pricing_table)
         if self.ai_circuit_breaker_cooldown_seconds <= 0:
             raise ValueError("ai_circuit_breaker_cooldown_seconds must be positive")
         if self.redis_consent_ttl_seconds <= 0:
@@ -644,6 +660,37 @@ def _env_csv(name: str) -> tuple[str, ...]:
     return tuple(part.strip() for part in raw.split(",") if part.strip())
 
 
+def parse_ai_pricing_table(raw: str) -> dict[str, tuple[Decimal, Decimal]]:
+    """Parse an ``AI_PRICING_TABLE`` value into per-model paise-per-token rates.
+
+    Format: comma-separated ``model:price_in:price_out`` entries, each price in
+    paise per token as a decimal (sub-paise fractions are allowed). Empty
+    entries are skipped; a malformed entry raises ``ValueError`` so a bad table
+    fails closed at boot rather than silently pricing a model at 0.
+    """
+    table: dict[str, tuple[Decimal, Decimal]] = {}
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        parts = [part.strip() for part in entry.split(":")]
+        if len(parts) != 3 or not parts[0]:
+            raise ValueError(
+                f"malformed AI pricing entry {entry!r}; expected 'model:price_in:price_out'"
+            )
+        try:
+            price_in = Decimal(parts[1])
+            price_out = Decimal(parts[2])
+        except InvalidOperation as exc:
+            raise ValueError(
+                f"malformed AI pricing entry {entry!r}; rates must be decimal paise-per-token"
+            ) from exc
+        if price_in < 0 or price_out < 0:
+            raise ValueError(f"AI pricing rates must be non-negative: {entry!r}")
+        table[parts[0]] = (price_in, price_out)
+    return table
+
+
 def get_settings() -> Settings:
     """Build ``Settings`` from environment variables.
 
@@ -791,6 +838,7 @@ def get_settings() -> Settings:
         ai_monthly_budget_paise=_env_int(
             "AI_MONTHLY_BUDGET_PAISE", DEFAULT_AI_MONTHLY_BUDGET_PAISE
         ),
+        ai_pricing_table=os.environ.get("AI_PRICING_TABLE", DEFAULT_AI_PRICING_TABLE),
         ai_fallback_provider=os.environ.get("AI_FALLBACK_PROVIDER", DEFAULT_AI_FALLBACK_PROVIDER),
         ai_fallback_base_url=os.environ.get("AI_FALLBACK_BASE_URL", DEFAULT_AI_FALLBACK_BASE_URL),
         ai_fallback_api_key=os.environ.get("AI_FALLBACK_API_KEY", DEFAULT_AI_FALLBACK_API_KEY),
