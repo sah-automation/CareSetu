@@ -58,6 +58,7 @@ from modules.partner.adapters import register_handlers as partner_register_handl
 from modules.partner.facade import PartnerFacade
 from modules.settlement.adapters import register_handlers as settlement_register_handlers
 from observability.logging import SERVICE_WORKER, configure_logging
+from observability.otel import flush_otel, init_otel
 from observability.sentry import flush_sentry, init_sentry
 
 logger = logging.getLogger(__name__)
@@ -218,6 +219,10 @@ async def run_worker_until_stopped(
     init_sentry(resolved_settings)
     registry = build_registry()
     engine = create_async_engine(resolved_settings.database_url)
+    # PHASE-14A A3a (#697): wire the OTel SDK at the worker composition root and
+    # instrument the worker's engine (DB spans) + httpx outbound spans when
+    # OTEL_ENABLED is on; inert when off. Never raises.
+    init_otel(resolved_settings, service=SERVICE_WORKER, engine=engine)
     scheduler = build_scheduler(resolved_settings)
     try:
         async with engine.connect() as connection:
@@ -237,6 +242,9 @@ async def run_worker_until_stopped(
         # PHASE-14A A4 (#696): flush queued Sentry events on shutdown; no-op
         # when Sentry is off.
         flush_sentry()
+        # PHASE-14A A3a (#697): force-flush the OTel exporter on shutdown so a
+        # Render spin-down does not drop buffered spans; no-op when off.
+        flush_otel()
 
 
 def install_signal_handlers(

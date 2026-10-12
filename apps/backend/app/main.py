@@ -79,6 +79,7 @@ from modules.partner.facade import PartnerFacade, ProviderProfileNotFoundError
 from modules.profile_media.adapters.media_store import build_profile_media_store
 from modules.profile_media.facade import ProfileMediaRetryPolicy
 from observability.logging import SERVICE_API, configure_logging
+from observability.otel import flush_otel, init_otel
 from observability.sentry import flush_sentry, init_sentry
 from worker.main import run_worker_until_stopped
 
@@ -313,6 +314,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # PHASE-14A A4 (#696): flush queued Sentry events on shutdown so a
             # Render spin-down does not drop them; no-op when Sentry is off.
             flush_sentry()
+            # PHASE-14A A3a (#697): force-flush the OTel exporter on shutdown so
+            # a Render spin-down does not drop buffered spans; no-op when off.
+            flush_otel()
 
     app = FastAPI(title="CareSetu API", version=APP_VERSION, lifespan=lifespan)
     app.state.settings = resolved_settings
@@ -985,6 +989,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
         return SeedEgressResponse(egress_id=egress_id)
+
+    # PHASE-14A A3a (#697): wire the OTel SDK and instrument the request path
+    # (FastAPI server spans, SQLAlchemy async DB spans, httpx outbound spans)
+    # when OTEL_ENABLED is on; inert when off. Done here rather than in the
+    # lifespan because the FastAPI instrumentor adds ASGI middleware, which
+    # Starlette forbids once the app has started - the lifespan force-flushes
+    # the exporter on shutdown instead. Never raises.
+    init_otel(resolved_settings, service=SERVICE_API, engine=engine, app=app)
 
     return app
 

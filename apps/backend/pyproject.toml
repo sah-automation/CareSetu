@@ -46,6 +46,17 @@ dependencies = [
     # ``before_send`` hook reuses A1's key denylist to scrub PHI/secrets before
     # an event leaves the process. A no-op when unset - never blocks boot.
     "sentry-sdk>=2.0",
+    # OpenTelemetry SDK + HTTP OTLP exporter + request-path instrumentation
+    # (PHASE-14A A3a, #697; plan-phase14 §5): server spans (FastAPI), DB spans
+    # (SQLAlchemy async engine) and outbound spans (httpx). The HTTP exporter
+    # is the production path - gRPC is frequently blocked on PaaS free tiers
+    # (Render). Gated on OTEL_ENABLED; inert when unset.
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-exporter-otlp-proto-http>=1.27",
+    "opentelemetry-instrumentation-fastapi>=0.48b0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.48b0",
+    "opentelemetry-instrumentation-httpx>=0.48b0",
 ]
 
 [dependency-groups]
