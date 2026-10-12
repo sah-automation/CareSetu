@@ -41,8 +41,10 @@ PHI is not (the same philosophy as A1's key denylist).
 
 from __future__ import annotations
 
+import contextlib
 import logging
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from observability.sentry import resolve_release
@@ -59,6 +61,22 @@ log = logging.getLogger(__name__)
 # roots pass the A1 ``SERVICE_API`` / ``SERVICE_WORKER`` identities instead so a
 # process has one name across logs and traces).
 SERVICE_NAME = "caresetu-backend"
+
+# The instrument scope names (one tracer + one meter for the whole backend).
+TRACER_NAME = "caresetu"
+METER_NAME = "caresetu"
+
+# Metric instrument names. A single hit/miss counter per outcome carries the
+# cache name as a ``cache`` attribute rather than one instrument per cache, so
+# the consent and directory caches share one metric family.
+_METRIC_HTTP_DURATION = "caresetu.http.server.duration"
+_METRIC_HTTP_ERRORS = "caresetu.http.server.errors"
+_METRIC_CACHE_HITS = "caresetu.cache.hits"
+_METRIC_CACHE_MISSES = "caresetu.cache.misses"
+_METRIC_OUTBOX_CLAIMED = "caresetu.outbox.claimed"
+_METRIC_OUTBOX_FANNED_OUT = "caresetu.outbox.fanned_out"
+_METRIC_OUTBOX_RETRIED = "caresetu.outbox.retried"
+_METRIC_OUTBOX_DEAD_LETTERED = "caresetu.outbox.dead_lettered"
 
 # Resource attribute keys (OTel semantic conventions).
 _ATTR_SERVICE_NAME = "service.name"
@@ -120,6 +138,18 @@ ALLOWED_SPAN_ATTRIBUTES: frozenset[str] = frozenset(
         "ai.confidence",
         "ai.intake_id",
         "ai.ai_job_id",
+        # Async-path surface (A3b): the outbox dispatcher's per-row spans and the
+        # APScheduler job spans. The table / event-type / job names are schema
+        # and registry labels, never patient data; message ids are opaque UUIDs.
+        # Outbox pass counters stay on metrics (caresetu.outbox.*), not on spans,
+        # so they are intentionally not allow-listed here.
+        "messaging.system",
+        "messaging.operation",
+        "messaging.destination.name",
+        "messaging.message.id",
+        "outbox.table",
+        "job.name",
+        "job.system",
         # Exception event type (the exception class name): safe and useful;
         # the sibling ``exception.message`` / ``exception.stacktrace`` keys are
         # deliberately NOT listed - they can echo PHI and are dropped.
@@ -134,6 +164,16 @@ ALLOWED_SPAN_ATTRIBUTES: frozenset[str] = frozenset(
 _configured = False
 _enabled = False
 _provider: TracerProvider | None = None
+
+# Metrics state (A3b), gated independently by ``METRICS_ENABLED``. ``_instruments``
+# caches lazily-created counters/histograms; because OTel's proxy meter rebinds
+# every instrument created before a real provider is set, the cached instruments
+# start reporting the moment :func:`init_metrics` wires the provider. When the
+# gate is off the meter is the OTel no-op meter and every increment is dropped.
+_metrics_configured = False
+_metrics_enabled = False
+_meter_provider: Any | None = None
+_instruments: dict[tuple[str, str], Any] = {}
 
 
 class OtelSettings(Protocol):
@@ -156,6 +196,9 @@ class OtelSettings(Protocol):
 
     @property
     def app_environment(self) -> str: ...
+
+    @property
+    def metrics_enabled(self) -> bool: ...
 
 
 def parse_otlp_headers(headers: Sequence[str]) -> dict[str, str]:
@@ -270,6 +313,308 @@ def _instrument_request_path(
         FastAPIInstrumentor.instrument_app(cast(Any, app), tracer_provider=provider)
 
 
+def _build_resource(settings: OtelSettings, service: str) -> Any:
+    """Build the OTel resource shared by the tracer and meter providers (A3b).
+
+    ``service.name`` is the process identity, ``deployment.environment`` comes
+    from ``APP_ENVIRONMENT`` and ``service.version`` from the A5
+    ``OTEL_SERVICE_VERSION`` git-SHA gate (the single version source shared with
+    A4). Deferred import - only reachable on the enabled path.
+    """
+    from opentelemetry.sdk.resources import Resource
+
+    return Resource.create(
+        {
+            _ATTR_SERVICE_NAME: service,
+            _ATTR_DEPLOYMENT_ENVIRONMENT: settings.app_environment,
+            _ATTR_SERVICE_VERSION: resolve_release(cast("SentrySettings", settings)),
+        }
+    )
+
+
+# --- metrics + async-path spans (A3b, #698) --------------------------------
+
+
+def get_meter(name: str = METER_NAME) -> Any:
+    """Return the OTel meter for ``name``.
+
+    When metrics are off (or the SDK never initialised) this is the OTel proxy
+    meter, whose instruments silently drop every measurement - so a counter call
+    is always safe and a no-op. Centralised here so the ``METRICS_ENABLED`` gate
+    and the instrument allow-list live in one place.
+    """
+    from opentelemetry import metrics
+
+    return metrics.get_meter(name)
+
+
+def get_tracer(name: str = TRACER_NAME) -> Any:
+    """Return the OTel tracer for ``name`` (the no-op tracer when tracing is off)."""
+    from opentelemetry import trace
+
+    return trace.get_tracer(name)
+
+
+def _instrument(name: str, *, kind: str, unit: str, description: str) -> Any:
+    """Lazily create (and cache) one metric instrument from the meter.
+
+    Cached so a request never pays instrument creation twice; the OTel proxy
+    meter rebinds a cached instrument when a real provider is set, so an
+    instrument created before :func:`init_metrics` still reports afterwards.
+    """
+    key = (kind, name)
+    instrument = _instruments.get(key)
+    if instrument is None:
+        meter = get_meter()
+        if kind == "histogram":
+            instrument = meter.create_histogram(name, unit, description)
+        else:
+            instrument = meter.create_counter(name, unit, description)
+        _instruments[key] = instrument
+    return instrument
+
+
+def record_cache_hit(cache: str) -> None:
+    """Increment the cache-hit counter for ``cache``; never raises.
+
+    A pure side-effect next to the existing cache ``try/except`` blocks: the
+    call is failure-silent and a no-op under the OTel proxy meter when metrics
+    are off, so cache behaviour is unchanged.
+    """
+    try:
+        _instrument(
+            _METRIC_CACHE_HITS,
+            kind="counter",
+            unit="1",
+            description="Redis cache hits, by cache",
+        ).add(1, {"cache": cache})
+    except Exception:
+        log.debug("cache hit metric failed", exc_info=True)
+
+
+def record_cache_miss(cache: str) -> None:
+    """Increment the cache-miss counter for ``cache``; never raises (see hit)."""
+    try:
+        _instrument(
+            _METRIC_CACHE_MISSES,
+            kind="counter",
+            unit="1",
+            description="Redis cache misses, by cache",
+        ).add(1, {"cache": cache})
+    except Exception:
+        log.debug("cache miss metric failed", exc_info=True)
+
+
+def record_request_latency(
+    duration_seconds: float, attributes: Mapping[str, Any] | None = None
+) -> None:
+    """Record one HTTP request's server duration; never raises.
+
+    Attributes are PHI-free by construction (method, templated route, status) -
+    the request metrics middleware never attaches a raw path or query string.
+    """
+    try:
+        _instrument(
+            _METRIC_HTTP_DURATION,
+            kind="histogram",
+            unit="s",
+            description="HTTP server request duration",
+        ).record(duration_seconds, dict(attributes) if attributes else None)
+    except Exception:
+        log.debug("request latency metric failed", exc_info=True)
+
+
+def record_request_error(attributes: Mapping[str, Any] | None = None) -> None:
+    """Increment the HTTP server error counter; never raises (see latency)."""
+    try:
+        _instrument(
+            _METRIC_HTTP_ERRORS,
+            kind="counter",
+            unit="1",
+            description="HTTP server errors (5xx or raised), by route",
+        ).add(1, dict(attributes) if attributes else None)
+    except Exception:
+        log.debug("request error metric failed", exc_info=True)
+
+
+def record_outbox_poll(
+    *,
+    claimed: int = 0,
+    fanned_out: int = 0,
+    retried: int = 0,
+    dead_lettered: int = 0,
+) -> None:
+    """Record one dispatcher poll-pass outcome as counters; never raises.
+
+    The four counts are exactly the ``TablePollResult`` fields the loop already
+    tracks; they become OTLP metrics so worker throughput is observable without
+    parsing logs.
+    """
+    for name, description, value in (
+        (_METRIC_OUTBOX_CLAIMED, "Outbox rows claimed", claimed),
+        (_METRIC_OUTBOX_FANNED_OUT, "Outbox rows fanned out", fanned_out),
+        (_METRIC_OUTBOX_RETRIED, "Outbox rows scheduled for retry", retried),
+        (_METRIC_OUTBOX_DEAD_LETTERED, "Outbox rows dead-lettered", dead_lettered),
+    ):
+        try:
+            _instrument(name, kind="counter", unit="1", description=description).add(value)
+        except Exception:
+            log.debug("outbox metric failed", exc_info=True)
+
+
+@contextlib.contextmanager
+def start_span(
+    name: str,
+    *,
+    traceparent: str | None = None,
+    attributes: Mapping[str, Any] | None = None,
+) -> Iterator[Any]:
+    """Start a span, linked to the propagated W3C context; no-op when off.
+
+    ``traceparent`` is the value stored on an outbox row by the A2 seam (#695):
+    when present it is extracted into the parent context, so the worker's span
+    continues the originating request's trace instead of starting a detached
+    root. With tracing off the manager yields ``None`` and does nothing, so the
+    caller's behaviour is unchanged.
+    """
+    if not _enabled:
+        yield None
+        return
+
+    from opentelemetry.propagate import extract
+
+    parent = extract({"traceparent": traceparent}) if traceparent else None
+    tracer = get_tracer()
+    with tracer.start_as_current_span(
+        name, context=parent, attributes=dict(attributes or {})
+    ) as span:
+        yield span
+
+
+def _request_metric_attributes(scope: Mapping[str, Any], status_code: int) -> dict[str, Any]:
+    """PHI-free request dimensions: method, templated route, status code.
+
+    The raw path is deliberately omitted (it can carry ids/query strings); only
+    the router's templated ``route.path`` is used, exactly like the span
+    allow-list keeps ``http.route`` and drops ``url.path``.
+    """
+    attributes: dict[str, Any] = {
+        "http.request.method": str(scope.get("method", "")),
+        "http.response.status_code": status_code,
+    }
+    route = scope.get("route")
+    path = getattr(route, "path", None)
+    if isinstance(path, str):
+        attributes["http.route"] = path
+    return attributes
+
+
+class _MetricsASGIMiddleware:
+    """Pure-ASGI middleware recording request latency + error counters (A3b).
+
+    Added to the FastAPI app only when ``METRICS_ENABLED`` is on. It wraps the
+    request so it can time it end to end and read the final status, then records
+    the latency histogram and (on a 5xx or a raised exception) the error counter.
+    Only PHI-free dimensions are attached (see :func:`_request_metric_attributes`).
+    """
+
+    def __init__(self, app: Any) -> None:
+        self._app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self._app(scope, receive, send)
+            return
+        started = time.perf_counter()
+        status_code = 500
+        failed = False
+
+        async def _send(message: dict[str, Any]) -> None:
+            nonlocal status_code
+            if message.get("type") == "http.response.start":
+                status_code = int(message.get("status", 500))
+            await send(message)
+
+        try:
+            await self._app(scope, receive, _send)
+        except Exception:
+            failed = True
+            raise
+        finally:
+            attributes = _request_metric_attributes(scope, status_code)
+            record_request_latency(time.perf_counter() - started, attributes)
+            if failed or status_code >= 500:
+                record_request_error(attributes)
+
+
+def init_metrics(
+    settings: OtelSettings,
+    *,
+    service: str = SERVICE_NAME,
+    metric_reader: Any | None = None,
+    app: Any | None = None,
+) -> bool:
+    """Initialise OTel metrics once per process; never raises, never blocks boot.
+
+    Gated independently by ``METRICS_ENABLED``: when the gate is off (or the
+    OTLP endpoint is unset) it returns immediately - no SDK import, no reader,
+    no global meter-provider mutation - so the off path is inert. When on, it
+    wires an OTLP HTTP metric exporter over the same endpoint/headers as tracing
+    and (when an app is supplied) adds the request metrics middleware.
+
+    ``metric_reader`` overrides the periodic OTLP reader (a test seam) so a test
+    can export into an in-memory reader. Any SDK failure is logged and swallowed.
+    """
+    global _metrics_configured, _metrics_enabled, _meter_provider
+
+    if _metrics_configured:
+        return _metrics_enabled
+    _metrics_configured = True
+
+    if not settings.metrics_enabled:
+        log.info("metrics disabled; OTLP metrics export off")
+        return False
+
+    endpoint = settings.otel_exporter_otlp_endpoint.strip()
+    if not endpoint:
+        log.info("metrics endpoint unset; OTLP metrics export off")
+        return False
+
+    try:
+        from opentelemetry import metrics
+        from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+        from opentelemetry.sdk.metrics import MeterProvider
+        from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+
+        reader = (
+            metric_reader
+            if metric_reader is not None
+            else PeriodicExportingMetricReader(
+                OTLPMetricExporter(
+                    endpoint=endpoint,
+                    headers=parse_otlp_headers(settings.otel_exporter_otlp_headers),
+                )
+            )
+        )
+        provider = MeterProvider(
+            resource=_build_resource(settings, service),
+            metric_readers=[reader],
+        )
+        metrics.set_meter_provider(provider)
+        if app is not None:
+            app.add_middleware(_MetricsASGIMiddleware)
+    except Exception:
+        log.warning("metrics init failed; OTLP metrics export disabled", exc_info=True)
+        _meter_provider = None
+        _metrics_enabled = False
+        return False
+
+    _meter_provider = provider
+    _metrics_enabled = True
+    log.info("metrics initialised (service=%s, env=%s)", service, settings.app_environment)
+    return True
+
+
 def init_otel(
     settings: OtelSettings,
     *,
@@ -294,6 +639,13 @@ def init_otel(
         return _enabled
     _configured = True
 
+    # A3b: metrics are gated independently of tracing. Wire them first so a
+    # metrics-only deployment (METRICS_ENABLED on, OTEL_ENABLED off) still
+    # exports; an app is passed through so the request metrics middleware can be
+    # added before the ASGI stack starts.
+    if getattr(settings, "metrics_enabled", False):
+        init_metrics(settings, service=service, app=app)
+
     if not settings.otel_enabled:
         log.info("otel disabled; request-path tracing off")
         return False
@@ -305,18 +657,11 @@ def init_otel(
 
     try:
         from opentelemetry import trace
-        from opentelemetry.sdk.resources import Resource
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor
         from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
 
-        resource = Resource.create(
-            {
-                _ATTR_SERVICE_NAME: service,
-                _ATTR_DEPLOYMENT_ENVIRONMENT: settings.app_environment,
-                _ATTR_SERVICE_VERSION: resolve_release(cast("SentrySettings", settings)),
-            }
-        )
+        resource = _build_resource(settings, service)
         sampler = ParentBased(root=TraceIdRatioBased(settings.otel_traces_sampler_ratio))
         provider = TracerProvider(resource=resource, sampler=sampler)
 
@@ -344,16 +689,29 @@ def init_otel(
 
 
 def flush_otel(timeout_millis: int = 5000) -> None:
-    """Force-flush then shut down the exporter; a no-op when OTel is off.
+    """Force-flush then shut down the trace + metric exporters; no-op when off.
 
     Called at both composition roots during shutdown (same discipline as the
     Sentry flush) so a Render spin-down or restart does not drop buffered
-    telemetry. A flush/shutdown failure is logged and swallowed.
+    telemetry. Each provider is flushed independently, so a metrics-only
+    deployment still flushes; a flush/shutdown failure is logged and swallowed.
     """
-    if not _enabled or _provider is None:
-        return
-    try:
-        _provider.force_flush(timeout_millis)
-        _provider.shutdown()
-    except Exception:
-        log.warning("otel flush failed", exc_info=True)
+    global _provider, _meter_provider
+
+    if _provider is not None:
+        try:
+            _provider.force_flush(timeout_millis)
+            _provider.shutdown()
+        except Exception:
+            log.warning("otel trace flush failed", exc_info=True)
+        finally:
+            _provider = None
+
+    if _meter_provider is not None:
+        try:
+            _meter_provider.force_flush(timeout_millis)
+            _meter_provider.shutdown()
+        except Exception:
+            log.warning("otel metrics flush failed", exc_info=True)
+        finally:
+            _meter_provider = None

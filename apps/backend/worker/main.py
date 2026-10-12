@@ -58,7 +58,7 @@ from modules.partner.adapters import register_handlers as partner_register_handl
 from modules.partner.facade import PartnerFacade
 from modules.settlement.adapters import register_handlers as settlement_register_handlers
 from observability.logging import SERVICE_WORKER, configure_logging
-from observability.otel import flush_otel, init_otel
+from observability.otel import flush_otel, init_otel, start_span
 from observability.sentry import flush_sentry, init_sentry
 
 logger = logging.getLogger(__name__)
@@ -149,16 +149,24 @@ async def _run_credential_sweep() -> None:
     """
     settings = get_settings()
     engine = create_async_engine(settings.database_url)
-    try:
-        facade = _build_sweep_facade(settings, engine)
-        closed = await facade.close_out_expired_credentials()
-    except Exception:
-        logger.exception(
-            "credential-expiry sweep pass failed; lazy read-hide keeps directory correctness"
-        )
-        raise
-    finally:
-        await engine.dispose()
+    # PHASE-14A A3b (#698): the scheduler job runs inside a span so worker
+    # activity shows up in traces; the sweep is not request-derived, so it has
+    # no traceparent to continue and the span is linked to nothing upstream.
+    # No-op when tracing is off, so the periodic job is unchanged.
+    with start_span(
+        "scheduler.credential_expiry_sweep",
+        attributes={"job.name": "credential-expiry-sweep", "job.system": "apscheduler"},
+    ):
+        try:
+            facade = _build_sweep_facade(settings, engine)
+            closed = await facade.close_out_expired_credentials()
+        except Exception:
+            logger.exception(
+                "credential-expiry sweep pass failed; lazy read-hide keeps directory correctness"
+            )
+            raise
+        finally:
+            await engine.dispose()
     logger.info("credential-expiry sweep pass closed out %d credential(s)", len(closed))
 
 

@@ -48,9 +48,10 @@ clobber a row a sibling worker already reclaimed and re-claimed.
 import asyncio
 import logging
 from collections.abc import Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import cast
+from typing import Any, cast
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -69,6 +70,7 @@ from bus.outbox_ddl import (
 )
 from bus.registry import HandlerRegistry, PayloadModel
 from observability.logging import reset_trace_id, set_trace_id, trace_id_from_traceparent
+from observability.otel import record_outbox_poll, start_span
 
 logger = logging.getLogger(__name__)
 
@@ -350,6 +352,28 @@ async def record_failed_attempt(
     return None if mapping is None else str(mapping["status"])
 
 
+def outbox_row_span(row: OutboxRow, table: OutboxTable) -> AbstractContextManager[Any]:
+    """The span context manager for delivering one claimed outbox row (A3b).
+
+    A messaging span (``messaging.*`` attributes) that adopts the row's stored
+    W3C ``traceparent`` as its parent, so the worker's span continues the trace
+    of the API request that produced the event (ADR-0002 delivery side, A2
+    #695). When tracing is off this is a no-op manager, so the loop is
+    unchanged.
+    """
+    return start_span(
+        "outbox.process",
+        traceparent=row.traceparent,
+        attributes={
+            "messaging.system": "caresetu.outbox",
+            "messaging.operation": "process",
+            "messaging.destination.name": table.table_name,
+            "messaging.message.id": str(row.event_id),
+            "outbox.table": table.table_name,
+        },
+    )
+
+
 async def process_outbox_table(
     engine: AsyncEngine,
     table: OutboxTable,
@@ -385,69 +409,72 @@ async def process_outbox_table(
         # previous context.
         trace_token = set_trace_id(trace_id_from_traceparent(row.traceparent) or str(row.event_id))
         try:
-            payload_model = registry.payload_model_for(row.event_type)
-            if payload_model is None:
-                logger.error(
-                    "no payload model registered for event_type %r; "
-                    "leaving outbox row %s for reclaim",
-                    row.event_type,
-                    row.event_id,
-                )
-                continue
-            try:
-                envelope = envelope_from_row(row, table.schema, payload_model)
-                result = await dispatch(registry, envelope)
-            except Exception:
-                logger.exception(
-                    "fan-out raised for outbox row %s (%s); leaving it for reclaim",
-                    row.event_id,
-                    row.event_type,
-                )
-                continue
-            fanned_out += 1
-            if not result.outcomes:
-                logger.error(
-                    "no handlers registered for event_type %r; leaving outbox row %s for reclaim",
-                    row.event_type,
-                    row.event_id,
-                )
-            elif result.all_succeeded:
-                async with engine.begin() as connection:
-                    if await delete_outbox_row(connection, target, row.id, row.next_attempt_at):
-                        deleted += 1
+            # PHASE-14A A3b (#698): the row's span adopts the same traceparent,
+            # so the OTel span - not just the log line - continues the request.
+            with outbox_row_span(row, table):
+                payload_model = registry.payload_model_for(row.event_type)
+                if payload_model is None:
+                    logger.error(
+                        "no payload model registered for event_type %r; "
+                        "leaving outbox row %s for reclaim",
+                        row.event_type,
+                        row.event_id,
+                    )
+                    continue
+                try:
+                    envelope = envelope_from_row(row, table.schema, payload_model)
+                    result = await dispatch(registry, envelope)
+                except Exception:
+                    logger.exception(
+                        "fan-out raised for outbox row %s (%s); leaving it for reclaim",
+                        row.event_id,
+                        row.event_type,
+                    )
+                    continue
+                fanned_out += 1
+                if not result.outcomes:
+                    logger.error(
+                        "no handler for event_type %r; leaving outbox row %s for reclaim",
+                        row.event_type,
+                        row.event_id,
+                    )
+                elif result.all_succeeded:
+                    async with engine.begin() as connection:
+                        if await delete_outbox_row(connection, target, row.id, row.next_attempt_at):
+                            deleted += 1
+                        else:
+                            logger.info(
+                                "outbox row %s was re-claimed by another worker; not deleting",
+                                row.event_id,
+                            )
+                else:
+                    async with engine.begin() as connection:
+                        outcome = await record_failed_attempt(connection, target, row, config)
+                    if outcome == OUTBOX_STATUS_DEAD_LETTER:
+                        dead_lettered += 1
+                        logger.error(
+                            "outbox row %s (%s) dead-lettered after %d attempts",
+                            row.event_id,
+                            row.event_type,
+                            row.attempts + 1,
+                        )
+                    elif outcome == OUTBOX_STATUS_PENDING:
+                        retried += 1
+                        logger.warning(
+                            "fan-out incomplete for outbox row %s (%s); retrying in %.1fs",
+                            row.event_id,
+                            row.event_type,
+                            backoff_delay(row.attempts + 1, config).total_seconds(),
+                        )
                     else:
                         logger.info(
-                            "outbox row %s was re-claimed by another worker; not deleting",
+                            "outbox row %s was re-claimed by another worker; not recording failure",
                             row.event_id,
                         )
-            else:
-                async with engine.begin() as connection:
-                    outcome = await record_failed_attempt(connection, target, row, config)
-                if outcome == OUTBOX_STATUS_DEAD_LETTER:
-                    dead_lettered += 1
-                    logger.error(
-                        "outbox row %s (%s) dead-lettered after %d attempts",
-                        row.event_id,
-                        row.event_type,
-                        row.attempts + 1,
-                    )
-                elif outcome == OUTBOX_STATUS_PENDING:
-                    retried += 1
-                    logger.warning(
-                        "fan-out incomplete for outbox row %s (%s); retrying in %.1fs",
-                        row.event_id,
-                        row.event_type,
-                        backoff_delay(row.attempts + 1, config).total_seconds(),
-                    )
-                else:
-                    logger.info(
-                        "outbox row %s was re-claimed by another worker; not recording failure",
-                        row.event_id,
-                    )
         finally:
             reset_trace_id(trace_token)
 
-    return TablePollResult(
+    poll_result = TablePollResult(
         table=table,
         stale_reclaimed=stale_reclaimed,
         claimed=len(claimed_rows),
@@ -456,6 +483,14 @@ async def process_outbox_table(
         retried=retried,
         dead_lettered=dead_lettered,
     )
+    # A3b: surface the pass outcome as counters (no-op when metrics are off).
+    record_outbox_poll(
+        claimed=poll_result.claimed,
+        fanned_out=poll_result.fanned_out,
+        retried=poll_result.retried,
+        dead_lettered=poll_result.dead_lettered,
+    )
+    return poll_result
 
 
 async def run_poll_loop(
