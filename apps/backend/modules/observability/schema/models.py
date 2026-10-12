@@ -61,6 +61,7 @@ observability_ai_usage_daily = Table(
         "task_type",
         name="uq_observability_ai_usage_daily_scope",
     ),
+    Index("ix_observability_ai_usage_daily_date", "usage_date"),
 )
 
 
