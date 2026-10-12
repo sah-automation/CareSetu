@@ -23,11 +23,18 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from bus.dispatch import dispatch
+from bus.dispatcher import DispatcherConfig, OutboxTable, process_outbox_table
 from bus.envelope import Envelope
 from bus.ledger import record_consumed_event
 from bus.outbox_ddl import materialize_consumed_events, materialize_outbox
 from bus.outbox_writer import write_outbox
 from bus.registry import Handler, HandlerRegistry
+from observability.logging import (
+    get_trace_id,
+    reset_trace_id,
+    set_trace_id,
+    trace_id_from_traceparent,
+)
 
 THROWAWAY_OUTBOX = "t2c_throwaway_outbox"
 
@@ -60,7 +67,7 @@ async def _outbox_rows(database_url: str, schema: str) -> list[dict[str, Any]]:
     try:
         async with engine.connect() as connection:
             result = await connection.execute(
-                text(f'SELECT event_id, status FROM "{schema}"."{THROWAWAY_OUTBOX}"')
+                text(f'SELECT event_id, status, traceparent FROM "{schema}"."{THROWAWAY_OUTBOX}"')
             )
             return [dict(mapping) for mapping in result.mappings().all()]
     finally:
@@ -134,3 +141,132 @@ def test_round_trip_publish_dispatch_replay_dedupes(
     replay = asyncio.run(dispatch(registry, envelope))
     assert replay.all_succeeded
     assert asyncio.run(_ledger_rows(database_url, throwaway_schema)) == 1
+
+
+def test_trace_id_propagates_from_api_through_outbox_to_dispatcher(
+    database_url: str, reachable_db: None, throwaway_schema: str
+) -> None:
+    """PHASE-14A A2 (#695): the request trace id survives API -> outbox -> dispatcher.
+
+    A request-scoped trace id is bound here exactly as ``TraceMiddleware`` binds
+    it for a real request. The writer embeds it in the outbox row as a W3C
+    ``traceparent``; the dispatcher restores it into the logging context before
+    the subscriber handler runs, so the worker-side handler observes the
+    originating request's id.
+    """
+    asyncio.run(_materialize(database_url, throwaway_schema))
+
+    envelope = Envelope[RoundTripPayload](
+        event_id=uuid4(),
+        event_type="phase1.round_trip",
+        producer="phase1",
+        payload=RoundTripPayload(round_trip_id=uuid4()),
+    )
+
+    trace_id = "7" * 32
+    seen: list[str | None] = []
+
+    async def handler(delivered: Envelope[BaseModel]) -> None:
+        engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
+        try:
+            async with engine.connect() as connection, connection.begin():
+                await record_consumed_event(
+                    connection,
+                    throwaway_schema,
+                    delivered,
+                    handler_result={"delivered": True},
+                )
+        finally:
+            await engine.dispose()
+        seen.append(get_trace_id())
+
+    registry = HandlerRegistry()
+    registry.register_payload_model("phase1.round_trip", RoundTripPayload)
+    registry.register("phase1.round_trip", handler)
+
+    token = set_trace_id(trace_id)
+    try:
+        asyncio.run(_publish(database_url, throwaway_schema, envelope))
+    finally:
+        reset_trace_id(token)
+
+    # API -> outbox: the published row carries a W3C traceparent rooted at it.
+    row = asyncio.run(_outbox_rows(database_url, throwaway_schema))[0]
+    assert trace_id_from_traceparent(row["traceparent"]) == trace_id
+
+    # outbox -> dispatcher: the claim restores it before the handler runs
+    # (process_outbox_table binds the recovered id then fans out via dispatch).
+    engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        result = asyncio.run(
+            process_outbox_table(
+                engine,
+                OutboxTable(throwaway_schema, THROWAWAY_OUTBOX),
+                registry,
+                DispatcherConfig(),
+            )
+        )
+    finally:
+        asyncio.run(engine.dispose())
+
+    assert result.deleted == 1
+    assert asyncio.run(_ledger_rows(database_url, throwaway_schema)) == 1
+    assert seen == [trace_id]
+
+
+def test_row_without_request_context_uses_no_trace_id_on_the_worker_side(
+    database_url: str, reachable_db: None, throwaway_schema: str
+) -> None:
+    """A row written with no request context stays null and falls back to the
+    event id as the worker-side correlation key (A1 behaviour, #695 keeps it).
+    """
+    asyncio.run(_materialize(database_url, throwaway_schema))
+
+    envelope = Envelope[RoundTripPayload](
+        event_id=uuid4(),
+        event_type="phase1.round_trip",
+        producer="phase1",
+        payload=RoundTripPayload(round_trip_id=uuid4()),
+    )
+
+    seen: list[str | None] = []
+
+    async def handler(delivered: Envelope[BaseModel]) -> None:
+        engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
+        try:
+            async with engine.connect() as connection, connection.begin():
+                await record_consumed_event(
+                    connection,
+                    throwaway_schema,
+                    delivered,
+                    handler_result={"delivered": True},
+                )
+        finally:
+            await engine.dispose()
+        seen.append(get_trace_id())
+
+    registry = HandlerRegistry()
+    registry.register_payload_model("phase1.round_trip", RoundTripPayload)
+    registry.register("phase1.round_trip", handler)
+
+    asyncio.run(_publish(database_url, throwaway_schema, envelope))
+
+    row = asyncio.run(_outbox_rows(database_url, throwaway_schema))[0]
+    assert row["traceparent"] is None
+
+    engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        result = asyncio.run(
+            process_outbox_table(
+                engine,
+                OutboxTable(throwaway_schema, THROWAWAY_OUTBOX),
+                registry,
+                DispatcherConfig(),
+            )
+        )
+    finally:
+        asyncio.run(engine.dispose())
+
+    assert result.deleted == 1
+    assert asyncio.run(_ledger_rows(database_url, throwaway_schema)) == 1
+    assert seen == [str(envelope.event_id)]

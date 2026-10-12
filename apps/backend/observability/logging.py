@@ -37,7 +37,9 @@ phone number or OTP is not.
 from __future__ import annotations
 
 import logging
+import re
 import sys
+import uuid
 from collections.abc import Mapping
 from contextvars import ContextVar, Token
 from typing import IO, Any, Protocol
@@ -101,6 +103,18 @@ REDACTION_KEY_FRAGMENTS: tuple[str, ...] = (
 # ``add_trace_id`` so every line carries it without threading a Request.
 _trace_id_var: ContextVar[str | None] = ContextVar("caresetu_trace_id", default=None)
 
+# W3C trace-context (PHASE-14A A2, #695): the async seam carries a well-formed
+# ``traceparent`` per row (``00-<32 hex trace-id>-<16 hex parent-id>-<01>``) so
+# a worker's log/trace context links back to the originating API request. Only
+# lowercase hex ids are honoured - a client-supplied id that is not a valid
+# trace-id never enters the seam.
+_TRACEPARENT_VERSION = "00"
+_TRACEPARENT_FLAGS = "01"
+_TRACE_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+_TRACEPARENT_PATTERN = re.compile(
+    rf"^{_TRACEPARENT_VERSION}-[0-9a-f]{{32}}-[0-9a-f]{{16}}-{_TRACEPARENT_FLAGS}$"
+)
+
 # The handler this module owns, so re-configuring (app + worker in one process,
 # or repeated ``create_app`` calls in tests) replaces it instead of stacking
 # duplicate lines. Other handlers - notably pytest's log capture - are left
@@ -121,6 +135,45 @@ def reset_trace_id(token: Token[str | None]) -> None:
 def get_trace_id() -> str | None:
     """The trace id bound to the current context, or ``None`` outside one."""
     return _trace_id_var.get()
+
+
+def is_valid_trace_id(trace_id: str) -> bool:
+    """Whether ``trace_id`` is a valid W3C trace-id segment (32 lowercase hex).
+
+    W3C trace-context forbids the all-zero trace-id; the OTel SDK consumes this
+    seam's value downstream (PHASE-14A A3), so an all-zero id is rejected here
+    rather than stored and later dropped.
+    """
+    return _TRACE_ID_PATTERN.match(trace_id) is not None and trace_id != "0" * 32
+
+
+def build_traceparent(trace_id: str | None) -> str | None:
+    """A W3C ``traceparent`` rooted at ``trace_id``, or ``None`` when malformed.
+
+    The outbox writer stores the result per row so A3 (the OTel SDK) can consume
+    it directly (plan-phase14-observability §5). A fresh random parent-id is
+    minted per call because each outbox row's fan-out is its own span. A trace
+    id that is not 32 lowercase hex - e.g. a client-supplied ``X-Request-Id`` of
+    another shape - yields ``None`` so a malformed value never enters the seam
+    and the row stays null.
+    """
+    if trace_id is None or not is_valid_trace_id(trace_id):
+        return None
+    parent_id = uuid.uuid4().hex[:16]
+    return f"{_TRACEPARENT_VERSION}-{trace_id}-{parent_id}-{_TRACEPARENT_FLAGS}"
+
+
+def trace_id_from_traceparent(traceparent: str | None) -> str | None:
+    """The trace-id segment of a stored W3C ``traceparent``, or ``None``.
+
+    The dispatcher binds the extracted id into the logging context before any
+    handler runs so worker lines inherit the originating request's id. A row
+    written with no request context has a null column and yields ``None``; a
+    malformed stored value is ignored rather than echoed.
+    """
+    if traceparent is None or _TRACEPARENT_PATTERN.match(traceparent) is None:
+        return None
+    return traceparent.split("-", 3)[1]
 
 
 def _is_denied(key: str) -> bool:

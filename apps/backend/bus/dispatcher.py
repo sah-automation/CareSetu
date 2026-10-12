@@ -68,7 +68,7 @@ from bus.outbox_ddl import (
     outbox_table,
 )
 from bus.registry import HandlerRegistry, PayloadModel
-from observability.logging import reset_trace_id, set_trace_id
+from observability.logging import reset_trace_id, set_trace_id, trace_id_from_traceparent
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +103,7 @@ class OutboxRow:
     occurred_at: datetime
     next_attempt_at: datetime
     attempts: int
+    traceparent: str | None = None
 
 
 @dataclass(frozen=True)
@@ -228,6 +229,7 @@ async def claim_pending_rows(
             target.c.occurred_at,
             target.c.next_attempt_at,
             target.c.attempts,
+            target.c.traceparent,
         )
     )
     result = await connection.execute(statement)
@@ -244,6 +246,7 @@ def _to_outbox_row(mapping: RowMapping) -> OutboxRow:
         occurred_at=cast(datetime, mapping["occurred_at"]),
         next_attempt_at=cast(datetime, mapping["next_attempt_at"]),
         attempts=cast(int, mapping["attempts"]),
+        traceparent=cast(str | None, mapping["traceparent"]),
     )
 
 
@@ -374,10 +377,13 @@ async def process_outbox_table(
     retried = 0
     dead_lettered = 0
     for row in claimed_rows:
-        # PHASE-14A A1 (#694): the outbox event id is the consumer-correlation
-        # key (error-handling-observability §3); bind it so every line this
-        # fan-out emits carries a trace_id, then restore the previous context.
-        trace_token = set_trace_id(str(row.event_id))
+        # PHASE-14A A2 (#695): when the originating API request carried a trace
+        # id, the row's stored W3C traceparent recovers it and it becomes the
+        # correlation key for this fan-out, so the worker's lines link back to
+        # the request. A row written with no request context keeps the A1
+        # fallback - the outbox event id. Bind whichever, then restore the
+        # previous context.
+        trace_token = set_trace_id(trace_id_from_traceparent(row.traceparent) or str(row.event_id))
         try:
             payload_model = registry.payload_model_for(row.event_type)
             if payload_model is None:

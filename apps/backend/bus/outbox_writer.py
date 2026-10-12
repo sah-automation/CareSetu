@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from bus.envelope import Envelope
 from bus.outbox_ddl import OUTBOX_STATUS_PENDING, outbox_table
+from observability.logging import build_traceparent, get_trace_id
 
 
 async def write_outbox(
@@ -27,6 +28,11 @@ async def write_outbox(
 
     Runs inside ``connection``'s active transaction - the caller commits or
     rolls back the state change and its event together (ADR-0002 §1).
+
+    The row's ``traceparent`` comes from the surrounding request context (the id
+    ``TraceMiddleware`` bound, PHASE-14A A2, #695): when the request carried a
+    valid trace id a W3C ``traceparent`` is derived from it, and when none is in
+    context the column stays null.
     """
     table = outbox_table(table_name, schema)
     await connection.execute(
@@ -37,5 +43,6 @@ async def write_outbox(
             occurred_at=envelope.occurred_at,
             status=OUTBOX_STATUS_PENDING,
             attempts=0,
+            traceparent=build_traceparent(get_trace_id()),
         )
     )

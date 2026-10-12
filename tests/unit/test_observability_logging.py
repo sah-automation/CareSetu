@@ -33,11 +33,13 @@ from observability.logging import (
     REDACTED_VALUE,
     SERVICE_API,
     SERVICE_WORKER,
+    build_traceparent,
     configure_logging,
     get_trace_id,
     redact_processor,
     reset_trace_id,
     set_trace_id,
+    trace_id_from_traceparent,
 )
 
 
@@ -65,6 +67,51 @@ def test_trace_id_context_round_trip() -> None:
     assert get_trace_id() == "trace-1"
     reset_trace_id(token)
     assert get_trace_id() is None
+
+
+def test_build_traceparent_derives_valid_w3c_from_32_hex_trace_id() -> None:
+    trace_id = "7" * 32
+
+    traceparent = build_traceparent(trace_id)
+
+    assert traceparent is not None
+    version, trace_segment, parent_segment, flags = traceparent.split("-")
+    assert version == "00"
+    assert trace_segment == trace_id
+    assert len(parent_segment) == 16
+    assert int(parent_segment, 16) >= 0
+    assert flags == "01"
+
+
+def test_build_traceparent_mints_a_fresh_parent_each_call() -> None:
+    trace_id = "a" * 32
+
+    assert build_traceparent(trace_id) != build_traceparent(trace_id)
+
+
+def test_build_traceparent_returns_none_without_context_or_malformed_id() -> None:
+    assert build_traceparent(None) is None
+    assert build_traceparent("") is None
+    assert build_traceparent("not-a-trace-id") is None
+    assert build_traceparent("Z" * 32) is None
+    assert build_traceparent("0" * 31) is None
+    assert build_traceparent("0" * 32) is None
+
+
+def test_trace_id_from_traceparent_round_trips() -> None:
+    trace_id = "f" * 32
+
+    traceparent = build_traceparent(trace_id)
+
+    assert trace_id_from_traceparent(traceparent) == trace_id
+
+
+def test_trace_id_from_traceparent_rejects_null_and_malformed_values() -> None:
+    assert trace_id_from_traceparent(None) is None
+    assert trace_id_from_traceparent("") is None
+    assert trace_id_from_traceparent("00-" + "0" * 32 + "-" + "0" * 16 + "-02") is None
+    assert trace_id_from_traceparent("00-" + "0" * 31 + "-" + "0" * 16 + "-01") is None
+    assert trace_id_from_traceparent("garbage") is None
 
 
 def test_json_format_renders_stdlib_logger_line(isolated_logging: Any) -> None:
