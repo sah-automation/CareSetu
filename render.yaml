@@ -80,6 +80,33 @@ services:
         sync: false
       - key: LANGFUSE_HOST
         value: https://us.cloud.langfuse.com
+      # Observability gates (PHASE-14A A5, #693; plan-phase14 §4): every gate
+      # is additive and disabled by default, so nothing here changes current
+      # boot behaviour until the consuming ticket (A1/A3/A4, MOD-013) lands.
+      # LOG_FORMAT=json is the production structured-log intent (A1); Sentry,
+      # OTel endpoints and headers are secrets set in the Render Dashboard
+      # during provisioning, never synced from the repo. OTEL_SERVICE_VERSION
+      # is the git SHA release tag (shared by A3/A4) - dashboard-managed.
+      - key: LOG_FORMAT
+        value: json
+      - key: SENTRY_DSN
+        sync: false
+      - key: SENTRY_TRACES_SAMPLE_RATE
+        value: "0.0"
+      - key: OTEL_ENABLED
+        value: "false"
+      - key: OTEL_EXPORTER_OTLP_ENDPOINT
+        sync: false
+      - key: OTEL_EXPORTER_OTLP_HEADERS
+        sync: false
+      - key: OTEL_TRACES_SAMPLER_RATIO
+        value: "1.0"
+      - key: OTEL_SERVICE_VERSION
+        sync: false
+      - key: METRICS_ENABLED
+        value: "false"
+      - key: OBSERVABILITY_ENABLED
+        value: "false"
       # Durable intake-media backend (PHASE-7 fix #385): the production backend
       # is a private Supabase Storage bucket so voice captures survive Render's
       # ephemeral disk (wiped on redeploy). SUPABASE_URL and

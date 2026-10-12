@@ -145,6 +145,14 @@ DEFAULT_AI_FALLBACK_PROVIDER = ""
 DEFAULT_AI_FALLBACK_BASE_URL = ""
 DEFAULT_AI_FALLBACK_API_KEY = ""
 DEFAULT_AI_FALLBACK_MODEL = ""
+# Observability gates (PHASE-14A A5, #693; plan-phase14 §4, Appendix A.2):
+# every vendor gate is additive and disabled by default so local dev, tests and
+# CI are unchanged until one is set. Nothing reads these yet - later batch
+# tickets A1 (structlog), A2 (trace propagation), A3 (OTel) and A4 (Sentry)
+# consume them. ``LOG_FORMAT`` is the two-value log renderer selector.
+DEFAULT_LOG_FORMAT = "console"
+DEFAULT_SENTRY_TRACES_SAMPLE_RATE = 0.0
+DEFAULT_OTEL_TRACES_SAMPLER_RATIO = 1.0
 # Operator MFA TOTP secret encryption (PHASE-5 S8, #261): the AES-256-GCM key
 # for encrypting/decrypting the TOTP secret stored in ``iam_operator_mfa.secret``
 # comes from the ``IAM_MFA_SECRET_KEY`` environment variable (never committed).
@@ -303,6 +311,24 @@ class Settings:
     ai_fallback_base_url: str = DEFAULT_AI_FALLBACK_BASE_URL
     ai_fallback_api_key: str = DEFAULT_AI_FALLBACK_API_KEY
     ai_fallback_model: str = DEFAULT_AI_FALLBACK_MODEL
+    # Observability gates (PHASE-14A A5, #693; plan-phase14 §4): all additive
+    # and disabled by default, so boot and tests are unchanged until a gate is
+    # set. ``log_format`` selects the structlog renderer (A1); ``sentry_*``
+    # gates error tracking (A4); ``otel_*`` gate the OTLP exporter, headers and
+    # parent-based sampler ratio (A3); ``otel_service_version`` is the git-SHA
+    # source shared by A3 and A4; ``metrics_enabled`` gates the optional
+    # Prometheus ``/metrics`` surface (A3); ``observability_enabled`` gates the
+    # MOD-013 aggregate consumer (B-tickets).
+    log_format: str = DEFAULT_LOG_FORMAT
+    sentry_dsn: str = ""
+    sentry_traces_sample_rate: float = DEFAULT_SENTRY_TRACES_SAMPLE_RATE
+    otel_enabled: bool = False
+    otel_exporter_otlp_endpoint: str = ""
+    otel_exporter_otlp_headers: tuple[str, ...] = ()
+    otel_traces_sampler_ratio: float = DEFAULT_OTEL_TRACES_SAMPLER_RATIO
+    otel_service_version: str = ""
+    metrics_enabled: bool = False
+    observability_enabled: bool = False
 
     def __post_init__(self) -> None:
         if self.gateway_jwt_verify_enabled and not self.gateway_jwt_signing_key:
@@ -533,6 +559,35 @@ class Settings:
                     "profile_media_backend='supabase' requires "
                     "SUPABASE_SERVICE_ROLE_KEY from the environment"
                 )
+        log_format = self.log_format.strip().lower()
+        if log_format not in {"console", "json"}:
+            raise ValueError(
+                f"unsupported log_format {self.log_format!r}; expected 'console' or 'json'"
+            )
+        if (
+            not math.isfinite(self.sentry_traces_sample_rate)
+            or not 0 <= self.sentry_traces_sample_rate <= 1
+        ):
+            raise ValueError(
+                "sentry_traces_sample_rate must be finite and between 0 and 1 inclusive"
+            )
+        if self.sentry_traces_sample_rate > 0 and not self.sentry_dsn.strip():
+            raise ValueError(
+                "sentry_traces_sample_rate>0 requires SENTRY_DSN; refusing a sample "
+                "rate with no Sentry DSN (fail-closed)."
+            )
+        if (
+            not math.isfinite(self.otel_traces_sampler_ratio)
+            or not 0 <= self.otel_traces_sampler_ratio <= 1
+        ):
+            raise ValueError(
+                "otel_traces_sampler_ratio must be finite and between 0 and 1 inclusive"
+            )
+        if self.otel_enabled and not self.otel_exporter_otlp_endpoint.strip():
+            raise ValueError(
+                "otel_enabled=True requires OTEL_EXPORTER_OTLP_ENDPOINT from the "
+                "environment (fail-closed)."
+            )
 
     @property
     def mock_otp_readback_enabled(self) -> bool:
@@ -735,4 +790,18 @@ def get_settings() -> Settings:
         ai_fallback_base_url=os.environ.get("AI_FALLBACK_BASE_URL", DEFAULT_AI_FALLBACK_BASE_URL),
         ai_fallback_api_key=os.environ.get("AI_FALLBACK_API_KEY", DEFAULT_AI_FALLBACK_API_KEY),
         ai_fallback_model=os.environ.get("AI_FALLBACK_MODEL", DEFAULT_AI_FALLBACK_MODEL),
+        log_format=os.environ.get("LOG_FORMAT", DEFAULT_LOG_FORMAT),
+        sentry_dsn=os.environ.get("SENTRY_DSN", ""),
+        sentry_traces_sample_rate=_env_float(
+            "SENTRY_TRACES_SAMPLE_RATE", DEFAULT_SENTRY_TRACES_SAMPLE_RATE
+        ),
+        otel_enabled=_env_bool("OTEL_ENABLED", False),
+        otel_exporter_otlp_endpoint=os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+        otel_exporter_otlp_headers=_env_csv("OTEL_EXPORTER_OTLP_HEADERS"),
+        otel_traces_sampler_ratio=_env_float(
+            "OTEL_TRACES_SAMPLER_RATIO", DEFAULT_OTEL_TRACES_SAMPLER_RATIO
+        ),
+        otel_service_version=os.environ.get("OTEL_SERVICE_VERSION", ""),
+        metrics_enabled=_env_bool("METRICS_ENABLED", False),
+        observability_enabled=_env_bool("OBSERVABILITY_ENABLED", False),
     )
