@@ -649,6 +649,46 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 
 ---
 
+### 3.14 Module: `MOD-013` Observability
+
+- **Module ID:** `MOD-013`
+- **Primary Scope:** The operator-facing telemetry ledger - AI usage/cost, AI provider health, business rollups, and the alert feed - backed by the Postgres `observability` schema. A sibling of `MOD-011` (Audit): the same one-schema-rule extension of the audit pattern, applied to telemetry rather than an audit trail (ADR-0025). It is **telemetry, not a domain bounded context** - it owns no domain tables and exposes no facade for other modules to call; it consumes existing outbox events into its own schema and serves operator read surfaces.
+- **Traceability Link:** `plan-phase14-observability.md` §7, §9, `ADR-0025` (module + schema registration), `ADR-0024` (topology), `ADR-0002` (transactional outbox), `ADR-0003` (DB-per-module isolation), `NFR-001`, `NFR-SEC-006`, parent #692
+
+#### 1. Data Ownership & Storage Isolation
+
+- **Storage Type:** Relational - PostgreSQL schema `observability` (the twelfth `MODULE_SCHEMAS` entry, additive migration `v9_0__init_observability`): `obs_ai_usage_daily` (per date/provider/model/task_type counts, success/failure/timeout, low-confidence, tokens, `cost_paise`, avg/p95 `duration_ms`), `obs_ai_cost_budget` (monthly limit vs current spend, alert threshold, billing period), `obs_ai_provider_health` (rolling success rate, p50/p95/p99 latency, breaker state, last error), `obs_business_daily` (registry-driven `metric_key`/`date`/`value` JSONB rollup), `obs_alert_events` (the operator-visible alert feed), and `obs_consumed_events` (the idempotency ledger).
+- **Caching Strategy:** None - aggregates are read straight from the schema by the operator surfaces; the schema is the system of record that survives vendor retention limits (ADR-0024).
+- **Data Isolation Rule:** Private `observability` schema; `obs_*` tables reference only their own schema (no cross-schema foreign keys). Aggregation never crosses schemas - `MOD-013` never queries another module's tables; every input arrives as an outbox event. Where a decision surface needs a field no event payload carries, the resolution is a **narrow read-only exception registered on ADR-0025**, never a cross-schema read bolted on quietly.
+- **PHI Rule:** Telemetry only - pseudonymous ids and aggregate counters, never transcript text, patient identity, or raw provider payloads (`NFR-SEC-006`); no PHI in alert payloads.
+
+#### 2. Inbound & Outbound Interfaces
+
+- **Read-only Facade:** the operator read APIs below only - no other module calls into `MOD-013`; as telemetry rather than a domain bounded context it exposes no domain facade, only reads.
+- **Operator HTTP Surfaces (read-only, operator-gated):** `GET /v1/operator/observability/*` - `overview` (headline KPIs), `cost` (spend vs budget for the current period), `cost/trend`, `usage` (calls/tokens by provider/task), `quality` (low-confidence/success rate), `latency` (p50/p95/p99 by provider/route), `health` (dependency + outbox health), `alerts` (alert feed), `deeplinks` (Grafana/Sentry/Langfuse URLs). Flat `require_operator`; the admin/non-admin tier split is deferred to Batch 2 (plan §9.1).
+- **Inbound Events Subscribed:** the existing `§4.2` registry, via each producer's outbox - `ai_job.completed`, `ai_job.failed`, `case.*`, `partner.*`, `consent.*`, `record.accessed`, `audit.*` (ADR-0025 D3). No new event names are defined.
+- **Outbound Events Published:** none - `MOD-013` is a terminal consumer; it aggregates and serves reads (the alert feed lands in-schema, it is not a published event).
+
+#### 3. Core Business Logic & State Machines
+
+- **Event-driven aggregation:** the consumer accumulates counts, cost, and status as events arrive, and the nightly rollup (`plan-phase14-observability.md` §8) recomputes percentile-based aggregates into `obs_ai_usage_daily` and refreshes `obs_ai_provider_health`.
+- **Idempotency rule:** the consumer records `event_id` in `obs_consumed_events` before applying effects, so a replayed delivery is a no-op - the same `consumed_events` pattern every module uses (ADR-0002).
+- **Alert rule:** breached thresholds (AI budget meter > 80%, provider health drop, audit tamper, outbox backlog, breaker open, dead-letter row) write `obs_alert_events`, the operator-visible feed; delivery rides free channels (Sentry/Grafana) while the feed is the durable record, and no PHI enters a payload (`plan-phase14-observability.md` §11).
+
+#### 4. High-Level Tech Stack & Framework Constraints
+
+- **Language/Runtime:** Python 3.11+ (asyncio).
+- **Framework:** FastAPI + Pydantic v2 + SQLAlchemy 2.0 (async); module layout per `coding-standards.md` §2.
+- **Persistence Layer:** PostgreSQL (`observability` schema); the registry-driven `obs_business_daily` rollup lets later phases add metrics without schema churn.
+
+#### 5. Module NFR Allocation
+
+- **Latency SLA:** operator read APIs p95 < 500 ms (flat aggregates read from the schema).
+- **Availability Target:** Best-effort (`NFR-004`); an observability outage never blocks a domain path - telemetry is downstream of the bus.
+- **Per-Module NFRs:** no PHI in telemetry (`NFR-SEC-006`); replay-safe consumer via `obs_consumed_events` (ADR-0002); zero cross-schema reads (`ADR-0003`, ADR-0025).
+
+---
+
 ## 4. Inter-Module Communication & Event Bus Protocol
 
 **Protocol model.** Sync = module facade (in-process typed async calls through the FastAPI container, Pydantic schemas) exposed behind the gateway for external callers. Async = PostgreSQL **transactional outbox** per module → async dispatcher → idempotent subscribers. At-least-once delivery; consumers dedupe on `event_id`. No direct cross-schema SQL anywhere.
