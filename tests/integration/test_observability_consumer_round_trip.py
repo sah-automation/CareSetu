@@ -30,15 +30,32 @@ from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from bus.dispatch import dispatch
-from bus.dispatcher import DEFAULT_DISPATCHER_CONFIG, discover_outbox_tables, process_outbox_table
+from bus.dispatcher import (
+    DEFAULT_DISPATCHER_CONFIG,
+    discover_outbox_tables,
+    process_outbox_table,
+)
 from bus.envelope import Envelope
-from bus.events import EVENT_AI_JOB_COMPLETED, EVENT_AI_JOB_FAILED
+from bus.events import (
+    EVENT_AI_JOB_COMPLETED,
+    EVENT_AI_JOB_FAILED,
+    EVENT_AUDIT_TAMPER_DETECTED,
+    EVENT_CASE_CONSULT_COMPLETE,
+    EVENT_CONSENT_GRANTED,
+)
 from bus.outbox_writer import write_outbox
 from bus.registry import HandlerRegistry
 from modules.intake.adapters import register_handlers as register_intake_handlers
 from modules.intake.domain.events import AiJobCompletedPayload, AiJobFailedPayload
 from modules.intake.outbox import INTAKE_OUTBOX_TABLE
-from modules.observability.adapters import register_handlers as register_observability_handlers
+from modules.observability.adapters import (
+    register_handlers as register_observability_handlers,
+)
+from modules.observability.domain.consumer import (
+    CaseConsultCompleteTelemetryPayload,
+    ConsentLifecycleTelemetryPayload,
+    TamperDetectedTelemetryPayload,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_INI = REPO_ROOT / "apps" / "backend" / "alembic.ini"
@@ -74,6 +91,8 @@ async def clean_tables(database_url: str, migrated_schema: None) -> Iterator[Non
                 text(
                     "TRUNCATE TABLE observability.consumed_events, "
                     "observability.observability_ai_usage_daily, "
+                    "observability.observability_business_daily, "
+                    "observability.observability_alert_events, "
                     "intake.intake_outbox CASCADE"
                 )
             )
@@ -253,6 +272,114 @@ async def test_ai_job_events_round_trip_accumulate_and_dedupe_on_replay(
                 text("SELECT COUNT(*) FROM observability.consumed_events")
             )
         assert len(rows) == 2
+        assert ledger == 4
+    finally:
+        await engine.dispose()
+
+
+async def _business_rows(connection: AsyncConnection) -> dict[str, int]:
+    result = await connection.execute(
+        text(
+            "SELECT metric_key, (value->>'count')::int AS count "
+            "FROM observability.observability_business_daily"
+        )
+    )
+    return {str(mapping["metric_key"]): int(mapping["count"]) for mapping in result.mappings()}
+
+
+@pytest.mark.asyncio
+async def test_business_counts_and_tamper_alert_round_trip_replay_safe(
+    database_url: str, clean_tables: None
+) -> None:
+    """AC (#703): counts keyed by ``metric_key``+date; tamper -> one alert; replay no-op.
+
+    Two ``case.consult_complete`` and one ``consent.granted`` business events roll
+    into ``observability_business_daily`` keyed by ``metric_key`` + the envelope's
+    occurrence date, accumulating their ``value.count``. A ``audit.tamper_detected``
+    event (plus an ``ai_egress.recorded`` guardrail signal) writes one PHI-free
+    ``observability_alert_events`` row each. Replaying every ``event_id`` through
+    the idempotent consumers adds no rows and no effects.
+    """
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        registry = _registry()
+
+        consult_1 = Envelope[CaseConsultCompleteTelemetryPayload](
+            event_id=uuid4(),
+            event_type=EVENT_CASE_CONSULT_COMPLETE,
+            producer="care",
+            occurred_at=_NOW,
+            payload=CaseConsultCompleteTelemetryPayload(
+                case_id=1, patient_id=2, doctor_id=3, pre_summary_id=4
+            ),
+        )
+        consult_2 = Envelope[CaseConsultCompleteTelemetryPayload](
+            event_id=uuid4(),
+            event_type=EVENT_CASE_CONSULT_COMPLETE,
+            producer="care",
+            occurred_at=_NOW,
+            payload=CaseConsultCompleteTelemetryPayload(
+                case_id=5, patient_id=6, doctor_id=3, pre_summary_id=None
+            ),
+        )
+        granted = Envelope[ConsentLifecycleTelemetryPayload](
+            event_id=uuid4(),
+            event_type=EVENT_CONSENT_GRANTED,
+            producer="consent",
+            occurred_at=_NOW,
+            payload=ConsentLifecycleTelemetryPayload(
+                consent_id=7,
+                lineage_ref="lineage-7",
+                patient_id=2,
+                counterparty_type="doctor",
+                counterparty_id="3",
+                record_scope="consultations",
+                version=1,
+            ),
+        )
+        tamper = Envelope[TamperDetectedTelemetryPayload](
+            event_id=uuid4(),
+            event_type=EVENT_AUDIT_TAMPER_DETECTED,
+            producer="audit",
+            occurred_at=_NOW,
+            payload=TamperDetectedTelemetryPayload(
+                attempted_operation="UPDATE",
+                target_event_id="11111111-1111-1111-1111-111111111111",
+                attempted_at=_NOW,
+            ),
+        )
+
+        for envelope in (consult_1, consult_2, granted, tamper):
+            await dispatch(registry, envelope)
+
+        async with engine.connect() as connection:
+            business = await _business_rows(connection)
+            alerts = await connection.execute(
+                text("SELECT severity, kind, payload FROM observability.observability_alert_events")
+            )
+            alert_rows = [dict(mapping) for mapping in alerts.mappings().all()]
+
+        assert business == {EVENT_CASE_CONSULT_COMPLETE: 2, EVENT_CONSENT_GRANTED: 1}
+        assert len(alert_rows) == 1
+        assert alert_rows[0]["severity"] == "critical"
+        assert alert_rows[0]["kind"] == "audit_tamper"
+        # PHI-free: the producer's row-data ``details`` blob never reaches the alert.
+        assert "details" not in alert_rows[0]["payload"]
+        assert alert_rows[0]["payload"]["attempted_operation"] == "UPDATE"
+
+        # Replay every event_id: idempotent no-op, one ledger row per event.
+        for envelope in (consult_1, consult_2, granted, tamper):
+            await dispatch(registry, envelope)
+        async with engine.connect() as connection:
+            business = await _business_rows(connection)
+            alert_count = await connection.scalar(
+                text("SELECT COUNT(*) FROM observability.observability_alert_events")
+            )
+            ledger = await connection.scalar(
+                text("SELECT COUNT(*) FROM observability.consumed_events")
+            )
+        assert business == {EVENT_CASE_CONSULT_COMPLETE: 2, EVENT_CONSENT_GRANTED: 1}
+        assert alert_count == 1
         assert ledger == 4
     finally:
         await engine.dispose()
