@@ -78,7 +78,7 @@ import { fetchReviewQueue, type ReviewQueueItem } from "@/lib/intake/api";
 import { PROFILE_ANCHORS } from "@/components/doctor/profile/ProfileSectionIndex";
 import { STRINGS, type Dictionary } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
-import { formatFeePaise } from "@/components/pick/DoctorPickCard";
+import { formatInrPaise } from "@/lib/money";
 
 // ---- helpers ----
 
@@ -206,7 +206,7 @@ function FeeSummaryCard({ feePaise }: { feePaise: number | null }) {
             className="text-2xl font-semibold text-txt"
             data-testid="fee-summary-value"
           >
-            {formatFeePaise(feePaise)}
+            {formatInrPaise(feePaise)}
           </p>
           <Link
             href={`/doctor/profile#${PROFILE_ANCHORS.fee}`}
@@ -388,7 +388,7 @@ function KpiRow({
     feeStatus === "ready"
       ? feePaise === null
         ? t.feeUnset
-        : formatFeePaise(feePaise)
+        : formatInrPaise(feePaise)
       : DASH;
 
   return (
@@ -544,7 +544,7 @@ function ProfileStatusCard({ profile }: { profile: DoctorProfileView }) {
           }
         >
           {profile.consultation_fee != null
-            ? formatFeePaise(profile.consultation_fee)
+            ? formatInrPaise(profile.consultation_fee)
             : t.feeUnset}
         </span>
       </p>

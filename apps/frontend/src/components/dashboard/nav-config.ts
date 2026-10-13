@@ -11,6 +11,7 @@
 
 import type { ComponentType } from "react";
 import {
+  Activity,
   BadgeCheck,
   CalendarDays,
   ClipboardList,
@@ -247,6 +248,18 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       href: "/operator/audit",
       icon: ScrollText,
       soon: true,
+      group: "work",
+    },
+    // #708: the Observability console is LIVE, not a coming-soon placeholder -
+    // plan-phase14 §9.2 names this entry as the surface's one nav destination,
+    // and the overview page (#708) plus the C2b chart pages (#709) hang off it.
+    // Added rather than un-sooned, so the sidebar, the phone tab bar and the
+    // top-nav all pick it up from this one config.
+    {
+      key: "observability",
+      labelKey: "observability",
+      href: "/operator/observability",
+      icon: Activity,
       group: "work",
     },
   ],

@@ -23,10 +23,7 @@ import { EmptyState } from "@/components/layout/EmptyState";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/button";
 import { formatDistanceKm } from "@/components/directory/DirectoryCard";
-import {
-  DoctorPickCard,
-  formatFeePaise,
-} from "@/components/pick/DoctorPickCard";
+import { DoctorPickCard } from "@/components/pick/DoctorPickCard";
 import { PickConsentSheet } from "@/components/pick/PickConsentSheet";
 import { ApiError } from "@/lib/api-errors";
 import {
@@ -40,6 +37,7 @@ import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { specialtyLabel } from "@/lib/directory/specialtyLabel";
 import { fetchPreSummary } from "@/lib/intake/api";
+import { formatInrPaise } from "@/lib/money";
 import type { PickDoctorResult } from "@/lib/pick/api";
 import { deriveSpecialtyFromSymptoms } from "@/lib/pick/suggest";
 
@@ -194,7 +192,7 @@ export default function PickDoctorPage() {
                 </dt>
                 <dd className="mt-0.5 text-txt" data-testid="pick-confirm-fee">
                   {picked.consultation_fee !== null
-                    ? formatFeePaise(picked.consultation_fee)
+                    ? formatInrPaise(picked.consultation_fee)
                     : t.feeNotSet}
                 </dd>
               </div>

@@ -731,7 +731,13 @@ describe.each(["doctor", "partner", "operator"] as const)(
       const expected = {
         doctor: ["queue", "cases", "patients", "profile"],
         partner: ["orders", "history", "settlements", "profile"],
-        operator: ["home", "verifications", "disputes", "audit"],
+        operator: [
+          "home",
+          "verifications",
+          "disputes",
+          "audit",
+          "observability",
+        ],
       }[role];
 
       expected.forEach((key) => {

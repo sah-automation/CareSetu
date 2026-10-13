@@ -1053,6 +1053,9 @@ const en = {
     verifications: "Verifications",
     disputes: "Disputes",
     audit: "Audit",
+    // #708: the operator Observability console (plan-phase14 §9.2). A live
+    // entry, so it needs a label in both locales like every other destination.
+    observability: "Observability",
     // #538: section-group labels for the redesigned full-shell sidebar. Nav
     // items declare a group via NavItemDef.group; the sidebar composes ordered
     // labeled groups from these keys.
@@ -2798,6 +2801,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
       verifications: "सत्यापन",
       disputes: "विवाद",
       audit: "ऑडिट",
+      observability: "प्रेक्षण",
       sections: {
         work: "कार्य",
         account: "खाता",

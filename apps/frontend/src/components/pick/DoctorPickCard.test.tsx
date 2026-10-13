@@ -8,7 +8,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { DirectoryEntry } from "@/lib/directory/search";
-import { DoctorPickCard, formatFeePaise } from "./DoctorPickCard";
+import { DoctorPickCard } from "./DoctorPickCard";
 
 vi.mock("next/link", () => ({
   default: ({
@@ -53,13 +53,6 @@ const labels = {
 
 afterEach(() => {
   cleanup();
-});
-
-describe("formatFeePaise", () => {
-  it("formats integer paise as a whole-rupee INR amount", () => {
-    expect(formatFeePaise(50000)).toBe("\u20B9500");
-    expect(formatFeePaise(300)).toBe("\u20B93");
-  });
 });
 
 describe("DoctorPickCard", () => {

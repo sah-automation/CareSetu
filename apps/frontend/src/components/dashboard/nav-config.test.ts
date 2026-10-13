@@ -35,7 +35,7 @@ describe("NAV_CONFIG", () => {
     expect(home.soon).toBeUndefined();
   });
 
-  it("keeps every non-home staff entry as Soon except the doctor Cases, Patients and Profile tabs", () => {
+  it("keeps every non-home staff entry as Soon except the doctor Cases, Patients and Profile tabs and the operator Observability entry", () => {
     for (const role of ["doctor", "partner", "operator"] as const) {
       for (const item of NAV_CONFIG[role].slice(1)) {
         // #543: Profile joins Cases/Patients as a live doctor tab - each one
@@ -45,8 +45,12 @@ describe("NAV_CONFIG", () => {
           (item.key === "cases" ||
             item.key === "patients" ||
             item.key === "profile");
+        // #708: the operator's Observability entry joins them - the console has
+        // a live overview page behind it, so it may not read as coming-soon.
+        const isLiveOperatorTab =
+          role === "operator" && item.key === "observability";
         expect(item.soon, `${role}/${item.key}`).toBe(
-          isLiveDoctorTab ? undefined : true,
+          isLiveDoctorTab || isLiveOperatorTab ? undefined : true,
         );
       }
     }
@@ -179,7 +183,11 @@ describe("splitMobileTabs", () => {
       expect(tabs.map((item) => item.key)).toEqual(
         NAV_CONFIG[role].map((item) => item.key),
       );
-      expect(tabs).toHaveLength(4);
+      // #708: the operator bar grew to five destinations with the live
+      // Observability entry - still the cap, still no More sheet. What this
+      // asserts is the RULE (every staff role's destinations fit the bar),
+      // not one role's count, so the next role to grow needs no edit here.
+      expect(tabs.length).toBeLessThanOrEqual(TABBAR_MAX_DESTINATIONS);
       expect(hasMore).toBe(false);
       expect(overflow).toHaveLength(0);
     },
