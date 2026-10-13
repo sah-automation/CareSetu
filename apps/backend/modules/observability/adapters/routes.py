@@ -26,6 +26,7 @@ from fastapi import APIRouter, Depends, Query, Request, status
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_operator
 from modules.observability.facade import (
+    DEFAULT_WINDOW_DAYS,
     CostSummary,
     CostTrend,
     ObservabilityFacade,
@@ -35,10 +36,9 @@ from modules.observability.facade import (
 
 router = APIRouter(tags=["observability"])
 
-#: Default and ceiling of the windowed reads' ``days`` param. The default is the
-#: plan's 30 days (plan-phase14 §9.1); the ceiling bounds the table scan an
-#: operator (or a probe) can ask for at the edge.
-_DEFAULT_WINDOW_DAYS = 30
+#: Ceiling of the windowed reads' ``days`` param: one year of daily points, which is
+#: as much series as the chart behind these reads draws. It bounds the response, not
+#: the system, so it is a module constant rather than an env-driven limit.
 _MAX_WINDOW_DAYS = 365
 
 _Window = Annotated[int, Query(ge=1, le=_MAX_WINDOW_DAYS)]
@@ -73,7 +73,7 @@ async def read_cost(
 async def read_cost_trend(
     request: Request,
     principal: Annotated[Principal, Depends(require_operator)],
-    days: _Window = _DEFAULT_WINDOW_DAYS,
+    days: _Window = DEFAULT_WINDOW_DAYS,
 ) -> CostTrend:
     """Daily cost across the window, oldest day first, defaulting to 30 days.
 
@@ -95,7 +95,7 @@ async def read_cost_trend(
 async def read_usage(
     request: Request,
     principal: Annotated[Principal, Depends(require_operator)],
-    days: _Window = _DEFAULT_WINDOW_DAYS,
+    days: _Window = DEFAULT_WINDOW_DAYS,
 ) -> UsageReport:
     """Calls, tokens, and paise per ``(provider, model, task_type)`` scope.
 
@@ -116,7 +116,7 @@ async def read_usage(
 async def read_quality(
     request: Request,
     principal: Annotated[Principal, Depends(require_operator)],
-    days: _Window = _DEFAULT_WINDOW_DAYS,
+    days: _Window = DEFAULT_WINDOW_DAYS,
 ) -> QualityReport:
     """Success and low-confidence rates over the window, plus per-provider health.
 

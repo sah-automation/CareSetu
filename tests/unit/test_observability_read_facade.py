@@ -127,10 +127,12 @@ async def test_cost_summary_sums_the_budgeted_period() -> None:
     assert summary.period_start == _PERIOD_START
     assert summary.period_end == _PERIOD_END
     assert summary.total_spend_paise == 90_000
-    assert summary.total_limit_paise == 150_000
-    assert summary.remaining_paise == 60_000
-    assert summary.utilization_pct == Decimal("60.00")
-    # 90k of 150k is inside the cap, even though one scope alone breached its own.
+    # Spend sums across scopes; the cap does NOT - the rollup writes the single
+    # bill-wide cap onto every scope row, so summing it would double the budget.
+    assert summary.total_limit_paise == 100_000
+    assert summary.remaining_paise == 10_000
+    assert summary.utilization_pct == Decimal("90.00")
+    # 90k of the 100k cap is inside it, even though one scope alone breached its own.
     assert summary.exhausted is False
     assert [budget.model for budget in summary.budgets] == ["gpt-4o", "gpt-4o-mini"]
 
@@ -159,6 +161,22 @@ async def test_cost_summary_flags_an_overspent_scope() -> None:
     assert over.utilization_pct == Decimal("120.00")
     assert over.exhausted is True
     assert over.alert_threshold_pct == 80
+
+
+async def test_cost_summary_reads_the_bill_wide_cap_not_the_sum_of_the_scopes() -> None:
+    """One cap, one bill: a second scope must not buy a second budget.
+
+    ``_BUDGET_ROWS`` carries the same real-world shape the B5a rollup writes - one
+    ``AI_MONTHLY_BUDGET_PAISE`` figure repeated per scope - except that its two rows
+    disagree, so the ``max`` the summary takes is the conservative one.
+    """
+    same_cap = [dict(row, monthly_limit_paise=100_000) for row in _BUDGET_ROWS]
+
+    summary = await query_cost_summary(_connection(same_cap))
+
+    assert {budget.monthly_limit_paise for budget in summary.budgets} == {100_000}
+    assert summary.total_limit_paise == 100_000
+    assert summary.utilization_pct == Decimal("90.00")
 
 
 async def test_cost_summary_reads_an_uncapped_scope_without_dividing_by_zero() -> None:
@@ -201,6 +219,7 @@ async def test_facade_cost_summary_delegates_through_its_engine() -> None:
     summary = await facade.get_cost_summary()
 
     assert summary.total_spend_paise == 90_000
+    assert summary.total_limit_paise == 100_000
 
 
 # ------------------------------------------------------------------ trend
@@ -420,3 +439,24 @@ async def test_every_read_selects_from_the_observability_schema_only() -> None:
     # Quality is two reads of this schema, never one joined query.
     assert _from_target(quality, 0) == f"{table}usage_daily"
     assert _from_target(quality, 1) == f"{table}provider_health"
+
+
+@pytest.mark.parametrize(
+    ("method", "connection_args"),
+    [
+        ("get_cost_trend", (_TREND_ROWS,)),
+        ("get_usage", (_USAGE_ROWS,)),
+        ("get_quality", ([_TOTALS_ROW], _HEALTH_ROWS)),
+    ],
+)
+async def test_facade_windowed_reads_resolve_days_against_a_pinned_today(
+    method: str, connection_args: tuple[list[dict[str, object]], ...]
+) -> None:
+    """The routes pass ``days``; the facade turns it into the window it queries."""
+    facade = ObservabilityFacade(_engine(_connection(*connection_args)))
+
+    view = await getattr(facade, method)(days=7, today=_TODAY)
+
+    assert view.days == 7
+    assert view.from_date == date(2026, 10, 6)
+    assert view.to_date == _TODAY

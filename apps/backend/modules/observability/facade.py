@@ -57,6 +57,7 @@ from modules.observability.schema.models import (
 OBSERVABILITY_SCHEMA = "observability"
 
 __all__ = [
+    "DEFAULT_WINDOW_DAYS",
     "OBSERVABILITY_SCHEMA",
     "ROLLUP_MODE_BACKFILL",
     "ROLLUP_MODE_DAILY",
@@ -270,11 +271,18 @@ class CostBudgetView(BaseModel):
 class CostSummary(BaseModel):
     """Spend across the current billing period, plus the per-scope breakdown.
 
-    ``total_*`` are the sum over ``budgets``: ``observability_ai_cost_budget`` holds
-    one snapshotted row per scope, and the ``ai_budget`` alert is evaluated against
-    this month's total, so the headline and the alert can never disagree. An empty
-    table answers zeroes with a ``None`` period, which is "nothing budgeted yet",
-    not "spent nothing".
+    ``total_spend_paise`` is the sum over ``budgets`` - the whole bill. The cap is
+    NOT: ``observability_ai_cost_budget`` holds one snapshotted row per scope, and
+    the single bill-wide ``AI_MONTHLY_BUDGET_PAISE`` is written onto every one of
+    them, so ``total_limit_paise`` is the cap itself rather than its sum across
+    rows. The ``ai_budget`` alert is evaluated against exactly this pair, so the
+    headline and the alert cannot disagree.
+
+    ``period_start``/``period_end`` are the bounds the rows carry: the rollup stamps
+    them on every snapshot and re-stamps a stale row's period when it resets a
+    closed month, so they read as the period the figures belong to. An empty table
+    answers zeroes with a ``None`` period, which is "nothing budgeted yet", not
+    "spent nothing".
     """
 
     period_start: date | None
@@ -371,6 +379,11 @@ class QualityReport(BaseModel):
     providers: list[ProviderQualityRow]
 
 
+#: Default window of the windowed reads, in days (plan-phase14 §9.1: ``days=30``).
+#: The single definition: the routes import it rather than repeating the number,
+#: and the facade methods take the window the caller resolved.
+DEFAULT_WINDOW_DAYS = 30
+
 #: Two-decimal scale of the percentage figures (``60.00``, not ``60``).
 _PCT_QUANTUM = Decimal("0.01")
 
@@ -393,6 +406,15 @@ def _window_days(from_date: date, to_date: date) -> int:
     return (to_date - from_date).days + 1
 
 
+def _utilization_pct(spend_paise: int, limit_paise: int) -> Decimal:
+    """``spend`` as a percentage of ``limit`` at 2dp; an uncapped total reads ``0.00``."""
+    if limit_paise <= 0:
+        return Decimal("0.00")
+    return (Decimal(spend_paise) / Decimal(limit_paise) * 100).quantize(
+        _PCT_QUANTUM, rounding=ROUND_HALF_UP
+    )
+
+
 def _budget_view(row: RowMapping) -> CostBudgetView:
     """One ``observability_ai_cost_budget`` row as the cost route answers it.
 
@@ -402,6 +424,10 @@ def _budget_view(row: RowMapping) -> CostBudgetView:
     the rollup has not stamped a period onto yet (both period columns are nullable).
     An uncapped scope reports ``0.00`` rather than dividing by zero, and is never
     "exhausted" - there is no cap to exhaust.
+
+    ``remaining_paise`` and ``utilization_pct`` are this scope's SHARE against the
+    bill-wide cap every row carries (see :func:`query_cost_summary`) - the same
+    reading ``BudgetSnapshot`` takes, not a second budget of its own.
     """
     limit = int(row["monthly_limit_paise"])
     spend = int(row["current_spend_paise"])
@@ -415,11 +441,7 @@ def _budget_view(row: RowMapping) -> CostBudgetView:
         billing_period_start=row["billing_period_start"],
         billing_period_end=row["billing_period_end"],
         remaining_paise=max(0, limit - spend),
-        utilization_pct=(
-            (Decimal(spend) / Decimal(limit) * 100).quantize(_PCT_QUANTUM, rounding=ROUND_HALF_UP)
-            if capped
-            else Decimal("0.00")
-        ),
+        utilization_pct=_utilization_pct(spend, limit),
         exhausted=capped and spend >= limit,
     )
 
@@ -427,12 +449,17 @@ def _budget_view(row: RowMapping) -> CostBudgetView:
 async def query_cost_summary(connection: AsyncConnection) -> CostSummary:
     """Read spend against the budgeted period (``/cost``).
 
-    Every ``observability_ai_cost_budget`` row is the snapshotted month-to-date
-    spend of one ``(provider, model)`` scope (B5a ``build_budget_snapshot``), so
-    the period totals are the sum over the rows - no re-aggregation of the usage
-    ledger is needed, and the figure an operator sees is the one the ``ai_budget``
-    alert was evaluated against. An empty table is a zeroed summary, not an error:
-    before the first rollup there is simply nothing budgeted yet.
+    Spend is the SUM over the rows - each row is one ``(provider, model)`` scope's
+    snapshotted month-to-date share (B5a ``build_budget_snapshot``) - so the
+    headline is the whole bill, the same total the ``ai_budget`` alert is evaluated
+    against.
+
+    The cap is NOT that sum. ``AI_MONTHLY_BUDGET_PAISE`` is ONE cap for the whole
+    bill and the rollup writes that same figure onto every scope row, so summing
+    ``monthly_limit_paise`` would multiply the budget by the number of scopes and
+    understate utilisation. The total cap is the ``max`` over the rows - the one
+    cap, and the conservative reading if two rows ever disagree. Every other column
+    is derived from that pair, so the headline and the alert cannot disagree.
     """
     rows = await connection.execute(
         select(
@@ -450,7 +477,7 @@ async def query_cost_summary(connection: AsyncConnection) -> CostSummary:
     )
     budgets = [_budget_view(row) for row in rows.mappings()]
     total_spend = sum(budget.current_spend_paise for budget in budgets)
-    total_limit = sum(budget.monthly_limit_paise for budget in budgets)
+    total_limit = max((budget.monthly_limit_paise for budget in budgets), default=0)
     return CostSummary(
         period_start=_earliest_period_start(budgets),
         period_end=_latest_period_end(budgets),
@@ -473,15 +500,6 @@ def _latest_period_end(budgets: Sequence[CostBudgetView]) -> date | None:
     """The newest period end the budget rows carry, or ``None`` before the rollup."""
     ends = [budget.billing_period_end for budget in budgets if budget.billing_period_end]
     return max(ends) if ends else None
-
-
-def _utilization_pct(spend_paise: int, limit_paise: int) -> Decimal:
-    """``spend`` as a percentage of ``limit`` at 2dp; an uncapped total reads ``0.00``."""
-    if limit_paise <= 0:
-        return Decimal("0.00")
-    return (Decimal(spend_paise) / Decimal(limit_paise) * 100).quantize(
-        _PCT_QUANTUM, rounding=ROUND_HALF_UP
-    )
 
 
 async def query_cost_trend(
@@ -643,8 +661,10 @@ class ObservabilityFacade:
     call. Each opens the one settled engine connection and delegates its aggregate
     to the module helper, so routes hold no SQL and the reads stay in this module.
 
-    The windowed reads take ``today`` so the caller - or a test - can pin the
-    window; production leaves it unset and the facade reads the current UTC day.
+    The windowed reads take ``days`` and an optional ``today`` so the caller - or a
+    test - can pin the window; the routes own the default
+    (:data:`DEFAULT_WINDOW_DAYS`) and production leaves ``today`` unset, so the
+    facade reads the current UTC day.
     """
 
     def __init__(self, engine: AsyncEngine) -> None:
@@ -655,19 +675,19 @@ class ObservabilityFacade:
         async with self._engine.begin() as connection:
             return await query_cost_summary(connection)
 
-    async def get_cost_trend(self, *, days: int = 30, today: date | None = None) -> CostTrend:
-        """Read the daily cost series over the last ``days`` days (30 by default)."""
+    async def get_cost_trend(self, *, days: int, today: date | None = None) -> CostTrend:
+        """Read the daily cost series over the last ``days`` days."""
         from_date, to_date = window_for(days, today=today)
         async with self._engine.begin() as connection:
             return await query_cost_trend(connection, from_date=from_date, to_date=to_date)
 
-    async def get_usage(self, *, days: int = 30, today: date | None = None) -> UsageReport:
+    async def get_usage(self, *, days: int, today: date | None = None) -> UsageReport:
         """Read calls and tokens per provider/task scope over the last ``days`` days."""
         from_date, to_date = window_for(days, today=today)
         async with self._engine.begin() as connection:
             return await query_usage(connection, from_date=from_date, to_date=to_date)
 
-    async def get_quality(self, *, days: int = 30, today: date | None = None) -> QualityReport:
+    async def get_quality(self, *, days: int, today: date | None = None) -> QualityReport:
         """Read the quality rates and per-provider health over the last ``days`` days."""
         from_date, to_date = window_for(days, today=today)
         async with self._engine.begin() as connection:

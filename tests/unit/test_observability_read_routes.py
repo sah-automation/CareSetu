@@ -126,7 +126,11 @@ _QUALITY = QualityReport(
 
 
 class StubObservabilityFacade:
-    """Facade stand-in recording the calls each route made."""
+    """Facade stand-in recording the calls each route made.
+
+    The signatures mirror :class:`~modules.observability.facade.ObservabilityFacade`:
+    the route always passes ``days`` explicitly, so no default is repeated here.
+    """
 
     def __init__(self) -> None:
         self.summary_calls = 0
@@ -138,15 +142,15 @@ class StubObservabilityFacade:
         self.summary_calls += 1
         return _SUMMARY
 
-    async def get_cost_trend(self, *, days: int = 30) -> CostTrend:
+    async def get_cost_trend(self, *, days: int) -> CostTrend:
         self.trend_days.append(days)
         return _TREND.model_copy(update={"days": days})
 
-    async def get_usage(self, *, days: int = 30) -> UsageReport:
+    async def get_usage(self, *, days: int) -> UsageReport:
         self.usage_days.append(days)
         return _USAGE.model_copy(update={"days": days})
 
-    async def get_quality(self, *, days: int = 30) -> QualityReport:
+    async def get_quality(self, *, days: int) -> QualityReport:
         self.quality_days.append(days)
         return _QUALITY.model_copy(update={"days": days})
 

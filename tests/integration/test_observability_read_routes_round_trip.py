@@ -48,6 +48,10 @@ _STALE = _TODAY - timedelta(days=40)
 _PERIOD_START = _TODAY.replace(day=1)
 _PERIOD_END = _TODAY.replace(day=28)
 _DAY_START = datetime.combine(_TODAY, datetime.min.time(), tzinfo=UTC)
+#: The ONE bill-wide cap, stamped onto both scope rows exactly as the B5a rollup
+#: writes ``AI_MONTHLY_BUDGET_PAISE``. Summing it across the rows would double the
+#: budget, so the seeded total must stay this figure.
+_BUDGET_CAP_PAISE = 150_000
 
 COST_PATH = "/v1/operator/observability/cost"
 TREND_PATH = "/v1/operator/observability/cost/trend"
@@ -117,10 +121,10 @@ async def _seed(connection: AsyncConnection) -> None:
             "INSERT INTO observability.observability_ai_cost_budget "
             "(provider, model, monthly_limit_paise, alert_threshold_pct, "
             "current_spend_paise, billing_period_start, billing_period_end) VALUES "
-            "('openai', 'gpt-4o-mini', 150000, 80, 90000, :start, :end), "
-            "('anthropic', 'claude-3-5-haiku', 50000, 80, 20000, :start, :end)"
+            "('openai', 'gpt-4o-mini', :cap, 80, 90000, :start, :end), "
+            "('anthropic', 'claude-3-5-haiku', :cap, 80, 20000, :start, :end)"
         ),
-        {"start": _PERIOD_START, "end": _PERIOD_END},
+        {"cap": _BUDGET_CAP_PAISE, "start": _PERIOD_START, "end": _PERIOD_END},
     )
     await connection.execute(
         text(
@@ -176,9 +180,10 @@ async def test_cost_matches_the_seeded_budgets(
         body = client.get(COST_PATH, headers=_bearer()).json()
 
     assert body["total_spend_paise"] == 110_000
-    assert body["total_limit_paise"] == 200_000
-    assert body["remaining_paise"] == 90_000
-    assert body["utilization_pct"] == "55.00"
+    # The cap is read once, not summed: both scope rows carry the same 150_000.
+    assert body["total_limit_paise"] == _BUDGET_CAP_PAISE
+    assert body["remaining_paise"] == 40_000
+    assert body["utilization_pct"] == "73.33"
     assert body["exhausted"] is False
     assert body["period_start"] == _PERIOD_START.isoformat()
     assert body["period_end"] == _PERIOD_END.isoformat()
@@ -186,6 +191,8 @@ async def test_cost_matches_the_seeded_budgets(
         ("anthropic", "claude-3-5-haiku"),
         ("openai", "gpt-4o-mini"),
     ]
+    # Each scope's own share of that one cap: 20000/150000 and 90000/150000.
+    assert body["budgets"][0]["utilization_pct"] == "13.33"
     assert body["budgets"][1]["current_spend_paise"] == 90_000
     assert body["budgets"][1]["utilization_pct"] == "60.00"
 
