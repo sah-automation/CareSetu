@@ -16,7 +16,9 @@ Three pieces:
 * the ``metric_key -> computation`` registry (:data:`ROLLUP_REGISTRY`) whose
   results land in the generic ``observability_business_daily`` store
   (plan-phase14 §7.2), so a later phase adds a metric with one registry line and
-  no schema churn.
+  no schema churn;
+* the schedule (B5b #705): :func:`plan_rollup_dates`, which turns the rollup's
+  own persisted state into the dates one invocation covers.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ import calendar
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
@@ -100,6 +102,12 @@ RESOLVABLE_ALERT_KINDS: frozenset[str] = frozenset(
 )
 
 _RATE_QUANTUM = Decimal("0.0001")
+
+#: How one invocation covered its dates. Recorded on ``observability_rollup_runs``
+#: so an operator can tell the first-run backfill from the steady-state pass, and
+#: the planner can branch on it without re-reading the whole ledger.
+ROLLUP_MODE_BACKFILL = "backfill"
+ROLLUP_MODE_DAILY = "daily"
 
 
 # ------------------------------------------------------------------ estimator
@@ -809,3 +817,94 @@ register_rollup_metric(
     RollupMetric(metric_key=METRIC_KEY_AI_PROVIDER_HEALTH, compute=_provider_health_metric)
 )
 register_rollup_metric(RollupMetric(metric_key=METRIC_KEY_AI_SPEND, compute=_spend_metric))
+
+
+# ------------------------------------------------------------------- the schedule
+
+
+@dataclass(frozen=True)
+class RollupPlan:
+    """The dates one invocation rolls, oldest first, and which mode chose them.
+
+    ``dates`` may be EMPTY - the pass is then a no-op, which is what a re-run of
+    the same night is (plan-phase14 §8: "first run processes all existing
+    ``intake_ai_jobs``; subsequent runs process the previous day"). ``mode`` is
+    what the invocation records on the run ledger, so the backfill is auditable
+    after the fact rather than inferred.
+    """
+
+    mode: str
+    dates: tuple[date, ...]
+    last_rolled: date | None
+    history_start: date | None
+
+    @property
+    def is_backfill(self) -> bool:
+        """Whether this invocation is the first-run history sweep."""
+        return self.mode == ROLLUP_MODE_BACKFILL
+
+
+def _inclusive_window(first: date, last: date, max_dates: int) -> tuple[date, ...]:
+    """``first``..``last`` inclusive, oldest first, trimmed to ``max_dates`` from the front.
+
+    Trimming takes the OLDEST days, not the newest: a pass that skipped the middle
+    would lose it permanently, whereas one that stops early leaves the remainder
+    for the next invocation to pick up from the ledger it is about to write.
+    """
+    return tuple(first + timedelta(days=offset) for offset in range((last - first).days + 1))[
+        :max_dates
+    ]
+
+
+def plan_rollup_dates(
+    *,
+    today: date,
+    last_rolled: date | None,
+    history_start: date | None,
+    max_dates: int,
+) -> RollupPlan:
+    """The UTC dates one scheduled invocation rolls, from the rollup's own state.
+
+    B5b #705, plan-phase14 §8. Coverage is decided by what the rollup has ALREADY
+    recorded, never by when the job happened to fire, so the rule is testable and a
+    skipped night is not a lost day:
+
+    * ``last_rolled is None`` - the first run. It sweeps the recorded AI-job history
+      from ``history_start`` (the oldest ``observability_ai_usage_daily`` date, the
+      module's own record of what the B4 consumer metered) up to yesterday.
+    * otherwise - the daily pass. It rolls every day since ``last_rolled``, which in
+      the steady state is yesterday alone, and an already-current ledger plans nothing.
+
+    Yesterday is the hard ceiling in both cases: today is still accumulating when
+    the nightly pass fires. ``max_dates`` bounds one invocation; the surplus stays
+    covered by the next one.
+
+    A ``last_rolled`` at or beyond today is treated as no information at all rather
+    than as "already caught up": the caller reads the ledger bounded by today (see
+    ``rollup.load_rollup_state``), so a run stamped into the future cannot silently
+    switch the schedule off.
+    """
+    if max_dates < 1:
+        raise ValueError("max_dates must be at least 1")
+    yesterday = today - timedelta(days=1)
+
+    if last_rolled is None:
+        floor = min(filter(None, (history_start, yesterday)), default=yesterday)
+        return RollupPlan(
+            mode=ROLLUP_MODE_BACKFILL,
+            dates=_inclusive_window(floor, yesterday, max_dates),
+            last_rolled=None,
+            history_start=history_start,
+        )
+
+    first = last_rolled + timedelta(days=1)
+    if first > yesterday:
+        return RollupPlan(
+            mode=ROLLUP_MODE_DAILY, dates=(), last_rolled=last_rolled, history_start=history_start
+        )
+    return RollupPlan(
+        mode=ROLLUP_MODE_DAILY,
+        dates=_inclusive_window(first, yesterday, max_dates),
+        last_rolled=last_rolled,
+        history_start=history_start,
+    )

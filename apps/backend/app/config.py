@@ -168,6 +168,11 @@ DEFAULT_AI_FALLBACK_MODEL = ""
 DEFAULT_LOG_FORMAT = "console"
 DEFAULT_SENTRY_TRACES_SAMPLE_RATE = 0.0
 DEFAULT_OTEL_TRACES_SAMPLER_RATIO = 1.0
+# Days one nightly observability rollup invocation may cover (PHASE-14A B5b, #705).
+# Ninety trailing days comfortably spans MOD-013's whole retained history at
+# launch scale while keeping a single scheduled pass bounded; the trimmed surplus
+# is rolled by the next invocation, never skipped.
+DEFAULT_OBSERVABILITY_ROLLUP_MAX_DATES = 90
 # Operator MFA TOTP secret encryption (PHASE-5 S8, #261): the AES-256-GCM key
 # for encrypting/decrypting the TOTP secret stored in ``iam_operator_mfa.secret``
 # comes from the ``IAM_MFA_SECRET_KEY`` environment variable (never committed).
@@ -349,6 +354,13 @@ class Settings:
     otel_service_version: str = ""
     metrics_enabled: bool = False
     observability_enabled: bool = False
+    # Ceiling on the dates one nightly rollup invocation may cover (B5b #705,
+    # `worker/rollup.py`). A first-run backfill of a long history, or a catch-up
+    # after a long outage, is trimmed to the OLDEST `max_dates` days and the rest
+    # is picked up by the next invocation, so no single pass is unbounded while
+    # nothing is skipped. A limit, so configuration (coding-standards §9.1), not a
+    # constant.
+    observability_rollup_max_dates: int = DEFAULT_OBSERVABILITY_ROLLUP_MAX_DATES
 
     def __post_init__(self) -> None:
         if self.gateway_jwt_verify_enabled and not self.gateway_jwt_signing_key:
@@ -483,6 +495,8 @@ class Settings:
             raise ValueError("ai_circuit_breaker_threshold must be positive")
         if self.ai_monthly_budget_paise <= 0:
             raise ValueError("ai_monthly_budget_paise must be positive")
+        if self.observability_rollup_max_dates <= 0:
+            raise ValueError("observability_rollup_max_dates must be positive")
         parse_ai_pricing_table(self.ai_pricing_table)
         if self.ai_circuit_breaker_cooldown_seconds <= 0:
             raise ValueError("ai_circuit_breaker_cooldown_seconds must be positive")
@@ -857,4 +871,7 @@ def get_settings() -> Settings:
         otel_service_version=os.environ.get("OTEL_SERVICE_VERSION", ""),
         metrics_enabled=_env_bool("METRICS_ENABLED", False),
         observability_enabled=_env_bool("OBSERVABILITY_ENABLED", False),
+        observability_rollup_max_dates=_env_int(
+            "OBSERVABILITY_ROLLUP_MAX_DATES", DEFAULT_OBSERVABILITY_ROLLUP_MAX_DATES
+        ),
     )

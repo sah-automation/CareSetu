@@ -159,30 +159,31 @@ Free-tier constraints (accepted):
 3. Start command: `alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT` (migration is idempotent; runs every boot as belt-and-suspenders even though `deploy.yml` also migrates).
 4. Env vars:
 
-| Var                             | Value                                                                                                     |
-| :------------------------------ | :-------------------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`                  | Supabase direct connection string                                                                         |
-| `APP_ENVIRONMENT`               | `production`                                                                                              |
-| `GATEWAY_JWT_VERIFY_ENABLED`    | `true`                                                                                                    |
-| `GATEWAY_JWT_SIGNING_KEY`       | strong random secret (openssl rand -hex 32)                                                               |
-| `GATEWAY_RATE_LIMIT_ENABLED`    | `true`                                                                                                    |
-| `SMS_PROVIDER`                  | `mock`                                                                                                    |
-| `DEMO_MODE`                     | `true`                                                                                                    |
-| `CORS_ALLOWED_ORIGINS`          | `https://<frontend>.vercel.app`                                                                           |
-| `INTAKE_MEDIA_BACKEND`          | `supabase` (PHASE-7 #385)                                                                                 |
-| `SUPABASE_URL`                  | Supabase project URL (PHASE-7 #385)                                                                       |
-| `SUPABASE_SERVICE_ROLE_KEY`     | Supabase service role key (PHASE-7 #385)                                                                  |
-| `DISPATCHER_IN_PROCESS_ENABLED` | `true` (PHASE-7 #385 follow-up)                                                                           |
-| `AI_PROVIDER`                   | `openai_compatible` (T14 #414 - blueprint-managed so a sync cannot flip it back to mock)                  |
-| `AI_ALLOW_DEMO_PROVIDER`        | `true` (T14 #414 - explicit opt-in letting a real provider run under `DEMO_MODE=true`; blueprint-managed) |
-| `AI_API_KEY`                    | OpenAI-compatible API key (dashboard-only, `sync: false`, never committed)                                |
-| `AI_BASE_URL`                   | provider base URL (dashboard-only, `sync: false`)                                                         |
-| `AI_MODEL`                      | provider model (dashboard-only, `sync: false`)                                                            |
-| `AI_ASR_MODEL`                  | ASR model for `/audio/transcriptions` (dashboard-only, `sync: false`)                                     |
-| `AI_FALLBACK_PROVIDER`          | fallback provider (all-or-none, dashboard-only, `sync: false`)                                            |
-| `AI_FALLBACK_BASE_URL`          | fallback base URL (dashboard-only, `sync: false`)                                                         |
-| `AI_FALLBACK_API_KEY`           | fallback API key (dashboard-only, `sync: false`, never committed)                                         |
-| `AI_FALLBACK_MODEL`             | fallback model (dashboard-only, `sync: false`)                                                            |
+| Var                             | Value                                                                                                                                                                                                                                                            |
+| :------------------------------ | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                  | Supabase direct connection string                                                                                                                                                                                                                                |
+| `APP_ENVIRONMENT`               | `production`                                                                                                                                                                                                                                                     |
+| `GATEWAY_JWT_VERIFY_ENABLED`    | `true`                                                                                                                                                                                                                                                           |
+| `GATEWAY_JWT_SIGNING_KEY`       | strong random secret (openssl rand -hex 32)                                                                                                                                                                                                                      |
+| `GATEWAY_RATE_LIMIT_ENABLED`    | `true`                                                                                                                                                                                                                                                           |
+| `SMS_PROVIDER`                  | `mock`                                                                                                                                                                                                                                                           |
+| `DEMO_MODE`                     | `true`                                                                                                                                                                                                                                                           |
+| `CORS_ALLOWED_ORIGINS`          | `https://<frontend>.vercel.app`                                                                                                                                                                                                                                  |
+| `INTAKE_MEDIA_BACKEND`          | `supabase` (PHASE-7 #385)                                                                                                                                                                                                                                        |
+| `SUPABASE_URL`                  | Supabase project URL (PHASE-7 #385)                                                                                                                                                                                                                              |
+| `SUPABASE_SERVICE_ROLE_KEY`     | Supabase service role key (PHASE-7 #385)                                                                                                                                                                                                                         |
+| `DISPATCHER_IN_PROCESS_ENABLED` | `true` (PHASE-7 #385 follow-up)                                                                                                                                                                                                                                  |
+| `AI_PROVIDER`                   | `openai_compatible` (T14 #414 - blueprint-managed so a sync cannot flip it back to mock)                                                                                                                                                                         |
+| `AI_ALLOW_DEMO_PROVIDER`        | `true` (T14 #414 - explicit opt-in letting a real provider run under `DEMO_MODE=true`; blueprint-managed)                                                                                                                                                        |
+| `AI_API_KEY`                    | OpenAI-compatible API key (dashboard-only, `sync: false`, never committed)                                                                                                                                                                                       |
+| `AI_BASE_URL`                   | provider base URL (dashboard-only, `sync: false`)                                                                                                                                                                                                                |
+| `AI_MODEL`                      | provider model (dashboard-only, `sync: false`)                                                                                                                                                                                                                   |
+| `AI_ASR_MODEL`                  | ASR model for `/audio/transcriptions` (dashboard-only, `sync: false`)                                                                                                                                                                                            |
+| `AI_FALLBACK_PROVIDER`          | fallback provider (all-or-none, dashboard-only, `sync: false`)                                                                                                                                                                                                   |
+| `AI_FALLBACK_BASE_URL`          | fallback base URL (dashboard-only, `sync: false`)                                                                                                                                                                                                                |
+| `AI_FALLBACK_API_KEY`           | fallback API key (dashboard-only, `sync: false`, never committed)                                                                                                                                                                                                |
+| `AI_FALLBACK_MODEL`             | fallback model (dashboard-only, `sync: false`)                                                                                                                                                                                                                   |
+| `AI_MONTHLY_BUDGET_PAISE`       | monthly AI budget in paise (PHASE-14A B5b #705). The nightly rollup's `ai_budget` alert threshold is a repo **variable** of the same name (§6.2) - keep the two in step, or the scheduled alert compares against a different cap than the runtime `BudgetMeter`. |
 
 5. Create a **deploy hook** (Render dashboard → service → Deploy Hooks) and copy its URL into the GitHub secret `RENDER_DEPLOY_HOOK_URL`.
 
@@ -222,11 +223,40 @@ Vercel is not part of the workflow - it deploys itself from the same push. Order
 
 ### 6.2 GitHub Actions secrets
 
-| Secret                    | Source                                                                                            |
-| :------------------------ | :------------------------------------------------------------------------------------------------ |
-| `SUPABASE_DATABASE_URL`   | Supabase direct connection string (see 5.1)                                                       |
-| `RENDER_DEPLOY_HOOK_URL`  | Render service deploy hook (see 5.2)                                                              |
-| `BACKUP_DRILL_PASSPHRASE` | random passphrase for the DR drill's at-rest AES-256 encryption (TEST-E #133; `backup-drill.yml`) |
+| Secret                    | Source                                                                                                    |
+| :------------------------ | :-------------------------------------------------------------------------------------------------------- |
+| `SUPABASE_DATABASE_URL`   | Supabase direct connection string (see 5.1); `deploy.yml`, `backup-drill.yml`, `observability-rollup.yml` |
+| `RENDER_DEPLOY_HOOK_URL`  | Render service deploy hook (see 5.2)                                                                      |
+| `BACKUP_DRILL_PASSPHRASE` | random passphrase for the DR drill's at-rest AES-256 encryption (TEST-E #133; `backup-drill.yml`)         |
+
+Repository **variables** (Settings → Secrets and variables → Actions → Variables), not
+secrets - these are configuration, not credentials:
+
+| Variable                  | Value                                                                                                                                                                                                                                                                                                                                                                                         |
+| :------------------------ | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AI_MONTHLY_BUDGET_PAISE` | paise cap for the `ai_budget` alert threshold in the nightly rollup (PHASE-14A B5b #705; `observability-rollup.yml`). Must equal the Render service's `AI_MONTHLY_BUDGET_PAISE` (5.2), or the scheduled alert would compare against a different cap than the runtime `BudgetMeter` reports. Optional - unset it and the backend applies its own default, which is the one copy of the number. |
+
+### 6.2a Nightly observability rollup (PHASE-14A B5b #705)
+
+`.github/workflows/observability-rollup.yml` runs `python -m worker.rollup` on a
+nightly cron (02:45 UTC) plus a manual `workflow_dispatch` that accepts an optional
+`backfill_days` override. It is a scheduled workflow rather than an in-process
+scheduler because the Render free web process sleeps at ~15 minutes idle, so a timer
+inside it would fire only while someone was using the app.
+
+What the pass covers is decided by the database, not by the workflow: the entry point
+reads `observability_rollup_runs` and plans itself, so the first run sweeps all
+existing AI-job history and every run after that rolls the previous UTC day,
+catching up on any night the job missed. Re-rolling a night already covered is a
+no-op - every write in the pass is an upsert keyed on the rolled date, and the ledger
+row is written in the same transaction as the aggregates it describes. Nothing is
+rendered awake: the job runs against Supabase over `SUPABASE_DATABASE_URL` and
+hard-fails with a clear message if that secret is missing or the database is paused.
+
+The monthly AI budget period resets with no separate job: `observability_ai_cost_budget`
+carries a calendar-month billing period, so the first pass whose target date falls in
+the new month zeroes the closed month's spend - in practice the run on the 2nd, one
+day after the 1st's pass rolls the old month's last day.
 
 ### 6.3 Demo flow after deploy
 

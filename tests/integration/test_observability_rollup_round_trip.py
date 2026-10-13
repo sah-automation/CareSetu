@@ -12,12 +12,17 @@ that neither duplicates the alerts nor stacks the aggregates.
 Requires the native PostgreSQL; the suite skips cleanly when it is unreachable,
 migrates to head and downgrades afterwards (same shape as the B4a/B4b
 round-trip test).
+
+The B5b (#705) half at the bottom drives the SCHEDULE: the first-run backfill over
+seeded AI-job history, the previous-day pass after it, a re-run's idempotency, a
+missed night's catch-up, and the calendar-month budget-period reset - each against
+the ``observability_rollup_runs`` ledger the plan is read from.
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -37,9 +42,13 @@ from modules.observability.domain.rollup import (
     ALERT_KIND_PROVIDER_HEALTH_DROP,
     METRIC_KEY_AI_PROVIDER_HEALTH,
     METRIC_KEY_AI_SPEND,
+    ROLLUP_MODE_BACKFILL,
+    ROLLUP_MODE_DAILY,
     RollupThresholds,
+    plan_rollup_dates,
 )
-from modules.observability.facade import run_rollup
+from modules.observability.facade import load_rollup_state, run_rollup
+from worker.rollup import plan_from_state
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_INI = REPO_ROOT / "apps" / "backend" / "alembic.ini"
@@ -56,6 +65,7 @@ _TRUNCATE = (
     "observability.observability_ai_usage_daily, "
     "observability.observability_business_daily, "
     "observability.observability_alert_events, "
+    "observability.observability_rollup_runs, "
     "observability.consumed_events, "
     "intake.intake_outbox CASCADE"
 )
@@ -196,6 +206,21 @@ async def _metric_value(
     )
     row = result.mappings().first()
     return None if row is None else row["value"]
+
+
+async def _run_rows(connection: AsyncConnection) -> list[Any]:
+    result = await connection.execute(
+        text(
+            "SELECT rollup_date, mode, billing_period_start, health_rows, alerts_raised "
+            "FROM observability.observability_rollup_runs ORDER BY rollup_date"
+        )
+    )
+    return list(result.mappings().all())
+
+
+async def _run_row_count(engine: AsyncEngine) -> int:
+    async with engine.connect() as connection:
+        return len(await _run_rows(connection))
 
 
 @pytest.mark.asyncio
@@ -339,3 +364,280 @@ async def test_rollup_on_an_idle_day_invents_no_rows_and_closes_nothing(
         # The budget is still breached, so it stays open.
         assert await _open_alert_kinds(connection) == [ALERT_KIND_AI_BUDGET]
         assert await _metric_value(connection, f"{METRIC_KEY_AI_SPEND}.openai", quiet_day) is None
+
+
+# --------------------------------------------------------- B5b #705: the schedule
+
+
+async def _seed_two_days_of_usage(connection: AsyncConnection) -> None:
+    """Two consecutive days of usage, the shape a first-run backfill sweeps."""
+    await connection.execute(
+        text(
+            "INSERT INTO observability.observability_ai_usage_daily "
+            "(usage_date, provider, model, task_type, calls, success_count, "
+            "failure_count, timeout_count, input_tokens, output_tokens, cost_paise, "
+            "avg_duration_ms) VALUES "
+            "(:first, 'openai', 'gpt-4o-mini', 'structure', 2, 2, 0, 0, 10, 20, 40000, "
+            "  120.00), "
+            "(:second, 'openai', 'gpt-4o-mini', 'structure', 3, 3, 0, 0, 10, 20, 30000, "
+            "  150.00)"
+        ),
+        {"first": _TARGET_DATE - timedelta(days=1), "second": _TARGET_DATE},
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_first_run_backfills_every_day_of_existing_history(
+    engine: AsyncEngine,
+) -> None:
+    """With nothing on the ledger, the planned pass covers the whole recorded history.
+
+    ``today`` is the day after both seeded days, so "all AI-job history" is
+    10-11 and 10-12 - and never today itself, which is still accumulating.
+    """
+    async with engine.begin() as connection:
+        await _seed_two_days_of_usage(connection)
+
+    today = _TARGET_DATE + timedelta(days=1)
+    state = await load_rollup_state(engine, today)
+    assert state.last_rolled_date is None
+    plan = plan_rollup_dates(
+        today=today,
+        last_rolled=state.last_rolled_date,
+        history_start=state.history_start,
+        max_dates=90,
+    )
+    assert plan.mode == ROLLUP_MODE_BACKFILL
+    assert plan.dates == (_TARGET_DATE - timedelta(days=1), _TARGET_DATE)
+
+    for target in plan.dates:
+        await run_rollup(engine, target, thresholds=_THRESHOLDS, mode=plan.mode)
+
+    async with engine.connect() as connection:
+        # Both days landed their metrics, not just the trailing one.
+        for target in plan.dates:
+            assert (
+                await _metric_value(connection, f"{METRIC_KEY_AI_SPEND}.openai", target) is not None
+            )
+        # The ledger records each day, oldest first, tagged as the backfill.
+        assert [(row["rollup_date"], row["mode"]) for row in await _run_rows(connection)] == [
+            (_TARGET_DATE - timedelta(days=1), ROLLUP_MODE_BACKFILL),
+            (_TARGET_DATE, ROLLUP_MODE_BACKFILL),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_a_later_run_rolls_only_the_previous_day(engine: AsyncEngine) -> None:
+    """After the backfill the plan narrows to the trailing day, as plan §8 states.
+
+    The backfill ran against ``today = first_day``, so it swept 10-11 and 10-12
+    but not today. A pass on the NEXT day therefore has exactly one day to roll.
+    """
+    async with engine.begin() as connection:
+        await _seed_two_days_of_usage(connection)
+
+    first_day = _TARGET_DATE + timedelta(days=1)
+    state = await load_rollup_state(engine, first_day)
+    first = plan_rollup_dates(
+        today=first_day,
+        last_rolled=state.last_rolled_date,
+        history_start=state.history_start,
+        max_dates=90,
+    )
+    assert first.dates == (_TARGET_DATE - timedelta(days=1), _TARGET_DATE)
+    for target in first.dates:
+        await run_rollup(engine, target, thresholds=_THRESHOLDS, mode=first.mode)
+
+    assert (await load_rollup_state(engine, first_day)).last_rolled_date == _TARGET_DATE
+
+    # The next night's pass: yesterday is the one day the ledger has not covered.
+    second_day = first_day + timedelta(days=1)
+    state = await load_rollup_state(engine, second_day)
+    second = plan_rollup_dates(
+        today=second_day,
+        last_rolled=state.last_rolled_date,
+        history_start=state.history_start,
+        max_dates=90,
+    )
+
+    assert second.mode == ROLLUP_MODE_DAILY
+    assert second.dates == (first_day,)
+    await run_rollup(engine, first_day, thresholds=_THRESHOLDS, mode=second.mode)
+
+    # Re-planning right after that pass is a no-op: nothing is left to roll.
+    after = await load_rollup_state(engine, second_day)
+    assert after.last_rolled_date == first_day
+    assert (
+        plan_rollup_dates(
+            today=second_day,
+            last_rolled=after.last_rolled_date,
+            history_start=after.history_start,
+            max_dates=90,
+        ).dates
+        == ()
+    )
+
+
+@pytest.mark.asyncio
+async def test_re_running_a_rolled_date_leaves_one_ledger_row(engine: AsyncEngine) -> None:
+    """``rollup_date`` is UNIQUE, so a retried scheduled job refreshes rather than stacks."""
+    async with engine.begin() as connection:
+        await _seed_usage(connection)
+
+    await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS, mode=ROLLUP_MODE_DAILY)
+    await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS, mode=ROLLUP_MODE_DAILY)
+
+    assert await _run_row_count(engine) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_missed_night_is_caught_up_rather_than_lost(engine: AsyncEngine) -> None:
+    """A skipped run is a gap the ledger records, and the next pass fills it."""
+    async with engine.begin() as connection:
+        await _seed_two_days_of_usage(connection)
+
+    await run_rollup(engine, _TARGET_DATE - timedelta(days=1), thresholds=_THRESHOLDS)
+    # Two nights later, having rolled nothing in between.
+    today = _TARGET_DATE + timedelta(days=1)
+    state = await load_rollup_state(engine, today)
+    plan = plan_rollup_dates(
+        today=today,
+        last_rolled=state.last_rolled_date,
+        history_start=state.history_start,
+        max_dates=90,
+    )
+
+    assert plan.dates == (_TARGET_DATE,)
+
+    for target in plan.dates:
+        await run_rollup(engine, target, thresholds=_THRESHOLDS, mode=plan.mode)
+
+    async with engine.connect() as connection:
+        assert (
+            await _metric_value(connection, f"{METRIC_KEY_AI_SPEND}.openai", _TARGET_DATE)
+            is not None
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_budget_period_rolls_over_on_the_first_pass_in_the_new_month(
+    engine: AsyncEngine,
+) -> None:
+    """A closed month's spend comes back to zero for the new period (plan §8).
+
+    October's row holds 115,000 paise and the October billing period. The next
+    month's first pass resets the figure and moves the row onto the new period,
+    with no separate monthly job and no month-end trigger to forget.
+    """
+    async with engine.begin() as connection:
+        await _seed_usage(connection)
+    await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+    async with engine.connect() as connection:
+        assert (await _budget_row(connection))["current_spend_paise"] == 115_000
+        assert (await _budget_row(connection))["billing_period_start"] == _PERIOD_START
+
+    # The first of November: spend is scoped to the new month, so it is zero.
+    november = date(2026, 11, 1)
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO observability.observability_ai_usage_daily "
+                "(usage_date, provider, model, task_type, calls, success_count, "
+                "failure_count, timeout_count, input_tokens, output_tokens, cost_paise, "
+                "avg_duration_ms) VALUES "
+                "(:day, 'openai', 'gpt-4o-mini', 'structure', 1, 1, 0, 0, 5, 5, 1000, 90.00)"
+            ),
+            {"day": november},
+        )
+    await run_rollup(engine, november, thresholds=_THRESHOLDS)
+
+    async with engine.connect() as connection:
+        budget = await _budget_row(connection)
+        assert budget["billing_period_start"] == date(2026, 11, 1)
+        assert budget["billing_period_end"] == date(2026, 11, 30)
+        # October's 115,000 paise is gone; only November's 1,000 remains.
+        assert budget["current_spend_paise"] == 1_000
+        # A scope with no November traffic keeps its row but carries no spend.
+        anthropic = await connection.execute(
+            text(
+                "SELECT current_spend_paise, billing_period_start FROM "
+                "observability.observability_ai_cost_budget "
+                "WHERE provider = 'anthropic' AND model = 'claude-haiku'"
+            )
+        )
+        row = anthropic.mappings().one()
+        assert row["current_spend_paise"] == 0
+        assert row["billing_period_start"] == date(2026, 11, 1)
+        # The ledger says which period the last pass rolled into.
+        assert [record["billing_period_start"] for record in await _run_rows(connection)][-1] == (
+            date(2026, 11, 1)
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_period_reset_also_clears_a_row_that_never_had_a_period(
+    engine: AsyncEngine,
+) -> None:
+    """``billing_period_start`` is nullable, so the reset needs an explicit NULL arm.
+
+    A plain ``billing_period_start < period_start`` never matches NULL in SQL: the
+    row would keep a closed month's spend forever, which is the exact leak the
+    monthly reset exists to close.
+    """
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO observability.observability_ai_cost_budget "
+                "(provider, model, monthly_limit_paise, alert_threshold_pct, "
+                "current_spend_paise, billing_period_start, billing_period_end) "
+                "VALUES ('openai', 'gpt-4o-mini', 100000, 80, 99000, NULL, NULL)"
+            )
+        )
+        await _seed_usage(connection)
+
+    await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    async with engine.connect() as connection:
+        budget = await _budget_row(connection)
+        assert budget["billing_period_start"] == _PERIOD_START
+        # The stale 99,000 paise is zeroed and October's 115,000 accrued on top.
+        assert budget["current_spend_paise"] == 115_000
+
+
+@pytest.mark.asyncio
+async def test_a_manually_rolled_future_date_does_not_stall_the_schedule(
+    engine: AsyncEngine,
+) -> None:
+    """An operator's ``--date <some future day>`` must not wedge the nightly.
+
+    ``--date`` is an override with no opinion on the calendar, so it will happily
+    write a row dated ahead of now. Taken as the schedule's high-water mark, that one
+    row would make every later plan think it had nothing to roll - silently, every
+    night, until someone noticed the aggregates had stopped moving.
+    """
+    async with engine.begin() as connection:
+        await _seed_usage(connection)
+
+    today = _TARGET_DATE + timedelta(days=1)
+    await run_rollup(engine, today + timedelta(days=30), thresholds=_THRESHOLDS)
+
+    # The future row is invisible to the planner, so the one real day still gets rolled.
+    plan = await plan_from_state(engine, today)
+    assert plan.dates == (_TARGET_DATE,)
+
+
+@pytest.mark.asyncio
+async def test_rolling_today_by_hand_does_not_strand_yesterday(engine: AsyncEngine) -> None:
+    """A same-day manual roll must not be mistaken for a completed schedule.
+
+    The planner only ever plans through yesterday, so a ledger read that counted
+    today as done would report the schedule up to date and quietly drop the previous
+    night - the one day of spend the manual roll could not possibly have covered.
+    """
+    async with engine.begin() as connection:
+        await _seed_usage(connection)
+
+    today = _TARGET_DATE + timedelta(days=1)
+    await run_rollup(engine, today, thresholds=_THRESHOLDS)
+
+    assert (await plan_from_state(engine, today)).dates == (_TARGET_DATE,)

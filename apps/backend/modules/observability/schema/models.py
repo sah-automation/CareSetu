@@ -6,7 +6,7 @@ module is telemetry, not a domain bounded context - a sibling of MOD-011 Audit
 (plan-phase14 §7.1-7.2). B3 (#701) creates the storage foundation; the B4
 consumer accumulates into these aggregates and the B5 rollup recomputes the
 percentile-based columns. Column shapes are defined by the same-name
-``v9.0__init_observability`` migration.
+``v9.0__init_observability`` migration, plus the ``v9.1`` run ledger.
 """
 
 from __future__ import annotations
@@ -132,6 +132,31 @@ observability_alert_events = Table(
     Column("acked_by", BigInteger, nullable=True),
     Column("acked_at", DateTime(timezone=True), nullable=True),
     Index("ix_observability_alert_events_status", "status", "created_at"),
+)
+
+
+observability_rollup_runs = Table(
+    "observability_rollup_runs",
+    MODULE_METADATA,
+    Column("id", BigInteger, primary_key=True),
+    # The UTC day the pass rolled. UNIQUE, so re-running a date overwrites its row
+    # instead of stacking a second one - the ledger is the pass's idempotency key
+    # AND its last-run marker (B5b #705).
+    Column("rollup_date", Date, nullable=False),
+    # ``backfill`` (the first-run history sweep) or ``daily``; free text with a CHECK
+    # so a later mode is a migration, not a silent third value.
+    Column("mode", String(20), nullable=False),
+    # The calendar month the budget snapshot was taken against. Records which
+    # billing period the run rolled INTO, so a period reset is observable.
+    Column("billing_period_start", Date, nullable=False),
+    Column("providers", Integer, nullable=False, server_default=text("0")),
+    Column("health_rows", Integer, nullable=False, server_default=text("0")),
+    Column("metric_rows", Integer, nullable=False, server_default=text("0")),
+    Column("budget_snapshots", Integer, nullable=False, server_default=text("0")),
+    Column("alerts_raised", Integer, nullable=False, server_default=text("0")),
+    Column("alerts_resolved", Integer, nullable=False, server_default=text("0")),
+    Column("ran_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    UniqueConstraint("rollup_date", name="uq_observability_rollup_runs_date"),
 )
 
 

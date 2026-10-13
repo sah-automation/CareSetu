@@ -7,9 +7,13 @@ they decide -
 
 * ``observability_ai_provider_health``: the recomputed p50/p95/p99, success rate
   and observed breaker state;
-* ``observability_ai_cost_budget``: the month-to-date paise spend snapshot;
+* ``observability_ai_cost_budget``: the month-to-date paise spend snapshot, with
+  the calendar-month reset that clears a closed month's spend;
 * ``observability_business_daily``: one generic-store row per registered metric;
-* ``observability_alert_events``: the threshold alerts from the minimum alert set.
+* ``observability_alert_events``: the threshold alerts from the minimum alert set;
+* ``observability_rollup_runs``: the run ledger (B5b #705) - one row per rolled
+  day, written in the SAME transaction as the aggregates it describes, which is
+  both the pass's idempotency key and the marker the next invocation plans from.
 
 Two invariants carry over from the request path (ADR-0003, coding-standards §2):
 
@@ -35,7 +39,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Table, func, select
+from sqlalchemy import Table, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
@@ -44,6 +48,7 @@ from bus.dispatcher import count_outbox_rows, discover_outbox_tables
 from modules.observability.domain.consumer import AlertRow
 from modules.observability.domain.rollup import (
     RESOLVABLE_ALERT_KINDS,
+    ROLLUP_MODE_DAILY,
     BudgetSnapshot,
     OutboxTableHealth,
     ProviderHealth,
@@ -68,6 +73,7 @@ from modules.observability.schema.models import (
     observability_ai_usage_daily,
     observability_alert_events,
     observability_business_daily,
+    observability_rollup_runs,
 )
 
 logger = logging.getLogger(__name__)
@@ -117,6 +123,124 @@ def _day_window(target_date: date) -> tuple[datetime, datetime]:
     """The half-open UTC ``[start, end)`` bounds of one calendar day."""
     start = datetime.combine(target_date, time.min, tzinfo=UTC)
     return start, start + timedelta(days=1)
+
+
+@dataclass(frozen=True)
+class RollupRunState:
+    """What the rollup has already covered - the only inputs the planner needs.
+
+    ``last_rolled_date`` is the newest day on ``observability_rollup_runs``
+    (``None`` before the first run, which is what selects the backfill branch).
+    ``history_start`` is the oldest ``observability_ai_usage_daily`` date: MOD-013's
+    own record of the AI-job history the consumer metered, so the first run sweeps
+    all of it without reading ``intake_ai_jobs`` across the module boundary
+    (ADR-0003).
+    """
+
+    last_rolled_date: date | None
+    history_start: date | None
+
+
+async def _load_rollup_run_state(connection: AsyncConnection, horizon: date) -> RollupRunState:
+    """Read the last rolled day and the AI-job history floor from this schema.
+
+    ``horizon`` bounds the ledger read to the days that can actually have been
+    rolled. A row dated in the future - from a manual ``--date`` ahead of the clock,
+    or a clock that moved back - is invisible to the planner, so it cannot wedge
+    every later nightly pass by making the schedule look already-current.
+    """
+    ledger = observability_rollup_runs
+    last_rolled = await connection.execute(
+        select(func.max(ledger.c.rollup_date)).where(ledger.c.rollup_date <= horizon)
+    )
+    usage = observability_ai_usage_daily
+    history_start = await connection.execute(select(func.min(usage.c.usage_date)))
+    return RollupRunState(
+        last_rolled_date=_scalar_date(last_rolled),
+        history_start=_scalar_date(history_start),
+    )
+
+
+async def load_rollup_state(engine: AsyncEngine, horizon: date) -> RollupRunState:
+    """The scheduler seam: report what the rollup has covered as of ``horizon``."""
+    async with engine.connect() as connection:
+        return await _load_rollup_run_state(connection, horizon)
+
+
+def _scalar_date(result: Any) -> date | None:
+    """The single ``DATE`` a scalar aggregate returned, or ``None`` over an empty table."""
+    value = result.scalar()
+    return value if isinstance(value, date) else None
+
+
+def _reset_budget_period_statement(period_start: date, period_end: date) -> Any:
+    """The one UPDATE that rolls ``observability_ai_cost_budget`` into a new month.
+
+    A row whose ``billing_period_start`` predates the period - or carries no period
+    at all, since the column is nullable - holds a closed month's spend, so its
+    figure comes back to zero and it adopts the new period's bounds. Then the
+    pass's snapshots overwrite the scopes that actually spent. Rows already inside
+    the period are untouched, which is what makes the reset idempotent: a re-run of
+    the same night matches no row.
+
+    Expressed as SQLAlchemy expressions (never raw text) so it compiles for the
+    dialect and can be asserted without a database. The NULL arm is explicit
+    because ``billing_period_start < period_start`` is NULL-unsafe in SQL - a plain
+    comparison silently skips those rows, which is how a row with no period would
+    keep last month's spend forever.
+    """
+    table = observability_ai_cost_budget
+    return (
+        table.update()
+        .where(
+            or_(table.c.billing_period_start.is_(None), table.c.billing_period_start < period_start)
+        )
+        .values(
+            billing_period_start=period_start,
+            billing_period_end=period_end,
+            current_spend_paise=0,
+            updated_at=func.now(),
+        )
+    )
+
+
+def _insert_rollup_run(
+    target_date: date, mode: str, period_start: date, report: RollupReport
+) -> Any:
+    """The ``observability_rollup_runs`` upsert recording one completed pass.
+
+    Conflict target is ``rollup_date``: re-running a date refreshes its row instead
+    of stacking a second one, so the ledger stays one-row-per-day however often the
+    scheduled job is retried.
+    """
+    return (
+        insert(observability_rollup_runs)
+        .values(
+            rollup_date=target_date,
+            mode=mode,
+            billing_period_start=period_start,
+            providers=report.providers,
+            health_rows=report.health_rows,
+            metric_rows=report.metric_rows,
+            budget_snapshots=report.budget_snapshots,
+            alerts_raised=report.alerts_raised,
+            alerts_resolved=report.alerts_resolved,
+        )
+        .on_conflict_do_update(
+            index_elements=["rollup_date"],
+            set_={
+                "mode": mode,
+                "billing_period_start": period_start,
+                "providers": report.providers,
+                "health_rows": report.health_rows,
+                "metric_rows": report.metric_rows,
+                "budget_snapshots": report.budget_snapshots,
+                "alerts_raised": report.alerts_raised,
+                "alerts_resolved": report.alerts_resolved,
+                "ran_at": func.now(),
+            },
+        )
+    )
 
 
 def _upsert_statement(table: Table, values: dict[str, Any], conflict_keys: Sequence[str]) -> Any:
@@ -395,6 +519,7 @@ async def run_rollup(
     target_date: date,
     *,
     thresholds: RollupThresholds,
+    mode: str = ROLLUP_MODE_DAILY,
     schemas: Sequence[str] = MODULE_SCHEMAS,
 ) -> RollupReport:
     """Run the whole rollup for ``target_date`` in one transaction.
@@ -406,13 +531,17 @@ async def run_rollup(
 
     Every provider observed on ``target_date`` gets its health row plus one
     generic-store row per registered metric; every ``(provider, model)`` seen
-    month-to-date gets a budget snapshot; and the minimum alert set is evaluated
-    once per pass.
+    month-to-date gets a budget snapshot; the budget rows left over from a closed
+    month are rolled into this period first; the minimum alert set is evaluated
+    once per pass; and the whole thing ends by writing the ``mode``-tagged
+    ``observability_rollup_runs`` row - in this SAME transaction, so the
+    ``last_rolled`` marker can never advance past a pass that did not commit.
     """
     window_start, window_end = _day_window(target_date)
     period_start, period_end = budget_period_for(target_date)
 
     async with engine.begin() as connection:
+        await connection.execute(_reset_budget_period_statement(period_start, period_end))
         usages = await _load_provider_usage(connection, target_date)
         previous_rates = await _load_previous_success_rates(connection)
         period_spend = await _load_period_spend(connection, period_start, target_date)
@@ -491,19 +620,23 @@ async def run_rollup(
             await _load_open_rollup_alerts(connection),
         )
 
-    report = RollupReport(
-        target_date=target_date,
-        providers=len(usages),
-        health_rows=health_rows,
-        metric_rows=metric_rows,
-        budget_snapshots=snapshots,
-        alerts_raised=raised,
-        alerts_resolved=resolved,
-    )
+        report = RollupReport(
+            target_date=target_date,
+            providers=len(usages),
+            health_rows=health_rows,
+            metric_rows=metric_rows,
+            budget_snapshots=snapshots,
+            alerts_raised=raised,
+            alerts_resolved=resolved,
+        )
+        await connection.execute(_insert_rollup_run(target_date, mode, period_start, report))
+
     logger.info(
-        "rollup for %s refreshed %d provider health row(s), %d metric row(s) and "
-        "%d budget snapshot(s); raised %d alert(s), resolved %d",
+        "rollup for %s (%s, period %s) refreshed %d provider health row(s), %d metric "
+        "row(s) and %d budget snapshot(s); raised %d alert(s), resolved %d",
         report.target_date,
+        mode,
+        period_start,
         report.health_rows,
         report.metric_rows,
         report.budget_snapshots,

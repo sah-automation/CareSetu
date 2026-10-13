@@ -10,9 +10,13 @@ plus the schema constant the composition root resolves the ledger against.
 
 The B5a nightly rollup (#704) joins it as :func:`run_rollup`: the off-request-path
 pass that recomputes the percentile aggregates, snapshots budget spend and
-evaluates the alert thresholds. It is re-exported here so the ``python -m
-worker.rollup`` entry point reaches it through the facade, like every other
-composition-root seam.
+evaluates the alert thresholds. B5b (#705) adds the two scheduler seams the
+scheduled GitHub Action drives it through - :func:`load_rollup_state`, which
+reports what the rollup has already covered, and :func:`plan_rollup_dates`, which
+turns that state into the dates one invocation rolls (the first-run backfill, the
+previous day afterwards). Both are re-exported here so the
+``python -m worker.rollup`` entry point reaches them through the facade, like
+every other composition-root seam.
 """
 
 from __future__ import annotations
@@ -28,8 +32,14 @@ from modules.observability.domain.consumer import (
     AiJobFailedUsagePayload,
     AlertRow,
 )
-from modules.observability.domain.rollup import RollupThresholds
-from modules.observability.rollup import RollupReport, run_rollup
+from modules.observability.domain.rollup import (
+    ROLLUP_MODE_BACKFILL,
+    ROLLUP_MODE_DAILY,
+    RollupPlan,
+    RollupThresholds,
+    plan_rollup_dates,
+)
+from modules.observability.rollup import RollupReport, RollupRunState, load_rollup_state, run_rollup
 from modules.observability.schema.models import (
     observability_ai_usage_daily,
     observability_alert_events,
@@ -40,11 +50,17 @@ OBSERVABILITY_SCHEMA = "observability"
 
 __all__ = [
     "OBSERVABILITY_SCHEMA",
+    "ROLLUP_MODE_BACKFILL",
+    "ROLLUP_MODE_DAILY",
     "ObservabilityFacade",
+    "RollupPlan",
     "RollupReport",
+    "RollupRunState",
     "RollupThresholds",
     "accumulate_ai_usage",
     "accumulate_business_count",
+    "load_rollup_state",
+    "plan_rollup_dates",
     "record_alert_event",
     "run_rollup",
 ]

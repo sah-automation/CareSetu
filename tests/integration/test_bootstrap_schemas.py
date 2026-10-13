@@ -140,6 +140,7 @@ EXPECTED_OBSERVABILITY_TABLES = {
     "observability.observability_ai_provider_health",
     "observability.observability_business_daily",
     "observability.observability_alert_events",
+    "observability.observability_rollup_runs",
     "observability.observability_outbox",
     "observability.consumed_events",
 }

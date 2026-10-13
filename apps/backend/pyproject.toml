@@ -57,6 +57,12 @@ dependencies = [
     "opentelemetry-instrumentation-fastapi>=0.48b0",
     "opentelemetry-instrumentation-sqlalchemy>=0.48b0",
     "opentelemetry-instrumentation-httpx>=0.48b0",
+    # Declared for the tests that read the GitHub Actions workflows as data
+    # (PHASE-14A B5b, #705). The nightly rollup's schedule, secret gate and
+    # permissions are asserted by parsing the YAML, so the package is imported
+    # directly by test code rather than resolved transitively through
+    # ``uvicorn[standard]``.
+    "pyyaml>=6.0",
 ]
 
 [dependency-groups]
