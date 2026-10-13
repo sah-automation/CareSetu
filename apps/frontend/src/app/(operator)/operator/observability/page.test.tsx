@@ -12,14 +12,26 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { fetchOverview, type Overview } from "@/lib/operator/observability";
+import {
+  fetchAlerts,
+  fetchDeeplinks,
+  fetchOverview,
+  type AlertPage,
+  type Deeplinks,
+  type Overview,
+} from "@/lib/operator/observability";
 
 import ObservabilityOverviewPage from "./page";
 
 vi.mock("@/lib/operator/observability", async (importOriginal) => {
   const mod =
     await importOriginal<typeof import("@/lib/operator/observability")>();
-  return { ...mod, fetchOverview: vi.fn() };
+  return {
+    ...mod,
+    fetchOverview: vi.fn(),
+    fetchAlerts: vi.fn(),
+    fetchDeeplinks: vi.fn(),
+  };
 });
 
 vi.mock("next/navigation", () => ({
@@ -39,6 +51,8 @@ vi.mock("@/lib/auth/AuthContext", () => ({
 }));
 
 const mockFetchOverview = vi.mocked(fetchOverview);
+const mockFetchAlerts = vi.mocked(fetchAlerts);
+const mockFetchDeeplinks = vi.mocked(fetchDeeplinks);
 
 /** What the page renders for a rate the rollup has no sample for. */
 const UNMEASURED = "\u2014";
@@ -89,8 +103,51 @@ function resolveWith(data: Overview | null) {
   );
 }
 
+/** One alert, so the feed renders populated by default. */
+const OPEN_ALERTS: AlertPage = {
+  alerts: [
+    {
+      id: "11111111-1111-1111-1111-111111111111",
+      severity: "critical",
+      kind: "audit_tamper",
+      title: "Audit tamper attempt blocked",
+      payload: { source: "audit" },
+      status: "open",
+      created_at: "2026-10-12T10:00:00Z",
+      acked_by: null,
+      acked_at: null,
+    },
+  ],
+  total_count: 1,
+};
+
+/** All three vendors configured, so the links panel renders populated. */
+const DEEPLINKS: Deeplinks = {
+  grafana: "https://acme.grafana.net",
+  sentry: "https://o123.sentry.io/issues/?project=456",
+  langfuse: "https://cloud.langfuse.com/project/pk-lf-1",
+};
+
+function resolveAlertsWith(data: AlertPage | null) {
+  mockFetchAlerts.mockImplementation(() =>
+    data === null
+      ? Promise.reject(new Error("network down"))
+      : Promise.resolve(data),
+  );
+}
+
+function resolveDeeplinksWith(data: Deeplinks | null) {
+  mockFetchDeeplinks.mockImplementation(() =>
+    data === null
+      ? Promise.reject(new Error("network down"))
+      : Promise.resolve(data),
+  );
+}
+
 beforeEach(() => {
   resolveWith(ROLLED_OVERVIEW);
+  resolveAlertsWith(OPEN_ALERTS);
+  resolveDeeplinksWith(DEEPLINKS);
 });
 
 afterEach(() => {
@@ -283,5 +340,46 @@ describe("ObservabilityOverviewPage", () => {
     fireEvent.click(screen.getByTestId("error-banner-dismiss"));
 
     expect(screen.queryByTestId("error-banner")).toBeNull();
+  });
+
+  // #710 C3: the landing page also carries the inline alert feed and the
+  // vendor deep-links. Their detailed states live in the component tests; here
+  // we prove the page owns the reads.
+  it("renders the alert feed from the alerts route", async () => {
+    render(<ObservabilityOverviewPage />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("observability-alerts-list")).toBeTruthy();
+    });
+    expect(screen.getByText("Audit tamper attempt blocked")).toBeTruthy();
+    expect(mockFetchAlerts).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders a deep-link per configured vendor and omits absent ones", async () => {
+    resolveDeeplinksWith({
+      grafana: "https://acme.grafana.net",
+      sentry: null,
+      langfuse: null,
+    });
+
+    render(<ObservabilityOverviewPage />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("observability-deeplink-grafana")).toBeTruthy();
+    });
+    expect(screen.queryByTestId("observability-deeplink-sentry")).toBeNull();
+    expect(screen.queryByTestId("observability-deeplink-langfuse")).toBeNull();
+  });
+
+  it("shows the alert feed's empty state when there are no alerts", async () => {
+    resolveAlertsWith({ alerts: [], total_count: 0 });
+
+    render(<ObservabilityOverviewPage />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("empty-state-title").textContent).toBe(
+        "No alerts",
+      );
+    });
   });
 });

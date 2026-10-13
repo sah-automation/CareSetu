@@ -11,10 +11,12 @@
 // `spend_paise` from the same aggregate `/cost` headlines (facade.Overview).
 //
 // #709 (C2b) landed the panels these tiles drill into, so the tiles are live
-// links again - the doctor dashboard's whole-card `Link` shape (#681) - except
-// open alerts, whose feed is #712 and must not link to a page that does not
-// exist. `formatPct`/`formatDuration` moved to lib/operator/observability-format
-// so the panels format a rate exactly as this page does.
+// links again - the doctor dashboard's whole-card `Link` shape (#681). #710
+// (C3) added the inline alert feed and the vendor deep-links below the KPI row;
+// the open-alerts tile stays a card because the feed is a panel on this page,
+// not a route of its own. `formatPct`/`formatDuration` moved to
+// lib/operator/observability-format so the panels format a rate exactly as this
+// page does.
 //
 // Reuses the doctor dashboard's KpiTile/KpiRow pattern
 // (app/(doctor)/doctor/page.tsx): a tile shows a skeleton while its read is in
@@ -28,9 +30,16 @@ import Link from "next/link";
 import { EmptyState } from "@/components/layout/EmptyState";
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
 import { PageHeader } from "@/components/layout/PageHeader";
+import { AlertsFeed } from "@/components/observability/AlertsFeed";
+import { DeeplinksPanel } from "@/components/observability/DeeplinksPanel";
 import { PanelTabs } from "@/components/observability/ObservabilityPanelPage";
 import { formatInrPaise } from "@/lib/money";
-import { fetchOverview, type Overview } from "@/lib/operator/observability";
+import {
+  fetchAlerts,
+  fetchDeeplinks,
+  fetchOverview,
+  type Overview,
+} from "@/lib/operator/observability";
 import { formatDuration, formatPct } from "@/lib/operator/observability-format";
 import { usePanelRead } from "@/lib/operator/usePanelRead";
 
@@ -44,10 +53,10 @@ interface KpiTileProps {
   /** `critical` once the budget is exhausted; absent otherwise. */
   tone?: "critical";
   /**
-   * The panel this tile summarises. Absent only for the open-alerts tile,
-   * whose alert feed is #712 - a tile with no destination renders as a card,
-   * because a live link to a page that does not exist is the dead navigation
-   * the nav's `soon` flag exists to prevent.
+   * The panel this tile summarises. Absent for the open-alerts tile, whose
+   * feed is an inline panel on this page rather than its own route - a tile
+   * with no destination renders as a card, because a live link to a page that
+   * does not exist is the dead navigation the nav's `soon` flag prevents.
    */
   href?: string;
 }
@@ -56,8 +65,7 @@ interface KpiTileProps {
  * The headline-KPI tile, mirroring the doctor dashboard's: the value carries
  * the test hook, the label and hint sit under it. A tile whose panel exists is
  * a whole-card link to it (the doctor's `KpiTile` shape, #681); a tile whose
- * panel is still a ticket renders as a plain card, which is what #708 shipped
- * while every panel was #709.
+ * panel is an inline section rather than a route renders as a plain card.
  */
 function KpiTile({
   testId,
@@ -211,8 +219,8 @@ function tileSpecs(overview: Overview): TileSpec[] {
       href: PANEL_HREFS.health,
     },
     {
-      // No href: the alert feed is #712. The tile stays a card until its
-      // destination exists rather than linking to a page that does not.
+      // No href: the alert feed is an inline panel on this page, not a route.
+      // The tile stays a card rather than linking to a page that does not exist.
       testId: "kpi-open-alerts",
       label: LABELS.openAlerts,
       value: String(overview.open_alerts),
@@ -291,6 +299,14 @@ export default function ObservabilityOverviewPage() {
     dismissBanner,
   } = usePanelRead(fetchOverview);
 
+  // #710: the alert feed and the vendor deep-links are their own reads on the
+  // landing page. The feed is the standing record - unfiltered, newest first -
+  // so resolved alerts stay reviewable (there is no ack until Batch 2). Both
+  // render below the KPIs in every state, including "no telemetry yet": an
+  // audit-tamper alert is real whether or not any AI job has been rolled.
+  const alerts = usePanelRead(fetchAlerts);
+  const deeplinks = usePanelRead(fetchDeeplinks);
+
   const empty =
     status === "ready" && overview !== null && hasNoTelemetry(overview);
 
@@ -338,6 +354,11 @@ export default function ObservabilityOverviewPage() {
           body="The nightly rollup has not recorded any AI activity for this window."
         />
       )}
+
+      <div className="mt-6 flex flex-col gap-4">
+        <AlertsFeed read={alerts} />
+        <DeeplinksPanel read={deeplinks} />
+      </div>
     </>
   );
 }
