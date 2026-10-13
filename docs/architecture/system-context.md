@@ -17,7 +17,7 @@
 **Outside the boundary (in scope at launch):**
 
 - Five human actor types - Patient, Doctor Partner, Lab Partner, Chemist Partner, Operator.
-- Four third-party systems - SMS/OTP gateway, LLM/AI provider, WhatsApp Business API, UPI payment gateway.
+- Seven third-party systems - SMS/OTP gateway, LLM/AI provider, WhatsApp Business API, UPI payment gateway, and the observability vendors Langfuse Cloud, Grafana Cloud, and Sentry.
 - Client-supplied boundary inputs: patient voice/text/photo uploads, lab report uploads, geolocation (browser) for distance-based routing, and per-action consent grants.
 
 **Explicitly outside the boundary (carried forward, not built):** ABHA health-record integration (`REQ-038`, `[FUTURE]`), monetization/commission capture (`REQ-039`), native-app / WhatsApp-first patient channels (`REQ-040`, `[FUTURE]`), lab-report baseline parsing (`REQ-026`, deferred). WhatsApp carries **notifications only** at launch (`REQ-035`); no transaction or interaction occurs there.
@@ -51,6 +51,9 @@ C4Context
   System_Ext(llm, "LLM / AI Provider", "Hindi/English transcription, clinical pre-summary structuring, e-prescription drafting (voice note / photo)")
   System_Ext(wa, "WhatsApp Business API", "Notifications only: dosage reminders, 30/90-day re-test nudges")
   System_Ext(upi, "UPI Payment Gateway", "Platform-facilitated settlement for fraud-risk exception cases")
+  System_Ext(langfuse, "Langfuse Cloud", "AI span tracing, cost enrichment and evals; observes LLM calls, never replaces the provider")
+  System_Ext(grafana, "Grafana Cloud", "Metrics, distributed traces and optional log export over OTLP")
+  System_Ext(sentry, "Sentry", "Error and crash tracking with release + trace correlation")
 
   Rel(patient, caresetu, "Uses web app (register, consent, intake, book, upload, log)", "HTTPS, phone OTP + JWT + per-action consent")
   Rel(caresetu, patient, "Pre-summaries, prescriptions, in-app status & notifications", "HTTPS")
@@ -66,6 +69,9 @@ C4Context
   Rel(wa, caresetu, "Delivery-status callbacks", "HTTPS, signed webhook")
   Rel(caresetu, upi, "Initiates platform-facilitated payment", "HTTPS, server-side API key, idempotency key")
   Rel(upi, caresetu, "Payment status webhooks", "HTTPS, HMAC-signed")
+  Rel(caresetu, langfuse, "Exports AI spans, cost and eval metadata", "HTTPS, server-side key, PHI-free metadata")
+  Rel(caresetu, grafana, "Exports metrics, traces and logs over OTLP", "HTTPS, API token, PHI-free attributes")
+  Rel(caresetu, sentry, "Reports errors and crashes", "HTTPS, DSN, PHI-scrubbed")
 ```
 
 ---
@@ -90,12 +96,15 @@ _(All software systems, platforms, or APIs outside the blackbox perimeter)_
 
 ### 4.1 Integration Catalog
 
-| System ID     | External System       | Primary Function                                                                                            | Integration Pattern                                                      | Data Format                             | Auth Protocol                                           | Rate Limits / SLA                                                                                                                        | Traceability                                             |
-| :------------ | :-------------------- | :---------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------- | :-------------------------------------- | :------------------------------------------------------ | :--------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------- |
-| **`EXT-001`** | SMS / OTP Gateway     | Deliver phone-verification OTPs for patient identity                                                        | Outbound synchronous REST; optional delivery receipts (non-load-bearing) | JSON (+ text message)                   | Server-side API key                                     | Best-effort (no SLA per `NFR-004`); ~1 OTP per registration/login attempt; in-app resend cooldown ≥ 60 s                                 | `FEAT-001`, `NFR-002`                                    |
-| **`EXT-002`** | LLM / AI Provider     | Hindi/English voice-to-text, clinical pre-summary structuring, e-prescription drafting (voice note / photo) | Outbound synchronous REST (long-running); server-side orchestration      | JSON + audio/image uploads              | Server-side API key; freemium tier                      | Freemium quota; monthly token/₹ budget within `NFR-001` (≤ ₹2,000/mo total, observe-and-warn PS-10 - never a call block); timeout ≤ 30 s | `FEAT-006`, `FEAT-007`, `FEAT-009`, `NFR-001`, `NFR-002` |
-| **`EXT-003`** | WhatsApp Business API | Notifications only - dosage reminders, 30/90-day re-test nudges in English/Hindi                            | Outbound template messaging + inbound delivery-status callbacks          | JSON (template-based, per WhatsApp/DLT) | Bearer token / API key + webhook signature verification | WhatsApp business-tier rate limits; best-effort delivery (`NFR-004`)                                                                     | `FEAT-019`, `NFR-002`                                    |
-| **`EXT-004`** | UPI Payment Gateway   | Platform-facilitated settlement for fraud-risk exception cases (`FEAT-016` exception path)                  | Bi-directional - outbound initiation REST + inbound status webhooks      | JSON                                    | Server-side API key + HMAC webhook signature            | Partner quotas; best-effort; fallback to direct cash/UPI if unavailable                                                                  | `FEAT-016`, `NFR-002`                                    |
+| System ID     | External System       | Primary Function                                                                                              | Integration Pattern                                                      | Data Format                             | Auth Protocol                                               | Rate Limits / SLA                                                                                                                        | Traceability                                                                        |
+| :------------ | :-------------------- | :------------------------------------------------------------------------------------------------------------ | :----------------------------------------------------------------------- | :-------------------------------------- | :---------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------- |
+| **`EXT-001`** | SMS / OTP Gateway     | Deliver phone-verification OTPs for patient identity                                                          | Outbound synchronous REST; optional delivery receipts (non-load-bearing) | JSON (+ text message)                   | Server-side API key                                         | Best-effort (no SLA per `NFR-004`); ~1 OTP per registration/login attempt; in-app resend cooldown ≥ 60 s                                 | `FEAT-001`, `NFR-002`                                                               |
+| **`EXT-002`** | LLM / AI Provider     | Hindi/English voice-to-text, clinical pre-summary structuring, e-prescription drafting (voice note / photo)   | Outbound synchronous REST (long-running); server-side orchestration      | JSON + audio/image uploads              | Server-side API key; freemium tier                          | Freemium quota; monthly token/₹ budget within `NFR-001` (≤ ₹2,000/mo total, observe-and-warn PS-10 - never a call block); timeout ≤ 30 s | `FEAT-006`, `FEAT-007`, `FEAT-009`, `NFR-001`, `NFR-002`                            |
+| **`EXT-003`** | WhatsApp Business API | Notifications only - dosage reminders, 30/90-day re-test nudges in English/Hindi                              | Outbound template messaging + inbound delivery-status callbacks          | JSON (template-based, per WhatsApp/DLT) | Bearer token / API key + webhook signature verification     | WhatsApp business-tier rate limits; best-effort delivery (`NFR-004`)                                                                     | `FEAT-019`, `NFR-002`                                                               |
+| **`EXT-004`** | UPI Payment Gateway   | Platform-facilitated settlement for fraud-risk exception cases (`FEAT-016` exception path)                    | Bi-directional - outbound initiation REST + inbound status webhooks      | JSON                                    | Server-side API key + HMAC webhook signature                | Partner quotas; best-effort; fallback to direct cash/UPI if unavailable                                                                  | `FEAT-016`, `NFR-002`                                                               |
+| **`EXT-005`** | Langfuse Cloud        | AI span tracing, cost enrichment, and (Batch 2) eval datasets - observes `EXT-002` calls, never replaces them | Outbound (platform → provider); async batched span/metadata egress       | JSON (SDK payloads)                     | Server-side public + secret key (`LANGFUSE_PUBLIC_KEY`)     | Free tier ~50k observations/mo; off (no-op) when key absent; never load-bearing - a failure never blocks the AI call                     | `NFR-001`, `NFR-SEC-006`, `plan-phase14-observability.md` §4/§14                    |
+| **`EXT-006`** | Grafana Cloud         | Metrics, distributed traces, and optional log export over OTLP (Mimir/Tempo/Loki)                             | Outbound (platform → provider); OTLP/HTTP batch export                   | OTLP protobuf over HTTP, JSON logs      | Instance id + API token (`OTEL_ENABLED` + endpoint/headers) | Free tier ~14-day retention; off (no-op) when unconfigured; configurable sampler keeps ingest bounded                                    | `NFR-001`, `NFR-SEC-006`, `NFR-PERF-003`, `plan-phase14-observability.md` §4/§5/§14 |
+| **`EXT-007`** | Sentry                | Error and crash tracking with release + trace correlation                                                     | Outbound (platform → provider); error-event egress                       | JSON (SDK envelope)                     | Server-side DSN (`SENTRY_DSN`; empty = off)                 | Free tier ~5k events/mo; off (no-op) when DSN empty; `before_send` scrubs PHI before egress                                              | `NFR-001`, `NFR-SEC-006`, `plan-phase14-observability.md` §4/§14                    |
 
 ### 4.2 Integration Specifications (Detailed Contracts)
 
@@ -140,6 +149,30 @@ _(All software systems, platforms, or APIs outside the blackbox perimeter)_
 - **Error & Retry Behavior:** Idempotency key per order (no double charge); webhook replay-safe via dedupe on `payment_ref`; on gateway unavailable / timeout → fall back to direct cash/UPI at point of service with a risk note (PRD §5.2); reconciliation via status polling + webhooks; platform holds no funds and processes no refunds (`REQ-036`).
 - **Security & Verification:** Server-side API key; HMAC signature verification on every webhook (`NFR-SEC-005`); platform records only the settlement outcome (`GAP-010` baseline: receipts are partner-issued); `settlement_recorded` + `platform_payment_initiated` events written to the audit trail.
 
+#### System Integration: `EXT-005` (Langfuse Cloud)
+
+- **Ingress / Egress Direction:** Egress only (platform → provider); asynchronous batched span/metadata export. No inbound webhooks. Langfuse **observes** the `EXT-002` (LLM/AI Provider) calls made through the existing MOD-005 adapters; it does not replace `EXT-002` as the domain egress system of record and never receives a call of its own for inference.
+- **Network Protocol:** `HTTPS (TLS 1.2+)`, Langfuse SDK span/metadata export, `JSON`.
+- **Data Payload Schema:** Trace/observation records carrying the allow-listed metadata only - `task_type`, `provider`, `model`, `input_tokens`, `output_tokens`, `duration_ms`, `cost_paise`, `confidence`, `status`, pseudonymous `intake_id`/`ai_job_id`, `trace_id`, and prompt version. Never transcript text, patient identity, or raw provider payloads.
+- **Error & Retry Behavior:** SDK-buffered and best-effort; a missing key or a Langfuse outage is a no-op - the AI call completes regardless, so observability never blocks the core care loop (`NFR-PERF-003`). Buffered spans are force-flushed on shutdown so Render spin-down does not drop them.
+- **Security & Verification:** Server-side public/secret key (`LANGFUSE_PUBLIC_KEY`, already present in config; absent = no-op); PHI-free metadata enforced by an allow-list and a unit test that asserts only allow-listed keys are admitted (`plan-phase14-observability.md` §6, §10). The consent-gated minimal-egress contract for inference stays with `EXT-002` (`NFR-SEC-006`).
+
+#### System Integration: `EXT-006` (Grafana Cloud)
+
+- **Ingress / Egress Direction:** Egress only (platform → provider); OTLP batch export of metrics, traces, and (optionally) logs. No inbound webhooks.
+- **Network Protocol:** `HTTPS (TLS 1.2+)`, OTLP over HTTP (`opentelemetry-exporter-otlp-proto-http`); gRPC is avoided because it is frequently blocked on free PaaS tiers. Optional Prometheus `/metrics` scrape endpoint behind `METRICS_ENABLED` for local/backup use, never the production path.
+- **Data Payload Schema:** OTel spans (FastAPI, SQLAlchemy async, httpx, dispatcher, APScheduler), OTel metrics, and optionally structured JSON logs via the OTel logging bridge. Resource attributes `service.name`, `deployment.environment`, `service.version` (= git SHA); pseudonymous ids and numeric measures only.
+- **Error & Retry Behavior:** Gated by `OTEL_ENABLED` plus endpoint/headers; when unconfigured the instrumentation constructs but exports nothing (no-op), so local dev and CI are unchanged. Exporter egress is best-effort and bounded by the same timeout/degradation discipline as any external call (`NFR-PERF-003`); a configurable parent-based `traceidratio` sampler keeps ingest within the free tier; exporters force-flush on shutdown.
+- **Security & Verification:** Instance id + API token supplied server-side via environment (never client-exposed); transport TLS; an OTel attribute allow-list admits only pseudonymous ids and metrics - no phone, OTP, tokens, free text, or raw payloads (`NFR-SEC-006`; `plan-phase14-observability.md` §10). Free-tier retention (~14 days) is non-load-bearing: the Postgres `observability` schema is the system of record (`ADR-0025`).
+
+#### System Integration: `EXT-007` (Sentry)
+
+- **Ingress / Egress Direction:** Egress only (platform → provider); error and crash events. No inbound webhooks.
+- **Network Protocol:** `HTTPS (TLS 1.2+)`, Sentry SDK envelope, `JSON`.
+- **Data Payload Schema:** Error/exception events with stack traces, release = git SHA, and the correlated `trace_id`; custom tags limited to non-PHI context. No request bodies, phone numbers, OTPs, tokens, or free text.
+- **Error & Retry Behavior:** Gated by `SENTRY_DSN`; an empty DSN disables the SDK entirely (no-op). SDK-buffered and best-effort; a Sentry outage never blocks the application; events force-flush on shutdown so Render spin-down does not drop them.
+- **Security & Verification:** DSN supplied server-side via environment (never client-exposed); transport TLS; a `before_send` scrub removes phone/OTP/secrets/free text before egress, covered by a scrub test (`plan-phase14-observability.md` §10, §16). Free tier ~5k events/mo with quota alerting; PHI-free posture per `NFR-SEC-006`.
+
 ---
 
 ## 5. Non-Functional Boundary Rules & Edge Protection
@@ -148,7 +181,7 @@ _(System-wide perimeter constraints derived from `NFR-xxx`)_
 
 ### 5.1 Derived Perimeter Rules
 
-- **`NFR-SEC-001` Transport Security at the Boundary:** Every external channel - user web apps, partner web apps, operator console, and all four third-party integrations - uses `TLS 1.2+` in transit; all PHI encrypted at rest; no cleartext PII/PHI crosses any wire (`NFR-002`).
+- **`NFR-SEC-001` Transport Security at the Boundary:** Every external channel - user web apps, partner web apps, operator console, and all seven third-party integrations - uses `TLS 1.2+` in transit; all PHI encrypted at rest; no cleartext PII/PHI crosses any wire (`NFR-002`).
 - **`NFR-SEC-002` Identity & Authentication at the Boundary:** Patients authenticate via phone OTP + session JWT (baseline `GAP-001`); partners authenticate with credential-verified accounts gated by `REQ-028`; operator access requires MFA. Re-registration with an existing phone resolves to the existing identity, never a duplicate (`FEAT-001`).
 - **`NFR-SEC-003` Authorization (RBAC) at the Boundary:** Role-based access enforced on every boundary request - Patient (own record only), Partner (own orders/reports/prescriptions), Operator (all records, moderation, audit); denied cross-role access attempts are denied and written to the audit log (`FEAT-003`, `NFR-002`).
 - **`NFR-SEC-004` Ingress Filtering & Abuse Protection:** WAF/edge rate-limiting (e.g., on OTP, auth, and intake endpoints), DDoS mitigation, request validation (size/content-type/schema), and upload scanning; report uploads matched to order + patient before filing (`RISK-002` mitigation) (`NFR-002`, `FEAT-011`).
@@ -190,3 +223,6 @@ _(System-wide perimeter constraints derived from `NFR-xxx`)_
 | `EXT-002` (LLM/AI)            | `FEAT-006`, `FEAT-007`, `FEAT-009`, `NFR-001`, `NFR-002`   | TLS 1.2+; API key; PHI-minimized, consent-gated, audited egress; freemium budget | Defined |
 | `EXT-003` (WhatsApp)          | `FEAT-019`, `REQ-035`, `NFR-002`                           | TLS 1.2+; bearer token; signed webhooks; notifications only                      | Defined |
 | `EXT-004` (UPI GW)            | `FEAT-016`, `NFR-002`                                      | TLS 1.2+; API key; HMAC-signed webhooks; idempotency; no fund holding            | Defined |
+| `EXT-005` (Langfuse)          | `NFR-001`, `NFR-SEC-006`                                   | TLS 1.2+; server-side key; PHI-free allow-listed span metadata; no-op when off   | Defined |
+| `EXT-006` (Grafana Cloud)     | `NFR-001`, `NFR-SEC-006`, `NFR-PERF-003`                   | TLS 1.2+; API token; OTel attribute allow-list; sampler-bounded; no-op when off  | Defined |
+| `EXT-007` (Sentry)            | `NFR-001`, `NFR-SEC-006`                                   | TLS 1.2+; DSN; `before_send` PHI scrub; empty DSN = disabled                     | Defined |
