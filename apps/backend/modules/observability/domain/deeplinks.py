@@ -21,11 +21,6 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
-#: ``observability_deeplinks`` vendor keys, in the order the view declares them.
-VENDOR_GRAFANA = "grafana"
-VENDOR_SENTRY = "sentry"
-VENDOR_LANGFUSE = "langfuse"
-
 
 def _clean(url: str | None) -> str | None:
     """A configured URL without surrounding whitespace, or ``None`` when unset.

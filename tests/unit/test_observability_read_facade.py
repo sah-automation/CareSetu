@@ -26,6 +26,7 @@ import pytest
 
 from bus.dispatcher import OutboxRowCounts, OutboxTable
 from modules.observability.facade import (
+    BusinessCountView,
     ObservabilityFacade,
     build_deeplinks,
     query_alerts,
@@ -72,6 +73,10 @@ class _FakeResult:
     def scalar(self) -> object:
         """The single value a bare ``MAX(date)`` aggregate returns."""
         return self._rows[0]["value"] if self._rows else None
+
+    def scalar_one(self) -> object:
+        """The single value a bare ``COUNT(*)`` aggregate returns."""
+        return self._rows[0]["total"]
 
 
 def _connection(*results: list[dict[str, object]]) -> AsyncMock:
@@ -465,8 +470,9 @@ async def test_every_read_selects_from_the_observability_schema_only() -> None:
     assert _from_target(overview, 0) == f"{table}usage_daily"
     assert _from_target(overview, 1) == "observability.observability_alert_events"
     assert _from_target(overview, 2) == f"{table}provider_health"
-    assert _from_target(overview, 3) == "observability.observability_rollup_runs"
-    assert _from_target(overview, 4) == f"{table}cost_budget"
+    assert _from_target(overview, 3) == "observability.observability_business_daily"
+    assert _from_target(overview, 4) == "observability.observability_rollup_runs"
+    assert _from_target(overview, 5) == f"{table}cost_budget"
     assert _from_target(latency, 0) == f"{table}provider_health"
     assert _from_target(latency, 1) == "observability.observability_rollup_runs"
 
@@ -495,13 +501,15 @@ async def test_facade_windowed_reads_resolve_days_against_a_pinned_today(
 # ---------------------------------------------------------------- overview
 
 
-#: The five results ``query_overview`` reads, in the order it issues them: the
+#: The six results ``query_overview`` reads, in the order it issues them: the
 #: windowed usage sums, the open-alert counts, the provider-health aggregate, the
-#: rollup ledger's newest date, then the budget rows behind ``/cost``.
+#: registry-driven business counts, the rollup ledger's newest date, then the
+#: budget rows behind ``/cost``.
 _OVERVIEW_ROWS: tuple[list[dict[str, object]], ...] = (
     [{"calls": 9, "success_count": 7, "low_confidence_count": 2}],
     [{"open_alerts": 4, "critical_open_alerts": 1}],
     [{"p95_duration_ms": Decimal("8400.00"), "open_breakers": 1}],
+    [{"metric_key": "case.consult_complete", "count": 6}],
     [{"value": _TODAY}],
 )
 
@@ -520,6 +528,9 @@ async def test_overview_reports_the_headline_figures() -> None:
     assert overview.open_alerts == 4
     assert overview.critical_open_alerts == 1
     assert overview.open_breakers == 1
+    assert overview.business_counts == [
+        BusinessCountView(metric_key="case.consult_complete", count=6)
+    ]
     assert overview.last_rolled_date == _TODAY
 
 
@@ -543,6 +554,7 @@ async def test_overview_rates_are_none_before_the_first_rollup() -> None:
         [{"p95_duration_ms": None, "open_breakers": 0}],
         [],
         [],
+        [],
     )
 
     overview = await query_overview(_connection(*empty), from_date=_FROM, to_date=_TODAY)
@@ -550,6 +562,7 @@ async def test_overview_rates_are_none_before_the_first_rollup() -> None:
     assert overview.success_rate is None
     assert overview.low_confidence_rate is None
     assert overview.p95_duration_ms is None
+    assert overview.business_counts == []
     assert overview.last_rolled_date is None
     assert overview.spend_paise == 0
     assert overview.budget_paise == 0
@@ -691,7 +704,7 @@ async def test_health_reports_a_configured_cache_as_up_not_disabled(
     health = await query_health(_connection([], _BREAKER_ROWS), cache_configured=True)
 
     cache = next(entry for entry in health.dependencies if entry.name == "cache")
-    assert cache.status == "configured"
+    assert cache.status == "up"
     assert cache.detail is None
 
 
@@ -700,9 +713,7 @@ async def test_health_facade_reads_the_cache_flag_the_caller_resolved() -> None:
 
     health = await facade.get_health(cache_configured=True)
 
-    assert next(entry for entry in health.dependencies if entry.name == "cache").status == (
-        "configured"
-    )
+    assert next(entry for entry in health.dependencies if entry.name == "cache").status == "up"
 
 
 # ------------------------------------------------------------------ alerts
@@ -724,11 +735,10 @@ _ALERT_ROWS: list[dict[str, object]] = [
 
 
 async def test_alerts_pass_the_row_through_phi_free() -> None:
-    feed = await query_alerts(_connection(_ALERT_ROWS), limit=50)
+    page = await query_alerts(_connection([{"total": 1}], _ALERT_ROWS), page=1, page_size=25)
 
-    assert feed.limit == 50
-    assert feed.count == 1
-    entry = feed.alerts[0]
+    assert page.total_count == 1
+    entry = page.alerts[0]
     assert entry.kind == "breaker_open"
     assert entry.severity == "critical"
     assert entry.payload == {"source": "rollup", "provider": "anthropic"}
@@ -736,29 +746,39 @@ async def test_alerts_pass_the_row_through_phi_free() -> None:
 
 
 async def test_alerts_are_newest_first_with_a_stable_tiebreak() -> None:
-    connection = _connection(_ALERT_ROWS)
+    connection = _connection([{"total": 1}], _ALERT_ROWS)
 
-    await query_alerts(connection, limit=10)
+    await query_alerts(connection, page=1, page_size=10)
 
-    sql = _compiled(connection)
+    sql = _compiled(connection, 1)
     assert re.search(r"ORDER BY\s+observability\.observability_alert_events\.created_at DESC", sql)
     assert re.search(r"observability\.observability_alert_events\.id DESC", sql)
     assert "LIMIT" in sql
 
 
+async def test_alerts_page_offsets_past_the_rows_already_read() -> None:
+    connection = _connection([{"total": 30}], _ALERT_ROWS)
+
+    await query_alerts(connection, page=3, page_size=10)
+
+    assert "OFFSET 20" in _compiled(connection, 1)
+
+
 async def test_alerts_narrow_to_a_status_when_one_is_given() -> None:
-    connection = _connection(_ALERT_ROWS)
+    connection = _connection([{"total": 1}], _ALERT_ROWS)
 
-    await query_alerts(connection, limit=10, status="open")
+    await query_alerts(connection, page=1, page_size=10, status="open")
 
-    assert "WHERE observability.observability_alert_events.status" in _compiled(connection)
+    # Both the count and the page carry the filter, so total_count is the filtered total.
+    assert "WHERE observability.observability_alert_events.status" in _compiled(connection, 0)
+    assert "WHERE observability.observability_alert_events.status" in _compiled(connection, 1)
 
 
 async def test_alerts_are_empty_before_any_finding() -> None:
-    feed = await query_alerts(_connection([]), limit=25)
+    page = await query_alerts(_connection([{"total": 0}], []), page=1, page_size=25)
 
-    assert feed.count == 0
-    assert feed.alerts == []
+    assert page.total_count == 0
+    assert page.alerts == []
 
 
 # --------------------------------------------------------------- deeplinks

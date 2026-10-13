@@ -155,7 +155,7 @@ async def _seed(connection: AsyncConnection) -> None:
 
 
 async def _seed_rollup_and_alerts(connection: AsyncConnection) -> None:
-    """The B5a ledger row and three B4b/B5a alerts: two open, one resolved."""
+    """The B5a ledger row, two B4b business counts and three alerts."""
     await connection.execute(
         text(
             "INSERT INTO observability.observability_rollup_runs "
@@ -163,6 +163,22 @@ async def _seed_rollup_and_alerts(connection: AsyncConnection) -> None:
             "VALUES (:rolled, 'daily', :start, 2, now())"
         ),
         {"rolled": _YESTERDAY, "start": _PERIOD_START},
+    )
+    await connection.execute(
+        text(
+            "INSERT INTO observability.observability_business_daily "
+            "(metric_key, metric_date, value) VALUES "
+            "('case.consult_complete', :today, CAST(:six AS jsonb)), "
+            "('consent.granted', :today, CAST(:three AS jsonb)), "
+            "('case.closed', :stale, CAST(:one AS jsonb))"
+        ),
+        {
+            "today": _TODAY,
+            "stale": _STALE,
+            "six": '{"count": 6}',
+            "three": '{"count": 3}',
+            "one": '{"count": 1}',
+        },
     )
     await connection.execute(
         text(
@@ -391,6 +407,7 @@ async def test_reads_are_empty_before_the_first_rollup(
     assert overview["budget_paise"] == 0
     assert overview["budget_utilization_pct"] == "0.00"
     assert overview["p95_duration_ms"] is None
+    assert overview["business_counts"] == []
     assert overview["last_rolled_date"] is None
     assert overview["open_alerts"] == 0
     assert latency["providers"] == []
@@ -452,6 +469,12 @@ async def test_overview_matches_the_seeded_aggregates(
     assert body["open_alerts"] == 2
     assert body["critical_open_alerts"] == 1
     assert body["open_breakers"] == 1
+    # Today's registry-driven business counts, by key. The 40-day-old row is
+    # outside the window, so it must not appear.
+    assert body["business_counts"] == [
+        {"metric_key": "case.consult_complete", "count": 6},
+        {"metric_key": "consent.granted", "count": 3},
+    ]
     assert body["last_rolled_date"] == _YESTERDAY.isoformat()
 
 
@@ -464,9 +487,13 @@ async def test_overview_narrows_to_the_requested_window(
     assert body["total_calls"] == 8
     assert body["success_rate"] == "0.8750"
     # The budget and alert figures are not windowed: the cap is a period figure
-    # and an alert stays open until a pass resolves it.
+    # and an alert stays open until a pass resolves it. The business counts are.
     assert body["budget_paise"] == _BUDGET_CAP_PAISE
     assert body["open_alerts"] == 2
+    assert [entry["metric_key"] for entry in body["business_counts"]] == [
+        "case.consult_complete",
+        "consent.granted",
+    ]
 
 
 async def test_latency_reports_the_rolled_percentiles(
@@ -520,15 +547,15 @@ async def test_health_reports_a_configured_cache(
         body = client.get(HEALTH_PATH, headers=_bearer()).json()
 
     cache = next(e for e in body["dependencies"] if e["name"] == "cache")
-    assert cache["status"] == "configured"
+    assert cache["status"] == "up"
+    assert cache["detail"] is None
 
 
 async def test_alerts_feed_is_newest_first(rolled_engine: AsyncEngine, database_url: str) -> None:
     with _client(database_url) as client:
         body = client.get(ALERTS_PATH, headers=_bearer()).json()
 
-    assert body["limit"] == 50
-    assert body["count"] == 3
+    assert body["total_count"] == 3
     assert [(entry["created_at"], entry["kind"], entry["status"]) for entry in body["alerts"]] == [
         ("2026-10-12T03:00:00Z", "breaker_open", "open"),
         ("2026-10-11T03:00:00Z", "ai_budget", "open"),
@@ -538,15 +565,21 @@ async def test_alerts_feed_is_newest_first(rolled_engine: AsyncEngine, database_
     assert body["alerts"][0]["acked_by"] is None
 
 
-async def test_alerts_narrow_to_status_and_limit(
+async def test_alerts_narrow_to_status_and_page(
     rolled_engine: AsyncEngine, database_url: str
 ) -> None:
     with _client(database_url) as client:
-        open_feed = client.get(f"{ALERTS_PATH}?status=open&limit=1", headers=_bearer()).json()
+        first_page = client.get(f"{ALERTS_PATH}?page_size=1", headers=_bearer()).json()
+        second_page = client.get(f"{ALERTS_PATH}?page=2&page_size=1", headers=_bearer()).json()
         resolved = client.get(f"{ALERTS_PATH}?status=resolved", headers=_bearer()).json()
 
-    assert open_feed["count"] == 1
-    assert open_feed["alerts"][0]["kind"] == "breaker_open"
+    # One row per page, with the count of everything behind them.
+    assert [entry["kind"] for entry in first_page["alerts"]] == ["breaker_open"]
+    assert first_page["total_count"] == 3
+    assert [entry["kind"] for entry in second_page["alerts"]] == ["ai_budget"]
+    assert second_page["total_count"] == 3
+    # total_count counts the FILTER, not the whole table.
+    assert resolved["total_count"] == 1
     assert [entry["kind"] for entry in resolved["alerts"]] == ["outbox_dead_letter"]
 
 

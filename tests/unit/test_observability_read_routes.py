@@ -27,8 +27,9 @@ from app.main import create_app
 from modules.iam.domain.jwt import issue_token
 from modules.observability.facade import (
     AlertEntry,
-    AlertFeed,
+    AlertPage,
     BreakerHealthRow,
+    BusinessCountView,
     CostBudgetView,
     CostSummary,
     CostTrend,
@@ -160,6 +161,7 @@ _OVERVIEW = Overview(
     open_alerts=4,
     critical_open_alerts=1,
     open_breakers=1,
+    business_counts=[BusinessCountView(metric_key="case.consult_complete", count=6)],
     last_rolled_date=_TODAY,
 )
 
@@ -199,9 +201,8 @@ _HEALTH = SystemHealth(
     open_breakers=1,
 )
 
-_ALERTS = AlertFeed(
-    limit=50,
-    count=1,
+_ALERTS = AlertPage(
+    total_count=1,
     alerts=[
         AlertEntry(
             id=_ALERT_ID,
@@ -233,7 +234,7 @@ class StubObservabilityFacade:
         self.overview_days: list[int] = []
         self.latency_calls = 0
         self.health_cache_flags: list[bool] = []
-        self.alert_limits: list[int] = []
+        self.alert_pages: list[tuple[int, int]] = []
         self.alert_statuses: list[str | None] = []
         self.deeplink_settings: list[dict[str, Any]] = []
 
@@ -265,10 +266,12 @@ class StubObservabilityFacade:
         self.health_cache_flags.append(cache_configured)
         return _HEALTH
 
-    async def get_alerts(self, *, limit: int, status: str | None = None) -> AlertFeed:
-        self.alert_limits.append(limit)
+    async def get_alerts(
+        self, *, page: int, page_size: int, status: str | None = None
+    ) -> AlertPage:
+        self.alert_pages.append((page, page_size))
         self.alert_statuses.append(status)
-        return _ALERTS.model_copy(update={"limit": limit})
+        return _ALERTS
 
     def get_deeplinks(
         self,
@@ -405,6 +408,7 @@ def test_operator_reads_the_headline_kpis() -> None:
     assert body["open_alerts"] == 4
     assert body["critical_open_alerts"] == 1
     assert body["open_breakers"] == 1
+    assert body["business_counts"] == [{"metric_key": "case.consult_complete", "count": 6}]
     assert body["last_rolled_date"] == _TODAY.isoformat()
 
 
@@ -479,18 +483,17 @@ def test_health_resolves_a_configured_cache_from_settings() -> None:
     assert facade.health_cache_flags == [True]
 
 
-def test_alerts_default_to_the_first_fifty_newest() -> None:
+def test_alerts_default_to_the_first_page_of_twenty_five() -> None:
     facade = StubObservabilityFacade()
     client = _client(facade)
 
     response = client.get(ALERTS_PATH, headers=_operator())
 
     assert response.status_code == 200
-    assert facade.alert_limits == [50]
+    assert facade.alert_pages == [(1, 25)]
     assert facade.alert_statuses == [None]
     body = response.json()
-    assert body["limit"] == 50
-    assert body["count"] == 1
+    assert body["total_count"] == 1
     assert body["alerts"][0]["kind"] == "breaker_open"
     assert body["alerts"][0]["payload"] == {"source": "rollup", "provider": "anthropic"}
 
@@ -500,11 +503,11 @@ def test_alerts_narrow_to_a_recognised_status(status: str) -> None:
     facade = StubObservabilityFacade()
     client = _client(facade)
 
-    response = client.get(f"{ALERTS_PATH}?status={status}&limit=5", headers=_operator())
+    response = client.get(f"{ALERTS_PATH}?status={status}&page=3&page_size=5", headers=_operator())
 
     assert response.status_code == 200
     assert facade.alert_statuses == [status]
-    assert facade.alert_limits == [5]
+    assert facade.alert_pages == [(3, 5)]
 
 
 def test_deeplinks_answer_the_configured_vendors() -> None:
@@ -570,16 +573,19 @@ def test_out_of_range_window_is_rejected_at_the_edge(path: str, days: str) -> No
     assert facade.overview_days == []
 
 
-@pytest.mark.parametrize("limit", ["0", "201", "abc"])
-def test_out_of_range_alert_limit_is_rejected_at_the_edge(limit: str) -> None:
+@pytest.mark.parametrize(
+    "query",
+    ["page_size=0", "page_size=101", "page=0", "page=abc", "page_size=abc"],
+)
+def test_out_of_range_alert_paging_is_rejected_at_the_edge(query: str) -> None:
     facade = StubObservabilityFacade()
     client = _client(facade)
 
-    response = client.get(f"{ALERTS_PATH}?limit={limit}", headers=_operator())
+    response = client.get(f"{ALERTS_PATH}?{query}", headers=_operator())
 
     assert response.status_code == 422
     assert response.json()["code"] == "VALIDATION_ERROR"
-    assert facade.alert_limits == []
+    assert facade.alert_pages == []
 
 
 @pytest.mark.parametrize("status", ["acked", "OPEN", "all"])
@@ -645,7 +651,7 @@ def _facade_untouched(facade: StubObservabilityFacade) -> bool:
         and facade.overview_days == []
         and facade.latency_calls == 0
         and facade.health_cache_flags == []
-        and facade.alert_limits == []
+        and facade.alert_pages == []
         and facade.deeplink_settings == []
     )
 

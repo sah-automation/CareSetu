@@ -28,10 +28,10 @@ from app.config import Settings
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_operator
 from modules.observability.facade import (
-    DEFAULT_ALERT_FEED_LIMIT,
+    DEFAULT_ALERT_PAGE_SIZE,
     DEFAULT_WINDOW_DAYS,
-    MAX_ALERT_FEED_LIMIT,
-    AlertFeed,
+    MAX_ALERT_PAGE_SIZE,
+    AlertPage,
     CostSummary,
     CostTrend,
     Deeplinks,
@@ -52,12 +52,14 @@ _MAX_WINDOW_DAYS = 365
 
 _Window = Annotated[int, Query(ge=1, le=_MAX_WINDOW_DAYS)]
 
-#: The alert statuses ``observability_alert_events.status`` can hold
-#: (``domain/rollup.py``). Declared as a ``Literal`` so a typo is a 422 at the
-#: edge rather than an empty feed that reads as "nothing is wrong".
+#: The alert statuses ``observability_alert_events.status`` can hold. Spelled as a
+#: ``Literal`` rather than imported from the domain so FastAPI can render the
+#: accepted values into the OpenAPI schema and refuse a typo at the edge: a
+#: misspelled status that 200'd with an empty feed would read as "nothing is wrong".
 _AlertStatus = Annotated[Literal["open", "resolved"] | None, Query(alias="status")]
 
-_AlertLimit = Annotated[int, Query(ge=1, le=MAX_ALERT_FEED_LIMIT)]
+_Page = Annotated[int, Query(ge=1)]
+_PageSize = Annotated[int, Query(ge=1, le=MAX_ALERT_PAGE_SIZE)]
 
 
 def _facade(request: Request) -> ObservabilityFacade:
@@ -220,24 +222,27 @@ async def read_health(
 
 @router.get(
     "/v1/operator/observability/alerts",
-    response_model=AlertFeed,
+    response_model=AlertPage,
     status_code=status.HTTP_200_OK,
     summary="Read the observability alert feed (operator only)",
 )
 async def read_alerts(
     request: Request,
     principal: Annotated[Principal, Depends(require_operator)],
-    limit: _AlertLimit = DEFAULT_ALERT_FEED_LIMIT,
+    page: _Page = 1,
+    page_size: _PageSize = DEFAULT_ALERT_PAGE_SIZE,
     alert_status: _AlertStatus = None,
-) -> AlertFeed:
-    """The newest page of ``observability_alert_events``, PHI-free fields only.
+) -> AlertPage:
+    """One page of ``observability_alert_events``, newest first, PHI-free fields only.
 
-    Unfiltered it is the standing-problems view; ``status`` narrows it to what is
-    still open or to what a later pass resolved. An unrecognised status is a 422
-    at the edge, never a silently empty feed.
+    Paged as api-standards §4 asks - ``page``/``page_size`` (default 25, max 100)
+    with ``total_count`` over the whole filter, so a client can page back through
+    a long feed. Unfiltered it is the standing-problems view; ``status`` narrows
+    it to what is still open or to what a later pass resolved. An unrecognised
+    status is a 422 at the edge, never a silently empty feed.
     """
     del principal
-    return await _facade(request).get_alerts(limit=limit, status=alert_status)
+    return await _facade(request).get_alerts(page=page, page_size=page_size, status=alert_status)
 
 
 @router.get(

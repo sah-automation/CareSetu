@@ -31,7 +31,7 @@ from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel
-from sqlalchemy import Integer, cast, func, literal, literal_column, select
+from sqlalchemy import Integer, cast, func, literal, literal_column, select, true
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -68,24 +68,24 @@ from modules.observability.schema.models import (
 
 OBSERVABILITY_SCHEMA = "observability"
 
-#: Ceiling of the alert feed's ``limit`` param. An operator page shows a page of
-#: alerts, not the table - the deeper history is what the retention/export jobs
-#: are for.
-MAX_ALERT_FEED_LIMIT = 200
-
-#: Default page size of the alert feed, matching the plan's "inline alert feed".
-DEFAULT_ALERT_FEED_LIMIT = 50
+#: Default and ceiling of one page of the alert feed (api-standards §4: default
+#: 25, max 100). The feed is paged rather than capped at one screen because the
+#: operator page shows its most recent page and can page back through a long
+#: incident.
+DEFAULT_ALERT_PAGE_SIZE = 25
+MAX_ALERT_PAGE_SIZE = 100
 
 __all__ = [
-    "DEFAULT_ALERT_FEED_LIMIT",
+    "DEFAULT_ALERT_PAGE_SIZE",
     "DEFAULT_WINDOW_DAYS",
-    "MAX_ALERT_FEED_LIMIT",
+    "MAX_ALERT_PAGE_SIZE",
     "OBSERVABILITY_SCHEMA",
     "ROLLUP_MODE_BACKFILL",
     "ROLLUP_MODE_DAILY",
     "AlertEntry",
-    "AlertFeed",
+    "AlertPage",
     "BreakerHealthRow",
+    "BusinessCountView",
     "CostBudgetView",
     "CostSummary",
     "CostTrend",
@@ -723,6 +723,11 @@ class Overview(BaseModel):
     open_alerts: int
     critical_open_alerts: int
     open_breakers: int
+    #: The registry-driven business event counts the B4b consumer accumulated over
+    #: the window (plan-phase14 §7.2), newest store first by key. The last thing
+    #: an operator page shows above the fold: not just that the system is healthy,
+    #: but what it actually did today.
+    business_counts: list[BusinessCountView]
     #: The newest day the nightly rollup covered - how stale the percentiles,
     #: the budget snapshot and the health rows above can be.
     last_rolled_date: date | None
@@ -765,13 +770,18 @@ class LatencyReport(BaseModel):
 
 
 class DependencyHealth(BaseModel):
-    """One dependency's reachability as this read observed it.
+    """One dependency's state as this read observed it.
 
-    ``status`` is ``up`` when the read reached it, ``disabled`` when the
-    deployment has it switched off (an unset ``REDIS_URL`` is a configuration
-    choice, not an outage), and ``down`` when it was reached for and refused.
-    ``latency_ms`` is the round trip this read measured - the observed figure an
-    SLO is compared against, not a target.
+    Two statuses, both reachable, and neither overstated. ``up`` means the read
+    itself reached the dependency (the database probe) or the deployment has it
+    configured (the cache, which is deliberately never dialled per request - see
+    :func:`query_health`). ``disabled`` means the deployment switched it off,
+    which for the optional Redis cache is a configuration choice with a SQL
+    fallback rather than an outage.
+
+    ``latency_ms`` is the round trip this read measured and is present only when
+    one was taken; ``detail`` carries the human-readable reason for a
+    ``disabled`` dependency.
     """
 
     name: str
@@ -805,6 +815,22 @@ class BreakerHealthRow(BaseModel):
 
     provider: str
     breaker_state: str
+
+
+class BusinessCountView(BaseModel):
+    """One registry-driven business event's count over the window.
+
+    ``metric_key`` is the ``BUSINESS_EVENT_METRICS`` key the B4b consumer
+    accumulates (plan-phase14 §7.2); ``count`` is the ``value.count`` the B4a-style
+    increment maintains in ``observability_business_daily``.
+
+    A key with no event in the window is ABSENT rather than zero: the store holds
+    what was counted, and inventing a row per registered key would make a metric
+    nobody fires look like one that fired and did nothing.
+    """
+
+    metric_key: str
+    count: int
 
 
 class SystemHealth(BaseModel):
@@ -849,18 +875,17 @@ class AlertEntry(BaseModel):
     acked_at: datetime | None
 
 
-class AlertFeed(BaseModel):
-    """The newest page of the alert feed, newest first.
+class AlertPage(BaseModel):
+    """One page of the alert feed, newest first, plus the full match count.
 
-    ``limit`` echoes the page size the caller asked for and ``count`` is how many
-    rows came back, so a client can tell "the page was full" from "that is all of
-    them". Ties on ``created_at`` are broken by ``id`` so a page is stable while
-    a pass is still inserting.
+    Paged as api-standards §4 asks, with ``total_count`` counting every matching
+    row rather than the page alone, so a client can tell a full page from the end
+    of the feed. Ties on ``created_at`` are broken by ``id``, which keeps a page
+    stable while a pass is still inserting.
     """
 
-    limit: int
-    count: int
     alerts: list[AlertEntry]
+    total_count: int
 
 
 class Deeplinks(BaseModel):
@@ -889,8 +914,19 @@ def _elapsed_ms(started: float) -> Decimal:
     return Decimal(f"{(perf_counter() - started) * 1000:.2f}")
 
 
-def _max_date(value: object) -> date | None:
-    """A ``MAX(DATE)`` aggregate's value, or ``None`` over an empty table."""
+async def _last_rolled_date(connection: AsyncConnection) -> date | None:
+    """The newest day the nightly rollup covered, or ``None`` before its first pass.
+
+    The freshness marker both ``/overview`` and ``/latency`` carry: every rolled
+    figure the operator sees - percentiles, budget snapshots, provider health -
+    is only as current as this date.
+    """
+    result = await connection.execute(
+        select(func.max(observability_rollup_runs.c.rollup_date)).select_from(
+            observability_rollup_runs
+        )
+    )
+    value = result.scalar()
     return value if isinstance(value, date) else None
 
 
@@ -942,12 +978,17 @@ async def query_overview(
     )
     health_row = provider_health.mappings().one()
 
-    last_rolled = await connection.execute(
-        select(func.max(observability_rollup_runs.c.rollup_date)).select_from(
-            observability_rollup_runs
+    business = observability_business_daily
+    business_rows = await connection.execute(
+        select(
+            business.c.metric_key,
+            cast(business.c.value.op("->>")("count"), Integer).label("count"),
         )
+        .where(business.c.metric_date.between(from_date, to_date))
+        .order_by(business.c.metric_key)
     )
 
+    last_rolled = await _last_rolled_date(connection)
     cost = await query_cost_summary(connection)
     return Overview(
         days=_window_days(from_date, to_date),
@@ -966,7 +1007,11 @@ async def query_overview(
         open_alerts=int(alert_row["open_alerts"]),
         critical_open_alerts=int(alert_row["critical_open_alerts"]),
         open_breakers=int(health_row["open_breakers"]),
-        last_rolled_date=_max_date(last_rolled.scalar()),
+        business_counts=[
+            BusinessCountView(metric_key=entry["metric_key"], count=int(entry["count"]))
+            for entry in business_rows.mappings()
+        ],
+        last_rolled_date=last_rolled,
     )
 
 
@@ -994,13 +1039,8 @@ async def query_latency(connection: AsyncConnection) -> LatencyReport:
             health.c.window_end,
         ).order_by(health.c.provider)
     )
-    last_rolled = await connection.execute(
-        select(func.max(observability_rollup_runs.c.rollup_date)).select_from(
-            observability_rollup_runs
-        )
-    )
     return LatencyReport(
-        last_rolled_date=_max_date(last_rolled.scalar()),
+        last_rolled_date=await _last_rolled_date(connection),
         providers=[
             LatencyRow(
                 provider=entry["provider"],
@@ -1016,16 +1056,15 @@ async def query_latency(connection: AsyncConnection) -> LatencyReport:
     )
 
 
-async def query_health(
-    connection: AsyncConnection, *, cache_configured: bool, schemas: Sequence[str] = MODULE_SCHEMAS
-) -> SystemHealth:
-    """Read dependency reachability plus outbox and breaker state (``/health``).
+async def query_health(connection: AsyncConnection, *, cache_configured: bool) -> SystemHealth:
+    """Read dependency state plus outbox and breaker state (``/health``).
 
     The database entry is a timed round trip on this very connection, so the
     figure an operator reads is the one this request experienced. The cache entry
-    is resolved from Settings rather than dialled: the plan's cache is optional
-    with a SQL fallback, so an unconfigured cache is reported ``disabled`` - the
-    decision it is, not a failed dependency.
+    is resolved from Settings and never dialled: the plan's Redis is optional
+    with a SQL fallback, so the route must not spend a connection timeout
+    discovering that on every dashboard load - an unconfigured cache is reported
+    ``disabled``, the configuration choice it is.
 
     Outbox counts come from ``bus.dispatcher``: ADR-0003 names the dispatcher the
     only sanctioned cross-schema reader, so the SELECT stays there and this layer
@@ -1039,12 +1078,14 @@ async def query_health(
         DependencyHealth(name="database", status="up", latency_ms=_elapsed_ms(started)),
         DependencyHealth(
             name="cache",
-            status="configured" if cache_configured else "disabled",
+            status="up" if cache_configured else "disabled",
             detail=None if cache_configured else "REDIS_URL is unset; reads fall back to SQL",
         ),
     ]
 
-    counts = await count_outbox_rows(connection, await discover_outbox_tables(connection, schemas))
+    counts = await count_outbox_rows(
+        connection, await discover_outbox_tables(connection, MODULE_SCHEMAS)
+    )
     outbox = [
         OutboxHealthRow(
             table_schema=row.table.schema,
@@ -1076,16 +1117,28 @@ async def query_health(
 
 
 async def query_alerts(
-    connection: AsyncConnection, *, limit: int, status: str | None = None
-) -> AlertFeed:
-    """Read the newest page of the alert feed (``/alerts``).
+    connection: AsyncConnection, *, page: int, page_size: int, status: str | None = None
+) -> AlertPage:
+    """Read one page of the alert feed, newest first (``/alerts``).
 
     Unfiltered, this is the operator's standing-problems view; ``status`` narrows
     it to what is still open or to what a later pass has resolved. The feed is
     ordered newest first and carries only PHI-free columns, so it can be rendered
     inline on the operator page (plan-phase14 §9.2).
+
+    ``total_count`` is a second aggregate over the same filter rather than
+    ``len(alerts)``, so a caller can page back through a long feed without paging
+    to find out there is more.
     """
-    statement = select(
+    filter_clause = (
+        (observability_alert_events.c.status == status) if status is not None else true()
+    )
+    counted = await connection.execute(
+        select(func.count()).select_from(observability_alert_events).where(filter_clause)
+    )
+    total = int(counted.scalar_one())
+
+    columns = (
         observability_alert_events.c.id,
         observability_alert_events.c.severity,
         observability_alert_events.c.kind,
@@ -1096,13 +1149,15 @@ async def query_alerts(
         observability_alert_events.c.acked_by,
         observability_alert_events.c.acked_at,
     )
-    if status is not None:
-        statement = statement.where(observability_alert_events.c.status == status)
     rows = await connection.execute(
-        statement.order_by(
+        select(*columns)
+        .where(filter_clause)
+        .order_by(
             observability_alert_events.c.created_at.desc(),
             observability_alert_events.c.id.desc(),
-        ).limit(limit)
+        )
+        .offset((page - 1) * page_size)
+        .limit(page_size)
     )
     alerts = [
         AlertEntry(
@@ -1118,7 +1173,7 @@ async def query_alerts(
         )
         for entry in rows.mappings()
     ]
-    return AlertFeed(limit=limit, count=len(alerts), alerts=alerts)
+    return AlertPage(alerts=alerts, total_count=total)
 
 
 def build_deeplinks(
@@ -1201,10 +1256,12 @@ class ObservabilityFacade:
         async with self._engine.begin() as connection:
             return await query_health(connection, cache_configured=cache_configured)
 
-    async def get_alerts(self, *, limit: int, status: str | None = None) -> AlertFeed:
-        """Read the newest page of the alert feed, optionally narrowed by status."""
+    async def get_alerts(
+        self, *, page: int, page_size: int, status: str | None = None
+    ) -> AlertPage:
+        """Read one page of the alert feed, optionally narrowed by status."""
         async with self._engine.begin() as connection:
-            return await query_alerts(connection, limit=limit, status=status)
+            return await query_alerts(connection, page=page, page_size=page_size, status=status)
 
     def get_deeplinks(
         self,
