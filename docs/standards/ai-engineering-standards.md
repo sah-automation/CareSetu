@@ -25,7 +25,7 @@
 
 ### A4. Cost & budget metering
 
-- Every AI call records provider, tokens, and ₹cost to `ai_jobs`; counters persist (`NFR-001`, `NFR-COST-001`).
+- Every AI call records provider, tokens, and ₹cost to `intake.intake_ai_jobs`; counters persist (`NFR-001`, `NFR-COST-001`).
 - Monthly budget is **observe-and-warn**, never a block (PS-10, #408): spend is reported against the configured `ai_monthly_budget_paise` knob and an exhausted budget is logged/reportable only - the pipeline proceeds. This deliberately deviates from spec #344's hard-stop wording so internal engineering does not delay the care loop on spend; the knob stays so a cap can be reintroduced later without a rewrite.
 - Egress is **PHI-minimized and consent-gated** (`NFR-SEC-006`): only intake/prescription context leaves, never the full record; each egress is audited.
 
@@ -46,10 +46,11 @@ An abstract **AI gateway port** sits behind `MOD-005`. All LLM calls go through 
 ### A7. Observability & Tracing
 
 - Every LLM call flows through the AI gateway port and is traced via Langfuse SDK (`@observe` decorator from `observability.langfuse_client`).
-- Trace captures: provider, model, task_type, input/output tokens, latency_ms, cost_paise, confidence score, status.
-- **PHI is never sent to Langfuse** - only pseudonymous IDs and structured metadata (same boundary as `NFR-SEC-006`).
+- Trace captures: provider, model, task_type, input/output tokens, **duration_ms**, cost_paise, confidence score, status. (`duration_ms` is the real column on `intake.intake_ai_jobs`; there is no `latency_ms`.) Pseudonymous `intake_id` / `ai_job_id`, `trace_id` and prompt version ride along.
+- **PHI is never sent to Langfuse** - only pseudonymous IDs and structured metadata (same boundary as `NFR-SEC-006`). Span metadata is enforced by an allow-list and a unit test that asserts only allow-listed keys are admitted.
 - Prompt versions are managed in Langfuse UI and deployed via API (extends A6 versioning).
-- Quality evaluations run via Langfuse eval framework: confidence score distribution, doctor review outcomes.
+- **Cost is priced from a real table.** A model with no entry in the pricing table prices at **0 and is flagged as unknown** - that flag is what makes the gap visible. A known-free model is priced at 0 deliberately (an explicit entry), which is different from being unpriced. Per-model input/output rates in paise come from configuration, not from a constant; if the whole table is empty, every call is silently free and the budget meter (A4) has no signal, so `NFR-001` is unenforceable.
+- **Evals run on the Langfuse eval framework** (Batch 2 of `PHASE-14A`, plan §13): curated **datasets** of scored transcripts feed **LLM-as-judge** scoring on three axes - completeness (did the pre-summary capture every reported symptom?), confidence calibration (do high-confidence summaries really deserve the confidence), and rx-draft accuracy (does the drafted prescription match the doctor-approved `rx_items`?) - plus an **annotation queue** fed by doctor review outcomes. Judge scores are advisory evidence for A3/A6, never an automatic approval gate: a pre-summary still becomes clinical output only through doctor review (A3).
 - The Langfuse client is a no-op when `LANGFUSE_PUBLIC_KEY` is absent - tracing never blocks boot or the care loop.
 - **Enforced by the `check-ai-tracing` pre-commit gate:** a concrete method on any `MOD-005` class named as the AI boundary (`*Gateway*`, `*Provider*`, `*LLM*`, `*AI*`) must reference `@observe` or the `langfuse` client, or the build fails (`apps/backend/scripts/check_ai_tracing.py`). Abstract stubs and `_private` helpers are exempt.
 

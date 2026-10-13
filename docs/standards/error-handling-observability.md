@@ -38,6 +38,44 @@ Classify every failure into exactly one bucket; handling differs per bucket:
 
 ## 5. Metrics & Alerts (cost-aware)
 
-- `NFR-001` forbids paid observability. Use free/self-hosted options (e.g. SQL-backed counters, Prometheus/Grafana OSS on the same VM, or plain structured logs).
-- Minimum alert set: `MOD-011` tamper attempt; backup failure; AI budget meter > 80%; outbox backlog > threshold; repeated third-party failures (breaker open).
-- All alerting must be reviewable from the operator console - no PHI in alert payloads.
+- `NFR-001` forbids paid observability. The stack is hybrid free-tier plus Postgres as the system of record (`PHASE-14A`, `ADR-0024`/`0025`/`0026`):
+
+  | Signal                     | Tool                                 | Gate (off by default)                           | Landing                                                                              |
+  | :------------------------- | :----------------------------------- | :---------------------------------------------- | :----------------------------------------------------------------------------------- |
+  | Structured logs            | structlog JSON to stdout             | `LOG_FORMAT` (`console` in dev, `json` in prod) | Render logs; optional OTel log bridge to Grafana Loki                                |
+  | Errors / crashes           | Sentry SDK                           | `SENTRY_DSN` empty = off                        | Sentry free; `before_send` scrubs PHI, release = git SHA                             |
+  | Infra + app metrics/traces | OpenTelemetry SDK (OTLP/HTTP)        | `OTEL_ENABLED` + endpoint/headers               | Grafana Cloud free (Mimir/Tempo/Loki)                                                |
+  | AI spans + cost            | Langfuse SDK                         | `LANGFUSE_PUBLIC_KEY` (already present)         | Langfuse Cloud free                                                                  |
+  | Uptime                     | external free monitor                | dashboard-configured (probes `GET /health`)     | survives Render cold starts                                                          |
+  | AI/business aggregates     | Postgres `observability` (`MOD-013`) | `OBSERVABILITY_ENABLED`                         | **system of record** - vendor retention limits or churn never lose the decision data |
+
+- Every vendor client is env-gated and no-ops when unconfigured, so local dev and CI boot unchanged until a gate is set; exporters force-flush on shutdown so a Render spin-down does not drop buffered telemetry.
+- Aggregation never crosses schemas: `MOD-013` consumes outbox events into its own `observability` schema rather than reading other modules' tables (`ADR-0003`, `ADR-0025`).
+- **No PHI in logs, spans, error payloads or alert payloads** - redaction at the structlog processor, `before_send` in Sentry, and an attribute allow-list on OTel spans; pseudonymous ids only (`NFR-SEC-006`).
+
+### 5.1 SLOs
+
+Percentiles, not averages. Derived from the existing NFRs and the whitebox latency SLAs; the plan remains the source of truth for these numbers (`plan-phase14-observability.md` §11), restated here so the standard is checkable on its own.
+
+| SLO                                        | Target                                                              |
+| :----------------------------------------- | :------------------------------------------------------------------ |
+| Auth - token validation (`validate_token`) | p95 < 100 ms                                                        |
+| Auth - OTP verification (`verify_otp`)     | p95 < 400 ms                                                        |
+| Directory search                           | p95 < 250 ms                                                        |
+| AI call (end to end, provider included)    | p95 <= 30 s                                                         |
+| Care-loop latency (`KPI-008`)              | tracked per stage; stage deltas recorded from Phase 9 (`PHASE-14B`) |
+| Error rate (5xx share of requests)         | < 1%                                                                |
+
+### 5.2 Minimum alert set
+
+| Alert                | Trigger                                              | Signal source                                   |
+| :------------------- | :--------------------------------------------------- | :---------------------------------------------- |
+| Audit tamper         | any `audit.tamper_detected`                          | `audit.*` events → `observability_alert_events` |
+| Backup failure       | drill or nightly backup reports failure              | `backup-drill.yml`                              |
+| AI budget            | meter/spend above 80% of the monthly cap (`NFR-001`) | `observability_ai_cost_budget`                  |
+| Outbox backlog       | pending rows above threshold                         | `MOD-013` health read                           |
+| Circuit breaker open | provider breaker state ≠ closed                      | `observability_ai_provider_health`              |
+| Dead-letter row      | any dead-lettered event                              | dispatcher / `observability_alert_events`       |
+| Provider health drop | success rate or p95 degrades                         | `observability_ai_provider_health`              |
+
+- All alerting must be reviewable from the operator console - the in-app `observability_alert_events` feed is the operator-visible record; delivery itself goes through the free channels (Sentry alerts, Grafana Cloud alerting to email/Slack webhook).
