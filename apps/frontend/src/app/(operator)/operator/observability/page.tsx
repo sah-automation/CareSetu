@@ -9,7 +9,12 @@
 // The figures come from /overview rather than from each panel's own read so a
 // tile can never disagree with the page behind it: the backend computes
 // `spend_paise` from the same aggregate `/cost` headlines (facade.Overview).
-// The cost/usage/quality/latency panels are #709; this page is the KPIs only.
+//
+// #709 (C2b) landed the panels these tiles drill into, so the tiles are live
+// links again - the doctor dashboard's whole-card `Link` shape (#681) - except
+// open alerts, whose feed is #712 and must not link to a page that does not
+// exist. `formatPct`/`formatDuration` moved to lib/operator/observability-format
+// so the panels format a rate exactly as this page does.
 //
 // Reuses the doctor dashboard's KpiTile/KpiRow pattern
 // (app/(doctor)/doctor/page.tsx): a tile shows a skeleton while its read is in
@@ -18,19 +23,16 @@
 // rather than a wall of dashes - "no telemetry yet" is a different fact from
 // "telemetry that says nothing is wrong".
 
-import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 
 import { EmptyState } from "@/components/layout/EmptyState";
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
 import { PageHeader } from "@/components/layout/PageHeader";
-import { ApiError } from "@/lib/api-errors";
+import { PanelTabs } from "@/components/observability/ObservabilityPanelPage";
 import { formatInrPaise } from "@/lib/money";
 import { fetchOverview, type Overview } from "@/lib/operator/observability";
-
-type LoadStatus = "loading" | "ready" | "error";
-
-/** An unmeasured figure (see facade.Overview: a `null` rate, never a zero). */
-const DASH = "\u2014";
+import { formatDuration, formatPct } from "@/lib/operator/observability-format";
+import { usePanelRead } from "@/lib/operator/usePanelRead";
 
 interface KpiTileProps {
   testId: string;
@@ -41,22 +43,36 @@ interface KpiTileProps {
   pending: boolean;
   /** `critical` once the budget is exhausted; absent otherwise. */
   tone?: "critical";
+  /**
+   * The panel this tile summarises. Absent only for the open-alerts tile,
+   * whose alert feed is #712 - a tile with no destination renders as a card,
+   * because a live link to a page that does not exist is the dead navigation
+   * the nav's `soon` flag exists to prevent.
+   */
+  href?: string;
 }
 
 /**
  * The headline-KPI tile, mirroring the doctor dashboard's: the value carries
- * the test hook, the label and hint sit under it. Rendered as a card rather
- * than the doctor's `Link` because the panels these tiles would drill into are
- * #709 - a live link to a page that does not exist yet is the dead-navigation
- * failure the nav's `soon` flag exists to prevent.
+ * the test hook, the label and hint sit under it. A tile whose panel exists is
+ * a whole-card link to it (the doctor's `KpiTile` shape, #681); a tile whose
+ * panel is still a ticket renders as a plain card, which is what #708 shipped
+ * while every panel was #709.
  */
-function KpiTile({ testId, label, value, hint, pending, tone }: KpiTileProps) {
-  return (
-    <div
-      data-testid={testId}
-      data-tone={tone}
-      className="flex flex-col gap-1 rounded-lg border border-hairline bg-surface p-4"
-    >
+function KpiTile({
+  testId,
+  label,
+  value,
+  hint,
+  pending,
+  tone,
+  href,
+}: KpiTileProps) {
+  const className =
+    "flex flex-col gap-1 rounded-lg border border-hairline bg-surface p-4";
+  const toneClassName = tone === "critical" ? "text-danger" : "text-txt";
+  const body = (
+    <>
       {pending ? (
         <span
           data-testid={`${testId}-value`}
@@ -64,11 +80,7 @@ function KpiTile({ testId, label, value, hint, pending, tone }: KpiTileProps) {
         />
       ) : (
         <span
-          className={
-            tone === "critical"
-              ? "text-2xl font-semibold text-danger"
-              : "text-2xl font-semibold text-txt"
-          }
+          className={`text-2xl font-semibold ${toneClassName}`}
           data-testid={`${testId}-value`}
         >
           {value}
@@ -76,24 +88,27 @@ function KpiTile({ testId, label, value, hint, pending, tone }: KpiTileProps) {
       )}
       <span className="text-xs text-txt-muted">{label}</span>
       {!pending && hint && <span className="text-xs text-txt-sub">{hint}</span>}
-    </div>
+    </>
   );
-}
 
-/**
- * Percentages read at one decimal, trailing zeros dropped: `95.0` is "95%" on a
- * tile and `2.6` is "2.6%". A `null` rate is the em dash, not a zero.
- */
-function formatPct(value: number | null): string {
-  if (value === null) return DASH;
-  return `${Number(value.toFixed(1))}%`;
-}
+  if (!href) {
+    return (
+      <div data-testid={testId} data-tone={tone} className={className}>
+        {body}
+      </div>
+    );
+  }
 
-/** Latency in seconds past a second ("4.2s"), whole milliseconds below that. */
-function formatDuration(ms: number | null): string {
-  if (ms === null) return DASH;
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  return `${Number((ms / 1000).toFixed(1))}s`;
+  return (
+    <Link
+      href={href}
+      data-testid={testId}
+      data-tone={tone}
+      className={`${className} transition-[box-shadow,transform] hover:-translate-y-0.5 hover:shadow-pop focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring`}
+    >
+      {body}
+    </Link>
+  );
 }
 
 /**
@@ -121,7 +136,17 @@ interface TileSpec {
   value: string;
   hint?: string;
   tone?: "critical";
+  /** The panel this tile drills into; absent while that panel is unbuilt. */
+  href?: string;
 }
+
+/** The panel routes each KPI tile summarises (#709). */
+const PANEL_HREFS = {
+  cost: "/operator/observability/cost",
+  usage: "/operator/observability/usage",
+  quality: "/operator/observability/quality",
+  health: "/operator/observability/health",
+} as const;
 
 /**
  * The headline row's tiles, in display order: the bill, the AI's health, what
@@ -143,6 +168,7 @@ function tileSpecs(overview: Overview): TileSpec[] {
       value: formatInrPaise(overview.spend_paise),
       hint: `of ${formatInrPaise(overview.budget_paise)} budget`,
       tone: spendTone,
+      href: PANEL_HREFS.cost,
     },
     {
       testId: "kpi-budget-used",
@@ -154,32 +180,39 @@ function tileSpecs(overview: Overview): TileSpec[] {
             overview.budget_paise - overview.spend_paise,
           )} remaining`,
       tone: spendTone,
+      href: PANEL_HREFS.cost,
     },
     {
       testId: "kpi-ai-calls",
       label: LABELS.aiCalls,
       value: String(overview.total_calls),
       hint: `last ${overview.days} days`,
+      href: PANEL_HREFS.usage,
     },
     {
       testId: "kpi-success-rate",
       label: LABELS.successRate,
       value: formatPct(overview.success_rate),
       hint: `${overview.success_count} of ${overview.total_calls} calls`,
+      href: PANEL_HREFS.quality,
     },
     {
       testId: "kpi-low-confidence",
       label: LABELS.lowConfidence,
       value: formatPct(overview.low_confidence_rate),
       hint: `${overview.low_confidence_count} completions flagged`,
+      href: PANEL_HREFS.quality,
     },
     {
       testId: "kpi-p95-latency",
       label: LABELS.p95Latency,
       value: formatDuration(overview.p95_duration_ms),
       hint: "slowest provider",
+      href: PANEL_HREFS.health,
     },
     {
+      // No href: the alert feed is #712. The tile stays a card until its
+      // destination exists rather than linking to a page that does not.
       testId: "kpi-open-alerts",
       label: LABELS.openAlerts,
       value: String(overview.open_alerts),
@@ -190,6 +223,7 @@ function tileSpecs(overview: Overview): TileSpec[] {
       label: LABELS.openBreakers,
       value: String(overview.open_breakers),
       hint: "circuits tripped",
+      href: PANEL_HREFS.health,
     },
   ];
 }
@@ -215,6 +249,7 @@ function KpiRow({ overview }: { overview: Overview | null }) {
             hint={spec.hint}
             pending={overview === null}
             tone={spec.tone}
+            href={spec.href}
           />
         ))}
       </div>
@@ -247,29 +282,14 @@ function hasNoTelemetry(overview: Overview): boolean {
 }
 
 export default function ObservabilityOverviewPage() {
-  const [overview, setOverview] = useState<Overview | null>(null);
-  const [status, setStatus] = useState<LoadStatus>("loading");
-  const [errorTraceId, setErrorTraceId] = useState<string | undefined>();
-  const [bannerOpen, setBannerOpen] = useState(false);
-
-  const load = useCallback(() => {
-    setStatus("loading");
-    fetchOverview()
-      .then((data) => {
-        setOverview(data);
-        setStatus("ready");
-        setBannerOpen(false);
-      })
-      .catch((error: unknown) => {
-        setErrorTraceId(error instanceof ApiError ? error.traceId : undefined);
-        setStatus("error");
-        setBannerOpen(true);
-      });
-  }, []);
-
-  useEffect(() => {
-    load();
-  }, [load]);
+  const {
+    data: overview,
+    status,
+    errorTraceId,
+    bannerOpen,
+    reload: load,
+    dismissBanner,
+  } = usePanelRead(fetchOverview);
 
   const empty =
     status === "ready" && overview !== null && hasNoTelemetry(overview);
@@ -285,12 +305,14 @@ export default function ObservabilityOverviewPage() {
         }
       />
 
+      <PanelTabs current="overview" />
+
       {status === "error" && bannerOpen && (
         <ErrorBanner
           message="Could not load the observability overview."
           traceId={errorTraceId}
           onRetry={load}
-          onDismiss={() => setBannerOpen(false)}
+          onDismiss={dismissBanner}
         />
       )}
 
