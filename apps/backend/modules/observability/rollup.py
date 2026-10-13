@@ -437,8 +437,12 @@ async def _upsert_budget_snapshot(connection: AsyncConnection, snapshot: BudgetS
 async def _load_open_rollup_alerts(connection: AsyncConnection) -> list[_OpenAlert]:
     """Every open alert this rollup owns, with the marker it would re-raise under.
 
-    Consumer alerts (``audit_tamper`` / ``ai_egress``) carry no ``source`` marker
-    and are left alone - an operator's view of them outlives the nightly pass.
+    Alerts whose payload carries no ``source`` marker are skipped - this pass
+    only re-raises or resolves alerts it can identify by marker. Consumer alerts
+    (``audit_tamper`` / ``ai_egress``) do carry a ``source`` and so are loaded
+    here, but ``_apply_alerts`` never resolves them: their kinds are not in
+    :data:`RESOLVABLE_ALERT_KINDS`, so an operator's view of them outlives the
+    nightly pass.
     """
     table = observability_alert_events
     statement = select(table.c.id, table.c.kind, table.c.payload).where(

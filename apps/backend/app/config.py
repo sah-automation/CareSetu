@@ -342,8 +342,11 @@ class Settings:
     # gates error tracking (A4); ``otel_*`` gate the OTLP exporter, headers and
     # parent-based sampler ratio (A3); ``otel_service_version`` is the git-SHA
     # source shared by A3 and A4; ``metrics_enabled`` gates the optional
-    # Prometheus ``/metrics`` surface (A3); ``observability_enabled`` gates the
-    # MOD-013 aggregate consumer (B-tickets); ``grafana_url`` is the browsable
+    # Prometheus ``/metrics`` surface (A3); ``observability_enabled`` is the
+    # MOD-013 aggregate-consumer gate (B-tickets, plan-phase14 §4), reserved for
+    # a future opt-in - it is not yet read at runtime, because the composition
+    # root registers every module's handlers unconditionally
+    # (worker/main.py ``_MODULE_REGISTERS``); ``grafana_url`` is the browsable
     # Grafana base the operator ``/deeplinks`` read links out to (C1b #707).
     log_format: str = DEFAULT_LOG_FORMAT
     sentry_dsn: str = ""

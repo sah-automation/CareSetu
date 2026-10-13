@@ -202,6 +202,60 @@ jobs:
       - name: cross-schema FK scan
         run: uv run --project apps/backend python apps/backend/scripts/check_migrations_fk.py
 
+  observability-gates:
+    name: observability gates (boot with vendor gates ${{ matrix.gates }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [changes]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        gates: [off, on]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: "3.13"
+      - name: cache Python venv
+        id: venv-cache
+        uses: actions/cache@v4
+        with:
+          path: apps/backend/.venv
+          key: backend-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-${{ hashFiles('apps/backend/uv.lock') }}
+          restore-keys: backend-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-
+      - uses: ./.github/actions/setup-backend
+        with:
+          install: ${{ steps.venv-cache.outputs.cache-hit != 'true' }}
+      - name: boot the app with the observability gates ${{ matrix.gates }}
+        # Every Phase-14A vendor integration is env-gated and must be a no-op
+        # when unconfigured while still booting when configured (plan-phase14
+        # 4). The "off" leg proves the no-op path still boots - no unconditional
+        # SDK import, no shutdown flush that assumes a client - and the "on" leg
+        # proves the configured path still wires. Dummy endpoints keep this
+        # hermetic: the exporters fail to connect and are swallowed, exactly as
+        # a degraded boot would. No database needed (the engine is lazy and
+        # /health touches nothing).
+        run: uv run --directory apps/backend python -m scripts.check_observability_gates
+        env:
+          APP_ENVIRONMENT: test
+          SMS_PROVIDER: mock
+          GATEWAY_JWT_VERIFY_ENABLED: "true"
+          GATEWAY_JWT_SIGNING_KEY: e2e-dev-only-signing-key
+          GATEWAY_RATE_LIMIT_ENABLED: "false"
+          LOG_FORMAT: ${{ matrix.gates == 'on' && 'json' || 'console' }}
+          SENTRY_DSN: ${{ matrix.gates == 'on' && 'http://publickey@127.0.0.1:9/1' || '' }}
+          SENTRY_TRACES_SAMPLE_RATE: "0.0"
+          OTEL_ENABLED: ${{ matrix.gates == 'on' && 'true' || 'false' }}
+          OTEL_EXPORTER_OTLP_ENDPOINT: ${{ matrix.gates == 'on' && 'http://127.0.0.1:9/v1/traces' || '' }}
+          OTEL_TRACES_SAMPLER_RATIO: "1.0"
+          METRICS_ENABLED: ${{ matrix.gates == 'on' && 'true' || 'false' }}
+          LANGFUSE_PUBLIC_KEY: ${{ matrix.gates == 'on' && 'pk-lf-ci-smoke' || '' }}
+          LANGFUSE_SECRET_KEY: ${{ matrix.gates == 'on' && 'sk-lf-ci-smoke' || '' }}
+          LANGFUSE_HOST: ${{ matrix.gates == 'on' && 'http://127.0.0.1:9' || 'https://cloud.langfuse.com' }}
+          OBSERVABILITY_ENABLED: ${{ matrix.gates == 'on' && 'true' || 'false' }}
+
   contract-check:
     name: contract check (OpenAPI vs frontend auth client)
     runs-on: ubuntu-latest
