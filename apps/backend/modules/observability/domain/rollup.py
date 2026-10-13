@@ -224,16 +224,27 @@ class ProviderUsage:
 # ----------------------------------------------------------- health computation
 
 
+def ratio(numerator: int, denominator: int) -> Decimal | None:
+    """``numerator`` over ``denominator`` at the 4dp scale of the rate columns.
+
+    ``None`` only when ``denominator`` is zero: an absent sample is not a ``0.0000``
+    and the two must stay distinguishable to a reader. Shared by every rate MOD-013
+    reports, so the success rate, the provider-health rate, and the operator read
+    API's low-confidence rate all render at one scale.
+    """
+    if denominator <= 0:
+        return None
+    rate = Decimal(numerator) / Decimal(denominator)
+    return rate.quantize(_RATE_QUANTUM, rounding=ROUND_HALF_UP)
+
+
 def success_rate(success_count: int, calls: int) -> Decimal | None:
     """The share of ``calls`` that succeeded, at the 4dp scale of the column.
 
     ``None`` only when there were no calls at all - a scope with traffic and no
     success is a real ``0.0000`` and must stay distinguishable from no traffic.
     """
-    if calls <= 0:
-        return None
-    rate = Decimal(success_count) / Decimal(calls)
-    return rate.quantize(_RATE_QUANTUM, rounding=ROUND_HALF_UP)
+    return ratio(success_count, calls)
 
 
 def breaker_state_for(rate: Decimal | None, *, open_below: Decimal) -> str:
