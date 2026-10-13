@@ -6,11 +6,14 @@ kind, retry attempt, failure reason) and never carries PHI (transcript,
 structured clinical fields, confidence scores, egressed bytes stay in the
 ``intake`` schema - security-phii-standards no-PHI). ``intake.started``
 (PHASE-7 T05 #369) carries the funnel facts - patient id, mode, language -
-and has no intake id yet because it precedes capture. Covers the frozen event
-shapes, the ``register_handlers`` registration seam (payload models + the
-``intake.started`` telemetry and ``intake.captured`` self-subscriptions), and
-an emitted-envelope round-trip through the registry validator - all without a
-database.
+and has no intake id yet because it precedes capture. The ``ai_job.*`` events
+also carry the operational metering facts MOD-013 accumulates (B4a #702) -
+provider/model, tokens, priced cost, duration and the *derived*
+``low_confidence`` flag (the raw confidence score still never travels). Covers
+the frozen event shapes, the ``register_handlers`` registration seam (payload
+models + the ``intake.started`` telemetry and ``intake.captured`` self-
+subscriptions), and an emitted-envelope round-trip through the registry
+validator - all without a database.
 """
 
 from __future__ import annotations
@@ -95,8 +98,27 @@ def _capture_from_all_event_types() -> list[Envelope[BaseModel]]:
         intake_retry_requested_envelope(intake_id=1, record_attempt=2, reason="unusable_audio"),
         pre_summary_ready_envelope(intake_id=1, pre_summary_id=5, patient_id=7),
         pre_summary_low_confidence_envelope(intake_id=1, pre_summary_id=5),
-        ai_job_completed_envelope(ai_job_id=9, intake_id=1, task_type="structure"),
-        ai_job_failed_envelope(ai_job_id=9, intake_id=1, task_type="transcribe", reason="timeout"),
+        ai_job_completed_envelope(
+            ai_job_id=9,
+            intake_id=1,
+            task_type="structure",
+            provider="openai",
+            model="gpt-4o-mini",
+            input_tokens=900,
+            output_tokens=150,
+            cost_paise=24,
+            duration_ms=1200,
+            low_confidence=True,
+        ),
+        ai_job_failed_envelope(
+            ai_job_id=9,
+            intake_id=1,
+            task_type="transcribe",
+            reason="Ext002CallError",
+            provider="openai",
+            model="whisper-1",
+            timeout=True,
+        ),
         ai_egress_recorded_envelope(intake_id=1, ai_job_id=9, reason="structure"),
     ]
 
@@ -157,25 +179,54 @@ def test_pre_summary_low_confidence_names_the_summary() -> None:
     assert envelope.payload.pre_summary_id == 7
 
 
-def test_ai_job_completed_names_the_job_and_task() -> None:
-    envelope = ai_job_completed_envelope(ai_job_id=9, intake_id=42, task_type="draft")
+def test_ai_job_completed_names_the_job_and_carries_the_metering_facts() -> None:
+    envelope = ai_job_completed_envelope(
+        ai_job_id=9,
+        intake_id=42,
+        task_type="draft",
+        provider="openai",
+        model="gpt-4o-mini",
+        input_tokens=800,
+        output_tokens=120,
+        cost_paise=21,
+        duration_ms=950,
+        low_confidence=True,
+    )
 
     assert envelope.event_type == EVENT_AI_JOB_COMPLETED
     assert envelope.payload.ai_job_id == 9
     assert envelope.payload.intake_id == 42
     assert envelope.payload.task_type == "draft"
+    # B4a (#702): the telemetry facts MOD-013 accumulates from the event alone.
+    assert envelope.payload.provider == "openai"
+    assert envelope.payload.model == "gpt-4o-mini"
+    assert envelope.payload.input_tokens == 800
+    assert envelope.payload.output_tokens == 120
+    assert envelope.payload.cost_paise == 21
+    assert envelope.payload.duration_ms == 950
+    assert envelope.payload.low_confidence is True
 
 
-def test_ai_job_failed_carries_the_operational_reason() -> None:
+def test_ai_job_failed_carries_the_operational_reason_and_timeout_class() -> None:
     envelope = ai_job_failed_envelope(
-        ai_job_id=9, intake_id=42, task_type="summarize", reason="provider 429"
+        ai_job_id=9,
+        intake_id=42,
+        task_type="summarize",
+        reason="Ext002CallError",
+        provider="openai",
+        model="gpt-4o-mini",
+        timeout=True,
     )
 
     assert envelope.event_type == EVENT_AI_JOB_FAILED
     assert envelope.payload.ai_job_id == 9
     assert envelope.payload.intake_id == 42
     assert envelope.payload.task_type == "summarize"
-    assert envelope.payload.reason == "provider 429"
+    assert envelope.payload.reason == "Ext002CallError"
+    # B4a (#702): serving scope for the aggregate + the timeout bucket.
+    assert envelope.payload.provider == "openai"
+    assert envelope.payload.model == "gpt-4o-mini"
+    assert envelope.payload.timeout is True
 
 
 def test_ai_egress_recorded_names_the_job_and_reason() -> None:

@@ -6,7 +6,11 @@ Event names follow the registry dot-notation in ``internal-modules.md`` §4.2
 attempt, the failure reason - never PHI. The intake transcript, structured
 clinical fields and any patient content live in the ``intake`` schema and are
 read by the consuming facade; only identifiers and lifecycle facts travel on
-the bus (security-phii-standards no-PHI). Every builder answers an
+the bus (security-phii-standards no-PHI). The ``ai_job.*`` events also carry
+the operational METERING facts MOD-013's telemetry aggregates from the event
+alone (provider, model, tokens, cost, duration - and the derived
+``low_confidence`` flag, never the raw confidence score), so a consumer never
+crosses into the ``intake`` schema (B4 #702). Every builder answers an
 :class:`~bus.envelope.Envelope` the intake facade writes into
 ``intake.intake_outbox`` in the SAME transaction as the state change
 (ADR-0002 §1).
@@ -116,13 +120,25 @@ class AiJobCompletedPayload(BaseModel):
     """Subject of ``ai_job.completed``: an AI pipeline job finished.
 
     MOD-005 self-subscribes to chain the pipeline (e.g. structure -> publish a
-    pre-summary) and MOD-011 logs the completion. ``task_type`` names the job
-    kind; token/cost metering stays in the ``intake_ai_jobs`` row.
+    pre-summary) and MOD-011 logs the completion. Since B4 (#702) the payload
+    ALSO carries the operational metering facts MOD-013 accumulates from the
+    event alone - the serving provider/model, the provider-reported token use
+    priced into ``cost_paise``, the call duration, and the derived
+    ``low_confidence`` flag. The flag is computed upstream (always ``False`` for
+    transcribe) and never the raw confidence score, which stays in the intake
+    schema (security-phii-standards no-PHI). ``task_type`` names the job kind.
     """
 
     ai_job_id: int
     intake_id: int
     task_type: AiTaskType
+    provider: str
+    model: str
+    input_tokens: int
+    output_tokens: int
+    cost_paise: int
+    duration_ms: int
+    low_confidence: bool
 
 
 class AiJobFailedPayload(BaseModel):
@@ -130,13 +146,19 @@ class AiJobFailedPayload(BaseModel):
 
     MOD-011 logs the degrade path; ``reason`` carries the operational failure
     only (never PHI) so the audit/telemetry consumer can categorise the
-    failure without reading the AI gateway internals.
+    failure without reading the AI gateway internals. The serving provider/model
+    ride along for the MOD-013 usage aggregate (B4 #702), and ``timeout`` -
+    derived by the pipeline from the raised exception's cause chain - lets the
+    aggregate bucket timeouts separately from other failures.
     """
 
     ai_job_id: int
     intake_id: int
     task_type: AiTaskType
     reason: str
+    provider: str
+    model: str
+    timeout: bool
 
 
 class AiEgressRecordedPayload(BaseModel):
@@ -226,7 +248,17 @@ def pre_summary_low_confidence_envelope(
 
 
 def ai_job_completed_envelope(
-    *, ai_job_id: int, intake_id: int, task_type: AiTaskType
+    *,
+    ai_job_id: int,
+    intake_id: int,
+    task_type: AiTaskType,
+    provider: str,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cost_paise: int,
+    duration_ms: int,
+    low_confidence: bool,
 ) -> Envelope[AiJobCompletedPayload]:
     """Build the ``ai_job.completed`` envelope for the intake outbox."""
     return Envelope[AiJobCompletedPayload](
@@ -234,13 +266,29 @@ def ai_job_completed_envelope(
         event_type=EVENT_AI_JOB_COMPLETED,
         producer=PRODUCER_MODULE,
         payload=AiJobCompletedPayload(
-            ai_job_id=ai_job_id, intake_id=intake_id, task_type=task_type
+            ai_job_id=ai_job_id,
+            intake_id=intake_id,
+            task_type=task_type,
+            provider=provider,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_paise=cost_paise,
+            duration_ms=duration_ms,
+            low_confidence=low_confidence,
         ),
     )
 
 
 def ai_job_failed_envelope(
-    *, ai_job_id: int, intake_id: int, task_type: AiTaskType, reason: str
+    *,
+    ai_job_id: int,
+    intake_id: int,
+    task_type: AiTaskType,
+    reason: str,
+    provider: str,
+    model: str,
+    timeout: bool,
 ) -> Envelope[AiJobFailedPayload]:
     """Build the ``ai_job.failed`` envelope for the intake outbox."""
     return Envelope[AiJobFailedPayload](
@@ -248,7 +296,13 @@ def ai_job_failed_envelope(
         event_type=EVENT_AI_JOB_FAILED,
         producer=PRODUCER_MODULE,
         payload=AiJobFailedPayload(
-            ai_job_id=ai_job_id, intake_id=intake_id, task_type=task_type, reason=reason
+            ai_job_id=ai_job_id,
+            intake_id=intake_id,
+            task_type=task_type,
+            reason=reason,
+            provider=provider,
+            model=model,
+            timeout=timeout,
         ),
     )
 

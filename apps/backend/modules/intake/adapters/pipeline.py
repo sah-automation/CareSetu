@@ -37,6 +37,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import cast
 
+import httpx
 from cryptography.exceptions import InvalidTag
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -255,6 +256,8 @@ async def _run_structuring_pipeline(
             return
 
         settings = get_settings()
+        configured_provider = settings.ai_provider.strip().lower()
+        configured_model = settings.ai_model or _adapters.MOCK_AI_MODEL
         gateway = _adapters.build_ai_gateway(settings)
 
         # Resolve the transcript before any job is created, so an unstructurable
@@ -310,8 +313,8 @@ async def _run_structuring_pipeline(
             transcribe_job_id = await _insert_ai_job(
                 connection,
                 intake_id,
-                provider=settings.ai_provider.strip().lower(),
-                model=settings.ai_model or _adapters.MOCK_AI_MODEL,
+                provider=configured_provider,
+                model=configured_model,
                 task_type="transcribe",
             )
             try:
@@ -333,6 +336,9 @@ async def _run_structuring_pipeline(
                     intake_id=intake_id,
                     task_type="transcribe",
                     reason=_failure_reason(exc),
+                    provider=configured_provider,
+                    model=configured_model,
+                    timeout=_is_timeout(exc),
                 )
                 await _degrade_to_raw_review(
                     connection,
@@ -373,6 +379,7 @@ async def _run_structuring_pipeline(
                 elapsed_ms=transcribe_elapsed_ms,
                 input_tokens=transcribe_result.input_tokens,
                 output_tokens=transcribe_result.output_tokens,
+                low_confidence=False,
             )
             await _audit_egress(
                 consent_facade,
@@ -445,8 +452,8 @@ async def _run_structuring_pipeline(
         ai_job_id = await _insert_ai_job(
             connection,
             intake_id,
-            provider=settings.ai_provider.strip().lower(),
-            model=settings.ai_model or _adapters.MOCK_AI_MODEL,
+            provider=configured_provider,
+            model=configured_model,
         )
         try:
             started = time.monotonic()
@@ -482,6 +489,9 @@ async def _run_structuring_pipeline(
                 intake_id=intake_id,
                 task_type="structure",
                 reason=_failure_reason(exc),
+                provider=configured_provider,
+                model=configured_model,
+                timeout=_is_timeout(exc),
             )
             await _degrade_to_raw_review(
                 connection,
@@ -566,6 +576,22 @@ def _failure_reason(exc: BaseException) -> str:
     return type(exc).__name__
 
 
+def _is_timeout(exc: BaseException) -> bool:
+    """True when ``exc``'s cause chain bottoms out in a provider timeout.
+
+    ``post_with_backoff`` re-raises ``Ext002CallError(...) from exc``, so a
+    timed-out HTTP call keeps its ``httpx.TimeoutException`` cause. The failed
+    job classifies the failure as a timeout here - the telemetry consumer only
+    reads the boolean off the event (B4a #702), never the gateway internals.
+    """
+    current: BaseException | None = exc
+    while current is not None:
+        if isinstance(current, httpx.TimeoutException):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 async def _degrade_to_raw_review(
     connection: AsyncConnection,
     intake_id: int,
@@ -601,12 +627,18 @@ async def _fail_job(
     intake_id: int,
     task_type: str,
     reason: str,
+    provider: str,
+    model: str,
+    timeout: bool,
 ) -> None:
     """Mark the ai_jobs row ``failed`` and publish ``ai_job.failed``.
 
     Runs in the SAME transaction as the intake degradation, so a timeout/
     malformed-output failure durably records the failed job and its bus event
-    alongside the raw-review transition (ADR-0002 §1).
+    alongside the raw-review transition (ADR-0002 §1). The event carries the
+    configured plan's provider/model (the pre-call booking on the job row) and
+    the derived ``timeout`` classification so the MOD-013 usage aggregate can
+    bucket timeouts separately (B4a #702).
     """
     await connection.execute(
         intake_ai_jobs.update()
@@ -626,6 +658,9 @@ async def _fail_job(
             intake_id=intake_id,
             task_type=task_type,  # type: ignore[arg-type]
             reason=reason,
+            provider=provider,
+            model=model,
+            timeout=timeout,
         ),
     )
 
@@ -682,15 +717,18 @@ async def _complete_ai_job(
     elapsed_ms: int,
     input_tokens: int,
     output_tokens: int,
+    low_confidence: bool,
 ) -> None:
     """Persist a successful AI job + publish ``ai_job.completed`` (shared leg shape).
 
     The completed row carries the effective (serving) provider/model, the
     provider confidence, the provider's reported token usage priced into
     ``cost_paise`` by the per-model pricing helper (#399), and the call latency;
-    then ``ai_job.completed`` is emitted. Runs in the SAME transaction as the
-    ledger dedupe so a pass is a metered row per leg that ran - never a silent,
-    unlogged egress (PS-03). Shared by the transcribe leg
+    then ``ai_job.completed`` is emitted. The event carries the same metering
+    facts plus the derived ``low_confidence`` flag so the MOD-013 usage aggregate
+    accumulates from the event alone (B4a #702). Runs in the SAME transaction as
+    the ledger dedupe so a pass is a metered row per leg that ran - never a
+    silent, unlogged egress (PS-03). Shared by the transcribe leg
     (``task_type="transcribe"``, #401) and the structure leg
     (``task_type="structure"``) so the completion shape cannot drift between them.
     """
@@ -718,6 +756,13 @@ async def _complete_ai_job(
             ai_job_id=ai_job_id,
             intake_id=intake_id,
             task_type=task_type,
+            provider=provider,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_paise=cost_paise,
+            duration_ms=elapsed_ms,
+            low_confidence=low_confidence,
         ),
     )
 
@@ -817,4 +862,5 @@ async def _finalize_pipeline(
         elapsed_ms=elapsed_ms,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        low_confidence=low_conf,
     )
