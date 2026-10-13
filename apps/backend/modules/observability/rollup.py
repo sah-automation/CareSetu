@@ -47,6 +47,8 @@ from bus.bootstrap import MODULE_SCHEMAS
 from bus.dispatcher import count_outbox_rows, discover_outbox_tables
 from modules.observability.domain.consumer import AlertRow
 from modules.observability.domain.rollup import (
+    ALERT_STATUS_OPEN,
+    ALERT_STATUS_RESOLVED,
     RESOLVABLE_ALERT_KINDS,
     ROLLUP_MODE_DAILY,
     BudgetSnapshot,
@@ -77,9 +79,6 @@ from modules.observability.schema.models import (
 )
 
 logger = logging.getLogger(__name__)
-
-_ALERT_STATUS_OPEN = "open"
-_ALERT_STATUS_RESOLVED = "resolved"
 
 
 def _insert_alert(alert: AlertRow) -> Any:
@@ -443,7 +442,7 @@ async def _load_open_rollup_alerts(connection: AsyncConnection) -> list[_OpenAle
     """
     table = observability_alert_events
     statement = select(table.c.id, table.c.kind, table.c.payload).where(
-        table.c.status == _ALERT_STATUS_OPEN
+        table.c.status == ALERT_STATUS_OPEN
     )
     rows = (await connection.execute(statement)).all()
     alerts: list[_OpenAlert] = []
@@ -505,7 +504,7 @@ async def _apply_alerts(
         result = await connection.execute(
             observability_alert_events.update()
             .where(observability_alert_events.c.id.in_(stale))
-            .values(status=_ALERT_STATUS_RESOLVED)
+            .values(status=ALERT_STATUS_RESOLVED)
         )
         resolved = int(result.rowcount or 0)
     return raised, resolved

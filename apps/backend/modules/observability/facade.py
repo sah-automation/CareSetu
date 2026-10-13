@@ -2,11 +2,13 @@
 
 The only legal cross-module import target for the ``observability``
 module (coding-standards §2, ADR-0003). It is telemetry, not a domain
-bounded context: typed read methods over the aggregates arrive with the
-operator read routes (Batch 1 C1); the B4 public surface carries the effects
-the event consumers run - the AI-usage aggregation (B4a #702), the
-registry-driven business-daily counts and the PHI-free alert rows (B4b #703) -
-plus the schema constant the composition root resolves the ledger against.
+bounded context: the C1 operator read methods arrive with the operator read
+routes, split across two batches - C1a (``#706``) serves spend, usage and
+quality; C1b (``#707``) serves the overview, latency, health, alert feed and
+deep links. The B4 public surface carries the effects the event consumers
+run - the AI-usage aggregation (B4a #702), the registry-driven business-daily
+counts and the PHI-free alert rows (B4b #703) - plus the schema constant the
+composition root resolves the ledger against.
 
 The B5a nightly rollup (#704) joins it as :func:`run_rollup`: the off-request-path
 pass that recomputes the percentile aggregates, snapshots budget spend and
@@ -24,20 +26,29 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
+from time import perf_counter
+from typing import Any
+from uuid import UUID
 
 from pydantic import BaseModel
-from sqlalchemy import Integer, cast, func, literal_column, select
+from sqlalchemy import Integer, cast, func, literal, literal_column, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from bus.bootstrap import MODULE_SCHEMAS
+from bus.dispatcher import count_outbox_rows, discover_outbox_tables
 from bus.envelope import Envelope
 from modules.observability.domain.consumer import (
+    ALERT_SEVERITY_CRITICAL,
     AiJobCompletedUsagePayload,
     AiJobFailedUsagePayload,
     AlertRow,
 )
+from modules.observability.domain.deeplinks import grafana_link, langfuse_link, sentry_link
 from modules.observability.domain.rollup import (
+    ALERT_STATUS_OPEN,
+    BREAKER_STATE_OPEN,
     ROLLUP_MODE_BACKFILL,
     ROLLUP_MODE_DAILY,
     RollupPlan,
@@ -52,34 +63,59 @@ from modules.observability.schema.models import (
     observability_ai_usage_daily,
     observability_alert_events,
     observability_business_daily,
+    observability_rollup_runs,
 )
 
 OBSERVABILITY_SCHEMA = "observability"
 
+#: Ceiling of the alert feed's ``limit`` param. An operator page shows a page of
+#: alerts, not the table - the deeper history is what the retention/export jobs
+#: are for.
+MAX_ALERT_FEED_LIMIT = 200
+
+#: Default page size of the alert feed, matching the plan's "inline alert feed".
+DEFAULT_ALERT_FEED_LIMIT = 50
+
 __all__ = [
+    "DEFAULT_ALERT_FEED_LIMIT",
     "DEFAULT_WINDOW_DAYS",
+    "MAX_ALERT_FEED_LIMIT",
     "OBSERVABILITY_SCHEMA",
     "ROLLUP_MODE_BACKFILL",
     "ROLLUP_MODE_DAILY",
+    "AlertEntry",
+    "AlertFeed",
+    "BreakerHealthRow",
     "CostBudgetView",
     "CostSummary",
     "CostTrend",
     "CostTrendPoint",
+    "Deeplinks",
+    "DependencyHealth",
+    "LatencyReport",
+    "LatencyRow",
     "ObservabilityFacade",
+    "OutboxHealthRow",
+    "Overview",
     "ProviderQualityRow",
     "QualityReport",
     "RollupPlan",
     "RollupReport",
     "RollupRunState",
     "RollupThresholds",
+    "SystemHealth",
     "UsageReport",
     "UsageRow",
     "accumulate_ai_usage",
     "accumulate_business_count",
     "load_rollup_state",
     "plan_rollup_dates",
+    "query_alerts",
     "query_cost_summary",
     "query_cost_trend",
+    "query_health",
+    "query_latency",
+    "query_overview",
     "query_quality",
     "query_usage",
     "record_alert_event",
@@ -240,12 +276,14 @@ async def record_alert_event(connection: AsyncConnection, alert: AlertRow) -> No
     )
 
 
-# ------------------------------------------------------- operator read API (C1a)
+# ------------------------------------------------------- operator read API (C1)
 #
-# The four aggregates the operator observability routes serve (plan-phase14 §9.1),
+# The nine aggregates the operator observability routes serve (plan-phase14 §9.1),
 # projected out of this schema's own tables. No cross-schema SQL: the ledger MOD-013
 # accumulated is the system of record (ADR-0003), and a read never joins another
-# module's storage to build it.
+# module's storage to build it. The one exception is the ``/health`` outbox counts,
+# which are read through the dispatcher's own sanctioned contract rather than with
+# SQL of its own.
 
 
 class CostBudgetView(BaseModel):
@@ -652,14 +690,468 @@ async def query_quality(
     )
 
 
+class Overview(BaseModel):
+    """The operator landing page's headline KPIs (plan-phase14 §9.1).
+
+    One number per question the dashboard opens with: is the bill on plan, is the
+    AI working, is anything broken, and is the telemetry itself fresh. Each is
+    read from the aggregate that already owns it, so the overview can never
+    disagree with the route behind the tile - ``spend_paise`` and friends ARE
+    ``/cost``'s headline, and the rates are ``/quality``'s.
+
+    The windowed figures cover ``[from_date, to_date]``; spend and the alert
+    counts do not, because the budget is a billing-period figure and an alert
+    stays open until a later pass resolves it.
+    """
+
+    days: int
+    from_date: date
+    to_date: date
+    total_calls: int
+    success_count: int
+    success_rate: Decimal | None
+    low_confidence_count: int
+    low_confidence_rate: Decimal | None
+    #: The slowest provider's p95 across the last rolled day - the worst AI
+    #: latency the ledger knows of, which is the figure an SLO is written
+    #: against. ``None`` until a provider has a rolled latency sample.
+    p95_duration_ms: Decimal | None
+    spend_paise: int
+    budget_paise: int
+    budget_utilization_pct: Decimal
+    budget_exhausted: bool
+    open_alerts: int
+    critical_open_alerts: int
+    open_breakers: int
+    #: The newest day the nightly rollup covered - how stale the percentiles,
+    #: the budget snapshot and the health rows above can be.
+    last_rolled_date: date | None
+
+
+class LatencyRow(BaseModel):
+    """One provider's rolled latency distribution.
+
+    Percentiles come from ``observability_ai_provider_health``, which the nightly
+    rollup recomputes over the whole recorded history it can see and stamps with
+    the window it ranked. They are therefore "as of the last roll", not "over a
+    requested window" - ``window_start``/``window_end`` say which.
+
+    Each percentile is ``None`` for a provider with no timed completion, which is
+    not the same as a provider that responded instantly.
+    """
+
+    provider: str
+    sample_count: int
+    p50_duration_ms: Decimal | None
+    p95_duration_ms: Decimal | None
+    p99_duration_ms: Decimal | None
+    window_start: datetime | None
+    window_end: datetime | None
+
+
+class LatencyReport(BaseModel):
+    """Per-provider p50/p95/p99, plus how fresh those percentiles are.
+
+    No ``days`` param on purpose: the percentiles are a rolling snapshot the
+    rollup writes, not a windowed aggregate the read can re-derive, so a window
+    here would describe a period the numbers were never computed over. The HTTP
+    server's own route latency rides the OTel ``caresetu.http.server.duration``
+    histogram and is read from the OTLP backend, not from Postgres (see
+    plan-phase14 §5).
+    """
+
+    last_rolled_date: date | None
+    providers: list[LatencyRow]
+
+
+class DependencyHealth(BaseModel):
+    """One dependency's reachability as this read observed it.
+
+    ``status`` is ``up`` when the read reached it, ``disabled`` when the
+    deployment has it switched off (an unset ``REDIS_URL`` is a configuration
+    choice, not an outage), and ``down`` when it was reached for and refused.
+    ``latency_ms`` is the round trip this read measured - the observed figure an
+    SLO is compared against, not a target.
+    """
+
+    name: str
+    status: str
+    latency_ms: Decimal | None = None
+    detail: str | None = None
+
+
+class OutboxHealthRow(BaseModel):
+    """One outbox table's undelivered and terminally-failed rows.
+
+    Read through ``bus.dispatcher.count_outbox_rows``, never with SQL of this
+    module's own: ADR-0003 names the dispatcher the only sanctioned cross-schema
+    reader, and the outbox row contract is its to define. ``backlog`` is
+    ``pending`` plus ``inflight`` - rows still owed a delivery attempt.
+
+    ``table_schema`` is spelled out rather than named ``schema``, which would
+    shadow the pydantic field BaseModel itself carries.
+    """
+
+    table_schema: str
+    table: str
+    pending: int
+    inflight: int
+    dead_letter: int
+    backlog: int
+
+
+class BreakerHealthRow(BaseModel):
+    """One AI provider's recorded breaker state (the rollup observes, never trips)."""
+
+    provider: str
+    breaker_state: str
+
+
+class SystemHealth(BaseModel):
+    """Dependency reachability plus the outbox and circuit-breaker state.
+
+    Everything an operator needs to answer "is something stuck?" without leaving
+    the page: whether the stores answered, how much is queued for delivery, how
+    many deliveries are terminally failed, and which providers the rollup last
+    saw below its success-rate floor.
+
+    A database this read cannot reach is not reported here - with no database
+    there are no counts to report either, so the request fails through the app's
+    own error path rather than answering 200 with an empty body that an external
+    monitor would read as healthy.
+    """
+
+    dependencies: list[DependencyHealth]
+    outbox: list[OutboxHealthRow]
+    outbox_backlog: int
+    dead_letter_rows: int
+    breakers: list[BreakerHealthRow]
+    open_breakers: int
+
+
+class AlertEntry(BaseModel):
+    """One ``observability_alert_events`` row as the operator feed answers it.
+
+    ``payload`` is the PHI-free map the producers wrote (ids and figures only -
+    ``error-handling-observability.md`` §5); the read passes it through rather
+    than reshaping it, so an alert reads the same in the feed as it does in the
+    database.
+    """
+
+    id: UUID
+    severity: str
+    kind: str
+    title: str
+    payload: dict[str, Any]
+    status: str
+    created_at: datetime
+    acked_by: int | None
+    acked_at: datetime | None
+
+
+class AlertFeed(BaseModel):
+    """The newest page of the alert feed, newest first.
+
+    ``limit`` echoes the page size the caller asked for and ``count`` is how many
+    rows came back, so a client can tell "the page was full" from "that is all of
+    them". Ties on ``created_at`` are broken by ``id`` so a page is stable while
+    a pass is still inserting.
+    """
+
+    limit: int
+    count: int
+    alerts: list[AlertEntry]
+
+
+class Deeplinks(BaseModel):
+    """The operator page's outbound vendor links (plan-phase14 §9.1).
+
+    Every key is optional and independently ``None``: a deployment with Sentry but
+    no Grafana answers with a Sentry link and an absent Grafana one. The route
+    never fails over an unconfigured vendor - see
+    :mod:`modules.observability.domain.deeplinks`.
+    """
+
+    grafana: str | None = None
+    sentry: str | None = None
+    langfuse: str | None = None
+
+
+# ------------------------------------------------------- operator read API (C1b)
+#
+# The five reads C1b adds. Same rules as C1a above: this module's own tables,
+# the dispatcher's sanctioned outbox contract where a cross-schema figure is
+# wanted, and vendor URLs derived by pure functions over Settings.
+
+
+def _elapsed_ms(started: float) -> Decimal:
+    """Milliseconds since a :func:`time.perf_counter` reading, at 2dp."""
+    return Decimal(f"{(perf_counter() - started) * 1000:.2f}")
+
+
+def _max_date(value: object) -> date | None:
+    """A ``MAX(DATE)`` aggregate's value, or ``None`` over an empty table."""
+    return value if isinstance(value, date) else None
+
+
+async def query_overview(
+    connection: AsyncConnection, *, from_date: date, to_date: date
+) -> Overview:
+    """Read the headline KPIs (``/overview``).
+
+    Deliberately composed from the aggregates that already own each figure rather
+    than re-derived in one wide query: the spend is ``query_cost_summary``'s
+    summary verbatim (so the overview's budget tile is the same arithmetic the
+    ``ai_budget`` alert is raised against), the rates are the same windowed sums
+    ``/quality`` reads, and the freshness marker is the rollup ledger's newest
+    date. One extra read of the budget rows is cheaper than a second copy of the
+    cap-versus-spend rule that could drift from the first.
+    """
+    usage = observability_ai_usage_daily
+    totals = await connection.execute(
+        select(
+            func.coalesce(func.sum(usage.c.calls), 0).label("calls"),
+            func.coalesce(func.sum(usage.c.success_count), 0).label("success_count"),
+            func.coalesce(func.sum(usage.c.low_confidence_count), 0).label("low_confidence_count"),
+        ).where(usage.c.usage_date.between(from_date, to_date))
+    )
+    row = totals.mappings().one()
+    calls = int(row["calls"])
+    success_count = int(row["success_count"])
+    low_confidence_count = int(row["low_confidence_count"])
+
+    alerts = observability_alert_events
+    open_alerts = await connection.execute(
+        select(
+            func.count().label("open_alerts"),
+            func.count()
+            .filter(alerts.c.severity == ALERT_SEVERITY_CRITICAL)
+            .label("critical_open_alerts"),
+        ).where(alerts.c.status == ALERT_STATUS_OPEN)
+    )
+    alert_row = open_alerts.mappings().one()
+
+    health = observability_ai_provider_health
+    provider_health = await connection.execute(
+        select(
+            func.max(health.c.p95_duration_ms).label("p95_duration_ms"),
+            func.count()
+            .filter(health.c.breaker_state == BREAKER_STATE_OPEN)
+            .label("open_breakers"),
+        )
+    )
+    health_row = provider_health.mappings().one()
+
+    last_rolled = await connection.execute(
+        select(func.max(observability_rollup_runs.c.rollup_date)).select_from(
+            observability_rollup_runs
+        )
+    )
+
+    cost = await query_cost_summary(connection)
+    return Overview(
+        days=_window_days(from_date, to_date),
+        from_date=from_date,
+        to_date=to_date,
+        total_calls=calls,
+        success_count=success_count,
+        success_rate=ratio(success_count, calls),
+        low_confidence_count=low_confidence_count,
+        low_confidence_rate=ratio(low_confidence_count, success_count),
+        p95_duration_ms=health_row["p95_duration_ms"],
+        spend_paise=cost.total_spend_paise,
+        budget_paise=cost.total_limit_paise,
+        budget_utilization_pct=cost.utilization_pct,
+        budget_exhausted=cost.exhausted,
+        open_alerts=int(alert_row["open_alerts"]),
+        critical_open_alerts=int(alert_row["critical_open_alerts"]),
+        open_breakers=int(health_row["open_breakers"]),
+        last_rolled_date=_max_date(last_rolled.scalar()),
+    )
+
+
+async def query_latency(connection: AsyncConnection) -> LatencyReport:
+    """Read each provider's rolled p50/p95/p99 (``/latency``).
+
+    The percentiles are the B5a rollup's own ``observability_ai_provider_health``
+    rows, read verbatim with the window it ranked them over - recomputing them
+    here would rank a different sample (this request's window) than the one the
+    alert thresholds were evaluated against.
+
+    Providers the rollup has no latency sample for are absent entirely: there is
+    no row to project, and inventing a zero-percentile provider would read as a
+    provider that answered instantly.
+    """
+    health = observability_ai_provider_health
+    rows = await connection.execute(
+        select(
+            health.c.provider,
+            health.c.sample_count,
+            health.c.p50_duration_ms,
+            health.c.p95_duration_ms,
+            health.c.p99_duration_ms,
+            health.c.window_start,
+            health.c.window_end,
+        ).order_by(health.c.provider)
+    )
+    last_rolled = await connection.execute(
+        select(func.max(observability_rollup_runs.c.rollup_date)).select_from(
+            observability_rollup_runs
+        )
+    )
+    return LatencyReport(
+        last_rolled_date=_max_date(last_rolled.scalar()),
+        providers=[
+            LatencyRow(
+                provider=entry["provider"],
+                sample_count=int(entry["sample_count"]),
+                p50_duration_ms=entry["p50_duration_ms"],
+                p95_duration_ms=entry["p95_duration_ms"],
+                p99_duration_ms=entry["p99_duration_ms"],
+                window_start=entry["window_start"],
+                window_end=entry["window_end"],
+            )
+            for entry in rows.mappings()
+        ],
+    )
+
+
+async def query_health(
+    connection: AsyncConnection, *, cache_configured: bool, schemas: Sequence[str] = MODULE_SCHEMAS
+) -> SystemHealth:
+    """Read dependency reachability plus outbox and breaker state (``/health``).
+
+    The database entry is a timed round trip on this very connection, so the
+    figure an operator reads is the one this request experienced. The cache entry
+    is resolved from Settings rather than dialled: the plan's cache is optional
+    with a SQL fallback, so an unconfigured cache is reported ``disabled`` - the
+    decision it is, not a failed dependency.
+
+    Outbox counts come from ``bus.dispatcher``: ADR-0003 names the dispatcher the
+    only sanctioned cross-schema reader, so the SELECT stays there and this layer
+    only reshapes its rows. Every ``*_outbox`` table of every module schema is
+    counted, because a stuck outbox is stuck regardless of which module published
+    it.
+    """
+    started = perf_counter()
+    await connection.execute(select(literal(1)))
+    dependencies = [
+        DependencyHealth(name="database", status="up", latency_ms=_elapsed_ms(started)),
+        DependencyHealth(
+            name="cache",
+            status="configured" if cache_configured else "disabled",
+            detail=None if cache_configured else "REDIS_URL is unset; reads fall back to SQL",
+        ),
+    ]
+
+    counts = await count_outbox_rows(connection, await discover_outbox_tables(connection, schemas))
+    outbox = [
+        OutboxHealthRow(
+            table_schema=row.table.schema,
+            table=row.table.table_name,
+            pending=row.pending,
+            inflight=row.inflight,
+            dead_letter=row.dead_letter,
+            backlog=row.backlog,
+        )
+        for row in counts
+    ]
+
+    health = observability_ai_provider_health
+    breaker_rows = await connection.execute(
+        select(health.c.provider, health.c.breaker_state).order_by(health.c.provider)
+    )
+    breakers = [
+        BreakerHealthRow(provider=entry["provider"], breaker_state=entry["breaker_state"])
+        for entry in breaker_rows.mappings()
+    ]
+    return SystemHealth(
+        dependencies=dependencies,
+        outbox=outbox,
+        outbox_backlog=sum(row.backlog for row in outbox),
+        dead_letter_rows=sum(row.dead_letter for row in outbox),
+        breakers=breakers,
+        open_breakers=sum(1 for row in breakers if row.breaker_state == BREAKER_STATE_OPEN),
+    )
+
+
+async def query_alerts(
+    connection: AsyncConnection, *, limit: int, status: str | None = None
+) -> AlertFeed:
+    """Read the newest page of the alert feed (``/alerts``).
+
+    Unfiltered, this is the operator's standing-problems view; ``status`` narrows
+    it to what is still open or to what a later pass has resolved. The feed is
+    ordered newest first and carries only PHI-free columns, so it can be rendered
+    inline on the operator page (plan-phase14 §9.2).
+    """
+    statement = select(
+        observability_alert_events.c.id,
+        observability_alert_events.c.severity,
+        observability_alert_events.c.kind,
+        observability_alert_events.c.title,
+        observability_alert_events.c.payload,
+        observability_alert_events.c.status,
+        observability_alert_events.c.created_at,
+        observability_alert_events.c.acked_by,
+        observability_alert_events.c.acked_at,
+    )
+    if status is not None:
+        statement = statement.where(observability_alert_events.c.status == status)
+    rows = await connection.execute(
+        statement.order_by(
+            observability_alert_events.c.created_at.desc(),
+            observability_alert_events.c.id.desc(),
+        ).limit(limit)
+    )
+    alerts = [
+        AlertEntry(
+            id=entry["id"],
+            severity=entry["severity"],
+            kind=entry["kind"],
+            title=entry["title"],
+            payload=entry["payload"],
+            status=entry["status"],
+            created_at=entry["created_at"],
+            acked_by=entry["acked_by"],
+            acked_at=entry["acked_at"],
+        )
+        for entry in rows.mappings()
+    ]
+    return AlertFeed(limit=limit, count=len(alerts), alerts=alerts)
+
+
+def build_deeplinks(
+    *,
+    grafana_url: str | None = None,
+    sentry_dsn: str | None = None,
+    langfuse_host: str | None = None,
+    langfuse_public_key: str | None = None,
+) -> Deeplinks:
+    """Derive the vendor deep links from Settings (``/deeplinks``).
+
+    No database and no network: the read is a projection of configuration, so it
+    cannot fail because a vendor is absent or unreachable. Each key is derived
+    independently, which is what lets a Sentry-only deployment answer with a
+    Sentry link and nothing else.
+    """
+    return Deeplinks(
+        grafana=grafana_link(grafana_url),
+        sentry=sentry_link(sentry_dsn),
+        langfuse=langfuse_link(langfuse_host, langfuse_public_key),
+    )
+
+
 class ObservabilityFacade:
     """Typed public facade for observability.
 
-    The B4 public surface carries the effects the event consumers run. The C1a
-    (``#706``) read seam joins it: ``get_cost_summary``, ``get_cost_trend``,
-    ``get_usage``, and ``get_quality`` are what the operator observability routes
-    call. Each opens the one settled engine connection and delegates its aggregate
-    to the module helper, so routes hold no SQL and the reads stay in this module.
+    The B4 public surface carries the effects the event consumers run. The C1
+    (``#706``/``#707``) read seam joins it: ``get_cost_summary``,
+    ``get_cost_trend``, ``get_usage``, ``get_quality``, ``get_overview``,
+    ``get_latency``, ``get_health``, ``get_alerts`` and ``get_deeplinks`` are what
+    the operator observability routes call. Each opens the one settled engine
+    connection and delegates its aggregate to the module helper, so routes hold
+    no SQL and the reads stay in this module.
 
     The windowed reads take ``days`` and an optional ``today`` so the caller - or a
     test - can pin the window; the routes own the default
@@ -692,3 +1184,45 @@ class ObservabilityFacade:
         from_date, to_date = window_for(days, today=today)
         async with self._engine.begin() as connection:
             return await query_quality(connection, from_date=from_date, to_date=to_date)
+
+    async def get_overview(self, *, days: int, today: date | None = None) -> Overview:
+        """Read the headline KPIs over the last ``days`` days."""
+        from_date, to_date = window_for(days, today=today)
+        async with self._engine.begin() as connection:
+            return await query_overview(connection, from_date=from_date, to_date=to_date)
+
+    async def get_latency(self) -> LatencyReport:
+        """Read the rolled per-provider percentiles (no window - see ``LatencyReport``)."""
+        async with self._engine.begin() as connection:
+            return await query_latency(connection)
+
+    async def get_health(self, *, cache_configured: bool) -> SystemHealth:
+        """Read dependency reachability plus outbox and breaker state."""
+        async with self._engine.begin() as connection:
+            return await query_health(connection, cache_configured=cache_configured)
+
+    async def get_alerts(self, *, limit: int, status: str | None = None) -> AlertFeed:
+        """Read the newest page of the alert feed, optionally narrowed by status."""
+        async with self._engine.begin() as connection:
+            return await query_alerts(connection, limit=limit, status=status)
+
+    def get_deeplinks(
+        self,
+        *,
+        grafana_url: str | None = None,
+        sentry_dsn: str | None = None,
+        langfuse_host: str | None = None,
+        langfuse_public_key: str | None = None,
+    ) -> Deeplinks:
+        """Derive the vendor deep links from the configured Settings.
+
+        Synchronous: it reads configuration, never storage. It stays on the facade
+        so the routes keep the one seam every other read goes through and the
+        derivation has one home to be tested in.
+        """
+        return build_deeplinks(
+            grafana_url=grafana_url,
+            sentry_dsn=sentry_dsn,
+            langfuse_host=langfuse_host,
+            langfuse_public_key=langfuse_public_key,
+        )

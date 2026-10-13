@@ -343,7 +343,8 @@ class Settings:
     # parent-based sampler ratio (A3); ``otel_service_version`` is the git-SHA
     # source shared by A3 and A4; ``metrics_enabled`` gates the optional
     # Prometheus ``/metrics`` surface (A3); ``observability_enabled`` gates the
-    # MOD-013 aggregate consumer (B-tickets).
+    # MOD-013 aggregate consumer (B-tickets); ``grafana_url`` is the browsable
+    # Grafana base the operator ``/deeplinks`` read links out to (C1b #707).
     log_format: str = DEFAULT_LOG_FORMAT
     sentry_dsn: str = ""
     sentry_traces_sample_rate: float = DEFAULT_SENTRY_TRACES_SAMPLE_RATE
@@ -354,6 +355,12 @@ class Settings:
     otel_service_version: str = ""
     metrics_enabled: bool = False
     observability_enabled: bool = False
+    # Browsable Grafana base URL (C1b #707): the Grafana Cloud stack the OTLP
+    # endpoint above exports into. NOT derived from
+    # ``otel_exporter_otlp_endpoint`` - that host is an ingest endpoint, not
+    # something an operator can open - and empty by default, so an unconfigured
+    # deployment answers the ``/deeplinks`` read with an absent link.
+    grafana_url: str = ""
     # Ceiling on the dates one nightly rollup invocation may cover (B5b #705,
     # `worker/rollup.py`). A first-run backfill of a long history, or a catch-up
     # after a long outage, is trimmed to the OLDEST `max_dates` days and the rest
@@ -869,6 +876,7 @@ def get_settings() -> Settings:
             "OTEL_TRACES_SAMPLER_RATIO", DEFAULT_OTEL_TRACES_SAMPLER_RATIO
         ),
         otel_service_version=os.environ.get("OTEL_SERVICE_VERSION", ""),
+        grafana_url=os.environ.get("GRAFANA_URL", ""),
         metrics_enabled=_env_bool("METRICS_ENABLED", False),
         observability_enabled=_env_bool("OBSERVABILITY_ENABLED", False),
         observability_rollup_max_dates=_env_int(

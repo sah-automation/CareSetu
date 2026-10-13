@@ -42,6 +42,13 @@ from modules.observability.domain.consumer import (
 BREAKER_STATE_CLOSED = "closed"
 BREAKER_STATE_OPEN = "open"
 
+#: ``observability_alert_events.status`` vocabulary. ``open`` is the server
+#: default every producer's insert inherits; ``resolved`` is written ONLY by this
+#: rollup's resolve step. One definition for the two producers and the operator
+#: alert feed that reads both.
+ALERT_STATUS_OPEN = "open"
+ALERT_STATUS_RESOLVED = "resolved"
+
 #: Alert kinds this rollup owns. ``audit_tamper`` / ``ai_egress`` stay with the
 #: B4b consumer (``domain/consumer.py``) - one kind vocabulary, two producers.
 ALERT_KIND_AI_BUDGET = "ai_budget"

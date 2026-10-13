@@ -1,14 +1,17 @@
-"""C1a #706: the operator observability read routes against real PostgreSQL.
+"""C1 #706/#707: the operator observability read routes against real PostgreSQL.
 
 Seeds the ``observability`` schema the way the B4a consumer and the B5a rollup
 leave it - ``observability_ai_usage_daily`` per ``(date, provider, model,
 task_type)`` scope, ``observability_ai_cost_budget`` snapshotted for the current
 billing period, ``observability_ai_provider_health`` per provider - plus one
-usage row well outside the default window. Then it drives the four operator
-routes as an authenticated operator, through the app's own
-``observability_facade`` wiring, and asserts each response against that seed:
-the totals are the seeded sums, the 30-day default window excludes the stale row
-and a ``days=1`` window excludes yesterday, and every rate is the seeded ratio.
+usage row well outside the default window. The C1b routes additionally need the
+alert rows and the rollup-ledger row the B4b consumer and B5a pass write, and
+outbox rows in another module's schema for the ``/health`` backlog and
+dead-letter counts. Then it drives the nine operator routes as an authenticated
+operator, through the app's own ``observability_facade`` wiring, and asserts each
+response against that seed: the totals are the seeded sums, the 30-day default
+window excludes the stale row and a ``days=1`` window excludes yesterday, and
+every rate is the seeded ratio.
 
 Requires the native PostgreSQL; the suite skips cleanly when it is unreachable,
 and migrates to head and back down afterwards (same shape as the B4a/B5a
@@ -28,12 +31,15 @@ import pytest_asyncio
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import delete, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.config import Settings
 from app.main import create_app
+from bus.bootstrap import MODULE_SCHEMAS
+from bus.dispatcher import discover_outbox_tables
+from bus.outbox_ddl import outbox_table
 from modules.iam.domain.jwt import issue_token
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -57,6 +63,11 @@ COST_PATH = "/v1/operator/observability/cost"
 TREND_PATH = "/v1/operator/observability/cost/trend"
 USAGE_PATH = "/v1/operator/observability/usage"
 QUALITY_PATH = "/v1/operator/observability/quality"
+OVERVIEW_PATH = "/v1/operator/observability/overview"
+LATENCY_PATH = "/v1/operator/observability/latency"
+HEALTH_PATH = "/v1/operator/observability/health"
+ALERTS_PATH = "/v1/operator/observability/alerts"
+DEEPLINKS_PATH = "/v1/operator/observability/deeplinks"
 
 _TRUNCATE = (
     "TRUNCATE TABLE observability.observability_ai_provider_health, "
@@ -94,6 +105,11 @@ async def engine(database_url: str, migrated_schema: None) -> AsyncIterator[Asyn
     try:
         async with created.begin() as connection:
             await connection.execute(text(_TRUNCATE))
+            # ``/health`` counts every module's outbox, so a row another suite left
+            # behind would land in its totals. Emptied through the dispatcher's own
+            # table contract rather than with raw SQL naming other schemas.
+            for target in await discover_outbox_tables(connection, MODULE_SCHEMAS):
+                await connection.execute(delete(outbox_table(target.table_name, target.schema)))
     except Exception as exc:
         await created.dispose()
         pytest.skip(f"PostgreSQL unreachable at {database_url} - {exc}")
@@ -130,11 +146,57 @@ async def _seed(connection: AsyncConnection) -> None:
         text(
             "INSERT INTO observability.observability_ai_provider_health "
             "(provider, window_start, window_end, sample_count, success_rate, "
-            "breaker_state) VALUES "
-            "('openai', :start, :end, 8, 0.8750, 'closed'), "
-            "('anthropic', :start, :end, 1, 0.5000, 'open')"
+            "p50_duration_ms, p95_duration_ms, p99_duration_ms, breaker_state) VALUES "
+            "('openai', :start, :end, 8, 0.8750, 1200.00, 8400.00, 15100.00, 'closed'), "
+            "('anthropic', :start, :end, 1, 0.5000, 900.00, 1500.00, 1800.00, 'open')"
         ),
         {"start": _DAY_START, "end": _TODAY},
+    )
+
+
+async def _seed_rollup_and_alerts(connection: AsyncConnection) -> None:
+    """The B5a ledger row and three B4b/B5a alerts: two open, one resolved."""
+    await connection.execute(
+        text(
+            "INSERT INTO observability.observability_rollup_runs "
+            "(rollup_date, mode, billing_period_start, providers, ran_at) "
+            "VALUES (:rolled, 'daily', :start, 2, now())"
+        ),
+        {"rolled": _YESTERDAY, "start": _PERIOD_START},
+    )
+    await connection.execute(
+        text(
+            "INSERT INTO observability.observability_alert_events "
+            "(severity, kind, title, payload, status, created_at) VALUES "
+            "('critical', 'breaker_open', 'AI provider breaker open for anthropic', "
+            " CAST(:open_payload AS jsonb), 'open', :newest), "
+            "('warning', 'ai_budget', 'AI budget past 80% of the monthly cap', "
+            " CAST(:open_payload AS jsonb), 'open', :middle), "
+            "('warning', 'outbox_dead_letter', 'Outbox dead-letter row in intake.intake_outbox', "
+            " CAST(:resolved_payload AS jsonb), 'resolved', :oldest)"
+        ),
+        {
+            "open_payload": '{"source": "rollup", "provider": "anthropic"}',
+            "resolved_payload": '{"source": "rollup", "table": "intake.intake_outbox"}',
+            "newest": datetime(2026, 10, 12, 3, 0, tzinfo=UTC),
+            "middle": datetime(2026, 10, 11, 3, 0, tzinfo=UTC),
+            "oldest": datetime(2026, 10, 10, 3, 0, tzinfo=UTC),
+        },
+    )
+
+
+async def _seed_outbox(connection: AsyncConnection) -> None:
+    """Two pending, one inflight and one dead-lettered intake event, as a stuck queue."""
+    await connection.execute(
+        text(
+            "INSERT INTO intake.intake_outbox "
+            "(event_id, event_type, payload, occurred_at, status, attempts) VALUES "
+            "(:a, 'intake.ai_job_completed', '{}'::jsonb, now(), 'pending', 0), "
+            "(:b, 'intake.ai_job_completed', '{}'::jsonb, now(), 'pending', 1), "
+            "(:c, 'intake.ai_job_completed', '{}'::jsonb, now(), 'inflight', 1), "
+            "(:d, 'intake.ai_job_completed', '{}'::jsonb, now(), 'dead_letter', 5)"
+        ),
+        {"a": uuid.uuid4(), "b": uuid.uuid4(), "c": uuid.uuid4(), "d": uuid.uuid4()},
     )
 
 
@@ -144,6 +206,15 @@ async def seeded_engine(engine: AsyncEngine) -> AsyncIterator[AsyncEngine]:
     async with engine.begin() as connection:
         await _seed(connection)
     yield engine
+
+
+@pytest_asyncio.fixture
+async def rolled_engine(seeded_engine: AsyncEngine) -> AsyncIterator[AsyncEngine]:
+    """The seeded engine plus the rollup ledger, the alerts and the outbox rows."""
+    async with seeded_engine.begin() as connection:
+        await _seed_rollup_and_alerts(connection)
+        await _seed_outbox(connection)
+    yield seeded_engine
 
 
 def _token(scope: str = "operator") -> str:
@@ -160,7 +231,7 @@ def _bearer(scope: str = "operator") -> dict[str, str]:
     return {"Authorization": f"Bearer {_token(scope)}"}
 
 
-def _client(database_url: str) -> TestClient:
+def _client(database_url: str, **overrides: object) -> TestClient:
     """The real app - including its own ``observability_facade`` wiring."""
     return TestClient(
         create_app(
@@ -168,6 +239,7 @@ def _client(database_url: str) -> TestClient:
                 database_url=database_url,
                 gateway_jwt_verify_enabled=True,
                 gateway_jwt_signing_key=_SIGNING_KEY,
+                **overrides,  # type: ignore[arg-type]
             )
         )
     )
@@ -303,6 +375,9 @@ async def test_reads_are_empty_before_the_first_rollup(
         trend = client.get(TREND_PATH, headers=headers).json()
         usage = client.get(USAGE_PATH, headers=headers).json()
         quality = client.get(QUALITY_PATH, headers=headers).json()
+        overview = client.get(OVERVIEW_PATH, headers=headers).json()
+        latency = client.get(LATENCY_PATH, headers=headers).json()
+        alerts = client.get(ALERTS_PATH, headers=headers).json()
 
     assert cost["total_spend_paise"] == 0
     assert cost["period_start"] is None
@@ -312,6 +387,15 @@ async def test_reads_are_empty_before_the_first_rollup(
     assert quality["success_rate"] is None
     assert quality["low_confidence_rate"] is None
     assert quality["providers"] == []
+    assert overview["spend_paise"] == 0
+    assert overview["budget_paise"] == 0
+    assert overview["budget_utilization_pct"] == "0.00"
+    assert overview["p95_duration_ms"] is None
+    assert overview["last_rolled_date"] is None
+    assert overview["open_alerts"] == 0
+    assert latency["providers"] == []
+    assert latency["last_rolled_date"] is None
+    assert alerts["alerts"] == []
 
 
 async def test_windowed_reads_refuse_an_out_of_range_window(
@@ -340,3 +424,164 @@ async def test_rates_are_exact_decimals_not_binary_floats(
 
     assert isinstance(body["success_rate"], str)
     assert Decimal(body["success_rate"]) == Decimal("0.8000")
+
+
+# ------------------------------------------------- C1b (#707): the five reads
+
+
+async def test_overview_matches_the_seeded_aggregates(
+    rolled_engine: AsyncEngine, database_url: str
+) -> None:
+    with _client(database_url) as client:
+        body = client.get(OVERVIEW_PATH, headers=_bearer()).json()
+
+    assert body["days"] == 30
+    assert body["to_date"] == _TODAY.isoformat()
+    assert body["total_calls"] == 10
+    assert body["success_count"] == 8
+    assert body["success_rate"] == "0.8000"
+    assert body["low_confidence_count"] == 2
+    assert body["low_confidence_rate"] == "0.2500"
+    # The slowest provider's p95 across the seeded health rows, not a sum.
+    assert body["p95_duration_ms"] == "8400.00"
+    assert body["spend_paise"] == 110_000
+    assert body["budget_paise"] == _BUDGET_CAP_PAISE
+    assert body["budget_utilization_pct"] == "73.33"
+    assert body["budget_exhausted"] is False
+    # Two open alerts (one critical) and one provider with an open breaker.
+    assert body["open_alerts"] == 2
+    assert body["critical_open_alerts"] == 1
+    assert body["open_breakers"] == 1
+    assert body["last_rolled_date"] == _YESTERDAY.isoformat()
+
+
+async def test_overview_narrows_to_the_requested_window(
+    rolled_engine: AsyncEngine, database_url: str
+) -> None:
+    with _client(database_url) as client:
+        body = client.get(f"{OVERVIEW_PATH}?days=1", headers=_bearer()).json()
+
+    assert body["total_calls"] == 8
+    assert body["success_rate"] == "0.8750"
+    # The budget and alert figures are not windowed: the cap is a period figure
+    # and an alert stays open until a pass resolves it.
+    assert body["budget_paise"] == _BUDGET_CAP_PAISE
+    assert body["open_alerts"] == 2
+
+
+async def test_latency_reports_the_rolled_percentiles(
+    rolled_engine: AsyncEngine, database_url: str
+) -> None:
+    with _client(database_url) as client:
+        body = client.get(LATENCY_PATH, headers=_bearer()).json()
+
+    assert body["last_rolled_date"] == _YESTERDAY.isoformat()
+    assert [
+        (row["provider"], row["sample_count"], row["p50_duration_ms"], row["p95_duration_ms"])
+        for row in body["providers"]
+    ] == [
+        ("anthropic", 1, "900.00", "1500.00"),
+        ("openai", 8, "1200.00", "8400.00"),
+    ]
+    assert body["providers"][1]["p99_duration_ms"] == "15100.00"
+    # The window the rollup ranked over is echoed back, so a reader can judge freshness.
+    assert body["providers"][1]["window_start"] == "2026-10-13T00:00:00Z"
+
+
+async def test_health_counts_the_seeded_outbox_and_breakers(
+    rolled_engine: AsyncEngine, database_url: str
+) -> None:
+    with _client(database_url) as client:
+        body = client.get(HEALTH_PATH, headers=_bearer()).json()
+
+    database = next(e for e in body["dependencies"] if e["name"] == "database")
+    assert database["status"] == "up"
+    # No REDIS_URL in this deployment: a configuration choice, not a failed store.
+    cache = next(e for e in body["dependencies"] if e["name"] == "cache")
+    assert cache["status"] == "disabled"
+
+    intake = next(row for row in body["outbox"] if row["table"] == "intake_outbox")
+    assert (intake["pending"], intake["inflight"], intake["dead_letter"]) == (2, 1, 1)
+    assert intake["backlog"] == 3
+    # The totals sum every module's outbox; the fixture emptied them all.
+    assert body["outbox_backlog"] == 3
+    assert body["dead_letter_rows"] == 1
+    assert [(row["provider"], row["breaker_state"]) for row in body["breakers"]] == [
+        ("anthropic", "open"),
+        ("openai", "closed"),
+    ]
+    assert body["open_breakers"] == 1
+
+
+async def test_health_reports_a_configured_cache(
+    rolled_engine: AsyncEngine, database_url: str
+) -> None:
+    with _client(database_url, redis_url="redis://localhost:6379/0") as client:
+        body = client.get(HEALTH_PATH, headers=_bearer()).json()
+
+    cache = next(e for e in body["dependencies"] if e["name"] == "cache")
+    assert cache["status"] == "configured"
+
+
+async def test_alerts_feed_is_newest_first(rolled_engine: AsyncEngine, database_url: str) -> None:
+    with _client(database_url) as client:
+        body = client.get(ALERTS_PATH, headers=_bearer()).json()
+
+    assert body["limit"] == 50
+    assert body["count"] == 3
+    assert [(entry["created_at"], entry["kind"], entry["status"]) for entry in body["alerts"]] == [
+        ("2026-10-12T03:00:00Z", "breaker_open", "open"),
+        ("2026-10-11T03:00:00Z", "ai_budget", "open"),
+        ("2026-10-10T03:00:00Z", "outbox_dead_letter", "resolved"),
+    ]
+    assert body["alerts"][0]["payload"] == {"source": "rollup", "provider": "anthropic"}
+    assert body["alerts"][0]["acked_by"] is None
+
+
+async def test_alerts_narrow_to_status_and_limit(
+    rolled_engine: AsyncEngine, database_url: str
+) -> None:
+    with _client(database_url) as client:
+        open_feed = client.get(f"{ALERTS_PATH}?status=open&limit=1", headers=_bearer()).json()
+        resolved = client.get(f"{ALERTS_PATH}?status=resolved", headers=_bearer()).json()
+
+    assert open_feed["count"] == 1
+    assert open_feed["alerts"][0]["kind"] == "breaker_open"
+    assert [entry["kind"] for entry in resolved["alerts"]] == ["outbox_dead_letter"]
+
+
+async def test_deeplinks_answer_the_configured_vendors(database_url: str) -> None:
+    with _client(
+        database_url,
+        grafana_url="https://caresetu.grafana.net",
+        sentry_dsn="https://key@o4242.ingest.us-central1.sentry.io/7654321",
+        langfuse_public_key="pk-lf-1234",
+        langfuse_secret_key="sk-lf-1234",
+    ) as client:
+        body = client.get(DEEPLINKS_PATH, headers=_bearer()).json()
+
+    assert body == {
+        "grafana": "https://caresetu.grafana.net",
+        "sentry": "https://o4242.sentry.io/issues/?project=7654321",
+        "langfuse": "https://us.cloud.langfuse.com/project/pk-lf-1234",
+    }
+
+
+async def test_deeplinks_with_no_vendor_configured_answer_absent_links(
+    database_url: str,
+) -> None:
+    """No vendor configured is the default deployment; it must never be a 5xx."""
+    with _client(database_url) as client:
+        response = client.get(DEEPLINKS_PATH, headers=_bearer())
+
+    assert response.status_code == 200
+    assert response.json() == {"grafana": None, "sentry": None, "langfuse": None}
+
+
+async def test_c1b_routes_refuse_anonymous_and_non_operator_callers(
+    rolled_engine: AsyncEngine, database_url: str
+) -> None:
+    with _client(database_url) as client:
+        for path in (OVERVIEW_PATH, LATENCY_PATH, HEALTH_PATH, ALERTS_PATH, DEEPLINKS_PATH):
+            assert client.get(path).status_code == 401
+            assert client.get(path, headers=_bearer("patient")).status_code == 403

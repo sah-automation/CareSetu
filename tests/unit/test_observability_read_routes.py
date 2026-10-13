@@ -1,4 +1,4 @@
-"""C1a #706: the MOD-013 operator observability read routes.
+"""C1 #706/#707: the MOD-013 operator observability read routes.
 
 The routes are thin adapters (api-standards §1): resolve the gateway
 ``Principal`` through ``require_operator``, validate the query params, call the
@@ -16,6 +16,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -25,12 +26,22 @@ from app.gateway.jwt_verify import JWTVerifyMiddleware
 from app.main import create_app
 from modules.iam.domain.jwt import issue_token
 from modules.observability.facade import (
+    AlertEntry,
+    AlertFeed,
+    BreakerHealthRow,
     CostBudgetView,
     CostSummary,
     CostTrend,
     CostTrendPoint,
+    Deeplinks,
+    DependencyHealth,
+    LatencyReport,
+    LatencyRow,
+    OutboxHealthRow,
+    Overview,
     ProviderQualityRow,
     QualityReport,
+    SystemHealth,
     UsageReport,
     UsageRow,
 )
@@ -44,6 +55,13 @@ COST_PATH = "/v1/operator/observability/cost"
 TREND_PATH = "/v1/operator/observability/cost/trend"
 USAGE_PATH = "/v1/operator/observability/usage"
 QUALITY_PATH = "/v1/operator/observability/quality"
+OVERVIEW_PATH = "/v1/operator/observability/overview"
+LATENCY_PATH = "/v1/operator/observability/latency"
+HEALTH_PATH = "/v1/operator/observability/health"
+ALERTS_PATH = "/v1/operator/observability/alerts"
+DEEPLINKS_PATH = "/v1/operator/observability/deeplinks"
+
+_ALERT_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 
 _SUMMARY = CostSummary(
     period_start=date(2026, 10, 1),
@@ -125,6 +143,81 @@ _QUALITY = QualityReport(
 )
 
 
+_OVERVIEW = Overview(
+    days=30,
+    from_date=_FROM,
+    to_date=_TODAY,
+    total_calls=9,
+    success_count=7,
+    success_rate=Decimal("0.7778"),
+    low_confidence_count=2,
+    low_confidence_rate=Decimal("0.2857"),
+    p95_duration_ms=Decimal("8400.00"),
+    spend_paise=90_000,
+    budget_paise=150_000,
+    budget_utilization_pct=Decimal("60.00"),
+    budget_exhausted=False,
+    open_alerts=4,
+    critical_open_alerts=1,
+    open_breakers=1,
+    last_rolled_date=_TODAY,
+)
+
+_LATENCY = LatencyReport(
+    last_rolled_date=_TODAY,
+    providers=[
+        LatencyRow(
+            provider="openai",
+            sample_count=8,
+            p50_duration_ms=Decimal("1200.00"),
+            p95_duration_ms=Decimal("8400.00"),
+            p99_duration_ms=Decimal("15100.00"),
+            window_start=datetime(2026, 10, 12, tzinfo=UTC),
+            window_end=datetime(2026, 10, 13, tzinfo=UTC),
+        )
+    ],
+)
+
+_HEALTH = SystemHealth(
+    dependencies=[
+        DependencyHealth(name="database", status="up", latency_ms=Decimal("1.20")),
+        DependencyHealth(name="cache", status="disabled", detail="REDIS_URL is unset"),
+    ],
+    outbox=[
+        OutboxHealthRow(
+            table_schema="iam",
+            table="iam_outbox",
+            pending=7,
+            inflight=2,
+            dead_letter=1,
+            backlog=9,
+        )
+    ],
+    outbox_backlog=9,
+    dead_letter_rows=1,
+    breakers=[BreakerHealthRow(provider="anthropic", breaker_state="open")],
+    open_breakers=1,
+)
+
+_ALERTS = AlertFeed(
+    limit=50,
+    count=1,
+    alerts=[
+        AlertEntry(
+            id=_ALERT_ID,
+            severity="critical",
+            kind="breaker_open",
+            title="AI provider breaker open for anthropic",
+            payload={"source": "rollup", "provider": "anthropic"},
+            status="open",
+            created_at=datetime(2026, 10, 12, 3, 0, tzinfo=UTC),
+            acked_by=None,
+            acked_at=None,
+        )
+    ],
+)
+
+
 class StubObservabilityFacade:
     """Facade stand-in recording the calls each route made.
 
@@ -137,6 +230,12 @@ class StubObservabilityFacade:
         self.trend_days: list[int] = []
         self.usage_days: list[int] = []
         self.quality_days: list[int] = []
+        self.overview_days: list[int] = []
+        self.latency_calls = 0
+        self.health_cache_flags: list[bool] = []
+        self.alert_limits: list[int] = []
+        self.alert_statuses: list[str | None] = []
+        self.deeplink_settings: list[dict[str, Any]] = []
 
     async def get_cost_summary(self) -> CostSummary:
         self.summary_calls += 1
@@ -154,6 +253,41 @@ class StubObservabilityFacade:
         self.quality_days.append(days)
         return _QUALITY.model_copy(update={"days": days})
 
+    async def get_overview(self, *, days: int) -> Overview:
+        self.overview_days.append(days)
+        return _OVERVIEW.model_copy(update={"days": days})
+
+    async def get_latency(self) -> LatencyReport:
+        self.latency_calls += 1
+        return _LATENCY
+
+    async def get_health(self, *, cache_configured: bool) -> SystemHealth:
+        self.health_cache_flags.append(cache_configured)
+        return _HEALTH
+
+    async def get_alerts(self, *, limit: int, status: str | None = None) -> AlertFeed:
+        self.alert_limits.append(limit)
+        self.alert_statuses.append(status)
+        return _ALERTS.model_copy(update={"limit": limit})
+
+    def get_deeplinks(
+        self,
+        *,
+        grafana_url: str | None = None,
+        sentry_dsn: str | None = None,
+        langfuse_host: str | None = None,
+        langfuse_public_key: str | None = None,
+    ) -> Deeplinks:
+        self.deeplink_settings.append(
+            {
+                "grafana_url": grafana_url,
+                "sentry_dsn": sentry_dsn,
+                "langfuse_host": langfuse_host,
+                "langfuse_public_key": langfuse_public_key,
+            }
+        )
+        return Deeplinks(grafana=grafana_url or None)
+
 
 def _token(*, subject_id: int = 1, scope: str = "operator") -> str:
     return issue_token(
@@ -165,9 +299,13 @@ def _token(*, subject_id: int = 1, scope: str = "operator") -> str:
     )
 
 
-def _client(facade: StubObservabilityFacade | None = None) -> TestClient:
-    settings = Settings(gateway_jwt_verify_enabled=True, gateway_jwt_signing_key=_SIGNING_KEY)
-    app = create_app(settings=settings)
+def _client(
+    facade: StubObservabilityFacade | None = None, *, settings: Settings | None = None
+) -> TestClient:
+    resolved = settings or Settings(
+        gateway_jwt_verify_enabled=True, gateway_jwt_signing_key=_SIGNING_KEY
+    )
+    app = create_app(settings=resolved)
     app.state.observability_facade = facade if facade is not None else StubObservabilityFacade()
     return TestClient(app)
 
@@ -247,12 +385,174 @@ def test_operator_reads_quality_rates() -> None:
     assert body["providers"][0]["breaker_state"] == "closed"
 
 
+# ------------------------------------------------- C1b (#707): the five reads
+
+
+def test_operator_reads_the_headline_kpis() -> None:
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(OVERVIEW_PATH, headers=_operator())
+
+    assert response.status_code == 200
+    assert facade.overview_days == [30]
+    body = response.json()
+    assert body["days"] == 30
+    assert body["total_calls"] == 9
+    assert body["success_rate"] == "0.7778"
+    assert body["spend_paise"] == 90_000
+    assert body["budget_paise"] == 150_000
+    assert body["open_alerts"] == 4
+    assert body["critical_open_alerts"] == 1
+    assert body["open_breakers"] == 1
+    assert body["last_rolled_date"] == _TODAY.isoformat()
+
+
+def test_overview_honours_a_validated_days_param() -> None:
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(f"{OVERVIEW_PATH}?days=7", headers=_operator())
+
+    assert response.status_code == 200
+    assert facade.overview_days == [7]
+
+
+def test_operator_reads_provider_latency_percentiles() -> None:
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(LATENCY_PATH, headers=_operator())
+
+    assert response.status_code == 200
+    assert facade.latency_calls == 1
+    body = response.json()
+    assert body["last_rolled_date"] == _TODAY.isoformat()
+    row = body["providers"][0]
+    assert (row["provider"], row["sample_count"]) == ("openai", 8)
+    assert row["p50_duration_ms"] == "1200.00"
+    assert row["p95_duration_ms"] == "8400.00"
+    assert row["p99_duration_ms"] == "15100.00"
+
+
+def test_health_reports_dependencies_outbox_and_breakers() -> None:
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(HEALTH_PATH, headers=_operator())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [entry["name"] for entry in body["dependencies"]] == ["database", "cache"]
+    assert body["outbox_backlog"] == 9
+    assert body["dead_letter_rows"] == 1
+    assert body["open_breakers"] == 1
+    assert body["outbox"][0]["table_schema"] == "iam"
+
+
+def test_health_reports_an_unconfigured_cache_as_disabled() -> None:
+    """An unset ``REDIS_URL`` is a configuration choice, never a dialled store."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(HEALTH_PATH, headers=_operator())
+
+    assert facade.health_cache_flags == [False]
+    cache = next(e for e in response.json()["dependencies"] if e["name"] == "cache")
+    assert cache["status"] == "disabled"
+
+
+def test_health_resolves_a_configured_cache_from_settings() -> None:
+    facade = StubObservabilityFacade()
+    client = _client(
+        facade,
+        settings=Settings(
+            gateway_jwt_verify_enabled=True,
+            gateway_jwt_signing_key=_SIGNING_KEY,
+            redis_url="redis://localhost:6379/0",
+        ),
+    )
+
+    response = client.get(HEALTH_PATH, headers=_operator())
+
+    assert response.status_code == 200
+    assert facade.health_cache_flags == [True]
+
+
+def test_alerts_default_to_the_first_fifty_newest() -> None:
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(ALERTS_PATH, headers=_operator())
+
+    assert response.status_code == 200
+    assert facade.alert_limits == [50]
+    assert facade.alert_statuses == [None]
+    body = response.json()
+    assert body["limit"] == 50
+    assert body["count"] == 1
+    assert body["alerts"][0]["kind"] == "breaker_open"
+    assert body["alerts"][0]["payload"] == {"source": "rollup", "provider": "anthropic"}
+
+
+@pytest.mark.parametrize("status", ["open", "resolved"])
+def test_alerts_narrow_to_a_recognised_status(status: str) -> None:
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(f"{ALERTS_PATH}?status={status}&limit=5", headers=_operator())
+
+    assert response.status_code == 200
+    assert facade.alert_statuses == [status]
+    assert facade.alert_limits == [5]
+
+
+def test_deeplinks_answer_the_configured_vendors() -> None:
+    facade = StubObservabilityFacade()
+    client = _client(
+        facade,
+        settings=Settings(
+            gateway_jwt_verify_enabled=True,
+            gateway_jwt_signing_key=_SIGNING_KEY,
+            grafana_url="https://caresetu.grafana.net",
+        ),
+    )
+
+    response = client.get(DEEPLINKS_PATH, headers=_operator())
+
+    assert response.status_code == 200
+    assert facade.deeplink_settings == [
+        {
+            "grafana_url": "https://caresetu.grafana.net",
+            "sentry_dsn": "",
+            "langfuse_host": Settings().langfuse_host,
+            "langfuse_public_key": "",
+        }
+    ]
+    assert response.json() == {
+        "grafana": "https://caresetu.grafana.net",
+        "sentry": None,
+        "langfuse": None,
+    }
+
+
+def test_no_configured_vendor_answers_absent_links_not_an_error() -> None:
+    """The plan's vendors are env-gated; an unconfigured one is a null link, not a 5xx."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(DEEPLINKS_PATH, headers=_operator())
+
+    assert response.status_code == 200
+    assert response.json() == {"grafana": None, "sentry": None, "langfuse": None}
+
+
 # ------------------------------------------------------------------ validation
 
 
 @pytest.mark.parametrize(
     "path",
-    [TREND_PATH, USAGE_PATH, QUALITY_PATH],
+    [TREND_PATH, USAGE_PATH, QUALITY_PATH, OVERVIEW_PATH],
 )
 @pytest.mark.parametrize("days", ["0", "-1", "366", "abc", "1.5"])
 def test_out_of_range_window_is_rejected_at_the_edge(path: str, days: str) -> None:
@@ -267,12 +567,48 @@ def test_out_of_range_window_is_rejected_at_the_edge(path: str, days: str) -> No
     assert facade.trend_days == []
     assert facade.usage_days == []
     assert facade.quality_days == []
+    assert facade.overview_days == []
+
+
+@pytest.mark.parametrize("limit", ["0", "201", "abc"])
+def test_out_of_range_alert_limit_is_rejected_at_the_edge(limit: str) -> None:
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(f"{ALERTS_PATH}?limit={limit}", headers=_operator())
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "VALIDATION_ERROR"
+    assert facade.alert_limits == []
+
+
+@pytest.mark.parametrize("status", ["acked", "OPEN", "all"])
+def test_an_unrecognised_alert_status_is_rejected_at_the_edge(status: str) -> None:
+    """A typo must not read as an empty feed, which would say "nothing is wrong"."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(f"{ALERTS_PATH}?status={status}", headers=_operator())
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "VALIDATION_ERROR"
+    assert facade.alert_statuses == []
 
 
 # ------------------------------------------------------------------ refuses
 
 
-_ALL_PATHS = [COST_PATH, TREND_PATH, USAGE_PATH, QUALITY_PATH]
+_ALL_PATHS = [
+    COST_PATH,
+    TREND_PATH,
+    USAGE_PATH,
+    QUALITY_PATH,
+    OVERVIEW_PATH,
+    LATENCY_PATH,
+    HEALTH_PATH,
+    ALERTS_PATH,
+    DEEPLINKS_PATH,
+]
 
 
 @pytest.mark.parametrize("path", _ALL_PATHS)
@@ -306,6 +642,11 @@ def _facade_untouched(facade: StubObservabilityFacade) -> bool:
         and facade.trend_days == []
         and facade.usage_days == []
         and facade.quality_days == []
+        and facade.overview_days == []
+        and facade.latency_calls == 0
+        and facade.health_cache_flags == []
+        and facade.alert_limits == []
+        and facade.deeplink_settings == []
     )
 
 

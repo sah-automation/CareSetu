@@ -208,12 +208,17 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/doctor/profile/address",
         "/v1/doctor/profile/about",
         "/v1/doctor/profile/notifications",
-        # PHASE-14A C1a (#706): the first four operator observability reads. The
-        # rest of plan-phase14 §9.1 lands with C1b.
+        # PHASE-14A C1 (#706/#707): the whole plan-phase14 §9.1 operator
+        # observability read table.
         "/v1/operator/observability/cost",
         "/v1/operator/observability/cost/trend",
         "/v1/operator/observability/usage",
         "/v1/operator/observability/quality",
+        "/v1/operator/observability/overview",
+        "/v1/operator/observability/latency",
+        "/v1/operator/observability/health",
+        "/v1/operator/observability/alerts",
+        "/v1/operator/observability/deeplinks",
     }
 
 
