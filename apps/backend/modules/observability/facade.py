@@ -7,6 +7,12 @@ operator read routes (Batch 1 C1); the B4 public surface carries the effects
 the event consumers run - the AI-usage aggregation (B4a #702), the
 registry-driven business-daily counts and the PHI-free alert rows (B4b #703) -
 plus the schema constant the composition root resolves the ledger against.
+
+The B5a nightly rollup (#704) joins it as :func:`run_rollup`: the off-request-path
+pass that recomputes the percentile aggregates, snapshots budget spend and
+evaluates the alert thresholds. It is re-exported here so the ``python -m
+worker.rollup`` entry point reaches it through the facade, like every other
+composition-root seam.
 """
 
 from __future__ import annotations
@@ -22,6 +28,8 @@ from modules.observability.domain.consumer import (
     AiJobFailedUsagePayload,
     AlertRow,
 )
+from modules.observability.domain.rollup import RollupThresholds
+from modules.observability.rollup import RollupReport, run_rollup
 from modules.observability.schema.models import (
     observability_ai_usage_daily,
     observability_alert_events,
@@ -29,6 +37,17 @@ from modules.observability.schema.models import (
 )
 
 OBSERVABILITY_SCHEMA = "observability"
+
+__all__ = [
+    "OBSERVABILITY_SCHEMA",
+    "ObservabilityFacade",
+    "RollupReport",
+    "RollupThresholds",
+    "accumulate_ai_usage",
+    "accumulate_business_count",
+    "record_alert_event",
+    "run_rollup",
+]
 
 
 async def accumulate_ai_usage(

@@ -169,6 +169,60 @@ async def discover_outbox_tables(
     )
 
 
+@dataclass(frozen=True)
+class OutboxRowCounts:
+    """One outbox table's rows per status, for health reporting.
+
+    ``pending`` plus ``inflight`` is the backlog still owed a delivery attempt;
+    ``dead_letter`` is the terminal set a human has to look at.
+    """
+
+    table: OutboxTable
+    pending: int
+    inflight: int
+    dead_letter: int
+
+    @property
+    def backlog(self) -> int:
+        """Rows not yet delivered: ``pending`` plus ``inflight``."""
+        return self.pending + self.inflight
+
+
+async def count_outbox_rows(
+    connection: AsyncConnection, tables: Sequence[OutboxTable]
+) -> tuple[OutboxRowCounts, ...]:
+    """Count each outbox table's rows by status, without touching domain tables.
+
+    Part of the transport carve-out (ADR-0003): the dispatcher owns the outbox
+    contract, so the one cross-schema reader stays here rather than growing a
+    per-consumer SELECT. Used by MOD-013's nightly rollup to raise the
+    ``outbox_backlog`` / ``outbox_dead_letter`` alerts (plan-phase14 §11).
+
+    Counts are read on the caller's connection, so a caller inside a
+    transaction sees its own uncommitted writes - the same snapshot the rollup
+    reads its own aggregates from.
+    """
+    counts: list[OutboxRowCounts] = []
+    for target in tables:
+        table = outbox_table(target.table_name, target.schema)
+        statement: Select[tuple[str, int]] = (
+            select(column("status", String), func.count().label("rows"))
+            .select_from(table)
+            .group_by(column("status", String))
+        )
+        result = await connection.execute(statement)
+        by_status = {row[0]: int(row[1]) for row in result.all()}
+        counts.append(
+            OutboxRowCounts(
+                table=target,
+                pending=by_status.get(OUTBOX_STATUS_PENDING, 0),
+                inflight=by_status.get(OUTBOX_STATUS_INFLIGHT, 0),
+                dead_letter=by_status.get(OUTBOX_STATUS_DEAD_LETTER, 0),
+            )
+        )
+    return tuple(counts)
+
+
 async def reclaim_stale_inflight(
     connection: AsyncConnection, target: Table, config: DispatcherConfig
 ) -> int:
