@@ -10,6 +10,7 @@ import {
   uploadIntakeMedia,
   uploadDoctorMedia,
   reRecordIntake,
+  recordComposerOpened,
   fetchIntake,
   fetchPreSummary,
   savePatientEdits,
@@ -27,6 +28,38 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("recordComposerOpened (B4e, #721)", () => {
+  it("POSTs to the funnel entry endpoint with no body and no content back", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(recordComposerOpened()).resolves.toBeUndefined();
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://localhost:8000/v1/intake/composer-opened");
+    expect(init.method).toBe("POST");
+    // No body at all: the endpoint has no field to fill, so there is nothing
+    // here that could carry a patient id or any clinical content.
+    expect(init.body).toBeUndefined();
+  });
+
+  it("surfaces a gateway rejection as an ApiError rather than resolving", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse(
+          { code: "AUTH_UNAUTHENTICATED", message: "no", details: {} },
+          401,
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(recordComposerOpened()).rejects.toBeInstanceOf(ApiError);
+  });
 });
 
 describe("submitIntake", () => {

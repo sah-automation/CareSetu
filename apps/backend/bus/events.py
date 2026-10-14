@@ -129,6 +129,14 @@ EVENT_AI_EGRESS_RECORDED = "ai_egress.recorded"
 # rather than a cross-schema join (ADR-0003). Telemetry, deliberately NOT in
 # ``REGULATED_ACT_TYPES``.
 EVENT_INTAKE_DOCTOR_ASSIGNED = "intake.doctor_assigned"
+# MOD-005 (intake): emitted the moment a patient OPENS the intake composer, in
+# its own transaction and before any capture (B4e, #721). This is the intake
+# funnel's real ENTRY step: ``intake.started`` rides the capture transaction, so
+# a patient who opens the recorder and abandons produces nothing today and the
+# funnel has no head. Carries the patient, the session key and the trace id -
+# an arrival fact, never clinical content, deliberately NOT in
+# ``REGULATED_ACT_TYPES``.
+EVENT_INTAKE_COMPOSER_OPENED = "intake.composer_opened"
 
 # PHASE-4 T3 (#237): the canonical regulated-act whitelist. MOD-011 appends an
 # ``audit.event`` payload to the hash chain only when its ``event_type`` is

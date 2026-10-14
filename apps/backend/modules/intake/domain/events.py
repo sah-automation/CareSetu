@@ -13,7 +13,10 @@ alone (provider, model, tokens, cost, duration - and the derived
 crosses into the ``intake`` schema (B4 #702). The same holds for the
 ``intake.doctor_assigned`` care-attribution event (B4d #720): it carries the
 intake/patient/doctor references so attribution never needs a cross-schema join
-(ADR-0003). Every builder answers an
+(ADR-0003). And ``intake.composer_opened`` (B4e #721) is the funnel's real
+entry step - it fires before any capture, carries the session key the product
+ledger groups steps by, and writes no clinical content at all. Every builder
+answers an
 :class:`~bus.envelope.Envelope` the intake facade writes into
 ``intake.intake_outbox`` in the SAME transaction as the state change
 (ADR-0002 §1).
@@ -32,6 +35,7 @@ from bus.events import (
     EVENT_AI_JOB_COMPLETED,
     EVENT_AI_JOB_FAILED,
     EVENT_INTAKE_CAPTURED,
+    EVENT_INTAKE_COMPOSER_OPENED,
     EVENT_INTAKE_DOCTOR_ASSIGNED,
     EVENT_INTAKE_RETRY_REQUESTED,
     EVENT_INTAKE_STARTED,
@@ -228,6 +232,64 @@ class IntakeDoctorAssignedPayload(BaseModel):
     doctor_id: int
 
 
+class IntakeComposerOpenedPayload(BaseModel):
+    """Subject of ``intake.composer_opened``: a patient opened the composer.
+
+    The intake funnel's real ENTRY step (B4e, #721; #717 decision 4).
+    ``intake.started`` rides the capture transaction, so before this event a
+    patient who opened the recorder and walked away produced no trace at all and
+    the funnel had no head to drop off from. This event fires the moment the
+    composer opens, in its own transaction, BEFORE any capture - so it is
+    reached by a submit AND by an abandon alike, and the absence of the later
+    step is what distinguishes them. Two separate events on two separate
+    transactions is the whole mechanism: one event with two states could not
+    tell an abandon from a submit.
+
+    **No ``intake_id`` here, deliberately.** No intake row exists when a patient
+    opens the composer; asserting one would be asserting a fiction. Nor any
+    clinical content - no audio reference, no transcript, no typed symptoms, no
+    free text (security-phii-standards no-PHI). This records that a person
+    arrived, and nothing about what they said.
+
+    ``patient_id`` is the authenticated patient the entry belongs to. A consumer
+    that keys activity per actor hashes it into a pseudonymous key in its own
+    schema rather than storing the raw reference (#717 decision 7).
+
+    **Session key: the platform's trace-context session scope.** The frontend
+    holds no stable session identity - every persisted session field
+    (``identity_id``, ``jti``, ``scope``, ``phone``) is user-scoped, and the one
+    per-mutation id it mints is deliberately non-durable - so there is no client
+    session to key on, and minting one here would be building state no consumer
+    asked for. The key is therefore the platform's own session scope, which today
+    is the request: the trace context ``TraceMiddleware`` establishes and
+    ``resolve_trace_id`` reads. ``session_key`` and ``trace_id`` so coincide, and
+    stay separate fields because they answer separate questions on MOD-013's
+    ledger - which steps belong to one session versus which request to jump to in
+    the tracing backend. When a stable session identity arrives, only THIS
+    derivation changes; the field names, payload shape and registry entry stay
+    put. Until then a step-to-step gap must be measured from the ledger's own
+    timestamps, not assumed from this key (#739).
+
+    Both are bare ``str``, not a validated type, because ``TraceMiddleware``
+    already bounded them: a client ``X-Request-Id`` is honoured only when
+    printable, non-space and at most 128 characters, else a uuid4 hex is minted.
+    So neither field can carry unbounded client text into the ledger. The trade
+    is that a client CAN choose its own key; since this payload has no field
+    another patient's key could collide with beyond ``patient_id`` itself, the
+    worst that buys is scattered rows in the caller's OWN funnel - never read or
+    corrupt access to another's (#739 keys the ledger on a pseudonymous actor
+    hash, which is a consumer-side column, not a field of this event).
+
+    MOD-013 is the declared subscriber (#739): it records this as the funnel's
+    first step keyed on this event's ``event_id``, so a redelivery changes
+    nothing downstream.
+    """
+
+    patient_id: int
+    session_key: str
+    trace_id: str
+
+
 def intake_started_envelope(
     *, patient_id: int, mode: IntakeMode, language: IntakeLanguage
 ) -> Envelope[IntakeStartedPayload]:
@@ -397,5 +459,29 @@ def intake_doctor_assigned_envelope(
             intake_id=intake_id,
             patient_id=patient_id,
             doctor_id=doctor_id,
+        ),
+    )
+
+
+def intake_composer_opened_envelope(
+    *, patient_id: int, session_key: str, trace_id: str
+) -> Envelope[IntakeComposerOpenedPayload]:
+    """Build the ``intake.composer_opened`` funnel-entry envelope.
+
+    ``session_key`` is the platform's trace-context session scope and
+    ``trace_id`` is the request-scoped trace id; on this event they coincide,
+    for the reason set out on :class:`IntakeComposerOpenedPayload`. Both are
+    taken as arguments rather than read from the ambient context here so the
+    facade resolves the session scope ONCE, in the one place that owns that
+    decision.
+    """
+    return Envelope[IntakeComposerOpenedPayload](
+        event_id=uuid4(),
+        event_type=EVENT_INTAKE_COMPOSER_OPENED,
+        producer=PRODUCER_MODULE,
+        payload=IntakeComposerOpenedPayload(
+            patient_id=patient_id,
+            session_key=session_key,
+            trace_id=trace_id,
         ),
     )

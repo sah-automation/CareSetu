@@ -36,16 +36,20 @@ from app.gateway.errors import (
 _DEFAULT_AUTH_PATH_PREFIX = "/v1/auth/"
 # Intake write surface (PS-05, #403): the media-and-row-writing shapes that
 # upload and persist on the strict tier. ``upload-media`` (patient),
-# ``upload-doctor-media`` (#481) and ``submit`` are exact paths; ``pick-doctor``
-# and ``re-record`` are per-intake dynamic routes, matched by the
-# ``/v1/intake/`` prefix plus their path suffix so the GET read shapes
-# (``/{intake_id}``, ``/pre-summary``, ``/media/{id}``) never match.
+# ``upload-doctor-media`` (#481), ``submit`` and ``composer-opened`` (#721) are
+# exact paths; ``pick-doctor`` and ``re-record`` are per-intake dynamic routes,
+# matched by the ``/v1/intake/`` prefix plus their path suffix so the GET read
+# shapes (``/{intake_id}``, ``/pre-summary``, ``/media/{id}``) never match.
 # ``pick-doctor`` counts because the pick IS a row write plus a consent
 # grant (PHASE-8.1 T05, #443) - the same abuse target as the media trio.
+# ``composer-opened`` writes an outbox row like ``pick-doctor`` (a small,
+# patient-initiated write sharing this per-IP budget since #443), so it counts
+# too; splitting the intake surface into its own bucket is a separate concern.
 _DEFAULT_INTAKE_PATH_PREFIX = "/v1/intake/"
 _INTAKE_UPLOAD_MEDIA_PATH = f"{_DEFAULT_INTAKE_PATH_PREFIX}upload-media"
 _INTAKE_UPLOAD_DOCTOR_MEDIA_PATH = f"{_DEFAULT_INTAKE_PATH_PREFIX}upload-doctor-media"
 _INTAKE_SUBMIT_PATH = f"{_DEFAULT_INTAKE_PATH_PREFIX}submit"
+_INTAKE_COMPOSER_OPENED_PATH = f"{_DEFAULT_INTAKE_PATH_PREFIX}composer-opened"
 _INTAKE_PICK_DOCTOR_PATH_SUFFIX = "/pick-doctor"
 _INTAKE_RE_RECORD_PATH_SUFFIX = "/re-record"
 # Profile-media write surface (US-20, #533/#529): the two photo UPLOAD routes are
@@ -137,14 +141,14 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         """The strict-tier surface ``path`` + ``method`` belong to, if any.
 
         The auth surface is prefix-matched (``/v1/auth/*``). The intake surface
-        is the media-and-row-writing trio - ``upload-media`` (patient), the
-        doctor-scoped ``upload-doctor-media`` (#481), ``submit``, and the
-        per-intake ``pick-doctor`` / ``re-record`` shapes - plus the two
-        profile-photo UPLOAD routes (US-20, a multi-MB body into object storage
-        each), so the patient's read routes (intake detail, pre-summary, clip
-        playback, and the photo ``GET``) are never counted: abusing the
-        payer-facing writes is the threat, re-fetching a status or a clip is not
-        (PS-05, #403).
+        is the media-and-row-writing shapes - ``upload-media`` (patient), the
+        doctor-scoped ``upload-doctor-media`` (#481), ``submit``, the
+        ``composer-opened`` funnel entry (#721), and the per-intake
+        ``pick-doctor`` / ``re-record`` shapes - plus the two profile-photo
+        UPLOAD routes (US-20, a multi-MB body into object storage each), so the
+        patient's read routes (intake detail, pre-summary, clip playback, and
+        the photo ``GET``) are never counted: abusing the payer-facing writes is
+        the threat, re-fetching a status or a clip is not (PS-05, #403).
         """
         if path.startswith(self.auth_path_prefix):
             return _SURFACE_AUTH
@@ -152,6 +156,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             _INTAKE_UPLOAD_MEDIA_PATH,
             _INTAKE_UPLOAD_DOCTOR_MEDIA_PATH,
             _INTAKE_SUBMIT_PATH,
+            _INTAKE_COMPOSER_OPENED_PATH,
         ) or (
             path.startswith(_DEFAULT_INTAKE_PATH_PREFIX)
             and (

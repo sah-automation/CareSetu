@@ -148,6 +148,9 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/intake/upload-media",
         # PHASE-8.1 T04 (#481): the doctor-scoped rx-input voice/photo upload.
         "/v1/intake/upload-doctor-media",
+        # B4e (#721): the funnel's entry step - a bodyless patient-scoped POST
+        # that records that the composer opened and writes no clinical content.
+        "/v1/intake/composer-opened",
         "/v1/intake/{intake_id}/re-record",
         "/v1/intake/{intake_id}",
         "/v1/intake/{intake_id}/pre-summary",

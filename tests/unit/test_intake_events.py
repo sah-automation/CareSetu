@@ -9,9 +9,12 @@ structured clinical fields, confidence scores, egressed bytes stay in the
 and has no intake id yet because it precedes capture. The ``ai_job.*`` events
 also carry the operational metering facts MOD-013 accumulates (B4a #702) -
 provider/model, tokens, priced cost, duration and the *derived*
-``low_confidence`` flag (the raw confidence score still never travels). Covers
-the frozen event shapes, the ``register_handlers`` registration seam (payload
-models + the ``intake.started`` telemetry and ``intake.captured`` self-
+``low_confidence`` flag (the raw confidence score still never travels).
+``intake.composer_opened`` (B4e #721) is the funnel's real ENTRY step: it fires
+when a patient opens the composer, before any capture, and carries the patient,
+the session key and the trace id - never an intake id, because no intake exists
+yet. Covers the frozen event shapes, the ``register_handlers`` registration seam
+(payload models + the ``intake.started`` telemetry and ``intake.captured`` self-
 subscriptions), and an emitted-envelope round-trip through the registry
 validator - all without a database.
 """
@@ -34,6 +37,7 @@ from bus.events import (
     EVENT_AI_JOB_COMPLETED,
     EVENT_AI_JOB_FAILED,
     EVENT_INTAKE_CAPTURED,
+    EVENT_INTAKE_COMPOSER_OPENED,
     EVENT_INTAKE_DOCTOR_ASSIGNED,
     EVENT_INTAKE_RETRY_REQUESTED,
     EVENT_INTAKE_STARTED,
@@ -44,10 +48,13 @@ from bus.registry import HandlerRegistry
 from modules.intake.adapters import intake_started_count, register_handlers
 from modules.intake.domain.events import (
     PRODUCER_MODULE,
+    IntakeComposerOpenedPayload,
+    IntakeStartedPayload,
     ai_egress_recorded_envelope,
     ai_job_completed_envelope,
     ai_job_failed_envelope,
     intake_captured_envelope,
+    intake_composer_opened_envelope,
     intake_doctor_assigned_envelope,
     intake_retry_requested_envelope,
     intake_started_envelope,
@@ -58,6 +65,7 @@ from modules.intake.domain.events import (
 _ALL_EVENT_TYPES = (
     EVENT_INTAKE_STARTED,
     EVENT_INTAKE_CAPTURED,
+    EVENT_INTAKE_COMPOSER_OPENED,
     EVENT_INTAKE_RETRY_REQUESTED,
     EVENT_PRE_SUMMARY_READY,
     EVENT_PRE_SUMMARY_LOW_CONFIDENCE,
@@ -93,6 +101,7 @@ def test_every_intake_event_type_is_registered_in_bus_events() -> None:
     assert EVENT_AI_JOB_FAILED == "ai_job.failed"
     assert EVENT_AI_EGRESS_RECORDED == "ai_egress.recorded"
     assert EVENT_INTAKE_DOCTOR_ASSIGNED == "intake.doctor_assigned"
+    assert EVENT_INTAKE_COMPOSER_OPENED == "intake.composer_opened"
 
 
 def _capture_from_all_event_types() -> list[Envelope[BaseModel]]:
@@ -131,6 +140,11 @@ def _capture_from_all_event_types() -> list[Envelope[BaseModel]]:
         ),
         ai_egress_recorded_envelope(intake_id=1, ai_job_id=9, reason="structure"),
         intake_doctor_assigned_envelope(intake_id=1, patient_id=7, doctor_id=909),
+        intake_composer_opened_envelope(
+            patient_id=7,
+            session_key="e" * 32,
+            trace_id="e" * 32,
+        ),
     ]
 
 
@@ -285,6 +299,69 @@ def test_doctor_assigned_names_the_intake_the_patient_and_the_doctor() -> None:
     }
 
 
+def test_composer_opened_carries_the_patient_session_key_and_trace_and_nothing_else() -> None:
+    """The funnel's entry step: an arrival fact, carrying no clinical content.
+
+    ``intake.composer_opened`` fires when a patient OPENS the composer, before
+    any capture (#717 decision 4), so the funnel has an entry that an abandon
+    also reaches - which ``intake.started`` cannot be, because it rides the
+    capture transaction. It carries the patient, the session key and the trace
+    id and nothing else: no intake id (none exists yet), no audio reference, no
+    transcript, no free text (security-phii-standards no-PHI).
+    """
+    envelope = intake_composer_opened_envelope(
+        patient_id=7,
+        session_key="e" * 32,
+        trace_id="e" * 32,
+    )
+
+    assert envelope.event_type == EVENT_INTAKE_COMPOSER_OPENED
+    assert envelope.producer == PRODUCER_MODULE
+    assert set(envelope.payload.model_dump(mode="json")) == {
+        "patient_id",
+        "session_key",
+        "trace_id",
+    }
+    assert envelope.payload.patient_id == 7
+    assert envelope.payload.session_key == "e" * 32
+    assert envelope.payload.trace_id == "e" * 32
+
+
+def test_composer_opened_and_intake_started_are_independently_routable() -> None:
+    """An abandon must be distinguishable from a submit.
+
+    The acceptance hinges on the two being SEPARATE events on SEPARATE
+    transactions, not one event with two states: composer-opened has no intake
+    id because no intake exists yet, and intake.started carries the mode and
+    language that only a submission knows. A patient who opens the composer and
+    walks away produces the first and never the second, which is exactly what
+    makes the drop-off countable.
+
+    Asserted through the registry a consumer routes on, not through constant
+    inequality: collapsing the two into one entry, or letting composer-opened
+    inherit ``intake.started``'s submission-only fields, breaks separability.
+    """
+    registry = HandlerRegistry()
+    register_handlers(registry)
+
+    composer_opened = intake_composer_opened_envelope(
+        patient_id=7, session_key="e" * 32, trace_id="e" * 32
+    )
+    started = intake_started_envelope(patient_id=7, mode="voice", language="hi")
+
+    assert composer_opened.event_type != started.event_type
+    assert registry.payload_model_for(composer_opened.event_type) is IntakeComposerOpenedPayload
+    assert registry.payload_model_for(started.event_type) is IntakeStartedPayload
+
+    # composer-opened carries no submission-only field, and vice versa.
+    assert "intake_id" not in composer_opened.payload.model_dump(mode="json")
+    assert set(started.payload.model_dump(mode="json")) & {
+        "patient_id",
+        "mode",
+        "language",
+    } == {"patient_id", "mode", "language"}
+
+
 def test_no_payload_carries_phi() -> None:
     # security-phii-standards: transcripts, clinical fields, confidence scores
     # and egressed bytes never travel - only ids and operational facts (and, for
@@ -331,7 +408,9 @@ def test_register_handlers_registers_the_self_subscriptions() -> None:
     # T08/T10/T11). ``intake.doctor_assigned`` deliberately has none here either:
     # its only subscriber is MOD-013's care-attribution edge (B4d #724), which
     # registers its own payload mirror and handler - MOD-005 publishes it and
-    # never consumes it back.
+    # never consumes it back. ``intake.composer_opened`` is the same shape: its
+    # only subscriber is MOD-013's product event ledger (B4e #739), so MOD-005
+    # publishes the payload model for fan-out and consumes nothing.
     for event_type in (
         EVENT_PRE_SUMMARY_READY,
         EVENT_PRE_SUMMARY_LOW_CONFIDENCE,
@@ -339,6 +418,7 @@ def test_register_handlers_registers_the_self_subscriptions() -> None:
         EVENT_AI_JOB_FAILED,
         EVENT_AI_EGRESS_RECORDED,
         EVENT_INTAKE_DOCTOR_ASSIGNED,
+        EVENT_INTAKE_COMPOSER_OPENED,
     ):
         assert registry.handlers_for(event_type) == ()
 

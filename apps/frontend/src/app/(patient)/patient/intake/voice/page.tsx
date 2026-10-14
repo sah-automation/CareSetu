@@ -26,6 +26,7 @@ import { useLang } from "@/lib/i18n/LangContext";
 import {
   fetchIntake,
   reRecordIntake,
+  recordComposerOpened,
   submitIntake,
   uploadIntakeMedia,
 } from "@/lib/intake/api";
@@ -150,6 +151,15 @@ export default function VoiceIntakePage() {
     setPaused(false);
     setStage("preview");
   }, [failWith]);
+
+  // The intake funnel's entry step (B4e, #721): report that the composer was
+  // reached, before anything is recorded or captured, so an abandon here is as
+  // countable as a submit. One-shot per mount, analytics only - the rejection is
+  // swallowed deliberately: a patient must never see an error because a ping
+  // failed, and nothing about the capture below depends on it.
+  useEffect(() => {
+    void recordComposerOpened().catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     if (stage !== "recording" || paused) {

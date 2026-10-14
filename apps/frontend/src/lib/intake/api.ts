@@ -6,7 +6,7 @@
 // asynchronously: submit returns a captured intake, and the pre-summary is
 // read later at the {intake_id}/pre-summary route.
 
-import { guardShape, request, requestBlob } from "@/lib/request";
+import { guardShape, request, requestBlob, requestVoid } from "@/lib/request";
 import { IDEMPOTENCY_KEY_HEADER, idempotencyKey } from "@/lib/idempotency";
 
 export type IntakeMode = "voice" | "text";
@@ -258,6 +258,20 @@ function isPreSummaryReviewResult(
     "reviewed_by" in value &&
     "reviewed_at" in value
   );
+}
+
+/**
+ * Record that the patient opened the intake composer (B4e, #721).
+ *
+ * Product analytics, not a clinical call: the endpoint takes no body, writes no
+ * intake row and carries no clinical content - it records that a person
+ * arrived, which is the funnel's entry step. Fire-and-forget, so a caller
+ * swallows the rejection rather than surfacing it: a patient must never see an
+ * error because an analytics ping failed, and nothing here is load-bearing for
+ * the capture that follows.
+ */
+export async function recordComposerOpened(): Promise<void> {
+  await requestVoid("/v1/intake/composer-opened", { method: "POST" });
 }
 
 /** Capture a symptom intake (text or voice). Emits intake.captured. */

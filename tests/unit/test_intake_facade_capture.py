@@ -25,6 +25,11 @@ facade-with-fakes seam:
   criterion 4). Capture durability is structural - the row + outbox event
   commit in one local transaction, so a later AI failure never rolls
   back the intake (accepted criterion 5).
+- ``record_composer_opened`` is the funnel's real ENTRY step (B4e #721): it
+  writes one ``intake.composer_opened`` outbox row in its own transaction and
+  nothing else - no intake row, no media ref, no clinical content - so a patient
+  who opens the composer and abandons is still countable. ``intake.started`` is
+  untouched and still fires at capture time.
 """
 
 from __future__ import annotations
@@ -41,8 +46,10 @@ from modules.intake.adapters.ai_gateway import DraftRxRequest
 from modules.intake.adapters.ai_provider_mock import MockAiProvider
 from modules.intake.domain.events import (
     EVENT_INTAKE_CAPTURED,
+    EVENT_INTAKE_COMPOSER_OPENED,
     EVENT_INTAKE_STARTED,
     IntakeCapturedPayload,
+    IntakeComposerOpenedPayload,
     IntakeStartedPayload,
 )
 from modules.intake.domain.exceptions import (
@@ -201,6 +208,88 @@ def _outbox_array(connection: AsyncMock, event_type: str) -> Insert | None:
         if stmt.compile().params["event_type"] == event_type:
             return stmt
     return None
+
+
+@pytest.mark.asyncio
+async def test_record_composer_opened_writes_only_the_entry_event_in_its_own_transaction() -> None:
+    """The funnel entry is an arrival fact: one outbox row, no clinical write.
+
+    There is no intake row, no media ref and nothing else on this path - the
+    patient has opened a screen and typed nothing, so the seam must not invent a
+    capture. One ``engine.begin()`` proves the event rides its own transaction
+    rather than joining a capture that may never happen (ADR-0002 S1).
+    """
+    connection = _connection([_outbox_result()])
+    facade = _facade(connection)
+
+    await facade.record_composer_opened(patient_id=7, trace_id="a" * 32)
+
+    facade._engine.begin.assert_called_once()
+    outboxes = _outbox_inserts(connection)
+    assert [stmt.compile().params["event_type"] for stmt in outboxes] == [
+        EVENT_INTAKE_COMPOSER_OPENED
+    ]
+    # Nothing beyond the outbox row: an opened composer must not create an
+    # intake, a media ref, a pre-summary or an AI job.
+    assert _inserts(connection) == outboxes
+
+
+@pytest.mark.asyncio
+async def test_record_composer_opened_keys_the_event_on_the_patient_and_the_trace_scope() -> None:
+    """The payload is the patient plus the platform's trace-context session scope.
+
+    ``session_key`` and ``trace_id`` coincide today because the platform's only
+    session scope is the request - the full derivation and its limits are set out
+    on ``IntakeComposerOpenedPayload``; both are carried so the product ledger's
+    two columns keep their own meanings.
+    """
+    connection = _connection([_outbox_result()])
+    facade = _facade(connection)
+
+    await facade.record_composer_opened(patient_id=7, trace_id="a" * 32)
+
+    stmt = _outbox_array(connection, EVENT_INTAKE_COMPOSER_OPENED)
+    assert stmt is not None
+    payload = IntakeComposerOpenedPayload.model_validate(stmt.compile().params["payload"])
+    assert payload.patient_id == 7
+    assert payload.session_key == "a" * 32
+    assert payload.trace_id == "a" * 32
+
+
+@pytest.mark.asyncio
+async def test_submit_intake_still_writes_intake_started_at_capture_time() -> None:
+    """``intake.started`` is retained unchanged and is NOT the funnel's entry.
+
+    #721 keeps this event exactly where it was - on the capture transaction,
+    with its existing payload - and only stops calling it the funnel's entry
+    step. A composer-opened publish and a capture publish therefore write two
+    different event types, and capture alone still writes ``intake.started``.
+    """
+    connection = _connection(
+        [
+            _outbox_result(),
+            _intake_id_result(intake_id=9),
+            _outbox_result(),
+            _outbox_result(),
+        ]
+    )
+    facade = _facade(connection)
+
+    await facade.record_composer_opened(patient_id=7, trace_id="a" * 32)
+    await facade.submit_intake(patient_id=7, mode="text", language="hi", text="sir dard hai")
+
+    published = [stmt.compile().params["event_type"] for stmt in _outbox_inserts(connection)]
+    assert published == [
+        EVENT_INTAKE_COMPOSER_OPENED,
+        EVENT_INTAKE_STARTED,
+        EVENT_INTAKE_CAPTURED,
+    ]
+    # The retained event keeps its existing payload shape - no session key, no
+    # trace id bolted on - so nothing downstream of #369 has to change.
+    started = IntakeStartedPayload.model_validate(
+        _outbox_array(connection, EVENT_INTAKE_STARTED).compile().params["payload"]  # type: ignore[union-attr]
+    )
+    assert set(started.model_dump(mode="json")) == {"patient_id", "mode", "language"}
 
 
 @pytest.mark.asyncio

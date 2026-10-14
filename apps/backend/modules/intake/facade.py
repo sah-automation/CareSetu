@@ -41,6 +41,7 @@ from modules.intake.adapters.ai_gateway import (
 from modules.intake.adapters.media_store import PREFIX, RX_INPUT_PREFIX, IntakeMediaStore
 from modules.intake.domain.events import (
     intake_captured_envelope,
+    intake_composer_opened_envelope,
     intake_doctor_assigned_envelope,
     intake_retry_requested_envelope,
     intake_started_envelope,
@@ -204,6 +205,49 @@ class IntakeFacade:
         self._sleep = sleep
         self._consent_facade = consent_facade
         self._iam_facade = iam_facade
+
+    async def record_composer_opened(self, *, patient_id: int, trace_id: str) -> None:
+        """Record one ``intake.composer_opened`` funnel-entry event.
+
+        The intake funnel's real ENTRY step (B4e, #721; #717 decision 4).
+        ``intake.started`` is written inside the capture transaction by
+        :meth:`submit_intake`, so a patient who opened the recorder and walked
+        away without submitting produced no event at all and the funnel had no
+        head to drop off from. This seam fires the moment the composer opens, so
+        it is reached by a submit AND by an abandon alike - the two are then
+        distinguishable precisely because they are SEPARATE events on SEPARATE
+        transactions.
+
+        Deliberately the narrowest write on this module: one ``intake.composer_
+        opened`` outbox row in its own transaction and nothing else. No intake
+        row, no media ref, no clinical content of any kind (security-phii-
+        standards no-PHI) - the patient has opened a screen and typed nothing,
+        so the seam must not invent a capture for them. That also makes it
+        consent-safe by construction rather than by a gate: ``check_consent``
+        keys on a (patient, counterparty, record_scope) triple and no
+        counterparty exists before the doctor pick, but nothing here reads the
+        patient's record, writes clinical content or egresses anything, so there
+        is nothing for a consent gate to protect. The row that does arrive is a
+        row in the intake module's own outbox, written under the patient's own
+        authenticated scope.
+
+        ``trace_id`` is resolved by the route through ``resolve_trace_id`` - the
+        gateway's single read point for the request-scoped id - and doubles as
+        the product ledger's session key, the platform holding no client session
+        identity to key on (see :class:`IntakeComposerOpenedPayload` for why, and
+        for what changes when one exists).
+        """
+        async with self._engine.begin() as connection:
+            await write_outbox(
+                connection,
+                INTAKE_SCHEMA,
+                INTAKE_OUTBOX_TABLE,
+                intake_composer_opened_envelope(
+                    patient_id=patient_id,
+                    session_key=trace_id,
+                    trace_id=trace_id,
+                ),
+            )
 
     async def submit_intake(
         self,
