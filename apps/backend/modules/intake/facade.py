@@ -41,6 +41,7 @@ from modules.intake.adapters.ai_gateway import (
 from modules.intake.adapters.media_store import PREFIX, RX_INPUT_PREFIX, IntakeMediaStore
 from modules.intake.domain.events import (
     intake_captured_envelope,
+    intake_doctor_assigned_envelope,
     intake_retry_requested_envelope,
     intake_started_envelope,
     pre_summary_ready_envelope,
@@ -1321,6 +1322,13 @@ class IntakeFacade:
         visible when this transaction committed), so a later ``check_consent``
         never answers from a stale decision.
 
+        The pick also publishes ``intake.doctor_assigned`` into the intake outbox
+        in that same transaction (B4d, #720): doctor attribution rides an event,
+        never a cross-schema join (ADR-0003), so the event - not the assignment
+        column - is the legal source of the intake-to-doctor pairing downstream
+        (MOD-013's care-attribution edge, #724). Exactly one pick ever publishes
+        it, since a re-pick is refused below.
+
         Raises :class:`IntakeNotFoundError` when the intake is not the caller's;
         :class:`IllegalIntakeTransitionError` when a doctor is already assigned;
         :class:`IntakeValidationError` when ``partner_id`` is missing.
@@ -1367,6 +1375,24 @@ class IntakeFacade:
                     assigned_partner_id=partner_id,
                     updated_at=func.now(),
                 )
+            )
+            # The care-attribution event rides the SAME transaction as the
+            # assignment it describes (ADR-0002 S1, B4d #720): an event written
+            # after the commit could describe a pick that rolled back, and an
+            # event that never lands leaves every other module unable to learn
+            # the intake-to-doctor pairing without a cross-schema read, which
+            # ADR-0003 forbids. Publishing inside this transaction also keeps the
+            # three consent grants below all-or-nothing with the attribution
+            # edge: a failing grant leg rolls the edge back too.
+            await write_outbox(
+                connection,
+                INTAKE_SCHEMA,
+                INTAKE_OUTBOX_TABLE,
+                intake_doctor_assigned_envelope(
+                    intake_id=intake_id,
+                    patient_id=patient_id,
+                    doctor_id=partner_id,
+                ),
             )
             consent_granted: dict[str, ConsentView] = {}
             for record_scope in record_scopes:

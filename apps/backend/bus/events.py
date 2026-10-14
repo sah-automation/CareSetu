@@ -123,6 +123,12 @@ EVENT_PRE_SUMMARY_LOW_CONFIDENCE = "pre_summary.low_confidence"
 EVENT_AI_JOB_COMPLETED = "ai_job.completed"
 EVENT_AI_JOB_FAILED = "ai_job.failed"
 EVENT_AI_EGRESS_RECORDED = "ai_egress.recorded"
+# MOD-005 (intake): emitted at the moment a patient picks their doctor, in the
+# SAME transaction as the ``assigned_partner_id`` write (B4d, #720). Carries the
+# intake, patient and doctor references, so doctor attribution rides an event
+# rather than a cross-schema join (ADR-0003). Telemetry, deliberately NOT in
+# ``REGULATED_ACT_TYPES``.
+EVENT_INTAKE_DOCTOR_ASSIGNED = "intake.doctor_assigned"
 
 # PHASE-4 T3 (#237): the canonical regulated-act whitelist. MOD-011 appends an
 # ``audit.event`` payload to the hash chain only when its ``event_type`` is

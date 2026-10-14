@@ -321,7 +321,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 
 - **Inbound Sync APIs:** `submit_intake(patient, mode, language, media|text)`, `get_intake`, `get_pre_summary(intake_id)`, `mark_pre_summary_reviewed(intake_id, doctor)`, `request_rx_draft(doctor_input_ref, pre_summary_ref, history_summary)`.
 - **Inbound Events Subscribed:** `intake.captured` (self-trigger → async AI pipeline), `intake.started` (self: telemetry-only log + count - intake funnel entry, T05 #369).
-- **Outbound Events Published:** `intake.started`, `intake.captured`, `pre_summary.ready`, `pre_summary.low_confidence`, `ai_job.completed`, `ai_job.failed`, `ai_egress.recorded`.
+- **Outbound Events Published:** `intake.started`, `intake.captured`, `intake.retry_requested`, `intake.doctor_assigned` (care-attribution edge at the pick, B4d #720), `pre_summary.ready`, `pre_summary.low_confidence`, `ai_job.completed`, `ai_job.failed`, `ai_egress.recorded`.
 
 #### 3. Core Business Logic & State Machines
 
@@ -666,7 +666,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 
 - **Read-only Facade:** the operator read APIs below only - no other module calls into `MOD-013`; as telemetry rather than a domain bounded context it exposes no domain facade, only reads.
 - **Operator HTTP Surfaces (read-only, operator-gated):** `GET /v1/operator/observability/*` - `overview` (headline KPIs), `cost` (spend vs budget for the current period), `cost/trend`, `usage` (calls/tokens by provider/task), `quality` (low-confidence/success rate), `latency` (p50/p95/p99 by provider/route), `health` (dependency + outbox health), `alerts` (alert feed), `deeplinks` (Grafana/Sentry/Langfuse URLs). Flat `require_operator`; the admin/non-admin tier split is deferred to Batch 2 (plan §9.1).
-- **Inbound Events Subscribed:** the existing `§4.2` registry, via each producer's outbox - `ai_job.completed`, `ai_job.failed`, `case.*`, `partner.*`, `consent.*`, `record.accessed`, `audit.*` (ADR-0025 D3). No new event names are defined.
+- **Inbound Events Subscribed:** the existing `§4.2` registry, via each producer's outbox - `ai_job.completed`, `ai_job.failed`, `case.*`, `partner.*`, `consent.*`, `record.accessed`, `audit.*` (ADR-0025 D3). `MOD-013` defines no event names of its own; the one new name this wave adds, `intake.doctor_assigned` (B4d #720), is published by `MOD-005` and its `MOD-013` subscription lands with the care-attribution edge that consumes it (#724).
 - **Outbound Events Published:** none - `MOD-013` is a terminal consumer; it aggregates and serves reads (the alert feed lands in-schema, it is not a published event).
 
 #### 3. Core Business Logic & State Machines
@@ -753,6 +753,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 | `intake.started`                               | `MOD-005` (Intake)          | `MOD-005` (self: telemetry log + count)                                                         | JSON           | At-least-once              |
 | `intake.captured`                              | `MOD-005` (Intake)          | `MOD-005` (self: AI pipeline), `MOD-011`                                                        | JSON           | At-least-once              |
 | `intake.retry_requested`                       | `MOD-005` (Intake)          | `MOD-005` (self: re-record flow), `MOD-011`                                                     | JSON           | At-least-once              |
+| `intake.doctor_assigned`                       | `MOD-005` (Intake)          | `MOD-013` (care-attribution edge - per-doctor cost attribution, B4d #720)                       | JSON           | At-least-once              |
 | `pre_summary.ready`                            | `MOD-005` (Intake)          | `MOD-006` (care-case birth - patient identity on payload), `MOD-010` (in-app notify), `MOD-011` | JSON           | At-least-once              |
 | `pre_summary.low_confidence`                   | `MOD-005` (Intake)          | `MOD-006` (record-and-surface `forced_review` flag), `MOD-011`                                  | JSON           | At-least-once              |
 | `ai_job.completed`                             | `MOD-005` (Intake)          | `MOD-005` (self: pre-summary publish), `MOD-011`, `MOD-013`                                     | JSON           | At-least-once              |
@@ -803,6 +804,8 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 > `intake.captured` carries `patient_id` (int), `mode` (`voice` | `text`), and `duration_s` (float | None) alongside `intake_id`; `duration_s` is the audio duration in seconds for voice intake, None for text (T06 #370).
 
 > `intake.retry_requested` carries a PHI-free `reason` string (e.g. `unusable_audio`) alongside `intake_id` and `record_attempt` (T06 #370).
+
+> `intake.doctor_assigned` carries `intake_id`, `patient_id` and `doctor_id`, and is written by `pick_doctor` in the SAME transaction as the `assigned_partner_id` assignment (B4d #720). It is the care-attribution edge: doctor attribution rides this EVENT, never a join to the partner/care tables, which `ADR-0003` forbids - so a consumer learns the intake-to-doctor pairing only because the event said so. `doctor_id` is the `MOD-002` partner-directory record id of the doctor (the same reference the assignment column and the pick's consent counterparty carry), not a partner entry of arbitrary type. `partner.selected` cannot serve this purpose: it is the anonymous directory-pick analytics event emitted from an unauthenticated public route, with no patient and no intake. Identity references only, no clinical content; exactly one pick publishes it per intake, and a pick that rolls back publishes none.
 
 > `ai_job.completed` and `ai_job.failed` carry the MOD-013 metering facts (B4a #702: provider, model, tokens, priced `cost_paise`, duration, the derived `low_confidence`/`timeout` flags) **and**, since B4c (#719), the identity references per-patient and per-doctor cost attribution reads: `patient_id`, a nullable `doctor_id` and the `trace_id` join key. All are resolved producer-locally at the two intake publish sites (`doctor_id` stays null on the transcription and structuring legs, which involve no doctor; `trace_id` is the ambient context id the outbox writer already stamps). Only identity references travel - no clinical content - per the observability no-PHI rule; MOD-013's mirrors accept the widened shape.
 

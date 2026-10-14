@@ -10,7 +10,10 @@ the bus (security-phii-standards no-PHI). The ``ai_job.*`` events also carry
 the operational METERING facts MOD-013's telemetry aggregates from the event
 alone (provider, model, tokens, cost, duration - and the derived
 ``low_confidence`` flag, never the raw confidence score), so a consumer never
-crosses into the ``intake`` schema (B4 #702). Every builder answers an
+crosses into the ``intake`` schema (B4 #702). The same holds for the
+``intake.doctor_assigned`` care-attribution event (B4d #720): it carries the
+intake/patient/doctor references so attribution never needs a cross-schema join
+(ADR-0003). Every builder answers an
 :class:`~bus.envelope.Envelope` the intake facade writes into
 ``intake.intake_outbox`` in the SAME transaction as the state change
 (ADR-0002 §1).
@@ -29,6 +32,7 @@ from bus.events import (
     EVENT_AI_JOB_COMPLETED,
     EVENT_AI_JOB_FAILED,
     EVENT_INTAKE_CAPTURED,
+    EVENT_INTAKE_DOCTOR_ASSIGNED,
     EVENT_INTAKE_RETRY_REQUESTED,
     EVENT_INTAKE_STARTED,
     EVENT_PRE_SUMMARY_LOW_CONFIDENCE,
@@ -194,6 +198,36 @@ class AiEgressRecordedPayload(BaseModel):
     reason: str
 
 
+class IntakeDoctorAssignedPayload(BaseModel):
+    """Subject of ``intake.doctor_assigned``: a patient picked their doctor.
+
+    The care-attribution edge (B4d, #720; #717 decision 3). Doctor attribution
+    rides THIS EVENT rather than a join: without it the only way for another
+    module to learn which doctor an intake belongs to would be to read the
+    partner/care tables across the schema boundary, which ADR-0003 forbids. So
+    the three references travel at the moment of the pick and nothing else is
+    needed downstream - only identity references, never clinical content
+    (security-phii-standards no-PHI).
+
+    ``doctor_id`` is honestly named: it is the ``MOD-002`` partner-directory
+    record id of the doctor - the same value written to
+    ``intake_intakes.assigned_partner_id`` and the same reference this pick
+    addresses as its ``doctor`` consent counterparty. The pick path declares that
+    counterparty type; it does not itself verify the partner's directory type, so
+    downstream code must not read more into the reference than "the record the
+    patient picked, as this intake's doctor". A consumer that keys spend per
+    doctor hashes this reference into a pseudonymous key in its own schema rather
+    than storing the raw reference.
+
+    MOD-013 is the declared subscriber (#724): it records the edge keyed on this
+    event's ``event_id``, so a redelivery changes nothing downstream.
+    """
+
+    intake_id: int
+    patient_id: int
+    doctor_id: int
+
+
 def intake_started_envelope(
     *, patient_id: int, mode: IntakeMode, language: IntakeLanguage
 ) -> Envelope[IntakeStartedPayload]:
@@ -348,4 +382,20 @@ def ai_egress_recorded_envelope(
         event_type=EVENT_AI_EGRESS_RECORDED,
         producer=PRODUCER_MODULE,
         payload=AiEgressRecordedPayload(intake_id=intake_id, ai_job_id=ai_job_id, reason=reason),
+    )
+
+
+def intake_doctor_assigned_envelope(
+    *, intake_id: int, patient_id: int, doctor_id: int
+) -> Envelope[IntakeDoctorAssignedPayload]:
+    """Build the ``intake.doctor_assigned`` care-attribution envelope."""
+    return Envelope[IntakeDoctorAssignedPayload](
+        event_id=uuid4(),
+        event_type=EVENT_INTAKE_DOCTOR_ASSIGNED,
+        producer=PRODUCER_MODULE,
+        payload=IntakeDoctorAssignedPayload(
+            intake_id=intake_id,
+            patient_id=patient_id,
+            doctor_id=doctor_id,
+        ),
     )

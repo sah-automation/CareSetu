@@ -34,6 +34,7 @@ from bus.events import (
     EVENT_AI_JOB_COMPLETED,
     EVENT_AI_JOB_FAILED,
     EVENT_INTAKE_CAPTURED,
+    EVENT_INTAKE_DOCTOR_ASSIGNED,
     EVENT_INTAKE_RETRY_REQUESTED,
     EVENT_INTAKE_STARTED,
     EVENT_PRE_SUMMARY_LOW_CONFIDENCE,
@@ -47,6 +48,7 @@ from modules.intake.domain.events import (
     ai_job_completed_envelope,
     ai_job_failed_envelope,
     intake_captured_envelope,
+    intake_doctor_assigned_envelope,
     intake_retry_requested_envelope,
     intake_started_envelope,
     pre_summary_low_confidence_envelope,
@@ -62,6 +64,7 @@ _ALL_EVENT_TYPES = (
     EVENT_AI_JOB_COMPLETED,
     EVENT_AI_JOB_FAILED,
     EVENT_AI_EGRESS_RECORDED,
+    EVENT_INTAKE_DOCTOR_ASSIGNED,
 )
 
 
@@ -89,6 +92,7 @@ def test_every_intake_event_type_is_registered_in_bus_events() -> None:
     assert EVENT_AI_JOB_COMPLETED == "ai_job.completed"
     assert EVENT_AI_JOB_FAILED == "ai_job.failed"
     assert EVENT_AI_EGRESS_RECORDED == "ai_egress.recorded"
+    assert EVENT_INTAKE_DOCTOR_ASSIGNED == "intake.doctor_assigned"
 
 
 def _capture_from_all_event_types() -> list[Envelope[BaseModel]]:
@@ -126,6 +130,7 @@ def _capture_from_all_event_types() -> list[Envelope[BaseModel]]:
             trace_id=None,
         ),
         ai_egress_recorded_envelope(intake_id=1, ai_job_id=9, reason="structure"),
+        intake_doctor_assigned_envelope(intake_id=1, patient_id=7, doctor_id=909),
     ]
 
 
@@ -258,6 +263,28 @@ def test_ai_egress_recorded_names_the_job_and_reason() -> None:
     assert envelope.payload.reason == "transcribe"
 
 
+def test_doctor_assigned_names_the_intake_the_patient_and_the_doctor() -> None:
+    """The care-attribution edge rides the event: all three references, nothing else.
+
+    This is the ONLY legal path for doctor attribution (#717 decision 3): a
+    consumer learns which doctor an intake belongs to from this payload, never by
+    joining to the care or partner schema (ADR-0003). It deliberately carries no
+    clinical content - the references only.
+    """
+    envelope = intake_doctor_assigned_envelope(intake_id=42, patient_id=7, doctor_id=909)
+
+    assert envelope.event_type == EVENT_INTAKE_DOCTOR_ASSIGNED
+    assert envelope.producer == PRODUCER_MODULE
+    assert envelope.payload.intake_id == 42
+    assert envelope.payload.patient_id == 7
+    assert envelope.payload.doctor_id == 909
+    assert set(envelope.payload.model_dump(mode="json")) == {
+        "intake_id",
+        "patient_id",
+        "doctor_id",
+    }
+
+
 def test_no_payload_carries_phi() -> None:
     # security-phii-standards: transcripts, clinical fields, confidence scores
     # and egressed bytes never travel - only ids and operational facts (and, for
@@ -301,13 +328,17 @@ def test_register_handlers_registers_the_self_subscriptions() -> None:
     assert registry.handlers_for(EVENT_INTAKE_CAPTURED)
     assert registry.handlers_for(EVENT_INTAKE_RETRY_REQUESTED)
     # No other intake event has a handler seat yet (pipeline bodies land in
-    # T08/T10/T11).
+    # T08/T10/T11). ``intake.doctor_assigned`` deliberately has none here either:
+    # its only subscriber is MOD-013's care-attribution edge (B4d #724), which
+    # registers its own payload mirror and handler - MOD-005 publishes it and
+    # never consumes it back.
     for event_type in (
         EVENT_PRE_SUMMARY_READY,
         EVENT_PRE_SUMMARY_LOW_CONFIDENCE,
         EVENT_AI_JOB_COMPLETED,
         EVENT_AI_JOB_FAILED,
         EVENT_AI_EGRESS_RECORDED,
+        EVENT_INTAKE_DOCTOR_ASSIGNED,
     ):
         assert registry.handlers_for(event_type) == ()
 

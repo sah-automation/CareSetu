@@ -8,12 +8,18 @@ picking at the facade-with-fakes seam:
   prescriptions AND health_background consent lineages are minted on the
   same connection - all three grants or none (#480, widened #663), no
   second gate.
+- The care-attribution event (``intake.doctor_assigned``, B4d #720) is written
+  to the intake outbox on that same connection, inside that same transaction as
+  the assignment, so a downstream consumer learns the intake-to-doctor pairing
+  from the event rather than from a cross-schema read (ADR-0003). A pick that
+  rolls back leaves no attribution edge behind, and a refused second pick
+  publishes nothing at all.
 - After the transaction commits, the consent cache is invalidated for every
   scope just granted so a later check_consent never answers stale.
 - The pick result contract reports the consultations grant only - the
   widened grant set never changes the response shape.
 - A grant-leg failure aborts the pick: the transaction exits with the
-  exception and nothing (assignment or grant) persists.
+  exception and nothing (assignment, attribution event or grant) persists.
 - Exactly-one-doctor: a second pick on an already-assigned intake raises
   IllegalIntakeTransitionError.
 - The wrong owner is refused with IntakeNotFoundError, never revealing the
@@ -25,10 +31,14 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, call
+from uuid import UUID
 
 import pytest
+from sqlalchemy.sql.expression import Insert
 
+from bus.events import EVENT_INTAKE_DOCTOR_ASSIGNED
 from modules.consent.facade import ConsentView
+from modules.intake.domain.events import IntakeDoctorAssignedPayload
 from modules.intake.domain.exceptions import (
     IllegalIntakeTransitionError,
     IntakeNotFoundError,
@@ -122,6 +132,17 @@ def _facade(connection: AsyncMock, consent_facade: AsyncMock | None = None) -> I
     return facade
 
 
+def _doctor_assigned_writes(connection: AsyncMock) -> list[Insert]:
+    """The ``intake_outbox`` inserts carrying the care-attribution event."""
+    return [
+        c.args[0]
+        for c in connection.execute.await_args_list
+        if isinstance(c.args[0], Insert)
+        and c.args[0].table.name == "intake_outbox"
+        and c.args[0].compile().params["event_type"] == EVENT_INTAKE_DOCTOR_ASSIGNED
+    ]
+
+
 # ---------------------------------------------------------------------------
 # pick_doctor: happy path
 # ---------------------------------------------------------------------------
@@ -150,9 +171,11 @@ async def test_pick_doctor_writes_assignment_and_grants_consent_atomically() -> 
 
     # 1. SELECT FOR UPDATE → intake row (unassigned)
     # 2. UPDATE → set assigned_partner_id
+    # 3. INSERT → intake_outbox (the care-attribution event)
     connection = _connection(
         [
             _FakeResult(row=_intake_row(assigned_partner_id=None)),
+            _FakeResult(row=None),
             _FakeResult(row=None),
         ]
     )
@@ -190,6 +213,86 @@ async def test_pick_doctor_writes_assignment_and_grants_consent_atomically() -> 
 
 
 @pytest.mark.asyncio
+async def test_pick_doctor_publishes_the_care_attribution_event_in_the_pick_transaction() -> None:
+    """The pick rides an event, not a join (B4d, #720; #717 decision 3).
+
+    The outbox insert names the intake, the patient and the doctor on the SAME
+    connection, inside the SAME transaction as the assignment and the grants, so
+    attribution exists only because the event said so and never because any
+    module read the care or partner schema (ADR-0003). Asserting the row rather
+    than the row-``event_id`` is deliberate: replay safety downstream is the
+    consumer's ledger, and the producer's guarantee here is exactly-once per
+    intake (a second pick is refused, proven below).
+    """
+    consent_facade = AsyncMock()
+    consent_facade.grant_consent_on.return_value = _consent_view()
+
+    connection = _connection(
+        [
+            _FakeResult(row=_intake_row(assigned_partner_id=None)),
+            _FakeResult(row=None),
+            _FakeResult(row=None),
+        ]
+    )
+    engine = _engine(connection)
+    facade = IntakeFacade(engine=engine)
+    facade._consent_facade = consent_facade
+
+    await facade.pick_doctor(intake_id=1, patient_id=7, partner_id=909)
+
+    writes = _doctor_assigned_writes(connection)
+    assert len(writes) == 1
+    values = writes[0].compile().params
+    # A pending outbox row like every other published event - the dispatcher
+    # owns the status transition (ADR-0002 S2) - carrying the ``event_id`` a
+    # consumer dedupes on, so redelivering this row changes nothing downstream.
+    assert values["status"] == "pending"
+    assert UUID(str(values["event_id"]))
+    payload = IntakeDoctorAssignedPayload.model_validate(values["payload"])
+    assert payload.intake_id == 1
+    assert payload.patient_id == 7
+    # The doctor reference is the same identity the assignment wrote and the
+    # consent grant addressed - one pick, one doctor, one reference.
+    assert payload.doctor_id == 909
+    # It committed with the pick: the transaction exited cleanly.
+    assert engine.begin.return_value.__aexit__.call_args.args[0] is None
+
+
+@pytest.mark.asyncio
+async def test_pick_doctor_attribution_event_does_not_outlive_a_failed_pick() -> None:
+    """An aborted pick leaves no attribution edge behind.
+
+    The event is written INSIDE the transaction, so a grant-leg failure rolls it
+    back with the assignment. Publishing after the commit would describe a pick
+    that never happened - the bug this seam exists to prevent.
+    """
+    consent_facade = AsyncMock()
+    consent_facade.grant_consent_on.side_effect = [
+        _consent_view(),
+        RuntimeError("grant failed"),
+    ]
+
+    connection = _connection(
+        [
+            _FakeResult(row=_intake_row(assigned_partner_id=None)),
+            _FakeResult(row=None),
+            _FakeResult(row=None),
+        ]
+    )
+    engine = _engine(connection)
+    facade = IntakeFacade(engine=engine)
+    facade._consent_facade = consent_facade
+
+    with pytest.raises(RuntimeError, match="grant failed"):
+        await facade.pick_doctor(intake_id=1, patient_id=7, partner_id=909)
+
+    # The insert was attempted on the open connection, and that same connection
+    # exited with the exception - so the edge cannot have committed.
+    assert len(_doctor_assigned_writes(connection)) == 1
+    assert engine.begin.return_value.__aexit__.call_args.args[0] is RuntimeError
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failing_scope",
     ["consultations", "prescriptions", "health_background"],
@@ -214,6 +317,7 @@ async def test_pick_doctor_grant_failure_aborts_pick(failing_scope: str) -> None
     connection = _connection(
         [
             _FakeResult(row=_intake_row(assigned_partner_id=None)),
+            _FakeResult(row=None),
             _FakeResult(row=None),
         ]
     )
@@ -245,6 +349,7 @@ async def test_pick_doctor_invalidates_cache_after_commit() -> None:
     connection = _connection(
         [
             _FakeResult(row=_intake_row(assigned_partner_id=None)),
+            _FakeResult(row=None),
             _FakeResult(row=None),
         ]
     )
@@ -321,6 +426,9 @@ async def test_pick_doctor_second_pick_raises_illegal_transition() -> None:
         await facade.pick_doctor(intake_id=1, patient_id=7, partner_id=909)
 
     consent_facade.grant_consent_on.assert_not_awaited()
+    # A refused pick publishes no attribution edge: exactly one pick exists per
+    # intake, so the pairing can never be re-announced for a second doctor.
+    assert _doctor_assigned_writes(connection) == []
 
 
 # ---------------------------------------------------------------------------
