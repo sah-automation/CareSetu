@@ -9,9 +9,10 @@ refreshed with the recomputed percentiles and breaker state,
 ``observability_alert_events`` - plus that re-running the same date is a no-op
 that neither duplicates the alerts nor stacks the aggregates.
 
-Requires the native PostgreSQL; the suite skips cleanly when it is unreachable,
-migrates to head and downgrades afterwards (same shape as the B4a/B4b
-round-trip test).
+Requires the native PostgreSQL; the suite skips cleanly when it is unreachable.
+The shared integration conftest migrates to head once per file, empties the
+observability aggregates and the outboxes before each test, and downgrades
+afterwards.
 
 The B5b (#705) half at the bottom drives the SCHEDULE: the first-run backfill over
 seeded AI-job history, the previous-day pass after it, a re-run's idempotency, a
@@ -21,20 +22,14 @@ the ``observability_rollup_runs`` ledger the plan is read from.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterator
 from datetime import date, timedelta
 from decimal import Decimal
-from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 import pytest
-import pytest_asyncio
-from alembic import command
-from alembic.config import Config
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
-from sqlalchemy.pool import NullPool
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from modules.observability.domain.rollup import (
     ALERT_KIND_AI_BUDGET,
@@ -50,57 +45,11 @@ from modules.observability.domain.rollup import (
 from modules.observability.facade import load_rollup_state, run_rollup
 from worker.rollup import plan_from_state
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-ALEMBIC_INI = REPO_ROOT / "apps" / "backend" / "alembic.ini"
-
 _TARGET_DATE = date(2026, 10, 12)
 _PERIOD_START = date(2026, 10, 1)
 _PERIOD_END = date(2026, 10, 31)
 #: A budget the seeded spend breaches past the default 80% threshold.
 _THRESHOLDS = RollupThresholds(monthly_budget_paise=100_000)
-
-_TRUNCATE = (
-    "TRUNCATE TABLE observability.observability_ai_provider_health, "
-    "observability.observability_ai_cost_budget, "
-    "observability.observability_ai_usage_daily, "
-    "observability.observability_business_daily, "
-    "observability.observability_alert_events, "
-    "observability.observability_rollup_runs, "
-    "observability.consumed_events, "
-    "intake.intake_outbox CASCADE"
-)
-
-
-def _alembic_config(database_url: str) -> Config:
-    config = Config(str(ALEMBIC_INI))
-    config.set_main_option("sqlalchemy.url", database_url)
-    return config
-
-
-@pytest.fixture(scope="module")
-def migrated_schema(database_url: str) -> Iterator[None]:
-    """Migrate to head (intake + observability v9.0), restore base after."""
-    config = _alembic_config(database_url)
-    try:
-        command.upgrade(config, "head")
-    except Exception as exc:
-        pytest.skip(f"PostgreSQL unreachable at {database_url} - {exc}")
-    yield
-    command.downgrade(config, "base")
-
-
-@pytest_asyncio.fixture
-async def engine(database_url: str, migrated_schema: None) -> AsyncIterator[AsyncEngine]:
-    """A clean engine: every observability aggregate truncated before each test."""
-    created = create_async_engine(database_url, poolclass=NullPool)
-    try:
-        async with created.begin() as connection:
-            await connection.execute(text(_TRUNCATE))
-    except Exception as exc:
-        await created.dispose()
-        pytest.skip(f"PostgreSQL unreachable at {database_url} - {exc}")
-    yield created
-    await created.dispose()
 
 
 async def _seed_usage(connection: AsyncConnection) -> None:

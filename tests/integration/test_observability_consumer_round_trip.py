@@ -10,21 +10,18 @@ per (usage_date, provider, model, task_type) scope) while recording each
 no ledger rows (exactly-once accumulation).
 
 Requires the native PostgreSQL; the suite skips cleanly when it is
-unreachable, migrates to head for the modules and downgrades afterwards.
+unreachable. The shared integration conftest migrates to head once per file,
+empties the observability aggregates and the outboxes before each test, and
+downgrades afterwards.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
-from pathlib import Path
 from uuid import uuid4
 
 import pytest
-import pytest_asyncio
-from alembic import command
-from alembic.config import Config
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -57,48 +54,7 @@ from modules.observability.domain.consumer import (
     TamperDetectedTelemetryPayload,
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-ALEMBIC_INI = REPO_ROOT / "apps" / "backend" / "alembic.ini"
-
 _NOW = datetime(2026, 10, 13, 8, 15, 0, tzinfo=UTC)
-
-
-def _alembic_config(database_url: str) -> Config:
-    config = Config(str(ALEMBIC_INI))
-    config.set_main_option("sqlalchemy.url", database_url)
-    return config
-
-
-@pytest.fixture(scope="module")
-def migrated_schema(database_url: str) -> Iterator[None]:
-    """Migrate to head (intake + observability v9.0), restore base after."""
-    config = _alembic_config(database_url)
-    try:
-        command.upgrade(config, "head")
-    except Exception as exc:
-        pytest.skip(f"PostgreSQL unreachable at {database_url} - {exc}")
-    yield
-    command.downgrade(config, "base")
-
-
-@pytest_asyncio.fixture
-async def clean_tables(database_url: str, migrated_schema: None) -> Iterator[None]:
-    """Empty the observability aggregates + bus ledger and the intake outbox."""
-    engine = create_async_engine(database_url, poolclass=NullPool)
-    try:
-        async with engine.begin() as connection:
-            await connection.execute(
-                text(
-                    "TRUNCATE TABLE observability.consumed_events, "
-                    "observability.observability_ai_usage_daily, "
-                    "observability.observability_business_daily, "
-                    "observability.observability_alert_events, "
-                    "intake.intake_outbox CASCADE"
-                )
-            )
-    finally:
-        await engine.dispose()
-    yield
 
 
 def _registry() -> HandlerRegistry:

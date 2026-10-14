@@ -13,37 +13,27 @@ response against that seed: the totals are the seeded sums, the 30-day default
 window excludes the stale row and a ``days=1`` window excludes yesterday, and
 every rate is the seeded ratio.
 
-Requires the native PostgreSQL; the suite skips cleanly when it is unreachable,
-and migrates to head and back down afterwards (same shape as the B4a/B5a
-round-trip tests).
+Requires the native PostgreSQL; the suite skips cleanly when it is unreachable.
+The shared integration conftest migrates to head once per file, empties the
+observability aggregates and every module's outbox before each test (``/health``
+counts them all), and downgrades afterwards.
 """
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
 
-import pytest
 import pytest_asyncio
-from alembic import command
-from alembic.config import Config
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, text
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
-from sqlalchemy.pool import NullPool
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app.config import Settings
 from app.main import create_app
-from bus.bootstrap import MODULE_SCHEMAS
-from bus.dispatcher import discover_outbox_tables
-from bus.outbox_ddl import outbox_table
 from modules.iam.domain.jwt import issue_token
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-ALEMBIC_INI = REPO_ROOT / "apps" / "backend" / "alembic.ini"
 
 _SIGNING_KEY = "integration-observability-read-signing-key"
 
@@ -68,53 +58,6 @@ LATENCY_PATH = "/v1/operator/observability/latency"
 HEALTH_PATH = "/v1/operator/observability/health"
 ALERTS_PATH = "/v1/operator/observability/alerts"
 DEEPLINKS_PATH = "/v1/operator/observability/deeplinks"
-
-_TRUNCATE = (
-    "TRUNCATE TABLE observability.observability_ai_provider_health, "
-    "observability.observability_ai_cost_budget, "
-    "observability.observability_ai_usage_daily, "
-    "observability.observability_business_daily, "
-    "observability.observability_alert_events, "
-    "observability.observability_rollup_runs, "
-    "observability.consumed_events CASCADE"
-)
-
-
-def _alembic_config(database_url: str) -> Config:
-    config = Config(str(ALEMBIC_INI))
-    config.set_main_option("sqlalchemy.url", database_url)
-    return config
-
-
-@pytest.fixture(scope="module")
-def migrated_schema(database_url: str) -> Iterator[None]:
-    """Migrate to head (intake + observability v9.0), restore base after."""
-    config = _alembic_config(database_url)
-    try:
-        command.upgrade(config, "head")
-    except Exception as exc:
-        pytest.skip(f"PostgreSQL unreachable at {database_url} - {exc}")
-    yield
-    command.downgrade(config, "base")
-
-
-@pytest_asyncio.fixture
-async def engine(database_url: str, migrated_schema: None) -> AsyncIterator[AsyncEngine]:
-    """A clean engine: every observability aggregate truncated before each test."""
-    created = create_async_engine(database_url, poolclass=NullPool)
-    try:
-        async with created.begin() as connection:
-            await connection.execute(text(_TRUNCATE))
-            # ``/health`` counts every module's outbox, so a row another suite left
-            # behind would land in its totals. Emptied through the dispatcher's own
-            # table contract rather than with raw SQL naming other schemas.
-            for target in await discover_outbox_tables(connection, MODULE_SCHEMAS):
-                await connection.execute(delete(outbox_table(target.table_name, target.schema)))
-    except Exception as exc:
-        await created.dispose()
-        pytest.skip(f"PostgreSQL unreachable at {database_url} - {exc}")
-    yield created
-    await created.dispose()
 
 
 async def _seed(connection: AsyncConnection) -> None:
@@ -511,8 +454,10 @@ async def test_latency_reports_the_rolled_percentiles(
         ("openai", 8, "1200.00", "8400.00"),
     ]
     assert body["providers"][1]["p99_duration_ms"] == "15100.00"
-    # The window the rollup ranked over is echoed back, so a reader can judge freshness.
-    assert body["providers"][1]["window_start"] == "2026-10-13T00:00:00Z"
+    # The window the rollup ranked over is echoed back, so a reader can judge
+    # freshness. Derived from ``_TODAY`` because that is what the health rows were
+    # seeded with - a hardcoded date would fail on the day after it was written.
+    assert body["providers"][1]["window_start"] == f"{_TODAY.isoformat()}T00:00:00Z"
 
 
 async def test_health_counts_the_seeded_outbox_and_breakers(
