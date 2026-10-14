@@ -127,6 +127,15 @@ class AiJobCompletedPayload(BaseModel):
     ``low_confidence`` flag. The flag is computed upstream (always ``False`` for
     transcribe) and never the raw confidence score, which stays in the intake
     schema (security-phii-standards no-PHI). ``task_type`` names the job kind.
+
+    B4c (#719) widens the payload with the identity references the per-patient
+    and per-doctor cost attribution needs: ``patient_id``, a nullable
+    ``doctor_id`` (null on the transcription and structuring legs, which involve
+    no doctor) and the ``trace_id`` that joins the event to the platform's
+    tracing backend (the shared join key, #717 decision 41). All are resolved
+    producer-locally - no module reads another module's tables - and only
+    identity references travel, never clinical content (security-phii-standards
+    no-PHI).
     """
 
     ai_job_id: int
@@ -139,6 +148,9 @@ class AiJobCompletedPayload(BaseModel):
     cost_paise: int
     duration_ms: int
     low_confidence: bool
+    patient_id: int
+    doctor_id: int | None
+    trace_id: str | None
 
 
 class AiJobFailedPayload(BaseModel):
@@ -150,6 +162,11 @@ class AiJobFailedPayload(BaseModel):
     ride along for the MOD-013 usage aggregate (B4 #702), and ``timeout`` -
     derived by the pipeline from the raised exception's cause chain - lets the
     aggregate bucket timeouts separately from other failures.
+
+    B4c (#719) carries the same identity references the completed payload does -
+    ``patient_id``, a nullable ``doctor_id`` (null on the transcription and
+    structuring legs) and the ``trace_id`` join key - resolved producer-locally,
+    identity only, no clinical content (security-phii-standards no-PHI).
     """
 
     ai_job_id: int
@@ -159,6 +176,9 @@ class AiJobFailedPayload(BaseModel):
     provider: str
     model: str
     timeout: bool
+    patient_id: int
+    doctor_id: int | None
+    trace_id: str | None
 
 
 class AiEgressRecordedPayload(BaseModel):
@@ -259,6 +279,9 @@ def ai_job_completed_envelope(
     cost_paise: int,
     duration_ms: int,
     low_confidence: bool,
+    patient_id: int,
+    doctor_id: int | None,
+    trace_id: str | None,
 ) -> Envelope[AiJobCompletedPayload]:
     """Build the ``ai_job.completed`` envelope for the intake outbox."""
     return Envelope[AiJobCompletedPayload](
@@ -276,6 +299,9 @@ def ai_job_completed_envelope(
             cost_paise=cost_paise,
             duration_ms=duration_ms,
             low_confidence=low_confidence,
+            patient_id=patient_id,
+            doctor_id=doctor_id,
+            trace_id=trace_id,
         ),
     )
 
@@ -289,6 +315,9 @@ def ai_job_failed_envelope(
     provider: str,
     model: str,
     timeout: bool,
+    patient_id: int,
+    doctor_id: int | None,
+    trace_id: str | None,
 ) -> Envelope[AiJobFailedPayload]:
     """Build the ``ai_job.failed`` envelope for the intake outbox."""
     return Envelope[AiJobFailedPayload](
@@ -303,6 +332,9 @@ def ai_job_failed_envelope(
             provider=provider,
             model=model,
             timeout=timeout,
+            patient_id=patient_id,
+            doctor_id=doctor_id,
+            trace_id=trace_id,
         ),
     )
 

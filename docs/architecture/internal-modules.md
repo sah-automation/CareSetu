@@ -804,6 +804,8 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 
 > `intake.retry_requested` carries a PHI-free `reason` string (e.g. `unusable_audio`) alongside `intake_id` and `record_attempt` (T06 #370).
 
+> `ai_job.completed` and `ai_job.failed` carry the MOD-013 metering facts (B4a #702: provider, model, tokens, priced `cost_paise`, duration, the derived `low_confidence`/`timeout` flags) **and**, since B4c (#719), the identity references per-patient and per-doctor cost attribution reads: `patient_id`, a nullable `doctor_id` and the `trace_id` join key. All are resolved producer-locally at the two intake publish sites (`doctor_id` stays null on the transcription and structuring legs, which involve no doctor; `trace_id` is the ambient context id the outbox writer already stamps). Only identity references travel - no clinical content - per the observability no-PHI rule; MOD-013's mirrors accept the widened shape.
+
 > `otp.failed` carries a `reason`: `lockout` when the brute-force lockout triggers (MOD-001, ADR-0004) or `delivery` when an SMS send has exhausted every retry and the code never reached the phone (MOD-001, PHASE-2 REM T5 #81).
 
 > `patient.auth_failed` carries a `reason`; the shared failure-reason vocabulary includes `access_denied`, emitted when an authenticated caller is refused on a protected route (403, insufficient scope or missing role) so the denial is auditable, and written to the iam outbox in its own transaction. Anonymous denials (401) carry no identity to attribute and stay log-only - no outbox write (MOD-001, PHASE-2 REM T7 #87).

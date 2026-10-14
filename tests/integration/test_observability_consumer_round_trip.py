@@ -56,6 +56,9 @@ from modules.observability.domain.consumer import (
 
 _NOW = datetime(2026, 10, 13, 8, 15, 0, tzinfo=UTC)
 
+#: A well-formed W3C trace-id (32 lowercase hex) the widened payloads carry (#719).
+_TRACE_ID = "a" * 32
+
 
 def _registry() -> HandlerRegistry:
     registry = HandlerRegistry()
@@ -90,6 +93,9 @@ def _completed_envelope(
             cost_paise=cost_paise,
             duration_ms=duration_ms,
             low_confidence=low_confidence,
+            patient_id=7,
+            doctor_id=None,
+            trace_id=_TRACE_ID,
         ),
     )
 
@@ -109,6 +115,9 @@ def _failed_envelope(*, ai_job_id: int, reason: str, timeout: bool) -> Envelope[
             provider="openai",
             model="whisper-1",
             timeout=timeout,
+            patient_id=7,
+            doctor_id=None,
+            trace_id=_TRACE_ID,
         ),
     )
 

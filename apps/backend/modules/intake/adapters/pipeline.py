@@ -83,6 +83,7 @@ from modules.intake.schema.models import (
     intake_media_refs,
     intake_pre_summaries,
 )
+from observability.logging import get_trace_id
 
 logger = logging.getLogger(__name__)
 
@@ -334,6 +335,8 @@ async def _run_structuring_pipeline(
                     connection,
                     ai_job_id=transcribe_job_id,
                     intake_id=intake_id,
+                    patient_id=row.patient_id,
+                    doctor_id=None,
                     task_type="transcribe",
                     reason=_failure_reason(exc),
                     provider=configured_provider,
@@ -372,6 +375,8 @@ async def _run_structuring_pipeline(
                 connection,
                 ai_job_id=transcribe_job_id,
                 intake_id=intake_id,
+                patient_id=row.patient_id,
+                doctor_id=None,
                 task_type="transcribe",
                 provider=effective_transcribe_provider,
                 model=effective_transcribe_model,
@@ -487,6 +492,8 @@ async def _run_structuring_pipeline(
                 connection,
                 ai_job_id=ai_job_id,
                 intake_id=intake_id,
+                patient_id=row.patient_id,
+                doctor_id=None,
                 task_type="structure",
                 reason=_failure_reason(exc),
                 provider=configured_provider,
@@ -625,6 +632,8 @@ async def _fail_job(
     *,
     ai_job_id: int,
     intake_id: int,
+    patient_id: int,
+    doctor_id: int | None,
     task_type: str,
     reason: str,
     provider: str,
@@ -638,7 +647,11 @@ async def _fail_job(
     alongside the raw-review transition (ADR-0002 §1). The event carries the
     configured plan's provider/model (the pre-call booking on the job row) and
     the derived ``timeout`` classification so the MOD-013 usage aggregate can
-    bucket timeouts separately (B4a #702).
+    bucket timeouts separately (B4a #702). It also carries the identity
+    references B4c (#719) needs for attribution: the ``patient_id`` and
+    ``doctor_id`` in scope at the caller (null on the transcription and
+    structuring legs, which involve no doctor) and the ambient ``trace_id``
+    resolved producer-locally - identity only, no PHI.
     """
     await connection.execute(
         intake_ai_jobs.update()
@@ -661,6 +674,9 @@ async def _fail_job(
             provider=provider,
             model=model,
             timeout=timeout,
+            patient_id=patient_id,
+            doctor_id=doctor_id,
+            trace_id=get_trace_id(),
         ),
     )
 
@@ -710,6 +726,8 @@ async def _complete_ai_job(
     *,
     ai_job_id: int,
     intake_id: int,
+    patient_id: int,
+    doctor_id: int | None,
     task_type: AiTaskType,
     provider: str,
     model: str,
@@ -726,11 +744,15 @@ async def _complete_ai_job(
     ``cost_paise`` by the per-model pricing helper (#399), and the call latency;
     then ``ai_job.completed`` is emitted. The event carries the same metering
     facts plus the derived ``low_confidence`` flag so the MOD-013 usage aggregate
-    accumulates from the event alone (B4a #702). Runs in the SAME transaction as
-    the ledger dedupe so a pass is a metered row per leg that ran - never a
-    silent, unlogged egress (PS-03). Shared by the transcribe leg
-    (``task_type="transcribe"``, #401) and the structure leg
-    (``task_type="structure"``) so the completion shape cannot drift between them.
+    accumulates from the event alone (B4a #702), and the identity references
+    B4c (#719) needs for per-patient/doctor attribution - the ``patient_id`` and
+    ``doctor_id`` in scope at the caller (null on the transcription and
+    structuring legs, which involve no doctor) and the ambient ``trace_id``
+    resolved producer-locally. Runs in the SAME transaction as the ledger dedupe
+    so a pass is a metered row per leg that ran - never a silent, unlogged egress
+    (PS-03). Shared by the transcribe leg (``task_type="transcribe"``, #401) and
+    the structure leg (``task_type="structure"``) so the completion shape cannot
+    drift between them.
     """
     cost_paise = compute_cost_paise(model, input_tokens=input_tokens, output_tokens=output_tokens)
     await connection.execute(
@@ -763,6 +785,9 @@ async def _complete_ai_job(
             cost_paise=cost_paise,
             duration_ms=elapsed_ms,
             low_confidence=low_confidence,
+            patient_id=patient_id,
+            doctor_id=doctor_id,
+            trace_id=get_trace_id(),
         ),
     )
 
@@ -855,6 +880,8 @@ async def _finalize_pipeline(
         connection,
         ai_job_id=ai_job_id,
         intake_id=intake_id,
+        patient_id=patient_id,
+        doctor_id=None,
         task_type="structure",
         provider=provider,
         model=model,

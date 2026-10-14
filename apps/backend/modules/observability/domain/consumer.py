@@ -43,7 +43,10 @@ class AiJobCompletedUsagePayload(BaseModel):
 
     ``low_confidence`` is the producer's derived flag (always ``False`` for
     transcribe) - never the raw confidence score, which stays in the intake
-    schema. MOD-013 accumulates it directly and never recomputes it.
+    schema. MOD-013 accumulates it directly and never recomputes it. Since B4c
+    (#719) the payload also carries the identity references attribution reads:
+    ``patient_id``, a nullable ``doctor_id`` (null on the transcription and
+    structuring legs) and the ``trace_id`` join key - identity only, no PHI.
     """
 
     ai_job_id: int
@@ -56,6 +59,9 @@ class AiJobCompletedUsagePayload(BaseModel):
     cost_paise: int
     duration_ms: int
     low_confidence: bool
+    patient_id: int
+    doctor_id: int | None
+    trace_id: str | None
 
 
 class AiJobFailedUsagePayload(BaseModel):
@@ -63,7 +69,9 @@ class AiJobFailedUsagePayload(BaseModel):
 
     ``timeout`` is classified upstream (the producer walks its exception's
     cause chain for ``httpx.TimeoutException``); MOD-013 buckets timeouts
-    separately from other failures using only this flag.
+    separately from other failures using only this flag. B4c (#719) carries the
+    same identity references as the completed mirror - ``patient_id``, a
+    nullable ``doctor_id`` and the ``trace_id`` join key.
     """
 
     ai_job_id: int
@@ -73,6 +81,9 @@ class AiJobFailedUsagePayload(BaseModel):
     model: str
     reason: str
     timeout: bool
+    patient_id: int
+    doctor_id: int | None
+    trace_id: str | None
 
 
 class CaseConsultCompleteTelemetryPayload(BaseModel):

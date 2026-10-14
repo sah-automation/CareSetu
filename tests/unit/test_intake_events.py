@@ -109,6 +109,9 @@ def _capture_from_all_event_types() -> list[Envelope[BaseModel]]:
             cost_paise=24,
             duration_ms=1200,
             low_confidence=True,
+            patient_id=7,
+            doctor_id=None,
+            trace_id="a" * 32,
         ),
         ai_job_failed_envelope(
             ai_job_id=9,
@@ -118,6 +121,9 @@ def _capture_from_all_event_types() -> list[Envelope[BaseModel]]:
             provider="openai",
             model="whisper-1",
             timeout=True,
+            patient_id=7,
+            doctor_id=None,
+            trace_id=None,
         ),
         ai_egress_recorded_envelope(intake_id=1, ai_job_id=9, reason="structure"),
     ]
@@ -191,6 +197,9 @@ def test_ai_job_completed_names_the_job_and_carries_the_metering_facts() -> None
         cost_paise=21,
         duration_ms=950,
         low_confidence=True,
+        patient_id=7,
+        doctor_id=8,
+        trace_id="c" * 32,
     )
 
     assert envelope.event_type == EVENT_AI_JOB_COMPLETED
@@ -205,6 +214,10 @@ def test_ai_job_completed_names_the_job_and_carries_the_metering_facts() -> None
     assert envelope.payload.cost_paise == 21
     assert envelope.payload.duration_ms == 950
     assert envelope.payload.low_confidence is True
+    # B4c (#719): the identity references attribution reads - identity only, no PHI.
+    assert envelope.payload.patient_id == 7
+    assert envelope.payload.doctor_id == 8
+    assert envelope.payload.trace_id == "c" * 32
 
 
 def test_ai_job_failed_carries_the_operational_reason_and_timeout_class() -> None:
@@ -216,6 +229,9 @@ def test_ai_job_failed_carries_the_operational_reason_and_timeout_class() -> Non
         provider="openai",
         model="gpt-4o-mini",
         timeout=True,
+        patient_id=7,
+        doctor_id=None,
+        trace_id="d" * 32,
     )
 
     assert envelope.event_type == EVENT_AI_JOB_FAILED
@@ -227,6 +243,10 @@ def test_ai_job_failed_carries_the_operational_reason_and_timeout_class() -> Non
     assert envelope.payload.provider == "openai"
     assert envelope.payload.model == "gpt-4o-mini"
     assert envelope.payload.timeout is True
+    # B4c (#719): these failure legs involve no doctor, so the reference is null.
+    assert envelope.payload.patient_id == 7
+    assert envelope.payload.doctor_id is None
+    assert envelope.payload.trace_id == "d" * 32
 
 
 def test_ai_egress_recorded_names_the_job_and_reason() -> None:

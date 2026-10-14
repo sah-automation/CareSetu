@@ -61,6 +61,9 @@ def test_intake_completed_payload_revalidates_into_the_observability_mirror() ->
         cost_paise=24,
         duration_ms=1200,
         low_confidence=True,
+        patient_id=7,
+        doctor_id=8,
+        trace_id="e" * 32,
     )
     mirror = AiJobCompletedUsagePayload.model_validate(envelope.payload.model_dump())
     assert isinstance(mirror, AiJobCompletedUsagePayload)
@@ -71,6 +74,10 @@ def test_intake_completed_payload_revalidates_into_the_observability_mirror() ->
     assert mirror.cost_paise == 24
     assert mirror.duration_ms == 1200
     assert mirror.low_confidence is True
+    # B4c (#719): the widened identity references revalidate into the mirror.
+    assert mirror.patient_id == 7
+    assert mirror.doctor_id == 8
+    assert mirror.trace_id == "e" * 32
 
 
 def test_intake_failed_payload_revalidates_into_the_observability_mirror() -> None:
@@ -82,6 +89,9 @@ def test_intake_failed_payload_revalidates_into_the_observability_mirror() -> No
         provider="openai",
         model="whisper-1",
         timeout=True,
+        patient_id=7,
+        doctor_id=None,
+        trace_id=None,
     )
     mirror = AiJobFailedUsagePayload.model_validate(envelope.payload.model_dump())
     assert isinstance(mirror, AiJobFailedUsagePayload)
@@ -89,6 +99,10 @@ def test_intake_failed_payload_revalidates_into_the_observability_mirror() -> No
     assert mirror.model == "whisper-1"
     assert mirror.reason == "Ext002CallError"
     assert mirror.timeout is True
+    # B4c (#719): the transcription leg has no doctor; the reference stays null.
+    assert mirror.patient_id == 7
+    assert mirror.doctor_id is None
+    assert mirror.trace_id is None
 
 
 @pytest.mark.asyncio
@@ -133,6 +147,9 @@ async def test_completed_handler_accumulates_exactly_once_per_event_id(
         cost_paise=24,
         duration_ms=1200,
         low_confidence=True,
+        patient_id=7,
+        doctor_id=None,
+        trace_id=None,
     )
     second = ai_job_completed_envelope(
         ai_job_id=10,
@@ -145,6 +162,9 @@ async def test_completed_handler_accumulates_exactly_once_per_event_id(
         cost_paise=14,
         duration_ms=800,
         low_confidence=False,
+        patient_id=7,
+        doctor_id=None,
+        trace_id=None,
     )
 
     await handler(first)
@@ -198,6 +218,9 @@ async def test_failed_handler_accumulates_exactly_once_per_event_id(
         provider="openai",
         model="gpt-4o-mini",
         timeout=True,
+        patient_id=7,
+        doctor_id=None,
+        trace_id=None,
     )
     malformed = ai_job_failed_envelope(
         ai_job_id=10,
@@ -207,6 +230,9 @@ async def test_failed_handler_accumulates_exactly_once_per_event_id(
         provider="openai",
         model="gpt-4o-mini",
         timeout=False,
+        patient_id=7,
+        doctor_id=None,
+        trace_id=None,
     )
 
     await handler(timeout)
