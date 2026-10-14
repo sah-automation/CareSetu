@@ -11,10 +11,18 @@
 // Deeplinks) and raises `ApiError` otherwise, so a page renders one error path
 // for a network failure, a refused read and a body that drifted alike.
 //
-// Money is paise (api-standards §3) and percentages/percentiles are backend
-// `Decimal`s, which FastAPI's encoder serializes as JSON numbers - never
-// strings - so both arrive as plain `number`s here. A rate whose denominator is
-// empty is `null`, which means "not yet measured" and never reads as zero.
+// Money is paise (api-standards §3), so it arrives as a plain `number`.
+//
+// Percentages and percentiles are a different story: the backend models them as
+// Python `Decimal`s, and pydantic's JSON encoder serialises a `Decimal` as a
+// STRING - `"73.33"`, not `73.33`. That is the wire contract (the round-trip
+// integration tests assert it), so every one of those fields is decoded to a
+// `number` here, at the one boundary where a wire body becomes a domain model.
+// Skipping this decode does not merely mis-render a figure: `formatPct` calls
+// `value.toFixed`, so a string takes down the whole panel.
+//
+// A rate whose denominator is empty stays `null` through the decode, which
+// means "not yet measured" and never reads as zero.
 
 import { guardShape, request } from "@/lib/request";
 
@@ -281,8 +289,86 @@ function isArrayOf<T>(
   return Array.isArray(value) && value.every(guard);
 }
 
+/**
+ * Decode one wire decimal to a `number`.
+ *
+ * pydantic serialises a backend `Decimal` as a JSON string (`"73.33"`), so a
+ * numeric-string, a bare JSON number, or `null` are all legal on the wire and
+ * all have to land as the `number`/`null` the declared model promises. A value
+ * that is neither decodes to `NaN`, which `isWireDecimal` then rejects so the
+ * guard raises `UNEXPECTED_ERROR` rather than a figure rendering as "NaN%".
+ */
+function wireDecimal(value: unknown): number | null {
+  if (value === null) return null;
+  if (typeof value === "number") return value;
+  if (typeof value === "string" && value.trim() !== "") return Number(value);
+  return Number.NaN;
+}
+
+/**
+ * True when a `Decimal`-declared field is a number or `null`, or the numeric
+ * string pydantic actually emits. Widening the guards to accept the wire's
+ * string form is what lets the decode below run; a value that decodes to `NaN`
+ * fails here and never reaches a formatter.
+ */
+function isWireDecimal(value: unknown): boolean {
+  if (value === null) return true;
+  const decoded = wireDecimal(value);
+  return typeof decoded === "number" && Number.isFinite(decoded);
+}
+
+/**
+ * Decode every `Decimal` field a model declares, in place on a shallow copy.
+ *
+ * The `Decimal`s on the wire are strings, so each named key is coerced to a
+ * number here - the one place a wire body becomes the domain model. A `null`
+ * rate stays `null` ("not yet measured").
+ */
+function withDecimals<T extends object>(model: T, keys: readonly string[]): T {
+  if (keys.length === 0) return model;
+  const copy = { ...model } as Record<string, unknown>;
+  for (const key of keys) {
+    if (key in copy) {
+      copy[key] = wireDecimal(copy[key]);
+    }
+  }
+  return copy as T;
+}
+
+/** Cost/quality/latency/overview/health `Decimal` fields, keyed by model. */
+const COST_DECIMALS = ["utilization_pct"] as const;
+const COST_BUDGET_DECIMALS = ["utilization_pct"] as const;
+const OVERVIEW_DECIMALS = [
+  "success_rate",
+  "low_confidence_rate",
+  "p95_duration_ms",
+  "budget_utilization_pct",
+] as const;
+const QUALITY_DECIMALS = ["success_rate", "low_confidence_rate"] as const;
+const PROVIDER_QUALITY_DECIMALS = ["success_rate"] as const;
+const LATENCY_DECIMALS = [
+  "p50_duration_ms",
+  "p95_duration_ms",
+  "p99_duration_ms",
+] as const;
+const DEPENDENCY_DECIMALS = ["latency_ms"] as const;
+
 function isBusinessCountView(value: unknown): value is BusinessCountView {
   return isRecord(value) && hasKeys(value, ["metric_key", "count"]);
+}
+
+/**
+ * Key-presence PLUS decodability check for a model's `Decimal` fields. The one
+ * place the guards are stricter than "is the key there": a decimal that will not
+ * decode to a finite number is a body the client cannot honestly model, and
+ * `guardShape` turns that into the same `UNEXPECTED_ERROR` every other shape
+ * fault produces.
+ */
+function hasWireDecimals(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+): boolean {
+  return keys.every((key) => key in value && isWireDecimal(value[key]));
 }
 
 function isOverview(value: unknown): value is Overview {
@@ -308,6 +394,7 @@ function isOverview(value: unknown): value is Overview {
       "business_counts",
       "last_rolled_date",
     ]) &&
+    hasWireDecimals(value, OVERVIEW_DECIMALS) &&
     isArrayOf(value.business_counts, isBusinessCountView)
   );
 }
@@ -326,7 +413,8 @@ function isCostBudgetView(value: unknown): value is CostBudgetView {
       "remaining_paise",
       "utilization_pct",
       "exhausted",
-    ])
+    ]) &&
+    hasWireDecimals(value, COST_BUDGET_DECIMALS)
   );
 }
 
@@ -343,6 +431,7 @@ function isCostSummary(value: unknown): value is CostSummary {
       "exhausted",
       "budgets",
     ]) &&
+    hasWireDecimals(value, COST_DECIMALS) &&
     isArrayOf(value.budgets, isCostBudgetView)
   );
 }
@@ -404,7 +493,8 @@ function isProviderQualityRow(value: unknown): value is ProviderQualityRow {
       "sample_count",
       "success_rate",
       "breaker_state",
-    ])
+    ]) &&
+    hasWireDecimals(value, PROVIDER_QUALITY_DECIMALS)
   );
 }
 
@@ -424,6 +514,7 @@ function isQualityReport(value: unknown): value is QualityReport {
       "low_confidence_rate",
       "providers",
     ]) &&
+    hasWireDecimals(value, QUALITY_DECIMALS) &&
     isArrayOf(value.providers, isProviderQualityRow)
   );
 }
@@ -439,7 +530,8 @@ function isLatencyRow(value: unknown): value is LatencyRow {
       "p99_duration_ms",
       "window_start",
       "window_end",
-    ])
+    ]) &&
+    hasWireDecimals(value, LATENCY_DECIMALS)
   );
 }
 
@@ -454,7 +546,8 @@ function isLatencyReport(value: unknown): value is LatencyReport {
 function isDependencyHealth(value: unknown): value is DependencyHealth {
   return (
     isRecord(value) &&
-    hasKeys(value, ["name", "status", "latency_ms", "detail"])
+    hasKeys(value, ["name", "status", "latency_ms", "detail"]) &&
+    hasWireDecimals(value, DEPENDENCY_DECIMALS)
   );
 }
 
@@ -542,21 +635,30 @@ export async function fetchOverview(
   const data = await request<unknown>(
     `${OBSERVABILITY_BASE}/overview${windowQuery(params.days)}`,
   );
-  return guardShape(
-    data,
-    isOverview,
-    "The API returned an unexpected observability overview shape",
+  return withDecimals(
+    guardShape(
+      data,
+      isOverview,
+      "The API returned an unexpected observability overview shape",
+    ),
+    OVERVIEW_DECIMALS,
   );
 }
 
 /** AI spend against the current billing period's budget, per budget scope. */
 export async function fetchCost(): Promise<CostSummary> {
   const data = await request<unknown>(`${OBSERVABILITY_BASE}/cost`);
-  return guardShape(
+  const summary = guardShape(
     data,
     isCostSummary,
     "The API returned an unexpected observability cost shape",
   );
+  return {
+    ...withDecimals(summary, COST_DECIMALS),
+    budgets: summary.budgets.map((budget) =>
+      withDecimals(budget, COST_BUDGET_DECIMALS),
+    ),
+  };
 }
 
 /** The daily cost series over the window, oldest day first. */
@@ -594,11 +696,17 @@ export async function fetchQuality(
   const data = await request<unknown>(
     `${OBSERVABILITY_BASE}/quality${windowQuery(params.days)}`,
   );
-  return guardShape(
+  const report = guardShape(
     data,
     isQualityReport,
     "The API returned an unexpected observability quality shape",
   );
+  return {
+    ...withDecimals(report, QUALITY_DECIMALS),
+    providers: report.providers.map((provider) =>
+      withDecimals(provider, PROVIDER_QUALITY_DECIMALS),
+    ),
+  };
 }
 
 /**
@@ -607,21 +715,33 @@ export async function fetchQuality(
  */
 export async function fetchLatency(): Promise<LatencyReport> {
   const data = await request<unknown>(`${OBSERVABILITY_BASE}/latency`);
-  return guardShape(
+  const report = guardShape(
     data,
     isLatencyReport,
     "The API returned an unexpected observability latency shape",
   );
+  return {
+    ...report,
+    providers: report.providers.map((provider) =>
+      withDecimals(provider, LATENCY_DECIMALS),
+    ),
+  };
 }
 
 /** Dependency reachability plus the outbox and circuit-breaker state. */
 export async function fetchHealth(): Promise<SystemHealth> {
   const data = await request<unknown>(`${OBSERVABILITY_BASE}/health`);
-  return guardShape(
+  const health = guardShape(
     data,
     isSystemHealth,
     "The API returned an unexpected observability health shape",
   );
+  return {
+    ...health,
+    dependencies: health.dependencies.map((dependency) =>
+      withDecimals(dependency, DEPENDENCY_DECIMALS),
+    ),
+  };
 }
 
 /** The paged alert feed, newest first. */

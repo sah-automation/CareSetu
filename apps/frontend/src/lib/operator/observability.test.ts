@@ -374,3 +374,84 @@ describe("shared transport", () => {
     await expect(fetchOverview()).rejects.toMatchObject({ code: "FORBIDDEN" });
   });
 });
+
+// The backend models every rate, utilization and latency as a Python `Decimal`,
+// which pydantic's JSON encoder serialises as a STRING ("73.33"), not a number.
+// These bodies are the wire shape the routes actually emit; the models above are
+// the DOMAIN shape the console renders. A client that passes the wire body
+// through unchecked hands a string to every formatter, and `formatPct` dies on
+// `value.toFixed is not a function` - the /operator/observability/cost crash.
+describe("decimal wire values", () => {
+  const COST_WIRE = {
+    ...COST,
+    utilization_pct: "25.00",
+    budgets: [
+      {
+        provider: "openai",
+        model: "gpt-4o-mini",
+        monthly_limit_paise: 300000,
+        alert_threshold_pct: 80,
+        current_spend_paise: 100000,
+        billing_period_start: "2026-10-01",
+        billing_period_end: "2026-10-31",
+        remaining_paise: 200000,
+        utilization_pct: "33.33",
+        exhausted: false,
+      },
+    ],
+  };
+
+  const OVERVIEW_WIRE = {
+    ...OVERVIEW,
+    success_rate: "95.00",
+    low_confidence_rate: "2.60",
+    p95_duration_ms: "4200.00",
+    budget_utilization_pct: "25.00",
+  };
+
+  it("resolves cost utilizations as numbers the formatters can take", async () => {
+    stubFetch(COST_WIRE);
+
+    const summary = await fetchCost();
+
+    expect(summary.utilization_pct).toBe(25);
+    expect(summary.budgets[0].utilization_pct).toBeCloseTo(33.33, 2);
+    expect(typeof summary.utilization_pct).toBe("number");
+  });
+
+  it("resolves overview rates and latencies as numbers", async () => {
+    stubFetch(OVERVIEW_WIRE);
+
+    const overview = await fetchOverview();
+
+    expect(overview.success_rate).toBe(95);
+    expect(overview.low_confidence_rate).toBeCloseTo(2.6, 5);
+    expect(overview.p95_duration_ms).toBe(4200);
+    expect(overview.budget_utilization_pct).toBe(25);
+  });
+
+  it("keeps an unmeasured rate null rather than coercing it to a number", async () => {
+    stubFetch({ ...OVERVIEW_WIRE, success_rate: null, p95_duration_ms: null });
+
+    const overview = await fetchOverview();
+
+    expect(overview.success_rate).toBeNull();
+    expect(overview.p95_duration_ms).toBeNull();
+  });
+
+  it("still accepts a decimal the wire sends as a bare JSON number", async () => {
+    stubFetch({ ...COST_WIRE, utilization_pct: 25 });
+
+    const summary = await fetchCost();
+
+    expect(summary.utilization_pct).toBe(25);
+  });
+
+  it("rejects a decimal that is not a number rather than rendering NaN", async () => {
+    stubFetch({ ...COST_WIRE, utilization_pct: "not-a-number" });
+
+    await expect(fetchCost()).rejects.toMatchObject({
+      code: "UNEXPECTED_ERROR",
+    });
+  });
+});
