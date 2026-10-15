@@ -3,12 +3,34 @@
 Shared cross-module observability support: the Langfuse client singleton that
 the AI gateway port (standard A6, Phase 7+) consumes for LLM call tracing, the
 structured-logging configuration (A1, #694) that the API, worker and dispatcher
-share, the Sentry error-tracking bootstrap (A4, #696) and the OpenTelemetry
-request-path bootstrap (A3a, #697). Lives at the top level alongside ``bus``
+share, the Sentry error-tracking bootstrap (A4, #696), the OpenTelemetry
+request-path bootstrap (A3a, #697) and the bounded in-process server-error
+capture buffer (B8, #726) that the gateway error seam writes and the worker's
+drain empties. Lives at the top level alongside ``bus``
 (also shared infra): it is not a module, has no schema, and imports nothing from
 ``modules``.
 """
 
+from observability.error_capture import (
+    ERROR_KIND_SERVER_ERROR_RESPONSE,
+    ERROR_KIND_UNHANDLED_EXCEPTION,
+    STATUS_CLASS_CLIENT_ERROR,
+    STATUS_CLASS_REDIRECT,
+    STATUS_CLASS_SERVER_ERROR,
+    STATUS_CLASS_SUCCESS,
+    UNMATCHED_ROUTE_TEMPLATE,
+    CapturedError,
+    capture_server_error,
+    configure_error_capture,
+    discard_error_captures,
+    dropped_error_captures,
+    error_capture_capacity,
+    fingerprint_for,
+    pending_error_captures,
+    reset_error_capture,
+    route_template_for,
+    status_class_for,
+)
 from observability.langfuse_client import (
     flush_langfuse,
     get_configured_client,
@@ -60,17 +82,31 @@ from observability.sentry import (
 __all__ = [
     "ALLOWED_SPAN_ATTRIBUTES",
     "ALLOWED_SPAN_METADATA_KEYS",
+    "ERROR_KIND_SERVER_ERROR_RESPONSE",
+    "ERROR_KIND_UNHANDLED_EXCEPTION",
     "METER_NAME",
     "REDACTED_VALUE",
     "REDACTION_KEY_FRAGMENTS",
     "SERVICE_API",
     "SERVICE_WORKER",
+    "STATUS_CLASS_CLIENT_ERROR",
+    "STATUS_CLASS_REDIRECT",
+    "STATUS_CLASS_SERVER_ERROR",
+    "STATUS_CLASS_SUCCESS",
     "TRACER_NAME",
+    "UNMATCHED_ROUTE_TEMPLATE",
     "AllowListSpanProcessor",
+    "CapturedError",
     "SpanMetadataError",
     "apply_span_allow_list",
     "build_span_metadata",
+    "capture_server_error",
+    "configure_error_capture",
     "configure_logging",
+    "discard_error_captures",
+    "dropped_error_captures",
+    "error_capture_capacity",
+    "fingerprint_for",
     "flush_langfuse",
     "flush_otel",
     "flush_sentry",
@@ -83,16 +119,20 @@ __all__ = [
     "init_otel",
     "init_sentry",
     "parse_otlp_headers",
+    "pending_error_captures",
     "record_cache_hit",
     "record_cache_miss",
     "record_outbox_poll",
     "record_request_error",
     "record_request_latency",
     "redact_value",
+    "reset_error_capture",
     "reset_trace_id",
     "resolve_release",
+    "route_template_for",
     "scrub_event",
     "set_span_metadata",
     "set_trace_id",
     "start_span",
+    "status_class_for",
 ]

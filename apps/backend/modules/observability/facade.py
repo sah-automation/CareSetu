@@ -30,6 +30,12 @@ turns that state into the dates one invocation rolls (the first-run backfill, th
 previous day afterwards). Both are re-exported here so the
 ``python -m worker.rollup`` entry point reaches them through the facade, like
 every other composition-root seam.
+
+B8 (#726) adds :func:`drain_error_buffer`, the same shape for a different job: the
+gateway error seam buffers failures in process, and this drains them into
+``observability_error_events`` in one transaction off the request path. It is the
+ONLY writer of that table, and it is re-exported here so the worker's scheduled
+drain reaches it through the facade rather than reaching into the module.
 """
 
 from __future__ import annotations
@@ -75,6 +81,7 @@ from modules.observability.domain.rollup import (
     plan_rollup_dates,
     ratio,
 )
+from modules.observability.error_stream import ErrorDrainReport, drain_error_buffer
 from modules.observability.rollup import RollupReport, RollupRunState, load_rollup_state, run_rollup
 from modules.observability.schema.models import (
     observability_ai_cost_budget,
@@ -115,6 +122,7 @@ __all__ = [
     "CostTrendPoint",
     "Deeplinks",
     "DependencyHealth",
+    "ErrorDrainReport",
     "LatencyReport",
     "LatencyRow",
     "ObservabilityFacade",
@@ -131,6 +139,7 @@ __all__ = [
     "UsageRow",
     "accumulate_ai_usage",
     "accumulate_business_count",
+    "drain_error_buffer",
     "load_rollup_state",
     "plan_rollup_dates",
     "query_alerts",

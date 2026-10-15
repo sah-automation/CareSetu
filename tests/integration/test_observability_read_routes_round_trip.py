@@ -13,6 +13,11 @@ response against that seed: the totals are the seeded sums, the 30-day default
 window excludes the stale row and a ``days=1`` window excludes yesterday, and
 every rate is the seeded ratio.
 
+B8 (#726) folds the gateway error capture into this same round trip rather than
+opening a fourth fixture: the real app raises a real 5xx, the catch-all seam
+buffers it, and the module facade's drain writes the captured record - so the row
+exists only if every hop of the capture path works.
+
 Requires the native PostgreSQL; the suite skips cleanly when it is unreachable.
 The shared integration conftest migrates to head once per file, empties the
 observability aggregates and every module's outbox before each test (``/health``
@@ -27,6 +32,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest_asyncio
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -34,8 +40,13 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from app.config import Settings
 from app.main import create_app
 from modules.iam.domain.jwt import issue_token
+from modules.observability.facade import drain_error_buffer
+from observability.error_capture import pending_error_captures, reset_error_capture
 
 _SIGNING_KEY = "integration-observability-read-signing-key"
+#: A client-presented trace id, so the round trip asserts the id the CALLER chose
+#: survives all the way into the stored record rather than one minted in passing.
+_TRACE_ID = "integration-trace-abc123"
 
 _TODAY = datetime.now(UTC).date()
 _YESTERDAY = _TODAY - timedelta(days=1)
@@ -202,6 +213,57 @@ def _client(database_url: str, **overrides: object) -> TestClient:
             )
         )
     )
+
+
+def _failing_client(database_url: str) -> TestClient:
+    """The real app plus routes that fail, for the B8 error-capture round trip.
+
+    ``dispatcher_in_process_enabled=False`` so the lifespan does NOT start the
+    worker: these tests drive the drain themselves, and a scheduled drain firing
+    mid-test would be a race over the very buffer under assertion.
+
+    ``raise_server_exceptions=False`` because Starlette's ``ServerErrorMiddleware``
+    sends the envelope AND re-raises the exception - a real client only ever sees
+    the 500, so the test client has to as well or the assertion lands on the wrong
+    side of the seam.
+    """
+    app = create_app(
+        settings=Settings(
+            database_url=database_url,
+            gateway_jwt_verify_enabled=True,
+            gateway_jwt_signing_key=_SIGNING_KEY,
+            dispatcher_in_process_enabled=False,
+        )
+    )
+
+    @app.get("/v1/cases/{case_id}/entries/boom")
+    def boom(case_id: str) -> None:
+        raise RuntimeError(f"database unavailable for case {case_id}")
+
+    @app.get("/v1/cases/{case_id}/entries/unavailable")
+    def unavailable() -> JSONResponse:
+        return JSONResponse(status_code=503, content={"code": "SERVICE_UNAVAILABLE"})
+
+    @app.get("/v1/cases/{case_id}/entries/both-ways")
+    def both_ways() -> JSONResponse:
+        """Raises on the first call, gives up on the second.
+
+        One route reached by both capture seams, so a test can show ``kind``
+        separating two records whose route, method and status would otherwise
+        collapse them together.
+        """
+        both_ways.calls += 1
+        if both_ways.calls == 1:
+            raise RuntimeError("the dependency went away mid-request")
+        return JSONResponse(status_code=503, content={"code": "SERVICE_UNAVAILABLE"})
+
+    both_ways.calls = 0
+
+    @app.get("/v1/cases/{case_id}/entries/fine")
+    def fine() -> dict[str, str]:
+        return {"status": "ok"}
+
+    return TestClient(app, raise_server_exceptions=False)
 
 
 async def test_cost_matches_the_seeded_budgets(
@@ -563,3 +625,208 @@ async def test_c1b_routes_refuse_anonymous_and_non_operator_callers(
         for path in (OVERVIEW_PATH, LATENCY_PATH, HEALTH_PATH, ALERTS_PATH, DEEPLINKS_PATH):
             assert client.get(path).status_code == 401
             assert client.get(path, headers=_bearer("patient")).status_code == 403
+
+
+# ------------------------------------------------------- B8 #726: the error stream
+#
+# The gateway error capture folds into THIS round trip rather than getting its own
+# fixture (spec #717 Testing Decisions): driving a real 5xx through the real ASGI
+# application, then draining the buffer, is the same seam reached through a
+# different door - real migrations, real Postgres, the real module facade.
+
+
+async def _captured_error_rows(engine: AsyncEngine) -> list[dict[str, object]]:
+    """Every row the error stream holds, as plain dicts for assertion."""
+    async with engine.connect() as connection:
+        result = await connection.execute(
+            text(
+                "SELECT fingerprint, route_template, method, status_code, status_class, "
+                "kind, code, trace_id, occurrences, first_seen_at, last_seen_at "
+                "FROM observability.observability_error_events "
+                "ORDER BY route_template"
+            )
+        )
+        return [dict(row) for row in result.mappings()]
+
+
+async def test_a_real_server_error_drains_into_exactly_one_captured_record(
+    engine: AsyncEngine, database_url: str
+) -> None:
+    """B8 #726: one real 5xx through the real app, one row carrying the trace id.
+
+    Driven end to end - the request raises inside a route, the catch-all seam
+    answers 500 AND buffers, the worker's drain writes through the module facade -
+    so the row exists only if every hop of the capture path works. Nothing here
+    inserts a row directly.
+    """
+    reset_error_capture()
+
+    with _failing_client(database_url) as client:
+        response = client.get("/v1/cases/912/entries/boom", headers={"X-Request-Id": _TRACE_ID})
+
+    assert response.status_code == 500
+    assert response.json()["code"] == "INTERNAL_SERVER_ERROR"
+
+    report = await drain_error_buffer(engine)
+
+    assert report.written == 1
+    assert report.frequencies == 1
+    (row,) = await _captured_error_rows(engine)
+    assert row["route_template"] == "/v1/cases/{case_id}/entries/boom"
+    # The concrete id the request carried never reaches telemetry.
+    assert "912" not in str(row["route_template"])
+    assert row["method"] == "GET"
+    assert row["status_code"] == 500
+    assert row["status_class"] == "5xx"
+    assert row["kind"] == "unhandled_exception"
+    assert row["code"] == "INTERNAL_SERVER_ERROR"
+    assert row["trace_id"] == _TRACE_ID
+    assert row["occurrences"] == 1
+    assert row["first_seen_at"] == row["last_seen_at"]
+
+
+async def test_the_buffer_is_empty_once_the_drain_has_persisted_it(
+    engine: AsyncEngine, database_url: str
+) -> None:
+    """B8 #726: what the drain wrote, the drain released - never twice."""
+    reset_error_capture()
+
+    with _failing_client(database_url) as client:
+        client.get("/v1/cases/912/entries/boom")
+    await drain_error_buffer(engine)
+
+    assert pending_error_captures() == ()
+
+    second = await drain_error_buffer(engine)
+
+    assert second.written == 0
+    assert len(await _captured_error_rows(engine)) == 1
+
+
+async def test_repeated_identical_failures_collapse_onto_one_row_with_a_count(
+    engine: AsyncEngine, database_url: str
+) -> None:
+    """B8 #726: a loop is one entry with a count, not a wall burying every other error."""
+    reset_error_capture()
+
+    with _failing_client(database_url) as client:
+        for _ in range(3):
+            client.get("/v1/cases/912/entries/boom", headers={"X-Request-Id": _TRACE_ID})
+
+    report = await drain_error_buffer(engine)
+
+    assert (report.written, report.frequencies) == (3, 1)
+    (row,) = await _captured_error_rows(engine)
+    assert row["occurrences"] == 3
+
+
+async def test_two_different_failures_stay_two_separate_entries(
+    engine: AsyncEngine, database_url: str
+) -> None:
+    """B8 #726: a fingerprint that merged everything would hide the failure it merged."""
+    reset_error_capture()
+
+    with _failing_client(database_url) as client:
+        client.get("/v1/cases/912/entries/boom")
+        client.get("/v1/cases/913/entries/boom")
+
+    await drain_error_buffer(engine)
+
+    rows = await _captured_error_rows(engine)
+    assert len(rows) == 1
+    assert rows[0]["occurrences"] == 2
+
+    reset_error_capture()
+    with _failing_client(database_url) as client:
+        client.get("/v1/cases/912/entries/unavailable")
+
+    await drain_error_buffer(engine)
+
+    rows = await _captured_error_rows(engine)
+    assert sorted(row["route_template"] for row in rows) == [
+        "/v1/cases/{case_id}/entries/boom",
+        "/v1/cases/{case_id}/entries/unavailable",
+    ]
+
+
+async def test_a_handled_5xx_drains_under_its_own_kind(
+    engine: AsyncEngine, database_url: str
+) -> None:
+    """B8 #726: a 5xx a handler produced ITSELF reaches Postgres too.
+
+    The trace seam is the half the exception seam cannot see - the handler caught
+    nothing because nothing escaped - and it is the half with no envelope code to
+    read. This drives that seam all the way to a row, because the capture being
+    correct in memory says nothing about the upsert accepting a record whose
+    ``code`` is empty and whose ``kind`` differs from the exception seam's.
+    """
+    reset_error_capture()
+
+    with _failing_client(database_url) as client:
+        response = client.get(
+            "/v1/cases/912/entries/unavailable", headers={"X-Request-Id": _TRACE_ID}
+        )
+
+    assert response.status_code == 503
+    report = await drain_error_buffer(engine)
+
+    assert (report.written, report.frequencies) == (1, 1)
+    (row,) = await _captured_error_rows(engine)
+    assert row["kind"] == "server_error_response"
+    assert row["status_code"] == 503
+    assert row["status_class"] == "5xx"
+    assert row["route_template"] == "/v1/cases/{case_id}/entries/unavailable"
+    assert "912" not in str(row["route_template"])
+    assert row["trace_id"] == _TRACE_ID
+    # No envelope is read from the response body - the middleware exists to hand
+    # that stream back untouched - so the code column carries the seam's fixed
+    # empty default rather than a guess.
+    assert row["code"] == ""
+
+
+async def test_the_two_seams_produce_two_distinct_entries_for_one_failure(
+    engine: AsyncEngine, database_url: str
+) -> None:
+    """B8 #726: the seam is part of the fingerprint, or the two collapse into one.
+
+    Both requests hit the SAME route and the same method and the same status, so the
+    only thing separating the two records is ``kind`` - which is the point. An
+    escaped exception and a handler-produced 5xx are different operational problems;
+    without ``kind`` in the collapse key the operator gets one row whose count mixes
+    them, and cannot tell whether the service raised or the handler gave up.
+    """
+    reset_error_capture()
+
+    with _failing_client(database_url) as client:
+        # First call: the handler raises, the catch-all seam captures it. Second:
+        # the handler gives up by itself, the trace seam captures that.
+        assert client.get("/v1/cases/912/entries/both-ways").status_code == 500
+        assert client.get("/v1/cases/912/entries/both-ways").status_code == 503
+
+    report = await drain_error_buffer(engine)
+
+    assert (report.written, report.frequencies) == (2, 2)
+    rows = await _captured_error_rows(engine)
+    assert sorted(row["kind"] for row in rows) == [
+        "server_error_response",
+        "unhandled_exception",
+    ]
+    # Same route, same method - so kind is demonstrably what separated them.
+    assert {str(row["route_template"]) for row in rows} == {"/v1/cases/{case_id}/entries/both-ways"}
+    assert [row["status_code"] for row in rows] == [500, 503]
+
+
+async def test_a_healthy_request_starts_no_record_and_no_drain_writes_nothing(
+    engine: AsyncEngine, database_url: str
+) -> None:
+    """B8 #726: capture fires on failure only - otherwise the buffer is a request log."""
+    reset_error_capture()
+
+    with _failing_client(database_url) as client:
+        assert client.get("/v1/cases/912/entries/fine").status_code == 200
+
+    assert pending_error_captures() == ()
+    report = await drain_error_buffer(engine)
+
+    assert (report.written, report.frequencies) == (0, 0)
+    assert await _captured_error_rows(engine) == []

@@ -173,6 +173,23 @@ DEFAULT_OTEL_TRACES_SAMPLER_RATIO = 1.0
 # launch scale while keeping a single scheduled pass bounded; the trimmed surplus
 # is rolled by the next invocation, never skipped.
 DEFAULT_OBSERVABILITY_ROLLUP_MAX_DATES = 90
+# PHASE-14A B8 (#726). The gateway error seam buffers captured server errors in a
+# bounded in-process deque and the worker drains it on an interval, so two numbers
+# describe the capture path rather than living as constants inside it.
+# ``ERROR_CAPTURE_MAX_RECORDS`` is the buffer ceiling: a thousand records ride out
+# a drain interval through a spike, and a storm past that DISCARDS the oldest
+# rather than growing - an unbounded buffer turns an error storm into an
+# out-of-memory kill, which is worse than the outage it was recording. It is
+# declared HERE and imported by ``observability.error_capture``, the other way
+# round from every other default: the buffer needs a ceiling before any
+# composition root has run to configure one, and ``app.config`` may not import the
+# ``observability`` package - its ``__init__`` reaches back into this module for
+# ``APP_VERSION``, so the dependency runs config -> capture and never the reverse
+# (coding-standards §9.2).
+# ``ERROR_DRAIN_INTERVAL_SECONDS`` is how often the drain fires; a short interval
+# keeps the operator's feed close to live without a write per request.
+DEFAULT_ERROR_CAPTURE_MAX_RECORDS = 1000
+DEFAULT_ERROR_DRAIN_INTERVAL_SECONDS = 30
 # Operator MFA TOTP secret encryption (PHASE-5 S8, #261): the AES-256-GCM key
 # for encrypting/decrypting the TOTP secret stored in ``iam_operator_mfa.secret``
 # comes from the ``IAM_MFA_SECRET_KEY`` environment variable (never committed).
@@ -371,6 +388,16 @@ class Settings:
     # nothing is skipped. A limit, so configuration (coding-standards §9.1), not a
     # constant.
     observability_rollup_max_dates: int = DEFAULT_OBSERVABILITY_ROLLUP_MAX_DATES
+    # Ceiling on the in-process error-capture buffer (B8 #726). The gateway error
+    # seam appends one record per server error and the worker drains the buffer on
+    # ``error_drain_interval_seconds``; a full buffer DISCARDS its oldest record, so
+    # this is the point past which the error stream becomes incomplete rather than
+    # the point past which the process becomes unsafe. A limit, so configuration
+    # (coding-standards §9.1), not a constant.
+    error_capture_max_records: int = DEFAULT_ERROR_CAPTURE_MAX_RECORDS
+    # How often the worker drains the error buffer, in seconds. Bounded below only
+    # by "must be positive": a zero interval is a busy loop against the database.
+    error_drain_interval_seconds: int = DEFAULT_ERROR_DRAIN_INTERVAL_SECONDS
 
     def __post_init__(self) -> None:
         if self.gateway_jwt_verify_enabled and not self.gateway_jwt_signing_key:
@@ -507,6 +534,10 @@ class Settings:
             raise ValueError("ai_monthly_budget_paise must be positive")
         if self.observability_rollup_max_dates <= 0:
             raise ValueError("observability_rollup_max_dates must be positive")
+        if self.error_capture_max_records <= 0:
+            raise ValueError("error_capture_max_records must be positive")
+        if self.error_drain_interval_seconds <= 0:
+            raise ValueError("error_drain_interval_seconds must be positive")
         parse_ai_pricing_table(self.ai_pricing_table)
         if self.ai_circuit_breaker_cooldown_seconds <= 0:
             raise ValueError("ai_circuit_breaker_cooldown_seconds must be positive")
@@ -884,5 +915,11 @@ def get_settings() -> Settings:
         observability_enabled=_env_bool("OBSERVABILITY_ENABLED", False),
         observability_rollup_max_dates=_env_int(
             "OBSERVABILITY_ROLLUP_MAX_DATES", DEFAULT_OBSERVABILITY_ROLLUP_MAX_DATES
+        ),
+        error_capture_max_records=_env_int(
+            "ERROR_CAPTURE_MAX_RECORDS", DEFAULT_ERROR_CAPTURE_MAX_RECORDS
+        ),
+        error_drain_interval_seconds=_env_int(
+            "ERROR_DRAIN_INTERVAL_SECONDS", DEFAULT_ERROR_DRAIN_INTERVAL_SECONDS
         ),
     )

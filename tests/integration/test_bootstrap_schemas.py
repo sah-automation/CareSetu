@@ -144,6 +144,10 @@ EXPECTED_OBSERVABILITY_TABLES = {
     "observability.observability_business_daily",
     "observability.observability_alert_events",
     "observability.observability_rollup_runs",
+    "observability.observability_error_events",
+    "observability.observability_http_minute",
+    "observability.observability_product_events",
+    "observability.observability_product_daily",
     "observability.observability_outbox",
     "observability.consumed_events",
 }

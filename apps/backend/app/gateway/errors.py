@@ -9,6 +9,12 @@ strings and the distinguishing cause stays server-side, recorded via the
 module logger as a structured ``gateway_rejection`` line carrying the trace
 id. ``error_response`` is the single funnel for all three shapes so the log
 line and the envelope can never drift.
+
+``CODE_INTERNAL_SERVER_ERROR`` below belongs to the catch-all seam in
+``app/main.py``, which captures its failures into the bounded error buffer
+(#726). It lives here beside the gateway rejections because the captured record's
+fingerprint is derived from the code: a code spelled two different ways in two
+places splits one failure into two entries in the operator's feed.
 """
 
 from __future__ import annotations
@@ -24,10 +30,17 @@ from app.gateway.trace import resolve_trace_id
 CODE_AUTH_UNAUTHENTICATED = "AUTH_UNAUTHENTICATED"
 CODE_AUTH_INSUFFICIENT_SCOPE = "AUTH_INSUFFICIENT_SCOPE"
 CODE_RATE_LIMIT_EXCEEDED = "RATE_LIMIT_EXCEEDED"
+#: The catch-all seam's envelope code (app/main.py's ``Exception`` handler). Named
+#: here beside the gateway rejections so the string that goes into the envelope, the
+#: log line and the captured error record (#726) is spelled once - a code that
+#: drifts between the envelope and the telemetry is an error feed that groups two
+#: different failures under one fingerprint.
+CODE_INTERNAL_SERVER_ERROR = "INTERNAL_SERVER_ERROR"
 
 MESSAGE_AUTH_UNAUTHENTICATED = "Authentication required; provide a valid access token"
 MESSAGE_AUTH_INSUFFICIENT_SCOPE = "Your session does not grant the scope this route requires"
 MESSAGE_RATE_LIMIT_EXCEEDED = "Too many requests; retry after the window"
+MESSAGE_INTERNAL_SERVER_ERROR = "An unexpected error occurred"
 
 logger = logging.getLogger(__name__)
 

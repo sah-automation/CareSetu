@@ -24,7 +24,13 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.config import APP_VERSION, Settings, get_settings
-from app.gateway.errors import ErrorEnvelope, error_response, register_gateway_error_handlers
+from app.gateway.errors import (
+    CODE_INTERNAL_SERVER_ERROR,
+    MESSAGE_INTERNAL_SERVER_ERROR,
+    ErrorEnvelope,
+    error_response,
+    register_gateway_error_handlers,
+)
 from app.gateway.idempotency import IdempotencyStore, run_idempotent
 from app.gateway.jwt_verify import JWTVerifyMiddleware
 from app.gateway.principal import Principal
@@ -80,6 +86,11 @@ from modules.partner.directory_cache import (
 from modules.partner.facade import PartnerFacade, ProviderProfileNotFoundError
 from modules.profile_media.adapters.media_store import build_profile_media_store
 from modules.profile_media.facade import ProfileMediaRetryPolicy
+from observability.error_capture import (
+    ERROR_KIND_UNHANDLED_EXCEPTION,
+    capture_server_error,
+    configure_error_capture,
+)
 from observability.langfuse_client import flush_langfuse, get_langfuse_client
 from observability.logging import SERVICE_API, configure_logging
 from observability.otel import flush_otel, init_otel
@@ -292,6 +303,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # caches (both degrade to SQL when absent/unhealthy)
         await init_redis_client(resolved_settings)
         await init_directory_redis_client(resolved_settings)
+        # PHASE-14A B8 (#726): size the in-process error-capture buffer here, at the
+        # WEB composition root - not only in worker/main.py. This is the process
+        # that captures: a route that raises calls ``capture_server_error`` before
+        # any worker exists, so a setting applied only by the worker would leave the
+        # ceiling at its import-time default on the one path the ceiling exists to
+        # protect. The worker applies it too, so whichever process runs first has
+        # already done it.
+        configure_error_capture(resolved_settings.error_capture_max_records)
         # In-process dispatcher (worker-outbox-runbook Rule 1, Render free
         # worker gap): when DISPATCHER_IN_PROCESS_ENABLED=true the lifespan
         # hosts exactly one outbox poll loop (intake pipeline, audit/consent/
@@ -654,10 +673,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         trace_id = resolve_trace_id(request)
         logger.exception("unhandled_exception trace_id=%s path=%s", trace_id, request.url.path)
         envelope = ErrorEnvelope(
-            code="INTERNAL_SERVER_ERROR",
-            message="An unexpected error occurred",
+            code=CODE_INTERNAL_SERVER_ERROR,
+            message=MESSAGE_INTERNAL_SERVER_ERROR,
             trace_id=trace_id,
             details={},
+        )
+        # PHASE-14A B8 (#726): capture the failure into the bounded in-process
+        # buffer the worker drains into the observability error stream. One append
+        # to a deque, on a request that is ALREADY failing - deliberately not a
+        # write, which would add latency to exactly the requests least able to
+        # afford it. The record carries the matched ROUTE TEMPLATE rather than the
+        # path just logged above, so no identifier reaches telemetry.
+        capture_server_error(
+            request=request,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            kind=ERROR_KIND_UNHANDLED_EXCEPTION,
+            code=CODE_INTERNAL_SERVER_ERROR,
+            trace_id=trace_id,
         )
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

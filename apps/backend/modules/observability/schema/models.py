@@ -8,7 +8,10 @@ consumer accumulates into these aggregates and the B5 rollup recomputes the
 percentile-based columns. Column shapes are defined by the same-name
 ``v9.0__init_observability`` migration, plus the ``v9.1`` run ledger and the
 ``v9.2`` attribution table set (B6 #723), which adds the granular per-job spend
-source, the care-attribution edge and the daily per-actor aggregate.
+source, the care-attribution edge and the daily per-actor aggregate, and the
+``v9.3`` runtime-capture and product table set (B8 #726), which adds the captured
+error stream, the per-minute HTTP counter and the product event ledger with its
+daily rollup.
 """
 
 from __future__ import annotations
@@ -276,4 +279,138 @@ observability_attribution_daily = Table(
         name="uq_observability_attribution_daily_scope",
     ),
     Index("ix_observability_attribution_daily_date_kind", "usage_date", "actor_kind"),
+)
+
+
+observability_error_events = Table(
+    "observability_error_events",
+    MODULE_METADATA,
+    Column("id", BigInteger, primary_key=True),
+    # The collapse key (#717 decision 14), UNIQUE: one row per DISTINCT failure,
+    # so a loop of identical 5xx is one entry carrying a count instead of a wall
+    # of near-identical rows that bury every other error. Derived only from the
+    # STABLE attributes of a failure - never from the trace id or a timestamp,
+    # either of which would collapse nothing.
+    Column("fingerprint", String(64), nullable=False),
+    # The ROUTE TEMPLATE, never the concrete request path (#717 decision 13). A
+    # concrete path puts an identifier into telemetry and makes cardinality
+    # unbounded; the capture seam is what keeps this column honest, and the
+    # runtime round trip is what proves it.
+    Column("route_template", String(200), nullable=False),
+    Column("method", String(10), nullable=False),
+    Column("status_code", Integer, nullable=False),
+    # The COLLAPSED class, never the raw code, so 500 and 502 on one route are one
+    # series and one entry.
+    Column("status_class", String(3), nullable=False),
+    # ``unhandled_exception`` or ``server_error_response``: both are captured, so a
+    # swallowed exception is not invisible.
+    Column("kind", String(30), nullable=False),
+    # The envelope's stable, human-safe code - never internal detail
+    # (error-handling-observability §1).
+    Column("code", String(64), nullable=False, server_default=text("''")),
+    # The cross-tool join key (#717 decision 41), carrying the MOST RECENT
+    # occurrence's - the one an operator jumping from the feed wants.
+    Column("trace_id", String(64), nullable=False),
+    Column("occurrences", Integer, nullable=False, server_default=text("1")),
+    Column("first_seen_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("last_seen_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    UniqueConstraint("fingerprint", name="uq_observability_error_events_fingerprint"),
+    Index("ix_observability_error_events_last_seen", "last_seen_at"),
+    Index("ix_observability_error_events_route", "route_template"),
+)
+
+
+observability_http_minute = Table(
+    "observability_http_minute",
+    MODULE_METADATA,
+    Column("id", BigInteger, primary_key=True),
+    # Truncated to the minute in UTC: the grain the table exists for
+    # (#717 decision 15) - one row per route per minute, never one write per
+    # request.
+    Column("minute_ts", DateTime(timezone=True), nullable=False),
+    Column("route_template", String(200), nullable=False),
+    Column("method", String(10), nullable=False),
+    Column("status_class", String(3), nullable=False),
+    Column("requests", BigInteger, nullable=False, server_default=text("0")),
+    # The 5xx subset of ``requests``, carried alongside so the error rate is a
+    # stored numerator over a stored denominator instead of a second scan. #727
+    # is the writer; this ticket creates the table it writes.
+    Column("errors", BigInteger, nullable=False, server_default=text("0")),
+    UniqueConstraint(
+        "minute_ts",
+        "route_template",
+        "method",
+        "status_class",
+        name="uq_observability_http_minute_scope",
+    ),
+    Index("ix_observability_http_minute_ts", "minute_ts"),
+)
+
+
+observability_product_events = Table(
+    "observability_product_events",
+    MODULE_METADATA,
+    Column("id", BigInteger, primary_key=True),
+    # UNIQUE because the ledger row's identity IS the event that reported it: a
+    # redelivery is already a no-op through the consumed-event ledger, and this
+    # makes a second event id about the same occurrence a visible defect rather
+    # than a silently doubled funnel step - the rule #723 takes on ``ai_job_ref``.
+    Column("event_id", PgUUID(as_uuid=True), nullable=False),
+    Column("occurred_at", DateTime(timezone=True), nullable=False),
+    # ``patient`` or ``doctor``, both NULLABLE TOGETHER: a step a machine
+    # finished has no human behind it, and a placeholder actor there would inflate
+    # the active-user count derived from exactly this column.
+    Column("actor_kind", String(20), nullable=True),
+    # A one-way domain-separated hash of the identity reference
+    # (domain.pseudonym.actor_key), never the raw reference.
+    Column("actor_key", String(64), nullable=True),
+    Column("session_key", String(64), nullable=False),
+    # NOT NULL: decision 41 makes the trace id the thing that lets any funnel
+    # number be traced back to the real user journey.
+    Column("trace_id", String(64), nullable=False),
+    # Registry-driven names (#717 decision 23): adding a step is a registry
+    # entry, never a migration.
+    Column("funnel", String(50), nullable=False),
+    Column("step", String(50), nullable=False),
+    Column("outcome", String(20), nullable=False),
+    Column("duration_ms", Integer, nullable=True),
+    UniqueConstraint("event_id", name="uq_observability_product_events_event"),
+    Index("ix_observability_product_events_occurred", "occurred_at"),
+    Index("ix_observability_product_events_funnel_step", "funnel", "step", "outcome"),
+    Index("ix_observability_product_events_actor", "actor_key", "occurred_at"),
+    Index("ix_observability_product_events_trace", "trace_id"),
+)
+
+
+observability_product_daily = Table(
+    "observability_product_daily",
+    MODULE_METADATA,
+    Column("id", BigInteger, primary_key=True),
+    Column("event_date", Date, nullable=False),
+    Column("funnel", String(50), nullable=False),
+    Column("step", String(50), nullable=False),
+    Column("outcome", String(20), nullable=False),
+    # Recomputed in FULL each pass rather than incremented, which is what makes a
+    # late-arriving actor key idempotent - the rule ``attribution_daily`` follows
+    # (decision 6).
+    Column("events", BigInteger, nullable=False, server_default=text("0")),
+    # Distinct pseudonymous actors over the day: the daily-active-user numerator
+    # decision 26 derives from the ledger, counted here so a long window never
+    # re-counts the raw ledger.
+    Column("actor_count", Integer, nullable=False, server_default=text("0")),
+    # A SUM and a sample count, NOT a median: a median cannot be derived from a
+    # total, and a column that reads like a median because it was computed from an
+    # aggregate is how a funnel's thinking time quietly becomes a mean.
+    Column("total_duration_ms", BigInteger, nullable=False, server_default=text("0")),
+    Column("duration_samples", BigInteger, nullable=False, server_default=text("0")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    UniqueConstraint(
+        "event_date",
+        "funnel",
+        "step",
+        "outcome",
+        name="uq_observability_product_daily_scope",
+    ),
+    Index("ix_observability_product_daily_date_funnel", "event_date", "funnel"),
 )

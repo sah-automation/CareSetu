@@ -6,6 +6,16 @@ route can answer, and flows through every error envelope and the log lines that
 record them (error-handling-observability §3). ``resolve_trace_id`` is the
 single read point for both the gateway rejection funnel and the iam error
 envelope, so an envelope and its log line can never drift.
+
+Since PHASE-14A B8 (#726) this middleware is also where a server-error
+RESPONSE is captured into the bounded in-process error buffer. An exception that
+escapes every module handler is captured on the other side instead, by the
+catch-all seam in ``app/main.py`` - Starlette runs a registered ``Exception``
+handler in its ``ServerErrorMiddleware``, which sits OUTSIDE all user middleware,
+so an exception never comes back through here and the two seams cannot double
+capture the same failure. What reaches ``call_next`` instead is a 5xx a handler
+produced deliberately, and that is the half of the error feed the exception seam
+cannot see.
 """
 
 from __future__ import annotations
@@ -16,6 +26,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.requests import Request
 from starlette.responses import Response
 
+from observability.error_capture import ERROR_KIND_SERVER_ERROR_RESPONSE, capture_server_error
 from observability.logging import reset_trace_id, set_trace_id
 
 _TRACE_HEADER = "x-request-id"
@@ -65,11 +76,32 @@ class TraceMiddleware(BaseHTTPMiddleware):
             candidate = client_trace_id.strip()
             if _is_safe_trace_id(candidate):
                 request.state.trace_id = candidate
+        # Resolved ONCE and reused by the capture below: ``resolve_trace_id`` reads
+        # ``request.state`` after the first call, so a second call is a redundant
+        # read, and one local is the cheaper way to say "this request's id".
+        trace_id = resolve_trace_id(request)
         # PHASE-14A A1 (#694): bind the one request-scoped id into the logging
         # context so every log line emitted while this request is in flight -
         # across the gateway, routes, and module facades - carries it.
-        token = set_trace_id(resolve_trace_id(request))
+        token = set_trace_id(trace_id)
         try:
-            return await call_next(request)
+            response = await call_next(request)
         finally:
             reset_trace_id(token)
+        # PHASE-14A B8 (#726): a 5xx the handler produced itself is captured here,
+        # outside the trace-reset above so the record still carries this request's
+        # id. One integer comparison on the way out of every request; the capture
+        # itself only runs for a failure, and it buffers rather than writes.
+        if response.status_code >= 500:
+            capture_server_error(
+                request=request,
+                status_code=response.status_code,
+                kind=ERROR_KIND_SERVER_ERROR_RESPONSE,
+                # No envelope code: reading one would mean consuming the response
+                # stream this middleware exists to hand back. The route template,
+                # method and status already identify the failure, and ``kind`` is
+                # what keeps it separate from an escaped exception in the feed.
+                code="",
+                trace_id=trace_id,
+            )
+        return response
