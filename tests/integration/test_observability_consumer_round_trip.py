@@ -1,13 +1,20 @@
-"""B4a #702, B4 #722: MOD-013 consumer round trip against real PostgreSQL.
+"""B4a #702, B4 #722, B6 #723: MOD-013 consumer round trip against real PostgreSQL.
 
 The phase-spec integration test: ``ai_job.completed`` / ``ai_job.failed``
 events are published into the ``intake.intake_outbox`` exactly as the MOD-005
 pipeline publishes them, a single poll pass claims + fans them out, and MOD-013
 accumulates each into ``observability.observability_ai_usage_daily`` (one row
-per (usage_date, provider, model, task_type) scope) while recording each
-``event_id`` in ``observability.consumed_events`` FIRST. Replaying the same two
-``event_id`` values through the idempotent consumers changes nothing and adds
-no ledger rows (exactly-once accumulation).
+per (usage_date, provider, model, task_type) scope) and writes one granular
+``observability.observability_ai_job_spend`` row per job, recording each
+``event_id`` in ``observability.consumed_events`` FIRST. Replaying the same
+``event_id`` values through the idempotent consumers changes nothing and adds no
+ledger rows (exactly-once accumulation).
+
+The granular row is what the per-patient and per-doctor numbers are computed FROM
+(#723), so the round trip asserts it is complete, attribution-bearing and
+PHI-free: every fact the business lens needs is on the row, and the identity it
+is attributed to is a one-way hash rather than the reference that arrived on the
+event.
 
 The ``draft`` case is different in kind: it drives the REAL
 ``IntakeFacade.request_rx_draft`` so the prescription-drafting leg's metering is
@@ -31,7 +38,7 @@ from uuid import uuid4
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from bus.dispatch import dispatch
@@ -68,6 +75,11 @@ from modules.observability.domain.consumer import (
     ConsentLifecycleTelemetryPayload,
     TamperDetectedTelemetryPayload,
 )
+from modules.observability.domain.pseudonym import (
+    ACTOR_KIND_DOCTOR,
+    ACTOR_KIND_PATIENT,
+    actor_key,
+)
 
 _NOW = datetime(2026, 10, 13, 8, 15, 0, tzinfo=UTC)
 
@@ -90,6 +102,8 @@ def _completed_envelope(
     cost_paise: int,
     duration_ms: int,
     low_confidence: bool,
+    patient_id: int = 7,
+    doctor_id: int | None = None,
 ) -> Envelope[AiJobCompletedPayload]:
     """A MOD-005-style ``ai_job.completed`` envelope as the pipeline publishes."""
     return Envelope[AiJobCompletedPayload](
@@ -108,14 +122,21 @@ def _completed_envelope(
             cost_paise=cost_paise,
             duration_ms=duration_ms,
             low_confidence=low_confidence,
-            patient_id=7,
-            doctor_id=None,
+            patient_id=patient_id,
+            doctor_id=doctor_id,
             trace_id=_TRACE_ID,
         ),
     )
 
 
-def _failed_envelope(*, ai_job_id: int, reason: str, timeout: bool) -> Envelope[AiJobFailedPayload]:
+def _failed_envelope(
+    *,
+    ai_job_id: int,
+    reason: str,
+    timeout: bool,
+    patient_id: int = 7,
+    doctor_id: int | None = None,
+) -> Envelope[AiJobFailedPayload]:
     """A MOD-005-style ``ai_job.failed`` envelope as the pipeline publishes."""
     return Envelope[AiJobFailedPayload](
         event_id=uuid4(),
@@ -130,8 +151,8 @@ def _failed_envelope(*, ai_job_id: int, reason: str, timeout: bool) -> Envelope[
             provider="openai",
             model="whisper-1",
             timeout=timeout,
-            patient_id=7,
-            doctor_id=None,
+            patient_id=patient_id,
+            doctor_id=doctor_id,
             trace_id=_TRACE_ID,
         ),
     )
@@ -149,6 +170,53 @@ async def _usage_rows(connection: AsyncConnection) -> list[dict[str, object]]:
     return [dict(mapping) for mapping in result.mappings().all()]
 
 
+async def _spend_rows(connection: AsyncConnection) -> list[dict[str, object]]:
+    result = await connection.execute(
+        text(
+            "SELECT ai_job_ref, usage_date, intake_ref, patient_key, doctor_key, provider, "
+            "model, task_type, input_tokens, output_tokens, cost_paise, status, trace_id "
+            "FROM observability.observability_ai_job_spend "
+            "ORDER BY status, model, input_tokens"
+        )
+    )
+    return [dict(mapping) for mapping in result.mappings().all()]
+
+
+async def _row_counts(connection: AsyncConnection) -> dict[str, int]:
+    """Every table this batch's consumption can write, counted at once."""
+    counts = {}
+    for table in (
+        "observability.observability_ai_usage_daily",
+        "observability.observability_ai_job_spend",
+        "observability.observability_care_attribution_edges",
+        "observability.observability_attribution_daily",
+        "observability.consumed_events",
+    ):
+        counts[table] = int(await connection.scalar(text(f"SELECT COUNT(*) FROM {table}")))
+    return counts
+
+
+async def _attribution_table_text(connection: AsyncConnection) -> str:
+    """Every stored value of the attribution table set, flattened to one string.
+
+    Reaching below the seam on purpose: the rule being proven - the observability
+    schema carries no raw identity reference and no clinical content - is a
+    statement about what is ABSENT from storage, so it has to be asserted over
+    the whole table rather than over the columns one read happens to select.
+    """
+    rows = await connection.execute(
+        text(
+            "SELECT to_jsonb(spend)::text AS row FROM "
+            "observability.observability_ai_job_spend spend "
+            "UNION ALL SELECT to_jsonb(edge)::text FROM "
+            "observability.observability_care_attribution_edges edge "
+            "UNION ALL SELECT to_jsonb(daily)::text FROM "
+            "observability.observability_attribution_daily daily"
+        )
+    )
+    return " ".join(str(row[0]) for row in rows)
+
+
 @pytest.mark.asyncio
 async def test_ai_job_events_round_trip_accumulate_and_dedupe_on_replay(
     database_url: str, clean_tables: None
@@ -162,9 +230,21 @@ async def test_ai_job_events_round_trip_accumulate_and_dedupe_on_replay(
     and collapse into a row with timeout and plain-failure bucketed separately
     (calls == success + failure + timeout). Replaying the same event_ids through
     the consumers changes no row and adds no ledger row.
+
+    AC (#723) rides the same pass: the same four jobs also write FOUR granular
+    ``observability_ai_job_spend`` rows - one per job, so the per-patient and
+    per-doctor numbers have something to be computed from. The completed job
+    that names a doctor proves the doctor key is populated and hashed; the three
+    that name no doctor prove the column is honestly nullable rather than filled
+    with a placeholder. Replay adds no per-job row either, and neither raw
+    identity reference survives anywhere in the three new tables.
     """
     engine = create_async_engine(database_url, poolclass=NullPool)
     try:
+        # Distinctive references, so the "no raw identity in the schema" scan
+        # below cannot pass by accident on a short number appearing in a digest.
+        patient_ref = 700_000_007
+        doctor_ref = 900_000_003
         completed_1 = _completed_envelope(
             ai_job_id=9,
             input_tokens=900,
@@ -172,6 +252,8 @@ async def test_ai_job_events_round_trip_accumulate_and_dedupe_on_replay(
             cost_paise=24,
             duration_ms=1200,
             low_confidence=True,
+            patient_id=patient_ref,
+            doctor_id=doctor_ref,
         )
         completed_2 = _completed_envelope(
             ai_job_id=10,
@@ -180,9 +262,14 @@ async def test_ai_job_events_round_trip_accumulate_and_dedupe_on_replay(
             cost_paise=14,
             duration_ms=800,
             low_confidence=False,
+            patient_id=patient_ref,
         )
-        failed_1 = _failed_envelope(ai_job_id=11, reason="Ext002CallError", timeout=True)
-        failed_2 = _failed_envelope(ai_job_id=12, reason="ValidationError", timeout=False)
+        failed_1 = _failed_envelope(
+            ai_job_id=11, reason="Ext002CallError", timeout=True, patient_id=patient_ref
+        )
+        failed_2 = _failed_envelope(
+            ai_job_id=12, reason="ValidationError", timeout=False, patient_id=patient_ref
+        )
 
         async with engine.begin() as connection:
             await write_outbox(connection, "intake", INTAKE_OUTBOX_TABLE, completed_1)
@@ -200,6 +287,7 @@ async def test_ai_job_events_round_trip_accumulate_and_dedupe_on_replay(
 
         async with engine.connect() as connection:
             rows = await _usage_rows(connection)
+            spend = await _spend_rows(connection)
             ledger = await connection.scalar(
                 text("SELECT COUNT(*) FROM observability.consumed_events")
             )
@@ -239,20 +327,72 @@ async def test_ai_job_events_round_trip_accumulate_and_dedupe_on_replay(
         assert transcribe["cost_paise"] == 0
         assert transcribe["avg_duration_ms"] is None
 
-        # Replay the same event_ids through the idempotent consumers: the
-        # ledger conflict is recorded and nothing accumulates - still two rows,
-        # still four ledger rows.
+        # B6 (#723): four jobs in, four granular rows out - the granular grain is
+        # the JOB, not the scope, which is the whole reason this table exists.
+        assert len(spend) == 4
+
+        structure_job = next(row for row in spend if row["input_tokens"] == 900)
+        assert structure_job["ai_job_ref"] == 9
+        assert structure_job["usage_date"] == _NOW.date()
+        assert structure_job["intake_ref"] == 1
+        assert structure_job["provider"] == "openai"
+        assert structure_job["model"] == "gpt-4o-mini"
+        assert structure_job["task_type"] == "structure"
+        assert structure_job["output_tokens"] == 150
+        assert structure_job["cost_paise"] == 24
+        assert structure_job["status"] == "completed"
+        assert structure_job["trace_id"] == _TRACE_ID
+
+        # Attribution is present and is a ONE-WAY HASH of the references that
+        # arrived on the event - never the references themselves.
+        assert structure_job["patient_key"] == actor_key(ACTOR_KIND_PATIENT, patient_ref)
+        assert structure_job["doctor_key"] == actor_key(ACTOR_KIND_DOCTOR, doctor_ref)
+
+        # A failed call reports no usage: it records an attempt at zero, not a
+        # fabricated free job.
+        failed_job = next(row for row in spend if row["status"] == "failed")
+        assert failed_job["model"] == "whisper-1"
+        assert failed_job["task_type"] == "transcribe"
+        assert failed_job["input_tokens"] == 0
+        assert failed_job["output_tokens"] == 0
+        assert failed_job["cost_paise"] == 0
+
+        # The three jobs that named no doctor (the transcription and structuring
+        # legs run before a pick) leave the doctor key NULL - a real gap an
+        # operator can see, not a placeholder that looks attributed.
+        doctorless = [row for row in spend if row["doctor_key"] is None]
+        assert len(doctorless) == 3
+
+        # Neither raw identity reference survives anywhere in the three new
+        # tables - not as a column, not as a substring of one.
+        async with engine.connect() as connection:
+            stored = await _attribution_table_text(connection)
+        assert str(patient_ref) not in stored
+        assert str(doctor_ref) not in stored
+
+        # Replay the same event_ids through the idempotent consumers: the ledger
+        # conflict is recorded and NOTHING accumulates. The count is taken over
+        # every table this batch's consumption can write, not just the two the
+        # first pass happened to populate, because the AC is written as a blanket
+        # claim - "every row count unchanged" - and a later ticket filling the
+        # edge or the aggregate must not be able to break the guarantee silently.
+        before_replay: dict[str, int] = {}
+        async with engine.connect() as connection:
+            before_replay = await _row_counts(connection)
         await dispatch(registry, completed_1)
         await dispatch(registry, completed_2)
         await dispatch(registry, failed_1)
         await dispatch(registry, failed_2)
         async with engine.connect() as connection:
-            rows = await _usage_rows(connection)
-            ledger = await connection.scalar(
-                text("SELECT COUNT(*) FROM observability.consumed_events")
-            )
-        assert len(rows) == 2
-        assert ledger == 4
+            after_replay = await _row_counts(connection)
+        assert after_replay == before_replay
+        assert after_replay == {
+            "observability.observability_ai_usage_daily": 2,
+            "observability.observability_ai_job_spend": 4,
+            "observability.observability_care_attribution_edges": 0,
+            "observability.observability_attribution_daily": 0,
+            "observability.consumed_events": 4,
+        }
     finally:
         await engine.dispose()
 
@@ -287,7 +427,9 @@ async def test_drafting_leg_reaches_the_usage_aggregate_as_a_produced_task_type(
     pipeline's scopes is the proof that the prescription-drafting figure an
     operator reports is the figure the platform spends. A failed draft is metered
     on the same seam and lands in the SAME scope as a counted failure rather than
-    as nothing - the two halves of "every draft is metered".
+    as nothing - the two halves of "every draft is metered". #723's granular row
+    records the same two attempts, and neither the patient's complaint text nor
+    the raw patient reference follows them into telemetry.
     """
     engine = create_async_engine(database_url, poolclass=NullPool)
     facade_engine = create_async_engine(database_url, poolclass=NullPool)
@@ -358,6 +500,8 @@ async def test_drafting_leg_reaches_the_usage_aggregate_as_a_produced_task_type(
 
         async with engine.connect() as connection:
             rows = await _usage_rows(connection)
+            spend = await _spend_rows(connection)
+            stored = await _attribution_table_text(connection)
         draft_row = next(row for row in rows if str(row["task_type"]) == "draft")
         assert draft_row["provider"] == MOCK_AI_PROVIDER
         assert draft_row["model"] == MOCK_AI_MODEL
@@ -368,9 +512,72 @@ async def test_drafting_leg_reaches_the_usage_aggregate_as_a_produced_task_type(
         assert draft_row["cost_paise"] == 0
         # The mock is clean (0.8), so nothing lands in the low-confidence bucket.
         assert draft_row["low_confidence_count"] == 0
+
+        # #723: the metered drafting leg is metered GRANULARLY too, so the spend
+        # an operator attributes to this patient's prescription is a row it can
+        # point at, not a counter that was averaged away with everyone else's.
+        # Counted per status rather than read positionally, so the assertion does
+        # not depend on the reader's ORDER BY.
+        assert {str(row["status"]) for row in spend} == {"completed", "failed"}
+        assert all(row["task_type"] == "draft" for row in spend)
+        assert [row["status"] for row in spend].count("completed") == 1
+        assert [row["status"] for row in spend].count("failed") == 1
+        assert spend[0]["patient_key"] == actor_key(ACTOR_KIND_PATIENT, patient_id)
+
+        # And the drafting leg is the one place clinical content came closest to
+        # the boundary - the patient's complaint text is sitting in the intake row
+        # this job was produced from. None of it follows the job into telemetry.
+        assert "sir dard hai" not in stored
+        assert "mock medication" not in stored
+        assert str(patient_id) not in stored
     finally:
         await facade_engine.dispose()
         await engine.dispose()
+
+
+async def _nullable_columns(database_url: str, schema: str, table: str) -> set[str]:
+    engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        async with engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = :schema AND table_name = :table "
+                    "AND is_nullable = 'YES'"
+                ),
+                {"schema": schema, "table": table},
+            )
+            return {str(row[0]) for row in result}
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_daily_aggregate_ships_empty_revenue_and_tier_dimensions(
+    database_url: str, clean_tables: None
+) -> None:
+    """AC (#723): the daily per-actor aggregate carries nullable revenue and tier.
+
+    Reaches below the seam deliberately, with a comment: the rule is about a
+    column being ABSENT of data and PERMITTED to be empty, which no read can
+    show because nothing reads the table yet. #717 decision 9 defers the revenue
+    model entirely, so the contract this pins is that the two dimensions EXIST,
+    are NULLABLE (so a rollup can leave them empty rather than invent a zero),
+    and that no writer has written one - turning monetization on is then a data
+    write, exactly as the decision claims, not a migration.
+    """
+    nullable = await _nullable_columns(
+        database_url, "observability", "observability_attribution_daily"
+    )
+    assert {"revenue_paise", "tier_key"} <= nullable
+
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        async with engine.connect() as connection:
+            counts = await _row_counts(connection)
+    finally:
+        await engine.dispose()
+    assert counts["observability.observability_attribution_daily"] == 0
 
 
 async def _business_rows(connection: AsyncConnection) -> dict[str, int]:

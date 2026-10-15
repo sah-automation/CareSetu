@@ -20,6 +20,13 @@ signals write PHI-free ``observability_alert_events`` rows. Both effects ride
 the same ledger-first ``run_handler`` transaction, so every subscription is
 replay-safe.
 
+B6 (#723) adds the granular attribution effect to the two ``ai_job.*`` handlers:
+each finished AI job writes one ``observability_ai_job_spend`` row carrying the
+usage date, the intake reference, HASHED patient and doctor keys, provider,
+model, task type, tokens, cost, status and trace id. It runs in the same
+transaction as the ledger row and the daily accumulation, so the replay proof
+that holds for one holds for all three.
+
 MOD-005 owns the registry payload models for ``ai_job.*`` (its self-
 subscription seam registers them), so MOD-013 registers handlers ONLY - the
 ``run_handler`` harness re-validates the dispatched intake payload into the
@@ -80,6 +87,7 @@ from modules.observability.facade import (
     OBSERVABILITY_SCHEMA,
     accumulate_ai_usage,
     accumulate_business_count,
+    record_ai_job_spend,
     record_alert_event,
 )
 
@@ -148,12 +156,17 @@ def register_handlers(registry: HandlerRegistry) -> None:
     async def accumulate_ai_job_completed(envelope: Envelope[BaseModel]) -> None:
         """Consume ``ai_job.completed``: accumulate one success into the daily row.
 
-        Ledger first, upsert second, one transaction: a redelivered ``event_id``
-        finds its ledger row and skips the upsert (at-least-once).
+        Ledger first, then both effects, one transaction: a redelivered
+        ``event_id`` finds its ledger row and skips them all (at-least-once).
+        B6 (#723) adds the second effect - the one-granular-row-per-job
+        ``observability_ai_job_spend`` record the attribution aggregate is
+        computed from - in the SAME transaction as the daily accumulation, so the
+        two can never disagree about how many jobs ran.
         """
 
         async def _impl(connection: AsyncConnection, payload: AiJobCompletedUsagePayload) -> None:
             await accumulate_ai_usage(connection, envelope, payload)
+            await record_ai_job_spend(connection, envelope, payload)
 
         await run_handler(
             envelope,
@@ -168,13 +181,17 @@ def register_handlers(registry: HandlerRegistry) -> None:
     async def accumulate_ai_job_failed(envelope: Envelope[BaseModel]) -> None:
         """Consume ``ai_job.failed``: accumulate one failure/timeout into the row.
 
-        Ledger first, upsert second, one transaction: a redelivered ``event_id``
-        finds its ledger row and skips the upsert (at-least-once). Timeouts are
-        bucketed separately from other failures via the event's derived flag.
+        Ledger first, then both effects, one transaction: a redelivered
+        ``event_id`` finds its ledger row and skips them all (at-least-once).
+        Timeouts are bucketed separately from other failures via the event's
+        derived flag. The attempt is still recorded as a per-job row with zero
+        tokens and zero cost: a job that was tried and failed spent nothing, but
+        it did happen, and cost-per-pass is a ratio over attempts.
         """
 
         async def _impl(connection: AsyncConnection, payload: AiJobFailedUsagePayload) -> None:
             await accumulate_ai_usage(connection, envelope, payload)
+            await record_ai_job_spend(connection, envelope, payload)
 
         await run_handler(
             envelope,

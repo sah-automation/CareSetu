@@ -10,6 +10,11 @@ run - the AI-usage aggregation (B4a #702), the registry-driven business-daily
 counts and the PHI-free alert rows (B4b #703) - plus the schema constant the
 composition root resolves the ledger against.
 
+B6 (#723) adds :func:`record_ai_job_spend`: the one-granular-row-per-AI-job
+effect that makes per-patient and per-doctor attribution arithmetic rather than
+guesswork, keyed on the one-way actor hashes rather than on raw identity
+references.
+
 The B5a nightly rollup (#704) joins it as :func:`run_rollup`: the off-request-path
 pass that recomputes the percentile aggregates, snapshots budget spend and
 evaluates the alert thresholds. B5b (#705) adds the two scheduler seams the
@@ -46,6 +51,11 @@ from modules.observability.domain.consumer import (
     AlertRow,
 )
 from modules.observability.domain.deeplinks import grafana_link, langfuse_link, sentry_link
+from modules.observability.domain.pseudonym import (
+    ACTOR_KIND_DOCTOR,
+    ACTOR_KIND_PATIENT,
+    actor_key,
+)
 from modules.observability.domain.rollup import (
     ALERT_STATUS_OPEN,
     BREAKER_STATE_OPEN,
@@ -59,6 +69,7 @@ from modules.observability.domain.rollup import (
 from modules.observability.rollup import RollupReport, RollupRunState, load_rollup_state, run_rollup
 from modules.observability.schema.models import (
     observability_ai_cost_budget,
+    observability_ai_job_spend,
     observability_ai_provider_health,
     observability_ai_usage_daily,
     observability_alert_events,
@@ -68,6 +79,12 @@ from modules.observability.schema.models import (
 
 OBSERVABILITY_SCHEMA = "observability"
 
+#: The two outcomes ``observability_ai_job_spend.status`` can hold - a closed
+#: vocabulary the migration's CHECK constraint enforces, so a third state is a
+#: migration rather than a silent value.
+AI_JOB_SPEND_STATUS_COMPLETED = "completed"
+AI_JOB_SPEND_STATUS_FAILED = "failed"
+
 #: Default and ceiling of one page of the alert feed (api-standards §4: default
 #: 25, max 100). The feed is paged rather than capped at one screen because the
 #: operator page shows its most recent page and can page back through a long
@@ -76,6 +93,8 @@ DEFAULT_ALERT_PAGE_SIZE = 25
 MAX_ALERT_PAGE_SIZE = 100
 
 __all__ = [
+    "AI_JOB_SPEND_STATUS_COMPLETED",
+    "AI_JOB_SPEND_STATUS_FAILED",
     "DEFAULT_ALERT_PAGE_SIZE",
     "DEFAULT_WINDOW_DAYS",
     "MAX_ALERT_PAGE_SIZE",
@@ -118,6 +137,7 @@ __all__ = [
     "query_overview",
     "query_quality",
     "query_usage",
+    "record_ai_job_spend",
     "record_alert_event",
     "run_rollup",
     "window_for",
@@ -211,6 +231,71 @@ async def accumulate_ai_usage(
                 "updated_at": func.now(),
             },
         )
+    )
+    await connection.execute(statement)
+
+
+async def record_ai_job_spend(
+    connection: AsyncConnection,
+    envelope: Envelope[BaseModel],
+    payload: AiJobCompletedUsagePayload | AiJobFailedUsagePayload,
+) -> None:
+    """Write ONE granular ``observability_ai_job_spend`` row for one finished AI job.
+
+    B6 (#723). ``observability_ai_usage_daily`` answers "what did this scope
+    spend" but has already discarded attribution by the time the day closes.
+    This row is the granular source the per-patient and per-doctor numbers are
+    computed FROM, so it is kept at one row per job rather than per scope.
+
+    Runs in the same ``run_handler`` transaction as the ``consumed_events``
+    ledger row and as :func:`accumulate_ai_usage`, so all three roll back
+    together and a replayed ``event_id`` writes none of them.
+
+    PHI-free by construction: the identity references on the payload are hashed
+    through :func:`~modules.observability.domain.pseudonym.actor_key` before they
+    are written, so the raw patient/doctor reference never lands in this schema
+    (ADR-0025 D7). Nothing else on the payload is clinical - the transcript, the
+    confidence score and the failure reason stay in ``intake``.
+
+    A failed job records zero tokens and zero cost rather than a fabricated free
+    call, mirroring what the daily aggregate does; the row's existence and its
+    ``failed`` status are the record of the attempt.
+
+    ``ai_job_ref`` is UNIQUE on the table, so this insert is also the enforcement
+    of "one row per AI job": the outbox ledger already makes a redelivery of the
+    same ``event_id`` a no-op, and a SECOND event about the same job - which no
+    current producer emits, since every leg books a fresh job row - would fail
+    the constraint instead of quietly doubling one patient's spend.
+    """
+    if isinstance(payload, AiJobCompletedUsagePayload):
+        input_tokens = payload.input_tokens
+        output_tokens = payload.output_tokens
+        cost_paise = payload.cost_paise
+        status = AI_JOB_SPEND_STATUS_COMPLETED
+    else:
+        input_tokens = 0
+        output_tokens = 0
+        cost_paise = 0
+        status = AI_JOB_SPEND_STATUS_FAILED
+
+    statement = insert(observability_ai_job_spend).values(
+        usage_date=envelope.occurred_at.date(),
+        ai_job_ref=payload.ai_job_id,
+        intake_ref=payload.intake_id,
+        patient_key=actor_key(ACTOR_KIND_PATIENT, payload.patient_id),
+        doctor_key=(
+            actor_key(ACTOR_KIND_DOCTOR, payload.doctor_id)
+            if payload.doctor_id is not None
+            else None
+        ),
+        provider=payload.provider,
+        model=payload.model,
+        task_type=payload.task_type,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cost_paise=cost_paise,
+        status=status,
+        trace_id=payload.trace_id,
     )
     await connection.execute(statement)
 

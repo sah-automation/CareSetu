@@ -1,4 +1,4 @@
-"""B4a #702: MOD-013 consumer registration + exactly-once accumulation (no DB).
+"""B4a #702, B6 #723: MOD-013 consumer registration + exactly-once effects (no DB).
 
 Covers the composition-root seam: the ``ai_job.completed`` / ``ai_job.failed``
 consumers register handler seats at the worker without ever owning (or
@@ -6,8 +6,9 @@ stealing) the ``ai_job.*`` registry payload models - MOD-005 owns those, and
 MOD-013 merely re-validates the dispatched intake payload into its local mirror
 (the MOD-011 consumer shape). The replay test drives the registered handler
 through the same short-lived engine + ledger seam as the live dispatcher: a
-replayed ``event_id`` is a no-op (ledger dedupe), so the aggregate upsert
-effect runs exactly once per distinct event.
+replayed ``event_id`` is a no-op (ledger dedupe), so every effect behind that one
+ledger row - the daily accumulation AND the per-job spend row - runs exactly once
+per distinct event.
 """
 
 from __future__ import annotations
@@ -172,6 +173,11 @@ async def test_completed_handler_accumulates_exactly_once_per_event_id(
     assert isinstance(accumulate.await_args.args[2], AiJobCompletedUsagePayload)
     assert accumulate.await_args.args[2].low_confidence is True
 
+    # Replay: the ledger row already exists, so every effect behind it is skipped.
+    # What that guarantees for the WHOLE handler - including the per-job spend
+    # row of #723, which this file deliberately does not mock - is asserted once,
+    # at the real-database seam, in
+    # tests/integration/test_observability_consumer_round_trip.py.
     await handler(first)
     assert accumulate.await_count == 1
 
