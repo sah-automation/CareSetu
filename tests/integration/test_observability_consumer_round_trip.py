@@ -1,4 +1,4 @@
-"""B4a #702: MOD-013 consumer round trip against real PostgreSQL.
+"""B4a #702, B4 #722: MOD-013 consumer round trip against real PostgreSQL.
 
 The phase-spec integration test: ``ai_job.completed`` / ``ai_job.failed``
 events are published into the ``intake.intake_outbox`` exactly as the MOD-005
@@ -9,6 +9,11 @@ per (usage_date, provider, model, task_type) scope) while recording each
 ``event_id`` values through the idempotent consumers changes nothing and adds
 no ledger rows (exactly-once accumulation).
 
+The ``draft`` case is different in kind: it drives the REAL
+``IntakeFacade.request_rx_draft`` so the prescription-drafting leg's metering is
+produced by the seam rather than hand-written here, which is what proves
+``draft`` is a produced task type rather than a declared-but-empty one (#722).
+
 Requires the native PostgreSQL; the suite skips cleanly when it is
 unreachable. The shared integration conftest migrates to head once per file,
 empties the observability aggregates and the outboxes before each test, and
@@ -17,11 +22,14 @@ downgrades afterwards.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from decimal import Decimal
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -43,7 +51,14 @@ from bus.events import (
 from bus.outbox_writer import write_outbox
 from bus.registry import HandlerRegistry
 from modules.intake.adapters import register_handlers as register_intake_handlers
+from modules.intake.adapters.ai_gateway import Ext002CallError
+from modules.intake.adapters.ai_provider_mock import (
+    MOCK_AI_MODEL,
+    MOCK_AI_PROVIDER,
+    MockAiProvider,
+)
 from modules.intake.domain.events import AiJobCompletedPayload, AiJobFailedPayload
+from modules.intake.facade import IntakeFacade
 from modules.intake.outbox import INTAKE_OUTBOX_TABLE
 from modules.observability.adapters import (
     register_handlers as register_observability_handlers,
@@ -239,6 +254,122 @@ async def test_ai_job_events_round_trip_accumulate_and_dedupe_on_replay(
         assert len(rows) == 2
         assert ledger == 4
     finally:
+        await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def clean_intake_tables(database_url: str, migrated_schema: None) -> AsyncIterator[None]:
+    """Empty the intake tables the drafting leg writes, so its row counts are exact."""
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "TRUNCATE TABLE intake.intake_outbox, intake.intake_ai_jobs, "
+                    "intake.intake_pre_summaries, intake.intake_intakes CASCADE"
+                )
+            )
+    finally:
+        await engine.dispose()
+    yield
+
+
+@pytest.mark.asyncio
+async def test_drafting_leg_reaches_the_usage_aggregate_as_a_produced_task_type(
+    database_url: str, clean_tables: None, clean_intake_tables: None
+) -> None:
+    """AC (#722): ``draft`` is a PRODUCED task type, not a declared-but-empty one.
+
+    Nothing here is hand-written: the REAL ``IntakeFacade.request_rx_draft`` runs
+    against real PostgreSQL and a real gateway, writing its own ``intake_ai_jobs``
+    rows and outbox events, then the real dispatcher with the real registry
+    consumes them. ``draft`` landing in ``observability_ai_usage_daily`` beside the
+    pipeline's scopes is the proof that the prescription-drafting figure an
+    operator reports is the figure the platform spends. A failed draft is metered
+    on the same seam and lands in the SAME scope as a counted failure rather than
+    as nothing - the two halves of "every draft is metered".
+    """
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    facade_engine = create_async_engine(database_url, poolclass=NullPool)
+    patient_id = uuid4().int % (2**53)
+    try:
+        async with engine.begin() as connection:
+            intake_id = int(
+                await connection.scalar(
+                    text(
+                        "INSERT INTO intake.intake_intakes "
+                        "(patient_id, mode, language, status, text) "
+                        "VALUES (:patient_id, 'text', 'hi', 'ready_for_review', 'sir dard hai') "
+                        "RETURNING id"
+                    ),
+                    {"patient_id": patient_id},
+                )
+            )
+            pre_summary_id = int(
+                await connection.scalar(
+                    text(
+                        "INSERT INTO intake.intake_pre_summaries (intake_id, review_state) "
+                        "VALUES (:intake_id, 'draft') RETURNING id"
+                    ),
+                    {"intake_id": intake_id},
+                )
+            )
+
+        facade = IntakeFacade(engine=facade_engine, ai_gateway=MockAiProvider())
+        draft = await facade.request_rx_draft(
+            doctor_input_ref=1, pre_summary_ref=pre_summary_id, history_summary="past notes"
+        )
+        assert draft.rx_items[0].name == "mock medication"
+
+        with (
+            patch.object(
+                MockAiProvider,
+                "draft_rx",
+                side_effect=Ext002CallError("provider unavailable", retries_exhausted=True),
+            ),
+            pytest.raises(Ext002CallError),
+        ):
+            await facade.request_rx_draft(
+                doctor_input_ref=1, pre_summary_ref=pre_summary_id, history_summary="again"
+            )
+
+        async with engine.connect() as connection:
+            jobs = await connection.execute(
+                text(
+                    "SELECT task_type, status, provider, model, confidence, duration_ms, "
+                    "error_message FROM intake.intake_ai_jobs WHERE intake_id = :intake_id "
+                    "ORDER BY id"
+                ),
+                {"intake_id": intake_id},
+            )
+            job_rows = [dict(mapping) for mapping in jobs.mappings().all()]
+        assert [row["task_type"] for row in job_rows] == ["draft", "draft"]
+        assert [row["status"] for row in job_rows] == ["completed", "failed"]
+        assert job_rows[0]["duration_ms"] is not None
+        # The failed call reports no usage, so it records no token count rather
+        # than a fabricated free call.
+        assert job_rows[1]["error_message"] == "Ext002CallError"
+
+        registry = _registry()
+        async with engine.connect() as connection:
+            tables = await discover_outbox_tables(connection, ("intake",))
+        for table in tables:
+            await process_outbox_table(engine, table, registry, DEFAULT_DISPATCHER_CONFIG)
+
+        async with engine.connect() as connection:
+            rows = await _usage_rows(connection)
+        draft_row = next(row for row in rows if str(row["task_type"]) == "draft")
+        assert draft_row["provider"] == MOCK_AI_PROVIDER
+        assert draft_row["model"] == MOCK_AI_MODEL
+        assert draft_row["calls"] == 2
+        assert draft_row["success_count"] == 1
+        assert draft_row["failure_count"] == 1
+        assert draft_row["timeout_count"] == 0
+        assert draft_row["cost_paise"] == 0
+        # The mock is clean (0.8), so nothing lands in the low-confidence bucket.
+        assert draft_row["low_confidence_count"] == 0
+    finally:
+        await facade_engine.dispose()
         await engine.dispose()
 
 

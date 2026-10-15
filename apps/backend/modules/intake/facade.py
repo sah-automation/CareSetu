@@ -21,11 +21,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
 from cryptography.exceptions import InvalidTag
+from pydantic import ValidationError
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -37,6 +39,15 @@ from modules.intake.adapters.ai_gateway import (
     AiGateway,
     DraftRxRequest,
     DraftRxResult,
+    Ext002CallError,
+)
+from modules.intake.adapters.ai_jobs import (
+    complete_ai_job,
+    configured_plan,
+    fail_ai_job,
+    failure_reason,
+    insert_ai_job,
+    is_timeout,
 )
 from modules.intake.adapters.media_store import PREFIX, RX_INPUT_PREFIX, IntakeMediaStore
 from modules.intake.domain.events import (
@@ -1479,8 +1490,7 @@ class IntakeFacade:
         Delegates to the AI gateway ``draft_rx`` leg (the Phase 7 providers
         - mock/fallback/openai-compatible) and returns a typed result with the
         draft ``rx_items`` and the provider confidence. The caller
-        (``PrescriptionFacade.create_rx_draft``) supplies the consent-gated
-        history
+        (``PrescriptionFacade.create_rx_draft``) supplies the consent-gated history
         context via ``history_summary`` (NFR-SEC-006) - this facade never
         performs a raw history read.
 
@@ -1488,12 +1498,32 @@ class IntakeFacade:
         ``pre_summary_ref`` so the AI gateway's ``AiEgressContext`` carries
         only the intake context (NFR-SEC-006 egress boundary). Raises
         :class:`~modules.intake.domain.exceptions.IntakeNotFoundError` when no
-        pre-summary or intake exists for the given references.
+        pre-summary or intake exists for the given references - including when
+        the pre-summary's intake cannot be read, because the metered job row is
+        keyed to that intake and a draft spent without one is unrecordable spend.
+
+        The drafting leg is METERED like the transcription and structuring legs
+        (PS-03, B4 #722): a ``draft`` ``ai_jobs`` row is booked before the
+        provider call and finalized with the effective serving provider/model,
+        the provider's reported tokens priced into ``cost_paise``, the call
+        duration and the confidence; ``ai_job.completed`` rides the same
+        transaction. A provider failure finalizes the same row ``failed`` and
+        publishes ``ai_job.failed`` instead - durably, because the transaction
+        commits before the error is re-raised - and records no token count,
+        since a failed call reports no usage and a fabricated zero would read as
+        a free call. The event's ``doctor_id`` is null: the drafting doctor lives
+        in the care schema, which this module cannot read (ADR-0003), so per-
+        doctor attribution rides the ``intake.doctor_assigned`` edge (#720)
+        instead. The drafting-cap and consent gates stay in the care module and
+        are untouched by this metering.
         """
         gateway = self._ai_gateway
         if gateway is None:
             gateway = build_ai_gateway(get_settings())
 
+        configured_provider, configured_model = configured_plan()
+
+        draft_failure: Ext002CallError | ValidationError
         async with self._engine.begin() as connection:
             ps_row = (
                 await connection.execute(
@@ -1505,35 +1535,89 @@ class IntakeFacade:
             if ps_row is None:
                 raise IntakeNotFoundError(f"pre-summary {pre_summary_ref} not found for rx-draft")
 
+            intake_id = int(ps_row.intake_id)
             intake_row = (
                 await connection.execute(
                     select(intake_intakes).where(
-                        intake_intakes.c.id == ps_row.intake_id,
+                        intake_intakes.c.id == intake_id,
                     )
                 )
             ).first()
-            language: str = intake_row.language if intake_row is not None else "en"
+            if intake_row is None:
+                raise IntakeNotFoundError(f"intake {intake_id} not found for rx-draft")
 
-        draft_result: DraftRxResult = await gateway.draft_rx(
-            DraftRxRequest(
-                doctor_input_ref=str(doctor_input_ref),
-                pre_summary_ref=str(pre_summary_ref),
-                patient_history_summary=history_summary or "",
-                context=AiEgressContext(language=language),
+            patient_id = int(intake_row.patient_id)
+            job_id = await insert_ai_job(
+                connection,
+                intake_id,
+                provider=configured_provider,
+                model=configured_model,
+                task_type="draft",
             )
-        )
-
-        return RxDraftResult(
-            doctor_input_ref=doctor_input_ref,
-            pre_summary_ref=pre_summary_ref,
-            rx_items=[
-                RxDraftItem(
-                    name=item.name,
-                    dose=item.dose,
-                    duration=item.duration,
-                    frequency=item.frequency,
+            try:
+                started = time.monotonic()
+                draft_result: DraftRxResult = await gateway.draft_rx(
+                    DraftRxRequest(
+                        doctor_input_ref=str(doctor_input_ref),
+                        pre_summary_ref=str(pre_summary_ref),
+                        patient_history_summary=history_summary or "",
+                        context=AiEgressContext(language=intake_row.language),
+                    )
                 )
-                for item in draft_result.rx_items
-            ],
-            confidence=draft_result.confidence,
-        )
+                elapsed_ms = int((time.monotonic() - started) * 1000)
+            except (Ext002CallError, ValidationError) as exc:
+                # The booking row is already written on this connection; only
+                # its status and the failure event are left to write, and both
+                # commit with it when the block below exits.
+                await fail_ai_job(
+                    connection,
+                    ai_job_id=job_id,
+                    intake_id=intake_id,
+                    patient_id=patient_id,
+                    doctor_id=None,
+                    task_type="draft",
+                    reason=failure_reason(exc),
+                    provider=configured_provider,
+                    model=configured_model,
+                    timeout=is_timeout(exc),
+                )
+                draft_failure = exc
+            else:
+                await complete_ai_job(
+                    connection,
+                    ai_job_id=job_id,
+                    intake_id=intake_id,
+                    patient_id=patient_id,
+                    doctor_id=None,
+                    task_type="draft",
+                    provider=gateway.effective_provider or configured_provider,
+                    model=gateway.effective_model or configured_model,
+                    confidence=draft_result.confidence,
+                    elapsed_ms=elapsed_ms,
+                    input_tokens=draft_result.input_tokens,
+                    output_tokens=draft_result.output_tokens,
+                    # The domain declares ONE confidence threshold (0.70,
+                    # AMB-006), so the drafting leg reuses it rather than
+                    # inventing a second: below it, the draft is a low-confidence
+                    # outcome the quality panels should count.
+                    low_confidence=is_low_confidence(draft_result.confidence),
+                )
+                return RxDraftResult(
+                    doctor_input_ref=doctor_input_ref,
+                    pre_summary_ref=pre_summary_ref,
+                    rx_items=[
+                        RxDraftItem(
+                            name=item.name,
+                            dose=item.dose,
+                            duration=item.duration,
+                            frequency=item.frequency,
+                        )
+                        for item in draft_result.rx_items
+                    ],
+                    confidence=draft_result.confidence,
+                )
+
+        # Only the failure branch falls through here, and the transaction above
+        # has already committed: the failed job row and its ``ai_job.failed``
+        # event are durable before the caller sees the provider error (PS-03).
+        raise draft_failure

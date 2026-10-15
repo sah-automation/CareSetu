@@ -130,6 +130,25 @@ def _intake_facade(connection: AsyncMock, gateway: MockAiProvider | None = None)
     return IntakeFacade(engine=_engine(connection), ai_gateway=gateway)
 
 
+def _draft_seam_connection() -> AsyncMock:
+    """Script the intake drafting seam's five executes, in order (B4 #722).
+
+    The seam reads its pre-summary, reads the intake, books the ``draft``
+    ``ai_jobs`` row, finalizes it and publishes the metering event - all on one
+    connection. This care suite only cares that the seam got far enough to return
+    a draft, so the metering statements are given throwaway results.
+    """
+    return _connection(
+        [
+            _FakeResult(row=_pre_summary_row()),
+            _FakeResult(row=_intake_row()),
+            _FakeResult(scalar=1),
+            _FakeResult(),
+            _FakeResult(),
+        ]
+    )
+
+
 class _FakeHealthFacade:
     """Never performs a raw read - it IS the consented path the facade calls.
 
@@ -283,8 +302,8 @@ def _pre_summary_row(*, pre_summary_id: int = 5, intake_id: int = 1) -> object:
     return SimpleNamespace(id=pre_summary_id, intake_id=intake_id)
 
 
-def _intake_row(*, intake_id: int = 1, language: str = "en") -> object:
-    return SimpleNamespace(id=intake_id, language=language)
+def _intake_row(*, intake_id: int = 1, patient_id: int = 7, language: str = "en") -> object:
+    return SimpleNamespace(id=intake_id, patient_id=patient_id, language=language)
 
 
 def _assigned_partner_row(
@@ -328,7 +347,7 @@ async def test_create_ai_draft_stores_immutable_snapshot_and_publishes() -> None
             _FakeResult(),
         ]
     )
-    intake_conn = _connection([_FakeResult(row=_pre_summary_row()), _FakeResult(row=_intake_row())])
+    intake_conn = _draft_seam_connection()
     gateway = MockAiProvider()
     health = _FakeHealthFacade(_timeline(entry_types=["rx"]))
     facade = _care_facade(care_conn, _intake_facade(intake_conn, gateway), health)
@@ -370,7 +389,7 @@ async def test_create_ai_draft_reads_history_only_via_consented_path() -> None:
             _FakeResult(),
         ]
     )
-    intake_conn = _connection([_FakeResult(row=_pre_summary_row()), _FakeResult(row=_intake_row())])
+    intake_conn = _draft_seam_connection()
     gateway = MockAiProvider()
     health = _FakeHealthFacade(_timeline(entry_types=["rx", "prescription"]))
     facade = _care_facade(care_conn, _intake_facade(intake_conn, gateway), health)
@@ -420,7 +439,7 @@ async def test_create_ai_draft_regenerate_increments_attempt_no() -> None:
             _FakeResult(),
         ]
     )
-    intake_conn = _connection([_FakeResult(row=_pre_summary_row()), _FakeResult(row=_intake_row())])
+    intake_conn = _draft_seam_connection()
     facade = _care_facade(
         care_conn,
         _intake_facade(intake_conn, MockAiProvider()),
@@ -452,7 +471,7 @@ async def test_create_ai_draft_clears_prior_working_revision() -> None:
             _FakeResult(),
         ]
     )
-    intake_conn = _connection([_FakeResult(row=_pre_summary_row()), _FakeResult(row=_intake_row())])
+    intake_conn = _draft_seam_connection()
     facade = _care_facade(
         care_conn,
         _intake_facade(intake_conn, MockAiProvider()),

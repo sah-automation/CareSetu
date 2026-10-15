@@ -22,13 +22,15 @@ validator - all without a database.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, get_args
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
 from pydantic import BaseModel
+from sqlalchemy import CheckConstraint
 
 from bus.dispatcher import OutboxRow, envelope_from_row
 from bus.envelope import Envelope, is_valid_event_type
@@ -48,6 +50,7 @@ from bus.registry import HandlerRegistry
 from modules.intake.adapters import intake_started_count, register_handlers
 from modules.intake.domain.events import (
     PRODUCER_MODULE,
+    AiTaskType,
     IntakeComposerOpenedPayload,
     IntakeStartedPayload,
     ai_egress_recorded_envelope,
@@ -61,6 +64,7 @@ from modules.intake.domain.events import (
     pre_summary_low_confidence_envelope,
     pre_summary_ready_envelope,
 )
+from modules.intake.schema.models import intake_ai_jobs
 
 _ALL_EVENT_TYPES = (
     EVENT_INTAKE_STARTED,
@@ -102,6 +106,26 @@ def test_every_intake_event_type_is_registered_in_bus_events() -> None:
     assert EVENT_AI_EGRESS_RECORDED == "ai_egress.recorded"
     assert EVENT_INTAKE_DOCTOR_ASSIGNED == "intake.doctor_assigned"
     assert EVENT_INTAKE_COMPOSER_OPENED == "intake.composer_opened"
+
+
+def test_the_declared_task_type_vocabulary_is_exactly_the_schema_constraint() -> None:
+    """#722 meters the drafting leg with the ALREADY-DECLARED ``draft`` type.
+
+    Metering the prescription-drafting leg must not widen the vocabulary: the
+    payload's ``AiTaskType`` and the ``ai_jobs`` check constraint stay the same
+    four names, in the same order, so ``draft`` became a PRODUCED type rather
+    than a new one being invented, and ``summarize`` stays declared-only.
+    """
+    declared = get_args(AiTaskType)
+    assert declared == ("transcribe", "structure", "draft", "summarize")
+
+    check = next(
+        constraint
+        for constraint in intake_ai_jobs.constraints
+        if isinstance(constraint, CheckConstraint)
+        and constraint.name == "ck_intake_ai_jobs_task_type"
+    )
+    assert set(re.findall(r"'(\w+)'", str(check.sqltext))) == set(declared)
 
 
 def _capture_from_all_event_types() -> list[Envelope[BaseModel]]:
