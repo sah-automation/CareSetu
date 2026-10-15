@@ -1,4 +1,4 @@
-"""B4a #702, B6 #723: MOD-013 consumer registration + exactly-once effects (no DB).
+"""B4a #702, B6 #723, B7 #724: MOD-013 consumer registration + exactly-once effects.
 
 Covers the composition-root seam: the ``ai_job.completed`` / ``ai_job.failed``
 consumers register handler seats at the worker without ever owning (or
@@ -9,6 +9,10 @@ through the same short-lived engine + ledger seam as the live dispatcher: a
 replayed ``event_id`` is a no-op (ledger dedupe), so every effect behind that one
 ledger row - the daily accumulation AND the per-job spend row - runs exactly once
 per distinct event.
+
+B7 (#724) adds the ``intake.doctor_assigned`` seat on the same shape: one
+consumer for the care-attribution edge, with MOD-005 still owning the registry
+payload model and MOD-013 holding a three-reference mirror of its own.
 """
 
 from __future__ import annotations
@@ -19,19 +23,26 @@ import pytest
 from pydantic import BaseModel
 
 from bus.envelope import Envelope
-from bus.events import EVENT_AI_JOB_COMPLETED, EVENT_AI_JOB_FAILED
+from bus.events import (
+    EVENT_AI_JOB_COMPLETED,
+    EVENT_AI_JOB_FAILED,
+    EVENT_INTAKE_DOCTOR_ASSIGNED,
+)
 from bus.registry import HandlerRegistry
 from modules.intake.adapters import register_handlers as register_intake_handlers
 from modules.intake.domain.events import (
     AiJobCompletedPayload,
     AiJobFailedPayload,
+    IntakeDoctorAssignedPayload,
     ai_job_completed_envelope,
     ai_job_failed_envelope,
+    intake_doctor_assigned_envelope,
 )
 from modules.observability.adapters import register_handlers as register_obs_handlers
 from modules.observability.domain.consumer import (
     AiJobCompletedUsagePayload,
     AiJobFailedUsagePayload,
+    IntakeDoctorAssignedTelemetryPayload,
 )
 
 
@@ -48,6 +59,26 @@ def test_register_handlers_registers_both_consumers_without_owning_the_models() 
     # duplicate (which the registry's one-model-per-type guard would reject).
     assert registry.payload_model_for(EVENT_AI_JOB_COMPLETED) is AiJobCompletedPayload
     assert registry.payload_model_for(EVENT_AI_JOB_FAILED) is AiJobFailedPayload
+
+
+def test_doctor_assigned_registers_one_consumer_without_owning_the_model() -> None:
+    """The care-attribution seat exists, and MOD-005 still owns the payload model."""
+    registry = HandlerRegistry()
+    register_intake_handlers(registry)
+    register_obs_handlers(registry)
+
+    assert len(registry.handlers_for(EVENT_INTAKE_DOCTOR_ASSIGNED)) == 1
+    assert registry.payload_model_for(EVENT_INTAKE_DOCTOR_ASSIGNED) is IntakeDoctorAssignedPayload
+
+
+def test_doctor_assigned_payload_revalidates_into_the_observability_mirror() -> None:
+    """The three references the edge needs travel, and nothing clinical rides along."""
+    envelope = intake_doctor_assigned_envelope(intake_id=42, patient_id=7, doctor_id=8)
+    mirror = IntakeDoctorAssignedTelemetryPayload.model_validate(envelope.payload.model_dump())
+    assert isinstance(mirror, IntakeDoctorAssignedTelemetryPayload)
+    assert mirror.intake_id == 42
+    assert mirror.patient_id == 7
+    assert mirror.doctor_id == 8
 
 
 def test_intake_completed_payload_revalidates_into_the_observability_mirror() -> None:
@@ -251,3 +282,63 @@ async def test_failed_handler_accumulates_exactly_once_per_event_id(
     await handler(malformed)
     assert accumulate.await_count == 2
     assert accumulate.await_args.args[2].timeout is False
+
+
+@pytest.mark.asyncio
+async def test_care_attribution_handler_writes_the_edge_exactly_once_per_event_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A replayed ``event_id`` writes no edge; a genuinely new event does.
+
+    This file fakes the ledger, so what is under test is narrower than it looks:
+    that the registered handler reaches the effect only when ``run_handler``
+    reports a first delivery. The exactly-once guarantee itself, and the row the
+    effect writes - including the monotonic ``assigned_at`` guard - are asserted
+    against real PostgreSQL in
+    tests/integration/test_observability_consumer_round_trip.py.
+    """
+    registry = HandlerRegistry()
+    register_intake_handlers(registry)
+    register_obs_handlers(registry)
+    handler = registry.handlers_for(EVENT_INTAKE_DOCTOR_ASSIGNED)[0]
+
+    engine = MagicMock()
+    engine.begin.return_value.__aenter__ = AsyncMock(return_value=AsyncMock())
+    engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+    engine.dispose = AsyncMock()
+    monkeypatch.setattr("bus.handler_harness._delivery_engine", lambda: engine)
+
+    delivered: set[str] = set()
+    edge = AsyncMock()
+
+    async def fake_ledger(
+        conn: object, schema: str, envelope: Envelope[BaseModel], handler_result: object
+    ) -> bool:
+        del conn, schema, handler_result
+        if str(envelope.event_id) in delivered:
+            return False
+        delivered.add(str(envelope.event_id))
+        return True
+
+    monkeypatch.setattr("bus.handler_harness.record_consumed_event", fake_ledger)
+    monkeypatch.setattr("modules.observability.adapters.record_care_attribution_edge", edge)
+
+    first = intake_doctor_assigned_envelope(intake_id=42, patient_id=7, doctor_id=8)
+    # A genuinely NEW event about the same intake - a re-pick, not a redelivery.
+    # It must reach the effect: "exactly one doctor" is the schema's job to
+    # enforce, not a reason to drop an event on the floor.
+    repick = intake_doctor_assigned_envelope(intake_id=42, patient_id=7, doctor_id=9)
+
+    await handler(first)
+    assert edge.await_count == 1
+    mirror = edge.await_args.args[2]
+    assert isinstance(mirror, IntakeDoctorAssignedTelemetryPayload)
+    assert mirror.intake_id == 42
+    assert mirror.doctor_id == 8
+
+    await handler(first)
+    assert edge.await_count == 1
+
+    await handler(repick)
+    assert edge.await_count == 2
+    assert edge.await_args.args[2].doctor_id == 9

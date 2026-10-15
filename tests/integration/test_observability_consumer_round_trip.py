@@ -1,4 +1,4 @@
-"""B4a #702, B4 #722, B6 #723: MOD-013 consumer round trip against real PostgreSQL.
+"""B4a #702, B4 #722, B6 #723, B7 #724: MOD-013 consumer round trip vs real PostgreSQL.
 
 The phase-spec integration test: ``ai_job.completed`` / ``ai_job.failed``
 events are published into the ``intake.intake_outbox`` exactly as the MOD-005
@@ -15,6 +15,11 @@ The granular row is what the per-patient and per-doctor numbers are computed FRO
 PHI-free: every fact the business lens needs is on the row, and the identity it
 is attributed to is a one-way hash rather than the reference that arrived on the
 event.
+
+B7 (#724) adds the fourth subscription, ``intake.doctor_assigned``: the
+care-attribution edge. Its round trip proves the edge exists only because the
+event said so, that replaying it writes nothing, and that an intake's spend
+resolves to exactly one doctor through it.
 
 The ``draft`` case is different in kind: it drives the REAL
 ``IntakeFacade.request_rx_draft`` so the prescription-drafting leg's metering is
@@ -54,6 +59,7 @@ from bus.events import (
     EVENT_AUDIT_TAMPER_DETECTED,
     EVENT_CASE_CONSULT_COMPLETE,
     EVENT_CONSENT_GRANTED,
+    EVENT_INTAKE_DOCTOR_ASSIGNED,
 )
 from bus.outbox_writer import write_outbox
 from bus.registry import HandlerRegistry
@@ -64,7 +70,11 @@ from modules.intake.adapters.ai_provider_mock import (
     MOCK_AI_PROVIDER,
     MockAiProvider,
 )
-from modules.intake.domain.events import AiJobCompletedPayload, AiJobFailedPayload
+from modules.intake.domain.events import (
+    AiJobCompletedPayload,
+    AiJobFailedPayload,
+    IntakeDoctorAssignedPayload,
+)
 from modules.intake.facade import IntakeFacade
 from modules.intake.outbox import INTAKE_OUTBOX_TABLE
 from modules.observability.adapters import (
@@ -393,6 +403,192 @@ async def test_ai_job_events_round_trip_accumulate_and_dedupe_on_replay(
             "observability.observability_attribution_daily": 0,
             "observability.consumed_events": 4,
         }
+    finally:
+        await engine.dispose()
+
+
+def _doctor_assigned_envelope(
+    *,
+    intake_id: int,
+    patient_id: int,
+    doctor_id: int,
+    occurred_at: datetime = _NOW,
+) -> Envelope[IntakeDoctorAssignedPayload]:
+    """A MOD-005-style ``intake.doctor_assigned`` envelope as ``pick_doctor`` publishes."""
+    return Envelope[IntakeDoctorAssignedPayload](
+        event_id=uuid4(),
+        event_type=EVENT_INTAKE_DOCTOR_ASSIGNED,
+        producer="intake",
+        occurred_at=occurred_at,
+        payload=IntakeDoctorAssignedPayload(
+            intake_id=intake_id,
+            patient_id=patient_id,
+            doctor_id=doctor_id,
+        ),
+    )
+
+
+async def _edge_rows(connection: AsyncConnection) -> list[dict[str, object]]:
+    result = await connection.execute(
+        text(
+            "SELECT intake_ref, patient_key, doctor_key, event_id, assigned_at "
+            "FROM observability.observability_care_attribution_edges ORDER BY intake_ref"
+        )
+    )
+    return [dict(mapping) for mapping in result.mappings().all()]
+
+
+@pytest.mark.asyncio
+async def test_doctor_pick_round_trips_into_one_attribution_edge_per_intake(
+    database_url: str, clean_tables: None
+) -> None:
+    """AC (#724): one edge row per pick, written because the event said so.
+
+    The edge is the only legal record of which doctor an intake belongs to:
+    MOD-013 cannot read the care schema (ADR-0003), so the row exists because
+    ``intake.doctor_assigned`` was published and nothing else. It carries the
+    intake reference plus the two ONE-WAY actor keys, never the raw references
+    that arrived on the event.
+
+    Five things are proved here, all at the real-database seam:
+
+    1. One pick writes exactly one edge, ledger-first alongside the effect.
+    2. Replaying the same ``event_id`` writes no second edge and no second ledger
+       row - the replay proof, over a table the previous batch left empty.
+    3. A genuinely NEW event about an already-picked intake - a re-pick - leaves
+       exactly one edge pointing at the newest doctor. "Exactly one doctor" is
+       the schema's rule, not the producer's, so the effect upserts rather than
+       failing a constraint or stacking a second row.
+    4. A STALE event arriving late is dropped rather than allowed to roll the
+       pairing backwards, so "newest pick wins" holds regardless of the order
+       deliveries happen to arrive in.
+    5. The edge is what resolves an intake's spend: the transcription and
+       structuring rows are written with a NULL doctor key (they run before a
+       pick), and after the edge lands they resolve to exactly one doctor.
+    """
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        patient_ref = 700_000_007
+        doctor_ref = 900_000_003
+        other_doctor_ref = 900_000_004
+
+        # Spend written BEFORE the pick, exactly as the pipeline meters it: the
+        # transcription and structuring legs run with no doctor involved, so their
+        # doctor key is honestly NULL.
+        transcribe = _completed_envelope(
+            ai_job_id=21,
+            input_tokens=800,
+            output_tokens=0,
+            cost_paise=18,
+            duration_ms=1100,
+            low_confidence=False,
+            patient_id=patient_ref,
+        )
+        assigned = _doctor_assigned_envelope(
+            intake_id=1, patient_id=patient_ref, doctor_id=doctor_ref
+        )
+
+        async with engine.begin() as connection:
+            await write_outbox(connection, "intake", INTAKE_OUTBOX_TABLE, transcribe)
+            await write_outbox(connection, "intake", INTAKE_OUTBOX_TABLE, assigned)
+
+        registry = _registry()
+        async with engine.connect() as connection:
+            tables = await discover_outbox_tables(connection, ("intake",))
+        for table in tables:
+            await process_outbox_table(engine, table, registry, DEFAULT_DISPATCHER_CONFIG)
+
+        async with engine.connect() as connection:
+            edges = await _edge_rows(connection)
+            ledger = await connection.scalar(
+                text("SELECT COUNT(*) FROM observability.consumed_events")
+            )
+        assert ledger == 2
+        assert len(edges) == 1
+
+        edge = edges[0]
+        assert edge["intake_ref"] == 1
+        # Provenance: the row names the delivery that wrote it, so the audit trail
+        # says which pick this attribution came from.
+        assert edge["event_id"] == assigned.event_id
+        assert edge["assigned_at"] == _NOW
+        # Both identities are hashed through #723's helper - the SAME helper, so a
+        # key minted here joins one minted at rollup time. Two conventions in one
+        # schema is how attribution silently stops reconciling.
+        assert edge["patient_key"] == actor_key(ACTOR_KIND_PATIENT, patient_ref)
+        assert edge["doctor_key"] == actor_key(ACTOR_KIND_DOCTOR, doctor_ref)
+
+        async with engine.connect() as connection:
+            stored = await _attribution_table_text(connection)
+        assert str(patient_ref) not in stored
+        assert str(doctor_ref) not in stored
+
+        # Replay the SAME event_id: no second edge, no second ledger row.
+        async with engine.connect() as connection:
+            before_replay = await _row_counts(connection)
+        await dispatch(registry, assigned)
+        async with engine.connect() as connection:
+            after_replay = await _row_counts(connection)
+            edges = await _edge_rows(connection)
+        assert after_replay == before_replay
+        assert after_replay["observability.observability_care_attribution_edges"] == 1
+        assert len(edges) == 1
+
+        # A genuinely new event about the same intake - a re-pick - must leave ONE
+        # edge pointing at the newest doctor, not two edges and not a constraint
+        # failure. The uniqueness of ``intake_ref`` is what enforces this; the
+        # producer refusing to re-pick is not relied on.
+        repick = _doctor_assigned_envelope(
+            intake_id=1,
+            patient_id=patient_ref,
+            doctor_id=other_doctor_ref,
+            occurred_at=datetime(2026, 10, 13, 9, 0, 0, tzinfo=UTC),
+        )
+        await dispatch(registry, repick)
+        async with engine.connect() as connection:
+            edges = await _edge_rows(connection)
+        assert len(edges) == 1
+        assert edges[0]["doctor_key"] == actor_key(ACTOR_KIND_DOCTOR, other_doctor_ref)
+        assert edges[0]["event_id"] == repick.event_id
+        assert edges[0]["assigned_at"] == repick.occurred_at
+
+        # "Newest pick wins" is a property of the code, not an assumption about
+        # delivery order: a DIFFERENT event_id that is OLDER than the edge already
+        # recorded - a stale pick arriving late, which the ledger lets through
+        # because it is not a redelivery - is dropped rather than allowed to roll
+        # the pairing, and its timestamp, backwards.
+        stale = _doctor_assigned_envelope(
+            intake_id=1,
+            patient_id=patient_ref,
+            doctor_id=doctor_ref,
+            occurred_at=datetime(2026, 10, 13, 7, 0, 0, tzinfo=UTC),
+        )
+        await dispatch(registry, stale)
+        async with engine.connect() as connection:
+            edges = await _edge_rows(connection)
+        assert len(edges) == 1
+        assert edges[0]["doctor_key"] == actor_key(ACTOR_KIND_DOCTOR, other_doctor_ref)
+        assert edges[0]["event_id"] == repick.event_id
+        assert edges[0]["assigned_at"] == repick.occurred_at
+
+        # AC (#724), stated as the operator reads it: one intake's spend resolves
+        # to exactly one doctor THROUGH the edge. The transcribing row named no
+        # doctor, so its doctor comes from here and only here - never from a read
+        # of the care schema.
+        async with engine.connect() as connection:
+            resolved = await connection.execute(
+                text(
+                    "SELECT edge.doctor_key AS doctor_key, spend.cost_paise AS cost_paise "
+                    "FROM observability.observability_ai_job_spend spend "
+                    "JOIN observability.observability_care_attribution_edges edge "
+                    "ON edge.intake_ref = spend.intake_ref "
+                    "WHERE spend.doctor_key IS NULL"
+                )
+            )
+            rows = resolved.mappings().all()
+        assert len(rows) == 1
+        assert rows[0]["doctor_key"] == actor_key(ACTOR_KIND_DOCTOR, other_doctor_ref)
+        assert rows[0]["cost_paise"] == 18
     finally:
         await engine.dispose()
 

@@ -27,6 +27,13 @@ model, task type, tokens, cost, status and trace id. It runs in the same
 transaction as the ledger row and the daily accumulation, so the replay proof
 that holds for one holds for all three.
 
+B7 (#724) registers the care-attribution subscription, ``intake.doctor_assigned``:
+the edge. It writes one ``observability_care_attribution_edges`` row per doctor
+pick - intake reference plus the hashed patient and doctor keys - in the same
+ledger-first transaction. Doctor attribution rides this event rather than a join
+to the care schema, which the module isolation rule forbids (ADR-0003); the edge
+exists only because the event said so.
+
 MOD-005 owns the registry payload models for ``ai_job.*`` (its self-
 subscription seam registers them), so MOD-013 registers handlers ONLY - the
 ``run_handler`` harness re-validates the dispatched intake payload into the
@@ -54,6 +61,7 @@ from bus.events import (
     EVENT_CONSENT_GRANTED,
     EVENT_CONSENT_REQUESTED,
     EVENT_CONSENT_REVOKED,
+    EVENT_INTAKE_DOCTOR_ASSIGNED,
     EVENT_PARTNER_ACTIVATED,
     EVENT_PARTNER_CREDENTIAL_REVIEWED,
     EVENT_PARTNER_REGISTERED,
@@ -73,6 +81,7 @@ from modules.observability.domain.consumer import (
     CaseClosedTelemetryPayload,
     CaseConsultCompleteTelemetryPayload,
     ConsentLifecycleTelemetryPayload,
+    IntakeDoctorAssignedTelemetryPayload,
     PartnerCredentialReviewedTelemetryPayload,
     PartnerDecisionTelemetryPayload,
     PartnerRegisteredTelemetryPayload,
@@ -89,6 +98,7 @@ from modules.observability.facade import (
     accumulate_business_count,
     record_ai_job_spend,
     record_alert_event,
+    record_care_attribution_edge,
 )
 
 #: B4b (#703): the consumed event types that roll into ``obs_business_daily``,
@@ -259,3 +269,35 @@ def register_handlers(registry: HandlerRegistry) -> None:
         )
 
     registry.register(EVENT_AI_EGRESS_RECORDED, record_ai_egress_alert)
+
+    async def record_care_attribution(envelope: Envelope[BaseModel]) -> None:
+        """Consume ``intake.doctor_assigned``: record the intake -> doctor edge.
+
+        B7 (#724). The single effect, so it is a plain ``run_handler`` call rather
+        than the registry-driven business-counter loop: the row this writes is not
+        a count but the pairing the nightly rollup resolves an intake's spend
+        through. ``run_handler`` writes the ``consumed_events`` ledger row FIRST,
+        in the same transaction as the edge, so a redelivered ``event_id`` writes
+        no edge and a crash rolls both back together.
+
+        No business counter rides along, deliberately. ``intake.doctor_assigned``
+        is not a funnel step or an activity signal - it is the attribution edge,
+        and counting it would put a second meaning on the same delivery. The
+        activity counts come from the product event ledger's own event family
+        (#722's composer-opened entry step), not from this one.
+        """
+
+        async def _impl(
+            connection: AsyncConnection, payload: IntakeDoctorAssignedTelemetryPayload
+        ) -> None:
+            await record_care_attribution_edge(connection, envelope, payload)
+
+        await run_handler(
+            envelope,
+            IntakeDoctorAssignedTelemetryPayload,
+            _impl,
+            "record_care_attribution_edge",
+            OBSERVABILITY_SCHEMA,
+        )
+
+    registry.register(EVENT_INTAKE_DOCTOR_ASSIGNED, record_care_attribution)

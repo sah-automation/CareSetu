@@ -15,6 +15,12 @@ effect that makes per-patient and per-doctor attribution arithmetic rather than
 guesswork, keyed on the one-way actor hashes rather than on raw identity
 references.
 
+B7 (#724) adds :func:`record_care_attribution_edge`: the one-row-per-intake
+care-attribution edge that says which doctor an intake belongs to. It is written
+because MOD-005 published ``intake.doctor_assigned``, never by reading the care
+schema - the module isolation rule (ADR-0003) makes the event the only legal
+source of that pairing.
+
 The B5a nightly rollup (#704) joins it as :func:`run_rollup`: the off-request-path
 pass that recomputes the percentile aggregates, snapshots budget spend and
 evaluates the alert thresholds. B5b (#705) adds the two scheduler seams the
@@ -49,6 +55,7 @@ from modules.observability.domain.consumer import (
     AiJobCompletedUsagePayload,
     AiJobFailedUsagePayload,
     AlertRow,
+    IntakeDoctorAssignedTelemetryPayload,
 )
 from modules.observability.domain.deeplinks import grafana_link, langfuse_link, sentry_link
 from modules.observability.domain.pseudonym import (
@@ -74,6 +81,7 @@ from modules.observability.schema.models import (
     observability_ai_usage_daily,
     observability_alert_events,
     observability_business_daily,
+    observability_care_attribution_edges,
     observability_rollup_runs,
 )
 
@@ -139,6 +147,7 @@ __all__ = [
     "query_usage",
     "record_ai_job_spend",
     "record_alert_event",
+    "record_care_attribution_edge",
     "run_rollup",
     "window_for",
 ]
@@ -296,6 +305,75 @@ async def record_ai_job_spend(
         cost_paise=cost_paise,
         status=status,
         trace_id=payload.trace_id,
+    )
+    await connection.execute(statement)
+
+
+async def record_care_attribution_edge(
+    connection: AsyncConnection,
+    envelope: Envelope[BaseModel],
+    payload: IntakeDoctorAssignedTelemetryPayload,
+) -> None:
+    """Write ONE ``observability_care_attribution_edges`` row for one doctor pick.
+
+    B7 (#724), the writer half of #717 decision 3. ``observability_ai_job_spend``
+    (#723) carries a per-job doctor key, but the transcription and structuring
+    legs run BEFORE a pick, so those rows have a NULL one - and a NULL is a gap
+    an operator can see, not a placeholder that looks attributed. This row is what
+    closes the gap after the fact: the rollup (#725) resolves an intake's spend to
+    its doctor through this edge, so late-arriving attribution is reconciled on the
+    next pass rather than lost for the day.
+
+    The edge exists only because ``intake.doctor_assigned`` said so. There is no
+    other legal source for the pairing: MOD-013 reading the intake or partner
+    tables would be a cross-schema read, which ADR-0003 forbids.
+
+    Runs in the same ``run_handler`` transaction as the ``consumed_events`` ledger
+    row, which is written FIRST and gates this effect - so a replayed ``event_id``
+    writes no edge, and a crash rolls the ledger row and the edge back together.
+
+    PHI-free by construction: both identity references are hashed through
+    :func:`~modules.observability.domain.pseudonym.actor_key` before they are
+    written, so the raw patient/doctor reference never lands in this schema
+    (ADR-0025 D7). Reusing #723's helper verbatim is the point: a key computed at
+    consume time has to join one computed at rollup time, and two hashing
+    conventions in one schema is how attribution quietly stops reconciling.
+
+    **The conflict rule.** ``intake_ref`` is UNIQUE, so an intake has exactly one
+    doctor and this upserts on that key rather than inserting and hoping. A
+    genuinely new event about an already-picked intake - a re-pick - OVERWRITES
+    the edge, because the newest pick is the intake's current truth and two rows
+    would make attribution ambiguous. Overwriting rather than raising is also
+    what keeps a data-quality question from becoming an ops incident: an insert
+    would abort the transaction holding the ledger row, retry forever and land in
+    the dead letter, and the wrong first edge would then be uncorrectable without
+    a migration.
+
+    The overwrite is MONOTONIC in ``assigned_at``, not merely last-delivered-wins:
+    the guard below drops an arriving event older than the edge it would replace.
+    Without it a late delivery of a stale pick - a redelivery the ledger lets
+    through because it is a different ``event_id`` - would quietly roll the edge,
+    and its ``assigned_at``, backwards to a doctor the patient has moved on from.
+    Replay is not re-pick and never reaches here at all: the ledger row is written
+    first, so a redelivered ``event_id`` cannot fail the constraint, cannot move
+    the edge, and cannot overwrite the provenance columns either.
+    """
+    statement = insert(observability_care_attribution_edges).values(
+        intake_ref=payload.intake_id,
+        patient_key=actor_key(ACTOR_KIND_PATIENT, payload.patient_id),
+        doctor_key=actor_key(ACTOR_KIND_DOCTOR, payload.doctor_id),
+        event_id=envelope.event_id,
+        assigned_at=envelope.occurred_at,
+    )
+    statement = statement.on_conflict_do_update(
+        index_elements=["intake_ref"],
+        set_={
+            "patient_key": statement.excluded.patient_key,
+            "doctor_key": statement.excluded.doctor_key,
+            "event_id": statement.excluded.event_id,
+            "assigned_at": statement.excluded.assigned_at,
+        },
+        where=statement.excluded.assigned_at >= observability_care_attribution_edges.c.assigned_at,
     )
     await connection.execute(statement)
 

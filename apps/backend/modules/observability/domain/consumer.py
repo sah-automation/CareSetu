@@ -11,6 +11,11 @@ clinical fields and raw confidence score never travel, security-phii-
 standards): provider/model, token use, priced cost, duration and the derived
 ``low_confidence`` flag on completion; the failure reason, serving
 provider/model and the derived ``timeout`` classification on failure.
+
+B7 (#724) adds the ``intake.doctor_assigned`` mirror: the care-attribution
+edge's three references - intake, patient, doctor - and nothing else. It is the
+mirror that makes "which doctor does this intake belong to" answerable inside
+this schema without any module reading another's tables (ADR-0003).
 """
 
 from __future__ import annotations
@@ -84,6 +89,46 @@ class AiJobFailedUsagePayload(BaseModel):
     patient_id: int
     doctor_id: int | None
     trace_id: str | None
+
+
+class IntakeDoctorAssignedTelemetryPayload(BaseModel):
+    """Observability's mirror of MOD-005's ``intake.doctor_assigned`` payload.
+
+        B7 (#724): the care-attribution edge. Three references and nothing else - the
+        intake, the patient and the doctor the patient picked - because that is the
+        whole of what attribution needs, and every fact on the row is an identity
+        reference rather than clinical content (security-phii-standards no-PHI).
+        MOD-005 owns the registry payload model, so MOD-013 registers no duplicate;
+        ``run_handler`` re-validates the dispatched intake payload into this local
+        mirror before the edge is written.
+
+        This event is the ONLY reason the edge exists. Doctor attribution rides an
+        event rather than a join because the alternative - MOD-013 reading
+        ``intake_intakes.assigned_partner_id`` or the partner tables - is a
+        cross-schema read, which the module isolation rule forbids (ADR-0003, #717
+        decision 3). If the producer stopped emitting this, attribution would go
+        blind rather than silently start guessing, which is the failure mode the
+        event was chosen over a join to avoid.
+
+    **Conflict rule - an intake has exactly one doctor, and the schema says so.**
+        ``observability_care_attribution_edges.intake_ref`` is UNIQUE, so two edges
+        for one intake cannot coexist; the effect upserts on that key. A second,
+        genuinely new event about an already-picked intake - a re-pick - therefore
+        OVERWRITES the edge rather than stacking a second one, making the newest pick
+        the intake's attribution. The overwrite is monotonic in ``assigned_at``: an
+        event older than the edge it would replace is dropped rather than allowed to
+        roll the pairing backwards, so "newest pick wins" is a property of the code
+        rather than an assumption about delivery order. A redelivery of the SAME event
+        is a different thing entirely and never reaches the upsert at all -
+        ``run_handler`` writes the ``consumed_events`` ledger row first and returns
+        before the effect runs, so a replay can neither fail the constraint nor
+        overwrite the provenance columns. "Exactly one doctor" is therefore enforced
+        by the schema rather than by trusting the producer to never re-pick.
+    """
+
+    intake_id: int
+    patient_id: int
+    doctor_id: int
 
 
 class CaseConsultCompleteTelemetryPayload(BaseModel):
