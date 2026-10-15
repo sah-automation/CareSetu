@@ -51,6 +51,8 @@ from bus.bootstrap import MODULE_SCHEMAS
 from bus.dispatcher import count_outbox_rows, discover_outbox_tables
 from bus.envelope import Envelope
 from modules.observability.domain.consumer import (
+    AI_JOB_SPEND_STATUS_COMPLETED,
+    AI_JOB_SPEND_STATUS_FAILED,
     ALERT_SEVERITY_CRITICAL,
     AiJobCompletedUsagePayload,
     AiJobFailedUsagePayload,
@@ -86,12 +88,6 @@ from modules.observability.schema.models import (
 )
 
 OBSERVABILITY_SCHEMA = "observability"
-
-#: The two outcomes ``observability_ai_job_spend.status`` can hold - a closed
-#: vocabulary the migration's CHECK constraint enforces, so a third state is a
-#: migration rather than a silent value.
-AI_JOB_SPEND_STATUS_COMPLETED = "completed"
-AI_JOB_SPEND_STATUS_FAILED = "failed"
 
 #: Default and ceiling of one page of the alert feed (api-standards §4: default
 #: 25, max 100). The feed is paged rather than capped at one screen because the

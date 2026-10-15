@@ -10,6 +10,10 @@ they decide -
 * ``observability_ai_cost_budget``: the month-to-date paise spend snapshot, with
   the calendar-month reset that clears a closed month's spend;
 * ``observability_business_daily``: one generic-store row per registered metric;
+* ``observability_attribution_daily``: the daily per-actor aggregate (B6 #725),
+  recomputed in full from ``observability_ai_job_spend`` and its
+  ``observability_care_attribution_edges``, never incremented, so a care-attribution
+  edge that lands after its AI job fills the doctor key in without double counting;
 * ``observability_alert_events``: the threshold alerts from the minimum alert set;
 * ``observability_rollup_runs``: the run ledger (B5b #705) - one row per rolled
   day, written in the SAME transaction as the aggregates it describes, which is
@@ -51,6 +55,8 @@ from modules.observability.domain.rollup import (
     ALERT_STATUS_RESOLVED,
     RESOLVABLE_ALERT_KINDS,
     ROLLUP_MODE_DAILY,
+    ActorSpend,
+    AttributionDaily,
     BudgetSnapshot,
     OutboxTableHealth,
     ProviderHealth,
@@ -61,6 +67,7 @@ from modules.observability.domain.rollup import (
     alert_key,
     alert_marker,
     budget_period_for,
+    build_attribution_daily,
     build_budget_snapshot,
     compute_provider_health,
     evaluate_budget_alerts,
@@ -71,10 +78,13 @@ from modules.observability.domain.rollup import (
 )
 from modules.observability.schema.models import (
     observability_ai_cost_budget,
+    observability_ai_job_spend,
     observability_ai_provider_health,
     observability_ai_usage_daily,
     observability_alert_events,
+    observability_attribution_daily,
     observability_business_daily,
+    observability_care_attribution_edges,
     observability_rollup_runs,
 )
 
@@ -104,6 +114,7 @@ class RollupReport:
     providers: int
     health_rows: int
     metric_rows: int
+    attribution_rows: int
     budget_snapshots: int
     alerts_raised: int
     alerts_resolved: int
@@ -376,6 +387,70 @@ async def _load_outbox_health(
     ]
 
 
+async def _load_actor_spend(connection: AsyncConnection, target_date: date) -> list[ActorSpend]:
+    """Load one date of ``observability_ai_job_spend``, the granular attribution source.
+
+    Ordered by ``ai_job_ref`` so the loaded sequence - and therefore the recompute
+    - does not depend on the planner's choice of scan order. Ordering is not
+    cosmetic: the aggregate's own output is sorted, and this keeps the input
+    deterministic for the same reason.
+    """
+    table = observability_ai_job_spend
+    statement = (
+        select(
+            table.c.intake_ref,
+            table.c.patient_key,
+            table.c.doctor_key,
+            table.c.provider,
+            table.c.model,
+            table.c.task_type,
+            table.c.input_tokens,
+            table.c.output_tokens,
+            table.c.cost_paise,
+            table.c.status,
+        )
+        .where(table.c.usage_date == target_date)
+        .order_by(table.c.ai_job_ref)
+    )
+    rows = (await connection.execute(statement)).all()
+    return [
+        ActorSpend(
+            intake_ref=row.intake_ref,
+            patient_key=row.patient_key,
+            doctor_key=row.doctor_key,
+            provider=row.provider,
+            model=row.model,
+            task_type=row.task_type,
+            input_tokens=row.input_tokens,
+            output_tokens=row.output_tokens,
+            cost_paise=row.cost_paise,
+            status=row.status,
+        )
+        for row in rows
+    ]
+
+
+async def _load_doctor_by_intake(
+    connection: AsyncConnection, spend: Sequence[ActorSpend]
+) -> dict[int, str]:
+    """The doctor each of ``spend``'s intakes currently belongs to, from the edge.
+
+    ``observability_care_attribution_edges`` is MOD-013's own record of what
+    ``intake.doctor_assigned`` said (decision 3), so reading it here is not a
+    cross-schema read (ADR-0003). It is bounded to the intakes this day's jobs
+    touched rather than read whole: the edge table grows by one row per doctor pick
+    while the day's jobs are a window onto it.
+    """
+    if not spend:
+        return {}
+    table = observability_care_attribution_edges
+    statement = select(table.c.intake_ref, table.c.doctor_key).where(
+        table.c.intake_ref.in_(sorted({row.intake_ref for row in spend}))
+    )
+    rows = (await connection.execute(statement)).all()
+    return {row.intake_ref: row.doctor_key for row in rows}
+
+
 # ----------------------------------------------------------------- the writes
 
 
@@ -412,6 +487,47 @@ async def _upsert_business_metric(
     }
     statement = _upsert_statement(
         observability_business_daily, values, ("metric_key", "metric_date")
+    )
+    await connection.execute(statement)
+
+
+async def _upsert_attribution_daily(
+    connection: AsyncConnection, target_date: date, row: AttributionDaily
+) -> None:
+    """Write one actor-day row of ``observability_attribution_daily``, recomputed whole.
+
+    B6 (#725), decision 6. Every counter is written as the value this pass
+    recomputed from the day's source rows, and the conflict target is the table's
+    full UNIQUE key, so a rerun converges on the same figures instead of adding to
+    them. That is what makes the late-arriving care-attribution edge work: the
+    doctor key fills in on the next pass, and the patient's spend is the same
+    number it was the pass before rather than the sum of both.
+
+    ``revenue_paise`` and ``tier_key`` are deliberately ABSENT from the values.
+    The PRD defers the revenue model, so this pass has no source for either and no
+    business claiming them: they land NULL on insert and are left untouched on
+    conflict. Refreshing them to NULL nightly would make "turning monetization on
+    is a data write" false - the first pass after monetization began would erase
+    it - so the dimensions stay writable by whoever captures revenue (decision 9).
+    """
+    values: dict[str, Any] = {
+        "usage_date": target_date,
+        "actor_kind": row.actor_kind,
+        "actor_key": row.actor_key,
+        "provider": row.provider,
+        "model": row.model,
+        "task_type": row.task_type,
+        "jobs": row.jobs,
+        "completed_jobs": row.completed_jobs,
+        "failed_jobs": row.failed_jobs,
+        "input_tokens": row.input_tokens,
+        "output_tokens": row.output_tokens,
+        "cost_paise": row.cost_paise,
+    }
+    statement = _upsert_statement(
+        observability_attribution_daily,
+        values,
+        ("usage_date", "actor_kind", "actor_key", "provider", "model", "task_type"),
     )
     await connection.execute(statement)
 
@@ -533,12 +649,30 @@ async def run_rollup(
     counting. Loads, decides, persists, and returns what it wrote.
 
     Every provider observed on ``target_date`` gets its health row plus one
-    generic-store row per registered metric; every ``(provider, model)`` seen
-    month-to-date gets a budget snapshot; the budget rows left over from a closed
-    month are rolled into this period first; the minimum alert set is evaluated
-    once per pass; and the whole thing ends by writing the ``mode``-tagged
-    ``observability_rollup_runs`` row - in this SAME transaction, so the
-    ``last_rolled`` marker can never advance past a pass that did not commit.
+    generic-store row per registered metric; every ``(actor, provider, model, task
+    type)`` with spend on that day gets its recomputed attribution row; every
+    ``(provider, model)`` seen month-to-date gets a budget snapshot; the budget
+    rows left over from a closed month are rolled into this period first; the
+    minimum alert set is evaluated once per pass; and the whole thing ends by
+    writing the ``mode``-tagged ``observability_rollup_runs`` row - in this SAME
+    transaction, so the ``last_rolled`` marker can never advance past a pass that
+    did not commit.
+
+    **How a recompute is asked for.** The ledger is a COVERAGE marker, not a lock:
+    :func:`plan_rollup_dates` plans the days it has never covered and returns
+    nothing once it is current, which is correct - re-planning an already-rolled
+    night would do no work. A recompute of a day that HAS been rolled is therefore
+    requested explicitly, through the existing operator ``--date`` override
+    (``worker.rollup.resolve_target_dates``), which names one date and bypasses the
+    planner exactly as a manual re-run always has. That is what makes a corrected
+    attribution converge: the day is re-derived from its source rows rather than
+    patched. Nothing here needs a new entry point.
+
+    **What the ledger does not count.** ``RollupReport.attribution_rows`` reaches
+    the nightly log line but not ``observability_rollup_runs``: that table's
+    columns were fixed by the migration #717 decision 43 enumerated, and widening
+    it for one counter is a migration this batch has already closed. The count is
+    the nightly log's to report; the ledger stays a coverage marker.
     """
     window_start, window_end = _day_window(target_date)
     period_start, period_end = budget_period_for(target_date)
@@ -550,6 +684,14 @@ async def run_rollup(
         period_spend = await _load_period_spend(connection, period_start, target_date)
         stored_limits = await _load_budget_limits(connection)
         outbox_health = await _load_outbox_health(connection, schemas)
+
+        # Recomputed, not accumulated: every actor row below is the whole figure for
+        # its scope, derived from this day's per-job rows and the care-attribution
+        # edges among them. This is why a doctor who is picked AFTER their patient's
+        # job finishes still shows up - the next pass re-derives the day and the
+        # doctor key is simply there.
+        actor_spend = await _load_actor_spend(connection, target_date)
+        doctor_by_intake = await _load_doctor_by_intake(connection, actor_spend)
 
         alerts: list[AlertRow] = []
         health_rows = 0
@@ -573,6 +715,13 @@ async def run_rollup(
                     health, previous_rates.get(usage.provider), thresholds
                 )
             )
+
+        attribution_rows = 0
+        for actor_row in build_attribution_daily(
+            spend=actor_spend, doctor_by_intake=doctor_by_intake
+        ):
+            await _upsert_attribution_daily(connection, target_date, actor_row)
+            attribution_rows += 1
 
         snapshots = 0
         for (provider, model), spend_paise in sorted(period_spend.items()):
@@ -628,6 +777,7 @@ async def run_rollup(
             providers=len(usages),
             health_rows=health_rows,
             metric_rows=metric_rows,
+            attribution_rows=attribution_rows,
             budget_snapshots=snapshots,
             alerts_raised=raised,
             alerts_resolved=resolved,
@@ -636,12 +786,14 @@ async def run_rollup(
 
     logger.info(
         "rollup for %s (%s, period %s) refreshed %d provider health row(s), %d metric "
-        "row(s) and %d budget snapshot(s); raised %d alert(s), resolved %d",
+        "row(s), %d actor aggregate row(s) and %d budget snapshot(s); raised %d alert(s), "
+        "resolved %d",
         report.target_date,
         mode,
         period_start,
         report.health_rows,
         report.metric_rows,
+        report.attribution_rows,
         report.budget_snapshots,
         report.alerts_raised,
         report.alerts_resolved,

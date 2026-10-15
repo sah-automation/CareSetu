@@ -17,6 +17,9 @@ Three pieces:
   results land in the generic ``observability_business_daily`` store
   (plan-phase14 §7.2), so a later phase adds a metric with one registry line and
   no schema churn;
+* the daily per-actor attribution aggregate (:func:`build_attribution_daily`,
+  B6 #725), recomputed in full from the per-job spend rows so that a doctor
+  attribution arriving after its AI job fills itself in without double counting;
 * the schedule (B5b #705): :func:`plan_rollup_dates`, which turns the rollup's
   own persisted state into the dates one invocation covers.
 """
@@ -32,9 +35,17 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from modules.observability.domain.consumer import (
+    AI_JOB_SPEND_STATUS_COMPLETED,
+    AI_JOB_SPEND_STATUS_FAILED,
     ALERT_SEVERITY_CRITICAL,
     ALERT_SEVERITY_WARNING,
+    AiJobSpendStatus,
     AlertRow,
+)
+from modules.observability.domain.pseudonym import (
+    ACTOR_KIND_DOCTOR,
+    ACTOR_KIND_PATIENT,
+    ActorKind,
 )
 
 #: ``observability_ai_provider_health.breaker_state`` vocabulary. ``half_open``
@@ -421,6 +432,183 @@ def build_budget_snapshot(
 
 
 # ------------------------------------------------------------------ thresholds
+
+
+@dataclass(frozen=True)
+class ActorSpend:
+    """One ``observability_ai_job_spend`` row, as the attribution rollup reads it.
+
+    ``doctor_key`` is what the JOB knew, which for the transcription and
+    structuring legs is nothing: those run before the patient picks a doctor. The
+    edge in :func:`build_attribution_daily` is what fills that gap.
+    """
+
+    intake_ref: int
+    patient_key: str
+    doctor_key: str | None
+    provider: str
+    model: str
+    task_type: str
+    input_tokens: int
+    output_tokens: int
+    cost_paise: int
+    status: AiJobSpendStatus
+
+
+@dataclass(frozen=True)
+class _ActorScope:
+    """The grouping key of one actor row: the table's UNIQUE key minus the date.
+
+    Named rather than a bare five-tuple so the summed figure is written back out
+    field by field against something that says what each element is.
+    """
+
+    actor_kind: ActorKind
+    actor_key: str
+    provider: str
+    model: str
+    task_type: str
+
+
+@dataclass(frozen=True)
+class AttributionDaily:
+    """One recomputed actor-day row of ``observability_attribution_daily``.
+
+    The UNIQUE key of the table is ``(usage_date, actor_kind, actor_key, provider,
+    model, task_type)``; ``usage_date`` is supplied by the adapter, so this value
+    carries the other five plus the six counters.
+
+    **Counters only.** Cost per thousand input or output tokens, per request, per
+    completed task, per patient, per doctor and cost-of-pass are read-time
+    divisions over exactly these columns (#717 decision 8), so none of them is a
+    column here: a stored copy would be a second source of truth that goes stale
+    the moment the day is recomputed.
+
+    ``revenue_paise`` and ``tier_key`` are absent for the mirror-image reason
+    (decision 9): the PRD defers the revenue model, so the rollup has no source
+    for them and must not claim the dimensions - see
+    :func:`~modules.observability.rollup._upsert_attribution_daily`.
+    """
+
+    actor_kind: ActorKind
+    actor_key: str
+    provider: str
+    model: str
+    task_type: str
+    jobs: int
+    completed_jobs: int
+    failed_jobs: int
+    input_tokens: int
+    output_tokens: int
+    cost_paise: int
+
+
+@dataclass
+class _ActorTotals:
+    """The running counters for one actor scope, summed over that day's jobs."""
+
+    jobs: int = 0
+    completed_jobs: int = 0
+    failed_jobs: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_paise: int = 0
+
+    def add(self, spend: ActorSpend) -> None:
+        """Add one job's contribution. The status vocabulary is closed by a CHECK."""
+        self.jobs += 1
+        if spend.status == AI_JOB_SPEND_STATUS_COMPLETED:
+            self.completed_jobs += 1
+        elif spend.status == AI_JOB_SPEND_STATUS_FAILED:
+            self.failed_jobs += 1
+        self.input_tokens += spend.input_tokens
+        self.output_tokens += spend.output_tokens
+        self.cost_paise += spend.cost_paise
+
+
+def _doctor_for(spend: ActorSpend, doctor_by_intake: Mapping[int, str]) -> str | None:
+    """The doctor this job's spend belongs to, or ``None`` when nothing says yet.
+
+    The intake's CURRENT edge wins over the key the job itself carried. A re-pick
+    moves the edge, and a drafting job that ran before it carries the doctor the
+    patient has moved on from; letting the row's own key win would split one
+    intake's spend across two doctors on the same day and stop the per-patient and
+    per-doctor figures reconciling. The row's key is the fallback, which is what
+    covers a pick the edge table has not recorded yet.
+
+    ``None`` is returned rather than a placeholder: an unattributed job produces no
+    doctor row at all, so an operator can see the gap instead of reading
+    unattributed spend as attributed.
+    """
+    edge = doctor_by_intake.get(spend.intake_ref)
+    return edge if edge is not None else spend.doctor_key
+
+
+def build_attribution_daily(
+    *,
+    spend: Sequence[ActorSpend],
+    doctor_by_intake: Mapping[int, str],
+) -> tuple[AttributionDaily, ...]:
+    """Recompute one day's per-actor aggregate from the per-job spend rows.
+
+    B6 (#725), #717 decisions 5-9. Every returned row is the WHOLE figure for its
+    scope, derived from this day's source rows and nothing else: the adapter
+    upserts it on the table's UNIQUE key, so a second pass over the same data
+    lands on the identical row rather than adding to it. That is the property the
+    late-arriving care-attribution edge depends on - an incrementing rollup could
+    never add a doctor to an intake whose jobs were already counted.
+
+    Each job contributes to TWO rows - its patient and, when a doctor is known, the
+    doctor whose case it served - with identical figures. That is not double
+    counting: it is one rupee of cost recorded against the two actors the business
+    reads need it against, which is what lets per-patient and per-doctor cost
+    reconcile.
+
+    The output is sorted by ``(actor_kind, actor_key, provider, model, task_type)``
+    so two passes over the same rows produce the same rows in the same order -
+    order must not depend on arrival for a recompute to be verifiable.
+    """
+    totals: dict[_ActorScope, _ActorTotals] = {}
+    for row in spend:
+        actors = [(ACTOR_KIND_PATIENT, row.patient_key)]
+        doctor = _doctor_for(row, doctor_by_intake)
+        if doctor is not None:
+            actors.append((ACTOR_KIND_DOCTOR, doctor))
+        for actor_kind, actor_key in actors:
+            scope = _ActorScope(
+                actor_kind=actor_kind,
+                actor_key=actor_key,
+                provider=row.provider,
+                model=row.model,
+                task_type=row.task_type,
+            )
+            totals.setdefault(scope, _ActorTotals()).add(row)
+
+    return tuple(
+        AttributionDaily(
+            actor_kind=scope.actor_kind,
+            actor_key=scope.actor_key,
+            provider=scope.provider,
+            model=scope.model,
+            task_type=scope.task_type,
+            jobs=total.jobs,
+            completed_jobs=total.completed_jobs,
+            failed_jobs=total.failed_jobs,
+            input_tokens=total.input_tokens,
+            output_tokens=total.output_tokens,
+            cost_paise=total.cost_paise,
+        )
+        for scope, total in sorted(totals.items(), key=lambda item: _scope_sort_key(item[0]))
+    )
+
+
+def _scope_sort_key(scope: _ActorScope) -> tuple[str, str, str, str, str]:
+    """``_ActorScope`` in the order the aggregate is written and read back.
+
+    Stated rather than inherited from ``order=True`` so the sort order is the
+    table's UNIQUE key, in the table's column order, by inspection.
+    """
+    return (scope.actor_kind, scope.actor_key, scope.provider, scope.model, scope.task_type)
 
 
 @dataclass(frozen=True)

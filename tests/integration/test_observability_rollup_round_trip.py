@@ -31,6 +31,11 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from modules.observability.domain.pseudonym import (
+    ACTOR_KIND_DOCTOR,
+    ACTOR_KIND_PATIENT,
+    actor_key,
+)
 from modules.observability.domain.rollup import (
     ALERT_KIND_AI_BUDGET,
     ALERT_KIND_OUTBOX_DEAD_LETTER,
@@ -43,7 +48,7 @@ from modules.observability.domain.rollup import (
     plan_rollup_dates,
 )
 from modules.observability.facade import load_rollup_state, run_rollup
-from worker.rollup import plan_from_state
+from worker.rollup import plan_from_state, resolve_dates
 
 _TARGET_DATE = date(2026, 10, 12)
 _PERIOD_START = date(2026, 10, 1)
@@ -170,6 +175,478 @@ async def _run_rows(connection: AsyncConnection) -> list[Any]:
 async def _run_row_count(engine: AsyncEngine) -> int:
     async with engine.connect() as connection:
         return len(await _run_rows(connection))
+
+
+# ------------------------------------------ B6 #725: the daily per-actor aggregate
+
+#: The 64-char hex the domain's ``actor_key`` produces for each of these refs, so
+#: the assertions name the same pseudonyms the consumer writes rather than
+#: re-deriving a second hashing convention in the test.
+_PATIENT_ONE = actor_key(ACTOR_KIND_PATIENT, 101)
+_PATIENT_TWO = actor_key(ACTOR_KIND_PATIENT, 102)
+_DOCTOR_ONE = actor_key(ACTOR_KIND_DOCTOR, 201)
+_DOCTOR_TWO = actor_key(ACTOR_KIND_DOCTOR, 202)
+
+#: Every column the aggregate is read back through, minus the two maintenance
+#: timestamps. Compared as a whole so an accidental per-unit column cannot be added
+#: without this failing.
+_ATTRIBUTION_COLUMNS = (
+    "id",
+    "usage_date",
+    "actor_kind",
+    "actor_key",
+    "provider",
+    "model",
+    "task_type",
+    "jobs",
+    "completed_jobs",
+    "failed_jobs",
+    "input_tokens",
+    "output_tokens",
+    "cost_paise",
+    "revenue_paise",
+    "tier_key",
+    "created_at",
+    "updated_at",
+)
+
+
+async def _seed_actor_spend(connection: AsyncConnection) -> None:
+    """Four per-job spend rows on the target date, as #723's consumer leaves them.
+
+    Intake 501 belongs to patient 101 and is transcribed BEFORE any doctor pick, so
+    its doctor key is NULL - the late-attribution case. Intake 502 is a second job
+    for the same patient on a different task type. Intake 503 is patient 102's, and
+    its drafting job carries its own doctor key because a pick had already happened.
+    One job (504) failed, recording the attempt at zero tokens and zero paise.
+    """
+    await connection.execute(
+        text(
+            "INSERT INTO observability.observability_ai_job_spend "
+            "(usage_date, ai_job_ref, intake_ref, patient_key, doctor_key, provider, "
+            "model, task_type, input_tokens, output_tokens, cost_paise, status) VALUES "
+            "(:day, 9001, 501, :patient_one, NULL, 'openai', 'gpt-4o-mini', "
+            " 'transcribe', 1000, 200, 4_500, 'completed'), "
+            "(:day, 9002, 502, :patient_one, NULL, 'openai', 'gpt-4o-mini', "
+            " 'structure', 300, 60, 1_200, 'completed'), "
+            "(:day, 9003, 503, :patient_two, :doctor_one, 'anthropic', 'claude-haiku', "
+            " 'draft', 800, 400, 9_000, 'completed'), "
+            "(:day, 9004, 504, :patient_two, :doctor_one, 'anthropic', 'claude-haiku', "
+            " 'draft', 0, 0, 0, 'failed')"
+        ),
+        {
+            "day": _TARGET_DATE,
+            "patient_one": _PATIENT_ONE,
+            "patient_two": _PATIENT_TWO,
+            "doctor_one": _DOCTOR_ONE,
+        },
+    )
+
+
+async def _seed_care_edge(
+    connection: AsyncConnection, *, intake_ref: int, patient_key: str, doctor_key: str
+) -> None:
+    """One ``intake.doctor_assigned`` edge, as #724's consumer records it."""
+    await connection.execute(
+        text(
+            "INSERT INTO observability.observability_care_attribution_edges "
+            "(intake_ref, patient_key, doctor_key, event_id, assigned_at) "
+            "VALUES (:intake_ref, :patient_key, :doctor_key, :event_id, now())"
+        ),
+        {
+            "intake_ref": intake_ref,
+            "patient_key": patient_key,
+            "doctor_key": doctor_key,
+            "event_id": uuid4(),
+        },
+    )
+
+
+async def _seed_every_doctor_edge(connection: AsyncConnection) -> None:
+    """A pick for all three intakes, so every job is attributed to a doctor."""
+    await _seed_care_edge(
+        connection, intake_ref=501, patient_key=_PATIENT_ONE, doctor_key=_DOCTOR_ONE
+    )
+    await _seed_care_edge(
+        connection, intake_ref=502, patient_key=_PATIENT_ONE, doctor_key=_DOCTOR_ONE
+    )
+    await _seed_care_edge(
+        connection, intake_ref=503, patient_key=_PATIENT_TWO, doctor_key=_DOCTOR_ONE
+    )
+
+
+async def _attribution_rows(
+    connection: AsyncConnection, *, actor_kind: str | None = None
+) -> list[Any]:
+    """The actor aggregate as a plain dict per row, ordered so a rerun compares.
+
+    Every column is read INCLUDING ``id`` and ``created_at`` and EXCLUDING only
+    ``updated_at`` - the one column a recompute deliberately advances, because it
+    is the pass's own audit stamp and says when this scope was last re-derived.
+    Everything an operator reads a number from is therefore comparable.
+    """
+    where = "WHERE actor_kind = :actor_kind" if actor_kind is not None else ""
+    result = await connection.execute(
+        text(
+            "SELECT id, created_at, usage_date, actor_kind, actor_key, provider, model, "
+            "task_type, jobs, completed_jobs, failed_jobs, input_tokens, output_tokens, "
+            f"cost_paise, revenue_paise, tier_key "
+            f"FROM observability.observability_attribution_daily "
+            f"{where} ORDER BY actor_kind, actor_key, provider, model, task_type"
+        ),
+        {"actor_kind": actor_kind} if actor_kind is not None else {},
+    )
+    return [dict(row) for row in result.mappings().all()]
+
+
+async def _attribution_updated_at(connection: AsyncConnection) -> list[Any]:
+    """The aggregate's one moving column, so a rerun's audit stamp can be asserted."""
+    result = await connection.execute(
+        text(
+            "SELECT updated_at FROM observability.observability_attribution_daily "
+            "ORDER BY actor_kind, actor_key, provider, model, task_type"
+        )
+    )
+    return [row[0] for row in result.all()]
+
+
+async def _attribution_row(
+    connection: AsyncConnection, *, actor_kind: str, actor_key: str, task_type: str
+) -> Any:
+    result = await connection.execute(
+        text(
+            "SELECT jobs, completed_jobs, failed_jobs, input_tokens, output_tokens, "
+            "cost_paise, revenue_paise, tier_key FROM "
+            "observability.observability_attribution_daily "
+            "WHERE actor_kind = :actor_kind AND actor_key = :actor_key "
+            "AND task_type = :task_type"
+        ),
+        {"actor_kind": actor_kind, "actor_key": actor_key, "task_type": task_type},
+    )
+    return result.mappings().one()
+
+
+@pytest.mark.asyncio
+async def test_the_rollup_derives_a_daily_actor_aggregate_recomputed_from_the_jobs(
+    engine: AsyncEngine,
+) -> None:
+    """The acceptance criterion: per-patient and per-doctor spend, summed not merged."""
+    async with engine.begin() as connection:
+        await _seed_actor_spend(connection)
+        await _seed_every_doctor_edge(connection)
+
+    report = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    # Three patient rows (one per task type) and three doctor rows.
+    assert report.attribution_rows == 6
+
+    async with engine.connect() as connection:
+        patients = await _attribution_rows(connection, actor_kind="patient")
+        # Patient 101 paid 5,700 paise across two task types; nothing is summed
+        # across them, so the task-type breakdown stays a plain group-by.
+        assert {(row["actor_key"], row["task_type"], row["cost_paise"]) for row in patients} == {
+            (_PATIENT_ONE, "structure", 1_200),
+            (_PATIENT_ONE, "transcribe", 4_500),
+            (_PATIENT_TWO, "draft", 9_000),
+        }
+        # Patient 102's failed job is counted as attempted and never as spend.
+        failed_leg = next(row for row in patients if row["actor_key"] == _PATIENT_TWO)
+        assert (failed_leg["jobs"], failed_leg["completed_jobs"], failed_leg["failed_jobs"]) == (
+            2,
+            1,
+            1,
+        )
+
+        # One rupee of spend is recorded against the patient who paid and the doctor
+        # whose case it served, so the two sides reconcile exactly.
+        doctors = await _attribution_rows(connection, actor_kind="doctor")
+        assert (
+            sum(row["cost_paise"] for row in doctors)
+            == sum(row["cost_paise"] for row in patients)
+            == 14_700
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_care_edge_that_lands_after_its_job_fills_the_doctor_in_with_no_double_count(
+    engine: AsyncEngine,
+) -> None:
+    """The late-arriving attribution edge, which is what "recomputed, not accumulated" buys.
+
+    The transcription job is metered while the patient has no doctor yet, so the
+    first pass can only produce the patient row - a gap an operator can see, not a
+    doctor key invented to fill it. The pick then lands, and the next pass for the
+    SAME date adds the doctor while the patient's figure comes back unchanged. An
+    incrementing rollup could not do this without counting the day twice.
+    """
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO observability.observability_ai_job_spend "
+                "(usage_date, ai_job_ref, intake_ref, patient_key, doctor_key, provider, "
+                "model, task_type, input_tokens, output_tokens, cost_paise, status) VALUES "
+                "(:day, 9001, 501, :patient, NULL, 'openai', 'gpt-4o-mini', "
+                " 'transcribe', 1000, 200, 4500, 'completed')"
+            ),
+            {"day": _TARGET_DATE, "patient": _PATIENT_ONE},
+        )
+
+    first = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    async with engine.connect() as connection:
+        assert first.attribution_rows == 1
+        before = await _attribution_rows(connection)
+        assert [row["actor_kind"] for row in before] == ["patient"]
+
+    # The patient picks a doctor some time after the job finished.
+    async with engine.begin() as connection:
+        await _seed_care_edge(
+            connection, intake_ref=501, patient_key=_PATIENT_ONE, doctor_key=_DOCTOR_ONE
+        )
+
+    second = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    assert second.attribution_rows == 2
+
+    async with engine.connect() as connection:
+        after = await _attribution_rows(connection)
+        assert [(row["actor_kind"], row["actor_key"], row["cost_paise"]) for row in after] == [
+            ("doctor", _DOCTOR_ONE, 4_500),
+            ("patient", _PATIENT_ONE, 4_500),
+        ]
+        # The patient row is byte-identical to the first pass: the day was recomputed,
+        # not added to, so the patient's spend did not double.
+        assert next(row for row in after if row["actor_kind"] == "patient") == before[0]
+
+
+@pytest.mark.asyncio
+async def test_rolling_the_same_date_twice_leaves_identical_aggregate_rows(
+    engine: AsyncEngine,
+) -> None:
+    """A retried nightly job converges: the same rows, the same figures, one row each.
+
+    The strong form of idempotency: the same ROWS, carrying the same primary key
+    and the same ``created_at``, with every figure identical - not merely the same
+    totals. A recompute-in-full that inserted a second row per scope, or rebuilt a
+    row from scratch, would show up here.
+    """
+    async with engine.begin() as connection:
+        await _seed_actor_spend(connection)
+        await _seed_every_doctor_edge(connection)
+
+    first = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+    async with engine.connect() as connection:
+        after_first = await _attribution_rows(connection)
+        stamped_first = await _attribution_updated_at(connection)
+
+    second = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+    async with engine.connect() as connection:
+        after_second = await _attribution_rows(connection)
+        stamped_second = await _attribution_updated_at(connection)
+
+    assert second.attribution_rows == first.attribution_rows == 6
+    assert after_second == after_first
+    # ``updated_at`` is the single deliberate exception: it is the pass's own audit
+    # stamp, and refreshing it is how an operator tells "re-derived last night" from
+    # "never rolled". Every other column is byte-identical.
+    assert stamped_second and all(
+        new >= old for new, old in zip(stamped_second, stamped_first, strict=True)
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_daily_actor_aggregate_ships_with_revenue_and_tier_empty(
+    engine: AsyncEngine,
+) -> None:
+    """Decision 9: the monetization dimensions are present and NULL, not zero.
+
+    NULL reads as "not captured"; a 0 would read as "captured, and it was nothing",
+    which is how an unrevenueed day would get mistaken for a free one. The columns
+    are asserted here rather than in a unit test because this is the whole claim:
+    a nightly pass leaves them empty, so turning monetization on is a data write.
+    """
+    async with engine.begin() as connection:
+        await _seed_actor_spend(connection)
+        await _seed_every_doctor_edge(connection)
+
+    await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    async with engine.connect() as connection:
+        rows = await _attribution_rows(connection)
+        assert rows
+        for row in rows:
+            assert row["revenue_paise"] is None
+            assert row["tier_key"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_actor_aggregate_stores_counters_and_no_derived_figure(
+    engine: AsyncEngine,
+) -> None:
+    """Decision 8, against the real table: cost per thousand tokens and friends stay derived."""
+    async with engine.begin() as connection:
+        await _seed_actor_spend(connection)
+        await _seed_every_doctor_edge(connection)
+    await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    async with engine.connect() as connection:
+        result = await connection.execute(
+            text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = 'observability' "
+                "AND table_name = 'observability_attribution_daily'"
+            )
+        )
+        stored = {row[0] for row in result.all()}
+
+    assert stored == set(_ATTRIBUTION_COLUMNS)
+    assert (
+        not {
+            "cost_per_thousand_input_tokens",
+            "cost_per_thousand_output_tokens",
+            "cost_per_request",
+            "cost_per_completed_task",
+            "cost_per_patient",
+            "cost_per_doctor",
+            "cost_of_pass",
+            "gross_margin",
+        }
+        & stored
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_recompute_of_an_already_rolled_date_is_reachable_from_the_entry_point(
+    engine: AsyncEngine,
+) -> None:
+    """How a rerun-for-a-date is ASKED FOR, driven through the real operator path.
+
+    The run ledger is a coverage marker: once it is current the planner plans
+    nothing, which is correct and would otherwise make a recompute unreachable -
+    and the whole late-attribution story depends on being able to re-derive a day
+    that has already been rolled. The existing ``--date`` override is that path, and
+    this asserts it end to end rather than trusting the docstring: the override
+    names the date, the pass re-derives it, and the ledger still holds one row.
+    """
+    async with engine.begin() as connection:
+        await _seed_actor_spend(connection)
+    await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    # The scheduled planner is now current and plans nothing - the correct no-op.
+    assert (await plan_from_state(engine, _TARGET_DATE + timedelta(days=1))).dates == ()
+
+    # The operator asks for that same date by hand, through the same seam the CLI uses.
+    rerun = resolve_dates(_TARGET_DATE + timedelta(days=1), target_date=_TARGET_DATE)
+    assert rerun is not None
+    assert rerun.dates == (_TARGET_DATE,)
+    # It is recorded as the daily shape, so the ledger's mode column stays honest.
+    assert rerun.mode == ROLLUP_MODE_DAILY
+
+    async with engine.begin() as connection:
+        await _seed_every_doctor_edge(connection)
+    for target in rerun.dates:
+        await run_rollup(engine, target, thresholds=_THRESHOLDS, mode=rerun.mode)
+
+    async with engine.connect() as connection:
+        # The re-derivation filled the doctors in, and the ledger is still one row.
+        assert len(await _attribution_rows(connection, actor_kind="doctor")) == 3
+    assert await _run_row_count(engine) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_monetization_write_survives_a_recompute(engine: AsyncEngine) -> None:
+    """Decision 9's actual claim: turning monetization on is a data write.
+
+    The rollup has no revenue source, so it must not blank the columns on every
+    nightly pass - otherwise the first pass after monetization began would erase
+    it and the "data write, not a migration" promise would be false. Proven here
+    against the real table rather than asserted on the compiled SQL: a monetization
+    writer's row is still standing after the next pass recomputes the counters.
+    """
+    async with engine.begin() as connection:
+        await _seed_actor_spend(connection)
+        await _seed_every_doctor_edge(connection)
+    await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    # Monetization arrives as a plain data write, with no code change anywhere.
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "UPDATE observability.observability_attribution_daily "
+                "SET revenue_paise = 250_000, tier_key = 'pro' "
+                "WHERE actor_kind = 'doctor'"
+            )
+        )
+
+    await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    async with engine.connect() as connection:
+        rows = await _attribution_rows(connection)
+        doctors = [row for row in rows if row["actor_kind"] == "doctor"]
+        assert doctors
+        for row in doctors:
+            assert (row["revenue_paise"], row["tier_key"]) == (250_000, "pro")
+        # The counters were still recomputed, so the write is not what froze them.
+        assert {row["cost_paise"] for row in doctors} == {4_500, 1_200, 9_000}
+
+
+@pytest.mark.asyncio
+async def test_a_day_with_no_ai_jobs_writes_no_actor_rows(engine: AsyncEngine) -> None:
+    """An idle day invents nothing: there is no actor to attribute zero spend to."""
+    async with engine.begin() as connection:
+        await _seed_usage(connection)
+
+    report = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    assert report.providers == 2
+    assert report.attribution_rows == 0
+
+    async with engine.connect() as connection:
+        assert await _attribution_rows(connection) == []
+
+
+@pytest.mark.asyncio
+async def test_the_backfill_sweeps_the_actor_aggregate_for_every_history_day(
+    engine: AsyncEngine,
+) -> None:
+    """A first run covers the whole recorded history, so no actor-day is missed.
+
+    The same shape as the B5b schedule tests above, asserted through the surface
+    this ticket adds: the per-job rows carry their own ``usage_date``, so a pass
+    that only rolled the trailing day would leave the earlier one unattributed.
+    """
+    async with engine.begin() as connection:
+        await _seed_two_days_of_usage(connection)
+        await _seed_actor_spend(connection)
+        await connection.execute(
+            text(
+                "UPDATE observability.observability_ai_job_spend "
+                "SET usage_date = :day WHERE ai_job_ref = 9001"
+            ),
+            {"day": _TARGET_DATE - timedelta(days=1)},
+        )
+        await _seed_every_doctor_edge(connection)
+
+    today = _TARGET_DATE + timedelta(days=1)
+    plan = await plan_from_state(engine, today)
+    assert plan.dates == (_TARGET_DATE - timedelta(days=1), _TARGET_DATE)
+    for target in plan.dates:
+        await run_rollup(engine, target, thresholds=_THRESHOLDS, mode=plan.mode)
+
+    async with engine.connect() as connection:
+        rows = await _attribution_rows(connection)
+        # Both days landed their own rows rather than one day's figures drifting
+        # into the other, and each day's patient and doctor totals reconcile.
+        totals: dict[tuple[date, str], int] = {}
+        for row in rows:
+            key = (row["usage_date"], row["actor_kind"])
+            totals[key] = totals.get(key, 0) + row["cost_paise"]
+        assert totals == {
+            (_TARGET_DATE - timedelta(days=1), "patient"): 4_500,
+            (_TARGET_DATE - timedelta(days=1), "doctor"): 4_500,
+            (_TARGET_DATE, "patient"): 10_200,
+            (_TARGET_DATE, "doctor"): 10_200,
+        }
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,7 @@ import inspect
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -24,9 +25,12 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import CompileError
 
 from modules.observability.domain.consumer import AlertRow
+from modules.observability.domain.pseudonym import ActorKind
 from modules.observability.domain.rollup import (
     METRIC_KEY_AI_PROVIDER_HEALTH,
     METRIC_KEY_AI_SPEND,
+    ActorSpend,
+    AttributionDaily,
     ProviderUsage,
     UsageScope,
     alert_key,
@@ -39,11 +43,17 @@ from modules.observability.domain.rollup import (
 from modules.observability.facade import RollupReport, run_rollup
 from modules.observability.rollup import (
     _apply_alerts,
+    _load_actor_spend,
+    _load_doctor_by_intake,
+    _upsert_attribution_daily,
     _upsert_business_metric,
     _upsert_provider_health,
     _upsert_statement,
 )
-from modules.observability.schema.models import observability_ai_cost_budget
+from modules.observability.schema.models import (
+    observability_ai_cost_budget,
+    observability_attribution_daily,
+)
 from worker import rollup as entry_point
 
 _TARGET_DATE = date(2026, 10, 12)
@@ -313,6 +323,157 @@ def test_apply_alerts_leaves_a_consumer_alert_alone() -> None:
 
     assert (raised, resolved) == (0, 0)
     assert "UPDATE" not in connection.sql
+
+
+# --------------------------------------------------- B6 #725: the actor aggregate
+
+
+def _spend_row(**overrides: Any) -> Any:
+    """One ``observability_ai_job_spend`` result row, as the adapter's load sees it."""
+    row = SimpleNamespace(
+        intake_ref=10,
+        patient_key="patient-a",
+        doctor_key=None,
+        provider="openai",
+        model="gpt-4o-mini",
+        task_type="structure",
+        input_tokens=100,
+        output_tokens=20,
+        cost_paise=500,
+        status="completed",
+    )
+    for name, value in overrides.items():
+        setattr(row, name, value)
+    return row
+
+
+def _spend(**overrides: Any) -> ActorSpend:
+    """One per-job spend row as the domain's value type, for the edge-load test."""
+    fields: dict[str, Any] = {
+        "intake_ref": 10,
+        "patient_key": "patient-a",
+        "doctor_key": None,
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "task_type": "structure",
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "cost_paise": 500,
+        "status": "completed",
+    }
+    fields.update(overrides)
+    return ActorSpend(**fields)  # type: ignore[arg-type]
+
+
+def _attribution(
+    *,
+    actor_kind: ActorKind = "patient",
+    actor_key: str = "patient-a",
+    task_type: str = "structure",
+    jobs: int = 3,
+    cost_paise: int = 900,
+) -> AttributionDaily:
+    """One recomputed actor-day row, built from the pure core's value type."""
+    return AttributionDaily(
+        actor_kind=actor_kind,
+        actor_key=actor_key,
+        provider="openai",
+        model="gpt-4o-mini",
+        task_type=task_type,
+        jobs=jobs,
+        completed_jobs=jobs - 1,
+        failed_jobs=1,
+        input_tokens=300,
+        output_tokens=60,
+        cost_paise=cost_paise,
+    )
+
+
+def test_the_attribution_upsert_rewrites_every_counter_on_the_scope_key() -> None:
+    """The whole figure is SET, so a rerun lands on the recomputed numbers.
+
+    The conflict target is the table's full UNIQUE key: a pass that recomputed into
+    the same row is what stops the aggregate stacking, and a counter that was left
+    out of the SET clause would silently keep its previous value.
+    """
+    connection = _RecordingConnection()
+
+    asyncio.run(  # type: ignore[arg-type]
+        _upsert_attribution_daily(connection, _TARGET_DATE, _attribution())
+    )
+
+    sql = connection.sql
+    assert "INSERT INTO observability.observability_attribution_daily" in sql
+    assert (
+        "ON CONFLICT (usage_date, actor_kind, actor_key, provider, model, task_type) DO UPDATE"
+        in sql
+    )
+    update_set = sql.split("DO UPDATE SET", 1)[1]
+    for counter in (
+        "jobs",
+        "completed_jobs",
+        "failed_jobs",
+        "input_tokens",
+        "output_tokens",
+        "cost_paise",
+    ):
+        assert f"{counter} = " in update_set
+    # No accumulation anywhere: the SET clause carries no arithmetic on the old row.
+    assert "observability_attribution_daily.jobs +" not in sql
+
+
+def test_the_attribution_upsert_leaves_revenue_and_tier_to_whoever_captures_them() -> None:
+    """Decision 9: the rollup has no revenue source, so it must not clobber one.
+
+    The columns are nullable and NULL today. Refreshing them to NULL on every
+    nightly pass would make "turning monetization on is a data write" false - the
+    first pass after monetization started would erase it - so they are omitted
+    from the values entirely: NULL on insert, untouched on conflict.
+    """
+    connection = _RecordingConnection()
+
+    asyncio.run(  # type: ignore[arg-type]
+        _upsert_attribution_daily(connection, _TARGET_DATE, _attribution())
+    )
+
+    assert "revenue_paise" not in connection.sql
+    assert "tier_key" not in connection.sql
+    assert observability_attribution_daily.c.revenue_paise.nullable is True
+
+
+def test_the_actor_spend_load_reads_one_day_from_the_granular_source() -> None:
+    """One row per AI job, keyed on the date the job finished - never an increment."""
+    connection = _RecordingConnection([_spend_row()])
+
+    loaded = asyncio.run(_load_actor_spend(connection, _TARGET_DATE))  # type: ignore[arg-type]
+
+    assert loaded == [_spend()]
+    assert "FROM observability.observability_ai_job_spend" in connection.sql
+    assert "usage_date" in connection.sql
+
+
+def test_the_doctor_edge_load_asks_only_about_the_intakes_the_day_touched() -> None:
+    """The edge read is bounded by this day's intakes, not a full-table scan.
+
+    Both tables are MOD-013's own, so the join is legal (ADR-0003); bounding it is
+    about the query, not the boundary. A day with no jobs must not query at all.
+    """
+    connection = _RecordingConnection([SimpleNamespace(intake_ref=10, doctor_key="doctor-a")])
+    spend = [_spend(status="failed", input_tokens=0, output_tokens=0, cost_paise=0)]
+
+    loaded = asyncio.run(_load_doctor_by_intake(connection, spend))  # type: ignore[arg-type]
+
+    assert loaded == {10: "doctor-a"}
+    assert "FROM observability.observability_care_attribution_edges" in connection.sql
+    assert "intake_ref IN (10)" in connection.sql
+
+
+def test_an_idle_day_asks_the_edge_table_nothing() -> None:
+    """No jobs means no intakes, and an empty IN list is a query that cannot help."""
+    connection = _RecordingConnection()
+
+    assert asyncio.run(_load_doctor_by_intake(connection, [])) == {}  # type: ignore[arg-type]
+    assert connection.statements == []
 
 
 # ------------------------------------------------------------------- the seam

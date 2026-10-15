@@ -36,6 +36,8 @@ from modules.observability.domain.rollup import (
     DEFAULT_PROVIDER_HEALTH_DROP_THRESHOLD,
     METRIC_KEY_AI_PROVIDER_HEALTH,
     METRIC_KEY_AI_SPEND,
+    ActorSpend,
+    AttributionDaily,
     BudgetSnapshot,
     OutboxTableHealth,
     ProviderHealth,
@@ -45,6 +47,7 @@ from modules.observability.domain.rollup import (
     UsageScope,
     breaker_state_for,
     budget_period_for,
+    build_attribution_daily,
     build_breaker_open_alert,
     build_budget_alert,
     build_budget_snapshot,
@@ -63,6 +66,7 @@ from modules.observability.domain.rollup import (
     success_rate,
     weighted_percentile,
 )
+from modules.observability.schema.models import observability_attribution_daily
 
 _TARGET_DATE = date(2026, 10, 12)
 _WINDOW_START = datetime(2026, 10, 12, tzinfo=UTC)
@@ -602,3 +606,234 @@ def test_rollup_thresholds_carry_the_documented_defaults() -> None:
 def test_rollup_thresholds_reject_a_non_positive_budget() -> None:
     with pytest.raises(ValueError, match="monthly_budget_paise"):
         RollupThresholds(monthly_budget_paise=0)
+
+
+# ------------------------------------- B6 #725: the per-actor attribution rollup
+
+#: ``observability_attribution_daily`` stores the raw counters and NOTHING derived
+#: from them. Cost per thousand input or output tokens, per request, per completed
+#: task, per patient, per doctor and cost-of-pass are all read-time divisions over
+#: these same columns: a stored copy would be a second source of truth that goes
+#: stale the moment a day's spend is recomputed (#717 decision 8).
+_PER_UNIT_FIGURES = (
+    "cost_per_thousand_input_tokens",
+    "cost_per_thousand_output_tokens",
+    "cost_per_request",
+    "cost_per_completed_task",
+    "cost_per_patient",
+    "cost_per_doctor",
+    "cost_of_pass",
+    "gross_margin",
+)
+
+
+def _spend(
+    *,
+    intake_ref: int = 10,
+    patient_key: str = "patient-a",
+    doctor_key: str | None = None,
+    provider: str = "openai",
+    model: str = "gpt-4o-mini",
+    task_type: str = "structure",
+    input_tokens: int = 100,
+    output_tokens: int = 20,
+    cost_paise: int = 500,
+    status: str = "completed",
+) -> ActorSpend:
+    """One ``observability_ai_job_spend`` row as #723's consumer leaves it."""
+    return ActorSpend(
+        intake_ref=intake_ref,
+        patient_key=patient_key,
+        doctor_key=doctor_key,
+        provider=provider,
+        model=model,
+        task_type=task_type,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cost_paise=cost_paise,
+        status=status,
+    )
+
+
+def test_the_attribution_rollup_splits_one_jobs_spend_across_patient_and_doctor() -> None:
+    """A patient's cost and the doctor who served it are the SAME spend, counted twice.
+
+    One job is one rupee of cost and two facts about it: whose it was, and whose
+    case it served. The two actor rows therefore carry identical figures, which is
+    what lets per-patient and per-doctor cost reconcile against each other.
+    """
+    rows = build_attribution_daily(spend=[_spend()], doctor_by_intake={10: "doctor-a"})
+
+    assert [(row.actor_kind, row.actor_key) for row in rows] == [
+        ("doctor", "doctor-a"),
+        ("patient", "patient-a"),
+    ]
+    for row in rows:
+        assert (row.jobs, row.completed_jobs, row.failed_jobs) == (1, 1, 0)
+        assert (row.input_tokens, row.output_tokens, row.cost_paise) == (100, 20, 500)
+
+
+def test_a_doctor_edge_that_lands_after_its_ai_job_fills_the_doctor_in_on_the_next_pass() -> None:
+    """The late-arriving attribution case, and the reason nothing here increments.
+
+    Transcription and structuring run BEFORE the patient picks a doctor, so the job
+    row reaches the source table with no doctor at all. The first pass can only
+    produce the patient row; once the edge lands, the next pass adds the doctor -
+    and because every figure is recomputed from the same source rows rather than
+    added to the previous pass's total, the patient row comes back unchanged
+    instead of the day's spend being counted a second time.
+    """
+    without_edge = build_attribution_daily(spend=[_spend()], doctor_by_intake={})
+    assert [row.actor_kind for row in without_edge] == ["patient"]
+
+    with_edge = build_attribution_daily(spend=[_spend()], doctor_by_intake={10: "doctor-a"})
+    assert [row.actor_kind for row in with_edge] == ["doctor", "patient"]
+
+    patient_now = next(row for row in with_edge if row.actor_kind == "patient")
+    assert patient_now == without_edge[0]
+
+
+def test_an_unattributed_job_leaves_no_doctor_row_to_invent() -> None:
+    """A missing doctor is a gap the operator can see, not a row that looks attributed.
+
+    Writing a row under a placeholder key would make unattributed spend
+    indistinguishable from attributed spend in every per-doctor figure downstream.
+    """
+    rows = build_attribution_daily(spend=[_spend()], doctor_by_intake={})
+
+    assert len(rows) == 1
+
+
+def test_the_intakes_current_edge_outranks_a_jobs_own_doctor_key() -> None:
+    """One intake has one doctor, so the edge decides and the row's key is the fallback.
+
+    A re-pick moves the edge, and a drafting job that ran before it carries the
+    doctor the patient has moved on from. Letting each row's own key win would
+    split one intake's spend across two doctors on the same day and stop the
+    per-patient and per-doctor figures reconciling.
+    """
+    rows = build_attribution_daily(
+        spend=[_spend(doctor_key="doctor-old")], doctor_by_intake={10: "doctor-new"}
+    )
+
+    assert [(row.actor_kind, row.actor_key) for row in rows] == [
+        ("doctor", "doctor-new"),
+        ("patient", "patient-a"),
+    ]
+
+
+def test_a_drafting_job_is_attributed_to_its_own_doctor_without_an_edge() -> None:
+    """The fallback is what covers a pick the edge table has not recorded yet."""
+    rows = build_attribution_daily(
+        spend=[_spend(task_type="draft", doctor_key="doctor-a")], doctor_by_intake={}
+    )
+
+    assert [(row.actor_kind, row.actor_key) for row in rows] == [
+        ("doctor", "doctor-a"),
+        ("patient", "patient-a"),
+    ]
+
+
+def test_a_failed_job_counts_as_attempted_and_never_as_spend() -> None:
+    """The attempt is recorded; the tokens and paise are not fabricated as free."""
+    rows = build_attribution_daily(
+        spend=[_spend(status="failed", input_tokens=0, output_tokens=0, cost_paise=0)],
+        doctor_by_intake={10: "doctor-a"},
+    )
+
+    for row in rows:
+        assert (row.jobs, row.completed_jobs, row.failed_jobs) == (1, 0, 1)
+        assert (row.input_tokens, row.output_tokens, row.cost_paise) == (0, 0, 0)
+
+
+def test_the_attribution_rollup_sums_a_scope_and_keeps_the_actor_kinds_apart() -> None:
+    """One row per (actor, provider, model, task type): summed, never merged away."""
+    rows = build_attribution_daily(
+        spend=[
+            _spend(cost_paise=500),
+            _spend(cost_paise=300, output_tokens=10),
+            _spend(cost_paise=7, task_type="draft"),
+        ],
+        doctor_by_intake={10: "doctor-a"},
+    )
+
+    indexed = {(row.actor_kind, row.actor_key, row.task_type): row for row in rows}
+    structure = indexed[("patient", "patient-a", "structure")]
+    assert (structure.jobs, structure.cost_paise, structure.output_tokens) == (2, 800, 30)
+    # The draft is its own scope, so a task-type breakdown is a plain group-by.
+    assert indexed[("doctor", "doctor-a", "draft")].cost_paise == 7
+    assert len(rows) == 4
+
+
+def test_a_repeat_pass_over_the_same_rows_produces_identical_rows_in_identical_order() -> None:
+    """Recompute-in-full is only idempotent if the order does not depend on arrival."""
+    spend = [
+        _spend(patient_key="patient-b", intake_ref=11, cost_paise=9),
+        _spend(patient_key="patient-a", intake_ref=10, cost_paise=5),
+    ]
+
+    first = build_attribution_daily(spend=spend, doctor_by_intake={10: "doctor-a", 11: "doctor-a"})
+    second = build_attribution_daily(spend=spend, doctor_by_intake={10: "doctor-a", 11: "doctor-a"})
+
+    assert first == second
+    assert [(row.actor_kind, row.actor_key) for row in first] == [
+        ("doctor", "doctor-a"),
+        ("patient", "patient-a"),
+        ("patient", "patient-b"),
+    ]
+
+
+def test_the_attribution_rollup_of_an_empty_day_writes_nothing() -> None:
+    """An idle day invents no actor rows; ``run_rollup`` has nothing to upsert."""
+    assert build_attribution_daily(spend=[], doctor_by_intake={10: "doctor-a"}) == ()
+
+
+def test_the_daily_actor_aggregate_stores_counters_and_no_per_unit_figure() -> None:
+    """Decision 8, as a negative: the per-unit figures must not become columns."""
+    assert tuple(field for field in AttributionDaily.__dataclass_fields__) == (
+        "actor_kind",
+        "actor_key",
+        "provider",
+        "model",
+        "task_type",
+        "jobs",
+        "completed_jobs",
+        "failed_jobs",
+        "input_tokens",
+        "output_tokens",
+        "cost_paise",
+    )
+
+    stored = {column.name for column in observability_attribution_daily.c}
+    assert not set(_PER_UNIT_FIGURES) & stored
+    # The counters the derived figures are read from are here, so the read-time
+    # division has something to divide.
+    assert {"jobs", "completed_jobs", "input_tokens", "output_tokens", "cost_paise"} <= stored
+
+
+def test_the_daily_actor_aggregate_keeps_revenue_and_tier_nullable_and_empty() -> None:
+    """Decision 9: the monetization dimensions ship present and NULL.
+
+    NULL is "not captured", deliberately not 0, which would mean "captured, and it
+    was nothing" - so a reader can tell an unrevenueed day from a free one without
+    a second column, and switching monetization on is a data write.
+    """
+    revenue = observability_attribution_daily.c.revenue_paise
+    tier = observability_attribution_daily.c.tier_key
+
+    assert (revenue.nullable, tier.nullable) == (True, True)
+    assert (revenue.server_default, tier.server_default) == (None, None)
+
+
+def test_the_actor_aggregate_carries_no_identifying_column() -> None:
+    """Decision 7 and ADR-0025 D7: a one-way actor key, never an identity reference."""
+    assert "actor_key" in observability_attribution_daily.c
+    assert not {
+        "patient_id",
+        "patient_ref",
+        "doctor_id",
+        "doctor_ref",
+        "intake_ref",
+        "name",
+        "phone",
+    } & set(observability_attribution_daily.c.keys())

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -41,6 +41,18 @@ from bus.events import (
     EVENT_PARTNER_VERIFICATION_STARTED,
     EVENT_RECORD_ACCESSED,
 )
+
+#: The two outcomes ``observability_ai_job_spend.status`` can hold - a closed
+#: vocabulary the migration's CHECK constraint enforces, so a third state is a
+#: migration rather than a silent value. Declared here rather than in the facade
+#: because the attribution rollup's pure core reads the same column and a schema's
+#: vocabulary must have exactly one definition.
+AI_JOB_SPEND_STATUS_COMPLETED = "completed"
+AI_JOB_SPEND_STATUS_FAILED = "failed"
+#: The same closed vocabulary as a TYPE, so a caller cannot pass a third state the
+#: CHECK constraint would reject. Spelled as literals rather than built from the
+#: constants above, matching how ``domain.pseudonym`` types ``ActorKind``.
+AiJobSpendStatus = Literal["completed", "failed"]
 
 
 class AiJobCompletedUsagePayload(BaseModel):
