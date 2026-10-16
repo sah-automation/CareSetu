@@ -30,6 +30,7 @@ from modules.observability.facade import (
     AlertPage,
     BreakerHealthRow,
     BusinessCountView,
+    CaptureLiveness,
     CostBudgetView,
     CostSummary,
     CostTrend,
@@ -42,7 +43,10 @@ from modules.observability.facade import (
     Overview,
     ProviderQualityRow,
     QualityReport,
+    RouteThroughputRow,
     SystemHealth,
+    ThroughputPoint,
+    ThroughputReport,
     UsageReport,
     UsageRow,
 )
@@ -51,6 +55,8 @@ _SIGNING_KEY = "unit-test-observability-read-signing-key"
 
 _TODAY = date(2026, 10, 12)
 _FROM = _TODAY - timedelta(days=29)
+_FROM_TS = datetime(2026, 10, 14, 11, 34, 56, tzinfo=UTC)
+_TO_TS = datetime(2026, 10, 14, 12, 34, 56, tzinfo=UTC)
 
 COST_PATH = "/v1/operator/observability/cost"
 TREND_PATH = "/v1/operator/observability/cost/trend"
@@ -58,6 +64,7 @@ USAGE_PATH = "/v1/operator/observability/usage"
 QUALITY_PATH = "/v1/operator/observability/quality"
 OVERVIEW_PATH = "/v1/operator/observability/overview"
 LATENCY_PATH = "/v1/operator/observability/latency"
+THROUGHPUT_PATH = "/v1/operator/observability/throughput"
 HEALTH_PATH = "/v1/operator/observability/health"
 ALERTS_PATH = "/v1/operator/observability/alerts"
 DEEPLINKS_PATH = "/v1/operator/observability/deeplinks"
@@ -180,6 +187,58 @@ _LATENCY = LatencyReport(
     ],
 )
 
+#: The busy case: traffic recorded, some of it failed. The EMPTY case is the one the
+#: ticket exists for - see ``_NO_THROUGHPUT``.
+_THROUGHPUT = ThroughputReport(
+    minutes=60,
+    from_ts=_FROM_TS,
+    to_ts=_TO_TS,
+    requests=14,
+    errors=3,
+    error_rate=Decimal("0.2143"),
+    requests_per_minute=Decimal("0.23"),
+    points=[
+        ThroughputPoint(
+            minute_ts=datetime(2026, 10, 14, 12, 34, tzinfo=UTC),
+            requests=14,
+            errors=3,
+            error_rate=Decimal("0.2143"),
+        )
+    ],
+    routes=[
+        RouteThroughputRow(
+            route_template="/v1/cases/{case_id}/entries",
+            method="POST",
+            requests=14,
+            errors=3,
+            error_rate=Decimal("0.2143"),
+        )
+    ],
+    routes_total=1,
+    capture=CaptureLiveness(
+        capturing=True,
+        requests_recorded=14,
+        last_recorded_at=datetime(2026, 10, 14, 12, 34, tzinfo=UTC),
+    ),
+)
+
+#: Nothing recorded in the window: every rate null rather than zero, and capture
+#: reporting itself as not watching. A route that answered this with ``0.0000``
+#: would be indistinguishable from a healthy hour.
+_NO_THROUGHPUT = ThroughputReport(
+    minutes=60,
+    from_ts=_FROM_TS,
+    to_ts=_TO_TS,
+    requests=0,
+    errors=0,
+    error_rate=None,
+    requests_per_minute=None,
+    points=[],
+    routes=[],
+    routes_total=0,
+    capture=CaptureLiveness(capturing=False, requests_recorded=0, last_recorded_at=None),
+)
+
 _HEALTH = SystemHealth(
     dependencies=[
         DependencyHealth(name="database", status="up", latency_ms=Decimal("1.20")),
@@ -233,6 +292,8 @@ class StubObservabilityFacade:
         self.quality_days: list[int] = []
         self.overview_days: list[int] = []
         self.latency_calls = 0
+        self.throughput_minutes: list[int] = []
+        self.throughput_empty = False
         self.health_cache_flags: list[bool] = []
         self.alert_pages: list[tuple[int, int]] = []
         self.alert_statuses: list[str | None] = []
@@ -261,6 +322,11 @@ class StubObservabilityFacade:
     async def get_latency(self) -> LatencyReport:
         self.latency_calls += 1
         return _LATENCY
+
+    async def get_throughput(self, *, minutes: int) -> ThroughputReport:
+        self.throughput_minutes.append(minutes)
+        view = _NO_THROUGHPUT if self.throughput_empty else _THROUGHPUT
+        return view.model_copy(update={"minutes": minutes})
 
     async def get_health(self, *, cache_configured: bool) -> SystemHealth:
         self.health_cache_flags.append(cache_configured)
@@ -439,6 +505,83 @@ def test_operator_reads_provider_latency_percentiles() -> None:
     assert row["p99_duration_ms"] == "15100.00"
 
 
+def test_throughput_defaults_to_the_last_hour_in_minutes() -> None:
+    """Minutes, not days: the counter's grain is a minute and the read asks at it."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(THROUGHPUT_PATH, headers=_operator())
+
+    assert response.status_code == 200
+    assert facade.throughput_minutes == [60]
+    body = response.json()
+    assert body["minutes"] == 60
+    assert body["requests"] == 14
+    assert body["errors"] == 3
+    assert body["error_rate"] == "0.2143"
+    assert body["requests_per_minute"] == "0.23"
+    assert body["routes"][0]["route_template"] == "/v1/cases/{case_id}/entries"
+    assert body["capture"]["capturing"] is True
+
+
+def test_throughput_honours_a_validated_minutes_param() -> None:
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(f"{THROUGHPUT_PATH}?minutes=15", headers=_operator())
+
+    assert response.status_code == 200
+    assert facade.throughput_minutes == [15]
+
+
+@pytest.mark.parametrize("minutes", ["0", "-1", "1441", "abc"])
+def test_an_out_of_range_throughput_window_is_rejected_at_the_edge(minutes: str) -> None:
+    """A wide window is a table scan, so it is refused before the facade is reached."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(f"{THROUGHPUT_PATH}?minutes={minutes}", headers=_operator())
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "VALIDATION_ERROR"
+    assert facade.throughput_minutes == []
+
+
+def test_throughput_says_no_requests_were_recorded_rather_than_nothing_failed() -> None:
+    """#727: the answer that stops an empty feed reading as a healthy system.
+
+    The wire shape is the whole point - null rates plus ``capturing: false`` - and a
+    zeroed body would be indistinguishable from a clean hour.
+    """
+    facade = StubObservabilityFacade()
+    facade.throughput_empty = True
+    client = _client(facade)
+
+    body = client.get(THROUGHPUT_PATH, headers=_operator()).json()
+
+    assert body["requests"] == 0
+    assert body["error_rate"] is None
+    assert body["requests_per_minute"] is None
+    assert body["points"] == []
+    assert body["capture"] == {
+        "capturing": False,
+        "requests_recorded": 0,
+        "last_recorded_at": None,
+    }
+
+
+def test_throughput_rates_are_exact_decimals_not_binary_floats() -> None:
+    """api-standards: derived ratios keep their scale on the wire, as strings."""
+    client = _client()
+
+    body = client.get(THROUGHPUT_PATH, headers=_operator()).json()
+
+    assert isinstance(body["error_rate"], str)
+    assert Decimal(body["error_rate"]) == Decimal("0.2143")
+    assert isinstance(body["requests_per_minute"], str)
+    assert Decimal(body["requests_per_minute"]) == Decimal("0.23")
+
+
 def test_health_reports_dependencies_outbox_and_breakers() -> None:
     facade = StubObservabilityFacade()
     client = _client(facade)
@@ -611,6 +754,7 @@ _ALL_PATHS = [
     QUALITY_PATH,
     OVERVIEW_PATH,
     LATENCY_PATH,
+    THROUGHPUT_PATH,
     HEALTH_PATH,
     ALERTS_PATH,
     DEEPLINKS_PATH,
@@ -650,6 +794,7 @@ def _facade_untouched(facade: StubObservabilityFacade) -> bool:
         and facade.quality_days == []
         and facade.overview_days == []
         and facade.latency_calls == 0
+        and facade.throughput_minutes == []
         and facade.health_cache_flags == []
         and facade.alert_pages == []
         and facade.deeplink_settings == []

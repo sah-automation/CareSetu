@@ -16,7 +16,10 @@ every rate is the seeded ratio.
 B8 (#726) folds the gateway error capture into this same round trip rather than
 opening a fourth fixture: the real app raises a real 5xx, the catch-all seam
 buffers it, and the module facade's drain writes the captured record - so the row
-exists only if every hop of the capture path works.
+exists only if every hop of the capture path works. B9 (#727) folds the per-minute
+HTTP counter into it the same way, and additionally drives ``/throughput`` over the
+rows that fold produced, so the aggregate read is proven against the exact shape
+the capture writes rather than a hand-written seed.
 
 Requires the native PostgreSQL; the suite skips cleanly when it is unreachable.
 The shared integration conftest migrates to head once per file, empties the
@@ -40,8 +43,9 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from app.config import Settings
 from app.main import create_app
 from modules.iam.domain.jwt import issue_token
-from modules.observability.facade import drain_error_buffer
+from modules.observability.facade import drain_error_buffer, drain_http_counter
 from observability.error_capture import pending_error_captures, reset_error_capture
+from observability.http_counter import pending_http_counts, reset_http_counter
 
 _SIGNING_KEY = "integration-observability-read-signing-key"
 #: A client-presented trace id, so the round trip asserts the id the CALLER chose
@@ -66,6 +70,7 @@ USAGE_PATH = "/v1/operator/observability/usage"
 QUALITY_PATH = "/v1/operator/observability/quality"
 OVERVIEW_PATH = "/v1/operator/observability/overview"
 LATENCY_PATH = "/v1/operator/observability/latency"
+THROUGHPUT_PATH = "/v1/operator/observability/throughput"
 HEALTH_PATH = "/v1/operator/observability/health"
 ALERTS_PATH = "/v1/operator/observability/alerts"
 DEEPLINKS_PATH = "/v1/operator/observability/deeplinks"
@@ -830,3 +835,259 @@ async def test_a_healthy_request_starts_no_record_and_no_drain_writes_nothing(
 
     assert (report.written, report.frequencies) == (0, 0)
     assert await _captured_error_rows(engine) == []
+
+
+# ------------------------------------------------- B9 #727: the per-minute counter
+#
+# The request counter folds into THIS round trip for the reason the error capture
+# does (spec #717 Testing Decisions): drive real traffic through the real ASGI
+# application, fold it through the module facade, then read ``/throughput`` back
+# over the rows the capture actually produced. Nothing here inserts a counter row
+# directly, so the row's shape, its unique key and the aggregate the read computes
+# over it are all proven against each other.
+
+
+def _counter_client(database_url: str) -> TestClient:
+    """The real app plus routes that succeed and routes that fail, for the B9 fold.
+
+    ``dispatcher_in_process_enabled=False`` so the lifespan does NOT start the
+    worker: these tests drive the fold themselves, and a scheduled fold firing
+    mid-test would be a race over the very map under assertion.
+
+    ``raise_server_exceptions=False`` because Starlette's ``ServerErrorMiddleware``
+    sends the envelope AND re-raises - a real client only sees the 500.
+    """
+    app = create_app(
+        settings=Settings(
+            database_url=database_url,
+            gateway_jwt_verify_enabled=True,
+            gateway_jwt_signing_key=_SIGNING_KEY,
+            dispatcher_in_process_enabled=False,
+        )
+    )
+
+    @app.get("/v1/cases/{case_id}/entries/fine")
+    def fine() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @app.get("/v1/cases/{case_id}/entries/unavailable")
+    def unavailable() -> JSONResponse:
+        return JSONResponse(status_code=503, content={"code": "SERVICE_UNAVAILABLE"})
+
+    @app.get("/v1/cases/{case_id}/entries/boom")
+    def boom(case_id: str) -> None:
+        raise RuntimeError(f"database unavailable for case {case_id}")
+
+    return TestClient(app, raise_server_exceptions=False)
+
+
+async def _counter_rows(engine: AsyncEngine) -> list[dict[str, object]]:
+    """Every row the per-minute counter holds, as plain dicts for assertion."""
+    async with engine.connect() as connection:
+        result = await connection.execute(
+            text(
+                "SELECT minute_ts, route_template, method, status_class, requests, errors "
+                "FROM observability.observability_http_minute "
+                "ORDER BY route_template, status_class"
+            )
+        )
+        return [dict(row) for row in result.mappings()]
+
+
+async def test_a_burst_of_real_requests_folds_into_one_row_per_route_per_minute(
+    engine: AsyncEngine, database_url: str
+) -> None:
+    """B9 #727: the grain, proven against Postgres rather than against a dict.
+
+    Ten requests to one route inside one minute are ONE row. The obvious
+    implementation - a record per request, as the error capture does - would write
+    ten rows or ten upserts here and only show the difference under load; this
+    assertion is about the row count, so it fails on the design.
+    """
+    reset_http_counter()
+
+    with _counter_client(database_url) as client:
+        for _ in range(10):
+            assert client.get("/v1/cases/912/entries/fine").status_code == 200
+
+    assert len(pending_http_counts()) == 1
+    report = await drain_http_counter(engine)
+
+    assert (report.series, report.requests) == (1, 10)
+    (row,) = await _counter_rows(engine)
+    assert row["route_template"] == "/v1/cases/{case_id}/entries/fine"
+    # The concrete id the request carried never reaches telemetry.
+    assert "912" not in str(row["route_template"])
+    assert row["method"] == "GET"
+    assert row["status_class"] == "2xx"
+    assert row["requests"] == 10
+    assert row["errors"] == 0
+    assert row["minute_ts"].second == 0
+
+
+async def test_the_stored_error_numerator_is_the_server_error_subset(
+    engine: AsyncEngine, database_url: str
+) -> None:
+    """B9 #727: 500 and 503 on one route are one ``5xx`` series, and it carries the errors.
+
+    Three failures of two different codes and one success, so the rate the read
+    reports can only be ``3 of 4`` if the numerator really is the stored 5xx subset
+    rather than a second scan - or the raw codes leaking into the series.
+    """
+    reset_http_counter()
+
+    with _counter_client(database_url) as client:
+        assert client.get("/v1/cases/912/entries/unavailable").status_code == 503
+        assert client.get("/v1/cases/912/entries/boom").status_code == 500
+        assert client.get("/v1/cases/912/entries/fine").status_code == 200
+
+    await drain_http_counter(engine)
+
+    rows = {
+        (str(row["route_template"]), str(row["status_class"])): row
+        for row in await _counter_rows(engine)
+    }
+    success = rows[("/v1/cases/{case_id}/entries/fine", "2xx")]
+    produced = rows[("/v1/cases/{case_id}/entries/unavailable", "5xx")]
+    escaped = rows[("/v1/cases/{case_id}/entries/boom", "5xx")]
+    assert (success["requests"], success["errors"]) == (1, 0)
+    assert (produced["requests"], produced["errors"]) == (1, 1)
+    assert (escaped["requests"], escaped["errors"]) == (1, 1)
+
+
+async def test_throughput_reports_the_folded_traffic_over_the_recent_past(
+    engine: AsyncEngine, database_url: str
+) -> None:
+    """B9 #727: the whole path - real requests, real fold, real aggregate read.
+
+    Nothing is inserted by hand, so the numbers the operator would see can only
+    exist if the capture, the fold and the read agree.
+    """
+    reset_http_counter()
+    reset_error_capture()
+
+    with _counter_client(database_url) as client:
+        for _ in range(9):
+            client.get("/v1/cases/912/entries/fine")
+        assert client.get("/v1/cases/912/entries/unavailable").status_code == 503
+        assert client.get("/v1/cases/912/entries/boom").status_code == 500
+
+    await drain_http_counter(engine)
+
+    with _client(database_url) as client:
+        body = client.get(THROUGHPUT_PATH, headers=_bearer()).json()
+
+    assert body["minutes"] == 60
+    assert body["requests"] == 11
+    assert body["errors"] == 2
+    assert body["error_rate"] == "0.1818"
+    assert len(body["points"]) == 1
+    (point,) = body["points"]
+    assert (point["requests"], point["errors"], point["error_rate"]) == (11, 2, "0.1818")
+    assert body["routes_total"] == 3
+    assert [
+        (row["route_template"], row["method"], row["requests"], row["errors"])
+        for row in body["routes"]
+    ] == [
+        ("/v1/cases/{case_id}/entries/fine", "GET", 9, 0),
+        ("/v1/cases/{case_id}/entries/boom", "GET", 1, 1),
+        ("/v1/cases/{case_id}/entries/unavailable", "GET", 1, 1),
+    ]
+    assert body["capture"] == {
+        "capturing": True,
+        "requests_recorded": 11,
+        "last_recorded_at": point["minute_ts"],
+    }
+
+
+async def test_throughput_reports_no_capture_when_nothing_was_recorded(
+    engine: AsyncEngine, database_url: str
+) -> None:
+    """B9 #727: the interesting case is NO requests, and it must not read as healthy.
+
+    Every rate is ``null`` and ``capturing`` is false. A body of ``0`` and
+    ``"0.0000"`` would be the same numbers as a clean hour and would say nothing
+    about whether anything was watching - which is the failure the whole
+    capture-liveness block exists to prevent (#717 story 35).
+    """
+    reset_http_counter()
+
+    with _client(database_url) as client:
+        body = client.get(THROUGHPUT_PATH, headers=_bearer()).json()
+
+    assert body["requests"] == 0
+    assert body["errors"] == 0
+    assert body["error_rate"] is None
+    assert body["requests_per_minute"] is None
+    assert body["points"] == []
+    assert body["routes"] == []
+    assert body["routes_total"] == 0
+    assert body["capture"] == {
+        "capturing": False,
+        "requests_recorded": 0,
+        "last_recorded_at": None,
+    }
+
+
+async def test_throughput_narrows_to_the_requested_minute_window(
+    engine: AsyncEngine, database_url: str
+) -> None:
+    """A minute-grain read honours a minute param, and a shorter one still counts.
+
+    Seeded at minutes the READ will resolve against, computed here rather than at
+    import: a module-level stamp would drift a minute as the file runs and the
+    narrow window would become a coin flip.
+    """
+    reset_http_counter()
+    current_minute = datetime.now(UTC).replace(second=0, microsecond=0)
+    async with engine.begin() as connection:
+        for offset, count in ((-5, 4), (0, 7)):
+            await connection.execute(
+                text(
+                    "INSERT INTO observability.observability_http_minute "
+                    "(minute_ts, route_template, method, status_class, requests, errors) "
+                    "VALUES (:minute_ts, '/v1/cases/{case_id}/entries/fine', 'GET', '2xx', "
+                    ":requests, 0)"
+                ),
+                {"minute_ts": current_minute + timedelta(minutes=offset), "requests": count},
+            )
+
+    with _client(database_url) as client:
+        wide = client.get(THROUGHPUT_PATH, headers=_bearer()).json()
+        narrow = client.get(f"{THROUGHPUT_PATH}?minutes=2", headers=_bearer()).json()
+
+    assert wide["requests"] == 11
+    assert len(wide["points"]) == 2
+    assert narrow["minutes"] == 2
+    assert narrow["requests"] == 7
+    assert len(narrow["points"]) == 1
+
+
+async def test_a_folded_minute_is_not_written_twice(engine: AsyncEngine, database_url: str) -> None:
+    """B9 #727: the counter is released after the commit, so a second fold adds nothing.
+
+    The release is what makes the retry exact. A counter whose deltas were
+    double-released would inflate throughput permanently and invisibly, which is the
+    opposite of the error stream's re-count - and this row's count would be 6 instead
+    of 3.
+    """
+    reset_http_counter()
+
+    with _counter_client(database_url) as client:
+        for _ in range(3):
+            client.get("/v1/cases/912/entries/fine")
+
+    await drain_http_counter(engine)
+    assert pending_http_counts() == ()
+    second = await drain_http_counter(engine)
+
+    assert (second.series, second.requests) == (0, 0)
+    (row,) = await _counter_rows(engine)
+    assert row["requests"] == 3
+
+
+async def test_the_throughput_route_refuses_anonymous_and_non_operator_callers(
+    database_url: str,
+) -> None:
+    assert _client(database_url).get(THROUGHPUT_PATH).status_code == 401
+    assert _client(database_url).get(THROUGHPUT_PATH, headers=_bearer("patient")).status_code == 403

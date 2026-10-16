@@ -36,6 +36,16 @@ gateway error seam buffers failures in process, and this drains them into
 ``observability_error_events`` in one transaction off the request path. It is the
 ONLY writer of that table, and it is re-exported here so the worker's scheduled
 drain reaches it through the facade rather than reaching into the module.
+
+B9 (#727) adds :func:`drain_http_counter` and the ``/throughput`` read. The
+gateway counts every answered request into a per-minute bucket in process; this
+folds those buckets into ``observability_http_minute`` - the ONLY writer of that
+table - and serves throughput, error rate and the capture-liveness answer over the
+recent past. The count is one row per route per MINUTE (#717 decision 15), which
+is what makes the figure queryable from Postgres beyond the vendor's fourteen-day
+retention; ``/throughput`` is where that becomes operator-visible, and it reports
+whether capture was working at all so an empty error feed never reads as a healthy
+system.
 """
 
 from __future__ import annotations
@@ -82,6 +92,10 @@ from modules.observability.domain.rollup import (
     ratio,
 )
 from modules.observability.error_stream import ErrorDrainReport, drain_error_buffer
+from modules.observability.http_counter_stream import (
+    HttpCounterDrainReport,
+    drain_http_counter,
+)
 from modules.observability.rollup import RollupReport, RollupRunState, load_rollup_state, run_rollup
 from modules.observability.schema.models import (
     observability_ai_cost_budget,
@@ -91,6 +105,7 @@ from modules.observability.schema.models import (
     observability_alert_events,
     observability_business_daily,
     observability_care_attribution_edges,
+    observability_http_minute,
     observability_rollup_runs,
 )
 
@@ -103,12 +118,32 @@ OBSERVABILITY_SCHEMA = "observability"
 DEFAULT_ALERT_PAGE_SIZE = 25
 MAX_ALERT_PAGE_SIZE = 100
 
+#: Window of the ``/throughput`` read, in MINUTES rather than days (B9 #727). The
+#: counter's grain is a minute, so a day-granular window would answer a question
+#: about an hour: the read exists to separate a spike from a trickle over "the
+#: recent past", and a default wide enough to show a thirty-day trend is wide
+#: enough to hide the spike in it. Sixty minutes is one working hour of a single
+#: shift, and the ceiling is a full day - long enough to see this morning's outage
+#: from this afternoon, short enough that a response stays a few thousand rows.
+DEFAULT_THROUGHPUT_WINDOW_MINUTES = 60
+MAX_THROUGHPUT_WINDOW_MINUTES = 1440
+
+#: How many route rows ``/throughput`` returns. The per-route breakdown is a
+#: "which endpoints are busy" list for a panel, not a dump: at launch scale a day
+#: window touches a couple of hundred route/method pairs and no card renders that.
+#: The total beside it is the honest signal that the list is truncated - the same
+#: reason ``AlertPage`` carries ``total_count``.
+MAX_THROUGHPUT_ROUTE_ROWS = 20
+
 __all__ = [
     "AI_JOB_SPEND_STATUS_COMPLETED",
     "AI_JOB_SPEND_STATUS_FAILED",
     "DEFAULT_ALERT_PAGE_SIZE",
+    "DEFAULT_THROUGHPUT_WINDOW_MINUTES",
     "DEFAULT_WINDOW_DAYS",
     "MAX_ALERT_PAGE_SIZE",
+    "MAX_THROUGHPUT_ROUTE_ROWS",
+    "MAX_THROUGHPUT_WINDOW_MINUTES",
     "OBSERVABILITY_SCHEMA",
     "ROLLUP_MODE_BACKFILL",
     "ROLLUP_MODE_DAILY",
@@ -116,6 +151,7 @@ __all__ = [
     "AlertPage",
     "BreakerHealthRow",
     "BusinessCountView",
+    "CaptureLiveness",
     "CostBudgetView",
     "CostSummary",
     "CostTrend",
@@ -123,6 +159,7 @@ __all__ = [
     "Deeplinks",
     "DependencyHealth",
     "ErrorDrainReport",
+    "HttpCounterDrainReport",
     "LatencyReport",
     "LatencyRow",
     "ObservabilityFacade",
@@ -134,12 +171,16 @@ __all__ = [
     "RollupReport",
     "RollupRunState",
     "RollupThresholds",
+    "RouteThroughputRow",
     "SystemHealth",
+    "ThroughputPoint",
+    "ThroughputReport",
     "UsageReport",
     "UsageRow",
     "accumulate_ai_usage",
     "accumulate_business_count",
     "drain_error_buffer",
+    "drain_http_counter",
     "load_rollup_state",
     "plan_rollup_dates",
     "query_alerts",
@@ -149,6 +190,7 @@ __all__ = [
     "query_latency",
     "query_overview",
     "query_quality",
+    "query_throughput",
     "query_usage",
     "record_ai_job_spend",
     "record_alert_event",
@@ -593,6 +635,12 @@ DEFAULT_WINDOW_DAYS = 30
 #: Two-decimal scale of the percentage figures (``60.00``, not ``60``).
 _PCT_QUANTUM = Decimal("0.01")
 
+#: Two-decimal scale of the requests-per-MINUTE average (``6.75``, not ``6.75xx``).
+#: Its own constant rather than ``_PCT_QUANTUM`` because the figure is a count and
+#: not a percentage, and a reader reaching for the percentage scale there would be
+#: reading a name that does not describe what it quantizes.
+_PER_MINUTE_QUANTUM = Decimal("0.01")
+
 
 def window_for(days: int, *, today: date | None = None) -> tuple[date, date]:
     """The inclusive ``[from_date, to_date]`` window of ``days`` UTC days ending today.
@@ -610,6 +658,40 @@ def window_for(days: int, *, today: date | None = None) -> tuple[date, date]:
 def _window_days(from_date: date, to_date: date) -> int:
     """The span of an inclusive window in days - the ``days`` a view echoes back."""
     return (to_date - from_date).days + 1
+
+
+def _window_minutes(from_ts: datetime, to_ts: datetime) -> int:
+    """The span of the half-open ``[from_ts, to_ts)`` minute window.
+
+    Rounded down on purpose: ``to_ts`` is "now" and carries seconds and microseconds,
+    so the exact span is a fraction of a minute and a reported ``minutes`` that
+    changed every second would be a number no reader could use. The floor keeps the
+    denominator a whole number of minute buckets, which is what it divides.
+    """
+    return max(0, int((to_ts - from_ts).total_seconds()) // 60)
+
+
+def _per_minute(requests: int, minutes: int) -> Decimal | None:
+    """``requests`` spread over ``minutes`` at 2dp; ``None`` when there is no answer.
+
+    Two decimals rather than the four the ratio helpers carry: this figure is a
+    count per minute ("6.75"), and a fourth place would be a resolution the grain
+    cannot support - one request in a sixty-minute window is 0.0167, which rounds
+    to 0.02 and then to nothing at all on a shorter window.
+
+    ``None`` for a zero numerator OR a zero denominator. The numerator case is the
+    one that matters and it is stated here because it is easy to get wrong:
+    ``error_rate`` is ``None`` only for an EMPTY denominator, and reads
+    ``0.0000`` for a window where requests were recorded and none failed. An
+    average of zero over a window where nothing was recorded would be a claim
+    about the platform that was never measured - the same reason
+    :class:`CaptureLiveness` exists.
+    """
+    if requests <= 0 or minutes <= 0:
+        return None
+    return (Decimal(requests) / Decimal(minutes)).quantize(
+        _PER_MINUTE_QUANTUM, rounding=ROUND_HALF_UP
+    )
 
 
 def _utilization_pct(spend_paise: int, limit_paise: int) -> Decimal:
@@ -937,6 +1019,111 @@ class LatencyReport(BaseModel):
     providers: list[LatencyRow]
 
 
+class CaptureLiveness(BaseModel):
+    """Whether request capture ITSELF was working over the window (B9 #727).
+
+        The answer that stops an empty feed reading as a healthy system. "No errors"
+        and "nothing was watched" produce the same empty table, and only one of them is
+        good news, so the read has to say which it saw - see #717 story 35.
+
+    ``capturing`` is ``True`` iff at least one request was recorded in the window.
+    It is deliberately NOT a claim that the counter is unbroken: a dead capture and
+    a quiet system are indistinguishable from the rows alone, and inventing a liveness
+    verdict that cannot be supported would replace one wrong answer with another.
+    What it does support is the honest one - ``requests_recorded`` is a measurement,
+    and every rate in the report is ``None`` when NOTHING was recorded (as distinct
+    from ``0.0000``, which is a clean window), so a reader cannot mistake a missing
+    measurement for a clean one. ``last_recorded_at`` is the next question an operator
+    asks ("when did we last see ANY traffic?"), and it is ``None`` rather than an
+    invented epoch when nothing was.
+    """
+
+    capturing: bool
+    requests_recorded: int
+    last_recorded_at: datetime | None
+
+
+class ThroughputPoint(BaseModel):
+    """One minute of platform-wide traffic, summed across every route.
+
+    Minutes with no traffic at all are ABSENT rather than zero-filled: a flat line
+    of zeros across a quiet night is indistinguishable from a counter that stopped
+    recording, and only the gap says which. A chart that needs a continuous axis
+    fills the gap client-side, where a fill is a rendering choice rather than a
+    claim about the data.
+    """
+
+    minute_ts: datetime
+    requests: int
+    errors: int
+    error_rate: Decimal | None
+
+
+class RouteThroughputRow(BaseModel):
+    """One route template's traffic over the whole window.
+
+    Carries the METHOD as well as the template because the pair is the label the
+    counter stores and the pair an operator reasons about: a ``POST`` to a template
+    is a submission and a ``GET`` on the same path is a fetch, and a merged figure
+    would hide one of them. The template is the PATTERN - never a concrete path -
+    so no patient identifier can reach this response (ADR-0025 D7).
+    """
+
+    route_template: str
+    method: str
+    requests: int
+    errors: int
+    error_rate: Decimal | None
+
+
+class ThroughputReport(BaseModel):
+    """Request throughput and error rate over the recent past (B9 #727).
+
+    What the operator needs to tell a real outage from a quiet period (#717 stories
+    33 and 34): the totals answer "how much", ``points`` answers "a spike or a
+    trickle", and ``routes`` answers "where". Every rate is ``None`` rather than
+    ``0`` when nothing was recorded in the window - see :class:`CaptureLiveness`
+    for why that distinction is the point of the read.
+
+    ``error_rate`` is the STORED numerator over the STORED denominator: ``errors``
+    is the 5xx subset of ``requests``, carried on the counter rows rather than
+    re-derived here, so the rate cannot drift from the series it is read beside.
+    Client errors are not in it - a 404 is a caller's mistake, not the platform
+    failing, and folding 4xx into "error rate" would make a broken frontend link
+    read as an outage.
+
+    The window is half-open, ``[from_ts, to_ts)``, which is the only honest
+    spelling for a minute-granular series read against "now": an inclusive end
+    would put the in-progress minute in the window twice over two reads and make
+    the total move as the clock ticks.
+    """
+
+    minutes: int
+    from_ts: datetime
+    to_ts: datetime
+    requests: int
+    errors: int
+    error_rate: Decimal | None
+    #: ``requests`` spread over the WHOLE window, so a burst over three minutes is
+    #: visibly lower than a steady trickle across all of them. ``None`` when
+    #: nothing was recorded, for the same reason ``error_rate`` is.
+    requests_per_minute: Decimal | None
+    points: list[ThroughputPoint]
+    routes: list[RouteThroughputRow]
+    #: How many route/method pairs the window holds in total, which is more than
+    #: ``routes`` when the busiest exceeded :data:`MAX_THROUGHPUT_ROUTE_ROWS`.
+    #:
+    #: Capped rather than paginated on purpose. api-standards §4 governs list
+    #: ENDPOINTS, and this is a KPI read with a breakdown nested inside it - the same
+    #: shape as ``Overview.business_counts``, which is unbounded. A cursor over a
+    #: sub-list of an aggregate would be a second navigation inside a panel, and the
+    #: number an operator wants off it ("which endpoint is this?") is answered by the
+    #: busiest rows. What must not happen is a silent truncation, which is what the
+    #: total beside the cap is for.
+    routes_total: int
+    capture: CaptureLiveness
+
+
 class DependencyHealth(BaseModel):
     """One dependency's state as this read observed it.
 
@@ -1224,6 +1411,112 @@ async def query_latency(connection: AsyncConnection) -> LatencyReport:
     )
 
 
+async def query_throughput(
+    connection: AsyncConnection, *, from_ts: datetime, to_ts: datetime
+) -> ThroughputReport:
+    """Read request throughput and error rate over ``[from_ts, to_ts)`` (``/throughput``).
+
+    Three reads of ONE table, never a join: the per-minute series, the number of
+    distinct route/method pairs in the window, and the busiest of those pairs. The
+    window's TOTAL is summed from the per-minute rows rather than issued as a fourth
+    aggregate, which is not an optimisation - the per-minute rows ARE the window's
+    truth, so summing them in Python cannot disagree with the series the operator is
+    looking at beside them, while a separately issued aggregate could.
+
+    ``routes_total`` counts the pairs the window holds while ``routes`` carries the
+    busiest :data:`MAX_THROUGHPUT_ROUTE_ROWS` of them, so a truncated list says so
+    instead of quietly under-reporting.
+
+    The half-open window is applied in SQL (``>= from_ts AND < to_ts``) rather than
+    in Python, so the index on ``minute_ts`` does the narrowing and a wide window
+    never drags the table in. ``to_ts`` is exclusive so the in-progress minute is
+    never counted twice across two reads.
+    """
+    counter = observability_http_minute
+    window = (counter.c.minute_ts >= from_ts) & (counter.c.minute_ts < to_ts)
+
+    minute_rows = await connection.execute(
+        select(
+            counter.c.minute_ts,
+            func.coalesce(func.sum(counter.c.requests), 0).label("requests"),
+            func.coalesce(func.sum(counter.c.errors), 0).label("errors"),
+        )
+        .where(window)
+        .group_by(counter.c.minute_ts)
+        .order_by(counter.c.minute_ts)
+    )
+    points = [
+        ThroughputPoint(
+            minute_ts=entry["minute_ts"],
+            requests=int(entry["requests"]),
+            errors=int(entry["errors"]),
+            # A minute with rows cannot have an empty denominator in practice, but
+            # the type admits it and ``ratio`` already answers that honestly.
+            error_rate=ratio(int(entry["errors"]), int(entry["requests"])),
+        )
+        for entry in minute_rows.mappings()
+    ]
+
+    route_count = await connection.execute(
+        select(func.count()).select_from(
+            select(
+                counter.c.route_template,
+                counter.c.method,
+            )
+            .where(window)
+            .distinct()
+            .subquery()
+        )
+    )
+    route_rows = await connection.execute(
+        select(
+            counter.c.route_template,
+            counter.c.method,
+            func.coalesce(func.sum(counter.c.requests), 0).label("requests"),
+            func.coalesce(func.sum(counter.c.errors), 0).label("errors"),
+        )
+        .where(window)
+        .group_by(counter.c.route_template, counter.c.method)
+        .order_by(func.sum(counter.c.requests).desc(), counter.c.route_template, counter.c.method)
+        .limit(MAX_THROUGHPUT_ROUTE_ROWS)
+    )
+    routes = [
+        RouteThroughputRow(
+            route_template=str(entry["route_template"]),
+            method=str(entry["method"]),
+            requests=int(entry["requests"]),
+            errors=int(entry["errors"]),
+            error_rate=ratio(int(entry["errors"]), int(entry["requests"])),
+        )
+        for entry in route_rows.mappings()
+    ]
+
+    requests = sum(point.requests for point in points)
+    errors = sum(point.errors for point in points)
+    minutes = _window_minutes(from_ts, to_ts)
+    last_recorded_at = points[-1].minute_ts if points else None
+    return ThroughputReport(
+        minutes=minutes,
+        from_ts=from_ts,
+        to_ts=to_ts,
+        requests=requests,
+        errors=errors,
+        # ``ratio`` answers ``None`` for an empty denominator, which is exactly the
+        # "nothing was recorded, so nothing failed" answer - never a 0.0000 that
+        # reads as a clean window.
+        error_rate=ratio(errors, requests),
+        requests_per_minute=_per_minute(requests, minutes),
+        points=points,
+        routes=routes,
+        routes_total=int(route_count.scalar_one()),
+        capture=CaptureLiveness(
+            capturing=requests > 0,
+            requests_recorded=requests,
+            last_recorded_at=last_recorded_at,
+        ),
+    )
+
+
 async def query_health(connection: AsyncConnection, *, cache_configured: bool) -> SystemHealth:
     """Read dependency state plus outbox and breaker state (``/health``).
 
@@ -1369,17 +1662,17 @@ class ObservabilityFacade:
     """Typed public facade for observability.
 
     The B4 public surface carries the effects the event consumers run. The C1
-    (``#706``/``#707``) read seam joins it: ``get_cost_summary``,
-    ``get_cost_trend``, ``get_usage``, ``get_quality``, ``get_overview``,
-    ``get_latency``, ``get_health``, ``get_alerts`` and ``get_deeplinks`` are what
-    the operator observability routes call. Each opens the one settled engine
-    connection and delegates its aggregate to the module helper, so routes hold
-    no SQL and the reads stay in this module.
+        (``#706``/``#707``) read seam joins it: ``get_cost_summary``,
+        ``get_cost_trend``, ``get_usage``, ``get_quality``, ``get_overview``,
+        ``get_latency``, ``get_throughput``, ``get_health``, ``get_alerts`` and
+        ``get_deeplinks`` are what the operator observability routes call. Each opens
+        the one settled engine connection and delegates its aggregate to the module
+        helper, so routes hold no SQL and the reads stay in this module.
 
-    The windowed reads take ``days`` and an optional ``today`` so the caller - or a
-    test - can pin the window; the routes own the default
-    (:data:`DEFAULT_WINDOW_DAYS`) and production leaves ``today`` unset, so the
-    facade reads the current UTC day.
+        The windowed reads take ``days`` (or, for the per-minute counter, ``minutes``)
+        and an optional pinned instant so the caller - or a test - can pin the window;
+        the routes own the default and production leaves the instant unset, so the
+        facade reads the current UTC day or instant.
     """
 
     def __init__(self, engine: AsyncEngine) -> None:
@@ -1418,6 +1711,29 @@ class ObservabilityFacade:
         """Read the rolled per-provider percentiles (no window - see ``LatencyReport``)."""
         async with self._engine.begin() as connection:
             return await query_latency(connection)
+
+    async def get_throughput(
+        self, *, minutes: int, now: datetime | None = None
+    ) -> ThroughputReport:
+        """Read throughput and error rate over the last ``minutes`` minutes.
+
+        The window is resolved HERE, against the current UTC instant, for the same
+        reason the daily reads resolve ``today`` here: the route owns the default
+        (:data:`DEFAULT_THROUGHPUT_WINDOW_MINUTES`) and the facade owns the clock,
+        so a test can pin ``now`` and get the identical half-open window the
+        production read would have taken at that instant.
+
+        ``now`` is used verbatim, NOT truncated to the minute: the counter's rows
+        are minute-truncated but the window's exclusive end is an instant on the
+        clock, and rounding it down would drop the in-progress minute from every
+        read instead of showing it counting up.
+        """
+        if minutes < 1:
+            raise ValueError("minutes must be positive")
+        to_ts = now if now is not None else datetime.now(UTC)
+        from_ts = to_ts - timedelta(minutes=minutes)
+        async with self._engine.begin() as connection:
+            return await query_throughput(connection, from_ts=from_ts, to_ts=to_ts)
 
     async def get_health(self, *, cache_configured: bool) -> SystemHealth:
         """Read dependency reachability plus outbox and breaker state."""

@@ -6,7 +6,8 @@ structured-logging configuration (A1, #694) that the API, worker and dispatcher
 share, the Sentry error-tracking bootstrap (A4, #696), the OpenTelemetry
 request-path bootstrap (A3a, #697) and the bounded in-process server-error
 capture buffer (B8, #726) that the gateway error seam writes and the worker's
-drain empties. Lives at the top level alongside ``bus``
+drain empties, and the in-process per-minute HTTP counter (B9, #727) the gateway
+counts every answered request into. Lives at the top level alongside ``bus``
 (also shared infra): it is not a module, has no schema, and imports nothing from
 ``modules``.
 """
@@ -30,6 +31,18 @@ from observability.error_capture import (
     reset_error_capture,
     route_template_for,
     status_class_for,
+)
+from observability.http_counter import (
+    CounterKey,
+    MinuteCount,
+    configure_http_counter,
+    dropped_http_requests,
+    flush_http_counts,
+    http_counter_capacity,
+    minute_bucket,
+    pending_http_counts,
+    record_request,
+    reset_http_counter,
 )
 from observability.langfuse_client import (
     flush_langfuse,
@@ -97,16 +110,21 @@ __all__ = [
     "UNMATCHED_ROUTE_TEMPLATE",
     "AllowListSpanProcessor",
     "CapturedError",
+    "CounterKey",
+    "MinuteCount",
     "SpanMetadataError",
     "apply_span_allow_list",
     "build_span_metadata",
     "capture_server_error",
     "configure_error_capture",
+    "configure_http_counter",
     "configure_logging",
     "discard_error_captures",
     "dropped_error_captures",
+    "dropped_http_requests",
     "error_capture_capacity",
     "fingerprint_for",
+    "flush_http_counts",
     "flush_langfuse",
     "flush_otel",
     "flush_sentry",
@@ -115,18 +133,23 @@ __all__ = [
     "get_meter",
     "get_trace_id",
     "get_tracer",
+    "http_counter_capacity",
     "init_metrics",
     "init_otel",
     "init_sentry",
+    "minute_bucket",
     "parse_otlp_headers",
     "pending_error_captures",
+    "pending_http_counts",
     "record_cache_hit",
     "record_cache_miss",
     "record_outbox_poll",
+    "record_request",
     "record_request_error",
     "record_request_latency",
     "redact_value",
     "reset_error_capture",
+    "reset_http_counter",
     "reset_trace_id",
     "resolve_release",
     "route_template_for",

@@ -15,7 +15,8 @@ gateway handlers and anything unexpected falls to the app catch-all.
 
 Scope: the whole plan-phase14 §9.1 read table. C1a (#706) serves ``cost``,
 ``cost/trend``, ``usage`` and ``quality``; C1b (#707) adds ``overview``,
-``latency``, ``health``, ``alerts`` and ``deeplinks``.
+``latency``, ``health``, ``alerts`` and ``deeplinks``; B9 (#727) adds
+``throughput``, the per-minute request counter and the capture-liveness answer.
 """
 
 from __future__ import annotations
@@ -29,8 +30,10 @@ from app.gateway.principal import Principal
 from app.gateway.rbac import require_operator
 from modules.observability.facade import (
     DEFAULT_ALERT_PAGE_SIZE,
+    DEFAULT_THROUGHPUT_WINDOW_MINUTES,
     DEFAULT_WINDOW_DAYS,
     MAX_ALERT_PAGE_SIZE,
+    MAX_THROUGHPUT_WINDOW_MINUTES,
     AlertPage,
     CostSummary,
     CostTrend,
@@ -40,6 +43,7 @@ from modules.observability.facade import (
     Overview,
     QualityReport,
     SystemHealth,
+    ThroughputReport,
     UsageReport,
 )
 
@@ -51,6 +55,14 @@ router = APIRouter(tags=["observability"])
 _MAX_WINDOW_DAYS = 365
 
 _Window = Annotated[int, Query(ge=1, le=_MAX_WINDOW_DAYS)]
+
+#: The ``/throughput`` window, in minutes against the counter's own grain. It
+#: carries its own ceiling rather than borrowing ``_MAX_WINDOW_DAYS`` because the
+#: two are not the same shape: a day of MINUTE rows is a thousand series to
+#: aggregate, where a day of daily rows is thirty. Like ``_MAX_WINDOW_DAYS`` it is a
+#: constant rather than an env-driven limit, because it bounds the RESPONSE rather
+#: than the system.
+_MinuteWindow = Annotated[int, Query(ge=1, le=MAX_THROUGHPUT_WINDOW_MINUTES)]
 
 #: The alert statuses ``observability_alert_events.status`` can hold. Spelled as a
 #: ``Literal`` rather than imported from the domain so FastAPI can render the
@@ -197,6 +209,33 @@ async def read_latency(
     """
     del principal
     return await _facade(request).get_latency()
+
+
+@router.get(
+    "/v1/operator/observability/throughput",
+    response_model=ThroughputReport,
+    status_code=status.HTTP_200_OK,
+    summary="Read request throughput, error rate and capture liveness (operator only)",
+)
+async def read_throughput(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_operator)],
+    minutes: _MinuteWindow = DEFAULT_THROUGHPUT_WINDOW_MINUTES,
+) -> ThroughputReport:
+    """Requests served and the server-error rate over the recent past.
+
+    ``minutes`` rather than ``days``: the counter's grain is a minute, so the read
+    asks for the same span the data is stored at and a day would answer a question
+    about an hour. The window is bounded in the query parameter itself
+    (:data:`MAX_THROUGHPUT_WINDOW_MINUTES`), so an over-wide request is refused at
+    the edge rather than turning the panel into a table scan.
+
+    The response carries ``capture`` because the alternative is the failure this
+    read exists to prevent: an empty feed of errors, indistinguishable from a
+    healthy system unless the read says whether any request was recorded at all.
+    """
+    del principal
+    return await _facade(request).get_throughput(minutes=minutes)
 
 
 @router.get(

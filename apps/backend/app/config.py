@@ -190,6 +190,29 @@ DEFAULT_OBSERVABILITY_ROLLUP_MAX_DATES = 90
 # keeps the operator's feed close to live without a write per request.
 DEFAULT_ERROR_CAPTURE_MAX_RECORDS = 1000
 DEFAULT_ERROR_DRAIN_INTERVAL_SECONDS = 30
+# PHASE-14A B9 (#727). The gateway counts every answered request into a per-minute
+# bucket in process, and the worker folds those buckets into one row per route per
+# minute - so two numbers describe the counter rather than living as constants
+# inside it.
+# ``HTTP_COUNTER_MAX_SERIES`` is the ceiling on how many DISTINCT
+# ``(minute, route template, method, status class)`` buckets may be waiting for a
+# drain at once. It is not a request ceiling: a thousand requests to one route in
+# one minute are ONE series, which is the whole point of the design (#717
+# decision 15). A few thousand series is a few hundred routes' worth of a couple
+# of minutes' traffic - far more than the drain interval ever lets accumulate -
+# and past it the OLDEST minute is discarded and counted rather than the map
+# growing, because an unbounded map turns a traffic spike into an out-of-memory
+# kill, the same argument the error buffer is bounded on. Declared HERE, and
+# imported by ``observability.http_counter`` rather than restated, for the same
+# dependency reason as ``ERROR_CAPTURE_MAX_RECORDS`` above: ``app.config`` may not
+# import the ``observability`` package (its ``__init__`` reaches back here for
+# ``APP_VERSION``), so the dependency runs config -> counter and never the reverse.
+# ``HTTP_COUNTER_DRAIN_INTERVAL_SECONDS`` is how often the fold runs. The grain is
+# a minute, so a cadence at or above that is what bounds the write cost at one
+# row per route per minute; draining faster cannot add information and draining
+# slower leaves the operator's "recent past" stale.
+DEFAULT_HTTP_COUNTER_MAX_SERIES = 5000
+DEFAULT_HTTP_COUNTER_DRAIN_INTERVAL_SECONDS = 60
 # Operator MFA TOTP secret encryption (PHASE-5 S8, #261): the AES-256-GCM key
 # for encrypting/decrypting the TOTP secret stored in ``iam_operator_mfa.secret``
 # comes from the ``IAM_MFA_SECRET_KEY`` environment variable (never committed).
@@ -398,6 +421,18 @@ class Settings:
     # How often the worker drains the error buffer, in seconds. Bounded below only
     # by "must be positive": a zero interval is a busy loop against the database.
     error_drain_interval_seconds: int = DEFAULT_ERROR_DRAIN_INTERVAL_SECONDS
+    # Ceiling on the in-process per-minute HTTP counter (B9 #727). Every answered
+    # request increments one ``(minute, route, method, status class)`` bucket and
+    # the worker folds them into ``observability_http_minute`` on
+    # ``http_counter_drain_interval_seconds``; at the ceiling the OLDEST minute is
+    # discarded and counted, so this is the point past which throughput for the
+    # dropped minutes is missing rather than the point past which the process
+    # becomes unsafe. A limit, so configuration (coding-standards §9.1).
+    http_counter_max_series: int = DEFAULT_HTTP_COUNTER_MAX_SERIES
+    # How often the worker folds the per-minute counter into the observability
+    # schema, in seconds. Bounded below only by "must be positive": a zero interval
+    # is a busy loop against the database.
+    http_counter_drain_interval_seconds: int = DEFAULT_HTTP_COUNTER_DRAIN_INTERVAL_SECONDS
 
     def __post_init__(self) -> None:
         if self.gateway_jwt_verify_enabled and not self.gateway_jwt_signing_key:
@@ -538,6 +573,10 @@ class Settings:
             raise ValueError("error_capture_max_records must be positive")
         if self.error_drain_interval_seconds <= 0:
             raise ValueError("error_drain_interval_seconds must be positive")
+        if self.http_counter_max_series <= 0:
+            raise ValueError("http_counter_max_series must be positive")
+        if self.http_counter_drain_interval_seconds <= 0:
+            raise ValueError("http_counter_drain_interval_seconds must be positive")
         parse_ai_pricing_table(self.ai_pricing_table)
         if self.ai_circuit_breaker_cooldown_seconds <= 0:
             raise ValueError("ai_circuit_breaker_cooldown_seconds must be positive")
@@ -921,5 +960,11 @@ def get_settings() -> Settings:
         ),
         error_drain_interval_seconds=_env_int(
             "ERROR_DRAIN_INTERVAL_SECONDS", DEFAULT_ERROR_DRAIN_INTERVAL_SECONDS
+        ),
+        http_counter_max_series=_env_int(
+            "HTTP_COUNTER_MAX_SERIES", DEFAULT_HTTP_COUNTER_MAX_SERIES
+        ),
+        http_counter_drain_interval_seconds=_env_int(
+            "HTTP_COUNTER_DRAIN_INTERVAL_SECONDS", DEFAULT_HTTP_COUNTER_DRAIN_INTERVAL_SECONDS
         ),
     )

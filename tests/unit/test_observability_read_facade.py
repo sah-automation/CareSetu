@@ -2,10 +2,11 @@
 
 Pins the documented read aggregates - spend against the budgeted period, the
 daily cost trend, calls/tokens per provider/task scope, the quality rates, the
-overview's headline KPIs, the rolled latency percentiles, dependency/outbox health
-and the alert feed - against a mocked connection, so the window that reaches SQL,
-the aggregation, and the derived arithmetic are all covered without a live
-database (coding-standards §2: DB-free unit surface).
+overview's headline KPIs, the rolled latency percentiles, request throughput with
+its capture-liveness answer, dependency/outbox health and the alert feed - against
+a mocked connection, so the window that reaches SQL, the aggregation, and the
+derived arithmetic are all covered without a live database (coding-standards §2:
+DB-free unit surface).
 
 Every SELECT is against the ``observability`` schema only: the read facade never
 crosses a module boundary (ADR-0003). The ``/health`` outbox counts are the one
@@ -36,6 +37,7 @@ from modules.observability.facade import (
     query_latency,
     query_overview,
     query_quality,
+    query_throughput,
     query_usage,
     window_for,
 )
@@ -45,6 +47,11 @@ _TODAY = date(2026, 10, 12)
 _FROM = date(2026, 9, 13)
 _PERIOD_START = date(2026, 10, 1)
 _PERIOD_END = date(2026, 10, 31)
+
+#: The window ``get_throughput(minutes=60)`` resolves against a pinned instant. The
+#: series is per minute, so these are instants and not dates.
+_NOW = datetime(2026, 10, 14, 12, 34, 56, tzinfo=UTC)
+_FROM_TS = datetime(2026, 10, 14, 11, 34, 56, tzinfo=UTC)
 
 
 class _FakeMappings:
@@ -451,6 +458,7 @@ async def test_every_read_selects_from_the_observability_schema_only() -> None:
     quality = _connection([_TOTALS_ROW], _HEALTH_ROWS)
     overview = _connection(*_OVERVIEW_ROWS, _BUDGET_ROWS)
     latency = _connection(_LATENCY_ROWS, [{"value": _TODAY}])
+    throughput = _connection([_MINUTE_12_34], [{"total": 2}], _ROUTE_ROWS)
 
     await query_cost_summary(cost)
     await query_cost_trend(trend, from_date=_FROM, to_date=_TODAY)
@@ -458,6 +466,7 @@ async def test_every_read_selects_from_the_observability_schema_only() -> None:
     await query_quality(quality, from_date=_FROM, to_date=_TODAY)
     await query_overview(overview, from_date=_FROM, to_date=_TODAY)
     await query_latency(latency)
+    await query_throughput(throughput, from_ts=_FROM_TS, to_ts=_NOW)
 
     table = "observability.observability_ai_"
     assert _from_target(cost) == f"{table}cost_budget"
@@ -475,6 +484,17 @@ async def test_every_read_selects_from_the_observability_schema_only() -> None:
     assert _from_target(overview, 5) == f"{table}cost_budget"
     assert _from_target(latency, 0) == f"{table}provider_health"
     assert _from_target(latency, 1) == "observability.observability_rollup_runs"
+    # Throughput is three reads of ONE counter table - the per-minute series, the
+    # distinct-pair count and the busiest pairs - never a join against another module.
+    counter = "observability.observability_http_minute"
+    assert _from_target(throughput, 0) == counter
+    assert _from_target(throughput, 2) == counter
+    # The distinct-pair count wraps the same table in a subquery, so its FROM is the
+    # derived table rather than the table itself.
+    assert counter in _compiled(throughput, 1)
+    assert "SELECT count(*) AS count_1 FROM (SELECT DISTINCT" in " ".join(
+        _compiled(throughput, 1).split()
+    )
 
 
 @pytest.mark.parametrize(
@@ -626,6 +646,193 @@ async def test_latency_keeps_an_unsampled_providers_null_percentiles() -> None:
 
     assert report.providers[0].sample_count == 0
     assert report.providers[0].p50_duration_ms is None
+
+
+# -------------------------------------------------------------- throughput (B9 #727)
+#
+# The three reads ``query_throughput`` issues, in order: the per-minute series, the
+# count of distinct route/method pairs in the window, then the busiest of those
+# pairs. ``_connection`` replays them in that order.
+
+_MINUTE_12_33: dict[str, object] = {
+    "minute_ts": datetime(2026, 10, 14, 12, 33, tzinfo=UTC),
+    "requests": 4,
+    "errors": 0,
+}
+_MINUTE_12_34: dict[str, object] = {
+    "minute_ts": datetime(2026, 10, 14, 12, 34, tzinfo=UTC),
+    "requests": 10,
+    "errors": 3,
+}
+_ROUTE_ROWS: list[dict[str, object]] = [
+    {
+        "route_template": "/v1/cases/{case_id}/entries",
+        "method": "POST",
+        "requests": 12,
+        "errors": 3,
+    },
+    {
+        "route_template": "/health",
+        "method": "GET",
+        "requests": 2,
+        "errors": 0,
+    },
+]
+
+
+def _throughput(
+    minutes: list[dict[str, object]],
+    routes: list[dict[str, object]] = _ROUTE_ROWS,
+    routes_total: int = 2,
+) -> AsyncMock:
+    return _connection(minutes, [{"total": routes_total}], routes)
+
+
+async def test_throughput_sums_the_window_and_reports_the_rate() -> None:
+    report = await query_throughput(
+        _throughput([_MINUTE_12_33, _MINUTE_12_34]), from_ts=_FROM_TS, to_ts=_NOW
+    )
+
+    assert report.minutes == 60
+    assert (report.from_ts, report.to_ts) == (_FROM_TS, _NOW)
+    assert (report.requests, report.errors) == (14, 3)
+    # The stored 5xx numerator over the stored denominator - 3 of 14.
+    assert report.error_rate == Decimal("0.2143")
+    # 14 requests spread over the whole hour, not over the two busy minutes.
+    assert report.requests_per_minute == Decimal("0.23")
+
+
+async def test_throughput_keeps_the_per_minute_series_in_order() -> None:
+    """A spike is only visible if the minutes keep their order and stay separate."""
+    report = await query_throughput(
+        _throughput([_MINUTE_12_33, _MINUTE_12_34]), from_ts=_FROM_TS, to_ts=_NOW
+    )
+
+    assert [(point.minute_ts, point.requests, point.errors) for point in report.points] == [
+        (datetime(2026, 10, 14, 12, 33, tzinfo=UTC), 4, 0),
+        (datetime(2026, 10, 14, 12, 34, tzinfo=UTC), 10, 3),
+    ]
+    assert report.points[0].error_rate == Decimal("0.0000")
+    assert report.points[1].error_rate == Decimal("0.3000")
+
+
+async def test_throughput_leaves_quiet_minutes_absent_rather_than_zero() -> None:
+    """A zero-filled minute is indistinguishable from a counter that stopped."""
+    report = await query_throughput(_throughput([_MINUTE_12_34]), from_ts=_FROM_TS, to_ts=_NOW)
+
+    assert [point.minute_ts.minute for point in report.points] == [34]
+
+
+async def test_throughput_reports_the_busiest_routes_with_their_own_rate() -> None:
+    report = await query_throughput(_throughput([]), from_ts=_FROM_TS, to_ts=_NOW)
+
+    assert [
+        (row.route_template, row.method, row.requests, row.error_rate) for row in report.routes
+    ] == [
+        ("/v1/cases/{case_id}/entries", "POST", 12, Decimal("0.2500")),
+        ("/health", "GET", 2, Decimal("0.0000")),
+    ]
+    assert report.routes_total == 2
+
+
+async def test_throughput_reports_the_busy_route_total_even_when_the_list_is_capped() -> None:
+    """A truncated breakdown that does not say so reads as the whole truth."""
+    report = await query_throughput(
+        _throughput([], routes=_ROUTE_ROWS[:1], routes_total=214), from_ts=_FROM_TS, to_ts=_NOW
+    )
+
+    assert len(report.routes) == 1
+    assert report.routes_total == 214
+
+
+async def test_throughput_bounds_the_window_in_sql_on_the_minute_index() -> None:
+    """A wide window must be narrowed by the index, not by dragging the table in."""
+    connection = _throughput([_MINUTE_12_34])
+    await query_throughput(connection, from_ts=_FROM_TS, to_ts=_NOW)
+
+    assert "minute_ts >=" in _compiled(connection, 0)
+    assert "minute_ts <" in _compiled(connection, 0)
+
+
+async def test_throughput_with_nothing_recorded_reports_no_capture_rather_than_a_clean_window() -> (
+    None
+):
+    """#727: the whole point of the read - an empty feed is not a healthy system.
+
+    ``error_rate`` and ``requests_per_minute`` are ``None`` rather than ``0.0000``,
+    because ``None`` says "nothing was measured" and ``0`` says "nothing failed",
+    and only one of those is a fact about the platform.
+    """
+    report = await query_throughput(
+        _throughput([], routes=[], routes_total=0), from_ts=_FROM_TS, to_ts=_NOW
+    )
+
+    assert report.requests == 0
+    assert report.errors == 0
+    assert report.error_rate is None
+    assert report.requests_per_minute is None
+    assert report.points == []
+    assert report.routes == []
+    assert report.routes_total == 0
+    assert report.capture.capturing is False
+    assert report.capture.requests_recorded == 0
+    assert report.capture.last_recorded_at is None
+
+
+async def test_throughput_reports_capture_liveness_when_traffic_was_recorded() -> None:
+    """The other side of the same distinction: requests seen, and none of them failed."""
+    report = await query_throughput(
+        _throughput(
+            [_MINUTE_12_33],
+            routes=[{"route_template": "/health", "method": "GET", "requests": 4, "errors": 0}],
+        ),
+        from_ts=_FROM_TS,
+        to_ts=_NOW,
+    )
+
+    assert report.error_rate == Decimal("0.0000")
+    assert report.capture.capturing is True
+    assert report.capture.requests_recorded == 4
+    assert report.capture.last_recorded_at == datetime(2026, 10, 14, 12, 33, tzinfo=UTC)
+
+
+async def test_throughput_keeps_an_empty_denominator_null_in_a_single_point() -> None:
+    """A minute row with no requests is a stored zero, and its rate is unknown."""
+    report = await query_throughput(
+        _throughput([{**_MINUTE_12_34, "requests": 0, "errors": 0}]), from_ts=_FROM_TS, to_ts=_NOW
+    )
+
+    assert report.points[0].error_rate is None
+
+
+async def test_the_throughput_window_is_half_open_and_resolves_against_a_pinned_now() -> None:
+    """``to_ts`` is an instant, not a minute: rounding it down would hide the live one."""
+    facade = ObservabilityFacade(_engine(_throughput([_MINUTE_12_34])))
+
+    view = await facade.get_throughput(minutes=60, now=_NOW)
+
+    assert view.minutes == 60
+    assert view.to_ts == _NOW
+    assert view.from_ts == _FROM_TS
+
+
+async def test_the_throughput_window_floors_at_whole_minutes() -> None:
+    """``now`` carries seconds, and a reported span that ticks every second is unusable."""
+    facade = ObservabilityFacade(_engine(_throughput([])))
+
+    view = await facade.get_throughput(
+        minutes=60, now=datetime(2026, 10, 14, 12, 34, 30, tzinfo=UTC)
+    )
+
+    assert view.minutes == 60
+
+
+@pytest.mark.parametrize("minutes", [0, -1])
+async def test_the_throughput_window_refuses_a_non_positive_span(minutes: int) -> None:
+    facade = ObservabilityFacade(_engine(_throughput([])))
+
+    with pytest.raises(ValueError, match="minutes must be positive"):
+        await facade.get_throughput(minutes=minutes, now=_NOW)
 
 
 # ------------------------------------------------------------------ health

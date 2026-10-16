@@ -13,7 +13,10 @@ PHASE-6 T04a (#315) also pins the periodic-job scheduler seam: exactly one
 stop discipline around the poll loop. PHASE-14A B8 (#726) adds the second
 periodic job - the ``error-buffer-drain`` interval pass that empties the gateway
 seam's in-process capture buffer into the observability schema - and the callback
-that persists it through the module facade.
+that persists it through the module facade. PHASE-14A B9 (#727) adds the third:
+the ``http-counter-fold`` interval pass that adds the gateway's per-minute request
+buckets onto ``observability_http_minute``, with its OWN failure latch so one
+drain's outage cannot speak for the other.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ import signal
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from apscheduler.job import Job
@@ -35,7 +39,7 @@ import worker.main as worker_main
 from app.config import Settings
 from bus.bootstrap import MODULE_SCHEMAS
 from bus.registry import HandlerRegistry
-from modules.observability.facade import ErrorDrainReport
+from modules.observability.facade import ErrorDrainReport, HttpCounterDrainReport
 from modules.partner.facade import PartnerFacade
 
 
@@ -316,7 +320,7 @@ async def test_a_drain_failing_on_every_firing_logs_the_transition_not_a_flood(
     and a traceback flood - and the recovery line is what tells an operator the error
     stream has a hole in it, which a lone "it failed" line does not.
     """
-    monkeypatch.setattr(worker_main, "_error_drain_failures", 0)
+    monkeypatch.setattr(worker_main, "_error_drain_latch", worker_main._DrainLatch())
     engine = SimpleNamespace(dispose=_unreachable_dispose)
 
     async def exploding_drain(candidate: object) -> ErrorDrainReport:
@@ -338,7 +342,197 @@ async def test_a_drain_failing_on_every_firing_logs_the_transition_not_a_flood(
     assert "recovered after 3 failed pass(es)" in caplog.text
     assert "unwritten for that window" in caplog.text
     # The counter resets, so a later outage gets its own first-failure traceback.
-    assert worker_main._error_drain_failures == 0
+    assert worker_main._error_drain_latch.failures == 0
+
+
+# ------------------------------------------------- B9 #727: the HTTP-counter fold
+
+
+def test_build_scheduler_registers_the_counter_fold_on_an_interval() -> None:
+    """B9 #727: the fold is an INTERVAL job on the counter's own grain.
+
+    An interval rather than a cron because it folds in-process state, and the
+    default cadence is one minute because that is the grain - which is what bounds
+    the write cost at one row per route per minute.
+    """
+    scheduler = worker_main.build_scheduler(Settings())
+
+    job = _job(scheduler, "http-counter-fold")
+    assert isinstance(job.trigger, IntervalTrigger)
+    assert job.func is worker_main._run_http_counter_drain
+    assert job.max_instances == 1
+    assert job.coalesce
+    assert job.trigger.interval == timedelta(seconds=60)
+
+
+def test_build_scheduler_honours_a_configured_counter_fold_interval() -> None:
+    """B9 #727: the fold cadence is configuration (coding-standards §9.1)."""
+    scheduler = worker_main.build_scheduler(Settings(http_counter_drain_interval_seconds=15))
+
+    assert _job(scheduler, "http-counter-fold").trigger.interval == timedelta(seconds=15)
+
+
+async def test_the_counter_fold_keeps_its_own_failure_latch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B9 #727: a failing error drain must not be reported as a failing counter fold.
+
+    The two write different tables with different loss semantics - the error feed's
+    loss is a countable occurrence, the counter's would inflate throughput
+    permanently - so one shared latch would hide a stopped fold behind a healthy
+    drain, or the reverse. Proven by BEHAVIOUR rather than by comparing two module
+    attributes, because "they are different objects" is only worth anything if
+    driving one does not move the other.
+    """
+    monkeypatch.setattr(worker_main, "_error_drain_latch", worker_main._DrainLatch())
+    monkeypatch.setattr(worker_main, "_http_counter_drain_latch", worker_main._DrainLatch())
+    engine = SimpleNamespace(dispose=_unreachable_dispose)
+
+    async def exploding(candidate: object) -> Any:
+        raise RuntimeError("database unavailable")
+
+    async def healthy(candidate: object) -> HttpCounterDrainReport:
+        return HttpCounterDrainReport(series=1, requests=4, dropped=0)
+
+    monkeypatch.setattr(worker_main, "drain_error_buffer", healthy)
+    monkeypatch.setattr(worker_main, "drain_http_counter", exploding)
+    await worker_main._run_http_counter_drain(engine=engine)
+
+    assert worker_main._http_counter_drain_latch.failures == 1
+    assert worker_main._error_drain_latch.failures == 0
+
+
+async def test_counter_fold_callback_persists_through_the_module_facade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B9 #727: the fold reaches the module through its facade, never around it."""
+    seen: list[object] = []
+
+    async def fake_fold(engine: object) -> HttpCounterDrainReport:
+        seen.append(engine)
+        return HttpCounterDrainReport(series=3, requests=9400, dropped=0)
+
+    engine = SimpleNamespace(dispose=_unreachable_dispose)
+    monkeypatch.setattr(worker_main, "drain_http_counter", fake_fold)
+
+    await worker_main._run_http_counter_drain(engine=engine)
+
+    assert seen == [engine]
+
+
+async def test_counter_fold_builds_and_disposes_its_own_engine_when_given_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A supplied engine outlives the pass; an owned one must not."""
+    disposed = 0
+
+    async def fake_fold(engine: object) -> HttpCounterDrainReport:
+        return HttpCounterDrainReport(series=0, requests=0, dropped=0)
+
+    async def dispose() -> None:
+        nonlocal disposed
+        disposed += 1
+
+    monkeypatch.setattr(worker_main, "drain_http_counter", fake_fold)
+    monkeypatch.setattr(
+        worker_main, "create_async_engine", lambda url: SimpleNamespace(dispose=dispose)
+    )
+
+    await worker_main._run_http_counter_drain()
+
+    assert disposed == 1
+
+
+async def test_counter_fold_swallows_a_failed_pass_so_the_job_survives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient blip must not kill the recurring job; the deltas retry next pass."""
+
+    async def exploding_fold(engine: object) -> HttpCounterDrainReport:
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(worker_main, "drain_http_counter", exploding_fold)
+
+    await worker_main._run_http_counter_drain(engine=SimpleNamespace(dispose=_unreachable_dispose))
+
+
+async def test_a_counter_fold_failing_on_every_firing_logs_the_transition_not_a_flood(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B9 #727: throughput going unwritten must be visible without drowning the logs.
+
+    The recovery line is the part that matters - it names the window in which the
+    counter was not being written, which is the gap the capture-liveness read will
+    later have to answer for.
+    """
+    monkeypatch.setattr(worker_main, "_http_counter_drain_latch", worker_main._DrainLatch())
+    engine = SimpleNamespace(dispose=_unreachable_dispose)
+
+    async def exploding_fold(candidate: object) -> HttpCounterDrainReport:
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(worker_main, "drain_http_counter", exploding_fold)
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            await worker_main._run_http_counter_drain(engine=engine)
+        assert caplog.text.count("fold pass failed") == 1
+        assert "3 consecutive pass(es)" in caplog.text
+
+        async def healthy_fold(candidate: object) -> HttpCounterDrainReport:
+            return HttpCounterDrainReport(series=1, requests=4, dropped=0)
+
+        monkeypatch.setattr(worker_main, "drain_http_counter", healthy_fold)
+        await worker_main._run_http_counter_drain(engine=engine)
+
+    assert "recovered after 3 failed pass(es)" in caplog.text
+    assert worker_main._http_counter_drain_latch.failures == 0
+
+
+async def test_the_counter_fold_log_line_reports_both_figures(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B9 #727: buckets and requests say different things, and the line needs both.
+
+    "wrote 9400 rows" would describe a per-request design this ticket exists not to
+    build; "wrote 12 buckets covering 9400 requests" is the whole claim in one line.
+    """
+    logged = False
+
+    async def fake_fold(engine: object) -> HttpCounterDrainReport:
+        nonlocal logged
+        logged = True
+        return HttpCounterDrainReport(series=12, requests=9400, dropped=0)
+
+    monkeypatch.setattr(worker_main, "drain_http_counter", fake_fold)
+    with caplog.at_level(logging.INFO):
+        await worker_main._run_http_counter_drain(
+            engine=SimpleNamespace(dispose=_unreachable_dispose)
+        )
+
+    assert logged
+    assert "wrote 12 bucket(s) covering 9400 request(s)" in caplog.text
+
+
+async def test_a_quiet_counter_logs_nothing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Zero series is not a pass that wrote nothing to report - it is nothing.
+
+    A line every interval for an idle system is how a log gets read past the one
+    line that mattered.
+    """
+
+    async def quiet_fold(engine: object) -> HttpCounterDrainReport:
+        return HttpCounterDrainReport(series=0, requests=0, dropped=0)
+
+    monkeypatch.setattr(worker_main, "drain_http_counter", quiet_fold)
+    with caplog.at_level(logging.INFO):
+        await worker_main._run_http_counter_drain(
+            engine=SimpleNamespace(dispose=_unreachable_dispose)
+        )
+
+    assert "bucket(s) covering" not in caplog.text
 
 
 def test_build_sweep_facade_composes_without_an_iam_facade() -> None:
