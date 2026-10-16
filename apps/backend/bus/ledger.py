@@ -10,6 +10,19 @@ handler treats a ``False`` return as a replay and skips its effects.
 The helper is transport plumbing (like ``bus.outbox_writer``): it serializes
 the envelope into the ledger row shape. The ledger itself lives with the
 subscriber, never shared across modules.
+
+``handler_result`` is free-form JSON the CALLER fills - the handler's own name
+    today, plus the pseudonymous actor key for a consumer that counts distinct actors
+    from this ledger rather than from a table of its own (#729's recent-activity
+    figure). Nothing structured is parsed back out of it here: the ledger's contract
+    is the ``event_id`` dedupe, and a consumer that wants a number keeps its own
+    reader over its own copy of the row.
+
+    :data:`HANDLER_RESULT_ACTOR_KEY` names that one structured key. It lives here,
+    beside the writer, because the writer and the reader are the two halves of a
+    contract the ledger does not enforce: a subscriber that writes ``actor_key`` and
+    a subscriber that counts ``->'actor_key'`` must not spell it differently, and a
+    silent rename would show up only as a board reading zero.
 """
 
 from collections.abc import Mapping
@@ -21,6 +34,12 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from bus.envelope import Envelope
 from bus.outbox_ddl import consumed_events_table
+
+#: The ``handler_result`` key a handler fills with its pseudonymous actor key, and
+#: the reader of a recent-activity count selects on. A HASH, never the raw actor
+#: reference: the ledger is durable and an operator read must not be able to
+#: de-anonymize it.
+HANDLER_RESULT_ACTOR_KEY = "actor_key"
 
 
 async def record_consumed_event(

@@ -139,6 +139,7 @@ EXPECTED_OBSERVABILITY_TABLES = {
     "observability.observability_ai_cost_budget",
     "observability.observability_ai_provider_health",
     "observability.observability_ai_job_spend",
+    "observability.observability_ai_queue_open",
     "observability.observability_care_attribution_edges",
     "observability.observability_attribution_daily",
     "observability.observability_business_daily",

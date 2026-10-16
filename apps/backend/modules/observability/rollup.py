@@ -54,6 +54,7 @@ from bus.bootstrap import MODULE_SCHEMAS
 from bus.dispatcher import count_outbox_rows, discover_outbox_tables
 from modules.observability.domain.consumer import AI_JOB_SPEND_STATUS_FAILED, AlertRow
 from modules.observability.domain.rollup import (
+    ALERT_KIND_QUEUE_AGE,
     ALERT_STATUS_OPEN,
     ALERT_STATUS_RESOLVED,
     ROLLUP_MODE_DAILY,
@@ -64,6 +65,7 @@ from modules.observability.domain.rollup import (
     ProviderFailures,
     ProviderHealth,
     ProviderUsage,
+    QueueHealth,
     RollupMetricValue,
     RollupThresholds,
     UsageScope,
@@ -77,6 +79,7 @@ from modules.observability.domain.rollup import (
     evaluate_budget_alerts,
     evaluate_outbox_health_alerts,
     evaluate_provider_health_alerts,
+    evaluate_queue_health_alerts,
     evaluated_alert_keys,
     rollup_metrics_for,
     summarize_failures,
@@ -85,6 +88,7 @@ from modules.observability.schema.models import (
     observability_ai_cost_budget,
     observability_ai_job_spend,
     observability_ai_provider_health,
+    observability_ai_queue_open,
     observability_ai_usage_daily,
     observability_alert_events,
     observability_attribution_daily,
@@ -428,6 +432,35 @@ async def _load_outbox_health(
     ]
 
 
+async def _load_queue_health(connection: AsyncConnection) -> list[QueueHealth]:
+    """Every AI queue's still-open depth and oldest enqueue, as the pure input type (B5 #729).
+
+    Read from this module's OWN ``observability_ai_queue_open`` table, which the
+    ``ai_job.queued`` / ``ai_job.completed`` / ``ai_job.failed`` handlers maintain.
+    There is no cross-schema read here and no second source: reading
+    ``intake_ai_jobs`` directly would be exactly the ADR-0003 violation the enqueue
+    event exists to avoid.
+
+    A queue with nothing open is ABSENT rather than present-with-zero, because the
+    consumer deletes a row when its job closes: an empty row here would be a claim
+    that this pass observed an idle queue, and the resolve step is built on
+    "absence of evidence never clears an alert". A queue that appears here is a
+    queue with work in it; a queue that does not is not re-evaluated, and its
+    standing ``queue_age`` alert is left open rather than silently closed.
+    """
+    table = observability_ai_queue_open
+    rows = (
+        await connection.execute(
+            select(table.c.queue, func.count(), func.min(table.c.enqueued_at)).group_by(
+                table.c.queue
+            )
+        )
+    ).all()
+    return [
+        QueueHealth(queue=row.queue, depth=int(row[1]), oldest_enqueued_at=row[2]) for row in rows
+    ]
+
+
 async def _load_actor_spend(connection: AsyncConnection, target_date: date) -> list[ActorSpend]:
     """Load one date of ``observability_ai_job_spend``, the granular attribution source.
 
@@ -736,6 +769,19 @@ async def run_rollup(
         period_spend = await _load_period_spend(connection, period_start, target_date)
         stored_limits = await _load_budget_limits(connection)
         outbox_health = await _load_outbox_health(connection, schemas)
+        queue_health = await _load_queue_health(connection)
+        # The instant the queue ages are measured against. Read HERE rather than
+        # per-queue so every figure in one pass is as of the same moment, and so a
+        # pass that took a minute does not raise two different ages for one queue.
+        #
+        # Live state, deliberately, and the same trade the outbox backlog alert
+        # already makes one line below: what is queued RIGHT NOW cannot be read out
+        # of a day's aggregates, because a stall is by definition an absence of
+        # later activity. So a backfill of an old date evaluates the queue as it
+        # stands during that pass and stamps the age it measured into the alert
+        # payload - the number is self-describing rather than re-derivable from the
+        # target date it ran under.
+        queue_checked_at = datetime.now(UTC)
 
         # Recomputed, not accumulated: every actor row below is the whole figure for
         # its scope, derived from this day's per-job rows and the care-attribution
@@ -814,19 +860,31 @@ async def run_rollup(
         for table_health in outbox_health:
             alerts.extend(evaluate_outbox_health_alerts(table_health, thresholds))
 
+        # Age BEFORE depth, deliberately: age is the leading indicator and the one
+        # that pages on a stall the depth alert would not have noticed (#729).
+        for queue in queue_health:
+            alerts.extend(evaluate_queue_health_alerts(queue, thresholds, now=queue_checked_at))
+
         # What this pass could have re-raised. The resolve step closes an open
         # alert only inside this set, so absence of evidence never clears one.
+        open_alerts = await _load_open_rollup_alerts(connection)
         evaluated = evaluated_alert_keys(
             providers=[usage.provider for usage in usages],
             tables=[table_health.qualified_name for table_health in outbox_health],
+            queues=[queue.queue for queue in queue_health],
+            # A queue with no open jobs at all has DRAINED, which is the clearing of
+            # the age condition rather than an absence of evidence about it - so its
+            # standing alert is reconciled even though no row names it any more.
+            alerted_queues=[
+                queue
+                for alert in open_alerts
+                if alert.kind == ALERT_KIND_QUEUE_AGE
+                for queue in (alert.marker.get("queue"),)
+                if isinstance(queue, str)
+            ],
         )
 
-        raised, resolved = await _apply_alerts(
-            connection,
-            alerts,
-            evaluated,
-            await _load_open_rollup_alerts(connection),
-        )
+        raised, resolved = await _apply_alerts(connection, alerts, evaluated, open_alerts)
 
         report = RollupReport(
             target_date=target_date,

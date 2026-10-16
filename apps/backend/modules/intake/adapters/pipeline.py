@@ -317,6 +317,7 @@ async def _run_structuring_pipeline(
                 provider=configured_provider,
                 model=configured_model,
                 task_type="transcribe",
+                patient_id=row.patient_id,
             )
             try:
                 audio_bytes = await media_store.read(object_key=audio_key)
@@ -459,6 +460,7 @@ async def _run_structuring_pipeline(
             intake_id,
             provider=configured_provider,
             model=configured_model,
+            patient_id=row.patient_id,
         )
         try:
             started = time.monotonic()

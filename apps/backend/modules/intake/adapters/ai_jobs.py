@@ -33,6 +33,7 @@ from modules.intake.domain.events import (
     AiTaskType,
     ai_job_completed_envelope,
     ai_job_failed_envelope,
+    ai_job_queued_envelope,
 )
 from modules.intake.intake_models import INTAKE_SCHEMA
 from modules.intake.outbox import INTAKE_OUTBOX_TABLE
@@ -62,8 +63,9 @@ async def insert_ai_job(
     provider: str,
     model: str,
     task_type: AiTaskType = "structure",
+    patient_id: int,
 ) -> int:
-    """Create the running ai_jobs row for this leg (markable failed on error).
+    """Create the running ai_jobs row for this leg and announce the enqueue.
 
     The row is a booking marked BEFORE the provider call, so its provider/model
     are the configured plan (provider + placeholder model). A later successful
@@ -72,6 +74,22 @@ async def insert_ai_job(
     ``task_type`` defaults to ``structure`` (the pipeline's charge); the
     transcribe leg books a ``transcribe`` row and the drafting leg a ``draft``
     row, all with the SAME pre-call shape.
+
+    ``ai_job.queued`` rides the SAME transaction as the insert (B5, #729), so
+    "entered the pipeline" and "has a row" are one fact rather than two that can
+    disagree. It is what MOD-013 subtracts ``completed``/``failed`` from to
+    derive queue depth and ages the oldest still-open job from - a cross-schema
+    read of this table is forbidden by ADR-0003, so without this event there is
+    no queue to measure.
+
+    ``patient_id`` rides along because it is the actor this enqueue belongs to:
+    MOD-013 keys recent activity per pseudonymous actor from the events it has
+    consumed, and an enqueue with no patient would be activity nobody can count.
+    There is deliberately NO ``doctor_id`` parameter here - at enqueue time no leg
+    knows the doctor (the drafting doctor lives in the care schema, which this
+    module cannot read, and per-doctor attribution rides the
+    ``intake.doctor_assigned`` edge, #720), so it would be null at every call site
+    and read by nobody.
     """
     job_insert = await connection.execute(
         intake_ai_jobs.insert()
@@ -85,7 +103,20 @@ async def insert_ai_job(
         )
         .returning(intake_ai_jobs.c.id)
     )
-    return int(job_insert.scalar_one())
+    ai_job_id = int(job_insert.scalar_one())
+    await write_outbox(
+        connection,
+        INTAKE_SCHEMA,
+        INTAKE_OUTBOX_TABLE,
+        ai_job_queued_envelope(
+            ai_job_id=ai_job_id,
+            intake_id=intake_id,
+            task_type=task_type,
+            patient_id=patient_id,
+            trace_id=get_trace_id(),
+        ),
+    )
+    return ai_job_id
 
 
 #: The one operational failure reason that is a TOKEN rather than an exception

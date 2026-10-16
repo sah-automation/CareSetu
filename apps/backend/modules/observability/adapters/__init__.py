@@ -54,6 +54,7 @@ from bus.events import (
     EVENT_AI_EGRESS_RECORDED,
     EVENT_AI_JOB_COMPLETED,
     EVENT_AI_JOB_FAILED,
+    EVENT_AI_JOB_QUEUED,
     EVENT_AUDIT_EVENT,
     EVENT_AUDIT_TAMPER_DETECTED,
     EVENT_CASE_CLOSED,
@@ -77,6 +78,7 @@ from modules.observability.domain.consumer import (
     AiEgressRecordedTelemetryPayload,
     AiJobCompletedUsagePayload,
     AiJobFailedUsagePayload,
+    AiJobQueuedTelemetryPayload,
     AuditEventTelemetryPayload,
     CaseClosedTelemetryPayload,
     CaseConsultCompleteTelemetryPayload,
@@ -92,11 +94,14 @@ from modules.observability.domain.consumer import (
     build_ai_egress_alert,
     build_tamper_alert,
 )
+from modules.observability.domain.pseudonym import ACTOR_KIND_PATIENT, actor_key
 from modules.observability.facade import (
     OBSERVABILITY_SCHEMA,
     accumulate_ai_usage,
     accumulate_business_count,
+    close_ai_queue_item,
     record_ai_job_spend,
+    record_ai_queue_open,
     record_alert_event,
     record_care_attribution_edge,
 )
@@ -132,6 +137,23 @@ _UNCLAIMED_EVENT_MIRRORS: dict[str, type[BaseModel]] = {
 }
 
 
+def _patient_actor(payload: BaseModel) -> str:
+    """The pseudonymous PATIENT actor behind an AI job payload (B5 #729).
+
+    One function rather than a lambda per handler seat, so the three AI job events
+    cannot each hash a little differently - the recent-activity figure counts
+    DISTINCT keys off this ledger, and a handler that spelled the derivation its
+    own way would silently split one patient into two actors.
+
+    Returns the hash, never the raw reference: the ledger row is durable and a
+    board read must not be able to name anybody. Typed as :class:`BaseModel`
+    because the harness's projection parameter is generic over every mirror model;
+    it is only ever handed one of the three that declares ``patient_id``.
+    """
+    reference: int = payload.patient_id  # type: ignore[attr-defined]
+    return actor_key(ACTOR_KIND_PATIENT, reference)
+
+
 def _register_business_counter(
     registry: HandlerRegistry, event_type: str, mirror: type[BaseModel]
 ) -> None:
@@ -163,20 +185,50 @@ def _register_business_counter(
 def register_handlers(registry: HandlerRegistry) -> None:
     """Register the observability module's event handlers (B4a #702)."""
 
+    async def record_ai_job_queued(envelope: Envelope[BaseModel]) -> None:
+        """Consume ``ai_job.queued``: add one still-open job to the queue table.
+
+        B5 (#729). The ENQUEUE side of the queue, and the reason depth and age are
+        measurable at all: ``ai_job.completed`` / ``ai_job.failed`` say what became
+        of work that has already finished, so with only those two there is nothing
+        to subtract them from and a stalled job is invisible until it is gone.
+
+        Ledger first, then the effect, one transaction - a redelivered ``event_id``
+        finds its ledger row and skips both (at-least-once). The row it writes is
+        deleted by the completion/failure handlers, which is what makes depth
+        exactly ``enqueued - completed - failed``.
+        """
+
+        async def _impl(connection: AsyncConnection, payload: AiJobQueuedTelemetryPayload) -> None:
+            await record_ai_queue_open(connection, envelope, payload)
+
+        await run_handler(
+            envelope,
+            AiJobQueuedTelemetryPayload,
+            _impl,
+            "record_ai_queue_open",
+            OBSERVABILITY_SCHEMA,
+            actor_key_of=_patient_actor,
+        )
+
+    registry.register(EVENT_AI_JOB_QUEUED, record_ai_job_queued)
+
     async def accumulate_ai_job_completed(envelope: Envelope[BaseModel]) -> None:
         """Consume ``ai_job.completed``: accumulate one success into the daily row.
 
-        Ledger first, then both effects, one transaction: a redelivered
+        Ledger first, then all three effects, one transaction: a redelivered
         ``event_id`` finds its ledger row and skips them all (at-least-once).
         B6 (#723) adds the second effect - the one-granular-row-per-job
         ``observability_ai_job_spend`` record the attribution aggregate is
         computed from - in the SAME transaction as the daily accumulation, so the
-        two can never disagree about how many jobs ran.
+        two can never disagree about how many jobs ran. B5 (#729) adds the third:
+        closing the job's queue row, because a completed job is no longer queued.
         """
 
         async def _impl(connection: AsyncConnection, payload: AiJobCompletedUsagePayload) -> None:
             await accumulate_ai_usage(connection, envelope, payload)
             await record_ai_job_spend(connection, envelope, payload)
+            await close_ai_queue_item(connection, payload)
 
         await run_handler(
             envelope,
@@ -184,6 +236,7 @@ def register_handlers(registry: HandlerRegistry) -> None:
             _impl,
             "accumulate_ai_usage_completed",
             OBSERVABILITY_SCHEMA,
+            actor_key_of=_patient_actor,
         )
 
     registry.register(EVENT_AI_JOB_COMPLETED, accumulate_ai_job_completed)
@@ -191,17 +244,20 @@ def register_handlers(registry: HandlerRegistry) -> None:
     async def accumulate_ai_job_failed(envelope: Envelope[BaseModel]) -> None:
         """Consume ``ai_job.failed``: accumulate one failure/timeout into the row.
 
-        Ledger first, then both effects, one transaction: a redelivered
+        Ledger first, then all three effects, one transaction: a redelivered
         ``event_id`` finds its ledger row and skips them all (at-least-once).
         Timeouts are bucketed separately from other failures via the event's
         derived flag. The attempt is still recorded as a per-job row with zero
         tokens and zero cost: a job that was tried and failed spent nothing, but
-        it did happen, and cost-per-pass is a ratio over attempts.
+        it did happen, and cost-per-pass is a ratio over attempts. Since B5 (#729)
+        it also closes the job's queue row - a FAILED job left queued is the worst
+        kind of stuck, because it never recovers and never clears.
         """
 
         async def _impl(connection: AsyncConnection, payload: AiJobFailedUsagePayload) -> None:
             await accumulate_ai_usage(connection, envelope, payload)
             await record_ai_job_spend(connection, envelope, payload)
+            await close_ai_queue_item(connection, payload)
 
         await run_handler(
             envelope,
@@ -209,6 +265,7 @@ def register_handlers(registry: HandlerRegistry) -> None:
             _impl,
             "accumulate_ai_usage_failed",
             OBSERVABILITY_SCHEMA,
+            actor_key_of=_patient_actor,
         )
 
     registry.register(EVENT_AI_JOB_FAILED, accumulate_ai_job_failed)

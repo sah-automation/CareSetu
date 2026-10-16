@@ -40,6 +40,8 @@ from modules.observability.domain.rollup import (
     ALERT_KIND_AI_BUDGET,
     ALERT_KIND_OUTBOX_DEAD_LETTER,
     ALERT_KIND_PROVIDER_HEALTH_DROP,
+    ALERT_KIND_QUEUE_AGE,
+    DEFAULT_QUEUE_AGE_ALERT_THRESHOLD_SECONDS,
     METRIC_KEY_AI_PROVIDER_HEALTH,
     METRIC_KEY_AI_SPEND,
     ROLLUP_MODE_BACKFILL,
@@ -96,6 +98,40 @@ async def _seed_dead_letter(connection: AsyncConnection) -> None:
     )
 
 
+async def _seed_open_queue(
+    connection: AsyncConnection,
+    *,
+    age_seconds: int,
+    queue: str = "structure",
+    ai_job_ref: int = 4242,
+) -> None:
+    """One still-open AI job, enqueued ``age_seconds`` ago, as a stalled leg leaves.
+
+    Seeded by inserting the row the ``ai_job.queued`` handler would have written, so
+    the pass is exercised against the real table rather than a stub of it. The age
+    is anchored to the clock, because the alert compares the oldest open row's age
+    against the threshold AT THE MOMENT the pass runs.
+    """
+    await connection.execute(
+        text(
+            "INSERT INTO observability.observability_ai_queue_open "
+            "(ai_job_ref, queue, enqueued_at) VALUES "
+            "(:ref, :queue, now() - make_interval(secs => :age))"
+        ),
+        {"ref": ai_job_ref, "queue": queue, "age": age_seconds},
+    )
+
+
+async def _open_queue_rows(connection: AsyncConnection) -> list[Any]:
+    result = await connection.execute(
+        text(
+            "SELECT ai_job_ref, queue, enqueued_at FROM "
+            "observability.observability_ai_queue_open ORDER BY ai_job_ref"
+        )
+    )
+    return list(result.mappings().all())
+
+
 async def _seed_previous_health(connection: AsyncConnection) -> None:
     """A previous pass recorded a perfect success rate, so a drop is measurable."""
     await connection.execute(
@@ -133,7 +169,10 @@ async def _budget_row(connection: AsyncConnection) -> Any:
 
 async def _alert_rows(connection: AsyncConnection) -> list[Any]:
     result = await connection.execute(
-        text("SELECT kind, status FROM observability.observability_alert_events ORDER BY kind")
+        text(
+            "SELECT kind, status, severity, payload FROM "
+            "observability.observability_alert_events ORDER BY kind"
+        )
     )
     return list(result.all())
 
@@ -944,6 +983,144 @@ async def test_rollup_refreshes_health_snapshots_budget_and_raises_alerts(
             "timeout_count": 0,
             "cost_paise": 115_000,
         }
+
+
+@pytest.mark.asyncio
+async def test_rollup_raises_and_resolves_a_queue_age_alert_a_depth_alert_could_not_see(
+    engine: AsyncEngine,
+) -> None:
+    """B5 (#729): one wedged job pages on its AGE, and the alert clears when it drains.
+
+    The depth of this queue is a single row - five hundred times below the backlog
+    threshold - so a pass sized on depth sees nothing here at all. The age is what
+    finds it, which is the whole reason the kind exists.
+
+    The resolve half matters as much: the queue drains, and the standing alert must
+    close rather than sit in the feed until somebody clears it by hand.
+    """
+    stale = DEFAULT_QUEUE_AGE_ALERT_THRESHOLD_SECONDS + 600
+    async with engine.begin() as connection:
+        await _seed_open_queue(connection, age_seconds=stale)
+
+    raised = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    assert raised.alerts_raised == 1
+    async with engine.connect() as connection:
+        assert await _open_alert_kinds(connection) == [ALERT_KIND_QUEUE_AGE]
+        rows = await _alert_rows(connection)
+        alert = next(row for row in rows if row.kind == ALERT_KIND_QUEUE_AGE)
+        # The alert NAMES the stalled queue and both figures, so an operator can
+        # judge the stall rather than just see that one fired.
+        assert alert.payload["queue"] == "structure"
+        assert alert.payload["threshold_seconds"] == DEFAULT_QUEUE_AGE_ALERT_THRESHOLD_SECONDS
+        assert alert.payload["oldest_age_seconds"] >= stale
+        assert alert.severity == "critical"
+
+    # A re-run of the same night does not stack a second copy of the same finding.
+    again = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+    assert (again.alerts_raised, again.alerts_resolved) == (0, 0)
+
+    # The job finishes: its queue row goes, as the completion handler deletes it.
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("DELETE FROM observability.observability_ai_queue_open WHERE ai_job_ref = 4242")
+        )
+
+    cleared = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    assert cleared.alerts_resolved == 1
+    async with engine.connect() as connection:
+        assert await _open_alert_kinds(connection) == []
+        assert [(row.kind, row.status) for row in await _alert_rows(connection)] == [
+            (ALERT_KIND_QUEUE_AGE, "resolved")
+        ]
+
+
+@pytest.mark.asyncio
+async def test_one_drained_queue_does_not_resolve_another_queues_open_alert(
+    engine: AsyncEngine,
+) -> None:
+    """The drain rule is per queue: draining ``structure`` clears only ``structure``.
+
+    A pass reconciles the queue-age alerts it can see plus the ones whose queue has
+    gone completely empty. Two stale queues alert; one drains; the other's alert is
+    untouched - otherwise clearing one incident would silently close another.
+    """
+    stale = DEFAULT_QUEUE_AGE_ALERT_THRESHOLD_SECONDS + 60
+    async with engine.begin() as connection:
+        await _seed_open_queue(connection, age_seconds=stale)
+        await _seed_open_queue(connection, age_seconds=stale, queue="draft", ai_job_ref=4243)
+    await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    async with engine.connect() as connection:
+        assert sorted(await _open_alert_kinds(connection)) == [
+            ALERT_KIND_QUEUE_AGE,
+            ALERT_KIND_QUEUE_AGE,
+        ]
+        assert sorted(row.payload["queue"] for row in await _alert_rows(connection)) == [
+            "draft",
+            "structure",
+        ]
+
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("DELETE FROM observability.observability_ai_queue_open WHERE queue = 'draft'")
+        )
+
+    report = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    assert report.alerts_resolved == 1
+    async with engine.connect() as connection:
+        open_rows = await _alert_rows(connection)
+        assert sorted((row.payload["queue"], row.status) for row in open_rows) == [
+            ("draft", "resolved"),
+            ("structure", "open"),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_rollup_resolves_a_queue_age_alert_once_the_queue_drains_completely(
+    engine: AsyncEngine,
+) -> None:
+    """A queue whose open set is EMPTY has cleared its age condition.
+
+    This is the one place absence resolves rather than holds (#729). The table's
+    entire content IS the queue, so "no rows" is a positive statement that nothing
+    is waiting - unlike a provider with no rows, which only means no traffic was
+    observed. Without it, a one-job stall would leave its alert open for ever after
+    the job finished.
+    """
+    stale = DEFAULT_QUEUE_AGE_ALERT_THRESHOLD_SECONDS + 60
+    async with engine.begin() as connection:
+        await _seed_open_queue(connection, age_seconds=stale)
+    await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+    assert await _open_alert_count(engine) == 1
+
+    async with engine.begin() as connection:
+        await connection.execute(text("DELETE FROM observability.observability_ai_queue_open"))
+
+    report = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    assert (report.alerts_raised, report.alerts_resolved) == (0, 1)
+    assert await _open_alert_count(engine) == 0
+
+
+@pytest.mark.asyncio
+async def test_rollup_stays_quiet_about_a_queue_that_is_only_just_stale(
+    engine: AsyncEngine,
+) -> None:
+    """A job inside the age threshold is not an alert, however deep the queue is."""
+    async with engine.begin() as connection:
+        await _seed_open_queue(
+            connection, age_seconds=DEFAULT_QUEUE_AGE_ALERT_THRESHOLD_SECONDS // 2
+        )
+
+    report = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    assert report.alerts_raised == 0
+    async with engine.connect() as connection:
+        assert await _open_alert_kinds(connection) == []
+        assert [row.ai_job_ref for row in await _open_queue_rows(connection)] == [4242]
 
 
 @pytest.mark.asyncio

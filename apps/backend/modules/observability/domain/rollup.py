@@ -95,6 +95,7 @@ ALERT_KIND_PROVIDER_HEALTH_DROP = "provider_health_drop"
 ALERT_KIND_BREAKER_OPEN = "breaker_open"
 ALERT_KIND_OUTBOX_BACKLOG = "outbox_backlog"
 ALERT_KIND_OUTBOX_DEAD_LETTER = "outbox_dead_letter"
+ALERT_KIND_QUEUE_AGE = "queue_age"
 
 #: The share of a budget that raises ``ai_budget`` (plan-phase14 §11, the
 #: "AI budget meter > 80%" member of the minimum alert set).
@@ -114,6 +115,18 @@ DEFAULT_PROVIDER_HEALTH_DROP_THRESHOLD = Decimal("0.2")
 #: dispatch delay so a burst of freshly published events is not an alert.
 DEFAULT_OUTBOX_BACKLOG_ALERT_THRESHOLD = 500
 
+#: How old the OLDEST still-open job in one AI queue may get before ``queue_age``
+#: fires (B5, #729). Fifteen minutes is well past any healthy pipeline leg: a
+#: transcription or structuring call that has been waiting a quarter of an hour is
+#: not slow, it is stuck.
+#:
+#: Deliberately far BELOW what the backlog threshold would allow, because age and
+#: depth are not two views of one condition. A queue holding a single wedged job
+#: has a depth of one - invisible to an alert sized for five hundred rows - and an
+#: age that grows without limit. Age is the LEADING indicator; a stall has to page
+#: on it, not on the row count that follows an hour later.
+DEFAULT_QUEUE_AGE_ALERT_THRESHOLD_SECONDS = 900
+
 #: Rollup metric-key prefixes registered at import. The suffix appended to each
 #: key is the scope the entry computes over (the provider today).
 METRIC_KEY_AI_PROVIDER_HEALTH = "ai.provider_health"
@@ -126,7 +139,7 @@ _ALERT_SOURCE = "rollup"
 
 #: The payload keys that scope an alert to one subject. Two rollup alerts sharing
 #: a ``(kind, scope)`` are the same finding however many nights in a row it holds.
-_ALERT_SCOPE_KEYS = ("provider", "model", "table", "scope")
+_ALERT_SCOPE_KEYS = ("provider", "model", "table", "queue", "scope")
 
 #: The ``ai_budget`` alert's scope: the ONE monthly cap compared against TOTAL
 #: spend, the same figure ``BudgetMeter.meter()`` reports. Not per provider/model -
@@ -137,13 +150,16 @@ _BUDGET_ALERT_SCOPE = "monthly_total"
 #: the condition clears. ``provider_health_drop`` is deliberately absent: a drop
 #: is a transition with no steady state (the health row holds one rate per
 #: provider), so a pass raises it and leaves it for the operator's history rather
-#: than closing an alert it raised for the same reading.
+#: than closing an alert it raised for the same reading. ``queue_age`` belongs here
+#: (B5, #729): a queue that drains stops being an alert, and an alert that has to be
+#: cleared by hand trains the operator to ignore the feed.
 RESOLVABLE_ALERT_KINDS: frozenset[str] = frozenset(
     {
         ALERT_KIND_AI_BUDGET,
         ALERT_KIND_BREAKER_OPEN,
         ALERT_KIND_OUTBOX_BACKLOG,
         ALERT_KIND_OUTBOX_DEAD_LETTER,
+        ALERT_KIND_QUEUE_AGE,
     }
 )
 
@@ -774,10 +790,13 @@ class RollupThresholds:
     breaker_open_success_rate: Decimal = DEFAULT_BREAKER_OPEN_SUCCESS_RATE
     provider_health_drop_threshold: Decimal = DEFAULT_PROVIDER_HEALTH_DROP_THRESHOLD
     outbox_backlog_threshold: int = DEFAULT_OUTBOX_BACKLOG_ALERT_THRESHOLD
+    queue_age_threshold_seconds: int = DEFAULT_QUEUE_AGE_ALERT_THRESHOLD_SECONDS
 
     def __post_init__(self) -> None:
         if self.monthly_budget_paise <= 0:
             raise ValueError("monthly_budget_paise must be positive")
+        if self.queue_age_threshold_seconds <= 0:
+            raise ValueError("queue_age_threshold_seconds must be positive")
 
 
 # --------------------------------------------------------------- alert builders
@@ -924,6 +943,55 @@ def build_dead_letter_alert(table: str, *, dead_letter_count: int) -> AlertRow:
     )
 
 
+def build_queue_age_alert(
+    queue: str, *, oldest_age_seconds: int, threshold_seconds: int
+) -> AlertRow | None:
+    """The ``queue_age`` alert, or ``None`` at or below ``threshold_seconds``.
+
+    B5 (#729). Raised on the AGE of the oldest job still waiting in one AI queue,
+    never on its depth - a queue holding a single wedged job would sit at a depth
+    of one for the whole incident, which is exactly the case a depth threshold
+    sized for five hundred rows can never see. One alert per queue, so a stalled
+    ``structure`` leg names itself rather than being averaged into the pipeline.
+
+    Critical rather than warning: a job this old is not going to finish, and the
+    patient's workflow behind it is waiting on it. PHI-free by construction - a
+    closed queue name (the pipeline leg) and two durations.
+    """
+    if oldest_age_seconds <= threshold_seconds:
+        return None
+    return AlertRow(
+        severity=ALERT_SEVERITY_CRITICAL,
+        kind=ALERT_KIND_QUEUE_AGE,
+        title=(
+            f"Oldest job in the {queue} AI queue has waited "
+            f"{oldest_age_seconds}s (threshold {threshold_seconds}s)"
+        ),
+        payload={
+            "source": _ALERT_SOURCE,
+            "queue": queue,
+            "oldest_age_seconds": oldest_age_seconds,
+            "threshold_seconds": threshold_seconds,
+        },
+    )
+
+
+@dataclass(frozen=True)
+class QueueHealth:
+    """One AI queue's still-open work, as the rollup's pure input type (B5 #729).
+
+    ``depth`` is ``enqueued - completed - failed``, counted by the adapter from the
+    open-job rows the ``ai_job.queued`` / ``ai_job.completed`` / ``ai_job.failed``
+    events produce. ``oldest_enqueued_at`` is the enqueue instant of the oldest job
+    still open, and is ``None`` for an empty queue - an empty queue has no oldest
+    item, and inventing one would let a healthy idle pipeline raise a stall alert.
+    """
+
+    queue: str
+    depth: int
+    oldest_enqueued_at: datetime | None
+
+
 @dataclass(frozen=True)
 class OutboxTableHealth:
     """One outbox table's row counts, read through the dispatcher's table contract.
@@ -1016,6 +1084,25 @@ def evaluate_outbox_health_alerts(
     return tuple(alerts)
 
 
+def evaluate_queue_health_alerts(
+    health: QueueHealth, thresholds: RollupThresholds, *, now: datetime
+) -> tuple[AlertRow, ...]:
+    """The alerts one AI queue's depth and age raise.
+
+    ``now`` is passed in rather than read from the clock so a test can pin the
+    instant, which is the only way to assert an AGE without waiting for one.
+    """
+    if health.oldest_enqueued_at is None:
+        return ()
+    age = int((now - health.oldest_enqueued_at).total_seconds())
+    alert = build_queue_age_alert(
+        health.queue,
+        oldest_age_seconds=age,
+        threshold_seconds=thresholds.queue_age_threshold_seconds,
+    )
+    return () if alert is None else (alert,)
+
+
 # -------------------------------------------------------- alert identity / scope
 
 
@@ -1035,14 +1122,27 @@ def alert_key(kind: str, payload: Mapping[str, Any]) -> tuple[str, str]:
 
 
 def evaluated_alert_keys(
-    *, providers: Sequence[str], tables: Sequence[str]
+    *,
+    providers: Sequence[str],
+    tables: Sequence[str],
+    queues: Sequence[str] = (),
+    alerted_queues: Sequence[str] = (),
 ) -> set[tuple[str, str]]:
     """Every ``(kind, scope)`` a pass with these inputs could raise.
 
     The resolve step may only close an open alert this pass actually re-evaluated,
     so absence of evidence never clears a standing condition: a pass that saw no
     traffic for a provider leaves that provider's ``breaker_open`` alert open.
-    The monthly budget is always evaluated, so its key is unconditional.
+
+    ``queues`` (what the pass observed) and ``alerted_queues`` (what already carries
+    an open ``queue_age`` alert) are UNIONED, and that is the one place this rule is
+    deliberately broken. A provider with no rows means "we observed no traffic", which
+    is ambiguous; a queue with no open rows means "there is nothing queued", because
+    the table's entire content IS the queue. A drained queue has therefore CLEARED its
+    age condition, and without the union its alert would stay open forever - the
+    standing-problems list polluted by an incident that is over. ``queues`` defaults
+    to empty for callers that do not read queue state, and then no queue alert is
+    resolved at all.
     """
     keys = {
         alert_key(ALERT_KIND_AI_BUDGET, {"source": _ALERT_SOURCE, "scope": _BUDGET_ALERT_SCOPE})
@@ -1059,6 +1159,8 @@ def evaluated_alert_keys(
             alert_key(kind, marker)
             for kind in (ALERT_KIND_OUTBOX_BACKLOG, ALERT_KIND_OUTBOX_DEAD_LETTER)
         )
+    for queue in {*queues, *alerted_queues}:
+        keys.add(alert_key(ALERT_KIND_QUEUE_AGE, {"source": _ALERT_SOURCE, "queue": queue}))
     return keys
 
 

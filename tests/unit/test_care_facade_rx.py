@@ -131,18 +131,21 @@ def _intake_facade(connection: AsyncMock, gateway: MockAiProvider | None = None)
 
 
 def _draft_seam_connection() -> AsyncMock:
-    """Script the intake drafting seam's five executes, in order (B4 #722).
+    """Script the intake drafting seam's executes, in order (B4 #722, B5 #729).
 
     The seam reads its pre-summary, reads the intake, books the ``draft``
-    ``ai_jobs`` row, finalizes it and publishes the metering event - all on one
-    connection. This care suite only cares that the seam got far enough to return
-    a draft, so the metering statements are given throwaway results.
+    ``ai_jobs`` row, ANNOUNCES the enqueue (#729), finalizes the job and publishes
+    the completion event - all on one connection. This care suite only cares that
+    the seam got far enough to return a draft, so the metering statements are given
+    throwaway results; the queue announcement is one of them, since the enqueue and
+    the completion ride the same transaction either way.
     """
     return _connection(
         [
             _FakeResult(row=_pre_summary_row()),
             _FakeResult(row=_intake_row()),
             _FakeResult(scalar=1),
+            _FakeResult(),
             _FakeResult(),
             _FakeResult(),
         ]

@@ -314,16 +314,34 @@ def test_alert_marker_scopes_an_alert_to_its_subject() -> None:
 
 
 def test_evaluated_alert_keys_covers_every_family_the_pass_looked_at() -> None:
-    keys = evaluated_alert_keys(providers=["openai"], tables=["intake.intake_outbox"])
+    keys = evaluated_alert_keys(
+        providers=["openai"], tables=["intake.intake_outbox"], queues=["structure"]
+    )
 
     assert alert_key("ai_budget", {"source": "rollup", "scope": "monthly_total"}) in keys
     for kind in ("breaker_open", "provider_health_drop"):
         assert alert_key(kind, {"source": "rollup", "provider": "openai"}) in keys
     for kind in ("outbox_backlog", "outbox_dead_letter"):
         assert alert_key(kind, {"source": "rollup", "table": "intake.intake_outbox"}) in keys
+    assert alert_key("queue_age", {"source": "rollup", "queue": "structure"}) in keys
     # A provider this pass saw no traffic for is not in the evaluated set, so its
     # standing alert cannot be closed on absence of evidence.
     assert alert_key("breaker_open", {"source": "rollup", "provider": "anthropic"}) not in keys
+    # Same rule for a queue: a queue with nothing open produces no row, so its age
+    # alert is left standing rather than resolved by finding no work.
+    assert alert_key("queue_age", {"source": "rollup", "queue": "draft"}) not in keys
+
+
+def test_evaluated_alert_keys_resolves_no_queue_alert_for_a_pass_that_never_looked() -> None:
+    """The ``queues`` default must mean "saw none", not "saw all of them".
+
+    A default that resolved every queue alert would let a caller that forgot the
+    argument close an open stall on the strength of having checked nothing - the
+    exact failure the resolve step exists to prevent.
+    """
+    keys = evaluated_alert_keys(providers=["openai"], tables=[])
+
+    assert not any(kind == "queue_age" for kind, _ in keys)
 
 
 def test_apply_alerts_raises_each_breach_once_per_kind_and_scope() -> None:

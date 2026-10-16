@@ -30,12 +30,14 @@ from modules.observability.domain.rollup import (
     ALERT_KIND_OUTBOX_BACKLOG,
     ALERT_KIND_OUTBOX_DEAD_LETTER,
     ALERT_KIND_PROVIDER_HEALTH_DROP,
+    ALERT_KIND_QUEUE_AGE,
     BREAKER_STATE_CLOSED,
     BREAKER_STATE_OPEN,
     DEFAULT_BREAKER_OPEN_SUCCESS_RATE,
     DEFAULT_DEGRADED_SUCCESS_RATE,
     DEFAULT_OUTBOX_BACKLOG_ALERT_THRESHOLD,
     DEFAULT_PROVIDER_HEALTH_DROP_THRESHOLD,
+    DEFAULT_QUEUE_AGE_ALERT_THRESHOLD_SECONDS,
     FAILURE_REASON_RATE_LIMITED,
     METRIC_KEY_AI_PROVIDER_HEALTH,
     METRIC_KEY_AI_SPEND,
@@ -51,9 +53,11 @@ from modules.observability.domain.rollup import (
     ProviderFailures,
     ProviderHealth,
     ProviderUsage,
+    QueueHealth,
     RollupMetric,
     RollupThresholds,
     UsageScope,
+    alert_key,
     alert_kind_resolves,
     breaker_state_for,
     budget_period_for,
@@ -64,10 +68,13 @@ from modules.observability.domain.rollup import (
     build_dead_letter_alert,
     build_outbox_backlog_alert,
     build_provider_health_drop_alert,
+    build_queue_age_alert,
     compute_provider_health,
     evaluate_budget_alerts,
     evaluate_outbox_health_alerts,
     evaluate_provider_health_alerts,
+    evaluate_queue_health_alerts,
+    evaluated_alert_keys,
     percentile,
     provider_health_drop,
     provider_status,
@@ -83,6 +90,11 @@ from modules.observability.schema.models import observability_attribution_daily
 _TARGET_DATE = date(2026, 10, 12)
 _WINDOW_START = datetime(2026, 10, 12, tzinfo=UTC)
 _WINDOW_END = _WINDOW_START + timedelta(days=1)
+
+#: The instant the queue-age tests measure from. Pinned because an age is the
+#: difference between two instants and a test that used the real clock could only
+#: ever assert "roughly now".
+_QUEUE_NOW = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
 
 _PHI_KEYS = ("phone", "otp", "email", "name", "transcript", "patient", "text", "reason")
 
@@ -472,11 +484,17 @@ def test_the_two_alert_vocabularies_are_disjoint_and_cover_every_rollup_kind() -
         ALERT_KIND_BREAKER_OPEN,
         ALERT_KIND_OUTBOX_BACKLOG,
         ALERT_KIND_OUTBOX_DEAD_LETTER,
+        ALERT_KIND_QUEUE_AGE,
     }
 
     assert not RESOLVABLE_ALERT_KINDS & NON_RESOLVABLE_ALERT_KINDS
     assert every_kind == RESOLVABLE_ALERT_KINDS | NON_RESOLVABLE_ALERT_KINDS
     assert ALERT_KIND_PROVIDER_HEALTH_DROP in NON_RESOLVABLE_ALERT_KINDS
+    # A stalled queue drains and then stops being an alert (B5 #729), so unlike a
+    # provider health DROP it belongs to the resolvable half. Stated here because the
+    # kind would otherwise sit in that set for the same reason it was left out of the
+    # other one - by not being thought about.
+    assert alert_kind_resolves(ALERT_KIND_QUEUE_AGE)
 
 
 def test_the_resolve_step_reads_both_vocabularies_and_unknown_kinds_resolve_to_nothing() -> None:
@@ -714,6 +732,108 @@ def test_build_dead_letter_alert_is_critical() -> None:
     assert alert.kind == ALERT_KIND_OUTBOX_DEAD_LETTER
 
 
+# ------------------------------------------------------------------- queue age
+
+
+def _queue(queue: str, *, depth: int, oldest_age_s: int | None) -> QueueHealth:
+    """A queue whose oldest open job entered ``oldest_age_s`` seconds before now."""
+    enqueued_at = None if oldest_age_s is None else _QUEUE_NOW - timedelta(seconds=oldest_age_s)
+    return QueueHealth(queue=queue, depth=depth, oldest_enqueued_at=enqueued_at)
+
+
+def test_queue_age_alert_fires_on_a_single_wedged_job_the_depth_alert_cannot_see() -> None:
+    """The whole point of the kind: age leads, depth lags (#729).
+
+    A depth of ONE - far below the five-hundred-row backlog threshold - is all a
+    queue holding a single stalled job ever reaches. If the stall had to be
+    measured in depth it would never alert at all.
+    """
+    thresholds = RollupThresholds(monthly_budget_paise=1)
+
+    assert (
+        evaluate_outbox_health_alerts(
+            OutboxTableHealth(schema="intake", table="intake_outbox", pending=1),
+            thresholds,
+        )
+        == ()
+    )
+
+    alerts = evaluate_queue_health_alerts(
+        _queue("structure", depth=1, oldest_age_s=3_600), thresholds, now=_QUEUE_NOW
+    )
+
+    assert [alert.kind for alert in alerts] == [ALERT_KIND_QUEUE_AGE]
+    assert alerts[0].severity == ALERT_SEVERITY_CRITICAL
+    assert alerts[0].payload == {
+        "source": "rollup",
+        "queue": "structure",
+        "oldest_age_seconds": 3_600,
+        "threshold_seconds": DEFAULT_QUEUE_AGE_ALERT_THRESHOLD_SECONDS,
+    }
+    # The alert NAMES its queue, so a stalled structuring leg is identifiable
+    # rather than averaged into a single pipeline-wide figure.
+    assert "structure" in alerts[0].title
+
+
+def test_queue_age_alert_stays_quiet_at_or_below_the_threshold_and_on_an_empty_queue() -> None:
+    thresholds = RollupThresholds(monthly_budget_paise=1)
+    at_threshold = DEFAULT_QUEUE_AGE_ALERT_THRESHOLD_SECONDS
+
+    assert (
+        evaluate_queue_health_alerts(
+            _queue("draft", depth=4, oldest_age_s=at_threshold), thresholds, now=_QUEUE_NOW
+        )
+        == ()
+    )
+    assert (
+        evaluate_queue_health_alerts(
+            _queue("draft", depth=1, oldest_age_s=at_threshold + 1), thresholds, now=_QUEUE_NOW
+        )
+        != ()
+    )
+    # An idle pipeline is healthy: with nothing open there is no oldest item, and
+    # inventing one would alert on every quiet night.
+    assert (
+        evaluate_queue_health_alerts(
+            _queue("draft", depth=0, oldest_age_s=None), thresholds, now=_QUEUE_NOW
+        )
+        == ()
+    )
+
+
+def test_queue_age_threshold_is_configurable_and_must_be_positive() -> None:
+    tight = RollupThresholds(monthly_budget_paise=1, queue_age_threshold_seconds=60)
+
+    assert (
+        evaluate_queue_health_alerts(
+            _queue("transcribe", depth=1, oldest_age_s=120), tight, now=_QUEUE_NOW
+        )
+        != ()
+    )
+    with pytest.raises(ValueError, match="queue_age_threshold_seconds"):
+        RollupThresholds(monthly_budget_paise=1, queue_age_threshold_seconds=0)
+
+
+def test_a_drained_queue_is_still_evaluated_because_an_empty_open_set_clears_it() -> None:
+    """``alerted_queues`` re-admits a queue this pass no longer sees.
+
+    A queue's rows ARE the queue, so "no open rows" is a positive statement that
+    nothing is waiting - the one condition where absence resolves rather than holds.
+    Without the union, a single wedged job's alert would stay open for ever after the
+    job finished, and the standing-problems list would only ever grow.
+    """
+    observed = evaluated_alert_keys(providers=[], tables=[], queues=["draft"])
+    drained = evaluated_alert_keys(
+        providers=[], tables=[], queues=["draft"], alerted_queues=["structure"]
+    )
+
+    # The union adds exactly one key: the drained queue's, and nothing else moves.
+    assert drained - observed == {
+        alert_key(ALERT_KIND_QUEUE_AGE, {"source": "rollup", "queue": "structure"})
+    }
+    assert observed - drained == set()
+
+
 @pytest.mark.parametrize(
     "alert",
     [
@@ -738,6 +858,7 @@ def test_build_dead_letter_alert_is_critical() -> None:
             Decimal("1.0000"),
             drop_threshold=DEFAULT_PROVIDER_HEALTH_DROP_THRESHOLD,
         ),
+        build_queue_age_alert("structure", oldest_age_seconds=3_600, threshold_seconds=900),
     ],
 )
 def test_every_rollup_alert_payload_is_phi_free(alert: AlertRow) -> None:
@@ -763,6 +884,9 @@ def test_every_rollup_alert_payload_is_phi_free(alert: AlertRow) -> None:
         "table",
         "backlog",
         "dead_letter_count",
+        "queue",
+        "oldest_age_seconds",
+        "threshold_seconds",
     }
     for key in _PHI_KEYS:
         assert key not in payload

@@ -52,6 +52,7 @@ OBSERVABILITY_TABLES: tuple[str, ...] = (
     "observability.observability_ai_cost_budget",
     "observability.observability_ai_usage_daily",
     "observability.observability_ai_job_spend",
+    "observability.observability_ai_queue_open",
     "observability.observability_care_attribution_edges",
     "observability.observability_attribution_daily",
     "observability.observability_business_daily",

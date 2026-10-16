@@ -31,10 +31,12 @@ counts them all), and downgrades afterwards.
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from urllib.parse import unquote
 
 import pytest_asyncio
 from fastapi.responses import JSONResponse
@@ -45,6 +47,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from app.config import Settings
 from app.main import create_app
 from modules.iam.domain.jwt import issue_token
+from modules.observability.domain.pseudonym import ACTOR_KIND_PATIENT, actor_key
 from modules.observability.facade import drain_error_buffer, drain_http_counter
 from observability.error_capture import pending_error_captures, reset_error_capture
 from observability.http_counter import pending_http_counts, reset_http_counter
@@ -77,6 +80,7 @@ THROUGHPUT_PATH = "/v1/operator/observability/throughput"
 HEALTH_PATH = "/v1/operator/observability/health"
 ALERTS_PATH = "/v1/operator/observability/alerts"
 DEEPLINKS_PATH = "/v1/operator/observability/deeplinks"
+RELIABILITY_PATH = "/v1/operator/observability/reliability"
 
 
 async def _seed(connection: AsyncConnection) -> None:
@@ -1178,3 +1182,206 @@ async def test_the_throughput_route_refuses_anonymous_and_non_operator_callers(
 ) -> None:
     assert _client(database_url).get(THROUGHPUT_PATH).status_code == 401
     assert _client(database_url).get(THROUGHPUT_PATH, headers=_bearer("patient")).status_code == 403
+
+
+# --------------------------------------------------- B5 #729: the reliability board
+
+
+async def _seed_queue(connection: AsyncConnection) -> None:
+    """Two open AI jobs across two queues, as a stalled leg leaves them.
+
+    Rows are inserted exactly as the ``ai_job.queued`` handler writes them, so the
+    read is exercised against what the consumer really persists rather than a
+    hand-shaped stand-in. ``structure`` holds the OLD job - the one an operator has
+    to find - and ``draft`` holds a fresh one, so the board has to report the age of
+    the worst queue and not the average of the two.
+    """
+    await connection.execute(
+        text(
+            "INSERT INTO observability.observability_ai_queue_open "
+            "(ai_job_ref, queue, enqueued_at) VALUES "
+            "(9001, 'structure', now() - interval '40 minutes'), "
+            "(9002, 'structure', now() - interval '3 minutes'), "
+            "(9003, 'draft', now() - interval '2 minutes')"
+        )
+    )
+
+
+async def _seed_activity(connection: AsyncConnection) -> None:
+    """Three consumed events: two actors inside the window, one well before it."""
+    recent = datetime.now(UTC)
+    rows = [
+        (
+            uuid.uuid4(),
+            "ai_job.queued",
+            recent - timedelta(minutes=5),
+            actor_key(ACTOR_KIND_PATIENT, 101),
+        ),
+        (
+            uuid.uuid4(),
+            "ai_job.completed",
+            recent - timedelta(minutes=1),
+            actor_key(ACTOR_KIND_PATIENT, 101),
+        ),
+        (
+            uuid.uuid4(),
+            "ai_job.queued",
+            recent - timedelta(minutes=2),
+            actor_key(ACTOR_KIND_PATIENT, 202),
+        ),
+        # A patient the operator saw an hour ago and again yesterday: the window is
+        # the only thing separating them from the two active patients above.
+        (
+            uuid.uuid4(),
+            "ai_job.queued",
+            recent - timedelta(hours=20),
+            actor_key(ACTOR_KIND_PATIENT, 303),
+        ),
+        # Same actor twice in the window, on two different events - one actor, once.
+        (
+            uuid.uuid4(),
+            "ai_job.queued",
+            recent - timedelta(minutes=3),
+            actor_key(ACTOR_KIND_PATIENT, 202),
+        ),
+    ]
+    for event_id, event_type, processed_at, hashed in rows:
+        await connection.execute(
+            text(
+                "INSERT INTO observability.consumed_events "
+                "(event_id, event_type, processed_at, handler_result) VALUES "
+                "(:event_id, :event_type, :processed_at, CAST(:result AS jsonb))"
+            ),
+            {
+                "event_id": event_id,
+                "event_type": event_type,
+                "processed_at": processed_at,
+                "result": json.dumps({"handler": "record", "actor_key": hashed}),
+            },
+        )
+
+
+@pytest_asyncio.fixture
+async def reliable_engine(rolled_engine: AsyncEngine) -> AsyncIterator[AsyncEngine]:
+    """The rolled engine plus the queue rows and the actor-keyed activity ledger."""
+    async with rolled_engine.begin() as connection:
+        await _seed_queue(connection)
+        await _seed_activity(connection)
+    yield rolled_engine
+
+
+async def test_reliability_reports_queue_depth_oldest_age_and_the_seeded_outbox(
+    reliable_engine: AsyncEngine, database_url: str
+) -> None:
+    """Depth and age come from the open-job rows; backlog from every module's outbox.
+
+    The ``structure`` queue is the one that matters and the depth number alone hides
+    it - two rows is nothing - so the oldest age has to be reported alongside it, and
+    the outbox figures have to match ``/health`` rather than tell a second story.
+    """
+    with _client(database_url) as client:
+        body = client.get(RELIABILITY_PATH, headers=_bearer()).json()
+
+    queues = {row["queue"]: row for row in body["queues"]}
+    assert set(queues) == {"structure", "draft"}
+    assert queues["structure"]["depth"] == 2
+    assert queues["draft"]["depth"] == 1
+    # The worst queue's age drives the headline figure, in whole seconds.
+    assert 2_300 <= body["oldest_queued_age_s"] <= 2_430
+    assert body["oldest_queued_age_s"] == max(row["oldest_age_s"] for row in body["queues"])
+
+    # Every module's outbox is listed, exactly as ``/health`` serves it, and only
+    # intake is stuck.
+    intake = next(row for row in body["outbox"] if row["table"] == "intake_outbox")
+    assert (intake["pending"], intake["inflight"], intake["dead_letter"]) == (2, 1, 1)
+    assert all(row["backlog"] == 0 for row in body["outbox"] if row["table"] != "intake_outbox")
+    assert (body["outbox_backlog"], body["dead_letter_rows"]) == (3, 1)
+
+
+async def test_reliability_counts_distinct_actors_inside_the_requested_window(
+    reliable_engine: AsyncEngine, database_url: str
+) -> None:
+    """Activity is counted from MOD-013's own ledger, deduplicated per actor.
+
+    Five consumed events were seeded, but they belong to three patients and the
+    60-minute window only reaches two of them - patient 101 (twice) and patient 202
+    (twice). A row event count would say five; a per-event count would say four.
+    """
+    with _client(database_url) as client:
+        body = client.get(RELIABILITY_PATH, headers=_bearer()).json()
+
+    assert body["recent_active_actors"] == 2
+    assert body["activity_window_minutes"] == 60
+
+    # Patient 303's only event is 20 hours old, so a longer window finds them.
+    with _client(database_url) as client:
+        wide = client.get(f"{RELIABILITY_PATH}?minutes=1440", headers=_bearer()).json()
+
+    assert wide["recent_active_actors"] == 3
+    assert wide["activity_window_minutes"] == 1440
+    # Widening the window cannot move the queue figures; they are not windowed.
+    assert wide["queues"] == body["queues"]
+
+
+async def test_reliability_links_to_the_tracing_backend_and_stores_no_concurrency(
+    reliable_engine: AsyncEngine, database_url: str
+) -> None:
+    """Concurrency is a LINK, not a number - and never a column.
+
+    The in-flight gauge lives in the tracing backend, which cannot be read from
+    Postgres. The board therefore hands the operator a deep link with the metric
+    expression in it, and the response itself carries no concurrency figure at all
+    rather than a stale or invented one.
+    """
+    with _client(database_url, grafana_url="http://grafana.internal:3000") as client:
+        body = client.get(RELIABILITY_PATH, headers=_bearer()).json()
+
+    link = body["concurrency_grafana_link"]
+    assert link is not None and link.startswith("http://grafana.internal:3000/explore?left=")
+    explore = json.loads(unquote(link.split("left=", 1)[1]))
+    assert explore["queries"][0]["expr"] == "caresetu.http.server.inflight"
+    assert "concurrency" not in body
+
+
+async def test_reliability_without_a_configured_tracing_backend_answers_no_link(
+    reliable_engine: AsyncEngine, database_url: str
+) -> None:
+    """No configured Grafana is a missing affordance, not a broken read."""
+    with _client(database_url) as client:
+        body = client.get(RELIABILITY_PATH, headers=_bearer()).json()
+
+    assert body["concurrency_grafana_link"] is None
+
+
+async def test_reliability_is_empty_before_any_job_is_queued(
+    rolled_engine: AsyncEngine, database_url: str
+) -> None:
+    """A fresh deployment reads zero everywhere rather than erroring.
+
+    No open job means no queue rows at all - the board must report an empty queue
+    list, zero activity, and no oldest age rather than inventing a queue or raising
+    on the missing minimum.
+    """
+    with _client(database_url) as client:
+        body = client.get(RELIABILITY_PATH, headers=_bearer()).json()
+
+    assert (body["queues"], body["oldest_queued_age_s"]) == ([], None)
+    assert body["recent_active_actors"] == 0
+    assert body["outbox_backlog"] == 3
+
+
+async def test_the_reliability_route_refuses_a_window_outside_its_bounds(
+    database_url: str,
+) -> None:
+    """The window is clamped by the contract: 1..1440 minutes, 422 outside."""
+    with _client(database_url) as client:
+        assert client.get(f"{RELIABILITY_PATH}?minutes=0", headers=_bearer()).status_code == 422
+        assert client.get(f"{RELIABILITY_PATH}?minutes=1441", headers=_bearer()).status_code == 422
+
+
+async def test_the_reliability_route_refuses_anonymous_and_non_operator_callers(
+    database_url: str,
+) -> None:
+    assert _client(database_url).get(RELIABILITY_PATH).status_code == 401
+    forbidden = _client(database_url).get(RELIABILITY_PATH, headers=_bearer("patient"))
+    assert forbidden.status_code == 403

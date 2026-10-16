@@ -35,8 +35,9 @@ downgrades afterwards.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any, cast
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -56,6 +57,7 @@ from bus.envelope import Envelope
 from bus.events import (
     EVENT_AI_JOB_COMPLETED,
     EVENT_AI_JOB_FAILED,
+    EVENT_AI_JOB_QUEUED,
     EVENT_AUDIT_TAMPER_DETECTED,
     EVENT_CASE_CONSULT_COMPLETE,
     EVENT_CONSENT_GRANTED,
@@ -73,6 +75,8 @@ from modules.intake.adapters.ai_provider_mock import (
 from modules.intake.domain.events import (
     AiJobCompletedPayload,
     AiJobFailedPayload,
+    AiJobQueuedPayload,
+    AiTaskType,
     IntakeDoctorAssignedPayload,
 )
 from modules.intake.facade import IntakeFacade
@@ -169,6 +173,30 @@ def _failed_envelope(
     )
 
 
+def _queued_envelope(
+    *,
+    ai_job_id: int,
+    task_type: str = "structure",
+    patient_id: int = 7,
+    doctor_id: int | None = None,
+) -> Envelope[AiJobQueuedPayload]:
+    """A MOD-005-style ``ai_job.queued`` envelope as the pipeline publishes (B5 #729)."""
+    return Envelope[AiJobQueuedPayload](
+        event_id=uuid4(),
+        event_type=EVENT_AI_JOB_QUEUED,
+        producer="intake",
+        occurred_at=_NOW,
+        payload=AiJobQueuedPayload(
+            ai_job_id=ai_job_id,
+            intake_id=1,
+            task_type=cast(AiTaskType, task_type),
+            patient_id=patient_id,
+            doctor_id=doctor_id,
+            trace_id=_TRACE_ID,
+        ),
+    )
+
+
 async def _usage_rows(connection: AsyncConnection) -> list[dict[str, object]]:
     result = await connection.execute(
         text(
@@ -193,12 +221,35 @@ async def _spend_rows(connection: AsyncConnection) -> list[dict[str, object]]:
     return [dict(mapping) for mapping in result.mappings().all()]
 
 
+def _at(envelope: Envelope[Any], occurred_at: datetime) -> Envelope[Any]:
+    """The same delivery, stamped at a different instant (same ``event_id``)."""
+    return Envelope[Any](
+        event_id=envelope.event_id,
+        event_type=envelope.event_type,
+        producer=envelope.producer,
+        occurred_at=occurred_at,
+        payload=envelope.payload,
+    )
+
+
+async def _queue_rows(connection: AsyncConnection) -> list[dict[str, object]]:
+    """The still-open AI jobs, as the depth and the oldest-age are derived from."""
+    result = await connection.execute(
+        text(
+            "SELECT ai_job_ref, queue, enqueued_at FROM "
+            "observability.observability_ai_queue_open ORDER BY ai_job_ref"
+        )
+    )
+    return [dict(mapping) for mapping in result.mappings().all()]
+
+
 async def _row_counts(connection: AsyncConnection) -> dict[str, int]:
     """Every table this batch's consumption can write, counted at once."""
     counts = {}
     for table in (
         "observability.observability_ai_usage_daily",
         "observability.observability_ai_job_spend",
+        "observability.observability_ai_queue_open",
         "observability.observability_care_attribution_edges",
         "observability.observability_attribution_daily",
         "observability.consumed_events",
@@ -413,10 +464,155 @@ async def test_ai_job_events_round_trip_accumulate_and_dedupe_on_replay(
         assert after_replay == {
             "observability.observability_ai_usage_daily": 2,
             "observability.observability_ai_job_spend": 4,
+            "observability.observability_ai_queue_open": 0,
             "observability.observability_care_attribution_edges": 0,
             "observability.observability_attribution_daily": 0,
             "observability.consumed_events": 4,
         }
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_queue_depth_is_enqueued_minus_closed_and_the_oldest_row_is_the_aged_one(
+    database_url: str, clean_tables: None
+) -> None:
+    """B5 (#729): the whole queue, derived from events and from nothing else.
+
+    Three jobs enter the pipeline (two ``structure``, one ``transcribe``) and the
+    open set holds exactly those three, each stamped with the ENVELOPE's
+    ``occurred_at`` - so the age an operator reads comes from the clock the
+    delivery carried, not from a second value the producer could disagree with.
+    Two of them then close and the depth falls by exactly two: ``completed`` and
+    ``failed`` are both closures, and a failed job left queued would never drain.
+
+    The aged row is proved to be the OLDEST still-open one rather than "a row":
+    the surviving ``structure`` job is the earlier of the two, so a design that
+    kept the first-seen stamp would pass here only by accident.
+    """
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        older = _NOW - timedelta(minutes=30)
+        newer = _NOW - timedelta(seconds=5)
+        enqueued = [
+            # The first structure enqueue is the OLD one, so the aged row and the
+            # surviving row are different jobs and a "first stamp wins" bug shows.
+            _at(_queued_envelope(ai_job_id=21, task_type="structure"), older),
+            _queued_envelope(ai_job_id=22, task_type="structure"),
+            _at(_queued_envelope(ai_job_id=23, task_type="transcribe"), newer),
+        ]
+
+        async with engine.begin() as connection:
+            for envelope in enqueued:
+                await write_outbox(connection, "intake", INTAKE_OUTBOX_TABLE, envelope)
+
+        registry = _registry()
+        async with engine.connect() as connection:
+            tables = await discover_outbox_tables(connection, ("intake",))
+        for table in tables:
+            await process_outbox_table(engine, table, registry, DEFAULT_DISPATCHER_CONFIG)
+
+        async with engine.connect() as connection:
+            open_rows = await _queue_rows(connection)
+
+        assert [(row["ai_job_ref"], row["queue"]) for row in open_rows] == [
+            (21, "structure"),
+            (22, "structure"),
+            (23, "transcribe"),
+        ]
+        oldest = open_rows[0]["enqueued_at"]
+        assert oldest.tzinfo is not None
+        assert oldest == older
+        assert open_rows[1]["enqueued_at"] == _NOW
+        assert open_rows[2]["enqueued_at"] == newer
+
+        # Two closures, of different kinds: depth falls by exactly two.
+        completed = _completed_envelope(
+            ai_job_id=21,
+            input_tokens=100,
+            output_tokens=10,
+            cost_paise=2,
+            duration_ms=100,
+            low_confidence=False,
+        )
+        failed = _failed_envelope(ai_job_id=23, reason="Ext002CallError", timeout=True)
+        async with engine.begin() as connection:
+            await write_outbox(connection, "intake", INTAKE_OUTBOX_TABLE, completed)
+            await write_outbox(connection, "intake", INTAKE_OUTBOX_TABLE, failed)
+        async with engine.connect() as connection:
+            tables = await discover_outbox_tables(connection, ("intake",))
+        for table in tables:
+            await process_outbox_table(engine, table, registry, DEFAULT_DISPATCHER_CONFIG)
+
+        async with engine.connect() as connection:
+            remaining = await _queue_rows(connection)
+            counts = await _row_counts(connection)
+        assert [(row["ai_job_ref"], row["queue"]) for row in remaining] == [(22, "structure")]
+        # The surviving job is the one still open, so an age computed over the whole
+        # enqueue history would be wrong by the closed job's age.
+        assert remaining[0]["enqueued_at"] == _NOW
+        assert counts["observability.observability_ai_queue_open"] == 1
+
+        # A SECOND enqueue event naming a job already queued (a new event_id, so the
+        # ledger does not stop it) must not double the depth: the row's identity is
+        # the job.
+        duplicate = _queued_envelope(ai_job_id=22, task_type="structure")
+        await dispatch(registry, duplicate)
+        async with engine.connect() as connection:
+            after_duplicate = await _queue_rows(connection)
+        assert len(after_duplicate) == 1
+        assert after_duplicate[0]["ai_job_ref"] == 22
+
+        # Replay the whole pass: no row, no count, nothing moves. The baseline is
+        # taken AFTER the duplicate above, because that one was a genuinely new
+        # event_id and is supposed to have added its own ledger row.
+        async with engine.connect() as connection:
+            before_replay = await _row_counts(connection)
+        await dispatch(registry, enqueued[0])
+        await dispatch(registry, enqueued[1])
+        await dispatch(registry, enqueued[2])
+        await dispatch(registry, completed)
+        await dispatch(registry, failed)
+        async with engine.connect() as connection:
+            after_replay = await _row_counts(connection)
+        assert after_replay == before_replay
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_close_for_a_job_never_enqueued_deletes_nothing_and_does_not_fail(
+    database_url: str, clean_tables: None
+) -> None:
+    """A completion with no matching enqueue is a no-op, not a dead letter.
+
+    It is a real case - a deployment that starts mid-flight has no enqueue history,
+    and a delivery can arrive after its enqueue was dropped - and treating it as a
+    defect would stall the very queue the alert exists to protect. The cost is an
+    over-count that the age alert keeps reporting until the queue drains for real;
+    the alternative is losing the row permanently.
+    """
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        registry = _registry()
+        completed = _completed_envelope(
+            ai_job_id=31,
+            input_tokens=10,
+            output_tokens=1,
+            cost_paise=1,
+            duration_ms=50,
+            low_confidence=False,
+        )
+        await dispatch(registry, completed)
+
+        async with engine.connect() as connection:
+            counts = await _row_counts(connection)
+            pending = await connection.scalar(text("SELECT COUNT(*) FROM intake.intake_outbox"))
+        assert pending == 0
+        # The completion is still metered - only the queue row had nothing to close.
+        assert counts["observability.observability_ai_job_spend"] == 1
+        assert counts["observability.observability_ai_queue_open"] == 0
+        assert counts["observability.consumed_events"] == 1
     finally:
         await engine.dispose()
 

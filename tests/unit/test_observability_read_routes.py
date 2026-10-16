@@ -45,6 +45,8 @@ from modules.observability.facade import (
     ProviderBoardRow,
     ProviderQualityRow,
     QualityReport,
+    QueueDepthRow,
+    ReliabilityReport,
     RouteThroughputRow,
     SystemHealth,
     ThroughputPoint,
@@ -69,6 +71,7 @@ LATENCY_PATH = "/v1/operator/observability/latency"
 PROVIDERS_PATH = "/v1/operator/observability/providers"
 THROUGHPUT_PATH = "/v1/operator/observability/throughput"
 HEALTH_PATH = "/v1/operator/observability/health"
+RELIABILITY_PATH = "/v1/operator/observability/reliability"
 ALERTS_PATH = "/v1/operator/observability/alerts"
 DEEPLINKS_PATH = "/v1/operator/observability/deeplinks"
 
@@ -317,6 +320,35 @@ _HEALTH = SystemHealth(
     open_breakers=1,
 )
 
+_RELIABILITY = ReliabilityReport(
+    queues=[
+        QueueDepthRow(
+            queue="structure",
+            depth=2,
+            oldest_enqueued_at=datetime(2026, 10, 16, 11, 20, tzinfo=UTC),
+            oldest_age_s=2400,
+        )
+    ],
+    queue_depth=2,
+    oldest_queued_age_s=2400,
+    outbox=[
+        OutboxHealthRow(
+            table_schema="intake",
+            table="intake_outbox",
+            pending=2,
+            inflight=1,
+            dead_letter=1,
+            backlog=3,
+        )
+    ],
+    outbox_backlog=3,
+    dead_letter_rows=1,
+    # Named for what it is: RECENT activity, never simultaneous concurrency.
+    recent_active_actors=7,
+    activity_window_minutes=60,
+    concurrency_grafana_link="https://caresetu.grafana.net/explore?left=%7B%7D",
+)
+
 _ALERTS = AlertPage(
     total_count=1,
     alerts=[
@@ -353,6 +385,7 @@ class StubObservabilityFacade:
         self.throughput_minutes: list[int] = []
         self.throughput_empty = False
         self.health_cache_flags: list[bool] = []
+        self.reliability_calls: list[tuple[int, str | None]] = []
         self.alert_pages: list[tuple[int, int]] = []
         self.alert_statuses: list[str | None] = []
         self.deeplink_settings: list[dict[str, Any]] = []
@@ -393,6 +426,12 @@ class StubObservabilityFacade:
     async def get_health(self, *, cache_configured: bool) -> SystemHealth:
         self.health_cache_flags.append(cache_configured)
         return _HEALTH
+
+    async def get_reliability(
+        self, *, minutes: int, grafana_url: str | None = None, now: datetime | None = None
+    ) -> ReliabilityReport:
+        self.reliability_calls.append((minutes, grafana_url))
+        return _RELIABILITY.model_copy(update={"activity_window_minutes": minutes})
 
     async def get_alerts(
         self, *, page: int, page_size: int, status: str | None = None
@@ -716,6 +755,54 @@ def test_health_reports_dependencies_outbox_and_breakers() -> None:
     assert body["outbox"][0]["table_schema"] == "iam"
 
 
+def test_reliability_reports_queue_depth_age_activity_and_the_concurrency_link() -> None:
+    """The wire names must say RECENT ACTIVITY, and concurrency must be a link.
+
+    Both are named acceptance criteria (#729): the field an operator reads has to
+    be labelled for what it measures, and the one figure that is genuinely
+    simultaneous must arrive as a link rather than as a stored number.
+    """
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(RELIABILITY_PATH, headers=_operator())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert facade.reliability_calls == [(60, "")]
+    assert [(row["queue"], row["depth"], row["oldest_age_s"]) for row in body["queues"]] == [
+        ("structure", 2, 2400)
+    ]
+    assert body["queue_depth"] == 2
+    assert body["oldest_queued_age_s"] == 2400
+    # The per-outbox BREAKDOWN, with the dead-letter total beside it: a stuck module
+    # has to be identifiable rather than averaged into one number.
+    assert [(row["table_schema"], row["backlog"]) for row in body["outbox"]] == [("intake", 3)]
+    assert body["outbox_backlog"] == 3
+    assert body["dead_letter_rows"] == 1
+    assert body["recent_active_actors"] == 7
+    assert body["activity_window_minutes"] == 60
+    assert "concurrency" not in body
+    assert body["concurrency_grafana_link"].startswith("https://caresetu.grafana.net/explore")
+
+
+def test_reliability_honours_the_requested_activity_window_and_refuses_a_non_positive_one() -> None:
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(f"{RELIABILITY_PATH}?minutes=15", headers=_operator())
+
+    assert response.status_code == 200
+    assert facade.reliability_calls == [(15, "")]
+    assert response.json()["activity_window_minutes"] == 15
+
+    refused = client.get(f"{RELIABILITY_PATH}?minutes=0", headers=_operator())
+    assert refused.status_code == 422
+    # The ceiling is a response bound, not a system limit, so it is refused at the
+    # edge rather than by the read discovering it mid-query.
+    assert client.get(f"{RELIABILITY_PATH}?minutes=100000", headers=_operator()).status_code == 422
+
+
 def test_health_reports_an_unconfigured_cache_as_disabled() -> None:
     """An unset ``REDIS_URL`` is a configuration choice, never a dialled store."""
     facade = StubObservabilityFacade()
@@ -876,6 +963,7 @@ _ALL_PATHS = [
     PROVIDERS_PATH,
     THROUGHPUT_PATH,
     HEALTH_PATH,
+    RELIABILITY_PATH,
     ALERTS_PATH,
     DEEPLINKS_PATH,
 ]

@@ -228,6 +228,10 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         # PHASE-14A B9 (#728): the degraded-provider board, one row per upstream
         # model API with its healthy/degraded/down status derived at read time.
         "/v1/operator/observability/providers",
+        # PHASE-14A B5 (#729): the reliability read - AI-queue depth with the age of
+        # the oldest queued item, the per-outbox backlog breakdown, the RECENT-activity
+        # figure, and the link out to true concurrency.
+        "/v1/operator/observability/reliability",
     }
 
 

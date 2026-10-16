@@ -34,6 +34,7 @@ from bus.events import (
     EVENT_AI_EGRESS_RECORDED,
     EVENT_AI_JOB_COMPLETED,
     EVENT_AI_JOB_FAILED,
+    EVENT_AI_JOB_QUEUED,
     EVENT_INTAKE_CAPTURED,
     EVENT_INTAKE_COMPOSER_OPENED,
     EVENT_INTAKE_DOCTOR_ASSIGNED,
@@ -122,6 +123,43 @@ class PreSummaryLowConfidencePayload(BaseModel):
 
     intake_id: int
     pre_summary_id: int
+
+
+class AiJobQueuedPayload(BaseModel):
+    """Subject of ``ai_job.queued``: an AI job just ENTERED the pipeline (B5 #729).
+
+    Fired in the SAME transaction as the ``intake_ai_jobs`` row, at the moment
+    that row is created and before the provider call - which is what makes it the
+    enqueue side of the queue: ``ai_job.completed`` / ``ai_job.failed`` say what
+    became of the work, and with no enqueue event a queue has nothing to subtract
+    those two from.
+
+    MOD-013 consumes it to derive queue depth and the age of the oldest still-open
+    job, WITHOUT reading this module's tables (ADR-0003). That is the whole reason
+    this event exists, so the payload carries only what a consumer cannot work out
+    for itself: the job reference (the row's identity), the queue the work sits in
+    (``task_type`` - one queue per pipeline leg, the producer's own closed
+    vocabulary), the patient the work is about, and the trace id.
+
+    **No ``doctor_id`` here, unlike the completed and failed payloads.** At the
+    moment work is enqueued no leg knows the doctor: the drafting doctor lives in
+    the care schema, which this module cannot read (ADR-0003), and per-doctor
+    attribution rides the ``intake.doctor_assigned`` edge instead (#720). So the
+    field would be null at every producer and read by nobody - a doctor's identity
+    reference carried for no reason is exactly what no-PHI rules ask us not to do.
+
+    The ENQUEUE INSTANT IS NOT a payload field: it is the envelope's
+    ``occurred_at``, which the outbox writer stamps on the same row, so the age
+    figure is read from the same clock the delivery carries rather than from a
+    second, separately-supplied one. Identity references only, never clinical
+    content (security-phii-standards no-PHI).
+    """
+
+    ai_job_id: int
+    intake_id: int
+    task_type: AiTaskType
+    patient_id: int
+    trace_id: str | None
 
 
 class AiJobCompletedPayload(BaseModel):
@@ -360,6 +398,29 @@ def pre_summary_low_confidence_envelope(
         event_type=EVENT_PRE_SUMMARY_LOW_CONFIDENCE,
         producer=PRODUCER_MODULE,
         payload=PreSummaryLowConfidencePayload(intake_id=intake_id, pre_summary_id=pre_summary_id),
+    )
+
+
+def ai_job_queued_envelope(
+    *,
+    ai_job_id: int,
+    intake_id: int,
+    task_type: AiTaskType,
+    patient_id: int,
+    trace_id: str | None,
+) -> Envelope[AiJobQueuedPayload]:
+    """Build the ``ai_job.queued`` envelope for the intake outbox (B5 #729)."""
+    return Envelope[AiJobQueuedPayload](
+        event_id=uuid4(),
+        event_type=EVENT_AI_JOB_QUEUED,
+        producer=PRODUCER_MODULE,
+        payload=AiJobQueuedPayload(
+            ai_job_id=ai_job_id,
+            intake_id=intake_id,
+            task_type=task_type,
+            patient_id=patient_id,
+            trace_id=trace_id,
+        ),
     )
 
 

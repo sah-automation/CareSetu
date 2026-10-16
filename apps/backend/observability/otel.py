@@ -45,8 +45,12 @@ import contextlib
 import logging
 import time
 from collections.abc import Iterator, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
+# The metric NAME lives with the pure link builder in the domain, not here: the
+# operator reliability read links to this signal, so the name is part of that
+# read's contract and the SDK - which needs no domain - is the side that reads it.
+from modules.observability.domain.deeplinks import HTTP_INFLIGHT_METRIC
 from observability.sentry import resolve_release
 
 if TYPE_CHECKING:
@@ -355,7 +359,13 @@ def get_tracer(name: str = TRACER_NAME) -> Any:
     return trace.get_tracer(name)
 
 
-def _instrument(name: str, *, kind: str, unit: str, description: str) -> Any:
+#: The instrument kinds this module can create. A closed set rather than free
+#: ``str``, so a typo in a new metric's ``kind=`` is a type error at ``mypy --strict``
+#: instead of a counter quietly recording where a histogram was meant to go.
+InstrumentKind = Literal["counter", "histogram", "up_down_counter"]
+
+
+def _instrument(name: str, *, kind: InstrumentKind, unit: str, description: str) -> Any:
     """Lazily create (and cache) one metric instrument from the meter.
 
     Cached so a request never pays instrument creation twice; the OTel proxy
@@ -368,6 +378,11 @@ def _instrument(name: str, *, kind: str, unit: str, description: str) -> Any:
         meter = get_meter()
         if kind == "histogram":
             instrument = meter.create_histogram(name, unit, description)
+        elif kind == "up_down_counter":
+            # Non-monotonic: the in-flight request count (#729), which is the one
+            # figure whose value legitimately goes back down. See
+            # ``record_request_inflight`` for why this is not a ``Gauge``.
+            instrument = meter.create_up_down_counter(name, unit, description)
         else:
             instrument = meter.create_counter(name, unit, description)
         _instruments[key] = instrument
@@ -435,6 +450,38 @@ def record_request_error(attributes: Mapping[str, Any] | None = None) -> None:
         ).add(1, dict(attributes) if attributes else None)
     except Exception:
         log.debug("request error metric failed", exc_info=True)
+
+
+def record_request_inflight(delta: int) -> None:
+    """Move the in-flight request count by ``delta`` (+1 on entry, -1 on exit); never raises.
+
+    B5 (#729). This is the TRUE concurrency figure the operator reliability read
+    links to instead of approximating in Postgres. Recorded in the SAME
+    ``_MetricsASGIMiddleware`` that times the request, because the window this
+    measure has is exactly that request's: increment before
+    ``await self.app(...)`` and decrement in the ``finally``, so a request that
+    raises still leaves the count where it started.
+
+    An UpDownCounter, not a synchronous ``Gauge``: a gauge carries an ABSOLUTE
+    value, which only one process can know, whereas an up/down delta is summed by
+    whatever receives the export. The value is therefore correct as an in-flight
+    COUNT in the tracing backend today and stays correct the day the deferred
+    multi-instance path is taken, instead of being right only while there is one
+    process.
+
+    Unlabelled on purpose - see :data:`HTTP_INFLIGHT_METRIC`. A failure is logged
+    and swallowed like every other metric call: telemetry that can take a request
+    down is not telemetry.
+    """
+    try:
+        _instrument(
+            HTTP_INFLIGHT_METRIC,
+            kind="up_down_counter",
+            unit="{request}",
+            description="HTTP server requests in flight",
+        ).add(delta)
+    except Exception:
+        log.debug("request inflight metric failed", exc_info=True)
 
 
 def record_outbox_poll(
@@ -516,6 +563,12 @@ class _MetricsASGIMiddleware:
     request so it can time it end to end and read the final status, then records
     the latency histogram and (on a 5xx or a raised exception) the error counter.
     Only PHI-free dimensions are attached (see :func:`_request_metric_attributes`).
+
+    Since B5 (#729) it also moves the in-flight request count (+1 in, -1 in the
+    ``finally``), which is the true concurrency figure the operator reliability read
+    links to. Same middleware on purpose: the count has to rise the instant the
+    request enters and fall the instant it leaves, and this is the only seam that
+    sees both edges of a request.
     """
 
     def __init__(self, app: Any) -> None:
@@ -528,6 +581,7 @@ class _MetricsASGIMiddleware:
         started = time.perf_counter()
         status_code = 500
         failed = False
+        record_request_inflight(1)
 
         async def _send(message: dict[str, Any]) -> None:
             nonlocal status_code
@@ -545,6 +599,7 @@ class _MetricsASGIMiddleware:
             record_request_latency(time.perf_counter() - started, attributes)
             if failed or status_code >= 500:
                 record_request_error(attributes)
+            record_request_inflight(-1)
 
 
 def init_metrics(

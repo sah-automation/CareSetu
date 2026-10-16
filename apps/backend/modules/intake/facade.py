@@ -1553,6 +1553,7 @@ class IntakeFacade:
                 provider=configured_provider,
                 model=configured_model,
                 task_type="draft",
+                patient_id=patient_id,
             )
             try:
                 started = time.monotonic()

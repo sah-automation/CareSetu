@@ -140,6 +140,7 @@ def _draft_seam_connection() -> AsyncMock:
             _FakeResult(scalar=1),
             _FakeResult(),
             _FakeResult(),
+            _FakeResult(),
         ]
     )
 

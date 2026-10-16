@@ -17,7 +17,9 @@ Scope: the whole plan-phase14 §9.1 read table. C1a (#706) serves ``cost``,
 ``cost/trend``, ``usage`` and ``quality``; C1b (#707) adds ``overview``,
 ``latency``, ``health``, ``alerts`` and ``deeplinks``; B9 (#727) adds
 ``throughput``, the per-minute request counter and the capture-liveness answer;
-B9 (#728) adds ``providers``, the degraded-provider board.
+B9 (#728) adds ``providers``, the degraded-provider board; B5 (#729) adds
+``reliability``, the queue depth/age read with the per-outbox breakdown, the
+recent-activity figure and the link out to true concurrency.
 """
 
 from __future__ import annotations
@@ -30,9 +32,11 @@ from app.config import Settings
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_operator
 from modules.observability.facade import (
+    DEFAULT_ACTIVITY_WINDOW_MINUTES,
     DEFAULT_ALERT_PAGE_SIZE,
     DEFAULT_THROUGHPUT_WINDOW_MINUTES,
     DEFAULT_WINDOW_DAYS,
+    MAX_ACTIVITY_WINDOW_MINUTES,
     MAX_ALERT_PAGE_SIZE,
     MAX_THROUGHPUT_WINDOW_MINUTES,
     AlertPage,
@@ -44,6 +48,7 @@ from modules.observability.facade import (
     Overview,
     ProviderBoardReport,
     QualityReport,
+    ReliabilityReport,
     SystemHealth,
     ThroughputReport,
     UsageReport,
@@ -65,6 +70,13 @@ _Window = Annotated[int, Query(ge=1, le=_MAX_WINDOW_DAYS)]
 #: constant rather than an env-driven limit, because it bounds the RESPONSE rather
 #: than the system.
 _MinuteWindow = Annotated[int, Query(ge=1, le=MAX_THROUGHPUT_WINDOW_MINUTES)]
+
+#: The ``/reliability`` recent-ACTIVITY window, in minutes against the consumed-event
+#: ledger's own ``processed_at`` grain. It carries its own ceiling for the same reason
+#: ``_MinuteWindow`` does: it bounds the RESPONSE, so it is a module constant rather
+#: than an env-driven limit - and the queue figures on that read are a now-reading
+#: that this window deliberately does not apply to.
+_ActivityWindow = Annotated[int, Query(ge=1, le=MAX_ACTIVITY_WINDOW_MINUTES)]
 
 #: The alert statuses ``observability_alert_events.status`` can hold. Spelled as a
 #: ``Literal`` rather than imported from the domain so FastAPI can render the
@@ -291,6 +303,38 @@ async def read_health(
     del principal
     settings = _settings(request)
     return await _facade(request).get_health(cache_configured=bool(settings.redis_url.strip()))
+
+
+@router.get(
+    "/v1/operator/observability/reliability",
+    response_model=ReliabilityReport,
+    status_code=status.HTTP_200_OK,
+    summary="Read queue depth and age, per-outbox backlog and recent activity (operator only)",
+)
+async def read_reliability(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_operator)],
+    minutes: _ActivityWindow = DEFAULT_ACTIVITY_WINDOW_MINUTES,
+) -> ReliabilityReport:
+    """How much work is waiting, how old the oldest is, and who was here recently.
+
+    B5 (#729). Three answers on one surface because they are read together: the AI
+    queues with their depth and oldest-item age, the per-module outbox breakdown
+    with the dead-letter total, and the RECENT-ACTIVITY figure.
+
+    The field is ``recent_active_actors``, and the distinction is the point: it is
+    how many distinct people were here in the last ``minutes``, never how many are
+    here now. Simultaneous concurrency is a live signal in the tracing backend, so
+    this read hands back ``concurrency_grafana_link`` instead of a number that
+    would be stale the moment it was computed (#717 decision 17).
+
+    ``minutes`` applies to the activity figure only, and is bounded in the query
+    parameter itself (:data:`MAX_ACTIVITY_WINDOW_MINUTES`): the queue figures are a
+    now-reading, because a queue has no window.
+    """
+    del principal
+    settings = _settings(request)
+    return await _facade(request).get_reliability(minutes=minutes, grafana_url=settings.grafana_url)
 
 
 @router.get(

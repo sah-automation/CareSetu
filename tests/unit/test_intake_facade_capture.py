@@ -60,6 +60,7 @@ from modules.intake.adapters.ai_provider_mock import MockAiProvider
 from modules.intake.domain.events import (
     EVENT_AI_JOB_COMPLETED,
     EVENT_AI_JOB_FAILED,
+    EVENT_AI_JOB_QUEUED,
     EVENT_INTAKE_CAPTURED,
     EVENT_INTAKE_COMPOSER_OPENED,
     EVENT_INTAKE_STARTED,
@@ -940,7 +941,14 @@ async def test_request_rx_draft_writes_a_metered_draft_job_and_publishes_complet
     # schema, and per-actor attribution rides the ``intake.doctor_assigned``
     # edge (#720) rather than a cross-schema read (ADR-0003).
     assert event["doctor_id"] is None
-    assert connection.outbox_types() == [EVENT_AI_JOB_COMPLETED]
+    # The booking announced the enqueue before the completion closed it (#729), so
+    # the leg's queue row has both ends.
+    assert connection.outbox_types() == [EVENT_AI_JOB_QUEUED, EVENT_AI_JOB_COMPLETED]
+    queued = connection.outbox_payload(EVENT_AI_JOB_QUEUED)
+    assert queued["ai_job_id"] == 42
+    assert queued["intake_id"] == 1
+    assert queued["task_type"] == "draft"
+    assert queued["patient_id"] == 7
 
 
 @pytest.mark.asyncio
@@ -1008,7 +1016,19 @@ async def test_request_rx_draft_failure_records_the_job_failed_and_still_raises(
     assert event["reason"] == "Ext002CallError"
     assert event["patient_id"] == 7
     assert event["doctor_id"] is None
-    assert connection.outbox_types() == [EVENT_AI_JOB_FAILED]
+    # The enqueue came FIRST (#729): queue depth is ``enqueued - completed -
+    # failed``, so a job that only published its failure would never have been
+    # counted as queued and the depth arithmetic would have no enqueue term.
+    assert connection.outbox_types() == [EVENT_AI_JOB_QUEUED, EVENT_AI_JOB_FAILED]
+    queued = connection.outbox_payload(EVENT_AI_JOB_QUEUED)
+    # The enqueue names the SAME job the close names - that identity is what makes
+    # the pair a queue in and a queue out rather than two unrelated events.
+    assert queued["ai_job_id"] == event["ai_job_id"]
+    assert queued["task_type"] == "draft"
+    assert queued["patient_id"] == 7
+    # NO doctor reference on the enqueue: at enqueue time the drafting doctor lives
+    # in the care schema (ADR-0003), so carrying one would be a null nobody reads.
+    assert "doctor_id" not in queued
     # The transaction committed on the way out of the facade, so the recorded
     # failure is not rolled back with the exception.
     assert connection.rolled_back is False

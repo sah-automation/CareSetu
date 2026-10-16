@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
+from urllib.parse import unquote
 
 import pytest
 
@@ -38,6 +39,7 @@ from modules.observability.facade import (
     query_overview,
     query_provider_board,
     query_quality,
+    query_reliability,
     query_throughput,
     query_usage,
     window_for,
@@ -1023,6 +1025,109 @@ async def test_health_facade_reads_the_cache_flag_the_caller_resolved() -> None:
     health = await facade.get_health(cache_configured=True)
 
     assert next(entry for entry in health.dependencies if entry.name == "cache").status == "up"
+
+
+# -------------------------------------------------------------- reliability
+
+_RELIABILITY_NOW = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
+
+_QUEUE_ROWS: list[dict[str, object]] = [
+    {
+        "queue": "structure",
+        "depth": 3,
+        # 40 minutes old - a stalled queue, which is the figure that leads.
+        "oldest_enqueued_at": _RELIABILITY_NOW - timedelta(minutes=40),
+    },
+    {
+        "queue": "transcribe",
+        "depth": 1,
+        "oldest_enqueued_at": _RELIABILITY_NOW - timedelta(seconds=5),
+    },
+]
+
+
+async def test_reliability_reports_depth_and_age_per_queue_and_the_outbox_breakdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_dispatcher(monkeypatch)
+    connection = _connection(_QUEUE_ROWS, [{"total": 2}])
+
+    report = await query_reliability(connection, minutes=60, now=_RELIABILITY_NOW, grafana_url=None)
+
+    assert [(row.queue, row.depth, row.oldest_age_s) for row in report.queues] == [
+        ("structure", 3, 2400),
+        ("transcribe", 1, 5),
+    ]
+    assert report.queue_depth == 4
+    # The headline age is the OLDEST across the queues, not an average of them:
+    # averaging would halve a forty-minute stall behind a fresh transcribe.
+    assert report.oldest_queued_age_s == 2400
+    # The per-outbox breakdown comes from the SAME figures /health serves, so the
+    # two reads cannot disagree - and it is a breakdown, not a total, so a stuck
+    # module is identifiable instead of averaged against five healthy ones.
+    assert [(row.table_schema, row.backlog) for row in report.outbox] == [("iam", 9), ("intake", 0)]
+    assert report.outbox_backlog == 9
+    assert report.dead_letter_rows == 1
+
+
+async def test_reliability_reports_recent_activity_and_links_concurrency_rather_than_storing_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_dispatcher(monkeypatch)
+    connection = _connection(_QUEUE_ROWS, [{"total": 2}])
+
+    report = await query_reliability(
+        connection, minutes=60, now=_RELIABILITY_NOW, grafana_url="https://grafana.example.com/"
+    )
+
+    assert report.recent_active_actors == 2
+    assert report.activity_window_minutes == 60
+    # True concurrency is NOT a field on this read - it is a link to the tracing
+    # backend, because a number that changes every millisecond cannot be stored in
+    # Postgres and an approximation beside the real one would be read as the figure.
+    assert not hasattr(report, "concurrency")
+    assert report.concurrency_grafana_link is not None
+    assert report.concurrency_grafana_link.startswith("https://grafana.example.com/explore?left=")
+    assert "caresetu.http.server.inflight" in unquote(report.concurrency_grafana_link)
+
+
+async def test_reliability_answers_an_empty_pipeline_without_inventing_an_age(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_dispatcher(monkeypatch)
+    connection = _connection([], [{"total": 0}])
+
+    report = await query_reliability(connection, minutes=60, now=_RELIABILITY_NOW, grafana_url=None)
+
+    assert report.queues == []
+    assert report.queue_depth == 0
+    assert report.oldest_queued_age_s is None
+    assert report.recent_active_actors == 0
+    # No Grafana configured is an ABSENT link, never a broken one.
+    assert report.concurrency_grafana_link is None
+
+
+async def test_reliability_facade_resolves_its_window_against_the_pinned_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_dispatcher(monkeypatch)
+    facade = ObservabilityFacade(_engine(_connection(_QUEUE_ROWS, [{"total": 1}])))
+
+    report = await facade.get_reliability(minutes=15, now=_RELIABILITY_NOW, grafana_url=None)
+
+    assert report.activity_window_minutes == 15
+    assert report.oldest_queued_age_s == 2400
+
+
+@pytest.mark.parametrize("minutes", [0, -1])
+async def test_the_reliability_window_refuses_a_non_positive_span(
+    minutes: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_dispatcher(monkeypatch)
+    facade = ObservabilityFacade(_engine(_connection(_QUEUE_ROWS, [{"total": 1}])))
+
+    with pytest.raises(ValueError, match="minutes must be positive"):
+        await facade.get_reliability(minutes=minutes, now=_RELIABILITY_NOW, grafana_url=None)
 
 
 # ------------------------------------------------------------------ alerts

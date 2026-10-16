@@ -177,6 +177,7 @@ def _draft_seam_connection() -> AsyncMock:
             _FakeResult(scalar=1),
             _FakeResult(),
             _FakeResult(),
+            _FakeResult(),
         ]
     )
 
@@ -490,6 +491,7 @@ class TestRejectionPath:
                 ),
                 _FakeResult(scalar=1),
                 _FakeResult(row=_doctor_input_row()),
+                _FakeResult(),
                 _FakeResult(),
                 _FakeResult(),
                 _FakeResult(),

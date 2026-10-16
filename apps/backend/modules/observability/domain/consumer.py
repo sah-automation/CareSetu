@@ -127,6 +127,36 @@ def sanitize_failure_reason(reason: str | None) -> str | None:
     )
 
 
+class AiJobQueuedTelemetryPayload(BaseModel):
+    """Observability's mirror of MOD-005's ``ai_job.queued`` payload (B5 #729).
+
+    The enqueue side of the queue: this is the only event that says work ENTERED
+    the pipeline, so it is the only thing ``enqueued`` can be counted from.
+    ``task_type`` is the QUEUE the job sits in - one queue per pipeline leg - and
+    the mirror widens it to ``str`` rather than the producer's ``Literal`` because
+    MOD-013 cannot import the producing module to reuse its alias (ADR-0003); the
+    leg name is a closed vocabulary on the producer side either way, and a leg
+    MOD-013 does not recognise still measures correctly as its own queue.
+
+    The enqueue INSTANT is deliberately absent: it is the envelope's
+    ``occurred_at``, read off the delivery, so the age figure is computed from the
+    same clock the event was stamped with rather than from a second value the
+    producer supplied and could disagree with.
+
+    ``patient_id`` is the actor this enqueue belongs to, and the recent-activity
+    read counts DISTINCT pseudonymous hashes of it. There is no ``doctor_id`` to
+    mirror: the producer has none to give at enqueue time (ADR-0003 puts the
+    drafting doctor in the care schema), so a mirrored field would only ever be
+    null.
+    """
+
+    ai_job_id: int
+    intake_id: int
+    task_type: str
+    patient_id: int
+    trace_id: str | None
+
+
 class AiJobCompletedUsagePayload(BaseModel):
     """Observability's mirror of the ``ai_job.completed`` payload.
 

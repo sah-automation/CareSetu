@@ -122,6 +122,14 @@ EVENT_PRE_SUMMARY_READY = "pre_summary.ready"
 EVENT_PRE_SUMMARY_LOW_CONFIDENCE = "pre_summary.low_confidence"
 EVENT_AI_JOB_COMPLETED = "ai_job.completed"
 EVENT_AI_JOB_FAILED = "ai_job.failed"
+# MOD-005 (intake): emitted when an AI job ENTERS the pipeline - the ``ai_jobs``
+# row is created, before the provider call (B5, #729). ``ai_job.completed`` /
+# ``ai_job.failed`` say what became of the work; without this one nothing says a
+# job ever entered, so queue depth has no enqueue side to subtract from and the
+# age of the oldest still-open job is unmeasurable. MOD-013 derives both from the
+# three events rather than reading ``intake_ai_jobs`` across schemas (ADR-0003).
+# Telemetry, deliberately NOT in ``REGULATED_ACT_TYPES``.
+EVENT_AI_JOB_QUEUED = "ai_job.queued"
 EVENT_AI_EGRESS_RECORDED = "ai_egress.recorded"
 # MOD-005 (intake): emitted at the moment a patient picks their doctor, in the
 # SAME transaction as the ``assigned_partner_id`` write (B4d, #720). Carries the

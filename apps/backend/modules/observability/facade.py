@@ -46,6 +46,16 @@ is what makes the figure queryable from Postgres beyond the vendor's fourteen-da
 retention; ``/throughput`` is where that becomes operator-visible, and it reports
 whether capture was working at all so an empty error feed never reads as a healthy
 system.
+
+B5a (#729) adds :func:`record_ai_queue_open` / :func:`close_ai_queue_item` - the
+still-open AI jobs the ``ai_job.queued`` event opens and the completion/failure
+events close - plus the ``/reliability`` read. Queue DEPTH and the age of the
+oldest queued item are derived from those rows because a cross-schema read of
+``intake_ai_jobs`` is forbidden (ADR-0003): depth is the lagging figure and age
+is the leading one, and an alert that waits for a row count cannot see a queue
+that has stopped draining. The same read serves the per-outbox backlog breakdown
+and the recent-ACTIVITY figure, and LINKS to the tracing backend for true
+concurrency rather than approximating it in Postgres (#717 decision 17).
 """
 
 from __future__ import annotations
@@ -58,7 +68,7 @@ from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel
-from sqlalchemy import Integer, cast, func, literal, literal_column, select, true
+from sqlalchemy import Integer, cast, delete, func, literal, literal_column, select, true
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -66,17 +76,24 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from bus.bootstrap import MODULE_SCHEMAS
 from bus.dispatcher import count_outbox_rows, discover_outbox_tables
 from bus.envelope import Envelope
+from bus.ledger import HANDLER_RESULT_ACTOR_KEY
 from modules.observability.domain.consumer import (
     AI_JOB_SPEND_STATUS_COMPLETED,
     AI_JOB_SPEND_STATUS_FAILED,
     ALERT_SEVERITY_CRITICAL,
     AiJobCompletedUsagePayload,
     AiJobFailedUsagePayload,
+    AiJobQueuedTelemetryPayload,
     AlertRow,
     IntakeDoctorAssignedTelemetryPayload,
     sanitize_failure_reason,
 )
-from modules.observability.domain.deeplinks import grafana_link, langfuse_link, sentry_link
+from modules.observability.domain.deeplinks import (
+    grafana_link,
+    grafana_metric_link,
+    langfuse_link,
+    sentry_link,
+)
 from modules.observability.domain.pseudonym import (
     ACTOR_KIND_DOCTOR,
     ACTOR_KIND_PATIENT,
@@ -105,10 +122,12 @@ from modules.observability.schema.models import (
     observability_ai_cost_budget,
     observability_ai_job_spend,
     observability_ai_provider_health,
+    observability_ai_queue_open,
     observability_ai_usage_daily,
     observability_alert_events,
     observability_business_daily,
     observability_care_attribution_edges,
+    observability_consumed_events,
     observability_http_minute,
     observability_rollup_runs,
 )
@@ -139,12 +158,23 @@ MAX_THROUGHPUT_WINDOW_MINUTES = 1440
 #: reason ``AlertPage`` carries ``total_count``.
 MAX_THROUGHPUT_ROUTE_ROWS = 20
 
+#: Window of the ``/reliability`` read's RECENT-ACTIVITY figure (B5 #729), in
+#: minutes, for the same reason ``/throughput`` counts in minutes: the question is
+#: "who was here just now", and a day-long window answers "who was here this
+#: morning" instead. Sixty minutes is one working hour of a single shift; the
+#: ceiling is a full day, so an operator can widen the lens without the read
+#: becoming an unbounded scan of the consumed-event ledger.
+DEFAULT_ACTIVITY_WINDOW_MINUTES = 60
+MAX_ACTIVITY_WINDOW_MINUTES = 1440
+
 __all__ = [
     "AI_JOB_SPEND_STATUS_COMPLETED",
     "AI_JOB_SPEND_STATUS_FAILED",
+    "DEFAULT_ACTIVITY_WINDOW_MINUTES",
     "DEFAULT_ALERT_PAGE_SIZE",
     "DEFAULT_THROUGHPUT_WINDOW_MINUTES",
     "DEFAULT_WINDOW_DAYS",
+    "MAX_ACTIVITY_WINDOW_MINUTES",
     "MAX_ALERT_PAGE_SIZE",
     "MAX_THROUGHPUT_ROUTE_ROWS",
     "MAX_THROUGHPUT_WINDOW_MINUTES",
@@ -171,6 +201,8 @@ __all__ = [
     "Overview",
     "ProviderQualityRow",
     "QualityReport",
+    "QueueDepthRow",
+    "ReliabilityReport",
     "RollupPlan",
     "RollupReport",
     "RollupRunState",
@@ -183,6 +215,7 @@ __all__ = [
     "UsageRow",
     "accumulate_ai_usage",
     "accumulate_business_count",
+    "close_ai_queue_item",
     "drain_error_buffer",
     "drain_http_counter",
     "load_rollup_state",
@@ -194,9 +227,11 @@ __all__ = [
     "query_latency",
     "query_overview",
     "query_quality",
+    "query_reliability",
     "query_throughput",
     "query_usage",
     "record_ai_job_spend",
+    "record_ai_queue_open",
     "record_alert_event",
     "record_care_attribution_edge",
     "run_rollup",
@@ -368,6 +403,72 @@ async def record_ai_job_spend(
         status=status,
         trace_id=payload.trace_id,
         failure_reason=failure_reason,
+    )
+    await connection.execute(statement)
+
+
+async def record_ai_queue_open(
+    connection: AsyncConnection,
+    envelope: Envelope[BaseModel],
+    payload: AiJobQueuedTelemetryPayload,
+) -> None:
+    """Add one still-open AI job to ``observability_ai_queue_open`` (B5 #729).
+
+    The writer half of #717 decision 16. This table is the OPEN SET of AI work,
+    and it exists because the depth and the age have to be DERIVED FROM AN EVENT:
+    reading ``intake_ai_jobs`` from here would be a cross-schema read, which
+    ADR-0003 forbids, and an enqueue event is what makes the queue measurable at
+    all - ``ai_job.completed`` and ``ai_job.failed`` alone describe only what
+    became of work that is already finished.
+
+    Runs in the same ``run_handler`` transaction as the ``consumed_events`` ledger
+    row, which is written first and gates this effect, so a replayed ``event_id``
+    adds nothing and a crash rolls both back together.
+
+    ``enqueued_at`` is the ENVELOPE's ``occurred_at``, not a payload field: the age
+    of the oldest queued item is the leading indicator this whole table exists to
+    serve, and it must be measured from the instant the delivery was stamped, not
+    from a second value the producer supplied and could disagree with.
+
+    ``ON CONFLICT DO NOTHING`` on ``ai_job_ref``, for the same reason the spend
+    table's unique key exists: the ledger already makes a redelivery a no-op, and a
+    SECOND enqueue event about one job must be a no-op too rather than a silently
+    doubled depth.
+    """
+    statement = (
+        insert(observability_ai_queue_open)
+        .values(
+            ai_job_ref=payload.ai_job_id,
+            queue=payload.task_type,
+            enqueued_at=envelope.occurred_at,
+        )
+        .on_conflict_do_nothing(index_elements=["ai_job_ref"])
+    )
+    await connection.execute(statement)
+
+
+async def close_ai_queue_item(
+    connection: AsyncConnection, payload: AiJobCompletedUsagePayload | AiJobFailedUsagePayload
+) -> None:
+    """Take one finished AI job back out of ``observability_ai_queue_open`` (B5 #729).
+
+    The other half of :func:`record_ai_queue_open`: completed AND failed close an
+    item, so depth is ``enqueued - completed - failed`` by construction rather than
+    by a counter somebody has to remember to decrement.
+
+    A close for a job this consumer never saw enqueue deletes nothing and is not an
+    error. That is a real case - a completion can be delivered after the enqueue was
+    dropped, and a deployment that starts mid-flight has no history at all - and
+    treating it as a defect would put a harmless delivery in the dead letter and
+    stall the very queue the alert is meant to protect. The depth of a queue is
+    then an OVER-count, which the age alert will keep reporting until the item's
+    queue drains for real.
+
+    Takes the payload rather than the envelope because the key is the job, not the
+    event: both close events name the same ``ai_job_id`` the enqueue wrote.
+    """
+    statement = delete(observability_ai_queue_open).where(
+        observability_ai_queue_open.c.ai_job_ref == payload.ai_job_id
     )
     await connection.execute(statement)
 
@@ -1307,6 +1408,76 @@ class SystemHealth(BaseModel):
     open_breakers: int
 
 
+class QueueDepthRow(BaseModel):
+    """One AI pipeline queue: how much work is waiting, and how old the oldest is.
+
+    B5 (#729). ``depth`` is ``enqueued - completed - failed``, derived from the
+    ``observability_ai_queue_open`` rows rather than kept as a running counter, so
+    the figure cannot drift from the events that caused it. One queue per pipeline
+    leg (``transcribe``/``structure``/``draft``/``summarize``) - a queue is named by
+    the work it holds, not by the module that happened to publish it.
+
+    **The two figures are different signals and neither stands in for the other.**
+    ``depth`` is LAGGING: a queue of one row looks identical whether that row was
+    enqueued a second ago or an hour ago. ``oldest_age_s`` is LEADING: it is the
+    only figure that moves when a queue has stalled rather than filled. An operator
+    asking "is it draining" reads the age; one asking "is it backing up" reads the
+    depth.
+
+    ``oldest_age_s`` is ``None`` for a queue with nothing waiting, not ``0`` - an
+    empty queue has no oldest item, and a zero would read as "the oldest item is
+    brand new", which is a claim about work that does not exist.
+    """
+
+    queue: str
+    depth: int
+    oldest_enqueued_at: datetime | None
+    oldest_age_s: int | None
+
+
+class ReliabilityReport(BaseModel):
+    """Queue depth and age, per-outbox backlog, and RECENT ACTIVITY (B5 #729).
+
+    The operator's "is anything stuck, and is anyone even using this" read, and the
+    surface #717 decision 16/17 asked for.
+
+    Two kinds of queue live here and they are not interchangeable:
+
+    * ``queues`` is the AI PIPELINE queue, derived from the enqueue/completion
+      events into this module's own table. It knows how old the oldest waiting job
+      is, which is the figure that pages before any depth does.
+    * ``outbox`` is the per-MODULE event backlog, counted through the dispatcher's
+      sanctioned cross-schema contract. It is broken out per table rather than
+      totalled because a total AVERAGES a stuck module away against five healthy
+      ones - the breakdown is the whole point of carrying it here. ``outbox_backlog``
+      and ``dead_letter_rows`` are the totals an operator scans, and every one of
+      them is the sum of the rows beside it.
+
+    **``recent_active_actors`` is ACTIVITY, never concurrency.** It counts
+    DISTINCT pseudonymous actors whose work this consumer processed over
+    ``activity_window_minutes`` - how many people were here recently, not how many
+    are here now. The field name says so, and the only simultaneous figure on this
+    surface is the link: ``concurrency_grafana_link`` points at the tracing
+    backend's live in-flight metric, which is where a number that changes every
+    millisecond belongs. Nothing here approximates or stores it (#717 decision 17).
+
+    ``recent_active_actors`` is counted from this module's own
+    ``consumed_events`` ledger, so it needs no table of its own and cannot disagree
+    with what was actually consumed: an actor appears here exactly when a delivery
+    naming them was applied.
+    """
+
+    queues: list[QueueDepthRow]
+    queue_depth: int
+    oldest_queued_age_s: int | None
+    outbox: list[OutboxHealthRow]
+    outbox_backlog: int
+    dead_letter_rows: int
+    recent_active_actors: int
+    activity_window_minutes: int
+    concurrency_grafana_link: str | None
+
+
 class AlertEntry(BaseModel):
     """One ``observability_alert_events`` row as the operator feed answers it.
 
@@ -1669,6 +1840,35 @@ async def query_throughput(
     )
 
 
+async def _outbox_health_rows(connection: AsyncConnection) -> list[OutboxHealthRow]:
+    """Every module outbox table's undelivered and dead-lettered row counts.
+
+    The ONE place the outbox breakdown is built, so ``/health`` and
+    ``/reliability`` cannot report different totals for the same tables. Counts
+    come from ``bus.dispatcher``: ADR-0003 names the dispatcher the only sanctioned
+    cross-schema reader, so the SELECT stays there and this layer only reshapes its
+    rows.
+
+    Every ``*_outbox`` table of every module schema is counted, because a stuck
+    outbox is stuck regardless of which module published it - and the rows are kept
+    PER TABLE rather than summed, so the caller can tell which module is stuck.
+    """
+    counts = await count_outbox_rows(
+        connection, await discover_outbox_tables(connection, MODULE_SCHEMAS)
+    )
+    return [
+        OutboxHealthRow(
+            table_schema=row.table.schema,
+            table=row.table.table_name,
+            pending=row.pending,
+            inflight=row.inflight,
+            dead_letter=row.dead_letter,
+            backlog=row.backlog,
+        )
+        for row in counts
+    ]
+
+
 async def query_health(connection: AsyncConnection, *, cache_configured: bool) -> SystemHealth:
     """Read dependency state plus outbox and breaker state (``/health``).
 
@@ -1679,11 +1879,9 @@ async def query_health(connection: AsyncConnection, *, cache_configured: bool) -
     discovering that on every dashboard load - an unconfigured cache is reported
     ``disabled``, the configuration choice it is.
 
-    Outbox counts come from ``bus.dispatcher``: ADR-0003 names the dispatcher the
-    only sanctioned cross-schema reader, so the SELECT stays there and this layer
-    only reshapes its rows. Every ``*_outbox`` table of every module schema is
-    counted, because a stuck outbox is stuck regardless of which module published
-    it.
+    Outbox counts come from :func:`_outbox_health_rows`, the same breakdown
+    ``/reliability`` serves, because both answer the same question about the same
+    tables and two implementations would eventually disagree.
     """
     started = perf_counter()
     await connection.execute(select(literal(1)))
@@ -1696,20 +1894,7 @@ async def query_health(connection: AsyncConnection, *, cache_configured: bool) -
         ),
     ]
 
-    counts = await count_outbox_rows(
-        connection, await discover_outbox_tables(connection, MODULE_SCHEMAS)
-    )
-    outbox = [
-        OutboxHealthRow(
-            table_schema=row.table.schema,
-            table=row.table.table_name,
-            pending=row.pending,
-            inflight=row.inflight,
-            dead_letter=row.dead_letter,
-            backlog=row.backlog,
-        )
-        for row in counts
-    ]
+    outbox = await _outbox_health_rows(connection)
 
     health = observability_ai_provider_health
     breaker_rows = await connection.execute(
@@ -1726,6 +1911,117 @@ async def query_health(connection: AsyncConnection, *, cache_configured: bool) -
         dead_letter_rows=sum(row.dead_letter for row in outbox),
         breakers=breakers,
         open_breakers=sum(1 for row in breakers if row.breaker_state == BREAKER_STATE_OPEN),
+    )
+
+
+async def _query_queue_depth(connection: AsyncConnection, now: datetime) -> list[QueueDepthRow]:
+    """Per-queue depth and oldest-age over the OPEN AI jobs this consumer holds.
+
+    ``count(*)`` and ``min(enqueued_at)`` over the same rows, grouped by queue, so
+    the two figures cannot describe different sets of work - the failing mode of a
+    design that keeps depth in a counter and the oldest stamp in a column, where a
+    missed close leaves the age pinned at a job that is no longer there.
+
+    Age is computed HERE, in the read, from ``now`` rather than stored: it is the
+    difference between two instants, and storing it would make it a number that
+    was true when it was written.
+    """
+    table = observability_ai_queue_open
+    rows = (
+        (
+            await connection.execute(
+                select(
+                    table.c.queue.label("queue"),
+                    func.count().label("depth"),
+                    func.min(table.c.enqueued_at).label("oldest_enqueued_at"),
+                ).group_by(table.c.queue)
+            )
+        )
+        .mappings()
+        .all()
+    )
+    return [
+        QueueDepthRow(
+            queue=row["queue"],
+            depth=int(row["depth"]),
+            oldest_enqueued_at=row["oldest_enqueued_at"],
+            oldest_age_s=(
+                int((now - row["oldest_enqueued_at"]).total_seconds())
+                if row["oldest_enqueued_at"] is not None
+                else None
+            ),
+        )
+        for row in rows
+    ]
+
+
+async def _count_recent_active_actors(connection: AsyncConnection, from_ts: datetime) -> int:
+    """Distinct pseudonymous actors this consumer applied work for since ``from_ts``.
+
+    Read off ``consumed_events`` - this module's OWN ledger - rather than a table
+    of its own, which is what keeps the figure honest for free: an actor is counted
+    exactly when a delivery naming them was applied, and a replay (the ledger's
+    whole purpose) cannot count them twice.
+
+    The actor is the one-way hash the ledger row's ``handler_result`` carries, not
+    an identity reference: the ledger is not a PHI store, and a count of distinct
+    hashes answers "how many people" without naming any of them.
+
+    Rows whose ``handler_result`` has no actor key - every handler that is not
+    about an actor - are excluded rather than counted as one shared anonymous actor,
+    which is the answer a naive ``count(distinct ...)`` with no filter would give.
+    The filter is the JSON ``->`` operator rather than a ``has_key`` predicate: the
+    ledger column is declared generic ``JSON`` (the outbox DDL factory serves every
+    module's ledger), and on PostgreSQL an absent key already extracts as SQL NULL.
+    The key name is the writer's constant rather than a literal spelled here, so the
+    write and this read cannot drift apart into a board that reads zero.
+    """
+    table = observability_consumed_events
+    actor = table.c.handler_result[HANDLER_RESULT_ACTOR_KEY].as_string()
+    statement = select(func.count(func.distinct(actor))).where(
+        table.c.processed_at >= from_ts,
+        actor.is_not(None),
+    )
+    counted = await connection.execute(statement)
+    return int(counted.scalar_one())
+
+
+async def query_reliability(
+    connection: AsyncConnection, *, minutes: int, now: datetime, grafana_url: str | None
+) -> ReliabilityReport:
+    """Read queue depth and age, per-outbox backlog, and recent activity.
+
+    B5 (#729). A now-reading with one windowed figure: the queue figures are the
+    state as of ``now`` (a queue does not have a window), and only the recent-activity
+    count is windowed, by ``minutes``.
+
+    ``now`` is passed in rather than read from the clock so a test can pin the
+    instant and get the identical ages production would report at that instant -
+    the same reason ``/throughput`` resolves its window in the facade.
+
+    ``minutes`` bounds the activity window and is validated HERE, the one place:
+    both the route (whose ``Query`` bounds answer 422) and
+    :meth:`~modules.observability.facade.ObservabilityFacade.get_reliability` funnel
+    into this function, so a caller that arrives by neither still cannot ask for a
+    window of zero or negative minutes and get an answer shaped like a real one.
+    """
+    if minutes < 1:
+        raise ValueError("minutes must be positive")
+    queues = await _query_queue_depth(connection, now)
+    outbox = await _outbox_health_rows(connection)
+    ages = [row.oldest_age_s for row in queues if row.oldest_age_s is not None]
+    return ReliabilityReport(
+        queues=queues,
+        queue_depth=sum(row.depth for row in queues),
+        oldest_queued_age_s=max(ages) if ages else None,
+        outbox=outbox,
+        outbox_backlog=sum(row.backlog for row in outbox),
+        dead_letter_rows=sum(row.dead_letter for row in outbox),
+        recent_active_actors=await _count_recent_active_actors(
+            connection, now - timedelta(minutes=minutes)
+        ),
+        activity_window_minutes=minutes,
+        concurrency_grafana_link=grafana_metric_link(grafana_url),
     )
 
 
@@ -1901,6 +2197,34 @@ class ObservabilityFacade:
         """Read dependency reachability plus outbox and breaker state."""
         async with self._engine.begin() as connection:
             return await query_health(connection, cache_configured=cache_configured)
+
+    async def get_reliability(
+        self,
+        *,
+        minutes: int,
+        grafana_url: str | None = None,
+        now: datetime | None = None,
+    ) -> ReliabilityReport:
+        """Read queue depth and age, the per-outbox backlog, and recent activity.
+
+        B5 (#729). The clock is resolved HERE, against the current UTC instant, for
+        the same reason ``/throughput`` resolves its window here: the route owns the
+        default and the facade owns the clock, so a test can pin ``now`` and get the
+        identical ages the production read would have reported at that instant.
+
+        ``grafana_url`` is configuration, not storage, so it is passed in by the
+        route from Settings and only ever becomes a link - the concurrency figure
+        itself stays in the tracing backend (#717 decision 17).
+
+        The window is NOT validated here: :func:`query_reliability` owns that check
+        and every path into this read goes through it, so a second copy would only
+        be a second place for the two to disagree about what a valid window is.
+        """
+        to_ts = now if now is not None else datetime.now(UTC)
+        async with self._engine.begin() as connection:
+            return await query_reliability(
+                connection, minutes=minutes, now=to_ts, grafana_url=grafana_url
+            )
 
     async def get_alerts(
         self, *, page: int, page_size: int, status: str | None = None

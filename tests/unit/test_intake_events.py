@@ -38,6 +38,7 @@ from bus.events import (
     EVENT_AI_EGRESS_RECORDED,
     EVENT_AI_JOB_COMPLETED,
     EVENT_AI_JOB_FAILED,
+    EVENT_AI_JOB_QUEUED,
     EVENT_INTAKE_CAPTURED,
     EVENT_INTAKE_COMPOSER_OPENED,
     EVENT_INTAKE_DOCTOR_ASSIGNED,
@@ -75,6 +76,7 @@ _ALL_EVENT_TYPES = (
     EVENT_PRE_SUMMARY_LOW_CONFIDENCE,
     EVENT_AI_JOB_COMPLETED,
     EVENT_AI_JOB_FAILED,
+    EVENT_AI_JOB_QUEUED,
     EVENT_AI_EGRESS_RECORDED,
     EVENT_INTAKE_DOCTOR_ASSIGNED,
 )
@@ -103,6 +105,7 @@ def test_every_intake_event_type_is_registered_in_bus_events() -> None:
     assert EVENT_PRE_SUMMARY_LOW_CONFIDENCE == "pre_summary.low_confidence"
     assert EVENT_AI_JOB_COMPLETED == "ai_job.completed"
     assert EVENT_AI_JOB_FAILED == "ai_job.failed"
+    assert EVENT_AI_JOB_QUEUED == "ai_job.queued"
     assert EVENT_AI_EGRESS_RECORDED == "ai_egress.recorded"
     assert EVENT_INTAKE_DOCTOR_ASSIGNED == "intake.doctor_assigned"
     assert EVENT_INTAKE_COMPOSER_OPENED == "intake.composer_opened"

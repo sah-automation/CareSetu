@@ -1,8 +1,9 @@
 """MOD-013: deriving the operator observability deep links from Settings.
 
-C1b (#707). Pure functions over the vendor configuration - no database, no HTTP,
-no network - so every URL shape is unit-tested without a deployment
-(error-handling-observability.md §5, coding-standards §2).
+C1b (#707), widened by B5 (#729) with :func:`grafana_metric_link`. Pure functions
+over the vendor configuration - no database, no HTTP, no network - so every URL
+shape is unit-tested without a deployment (error-handling-observability.md §5,
+coding-standards §2).
 
 The rule these share: **an unconfigured vendor is an ABSENT link, never a
 failure**. The plan's vendor clients are env-gated and no-op when unconfigured
@@ -19,7 +20,26 @@ nothing: the DSN's key half is dropped before the URL is built, so a
 
 from __future__ import annotations
 
-from urllib.parse import urlsplit
+import json
+from urllib.parse import quote, urlsplit
+
+#: TRUE request concurrency, as a tracing-backend signal (B5 #729, #717 decision
+#: 17). Requests in flight at this instant - the only honest place saturation
+#: lives, because a Postgres-resident count would be a snapshot of a number that
+#: changes every millisecond and would read as though it were the real one. The
+#: operator reliability read LINKS here rather than storing anything.
+#:
+#: The NAME is declared here, beside the link that points at it, because the link is
+#: the read's public contract: a metric name spelled once means the recorded signal
+#: and the URL that opens it cannot drift apart. ``observability.otel`` - which
+#: records it - reads the constant from here, so the dependency runs instrument ->
+#: contract and never the other way (coding-standards §2: the domain imports no
+#: infrastructure).
+#:
+#: Unlabelled by design: one series for the whole service. Under the free tier's
+#: ten-thousand-active-series ceiling that is deliberate - a metric labelled per
+#: route would spend a series per endpoint to answer a question the total answers.
+HTTP_INFLIGHT_METRIC = "caresetu.http.server.inflight"
 
 
 def _clean(url: str | None) -> str | None:
@@ -47,6 +67,39 @@ def grafana_link(grafana_url: str | None) -> str | None:
     if base is None:
         return None
     return base.rstrip("/")
+
+
+def grafana_metric_link(
+    grafana_url: str | None, *, metric: str = HTTP_INFLIGHT_METRIC, window: str = "now-1h"
+) -> str | None:
+    """A Grafana **Explore** pane already filtered to ``metric``, or ``None``.
+
+    B5 (#729). The one place true request concurrency is reported: it is a live
+    signal in the tracing backend, so this read LINKS to it rather than storing an
+    approximation of it in Postgres. An approximation stored beside the real thing
+    is worse than no number at all - it would be read as the figure.
+
+    Explore rather than a dashboard, because this repository has shipped no
+    dashboard for the metric: an Explore pane asks the question, while a named
+    dashboard link would point at a page that does not exist. The default metric is
+    :data:`HTTP_INFLIGHT_METRIC` - requests in flight - which is the number the
+    platform records and therefore the only one this link may promise to reach.
+
+    No ``datasource`` key is emitted on purpose. Explore then resolves the default
+    datasource, which is the one configured to receive the platform's own metrics -
+    and hard-coding a datasource UID would put a value in the URL that this
+    deployment may not have. The ``left`` payload is percent-encoded, which is what
+    Grafana expects; ``window`` is a Grafana-relative range, so the pane lands on
+    the last hour rather than on the epoch.
+    """
+    base = grafana_link(grafana_url)
+    if base is None:
+        return None
+    left = json.dumps(
+        {"queries": [{"expr": metric}], "range": {"from": window, "to": "now"}},
+        separators=(",", ":"),
+    )
+    return f"{base}/explore?left={quote(left, safe='')}"
 
 
 def sentry_link(sentry_dsn: str | None) -> str | None:

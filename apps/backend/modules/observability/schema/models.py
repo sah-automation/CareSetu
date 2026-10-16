@@ -13,7 +13,9 @@ source, the care-attribution edge and the daily per-actor aggregate, and the
 error stream, the per-minute HTTP counter and the product event ledger with its
 daily rollup, and the ``v9.4`` pair of columns (B9 #728) that let the provider
 board name a failure - the per-job ``failure_reason`` and the per-provider
-``rate_limit_count``.
+``rate_limit_count`` - and the ``v9.5`` queue table (B5 #729) that holds the
+still-open AI jobs the enqueue/completion events produce, from which depth and the
+oldest queued item's age are derived.
 """
 
 from __future__ import annotations
@@ -231,6 +233,39 @@ observability_ai_job_spend = Table(
     Index("ix_observability_ai_job_spend_usage_date", "usage_date"),
     Index("ix_observability_ai_job_spend_patient", "patient_key", "usage_date"),
     Index("ix_observability_ai_job_spend_doctor", "doctor_key", "usage_date"),
+)
+
+
+observability_ai_queue_open = Table(
+    "observability_ai_queue_open",
+    MODULE_METADATA,
+    Column("id", BigInteger, primary_key=True),
+    # The AI job's OWN reference and the grain of the table: one row per job that
+    # has ENTERED the pipeline and not yet closed, written from ``ai_job.queued``
+    # and deleted by ``ai_job.completed`` / ``ai_job.failed`` (B5, #729). UNIQUE
+    # for the same reason ``ai_job_ref`` is unique on the spend table: the row's
+    # identity is the job, so a second enqueue event about one job is a visible
+    # defect rather than a quietly doubled queue depth.
+    #
+    # Rows are the OPEN set, not a log. That is what makes depth exactly
+    # ``enqueued - completed - failed`` rather than an approximation of it, and it
+    # is what lets the age come from the oldest row still here - an oldest-stamp
+    # column on an aggregate would have to be un-set by a close that did not happen
+    # to be the oldest, which is precisely the stall an age figure must not miss.
+    Column("ai_job_ref", BigInteger, nullable=False),
+    # The QUEUE the work sits in: one queue per pipeline leg, carrying the
+    # producer's closed task-type vocabulary (``transcribe``/``structure``/
+    # ``draft``/``summarize``). A second vocabulary is deliberately NOT declared
+    # here - MOD-013 cannot import the intake module to reuse its enum, and the
+    # leg name is not free-form on the producer side either.
+    Column("queue", String(30), nullable=False),
+    # The enqueue instant, taken from the envelope's ``occurred_at`` rather than a
+    # payload field, so the age figure is read from the same clock the delivery
+    # carried.
+    Column("enqueued_at", DateTime(timezone=True), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    UniqueConstraint("ai_job_ref", name="uq_observability_ai_queue_open_job"),
+    Index("ix_observability_ai_queue_open_queue", "queue"),
 )
 
 
