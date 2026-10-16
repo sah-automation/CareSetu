@@ -87,6 +87,13 @@ async def post_with_backoff(
     attributable to the serving adapter.
     """
     last_status = 0
+    #: Whether the provider refused us for quota at any point in this call. Tracked
+    #: across the retry loop and carried on BOTH exhaustion raises, so the flag means
+    #: one thing: this call failed, and at some attempt the provider answered HTTP
+    #: 429. The answer to that is to send less, which is not the answer to an
+    #: unreachable provider - and the provider board (#728) can only tell them apart
+    #: if the flag survives to the raise.
+    rate_limited = False
     for attempt in range(max_retries + 1):
         if attempt > 0:
             await sleep(_backoff_delay(attempt))
@@ -109,10 +116,15 @@ async def post_with_backoff(
                 raise Ext002CallError(
                     f"{label} {url} failed after {max_retries + 1} attempts (network error)",
                     retries_exhausted=True,
+                    rate_limited=rate_limited,
                 ) from exc
             continue
         if response.status_code == 429 or response.status_code >= 500:
             last_status = response.status_code
+            # Sticky across attempts, exactly as ``last_status`` is: a 429 seen on any
+            # attempt of a call that ultimately failed means the provider was
+            # throttling us, whatever the last attempt happened to return.
+            rate_limited = response.status_code == 429 or rate_limited
             continue
         if response.is_success:
             try:
@@ -145,6 +157,7 @@ async def post_with_backoff(
     raise Ext002CallError(
         f"{label} {url} failed after {max_retries + 1} attempts (last HTTP {last_status})",
         retries_exhausted=True,
+        rate_limited=rate_limited,
     )
 
 
@@ -277,11 +290,23 @@ class Ext002CallError(RuntimeError):
     the caller's problem and never trip it. Owned by the port so every adapter
     (EXT-002 provider, OpenAI-compatible chat, fallback chain) raises and
     routes on the same typed error.
+
+    ``rate_limited`` records WHICH of those happened, for the cases where it
+    changes what an operator should do: a provider answering HTTP 429 is being
+    throttled and the answer is to slow down, while a 5xx or a refused connection
+    is an outage. Both surface as the same class with the same ``retries_exhausted``,
+    so without this flag the provider board (#728) cannot tell the two apart and a
+    throttled provider reads as an unreachable one. Default ``False`` so every
+    existing construction site - the non-retryable rejections, which are never a
+    429 - stays correct without naming the flag.
     """
 
-    def __init__(self, message: str, *, retries_exhausted: bool) -> None:
+    def __init__(
+        self, message: str, *, retries_exhausted: bool, rate_limited: bool = False
+    ) -> None:
         super().__init__(message)
         self.retries_exhausted = retries_exhausted
+        self.rate_limited = rate_limited
 
 
 class AiGateway(Protocol):

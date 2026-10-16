@@ -12,6 +12,12 @@ standards): provider/model, token use, priced cost, duration and the derived
 ``low_confidence`` flag on completion; the failure reason, serving
 provider/model and the derived ``timeout`` classification on failure.
 
+B9 (#728) keeps the failure REASON rather than only its ``timeout``/``failure``
+split, so the provider board can name a degraded provider's failure instead of
+inferring it. The producer emits a closed token, which is what keeps PHI out;
+:func:`sanitize_failure_reason` runs at consume time, BEFORE the write, and
+bounds what is stored to one line.
+
 B7 (#724) adds the ``intake.doctor_assigned`` mirror: the care-attribution
 edge's three references - intake, patient, doctor - and nothing else. It is the
 mirror that makes "which doctor does this intake belong to" answerable inside
@@ -20,6 +26,7 @@ this schema without any module reading another's tables (ADR-0003).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
@@ -53,6 +60,71 @@ AI_JOB_SPEND_STATUS_FAILED = "failed"
 #: CHECK constraint would reject. Spelled as literals rather than built from the
 #: constants above, matching how ``domain.pseudonym`` types ``ActorKind``.
 AiJobSpendStatus = Literal["completed", "failed"]
+
+#: The longest failure reason written to ``observability_ai_job_spend.failure_reason``
+#: (#728). Generous enough for any operational token or class name a producer might
+#: reasonably emit, and short enough that a column an operator reads in a table
+#: cannot become a wall of text. A longer reason is cut, not rejected: refusing to
+#: record why a provider failed would defeat the column's only purpose.
+MAX_FAILURE_REASON_CHARS = 200
+
+#: Appended to a reason cut at :data:`MAX_FAILURE_REASON_CHARS`, so a reader can
+#: see that what they are looking at is not the whole reason rather than assuming
+#: the provider stopped talking mid-sentence.
+_FAILURE_REASON_ELLIPSIS = "..."
+
+#: Control characters, which a reason has no business carrying and which would
+#: corrupt a log line, a CSV export and a terminal alike. Matched rather than
+#: enumerated because the set is every Unicode ``Cc`` codepoint plus the two
+#: separators a reason must never contain: no reason needs a newline (it would
+#: forge a second line in any log it was ever copied into) or a NUL.
+_CONTROL_OR_SEPARATOR = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+#: What splits a raw reason into the line worth keeping and the body a provider
+#: echoed. Separators from :data:`_CONTROL_OR_SEPARATOR` that END a line, so that
+#: "first line" means the same thing here as it does in a log viewer.
+_LINE_BREAK = re.compile(r"[\r\n\u2028\u2029]")
+
+
+def sanitize_failure_reason(reason: str | None) -> str | None:
+    """The failure reason as it may be STORED, or ``None`` when there is nothing to store.
+
+    Runs at consume time, BEFORE the write, so the value that reaches the schema
+    is one bounded line whatever a producer put in the event.
+
+    The PHI guarantee is the PRODUCER's, not this function's: the producer's
+    ``failure_reason()`` emits a closed vocabulary - a class name or a
+    ``rate_limited`` token - and never a provider's body, so there is no patient
+    content in the value to leak. This function is what makes that promise hold
+    at the storage seam even if a producer is later changed or a new one is added
+    (security-phii-standards). Four rules, in order:
+
+    * everything after the first line break is DROPPED, because that is where a
+      provider's echoed request lives. A multi-line body keeps only its status
+      line, which is the part that names the failure;
+    * the surviving line's control characters are replaced, so no reason can forge
+      a second line in a log, a CSV export or a terminal;
+    * every run of whitespace collapses to one space, so the stored value is a
+      single line whose length is meaningful;
+    * the result is capped at :data:`MAX_FAILURE_REASON_CHARS` with an ellipsis, so
+      a runaway single-line body is cut rather than stored whole.
+
+    Whitespace-only and empty reasons become ``None`` - "no reason to give" is an
+    honest NULL, while a column holding ``"   "`` would read as a named failure
+    that says nothing.
+    """
+    if reason is None:
+        return None
+    first_line = _LINE_BREAK.split(reason, maxsplit=1)[0]
+    stripped = _CONTROL_OR_SEPARATOR.sub(" ", first_line)
+    collapsed = " ".join(stripped.split())
+    if not collapsed:
+        return None
+    if len(collapsed) <= MAX_FAILURE_REASON_CHARS:
+        return collapsed
+    return collapsed[: MAX_FAILURE_REASON_CHARS - len(_FAILURE_REASON_ELLIPSIS)] + (
+        _FAILURE_REASON_ELLIPSIS
+    )
 
 
 class AiJobCompletedUsagePayload(BaseModel):

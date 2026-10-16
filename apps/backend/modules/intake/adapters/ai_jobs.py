@@ -18,6 +18,7 @@ MOD-013 usage aggregate structurally unable to count the spend.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -26,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.config import get_settings
 from bus.outbox_writer import write_outbox
+from modules.intake.adapters.ai_gateway import Ext002CallError
 from modules.intake.adapters.ai_provider_mock import MOCK_AI_MODEL
 from modules.intake.domain.events import (
     AiTaskType,
@@ -86,8 +88,47 @@ async def insert_ai_job(
     return int(job_insert.scalar_one())
 
 
+#: The one operational failure reason that is a TOKEN rather than an exception
+#: class name. A provider answering HTTP 429 is being throttled, and the answer to
+#: that is to send less, not to treat the provider as unreachable - so it has to be
+#: nameable on the provider board (#728). Every provider outage otherwise surfaces
+#: as the same ``Ext002CallError``, which names nothing. PHI-free by construction:
+#: it is a closed vocabulary member, not text lifted out of a provider response.
+#:
+#: MOD-013 counts the same token and, per ADR-0003, cannot import this module to
+#: read it, so it keeps a copy. ``test_the_reason_the_producer_emits_is_the_one_
+#: the_rollup_counts`` is what holds the two copies together: a rename here alone
+#: would otherwise leave the board counting zero quotas and reporting a throttled
+#: provider as healthy.
+FAILURE_REASON_RATE_LIMITED = "rate_limited"
+
+
+def _cause_chain(exc: BaseException) -> Iterator[BaseException]:
+    """``exc`` and every exception reachable from it by ``__cause__``/``__context__``.
+
+    The same walk :func:`is_timeout` performs, extracted because both answers are
+    read off the chain and a second copy of the traversal would be free to drift
+    from the first.
+    """
+    current: BaseException | None = exc
+    while current is not None:
+        yield current
+        current = current.__cause__ or current.__context__
+
+
 def failure_reason(exc: BaseException) -> str:
-    """A short, PHI-free operational failure reason for the job + event."""
+    """A short, PHI-free operational failure reason for the job + event.
+
+    The exception's class name for everything it already names, and
+    :data:`FAILURE_REASON_RATE_LIMITED` for the one case it does not. That case is
+    decided from the typed error the gateway raises, never from parsing a
+    provider's response body: a provider error body can echo the request content
+    that was sent to it, so nothing of it is recorded here - only whether the
+    typed call error says the provider refused for quota.
+    """
+    for link in _cause_chain(exc):
+        if isinstance(link, Ext002CallError) and link.rate_limited:
+            return FAILURE_REASON_RATE_LIMITED
     return type(exc).__name__
 
 
@@ -99,12 +140,7 @@ def is_timeout(exc: BaseException) -> bool:
     job classifies the failure as a timeout here - the telemetry consumer only
     reads the boolean off the event (B4a #702), never the gateway internals.
     """
-    current: BaseException | None = exc
-    while current is not None:
-        if isinstance(current, httpx.TimeoutException):
-            return True
-        current = current.__cause__ or current.__context__
-    return False
+    return any(isinstance(link, httpx.TimeoutException) for link in _cause_chain(exc))
 
 
 async def fail_ai_job(
@@ -236,6 +272,7 @@ async def complete_ai_job(
 
 
 __all__ = [
+    "FAILURE_REASON_RATE_LIMITED",
     "complete_ai_job",
     "fail_ai_job",
     "failure_reason",

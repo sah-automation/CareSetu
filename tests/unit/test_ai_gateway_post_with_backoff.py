@@ -168,6 +168,99 @@ async def test_500_retries_then_outage() -> None:
     assert call_count == 3
 
 
+async def test_only_a_429_names_the_failure_as_a_rate_limit() -> None:
+    """B9 #728: the board can say "being throttled" only if the gateway says so.
+
+    A 5xx exhaustion and a 429 exhaustion are the same class with the same
+    ``retries_exhausted``, and both trip the breaker identically. Without this
+    flag the provider board cannot tell being throttled from being unreachable,
+    which are opposite operator responses.
+    """
+
+    async def _exhausted_with(status_code: int) -> Ext002CallError:
+        def _handler(request: httpx.Request) -> httpx.Response:
+            return _error(status_code)
+
+        with pytest.raises(Ext002CallError) as exc_info:
+            await post_with_backoff(
+                _client(_handler),
+                _URL,
+                headers={},
+                max_retries=1,
+                sleep=_noop_sleep,
+            )
+        return exc_info.value
+
+    assert (await _exhausted_with(429)).rate_limited is True
+    assert (await _exhausted_with(500)).rate_limited is False
+
+
+async def test_a_network_failure_is_not_a_rate_limit() -> None:
+    """The flag is set only by an observed refusal, never by defaulting to yes."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused")
+
+    with pytest.raises(Ext002CallError) as exc_info:
+        await post_with_backoff(
+            _client(_handler),
+            _URL,
+            headers={},
+            max_retries=1,
+            sleep=_noop_sleep,
+        )
+
+    assert exc_info.value.rate_limited is False
+
+
+async def test_a_429_on_one_attempt_still_names_the_call_as_rate_limited() -> None:
+    """Sticky across the retry loop, on BOTH exhaustion raises.
+
+    A provider that refused once and then dropped the connection was throttling
+    us during this call. Whether the final attempt got a 429 or a network error,
+    the operator's answer is the same one, so the flag must not depend on which
+    attempt happened to be last.
+    """
+    call_count = 0
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _error(429)
+        raise httpx.ConnectError("refused")
+
+    with pytest.raises(Ext002CallError) as exc_info:
+        await post_with_backoff(
+            _client(_handler),
+            _URL,
+            headers={},
+            max_retries=1,
+            sleep=_noop_sleep,
+        )
+
+    assert exc_info.value.rate_limited is True
+
+
+async def test_a_non_retryable_rejection_is_never_a_rate_limit() -> None:
+    """A 4xx contract rejection is the caller's problem, not a quota refusal."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return _error(400, '{"error": "bad request"}')
+
+    with pytest.raises(Ext002CallError) as exc_info:
+        await post_with_backoff(
+            _client(_handler),
+            _URL,
+            headers={},
+            max_retries=2,
+            sleep=_noop_sleep,
+        )
+
+    assert exc_info.value.retries_exhausted is False
+    assert exc_info.value.rate_limited is False
+
+
 async def test_429_then_success_recovers() -> None:
     call_count = 0
     sleeps: list[float] = []

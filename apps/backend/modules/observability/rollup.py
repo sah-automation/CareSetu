@@ -6,7 +6,8 @@ pure functions in :mod:`modules.observability.domain.rollup`, and persists what
 they decide -
 
 * ``observability_ai_provider_health``: the recomputed p50/p95/p99, success rate
-  and observed breaker state;
+  and observed breaker state, plus the quota-refusal count and the newest failure
+  reason the provider board names a degradation with (B9 #728);
 * ``observability_ai_cost_budget``: the month-to-date paise spend snapshot, with
   the calendar-month reset that clears a closed month's spend;
 * ``observability_business_daily``: one generic-store row per registered metric;
@@ -30,7 +31,9 @@ Two invariants carry over from the request path (ADR-0003, coding-standards §2)
 
 Alert writes are idempotent per ``(kind, scope)``: a nightly job that re-runs (or
 a backfill that overlaps a nightly pass) raises one open alert per breached
-threshold, and resolves it again once the threshold clears.
+threshold, and resolves it again once the threshold clears - except for the kinds
+``alert_kind_resolves`` refuses, a provider health drop above all, which must never
+disappear from the operator's list.
 """
 
 from __future__ import annotations
@@ -49,22 +52,23 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from bus.bootstrap import MODULE_SCHEMAS
 from bus.dispatcher import count_outbox_rows, discover_outbox_tables
-from modules.observability.domain.consumer import AlertRow
+from modules.observability.domain.consumer import AI_JOB_SPEND_STATUS_FAILED, AlertRow
 from modules.observability.domain.rollup import (
     ALERT_STATUS_OPEN,
     ALERT_STATUS_RESOLVED,
-    RESOLVABLE_ALERT_KINDS,
     ROLLUP_MODE_DAILY,
     ActorSpend,
     AttributionDaily,
     BudgetSnapshot,
     OutboxTableHealth,
+    ProviderFailures,
     ProviderHealth,
     ProviderUsage,
     RollupMetricValue,
     RollupThresholds,
     UsageScope,
     alert_key,
+    alert_kind_resolves,
     alert_marker,
     budget_period_for,
     build_attribution_daily,
@@ -75,6 +79,7 @@ from modules.observability.domain.rollup import (
     evaluate_provider_health_alerts,
     evaluated_alert_keys,
     rollup_metrics_for,
+    summarize_failures,
 )
 from modules.observability.schema.models import (
     observability_ai_cost_budget,
@@ -314,6 +319,42 @@ async def _load_provider_usage(
     ]
 
 
+async def _load_provider_failures(
+    connection: AsyncConnection, target_date: date
+) -> dict[str, ProviderFailures]:
+    """Each provider's quota refusals and newest failure reason for ``target_date``.
+
+    Read from ``observability_ai_job_spend`` - the module's own per-job source,
+    already read here for the attribution aggregate - so the board's failure
+    figures come from the same rows every other per-job number comes from rather
+    than from a second tally. Never a cross-schema read (ADR-0003): the raw error
+    lives in ``intake``, and what arrives here is the reason the producer
+    classified as an operational token.
+
+    Failed rows only, ordered ``created_at``/``ai_job_ref`` DESCENDING so the
+    newest failure is first and :func:`summarize_failures` can take it without
+    re-sorting. ``ai_job_ref`` breaks ties because two jobs can share a
+    ``created_at`` to the microsecond, and an unordered "most recent" would make
+    the health row - and therefore what the board names as the last error -
+    depend on the planner's choice of scan order.
+    """
+    table = observability_ai_job_spend
+    statement = (
+        select(table.c.provider, table.c.failure_reason)
+        .where(
+            table.c.usage_date == target_date,
+            table.c.status == AI_JOB_SPEND_STATUS_FAILED,
+            table.c.failure_reason.is_not(None),
+        )
+        .order_by(table.c.provider, table.c.created_at.desc(), table.c.ai_job_ref.desc())
+    )
+    rows = (await connection.execute(statement)).all()
+    by_provider: dict[str, list[str]] = {}
+    for provider, reason in rows:
+        by_provider.setdefault(provider, []).append(reason)
+    return {provider: summarize_failures(reasons) for provider, reasons in by_provider.items()}
+
+
 async def _load_previous_success_rates(
     connection: AsyncConnection,
 ) -> dict[str, Decimal | None]:
@@ -455,7 +496,14 @@ async def _load_doctor_by_intake(
 
 
 async def _upsert_provider_health(connection: AsyncConnection, health: ProviderHealth) -> None:
-    """Refresh one provider's rolling health row (one row per provider)."""
+    """Refresh one provider's rolling health row (one row per provider).
+
+    ``timeout_count``, ``rate_limit_count`` and ``last_error`` are written in FULL
+    like every other column here, so a provider that recovered has yesterday's
+    named failure cleared rather than left sitting under a healthy status - a
+    stale last error is worse than none, because it names a failure that is not
+    happening.
+    """
     values: dict[str, Any] = {
         "provider": health.provider,
         "window_start": health.window_start,
@@ -466,6 +514,9 @@ async def _upsert_provider_health(connection: AsyncConnection, health: ProviderH
         "p95_duration_ms": health.p95_duration_ms,
         "p99_duration_ms": health.p99_duration_ms,
         "breaker_state": health.breaker_state,
+        "timeout_count": health.timeout_count,
+        "rate_limit_count": health.rate_limit_count,
+        "last_error": health.last_error,
     }
     statement = _upsert_statement(observability_ai_provider_health, values, ("provider",))
     await connection.execute(statement)
@@ -592,9 +643,9 @@ async def _apply_alerts(
     ``(kind, scope)`` in ``evaluated`` - and the condition has since cleared. A
     pass that saw no traffic for a provider therefore leaves that provider's
     standing ``breaker_open`` alert open rather than clearing it on absence of
-    evidence. Kinds in :data:`RESOLVABLE_ALERT_KINDS` are standing conditions;
-    the rest (``provider_health_drop``) describe a transition with no steady
-    state, so they are raised and left for the operator's history.
+    evidence. Kinds :func:`alert_kind_resolves` accepts are standing conditions;
+    the ones it refuses (``provider_health_drop``, #728) describe a transition
+    with no steady state, so they are raised and left for the operator's history.
 
     Returns ``(raised, resolved)``.
     """
@@ -615,7 +666,7 @@ async def _apply_alerts(
     stale = [
         open_alert.alert_id
         for open_alert in open_alerts
-        if open_alert.kind in RESOLVABLE_ALERT_KINDS
+        if alert_kind_resolves(open_alert.kind)
         and (open_alert.kind, repr(sorted(open_alert.marker.items()))) in evaluated
         and (open_alert.kind, repr(sorted(open_alert.marker.items()))) not in fired
     ]
@@ -680,6 +731,7 @@ async def run_rollup(
     async with engine.begin() as connection:
         await connection.execute(_reset_budget_period_statement(period_start, period_end))
         usages = await _load_provider_usage(connection, target_date)
+        provider_failures = await _load_provider_failures(connection, target_date)
         previous_rates = await _load_previous_success_rates(connection)
         period_spend = await _load_period_spend(connection, period_start, target_date)
         stored_limits = await _load_budget_limits(connection)
@@ -704,6 +756,10 @@ async def run_rollup(
                 window_end,
                 usage,
                 breaker_open_below=thresholds.breaker_open_success_rate,
+                # Absent for a provider whose failures predate this column or whose
+                # failed jobs all recorded no reason; ``compute_provider_health``
+                # reads that as "none observed", not as a provider with no failures.
+                failures=provider_failures.get(usage.provider),
             )
             await _upsert_provider_health(connection, health)
             health_rows += 1

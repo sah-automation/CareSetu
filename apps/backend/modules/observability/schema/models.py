@@ -11,7 +11,9 @@ percentile-based columns. Column shapes are defined by the same-name
 source, the care-attribution edge and the daily per-actor aggregate, and the
 ``v9.3`` runtime-capture and product table set (B8 #726), which adds the captured
 error stream, the per-minute HTTP counter and the product event ledger with its
-daily rollup.
+daily rollup, and the ``v9.4`` pair of columns (B9 #728) that let the provider
+board name a failure - the per-job ``failure_reason`` and the per-provider
+``rate_limit_count``.
 """
 
 from __future__ import annotations
@@ -100,6 +102,19 @@ observability_ai_provider_health = Table(
     Column("p95_duration_ms", Numeric(10, 2), nullable=True),
     Column("p99_duration_ms", Numeric(10, 2), nullable=True),
     Column("breaker_state", String(20), nullable=False, server_default=text("'closed'")),
+    # How many of the window's calls the provider refused for quota, and how many
+    # timed out. Both are rolled up from ``observability_ai_usage_daily`` at the
+    # provider's grain rather than joined back at read time, so the board is one
+    # table read over rows the SAME pass computed - a read-time join would have to
+    # guess which date each provider was last rolled on, and a provider whose
+    # traffic stopped would report a different day's timeouts than the success rate
+    # beside it. DEFAULT 0 describes the row before the first pass, not a day.
+    Column("timeout_count", Integer, nullable=False, server_default=text("0")),
+    Column("rate_limit_count", Integer, nullable=False, server_default=text("0")),
+    # The most recent failure's reason, so a degraded provider can be NAMED rather
+    # than inferred from its counters (#717 decision 18). Written by the nightly
+    # rollup from the per-job failure reasons; NULL means the window recorded no
+    # failure to name, which is not the same as "no failure" on its own.
     Column("last_error", Text, nullable=True),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     UniqueConstraint("provider", name="uq_observability_ai_provider_health_provider"),
@@ -205,6 +220,12 @@ observability_ai_job_spend = Table(
     # The cross-tool join key: platform logs, tracing backend and AI backend all
     # carry it, so one identifier reaches all three (decision 41).
     Column("trace_id", String(64), nullable=True),
+    # The failed job's operational reason, sanitised and length-capped by the
+    # consumer before it is written (#728). The granular per-job grain is what the
+    # nightly rollup reads to name the provider's ``last_error``: one row per
+    # provider could only hold whatever arrived last, with no ordering to resolve
+    # a tie on. NULL on every completed job - there was no failure to describe.
+    Column("failure_reason", Text, nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     UniqueConstraint("ai_job_ref", name="uq_observability_ai_job_spend_job"),
     Index("ix_observability_ai_job_spend_usage_date", "usage_date"),

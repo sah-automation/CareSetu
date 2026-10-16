@@ -81,6 +81,7 @@ from modules.observability.adapters import (
     register_handlers as register_observability_handlers,
 )
 from modules.observability.domain.consumer import (
+    MAX_FAILURE_REASON_CHARS,
     CaseConsultCompleteTelemetryPayload,
     ConsentLifecycleTelemetryPayload,
     TamperDetectedTelemetryPayload,
@@ -184,8 +185,8 @@ async def _spend_rows(connection: AsyncConnection) -> list[dict[str, object]]:
     result = await connection.execute(
         text(
             "SELECT ai_job_ref, usage_date, intake_ref, patient_key, doctor_key, provider, "
-            "model, task_type, input_tokens, output_tokens, cost_paise, status, trace_id "
-            "FROM observability.observability_ai_job_spend "
+            "model, task_type, input_tokens, output_tokens, cost_paise, status, trace_id, "
+            "failure_reason FROM observability.observability_ai_job_spend "
             "ORDER BY status, model, input_tokens"
         )
     )
@@ -352,6 +353,10 @@ async def test_ai_job_events_round_trip_accumulate_and_dedupe_on_replay(
         assert structure_job["cost_paise"] == 24
         assert structure_job["status"] == "completed"
         assert structure_job["trace_id"] == _TRACE_ID
+        # #728: a completed job has no failure to describe, so the column is NULL
+        # rather than an empty string that would read as a named failure saying
+        # nothing.
+        assert structure_job["failure_reason"] is None
 
         # Attribution is present and is a ONE-WAY HASH of the references that
         # arrived on the event - never the references themselves.
@@ -359,13 +364,22 @@ async def test_ai_job_events_round_trip_accumulate_and_dedupe_on_replay(
         assert structure_job["doctor_key"] == actor_key(ACTOR_KIND_DOCTOR, doctor_ref)
 
         # A failed call reports no usage: it records an attempt at zero, not a
-        # fabricated free job.
-        failed_job = next(row for row in spend if row["status"] == "failed")
+        # fabricated free job. Selected by job reference because both failed jobs
+        # sort identically on the helper's ORDER BY.
+        failed_job = next(row for row in spend if row["ai_job_ref"] == 11)
         assert failed_job["model"] == "whisper-1"
         assert failed_job["task_type"] == "transcribe"
         assert failed_job["input_tokens"] == 0
         assert failed_job["output_tokens"] == 0
         assert failed_job["cost_paise"] == 0
+        # #728: the sanitised reason rides the per-job row, which is what the
+        # nightly rollup reads to name the provider's last error.
+        assert failed_job["failure_reason"] == "Ext002CallError"
+        # The sibling failure keeps its own reason: the two are distinct findings
+        # and the board names the newest one, not a merge of them.
+        assert next(row for row in spend if row["ai_job_ref"] == 12)["failure_reason"] == (
+            "ValidationError"
+        )
 
         # The three jobs that named no doctor (the transcription and structuring
         # legs run before a pick) leave the doctor key NULL - a real gap an
@@ -403,6 +417,58 @@ async def test_ai_job_events_round_trip_accumulate_and_dedupe_on_replay(
             "observability.observability_attribution_daily": 0,
             "observability.consumed_events": 4,
         }
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_hostile_provider_reason_is_sanitised_before_it_reaches_the_schema(
+    database_url: str, clean_tables: None
+) -> None:
+    """#728: the sanitiser runs at CONSUME time, so the raw value never lands.
+
+    A provider error body can echo the request content that was sent to it. This
+    drives one through the real dispatcher and asserts on the stored row rather
+    than on the sanitiser's return value, because the claim is about what the
+    schema ends up holding - a correct helper called after the write would pass a
+    unit test and still store the raw text.
+
+    The seeded reason also carries a clinical-looking fragment, standing in for an
+    echo of the patient's own words on the lines after the provider's status
+    line. The schema must NOT end up holding that echo, nor the newline that would
+    have forged a second row in any export; it must hold the status line alone.
+    """
+    hostile = (
+        "Ext002CallError: provider said 429\n"
+        "request echoed: patient complains of fever and cough since three days. "
+        + "the provider repeated its own diagnostics "
+        * 20
+    )
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        envelope = _failed_envelope(ai_job_id=77, reason=hostile, timeout=False)
+
+        async with engine.begin() as connection:
+            await write_outbox(connection, "intake", INTAKE_OUTBOX_TABLE, envelope)
+        registry = _registry()
+        async with engine.connect() as connection:
+            tables = await discover_outbox_tables(connection, ("intake",))
+        for table in tables:
+            await process_outbox_table(engine, table, registry, DEFAULT_DISPATCHER_CONFIG)
+
+        async with engine.connect() as connection:
+            stored = await connection.scalar(
+                text(
+                    "SELECT failure_reason FROM observability.observability_ai_job_spend "
+                    "WHERE ai_job_ref = 77"
+                )
+            )
+
+        # The provider's status line is what names the failure; everything it
+        # echoed after it is gone, newline included.
+        assert stored == "Ext002CallError: provider said 429"
+        assert "patient" not in stored
+        assert len(stored) < MAX_FAILURE_REASON_CHARS
     finally:
         await engine.dispose()
 

@@ -74,6 +74,7 @@ from modules.observability.domain.consumer import (
     AiJobFailedUsagePayload,
     AlertRow,
     IntakeDoctorAssignedTelemetryPayload,
+    sanitize_failure_reason,
 )
 from modules.observability.domain.deeplinks import grafana_link, langfuse_link, sentry_link
 from modules.observability.domain.pseudonym import (
@@ -86,9 +87,12 @@ from modules.observability.domain.rollup import (
     BREAKER_STATE_OPEN,
     ROLLUP_MODE_BACKFILL,
     ROLLUP_MODE_DAILY,
+    ProviderHealth,
+    ProviderStatus,
     RollupPlan,
     RollupThresholds,
     plan_rollup_dates,
+    provider_status,
     ratio,
 )
 from modules.observability.error_stream import ErrorDrainReport, drain_error_buffer
@@ -298,41 +302,52 @@ async def record_ai_job_spend(
 ) -> None:
     """Write ONE granular ``observability_ai_job_spend`` row for one finished AI job.
 
-    B6 (#723). ``observability_ai_usage_daily`` answers "what did this scope
-    spend" but has already discarded attribution by the time the day closes.
-    This row is the granular source the per-patient and per-doctor numbers are
-    computed FROM, so it is kept at one row per job rather than per scope.
+        B6 (#723). ``observability_ai_usage_daily`` answers "what did this scope
+        spend" but has already discarded attribution by the time the day closes.
+        This row is the granular source the per-patient and per-doctor numbers are
+        computed FROM, so it is kept at one row per job rather than per scope.
 
-    Runs in the same ``run_handler`` transaction as the ``consumed_events``
-    ledger row and as :func:`accumulate_ai_usage`, so all three roll back
-    together and a replayed ``event_id`` writes none of them.
+        Runs in the same ``run_handler`` transaction as the ``consumed_events``
+        ledger row and as :func:`accumulate_ai_usage`, so all three roll back
+        together and a replayed ``event_id`` writes none of them.
 
-    PHI-free by construction: the identity references on the payload are hashed
-    through :func:`~modules.observability.domain.pseudonym.actor_key` before they
-    are written, so the raw patient/doctor reference never lands in this schema
-    (ADR-0025 D7). Nothing else on the payload is clinical - the transcript, the
-    confidence score and the failure reason stay in ``intake``.
+        PHI-free by construction: the identity references on the payload are hashed
+        through :func:`~modules.observability.domain.pseudonym.actor_key` before they
+        are written, so the raw patient/doctor reference never lands in this schema
+        (ADR-0025 D7). Nothing else on the payload is clinical - the transcript, the
+        confidence score and the failure reason stay in ``intake``.
 
     A failed job records zero tokens and zero cost rather than a fabricated free
-    call, mirroring what the daily aggregate does; the row's existence and its
-    ``failed`` status are the record of the attempt.
+        call, mirroring what the daily aggregate does; the row's existence and its
+        ``failed`` status are the record of the attempt.
 
-    ``ai_job_ref`` is UNIQUE on the table, so this insert is also the enforcement
-    of "one row per AI job": the outbox ledger already makes a redelivery of the
-    same ``event_id`` a no-op, and a SECOND event about the same job - which no
-    current producer emits, since every leg books a fresh job row - would fail
-    the constraint instead of quietly doubling one patient's spend.
+        ``failure_reason`` (#728) is what the provider board names a degradation with,
+        so it is kept rather than discarded with the rest of the payload. Two
+        things keep it PHI-free, and they are not the same thing: the producer
+        emits an operational token rather than a provider body, and
+        :func:`sanitize_failure_reason` runs here, BEFORE the write, so what lands
+        is one bounded line - a body that echoed request content is reduced to its
+        status line. The docstring's "the failure reason stays in ``intake``" is
+        about the unredacted reason: this column never holds the provider's words.
+
+        ``ai_job_ref`` is UNIQUE on the table, so this insert is also the enforcement
+        of "one row per AI job": the outbox ledger already makes a redelivery of
+        the same ``event_id`` a no-op, and a SECOND event about the same job - which no
+        current producer emits, since every leg books a fresh job row - would fail
+        the constraint instead of quietly doubling one patient's spend.
     """
     if isinstance(payload, AiJobCompletedUsagePayload):
         input_tokens = payload.input_tokens
         output_tokens = payload.output_tokens
         cost_paise = payload.cost_paise
         status = AI_JOB_SPEND_STATUS_COMPLETED
+        failure_reason = None
     else:
         input_tokens = 0
         output_tokens = 0
         cost_paise = 0
         status = AI_JOB_SPEND_STATUS_FAILED
+        failure_reason = sanitize_failure_reason(payload.reason)
 
     statement = insert(observability_ai_job_spend).values(
         usage_date=envelope.occurred_at.date(),
@@ -352,6 +367,7 @@ async def record_ai_job_spend(
         cost_paise=cost_paise,
         status=status,
         trace_id=payload.trace_id,
+        failure_reason=failure_reason,
     )
     await connection.execute(statement)
 
@@ -1019,6 +1035,87 @@ class LatencyReport(BaseModel):
     providers: list[LatencyRow]
 
 
+class ProviderBoardRow(BaseModel):
+    """One upstream model API on the degraded-provider board (#728).
+
+    Everything a support engineer needs to tell a CareSetu bug from an upstream
+    outage, on one row per provider, all read from
+    ``observability_ai_provider_health`` - MOD-013's own table, so the board
+    introduces no cross-module read (ADR-0003).
+
+    ``status`` is DERIVED at read time from the other fields by
+    :func:`~modules.observability.domain.rollup.provider_status`, not stored: a
+    stored status is a second source of truth the nightly recompute could leave
+    contradicting the row it came from (#717 decision 18).
+
+    ``last_error`` is the newest failure's sanitised operational reason, written
+    by the rollup from the day's per-job failure reasons. ``None`` means the
+    window recorded no failure to name - which is why it is never the input to
+    ``status``: a provider that was refused for quota once and served everything
+    else is degraded, not down, and the count beside it is what says so.
+
+    ``timeout_count``, ``rate_limit_count`` and ``sample_count`` are three
+    different denominators and are read together: timeouts and quota refusals are
+    failures, ``sample_count`` counts only the completions the percentiles were
+    ranked over.
+    """
+
+    provider: str
+    status: ProviderStatus
+    breaker_state: str
+    success_rate: Decimal | None
+    sample_count: int
+    timeout_count: int
+    rate_limit_count: int
+    p50_duration_ms: Decimal | None
+    p95_duration_ms: Decimal | None
+    p99_duration_ms: Decimal | None
+    last_error: str | None
+    window_start: datetime | None
+    window_end: datetime | None
+
+    @classmethod
+    def from_health(cls, health: ProviderHealth) -> ProviderBoardRow:
+        """The board row for one rolled provider, ``status`` derived from the rest.
+
+        One place the stored counters become the served shape, so a counter added
+        to :class:`ProviderHealth` and to this model is wired here once rather
+        than left to two hand-written mappings drifting apart.
+        """
+        return cls(
+            provider=health.provider,
+            status=provider_status(health),
+            breaker_state=health.breaker_state,
+            success_rate=health.success_rate,
+            sample_count=health.sample_count,
+            timeout_count=health.timeout_count,
+            rate_limit_count=health.rate_limit_count,
+            p50_duration_ms=health.p50_duration_ms,
+            p95_duration_ms=health.p95_duration_ms,
+            p99_duration_ms=health.p99_duration_ms,
+            last_error=health.last_error,
+            window_start=health.window_start,
+            window_end=health.window_end,
+        )
+
+
+class ProviderBoardReport(BaseModel):
+    """The whole board, one row per provider the rollup has rolled, plus freshness.
+
+    No ``days`` param, for the reason :class:`LatencyReport` gives: every field is
+    the nightly rollup's rolling snapshot of one window, not a windowed aggregate
+    the read could re-derive. ``last_rolled_date`` and each row's own window bounds
+    are how a reader judges how fresh the board is.
+
+    Providers the rollup has never seen are ABSENT rather than listed as healthy.
+    An empty list is the honest answer before the first rollup, and a fabricated
+    row would read as a provider answering normally.
+    """
+
+    last_rolled_date: date | None
+    providers: list[ProviderBoardRow]
+
+
 class CaptureLiveness(BaseModel):
     """Whether request capture ITSELF was working over the window (B9 #727).
 
@@ -1411,6 +1508,61 @@ async def query_latency(connection: AsyncConnection) -> LatencyReport:
     )
 
 
+async def query_provider_board(connection: AsyncConnection) -> ProviderBoardReport:
+    """Read every rolled provider's board row (``/providers``).
+
+    ONE table read over ``observability_ai_provider_health`` plus the rollup
+    ledger's newest date, both inside this schema. The percentiles, the success
+    rate, the breaker state, the timeout and quota-refusal counts and the last
+    error were all computed by the same nightly pass and stamped with the window
+    it ranked, so re-deriving any of them here would rank a different sample than
+    the alerts were evaluated against - and a provider whose traffic stopped
+    would have its counters read against a date it was never rolled on.
+
+    ``status`` is derived here rather than selected, which is what makes the
+    healthy/degraded/down answer a read-time computation over stored counters
+    instead of a stored column a recompute could contradict (#717 decision 18).
+    """
+    health = observability_ai_provider_health
+    rows = await connection.execute(
+        select(
+            health.c.provider,
+            health.c.sample_count,
+            health.c.success_rate,
+            health.c.timeout_count,
+            health.c.rate_limit_count,
+            health.c.p50_duration_ms,
+            health.c.p95_duration_ms,
+            health.c.p99_duration_ms,
+            health.c.breaker_state,
+            health.c.last_error,
+            health.c.window_start,
+            health.c.window_end,
+        ).order_by(health.c.provider)
+    )
+    providers: list[ProviderBoardRow] = []
+    for entry in rows.mappings():
+        rolled = ProviderHealth(
+            provider=str(entry["provider"]),
+            window_start=entry["window_start"],
+            window_end=entry["window_end"],
+            sample_count=int(entry["sample_count"]),
+            success_rate=entry["success_rate"],
+            p50_duration_ms=entry["p50_duration_ms"],
+            p95_duration_ms=entry["p95_duration_ms"],
+            p99_duration_ms=entry["p99_duration_ms"],
+            breaker_state=str(entry["breaker_state"]),
+            timeout_count=int(entry["timeout_count"]),
+            rate_limit_count=int(entry["rate_limit_count"]),
+            last_error=entry["last_error"],
+        )
+        providers.append(ProviderBoardRow.from_health(rolled))
+    return ProviderBoardReport(
+        last_rolled_date=await _last_rolled_date(connection),
+        providers=providers,
+    )
+
+
 async def query_throughput(
     connection: AsyncConnection, *, from_ts: datetime, to_ts: datetime
 ) -> ThroughputReport:
@@ -1664,10 +1816,11 @@ class ObservabilityFacade:
     The B4 public surface carries the effects the event consumers run. The C1
         (``#706``/``#707``) read seam joins it: ``get_cost_summary``,
         ``get_cost_trend``, ``get_usage``, ``get_quality``, ``get_overview``,
-        ``get_latency``, ``get_throughput``, ``get_health``, ``get_alerts`` and
-        ``get_deeplinks`` are what the operator observability routes call. Each opens
-        the one settled engine connection and delegates its aggregate to the module
-        helper, so routes hold no SQL and the reads stay in this module.
+        ``get_latency``, ``get_provider_board`` (#728), ``get_throughput``,
+        ``get_health``, ``get_alerts`` and ``get_deeplinks`` are what the operator
+        observability routes call. Each opens the one settled engine connection and
+        delegates its aggregate to the module helper, so routes hold no SQL and the
+        reads stay in this module.
 
         The windowed reads take ``days`` (or, for the per-minute counter, ``minutes``)
         and an optional pinned instant so the caller - or a test - can pin the window;
@@ -1711,6 +1864,15 @@ class ObservabilityFacade:
         """Read the rolled per-provider percentiles (no window - see ``LatencyReport``)."""
         async with self._engine.begin() as connection:
             return await query_latency(connection)
+
+    async def get_provider_board(self) -> ProviderBoardReport:
+        """Read the degraded-provider board (no window - see ``ProviderBoardReport``).
+
+        The status on each row is derived by the read, never stored, so this is
+        where the healthy/degraded/down answer is produced.
+        """
+        async with self._engine.begin() as connection:
+            return await query_provider_board(connection)
 
     async def get_throughput(
         self, *, minutes: int, now: datetime | None = None

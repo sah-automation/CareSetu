@@ -41,6 +41,8 @@ from modules.observability.facade import (
     LatencyRow,
     OutboxHealthRow,
     Overview,
+    ProviderBoardReport,
+    ProviderBoardRow,
     ProviderQualityRow,
     QualityReport,
     RouteThroughputRow,
@@ -64,6 +66,7 @@ USAGE_PATH = "/v1/operator/observability/usage"
 QUALITY_PATH = "/v1/operator/observability/quality"
 OVERVIEW_PATH = "/v1/operator/observability/overview"
 LATENCY_PATH = "/v1/operator/observability/latency"
+PROVIDERS_PATH = "/v1/operator/observability/providers"
 THROUGHPUT_PATH = "/v1/operator/observability/throughput"
 HEALTH_PATH = "/v1/operator/observability/health"
 ALERTS_PATH = "/v1/operator/observability/alerts"
@@ -187,6 +190,60 @@ _LATENCY = LatencyReport(
     ],
 )
 
+#: The degraded-provider board (B9 #728). Three providers on purpose: one down, one
+#: degraded by quota refusals, one idle and therefore healthy - the third is the row
+#: that would silently read as an outage if "no traffic" were folded into "no data".
+_PROVIDER_BOARD = ProviderBoardReport(
+    last_rolled_date=_TODAY,
+    providers=[
+        ProviderBoardRow(
+            provider="anthropic",
+            status="down",
+            breaker_state="open",
+            success_rate=Decimal("0.0000"),
+            sample_count=0,
+            timeout_count=3,
+            rate_limit_count=0,
+            p50_duration_ms=None,
+            p95_duration_ms=None,
+            p99_duration_ms=None,
+            last_error="ConnectError",
+            window_start=datetime(2026, 10, 12, tzinfo=UTC),
+            window_end=datetime(2026, 10, 13, tzinfo=UTC),
+        ),
+        ProviderBoardRow(
+            provider="openai",
+            status="degraded",
+            breaker_state="closed",
+            success_rate=Decimal("0.8750"),
+            sample_count=8,
+            timeout_count=1,
+            rate_limit_count=2,
+            p50_duration_ms=Decimal("1200.00"),
+            p95_duration_ms=Decimal("8400.00"),
+            p99_duration_ms=Decimal("15100.00"),
+            last_error="rate_limited",
+            window_start=datetime(2026, 10, 12, tzinfo=UTC),
+            window_end=datetime(2026, 10, 13, tzinfo=UTC),
+        ),
+        ProviderBoardRow(
+            provider="together-ai",
+            status="healthy",
+            breaker_state="closed",
+            success_rate=None,
+            sample_count=0,
+            timeout_count=0,
+            rate_limit_count=0,
+            p50_duration_ms=None,
+            p95_duration_ms=None,
+            p99_duration_ms=None,
+            last_error=None,
+            window_start=None,
+            window_end=None,
+        ),
+    ],
+)
+
 #: The busy case: traffic recorded, some of it failed. The EMPTY case is the one the
 #: ticket exists for - see ``_NO_THROUGHPUT``.
 _THROUGHPUT = ThroughputReport(
@@ -292,6 +349,7 @@ class StubObservabilityFacade:
         self.quality_days: list[int] = []
         self.overview_days: list[int] = []
         self.latency_calls = 0
+        self.provider_board_calls = 0
         self.throughput_minutes: list[int] = []
         self.throughput_empty = False
         self.health_cache_flags: list[bool] = []
@@ -322,6 +380,10 @@ class StubObservabilityFacade:
     async def get_latency(self) -> LatencyReport:
         self.latency_calls += 1
         return _LATENCY
+
+    async def get_provider_board(self) -> ProviderBoardReport:
+        self.provider_board_calls += 1
+        return _PROVIDER_BOARD
 
     async def get_throughput(self, *, minutes: int) -> ThroughputReport:
         self.throughput_minutes.append(minutes)
@@ -503,6 +565,63 @@ def test_operator_reads_provider_latency_percentiles() -> None:
     assert row["p50_duration_ms"] == "1200.00"
     assert row["p95_duration_ms"] == "8400.00"
     assert row["p99_duration_ms"] == "15100.00"
+
+
+def test_the_provider_board_answers_healthy_degraded_and_down_per_provider() -> None:
+    """#717 story 37: triage without reading numbers."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(PROVIDERS_PATH, headers=_operator())
+
+    assert response.status_code == 200
+    assert facade.provider_board_calls == 1
+    body = response.json()
+    assert body["last_rolled_date"] == _TODAY.isoformat()
+    assert [(row["provider"], row["status"]) for row in body["providers"]] == [
+        ("anthropic", "down"),
+        ("openai", "degraded"),
+        ("together-ai", "healthy"),
+    ]
+
+
+def test_the_provider_board_carries_the_figures_and_quoted_decimals() -> None:
+    """Every input to the verdict is on the row, and rates travel as exact strings."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    row = client.get(PROVIDERS_PATH, headers=_operator()).json()["providers"][1]
+
+    assert row["breaker_state"] == "closed"
+    assert row["success_rate"] == "0.8750"
+    assert (row["timeout_count"], row["rate_limit_count"]) == (1, 2)
+    assert (row["p50_duration_ms"], row["p95_duration_ms"], row["p99_duration_ms"]) == (
+        "1200.00",
+        "8400.00",
+        "15100.00",
+    )
+    # The named failure, so the operator reads it rather than inferring it.
+    assert row["last_error"] == "rate_limited"
+
+
+def test_the_provider_board_distinguishes_idle_from_broken() -> None:
+    """A provider with no traffic reads healthy, with nulls - never as an outage.
+
+    The nulls are the load-bearing part: ``0.0000`` here would say the provider was
+    asked and refused, which is the opposite fact.
+    """
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    row = client.get(PROVIDERS_PATH, headers=_operator()).json()["providers"][2]
+
+    assert row["success_rate"] is None
+    assert (row["p50_duration_ms"], row["p95_duration_ms"], row["p99_duration_ms"]) == (
+        None,
+        None,
+        None,
+    )
+    assert row["last_error"] is None
 
 
 def test_throughput_defaults_to_the_last_hour_in_minutes() -> None:
@@ -754,6 +873,7 @@ _ALL_PATHS = [
     QUALITY_PATH,
     OVERVIEW_PATH,
     LATENCY_PATH,
+    PROVIDERS_PATH,
     THROUGHPUT_PATH,
     HEALTH_PATH,
     ALERTS_PATH,
@@ -794,6 +914,7 @@ def _facade_untouched(facade: StubObservabilityFacade) -> bool:
         and facade.quality_days == []
         and facade.overview_days == []
         and facade.latency_calls == 0
+        and facade.provider_board_calls == 0
         and facade.throughput_minutes == []
         and facade.health_cache_flags == []
         and facade.alert_pages == []

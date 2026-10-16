@@ -9,7 +9,8 @@ database (``error-handling-observability.md`` §5, coding-standards §2).
 Three pieces:
 
 * the estimator (:func:`percentile`, :func:`weighted_percentile`) plus the
-  provider-health recompute it feeds;
+  provider-health recompute it feeds, and the healthy/degraded/down status the
+  provider board derives from that recompute (#728);
 * the paise budget snapshot, which mirrors the ``BudgetMeter``'s
   observe-and-warn semantics (``modules/intake/budget_meter.py``, PS-10 #408) -
   the rollup SNAPSHOTS spend, it never enforces it;
@@ -32,7 +33,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Any
+from typing import Any, Literal
 
 from modules.observability.domain.consumer import (
     AI_JOB_SPEND_STATUS_COMPLETED,
@@ -52,6 +53,33 @@ from modules.observability.domain.pseudonym import (
 #: is deliberately absent: the rollup only observes, it never trips a breaker.
 BREAKER_STATE_CLOSED = "closed"
 BREAKER_STATE_OPEN = "open"
+
+#: The provider board's status vocabulary (#728, spec #717 decision 18). Derived at
+#: READ time from the counters the rollup stored and never stored as a column: a
+#: stored status is a second source of truth that the nightly recompute could leave
+#: contradicting the row it was derived from.
+PROVIDER_STATUS_HEALTHY: ProviderStatus = "healthy"
+PROVIDER_STATUS_DEGRADED: ProviderStatus = "degraded"
+PROVIDER_STATUS_DOWN: ProviderStatus = "down"
+ProviderStatus = Literal["healthy", "degraded", "down"]
+
+#: The token the intake producer emits on ``ai_job.failed`` for a provider that
+#: refused for quota. It lives here as well as in
+#: ``modules.intake.adapters.ai_jobs`` because ADR-0003 forbids importing the
+#: producing module, so the count cannot read the constant at runtime. What stops
+#: the two copies from drifting is the test named on the producer's constant:
+#: ``test_the_reason_the_producer_emits_is_the_one_the_rollup_counts``. Without a
+#: rename on both sides, the drift would be silent - the board would count zero
+#: quotas and show a throttled provider as healthy.
+FAILURE_REASON_RATE_LIMITED = "rate_limited"
+
+#: A provider whose observed success rate falls to or below this is ``degraded`` on
+#: the board even with nothing else wrong. Above it, a provider is healthy unless a
+#: quota refusal or a timeout says otherwise. Set at the same kind of boundary the
+#: breaker uses (:data:`DEFAULT_BREAKER_OPEN_SUCCESS_RATE` at 0.5), one tier lower,
+#: because this is the "something is wrong but the provider is still serving" line
+#: rather than the "stop calling it" one.
+DEFAULT_DEGRADED_SUCCESS_RATE = Decimal("0.9")
 
 #: ``observability_alert_events.status`` vocabulary. ``open`` is the server
 #: default every producer's insert inherits; ``resolved`` is written ONLY by this
@@ -118,6 +146,33 @@ RESOLVABLE_ALERT_KINDS: frozenset[str] = frozenset(
         ALERT_KIND_OUTBOX_DEAD_LETTER,
     }
 )
+
+#: Alert kinds that must NEVER auto-resolve (#728, #717 decision 20). Held as its
+#: own set, complementary to :data:`RESOLVABLE_ALERT_KINDS`, because a rule that
+#: exists only as an ABSENCE is one somebody tidies up: adding this kind to the set
+#: above looks like completing the vocabulary and silently makes a degraded
+#: provider disappear from the board the moment it recovers (#717 story 55).
+#: Stated here as data, the resolve step reads both sets, and a test asserts the
+#: two are disjoint and together cover every rollup kind - so "tidy it up" fails a
+#: test rather than shipping.
+NON_RESOLVABLE_ALERT_KINDS: frozenset[str] = frozenset(
+    {
+        ALERT_KIND_PROVIDER_HEALTH_DROP,
+    }
+)
+
+
+def alert_kind_resolves(kind: str) -> bool:
+    """Whether a later pass is allowed to close an open alert of ``kind``.
+
+    The single question the resolve step asks, and the single place both vocabularies
+    are read. Membership of :data:`RESOLVABLE_ALERT_KINDS` alone would leave the
+    never-auto-resolve rule living only in a comment: the two sets are therefore
+    checked together here, so a kind that lands in both is refused rather than
+    silently resolving.
+    """
+    return kind in RESOLVABLE_ALERT_KINDS and kind not in NON_RESOLVABLE_ALERT_KINDS
+
 
 _RATE_QUANTUM = Decimal("0.0001")
 
@@ -282,6 +337,12 @@ class ProviderHealth:
 
     ``window_start``/``window_end`` are the half-open UTC bounds of the rolled
     date, so a reader can tell a single-day window from a longer one.
+
+    ``timeout_count``, ``rate_limit_count`` and ``last_error`` are #728's
+    additions: the window's timeouts and quota refusals, and the most recent
+    failure's reason. The first two come from the day's usage scopes, the third
+    from the day's per-job spend rows, so all three are stored as measured rather
+    than reconstructed at read time.
     """
 
     provider: str
@@ -293,6 +354,9 @@ class ProviderHealth:
     p95_duration_ms: Decimal | None
     p99_duration_ms: Decimal | None
     breaker_state: str
+    timeout_count: int = 0
+    rate_limit_count: int = 0
+    last_error: str | None = None
 
 
 def duration_samples(usage: ProviderUsage) -> tuple[tuple[float, int], ...]:
@@ -309,6 +373,42 @@ def duration_samples(usage: ProviderUsage) -> tuple[tuple[float, int], ...]:
     )
 
 
+@dataclass(frozen=True)
+class ProviderFailures:
+    """One provider's failed attempts for a single rolled day.
+
+    Built from ``observability_ai_job_spend``, the per-job source the attribution
+    aggregate already reads, so the board's failure figures come from rows the
+    provider itself produced rather than from a second tally kept alongside them.
+    ``last_error`` is already ordered (most recent first) by whoever assembled it.
+    """
+
+    rate_limit_count: int
+    last_error: str | None
+
+
+def summarize_failures(reasons: Sequence[str | None]) -> ProviderFailures:
+    """Count the day's quota refusals and take its most recent reason to name.
+
+    ``reasons`` is the day's failed jobs in MOST-RECENT-FIRST order, so the first
+    non-empty entry is the newest failure there is to name. A day with no failure at
+    all gives ``rate_limit_count == 0`` and ``last_error is None``, which reads as
+    "nothing to report" rather than as a healthy provider - the board derives the
+    status separately and deliberately does not treat a missing reason as evidence
+    of health.
+    """
+    rate_limited = 0
+    last_error: str | None = None
+    for reason in reasons:
+        if not reason:
+            continue
+        if reason == FAILURE_REASON_RATE_LIMITED:
+            rate_limited += 1
+        if last_error is None:
+            last_error = reason
+    return ProviderFailures(rate_limit_count=rate_limited, last_error=last_error)
+
+
 def compute_provider_health(
     provider: str,
     window_start: datetime,
@@ -316,6 +416,7 @@ def compute_provider_health(
     usage: ProviderUsage,
     *,
     breaker_open_below: Decimal = DEFAULT_BREAKER_OPEN_SUCCESS_RATE,
+    failures: ProviderFailures | None = None,
 ) -> ProviderHealth:
     """Recompute one provider's health for the half-open window ``[start, end)``.
 
@@ -324,12 +425,18 @@ def compute_provider_health(
     observations behind the percentiles (completions), while ``success_rate`` is
     over ALL calls - a provider that mostly failed has a low rate over a thin
     latency sample, and the two numbers are read together.
+
+    ``failures`` carries the day's quota refusals and newest failure reason
+    (#728). It is optional and defaults to "none observed", so the count and the
+    reason a provider accumulated before this ticket existed still roll up - the
+    counters are unchanged, only previously-unwritten columns are filled.
     """
     points = duration_samples(usage)
     p50 = weighted_percentile(points, 0.50)
     p95 = weighted_percentile(points, 0.95)
     p99 = weighted_percentile(points, 0.99)
     rate = success_rate(usage.success_count, usage.calls)
+    observed = failures if failures is not None else ProviderFailures(0, None)
     return ProviderHealth(
         provider=provider,
         window_start=window_start,
@@ -340,7 +447,50 @@ def compute_provider_health(
         p95_duration_ms=_as_ms(p95) if p95 is not None else None,
         p99_duration_ms=_as_ms(p99) if p99 is not None else None,
         breaker_state=breaker_state_for(rate, open_below=breaker_open_below),
+        timeout_count=usage.timeout_count,
+        rate_limit_count=observed.rate_limit_count,
+        last_error=observed.last_error,
     )
+
+
+def provider_status(health: ProviderHealth) -> ProviderStatus:
+    """Resolve one rolled provider's board status: healthy, degraded or down.
+
+    Derived from the counters the health row carries, never stored (#717
+    decision 18): a stored status would be a second source of truth the nightly
+    recompute could leave contradicting the row it was derived from. The order is
+    what makes each verdict safe to act on, so it is the order written:
+
+    1. **Down** when the breaker is open, or when the window recorded calls and
+       NOT ONE of them succeeded. The second arm is the one an operator most
+       needs right, and it is written out rather than left to the breaker: a
+       ``success_rate`` of ``0.0000`` is a provider that was asked and refused
+       every time, with every percentile ``None`` behind it because there was no
+       completion to time. Reading that as "no data" would report an outage as
+       silence.
+    2. **Degraded** when the provider was refused for quota, when it timed out, or
+       when its success rate fell to or below :data:`DEFAULT_DEGRADED_SUCCESS_RATE`.
+       Any one of these is "still answering, but not normally", which calls for a
+       different action from down and a different one from healthy.
+    3. **Healthy** otherwise - including a provider with NO traffic at all
+       (``success_rate is None``), which is idle rather than working. Absence of a
+       sample is never evidence of a failure, exactly as it is not for
+       :func:`breaker_state_for`.
+
+    ``last_error`` is deliberately NOT an input. A named failure is what an
+    operator reads once the status has already told them to look, and letting it
+    drive the status would make the word a provider happened to emit on one call
+    outrank twenty that succeeded.
+    """
+    if health.breaker_state == BREAKER_STATE_OPEN:
+        return PROVIDER_STATUS_DOWN
+    if health.success_rate is not None and health.success_rate <= 0:
+        return PROVIDER_STATUS_DOWN
+    if health.rate_limit_count > 0 or health.timeout_count > 0:
+        return PROVIDER_STATUS_DEGRADED
+    if health.success_rate is not None and health.success_rate <= DEFAULT_DEGRADED_SUCCESS_RATE:
+        return PROVIDER_STATUS_DEGRADED
+    return PROVIDER_STATUS_HEALTHY
 
 
 def provider_health_drop(previous: Decimal | None, current: Decimal | None) -> Decimal | None:

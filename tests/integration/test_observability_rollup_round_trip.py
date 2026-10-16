@@ -22,7 +22,7 @@ the ``observability_rollup_runs`` ledger the plan is read from.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
@@ -111,8 +111,8 @@ async def _health_row(connection: AsyncConnection, provider: str) -> Any:
     result = await connection.execute(
         text(
             "SELECT sample_count, success_rate, p50_duration_ms, p95_duration_ms, "
-            "p99_duration_ms, breaker_state FROM "
-            "observability.observability_ai_provider_health WHERE provider = :provider"
+            "p99_duration_ms, breaker_state, timeout_count, rate_limit_count, last_error "
+            "FROM observability.observability_ai_provider_health WHERE provider = :provider"
         ),
         {"provider": provider},
     )
@@ -175,6 +175,238 @@ async def _run_rows(connection: AsyncConnection) -> list[Any]:
 async def _run_row_count(engine: AsyncEngine) -> int:
     async with engine.connect() as connection:
         return len(await _run_rows(connection))
+
+
+# ------------------------------------------ B9 #728: naming the provider failure
+
+
+def _at_hour(hour: int) -> datetime:
+    """An aware instant on the target date, for seeding a per-job ``created_at``."""
+    return datetime.combine(_TARGET_DATE, time(hour), tzinfo=UTC)
+
+
+async def _seed_failed_jobs(connection: AsyncConnection) -> None:
+    """Three failed jobs on the target date, as #723's consumer leaves them.
+
+    Jobs 9002 and 9004 were refused for quota and job 9003 dropped its connection,
+    so the newest failure is the connection drop and the quota count is two. The
+    rows carry their own ``created_at`` so "most recent" is a fact about the seed
+    rather than about insertion order - the quota refusals are inserted first and
+    last, so insertion order would pick the wrong one.
+    """
+    await connection.execute(
+        text(
+            "INSERT INTO observability.observability_ai_job_spend "
+            "(usage_date, ai_job_ref, intake_ref, patient_key, doctor_key, provider, "
+            "model, task_type, input_tokens, output_tokens, cost_paise, status, "
+            "failure_reason, created_at) VALUES "
+            "(:day, 9002, 502, :patient_one, NULL, 'openai', 'gpt-4o-mini', "
+            " 'summarize', 0, 0, 0, 'failed', 'rate_limited', :first), "
+            "(:day, 9003, 503, :patient_one, NULL, 'openai', 'gpt-4o-mini', "
+            " 'summarize', 0, 0, 0, 'failed', 'ConnectError', :last), "
+            "(:day, 9004, 504, :patient_one, NULL, 'openai', 'gpt-4o-mini', "
+            " 'summarize', 0, 0, 0, 'failed', 'rate_limited', :middle)"
+        ),
+        {
+            "day": _TARGET_DATE,
+            "patient_one": _PATIENT_ONE,
+            "first": _at_hour(1),
+            "middle": _at_hour(2),
+            "last": _at_hour(3),
+        },
+    )
+
+
+async def _seed_completed_job_with_reason(connection: AsyncConnection, *, ai_job_ref: int) -> None:
+    """A COMPLETED job that nonetheless carries a reason, as a bad write would.
+
+    The loader must ignore it: the board names the newest FAILURE, and counting a
+    completed job's leftover reason would report a throttle for a call that
+    succeeded.
+    """
+    await connection.execute(
+        text(
+            "INSERT INTO observability.observability_ai_job_spend "
+            "(usage_date, ai_job_ref, intake_ref, patient_key, provider, model, "
+            "task_type, input_tokens, output_tokens, cost_paise, status, failure_reason, "
+            " created_at) VALUES "
+            "(:day, :ref, 505, :patient_one, 'openai', 'gpt-4o-mini', 'summarize', "
+            " 10, 20, 500, 'completed', 'rate_limited', :late)"
+        ),
+        {
+            "day": _TARGET_DATE,
+            "ref": ai_job_ref,
+            "patient_one": _PATIENT_ONE,
+            "late": _at_hour(4),
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_rollup_writes_the_last_error_nothing_used_to_write(
+    engine: AsyncEngine,
+) -> None:
+    """AC1: a degraded provider can be NAMED rather than inferred from its counters."""
+    async with engine.begin() as connection:
+        await _seed_usage(connection)
+        await _seed_failed_jobs(connection)
+
+    await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    async with engine.connect() as connection:
+        openai = await _health_row(connection, "openai")
+        # The newest failure was a dropped connection, so that is what is named -
+        # not either of the two quota refusals, which happened earlier in the day.
+        assert openai["last_error"] == "ConnectError"
+        assert openai["rate_limit_count"] == 2
+        # The timeouts come from the day's own usage scopes, not from the failures.
+        assert openai["timeout_count"] == 0
+        # A provider whose jobs all completed has no failure to name.
+        assert (await _health_row(connection, "anthropic"))["last_error"] is None
+        assert (await _health_row(connection, "anthropic"))["rate_limit_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_the_rollup_names_the_newest_failure_by_its_timestamp_not_its_insert(
+    engine: AsyncEngine,
+) -> None:
+    """Two jobs sharing a ``created_at`` are ordered by their job reference.
+
+    Without the tie-break the named last error would depend on the planner's
+    choice of scan order, so the same seeded day could name either failure.
+    """
+    async with engine.begin() as connection:
+        await _seed_usage(connection)
+        await connection.execute(
+            text(
+                "INSERT INTO observability.observability_ai_job_spend "
+                "(usage_date, ai_job_ref, intake_ref, patient_key, provider, model, "
+                "task_type, input_tokens, output_tokens, cost_paise, status, "
+                "failure_reason, created_at) VALUES "
+                "(:day, 9101, 601, :patient_one, 'openai', 'gpt-4o-mini', 'summarize', "
+                " 0, 0, 0, 'failed', 'OlderFailure', :same), "
+                "(:day, 9102, 602, :patient_one, 'openai', 'gpt-4o-mini', 'summarize', "
+                " 0, 0, 0, 'failed', 'NewerFailure', :same)"
+            ),
+            {
+                "day": _TARGET_DATE,
+                "patient_one": _PATIENT_ONE,
+                "same": _at_hour(5),
+            },
+        )
+
+    await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    async with engine.connect() as connection:
+        # 9102 > 9101, so the higher job reference wins the tie.
+        assert (await _health_row(connection, "openai"))["last_error"] == "NewerFailure"
+
+
+@pytest.mark.asyncio
+async def test_the_rollup_names_a_failed_job_not_a_completed_one_that_carries_a_reason(
+    engine: AsyncEngine,
+) -> None:
+    """The newest reason is the newest FAILURE's, whatever row happens to be newer."""
+    async with engine.begin() as connection:
+        await _seed_usage(connection)
+        await _seed_failed_jobs(connection)
+        await _seed_completed_job_with_reason(connection, ai_job_ref=9999)
+
+    await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    async with engine.connect() as connection:
+        openai = await _health_row(connection, "openai")
+        # The completed job is the newest row by a wide margin and is still ignored.
+        assert openai["last_error"] == "ConnectError"
+        assert openai["rate_limit_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_recovered_provider_has_its_named_failure_cleared(engine: AsyncEngine) -> None:
+    """A stale last error is worse than none: it names a failure that is not happening.
+
+    Written in FULL on every pass, so the second pass - which sees a provider with
+    no failures at all - blanks the column rather than leaving yesterday's reason
+    under a healthy status.
+    """
+    async with engine.begin() as connection:
+        await _seed_usage(connection)
+        await _seed_failed_jobs(connection)
+    await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    async with engine.connect() as connection:
+        assert (await _health_row(connection, "openai"))["last_error"] == "ConnectError"
+
+    # The next night's pass rolls a day whose openai traffic all succeeded, with no
+    # failed job to name.
+    recovered = _TARGET_DATE + timedelta(days=1)
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO observability.observability_ai_usage_daily "
+                "(usage_date, provider, model, task_type, calls, success_count, "
+                "failure_count, timeout_count, input_tokens, output_tokens, cost_paise, "
+                "avg_duration_ms) VALUES "
+                "(:day, 'openai', 'gpt-4o-mini', 'structure', 4, 4, 0, 0, 10, 20, 1000, "
+                "  120.00)"
+            ),
+            {"day": recovered},
+        )
+    await run_rollup(engine, recovered, thresholds=_THRESHOLDS)
+
+    async with engine.connect() as connection:
+        openai = await _health_row(connection, "openai")
+        assert openai["last_error"] is None
+        assert openai["rate_limit_count"] == 0
+        assert openai["timeout_count"] == 0
+        assert openai["success_rate"] == Decimal("1.0000")
+
+
+@pytest.mark.asyncio
+async def test_the_provider_health_row_stores_no_status_column(engine: AsyncEngine) -> None:
+    """AC: healthy/degraded/down is DERIVED, not stored (#717 decision 18).
+
+    Asserted against the real table because the claim is about the schema: a
+    stored status would be a second source of truth the nightly recompute could
+    leave contradicting the counters it was derived from.
+    """
+    async with engine.begin() as connection:
+        await _seed_usage(connection)
+    await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    async with engine.connect() as connection:
+        result = await connection.execute(
+            text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = 'observability' "
+                "AND table_name = 'observability_ai_provider_health'"
+            )
+        )
+        stored = {row[0] for row in result.all()}
+
+    assert not {"status", "health_status", "provider_status"} & stored
+    # The two columns #728 added ARE there, which is what the assertion above guards.
+    assert {"last_error", "timeout_count", "rate_limit_count"} <= stored
+
+
+@pytest.mark.asyncio
+async def test_a_rolled_day_with_no_failures_writes_no_name_and_no_count(
+    engine: AsyncEngine,
+) -> None:
+    """The pre-#728 behaviour survives as an honest zero/NULL, not a failure."""
+    async with engine.begin() as connection:
+        await _seed_usage(connection)
+        await _seed_actor_spend(connection)
+
+    await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    async with engine.connect() as connection:
+        openai = await _health_row(connection, "openai")
+        assert openai["last_error"] is None
+        assert openai["rate_limit_count"] == 0
+        # anthropic has no per-job rows at all, so it is absent from the load map
+        # entirely rather than being counted as a provider with zero failures.
+        assert (await _health_row(connection, "anthropic"))["last_error"] is None
 
 
 # ------------------------------------------ B6 #725: the daily per-actor aggregate

@@ -13,6 +13,11 @@ per distinct event.
 B7 (#724) adds the ``intake.doctor_assigned`` seat on the same shape: one
 consumer for the care-attribution edge, with MOD-005 still owning the registry
 payload model and MOD-013 holding a three-reference mirror of its own.
+
+B9 (#728) adds the sanitiser for the failure reason kept on the per-job spend
+row, so the provider board can name a degradation. The sanitiser is tested HERE,
+at the consumer seam, because its whole job is to decide what may be written -
+before the value reaches the write, not after.
 """
 
 from __future__ import annotations
@@ -40,9 +45,11 @@ from modules.intake.domain.events import (
 )
 from modules.observability.adapters import register_handlers as register_obs_handlers
 from modules.observability.domain.consumer import (
+    MAX_FAILURE_REASON_CHARS,
     AiJobCompletedUsagePayload,
     AiJobFailedUsagePayload,
     IntakeDoctorAssignedTelemetryPayload,
+    sanitize_failure_reason,
 )
 
 
@@ -342,3 +349,70 @@ async def test_care_attribution_handler_writes_the_edge_exactly_once_per_event_i
     await handler(repick)
     assert edge.await_count == 2
     assert edge.await_args.args[2].doctor_id == 9
+
+
+# ------------------------------------------- B9 #728: what may be STORED as a reason
+
+
+def test_a_operational_token_passes_the_sanitiser_unchanged() -> None:
+    """The shape the producer actually emits must survive verbatim."""
+    assert sanitize_failure_reason("rate_limited") == "rate_limited"
+    assert sanitize_failure_reason("Ext002CallError") == "Ext002CallError"
+
+
+def test_control_characters_and_newlines_are_stripped_rather_than_stored() -> None:
+    """A stored reason must be one line, whatever a producer puts in the event.
+
+    A newline would forge a second line in every log the value was ever copied
+    into, and a control character corrupts a CSV export and a terminal alike.
+    """
+    assert sanitize_failure_reason("Ext002CallError\rinjected: row two") == "Ext002CallError"
+    assert sanitize_failure_reason("a\x00b\x07c") == "a b c"
+    # U+2028 is not a C0 control but is a line separator to several readers.
+    assert sanitize_failure_reason("before\u2028after") == "before"
+
+
+def test_only_the_status_line_of_an_echoed_body_survives() -> None:
+    """A provider body echoes the request on the lines AFTER its status line.
+
+    Dropping the continuation is what keeps the guarantee honest if a producer
+    ever passes a body through instead of a closed token: the status line names
+    the failure, the lines after it can carry what was sent to the provider.
+    """
+    echoed = (
+        "Ext002CallError: provider said 429\n"
+        "request echoed: patient complains of fever and cough since three days"
+    )
+
+    assert sanitize_failure_reason(echoed) == "Ext002CallError: provider said 429"
+
+
+def test_a_runaway_reason_is_capped_and_marked_as_cut() -> None:
+    """The column is read on a board; a provider body must not become a wall of text."""
+    reason = "x" * (MAX_FAILURE_REASON_CHARS * 2)
+
+    stored = sanitize_failure_reason(reason)
+
+    assert stored is not None
+    assert len(stored) == MAX_FAILURE_REASON_CHARS
+    assert stored.endswith("...")
+    assert stored.startswith("x")
+
+
+def test_a_reason_at_the_cap_is_left_alone() -> None:
+    """The cap is a ceiling, not a target: a reason that fits is never cut."""
+    reason = "y" * MAX_FAILURE_REASON_CHARS
+
+    assert sanitize_failure_reason(reason) == reason
+
+
+def test_nothing_to_say_is_a_null_rather_than_a_blank_column() -> None:
+    """A column holding "   " would read as a named failure that says nothing."""
+    assert sanitize_failure_reason(None) is None
+    assert sanitize_failure_reason("") is None
+    assert sanitize_failure_reason("   ") is None
+    assert sanitize_failure_reason("\r\n\t") is None
+
+
+def test_whitespace_runs_collapse_so_the_stored_length_means_something() -> None:
+    assert sanitize_failure_reason("Ext002CallError \t  failed") == "Ext002CallError failed"

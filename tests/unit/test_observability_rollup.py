@@ -12,6 +12,7 @@ functions decide.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
@@ -32,19 +33,28 @@ from modules.observability.domain.rollup import (
     BREAKER_STATE_CLOSED,
     BREAKER_STATE_OPEN,
     DEFAULT_BREAKER_OPEN_SUCCESS_RATE,
+    DEFAULT_DEGRADED_SUCCESS_RATE,
     DEFAULT_OUTBOX_BACKLOG_ALERT_THRESHOLD,
     DEFAULT_PROVIDER_HEALTH_DROP_THRESHOLD,
+    FAILURE_REASON_RATE_LIMITED,
     METRIC_KEY_AI_PROVIDER_HEALTH,
     METRIC_KEY_AI_SPEND,
+    NON_RESOLVABLE_ALERT_KINDS,
+    PROVIDER_STATUS_DEGRADED,
+    PROVIDER_STATUS_DOWN,
+    PROVIDER_STATUS_HEALTHY,
+    RESOLVABLE_ALERT_KINDS,
     ActorSpend,
     AttributionDaily,
     BudgetSnapshot,
     OutboxTableHealth,
+    ProviderFailures,
     ProviderHealth,
     ProviderUsage,
     RollupMetric,
     RollupThresholds,
     UsageScope,
+    alert_kind_resolves,
     breaker_state_for,
     budget_period_for,
     build_attribution_daily,
@@ -60,10 +70,12 @@ from modules.observability.domain.rollup import (
     evaluate_provider_health_alerts,
     percentile,
     provider_health_drop,
+    provider_status,
     register_rollup_metric,
     rollup_metric_keys,
     rollup_metrics_for,
     success_rate,
+    summarize_failures,
     weighted_percentile,
 )
 from modules.observability.schema.models import observability_attribution_daily
@@ -257,6 +269,228 @@ def test_provider_health_drop_is_the_signed_delta_between_two_rates() -> None:
     # No prior reading (or nothing to compare) is not a drop.
     assert provider_health_drop(None, Decimal("0.6000")) is None
     assert provider_health_drop(Decimal("1.0000"), None) is None
+
+
+# ------------------------------------------- B9 #728: the named provider board
+
+
+def test_summarize_failures_counts_quota_refusals_and_names_the_newest() -> None:
+    """The order the loader hands over IS the recency order, newest first."""
+    failures = summarize_failures(
+        [
+            FAILURE_REASON_RATE_LIMITED,
+            "Ext002CallError",
+            FAILURE_REASON_RATE_LIMITED,
+        ]
+    )
+
+    assert failures.rate_limit_count == 2
+    assert failures.last_error == FAILURE_REASON_RATE_LIMITED
+
+
+def test_summarize_failures_names_a_non_quota_failure_without_counting_it() -> None:
+    """A refusal is not the only failure; the newest reason is still worth naming."""
+    failures = summarize_failures(["ConnectError", FAILURE_REASON_RATE_LIMITED, "ValueError"])
+
+    assert failures.rate_limit_count == 1
+    assert failures.last_error == "ConnectError"
+
+
+def test_summarize_failures_skips_absent_reasons_and_reports_nothing_to_name() -> None:
+    """A failed job whose producer gave no reason must not become the named error."""
+    failures = summarize_failures([None, None, "TimeoutError"])
+
+    assert failures.rate_limit_count == 0
+    assert failures.last_error == "TimeoutError"
+    assert summarize_failures([]) == ProviderFailures(0, None)
+    assert summarize_failures([None, None]) == ProviderFailures(0, None)
+
+
+def test_compute_provider_health_rolls_the_timeouts_and_named_failures_up() -> None:
+    """The two previously-unwritten columns are filled from the day's own rows."""
+    usage = _usage("openai", _scope(calls=10, success=8, failure=1, timeout=1))
+
+    health = compute_provider_health(
+        "openai",
+        _WINDOW_START,
+        _WINDOW_END,
+        usage,
+        failures=ProviderFailures(3, FAILURE_REASON_RATE_LIMITED),
+    )
+
+    assert health.timeout_count == 1
+    assert health.rate_limit_count == 3
+    assert health.last_error == FAILURE_REASON_RATE_LIMITED
+
+
+def test_compute_provider_health_defaults_the_failure_columns_for_a_clean_day() -> None:
+    """No ``failures`` means "none observed", not "the provider has never failed"."""
+    usage = _usage("openai", _scope(calls=4, success=4))
+
+    health = compute_provider_health("openai", _WINDOW_START, _WINDOW_END, usage)
+
+    assert (health.timeout_count, health.rate_limit_count, health.last_error) == (0, 0, None)
+
+
+def test_provider_status_is_healthy_for_a_clean_window() -> None:
+    usage = _usage("openai", _scope(calls=20, success=20))
+
+    assert (
+        provider_status(compute_provider_health("openai", _WINDOW_START, _WINDOW_END, usage))
+        == PROVIDER_STATUS_HEALTHY
+    )
+
+
+def test_provider_status_is_healthy_for_a_provider_with_no_traffic_at_all() -> None:
+    """Idle is not broken: an absent sample is never evidence of a failure."""
+    health = compute_provider_health(
+        "openai", _WINDOW_START, _WINDOW_END, _usage("openai", _scope(calls=0, success=0))
+    )
+
+    assert health.success_rate is None
+    assert health.breaker_state == BREAKER_STATE_CLOSED
+    assert provider_status(health) == PROVIDER_STATUS_HEALTHY
+
+
+def test_provider_status_is_down_when_the_breaker_is_open() -> None:
+    usage = _usage("openai", _scope(calls=10, success=2, failure=8))
+
+    health = compute_provider_health("openai", _WINDOW_START, _WINDOW_END, usage)
+
+    assert health.breaker_state == BREAKER_STATE_OPEN
+    assert provider_status(health) == PROVIDER_STATUS_DOWN
+
+
+def test_provider_status_is_down_when_not_one_call_succeeded() -> None:
+    """The case the brief calls out: traffic recorded, nothing succeeded.
+
+    ``success_rate`` is a real ``0.0000`` and every percentile is NULL behind it,
+    because there was no completion to time. Reading that as "no data" would
+    report an outage as silence - which is precisely the bug the board exists to
+    stop.
+
+    The row is built through ``compute_provider_health`` and the breaker state is
+    then patched to disagree with the stored rate, so the assertion is that the
+    stored state wins: a provider whose stored breaker state and stored rate
+    disagree must still resolve to down.
+    """
+    usage = _usage("openai", _scope(calls=3, success=0, failure=3, avg=None))
+
+    rolled = compute_provider_health("openai", _WINDOW_START, _WINDOW_END, usage)
+
+    assert rolled.success_rate == Decimal("0.0000")
+    assert (rolled.p50_duration_ms, rolled.p95_duration_ms, rolled.p99_duration_ms) == (
+        None,
+        None,
+        None,
+    )
+    assert provider_status(rolled) == PROVIDER_STATUS_DOWN
+
+    # The same row with its breaker not tripped - the rate alone still says down.
+    breaker_had_not_tripped = replace(rolled, breaker_state=BREAKER_STATE_CLOSED)
+    assert provider_status(breaker_had_not_tripped) == PROVIDER_STATUS_DOWN
+
+
+def test_provider_status_is_degraded_on_a_single_quota_refusal() -> None:
+    """One refusal among many successes degrades the provider; it does not down it."""
+    usage = _usage("openai", _scope(calls=100, success=99, failure=1))
+
+    health = compute_provider_health(
+        "openai",
+        _WINDOW_START,
+        _WINDOW_END,
+        usage,
+        failures=ProviderFailures(1, FAILURE_REASON_RATE_LIMITED),
+    )
+
+    assert health.success_rate == Decimal("0.9900")
+    assert provider_status(health) == PROVIDER_STATUS_DEGRADED
+
+
+def test_provider_status_is_degraded_on_a_timeout() -> None:
+    usage = _usage("openai", _scope(calls=100, success=99, timeout=1))
+
+    health = compute_provider_health("openai", _WINDOW_START, _WINDOW_END, usage)
+
+    assert health.timeout_count == 1
+    assert provider_status(health) == PROVIDER_STATUS_DEGRADED
+
+
+def test_provider_status_is_degraded_just_below_the_success_threshold() -> None:
+    usage = _usage("openai", _scope(calls=10, success=9, failure=1))
+
+    health = compute_provider_health("openai", _WINDOW_START, _WINDOW_END, usage)
+
+    # Exactly at the threshold, not merely under it: the boundary is inclusive, so a
+    # provider sitting precisely on it reads degraded rather than healthy.
+    assert health.success_rate == Decimal("0.9000")
+    assert health.success_rate == DEFAULT_DEGRADED_SUCCESS_RATE
+    assert provider_status(health) == PROVIDER_STATUS_DEGRADED
+
+
+def test_provider_status_is_healthy_just_above_the_success_threshold() -> None:
+    """The other side of the same boundary, so the line is pinned from both ends."""
+    usage = _usage("openai", _scope(calls=1000, success=901, failure=99))
+
+    health = compute_provider_health("openai", _WINDOW_START, _WINDOW_END, usage)
+
+    assert health.success_rate == Decimal("0.9010")
+    assert provider_status(health) == PROVIDER_STATUS_HEALTHY
+
+
+def test_provider_status_does_not_let_a_single_named_error_outrank_the_counters() -> None:
+    """One call's word never outweighs every other call succeeding.
+
+    The named error is what an operator READS once the status has told them to
+    look. If it drove the status, a provider that was refused once and served
+    everything else would read as an outage.
+    """
+    usage = _usage("openai", _scope(calls=1000, success=1000, failure=0, timeout=0))
+
+    health = compute_provider_health(
+        "openai",
+        _WINDOW_START,
+        _WINDOW_END,
+        usage,
+        failures=ProviderFailures(0, "ConnectError"),
+    )
+
+    assert health.last_error == "ConnectError"
+    assert provider_status(health) == PROVIDER_STATUS_HEALTHY
+
+
+def test_the_two_alert_vocabularies_are_disjoint_and_cover_every_rollup_kind() -> None:
+    """The never-auto-resolve rule is DATA, so "tidying it up" fails a test.
+
+    Read as an omission next to :data:`RESOLVABLE_ALERT_KINDS`, adding
+    ``provider_health_drop`` to that set looks like completing the vocabulary - and
+    silently makes a degraded provider disappear the moment it recovers.
+    """
+    every_kind = {
+        ALERT_KIND_AI_BUDGET,
+        ALERT_KIND_PROVIDER_HEALTH_DROP,
+        ALERT_KIND_BREAKER_OPEN,
+        ALERT_KIND_OUTBOX_BACKLOG,
+        ALERT_KIND_OUTBOX_DEAD_LETTER,
+    }
+
+    assert not RESOLVABLE_ALERT_KINDS & NON_RESOLVABLE_ALERT_KINDS
+    assert every_kind == RESOLVABLE_ALERT_KINDS | NON_RESOLVABLE_ALERT_KINDS
+    assert ALERT_KIND_PROVIDER_HEALTH_DROP in NON_RESOLVABLE_ALERT_KINDS
+
+
+def test_the_resolve_step_reads_both_vocabularies_and_unknown_kinds_resolve_to_nothing() -> None:
+    """The resolve step answers one question, from both sets rather than one.
+
+    :data:`RESOLVABLE_ALERT_KINDS` alone would leave the never-auto-resolve rule
+    living only in an absence, so the deny-list is read as well; and an unclassified
+    kind resolves to nothing rather than defaulting to yes, which is what makes
+    adding a new kind a deliberate act.
+    """
+    assert not alert_kind_resolves(ALERT_KIND_PROVIDER_HEALTH_DROP)
+    for kind in (ALERT_KIND_AI_BUDGET, ALERT_KIND_BREAKER_OPEN):
+        assert alert_kind_resolves(kind)
+    assert not alert_kind_resolves("a_kind_from_a_future_batch")
 
 
 # --------------------------------------------------------------------- budget

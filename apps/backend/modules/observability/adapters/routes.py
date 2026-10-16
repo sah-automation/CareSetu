@@ -16,7 +16,8 @@ gateway handlers and anything unexpected falls to the app catch-all.
 Scope: the whole plan-phase14 §9.1 read table. C1a (#706) serves ``cost``,
 ``cost/trend``, ``usage`` and ``quality``; C1b (#707) adds ``overview``,
 ``latency``, ``health``, ``alerts`` and ``deeplinks``; B9 (#727) adds
-``throughput``, the per-minute request counter and the capture-liveness answer.
+``throughput``, the per-minute request counter and the capture-liveness answer;
+B9 (#728) adds ``providers``, the degraded-provider board.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ from modules.observability.facade import (
     LatencyReport,
     ObservabilityFacade,
     Overview,
+    ProviderBoardReport,
     QualityReport,
     SystemHealth,
     ThroughputReport,
@@ -209,6 +211,38 @@ async def read_latency(
     """
     del principal
     return await _facade(request).get_latency()
+
+
+@router.get(
+    "/v1/operator/observability/providers",
+    response_model=ProviderBoardReport,
+    status_code=status.HTTP_200_OK,
+    summary="Read the per-provider degraded status board (operator only)",
+)
+async def read_providers(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_operator)],
+) -> ProviderBoardReport:
+    """Every rolled upstream model API, with whether it is healthy, degraded or down.
+
+    The board's whole purpose is telling a CareSetu bug from an upstream outage, so
+    each row carries the numbers that separate them: the quota refusals, the
+    timeouts, the success rate, the three percentiles, the breaker state and the
+    newest failure's reason. ``status`` is derived from those at read time, which
+    is why there is no stored column to drift.
+
+    No ``days`` param, for the same reason as ``/latency``: every field is the
+    nightly rollup's snapshot of one window, so a window here would describe a
+    period the numbers were never computed over. ``last_rolled_date`` and each
+    row's own bounds are how fresh the board is.
+
+    A separate route rather than a wider ``/quality``: that read's per-provider
+    list exists to give the quality panel its context, and folding an operational
+    verdict into it would either make every existing consumer carry a status it
+    has no use for or split the shape across two reads of the same table.
+    """
+    del principal
+    return await _facade(request).get_provider_board()
 
 
 @router.get(

@@ -225,6 +225,9 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         # PHASE-14A B9 (#727): the per-minute request counter, which carries the
         # capture-liveness answer rather than only the numbers.
         "/v1/operator/observability/throughput",
+        # PHASE-14A B9 (#728): the degraded-provider board, one row per upstream
+        # model API with its healthy/degraded/down status derived at read time.
+        "/v1/operator/observability/providers",
     }
 
 

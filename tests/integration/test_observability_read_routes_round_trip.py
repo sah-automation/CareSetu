@@ -19,7 +19,9 @@ buffers it, and the module facade's drain writes the captured record - so the ro
 exists only if every hop of the capture path works. B9 (#727) folds the per-minute
 HTTP counter into it the same way, and additionally drives ``/throughput`` over the
 rows that fold produced, so the aggregate read is proven against the exact shape
-the capture writes rather than a hand-written seed.
+the capture writes rather than a hand-written seed. B9 (#728) adds
+``/providers`` over the same seeded health rows, which carry the two failure
+columns and the named last error the board reads.
 
 Requires the native PostgreSQL; the suite skips cleanly when it is unreachable.
 The shared integration conftest migrates to head once per file, empties the
@@ -70,6 +72,7 @@ USAGE_PATH = "/v1/operator/observability/usage"
 QUALITY_PATH = "/v1/operator/observability/quality"
 OVERVIEW_PATH = "/v1/operator/observability/overview"
 LATENCY_PATH = "/v1/operator/observability/latency"
+PROVIDERS_PATH = "/v1/operator/observability/providers"
 THROUGHPUT_PATH = "/v1/operator/observability/throughput"
 HEALTH_PATH = "/v1/operator/observability/health"
 ALERTS_PATH = "/v1/operator/observability/alerts"
@@ -77,7 +80,13 @@ DEEPLINKS_PATH = "/v1/operator/observability/deeplinks"
 
 
 async def _seed(connection: AsyncConnection) -> None:
-    """Three in-window usage scopes, one stale scope, two budgets, two health rows."""
+    """Three in-window usage scopes, one stale scope, two budgets, three health rows.
+
+    The health rows are seeded for the board as well as ``/quality`` and ``/latency``:
+    ``openai`` is quota-refused and timing out behind a CLOSED breaker (degraded),
+    ``anthropic`` has an open breaker (down), and ``together-ai`` is a row the
+    rollup created with no traffic behind it at all (healthy, every rate NULL).
+    """
     await connection.execute(
         text(
             "INSERT INTO observability.observability_ai_usage_daily "
@@ -105,9 +114,13 @@ async def _seed(connection: AsyncConnection) -> None:
         text(
             "INSERT INTO observability.observability_ai_provider_health "
             "(provider, window_start, window_end, sample_count, success_rate, "
-            "p50_duration_ms, p95_duration_ms, p99_duration_ms, breaker_state) VALUES "
-            "('openai', :start, :end, 8, 0.8750, 1200.00, 8400.00, 15100.00, 'closed'), "
-            "('anthropic', :start, :end, 1, 0.5000, 900.00, 1500.00, 1800.00, 'open')"
+            "p50_duration_ms, p95_duration_ms, p99_duration_ms, breaker_state, "
+            "timeout_count, rate_limit_count, last_error) VALUES "
+            "('openai', :start, :end, 8, 0.8750, 1200.00, 8400.00, 15100.00, 'closed', "
+            " 1, 2, 'rate_limited'), "
+            "('anthropic', :start, :end, 1, 0.5000, 900.00, 1500.00, 1800.00, 'open', "
+            " 3, 0, 'ConnectError'), "
+            "('together-ai', NULL, NULL, 0, NULL, NULL, NULL, NULL, 'closed', 0, 0, NULL)"
         ),
         {"start": _DAY_START, "end": _TODAY},
     )
@@ -376,6 +389,8 @@ async def test_quality_reports_the_seeded_rates_and_health(
     ] == [
         ("anthropic", "0.5000", "open"),
         ("openai", "0.8750", "closed"),
+        # The idle provider's rate is NULL, not "0.0000": it was never asked.
+        ("together-ai", None, "closed"),
     ]
 
 
@@ -403,6 +418,7 @@ async def test_reads_are_empty_before_the_first_rollup(
         quality = client.get(QUALITY_PATH, headers=headers).json()
         overview = client.get(OVERVIEW_PATH, headers=headers).json()
         latency = client.get(LATENCY_PATH, headers=headers).json()
+        providers = client.get(PROVIDERS_PATH, headers=headers).json()
         alerts = client.get(ALERTS_PATH, headers=headers).json()
 
     assert cost["total_spend_paise"] == 0
@@ -422,6 +438,10 @@ async def test_reads_are_empty_before_the_first_rollup(
     assert overview["open_alerts"] == 0
     assert latency["providers"] == []
     assert latency["last_rolled_date"] is None
+    # #728: before the first rollup the board is EMPTY, not a list of healthy
+    # providers. A fabricated row would read as a provider answering normally.
+    assert providers["providers"] == []
+    assert providers["last_rolled_date"] is None
     assert alerts["alerts"] == []
 
 
@@ -519,12 +539,69 @@ async def test_latency_reports_the_rolled_percentiles(
     ] == [
         ("anthropic", 1, "900.00", "1500.00"),
         ("openai", 8, "1200.00", "8400.00"),
+        # The idle provider has a health row and therefore appears with NULL
+        # percentiles - which is not the same as a provider that answered instantly.
+        ("together-ai", 0, None, None),
     ]
     assert body["providers"][1]["p99_duration_ms"] == "15100.00"
     # The window the rollup ranked over is echoed back, so a reader can judge
     # freshness. Derived from ``_TODAY`` because that is what the health rows were
     # seeded with - a hardcoded date would fail on the day after it was written.
     assert body["providers"][1]["window_start"] == f"{_TODAY.isoformat()}T00:00:00Z"
+
+
+async def test_the_provider_board_derives_a_status_per_provider(
+    rolled_engine: AsyncEngine, database_url: str
+) -> None:
+    """#728: the whole point, driven through the real operator HTTP API.
+
+    The three seeded rows cover the three verdicts, and each one is distinguishable
+    only because the read derives it: an open breaker, quota refusals behind a
+    healthy breaker, and a provider the rollup never saw any traffic from.
+    """
+    with _client(database_url) as client:
+        body = client.get(PROVIDERS_PATH, headers=_bearer()).json()
+
+    assert body["last_rolled_date"] == _YESTERDAY.isoformat()
+    assert [(row["provider"], row["status"]) for row in body["providers"]] == [
+        ("anthropic", "down"),
+        ("openai", "degraded"),
+        ("together-ai", "healthy"),
+    ]
+
+
+async def test_the_provider_board_reports_the_figures_behind_each_verdict(
+    rolled_engine: AsyncEngine, database_url: str
+) -> None:
+    """Every input to the status is on the row, as an exact wire decimal."""
+    with _client(database_url) as client:
+        rows = {
+            row["provider"]: row
+            for row in client.get(PROVIDERS_PATH, headers=_bearer()).json()["providers"]
+        }
+
+    openai = rows["openai"]
+    assert openai["breaker_state"] == "closed"
+    assert openai["success_rate"] == "0.8750"
+    assert openai["sample_count"] == 8
+    # The two counters the verdict leans on, and the reason it names.
+    assert (openai["rate_limit_count"], openai["timeout_count"]) == (2, 1)
+    assert openai["last_error"] == "rate_limited"
+    assert (openai["p50_duration_ms"], openai["p95_duration_ms"], openai["p99_duration_ms"]) == (
+        "1200.00",
+        "8400.00",
+        "15100.00",
+    )
+
+    anthropic = rows["anthropic"]
+    assert anthropic["breaker_state"] == "open"
+    assert anthropic["last_error"] == "ConnectError"
+
+    # Idle is not broken: nulls and zero counts, never a success rate of 0.0000.
+    idle = rows["together-ai"]
+    assert idle["success_rate"] is None
+    assert (idle["rate_limit_count"], idle["timeout_count"], idle["sample_count"]) == (0, 0, 0)
+    assert idle["last_error"] is None
 
 
 async def test_health_counts_the_seeded_outbox_and_breakers(
@@ -548,6 +625,9 @@ async def test_health_counts_the_seeded_outbox_and_breakers(
     assert [(row["provider"], row["breaker_state"]) for row in body["breakers"]] == [
         ("anthropic", "open"),
         ("openai", "closed"),
+        # The idle provider has a row and a closed breaker: a provider that was
+        # never called is not an open breaker, and it is not absent either.
+        ("together-ai", "closed"),
     ]
     assert body["open_breakers"] == 1
 
@@ -627,7 +707,14 @@ async def test_c1b_routes_refuse_anonymous_and_non_operator_callers(
     rolled_engine: AsyncEngine, database_url: str
 ) -> None:
     with _client(database_url) as client:
-        for path in (OVERVIEW_PATH, LATENCY_PATH, HEALTH_PATH, ALERTS_PATH, DEEPLINKS_PATH):
+        for path in (
+            OVERVIEW_PATH,
+            LATENCY_PATH,
+            PROVIDERS_PATH,
+            HEALTH_PATH,
+            ALERTS_PATH,
+            DEEPLINKS_PATH,
+        ):
             assert client.get(path).status_code == 401
             assert client.get(path, headers=_bearer("patient")).status_code == 403
 

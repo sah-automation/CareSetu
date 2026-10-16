@@ -36,6 +36,7 @@ from modules.observability.facade import (
     query_health,
     query_latency,
     query_overview,
+    query_provider_board,
     query_quality,
     query_throughput,
     query_usage,
@@ -646,6 +647,107 @@ async def test_latency_keeps_an_unsampled_providers_null_percentiles() -> None:
 
     assert report.providers[0].sample_count == 0
     assert report.providers[0].p50_duration_ms is None
+
+
+# ------------------------------------------------- provider board (B9 #728)
+
+
+_BOARD_ROWS: list[dict[str, object]] = [
+    {
+        "provider": "anthropic",
+        "sample_count": 1,
+        "success_rate": Decimal("0.5000"),
+        "timeout_count": 1,
+        "rate_limit_count": 0,
+        "p50_duration_ms": Decimal("900.00"),
+        "p95_duration_ms": Decimal("1500.00"),
+        "p99_duration_ms": Decimal("1800.00"),
+        "breaker_state": "open",
+        "last_error": "ConnectError",
+        "window_start": datetime(2026, 10, 12, tzinfo=UTC),
+        "window_end": datetime(2026, 10, 13, tzinfo=UTC),
+    },
+    {
+        "provider": "openai",
+        "sample_count": 8,
+        "success_rate": Decimal("0.8750"),
+        "timeout_count": 0,
+        "rate_limit_count": 2,
+        "p50_duration_ms": Decimal("1200.00"),
+        "p95_duration_ms": Decimal("8400.00"),
+        "p99_duration_ms": Decimal("15100.00"),
+        "breaker_state": "closed",
+        "last_error": "rate_limited",
+        "window_start": datetime(2026, 10, 12, tzinfo=UTC),
+        "window_end": datetime(2026, 10, 13, tzinfo=UTC),
+    },
+    {
+        "provider": "together-ai",
+        "sample_count": 0,
+        "success_rate": None,
+        "timeout_count": 0,
+        "rate_limit_count": 0,
+        "p50_duration_ms": None,
+        "p95_duration_ms": None,
+        "p99_duration_ms": None,
+        "breaker_state": "closed",
+        "last_error": None,
+        "window_start": None,
+        "window_end": None,
+    },
+]
+
+
+async def test_the_board_derives_a_status_per_provider_from_the_stored_counters() -> None:
+    """#717 story 37: triage without reading numbers, from ONE table read."""
+    report = await query_provider_board(_connection(_BOARD_ROWS, [{"value": _TODAY}]))
+
+    assert report.last_rolled_date == _TODAY
+    assert [(row.provider, row.status) for row in report.providers] == [
+        ("anthropic", "down"),
+        ("openai", "degraded"),
+        ("together-ai", "healthy"),
+    ]
+
+
+async def test_the_board_carries_every_figure_the_triage_needs() -> None:
+    """Rate limits, timeouts, the rate, the three percentiles, the breaker, the error."""
+    report = await query_provider_board(_connection(_BOARD_ROWS, [{"value": _TODAY}]))
+
+    row = next(entry for entry in report.providers if entry.provider == "openai")
+    assert row.success_rate == Decimal("0.8750")
+    assert row.sample_count == 8
+    assert row.timeout_count == 0
+    assert row.rate_limit_count == 2
+    assert (row.p50_duration_ms, row.p95_duration_ms, row.p99_duration_ms) == (
+        Decimal("1200.00"),
+        Decimal("8400.00"),
+        Decimal("15100.00"),
+    )
+    assert row.breaker_state == "closed"
+    assert row.last_error == "rate_limited"
+    assert row.window_start == datetime(2026, 10, 12, tzinfo=UTC)
+
+
+async def test_the_board_is_empty_before_the_first_rollup_rather_than_all_healthy() -> None:
+    """A fabricated row would read as a provider answering normally."""
+    report = await query_provider_board(_connection([], []))
+
+    assert report.providers == []
+    assert report.last_rolled_date is None
+
+
+async def test_the_board_reads_only_the_observability_schema() -> None:
+    """No cross-module read is introduced by the board (#717 out-of-scope list)."""
+    connection = _connection(_BOARD_ROWS, [{"value": _TODAY}])
+
+    await query_provider_board(connection)
+
+    assert _from_target(connection, 0) == "observability.observability_ai_provider_health"
+    assert _from_target(connection, 1) == "observability.observability_rollup_runs"
+    compiled = _compiled(connection, 0)
+    assert "intake." not in compiled
+    assert "last_error" in compiled and "rate_limit_count" in compiled
 
 
 # -------------------------------------------------------------- throughput (B9 #727)

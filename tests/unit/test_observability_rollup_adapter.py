@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import inspect
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -31,6 +32,7 @@ from modules.observability.domain.rollup import (
     METRIC_KEY_AI_SPEND,
     ActorSpend,
     AttributionDaily,
+    ProviderFailures,
     ProviderUsage,
     UsageScope,
     alert_key,
@@ -45,6 +47,7 @@ from modules.observability.rollup import (
     _apply_alerts,
     _load_actor_spend,
     _load_doctor_by_intake,
+    _load_provider_failures,
     _upsert_attribution_daily,
     _upsert_business_metric,
     _upsert_provider_health,
@@ -132,6 +135,94 @@ def test_provider_health_upsert_refreshes_the_percentile_columns_in_place() -> N
     for column in ("p50_duration_ms", "p95_duration_ms", "p99_duration_ms", "success_rate"):
         assert column in sql
     assert "updated_at" in sql
+
+
+def test_provider_health_upsert_writes_the_columns_nothing_used_to_write() -> None:
+    """AC1: the last-error column is written by the rollup, in full, every pass.
+
+    Written in the DO UPDATE set rather than only on insert: a provider that
+    recovered must have yesterday's named failure CLEARED, because a stale last
+    error names a failure that is not happening and is worse than none.
+    """
+    connection = _RecordingConnection()
+    degraded = replace(
+        _health(),
+        timeout_count=2,
+        rate_limit_count=4,
+        last_error="rate_limited",
+    )
+
+    asyncio.run(_upsert_provider_health(connection, degraded))  # type: ignore[arg-type]
+
+    sql = connection.sql
+    assert "timeout_count" in sql
+    assert "rate_limit_count" in sql
+    assert "last_error" in sql
+    assert "'rate_limited'" in sql
+    update_set = sql.split("DO UPDATE SET", 1)[1]
+    for column in ("timeout_count", "rate_limit_count", "last_error"):
+        assert column in update_set, f"{column} is inserted but never refreshed"
+
+
+def test_provider_health_upsert_clears_a_recovered_providers_named_failure() -> None:
+    """A healthy pass writes NULL last error, not the previous night's reason."""
+    connection = _RecordingConnection()
+
+    asyncio.run(_upsert_provider_health(connection, _health()))  # type: ignore[arg-type]
+
+    assert "last_error" in connection.sql
+    assert "rate_limited" not in connection.sql
+
+
+def test_load_provider_failures_reads_failed_jobs_newest_first_per_provider() -> None:
+    """The order is the recency order, and it is pinned by ``ai_job_ref``.
+
+    Without the tie-break two jobs sharing a ``created_at`` would make the health
+    row's named last error - and so what the board shows an operator - depend on
+    the planner's choice of scan order.
+    """
+    connection = _RecordingConnection(
+        rows=[
+            ("openai", "rate_limited"),
+            ("openai", "ConnectError"),
+            ("anthropic", "TimeoutError"),
+        ]
+    )
+
+    loaded = asyncio.run(  # type: ignore[arg-type]
+        _load_provider_failures(connection, _TARGET_DATE)
+    )
+
+    assert loaded == {
+        "openai": ProviderFailures(1, "rate_limited"),
+        "anthropic": ProviderFailures(0, "TimeoutError"),
+    }
+    sql = connection.sql
+    assert "FROM observability.observability_ai_job_spend" in sql
+    assert "failure_reason IS NOT NULL" in sql
+    assert "status = 'failed'" in sql
+    assert "created_at DESC" in sql and "ai_job_ref DESC" in sql
+
+
+def test_load_provider_failures_omits_a_provider_with_no_failed_job() -> None:
+    """An absent key is what ``compute_provider_health`` reads as "none observed"."""
+    connection = _RecordingConnection(rows=[("openai", "ConnectError")])
+
+    loaded = asyncio.run(  # type: ignore[arg-type]
+        _load_provider_failures(connection, _TARGET_DATE)
+    )
+
+    assert set(loaded) == {"openai"}
+
+
+def test_load_provider_failures_is_empty_for_a_day_with_no_failures() -> None:
+    connection = _RecordingConnection(rows=[])
+
+    loaded = asyncio.run(  # type: ignore[arg-type]
+        _load_provider_failures(connection, _TARGET_DATE)
+    )
+
+    assert loaded == {}
 
 
 def test_business_metric_upsert_replaces_the_value_on_the_generic_store() -> None:
