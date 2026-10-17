@@ -38,6 +38,7 @@ counts them all), and downgrades afterwards.
 
 from __future__ import annotations
 
+import asyncio
 import calendar
 import json
 import uuid
@@ -61,7 +62,11 @@ from modules.observability.domain.pseudonym import (
     ACTOR_KIND_PATIENT,
     actor_key,
 )
-from modules.observability.facade import drain_error_buffer, drain_http_counter
+from modules.observability.facade import (
+    ObservabilityFacade,
+    drain_error_buffer,
+    drain_http_counter,
+)
 from observability.error_capture import pending_error_captures, reset_error_capture
 from observability.http_counter import pending_http_counts, reset_http_counter
 
@@ -692,6 +697,171 @@ async def test_alerts_narrow_to_status_and_page(
     # total_count counts the FILTER, not the whole table.
     assert resolved["total_count"] == 1
     assert [entry["kind"] for entry in resolved["alerts"]] == ["outbox_dead_letter"]
+
+
+# ------------------------------------------------------- B5 #735: acknowledgement
+#
+# The one WRITE in the operator observability surface, against the real table the
+# reads already sit on. It reuses this file's rolled fixture rather than opening a
+# fifth one (spec #717 decision 46): the alert rows it acts on are the three the
+# feed assertions above already prove are there, and an acknowledgement that cannot
+# be seen moving those rows between the open and acknowledged filters is not proven.
+
+
+async def _alert_row(engine: AsyncEngine, kind: str) -> dict[str, Any]:
+    """The stored acknowledgement columns for one seeded alert, as Postgres holds them."""
+    async with engine.begin() as connection:
+        row = (
+            (
+                await connection.execute(
+                    text(
+                        "SELECT status, acked_by, acked_at FROM "
+                        "observability.observability_alert_events WHERE kind = :kind"
+                    ),
+                    {"kind": kind},
+                )
+            )
+            .mappings()
+            .one()
+        )
+    return dict(row)
+
+
+async def test_acknowledging_an_alert_writes_the_operator_and_the_time(
+    rolled_engine: AsyncEngine, database_url: str
+) -> None:
+    with _client(database_url) as client:
+        open_alerts = client.get(f"{ALERTS_PATH}?status=open", headers=_bearer()).json()
+        alert_id = open_alerts["alerts"][0]["id"]
+        response = client.post(f"{ALERTS_PATH}/{alert_id}/acknowledge", headers=_bearer())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["already_acknowledged"] is False
+    assert body["alert"]["id"] == alert_id
+    assert body["alert"]["status"] == "acknowledged"
+    assert body["alert"]["acked_by"] == 1
+
+    row = await _alert_row(rolled_engine, "breaker_open")
+    assert row["status"] == "acknowledged"
+    assert row["acked_by"] == 1
+    assert row["acked_at"] is not None
+
+
+async def test_an_acknowledged_alert_leaves_the_open_filter_for_its_own(
+    rolled_engine: AsyncEngine, database_url: str
+) -> None:
+    """The point of the acknowledgement: the open list is what an operator works."""
+    with _client(database_url) as client:
+        alert_id = client.get(f"{ALERTS_PATH}?status=open", headers=_bearer()).json()["alerts"][0][
+            "id"
+        ]
+        client.post(f"{ALERTS_PATH}/{alert_id}/acknowledge", headers=_bearer())
+
+        still_open = client.get(f"{ALERTS_PATH}?status=open", headers=_bearer()).json()
+        acknowledged = client.get(f"{ALERTS_PATH}?status=acknowledged", headers=_bearer()).json()
+        every = client.get(ALERTS_PATH, headers=_bearer()).json()
+
+    assert [(entry["kind"], entry["status"]) for entry in still_open["alerts"]] == [
+        ("ai_budget", "open")
+    ]
+    assert still_open["total_count"] == 1
+    assert [entry["id"] for entry in acknowledged["alerts"]] == [alert_id]
+    assert acknowledged["total_count"] == 1
+    # The acknowledged row is still in the feed, and nothing was lost.
+    assert every["total_count"] == 3
+
+
+async def test_acknowledging_twice_leaves_the_first_acknowledgement_standing(
+    rolled_engine: AsyncEngine, database_url: str
+) -> None:
+    with _client(database_url) as client:
+        alert_id = client.get(ALERTS_PATH, headers=_bearer()).json()["alerts"][0]["id"]
+        first = client.post(f"{ALERTS_PATH}/{alert_id}/acknowledge", headers=_bearer()).json()
+        second = client.post(f"{ALERTS_PATH}/{alert_id}/acknowledge", headers=_bearer()).json()
+
+    assert first["already_acknowledged"] is False
+    assert second["already_acknowledged"] is True
+    assert second["alert"]["acked_at"] == first["alert"]["acked_at"]
+    row = await _alert_row(rolled_engine, "breaker_open")
+    # And the row still carries the FIRST acknowledgement's instant, not the
+    # second call's: the guarded write is what makes that true, not a
+    # read-then-write that happened not to race.
+    assert row["acked_at"] == datetime.fromisoformat(
+        first["alert"]["acked_at"].replace("Z", "+00:00")
+    )
+
+
+async def test_two_operators_acknowledging_at_once_leave_exactly_one_claim(
+    rolled_engine: AsyncEngine, database_url: str
+) -> None:
+    """The guard is the engine's, so it holds when the two calls actually overlap.
+
+    The serial case above proves the second call is refused; this proves the refusal
+    is not merely a property of arriving one after the other. Two facade calls are
+    driven concurrently against the real engine, so both UPDATEs are in flight at
+    once and the engine - not the caller - is what decides the order. Drop the
+    ``status = 'open'`` guard and both claims are written, which is the outcome this
+    test exists to rule out.
+    """
+    with _client(database_url) as client:
+        alert_id = client.get(ALERTS_PATH, headers=_bearer()).json()["alerts"][0]["id"]
+
+    facade = ObservabilityFacade(engine=rolled_engine)
+    first, second = await asyncio.gather(
+        facade.acknowledge_alert(alert_id=uuid.UUID(alert_id), acked_by=7),
+        facade.acknowledge_alert(alert_id=uuid.UUID(alert_id), acked_by=9),
+    )
+
+    assert [first.already_acknowledged, second.already_acknowledged].count(False) == 1
+    winner = first if not first.already_acknowledged else second
+    row = await _alert_row(rolled_engine, "breaker_open")
+    # The row carries the WINNER's operator, whichever coroutine that happened to be,
+    # and both callers were handed the same standing claim.
+    assert row["acked_by"] == winner.alert.acked_by
+    assert {first.alert.acked_by, second.alert.acked_by} == {row["acked_by"]}
+
+
+async def test_acknowledging_an_alert_that_does_not_exist_answers_not_found(
+    rolled_engine: AsyncEngine, database_url: str
+) -> None:
+    with _client(database_url) as client:
+        response = client.post(f"{ALERTS_PATH}/{uuid.uuid4()}/acknowledge", headers=_bearer())
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "ALERT_NOT_FOUND"
+
+
+async def test_acknowledging_a_resolved_alert_is_refused_and_leaves_it_resolved(
+    rolled_engine: AsyncEngine, database_url: str
+) -> None:
+    with _client(database_url) as client:
+        resolved = client.get(f"{ALERTS_PATH}?status=resolved", headers=_bearer()).json()
+        response = client.post(
+            f"{ALERTS_PATH}/{resolved['alerts'][0]['id']}/acknowledge", headers=_bearer()
+        )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "ALERT_ALREADY_RESOLVED"
+    assert (await _alert_row(rolled_engine, "outbox_dead_letter"))["status"] == "resolved"
+
+
+async def test_the_acknowledgement_endpoint_refuses_anonymous_and_non_operator_callers(
+    rolled_engine: AsyncEngine, database_url: str
+) -> None:
+    with _client(database_url) as client:
+        alert_id = client.get(ALERTS_PATH, headers=_bearer()).json()["alerts"][0]["id"]
+        path = f"{ALERTS_PATH}/{alert_id}/acknowledge"
+
+        assert client.post(path).status_code == 401
+        assert client.post(path, headers=_bearer("patient")).status_code == 403
+
+    # A refused call writes nothing: the row is exactly as it was seeded.
+    assert await _alert_row(rolled_engine, "breaker_open") == {
+        "status": "open",
+        "acked_by": None,
+        "acked_at": None,
+    }
 
 
 async def test_deeplinks_answer_the_configured_vendors(database_url: str) -> None:

@@ -135,14 +135,20 @@ from modules.observability.domain.deeplinks import (
     langfuse_link,
     sentry_link,
 )
+from modules.observability.domain.exceptions import (
+    AlertAlreadyResolvedError,
+    AlertNotFoundError,
+)
 from modules.observability.domain.pseudonym import (
     ACTOR_KIND_DOCTOR,
     ACTOR_KIND_PATIENT,
     actor_key,
 )
 from modules.observability.domain.rollup import (
+    ALERT_STATUS_ACKNOWLEDGED,
     ALERT_STATUS_OPEN,
     ALERT_STATUS_RESOLVED,
+    ALERT_STATUS_VOCABULARY,
     BREAKER_STATE_OPEN,
     ROLLUP_MODE_BACKFILL,
     ROLLUP_MODE_DAILY,
@@ -245,7 +251,6 @@ MAX_ERROR_WINDOW_MINUTES = 1440
 #: OpenAPI, so the route spells the edge gate separately. That is exactly why
 #: ``test_the_error_status_gate_matches_the_facade_vocabulary`` asserts the two agree -
 #: widening this filter takes two edits and the test fails if only one is made.
-#: #735 widens it when acknowledgement reaches captured errors.
 ERROR_STATUS_VOCABULARY: tuple[str, ...] = (ALERT_STATUS_OPEN, ALERT_STATUS_RESOLVED)
 
 #: The three periods ``/business`` serves, as wire spellings. Named constants rather
@@ -342,6 +347,7 @@ _UNAVAILABLE_DETAIL: dict[str, str] = {
 __all__ = [
     "AI_JOB_SPEND_STATUS_COMPLETED",
     "AI_JOB_SPEND_STATUS_FAILED",
+    "ALERT_STATUS_VOCABULARY",
     "BUSINESS_PERIODS",
     "BUSINESS_PERIOD_MONTH",
     "BUSINESS_PERIOD_TODAY",
@@ -367,6 +373,7 @@ __all__ = [
     "UNAVAILABLE_REVENUE_NOT_CAPTURED",
     "UNAVAILABLE_REVENUE_ZERO",
     "ActorSpendDistribution",
+    "AlertAcknowledgement",
     "AlertEntry",
     "AlertPage",
     "BreakerHealthRow",
@@ -413,6 +420,7 @@ __all__ = [
     "UsageRow",
     "accumulate_ai_usage",
     "accumulate_business_count",
+    "acknowledge_alert",
     "close_ai_queue_item",
     "drain_error_buffer",
     "drain_http_counter",
@@ -1728,6 +1736,19 @@ class AlertPage(BaseModel):
     total_count: int
 
 
+class AlertAcknowledgement(BaseModel):
+    """The outcome of one acknowledgement: the row as it now stands, and whose claim won.
+
+    ``already_acknowledged`` is the conflict rule made observable. A repeat is not a
+    409 - the write is idempotent and the first acknowledgement stands - so without
+    this flag a 200 on the second call would be read as "I am the one who took this"
+    when the columns say it was somebody else.
+    """
+
+    alert: AlertEntry
+    already_acknowledged: bool
+
+
 class ErrorFeedEntry(BaseModel):
     """One DISTINCT captured failure, as the live error feed answers it.
 
@@ -2311,20 +2332,62 @@ async def query_reliability(
     )
 
 
+#: Every column ``observability_alert_events`` contributes to an :class:`AlertEntry`,
+#: in one place. The feed and the acknowledgement read both select exactly this, so
+#: the row an operator is handed after acknowledging is byte-for-byte the row the
+#: feed would have handed them - including the two acknowledgement columns.
+_ALERT_COLUMNS = (
+    observability_alert_events.c.id,
+    observability_alert_events.c.severity,
+    observability_alert_events.c.kind,
+    observability_alert_events.c.title,
+    observability_alert_events.c.payload,
+    observability_alert_events.c.status,
+    observability_alert_events.c.created_at,
+    observability_alert_events.c.acked_by,
+    observability_alert_events.c.acked_at,
+)
+
+
+def _alert_entry(row: RowMapping) -> AlertEntry:
+    """One selected alert row as the feed and the acknowledgement both answer it."""
+    return AlertEntry(
+        id=row["id"],
+        severity=row["severity"],
+        kind=row["kind"],
+        title=row["title"],
+        payload=row["payload"],
+        status=row["status"],
+        created_at=row["created_at"],
+        acked_by=row["acked_by"],
+        acked_at=row["acked_at"],
+    )
+
+
 async def query_alerts(
     connection: AsyncConnection, *, page: int, page_size: int, status: str | None = None
 ) -> AlertPage:
     """Read one page of the alert feed, newest first (``/alerts``).
 
     Unfiltered, this is the operator's standing-problems view; ``status`` narrows
-    it to what is still open or to what a later pass has resolved. The feed is
-    ordered newest first and carries only PHI-free columns, so it can be rendered
-    inline on the operator page (plan-phase14 §9.2).
+    it to what is still open, to what an operator has taken ownership of, or to what
+    a later pass has resolved. The feed is ordered newest first and carries only
+    PHI-free columns, so it can be rendered inline on the operator page
+    (plan-phase14 §9.2).
 
     ``total_count`` is a second aggregate over the same filter rather than
     ``len(alerts)``, so a caller can page back through a long feed without paging
     to find out there is more.
+
+    An unrecognised status is refused rather than passed through, because the failure
+    mode of getting it wrong is an empty feed that reads as "nothing is wrong" - the
+    same reason the route's ``Literal`` refuses it at the edge, and the same rule
+    :func:`_error_status_clause` follows for the error feed.
     """
+    if status is not None and status not in ALERT_STATUS_VOCABULARY:
+        raise ValueError(
+            f"unknown alert status {status!r}; expected one of {', '.join(ALERT_STATUS_VOCABULARY)}"
+        )
     filter_clause = (
         (observability_alert_events.c.status == status) if status is not None else true()
     )
@@ -2333,19 +2396,8 @@ async def query_alerts(
     )
     total = int(counted.scalar_one())
 
-    columns = (
-        observability_alert_events.c.id,
-        observability_alert_events.c.severity,
-        observability_alert_events.c.kind,
-        observability_alert_events.c.title,
-        observability_alert_events.c.payload,
-        observability_alert_events.c.status,
-        observability_alert_events.c.created_at,
-        observability_alert_events.c.acked_by,
-        observability_alert_events.c.acked_at,
-    )
     rows = await connection.execute(
-        select(*columns)
+        select(*_ALERT_COLUMNS)
         .where(filter_clause)
         .order_by(
             observability_alert_events.c.created_at.desc(),
@@ -2354,21 +2406,63 @@ async def query_alerts(
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
-    alerts = [
-        AlertEntry(
-            id=entry["id"],
-            severity=entry["severity"],
-            kind=entry["kind"],
-            title=entry["title"],
-            payload=entry["payload"],
-            status=entry["status"],
-            created_at=entry["created_at"],
-            acked_by=entry["acked_by"],
-            acked_at=entry["acked_at"],
+    return AlertPage(alerts=[_alert_entry(row) for row in rows.mappings()], total_count=total)
+
+
+async def acknowledge_alert(
+    connection: AsyncConnection,
+    *,
+    alert_id: UUID,
+    acked_by: int,
+    acked_at: datetime,
+) -> AlertAcknowledgement:
+    """Move one alert to ``acknowledged`` and attribute it to the operator (#735).
+
+    Writes the ``acked_by`` / ``acked_at`` columns that have been on the row since
+    the first observability migration and that nothing ever wrote, so a response
+    becomes attributable rather than anonymous.
+
+    **The first acknowledgement stands, and the DATABASE is what decides that.** The
+    write is guarded on the alert still being ``open``, so a second caller does not
+    overwrite the first operator: it blocks on the first UPDATE's row lock,
+    re-evaluates the guard against the committed row and matches nothing. Reading
+    the status first and then writing would leave a window in which two operators
+    both read ``open`` and both write themselves in; guarding the write itself
+    closes that window in the engine rather than in this code.
+
+    So the three outcomes are decided by one statement plus one read-back:
+
+    - the UPDATE matched a row - this call wrote the acknowledgement;
+    - it matched nothing and the row reads ``acknowledged`` - somebody got here
+      first, and their operator and timestamp stand;
+    - it matched nothing and the row reads ``resolved`` - the alert is closed, and
+      acknowledging it would re-open a problem a later pass already cleared.
+    """
+    result = await connection.execute(
+        observability_alert_events.update()
+        .where(
+            observability_alert_events.c.id == alert_id,
+            observability_alert_events.c.status == ALERT_STATUS_OPEN,
         )
-        for entry in rows.mappings()
-    ]
-    return AlertPage(alerts=alerts, total_count=total)
+        .values(
+            status=ALERT_STATUS_ACKNOWLEDGED,
+            acked_by=acked_by,
+            acked_at=acked_at,
+        )
+    )
+    acknowledged_now = bool(result.rowcount)
+
+    rows = (
+        await connection.execute(
+            select(*_ALERT_COLUMNS).where(observability_alert_events.c.id == alert_id)
+        )
+    ).mappings()
+    row = rows.one_or_none()
+    if row is None:
+        raise AlertNotFoundError(alert_id)
+    if row["status"] == ALERT_STATUS_RESOLVED:
+        raise AlertAlreadyResolvedError(alert_id)
+    return AlertAcknowledgement(alert=_alert_entry(row), already_acknowledged=not acknowledged_now)
 
 
 def error_status(last_seen_at: datetime, *, opened_after: datetime) -> str:
@@ -3645,6 +3739,25 @@ class ObservabilityFacade:
         """Read one page of the alert feed, optionally narrowed by status."""
         async with self._engine.begin() as connection:
             return await query_alerts(connection, page=page, page_size=page_size, status=status)
+
+    async def acknowledge_alert(
+        self, *, alert_id: UUID, acked_by: int, now: datetime | None = None
+    ) -> AlertAcknowledgement:
+        """Acknowledge one alert as ``acked_by`` (#735), the module's only write.
+
+        The clock is resolved HERE, against the current UTC instant, for the same
+        reason the windowed reads resolve theirs here rather than in the route: a
+        test can pin ``now`` and get the identical ``acked_at`` production would
+        have stamped at that instant, and the route carries no time of its own.
+
+        ``acked_by`` is an identity reference, not a display name - the same shape
+        every other ``*_by`` column in the platform records "who did this" with.
+        """
+        acked_at = now if now is not None else datetime.now(UTC)
+        async with self._engine.begin() as connection:
+            return await acknowledge_alert(
+                connection, alert_id=alert_id, acked_by=acked_by, acked_at=acked_at
+            )
 
     async def get_error_feed(
         self,

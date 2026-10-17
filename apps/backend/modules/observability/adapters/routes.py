@@ -1,17 +1,25 @@
-"""MOD-013: HTTP adapter for the operator observability read surfaces (PHASE-14A C1, #706/#707).
+"""MOD-013: HTTP adapter for the operator observability surfaces (PHASE-14A C1, #706/#707).
+
+Twelve ``GET`` reads plus, since B5 (#735), the module's one ``POST`` write. The
+reads are the plan-phase14 §9.1 read table; the write is the alert acknowledgement,
+against a row this module already owns.
 
 The endpoints are thin adapters (api-standards §1): resolve the gateway
-``Principal``, validate the query params, call the observability read facade,
-answer its typed view. They sit behind the gateway middleware stack in
-``app.main``; every route declares ``require_operator`` (NFR-SEC-003,
-api-standards §6), so an anonymous caller is refused 401 and any non-operator
-scope 403 - both through the shared gateway error envelope, and both before the
-facade is reached.
+``Principal``, validate the query params, call the observability facade, answer its
+typed view. They sit behind the gateway middleware stack in ``app.main``; every
+route declares ``require_operator`` (NFR-SEC-003, api-standards §6), so an
+anonymous caller is refused 401 and any non-operator scope 403 - both through the
+shared gateway error envelope, and both before the facade is reached.
 
-The reads raise no module-level domain exceptions (an un-budgeted month, a window
-with no traffic, and an uncapped scope are all answers, not failures), so this
-router needs no error handler of its own - RBAC rejections answer through the
-gateway handlers and anything unexpected falls to the app catch-all.
+The READS raise no module-level domain exceptions (an un-budgeted month, a window
+with no traffic, and an uncapped scope are all answers, not failures), so they
+need no error handler of their own - RBAC rejections answer through the gateway
+handlers and anything unexpected falls to the app catch-all. B5 (#735) adds the
+module's first WRITE, and a write has outcomes a read never does: an alert that
+does not exist and an alert that is already resolved are both expected failures an
+operator can cause deliberately, so :func:`register_error_handlers` answers those
+two through the shared envelope rather than letting them fall to the catch-all as
+a 5xx.
 
 Scope: the whole plan-phase14 §9.1 read table. C1a (#706) serves ``cost``,
 ``cost/trend``, ``usage`` and ``quality``; C1b (#707) adds ``overview``,
@@ -27,17 +35,27 @@ B2 (#732) widens that one response with the per-unit figures, the per-patient an
 per-doctor attribution and the not-captured margin reason - the same read, answered
 more fully, because a second endpoint would re-read the same aggregate and the two
 answers would have to be kept in agreement by hand.
+B5 (#735) adds the one WRITE, ``/alerts/{alert_id}/acknowledge``, and widens the
+alert feed's status filter to the three statuses that write can now produce.
 """
 
 from __future__ import annotations
 
 from typing import Annotated, Literal, cast
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Depends, FastAPI, Query, Request, status
+from fastapi.responses import JSONResponse
 
 from app.config import Settings
+from app.gateway.errors import error_response
+from app.gateway.idempotency import run_idempotent
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_operator
+from modules.observability.domain.exceptions import (
+    AlertAlreadyResolvedError,
+    AlertNotFoundError,
+)
 from modules.observability.facade import (
     BUSINESS_PERIOD_MONTH,
     DEFAULT_ACTIVITY_WINDOW_MINUTES,
@@ -51,6 +69,7 @@ from modules.observability.facade import (
     MAX_ERROR_PAGE_SIZE,
     MAX_ERROR_WINDOW_MINUTES,
     MAX_THROUGHPUT_WINDOW_MINUTES,
+    AlertAcknowledgement,
     AlertPage,
     BusinessRead,
     CostSummary,
@@ -102,7 +121,11 @@ _ErrorWindow = Annotated[int, Query(ge=1, le=MAX_ERROR_WINDOW_MINUTES)]
 #: ``Literal`` rather than imported from the domain so FastAPI can render the
 #: accepted values into the OpenAPI schema and refuse a typo at the edge: a
 #: misspelled status that 200'd with an empty feed would read as "nothing is wrong".
-_AlertStatus = Annotated[Literal["open", "resolved"] | None, Query(alias="status")]
+#:
+#: The whole vocabulary now (#735), because an operator acknowledgement can move an
+#: alert into the third of the three statuses and the open list an operator works is
+#: exactly the one that shrinks when they do.
+_AlertStatus = Annotated[Literal["open", "acknowledged", "resolved"] | None, Query(alias="status")]
 
 #: The statuses ``/errors`` accepts, same reasoning as :data:`_AlertStatus` and the
 #: same words - an operator moving between the alert feed and the error feed should
@@ -114,10 +137,10 @@ _AlertStatus = Annotated[Literal["open", "resolved"] | None, Query(alias="status
 #: :data:`~modules.observability.facade.ERROR_STATUS_VOCABULARY`. A test asserts the
 #: two agree so the duplication cannot drift.
 #:
-#: Deliberately NOT the whole alert set: acknowledgement is written against the alert
-#: table and no writer can acknowledge a CAPTURED error, so accepting ``acknowledged``
-#: would offer a filter that can only ever return nothing. #735 widens this when that
-#: changes.
+#: Deliberately NOT the whole alert set even after #735: acknowledgement is an action
+#: against ``observability_alert_events`` and no writer can acknowledge a CAPTURED
+#: error, so accepting ``acknowledged`` here would offer a filter that can only ever
+#: return nothing.
 _ErrorStatus = Annotated[Literal["open", "resolved"] | None, Query(alias="status")]
 
 #: The periods ``/business`` accepts. Spelled as a static ``Literal`` for the reason
@@ -446,11 +469,58 @@ async def read_alerts(
     Paged as api-standards §4 asks - ``page``/``page_size`` (default 25, max 100)
     with ``total_count`` over the whole filter, so a client can page back through
     a long feed. Unfiltered it is the standing-problems view; ``status`` narrows
-    it to what is still open or to what a later pass resolved. An unrecognised
-    status is a 422 at the edge, never a silently empty feed.
+    it to what is still open, to what an operator has acknowledged, or to what a
+    later pass resolved - which is what lets an operator work the open list while
+    the answered ones stay one filter away. An unrecognised status is a 422 at the
+    edge, never a silently empty feed.
     """
     del principal
     return await _facade(request).get_alerts(page=page, page_size=page_size, status=alert_status)
+
+
+@router.post(
+    "/v1/operator/observability/alerts/{alert_id}/acknowledge",
+    response_model=AlertAcknowledgement,
+    status_code=status.HTTP_200_OK,
+    summary="Acknowledge an alert (operator only)",
+)
+async def acknowledge_alert(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_operator)],
+    alert_id: UUID,
+) -> AlertAcknowledgement:
+    """Take ownership of one alert: name the operator, stamp the time, close the status.
+
+    The write that fills the ``acked_by`` / ``acked_at`` columns which have been on
+    the row since the first observability migration and which nothing ever wrote. A
+    verb under the domain rather than a PATCH on the collection (api-standards §1),
+    because acknowledging is an action, not a field edit - and because the route is
+    then impossible to call with a body that sets ``status`` to anything else.
+
+    **Idempotent, and the FIRST acknowledgement stands.** A repeat is a 200 carrying
+    the standing row with ``already_acknowledged: true`` - not a 409, because refusing
+    a double-click would teach an operator that acknowledging is a once-only privilege
+    and would make them hesitate to press it. The flag is what keeps the 200 honest:
+    it says the claim on the row is not this call's.
+
+    Accepts ``Idempotency-Key`` (api-standards §5), so a retry on a network failure
+    replays the stored response instead of re-attributing anything.
+
+    A resolved alert is refused rather than acknowledged: it is closed, and moving it
+    to ``acknowledged`` would re-open a problem a later pass had already established
+    as cleared. An unknown alert is a 404, because an operator who pressed the button
+    on a row that is gone needs to be told that.
+    """
+    return await run_idempotent(
+        request,
+        lambda: _facade(request).acknowledge_alert(
+            alert_id=alert_id,
+            # An identity reference, not a display name - the same shape every other
+            # ``*_by`` column in the platform records "who did this" with.
+            acked_by=int(principal.subject_id),
+        ),
+        namespace=f"identity:{principal.subject_id}",
+    )
 
 
 @router.get(
@@ -521,3 +591,43 @@ async def read_deeplinks(
         langfuse_host=settings.langfuse_host,
         langfuse_public_key=settings.langfuse_public_key,
     )
+
+
+def register_error_handlers(app: FastAPI) -> None:
+    """Attach the MOD-013 error envelope to every expected observability failure.
+
+    Registered from ``app.main`` alongside the other modules'. Both handlers are
+    about the ONE write (#735) - the reads have no expected failures of their own.
+
+    ``ALERT_NOT_FOUND`` says the named alert row is gone; ``ALERT_ALREADY_RESOLVED``
+    says the operator asked to acknowledge something a later pass had already
+    closed. Both are prefixed by the alert RESOURCE rather than by ``MOD-013``,
+    matching the sibling resources rather than the module codes (``CARE_NOT_FOUND``,
+    ``CONSENT_NOT_FOUND``) - the alert feed is the only observability surface an
+    operator names a resource on, so the resource is what disambiguates the code.
+    Both are 4xx because both are outcomes of a call an operator made
+    deliberately, not defects.
+    """
+
+    async def _alert_not_found(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        return error_response(
+            status.HTTP_404_NOT_FOUND,
+            "ALERT_NOT_FOUND",
+            "No alert exists with that identifier",
+            log_tag="observability_rejection",
+            request=request,
+        )
+
+    async def _alert_already_resolved(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "ALERT_ALREADY_RESOLVED",
+            "That alert is already resolved, so it cannot be acknowledged",
+            log_tag="observability_rejection",
+            request=request,
+        )
+
+    app.add_exception_handler(AlertNotFoundError, _alert_not_found)
+    app.add_exception_handler(AlertAlreadyResolvedError, _alert_already_resolved)

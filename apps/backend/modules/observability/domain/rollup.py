@@ -83,10 +83,21 @@ DEFAULT_DEGRADED_SUCCESS_RATE = Decimal("0.9")
 
 #: ``observability_alert_events.status`` vocabulary. ``open`` is the server
 #: default every producer's insert inherits; ``resolved`` is written ONLY by this
-#: rollup's resolve step. One definition for the two producers and the operator
-#: alert feed that reads both.
+#: rollup's resolve step; ``acknowledged`` is written ONLY by an operator taking
+#: ownership of an open alert (#735). One definition for the two producers, the
+#: acknowledgement write and the operator alert feed that reads all three.
 ALERT_STATUS_OPEN = "open"
+ALERT_STATUS_ACKNOWLEDGED = "acknowledged"
 ALERT_STATUS_RESOLVED = "resolved"
+
+#: The closed set, in lifecycle order. A membership check rather than a chain of
+#: equality comparisons, so a fourth status has to be named here rather than
+#: quietly defaulting to one of the three.
+ALERT_STATUS_VOCABULARY: tuple[str, ...] = (
+    ALERT_STATUS_OPEN,
+    ALERT_STATUS_ACKNOWLEDGED,
+    ALERT_STATUS_RESOLVED,
+)
 
 #: Alert kinds this rollup owns. ``audit_tamper`` / ``ai_egress`` stay with the
 #: B4b consumer (``domain/consumer.py``) - one kind vocabulary, two producers.

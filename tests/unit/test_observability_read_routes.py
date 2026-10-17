@@ -17,6 +17,7 @@ import uuid
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
@@ -25,10 +26,16 @@ from app.config import Settings
 from app.gateway.jwt_verify import JWTVerifyMiddleware
 from app.main import create_app
 from modules.iam.domain.jwt import issue_token
+from modules.observability.domain.exceptions import (
+    AlertAlreadyResolvedError,
+    AlertNotFoundError,
+)
 from modules.observability.facade import (
+    ALERT_STATUS_VOCABULARY,
     BUSINESS_PERIODS,
     ERROR_STATUS_VOCABULARY,
     ActorSpendDistribution,
+    AlertAcknowledgement,
     AlertEntry,
     AlertPage,
     BreakerHealthRow,
@@ -92,6 +99,10 @@ DEEPLINKS_PATH = "/v1/operator/observability/deeplinks"
 BUSINESS_PATH = "/v1/operator/observability/business"
 
 _ALERT_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
+
+#: The instant the acknowledgement stub stamps. Pinned so the acknowledged row the
+#: route answers is a fixed value rather than whatever the wall clock said.
+_ACKED_AT = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
 
 _SUMMARY = CostSummary(
     period_start=date(2026, 10, 1),
@@ -382,6 +393,9 @@ _ALERTS = AlertPage(
     ],
 )
 
+#: The single row of :data:`_ALERTS`, as the acknowledgement endpoint answers it.
+_ALERT_ENTRY = _ALERTS.alerts[0]
+
 _ERRORS = ErrorFeedPage(
     total_count=1,
     total_occurrences=412,
@@ -555,6 +569,12 @@ class StubObservabilityFacade:
         self.reliability_calls: list[tuple[int, str | None]] = []
         self.alert_pages: list[tuple[int, int]] = []
         self.alert_statuses: list[str | None] = []
+        self.acknowledgements: list[tuple[str, int]] = []
+        #: What the stub answers instead of the write succeeding, so the route's
+        #: error envelope can be driven without a database underneath.
+        self.acknowledgement_is_repeat = False
+        self.acknowledgement_missing = False
+        self.acknowledgement_resolved = False
         self.error_feed_calls: list[tuple[int, int, str | None, int]] = []
         self.deeplink_settings: list[dict[str, Any]] = []
         self.business_periods: list[str] = []
@@ -608,6 +628,23 @@ class StubObservabilityFacade:
         self.alert_pages.append((page, page_size))
         self.alert_statuses.append(status)
         return _ALERTS
+
+    async def acknowledge_alert(
+        self, *, alert_id: UUID, acked_by: int, now: datetime | None = None
+    ) -> AlertAcknowledgement:
+        # The clock is the facade's, and this stub answers with a pinned instant.
+        del now
+        self.acknowledgements.append((str(alert_id), acked_by))
+        if self.acknowledgement_missing:
+            raise AlertNotFoundError(alert_id)
+        if self.acknowledgement_resolved:
+            raise AlertAlreadyResolvedError(alert_id)
+        entry = _ALERT_ENTRY.model_copy(
+            update={"status": "acknowledged", "acked_by": acked_by, "acked_at": _ACKED_AT}
+        )
+        return AlertAcknowledgement(
+            alert=entry, already_acknowledged=self.acknowledgement_is_repeat
+        )
 
     async def get_error_feed(
         self,
@@ -1032,7 +1069,7 @@ def test_alerts_default_to_the_first_page_of_twenty_five() -> None:
     assert body["alerts"][0]["payload"] == {"source": "rollup", "provider": "anthropic"}
 
 
-@pytest.mark.parametrize("status", ["open", "resolved"])
+@pytest.mark.parametrize("status", ["acknowledged", "open", "resolved"])
 def test_alerts_narrow_to_a_recognised_status(status: str) -> None:
     facade = StubObservabilityFacade()
     client = _client(facade)
@@ -1042,6 +1079,134 @@ def test_alerts_narrow_to_a_recognised_status(status: str) -> None:
     assert response.status_code == 200
     assert facade.alert_statuses == [status]
     assert facade.alert_pages == [(3, 5)]
+
+
+def test_the_alert_status_gate_matches_the_alert_vocabulary() -> None:
+    """The edge gate and the facade's vocabulary are written twice, so tie them here.
+
+    ``/alerts`` widens when the acknowledgement lands and ``/errors`` deliberately
+    does not (#730 - a captured error has no lifecycle and nothing can acknowledge
+    one), so neither set can be derived from the other. Reading the accepted values
+    off the RENDERED schema is what proves they reach a client reading the spec,
+    which is the whole reason the gate is a ``Literal`` at all.
+    """
+    client = _client()
+
+    schema = client.get("/openapi.json").json()
+    alert_status = next(
+        parameter
+        for parameter in schema["paths"][ALERTS_PATH]["get"]["parameters"]
+        if parameter["name"] == "status"
+    )
+    error_status = next(
+        parameter
+        for parameter in schema["paths"][ERRORS_PATH]["get"]["parameters"]
+        if parameter["name"] == "status"
+    )
+
+    alerts = next(entry for entry in alert_status["schema"]["anyOf"] if "enum" in entry)["enum"]
+    errors = next(entry for entry in error_status["schema"]["anyOf"] if "enum" in entry)["enum"]
+
+    assert tuple(alerts) == ALERT_STATUS_VOCABULARY
+    assert "acknowledged" in alerts
+    # Unchanged by #735, and kept asserting the difference is still deliberate.
+    assert tuple(errors) == ERROR_STATUS_VOCABULARY
+    assert "acknowledged" not in errors
+
+
+# ------------------------------------------------------- acknowledgement (#735)
+
+
+def test_acknowledging_writes_the_acknowledging_operator_and_returns_the_alert() -> None:
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.post(
+        f"{ALERTS_PATH}/{_ALERT_ID}/acknowledge", headers=_bearer(_token(subject_id=7))
+    )
+
+    assert response.status_code == 200
+    # The operator comes off the principal as an identity reference, not a display
+    # name, so the column records who rather than what they are called.
+    assert facade.acknowledgements == [(str(_ALERT_ID), 7)]
+    assert response.json() == {
+        "alert": {
+            **_ALERT_ENTRY.model_dump(mode="json"),
+            "status": "acknowledged",
+            "acked_by": 7,
+            "acked_at": _ACKED_AT.isoformat().replace("+00:00", "Z"),
+        },
+        "already_acknowledged": False,
+    }
+
+
+def test_a_repeat_acknowledgement_says_the_standing_one_was_not_this_call() -> None:
+    """The conflict rule is observable rather than a 200 to be read as "mine"."""
+    facade = StubObservabilityFacade()
+    facade.acknowledgement_is_repeat = True
+    client = _client(facade)
+
+    response = client.post(f"{ALERTS_PATH}/{_ALERT_ID}/acknowledge", headers=_operator())
+
+    assert response.status_code == 200
+    assert response.json()["already_acknowledged"] is True
+
+
+def test_acknowledging_refuses_anonymous_and_non_operator_callers() -> None:
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+    path = f"{ALERTS_PATH}/{_ALERT_ID}/acknowledge"
+
+    assert client.post(path).status_code == 401
+    assert client.post(path, headers=_bearer(_token(scope="patient"))).status_code == 403
+    assert facade.acknowledgements == []
+
+
+def test_acknowledging_something_that_is_not_an_alert_is_refused_at_the_edge() -> None:
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.post(f"{ALERTS_PATH}/not-a-uuid/acknowledge", headers=_operator())
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "VALIDATION_ERROR"
+    assert facade.acknowledgements == []
+
+
+def test_acknowledging_an_alert_that_does_not_exist_answers_not_found() -> None:
+    facade = StubObservabilityFacade()
+    facade.acknowledgement_missing = True
+    client = _client(facade)
+
+    response = client.post(f"{ALERTS_PATH}/{_ALERT_ID}/acknowledge", headers=_operator())
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "ALERT_NOT_FOUND"
+
+
+def test_acknowledging_a_resolved_alert_is_refused_as_a_conflict() -> None:
+    facade = StubObservabilityFacade()
+    facade.acknowledgement_resolved = True
+    client = _client(facade)
+
+    response = client.post(f"{ALERTS_PATH}/{_ALERT_ID}/acknowledge", headers=_operator())
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "ALERT_ALREADY_RESOLVED"
+
+
+def test_a_replayed_idempotency_key_replays_the_stored_acknowledgement() -> None:
+    """api-standards §5: a duplicate key returns the original result, unexecuted."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+    headers = {**_operator(), "Idempotency-Key": "ack-1"}
+
+    first = client.post(f"{ALERTS_PATH}/{_ALERT_ID}/acknowledge", headers=headers)
+    second = client.post(f"{ALERTS_PATH}/{_ALERT_ID}/acknowledge", headers=headers)
+
+    assert (first.status_code, second.status_code) == (200, 200)
+    assert first.json() == second.json()
+    assert facade.acknowledgements == [(str(_ALERT_ID), 1)]
 
 
 # ------------------------------------------------------------------ errors

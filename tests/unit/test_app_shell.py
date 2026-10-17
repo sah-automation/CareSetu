@@ -239,6 +239,9 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         # serving today, week-to-date and month-to-date, so the three periods are not
         # three aggregation copies.
         "/v1/operator/observability/business",
+        # PHASE-14A B5 (#735): the one operator WRITE in the module - the
+        # acknowledgement that fills the alert row's acked_by/acked_at columns.
+        "/v1/operator/observability/alerts/{alert_id}/acknowledge",
     }
 
 

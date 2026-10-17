@@ -28,6 +28,10 @@ import pytest
 from pydantic import ValidationError
 
 from bus.dispatcher import OutboxRowCounts, OutboxTable
+from modules.observability.domain.exceptions import (
+    AlertAlreadyResolvedError,
+    AlertNotFoundError,
+)
 from modules.observability.domain.rollup import ALERT_STATUS_OPEN, ALERT_STATUS_RESOLVED
 from modules.observability.facade import (
     BUSINESS_PERIOD_MONTH,
@@ -42,6 +46,7 @@ from modules.observability.facade import (
     BusinessCountView,
     MarginPercent,
     ObservabilityFacade,
+    acknowledge_alert,
     build_deeplinks,
     error_status,
     period_window,
@@ -85,13 +90,19 @@ class _FakeMappings:
     def one(self) -> dict[str, object]:
         return self._rows[0]
 
+    def one_or_none(self) -> dict[str, object] | None:
+        return self._rows[0] if self._rows else None
+
     def all(self) -> list[dict[str, object]]:
         return list(self._rows)
 
 
 class _FakeResult:
-    def __init__(self, rows: list[dict[str, object]]) -> None:
+    def __init__(self, rows: list[dict[str, object]], *, rowcount: int | None = None) -> None:
         self._rows = rows
+        #: A DML statement reports how many rows it matched and has none to read
+        #: back; a SELECT leaves this ``None`` and every assertion reads rows.
+        self.rowcount = rowcount
 
     def mappings(self) -> _FakeMappings:
         return _FakeMappings(self._rows)
@@ -105,10 +116,17 @@ class _FakeResult:
         return self._rows[0]["total"]
 
 
-def _connection(*results: list[dict[str, object]]) -> AsyncMock:
+def _written(rowcount: int) -> _FakeResult:
+    """A DML result: ``rowcount`` rows matched and no rows to read back."""
+    return _FakeResult([], rowcount=rowcount)
+
+
+def _connection(*results: list[dict[str, object]] | _FakeResult) -> AsyncMock:
     """A connection whose ``execute`` replays ``results`` in call order."""
     connection = AsyncMock()
-    pending = [_FakeResult(rows) for rows in results]
+    pending = [
+        result if isinstance(result, _FakeResult) else _FakeResult(result) for result in results
+    ]
     connection.execute = AsyncMock(side_effect=pending)
     return connection
 
@@ -1209,6 +1227,136 @@ async def test_alerts_are_empty_before_any_finding() -> None:
 
     assert page.total_count == 0
     assert page.alerts == []
+
+
+async def test_an_unrecognised_alert_status_is_refused_rather_than_filtered_on() -> None:
+    """The failure mode of getting this wrong is a page that says nothing is wrong."""
+    with pytest.raises(ValueError, match="unknown alert status"):
+        await query_alerts(_connection(), page=1, page_size=25, status="acked")
+
+
+@pytest.mark.parametrize("status", ["open", "acknowledged", "resolved"])
+async def test_alerts_accept_every_status_the_vocabulary_names(status: str) -> None:
+    """Widening the vocabulary must not leave a filter that 200s with nothing in it."""
+    page = await query_alerts(
+        _connection([{"total": 1}], _ALERT_ROWS), page=1, page_size=25, status=status
+    )
+
+    assert page.total_count == 1
+    assert len(page.alerts) == 1
+
+
+# ------------------------------------------------------- acknowledgement (#735)
+
+
+#: The alert the acknowledgement tests act on, as the feed's own fixture names it.
+_ALERT_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
+
+_ACKED_ROW: dict[str, object] = {
+    **_ALERT_ROWS[0],
+    "status": "acknowledged",
+    "acked_by": 7,
+    "acked_at": datetime(2026, 10, 14, 12, 0, tzinfo=UTC),
+}
+
+
+async def test_acknowledging_writes_the_operator_the_time_and_the_acknowledged_status() -> None:
+    connection = _connection(_written(1), [_ACKED_ROW])
+
+    result = await acknowledge_alert(
+        connection,
+        alert_id=_ALERT_ID,
+        acked_by=7,
+        acked_at=datetime(2026, 10, 14, 12, 0, tzinfo=UTC),
+    )
+
+    sql = _compiled(connection, 0)
+    assert "UPDATE observability.observability_alert_events" in sql
+    assert "status='acknowledged'" in sql
+    assert "acked_by=7" in sql
+    # The guard that makes the FIRST acknowledgement stand: the write is conditional
+    # on the alert still being open, so a second operator's UPDATE matches nothing
+    # rather than overwriting this one. A read-then-write would leave a window where
+    # both read ``open`` and both write themselves in; the round trip drives that
+    # race against real Postgres (``..._round_trip``) because only a real engine
+    # re-evaluates the guard after taking the row lock.
+    assert "status = 'open'" in sql
+    assert result.already_acknowledged is False
+    assert result.alert.status == "acknowledged"
+    assert (result.alert.acked_by, result.alert.acked_at) == (
+        7,
+        datetime(2026, 10, 14, 12, 0, tzinfo=UTC),
+    )
+
+
+async def test_acknowledging_twice_reports_the_first_acknowledgement_standing() -> None:
+    """A repeat is not a conflict: the SECOND operator's claim is simply refused.
+
+    ``already_acknowledged`` is what makes the outcome observable - the response
+    says the standing acknowledgement was not this call's, rather than leaving a
+    200 to be read as "I am the one who took this".
+    """
+    first = datetime(2026, 10, 14, 11, 0, tzinfo=UTC)
+    connection = _connection(
+        _written(0),
+        [{**_ACKED_ROW, "acked_by": 7, "acked_at": first}],
+    )
+
+    result = await acknowledge_alert(
+        connection,
+        alert_id=_ALERT_ID,
+        acked_by=9,
+        acked_at=datetime(2026, 10, 14, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.already_acknowledged is True
+    # Operator 9's claim was refused whole: neither column carries their id or time.
+    assert result.alert.acked_by == 7
+    assert result.alert.acked_at == first
+
+
+async def test_acknowledging_an_alert_that_does_not_exist_is_not_found() -> None:
+    connection = _connection(_written(0), [])
+
+    with pytest.raises(AlertNotFoundError):
+        await acknowledge_alert(
+            connection,
+            alert_id=uuid.UUID("22222222-2222-2222-2222-222222222222"),
+            acked_by=7,
+            acked_at=datetime(2026, 10, 14, 12, 0, tzinfo=UTC),
+        )
+
+
+async def test_acknowledging_a_resolved_alert_is_refused() -> None:
+    """A resolved alert is closed. Acknowledging it would re-open a fixed problem.
+
+    Answering 200 here would tell an operator they had taken ownership of an alert
+    that the feed still shows as resolved, and the acknowledgement columns would say
+    otherwise - so the refusal is the honest answer.
+    """
+    connection = _connection(_written(0), [{**_ALERT_ROWS[0], "status": "resolved"}])
+
+    with pytest.raises(AlertAlreadyResolvedError):
+        await acknowledge_alert(
+            connection,
+            alert_id=_ALERT_ID,
+            acked_by=7,
+            acked_at=datetime(2026, 10, 14, 12, 0, tzinfo=UTC),
+        )
+
+
+async def test_the_facade_acknowledgement_carries_the_operator_and_resolves_the_clock() -> None:
+    """The clock is resolved in the FACADE, as the windowed reads resolve theirs.
+
+    So a pinned ``now`` produces the identical ``acked_at`` production would have
+    written at that instant, and the route carries no time of its own.
+    """
+    connection = _connection(_written(1), [_ACKED_ROW])
+    facade = ObservabilityFacade(_engine(connection))
+
+    await facade.acknowledge_alert(alert_id=_ALERT_ID, acked_by=7, now=_NOW)
+
+    assert "acked_at='2026-10-14 12:34:56+00:00'" in _compiled(connection, 0)
 
 
 # ------------------------------------------------------------------ errors

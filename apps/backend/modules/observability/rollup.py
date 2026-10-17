@@ -65,6 +65,7 @@ from modules.observability.domain.consumer import AI_JOB_SPEND_STATUS_FAILED, Al
 from modules.observability.domain.rollup import (
     ALERT_KIND_COST_OUTLIER,
     ALERT_KIND_QUEUE_AGE,
+    ALERT_STATUS_ACKNOWLEDGED,
     ALERT_STATUS_OPEN,
     ALERT_STATUS_RESOLVED,
     ROLLUP_MODE_DAILY,
@@ -146,8 +147,8 @@ class RollupReport:
 
 
 @dataclass(frozen=True)
-class _OpenAlert:
-    """One open rollup alert, keyed by the ``(kind, scope)`` finding it records."""
+class _StandingAlert:
+    """One STANDING rollup alert (``open`` or ``acknowledged``), keyed by its finding."""
 
     alert_id: UUID
     kind: str
@@ -736,8 +737,15 @@ async def _upsert_budget_snapshot(connection: AsyncConnection, snapshot: BudgetS
 # ---------------------------------------------------------------- the alerts
 
 
-async def _load_open_rollup_alerts(connection: AsyncConnection) -> list[_OpenAlert]:
-    """Every open alert this rollup owns, with the marker it would re-raise under.
+async def _load_unresolved_rollup_alerts(connection: AsyncConnection) -> list[_StandingAlert]:
+    """Every STANDING alert this rollup owns, with the marker it would re-raise under.
+
+    Standing means ``open`` OR ``acknowledged``, not only ``open`` (#735). An
+    operator acknowledging an alert takes it off the open list, but it is still
+    standing: the condition behind it has not changed. Reading only ``open`` here
+    would make the next nightly pass raise a SECOND alert for the same still-breached
+    ``(kind, scope)`` and would never resolve the acknowledged row once the condition
+    cleared - acknowledging would make the feed less honest, not more.
 
     Alerts whose payload carries no ``source`` marker are skipped - this pass
     only re-raises or resolves alerts it can identify by marker. Consumer alerts
@@ -748,17 +756,17 @@ async def _load_open_rollup_alerts(connection: AsyncConnection) -> list[_OpenAle
     """
     table = observability_alert_events
     statement = select(table.c.id, table.c.kind, table.c.payload).where(
-        table.c.status == ALERT_STATUS_OPEN
+        table.c.status.in_((ALERT_STATUS_OPEN, ALERT_STATUS_ACKNOWLEDGED))
     )
     rows = (await connection.execute(statement)).all()
-    alerts: list[_OpenAlert] = []
+    alerts: list[_StandingAlert] = []
     for alert_id, kind, payload in rows:
         if not isinstance(payload, dict):
             continue
         marker = alert_marker(payload)
         if "source" not in marker:
             continue
-        alerts.append(_OpenAlert(alert_id=alert_id, kind=kind, marker=marker))
+        alerts.append(_StandingAlert(alert_id=alert_id, kind=kind, marker=marker))
     return alerts
 
 
@@ -766,15 +774,15 @@ async def _apply_alerts(
     connection: AsyncConnection,
     alerts: Sequence[AlertRow],
     evaluated: set[tuple[str, str]],
-    open_alerts: Sequence[_OpenAlert],
+    standing_alerts: Sequence[_StandingAlert],
 ) -> tuple[int, int]:
-    """Insert the newly-raised alerts and resolve the rollup's stale open ones.
+    """Insert the newly-raised alerts and resolve the rollup's stale standing ones.
 
     Idempotent per ``(kind, scope)``: a nightly re-run (or an overlapping
-    backfill pass) leaves one open alert per still-breached threshold instead of
+    backfill pass) leaves one standing alert per still-breached threshold instead of
     stacking a fresh row each night.
 
-    An open alert is resolved only when THIS pass actually re-evaluated it -
+    A standing alert is resolved only when THIS pass actually re-evaluated it -
     ``(kind, scope)`` in ``evaluated`` - and the condition has since cleared. A
     pass that saw no traffic for a provider therefore leaves that provider's
     standing ``breaker_open`` alert open rather than clearing it on absence of
@@ -782,10 +790,15 @@ async def _apply_alerts(
     the ones it refuses (``provider_health_drop``, #728) describe a transition
     with no steady state, so they are raised and left for the operator's history.
 
+    ``standing_alerts`` includes alerts an operator has ACKNOWLEDGED (#735), so
+    taking one off the open list neither lets the same breach be raised twice nor
+    stops a cleared condition from closing it.
+
     Returns ``(raised, resolved)``.
     """
     already_open = {
-        (open_alert.kind, repr(sorted(open_alert.marker.items()))) for open_alert in open_alerts
+        (standing_alert.kind, repr(sorted(standing_alert.marker.items())))
+        for standing_alert in standing_alerts
     }
     raised = 0
     fired: set[tuple[str, str]] = set()
@@ -799,11 +812,11 @@ async def _apply_alerts(
         raised += 1
 
     stale = [
-        open_alert.alert_id
-        for open_alert in open_alerts
-        if alert_kind_resolves(open_alert.kind)
-        and (open_alert.kind, repr(sorted(open_alert.marker.items()))) in evaluated
-        and (open_alert.kind, repr(sorted(open_alert.marker.items()))) not in fired
+        standing_alert.alert_id
+        for standing_alert in standing_alerts
+        if alert_kind_resolves(standing_alert.kind)
+        and (standing_alert.kind, repr(sorted(standing_alert.marker.items()))) in evaluated
+        and (standing_alert.kind, repr(sorted(standing_alert.marker.items()))) not in fired
     ]
     resolved = 0
     if stale:
@@ -990,9 +1003,9 @@ async def run_rollup(
         # per-route cap would make it the objective times the route count.
         alerts.extend(evaluate_http_error_rate_alerts(http_errors, thresholds))
 
-        # What this pass could have re-raised. The resolve step closes an open
+        # What this pass could have re-raised. The resolve step closes a standing
         # alert only inside this set, so absence of evidence never clears one.
-        open_alerts = await _load_open_rollup_alerts(connection)
+        standing_alerts = await _load_unresolved_rollup_alerts(connection)
         evaluated = evaluated_alert_keys(
             providers=[usage.provider for usage in usages],
             tables=[table_health.qualified_name for table_health in outbox_health],
@@ -1007,7 +1020,7 @@ async def run_rollup(
             # standing alert is reconciled even though no row names it any more.
             alerted_queues=[
                 queue
-                for alert in open_alerts
+                for alert in standing_alerts
                 if alert.kind == ALERT_KIND_QUEUE_AGE
                 for queue in (alert.marker.get("queue"),)
                 if isinstance(queue, str)
@@ -1025,14 +1038,14 @@ async def run_rollup(
             # ended when they stopped spending; that IS the condition clearing.
             alerted_actors=[
                 actor
-                for alert in open_alerts
+                for alert in standing_alerts
                 if alert.kind == ALERT_KIND_COST_OUTLIER
                 for actor in (alert.marker.get("actor"),)
                 if isinstance(actor, str)
             ],
         )
 
-        raised, resolved = await _apply_alerts(connection, alerts, evaluated, open_alerts)
+        raised, resolved = await _apply_alerts(connection, alerts, evaluated, standing_alerts)
 
         report = RollupReport(
             target_date=target_date,

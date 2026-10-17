@@ -53,6 +53,7 @@ from modules.observability.rollup import (
     _load_doctor_by_intake,
     _load_http_error_rate,
     _load_provider_failures,
+    _load_unresolved_rollup_alerts,
     _upsert_attribution_daily,
     _upsert_business_metric,
     _upsert_provider_health,
@@ -355,7 +356,7 @@ def _alert(kind: str, **payload: Any) -> AlertRow:
 
 
 def _open(kind: str, marker: dict[str, Any]) -> Any:
-    """One already-open rollup alert, as ``_load_open_rollup_alerts`` returns it."""
+    """One standing rollup alert, as ``_load_unresolved_rollup_alerts`` returns it."""
     existing = MagicMock()
     existing.kind = kind
     existing.marker = alert_marker(marker)
@@ -408,8 +409,29 @@ def test_evaluated_alert_keys_resolves_no_queue_alert_for_a_pass_that_never_look
     assert not any(kind == "queue_age" for kind, _ in keys)
 
 
+def test_an_acknowledged_alert_is_still_standing_for_the_next_pass() -> None:
+    """An acknowledged alert is not an open one, but it is not a gone one either.
+
+    #735 moved an alert out of ``open`` when an operator acknowledges it, and this
+    pass reads the standing set by status. If acknowledgement made a row invisible
+    here, the next nightly pass would raise a SECOND alert for the same still-breached
+    ``(kind, scope)`` and would never resolve the acknowledged row once the condition
+    cleared - two ways for acknowledging to make the feed worse rather than calmer.
+
+    Reaching below the seam to assert the WHERE is deliberate: the rule is entirely
+    about which rows this private loader selects, and no round trip can show it
+    without a full night of real rollup runs to drive.
+    """
+    connection = _RecordingConnection()
+
+    asyncio.run(_load_unresolved_rollup_alerts(connection))
+
+    sql = connection.sql
+    assert "status IN ('open', 'acknowledged')" in sql
+    assert "status = 'open'" not in sql
+
+
 def test_apply_alerts_raises_each_breach_once_per_kind_and_scope() -> None:
-    """A re-run of the same night must not stack duplicate open alerts."""
     connection = _RecordingConnection()
     breach = _alert("ai_budget", scope="monthly_total")
 

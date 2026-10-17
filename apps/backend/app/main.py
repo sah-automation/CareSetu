@@ -72,6 +72,9 @@ from modules.intake.adapters.routes import (
 )
 from modules.intake.adapters.routes import router as intake_router
 from modules.intake.facade import IntakeFacade
+from modules.observability.adapters.routes import (
+    register_error_handlers as register_observability_error_handlers,
+)
 from modules.observability.adapters.routes import router as observability_router
 from modules.observability.facade import ObservabilityFacade
 from modules.partner.adapters.artifact_store import build_artifact_store
@@ -679,6 +682,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_intake_error_handlers(app)
     register_care_error_handlers(app)
     register_doctor_error_handlers(app)
+    register_observability_error_handlers(app)
 
     # Catch-all for any unhandled exception that escapes the module-level
     # handlers above (e.g. SQLAlchemy OperationalError from a DB connection

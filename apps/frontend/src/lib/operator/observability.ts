@@ -32,8 +32,12 @@ const OBSERVABILITY_BASE = "/v1/operator/observability";
 /**
  * The alert statuses the feed can be filtered to. A typo is not a filter, so
  * the union closes the set rather than accepting any string.
+ *
+ * `acknowledged` (#735) is a status an operator can now put a row into, so the
+ * open list an operator works shrinks as they acknowledge and the answered ones
+ * stay one filter away. The console renders that filter in #738.
  */
-export type AlertStatus = "open" | "resolved";
+export type AlertStatus = "open" | "acknowledged" | "resolved";
 
 /**
  * One registry-driven business event's count over the window. A metric with no
