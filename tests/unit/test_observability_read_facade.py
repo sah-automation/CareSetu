@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import unquote
 
 import pytest
+from pydantic import ValidationError
 
 from bus.dispatcher import OutboxRowCounts, OutboxTable
 from modules.observability.domain.rollup import ALERT_STATUS_OPEN, ALERT_STATUS_RESOLVED
@@ -34,7 +35,12 @@ from modules.observability.facade import (
     BUSINESS_PERIOD_WEEK,
     DEFAULT_ERROR_WINDOW_MINUTES,
     ERROR_STATUS_VOCABULARY,
+    MAX_BUSINESS_TOP_ACTORS,
+    UNAVAILABLE_REASONS,
+    UNAVAILABLE_REVENUE_NOT_CAPTURED,
+    UNAVAILABLE_REVENUE_ZERO,
     BusinessCountView,
+    MarginPercent,
     ObservabilityFacade,
     build_deeplinks,
     error_status,
@@ -1524,12 +1530,20 @@ def test_period_window_refuses_an_unknown_period() -> None:
 #: ``draft`` row is here because #722 made the drafting leg metered, so the drafting
 #: spend is produced rather than declared - a breakdown that filtered it out would
 #: under-report the bill it exists to explain.
+#:
+#: ``completed_jobs``/``failed_jobs`` ride the same grain from #732, because the
+#: successful-outcome denominators - cost per completed task and cost-of-pass - are
+#: read from this row rather than from a second query that could disagree with it. The
+#: ``structure`` row carries a failure on purpose: a period where every job succeeded
+#: cannot tell a read-time division from a hard-coded one.
 _BUSINESS_ROWS: list[dict[str, object]] = [
     {
         "provider": "anthropic",
         "model": "claude-3-5-haiku",
         "task_type": "transcribe",
         "jobs": 3,
+        "completed_jobs": 3,
+        "failed_jobs": 0,
         "input_tokens": 300_000,
         "output_tokens": 30_000,
         "cost_paise": 60_000,
@@ -1539,6 +1553,8 @@ _BUSINESS_ROWS: list[dict[str, object]] = [
         "model": "gpt-4o-mini",
         "task_type": "draft",
         "jobs": 2,
+        "completed_jobs": 2,
+        "failed_jobs": 0,
         "input_tokens": 40_000,
         "output_tokens": 20_000,
         "cost_paise": 20_000,
@@ -1548,11 +1564,92 @@ _BUSINESS_ROWS: list[dict[str, object]] = [
         "model": "gpt-4o-mini",
         "task_type": "structure",
         "jobs": 5,
+        "completed_jobs": 4,
+        "failed_jobs": 1,
         "input_tokens": 100_000,
         "output_tokens": 0,
         "cost_paise": 10_000,
     },
 ]
+
+#: Per-actor rows from the ONE ``(actor_kind, actor_key)`` read #732 issues. Three
+#: patients - one heavy, one ordinary, one unattributed - so the distribution has a
+#: spread a mean would flatten, and one doctor carrying exactly the ``draft`` patient's
+#: figures, which is what the rollup writes for a job whose doctor is known.
+_BUSINESS_ACTOR_ROWS: list[dict[str, object]] = [
+    {
+        "actor_kind": "patient",
+        "actor_key": "patient-heavy",
+        "jobs": 5,
+        "completed_jobs": 4,
+        "failed_jobs": 1,
+        "cost_paise": 60_000,
+    },
+    {
+        "actor_kind": "patient",
+        "actor_key": "patient-draft",
+        "jobs": 2,
+        "completed_jobs": 2,
+        "failed_jobs": 0,
+        "cost_paise": 20_000,
+    },
+    {
+        "actor_kind": "patient",
+        "actor_key": "patient-ordinary",
+        "jobs": 3,
+        "completed_jobs": 3,
+        "failed_jobs": 0,
+        "cost_paise": 10_000,
+    },
+    {
+        "actor_kind": "doctor",
+        "actor_key": "doctor-a",
+        "jobs": 2,
+        "completed_jobs": 2,
+        "failed_jobs": 0,
+        "cost_paise": 20_000,
+    },
+]
+
+#: The recorded attribution edges: the ``draft`` patient's spend sits against one
+#: doctor, and ``patient-ordinary`` has none yet because nobody picked one.
+_BUSINESS_EDGE_ROWS: list[dict[str, object]] = [
+    {"patient_key": "patient-draft", "doctor_key": "doctor-a"},
+]
+
+#: No revenue captured - the state the world is actually in today, and the one the
+#: margin acceptance criterion is written about. ``captured_rows`` is ``COUNT`` rather
+#: than a flag because "we wrote nothing" and "we wrote zero" are both a ``SUM`` of
+#: zero, and telling them apart is the whole point of the not-captured reason.
+_BUSINESS_REVENUE_ROW: list[dict[str, object]] = [{"revenue_paise": 0, "captured_rows": 0}]
+
+
+def _business_connection(
+    *,
+    rows: list[dict[str, object]] | None = None,
+    budgets: list[dict[str, object]] | None = None,
+    actors: list[dict[str, object]] | None = None,
+    edges: list[dict[str, object]] | None = None,
+    revenue: list[dict[str, object]] | None = None,
+    tiers: list[dict[str, object]] | None = None,
+) -> AsyncMock:
+    """The business read's queries, in the order it issues them.
+
+    Six results because the read issues six: the grain aggregation, the budget
+    snapshot, the per-actor read, the attribution edges, the revenue aggregate and the
+    tier keys. Naming them here rather than at each call site is what makes the ORDER
+    the read depends on visible in one place - a stub that quietly returned rows in a
+    different order would hand each test the wrong table's figures.
+    """
+    return _connection(
+        _BUSINESS_ROWS if rows is None else rows,
+        _BUSINESS_BUDGET_ROWS if budgets is None else budgets,
+        _BUSINESS_ACTOR_ROWS if actors is None else actors,
+        _BUSINESS_EDGE_ROWS if edges is None else edges,
+        _BUSINESS_REVENUE_ROW if revenue is None else revenue,
+        [] if tiers is None else tiers,
+    )
+
 
 #: The budget snapshot rows behind the cap. Both scopes carry the SAME 150,000 cap -
 #: one bill-wide figure written onto every scope - so the cap is read as ``max``, the
@@ -1582,7 +1679,7 @@ _BUSINESS_BUDGET_ROWS: list[dict[str, object]] = [
 async def test_business_read_rolls_one_aggregation_up_into_three_breakdowns() -> None:
     """One grain read becomes the headline, the provider rows, the model rows and the
     task rows - so they reconcile by construction rather than by agreement."""
-    connection = _connection(_BUSINESS_ROWS, _BUSINESS_BUDGET_ROWS)
+    connection = _business_connection()
 
     view = await query_business(
         connection,
@@ -1622,7 +1719,7 @@ async def test_business_read_reports_each_token_side_against_its_own_rate() -> N
     one ``cost_paise`` per job, so both figures carry that same numerator and differ only
     in denominator. Quoting two independent prices would need per-side metering.
     """
-    connection = _connection(_BUSINESS_ROWS, _BUSINESS_BUDGET_ROWS)
+    connection = _business_connection()
 
     view = await query_business(
         connection,
@@ -1654,7 +1751,7 @@ async def test_business_read_spends_patient_rows_only_so_the_bill_is_not_doubled
     fixture - this rule cannot be shown by the arithmetic above, because the doctor
     rows are not in the fixture at all.
     """
-    connection = _connection(_BUSINESS_ROWS, _BUSINESS_BUDGET_ROWS)
+    connection = _business_connection()
 
     await query_business(
         connection,
@@ -1672,7 +1769,7 @@ async def test_business_read_spends_patient_rows_only_so_the_bill_is_not_doubled
 
 async def test_business_read_reads_the_cap_from_the_snapshot_and_projects_the_month_end() -> None:
     """Cap, consumed and projection come back together - the "before the cap" half."""
-    connection = _connection(_BUSINESS_ROWS, _BUSINESS_BUDGET_ROWS)
+    connection = _business_connection()
 
     view = await query_business(
         connection,
@@ -1700,9 +1797,9 @@ async def test_business_read_reads_the_cap_from_the_snapshot_and_projects_the_mo
 
 async def test_business_read_warns_before_the_cap_not_after() -> None:
     """The whole point of the projection: over the cap on the twentieth, not the last."""
-    connection = _connection(
-        _BUSINESS_ROWS,
-        [_BUSINESS_BUDGET_ROWS[0] | {"current_spend_paise": 140_000}],
+    connection = _business_connection(
+        rows=_BUSINESS_ROWS,
+        budgets=[_BUSINESS_BUDGET_ROWS[0] | {"current_spend_paise": 140_000}],
     )
 
     view = await query_business(
@@ -1723,9 +1820,9 @@ async def test_business_read_warns_before_the_cap_not_after() -> None:
 async def test_business_read_clamps_a_billing_period_that_has_already_closed() -> None:
     """A stale snapshot stamped on last month projects its FINAL figure, not an
     extrapolation past a month that is over."""
-    connection = _connection(
-        _BUSINESS_ROWS,
-        [
+    connection = _business_connection(
+        rows=_BUSINESS_ROWS,
+        budgets=[
             _BUSINESS_BUDGET_ROWS[0]
             | {
                 "billing_period_start": date(2026, 9, 1),
@@ -1758,9 +1855,9 @@ async def test_business_read_spans_the_widest_period_its_budget_rows_carry() -> 
     two-month basis projects lower than either month alone, which understates the burn
     rather than overstating it - the safer of the two directions to be wrong in.
     """
-    connection = _connection(
-        _BUSINESS_ROWS,
-        [
+    connection = _business_connection(
+        rows=_BUSINESS_ROWS,
+        budgets=[
             _BUSINESS_BUDGET_ROWS[0],
             _BUSINESS_BUDGET_ROWS[1]
             | {
@@ -1794,9 +1891,9 @@ async def test_business_read_clears_a_month_projected_under_the_cap() -> None:
     Worth pinning separately from the over-cap case: a flag that is always true is a
     flag nobody reads, and this is the read whose whole purpose is a verdict.
     """
-    connection = _connection(
-        _BUSINESS_ROWS,
-        [_BUSINESS_BUDGET_ROWS[0] | {"current_spend_paise": 10_000}],
+    connection = _business_connection(
+        rows=_BUSINESS_ROWS,
+        budgets=[_BUSINESS_BUDGET_ROWS[0] | {"current_spend_paise": 10_000}],
     )
 
     view = await query_business(
@@ -1818,9 +1915,11 @@ async def test_business_read_answers_without_a_projection_rather_than_inventing_
     It answers ``None`` - which says "nothing projected" - rather than dividing by
     zero or, worse, projecting against the period the caller happened to ask for.
     """
-    connection = _connection(
-        _BUSINESS_ROWS,
-        [_BUSINESS_BUDGET_ROWS[0] | {"billing_period_start": None, "billing_period_end": None}],
+    connection = _business_connection(
+        rows=_BUSINESS_ROWS,
+        budgets=[
+            _BUSINESS_BUDGET_ROWS[0] | {"billing_period_start": None, "billing_period_end": None}
+        ],
     )
 
     view = await query_business(
@@ -1842,7 +1941,7 @@ async def test_business_read_answers_without_a_projection_rather_than_inventing_
 async def test_business_read_answers_zeroes_for_a_period_with_no_activity() -> None:
     """A window the rollup has not written yet is an answer, not a failure - and the
     breakdown is empty rather than carrying a fabricated zero row."""
-    connection = _connection([], [])
+    connection = _business_connection(rows=[], budgets=[])
 
     view = await query_business(
         connection,
@@ -1860,9 +1959,17 @@ async def test_business_read_answers_zeroes_for_a_period_with_no_activity() -> N
     assert (view.by_provider, view.by_model, view.by_task_type) == ([], [], [])
 
 
-async def test_business_read_reads_the_attribution_aggregate_and_the_budget_snapshot_only() -> None:
-    """ADR-0003 module isolation, for this read: two tables, both ours, no join."""
-    connection = _connection(_BUSINESS_ROWS, _BUSINESS_BUDGET_ROWS)
+async def test_business_read_reads_only_its_own_two_tables() -> None:
+    """ADR-0003 module isolation, for this read, across ALL SIX of its queries.
+
+    Every query this read issues - the grain aggregation, the budget snapshot, the
+    per-actor read, the attribution edges, the revenue aggregate and the tier keys -
+    must name a table in the ``observability`` schema. The edge read is the one worth
+    watching: doctor attribution is exactly the join the module isolation rule
+    forbids, so a future change that resolved it by reading the care schema would pass
+    every other test in this file and leak the care module's tables into telemetry.
+    """
+    connection = _business_connection()
 
     await query_business(
         connection,
@@ -1872,8 +1979,38 @@ async def test_business_read_reads_the_attribution_aggregate_and_the_budget_snap
         today=_TODAY,
     )
 
-    assert _from_target(connection, 0) == "observability.observability_attribution_daily"
-    assert _from_target(connection, 1) == "observability.observability_ai_cost_budget"
+    assert [_from_target(connection, index) for index in range(connection.execute.await_count)] == [
+        "observability.observability_attribution_daily",
+        "observability.observability_ai_cost_budget",
+        "observability.observability_attribution_daily",
+        "observability.observability_care_attribution_edges",
+        "observability.observability_attribution_daily",
+        "observability.observability_attribution_daily",
+    ]
+
+
+async def test_business_read_reads_the_edges_only_for_patients_inside_the_window() -> None:
+    """The edge read is bounded by the window's own patients, not the whole table.
+
+    The edge table is keyed by intake and carries no date to filter on, so the only
+    honest bound is the aggregate: an answer naming a doctor for a patient who spent
+    nothing in this period is a row the read has no business returning, and an
+    unbounded scan of every intake ever recorded is a read whose cost grows with the
+    platform rather than with the period.
+    """
+    connection = _business_connection()
+
+    await query_business(
+        connection,
+        period=BUSINESS_PERIOD_MONTH,
+        from_date=_PERIOD_START,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    compiled = _compiled(connection, 3)
+    assert "observability_care_attribution_edges.patient_key IN" in compiled
+    assert "observability_attribution_daily.actor_kind" in compiled
 
 
 @pytest.mark.parametrize(
@@ -1893,7 +2030,7 @@ async def test_get_business_serves_every_period_through_one_method(
     this aggregation to keep in agreement. What this pins is that they are the SAME
     window-resolution, one call, not three tests of three near-identical functions.
     """
-    facade = ObservabilityFacade(_engine(_connection(_BUSINESS_ROWS, _BUSINESS_BUDGET_ROWS)))
+    facade = ObservabilityFacade(_engine(_business_connection()))
 
     view = await facade.get_business(period=period, today=_TODAY)
 
@@ -1905,9 +2042,607 @@ async def test_get_business_serves_every_period_through_one_method(
 async def test_get_business_resolves_today_once_so_the_window_and_the_projection_agree() -> None:
     """Two reads of the clock could straddle midnight and put this month's spend into
     tomorrow's window while the projection counted the other day."""
-    facade = ObservabilityFacade(_engine(_connection(_BUSINESS_ROWS, _BUSINESS_BUDGET_ROWS)))
+    facade = ObservabilityFacade(_engine(_business_connection()))
 
     view = await facade.get_business(period=BUSINESS_PERIOD_MONTH, today=_TODAY)
 
     assert view.projection_basis is not None
     assert view.projection_basis.elapsed_days == (_TODAY - _PERIOD_START).days + 1
+
+
+# ------------------------------- B2 #732: unit metrics, attribution and the margin reason
+
+
+async def test_business_read_divides_the_bill_by_each_unit_of_value() -> None:
+    """What one unit of value costs, computed here rather than stored (#732).
+
+    Five divisions over the counters the nightly rollup already wrote, on a period
+    carrying 90,000 paise across 10 jobs of which 9 completed:
+
+    * per request - over ALL 10 jobs, because the bill pays for the failures too
+    * per completed task - over the 9 that finished
+    * per patient - over the 3 patients in the window, over the WHOLE bill, because
+      every rupee has exactly one patient
+    * per doctor - over the ATTRIBUTED 20,000 paise and the 1 doctor the recorded
+      edge names. Not the whole bill: spend only reaches a doctor once an edge exists,
+      so the whole bill over the doctor count would be a number larger than any doctor's
+      row and would not reconcile with ``doctor_spend`` beside it. The 70,000-paise
+      difference is spend no doctor has been attributed to yet, and it is visible as the
+      gap between the two totals rather than hidden inside this ratio.
+    * cost-of-pass - spend per successful outcome, NOT per request and NOT per
+      token, which is the whole point of the named metric: an operator optimising it
+      is optimising for value delivered rather than for a cheap raw rate.
+
+    Each figure uses its own denominator on purpose. Cost per request and cost per
+    completed task differ exactly by the failure rate, and a read that reported one
+    number for both would hide the failures it is meant to make visible.
+    """
+    connection = _business_connection()
+
+    view = await query_business(
+        connection,
+        period=BUSINESS_PERIOD_MONTH,
+        from_date=_PERIOD_START,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    assert (view.spend_paise, view.jobs, view.completed_jobs, view.failed_jobs) == (
+        90_000,
+        10,
+        9,
+        1,
+    )
+    assert view.cost_per_request_paise == Decimal("9000.0000")
+    assert view.cost_per_completed_task_paise == Decimal("10000.0000")
+    assert view.cost_per_patient_paise == Decimal("30000.0000")
+    assert view.cost_per_doctor_paise == Decimal("20000.0000")
+    assert view.cost_of_pass_paise == Decimal("10000.0000")
+    # The per-doctor figure is the doctor total over the doctor count, so a reader can
+    # multiply it back and land on ``doctor_spend``.
+    assert view.cost_per_doctor_paise == Decimal(view.doctor_spend.total_spend_paise) / Decimal(
+        view.doctor_spend.actors
+    )
+
+
+async def test_cost_of_pass_is_the_bill_over_successful_outcomes() -> None:
+    """Cost-of-pass shares its denominator with cost-per-completed-task BY
+    CONSTRUCTION, and the test says so rather than pretending the two differ.
+
+    The aggregate carries exactly ONE successful-outcome counter, so with revenue and
+    tiers still empty there is no second outcome dimension for cost-of-pass to divide
+    by that cost-per-completed-task does not. The spec names both metrics, so both
+    are served - and this assertion is what stops their coincidence reading as a bug
+    in one of them the day someone notices it.
+    """
+    connection = _business_connection()
+
+    view = await query_business(
+        connection,
+        period=BUSINESS_PERIOD_MONTH,
+        from_date=_PERIOD_START,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    assert view.cost_of_pass_paise == view.cost_per_completed_task_paise
+    # And it is emphatically NOT the per-request figure, which is the mistake a reader
+    # checking only the denominator would be primed to expect.
+    assert view.cost_of_pass_paise != view.cost_per_request_paise
+
+
+async def test_every_per_unit_figure_is_null_on_an_empty_denominator() -> None:
+    """No traffic means no price, and a zero would be a claim about pricing nothing
+    measured - the same rule ``ratio``, ``_per_minute`` and the token rates follow.
+
+    A period the rollup has not written yet must answer null for each figure rather
+    than ``0.0000``: an operator reading a zero per patient concludes patients are
+    free, when the truth is that no patient spent anything.
+    """
+    connection = _business_connection(rows=[], budgets=[], actors=[], edges=[])
+
+    view = await query_business(
+        connection,
+        period=BUSINESS_PERIOD_TODAY,
+        from_date=_TODAY,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    assert view.cost_per_request_paise is None
+    assert view.cost_per_completed_task_paise is None
+    assert view.cost_of_pass_paise is None
+    # Cost per doctor is null for the same reason, and so is cost per patient over zero
+    # patients: nothing here divides by zero.
+    assert view.cost_per_patient_paise is None
+    assert view.cost_per_doctor_paise is None
+    assert view.patient_spend.actors == 0
+    assert view.doctor_spend.actors == 0
+    # An empty population has no distribution to rank, so no median rather than a
+    # zero median that would describe an actor nobody has.
+    assert view.patient_spend.median_spend_paise is None
+    assert view.patient_spend.max_spend_paise is None
+    assert view.top_patients == []
+    assert view.top_doctors == []
+
+
+async def test_the_distribution_reports_the_population_not_the_top_of_it() -> None:
+    """Median, ninety-fifth percentile and maximum, so one outlier is not the average.
+
+    Three patients at 60,000 / 20,000 / 10,000 paise. The MEAN of that is 30,000,
+    which describes nobody: it is the heavy patient pulling a light one up, and an
+    operator quoting it as "what a patient costs us" is quoting a number about an
+    actor who does not exist. The median is 20,000 - the actual middle patient - and
+    the maximum is the outlier, stated as its own figure so it cannot leak into the
+    average by being averaged.
+    """
+    connection = _business_connection()
+
+    view = await query_business(
+        connection,
+        period=BUSINESS_PERIOD_MONTH,
+        from_date=_PERIOD_START,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    assert view.patient_spend.actors == 3
+    assert view.patient_spend.median_spend_paise == Decimal("20000")
+    assert view.patient_spend.p95_spend_paise == Decimal("56000")
+    assert view.patient_spend.max_spend_paise == 60_000
+    # The population total is the headline bill, which is what lets a caller check the
+    # capped list against the whole without re-reading the aggregate.
+    assert view.patient_spend.total_spend_paise == view.spend_paise
+
+
+async def test_the_top_lists_are_heaviest_first_with_a_stable_tiebreak() -> None:
+    """The panel is a top ten, ordered by spend, never re-ordered between two reads.
+
+    The key tiebreak is not cosmetic: two actors with identical spend would otherwise
+    swap places between two reads of an unchanged period, and a list whose order moves
+    on its own is a list an operator stops trusting. The fixture carries one equal-spend
+    pair on purpose - distinct spends cannot catch this.
+    """
+    connection = _business_connection(
+        actors=[
+            *_BUSINESS_ACTOR_ROWS,
+            {
+                "actor_kind": "patient",
+                "actor_key": "patient-tied-a",
+                "jobs": 1,
+                "completed_jobs": 1,
+                "failed_jobs": 0,
+                "cost_paise": 10_000,
+            },
+            {
+                "actor_kind": "patient",
+                "actor_key": "patient-tied-b",
+                "jobs": 1,
+                "completed_jobs": 1,
+                "failed_jobs": 0,
+                "cost_paise": 10_000,
+            },
+        ]
+    )
+
+    view = await query_business(
+        connection,
+        period=BUSINESS_PERIOD_MONTH,
+        from_date=_PERIOD_START,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    assert [row.patient_key for row in view.top_patients] == [
+        "patient-heavy",
+        "patient-draft",
+        "patient-ordinary",
+        "patient-tied-a",
+        "patient-tied-b",
+    ]
+    assert view.patient_spend.actors == 5
+
+
+async def test_the_top_lists_are_capped_without_cutting_the_population() -> None:
+    """The cap bounds the PANEL, never the figures the panel is read beside.
+
+    Fifteen patients, so the list truncates - and the distribution still describes all
+    fifteen. Dropping actors from the aggregation instead would silently bend the
+    median, the ninety-fifth percentile and the totals, which is the worse failure of
+    the two: a wrong number beats a short list.
+    """
+    actors = [
+        {
+            "actor_kind": "patient",
+            "actor_key": f"patient-{index:02d}",
+            "jobs": 1,
+            "completed_jobs": 1,
+            "failed_jobs": 0,
+            "cost_paise": index * 1_000,
+        }
+        for index in range(1, 16)
+    ]
+    connection = _business_connection(actors=actors, edges=[])
+
+    view = await query_business(
+        connection,
+        period=BUSINESS_PERIOD_MONTH,
+        from_date=_PERIOD_START,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    assert len(view.top_patients) == MAX_BUSINESS_TOP_ACTORS
+    assert view.top_patients[0].patient_key == "patient-15"
+    assert view.patient_spend.actors == 15
+    assert view.patient_spend.total_spend_paise == sum(range(1, 16)) * 1_000
+
+
+async def test_each_patient_spend_names_the_doctor_its_cost_was_attributed_to() -> None:
+    """The recorded edge is what ties a patient's spend to a doctor (#732).
+
+    Not a join across to the care schema, which the module isolation rule forbids, and
+    not a guess: the edges are the only legal record of the pairing. A patient with no
+    edge answers ``None`` rather than being dropped, because "nobody has picked a doctor
+    yet" is the ordinary state of most patients and the row is still spend.
+    """
+    connection = _business_connection()
+
+    view = await query_business(
+        connection,
+        period=BUSINESS_PERIOD_MONTH,
+        from_date=_PERIOD_START,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    by_key = {row.patient_key: row for row in view.top_patients}
+    assert by_key["patient-draft"].attributed_doctor_key == "doctor-a"
+    assert by_key["patient-heavy"].attributed_doctor_key is None
+
+
+async def test_a_patient_seen_by_two_doctors_is_named_by_neither() -> None:
+    """An ambiguous attribution is no attribution.
+
+    The aggregate records each doctor's OWN total and not which of a patient's jobs went
+    to which doctor, so a patient whose spend two doctors both touched cannot be named
+    for either without picking one arbitrarily. Answering ``None`` says "the recorded
+    edges do not settle this", which is true; answering a doctor would be a claim the
+    data does not make, on a per-patient figure the operator would then trust.
+
+    The reconciliation is NOT lost to that ``None``, which is the thing worth asserting
+    here: the patient's rupee is still carried on the two doctor rows the edges do name,
+    and the conservation law over the population is unchanged. Naming the doctor is what
+    is unavailable; accounting for the money is not.
+    """
+    connection = _business_connection(
+        edges=[
+            {"patient_key": "patient-draft", "doctor_key": "doctor-a"},
+            {"patient_key": "patient-draft", "doctor_key": "doctor-b"},
+        ]
+    )
+
+    view = await query_business(
+        connection,
+        period=BUSINESS_PERIOD_MONTH,
+        from_date=_PERIOD_START,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    draft = next(row for row in view.top_patients if row.patient_key == "patient-draft")
+    assert draft.attributed_doctor_key is None
+    assert draft.spend_paise == 20_000
+    # The doctors the edges name still carry their rows, and the doctor total still
+    # cannot exceed the patient total: the pairing is unnamed, not unaccounted.
+    assert [row.doctor_key for row in view.top_doctors] == ["doctor-a"]
+    assert view.doctor_spend.total_spend_paise <= view.patient_spend.total_spend_paise
+
+
+async def test_the_patient_and_doctor_totals_reconcile_through_the_edge() -> None:
+    """The reconciliation criterion, stated as arithmetic.
+
+    The rollup writes one row per ACTOR, so a doctor row MIRRORS the patient row of the
+    same job rather than splitting it. That gives the law this asserts: every doctor
+    rupee is also a patient rupee, so the doctor total can only be at most the patient
+    total, and the difference is exactly the spend whose doctor is not yet known.
+
+    On this fixture the 20,000-paise draft patient is mirrored by ``doctor-a``, so the
+    two figures for that pair agree to the rupee and the unattributed remainder is the
+    transcribe and structure spend nobody has attributed to a doctor yet. If the rollup
+    ever stopped mirroring, this is the test that fails - and it is the real deliverable
+    of the attribution model, not the top lists beside it.
+    """
+    connection = _business_connection()
+
+    view = await query_business(
+        connection,
+        period=BUSINESS_PERIOD_MONTH,
+        from_date=_PERIOD_START,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    patients = {row.patient_key: row for row in view.top_patients}
+    doctors = {row.doctor_key: row for row in view.top_doctors}
+    draft = patients["patient-draft"]
+    doctor = doctors["doctor-a"]
+    assert draft.attributed_doctor_key == "doctor-a"
+    assert (doctor.spend_paise, doctor.jobs, doctor.completed_jobs) == (
+        draft.spend_paise,
+        draft.jobs,
+        draft.completed_jobs,
+    )
+    assert doctor.patients == 1
+    # The conservation law over the whole population, not just this pair.
+    assert view.doctor_spend.total_spend_paise == 20_000
+    assert view.patient_spend.total_spend_paise == 90_000
+    assert view.doctor_spend.total_spend_paise < view.patient_spend.total_spend_paise
+
+
+async def test_a_doctors_patient_count_is_the_distinct_attributed_patients() -> None:
+    """What makes an expensive caseload readable: expensive PER PERSON.
+
+    One doctor carrying three patients is a different operational fact from three
+    doctors carrying one each, and only the divisor tells them apart. The fixture
+    repeats one edge on purpose: a re-pick is still one patient, and counting edges
+    instead of distinct keys is the bug that row prevents.
+    """
+    connection = _business_connection(
+        edges=[
+            {"patient_key": "patient-draft", "doctor_key": "doctor-a"},
+            {"patient_key": "patient-ordinary", "doctor_key": "doctor-a"},
+            {"patient_key": "patient-heavy", "doctor_key": "doctor-a"},
+            {"patient_key": "patient-heavy", "doctor_key": "doctor-a"},
+        ]
+    )
+
+    view = await query_business(
+        connection,
+        period=BUSINESS_PERIOD_MONTH,
+        from_date=_PERIOD_START,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    doctor = next(row for row in view.top_doctors if row.doctor_key == "doctor-a")
+    assert doctor.patients == 3
+
+
+async def test_margin_answers_null_with_a_reason_rather_than_a_zero() -> None:
+    """The acceptance criterion, in the one shape that can satisfy it.
+
+    No revenue has ever been written, so both margin percentages are ABSENT and each
+    carries a machine-readable reason from the closed vocabulary. ``0.00`` would be the
+    defect: it is indistinguishable from a genuinely free month, it is a claim nothing
+    measured, and a finance lead puts it in a deck.
+
+    Both figures share ONE reason because they are absent for one reason. A caller
+    rendering gross margin and AI cost as a percentage of revenue side by side must not
+    have to guess whether it is looking at one gap or two.
+    """
+    connection = _business_connection()
+
+    view = await query_business(
+        connection,
+        period=BUSINESS_PERIOD_MONTH,
+        from_date=_PERIOD_START,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    margin = view.margin
+    assert margin.revenue_captured is False
+    assert margin.revenue_paise == 0
+    for figure in (margin.gross_margin, margin.ai_cost_pct_of_revenue):
+        assert figure.value is None
+        assert figure.reason == UNAVAILABLE_REVENUE_NOT_CAPTURED
+        assert figure.detail is not None
+    assert margin.gross_margin.reason == margin.ai_cost_pct_of_revenue.reason
+
+
+async def test_the_revenue_and_tier_dimensions_are_read_and_returned_empty() -> None:
+    """Present and empty is the shape; omitted would make the promise unverifiable.
+
+    The PRD defers the revenue model, so "turning monetization on is a data write, not a
+    migration" (#717 decision 9) can only be checked against a read that actually LOOKS
+    at the columns. A read that skipped them could make that promise whether or not it
+    were true.
+    """
+    connection = _business_connection()
+
+    view = await query_business(
+        connection,
+        period=BUSINESS_PERIOD_MONTH,
+        from_date=_PERIOD_START,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    assert view.margin.tier_keys == []
+    assert view.margin.tiers_captured is False
+    assert "observability_attribution_daily.revenue_paise" in _compiled(connection, 4)
+    assert "observability_attribution_daily.tier_key" in _compiled(connection, 5)
+
+
+async def test_margin_computes_once_revenue_is_captured() -> None:
+    """The shape monetization switches on with, so the promise is a promise.
+
+    100,000 paise of revenue against 90,000 of AI cost is a 10% gross margin, and AI
+    cost is 90% of revenue. Both are computed at read time over the same period as the
+    cost, so the two halves of each ratio are like for like.
+    """
+    connection = _business_connection(
+        revenue=[{"revenue_paise": 100_000, "captured_rows": 4}],
+        tiers=[{"tier_key": "free"}, {"tier_key": "pro"}],
+    )
+
+    view = await query_business(
+        connection,
+        period=BUSINESS_PERIOD_MONTH,
+        from_date=_PERIOD_START,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    margin = view.margin
+    assert margin.revenue_captured is True
+    assert margin.revenue_paise == 100_000
+    assert margin.gross_margin.value == Decimal("10.00")
+    assert margin.gross_margin.reason is None
+    assert margin.gross_margin.detail is None
+    assert margin.ai_cost_pct_of_revenue.value == Decimal("90.00")
+    assert margin.tiers_captured is True
+    assert margin.tier_keys == ["free", "pro"]
+
+
+async def test_a_captured_zero_revenue_is_absent_for_its_own_reason() -> None:
+    """Revenue that WAS captured and was zero is a different gap from revenue never
+    captured - and gets a different reason, because the two call for different action.
+
+    "We have no monetization" and "we made nothing" are both zero rows and both mean
+    there is no denominator for a margin; a reader told the first would go looking for
+    a revenue source, and a reader told the second would go looking for a sale.
+    """
+    connection = _business_connection(revenue=[{"revenue_paise": 0, "captured_rows": 4}])
+
+    view = await query_business(
+        connection,
+        period=BUSINESS_PERIOD_MONTH,
+        from_date=_PERIOD_START,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    margin = view.margin
+    assert margin.revenue_captured is True
+    assert margin.gross_margin.value is None
+    assert margin.gross_margin.reason == UNAVAILABLE_REVENUE_ZERO
+    assert margin.gross_margin.reason != UNAVAILABLE_REVENUE_NOT_CAPTURED
+
+
+async def test_the_headline_month_cost_of_goods_is_the_bill_the_alert_uses() -> None:
+    """One number for the board, and it is the SAME number - not a second one.
+
+    The headline AI cost of goods for the month is what the ``ai_budget`` alert is
+    evaluated against, carried under this name because it answers a different question
+    from "how much of the cap is gone". Two names for one figure is only safe while
+    they are the same figure, which is what this asserts.
+    """
+    connection = _business_connection()
+
+    view = await query_business(
+        connection,
+        period=BUSINESS_PERIOD_MONTH,
+        from_date=_PERIOD_START,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    assert view.margin.headline_month_cost_of_goods_paise == view.cap_consumed_paise
+    # And the PERIOD cost of goods is the selected period, so a margin built from it
+    # is like for like - never this month's cost against a day's revenue.
+    assert view.margin.cost_of_goods_paise == view.spend_paise
+
+
+@pytest.mark.parametrize("reason", UNAVAILABLE_REASONS)
+def test_every_unavailability_reason_pairs_with_an_absent_figure(reason: str) -> None:
+    """A reason is only usable if the shape accepts it, and there is no third kind.
+
+    The vocabulary is closed because it is what a client branches on: an open set would
+    invite free text somebody has to parse, and this read is the first operator-facing
+    answer that can legitimately be "we do not know".
+    """
+    figure = MarginPercent(value=None, reason=reason, detail="because")
+
+    assert figure.value is None
+    assert figure.reason == reason
+
+
+@pytest.mark.parametrize(
+    ("value", "reason", "detail"),
+    [
+        # A null with no reason: exactly the failure this model exists to make
+        # impossible, because a bare null says nothing a reader can act on.
+        (None, None, None),
+        # A value AND a reason: contradictory, and worse than either alone.
+        (Decimal("12.00"), UNAVAILABLE_REVENUE_ZERO, "because"),
+        # A computed figure carrying not-captured prose.
+        (Decimal("12.00"), None, "because"),
+        # An EMPTY reason beside a value. The check is ``is not None`` rather than
+        # truthiness on purpose: "" is not an explanation, and a validator that treated
+        # it as "no reason" would let exactly the bare figure this shape exists to
+        # prevent through the other door.
+        (Decimal("12.00"), "", None),
+    ],
+)
+def test_a_margin_percentage_cannot_contradict_its_own_reason(
+    value: Decimal | None, reason: str | None, detail: str | None
+) -> None:
+    """The pairing is enforced by the model, not merely documented in prose.
+
+    Every pair above is a shape a future edit could produce by accident - a third
+    percentage added without a reason, a helper that forgot to look one up - and each
+    one turns the not-captured answer back into the ambiguity it was built to remove.
+    """
+    with pytest.raises(ValidationError):
+        MarginPercent(value=value, reason=reason, detail=detail)
+
+
+def test_a_margin_percentage_rejects_a_reason_outside_the_closed_vocabulary() -> None:
+    """Free text is not a reason. The vocabulary is what makes the null machine-readable.
+
+    A reason no client has a case for is a reason a client will render as its own
+    generic empty state, which is precisely the "mistake a zero for not knowing" this
+    shape was introduced to prevent. The refusal comes from the field's own
+    :data:`~modules.observability.facade.UnavailableReason` type rather than from a
+    hand-written check, so the two accepted reasons are rendered into the message a
+    caller sees - there is no second list of valid reasons that could fall behind.
+    """
+    with pytest.raises(ValidationError, match="revenue_not_captured"):
+        MarginPercent(value=None, reason="no data", detail="because")
+
+
+async def test_a_doctors_patient_count_is_null_rather_than_zero_without_an_edge() -> None:
+    """The rollup can write a doctor row from a job row's own doctor key, with no edge.
+
+    Nothing recorded the pairing in that case, so the patient count is UNAVAILABLE, not
+    empty. ``0`` beside a non-zero ``spend_paise`` would read as "this doctor served
+    nobody", which is a claim about a caseload rather than a statement about the data,
+    and it is the same misleading zero the rest of this read refuses to emit.
+    """
+    connection = _business_connection(edges=[])
+
+    view = await query_business(
+        connection,
+        period=BUSINESS_PERIOD_MONTH,
+        from_date=_PERIOD_START,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    doctor = next(row for row in view.top_doctors if row.doctor_key == "doctor-a")
+    assert doctor.spend_paise == 20_000
+    assert doctor.patients is None
+
+
+async def test_the_headline_month_bill_is_null_when_no_budget_row_exists() -> None:
+    """A month with spend and no snapshot row has NO bill to quote, so it is null.
+
+    The snapshot is what says what the month has cost, and the read cannot invent it.
+    Zero here would be the worst version of the misleading zero this ticket is about: it
+    is the one figure a board is likely to quote, and it would say the month was free
+    when the aggregate beside it plainly holds spend.
+    """
+    connection = _business_connection(budgets=[])
+
+    view = await query_business(
+        connection,
+        period=BUSINESS_PERIOD_MONTH,
+        from_date=_PERIOD_START,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    assert view.spend_paise == 90_000
+    assert view.margin.headline_month_cost_of_goods_paise is None

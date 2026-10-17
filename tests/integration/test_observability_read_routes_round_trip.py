@@ -56,7 +56,11 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from app.config import Settings
 from app.main import create_app
 from modules.iam.domain.jwt import issue_token
-from modules.observability.domain.pseudonym import ACTOR_KIND_PATIENT, actor_key
+from modules.observability.domain.pseudonym import (
+    ACTOR_KIND_DOCTOR,
+    ACTOR_KIND_PATIENT,
+    actor_key,
+)
 from modules.observability.facade import drain_error_buffer, drain_http_counter
 from observability.error_capture import pending_error_captures, reset_error_capture
 from observability.http_counter import pending_http_counts, reset_http_counter
@@ -1681,6 +1685,18 @@ _ATTRIBUTION_SEED = """
 _TODAY_SPEND_PAISE = 90_000
 _MONTH_SPEND_PAISE = 2_000
 _BUSINESS_CAP_PAISE = 150_000
+
+#: The recorded care-attribution edges (#724) that let the business read answer "which
+#: doctor was this patient's cost attributed to". ``patient_key(ACTOR_KIND_PATIENT,
+#: 102)`` is exactly the actor ``p2`` above, and ``doctor-a`` is the doctor whose row
+#: mirrors p2's figures - which is what makes this the reconciliation fixture rather
+#: than decoration: if the rollup stopped mirroring, the per-patient and per-doctor
+#: figures would stop agreeing and the test that says so would fail.
+_BUSINESS_EDGE_SEED = """
+    INSERT INTO observability.observability_care_attribution_edges
+    (intake_ref, patient_key, doctor_key, event_id, assigned_at) VALUES
+    (9001, :p2, :d1, gen_random_uuid(), now())
+"""
 #: The snapshot's month-to-date figure. Set to the aggregate's own month-to-date sum
 #: because that is what the rollup writes - one ``_load_period_spend`` feeding the
 #: snapshot, one ``build_attribution_daily`` feeding the aggregate, both off the same
@@ -1694,21 +1710,20 @@ async def attributed_engine(engine: AsyncEngine) -> AsyncIterator[AsyncEngine]:
     """The daily per-actor aggregate and the budget snapshot the business read reads."""
     today = _utc_today()
     month_start, month_end = _month_bounds(today)
+    keys = {
+        "today": today,
+        "month_start": month_start,
+        "patient": ACTOR_KIND_PATIENT,
+        "doctor": ACTOR_KIND_DOCTOR,
+        "p1": actor_key(ACTOR_KIND_PATIENT, 101),
+        "p2": actor_key(ACTOR_KIND_PATIENT, 102),
+        "p3": actor_key(ACTOR_KIND_PATIENT, 103),
+        "p4": actor_key(ACTOR_KIND_PATIENT, 104),
+        "d1": actor_key(ACTOR_KIND_DOCTOR, 201),
+    }
     async with engine.begin() as connection:
-        await connection.execute(
-            text(_ATTRIBUTION_SEED),
-            {
-                "today": today,
-                "month_start": month_start,
-                "patient": ACTOR_KIND_PATIENT,
-                "doctor": "doctor",
-                "p1": actor_key(ACTOR_KIND_PATIENT, 101),
-                "p2": actor_key(ACTOR_KIND_PATIENT, 102),
-                "p3": actor_key(ACTOR_KIND_PATIENT, 103),
-                "p4": actor_key(ACTOR_KIND_PATIENT, 104),
-                "d1": actor_key("doctor", 201),
-            },
-        )
+        await connection.execute(text(_ATTRIBUTION_SEED), keys)
+        await connection.execute(text(_BUSINESS_EDGE_SEED), keys)
         await connection.execute(
             text(
                 "INSERT INTO observability.observability_ai_cost_budget "
@@ -1898,3 +1913,188 @@ async def test_the_business_route_refuses_anonymous_and_non_operator_callers(
     assert _client(database_url).get(BUSINESS_PATH).status_code == 401
     forbidden = _client(database_url).get(BUSINESS_PATH, headers=_bearer("patient"))
     assert forbidden.status_code == 403
+
+
+async def test_the_business_read_divides_the_bill_by_each_unit_of_value(
+    attributed_engine: AsyncEngine, database_url: str
+) -> None:
+    """What one unit of value costs, derived per request rather than stored.
+
+    The seeded month carries 90,000 paise over 10 jobs of which 9 completed, and every
+    figure below is that division and no other: 9,000 paise per request over ALL ten
+    (the bill pays for the failure too), 10,000 per completed task over the nine that
+    finished, 30,000 per patient over the three in the window, and cost-of-pass at
+    10,000 - spend per successful outcome, which is the named metric and NOT the
+    per-request figure.
+
+    Cost per doctor is the odd one out at 20,000 rather than 90,000, and the difference
+    is the point: only the 20,000 the recorded edge attributes reaches a doctor, so
+    dividing the whole bill by the doctor count would quote a figure larger than any
+    doctor's own row. The unattributed 70,000 stays visible as the gap between
+    ``patient_spend.total_spend_paise`` and ``doctor_spend.total_spend_paise``.
+
+    Quoted decimals arrive as strings at the rate scale the other ratios use.
+    """
+    del attributed_engine
+    body = _business_body(database_url, "today")
+
+    assert (body["completed_jobs"], body["failed_jobs"]) == (9, 1)
+    assert body["cost_per_request_paise"] == "9000.0000"
+    assert body["cost_per_completed_task_paise"] == "10000.0000"
+    assert body["cost_per_patient_paise"] == "30000.0000"
+    assert body["cost_per_doctor_paise"] == "20000.0000"
+    assert body["cost_of_pass_paise"] == "10000.0000"
+
+
+async def test_the_business_read_reports_where_per_patient_spend_actually_sits(
+    attributed_engine: AsyncEngine, database_url: str
+) -> None:
+    """Median, ninety-fifth percentile and maximum, because one outlier is not an average.
+
+    Three patients at 60,000 / 20,000 / 10,000 paise. Their mean is 30,000, which
+    describes nobody: it is the 60,000 patient pulling the 10,000 one up, and an
+    operator quoting it as "what a patient costs us" is quoting a number about an actor
+    who does not exist. The median is the 20,000 patient who does, and the maximum is
+    the outlier stated as its own figure so it cannot leak into an average.
+
+    The percentiles are over the whole population, which the seeded month proves twice
+    over: widening to ``month_to_date`` adds a FOURTH, far lighter patient and the
+    median moves, while the population total moves with it. A sample taken from the
+    capped list beside them would not move at all.
+    """
+    del attributed_engine
+    today = _business_body(database_url, "today")
+    month = _business_body(database_url, "month_to_date")
+
+    assert today["patient_spend"]["actors"] == 3
+    assert today["patient_spend"]["median_spend_paise"] == "20000"
+    assert today["patient_spend"]["p95_spend_paise"] == "56000"
+    assert today["patient_spend"]["max_spend_paise"] == _TODAY_SPEND_PAISE - 30_000
+    # The population total is the headline, so the capped list can be checked against
+    # the whole without a second query.
+    assert today["patient_spend"]["total_spend_paise"] == _TODAY_SPEND_PAISE
+
+    # The extra 2,000-paise patient pulls the median off the 20,000 figure and moves
+    # the total - which a median sampled from the top ten could not do. Rank-interpolated
+    # between the 10,000 and 20,000 patients, because that is the estimator the rest of
+    # the observability surface reports percentiles with.
+    assert month["patient_spend"]["actors"] == 4
+    assert month["patient_spend"]["median_spend_paise"] == "15000"
+    assert month["patient_spend"]["total_spend_paise"] == _TODAY_SPEND_PAISE + _MONTH_SPEND_PAISE
+
+
+async def test_the_business_read_names_the_doctor_each_patients_cost_was_attributed_to(
+    attributed_engine: AsyncEngine, database_url: str
+) -> None:
+    """The recorded edge is what ties a patient's spend to a doctor.
+
+    Not a join across to the care schema - forbidden by the module isolation rule - but
+    the edge #724 wrote when the doctor was picked. Two of the three seeded patients
+    have no edge and answer ``None`` rather than being dropped: "nobody has picked a
+    doctor yet" is the ordinary state of most patients, and the row is still spend.
+
+    The keys are the one-way hashes, so what an operator gets is a pseudonym they can
+    correlate across panels and nothing they can identify a human from.
+    """
+    del attributed_engine
+    body = _business_body(database_url, "today")
+    rows = {row["patient_key"]: row for row in body["top_patients"]}
+
+    # Heaviest first, and p1 is unattributed because the seed records no edge for them.
+    assert [row["patient_key"] for row in body["top_patients"]] == [
+        actor_key(ACTOR_KIND_PATIENT, 101),
+        actor_key(ACTOR_KIND_PATIENT, 102),
+        actor_key(ACTOR_KIND_PATIENT, 103),
+    ]
+    assert rows[actor_key(ACTOR_KIND_PATIENT, 102)]["attributed_doctor_key"] == actor_key(
+        ACTOR_KIND_DOCTOR, 201
+    )
+    assert rows[actor_key(ACTOR_KIND_PATIENT, 101)]["attributed_doctor_key"] is None
+    assert [row["doctor_key"] for row in body["top_doctors"]] == [actor_key(ACTOR_KIND_DOCTOR, 201)]
+
+
+async def test_per_patient_and_per_doctor_totals_reconcile_through_the_attribution_edge(
+    attributed_engine: AsyncEngine, database_url: str
+) -> None:
+    """The reconciliation criterion, proved against real Postgres.
+
+    This is the deliverable of the attribution model, not the lists beside it. The
+    rollup writes one row per ACTOR, so a doctor row MIRRORS the patient row of the
+    same job rather than splitting it, which gives the law asserted here: every doctor
+    rupee is also a patient rupee. So the doctor total is at most the patient total,
+    the difference is exactly the spend whose doctor is not yet known, and the pair the
+    edge names agrees to the rupee.
+
+    If the rollup ever stopped mirroring - or the read started attributing by joining
+    across to the care schema - this is the test that fails.
+    """
+    del attributed_engine
+    body = _business_body(database_url, "today")
+
+    patients = {row["patient_key"]: row for row in body["top_patients"]}
+    attributed = patients[actor_key(ACTOR_KIND_PATIENT, 102)]
+    doctor = body["top_doctors"][0]
+    assert doctor["doctor_key"] == actor_key(ACTOR_KIND_DOCTOR, 201)
+    assert attributed["attributed_doctor_key"] == doctor["doctor_key"]
+    assert (doctor["spend_paise"], doctor["jobs"], doctor["completed_jobs"]) == (
+        attributed["spend_paise"],
+        attributed["jobs"],
+        attributed["completed_jobs"],
+    )
+    assert doctor["patients"] == 1
+    # The conservation law over the whole period, not just this pair.
+    assert body["patient_spend"]["total_spend_paise"] == body["spend_paise"]
+    assert body["doctor_spend"]["total_spend_paise"] == 20_000
+    assert body["doctor_spend"]["total_spend_paise"] < body["patient_spend"]["total_spend_paise"]
+
+
+async def test_the_business_read_reports_margin_as_null_with_a_reason_and_never_a_zero(
+    attributed_engine: AsyncEngine, database_url: str
+) -> None:
+    """No revenue captured, so every margin percentage is null AND says why.
+
+    The distinction this test exists for is the difference between ``null`` and
+    ``0.00`` on the wire. A zero margin is a claim - "the margin is zero" - that
+    nothing measured, it is indistinguishable from a genuinely free month, and a
+    finance lead will put it in a deck. So both percentages arrive absent, each
+    carrying a machine-readable reason, and the dimensions they would have come from
+    are reported as present-and-empty rather than omitted - which is what makes
+    "turning monetization on is a data write, not a migration" checkable.
+    """
+    del attributed_engine
+    body = _business_body(database_url, "month_to_date")
+
+    margin = body["margin"]
+    assert margin["revenue_captured"] is False
+    assert margin["revenue_paise"] == 0
+    assert margin["tiers_captured"] is False
+    assert margin["tier_keys"] == []
+    for figure in (margin["gross_margin"], margin["ai_cost_pct_of_revenue"]):
+        # Asserted against BOTH the zero it must not be and the null it must be: a
+        # fixture that only checked ``is None`` would also pass on a missing key.
+        assert figure["value"] is None
+        assert figure["value"] != 0
+        assert figure["reason"] == "revenue_not_captured"
+        assert figure["detail"]
+
+
+async def test_the_business_read_reports_the_headline_month_cost_of_goods(
+    attributed_engine: AsyncEngine, database_url: str
+) -> None:
+    """One figure a finance lead can put in front of the board, for the month.
+
+    It is the SAME integer the read reports as the cap's consumed figure and the same
+    one the ``ai_budget`` alert is evaluated against - carried under this name because
+    it answers a different question ("what did AI cost us this month") from "how much
+    of the cap is gone". Two names for one figure is only safe while they are the same
+    figure, which is what this asserts on the wire.
+
+    It is the MONTH's figure even when the period asked for is a day, because a board
+    number does not shrink when an operator opens the panel on "today".
+    """
+    del attributed_engine
+    month = _business_body(database_url, "month_to_date")
+
+    assert month["margin"]["headline_month_cost_of_goods_paise"] == _BUSINESS_CONSUMED_PAISE
+    assert month["margin"]["headline_month_cost_of_goods_paise"] == month["cap_consumed_paise"]
+    assert month["margin"]["cost_of_goods_paise"] == month["spend_paise"]

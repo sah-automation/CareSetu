@@ -23,6 +23,10 @@ recent-activity figure and the link out to true concurrency; B8 (#730) adds
 ``errors``, the live collapsed error stream with its open/resolved split; B2
 (#731) adds ``business``, the period-parameterised spend read - today, week-to-date
 and month-to-date are three windows of ONE endpoint.
+B2 (#732) widens that one response with the per-unit figures, the per-patient and
+per-doctor attribution and the not-captured margin reason - the same read, answered
+more fully, because a second endpoint would re-read the same aggregate and the two
+answers would have to be kept in agreement by hand.
 """
 
 from __future__ import annotations
@@ -164,7 +168,7 @@ async def read_cost(
     "/v1/operator/observability/business",
     response_model=BusinessRead,
     status_code=status.HTTP_200_OK,
-    summary="Read period AI spend against the monthly cap, with the breakdown (operator only)",
+    summary="Read period AI spend, unit metrics, attribution and margin (operator only)",
 )
 async def read_business(
     request: Request,
@@ -189,6 +193,16 @@ async def read_business(
     ``projected_over_cap`` say where the month lands if the days so far are
     representative - and it is why an operator hears about the cap on the twentieth
     rather than on the last.
+
+    What one unit of value costs rides the same response: ``cost_per_request_paise``,
+    ``cost_per_completed_task_paise``, ``cost_per_patient_paise``,
+    ``cost_per_doctor_paise`` and ``cost_of_pass_paise`` are read-time divisions over
+    the same counters (#732, decision 8), and every one of them is ``null`` rather than
+    zero when its denominator is empty. The heavy actors come with them -
+    ``top_patients`` and ``top_doctors``, each beside the median, ninety-fifth
+    percentile and maximum over the WHOLE population, so one outlier cannot be read as
+    the average - and ``margin`` reports ``null`` with a machine-readable reason until
+    revenue is captured, never a zero a finance lead could quote.
     """
     del principal
     return await _facade(request).get_business(period=period)

@@ -28,6 +28,7 @@ from modules.iam.domain.jwt import issue_token
 from modules.observability.facade import (
     BUSINESS_PERIODS,
     ERROR_STATUS_VOCABULARY,
+    ActorSpendDistribution,
     AlertEntry,
     AlertPage,
     BreakerHealthRow,
@@ -40,13 +41,17 @@ from modules.observability.facade import (
     CostTrendPoint,
     Deeplinks,
     DependencyHealth,
+    DoctorSpend,
     ErrorFeedEntry,
     ErrorFeedPage,
     LatencyReport,
     LatencyRow,
+    MarginPercent,
+    MarginRead,
     ModelSpend,
     OutboxHealthRow,
     Overview,
+    PatientSpend,
     ProjectionBasis,
     ProviderBoardReport,
     ProviderBoardRow,
@@ -457,6 +462,75 @@ _BUSINESS = BusinessRead(
             paise_per_1k_output_tokens=Decimal("1000.0000"),
         )
     ],
+    # ---- #732: the unit figures, the actor attribution and the margin reason. The
+    # stub is what the route serialises, so these carry figures a real read could
+    # produce rather than placeholders: an operator-facing shape tested only with nulls
+    # would pass even if the fields were wired to the wrong thing.
+    completed_jobs=9,
+    failed_jobs=1,
+    cost_per_request_paise=Decimal("3000.0000"),
+    cost_per_completed_task_paise=Decimal("3333.3333"),
+    cost_per_patient_paise=Decimal("22500.0000"),
+    cost_per_doctor_paise=Decimal("10000.0000"),
+    cost_of_pass_paise=Decimal("3333.3333"),
+    patient_spend=ActorSpendDistribution(
+        actors=4,
+        total_spend_paise=30_000,
+        median_spend_paise=Decimal("5000"),
+        p95_spend_paise=Decimal("20000"),
+        max_spend_paise=20_000,
+    ),
+    doctor_spend=ActorSpendDistribution(
+        actors=2,
+        total_spend_paise=20_000,
+        median_spend_paise=Decimal("10000"),
+        p95_spend_paise=Decimal("15000"),
+        max_spend_paise=15_000,
+    ),
+    top_patients=[
+        PatientSpend(
+            patient_key="patient-hash-1",
+            attributed_doctor_key="doctor-hash-1",
+            jobs=2,
+            completed_jobs=2,
+            failed_jobs=0,
+            spend_paise=20_000,
+        ),
+        PatientSpend(
+            patient_key="patient-hash-2",
+            attributed_doctor_key=None,
+            jobs=1,
+            completed_jobs=1,
+            failed_jobs=0,
+            spend_paise=7_000,
+        ),
+    ],
+    top_doctors=[
+        DoctorSpend(
+            doctor_key="doctor-hash-1",
+            patients=2,
+            jobs=2,
+            completed_jobs=2,
+            failed_jobs=0,
+            spend_paise=15_000,
+        )
+    ],
+    margin=MarginRead(
+        revenue_paise=0,
+        cost_of_goods_paise=30_000,
+        headline_month_cost_of_goods_paise=90_000,
+        revenue_captured=False,
+        tiers_captured=False,
+        tier_keys=[],
+        # No revenue captured, so BOTH percentages are absent WITH the reason - never a
+        # zero, which would be indistinguishable from a genuinely free month.
+        gross_margin=MarginPercent(
+            value=None, reason="revenue_not_captured", detail="Revenue is not captured yet."
+        ),
+        ai_cost_pct_of_revenue=MarginPercent(
+            value=None, reason="revenue_not_captured", detail="Revenue is not captured yet."
+        ),
+    ),
 )
 
 
@@ -1215,6 +1289,68 @@ def test_operator_reads_period_spend_against_the_cap_with_its_breakdown() -> Non
         ("openai", "gpt-4o-mini")
     ]
     assert [row["provider"] for row in body["by_provider"]] == ["openai"]
+
+
+def test_the_business_route_carries_the_unit_metrics_and_actor_attribution() -> None:
+    """The per-unit figures and the actor lists reach the wire on this ONE endpoint.
+
+    The widening rides the read #731 already had rather than arriving as a second
+    route, so what has to be proved here is that it survived the response model: a
+    field added to the view and not to the schema would 200 with the number missing,
+    which a panel renders as a blank rather than as an error.
+    """
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    body = client.get(BUSINESS_PATH, headers=_operator()).json()
+
+    # Quoted decimal strings at the rate scale, like every other money ratio on this
+    # surface - a client parsing one and not the other would get a number and a string.
+    assert body["cost_per_request_paise"] == "3000.0000"
+    assert body["cost_per_completed_task_paise"] == "3333.3333"
+    assert body["cost_per_patient_paise"] == "22500.0000"
+    assert body["cost_per_doctor_paise"] == "10000.0000"
+    assert body["cost_of_pass_paise"] == "3333.3333"
+    # The distribution is over the population; the list beside it is the capped panel.
+    assert body["patient_spend"]["median_spend_paise"] == "5000"
+    assert body["patient_spend"]["p95_spend_paise"] == "20000"
+    assert body["patient_spend"]["max_spend_paise"] == 20_000
+    assert [row["patient_key"] for row in body["top_patients"]] == [
+        "patient-hash-1",
+        "patient-hash-2",
+    ]
+    # A key, never an identity: a top-patient list is people-shaped data in a
+    # PHI-free schema, so the wire carries a hash and nothing a human is named by.
+    assert body["top_patients"][0]["attributed_doctor_key"] == "doctor-hash-1"
+    assert body["top_patients"][1]["attributed_doctor_key"] is None
+    assert body["top_doctors"][0]["doctor_key"] == "doctor-hash-1"
+    assert body["top_doctors"][0]["patients"] == 2
+
+
+def test_the_business_route_serves_an_absent_margin_as_null_carrying_its_reason() -> None:
+    """``null`` on the wire, plus a reason - never ``0.00``, which is the defect.
+
+    This is asserted on the JSON rather than on the view because the wire is where the
+    distinction is actually lost: a client cannot tell a Python ``None`` from a zero
+    it was handed, but it can absolutely tell ``null`` from ``0.00``. The reason is on
+    the wire for the same reason - a client that renders "revenue is not captured yet"
+    is answering the operator, and one rendering a bare null is showing an empty box.
+    """
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    body = client.get(BUSINESS_PATH, headers=_operator()).json()
+
+    margin = body["margin"]
+    assert margin["revenue_captured"] is False
+    assert margin["tier_keys"] == []
+    for figure in (margin["gross_margin"], margin["ai_cost_pct_of_revenue"]):
+        assert figure["value"] is None
+        assert figure["reason"] == "revenue_not_captured"
+        assert figure["detail"]
+    # The board number rides the same response, and is the consumed figure rather than
+    # a separately derived one.
+    assert margin["headline_month_cost_of_goods_paise"] == body["cap_consumed_paise"]
 
 
 def test_the_business_read_defaults_to_the_month_the_cap_is_measured_against() -> None:

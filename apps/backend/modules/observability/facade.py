@@ -74,11 +74,23 @@ route handlers over three copies of the same aggregation is the failure mode tha
 decision exists to prevent. Everything spend-shaped is computed at read time out of
 ``observability_attribution_daily`` - the daily per-actor aggregate #725 writes - so no
 figure here has a stored second copy to drift from (#717 decision 8).
+
+B2 (#732) widens that same read rather than adding another one: the per-unit figures
+- cost per AI request, per completed task, per patient, per doctor, and cost-of-pass -
+plus who the heavy actors are. Top patients and top doctors come off the two actor
+kinds of the SAME aggregate, joined by the care-attribution edges #724 records, so the
+per-patient and per-doctor totals reconcile through an edge rather than through a
+cross-schema join that the module isolation rule forbids. The median, ninety-fifth
+percentile and maximum are reported BESIDE the top list rather than as its average,
+because a mean over a distribution with one heavy outlier describes nobody. The
+revenue and tier dimensions are read and returned as they are - empty - so margin
+answers ``null`` carrying a machine-readable not-captured reason rather than a zero a
+finance lead could quote (#717 decision 9).
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
@@ -86,7 +98,7 @@ from time import perf_counter
 from typing import Any, Literal, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from sqlalchemy import (
     ColumnElement,
     Integer,
@@ -138,6 +150,7 @@ from modules.observability.domain.rollup import (
     ProviderStatus,
     RollupPlan,
     RollupThresholds,
+    percentile,
     plan_rollup_dates,
     provider_status,
     ratio,
@@ -274,6 +287,58 @@ BUSINESS_PERIODS: tuple[str, ...] = (
 #: plain ``str``, because those are where an unvalidated value can still arrive.
 BusinessPeriod = Literal["today", "week_to_date", "month_to_date"]
 
+#: How many rows ``/business`` returns in each of its top-actor lists (#732). Ten is
+#: a panel, not a report: the operator question behind the list is "who is the heavy
+#: consumer THIS MONTH", and the answer is the top of the distribution rather than all
+#: of it.
+#:
+#: Not paginated, and deliberately so, for the reason
+#: :data:`MAX_THROUGHPUT_ROUTE_ROWS` already is: this bounds the RESPONSE for a panel
+#: that renders the whole list, where a cursor would offer a "next page" no panel has
+#: room to show. Every actor in the period is aggregated regardless - the distribution
+#: beside the list is computed over the whole population - so the cap costs a reader the
+#: visibility of the top ten and nothing else, where dropping actors from the
+#: aggregation would quietly bend every figure the read exists to report.
+MAX_BUSINESS_TOP_ACTORS = 10
+
+#: Why a derived figure is absent, as a closed machine-readable vocabulary (#732).
+#:
+#: These are statements about the DATA, never about the code, and that is the whole
+#: point: a caller switches on the reason, and a reason nobody has a case for cannot be
+#: added without a decision at this seam rather than by a developer typing a string.
+#: Each one is also rendered into prose by :data:`_UNAVAILABLE_DETAIL` so a panel can
+#: say something to a human, but the prose is a translation of the reason and never the
+#: reason itself - a string field alone would leave a client parsing English to find
+#: out whether a null is "we don't collect that yet" or "the arithmetic broke".
+UNAVAILABLE_REVENUE_NOT_CAPTURED: Literal["revenue_not_captured"] = "revenue_not_captured"
+UNAVAILABLE_REVENUE_ZERO: Literal["revenue_zero"] = "revenue_zero"
+
+UNAVAILABLE_REASONS: tuple[str, ...] = (
+    UNAVAILABLE_REVENUE_NOT_CAPTURED,
+    UNAVAILABLE_REVENUE_ZERO,
+)
+
+#: The same two reasons as one type, for every signature that takes an already-resolved
+#: reason. :data:`UNAVAILABLE_REASONS` is the runtime vocabulary a value is checked
+#: against and so widens to ``str``; this alias keeps the narrowing where the model
+#: itself does the validating, so a typo is a type error at the call site rather than a
+#: validator firing in production.
+UnavailableReason = Literal["revenue_not_captured", "revenue_zero"]
+
+#: The human sentence behind each reason. Deliberately separate from the reason
+#: itself so the vocabulary above stays a vocabulary: a panel renders this, a client
+#: branches on :data:`UNAVAILABLE_REASONS`, and neither has to parse the other.
+_UNAVAILABLE_DETAIL: dict[str, str] = {
+    UNAVAILABLE_REVENUE_NOT_CAPTURED: (
+        "Revenue is not captured yet. The revenue column exists on the daily "
+        "aggregate and is empty, so no margin percentage can be computed."
+    ),
+    UNAVAILABLE_REVENUE_ZERO: (
+        "Revenue is captured and is zero for this period, so there is no "
+        "denominator for a margin percentage."
+    ),
+}
+
 __all__ = [
     "AI_JOB_SPEND_STATUS_COMPLETED",
     "AI_JOB_SPEND_STATUS_FAILED",
@@ -290,6 +355,7 @@ __all__ = [
     "ERROR_STATUS_VOCABULARY",
     "MAX_ACTIVITY_WINDOW_MINUTES",
     "MAX_ALERT_PAGE_SIZE",
+    "MAX_BUSINESS_TOP_ACTORS",
     "MAX_ERROR_PAGE_SIZE",
     "MAX_ERROR_WINDOW_MINUTES",
     "MAX_THROUGHPUT_ROUTE_ROWS",
@@ -297,6 +363,10 @@ __all__ = [
     "OBSERVABILITY_SCHEMA",
     "ROLLUP_MODE_BACKFILL",
     "ROLLUP_MODE_DAILY",
+    "UNAVAILABLE_REASONS",
+    "UNAVAILABLE_REVENUE_NOT_CAPTURED",
+    "UNAVAILABLE_REVENUE_ZERO",
+    "ActorSpendDistribution",
     "AlertEntry",
     "AlertPage",
     "BreakerHealthRow",
@@ -310,16 +380,20 @@ __all__ = [
     "CostTrendPoint",
     "Deeplinks",
     "DependencyHealth",
+    "DoctorSpend",
     "ErrorDrainReport",
     "ErrorFeedEntry",
     "ErrorFeedPage",
     "HttpCounterDrainReport",
     "LatencyReport",
     "LatencyRow",
+    "MarginPercent",
+    "MarginRead",
     "ModelSpend",
     "ObservabilityFacade",
     "OutboxHealthRow",
     "Overview",
+    "PatientSpend",
     "ProjectionBasis",
     "ProviderQualityRow",
     "ProviderSpend",
@@ -2494,6 +2568,148 @@ class TaskTypeSpend(BaseModel):
     paise_per_1k_output_tokens: Decimal | None
 
 
+class MarginPercent(BaseModel):
+    """One derived margin percentage, paired with the reason it is absent.
+
+    **The pairing is the deliverable; the null is only the mechanism.** A margin
+    percentage of ``0.00`` is indistinguishable from a real zero-revenue month, and a
+    finance lead will put it in a deck: the number is not wrong, it is a claim about a
+    thing nobody measured. So an absent figure must carry WHY it is absent, in a
+    vocabulary a client can switch on (:data:`UNAVAILABLE_REASONS`) rather than a
+    sentence it has to parse, and the two halves are validated as a pair - a figure can
+    never be ``None`` without a reason or carry a reason while holding a value.
+
+    ``value`` is a percentage at the 2dp scale the other ratios use, never a fraction.
+    """
+
+    value: Decimal | None
+    reason: UnavailableReason | None
+    detail: str | None
+
+    @model_validator(mode="after")
+    def _value_and_reason_agree(self) -> MarginPercent:
+        # Deliberately NOT re-checking that ``reason`` is one of
+        # :data:`UNAVAILABLE_REASONS`: the field is typed :data:`UnavailableReason`, so
+        # pydantic has already refused anything else with the two accepted values in the
+        # message. Re-checking a closed vocabulary here would be a second definition of
+        # it, and the second one is the one that goes stale.
+        if (self.value is None) != (self.reason is not None):
+            raise ValueError(
+                "a margin percentage carries a reason if and only if it is absent; got "
+                f"value={self.value!r}, reason={self.reason!r}"
+            )
+        if self.reason is None and self.detail is not None:
+            raise ValueError("a computed margin percentage carries no not-captured detail")
+        return self
+
+
+class MarginRead(BaseModel):
+    """Revenue against AI cost of goods, plus the reason any percentage is absent.
+
+    ``revenue_paise`` and ``cost_of_goods_paise`` are both read over the READ'S OWN
+    PERIOD, so the two halves of every percentage here are like for like. A margin
+    built from this month's cost and last week's revenue is a number nobody can act on,
+    and the default period is ``month_to_date`` - so asking for the board figure is the
+    zero-argument call.
+
+    ``headline_month_cost_of_goods_paise`` is the separate, single number the finance
+    story asks for: AI spend for the BILLING MONTH, which is not the selected period
+    when an operator asks for ``today``. It is the same figure the read reports as
+    ``cap_consumed_paise`` and the same one the ``ai_budget`` alert is evaluated
+    against, carried under this name because it answers a different QUESTION ("what
+    did AI cost us this month") from "how much of the cap is gone"; a test asserts the
+    two figures are equal so the second name cannot become a second number.
+
+    It is ``None`` - never ``0`` - when no budget snapshot row has been written. The
+    snapshot is what says what the month has cost, and with no row there is no bill to
+    quote: reporting zero beside a month that plainly has spend would be exactly the
+    misleading zero the rest of this read is built to avoid, in the one figure a board
+    is most likely to quote.
+
+    ``revenue_captured`` and ``tiers_captured`` say whether the dimensions hold
+    anything at all, and ``tier_keys`` carries what they hold. Both are ``False`` and
+    ``[]`` today: the columns exist and stay empty, so switching monetization on is a
+    data write and not a migration (#717 decision 9). Reporting them as present-and-
+    empty rather than omitting them is what makes that promise checkable.
+    """
+
+    revenue_paise: int
+    cost_of_goods_paise: int
+    headline_month_cost_of_goods_paise: int | None
+    revenue_captured: bool
+    tiers_captured: bool
+    tier_keys: list[str]
+    gross_margin: MarginPercent
+    ai_cost_pct_of_revenue: MarginPercent
+
+
+class ActorSpendDistribution(BaseModel):
+    """Where per-actor spend sits across the WHOLE population, not just the top of it.
+
+    The three figures are the answer to "is this spend healthy", and they are reported
+    instead of a mean for the reason they are reported: one heavy patient drags a mean
+    far enough that the operator reads a typical patient as an expensive one. The
+    median is the typical one, the ninety-fifth percentile is "who needs looking at",
+    and the maximum is the ceiling nobody should be quietly surprised by.
+
+    All three are ``None`` on an empty population rather than zero - no actors means
+    there is no distribution to rank, not that every actor spent nothing. ``max`` is an
+    integer because it is an observed figure rather than a rank: no interpolation, and
+    a maximum that is off by a fraction of a paise is not a different maximum.
+    """
+
+    actors: int
+    total_spend_paise: int
+    median_spend_paise: Decimal | None
+    p95_spend_paise: Decimal | None
+    max_spend_paise: int | None
+
+
+class PatientSpend(BaseModel):
+    """One patient's spend over the period, and the doctor it was attributed to.
+
+    ``patient_key`` is the one-way hash the aggregate stores, never an identity
+    reference: a top-patient list is people-shaped data in a PHI-free schema, so what
+    it can carry is a key an operator can correlate between panels and nothing they
+    can identify a human from.
+
+    ``attributed_doctor_key`` comes from the care-attribution edges (#724), which is
+    the only legal record of that pairing - computing it by joining across to the care
+    schema is forbidden (ADR-0003). It is ``None`` when no doctor is known yet, which
+    is most patients before a doctor is picked, and equally ``None`` when the period
+    contains a re-pick and two doctors both served this patient's spend: the aggregate
+    records the doctor's own total and not which of the patient's jobs went to which
+    doctor, so naming either would be a claim the data does not make. An answer is
+    therefore only given where the recorded edge settles it.
+    """
+
+    patient_key: str
+    attributed_doctor_key: str | None
+    jobs: int
+    completed_jobs: int
+    failed_jobs: int
+    spend_paise: int
+
+
+class DoctorSpend(BaseModel):
+    """One doctor's caseload cost over the period.
+
+    ``doctor_key`` is pseudonymous for the same reason the patient key is, and
+    ``patients`` counts the DISTINCT patients the recorded edges attribute to this
+    doctor - the divisor that turns "this caseload is expensive" into "this caseload is
+    expensive PER PERSON", which is the difference between a heavy doctor and an
+    ordinary one seeing many patients. ``None`` when no edge names this doctor at all,
+    which is a missing count rather than a count of zero.
+    """
+
+    doctor_key: str
+    patients: int | None
+    jobs: int
+    completed_jobs: int
+    failed_jobs: int
+    spend_paise: int
+
+
 class BusinessRead(BaseModel):
     """Spend for one period, against the monthly cap, with the breakdown.
 
@@ -2515,6 +2731,43 @@ class BusinessRead(BaseModel):
     and ``projection_basis`` says what was assumed. Both are ``None`` when there is
     nothing to project from - an unstamped budget row has no period to spread spend
     across - which is an answer rather than a failure.
+
+    **The unit figures answer "what does one unit of value cost?"** Cost per AI
+    request, per completed task, per patient and per doctor, plus cost-of-pass - the
+    named metric where the denominator is SUCCESSFUL OUTCOMES rather than tokens or
+    raw requests, so an operator optimises for value delivered rather than for a cheap
+    rate. Every one is a division computed here, over counters the nightly rollup
+    already wrote; none is a column, because a stored copy would be a second source of
+    truth that goes stale the moment a day is recomputed (#717 decision 8). Each is
+    ``None`` on an empty denominator for the reason :func:`_per_1k_paise` gives: a
+    scope that sent nothing has no per-unit price, and quoting ``0.0000`` would be a
+    claim about its pricing that nothing measured.
+
+    **Cost per doctor divides the ATTRIBUTED spend by the doctor count**, which is the
+    one per-unit figure whose numerator is not the whole bill. Every rupee has exactly
+    one patient, so cost per patient IS the bill over the patient count; spend only
+    reaches a doctor once an attribution edge exists, so dividing the whole bill by the
+    doctor count would report a number larger than any doctor's row and would not
+    reconcile with ``doctor_spend`` beside it. What the reader gets is what a doctor's
+    attributable caseload costs, with the unattributed remainder visible as the gap
+    between the two totals.
+
+    Cost-of-pass and cost-per-completed-task are the SAME division today and are kept
+    as two fields anyway, because the aggregate carries exactly one successful-outcome
+    counter (``completed_jobs``) and the spec names both metrics: the value delivered
+    per finished leg, and the bill per pass. They come apart the moment a second
+    outcome dimension lands - a pass that delivered a prescription is worth more than
+    one that delivered a transcript - and a test asserts they coincide so nobody later
+    reads the coincidence as a bug in one of them.
+
+    The actor figures say WHO the money went to. ``patient_spend`` and ``doctor_spend``
+    describe the whole population - median, ninety-fifth percentile and maximum, not a
+    mean - while ``top_patients`` and ``top_doctors`` are the capped lists a panel
+    renders. They are not halves of one bill: the rollup writes one row per ACTOR, so
+    a doctor row MIRRORS the patient row of the same job, and the two totals reconcile
+    through the recorded attribution edge rather than by being two shares of one
+    number. ``doctor_spend.total_spend_paise`` is therefore at most the patient total,
+    and the gap is exactly the spend whose doctor is not yet known.
     """
 
     period: BusinessPeriod
@@ -2522,6 +2775,8 @@ class BusinessRead(BaseModel):
     period_end: date
     spend_paise: int
     jobs: int
+    completed_jobs: int
+    failed_jobs: int
     input_tokens: int
     output_tokens: int
     paise_per_1k_input_tokens: Decimal | None
@@ -2535,6 +2790,16 @@ class BusinessRead(BaseModel):
     by_provider: list[ProviderSpend]
     by_model: list[ModelSpend]
     by_task_type: list[TaskTypeSpend]
+    cost_per_request_paise: Decimal | None
+    cost_per_completed_task_paise: Decimal | None
+    cost_per_patient_paise: Decimal | None
+    cost_per_doctor_paise: Decimal | None
+    cost_of_pass_paise: Decimal | None
+    patient_spend: ActorSpendDistribution
+    doctor_spend: ActorSpendDistribution
+    top_patients: list[PatientSpend]
+    top_doctors: list[DoctorSpend]
+    margin: MarginRead
 
 
 #: Four-decimal scale of the cost-per-thousand-token figures (``0.1234``). The rate
@@ -2543,6 +2808,14 @@ class BusinessRead(BaseModel):
 #: rate is a fraction of a paise per thousand tokens, and rounding it to hundredths
 #: of a paise is a rounding that erases the difference it exists to show.
 _COST_PER_1K_QUANTUM = Decimal("0.0001")
+
+#: Four-decimal scale of every OTHER per-unit money figure (cost per request, per
+#: completed task, per patient, per doctor, cost-of-pass). The same scale as
+#: :data:`_COST_PER_1K_QUANTUM` and not reused from it: a constant named for one token
+#: rate would be read at the next call site as a claim about per-token pricing, which
+#: is exactly the misreading :func:`_per_1k_paise`'s docstring goes to some lengths to
+#: warn against.
+_UNIT_PAISES_QUANTUM = Decimal("0.0001")
 
 #: Paise is the unit money is rounded back into; see ``modules.intake.pricing``.
 _PAISE_QUANTUM = Decimal("1")
@@ -2603,6 +2876,129 @@ def _per_1k_paise(cost_paise: int, tokens: int) -> Decimal | None:
     )
 
 
+def _per_unit_paise(cost_paise: int, units: int) -> Decimal | None:
+    """``cost`` paise spread over ``units`` of value, at the 4dp rate scale (#732).
+
+    The "what does one unit cost" division behind cost per request, per completed task,
+    per patient, per doctor and cost-of-pass. Same scale as :func:`_per_1k_paise` and
+    for the same reason: these are rates on small denominators, and at 2dp a cost of
+    0.4 paise per patient and one of 0.44 paise per patient render as the same figure,
+    which erases the difference the number exists to show.
+
+    ``None`` for an empty denominator, for the reason ``ratio``, ``_per_minute`` and
+    :func:`_per_1k_paise` all give it: nothing was served, so there is no price to
+    quote, and ``0.0000`` would be a claim about a scope that measured nothing.
+    """
+    if units <= 0:
+        return None
+    return (Decimal(cost_paise) / Decimal(units)).quantize(
+        _UNIT_PAISES_QUANTUM, rounding=ROUND_HALF_UP
+    )
+
+
+def _spend_rank(samples: Sequence[int], fraction: float) -> Decimal | None:
+    """The ``fraction`` percentile of integer-paise spend figures, in whole paise.
+
+    Reuses the rollup's own :func:`~modules.observability.domain.rollup.percentile`
+    rather than a second rank definition: the median here and the p50 on the latency
+    panel must be the same statistic, or the operator comparing two panels is
+    comparing two definitions. It returns ``None`` for an empty sample, which this
+    passes straight through - an empty period has no median rather than a zero one.
+
+    The result is rounded to whole paise because money is integer paise. That is the
+    one place the interpolation the estimator does is undone, and it is correct: a
+    median of 20,000.5 paise is not a spend anyone made.
+    """
+    ranked = percentile([float(value) for value in samples], fraction)
+    if ranked is None:
+        return None
+    return Decimal(repr(ranked)).quantize(_PAISE_QUANTUM, rounding=ROUND_HALF_UP)
+
+
+def _spend_distribution(spend_by_actor: Mapping[str, int]) -> ActorSpendDistribution:
+    """Where one actor kind's spend sits across its whole population (#732).
+
+    Computed over EVERY actor in the period, not over the capped list beside it. That
+    is the difference between a distribution and a highlight reel: if the top ten were
+    the sample, the median would describe the top ten and the ninety-fifth percentile
+    would be the tenth, and both would be wrong by construction.
+
+    ``total_spend_paise`` is the population total, which is what lets a caller check
+    the capped list against the whole without re-reading the aggregate - and, for the
+    doctor kind, is what makes the reconciliation with the patient total checkable:
+    every doctor rupee is also a patient rupee, so the doctor total can only be at
+    most the patient total and the gap is the spend whose doctor is not yet known.
+    """
+    values = list(spend_by_actor.values())
+    if not values:
+        return ActorSpendDistribution(
+            actors=0,
+            total_spend_paise=0,
+            median_spend_paise=None,
+            p95_spend_paise=None,
+            max_spend_paise=None,
+        )
+    return ActorSpendDistribution(
+        actors=len(values),
+        total_spend_paise=sum(values),
+        median_spend_paise=_spend_rank(values, 0.50),
+        p95_spend_paise=_spend_rank(values, 0.95),
+        max_spend_paise=max(values),
+    )
+
+
+def _margin_percent(value: Decimal | None, reason: UnavailableReason | None) -> MarginPercent:
+    """A :class:`MarginPercent` with the detail that goes with ``reason``.
+
+    The detail is looked up rather than written at the call site so the prose and the
+    vocabulary cannot drift: there is no second place to say something different about
+    the same reason.
+    """
+    return MarginPercent(
+        value=value,
+        reason=reason,
+        detail=None if reason is None else _UNAVAILABLE_DETAIL[reason],
+    )
+
+
+def _margin_percentages(
+    *, revenue_paise: int, revenue_captured: bool, cost_of_goods_paise: int
+) -> tuple[MarginPercent, MarginPercent]:
+    """Both margin percentages, derived from one answer about revenue.
+
+    They are computed together because they are absent or present TOGETHER and for the
+    same reason: with no revenue neither has a denominator, and there is no version of
+    this data where one exists and the other does not. Two separate derivations would be
+    two places for them to disagree, and a panel showing "gross margin: 62%, AI cost: n/a"
+    would be reporting on half a fact.
+
+    The two reasons are distinguished because they call for different action: revenue
+    never captured means there is no revenue model to read, and revenue captured and zero
+    means the denominator is zero for this period alone.
+    """
+    if not revenue_captured:
+        absent = _margin_percent(None, UNAVAILABLE_REVENUE_NOT_CAPTURED)
+        return absent, absent
+    if revenue_paise <= 0:
+        absent = _margin_percent(None, UNAVAILABLE_REVENUE_ZERO)
+        return absent, absent
+    scale = Decimal(revenue_paise)
+    return (
+        _margin_percent(
+            (Decimal(revenue_paise - cost_of_goods_paise) / scale * 100).quantize(
+                _PCT_QUANTUM, rounding=ROUND_HALF_UP
+            ),
+            None,
+        ),
+        _margin_percent(
+            (Decimal(cost_of_goods_paise) / scale * 100).quantize(
+                _PCT_QUANTUM, rounding=ROUND_HALF_UP
+            ),
+            None,
+        ),
+    )
+
+
 @dataclass
 class _BreakdownTotals:
     """Additive totals for one breakdown row, folded up from the grain's rows.
@@ -2614,12 +3010,16 @@ class _BreakdownTotals:
     """
 
     jobs: int = 0
+    completed_jobs: int = 0
+    failed_jobs: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
     cost_paise: int = 0
 
     def add(self, row: RowMapping) -> None:
         self.jobs += int(row["jobs"])
+        self.completed_jobs += int(row["completed_jobs"])
+        self.failed_jobs += int(row["failed_jobs"])
         self.input_tokens += int(row["input_tokens"])
         self.output_tokens += int(row["output_tokens"])
         self.cost_paise += int(row["cost_paise"])
@@ -2642,6 +3042,74 @@ def _spend_figures(totals: _BreakdownTotals) -> dict[str, Any]:
         "paise_per_1k_input_tokens": _per_1k_paise(totals.cost_paise, totals.input_tokens),
         "paise_per_1k_output_tokens": _per_1k_paise(totals.cost_paise, totals.output_tokens),
     }
+
+
+@dataclass(frozen=True)
+class _ActorTotals:
+    """One actor's summed spend over the period, across every scope they touched.
+
+    Frozen because the read builds it from an already-grouped row rather than folding
+    into it: an actor is one ``(actor_kind, actor_key)`` group, so there is nothing to
+    accumulate and a mutable counter here would invite exactly the kind of second
+    folding that would put the actor figures at odds with the breakdown above them.
+    """
+
+    jobs: int = 0
+    completed_jobs: int = 0
+    failed_jobs: int = 0
+    cost_paise: int = 0
+
+    @classmethod
+    def from_row(cls, row: RowMapping) -> _ActorTotals:
+        return cls(
+            jobs=int(row["jobs"]),
+            completed_jobs=int(row["completed_jobs"]),
+            failed_jobs=int(row["failed_jobs"]),
+            cost_paise=int(row["cost_paise"]),
+        )
+
+
+def _order_by_spend(totals: Mapping[str, _ActorTotals]) -> list[tuple[str, _ActorTotals]]:
+    """Actors heaviest-first, with the pseudonymous key as a stable tiebreak.
+
+    The tiebreak is not cosmetic: two actors with identical spend would otherwise swap
+    places between two reads of an unchanged period, and a list whose order moves on
+    its own is a list an operator stops trusting.
+    """
+    return sorted(totals.items(), key=lambda item: (-item[1].cost_paise, item[0]))
+
+
+def _distinct_patients(patients: set[str] | None) -> int | None:
+    """How many distinct patients ``patients`` holds, or ``None`` when nothing does.
+
+    ``None`` rather than zero, for the same reason every other absent figure on this
+    read is null. A doctor row can exist with no recorded edge behind it - the rollup
+    falls back to the doctor key a job row carries - and for that doctor the pairing is
+    simply not recorded. ``0`` beside a non-zero ``spend_paise`` would be read as "this
+    doctor served nobody", which is a claim about a caseload rather than a statement
+    about the data; ``None`` says the count is unavailable.
+    """
+    return None if patients is None else len(patients)
+
+
+def _doctor_for_patient(edges: Mapping[str, set[str]], patient_key: str) -> str | None:
+    """The doctor ``patient_key``'s recorded edges name, or ``None`` when they do not
+    settle it.
+
+    An edge is one ``intake.doctor_assigned`` delivery, and a patient who re-picks can
+    accumulate several - the table is UNIQUE on ``intake_ref``, not on the patient. A
+    name is therefore only unambiguous for a patient with exactly one, and this says so
+    rather than guessing: it returns the single doctor when there is one, and ``None``
+    when the patient's spend sits against two or more, because a top-patient row that
+    named an arbitrary one of them would be a claim the data does not make.
+
+    The absence costs the reconciliation nothing. That patient's rupee is still in
+    ``doctor_spend`` and still appears on the doctor rows the edges DO name, so the
+    conservation law holds over the whole population; what a top-patient row gives up
+    is naming the doctor, not accounting for the money.
+    """
+    doctors: frozenset[str] = frozenset(edges.get(patient_key, ()))
+    return next(iter(doctors)) if len(doctors) == 1 else None
 
 
 def _accumulate(
@@ -2726,6 +3194,17 @@ async def query_business(
     span the rows carry - the same rule ``/cost`` reads them by. That holds because the
     rollup's period reset re-stamps every stale or unstamped row inside the same
     transaction it snapshots in, so a mixed set of periods cannot survive a pass.
+
+    **The actor figures come off the SAME table, one query, both kinds** (#732). An
+    actor's spend over a period is a fold over the same grain rows the breakdowns are
+    folded from, so ``patient_spend``/``doctor_spend`` and the two top lists cannot
+    disagree with the headline: they are the same numbers grouped by a different column.
+    Reading ``patient`` and ``doctor`` separately would be two more queries whose
+    agreement nothing would enforce.
+
+    The care-attribution edges are read for the patients in the window, not for the
+    whole table: they are how a patient's spend is tied to a doctor, and an edge for a
+    patient who sent nothing in this period cannot appear in this period's answer.
     """
     spend = observability_attribution_daily
     rows = await connection.execute(
@@ -2734,6 +3213,8 @@ async def query_business(
             spend.c.model,
             spend.c.task_type,
             func.coalesce(func.sum(spend.c.jobs), 0).label("jobs"),
+            func.coalesce(func.sum(spend.c.completed_jobs), 0).label("completed_jobs"),
+            func.coalesce(func.sum(spend.c.failed_jobs), 0).label("failed_jobs"),
             func.coalesce(func.sum(spend.c.input_tokens), 0).label("input_tokens"),
             func.coalesce(func.sum(spend.c.output_tokens), 0).label("output_tokens"),
             func.coalesce(func.sum(spend.c.cost_paise), 0).label("cost_paise"),
@@ -2779,10 +3260,45 @@ async def query_business(
         today=today,
     )
 
+    patient_totals, doctor_totals = await _query_actor_spend(
+        connection, from_date=from_date, to_date=to_date
+    )
+    edges = await _query_care_edges(connection, from_date=from_date, to_date=to_date)
+    margin = await _query_margin_dimensions(
+        connection,
+        from_date=from_date,
+        to_date=to_date,
+        period_spend_paise=totals.cost_paise,
+        # Absent rather than zero when the snapshot has no row: see MarginRead. The
+        # read cannot invent the month's bill from nothing, and an operator is better
+        # served by "no bill recorded yet" than by a zero they will quote.
+        headline_month_cost_of_goods_paise=cap_consumed if budgets else None,
+    )
+
+    ordered_patients = _order_by_spend(patient_totals)
+    ordered_doctors = _order_by_spend(doctor_totals)
+    patient_spend = _spend_distribution(
+        {key: scope.cost_paise for key, scope in patient_totals.items()}
+    )
+    doctor_spend = _spend_distribution(
+        {key: scope.cost_paise for key, scope in doctor_totals.items()}
+    )
+    # One pass over the edges builds BOTH directions of the same pairing: the doctor a
+    # patient's spend sits against, and the patients each doctor carries. Rescanning the
+    # edge list once per row of either top list would make the read quadratic in the
+    # number of edges, for a table that grows with the platform.
+    doctors_of: dict[str, set[str]] = {}
+    patients_of: dict[str, set[str]] = {}
+    for patient_key, doctor_key in edges:
+        doctors_of.setdefault(patient_key, set()).add(doctor_key)
+        patients_of.setdefault(doctor_key, set()).add(patient_key)
+
     return BusinessRead(
         period=period,
         period_start=from_date,
         period_end=to_date,
+        completed_jobs=totals.completed_jobs,
+        failed_jobs=totals.failed_jobs,
         **_spend_figures(totals),
         monthly_cap_paise=monthly_cap,
         cap_consumed_paise=cap_consumed,
@@ -2802,6 +3318,182 @@ async def query_business(
             TaskTypeSpend(task_type=task_type, **_spend_figures(scope))
             for task_type, scope in sorted(by_task_type.items())
         ],
+        cost_per_request_paise=_per_unit_paise(totals.cost_paise, totals.jobs),
+        cost_per_completed_task_paise=_per_unit_paise(totals.cost_paise, totals.completed_jobs),
+        cost_per_patient_paise=_per_unit_paise(totals.cost_paise, patient_spend.actors),
+        cost_per_doctor_paise=_per_unit_paise(doctor_spend.total_spend_paise, doctor_spend.actors),
+        cost_of_pass_paise=_per_unit_paise(totals.cost_paise, totals.completed_jobs),
+        patient_spend=patient_spend,
+        doctor_spend=doctor_spend,
+        top_patients=[
+            PatientSpend(
+                patient_key=key,
+                attributed_doctor_key=_doctor_for_patient(doctors_of, key),
+                jobs=scope.jobs,
+                completed_jobs=scope.completed_jobs,
+                failed_jobs=scope.failed_jobs,
+                spend_paise=scope.cost_paise,
+            )
+            for key, scope in ordered_patients[:MAX_BUSINESS_TOP_ACTORS]
+        ],
+        top_doctors=[
+            DoctorSpend(
+                doctor_key=key,
+                patients=_distinct_patients(patients_of.get(key)),
+                jobs=scope.jobs,
+                completed_jobs=scope.completed_jobs,
+                failed_jobs=scope.failed_jobs,
+                spend_paise=scope.cost_paise,
+            )
+            for key, scope in ordered_doctors[:MAX_BUSINESS_TOP_ACTORS]
+        ],
+        margin=margin,
+    )
+
+
+async def _query_actor_spend(
+    connection: AsyncConnection, *, from_date: date, to_date: date
+) -> tuple[dict[str, _ActorTotals], dict[str, _ActorTotals]]:
+    """Per-actor spend over the window, split by the two actor kinds (#732).
+
+    ONE grouped read over ``observability_attribution_daily`` at ``(actor_kind,
+    actor_key)``, returned as the patient map and the doctor map. Both actor kinds
+    come from it because they are the same rows read under two values of one column,
+    and issuing two queries would put the reconciliation between the per-patient and
+    per-doctor totals at the mercy of two filters drifting apart.
+
+    Every actor in the window is returned, not a top slice: the distribution beside
+    the capped list is computed over this whole map, and SQL ``LIMIT`` would take the
+    sample out from under it.
+    """
+    spend = observability_attribution_daily
+    rows = await connection.execute(
+        select(
+            spend.c.actor_kind,
+            spend.c.actor_key,
+            func.coalesce(func.sum(spend.c.jobs), 0).label("jobs"),
+            func.coalesce(func.sum(spend.c.completed_jobs), 0).label("completed_jobs"),
+            func.coalesce(func.sum(spend.c.failed_jobs), 0).label("failed_jobs"),
+            func.coalesce(func.sum(spend.c.cost_paise), 0).label("cost_paise"),
+        )
+        .where(
+            spend.c.actor_kind.in_((ACTOR_KIND_PATIENT, ACTOR_KIND_DOCTOR)),
+            spend.c.usage_date.between(from_date, to_date),
+        )
+        .group_by(spend.c.actor_kind, spend.c.actor_key)
+    )
+
+    patients: dict[str, _ActorTotals] = {}
+    doctors: dict[str, _ActorTotals] = {}
+    for row in rows.mappings():
+        totals = _ActorTotals.from_row(row)
+        if str(row["actor_kind"]) == ACTOR_KIND_PATIENT:
+            patients.setdefault(str(row["actor_key"]), totals)
+        else:
+            doctors.setdefault(str(row["actor_key"]), totals)
+    return patients, doctors
+
+
+async def _query_care_edges(
+    connection: AsyncConnection, *, from_date: date, to_date: date
+) -> list[tuple[str, str]]:
+    """``(patient_key, doctor_key)`` edges for the patients this window touched.
+
+    Restricted to the patients in the window by a subquery over the same aggregate,
+    because the edge table has no date of its own to filter on - it is keyed by intake
+    - and an answer naming a doctor for a patient who spent nothing this period is a
+    row this read has no business returning. The table is one row per intake, so it is
+    small enough that reading it whole would work; the restriction is here so that
+    stays true as the platform does.
+
+    Returned as a list of pairs rather than a dict because a patient may hold several
+    edges (a re-pick overwrites by ``intake_ref``, not by patient), and collapsing them
+    into one key each would silently drop the very ambiguity a reader has to be able to
+    see. :func:`_doctor_for_patient` decides what a single row may claim.
+    """
+    spend = observability_attribution_daily
+    edges = observability_care_attribution_edges
+    rows = await connection.execute(
+        select(edges.c.patient_key, edges.c.doctor_key).where(
+            edges.c.patient_key.in_(
+                select(spend.c.actor_key).where(
+                    spend.c.actor_kind == ACTOR_KIND_PATIENT,
+                    spend.c.usage_date.between(from_date, to_date),
+                )
+            )
+        )
+    )
+    return [(str(row["patient_key"]), str(row["doctor_key"])) for row in rows.mappings()]
+
+
+async def _query_margin_dimensions(
+    connection: AsyncConnection,
+    *,
+    from_date: date,
+    to_date: date,
+    period_spend_paise: int,
+    headline_month_cost_of_goods_paise: int | None,
+) -> MarginRead:
+    """Read the revenue and tier dimensions, and say why margin is absent (#732).
+
+    Both columns live on the daily per-actor aggregate and both are NULL on every row
+    today: the PRD defers the revenue model, so the rollup has no source for them and
+    deliberately does not write them (#717 decision 9). They are READ here rather than
+    omitted, which is what makes "turning monetization on is a data write, not a
+    migration" a claim this read can be checked against - a dimension the read did not
+    look at cannot be shown to be empty.
+
+    Revenue is read over the READ'S OWN PERIOD so the two halves of every percentage
+    are like for like, and the headline month's cost of goods rides beside it for the
+    board figure.
+
+    ``COUNT(revenue_paise)`` rather than ``SUM`` decides whether revenue is captured:
+    ``SUM`` of no rows and ``SUM`` of rows that are all NULL are both zero, and the
+    difference between "we collected nothing" and "we collected no revenue" is exactly
+    the difference between a reason and a margin.
+    """
+    spend = observability_attribution_daily
+    revenue_rows = await connection.execute(
+        select(
+            func.coalesce(func.sum(spend.c.revenue_paise), 0).label("revenue_paise"),
+            func.count(spend.c.revenue_paise).label("captured_rows"),
+        ).where(
+            spend.c.actor_kind == ACTOR_KIND_PATIENT,
+            spend.c.usage_date.between(from_date, to_date),
+        )
+    )
+    revenue = revenue_rows.mappings().one()
+    tier_rows = await connection.execute(
+        select(spend.c.tier_key)
+        .where(
+            spend.c.actor_kind == ACTOR_KIND_PATIENT,
+            spend.c.usage_date.between(from_date, to_date),
+            spend.c.tier_key.is_not(None),
+        )
+        .distinct()
+        .order_by(spend.c.tier_key)
+    )
+    tier_keys = [str(row["tier_key"]) for row in tier_rows.mappings()]
+
+    revenue_paise = int(revenue["revenue_paise"])
+    captured_rows = int(revenue["captured_rows"])
+    revenue_captured = captured_rows > 0
+    tiers_captured = bool(tier_keys)
+    gross_margin, ai_cost_pct = _margin_percentages(
+        revenue_paise=revenue_paise,
+        revenue_captured=revenue_captured,
+        cost_of_goods_paise=period_spend_paise,
+    )
+
+    return MarginRead(
+        revenue_paise=revenue_paise,
+        cost_of_goods_paise=period_spend_paise,
+        headline_month_cost_of_goods_paise=headline_month_cost_of_goods_paise,
+        revenue_captured=revenue_captured,
+        tiers_captured=tiers_captured,
+        tier_keys=tier_keys,
+        gross_margin=gross_margin,
+        ai_cost_pct_of_revenue=ai_cost_pct,
     )
 
 
@@ -2991,10 +3683,12 @@ class ObservabilityFacade:
     ) -> BusinessRead:
         """Read spend for ``period`` against the monthly cap, with the breakdown.
 
-        B2 (#731). One method for all three periods: ``today``, ``week_to_date`` and
-        ``month_to_date`` are three windows of this read, and the alternative - a
-        method each - would be three copies of the aggregation to keep in agreement
-        (#717 decision 11).
+        B2 (#731, widened by #732). One method for all three periods: ``today``,
+        ``week_to_date`` and ``month_to_date`` are three windows of this read, and the
+        alternative - a method each - would be three copies of the aggregation to keep
+        in agreement (#717 decision 11). The per-unit figures, the per-actor
+        attribution and the not-captured margin answer ride this same method rather
+        than three more that would each have to re-read the same aggregate.
 
         The clock is resolved HERE and the window resolved off it, for the same
         reason every other windowed read does: the route owns the default and the
