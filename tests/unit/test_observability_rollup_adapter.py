@@ -14,7 +14,7 @@ import argparse
 import asyncio
 import inspect
 from dataclasses import replace
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,6 +34,7 @@ from modules.observability.domain.rollup import (
     ActorDailySpend,
     ActorSpend,
     AttributionDaily,
+    HttpErrorRate,
     ProviderFailures,
     ProviderUsage,
     UsageScope,
@@ -50,6 +51,7 @@ from modules.observability.rollup import (
     _load_actor_daily_spend,
     _load_actor_spend,
     _load_doctor_by_intake,
+    _load_http_error_rate,
     _load_provider_failures,
     _upsert_attribution_daily,
     _upsert_business_metric,
@@ -63,6 +65,8 @@ from modules.observability.schema.models import (
 from worker import rollup as entry_point
 
 _TARGET_DATE = date(2026, 10, 12)
+_WINDOW_START = datetime(2026, 10, 12, tzinfo=UTC)
+_WINDOW_END = _WINDOW_START + timedelta(days=1)
 
 
 class _RecordingConnection:
@@ -226,6 +230,63 @@ def test_load_provider_failures_is_empty_for_a_day_with_no_failures() -> None:
     )
 
     assert loaded == {}
+
+
+def test_load_http_error_rate_sums_the_per_minute_rows_over_the_half_open_window() -> None:
+    """Adds the per-minute rows in Python, exactly as ``/throughput`` does.
+
+    ``query_throughput``'s own docstring is the reason and it binds this loader too:
+    the per-minute rows ARE the window's truth, so summing them cannot disagree with
+    the series an operator reads beside them, whereas a separately issued aggregate
+    could. Two surfaces reporting different error rates for the same minute range is
+    the one failure this alert cannot afford.
+
+    The window is HALF-OPEN, the same spelling ``query_throughput`` uses, so the
+    midnight boundary minute belongs to exactly one day.
+    """
+    connection = _RecordingConnection(
+        rows=[
+            SimpleNamespace(minute_ts=_WINDOW_START, requests=600, errors=20),
+            SimpleNamespace(
+                minute_ts=_WINDOW_START + timedelta(minutes=5), requests=400, errors=20
+            ),
+        ]
+    )
+
+    loaded = asyncio.run(  # type: ignore[arg-type]
+        _load_http_error_rate(connection, _WINDOW_START, _WINDOW_END)
+    )
+
+    assert loaded == HttpErrorRate(
+        requests=1_000, errors=40, window_start=_WINDOW_START, window_end=_WINDOW_END
+    )
+    assert loaded.error_rate == Decimal("0.0400")
+    sql = connection.sql
+    assert "FROM observability.observability_http_minute" in sql
+    # The per-minute series, not a second aggregate over it.
+    assert "sum(" not in sql
+    assert "minute_ts >= '2026-10-12 00:00:00+00:00'" in sql
+    assert "minute_ts < '2026-10-13 00:00:00+00:00'" in sql
+
+
+def test_load_http_error_rate_reports_zero_rather_than_null_for_a_day_it_never_saw() -> None:
+    """No rows sums to zero, which is an ABSENT denominator rather than a clean day.
+
+    ``error_rate`` is then ``None`` and ``traffic_recorded`` false, so the rule stays
+    silent AND the resolve step declines to close a standing alert on this pass - the
+    difference between "nothing failed" and "nothing was measured".
+    """
+    connection = _RecordingConnection(rows=[])
+
+    loaded = asyncio.run(  # type: ignore[arg-type]
+        _load_http_error_rate(connection, _WINDOW_START, _WINDOW_END)
+    )
+
+    assert loaded == HttpErrorRate(
+        requests=0, errors=0, window_start=_WINDOW_START, window_end=_WINDOW_END
+    )
+    assert loaded.error_rate is None
+    assert loaded.traffic_recorded is False
 
 
 def test_business_metric_upsert_replaces_the_value_on_the_generic_store() -> None:

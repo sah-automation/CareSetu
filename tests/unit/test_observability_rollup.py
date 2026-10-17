@@ -28,9 +28,12 @@ from modules.observability.domain.rollup import (
     ALERT_KIND_AI_BUDGET,
     ALERT_KIND_BREAKER_OPEN,
     ALERT_KIND_COST_OUTLIER,
+    ALERT_KIND_ERROR_RATE_HIGH,
+    ALERT_KIND_LATENCY_OBJECTIVE_BREACH,
     ALERT_KIND_OUTBOX_BACKLOG,
     ALERT_KIND_OUTBOX_DEAD_LETTER,
     ALERT_KIND_PROVIDER_HEALTH_DROP,
+    ALERT_KIND_PROVIDER_RATE_LIMITED,
     ALERT_KIND_QUEUE_AGE,
     BREAKER_STATE_CLOSED,
     BREAKER_STATE_OPEN,
@@ -38,8 +41,12 @@ from modules.observability.domain.rollup import (
     DEFAULT_BREAKER_OPEN_SUCCESS_RATE,
     DEFAULT_COST_OUTLIER_MULTIPLE,
     DEFAULT_DEGRADED_SUCCESS_RATE,
+    DEFAULT_ERROR_RATE_MIN_REQUESTS,
+    DEFAULT_ERROR_RATE_OBJECTIVE,
+    DEFAULT_LATENCY_OBJECTIVE_MS,
     DEFAULT_OUTBOX_BACKLOG_ALERT_THRESHOLD,
     DEFAULT_PROVIDER_HEALTH_DROP_THRESHOLD,
+    DEFAULT_PROVIDER_RATE_LIMIT_ALERT_COUNT,
     DEFAULT_QUEUE_AGE_ALERT_THRESHOLD_SECONDS,
     FAILURE_REASON_RATE_LIMITED,
     METRIC_KEY_AI_PROVIDER_HEALTH,
@@ -54,6 +61,7 @@ from modules.observability.domain.rollup import (
     ActorSpend,
     AttributionDaily,
     BudgetSnapshot,
+    HttpErrorRate,
     OutboxTableHealth,
     ProviderFailures,
     ProviderHealth,
@@ -75,12 +83,16 @@ from modules.observability.domain.rollup import (
     build_budget_snapshot,
     build_cost_outlier_alert,
     build_dead_letter_alert,
+    build_error_rate_alert,
+    build_latency_objective_breach_alert,
     build_outbox_backlog_alert,
     build_provider_health_drop_alert,
+    build_provider_rate_limited_alert,
     build_queue_age_alert,
     compute_provider_health,
     evaluate_budget_alerts,
     evaluate_cost_outlier_alerts,
+    evaluate_http_error_rate_alerts,
     evaluate_outbox_health_alerts,
     evaluate_provider_health_alerts,
     evaluate_queue_health_alerts,
@@ -181,6 +193,42 @@ def _budget(**kwargs: object) -> BudgetSnapshot:
         "period_end": date(2026, 10, 31),
     }
     return build_budget_snapshot(**{**defaults, **kwargs})
+
+
+def _rate_limited_health(provider: str = "openai", *, rate_limit_count: int) -> ProviderHealth:
+    """A provider's health for a day it was refused ``rate_limit_count`` times."""
+    return compute_provider_health(
+        provider,
+        _WINDOW_START,
+        _WINDOW_END,
+        _usage(provider, _scope(calls=20, success=18, failure=2)),
+        failures=ProviderFailures(rate_limit_count=rate_limit_count, last_error=None),
+    )
+
+
+def _slow_health(provider: str = "openai", *, p95_ms: Decimal) -> ProviderHealth:
+    """A provider's health for a day whose calls came back slower than the objective."""
+    return compute_provider_health(
+        provider,
+        _WINDOW_START,
+        _WINDOW_END,
+        _usage(provider, _scope(calls=20, success=20, avg=p95_ms)),
+    )
+
+
+def _volume(requests: int, errors: int) -> HttpErrorRate:
+    """One rolled day of the platform's own request counter, over the test window."""
+    return HttpErrorRate(
+        requests=requests,
+        errors=errors,
+        window_start=_WINDOW_START,
+        window_end=_WINDOW_END,
+    )
+
+
+def _thresholds(**kwargs: object) -> RollupThresholds:
+    """Default thresholds, with the alert knobs a test wants to move overridden."""
+    return RollupThresholds(monthly_budget_paise=200_000, **kwargs)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------- percentiles
@@ -526,6 +574,9 @@ def test_the_two_alert_vocabularies_are_disjoint_and_cover_every_rollup_kind() -
         ALERT_KIND_OUTBOX_DEAD_LETTER,
         ALERT_KIND_QUEUE_AGE,
         ALERT_KIND_COST_OUTLIER,
+        ALERT_KIND_ERROR_RATE_HIGH,
+        ALERT_KIND_PROVIDER_RATE_LIMITED,
+        ALERT_KIND_LATENCY_OBJECTIVE_BREACH,
     }
 
     assert not RESOLVABLE_ALERT_KINDS & NON_RESOLVABLE_ALERT_KINDS
@@ -539,6 +590,43 @@ def test_the_two_alert_vocabularies_are_disjoint_and_cover_every_rollup_kind() -
     # A one-day spend spike is the same shape of thing (B7 #733): it either repeats or
     # it does not, and an alert nobody can see close is one nobody clears by hand.
     assert alert_kind_resolves(ALERT_KIND_COST_OUTLIER)
+    # The three kinds #734 adds. Each is a figure that comes back DOWN when the
+    # condition clears, which is the whole test of whether it belongs in the
+    # resolvable half: quota refusals stop, the 5xx share falls, a provider speeds up.
+    for kind in (
+        ALERT_KIND_ERROR_RATE_HIGH,
+        ALERT_KIND_PROVIDER_RATE_LIMITED,
+        ALERT_KIND_LATENCY_OBJECTIVE_BREACH,
+    ):
+        assert alert_kind_resolves(kind), kind
+
+
+def test_the_auto_resolve_policy_is_explicit_about_every_kind() -> None:
+    """Which kinds close themselves and which must be closed by hand, named.
+
+    The policy is two sentences an operator depends on: "the open list clears itself
+    when the condition clears" and "a provider that went bad stays on the board".
+    Which kind sits in which half is the whole content of those sentences, so it is
+    asserted kind by kind here rather than left to be read out of two frozensets.
+    """
+    # Standing conditions: a level that returns to normal.
+    for kind in (
+        ALERT_KIND_AI_BUDGET,
+        ALERT_KIND_BREAKER_OPEN,
+        ALERT_KIND_OUTBOX_BACKLOG,
+        ALERT_KIND_OUTBOX_DEAD_LETTER,
+        ALERT_KIND_QUEUE_AGE,
+        ALERT_KIND_COST_OUTLIER,
+        ALERT_KIND_ERROR_RATE_HIGH,
+        ALERT_KIND_PROVIDER_RATE_LIMITED,
+        ALERT_KIND_LATENCY_OBJECTIVE_BREACH,
+    ):
+        assert kind in RESOLVABLE_ALERT_KINDS, kind
+        assert kind not in NON_RESOLVABLE_ALERT_KINDS, kind
+
+    # The one exception, and the reason the deny-set exists at all.
+    assert {ALERT_KIND_PROVIDER_HEALTH_DROP} == NON_RESOLVABLE_ALERT_KINDS
+    assert not alert_kind_resolves(ALERT_KIND_PROVIDER_HEALTH_DROP)
 
 
 def test_the_resolve_step_reads_both_vocabularies_and_unknown_kinds_resolve_to_nothing() -> None:
@@ -903,6 +991,18 @@ def test_a_drained_queue_is_still_evaluated_because_an_empty_open_set_clears_it(
             drop_threshold=DEFAULT_PROVIDER_HEALTH_DROP_THRESHOLD,
         ),
         build_queue_age_alert("structure", oldest_age_seconds=3_600, threshold_seconds=900),
+        build_provider_rate_limited_alert(
+            _rate_limited_health(rate_limit_count=3),
+            threshold=DEFAULT_PROVIDER_RATE_LIMIT_ALERT_COUNT,
+        ),
+        build_latency_objective_breach_alert(
+            _slow_health(p95_ms=Decimal("45000.00")), objective_ms=DEFAULT_LATENCY_OBJECTIVE_MS
+        ),
+        build_error_rate_alert(
+            _volume(1_000, 40),
+            objective=DEFAULT_ERROR_RATE_OBJECTIVE,
+            min_requests=DEFAULT_ERROR_RATE_MIN_REQUESTS,
+        ),
         build_cost_outlier_alert(
             "patient",
             "actor-a",
@@ -953,6 +1053,16 @@ def test_every_rollup_alert_payload_is_phi_free(alert: AlertRow) -> None:
         "baseline_days",
         "deviation_multiple",
         "threshold_multiple",
+        "rate_limit_count",
+        "threshold_count",
+        "p95_duration_ms",
+        "objective_ms",
+        "sample_count",
+        "requests",
+        "errors",
+        "error_rate",
+        "objective",
+        "min_requests",
     }
     for key in _PHI_KEYS:
         assert key not in payload
@@ -1025,6 +1135,24 @@ def test_rollup_thresholds_carry_the_documented_defaults() -> None:
     assert thresholds.breaker_open_success_rate == DEFAULT_BREAKER_OPEN_SUCCESS_RATE
     assert thresholds.provider_health_drop_threshold == DEFAULT_PROVIDER_HEALTH_DROP_THRESHOLD
     assert thresholds.outbox_backlog_threshold == DEFAULT_OUTBOX_BACKLOG_ALERT_THRESHOLD
+    # The two documented objectives #734 finally alerts on, and the floor that keeps
+    # the error-rate rule from firing on a three-request sample.
+    assert thresholds.error_rate_objective == DEFAULT_ERROR_RATE_OBJECTIVE
+    assert thresholds.error_rate_min_requests == DEFAULT_ERROR_RATE_MIN_REQUESTS
+    assert thresholds.latency_objective_ms == DEFAULT_LATENCY_OBJECTIVE_MS
+    assert thresholds.provider_rate_limit_count == DEFAULT_PROVIDER_RATE_LIMIT_ALERT_COUNT
+
+
+def test_rollup_thresholds_reject_an_objective_nobody_can_meet_or_a_lie_about() -> None:
+    """The new thresholds refuse values that would silence or perma-fire their rule."""
+    with pytest.raises(ValueError, match="error_rate_objective"):
+        RollupThresholds(monthly_budget_paise=200_000, error_rate_objective=Decimal("0"))
+    with pytest.raises(ValueError, match="error_rate_min_requests"):
+        RollupThresholds(monthly_budget_paise=200_000, error_rate_min_requests=0)
+    with pytest.raises(ValueError, match="latency_objective_ms"):
+        RollupThresholds(monthly_budget_paise=200_000, latency_objective_ms=0)
+    with pytest.raises(ValueError, match="provider_rate_limit_count"):
+        RollupThresholds(monthly_budget_paise=200_000, provider_rate_limit_count=0)
 
 
 def test_rollup_thresholds_reject_a_non_positive_budget() -> None:
@@ -1633,3 +1761,348 @@ def test_the_two_actor_kinds_keep_separate_cost_outlier_alerts() -> None:
         "doctor:actor-b",
         "patient:actor-a",
     ]
+
+
+# ------------------------------------------------------- rate-limited provider
+
+
+def test_a_rate_limited_provider_raises_its_own_kind() -> None:
+    """A quota refusal is named, and named separately from a generic health drop.
+
+    The board already shows ``rate_limit_count`` on a degraded row, but "degraded" is
+    a verdict and not an action: the fix for being throttled is to slow down, and
+    that is not what an operator does with a success-rate figure.
+    """
+    alert = build_provider_rate_limited_alert(
+        _rate_limited_health(rate_limit_count=3),
+        threshold=DEFAULT_PROVIDER_RATE_LIMIT_ALERT_COUNT,
+    )
+
+    assert alert is not None
+    assert alert.kind == ALERT_KIND_PROVIDER_RATE_LIMITED
+    assert alert.severity == ALERT_SEVERITY_WARNING
+    assert alert.payload["provider"] == "openai"
+    assert alert.payload["rate_limit_count"] == 3
+    assert alert.payload["threshold_count"] == DEFAULT_PROVIDER_RATE_LIMIT_ALERT_COUNT
+
+
+def test_a_provider_the_platform_never_throttled_raises_nothing() -> None:
+    """Zero refusals is the absence of a condition, not a mild form of it."""
+    assert (
+        build_provider_rate_limited_alert(
+            _rate_limited_health(rate_limit_count=0),
+            threshold=DEFAULT_PROVIDER_RATE_LIMIT_ALERT_COUNT,
+        )
+        is None
+    )
+
+
+def test_the_rate_limit_count_is_tunable_above_the_one_refusal_that_is_enough() -> None:
+    """The default fires on ONE refusal; a deployment that treats that as noise raises it."""
+    health = _rate_limited_health(rate_limit_count=2)
+
+    assert build_provider_rate_limited_alert(health, threshold=1) is not None
+    assert build_provider_rate_limited_alert(health, threshold=5) is None
+
+
+def test_a_throttled_provider_keeps_its_degradation_verdict_aside_from_the_alert() -> None:
+    """The alert and the board agree: the same refusal count that alerts is what degrades."""
+    health = _rate_limited_health(rate_limit_count=3)
+
+    assert provider_status(health) == PROVIDER_STATUS_DEGRADED
+    assert evaluate_provider_health_alerts(health, None, _thresholds()) == (
+        build_provider_rate_limited_alert(health, threshold=1),
+    )
+
+
+# ------------------------------------------------------------- latency objective
+
+
+def test_an_ai_call_slower_than_the_documented_objective_raises_its_own_kind() -> None:
+    """The objective is the standard's, not a round number the alert invented.
+
+    ``error-handling-observability.md`` §5.1 states "AI call (end to end, provider
+    included) p95 <= 30 s", so 30_000 ms is the comparison and the payload carries it
+    next to the measured p95 - a reader can falsify the judgement from the card.
+    """
+    health = _slow_health(p95_ms=Decimal("45000.00"))
+
+    alert = build_latency_objective_breach_alert(health, objective_ms=DEFAULT_LATENCY_OBJECTIVE_MS)
+
+    assert alert is not None
+    assert alert.kind == ALERT_KIND_LATENCY_OBJECTIVE_BREACH
+    assert alert.severity == ALERT_SEVERITY_WARNING
+    assert alert.payload["provider"] == "openai"
+    assert alert.payload["p95_duration_ms"] == "45000.00"
+    assert alert.payload["objective_ms"] == DEFAULT_LATENCY_OBJECTIVE_MS
+
+
+def test_the_latency_alert_measures_the_call_and_nothing_inside_it() -> None:
+    """A user-facing symptom, never an internal cause (#734, decision 20).
+
+    The p95 compared here is the AI call END TO END with the provider included: the
+    duration somebody waited for. It is deliberately NOT the duration of any function
+    inside the platform - ``validate_token`` p95 or ``check_consent`` p95 would be
+    faster, would breach far more often, and would page on something no user ever
+    experiences. Stated here because the temptation is to alert on the tightest
+    number in the standards rather than the one anybody feels.
+    """
+    assert DEFAULT_LATENCY_OBJECTIVE_MS == 30_000
+    internal = _slow_health(p95_ms=Decimal("120.00"))
+
+    # An internal function's p95 an order of magnitude inside the objective breaches
+    # none of them, because the rule only ever looks at the end-to-end call.
+    assert build_latency_objective_breach_alert(internal, objective_ms=100) is not None
+    assert (
+        build_latency_objective_breach_alert(internal, objective_ms=DEFAULT_LATENCY_OBJECTIVE_MS)
+        is None
+    )
+
+
+def test_a_provider_with_no_completion_to_time_is_not_a_slow_provider() -> None:
+    """No p95 means no sample, and an absent sample is never evidence of a failure."""
+    idle = compute_provider_health(
+        "openai",
+        _WINDOW_START,
+        _WINDOW_END,
+        _usage("openai", _scope(calls=4, success=0, failure=4, avg=None)),
+    )
+
+    assert idle.p95_duration_ms is None
+    assert build_latency_objective_breach_alert(idle, objective_ms=1) is None
+
+
+def test_a_call_exactly_at_the_objective_is_within_it() -> None:
+    """The objective states "p95 <= 30 s", so the rule fires strictly above."""
+    at_objective = _slow_health(p95_ms=Decimal("30000.00"))
+
+    assert build_latency_objective_breach_alert(at_objective, objective_ms=30_000) is None
+    assert (
+        build_latency_objective_breach_alert(
+            _slow_health(p95_ms=Decimal("30000.01")), objective_ms=30_000
+        )
+        is not None
+    )
+
+
+# -------------------------------------------------------------- high error rate
+
+
+def test_an_error_rate_past_the_documented_objective_raises_its_own_kind() -> None:
+    """The objective is standards §5.1's "error rate (5xx share of requests) < 1%".
+
+    The payload carries the numerator, the denominator and both rates, because a rate
+    with no denominator behind it is an unfalsifiable claim on an operator's board.
+    """
+    alerts = evaluate_http_error_rate_alerts(
+        _volume(1_000, 40),
+        _thresholds(),
+    )
+
+    assert len(alerts) == 1
+    alert = alerts[0]
+    assert alert.kind == ALERT_KIND_ERROR_RATE_HIGH
+    # Critical: the objective is the platform-wide "the platform is failing" line, and
+    # every caller is on the other side of it at once.
+    assert alert.severity == ALERT_SEVERITY_CRITICAL
+    assert alert.payload["requests"] == 1_000
+    assert alert.payload["errors"] == 40
+    assert alert.payload["error_rate"] == "0.0400"
+    assert alert.payload["objective"] == "0.0100"
+    assert alert.payload["min_requests"] == DEFAULT_ERROR_RATE_MIN_REQUESTS
+
+
+def test_an_error_rate_exactly_at_the_objective_is_within_it() -> None:
+    """The objective reads "< 1%", so one percent is not past it."""
+    assert (
+        evaluate_http_error_rate_alerts(
+            _volume(1_000, 10),
+            _thresholds(),
+        )
+        == ()
+    )
+
+
+def test_a_tiny_sample_is_silence_rather_than_a_hundred_percent_error_rate() -> None:
+    """One failure in three requests is 33% and is not an outage.
+
+    Without a floor this rule is the first thing an operator learns to dismiss: on a
+    quiet night a handful of requests carry the whole denominator, so every one of
+    them is a large share of it. The floor is why the alert can be trusted at all.
+    """
+    below_floor = evaluate_http_error_rate_alerts(
+        _volume(DEFAULT_ERROR_RATE_MIN_REQUESTS - 1, DEFAULT_ERROR_RATE_MIN_REQUESTS - 1),
+        _thresholds(),
+    )
+    at_floor = evaluate_http_error_rate_alerts(
+        _volume(DEFAULT_ERROR_RATE_MIN_REQUESTS, 90),
+        _thresholds(),
+    )
+
+    assert below_floor == ()
+    assert [alert.kind for alert in at_floor] == [ALERT_KIND_ERROR_RATE_HIGH]
+
+
+def test_a_day_the_counter_never_saw_is_not_a_perfect_error_rate() -> None:
+    """No recorded requests is an absent denominator, which reads as no alert."""
+    assert (
+        evaluate_http_error_rate_alerts(
+            _volume(0, 0),
+            _thresholds(),
+        )
+        == ()
+    )
+    assert _volume(0, 0).error_rate is None
+    # And it is also NOT a judgement the resolve step may act on, which is a separate
+    # question from whether the rule fires - see ``error_rate_evaluated``.
+    assert _volume(0, 0).traffic_recorded is False
+    assert _volume(1_000, 40).traffic_recorded is True
+
+
+def test_the_error_rate_floor_is_tunable() -> None:
+    """A deployment that wants the rule on thinner traffic can lower the floor."""
+    thin = _thresholds(error_rate_min_requests=10)
+
+    assert (
+        evaluate_http_error_rate_alerts(
+            _volume(10, 5),
+            thin,
+        )
+        != ()
+    )
+    assert (
+        evaluate_http_error_rate_alerts(
+            _volume(10, 5),
+            _thresholds(),
+        )
+        == ()
+    )
+
+
+# -------------------------------------------------------- dedupe across nights
+
+
+def test_every_new_kind_dedupes_on_one_marker_and_nights_do_not_stack_it() -> None:
+    """The dedupe marker is the existing mechanism, not a per-kind reinvention.
+
+    A nightly rollup that re-raised the same breach every night would bury the one
+    operator change that clears it. Two passes over the same condition must produce
+    the SAME key even though every measured figure between them moved, because the
+    marker holds the subject and nothing else.
+    """
+    rate_limited_keys = {
+        _key_of(
+            build_provider_rate_limited_alert(
+                _rate_limited_health(rate_limit_count=count), threshold=1
+            )
+        )
+        for count in (1, 3, 97)
+    }
+    latency_keys = {
+        _key_of(
+            build_latency_objective_breach_alert(
+                _slow_health(p95_ms=p95), objective_ms=DEFAULT_LATENCY_OBJECTIVE_MS
+            )
+        )
+        for p95 in (Decimal("31000.00"), Decimal("45000.00"), Decimal("90000.00"))
+    }
+    error_rate_keys = {
+        _key_of(
+            build_error_rate_alert(
+                volume,
+                objective=DEFAULT_ERROR_RATE_OBJECTIVE,
+                min_requests=DEFAULT_ERROR_RATE_MIN_REQUESTS,
+            )
+        )
+        for volume in (_volume(1_000, 40), _volume(9_000, 900))
+    }
+
+    assert len(rate_limited_keys) == 1
+    assert len(latency_keys) == 1
+    assert len(error_rate_keys) == 1
+
+
+def _key_of(alert: AlertRow | None) -> tuple[str, str]:
+    """The dedupe key of an alert the test expects to exist."""
+    assert alert is not None
+    return alert_key(alert.kind, alert.payload)
+
+
+def test_two_providers_in_trouble_do_not_share_one_alert() -> None:
+    """Distinct subjects must produce distinct markers or one breach hides the other.
+
+    The measured figures are deliberately outside the marker, so the SUBJECT has to
+    be inside it: two providers at the same refusal count are two findings, and
+    resolving one must leave the other open.
+    """
+
+    def key(provider: str, *, rate_limit_count: int) -> tuple[str, str]:
+        alert = build_provider_rate_limited_alert(
+            _rate_limited_health(provider, rate_limit_count=rate_limit_count),
+            threshold=1,
+        )
+        assert alert is not None
+        return alert_key(alert.kind, alert.payload)
+
+    openai = key("openai", rate_limit_count=1)
+    google = key("google", rate_limit_count=1)
+
+    assert openai != google
+    assert (
+        alert_key(ALERT_KIND_PROVIDER_RATE_LIMITED, {"source": "rollup", "provider": "google"})
+        == google
+    )
+
+
+# ------------------------------------------- the evaluated set and auto-resolve
+
+
+def test_the_platform_error_rate_is_reconciled_only_on_a_day_that_had_traffic() -> None:
+    """A day with no traffic is NOT the observation that the error rate is fine.
+
+    The rollup runs over arbitrary dates, so a backfill of a quiet day - one from
+    before the counter was deployed, or one simply nobody used the platform on -
+    would otherwise read zero requests, raise nothing, and silently close a LIVE
+    breach an operator was in the middle of. Gating on traffic keeps "absence of
+    evidence never clears a standing condition" true for the one subject that has no
+    rows of its own, and it defaults to closed for any caller that does not read the
+    counter at all, exactly like ``queues`` and ``actors`` do.
+    """
+    with_traffic = evaluated_alert_keys(providers=[], tables=[], error_rate_evaluated=True)
+    without_traffic = evaluated_alert_keys(providers=[], tables=[])
+    key = alert_key(ALERT_KIND_ERROR_RATE_HIGH, {"source": "rollup", "scope": "platform_total"})
+
+    assert key in with_traffic
+    assert key not in without_traffic
+
+
+def test_a_provider_marks_all_four_of_its_kinds_as_evaluated() -> None:
+    """Every kind scoped to a provider joins that provider's reconciliation.
+
+    The resolve step closes only what this pass could have re-raised, so a kind
+    missing from this set can never be closed by ANY pass - an alert with no exit.
+    """
+    keys = evaluated_alert_keys(providers=["openai"], tables=[])
+
+    for kind in (
+        ALERT_KIND_BREAKER_OPEN,
+        ALERT_KIND_PROVIDER_HEALTH_DROP,
+        ALERT_KIND_PROVIDER_RATE_LIMITED,
+        ALERT_KIND_LATENCY_OBJECTIVE_BREACH,
+    ):
+        assert alert_key(kind, {"source": "rollup", "provider": "openai"}) in keys, kind
+
+    # And nothing about a provider nobody observed: absence of evidence, not clearing.
+    assert not any("google" in repr(key) for key in keys)
+
+
+def test_the_three_new_kinds_resolve_and_the_health_drop_does_not() -> None:
+    """The policy read end to end: the resolve step asks one question, about data.
+
+    Each new kind clears itself when its figure comes back inside the objective; the
+    health drop stays open because it is the kind that must not quietly vanish.
+    """
+    assert alert_kind_resolves(ALERT_KIND_PROVIDER_RATE_LIMITED)
+    assert alert_kind_resolves(ALERT_KIND_ERROR_RATE_HIGH)
+    assert alert_kind_resolves(ALERT_KIND_LATENCY_OBJECTIVE_BREACH)
+    assert not alert_kind_resolves(ALERT_KIND_PROVIDER_HEALTH_DROP)

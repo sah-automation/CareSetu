@@ -18,7 +18,10 @@ they decide -
 * ``observability_alert_events``: the threshold alerts from the minimum alert set,
   including the ``cost_outlier`` rule that compares one actor's day against that
   SAME actor's trailing seven-day average rather than against any rupee amount
-  (B7 #733);
+  (B7 #733), and the three reliability kinds that put a name to the conditions the
+  plan states but had no alert behind: the platform-wide 5xx share against its
+  documented objective, a provider's quota refusals, and an AI call whose end-to-end
+  p95 is past the latency objective (B8 #734);
 * ``observability_rollup_runs``: the run ledger (B5b #705) - one row per rolled
   day, written in the SAME transaction as the aggregates it describes, which is
   both the pass's idempotency key and the marker the next invocation plans from.
@@ -36,7 +39,10 @@ Alert writes are idempotent per ``(kind, scope)``: a nightly job that re-runs (o
 a backfill that overlaps a nightly pass) raises one open alert per breached
 threshold, and resolves it again once the threshold clears - except for the kinds
 ``alert_kind_resolves`` refuses, a provider health drop above all, which must never
-disappear from the operator's list.
+disappear from the operator's list. That policy is DATA in the domain's
+``RESOLVABLE_ALERT_KINDS`` / ``NON_RESOLVABLE_ALERT_KINDS`` pair rather than a
+conditional in any builder, so which kinds close themselves is something a reader
+can read off the set instead of inferring from six builders (#734).
 """
 
 from __future__ import annotations
@@ -66,6 +72,7 @@ from modules.observability.domain.rollup import (
     ActorSpend,
     AttributionDaily,
     BudgetSnapshot,
+    HttpErrorRate,
     OutboxTableHealth,
     ProviderFailures,
     ProviderHealth,
@@ -84,6 +91,7 @@ from modules.observability.domain.rollup import (
     compute_provider_health,
     evaluate_budget_alerts,
     evaluate_cost_outlier_alerts,
+    evaluate_http_error_rate_alerts,
     evaluate_outbox_health_alerts,
     evaluate_provider_health_alerts,
     evaluate_queue_health_alerts,
@@ -101,6 +109,7 @@ from modules.observability.schema.models import (
     observability_attribution_daily,
     observability_business_daily,
     observability_care_attribution_edges,
+    observability_http_minute,
     observability_rollup_runs,
 )
 
@@ -287,6 +296,46 @@ def _upsert_statement(table: Table, values: dict[str, Any], conflict_keys: Seque
 
 
 # ------------------------------------------------------------------- the reads
+
+
+async def _load_http_error_rate(
+    connection: AsyncConnection, window_start: datetime, window_end: datetime
+) -> HttpErrorRate:
+    """Sum the platform's own request counter over the half-open day window (#734).
+
+    Reads ``observability_http_minute`` - the same table and the same stored 5xx
+    numerator over stored request denominator the ``/throughput`` operator read
+    reports. One aggregate over the whole window, not per route: the objective is
+    stated over all requests, so a per-route breakdown would only be a way to make it
+    harder to breach.
+
+    The total is added in PYTHON from the per-minute rows, deliberately mirroring
+    :func:`modules.observability.facade.query_throughput` rather than issuing a
+    separate server-side aggregate. That function's docstring gives the reason and it
+    applies here just as much: the per-minute rows ARE the window's truth, so adding
+    them here cannot disagree with the series an operator reads beside them, whereas a
+    separately issued aggregate could. The two surfaces would then be free to report
+    different error rates for the same minute range, which is the one failure this
+    alert cannot afford.
+
+    The window travels on the result, so the alert payload stamps the instants the
+    figures were measured over rather than a caller restating them. A day with no rows
+    is an ABSENT denominator: :attr:`HttpErrorRate.traffic_recorded` is ``False``, and
+    the resolve step treats that as "not judged" rather than as "clean".
+    """
+    counter = observability_http_minute
+    statement = (
+        select(counter.c.minute_ts, counter.c.requests, counter.c.errors)
+        .where((counter.c.minute_ts >= window_start) & (counter.c.minute_ts < window_end))
+        .order_by(counter.c.minute_ts)
+    )
+    rows = (await connection.execute(statement)).all()
+    return HttpErrorRate(
+        requests=sum(row.requests for row in rows),
+        errors=sum(row.errors for row in rows),
+        window_start=window_start,
+        window_end=window_end,
+    )
 
 
 async def _load_provider_usage(
@@ -790,7 +839,9 @@ async def run_rollup(
     type)`` with spend on that day gets its recomputed attribution row; every
     ``(provider, model)`` seen month-to-date gets a budget snapshot; the budget
     rows left over from a closed month are rolled into this period first; the
-    minimum alert set is evaluated once per pass; and the whole thing ends by
+    minimum alert set is evaluated once per pass - plus the platform's own error
+    rate over the day, which comes from a different table and is evaluated once for
+    the whole platform rather than per provider; and the whole thing ends by
     writing the ``mode``-tagged ``observability_rollup_runs`` row - in this SAME
     transaction, so the ``last_rolled`` marker can never advance past a pass that
     did not commit.
@@ -823,6 +874,10 @@ async def run_rollup(
         stored_limits = await _load_budget_limits(connection)
         outbox_health = await _load_outbox_health(connection, schemas)
         queue_health = await _load_queue_health(connection)
+        # The platform's OWN request counter for the day, summed once and evaluated
+        # once. Read here so the ``error_rate_high`` alert and the ``/throughput``
+        # read the operator opens next both describe the same day from the same rows.
+        http_errors = await _load_http_error_rate(connection, window_start, window_end)
         # The instant the queue ages are measured against. Read HERE rather than
         # per-queue so every figure in one pass is as of the same moment, and so a
         # pass that took a minute does not raise two different ages for one queue.
@@ -929,12 +984,23 @@ async def run_rollup(
         for queue in queue_health:
             alerts.extend(evaluate_queue_health_alerts(queue, thresholds, now=queue_checked_at))
 
+        # The platform-wide 5xx share against the objective the standards state
+        # (error-handling-observability.md §5.1, "5xx share of requests < 1%"). One
+        # alert, no per-route arm: the objective is stated over ALL requests, so a
+        # per-route cap would make it the objective times the route count.
+        alerts.extend(evaluate_http_error_rate_alerts(http_errors, thresholds))
+
         # What this pass could have re-raised. The resolve step closes an open
         # alert only inside this set, so absence of evidence never clears one.
         open_alerts = await _load_open_rollup_alerts(connection)
         evaluated = evaluated_alert_keys(
             providers=[usage.provider for usage in usages],
             tables=[table_health.qualified_name for table_health in outbox_health],
+            # Gated on traffic rather than unconditional: the rollup runs over
+            # arbitrary dates, so a backfill of a quiet day would otherwise see zero
+            # requests and silently close a live breach. "No traffic" is not a
+            # measurement that the error rate is fine.
+            error_rate_evaluated=http_errors.traffic_recorded,
             queues=[queue.queue for queue in queue_health],
             # A queue with no open jobs at all has DRAINED, which is the clearing of
             # the age condition rather than an absence of evidence about it - so its

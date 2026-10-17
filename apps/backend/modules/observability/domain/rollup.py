@@ -98,6 +98,15 @@ ALERT_KIND_OUTBOX_DEAD_LETTER = "outbox_dead_letter"
 ALERT_KIND_QUEUE_AGE = "queue_age"
 ALERT_KIND_COST_OUTLIER = "cost_outlier"
 
+#: The three reliability kinds #734 adds, closing the gap between the conditions the
+#: plan NAMES and the ones it alerts on. Each is a documented objective with no alert
+#: behind it until now: ``error-handling-observability.md`` §5.1 states an error-rate
+#: objective and a latency objective, and the provider board already computed a quota
+#: refusal count that nothing named.
+ALERT_KIND_ERROR_RATE_HIGH = "error_rate_high"
+ALERT_KIND_PROVIDER_RATE_LIMITED = "provider_rate_limited"
+ALERT_KIND_LATENCY_OBJECTIVE_BREACH = "latency_objective_breach"
+
 #: The share of a budget that raises ``ai_budget`` (plan-phase14 §11, the
 #: "AI budget meter > 80%" member of the minimum alert set).
 DEFAULT_BUDGET_ALERT_THRESHOLD_PCT = 80
@@ -154,6 +163,55 @@ MIN_COST_OUTLIER_BASELINE_DAYS = 3
 #: reads as at-or-below the threshold it fired against.
 _COST_OUTLIER_QUANTUM = Decimal("0.01")
 
+#: The share of requests that may fail with a 5xx before ``error_rate_high`` fires.
+#: NOT a round number this rule picked: it is the objective the standards already
+#: state - ``error-handling-observability.md`` §5.1 "Error rate (5xx share of
+#: requests) < 1%", restated at plan-phase14 §11 from the same NFRs. Read "< 1%",
+#: so the rule fires STRICTLY above it and exactly one percent is within budget.
+#: 4xx is deliberately not in the numerator: a 404 is a caller getting a route wrong,
+#: not the platform failing, and folding it in would make a bad frontend link read as
+#: an outage.
+DEFAULT_ERROR_RATE_OBJECTIVE = Decimal("0.01")
+
+#: How many requests a day must record before the error rate is judged at all. One
+#: failure in three requests is a third of the traffic and is not an outage, but on a
+#: quiet night a handful of requests carry the whole denominator and every one of
+#: them is a large share of it - which is the first thing an operator would learn to
+#: dismiss. The floor is what makes this alert trustworthy at all.
+DEFAULT_ERROR_RATE_MIN_REQUESTS = 100
+
+#: The latency objective ``error-handling-observability.md`` §5.1 states for the AI
+#: call END TO END, provider included: "p95 <= 30 s". Thirty seconds, because that is
+#: the number the objective names and an alert against any other one would be
+#: measuring something the standards never committed to.
+#:
+#: It is the end-to-end call and deliberately NOT an internal function's duration.
+#: ``validate_token`` p95 < 100 ms and ``check_consent`` p95 < 50 ms are tighter and
+#: would breach far more often, but neither is an internal cause - neither pages on
+#: anything a user experiences. The symptom is the wait.
+#:
+#: **What "p95" means here, honestly.** The latency the rollup has is the one the
+#: health row already stores as ``p95_duration_ms``, ranked over per-``(model,
+#: task_type)`` scope MEANS weighted by completions (see :func:`duration_samples`) -
+#: B4a accumulates a running mean per scope, never raw durations, so a true
+#: observation-level p95 is not recoverable from the daily table at all. This
+#: threshold is therefore measured against that same stored figure the provider board
+#: shows, not against a number only this alert knows: an alert that disagreed with the
+#: board about the same provider's latency would be worse than useless. A provider
+#: slow enough to breach it is genuinely slow; a provider whose true distribution has
+#: a long thin tail but a modest mean may sit closer to the line than the objective
+#: implies. #754 formalises the SLOs and is where that measurement gap is settled.
+DEFAULT_LATENCY_OBJECTIVE_MS = 30_000
+
+#: How many quota refusals one provider must accumulate in its window before
+#: ``provider_rate_limited`` fires. One is the default on purpose: a provider
+#: answering HTTP 429 is being throttled because of OUR volume, and the correct
+#: response is to slow down rather than to read a success-rate figure and shrug. One
+#: refusal is a fact about the provider's capacity, not a rounding artefact of a
+#: larger count; a deployment that treats it as noise raises the threshold here
+#: rather than losing the alert.
+DEFAULT_PROVIDER_RATE_LIMIT_ALERT_COUNT = 1
+
 #: Rollup metric-key prefixes registered at import. The suffix appended to each
 #: key is the scope the entry computes over (the provider today).
 METRIC_KEY_AI_PROVIDER_HEALTH = "ai.provider_health"
@@ -173,6 +231,13 @@ _ALERT_SCOPE_KEYS = ("provider", "model", "table", "queue", "scope", "actor")
 #: a per-scope cap would make the effective budget the cap times the scope count.
 _BUDGET_ALERT_SCOPE = "monthly_total"
 
+#: The ``error_rate_high`` alert's scope. Platform-wide and stated as ONE alert,
+#: because the objective it measures against (``error-handling-observability.md`` §5.1,
+#: "5xx share of requests < 1%") is itself stated over all requests: a per-route cap
+#: would make the effective objective the objective times the route count, and the
+#: worst route could never breach it on its own.
+_PLATFORM_ALERT_SCOPE = "platform_total"
+
 #: Alert kinds describing a STANDING condition, which a later pass resolves once
 #: the condition clears. ``provider_health_drop`` is deliberately absent: a drop
 #: is a transition with no steady state (the health row holds one rate per
@@ -182,6 +247,12 @@ _BUDGET_ALERT_SCOPE = "monthly_total"
 #: cleared by hand trains the operator to ignore the feed. ``cost_outlier`` belongs
 #: here for the same reason (B7, #733): a spike that does not repeat is a one-off
 #: worth reading once and then closing, not an incident to keep open.
+#:
+#: The three kinds #734 adds belong here for one shared reason, which is the TEST of
+#: membership: each is a LEVEL that comes back down. A provider stops refusing for
+#: quota, the 5xx share falls, a provider's p95 comes back under the objective - and
+#: in every case the condition has cleared, so the alert closes itself. An alert that
+#: has to be cleared by hand is one the operator stops clearing.
 RESOLVABLE_ALERT_KINDS: frozenset[str] = frozenset(
     {
         ALERT_KIND_AI_BUDGET,
@@ -190,6 +261,9 @@ RESOLVABLE_ALERT_KINDS: frozenset[str] = frozenset(
         ALERT_KIND_OUTBOX_DEAD_LETTER,
         ALERT_KIND_QUEUE_AGE,
         ALERT_KIND_COST_OUTLIER,
+        ALERT_KIND_ERROR_RATE_HIGH,
+        ALERT_KIND_PROVIDER_RATE_LIMITED,
+        ALERT_KIND_LATENCY_OBJECTIVE_BREACH,
     }
 )
 
@@ -899,6 +973,10 @@ class RollupThresholds:
     cost_outlier_multiple: Decimal = DEFAULT_COST_OUTLIER_MULTIPLE
     cost_outlier_baseline_days: int = COST_OUTLIER_BASELINE_DAYS
     cost_outlier_min_baseline_days: int = MIN_COST_OUTLIER_BASELINE_DAYS
+    error_rate_objective: Decimal = DEFAULT_ERROR_RATE_OBJECTIVE
+    error_rate_min_requests: int = DEFAULT_ERROR_RATE_MIN_REQUESTS
+    latency_objective_ms: int = DEFAULT_LATENCY_OBJECTIVE_MS
+    provider_rate_limit_count: int = DEFAULT_PROVIDER_RATE_LIMIT_ALERT_COUNT
 
     def __post_init__(self) -> None:
         if self.monthly_budget_paise <= 0:
@@ -919,6 +997,21 @@ class RollupThresholds:
                 "cost_outlier_min_baseline_days must be positive and no wider "
                 "than cost_outlier_baseline_days"
             )
+        # An objective of zero or less is unreachable rather than strict, so the
+        # rule could never fire - a configuration that reads as "alerting on error
+        # rate" while never alerting. Refused instead of honoured.
+        if self.error_rate_objective <= 0:
+            raise ValueError("error_rate_objective must be positive")
+        if self.error_rate_min_requests <= 0:
+            # A zero floor means the sample-size guard is off, which is the one
+            # thing that makes a three-request day read as a 33% outage.
+            raise ValueError("error_rate_min_requests must be positive")
+        if self.latency_objective_ms <= 0:
+            raise ValueError("latency_objective_ms must be positive")
+        if self.provider_rate_limit_count <= 0:
+            # Zero refusals is the ABSENCE of the condition, not a mild form of it;
+            # a threshold of zero would make the alert permanent.
+            raise ValueError("provider_rate_limit_count must be positive")
 
 
 # --------------------------------------------------------------- alert builders
@@ -1180,6 +1273,176 @@ def build_cost_outlier_alert(
 
 
 @dataclass(frozen=True)
+class HttpErrorRate:
+    """One rolled day's 5xx share of recorded requests, platform-wide (#734).
+
+    Summed from ``observability_http_minute`` over the half-open day window - the
+    same stored numerator over stored denominator the ``/throughput`` read reports,
+    and summed the same way (:func:`_load_http_error_rate` reads the per-minute rows
+    and adds them rather than issuing a second aggregate), so the alert and the
+    operator's board cannot tell different stories about one day.
+
+    The window travels WITH the measurement rather than beside it, exactly as
+    :class:`ProviderHealth` and :class:`BudgetSnapshot` carry theirs: an error rate
+    without the window it was measured over is a number nobody can check, and every
+    consumer here wants the same two instants.
+
+    ``requests`` is the denominator and ``errors`` the 5xx subset of it, carried
+    together so no reader has to trust the rate on its own. Both are zero on a day
+    the counter never saw, which is an ABSENT denominator (:attr:`error_rate` is
+    ``None``) rather than a perfect day - and, per :func:`evaluated_alert_keys`, not
+    an observation that clears a standing alert either.
+    """
+
+    requests: int
+    errors: int
+    window_start: datetime
+    window_end: datetime
+
+    @property
+    def error_rate(self) -> Decimal | None:
+        """The 5xx share at :data:`_RATE_QUANTUM`; ``None`` when nothing was recorded."""
+        return ratio(self.errors, self.requests)
+
+    @property
+    def traffic_recorded(self) -> bool:
+        """Whether this day has a denominator to judge at all.
+
+        The gate :func:`evaluated_alert_keys` reads before it will let a pass
+        reconcile the platform's open error-rate alert: a day with no recorded
+        requests is an ABSENT observation, not a clean one, and a backfill over a
+        quiet date would otherwise clear a live breach.
+        """
+        return self.requests > 0
+
+
+def build_error_rate_alert(
+    volume: HttpErrorRate,
+    *,
+    objective: Decimal,
+    min_requests: int,
+) -> AlertRow | None:
+    """The ``error_rate_high`` alert, or ``None`` at or below ``objective``.
+
+    **One platform-wide alert, and it is the documented objective.** The standards
+    state "error rate (5xx share of requests) < 1%"; this measures exactly that
+    figure against exactly that number, so an operator can check the card against
+    §5.1 rather than against a constant buried here. Strictly above, because the
+    objective reads "< 1%".
+
+    **The floor is part of the rule, not a guard around it.** Below ``min_requests``
+    the day is silent even when every recorded request failed: on a quiet night a
+    handful of requests carry the whole denominator, so one failure is a third of it,
+    and a rule that pages on that is a rule an operator learns to dismiss. Silently
+    wrong is worse than loudly absent.
+
+    The payload carries the numerator, the denominator and both rates so the
+    judgement is falsifiable from the card alone. PHI-free by construction: counts,
+    rates and a date window, no route, no subject.
+    """
+    if volume.requests < min_requests:
+        return None
+    rate = volume.error_rate
+    if rate is None or rate <= objective:
+        return None
+    return AlertRow(
+        severity=ALERT_SEVERITY_CRITICAL,
+        kind=ALERT_KIND_ERROR_RATE_HIGH,
+        title=(
+            f"5xx error rate {rate:.4f} of {volume.requests} recorded request(s) "
+            f"is past the {objective:.4f} objective"
+        ),
+        payload={
+            "source": _ALERT_SOURCE,
+            "scope": _PLATFORM_ALERT_SCOPE,
+            "requests": volume.requests,
+            "errors": volume.errors,
+            "error_rate": _rate_text(rate),
+            "objective": _rate_text(objective),
+            "min_requests": min_requests,
+            "window_start": volume.window_start.isoformat(),
+            "window_end": volume.window_end.isoformat(),
+        },
+    )
+
+
+def build_provider_rate_limited_alert(health: ProviderHealth, *, threshold: int) -> AlertRow | None:
+    """The ``provider_rate_limited`` alert, or ``None`` below ``threshold`` refusals.
+
+    **A quota refusal is not a health drop.** The board already folds one into a
+    ``degraded`` verdict, but a verdict is not an action: the response to being
+    throttled is to slow down, which is not what an operator does with a success-rate
+    figure. This kind names the count, so the alert says what to do.
+
+    One refusal is the default threshold, because the counter is a fact about the
+    provider's capacity rather than a rounding artefact of a larger number.
+
+    Unlike ``provider_health_drop`` this one RESOLVES: the count is a level over the
+    window, and a day the provider stops refusing clears it. That is not a route to a
+    degraded provider quietly vanishing, because the health-drop alert raised over
+    the same window stays open regardless.
+    """
+    if health.rate_limit_count < threshold:
+        return None
+    return AlertRow(
+        severity=ALERT_SEVERITY_WARNING,
+        kind=ALERT_KIND_PROVIDER_RATE_LIMITED,
+        title=(
+            f"AI provider {health.provider} refused {health.rate_limit_count} call(s) "
+            f"for rate limiting"
+        ),
+        payload={
+            "source": _ALERT_SOURCE,
+            "provider": health.provider,
+            "rate_limit_count": health.rate_limit_count,
+            "threshold_count": threshold,
+            "window_start": health.window_start.isoformat(),
+            "window_end": health.window_end.isoformat(),
+        },
+    )
+
+
+def build_latency_objective_breach_alert(
+    health: ProviderHealth, *, objective_ms: int
+) -> AlertRow | None:
+    """The ``latency_objective_breach`` alert, or ``None`` at or below ``objective_ms``.
+
+    **The symptom, not the cause.** The figure compared here is the AI call END TO END
+    with the provider included - the duration somebody waited for - measured against
+    the objective the standards state for it (§5.1, "p95 <= 30 s"). It is
+    deliberately NOT the duration of any function inside the platform:
+    ``validate_token`` p95 < 100 ms or ``check_consent`` p95 < 50 ms are tighter,
+    would breach far more often, and are internal causes. Paging on one of those is
+    paging on something no user experiences, which is how an alert feed earns a
+    mute. #734 makes this explicit because the temptation is to alert on the
+    tightest number the standards list rather than the one anybody feels.
+
+    ``None`` when the provider recorded no completion to time: an absent p95 is an
+    absent sample, which is never evidence of a slow provider - it is the same rule
+    that keeps a breaker closed on a provider with no traffic.
+    """
+    p95 = health.p95_duration_ms
+    if p95 is None or p95 <= objective_ms:
+        return None
+    return AlertRow(
+        severity=ALERT_SEVERITY_WARNING,
+        kind=ALERT_KIND_LATENCY_OBJECTIVE_BREACH,
+        title=(
+            f"AI call p95 for {health.provider} is {p95:.2f}ms, past the {objective_ms}ms objective"
+        ),
+        payload={
+            "source": _ALERT_SOURCE,
+            "provider": health.provider,
+            "p95_duration_ms": _ms_text(p95),
+            "objective_ms": objective_ms,
+            "sample_count": health.sample_count,
+            "window_start": health.window_start.isoformat(),
+            "window_end": health.window_end.isoformat(),
+        },
+    )
+
+
+@dataclass(frozen=True)
 class QueueHealth:
     """One AI queue's still-open work, as the rollup's pure input type (B5 #729).
 
@@ -1254,7 +1517,17 @@ def evaluate_provider_health_alerts(
     previous_success_rate: Decimal | None,
     thresholds: RollupThresholds,
 ) -> tuple[AlertRow, ...]:
-    """The alerts one provider's recomputed health raises, most severe first."""
+    """The alerts one provider's recomputed health raises, most severe first.
+
+    One health row in, up to four findings out - grouped by their input rather than
+    by their rule, the same way :func:`evaluate_outbox_health_alerts` derives two
+    alerts from one table's counts. A provider's breaker, drop, quota refusals and
+    p95 are four readings of the SAME window, so one pass over it raises all four and
+    cannot raise three of them because it read the row differently.
+
+    The critical ``breaker_open`` leads because a provider refusing every call is the
+    one an operator must see first; the warnings follow in the order they are tested.
+    """
     alerts: list[AlertRow] = []
     if health.breaker_state == BREAKER_STATE_OPEN:
         alerts.append(build_breaker_open_alert(health))
@@ -1265,7 +1538,37 @@ def evaluate_provider_health_alerts(
     )
     if drop_alert is not None:
         alerts.append(drop_alert)
+    rate_limit_alert = build_provider_rate_limited_alert(
+        health, threshold=thresholds.provider_rate_limit_count
+    )
+    if rate_limit_alert is not None:
+        alerts.append(rate_limit_alert)
+    latency_alert = build_latency_objective_breach_alert(
+        health, objective_ms=thresholds.latency_objective_ms
+    )
+    if latency_alert is not None:
+        alerts.append(latency_alert)
     return tuple(alerts)
+
+
+def evaluate_http_error_rate_alerts(
+    volume: HttpErrorRate,
+    thresholds: RollupThresholds,
+) -> tuple[AlertRow, ...]:
+    """The platform-wide ``error_rate_high`` alert for the rolled day.
+
+    A separate evaluator rather than another arm of the provider one because its input
+    is a different table entirely: ``observability_http_minute`` counts the platform's
+    OWN requests, not calls out to a provider, so it is not scoped to a provider and
+    has no provider row to hang off. It carries its own window, so the figures on the
+    card are the ones the pass measured rather than instants a caller restates.
+    """
+    alert = build_error_rate_alert(
+        volume,
+        objective=thresholds.error_rate_objective,
+        min_requests=thresholds.error_rate_min_requests,
+    )
+    return () if alert is None else (alert,)
 
 
 def evaluate_outbox_health_alerts(
@@ -1377,6 +1680,7 @@ def evaluated_alert_keys(
     alerted_queues: Sequence[str] = (),
     actors: Sequence[str] = (),
     alerted_actors: Sequence[str] = (),
+    error_rate_evaluated: bool = False,
 ) -> set[tuple[str, str]]:
     """Every ``(kind, scope)`` a pass with these inputs could raise.
 
@@ -1403,15 +1707,40 @@ def evaluated_alert_keys(
     absence of evidence - it is unreachable, a permanently open row no scheduler can
     ever close. Contrast a provider, which may take traffic again and be re-judged
     from scratch: an actor's spike cannot be un-spiked by later quiet, only ended.
+
+    ``error_rate_evaluated`` is the deliberate exception to that "absence is
+    ambiguous" rule, and it is gated rather than unconditional. The pass reads the
+    platform's own request counter every time, so unlike a provider there is no
+    per-subject input whose absence could mean "not looked at" - BUT a day the
+    counter recorded nothing on is ambiguous in the one direction that matters here:
+    the rollup runs over ARBITRARY dates, so a backfill of a quiet day from before
+    capture was deployed would otherwise see zero requests, raise nothing, and
+    silently close a LIVE breach an operator was in the middle of. So the platform
+    total joins the reconciled set only when that day actually carried traffic
+    (:attr:`HttpErrorRate.traffic_recorded`). Default ``False``, so a caller that
+    does not read the counter reconciles nothing - the same conservative default
+    ``queues`` and ``actors`` take.
     """
     keys = {
         alert_key(ALERT_KIND_AI_BUDGET, {"source": _ALERT_SOURCE, "scope": _BUDGET_ALERT_SCOPE})
     }
+    if error_rate_evaluated:
+        keys.add(
+            alert_key(
+                ALERT_KIND_ERROR_RATE_HIGH,
+                {"source": _ALERT_SOURCE, "scope": _PLATFORM_ALERT_SCOPE},
+            )
+        )
     for provider in providers:
         marker = {"source": _ALERT_SOURCE, "provider": provider}
         keys.update(
             alert_key(kind, marker)
-            for kind in (ALERT_KIND_BREAKER_OPEN, ALERT_KIND_PROVIDER_HEALTH_DROP)
+            for kind in (
+                ALERT_KIND_BREAKER_OPEN,
+                ALERT_KIND_PROVIDER_HEALTH_DROP,
+                ALERT_KIND_PROVIDER_RATE_LIMITED,
+                ALERT_KIND_LATENCY_OBJECTIVE_BREACH,
+            )
         )
     for table in tables:
         marker = {"source": _ALERT_SOURCE, "table": table}

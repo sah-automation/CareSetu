@@ -41,8 +41,11 @@ from modules.observability.domain.pseudonym import (
 from modules.observability.domain.rollup import (
     ALERT_KIND_AI_BUDGET,
     ALERT_KIND_COST_OUTLIER,
+    ALERT_KIND_ERROR_RATE_HIGH,
+    ALERT_KIND_LATENCY_OBJECTIVE_BREACH,
     ALERT_KIND_OUTBOX_DEAD_LETTER,
     ALERT_KIND_PROVIDER_HEALTH_DROP,
+    ALERT_KIND_PROVIDER_RATE_LIMITED,
     ALERT_KIND_QUEUE_AGE,
     DEFAULT_QUEUE_AGE_ALERT_THRESHOLD_SECONDS,
     METRIC_KEY_AI_PROVIDER_HEALTH,
@@ -1745,3 +1748,375 @@ async def test_the_cost_outlier_threshold_is_configurable_on_the_pass(engine: As
         alert = (await _alert_rows(connection))[0]
         assert alert.payload["threshold_multiple"] == "2.00"
         assert alert.payload["deviation_multiple"] == "5.00"
+
+
+# ---------------------------------- B8 #734: the reliability alert kinds
+
+
+async def _seed_throttled_provider(connection: AsyncConnection) -> None:
+    """One provider refused for quota twice on the target date, as #723 records it.
+
+    The refusals go through ``observability_ai_job_spend`` rather than being written
+    straight into the health row: the whole point of the alert is that it names the
+    count the board already derived from the provider's OWN failed jobs, so seeding
+    the source and letting the pass derive it is the only setup that proves so.
+    """
+    await connection.execute(
+        text(
+            "INSERT INTO observability.observability_ai_job_spend "
+            "(usage_date, ai_job_ref, intake_ref, patient_key, provider, model, "
+            "task_type, input_tokens, output_tokens, cost_paise, status, failure_reason, "
+            " created_at) VALUES "
+            "(:day, 9201, 701, :patient, 'openai', 'gpt-4o-mini', 'summarize', "
+            " 0, 0, 0, 'failed', 'rate_limited', :at), "
+            "(:day, 9202, 702, :patient, 'openai', 'gpt-4o-mini', 'summarize', "
+            " 0, 0, 0, 'failed', 'rate_limited', :at)"
+        ),
+        {"day": _TARGET_DATE, "patient": _PATIENT_ONE, "at": _at_hour(2)},
+    )
+
+
+async def _seed_slow_provider(connection: AsyncConnection, *, avg_duration_ms: Decimal) -> None:
+    """One provider whose completions came back at ``avg_duration_ms``, as B4a stores them.
+
+    The pass derives p95 from the day's own running mean, so the whole breach is
+    expressed as one figure: the mean the consumer wrote, and the objective the alert
+    compares it against.
+    """
+    await connection.execute(
+        text(
+            "INSERT INTO observability.observability_ai_usage_daily "
+            "(usage_date, provider, model, task_type, calls, success_count, "
+            "failure_count, timeout_count, input_tokens, output_tokens, cost_paise, "
+            "avg_duration_ms) VALUES "
+            "(:day, 'slowco', 'slow-model', 'transcribe', 20, 20, 0, 0, 10, 20, 4000, "
+            " :avg)"
+        ),
+        {"day": _TARGET_DATE, "avg": avg_duration_ms},
+    )
+
+
+async def _seed_request_counter(
+    connection: AsyncConnection, *, requests: int, errors: int, minute: int = 9
+) -> None:
+    """One minute of the platform's own counter, as the HTTP middleware's fold leaves it.
+
+    Seeded into ``observability_http_minute`` rather than a rollup table: the error
+    rate must come from the SAME rows the ``/throughput`` read reports, or the alert
+    and the operator's board could tell different stories about one day.
+    """
+    await connection.execute(
+        text(
+            "INSERT INTO observability.observability_http_minute "
+            "(minute_ts, route_template, method, status_class, requests, errors) VALUES "
+            "(:minute_ts, '/v1/patients/{id}', 'GET', :status_class, :requests, :errors)"
+        ),
+        {
+            "minute_ts": datetime.combine(_TARGET_DATE, time(hour=12, minute=minute), tzinfo=UTC),
+            "status_class": "5xx" if errors else "2xx",
+            "requests": requests,
+            "errors": errors,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_throttled_provider_gets_its_own_alert_and_it_closes_when_throttling_stops(
+    engine: AsyncEngine,
+) -> None:
+    """AC2-throttle: this kind resolves when the condition clears, so the open list stays honest.
+
+    The first pass sees two quota refusals and raises the alert; a later pass over a
+    day with none finds the condition gone and closes it. That round trip is the whole
+    claim - an alert with no visible way to close is one an operator stops clearing.
+    """
+    async with engine.begin() as connection:
+        await _seed_usage(connection)
+        await _seed_throttled_provider(connection)
+
+    await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    async with engine.connect() as connection:
+        assert ALERT_KIND_PROVIDER_RATE_LIMITED in await _open_alert_kinds(connection)
+        # The count comes from the provider's own failed jobs, and the payload carries
+        # it beside the threshold it fired against.
+        assert (await _health_row(connection, "openai"))["rate_limit_count"] == 2
+        alert = next(
+            row
+            for row in await _alert_rows(connection)
+            if row.kind == ALERT_KIND_PROVIDER_RATE_LIMITED
+        )
+        assert alert.payload["provider"] == "openai"
+        assert alert.payload["rate_limit_count"] == 2
+        assert alert.payload["threshold_count"] == 1
+
+    # The next night has no refusals at all: the condition cleared, so the alert does.
+    async with engine.begin() as connection:
+        await connection.execute(text("DELETE FROM observability.observability_ai_job_spend"))
+
+    report = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    assert (report.alerts_raised, report.alerts_resolved) == (0, 1)
+    async with engine.connect() as connection:
+        statuses = {
+            row.kind: row.status
+            for row in await _alert_rows(connection)
+            if row.kind == ALERT_KIND_PROVIDER_RATE_LIMITED
+        }
+        assert statuses == {ALERT_KIND_PROVIDER_RATE_LIMITED: "resolved"}
+
+
+@pytest.mark.asyncio
+async def test_a_slow_provider_breaches_the_latency_objective_and_clears_when_it_speeds_up(
+    engine: AsyncEngine,
+) -> None:
+    """AC4-latency: the alert measures the call somebody waited for, at the documented objective.
+
+    ``slowco`` completes in 45 s against the standards' end-to-end p95 objective of
+    30 s. Nothing about this alert looks inside the platform - there is no internal
+    function whose duration is consulted - so what it reports is the symptom.
+    """
+    async with engine.begin() as connection:
+        await _seed_slow_provider(connection, avg_duration_ms=Decimal("45000.00"))
+
+    await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    async with engine.connect() as connection:
+        assert ALERT_KIND_LATENCY_OBJECTIVE_BREACH in await _open_alert_kinds(connection)
+        alert = next(
+            row
+            for row in await _alert_rows(connection)
+            if row.kind == ALERT_KIND_LATENCY_OBJECTIVE_BREACH
+        )
+        assert alert.payload["provider"] == "slowco"
+        assert alert.payload["p95_duration_ms"] == "45000.00"
+        assert alert.payload["objective_ms"] == 30_000
+        assert alert.payload["sample_count"] == 20
+
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "UPDATE observability.observability_ai_usage_daily "
+                "SET avg_duration_ms = 900.00 WHERE provider = 'slowco'"
+            )
+        )
+
+    report = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    assert (report.alerts_raised, report.alerts_resolved) == (0, 1)
+    async with engine.connect() as connection:
+        assert ALERT_KIND_LATENCY_OBJECTIVE_BREACH not in await _open_alert_kinds(connection)
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_provider_speed_does_not_breach_the_latency_objective(
+    engine: AsyncEngine,
+) -> None:
+    """The silent half: a provider well inside the objective raises nothing."""
+    async with engine.begin() as connection:
+        await _seed_slow_provider(connection, avg_duration_ms=Decimal("1200.00"))
+
+    report = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    assert (report.alerts_raised, report.alerts_resolved) == (0, 0)
+    async with engine.connect() as connection:
+        assert ALERT_KIND_LATENCY_OBJECTIVE_BREACH not in await _open_alert_kinds(connection)
+
+
+@pytest.mark.asyncio
+async def test_a_past_the_objective_error_rate_raises_once_and_closes_when_it_recovers(
+    engine: AsyncEngine,
+) -> None:
+    """AC1-error-rate: the platform's own 5xx share against the objective, from its own table.
+
+    40 failures in 1,000 recorded requests is 4% against the standards' "< 1%", and
+    the payload carries the numerator and denominator so the operator can check it.
+    """
+    async with engine.begin() as connection:
+        await _seed_request_counter(connection, requests=1_000, errors=40)
+
+    await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    async with engine.connect() as connection:
+        assert ALERT_KIND_ERROR_RATE_HIGH in await _open_alert_kinds(connection)
+        alert = next(
+            row for row in await _alert_rows(connection) if row.kind == ALERT_KIND_ERROR_RATE_HIGH
+        )
+        assert alert.severity == "critical"
+        assert alert.payload["requests"] == 1_000
+        assert alert.payload["errors"] == 40
+        assert alert.payload["error_rate"] == "0.0400"
+        assert alert.payload["objective"] == "0.0100"
+        assert alert.payload["scope"] == "platform_total"
+
+    # A second night of the same breach does not stack: the marker holds the scope and
+    # not the figures, so this is the same open finding rather than a second card.
+    again = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+    assert (again.alerts_raised, again.alerts_resolved) == (0, 0)
+
+    async with engine.begin() as connection:
+        # The same minute bucket comes back healthy: the figure the alert compares is
+        # the day's TOTAL, so bringing this one row's failures to zero is the recovery.
+        await connection.execute(
+            text(
+                "UPDATE observability.observability_http_minute "
+                "SET status_class = '2xx', errors = 0 WHERE requests = 1000"
+            )
+        )
+
+    report = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    assert (report.alerts_raised, report.alerts_resolved) == (0, 1)
+    async with engine.connect() as connection:
+        assert ALERT_KIND_ERROR_RATE_HIGH not in await _open_alert_kinds(connection)
+
+
+@pytest.mark.asyncio
+async def test_a_backfill_over_a_day_with_no_traffic_does_not_close_a_live_breach(
+    engine: AsyncEngine,
+) -> None:
+    """A quiet date is not evidence the platform got better.
+
+    The rollup runs over ARBITRARY dates, so a backfill of a day nobody used the
+    platform on - or one from before the HTTP counter existed - sees zero requests.
+    Treating that as "the error rate is fine" would close a live breach an operator
+    was in the middle of, from a pass that measured nothing. The resolve step is
+    therefore gated on the day having carried traffic at all.
+    """
+    async with engine.begin() as connection:
+        await _seed_request_counter(connection, requests=1_000, errors=40)
+
+    await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+    async with engine.connect() as connection:
+        assert ALERT_KIND_ERROR_RATE_HIGH in await _open_alert_kinds(connection)
+
+    quiet_day = _TARGET_DATE - timedelta(days=1)
+    report = await run_rollup(engine, quiet_day, thresholds=_THRESHOLDS)
+
+    assert (report.alerts_raised, report.alerts_resolved) == (0, 0)
+    async with engine.connect() as connection:
+        assert ALERT_KIND_ERROR_RATE_HIGH in await _open_alert_kinds(connection)
+
+    # A day that DID carry traffic and was healthy does close it, so the gate is
+    # traffic rather than a blanket refusal to reconcile the platform kind.
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "UPDATE observability.observability_http_minute "
+                "SET status_class = '2xx', errors = 0 WHERE requests = 1000"
+            )
+        )
+
+    recovered = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    assert (recovered.alerts_raised, recovered.alerts_resolved) == (0, 1)
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_day_the_counter_never_saw_is_not_an_error_rate_breach(
+    engine: AsyncEngine,
+) -> None:
+    """No recorded requests is an absent denominator, which reads as silence.
+
+    Without this the very first rollup on a fresh deployment would have to decide what
+    a NULL sum means, and "everything failed" is the wrong answer.
+    """
+    report = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    assert (report.alerts_raised, report.alerts_resolved) == (0, 0)
+    async with engine.connect() as connection:
+        assert await _open_alert_kinds(connection) == []
+
+
+@pytest.mark.asyncio
+async def test_a_thin_sample_is_silence_even_when_every_request_failed(
+    engine: AsyncEngine,
+) -> None:
+    """Three requests, all 5xx: 100%, and not an outage.
+
+    The floor is what keeps this rule worth reading, so it is asserted against the
+    real table rather than only in the pure core.
+    """
+    async with engine.begin() as connection:
+        await _seed_request_counter(connection, requests=3, errors=3)
+
+    report = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    assert (report.alerts_raised, report.alerts_resolved) == (0, 0)
+    async with engine.connect() as connection:
+        assert await _open_alert_kinds(connection) == []
+
+
+@pytest.mark.asyncio
+async def test_the_reliability_alert_thresholds_move_with_the_rest_of_the_pass(
+    engine: AsyncEngine,
+) -> None:
+    """The knobs belong to ``RollupThresholds``, so a deployment moves them in one place."""
+    async with engine.begin() as connection:
+        await _seed_slow_provider(connection, avg_duration_ms=Decimal("1200.00"))
+
+    report = await run_rollup(
+        engine,
+        _TARGET_DATE,
+        thresholds=replace(_THRESHOLDS, latency_objective_ms=1_000),
+    )
+
+    assert report.alerts_raised == 1
+    async with engine.connect() as connection:
+        alert = next(
+            row
+            for row in await _alert_rows(connection)
+            if row.kind == ALERT_KIND_LATENCY_OBJECTIVE_BREACH
+        )
+        assert alert.payload["objective_ms"] == 1_000
+
+
+@pytest.mark.asyncio
+async def test_a_provider_health_drop_survives_a_clean_pass_while_the_new_kinds_do_not(
+    engine: AsyncEngine,
+) -> None:
+    """AC3-health-drop: the one kind that must not quietly leave the board.
+
+    The same pass that closes the throttle and latency alerts leaves the health drop
+    open, because a drop is a transition with no steady state rather than a level that
+    came back down. Without the deny-set the provider would be entirely off the board
+    the moment it recovered, which is the exact failure this ticket exists to prevent.
+    """
+    async with engine.begin() as connection:
+        await _seed_usage(connection)
+        await _seed_previous_health(connection)
+        await _seed_throttled_provider(connection)
+
+    await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    async with engine.connect() as connection:
+        open_before = await _open_alert_kinds(connection)
+        assert ALERT_KIND_PROVIDER_HEALTH_DROP in open_before
+        assert ALERT_KIND_PROVIDER_RATE_LIMITED in open_before
+
+    # Nothing left to breach: no refusals, and the success rate back where it was.
+    # The cost is left alone deliberately - it is what keeps the budget alert standing,
+    # so this pass reconciles the provider's own kinds and nothing else.
+    async with engine.begin() as connection:
+        await connection.execute(text("DELETE FROM observability.observability_ai_job_spend"))
+        await connection.execute(
+            text(
+                "UPDATE observability.observability_ai_usage_daily "
+                "SET calls = 5, success_count = 5, failure_count = 0 WHERE provider = 'openai'"
+            )
+        )
+
+    report = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    assert report.alerts_resolved == 1
+    async with engine.connect() as connection:
+        open_after = await _open_alert_kinds(connection)
+        assert ALERT_KIND_PROVIDER_HEALTH_DROP in open_after
+        assert ALERT_KIND_PROVIDER_RATE_LIMITED not in open_after
+        assert ALERT_KIND_AI_BUDGET in open_after
+        dropped = next(
+            row
+            for row in await _alert_rows(connection)
+            if row.kind == ALERT_KIND_PROVIDER_HEALTH_DROP
+        )
+        assert dropped.status == "open"
