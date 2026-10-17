@@ -15,7 +15,10 @@ they decide -
   recomputed in full from ``observability_ai_job_spend`` and its
   ``observability_care_attribution_edges``, never incremented, so a care-attribution
   edge that lands after its AI job fills the doctor key in without double counting;
-* ``observability_alert_events``: the threshold alerts from the minimum alert set;
+* ``observability_alert_events``: the threshold alerts from the minimum alert set,
+  including the ``cost_outlier`` rule that compares one actor's day against that
+  SAME actor's trailing seven-day average rather than against any rupee amount
+  (B7 #733);
 * ``observability_rollup_runs``: the run ledger (B5b #705) - one row per rolled
   day, written in the SAME transaction as the aggregates it describes, which is
   both the pass's idempotency key and the marker the next invocation plans from.
@@ -54,10 +57,12 @@ from bus.bootstrap import MODULE_SCHEMAS
 from bus.dispatcher import count_outbox_rows, discover_outbox_tables
 from modules.observability.domain.consumer import AI_JOB_SPEND_STATUS_FAILED, AlertRow
 from modules.observability.domain.rollup import (
+    ALERT_KIND_COST_OUTLIER,
     ALERT_KIND_QUEUE_AGE,
     ALERT_STATUS_OPEN,
     ALERT_STATUS_RESOLVED,
     ROLLUP_MODE_DAILY,
+    ActorDailySpend,
     ActorSpend,
     AttributionDaily,
     BudgetSnapshot,
@@ -69,6 +74,7 @@ from modules.observability.domain.rollup import (
     RollupMetricValue,
     RollupThresholds,
     UsageScope,
+    actor_alert_scope,
     alert_key,
     alert_kind_resolves,
     alert_marker,
@@ -77,6 +83,7 @@ from modules.observability.domain.rollup import (
     build_budget_snapshot,
     compute_provider_health,
     evaluate_budget_alerts,
+    evaluate_cost_outlier_alerts,
     evaluate_outbox_health_alerts,
     evaluate_provider_health_alerts,
     evaluate_queue_health_alerts,
@@ -504,6 +511,52 @@ async def _load_actor_spend(connection: AsyncConnection, target_date: date) -> l
     ]
 
 
+async def _load_actor_daily_spend(
+    connection: AsyncConnection, target_date: date, *, baseline_days: int
+) -> list[ActorDailySpend]:
+    """Load one actor-day of spend for the target day plus its trailing week.
+
+    Read from ``observability_attribution_daily`` - the aggregate #725 already
+    recomputes - rather than from ``observability_ai_job_spend``, because a baseline
+    is a per-ACTOR question and the aggregate has already collapsed the provider,
+    model and task-type split the rule must not look through.
+
+    ``baseline_days`` is the CONFIGURED window rather than the module default, so the
+    rows read are the rows the rule judges. A deployment that widens the window to
+    fourteen days must get fourteen days of history, not fourteen days judged against
+    seven.
+
+    Grouped here rather than in the domain, which is a pure module with no SQL: one
+    row per ``(actor, day)``, summed over that actor's scopes. Ordered so two passes
+    over the same rows load the same sequence in the same order.
+    """
+    table = observability_attribution_daily
+    statement = (
+        select(
+            table.c.actor_kind,
+            table.c.actor_key,
+            table.c.usage_date,
+            func.sum(table.c.cost_paise).label("cost_paise"),
+        )
+        .where(
+            table.c.usage_date > target_date - timedelta(days=baseline_days),
+            table.c.usage_date <= target_date,
+        )
+        .group_by(table.c.actor_kind, table.c.actor_key, table.c.usage_date)
+        .order_by(table.c.actor_kind, table.c.actor_key, table.c.usage_date)
+    )
+    rows = (await connection.execute(statement)).all()
+    return [
+        ActorDailySpend(
+            actor_kind=row.actor_kind,
+            actor_key=row.actor_key,
+            usage_date=row.usage_date,
+            cost_paise=int(row.cost_paise),
+        )
+        for row in rows
+    ]
+
+
 async def _load_doctor_by_intake(
     connection: AsyncConnection, spend: Sequence[ActorSpend]
 ) -> dict[int, str]:
@@ -825,6 +878,17 @@ async def run_rollup(
             await _upsert_attribution_daily(connection, target_date, actor_row)
             attribution_rows += 1
 
+        # Read AFTER the upserts above, in the same transaction, so the day under
+        # test is the aggregate this pass just wrote rather than whatever was there
+        # when the pass began. The seven days behind it are earlier passes' rows, and
+        # that asymmetry is the point: today's figure must be the one being judged.
+        actor_history = await _load_actor_daily_spend(
+            connection, target_date, baseline_days=thresholds.cost_outlier_baseline_days
+        )
+        alerts.extend(
+            evaluate_cost_outlier_alerts(actor_history, thresholds, target_date=target_date)
+        )
+
         snapshots = 0
         for (provider, model), spend_paise in sorted(period_spend.items()):
             stored_limit, stored_pct = stored_limits.get(
@@ -881,6 +945,24 @@ async def run_rollup(
                 if alert.kind == ALERT_KIND_QUEUE_AGE
                 for queue in (alert.marker.get("queue"),)
                 if isinstance(queue, str)
+            ],
+            # Every actor this pass measured, not only the ones that spiked: an actor
+            # whose day returned to normal is exactly the one whose alert has to
+            # close, and a set built from the alerts just raised could never contain
+            # it.
+            actors=sorted(
+                {actor_alert_scope(row.actor_kind, row.actor_key) for row in actor_history}
+            ),
+            # UNIONED with the actors already carrying an open cost_outlier, because an
+            # actor who leaves the trailing window can never be re-read by any later
+            # pass - their alert would be permanently open and unreachable. Their day
+            # ended when they stopped spending; that IS the condition clearing.
+            alerted_actors=[
+                actor
+                for alert in open_alerts
+                if alert.kind == ALERT_KIND_COST_OUTLIER
+                for actor in (alert.marker.get("actor"),)
+                if isinstance(actor, str)
             ],
         )
 

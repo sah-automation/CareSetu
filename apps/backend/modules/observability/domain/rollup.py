@@ -96,6 +96,7 @@ ALERT_KIND_BREAKER_OPEN = "breaker_open"
 ALERT_KIND_OUTBOX_BACKLOG = "outbox_backlog"
 ALERT_KIND_OUTBOX_DEAD_LETTER = "outbox_dead_letter"
 ALERT_KIND_QUEUE_AGE = "queue_age"
+ALERT_KIND_COST_OUTLIER = "cost_outlier"
 
 #: The share of a budget that raises ``ai_budget`` (plan-phase14 §11, the
 #: "AI budget meter > 80%" member of the minimum alert set).
@@ -127,6 +128,32 @@ DEFAULT_OUTBOX_BACKLOG_ALERT_THRESHOLD = 500
 #: on it, not on the row count that follows an hour later.
 DEFAULT_QUEUE_AGE_ALERT_THRESHOLD_SECONDS = 900
 
+#: How many times one actor's own trailing average a single day of its spend has to
+#: reach before ``cost_outlier`` fires (B7, #733). A multiple of their OWN history,
+#: deliberately and never a rupee amount: a patient whose case genuinely needs four
+#: imaging passes and a caller looping the same request four hundred times are the
+#: same figure on the meter, and only the actor's own baseline tells them apart. The
+#: absolute cap belongs to ``ai_budget``, which bounds the bill; this bounds the
+#: SHAPE of one actor's spend.
+DEFAULT_COST_OUTLIER_MULTIPLE = Decimal("3")
+
+#: How far back an actor's baseline reaches, in days: the seven days trailing the
+#: day under test, not the day under test itself. Including the day being judged
+#: would let a large spike raise its own baseline and hide itself.
+COST_OUTLIER_BASELINE_DAYS = 7
+
+#: How many of those seven days the actor must actually have spent on before it has
+#: a baseline at all. A patient is episodic - a returning one who last spent a week
+#: ago would otherwise be measured against an average diluted by six silent days
+#: and alert on a perfectly ordinary consultation, which is the false positive that
+#: trains an operator to dismiss the feed.
+MIN_COST_OUTLIER_BASELINE_DAYS = 3
+
+#: The precision every ratio in a ``cost_outlier`` payload is reported at. The rule
+#: compares at this precision too, so a payload can never state a deviation that
+#: reads as at-or-below the threshold it fired against.
+_COST_OUTLIER_QUANTUM = Decimal("0.01")
+
 #: Rollup metric-key prefixes registered at import. The suffix appended to each
 #: key is the scope the entry computes over (the provider today).
 METRIC_KEY_AI_PROVIDER_HEALTH = "ai.provider_health"
@@ -139,7 +166,7 @@ _ALERT_SOURCE = "rollup"
 
 #: The payload keys that scope an alert to one subject. Two rollup alerts sharing
 #: a ``(kind, scope)`` are the same finding however many nights in a row it holds.
-_ALERT_SCOPE_KEYS = ("provider", "model", "table", "queue", "scope")
+_ALERT_SCOPE_KEYS = ("provider", "model", "table", "queue", "scope", "actor")
 
 #: The ``ai_budget`` alert's scope: the ONE monthly cap compared against TOTAL
 #: spend, the same figure ``BudgetMeter.meter()`` reports. Not per provider/model -
@@ -152,7 +179,9 @@ _BUDGET_ALERT_SCOPE = "monthly_total"
 #: provider), so a pass raises it and leaves it for the operator's history rather
 #: than closing an alert it raised for the same reading. ``queue_age`` belongs here
 #: (B5, #729): a queue that drains stops being an alert, and an alert that has to be
-#: cleared by hand trains the operator to ignore the feed.
+#: cleared by hand trains the operator to ignore the feed. ``cost_outlier`` belongs
+#: here for the same reason (B7, #733): a spike that does not repeat is a one-off
+#: worth reading once and then closing, not an incident to keep open.
 RESOLVABLE_ALERT_KINDS: frozenset[str] = frozenset(
     {
         ALERT_KIND_AI_BUDGET,
@@ -160,6 +189,7 @@ RESOLVABLE_ALERT_KINDS: frozenset[str] = frozenset(
         ALERT_KIND_OUTBOX_BACKLOG,
         ALERT_KIND_OUTBOX_DEAD_LETTER,
         ALERT_KIND_QUEUE_AGE,
+        ALERT_KIND_COST_OUTLIER,
     }
 )
 
@@ -777,6 +807,81 @@ def _scope_sort_key(scope: _ActorScope) -> tuple[str, str, str, str, str]:
     return (scope.actor_kind, scope.actor_key, scope.provider, scope.model, scope.task_type)
 
 
+# ------------------------------------------------- the actor's own trailing week
+
+
+@dataclass(frozen=True)
+class ActorDailySpend:
+    """One actor's metered spend on one day, as the cost-outlier rule reads it.
+
+    The ``observability_attribution_daily`` aggregate already collapsed one actor's
+    day across providers, models and task types, so this is the whole actor-day
+    figure rather than a per-scope row - which is the grain a deviation has to be
+    measured at, since a caller abusing one task type must not be averaged away by
+    the patient's other, ordinary ones.
+    """
+
+    actor_kind: ActorKind
+    actor_key: str
+    usage_date: date
+    cost_paise: int
+
+
+@dataclass(frozen=True)
+class ActorCostBaseline:
+    """What one actor normally spends in a day, and how much of it was observed.
+
+    ``daily_paise`` is the MEAN over the days the actor actually spent on, not over
+    all seven calendar days. Those differ for an episodic actor, and the difference
+    is the whole judgement: an average diluted by six silent days is near zero, so
+    a returning patient's ordinary consultation would read as an infinite multiple
+    and alert every single time they came back.
+    """
+
+    actor_kind: ActorKind
+    actor_key: str
+    days: int
+    total_paise: int
+    daily_paise: Decimal
+
+
+def actor_cost_baseline(
+    rows: Sequence[ActorDailySpend], thresholds: RollupThresholds, *, target_date: date
+) -> ActorCostBaseline | None:
+    """One actor's own trailing-week average, or ``None`` when it has no history.
+
+    ``rows`` are ONE actor's days, which is the function's precondition and why the
+    actor is read off them rather than passed in beside them: a caller that stated
+    the pair separately could state one that disagrees with the rows it handed over.
+
+    ``None`` is the answer for an actor with too few spend days behind them, and the
+    caller must read it as silence rather than as zero. On a fresh database EVERY
+    actor is in this case, so treating it as a baseline of zero would raise the
+    whole population's first day as a spike - the loudest possible way to be wrong
+    about an abuse rule.
+
+    The day under test is excluded: a spike that counted itself would raise its own
+    average and halve the deviation it is being judged on. Rows outside the trailing
+    week are excluded too, so a caller may hand over a whole table.
+    """
+    window_start = target_date - timedelta(days=thresholds.cost_outlier_baseline_days)
+    spend_days = {
+        row.usage_date
+        for row in rows
+        if window_start < row.usage_date < target_date and row.cost_paise > 0
+    }
+    if len(spend_days) < thresholds.cost_outlier_min_baseline_days:
+        return None
+    total = sum(row.cost_paise for row in rows if row.usage_date in spend_days)
+    return ActorCostBaseline(
+        actor_kind=rows[0].actor_kind,
+        actor_key=rows[0].actor_key,
+        days=len(spend_days),
+        total_paise=total,
+        daily_paise=Decimal(total) / Decimal(len(spend_days)),
+    )
+
+
 @dataclass(frozen=True)
 class RollupThresholds:
     """The tunable half of the rollup: one value per alert threshold.
@@ -791,12 +896,29 @@ class RollupThresholds:
     provider_health_drop_threshold: Decimal = DEFAULT_PROVIDER_HEALTH_DROP_THRESHOLD
     outbox_backlog_threshold: int = DEFAULT_OUTBOX_BACKLOG_ALERT_THRESHOLD
     queue_age_threshold_seconds: int = DEFAULT_QUEUE_AGE_ALERT_THRESHOLD_SECONDS
+    cost_outlier_multiple: Decimal = DEFAULT_COST_OUTLIER_MULTIPLE
+    cost_outlier_baseline_days: int = COST_OUTLIER_BASELINE_DAYS
+    cost_outlier_min_baseline_days: int = MIN_COST_OUTLIER_BASELINE_DAYS
 
     def __post_init__(self) -> None:
         if self.monthly_budget_paise <= 0:
             raise ValueError("monthly_budget_paise must be positive")
         if self.queue_age_threshold_seconds <= 0:
             raise ValueError("queue_age_threshold_seconds must be positive")
+        if self.cost_outlier_multiple <= 1:
+            # A multiple of one or less fires on every day merely ABOVE the actor's
+            # own average, which is what half of any week looks like - the alert
+            # would be noise rather than a deviation.
+            raise ValueError("cost_outlier_multiple must be greater than 1")
+        if self.cost_outlier_baseline_days <= 0:
+            raise ValueError("cost_outlier_baseline_days must be positive")
+        if not 0 < self.cost_outlier_min_baseline_days <= self.cost_outlier_baseline_days:
+            # A minimum wider than the window can never be met, which would silence
+            # the rule for every actor in the system rather than for anyone.
+            raise ValueError(
+                "cost_outlier_min_baseline_days must be positive and no wider "
+                "than cost_outlier_baseline_days"
+            )
 
 
 # --------------------------------------------------------------- alert builders
@@ -976,6 +1098,87 @@ def build_queue_age_alert(
     )
 
 
+def _ratio_text(value: Decimal) -> str:
+    """A paise-per-day, threshold or deviation rendered at :data:`_COST_OUTLIER_QUANTUM`.
+
+    Rendered as text like every other figure in a payload, so the JSONB column needs
+    no encoder and a reader sees exactly the precision the rule compared at.
+    """
+    return f"{value:.2f}"
+
+
+def actor_alert_scope(actor_kind: ActorKind, actor_key: str) -> str:
+    """The ``(kind, key)`` pair a per-actor alert dedupes on.
+
+    One function for the builder and for the pass's evaluated set, because the two
+    must agree on a single string: a marker spelled one way when raised and another
+    when reconciled is an alert that can never be resolved.
+
+    The value is the PSEUDONYMOUS key, never an intake ref or a name - an alert
+    that identifies a patient breaks the no-PHI rule even when it identifies them
+    correctly. ``actor_key`` is a one-way hash, which is exactly what lets an
+    operator see the SAME actor spike again tomorrow without the payload ever
+    holding who they are.
+    """
+    return f"{actor_kind}:{actor_key}"
+
+
+def build_cost_outlier_alert(
+    actor_kind: ActorKind,
+    actor_key: str,
+    *,
+    recent_spend_paise: int,
+    baseline: ActorCostBaseline,
+    multiple: Decimal,
+    usage_date: date,
+) -> AlertRow | None:
+    """The ``cost_outlier`` alert for one actor's day, or ``None`` within range.
+
+    **Relative, never absolute.** The comparison is ``recent_spend_paise`` against
+    ``baseline.daily_paise * multiple`` - that actor's own trailing average times
+    the configured multiple. There is deliberately no rupee figure anywhere in the
+    rule: a legitimately heavy patient and a caller looping one request are the same
+    amount of money, and only the actor's own history separates them, so a cap here
+    would either shame the first and miss the second.
+
+    The alert therefore CARRIES both figures. A multiple without them is an
+    unfalsifiable claim; ``recent_day_spend_paise`` beside ``baseline_daily_paise``
+    is the whole judgement, and an operator reading only the feed can make it.
+
+    The comparison is done at the precision the payload reports
+    (:data:`_COST_OUTLIER_QUANTUM`), so a card cannot read ``3.00x`` against a
+    ``3.00`` threshold and leave the reader unable to see why it fired. A baseline of
+    zero is silence rather than a crash: an alert that takes the nightly pass down
+    with it helps nobody.
+    """
+    if recent_spend_paise <= 0 or baseline.daily_paise <= 0:
+        return None
+    deviation = (Decimal(recent_spend_paise) / baseline.daily_paise).quantize(_COST_OUTLIER_QUANTUM)
+    if deviation <= multiple.quantize(_COST_OUTLIER_QUANTUM):
+        return None
+    return AlertRow(
+        severity=ALERT_SEVERITY_WARNING,
+        kind=ALERT_KIND_COST_OUTLIER,
+        title=(
+            f"AI spend for {actor_kind} {actor_key} on {usage_date} is "
+            f"{_ratio_text(deviation)}x its own {baseline.days}-day average"
+        ),
+        payload={
+            "source": _ALERT_SOURCE,
+            "actor": actor_alert_scope(actor_kind, actor_key),
+            "actor_kind": actor_kind,
+            "actor_key": actor_key,
+            "usage_date": usage_date.isoformat(),
+            "recent_day_spend_paise": recent_spend_paise,
+            "baseline_daily_paise": _ratio_text(baseline.daily_paise),
+            "baseline_total_paise": baseline.total_paise,
+            "baseline_days": baseline.days,
+            "deviation_multiple": _ratio_text(deviation),
+            "threshold_multiple": _ratio_text(multiple),
+        },
+    )
+
+
 @dataclass(frozen=True)
 class QueueHealth:
     """One AI queue's still-open work, as the rollup's pure input type (B5 #729).
@@ -1103,6 +1306,51 @@ def evaluate_queue_health_alerts(
     return () if alert is None else (alert,)
 
 
+def evaluate_cost_outlier_alerts(
+    history: Sequence[ActorDailySpend],
+    thresholds: RollupThresholds,
+    *,
+    target_date: date,
+) -> tuple[AlertRow, ...]:
+    """The ``cost_outlier`` alerts one pass raises, one per actor at most.
+
+    ``history`` is the trailing window the adapter read - the day under test plus
+    the seven days behind it - and every actor in it is judged against ITSELF. One
+    alert per actor rather than per ``(actor, provider, model, task_type)``: the
+    question is whether this actor's day is out of character, and splitting the
+    figure by scope would hide an abuse that only looks normal once averaged across
+    task types.
+
+    No window filter here on purpose: :func:`actor_cost_baseline` bounds its own
+    days and the recent figure is ``usage_date == target_date``, so the window is
+    stated in exactly one place and the two cannot drift apart. A row outside it
+    therefore only costs an actor group that neither test can pass.
+
+    Output is ordered by ``(actor_kind, actor_key)`` so two passes over the same
+    rows raise the same alerts in the same order.
+    """
+    grouped: dict[tuple[ActorKind, str], list[ActorDailySpend]] = {}
+    for row in history:
+        grouped.setdefault((row.actor_kind, row.actor_key), []).append(row)
+
+    alerts: list[AlertRow] = []
+    for (actor_kind, actor_key), rows in sorted(grouped.items()):
+        baseline = actor_cost_baseline(rows, thresholds, target_date=target_date)
+        if baseline is None:
+            continue
+        alert = build_cost_outlier_alert(
+            actor_kind,
+            actor_key,
+            recent_spend_paise=sum(row.cost_paise for row in rows if row.usage_date == target_date),
+            baseline=baseline,
+            multiple=thresholds.cost_outlier_multiple,
+            usage_date=target_date,
+        )
+        if alert is not None:
+            alerts.append(alert)
+    return tuple(alerts)
+
+
 # -------------------------------------------------------- alert identity / scope
 
 
@@ -1127,6 +1375,8 @@ def evaluated_alert_keys(
     tables: Sequence[str],
     queues: Sequence[str] = (),
     alerted_queues: Sequence[str] = (),
+    actors: Sequence[str] = (),
+    alerted_actors: Sequence[str] = (),
 ) -> set[tuple[str, str]]:
     """Every ``(kind, scope)`` a pass with these inputs could raise.
 
@@ -1143,6 +1393,16 @@ def evaluated_alert_keys(
     standing-problems list polluted by an incident that is over. ``queues`` defaults
     to empty for callers that do not read queue state, and then no queue alert is
     resolved at all.
+
+    ``actors`` are the ``actor_alert_scope`` values of the actors whose trailing
+    week this pass read, and ``alerted_actors`` the ones already carrying an open
+    ``cost_outlier``. They are UNIONED for the same reason ``queues`` is, and the
+    reason is stronger here: an alert is about ONE DAY's figure, and an actor who
+    spends nothing for a week leaves the trailing window for good. No later pass can
+    ever re-read them, so without the union their alert is not merely un-cleared by
+    absence of evidence - it is unreachable, a permanently open row no scheduler can
+    ever close. Contrast a provider, which may take traffic again and be re-judged
+    from scratch: an actor's spike cannot be un-spiked by later quiet, only ended.
     """
     keys = {
         alert_key(ALERT_KIND_AI_BUDGET, {"source": _ALERT_SOURCE, "scope": _BUDGET_ALERT_SCOPE})
@@ -1161,6 +1421,8 @@ def evaluated_alert_keys(
         )
     for queue in {*queues, *alerted_queues}:
         keys.add(alert_key(ALERT_KIND_QUEUE_AGE, {"source": _ALERT_SOURCE, "queue": queue}))
+    for actor in {*actors, *alerted_actors}:
+        keys.add(alert_key(ALERT_KIND_COST_OUTLIER, {"source": _ALERT_SOURCE, "actor": actor}))
     return keys
 
 

@@ -22,6 +22,8 @@ the ``observability_rollup_runs`` ledger the plan is read from.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
@@ -38,6 +40,7 @@ from modules.observability.domain.pseudonym import (
 )
 from modules.observability.domain.rollup import (
     ALERT_KIND_AI_BUDGET,
+    ALERT_KIND_COST_OUTLIER,
     ALERT_KIND_OUTBOX_DEAD_LETTER,
     ALERT_KIND_PROVIDER_HEALTH_DROP,
     ALERT_KIND_QUEUE_AGE,
@@ -1476,3 +1479,269 @@ async def test_rolling_today_by_hand_does_not_strand_yesterday(engine: AsyncEngi
     await run_rollup(engine, today, thresholds=_THRESHOLDS)
 
     assert (await plan_from_state(engine, today)).dates == (_TARGET_DATE,)
+
+
+# ------------------------------------------- B7 #733: the cost-outlier alert
+
+
+async def _seed_actor_history(
+    connection: AsyncConnection, *, patient: str, days: Mapping[int, int]
+) -> None:
+    """Seed ``observability_attribution_daily`` for the days BEHIND the target date.
+
+    ``days`` maps how many days before the target date to what that actor spent.
+    These are earlier passes' committed rows, and writing them straight is the honest
+    way to set up a baseline: re-rolling seven dates through the pass would be testing
+    the scheduler, not the rule.
+    """
+    for offset, cost_paise in sorted(days.items(), reverse=True):
+        await connection.execute(
+            text(
+                "INSERT INTO observability.observability_attribution_daily "
+                "(usage_date, actor_kind, actor_key, provider, model, task_type, jobs, "
+                "completed_jobs, input_tokens, output_tokens, cost_paise) VALUES "
+                "(:day, 'patient', :patient, 'openai', 'gpt-4o-mini', 'structure', "
+                " 1, 1, 1000, 200, :cost)"
+            ),
+            {
+                "day": _TARGET_DATE - timedelta(days=offset),
+                "patient": patient,
+                "cost": cost_paise,
+            },
+        )
+
+
+async def _seed_spend_today(
+    connection: AsyncConnection, *, patient: str, cost_paise: int, ai_job_ref: int = 9101
+) -> None:
+    """One per-job spend row on the target date, for ``run_rollup`` to aggregate.
+
+    A doctor key is left NULL so the pass produces the patient row alone: this suite is
+    about the patient-actor rule, and an untested second actor only adds noise.
+    """
+    await connection.execute(
+        text(
+            "INSERT INTO observability.observability_ai_job_spend "
+            "(usage_date, ai_job_ref, intake_ref, patient_key, doctor_key, provider, "
+            "model, task_type, input_tokens, output_tokens, cost_paise, status) VALUES "
+            "(:day, :ref, 601, :patient, NULL, 'openai', 'gpt-4o-mini', 'structure', "
+            " 1000, 200, :cost, 'completed')"
+        ),
+        {"day": _TARGET_DATE, "ref": ai_job_ref, "patient": patient, "cost": cost_paise},
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_rollup_raises_a_cost_outlier_against_the_actors_own_trailing_week(
+    engine: AsyncEngine,
+) -> None:
+    """The acceptance criterion: 90x this patient's own average, and no absolute cap anywhere.
+
+    Three days at 1_000 paise, then 90_000 on the day under test. The same 90_000 figure
+    would be unremarkable against the seeded 100_000 paise monthly budget, which is the
+    point: an absolute cap cannot tell this from ordinary spend on a big day.
+    """
+    async with engine.begin() as connection:
+        await _seed_actor_history(
+            connection, patient=_PATIENT_ONE, days={1: 1_000, 2: 1_000, 3: 1_000}
+        )
+        await _seed_spend_today(connection, patient=_PATIENT_ONE, cost_paise=90_000)
+
+    report = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    assert report.alerts_raised == 1
+    async with engine.connect() as connection:
+        assert await _open_alert_kinds(connection) == [ALERT_KIND_COST_OUTLIER]
+        alert = (await _alert_rows(connection))[0]
+        # The alert NAMES the actor and carries BOTH figures, so an operator can judge
+        # the spike rather than just see that one fired.
+        assert alert.payload["actor_kind"] == "patient"
+        assert alert.payload["actor_key"] == _PATIENT_ONE
+        assert alert.payload["recent_day_spend_paise"] == 90_000
+        assert alert.payload["baseline_daily_paise"] == "1000.00"
+        assert alert.payload["baseline_days"] == 3
+        assert alert.payload["threshold_multiple"] == "3.00"
+        assert alert.severity == "warning"
+        # The one-line title names the actor too, so the feed's card view is judgeable
+        # without opening the payload.
+        titles = await connection.execute(
+            text("SELECT title FROM observability.observability_alert_events WHERE kind = :kind"),
+            {"kind": ALERT_KIND_COST_OUTLIER},
+        )
+        assert _PATIENT_ONE in titles.scalar_one()
+
+    # A re-run of the same night does not stack a second copy of the same finding.
+    again = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+    assert (again.alerts_raised, again.alerts_resolved) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_a_day_that_matches_the_actors_own_history_is_not_a_cost_outlier(
+    engine: AsyncEngine,
+) -> None:
+    """The below-threshold half: the rule is silent on an ordinary day.
+
+    Twice the actor's own average is a busy day, not a deviation, and an alert that
+    fires on ordinary traffic is one the operator stops reading.
+    """
+    async with engine.begin() as connection:
+        await _seed_actor_history(
+            connection, patient=_PATIENT_ONE, days={1: 1_000, 2: 1_000, 3: 1_000}
+        )
+        await _seed_spend_today(connection, patient=_PATIENT_ONE, cost_paise=2_000)
+
+    report = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    assert (report.alerts_raised, report.alerts_resolved) == (0, 0)
+    async with engine.connect() as connection:
+        assert await _open_alert_kinds(connection) == []
+
+
+@pytest.mark.asyncio
+async def test_an_actor_with_no_trailing_week_is_never_a_cost_outlier(engine: AsyncEngine) -> None:
+    """The fresh-database case, which is the first thing this rule meets on an empty one.
+
+    Every actor on a fresh database is in exactly this position, so reading "no
+    baseline" as zero would raise the whole population's first day as a spike.
+    """
+    async with engine.begin() as connection:
+        await _seed_spend_today(connection, patient=_PATIENT_ONE, cost_paise=90_000)
+
+    report = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    assert (report.alerts_raised, report.alerts_resolved) == (0, 0)
+    async with engine.connect() as connection:
+        assert await _open_alert_kinds(connection) == []
+        # The spend is still recorded; silence is not a dropped aggregate.
+        assert (
+            await _attribution_row(
+                connection, actor_kind="patient", actor_key=_PATIENT_ONE, task_type="structure"
+            )
+        )["cost_paise"] == 90_000
+
+
+@pytest.mark.asyncio
+async def test_a_cost_outlier_resolves_once_the_day_returns_to_the_actors_own_history(
+    engine: AsyncEngine,
+) -> None:
+    """AC4: the kind is in the auto-resolve set, so a one-off spike closes itself.
+
+    A spike that does not repeat is an incident that is over. Leaving its alert open
+    until somebody clears it by hand is what turns the standing list into noise.
+    """
+    async with engine.begin() as connection:
+        await _seed_actor_history(
+            connection, patient=_PATIENT_ONE, days={1: 1_000, 2: 1_000, 3: 1_000}
+        )
+        await _seed_spend_today(connection, patient=_PATIENT_ONE, cost_paise=90_000)
+    await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+    assert await _open_alert_count(engine) == 1
+
+    # The next pass finds the day within the actor's own range. The job's real cost is
+    # corrected at the source, so the recomputed aggregate - not a patched alert - is
+    # what clears it.
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "UPDATE observability.observability_ai_job_spend SET cost_paise = 1_500 "
+                "WHERE ai_job_ref = 9101"
+            )
+        )
+
+    report = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    assert (report.alerts_raised, report.alerts_resolved) == (0, 1)
+    async with engine.connect() as connection:
+        assert [(row.kind, row.status) for row in await _alert_rows(connection)] == [
+            (ALERT_KIND_COST_OUTLIER, "resolved")
+        ]
+
+
+@pytest.mark.asyncio
+async def test_a_cost_outlier_resolves_when_the_actor_leaves_the_trailing_week(
+    engine: AsyncEngine,
+) -> None:
+    """An actor who stops spending must still have their alert closed.
+
+    The trailing window only ever holds eight days, so a patient who has gone quiet
+    falls out of it for good. No later pass can re-read them, which would leave the
+    alert open for ever - unreachable rather than merely un-evidenced. The pass that
+    does NOT raise it is the pass that reconciles it.
+    """
+    async with engine.begin() as connection:
+        await _seed_actor_history(
+            connection, patient=_PATIENT_ONE, days={1: 1_000, 2: 1_000, 3: 1_000}
+        )
+        await _seed_spend_today(connection, patient=_PATIENT_ONE, cost_paise=90_000)
+    await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+    assert await _open_alert_count(engine) == 1
+
+    # A later night on which the actor appears nowhere: their whole history is behind
+    # the window that pass reads, so no row names them any more.
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE observability.observability_ai_job_spend SET cost_paise = 0")
+        )
+    later = await run_rollup(engine, _TARGET_DATE + timedelta(days=9), thresholds=_THRESHOLDS)
+
+    assert later.alerts_resolved == 1
+    async with engine.connect() as connection:
+        assert await _open_alert_kinds(connection) == []
+
+
+@pytest.mark.asyncio
+async def test_one_actors_cost_outlier_never_closes_or_opens_anothers(engine: AsyncEngine) -> None:
+    """The alert is scoped per actor: patient one spikes while patient two does not.
+
+    Their combined day is unchanged, so a rule evaluated over all spend together would
+    see nothing at all - which is what a per-actor marker prevents being masked.
+    """
+    async with engine.begin() as connection:
+        for patient in (_PATIENT_ONE, _PATIENT_TWO):
+            await _seed_actor_history(
+                connection, patient=patient, days={1: 1_000, 2: 1_000, 3: 1_000}
+            )
+        await _seed_spend_today(connection, patient=_PATIENT_ONE, cost_paise=90_000)
+        await _seed_spend_today(connection, patient=_PATIENT_TWO, cost_paise=1_000, ai_job_ref=9102)
+
+    report = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    assert report.alerts_raised == 1
+    async with engine.connect() as connection:
+        payloads = [row.payload for row in await _alert_rows(connection)]
+        assert [payload["actor_key"] for payload in payloads] == [_PATIENT_ONE]
+
+    # Patient one's day returns to normal: only that actor's alert may close.
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "UPDATE observability.observability_ai_job_spend SET cost_paise = 1_000 "
+                "WHERE ai_job_ref = 9101"
+            )
+        )
+
+    report = await run_rollup(engine, _TARGET_DATE, thresholds=_THRESHOLDS)
+
+    assert (report.alerts_raised, report.alerts_resolved) == (0, 1)
+
+
+@pytest.mark.asyncio
+async def test_the_cost_outlier_threshold_is_configurable_on_the_pass(engine: AsyncEngine) -> None:
+    """AC5: the multiple moves with the rollup's other thresholds, not in code."""
+    async with engine.begin() as connection:
+        await _seed_actor_history(
+            connection, patient=_PATIENT_ONE, days={1: 1_000, 2: 1_000, 3: 1_000}
+        )
+        await _seed_spend_today(connection, patient=_PATIENT_ONE, cost_paise=5_000)
+
+    report = await run_rollup(
+        engine,
+        _TARGET_DATE,
+        thresholds=replace(_THRESHOLDS, cost_outlier_multiple=Decimal("2")),
+    )
+
+    assert report.alerts_raised == 1
+    async with engine.connect() as connection:
+        alert = (await _alert_rows(connection))[0]
+        assert alert.payload["threshold_multiple"] == "2.00"
+        assert alert.payload["deviation_multiple"] == "5.00"

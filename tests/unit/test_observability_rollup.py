@@ -27,13 +27,16 @@ from modules.observability.domain.consumer import (
 from modules.observability.domain.rollup import (
     ALERT_KIND_AI_BUDGET,
     ALERT_KIND_BREAKER_OPEN,
+    ALERT_KIND_COST_OUTLIER,
     ALERT_KIND_OUTBOX_BACKLOG,
     ALERT_KIND_OUTBOX_DEAD_LETTER,
     ALERT_KIND_PROVIDER_HEALTH_DROP,
     ALERT_KIND_QUEUE_AGE,
     BREAKER_STATE_CLOSED,
     BREAKER_STATE_OPEN,
+    COST_OUTLIER_BASELINE_DAYS,
     DEFAULT_BREAKER_OPEN_SUCCESS_RATE,
+    DEFAULT_COST_OUTLIER_MULTIPLE,
     DEFAULT_DEGRADED_SUCCESS_RATE,
     DEFAULT_OUTBOX_BACKLOG_ALERT_THRESHOLD,
     DEFAULT_PROVIDER_HEALTH_DROP_THRESHOLD,
@@ -46,6 +49,8 @@ from modules.observability.domain.rollup import (
     PROVIDER_STATUS_DOWN,
     PROVIDER_STATUS_HEALTHY,
     RESOLVABLE_ALERT_KINDS,
+    ActorCostBaseline,
+    ActorDailySpend,
     ActorSpend,
     AttributionDaily,
     BudgetSnapshot,
@@ -57,20 +62,25 @@ from modules.observability.domain.rollup import (
     RollupMetric,
     RollupThresholds,
     UsageScope,
+    actor_alert_scope,
+    actor_cost_baseline,
     alert_key,
     alert_kind_resolves,
+    alert_marker,
     breaker_state_for,
     budget_period_for,
     build_attribution_daily,
     build_breaker_open_alert,
     build_budget_alert,
     build_budget_snapshot,
+    build_cost_outlier_alert,
     build_dead_letter_alert,
     build_outbox_backlog_alert,
     build_provider_health_drop_alert,
     build_queue_age_alert,
     compute_provider_health,
     evaluate_budget_alerts,
+    evaluate_cost_outlier_alerts,
     evaluate_outbox_health_alerts,
     evaluate_provider_health_alerts,
     evaluate_queue_health_alerts,
@@ -97,6 +107,36 @@ _WINDOW_END = _WINDOW_START + timedelta(days=1)
 _QUEUE_NOW = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
 
 _PHI_KEYS = ("phone", "otp", "email", "name", "transcript", "patient", "text", "reason")
+
+
+def _day(offset: int, cost_paise: int, *, actor_key: str = "actor-a") -> ActorDailySpend:
+    """One actor-day of spend, ``offset`` days before :data:`_TARGET_DATE`."""
+    return ActorDailySpend(
+        actor_kind="patient",
+        actor_key=actor_key,
+        usage_date=_TARGET_DATE - timedelta(days=offset),
+        cost_paise=cost_paise,
+    )
+
+
+def _trailing(
+    *daily_costs: int, recent: int = 100, actor_key: str = "actor-a"
+) -> list[ActorDailySpend]:
+    """An actor's trailing days, then the day under test.
+
+    ``daily_costs`` are the days BEHIND :data:`_TARGET_DATE`, oldest first, and
+    ``recent`` is the target day itself. Only the days listed count as spend days -
+    a day not listed is an actor who spent nothing, which is what makes the baseline
+    a mean over observed days rather than a mean over the calendar.
+    """
+    days = len(daily_costs)
+    return [
+        *(
+            _day(days - offset, cost, actor_key=actor_key)
+            for offset, cost in enumerate(daily_costs)
+        ),
+        _day(0, recent, actor_key=actor_key),
+    ]
 
 
 def _scope(
@@ -485,6 +525,7 @@ def test_the_two_alert_vocabularies_are_disjoint_and_cover_every_rollup_kind() -
         ALERT_KIND_OUTBOX_BACKLOG,
         ALERT_KIND_OUTBOX_DEAD_LETTER,
         ALERT_KIND_QUEUE_AGE,
+        ALERT_KIND_COST_OUTLIER,
     }
 
     assert not RESOLVABLE_ALERT_KINDS & NON_RESOLVABLE_ALERT_KINDS
@@ -495,6 +536,9 @@ def test_the_two_alert_vocabularies_are_disjoint_and_cover_every_rollup_kind() -
     # kind would otherwise sit in that set for the same reason it was left out of the
     # other one - by not being thought about.
     assert alert_kind_resolves(ALERT_KIND_QUEUE_AGE)
+    # A one-day spend spike is the same shape of thing (B7 #733): it either repeats or
+    # it does not, and an alert nobody can see close is one nobody clears by hand.
+    assert alert_kind_resolves(ALERT_KIND_COST_OUTLIER)
 
 
 def test_the_resolve_step_reads_both_vocabularies_and_unknown_kinds_resolve_to_nothing() -> None:
@@ -859,6 +903,18 @@ def test_a_drained_queue_is_still_evaluated_because_an_empty_open_set_clears_it(
             drop_threshold=DEFAULT_PROVIDER_HEALTH_DROP_THRESHOLD,
         ),
         build_queue_age_alert("structure", oldest_age_seconds=3_600, threshold_seconds=900),
+        build_cost_outlier_alert(
+            "patient",
+            "actor-a",
+            recent_spend_paise=90_000,
+            baseline=actor_cost_baseline(
+                _trailing(1_000, 1_000, 1_000),
+                RollupThresholds(monthly_budget_paise=200_000),
+                target_date=_TARGET_DATE,
+            ),
+            multiple=DEFAULT_COST_OUTLIER_MULTIPLE,
+            usage_date=_TARGET_DATE,
+        ),
     ],
 )
 def test_every_rollup_alert_payload_is_phi_free(alert: AlertRow) -> None:
@@ -887,6 +943,16 @@ def test_every_rollup_alert_payload_is_phi_free(alert: AlertRow) -> None:
         "queue",
         "oldest_age_seconds",
         "threshold_seconds",
+        "actor",
+        "actor_kind",
+        "actor_key",
+        "usage_date",
+        "recent_day_spend_paise",
+        "baseline_daily_paise",
+        "baseline_total_paise",
+        "baseline_days",
+        "deviation_multiple",
+        "threshold_multiple",
     }
     for key in _PHI_KEYS:
         assert key not in payload
@@ -1195,3 +1261,375 @@ def test_the_actor_aggregate_carries_no_identifying_column() -> None:
         "name",
         "phone",
     } & set(observability_attribution_daily.c.keys())
+
+
+# ---------------------------------------- B7 #733: the cost-outlier alert
+
+
+def test_a_day_that_multiplies_the_actors_own_week_raises_a_cost_outlier() -> None:
+    """The headline case: one actor, one day, ninety times what that actor normally spends."""
+    alerts = evaluate_cost_outlier_alerts(
+        _trailing(1_000, 1_000, 1_000, recent=90_000),
+        RollupThresholds(monthly_budget_paise=200_000),
+        target_date=_TARGET_DATE,
+    )
+
+    assert len(alerts) == 1
+    assert alerts[0].kind == ALERT_KIND_COST_OUTLIER
+    # A warning, not a page: the operator has to JUDGE this one, and a page for a
+    # figure that may be a legitimately heavy patient trains people to ignore pages.
+    assert alerts[0].severity == ALERT_SEVERITY_WARNING
+
+
+def test_the_cost_outlier_alert_names_the_actor_and_carries_both_figures() -> None:
+    """AC2: without both figures the alert is a claim nobody can check."""
+    alerts = evaluate_cost_outlier_alerts(
+        _trailing(1_000, 1_000, 1_000, recent=90_000),
+        RollupThresholds(monthly_budget_paise=200_000),
+        target_date=_TARGET_DATE,
+    )
+
+    payload = alerts[0].payload
+    assert payload["actor_kind"] == "patient"
+    assert payload["actor_key"] == "actor-a"
+    assert payload["usage_date"] == _TARGET_DATE.isoformat()
+    assert payload["baseline_daily_paise"] == "1000.00"
+    assert payload["baseline_total_paise"] == 3_000
+    assert payload["baseline_days"] == 3
+    assert payload["recent_day_spend_paise"] == 90_000
+    assert payload["threshold_multiple"] == "3.00"
+    assert payload["deviation_multiple"] == "90.00"
+    # The actor is named in the one-line title too: the feed's card view has to be
+    # judgeable without opening the payload.
+    assert "actor-a" in alerts[0].title
+    assert "90.00" in alerts[0].title
+
+
+def test_a_cost_outlier_is_a_spike_in_the_day_under_test_not_a_heavy_week() -> None:
+    """The other end of the same rule: a heavy trailing week with a normal day is quiet."""
+    alerts = evaluate_cost_outlier_alerts(
+        _trailing(*([10_000] * (COST_OUTLIER_BASELINE_DAYS - 1)), recent=10_000),
+        RollupThresholds(monthly_budget_paise=200_000),
+        target_date=_TARGET_DATE,
+    )
+
+    assert alerts == ()
+
+
+def test_the_outlier_rule_is_relative_so_a_heavy_actor_is_only_judged_against_itself() -> None:
+    """AC3: the same rupee figure alerts one actor and not another.
+
+    Both spend 90_000 paise on the day under test. The one with a small history is
+    the spike; the one that spends that every day is not, and an absolute cap could
+    only have called both of them - or neither.
+    """
+    spikes = evaluate_cost_outlier_alerts(
+        [
+            *_trailing(1_000, 1_000, 1_000, recent=90_000, actor_key="spiker"),
+            *_trailing(*([90_000] * 6), recent=90_000, actor_key="heavy"),
+        ],
+        RollupThresholds(monthly_budget_paise=200_000),
+        target_date=_TARGET_DATE,
+    )
+
+    assert [alert.payload["actor_key"] for alert in spikes] == ["spiker"]
+    assert spikes[0].payload["deviation_multiple"] == "90.00"
+
+
+def test_an_actor_with_no_trailing_history_is_never_a_cost_outlier() -> None:
+    """AC: the fresh-database case, written down because it fires first on an empty one.
+
+    Without a baseline every actor's first ever day would be an infinite multiple of
+    nothing, so the entire population would alert on day one.
+    """
+    assert (
+        evaluate_cost_outlier_alerts(
+            [_day(0, 90_000)],
+            RollupThresholds(monthly_budget_paise=200_000),
+            target_date=_TARGET_DATE,
+        )
+        == ()
+    )
+    assert (
+        actor_cost_baseline(
+            [_day(0, 90_000)],
+            RollupThresholds(monthly_budget_paise=200_000),
+            target_date=_TARGET_DATE,
+        )
+        is None
+    )
+
+
+def test_an_actor_with_too_little_history_has_no_baseline_to_be_an_outlier_against() -> None:
+    """A patient is episodic: one consultation last week is normal, not a 90x spike.
+
+    Averaged over seven calendar days including the six they spent nothing, their
+    baseline would be a seventh of one consultation and an ordinary return visit
+    would alert every single time.
+    """
+    history = _trailing(1_000, recent=90_000)
+
+    assert (
+        actor_cost_baseline(
+            history, RollupThresholds(monthly_budget_paise=200_000), target_date=_TARGET_DATE
+        )
+        is None
+    )
+    assert (
+        evaluate_cost_outlier_alerts(
+            history,
+            RollupThresholds(monthly_budget_paise=200_000),
+            target_date=_TARGET_DATE,
+        )
+        == ()
+    )
+
+
+def test_the_baseline_ignores_days_outside_the_trailing_week_and_the_day_under_test() -> None:
+    """The window is the seven days behind, so neither an older spike nor today's own
+    figure can move the bar it is judged against.
+
+    Including the day under test would let a large day raise its own average and halve
+    the deviation it is being measured by - an abuse worth 3x would read as 1.4x.
+    """
+    rows = [
+        *(_day(offset, 1_000) for offset in range(1, COST_OUTLIER_BASELINE_DAYS)),
+        _day(0, 1_000_000),
+        _day(COST_OUTLIER_BASELINE_DAYS, 999_999),
+    ]
+
+    baseline = actor_cost_baseline(
+        rows, RollupThresholds(monthly_budget_paise=200_000), target_date=_TARGET_DATE
+    )
+
+    assert baseline is not None
+    assert baseline.days == COST_OUTLIER_BASELINE_DAYS - 1
+    assert baseline.total_paise == 6_000
+    assert baseline.daily_paise == Decimal("1000")
+
+
+def test_the_baseline_window_is_configurable_and_the_adapter_reads_the_same_window() -> None:
+    """A deployment that widens the window gets a wider baseline, not a stale one.
+
+    The query is bounded by the SAME configured figure the rule judges against. If the
+    two were separate constants, a fourteen-day configuration would silently judge a
+    fourteen-day average against seven days of history.
+    """
+    wide = RollupThresholds(
+        monthly_budget_paise=200_000,
+        cost_outlier_baseline_days=14,
+        cost_outlier_min_baseline_days=10,
+    )
+    rows = [
+        *(_day(offset, 1_000) for offset in range(1, 11)),
+        _day(0, 90_000),
+    ]
+
+    assert (
+        actor_cost_baseline(
+            rows, RollupThresholds(monthly_budget_paise=200_000), target_date=_TARGET_DATE
+        ).days
+        == 6
+    )
+    baseline = actor_cost_baseline(rows, wide, target_date=_TARGET_DATE)
+    assert baseline is not None
+    assert baseline.days == 10
+    assert baseline.daily_paise == Decimal("1000")
+    # A minimum wider than the window could never be met, which would silence the rule
+    # for everyone rather than for anyone.
+    with pytest.raises(ValueError, match="cost_outlier_min_baseline_days"):
+        RollupThresholds(
+            monthly_budget_paise=200_000,
+            cost_outlier_baseline_days=2,
+            cost_outlier_min_baseline_days=3,
+        )
+
+
+def test_the_cost_outlier_multiple_travels_with_the_rollup_thresholds() -> None:
+    """AC5: the multiple is a threshold, so a deployment moves it without a code change."""
+    strict = RollupThresholds(monthly_budget_paise=200_000, cost_outlier_multiple=Decimal("20"))
+    lenient = RollupThresholds(monthly_budget_paise=200_000, cost_outlier_multiple=Decimal("2"))
+    # 1_000 paise on a 100 paise day is 10x the actor's own average.
+    history = _trailing(*([100] * 7), recent=1_000)
+
+    assert evaluate_cost_outlier_alerts(history, lenient, target_date=_TARGET_DATE) != ()
+    assert evaluate_cost_outlier_alerts(history, strict, target_date=_TARGET_DATE) == ()
+    assert RollupThresholds(monthly_budget_paise=200_000).cost_outlier_multiple == (
+        DEFAULT_COST_OUTLIER_MULTIPLE
+    )
+    # A multiple that fires on any day merely above the actor's own average is refused
+    # rather than shipped: half of any week is above its mean.
+    with pytest.raises(ValueError, match="cost_outlier_multiple"):
+        RollupThresholds(monthly_budget_paise=200_000, cost_outlier_multiple=Decimal("1"))
+
+
+def test_one_cost_outlier_alert_per_actor_no_matter_how_many_scopes_the_day_had() -> None:
+    """An abuse in one task type must not be averaged away by the actor's ordinary ones."""
+    alerts = evaluate_cost_outlier_alerts(
+        [*_trailing(1_000, 1_000, 1_000, recent=40_000), _day(0, 20_000)],
+        RollupThresholds(monthly_budget_paise=200_000),
+        target_date=_TARGET_DATE,
+    )
+
+    assert len(alerts) == 1
+    assert alerts[0].payload["recent_day_spend_paise"] == 60_000
+
+
+def test_the_reported_deviation_can_never_read_as_under_the_threshold_it_fired_against() -> None:
+    """The rule compares at the precision the payload reports.
+
+    At full precision 4_090paise on a 1_000paise baseline is 4.09x, but a fraction
+    just over a multiple - 3.004x - would otherwise be reported as ``3.00x`` beside a
+    ``3.00`` threshold, leaving the reader unable to see why the alert fired at all.
+    """
+    just_over = evaluate_cost_outlier_alerts(
+        _trailing(1_000, 1_000, 1_000, recent=3_004),
+        RollupThresholds(monthly_budget_paise=200_000),
+        target_date=_TARGET_DATE,
+    )
+    just_under = evaluate_cost_outlier_alerts(
+        _trailing(1_000, 1_000, 1_000, recent=2_999),
+        RollupThresholds(monthly_budget_paise=200_000),
+        target_date=_TARGET_DATE,
+    )
+
+    # Rounding down to the reported precision makes both sides agree, so a figure that
+    # would read as AT the threshold does not fire at all.
+    assert just_over == ()
+    assert just_under == ()
+    assert (
+        evaluate_cost_outlier_alerts(
+            _trailing(1_000, 1_000, 1_000, recent=3_010),
+            RollupThresholds(monthly_budget_paise=200_000),
+            target_date=_TARGET_DATE,
+        )[0].payload["deviation_multiple"]
+        == "3.01"
+    )
+
+
+def test_a_zero_baseline_is_silence_rather_than_a_pass_crash() -> None:
+    """The builder is public, so it must not divide by a baseline it did not build.
+
+    A zero baseline is not a deviation; it is an absence of one, and raising a
+    ``DivisionByZero`` out of the nightly pass over it would take the whole rollup
+    down for a figure that means nothing.
+    """
+    assert (
+        build_cost_outlier_alert(
+            "patient",
+            "actor-a",
+            recent_spend_paise=90_000,
+            baseline=ActorCostBaseline(
+                actor_kind="patient",
+                actor_key="actor-a",
+                days=3,
+                total_paise=0,
+                daily_paise=Decimal("0"),
+            ),
+            multiple=DEFAULT_COST_OUTLIER_MULTIPLE,
+            usage_date=_TARGET_DATE,
+        )
+        is None
+    )
+
+
+def test_a_cost_outlier_alert_dedupes_on_the_actor_and_not_on_the_figures() -> None:
+    """The marker is the actor alone, so the measured figures cannot change identity."""
+    payload = {
+        "source": "rollup",
+        "actor": actor_alert_scope("patient", "actor-a"),
+        "recent_day_spend_paise": 90_000,
+        "baseline_daily_paise": "1000.00",
+    }
+
+    assert alert_marker(payload) == {
+        "source": "rollup",
+        "actor": actor_alert_scope("patient", "actor-a"),
+    }
+    assert alert_key(ALERT_KIND_COST_OUTLIER, payload) == alert_key(
+        ALERT_KIND_COST_OUTLIER,
+        {"source": "rollup", "actor": actor_alert_scope("patient", "actor-a")},
+    )
+
+
+def test_the_resolve_step_may_close_a_cost_outlier_because_a_spike_has_a_steady_state() -> None:
+    """AC4: the kind is resolvable, and the vocabulary test states which half it is in."""
+    assert alert_kind_resolves(ALERT_KIND_COST_OUTLIER)
+    assert ALERT_KIND_COST_OUTLIER in RESOLVABLE_ALERT_KINDS
+    assert ALERT_KIND_COST_OUTLIER not in NON_RESOLVABLE_ALERT_KINDS
+
+
+def test_the_evaluated_keys_cover_every_actor_the_pass_measured() -> None:
+    """An actor measured and found normal is the one whose alert has to CLOSE.
+
+    A set built only from the alerts this pass raised could never contain an actor
+    that has stopped spiking, so its alert would sit open for ever.
+    """
+    keys = evaluated_alert_keys(
+        providers=[], tables=[], actors=[actor_alert_scope("patient", "actor-a")]
+    )
+
+    assert (
+        alert_key(
+            ALERT_KIND_COST_OUTLIER,
+            {"source": "rollup", "actor": actor_alert_scope("patient", "actor-a")},
+        )
+        in keys
+    )
+    # An actor this pass never read is not evaluated, so its alert is not closed on
+    # absence of evidence - unless it is handed over as ALREADY alerting, which is
+    # what the adapter does. Otherwise it could never be closed at all.
+    assert (
+        alert_key(
+            ALERT_KIND_COST_OUTLIER,
+            {"source": "rollup", "actor": actor_alert_scope("patient", "actor-b")},
+        )
+        not in keys
+    )
+
+
+def test_an_actor_who_has_gone_quiet_still_gets_their_cost_outlier_reconciled() -> None:
+    """An actor past the trailing window leaves it for good, so absence must resolve.
+
+    Their alert is about ONE DAY's figure, and later quiet cannot un-spike it - only
+    end it. Without the union no later pass would ever re-read them, so the row would
+    stay open for ever: not held on missing evidence, but unreachable.
+    """
+    observed_only = evaluated_alert_keys(
+        providers=[], tables=[], actors=[actor_alert_scope("patient", "actor-a")]
+    )
+    reconciled = evaluated_alert_keys(
+        providers=[],
+        tables=[],
+        actors=[actor_alert_scope("patient", "actor-a")],
+        alerted_actors=[actor_alert_scope("patient", "actor-b")],
+    )
+
+    # The union adds exactly the gone-quiet actor's key, and nothing else moves.
+    assert reconciled - observed_only == {
+        alert_key(ALERT_KIND_COST_OUTLIER, {"source": "rollup", "actor": "patient:actor-b"})
+    }
+    assert observed_only - reconciled == set()
+
+
+def test_the_two_actor_kinds_keep_separate_cost_outlier_alerts() -> None:
+    """A patient's spike and their doctor's are different findings, not one merged row."""
+    doctor = [
+        ActorDailySpend("doctor", "actor-b", _TARGET_DATE - timedelta(days=offset), 1_000)
+        for offset in range(1, 4)
+    ]
+    alerts = evaluate_cost_outlier_alerts(
+        [
+            *_trailing(1_000, 1_000, 1_000, recent=90_000, actor_key="actor-a"),
+            *_trailing(1_000, 1_000, 1_000, actor_key="actor-b"),
+            *doctor,
+            ActorDailySpend("doctor", "actor-b", _TARGET_DATE, 90_000),
+        ],
+        RollupThresholds(monthly_budget_paise=200_000),
+        target_date=_TARGET_DATE,
+    )
+
+    assert [alert.payload["actor"] for alert in alerts] == [
+        "doctor:actor-b",
+        "patient:actor-a",
+    ]

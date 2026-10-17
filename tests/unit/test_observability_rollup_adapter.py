@@ -28,8 +28,10 @@ from sqlalchemy.exc import CompileError
 from modules.observability.domain.consumer import AlertRow
 from modules.observability.domain.pseudonym import ActorKind
 from modules.observability.domain.rollup import (
+    COST_OUTLIER_BASELINE_DAYS,
     METRIC_KEY_AI_PROVIDER_HEALTH,
     METRIC_KEY_AI_SPEND,
+    ActorDailySpend,
     ActorSpend,
     AttributionDaily,
     ProviderFailures,
@@ -45,6 +47,7 @@ from modules.observability.domain.rollup import (
 from modules.observability.facade import RollupReport, run_rollup
 from modules.observability.rollup import (
     _apply_alerts,
+    _load_actor_daily_spend,
     _load_actor_spend,
     _load_doctor_by_intake,
     _load_provider_failures,
@@ -559,6 +562,42 @@ def test_the_actor_spend_load_reads_one_day_from_the_granular_source() -> None:
     assert loaded == [_spend()]
     assert "FROM observability.observability_ai_job_spend" in connection.sql
     assert "usage_date" in connection.sql
+
+
+def test_the_actor_day_load_sums_an_actors_scopes_over_one_trailing_week() -> None:
+    """B7 #733: the cost-outlier baseline reads the AGGREGATE, one row per actor-day.
+
+    Read from ``observability_attribution_daily`` rather than the per-job table so a
+    baseline is a per-ACTOR figure: collapsing the provider/model/task-type split is
+    the point, because a caller abusing one leg must not be averaged into the rest of
+    their day. Grouped and summed here because the domain is pure and holds no SQL.
+    """
+    connection = _RecordingConnection(
+        [
+            SimpleNamespace(
+                actor_kind="patient", actor_key="actor-a", usage_date=_TARGET_DATE, cost_paise=9_000
+            )
+        ]
+    )
+
+    loaded = asyncio.run(  # type: ignore[arg-type]
+        _load_actor_daily_spend(connection, _TARGET_DATE, baseline_days=COST_OUTLIER_BASELINE_DAYS)
+    )
+
+    assert loaded == [
+        ActorDailySpend(
+            actor_kind="patient", actor_key="actor-a", usage_date=_TARGET_DATE, cost_paise=9_000
+        )
+    ]
+    sql = connection.sql
+    assert "FROM observability.observability_attribution_daily" in sql
+    assert "observability_attribution_daily.cost_paise) AS cost_paise" in sql
+    assert "GROUP BY observability.observability_attribution_daily.actor_kind" in sql
+    # The window is the day under test plus the configured number of days behind it,
+    # and no older: an eight-day-old spike must not be able to set today's bar. It is
+    # the CONFIGURED figure, so the rows read are the rows the rule judges.
+    assert "observability_attribution_daily.usage_date >" in sql
+    assert "observability_attribution_daily.usage_date <=" in sql
 
 
 def test_the_doctor_edge_load_asks_only_about_the_intakes_the_day_touched() -> None:
