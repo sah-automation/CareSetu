@@ -3,10 +3,10 @@
 Pins the documented read aggregates - spend against the budgeted period, the
 daily cost trend, calls/tokens per provider/task scope, the quality rates, the
 overview's headline KPIs, the rolled latency percentiles, request throughput with
-its capture-liveness answer, dependency/outbox health and the alert feed - against
-a mocked connection, so the window that reaches SQL, the aggregation, and the
-derived arithmetic are all covered without a live database (coding-standards §2:
-DB-free unit surface).
+its capture-liveness answer, dependency/outbox health, the alert feed and the
+period-parameterised business spend read - against a mocked connection, so the window
+that reaches SQL, the aggregation, and the derived arithmetic are all covered without
+a live database (coding-standards §2: DB-free unit surface).
 
 Every SELECT is against the ``observability`` schema only: the read facade never
 crosses a module boundary (ADR-0003). The ``/health`` outbox counts are the one
@@ -29,13 +29,18 @@ import pytest
 from bus.dispatcher import OutboxRowCounts, OutboxTable
 from modules.observability.domain.rollup import ALERT_STATUS_OPEN, ALERT_STATUS_RESOLVED
 from modules.observability.facade import (
+    BUSINESS_PERIOD_MONTH,
+    BUSINESS_PERIOD_TODAY,
+    BUSINESS_PERIOD_WEEK,
     DEFAULT_ERROR_WINDOW_MINUTES,
     ERROR_STATUS_VOCABULARY,
     BusinessCountView,
     ObservabilityFacade,
     build_deeplinks,
     error_status,
+    period_window,
     query_alerts,
+    query_business,
     query_cost_summary,
     query_cost_trend,
     query_error_feed,
@@ -1472,3 +1477,437 @@ def test_deeplinks_with_nothing_configured_answer_absent_everywhere() -> None:
     links = ObservabilityFacade(MagicMock()).get_deeplinks()
 
     assert links == build_deeplinks()
+
+
+# --------------------------------------------------------------- business
+
+
+def test_period_window_names_the_three_periods() -> None:
+    """One read, three windows: they differ only in where they START (#717 dec. 11)."""
+    # 2026-10-12 is a Monday, so the week is that one day and month-to-date the 12th.
+    assert period_window(BUSINESS_PERIOD_TODAY, today=_TODAY) == (_TODAY, _TODAY)
+    assert period_window(BUSINESS_PERIOD_WEEK, today=_TODAY) == (_TODAY, _TODAY)
+    assert period_window(BUSINESS_PERIOD_MONTH, today=_TODAY) == (
+        date(2026, 10, 1),
+        _TODAY,
+    )
+
+    # Saturday: the week is Monday the 5th through today, NOT the rolling six days.
+    saturday = date(2026, 10, 17)
+    assert period_window(BUSINESS_PERIOD_WEEK, today=saturday) == (
+        date(2026, 10, 12),
+        saturday,
+    )
+    # The 1st: a month-to-date that has only seen one day is still a real answer.
+    assert period_window(BUSINESS_PERIOD_MONTH, today=date(2026, 10, 1)) == (
+        date(2026, 10, 1),
+        date(2026, 10, 1),
+    )
+
+
+def test_period_window_defaults_to_the_current_utc_day() -> None:
+    assert period_window(BUSINESS_PERIOD_TODAY)[1] == datetime.now(UTC).date()
+
+
+def test_period_window_refuses_an_unknown_period() -> None:
+    """An unknown period raises instead of falling back to one period's numbers.
+
+    Falling back would answer 200 with a DIFFERENT window's spend, which is the worse
+    failure a business read can have: the operator reads it as fact.
+    """
+    with pytest.raises(ValueError, match="unknown business period 'yesterday'"):
+        period_window("yesterday", today=_TODAY)
+
+
+#: The ``(provider, model, task_type)`` grain rows the one aggregation delivers, in
+#: the order its ``ORDER BY provider, model, task_type`` SELECT returns them. The
+#: ``draft`` row is here because #722 made the drafting leg metered, so the drafting
+#: spend is produced rather than declared - a breakdown that filtered it out would
+#: under-report the bill it exists to explain.
+_BUSINESS_ROWS: list[dict[str, object]] = [
+    {
+        "provider": "anthropic",
+        "model": "claude-3-5-haiku",
+        "task_type": "transcribe",
+        "jobs": 3,
+        "input_tokens": 300_000,
+        "output_tokens": 30_000,
+        "cost_paise": 60_000,
+    },
+    {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "task_type": "draft",
+        "jobs": 2,
+        "input_tokens": 40_000,
+        "output_tokens": 20_000,
+        "cost_paise": 20_000,
+    },
+    {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "task_type": "structure",
+        "jobs": 5,
+        "input_tokens": 100_000,
+        "output_tokens": 0,
+        "cost_paise": 10_000,
+    },
+]
+
+#: The budget snapshot rows behind the cap. Both scopes carry the SAME 150,000 cap -
+#: one bill-wide figure written onto every scope - so the cap is read as ``max``, the
+#: rule ``/cost`` already follows.
+_BUSINESS_BUDGET_ROWS: list[dict[str, object]] = [
+    {
+        "provider": "anthropic",
+        "model": "claude-3-5-haiku",
+        "monthly_limit_paise": 150_000,
+        "alert_threshold_pct": 80,
+        "current_spend_paise": 60_000,
+        "billing_period_start": _PERIOD_START,
+        "billing_period_end": _PERIOD_END,
+    },
+    {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "monthly_limit_paise": 150_000,
+        "alert_threshold_pct": 80,
+        "current_spend_paise": 30_000,
+        "billing_period_start": _PERIOD_START,
+        "billing_period_end": _PERIOD_END,
+    },
+]
+
+
+async def test_business_read_rolls_one_aggregation_up_into_three_breakdowns() -> None:
+    """One grain read becomes the headline, the provider rows, the model rows and the
+    task rows - so they reconcile by construction rather than by agreement."""
+    connection = _connection(_BUSINESS_ROWS, _BUSINESS_BUDGET_ROWS)
+
+    view = await query_business(
+        connection,
+        period=BUSINESS_PERIOD_MONTH,
+        from_date=_PERIOD_START,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    assert view.period == BUSINESS_PERIOD_MONTH
+    assert (view.period_start, view.period_end) == (_PERIOD_START, _TODAY)
+    assert view.spend_paise == 90_000
+    assert view.jobs == 10
+    assert view.input_tokens == 440_000
+    assert view.output_tokens == 50_000
+    assert [row.provider for row in view.by_provider] == ["anthropic", "openai"]
+    # Two models share one provider, which is what "by model WITHIN a provider" buys.
+    assert [(row.provider, row.model) for row in view.by_model] == [
+        ("anthropic", "claude-3-5-haiku"),
+        ("openai", "gpt-4o-mini"),
+    ]
+    assert [row.task_type for row in view.by_task_type] == ["draft", "structure", "transcribe"]
+    # Every breakdown adds up to the headline: the same three figures, folded three
+    # ways. A provider row IS the sum of its own model rows.
+    for breakdown in (view.by_provider, view.by_task_type):
+        assert sum(row.spend_paise for row in breakdown) == view.spend_paise
+    assert sum(row.spend_paise for row in view.by_model) == view.spend_paise
+
+
+async def test_business_read_reports_each_token_side_against_its_own_rate() -> None:
+    """Input and output are separate volumes with separate figures, never one blend.
+
+    A single ``cost / total_tokens`` figure absorbs a shift between the two sides into
+    one moving number; two figures at their own denominators do not.
+
+    These are RATES, not per-side prices, and the test says so: the metered tables hold
+    one ``cost_paise`` per job, so both figures carry that same numerator and differ only
+    in denominator. Quoting two independent prices would need per-side metering.
+    """
+    connection = _connection(_BUSINESS_ROWS, _BUSINESS_BUDGET_ROWS)
+
+    view = await query_business(
+        connection,
+        period=BUSINESS_PERIOD_MONTH,
+        from_date=_PERIOD_START,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    # 90,000 paise over 440,000 input tokens is 204.5454... per thousand.
+    assert view.paise_per_1k_input_tokens == Decimal("204.5455")
+    assert view.paise_per_1k_output_tokens == Decimal("1800.0000")
+    anthropic = view.by_provider[0]
+    assert anthropic.paise_per_1k_input_tokens == Decimal("200.0000")
+    assert anthropic.paise_per_1k_output_tokens == Decimal("2000.0000")
+    # ``structure`` produced no output tokens at all. That is "nothing to price",
+    # not "free output" - the two must stay distinguishable.
+    structure = next(row for row in view.by_task_type if row.task_type == "structure")
+    assert structure.output_tokens == 0
+    assert structure.paise_per_1k_output_tokens is None
+    assert structure.paise_per_1k_input_tokens == Decimal("100.0000")
+
+
+async def test_business_read_spends_patient_rows_only_so_the_bill_is_not_doubled() -> None:
+    """Every job writes a patient row AND a doctor row with identical figures.
+
+    Summing both kinds would count each rupee twice. The kind is a filter on the
+    MONEY, so it is asserted on the SQL the read issues rather than inferred from a
+    fixture - this rule cannot be shown by the arithmetic above, because the doctor
+    rows are not in the fixture at all.
+    """
+    connection = _connection(_BUSINESS_ROWS, _BUSINESS_BUDGET_ROWS)
+
+    await query_business(
+        connection,
+        period=BUSINESS_PERIOD_MONTH,
+        from_date=_PERIOD_START,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    sql = " ".join(_compiled(connection, 0).split())
+    assert "observability.observability_attribution_daily" in sql
+    assert "actor_kind = 'patient'" in sql
+    assert "doctor" not in sql
+
+
+async def test_business_read_reads_the_cap_from_the_snapshot_and_projects_the_month_end() -> None:
+    """Cap, consumed and projection come back together - the "before the cap" half."""
+    connection = _connection(_BUSINESS_ROWS, _BUSINESS_BUDGET_ROWS)
+
+    view = await query_business(
+        connection,
+        period=BUSINESS_PERIOD_TODAY,
+        from_date=_TODAY,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    # The cap is read ONCE, not summed across the scopes that each carry it.
+    assert view.monthly_cap_paise == 150_000
+    assert view.cap_consumed_paise == 90_000
+    assert view.cap_consumed_pct == Decimal("60.00")
+    # 90,000 over 12 of October's 31 days, straight-lined: 232,500.
+    assert view.projected_month_end_paise == 232_500
+    assert view.projection_basis is not None
+    assert view.projection_basis.period_start == _PERIOD_START
+    assert view.projection_basis.period_end == _PERIOD_END
+    assert view.projection_basis.elapsed_days == 12
+    assert view.projection_basis.period_days == 31
+    # Sixty per cent consumed on the twelfth still lands over the cap, and that is the
+    # warning: the month is not safe, the panel says so twelve days before the breach.
+    assert view.projected_over_cap is True
+
+
+async def test_business_read_warns_before_the_cap_not_after() -> None:
+    """The whole point of the projection: over the cap on the twentieth, not the last."""
+    connection = _connection(
+        _BUSINESS_ROWS,
+        [_BUSINESS_BUDGET_ROWS[0] | {"current_spend_paise": 140_000}],
+    )
+
+    view = await query_business(
+        connection,
+        period=BUSINESS_PERIOD_TODAY,
+        from_date=_TODAY,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    # 140,000 over 12 of 31 days lands at 361,667 against a 150,000 cap: still inside
+    # the month, already over budget by the end of it.
+    assert view.cap_consumed_pct == Decimal("93.33")
+    assert view.projected_month_end_paise == 361_667
+    assert view.projected_over_cap is True
+
+
+async def test_business_read_clamps_a_billing_period_that_has_already_closed() -> None:
+    """A stale snapshot stamped on last month projects its FINAL figure, not an
+    extrapolation past a month that is over."""
+    connection = _connection(
+        _BUSINESS_ROWS,
+        [
+            _BUSINESS_BUDGET_ROWS[0]
+            | {
+                "billing_period_start": date(2026, 9, 1),
+                "billing_period_end": date(2026, 9, 30),
+            }
+        ],
+    )
+
+    view = await query_business(
+        connection,
+        period=BUSINESS_PERIOD_MONTH,
+        from_date=_PERIOD_START,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    assert view.projection_basis is not None
+    assert view.projection_basis.elapsed_days == 30
+    assert view.projection_basis.period_days == 30
+    assert view.projected_month_end_paise == 60_000
+
+
+async def test_business_read_spans_the_widest_period_its_budget_rows_carry() -> None:
+    """What happens when the snapshot rows disagree about which month they are in.
+
+    The rollup's period reset re-stamps every stale or unstamped row inside the same
+    transaction it snapshots in, so a mixed set cannot survive a pass - but the read
+    has to have an answer if one exists anyway, and it takes the rule ``/cost`` already
+    reads these bounds by: the WIDEST span the rows carry. Two months' spend over a
+    two-month basis projects lower than either month alone, which understates the burn
+    rather than overstating it - the safer of the two directions to be wrong in.
+    """
+    connection = _connection(
+        _BUSINESS_ROWS,
+        [
+            _BUSINESS_BUDGET_ROWS[0],
+            _BUSINESS_BUDGET_ROWS[1]
+            | {
+                "billing_period_start": date(2026, 9, 1),
+                "billing_period_end": date(2026, 9, 30),
+            },
+        ],
+    )
+
+    view = await query_business(
+        connection,
+        period=BUSINESS_PERIOD_MONTH,
+        from_date=_PERIOD_START,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    assert view.cap_consumed_paise == 90_000
+    assert view.projection_basis is not None
+    assert view.projection_basis.period_start == date(2026, 9, 1)
+    assert view.projection_basis.period_end == _PERIOD_END
+    assert view.projection_basis.period_days == 61
+    assert view.projection_basis.elapsed_days == 42
+    # 90,000 over 42 of a 61-day window: 130,714.
+    assert view.projected_month_end_paise == 130_714
+
+
+async def test_business_read_clears_a_month_projected_under_the_cap() -> None:
+    """The healthy verdict, which is the answer most days should give.
+
+    Worth pinning separately from the over-cap case: a flag that is always true is a
+    flag nobody reads, and this is the read whose whole purpose is a verdict.
+    """
+    connection = _connection(
+        _BUSINESS_ROWS,
+        [_BUSINESS_BUDGET_ROWS[0] | {"current_spend_paise": 10_000}],
+    )
+
+    view = await query_business(
+        connection,
+        period=BUSINESS_PERIOD_MONTH,
+        from_date=_PERIOD_START,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    assert view.cap_consumed_pct == Decimal("6.67")
+    assert view.projected_month_end_paise == 25_833
+    assert view.projected_over_cap is False
+
+
+async def test_business_read_answers_without_a_projection_rather_than_inventing_one() -> None:
+    """An unstamped budget row has no period to spread spend across.
+
+    It answers ``None`` - which says "nothing projected" - rather than dividing by
+    zero or, worse, projecting against the period the caller happened to ask for.
+    """
+    connection = _connection(
+        _BUSINESS_ROWS,
+        [_BUSINESS_BUDGET_ROWS[0] | {"billing_period_start": None, "billing_period_end": None}],
+    )
+
+    view = await query_business(
+        connection,
+        period=BUSINESS_PERIOD_MONTH,
+        from_date=_PERIOD_START,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    assert view.projection_basis is None
+    assert view.projected_month_end_paise is None
+    assert view.projected_over_cap is False
+    # The spend itself is unaffected: the missing stamps cost the projection, not
+    # the numbers an operator is actually here for.
+    assert view.spend_paise == 90_000
+
+
+async def test_business_read_answers_zeroes_for_a_period_with_no_activity() -> None:
+    """A window the rollup has not written yet is an answer, not a failure - and the
+    breakdown is empty rather than carrying a fabricated zero row."""
+    connection = _connection([], [])
+
+    view = await query_business(
+        connection,
+        period=BUSINESS_PERIOD_TODAY,
+        from_date=_TODAY,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    assert (view.spend_paise, view.jobs, view.input_tokens, view.output_tokens) == (0, 0, 0, 0)
+    assert view.paise_per_1k_input_tokens is None
+    assert view.paise_per_1k_output_tokens is None
+    assert view.monthly_cap_paise == 0
+    assert view.cap_consumed_pct == Decimal("0.00")
+    assert (view.by_provider, view.by_model, view.by_task_type) == ([], [], [])
+
+
+async def test_business_read_reads_the_attribution_aggregate_and_the_budget_snapshot_only() -> None:
+    """ADR-0003 module isolation, for this read: two tables, both ours, no join."""
+    connection = _connection(_BUSINESS_ROWS, _BUSINESS_BUDGET_ROWS)
+
+    await query_business(
+        connection,
+        period=BUSINESS_PERIOD_MONTH,
+        from_date=_PERIOD_START,
+        to_date=_TODAY,
+        today=_TODAY,
+    )
+
+    assert _from_target(connection, 0) == "observability.observability_attribution_daily"
+    assert _from_target(connection, 1) == "observability.observability_ai_cost_budget"
+
+
+@pytest.mark.parametrize(
+    ("period", "expected_start"),
+    [
+        (BUSINESS_PERIOD_TODAY, _TODAY),
+        (BUSINESS_PERIOD_WEEK, _TODAY),
+        (BUSINESS_PERIOD_MONTH, _PERIOD_START),
+    ],
+)
+async def test_get_business_serves_every_period_through_one_method(
+    period: str, expected_start: date
+) -> None:
+    """The one seam all three periods go through (#717 decision 11).
+
+    Three methods, or three routes, or three queries would each be a second copy of
+    this aggregation to keep in agreement. What this pins is that they are the SAME
+    window-resolution, one call, not three tests of three near-identical functions.
+    """
+    facade = ObservabilityFacade(_engine(_connection(_BUSINESS_ROWS, _BUSINESS_BUDGET_ROWS)))
+
+    view = await facade.get_business(period=period, today=_TODAY)
+
+    assert view.period == period
+    assert view.period_start == expected_start
+    assert view.period_end == _TODAY
+
+
+async def test_get_business_resolves_today_once_so_the_window_and_the_projection_agree() -> None:
+    """Two reads of the clock could straddle midnight and put this month's spend into
+    tomorrow's window while the projection counted the other day."""
+    facade = ObservabilityFacade(_engine(_connection(_BUSINESS_ROWS, _BUSINESS_BUDGET_ROWS)))
+
+    view = await facade.get_business(period=BUSINESS_PERIOD_MONTH, today=_TODAY)
+
+    assert view.projection_basis is not None
+    assert view.projection_basis.elapsed_days == (_TODAY - _PERIOD_START).days + 1

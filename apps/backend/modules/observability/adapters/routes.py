@@ -20,7 +20,9 @@ Scope: the whole plan-phase14 §9.1 read table. C1a (#706) serves ``cost``,
 B9 (#728) adds ``providers``, the degraded-provider board; B5 (#729) adds
 ``reliability``, the queue depth/age read with the per-outbox breakdown, the
 recent-activity figure and the link out to true concurrency; B8 (#730) adds
-``errors``, the live collapsed error stream with its open/resolved split.
+``errors``, the live collapsed error stream with its open/resolved split; B2
+(#731) adds ``business``, the period-parameterised spend read - today, week-to-date
+and month-to-date are three windows of ONE endpoint.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ from app.config import Settings
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_operator
 from modules.observability.facade import (
+    BUSINESS_PERIOD_MONTH,
     DEFAULT_ACTIVITY_WINDOW_MINUTES,
     DEFAULT_ALERT_PAGE_SIZE,
     DEFAULT_ERROR_PAGE_SIZE,
@@ -45,6 +48,7 @@ from modules.observability.facade import (
     MAX_ERROR_WINDOW_MINUTES,
     MAX_THROUGHPUT_WINDOW_MINUTES,
     AlertPage,
+    BusinessRead,
     CostSummary,
     CostTrend,
     Deeplinks,
@@ -112,6 +116,16 @@ _AlertStatus = Annotated[Literal["open", "resolved"] | None, Query(alias="status
 #: changes.
 _ErrorStatus = Annotated[Literal["open", "resolved"] | None, Query(alias="status")]
 
+#: The periods ``/business`` accepts. Spelled as a static ``Literal`` for the reason
+#: :data:`_ErrorStatus` is: FastAPI renders the accepted values into OpenAPI and
+#: refuses a typo at the edge, where a hand-rolled check would 422 with no schema and
+#: a permissive one would answer 200 with a DIFFERENT period's numbers - which is the
+#: worse failure here, because an operator reads a whole month's spend as a day's.
+#: The values are the facade's own
+#: :data:`~modules.observability.facade.BUSINESS_PERIODS` constants, and
+#: ``test_the_business_period_gate_matches_the_facade_vocabulary`` asserts the two agree.
+_BusinessPeriod = Annotated[Literal["today", "week_to_date", "month_to_date"], Query()]
+
 _Page = Annotated[int, Query(ge=1)]
 _PageSize = Annotated[int, Query(ge=1, le=MAX_ALERT_PAGE_SIZE)]
 _ErrorPageSize = Annotated[int, Query(ge=1, le=MAX_ERROR_PAGE_SIZE)]
@@ -144,6 +158,40 @@ async def read_cost(
     """
     del principal
     return await _facade(request).get_cost_summary()
+
+
+@router.get(
+    "/v1/operator/observability/business",
+    response_model=BusinessRead,
+    status_code=status.HTTP_200_OK,
+    summary="Read period AI spend against the monthly cap, with the breakdown (operator only)",
+)
+async def read_business(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_operator)],
+    period: _BusinessPeriod = BUSINESS_PERIOD_MONTH,
+) -> BusinessRead:
+    """Spend for a period, against the monthly cap, with a projected month-end burn.
+
+    One endpoint for all three periods. ``period`` selects the window -
+    ``today``, ``week_to_date`` or ``month_to_date`` - rather than three handlers over
+    three copies of the same aggregation existing to choose between them (#717
+    decision 11). All three windows end today and differ only in where they start, so
+    the parameter is a start date, not a different question.
+
+    The default is ``month_to_date`` because the cap it is reported against is a
+    MONTHLY cap: a panel opened without a period is asking "how is this month
+    going", and answering with today's rupee figure would compare one day against a
+    month-long budget.
+
+    The cap figures ride every period, not just the monthly one. That is what makes
+    "is this spend healthy" answerable at a glance - ``projected_month_end_paise`` and
+    ``projected_over_cap`` say where the month lands if the days so far are
+    representative - and it is why an operator hears about the cap on the twentieth
+    rather than on the last.
+    """
+    del principal
+    return await _facade(request).get_business(period=period)
 
 
 @router.get(

@@ -24,6 +24,12 @@ the capture writes rather than a hand-written seed. B9 (#728) adds
 columns and the named last error the board reads, and B8 (#730) adds ``/errors``
 over the rows a real 5xx left behind - the same seam reached from the read's end.
 
+B2 (#731) adds ``/business`` over its own fixture: the daily per-actor attribution
+aggregate #725 writes, patient and doctor rows for the same job side by side, plus
+the budget snapshot. It is the only read whose window follows the clock rather than a
+pinned fixture date, so the assertions derive the projection ARITHMETIC instead of a
+figure that would only hold on one day of the month.
+
 Requires the native PostgreSQL; the suite skips cleanly when it is unreachable.
 The shared integration conftest migrates to head once per file, empties the
 observability aggregates and every module's outbox before each test (``/health``
@@ -32,11 +38,13 @@ counts them all), and downgrades afterwards.
 
 from __future__ import annotations
 
+import calendar
 import json
 import uuid
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from datetime import UTC, date, datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal
+from typing import Any
 from urllib.parse import unquote
 
 import pytest_asyncio
@@ -83,6 +91,7 @@ ALERTS_PATH = "/v1/operator/observability/alerts"
 ERRORS_PATH = "/v1/operator/observability/errors"
 DEEPLINKS_PATH = "/v1/operator/observability/deeplinks"
 RELIABILITY_PATH = "/v1/operator/observability/reliability"
+BUSINESS_PATH = "/v1/operator/observability/business"
 
 
 async def _seed(connection: AsyncConnection) -> None:
@@ -1630,4 +1639,262 @@ async def test_the_error_feed_route_refuses_anonymous_and_non_operator_callers(
     """The tenth read, behind the same flat operator requirement as the other nine."""
     assert _client(database_url).get(ERRORS_PATH).status_code == 401
     forbidden = _client(database_url).get(ERRORS_PATH, headers=_bearer("patient"))
+    assert forbidden.status_code == 403
+
+
+# ------------------------------------------------------------------ business
+#
+# ``/business`` resolves its own clock - the facade owns it, as it does for every
+# windowed read - so this fixture is anchored to the day the test RUNS rather than to
+# a pinned date. A pinned date would fall outside the window on every run but one,
+# and a suite that only passes on a Tuesday is not a suite.
+
+
+def _utc_today() -> date:
+    return datetime.now(UTC).date()
+
+
+def _month_bounds(today: date) -> tuple[date, date]:
+    start = today.replace(day=1)
+    end = start.replace(day=calendar.monthrange(start.year, start.month)[1])
+    return start, end
+
+
+#: One month of spend per PATIENT, as the #725 rollup writes it: today carries three
+#: scopes, the first of the month carries a fourth. The doctor row at the bottom
+#: mirrors the ``draft`` patient's figures EXACTLY, because that is what the rollup
+#: writes for a job whose doctor is known - one rupee recorded against the two actors
+#: the business reads need it against, not two halves of the bill.
+_ATTRIBUTION_SEED = """
+    INSERT INTO observability.observability_attribution_daily
+    (usage_date, actor_kind, actor_key, provider, model, task_type, jobs,
+     completed_jobs, failed_jobs, input_tokens, output_tokens, cost_paise) VALUES
+    (:today, :patient, :p1, 'openai', 'gpt-4o-mini', 'transcribe', 3, 3, 0, 300000, 30000, 60000),
+    (:today, :patient, :p2, 'openai', 'gpt-4o-mini', 'draft',       2, 2, 0,  40000, 20000, 20000),
+    (:today, :patient, :p3, 'anthropic', 'claude-3-5-haiku', 'structure',
+     5, 4, 1, 100000, 0, 10000),
+    (:today, :doctor, :d1, 'openai', 'gpt-4o-mini', 'draft', 2, 2, 0, 40000, 20000, 20000),
+    (:month_start, :patient, :p4, 'anthropic', 'claude-3-5-haiku', 'transcribe',
+     1, 1, 0, 10000, 1000, 2000)
+"""
+
+_TODAY_SPEND_PAISE = 90_000
+_MONTH_SPEND_PAISE = 2_000
+_BUSINESS_CAP_PAISE = 150_000
+#: The snapshot's month-to-date figure. Set to the aggregate's own month-to-date sum
+#: because that is what the rollup writes - one ``_load_period_spend`` feeding the
+#: snapshot, one ``build_attribution_daily`` feeding the aggregate, both off the same
+#: per-job rows - so a fixture where the two disagree would be testing a state the
+#: rollup cannot produce.
+_BUSINESS_CONSUMED_PAISE = _TODAY_SPEND_PAISE + _MONTH_SPEND_PAISE
+
+
+@pytest_asyncio.fixture
+async def attributed_engine(engine: AsyncEngine) -> AsyncIterator[AsyncEngine]:
+    """The daily per-actor aggregate and the budget snapshot the business read reads."""
+    today = _utc_today()
+    month_start, month_end = _month_bounds(today)
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(_ATTRIBUTION_SEED),
+            {
+                "today": today,
+                "month_start": month_start,
+                "patient": ACTOR_KIND_PATIENT,
+                "doctor": "doctor",
+                "p1": actor_key(ACTOR_KIND_PATIENT, 101),
+                "p2": actor_key(ACTOR_KIND_PATIENT, 102),
+                "p3": actor_key(ACTOR_KIND_PATIENT, 103),
+                "p4": actor_key(ACTOR_KIND_PATIENT, 104),
+                "d1": actor_key("doctor", 201),
+            },
+        )
+        await connection.execute(
+            text(
+                "INSERT INTO observability.observability_ai_cost_budget "
+                "(provider, model, monthly_limit_paise, alert_threshold_pct, "
+                "current_spend_paise, billing_period_start, billing_period_end) "
+                "VALUES ('openai', 'gpt-4o-mini', :cap, 80, :spent, :start, :end)"
+            ),
+            {
+                "cap": _BUSINESS_CAP_PAISE,
+                "spent": _BUSINESS_CONSUMED_PAISE,
+                "start": month_start,
+                "end": month_end,
+            },
+        )
+    yield engine
+
+
+def _business_body(database_url: str, period: str | None = None) -> dict[str, Any]:
+    path = BUSINESS_PATH if period is None else f"{BUSINESS_PATH}?period={period}"
+    with _client(database_url) as client:
+        return client.get(path, headers=_bearer()).json()
+
+
+def _expected_projection(today: date) -> tuple[int, int, int]:
+    """The straight-line month-end burn this read should report, and its day counts.
+
+    Derived here rather than pinned: the seed's billing period is the REAL current
+    month, so the elapsed-day count moves with the calendar and a hard-coded paise
+    figure would only hold on one day of it. What is pinned is the ARITHMETIC - the
+    projection must be the consumed figure scaled by period/elapsed days - which is
+    the part that could actually be wrong.
+    """
+    month_start, month_end = _month_bounds(today)
+    elapsed = (today - month_start).days + 1
+    period_days = (month_end - month_start).days + 1
+    projected = (
+        Decimal(_BUSINESS_CONSUMED_PAISE) * Decimal(period_days) / Decimal(elapsed)
+    ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    return int(projected), elapsed, period_days
+
+
+async def test_the_business_read_reports_todays_spend_and_its_breakdown(
+    attributed_engine: AsyncEngine, database_url: str
+) -> None:
+    """The headline is the seeded sum over the PERIOD, and the breakdowns reconcile.
+
+    Wire decimals arrive as strings at their stated scale (api-standards §3), which is
+    what the frontend already parses for the other reads.
+    """
+    del attributed_engine
+    today = _utc_today()
+    body = _business_body(database_url, "today")
+
+    assert body["period"] == "today"
+    assert (body["period_start"], body["period_end"]) == (today.isoformat(), today.isoformat())
+    assert body["spend_paise"] == _TODAY_SPEND_PAISE
+    assert body["jobs"] == 10
+    assert body["input_tokens"] == 440_000
+    assert body["output_tokens"] == 50_000
+    # Each side at its own denominator: 90,000 over 440,000 and over 50,000.
+    assert body["paise_per_1k_input_tokens"] == "204.5455"
+    assert body["paise_per_1k_output_tokens"] == "1800.0000"
+    assert [(row["provider"], row["jobs"], row["spend_paise"]) for row in body["by_provider"]] == [
+        ("anthropic", 5, 10_000),
+        ("openai", 5, 80_000),
+    ]
+    # Two models under one provider: "by model WITHIN a provider", not a flat model list.
+    assert [(row["provider"], row["model"]) for row in body["by_model"]] == [
+        ("anthropic", "claude-3-5-haiku"),
+        ("openai", "gpt-4o-mini"),
+    ]
+    assert [row["task_type"] for row in body["by_task_type"]] == [
+        "draft",
+        "structure",
+        "transcribe",
+    ]
+    for breakdown in ("by_provider", "by_model", "by_task_type"):
+        assert sum(row["spend_paise"] for row in body[breakdown]) == _TODAY_SPEND_PAISE
+    # ``structure`` recorded no output tokens: nothing to price, not "free output".
+    structure = next(row for row in body["by_task_type"] if row["task_type"] == "structure")
+    assert structure["output_tokens"] == 0
+    assert structure["paise_per_1k_output_tokens"] is None
+
+
+async def test_the_business_read_does_not_count_a_doctor_row_twice(
+    attributed_engine: AsyncEngine, database_url: str
+) -> None:
+    """The seed carries a doctor row mirroring the ``draft`` patient's figures.
+
+    The rollup writes one row per ACTOR, so the same rupee appears under both the
+    patient and the doctor who served the case. Summing both kinds would double the
+    bill this read exists to explain, which is why the actor kind is a filter on the
+    money rather than a grouping dimension.
+    """
+    del attributed_engine
+    body = _business_body(database_url, "today")
+
+    draft = next(row for row in body["by_task_type"] if row["task_type"] == "draft")
+    # 2 jobs and 20,000 paise - the patient's figures, not 4 jobs and 40,000.
+    assert (draft["jobs"], draft["spend_paise"]) == (2, 20_000)
+
+
+async def test_one_business_endpoint_serves_the_three_period_windows(
+    attributed_engine: AsyncEngine, database_url: str
+) -> None:
+    """Today, week-to-date and month-to-date are three WINDOWS of one read.
+
+    This is the acceptance criterion three separate reads would fail: one route, one
+    response, three windows - each ending today and differing only in where it
+    starts. The seeded first-of-the-month spend is what makes the wider windows
+    visibly wider than ``today``.
+    """
+    del attributed_engine
+    today = _utc_today()
+    month_start, _ = _month_bounds(today)
+    week_start = today - timedelta(days=today.weekday())
+
+    today_body = _business_body(database_url, "today")
+    week_body = _business_body(database_url, "week_to_date")
+    month_body = _business_body(database_url, "month_to_date")
+
+    assert (today_body["period_start"], today_body["period_end"]) == (
+        today.isoformat(),
+        today.isoformat(),
+    )
+    assert (week_body["period_start"], week_body["period_end"]) == (
+        week_start.isoformat(),
+        today.isoformat(),
+    )
+    assert (month_body["period_start"], month_body["period_end"]) == (
+        month_start.isoformat(),
+        today.isoformat(),
+    )
+    assert today_body["spend_paise"] == _TODAY_SPEND_PAISE
+    assert month_body["spend_paise"] == _TODAY_SPEND_PAISE + _MONTH_SPEND_PAISE
+    # The week reaches the 1st only when the 1st falls on or after this Monday; on a
+    # Monday - and on a month whose first day sits in the previous ISO week - the week
+    # window is today's alone, which is the correct answer rather than a missing row.
+    week_covers_month_start = week_start <= month_start <= today
+    assert week_body["spend_paise"] == _TODAY_SPEND_PAISE + (
+        _MONTH_SPEND_PAISE if week_covers_month_start else 0
+    )
+
+
+async def test_the_business_read_reports_the_cap_and_the_projected_burn_together(
+    attributed_engine: AsyncEngine, database_url: str
+) -> None:
+    """Cap, consumed and projection arrive in the SAME response - the warning shape.
+
+    The point is that a panel asking for ``today`` still learns where the MONTH lands:
+    an operator who only sees today's rupee figure finds out about the cap on the last
+    day of the month, which is the outcome the projection exists to prevent.
+    """
+    del attributed_engine
+    today = _utc_today()
+    projected, elapsed, period_days = _expected_projection(today)
+
+    body = _business_body(database_url, "today")
+
+    assert body["monthly_cap_paise"] == _BUSINESS_CAP_PAISE
+    # The consumed figure is READ off the budget snapshot, not recomputed from the
+    # aggregate - it is the same number ``/cost`` and the ``ai_budget`` alert use, and
+    # the rollup writes it from the same per-job rows the aggregate is built from, so
+    # one bill reaches the operator however they ask for it.
+    assert body["cap_consumed_paise"] == _BUSINESS_CONSUMED_PAISE
+    assert body["cap_consumed_pct"] == "61.33"
+    assert body["projected_month_end_paise"] == projected
+    assert body["projection_basis"] == {
+        "period_start": _month_bounds(today)[0].isoformat(),
+        "period_end": _month_bounds(today)[1].isoformat(),
+        "elapsed_days": elapsed,
+        "period_days": period_days,
+    }
+    # The flag is asserted as TRACKING the two figures beside it, not as a fixed
+    # value: a straight line from 92,000 consumed is over a 150,000 cap for most of a
+    # month and back under it on the last day, so the only claim that holds whatever
+    # day this runs is that the flag is derived from the projection and the cap and
+    # from nothing else. The two fixed-date cases in the facade unit tests pin the
+    # healthy and over-cap verdicts themselves.
+    assert body["projected_over_cap"] is (projected > _BUSINESS_CAP_PAISE)
+
+
+async def test_the_business_route_refuses_anonymous_and_non_operator_callers(
+    database_url: str,
+) -> None:
+    """This read sits behind the same flat operator requirement as the other reads."""
+    assert _client(database_url).get(BUSINESS_PATH).status_code == 401
+    forbidden = _client(database_url).get(BUSINESS_PATH, headers=_bearer("patient"))
     assert forbidden.status_code == 403

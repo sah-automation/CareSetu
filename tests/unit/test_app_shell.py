@@ -235,6 +235,10 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         # PHASE-14A B8 (#730): the live error feed, served from the capture's own
         # collapsed rows because Postgres is the system of record.
         "/v1/operator/observability/errors",
+        # PHASE-14A B2 (#731): the business read - ONE period-parameterised endpoint
+        # serving today, week-to-date and month-to-date, so the three periods are not
+        # three aggregation copies.
+        "/v1/operator/observability/business",
     }
 
 

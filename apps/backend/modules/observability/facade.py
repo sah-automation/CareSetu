@@ -64,15 +64,26 @@ the capture already collapsed repeats into one row per fingerprint with an
 occurrence count - so the read's work is paging, the open/resolved split, and
 carrying each entry's route TEMPLATE, method, status and trace identifier to the
 wire without ever touching a concrete request path.
+
+B2 (#731) adds the ``/business`` read: spend for a period, the monthly cap it is
+measured against, and a projected month-end burn, broken out by provider, by model
+within a provider and by task type, with input and output token volumes reported
+SEPARATELY and a rate per thousand on each side. Today, week-to-date and month-to-date
+are three windows of ONE period-parameterised read (#717 decision 11), because three
+route handlers over three copies of the same aggregation is the failure mode that
+decision exists to prevent. Everything spend-shaped is computed at read time out of
+``observability_attribution_daily`` - the daily per-actor aggregate #725 writes - so no
+figure here has a stored second copy to drift from (#717 decision 8).
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from time import perf_counter
-from typing import Any
+from typing import Any, Literal, TypeVar
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -144,6 +155,7 @@ from modules.observability.schema.models import (
     observability_ai_queue_open,
     observability_ai_usage_daily,
     observability_alert_events,
+    observability_attribution_daily,
     observability_business_daily,
     observability_care_attribution_edges,
     observability_consumed_events,
@@ -223,9 +235,52 @@ MAX_ERROR_WINDOW_MINUTES = 1440
 #: #735 widens it when acknowledgement reaches captured errors.
 ERROR_STATUS_VOCABULARY: tuple[str, ...] = (ALERT_STATUS_OPEN, ALERT_STATUS_RESOLVED)
 
+#: The three periods ``/business`` serves, as wire spellings. Named constants rather
+#: than bare strings so the route's ``Literal``, this module's validation and the tests
+#: all say the same word for the same window - the drift a raw literal invites.
+#:
+#: Typed as the ``Literal`` each one is, rather than as ``str``, so the route can use
+#: them as the DEFAULT of its own ``Literal`` parameter and keep ``mypy --strict``:
+#: a default of type ``str`` against a ``Literal`` parameter is a widened value the
+#: type system rightly refuses, and widening it back with a cast would throw away the
+#: only thing that ties the route's gate to these words.
+BUSINESS_PERIOD_TODAY: Literal["today"] = "today"
+BUSINESS_PERIOD_WEEK: Literal["week_to_date"] = "week_to_date"
+BUSINESS_PERIOD_MONTH: Literal["month_to_date"] = "month_to_date"
+
+#: The periods ``/business`` serves (#731, #717 decision 11). Today, week-to-date and
+#: month-to-date are three WINDOWS OF ONE READ, not three reads: each is a different
+#: start date against the same end date, so a fourth window is a value here rather
+#: than a route, a facade method and a query.
+#:
+#: The names are the wire spelling and are closed on purpose. An open "period" that
+#: fell back to something sensible when it was misspelled would answer 200 with
+#: another period's numbers, and an operator would read a whole month's spend as a
+#: day's. FastAPI needs a static ``Literal`` to render the accepted values into
+#: OpenAPI, so the route spells its gate separately for the same reason
+#: :data:`ERROR_STATUS_VOCABULARY` does, and
+#: ``test_the_business_period_gate_matches_the_facade_vocabulary`` asserts the two agree.
+BUSINESS_PERIODS: tuple[str, ...] = (
+    BUSINESS_PERIOD_TODAY,
+    BUSINESS_PERIOD_WEEK,
+    BUSINESS_PERIOD_MONTH,
+)
+
+#: The same three periods as one type, for every hop that takes an already-resolved
+#: period. :data:`BUSINESS_PERIODS` is deliberately a ``tuple[str, ...]`` - it is the
+#: runtime vocabulary a caller is checked against - so it widens the words back to
+#: ``str``; this alias keeps the narrowing for the signatures that never validate
+#: anything. Only :func:`period_window` and :func:`query_business`'s callers take a
+#: plain ``str``, because those are where an unvalidated value can still arrive.
+BusinessPeriod = Literal["today", "week_to_date", "month_to_date"]
+
 __all__ = [
     "AI_JOB_SPEND_STATUS_COMPLETED",
     "AI_JOB_SPEND_STATUS_FAILED",
+    "BUSINESS_PERIODS",
+    "BUSINESS_PERIOD_MONTH",
+    "BUSINESS_PERIOD_TODAY",
+    "BUSINESS_PERIOD_WEEK",
     "DEFAULT_ACTIVITY_WINDOW_MINUTES",
     "DEFAULT_ALERT_PAGE_SIZE",
     "DEFAULT_ERROR_PAGE_SIZE",
@@ -246,6 +301,8 @@ __all__ = [
     "AlertPage",
     "BreakerHealthRow",
     "BusinessCountView",
+    "BusinessPeriod",
+    "BusinessRead",
     "CaptureLiveness",
     "CostBudgetView",
     "CostSummary",
@@ -259,10 +316,13 @@ __all__ = [
     "HttpCounterDrainReport",
     "LatencyReport",
     "LatencyRow",
+    "ModelSpend",
     "ObservabilityFacade",
     "OutboxHealthRow",
     "Overview",
+    "ProjectionBasis",
     "ProviderQualityRow",
+    "ProviderSpend",
     "QualityReport",
     "QueueDepthRow",
     "ReliabilityReport",
@@ -272,6 +332,7 @@ __all__ = [
     "RollupThresholds",
     "RouteThroughputRow",
     "SystemHealth",
+    "TaskTypeSpend",
     "ThroughputPoint",
     "ThroughputReport",
     "UsageReport",
@@ -283,8 +344,10 @@ __all__ = [
     "drain_http_counter",
     "error_status",
     "load_rollup_state",
+    "period_window",
     "plan_rollup_dates",
     "query_alerts",
+    "query_business",
     "query_cost_summary",
     "query_cost_trend",
     "query_error_feed",
@@ -946,8 +1009,7 @@ async def query_cost_summary(connection: AsyncConnection) -> CostSummary:
         )
     )
     budgets = [_budget_view(row) for row in rows.mappings()]
-    total_spend = sum(budget.current_spend_paise for budget in budgets)
-    total_limit = max((budget.monthly_limit_paise for budget in budgets), default=0)
+    total_limit, total_spend = _budget_totals(budgets)
     return CostSummary(
         period_start=_earliest_period_start(budgets),
         period_end=_latest_period_end(budgets),
@@ -958,6 +1020,22 @@ async def query_cost_summary(connection: AsyncConnection) -> CostSummary:
         exhausted=total_limit > 0 and total_spend >= total_limit,
         budgets=budgets,
     )
+
+
+def _budget_totals(budgets: Sequence[CostBudgetView]) -> tuple[int, int]:
+    """The bill-wide ``(cap, consumed)`` pair the snapshot rows add up to.
+
+    The cap is the ``max``, NOT the sum: the rollup writes the single bill-wide
+    ``AI_MONTHLY_BUDGET_PAISE`` onto EVERY scope row, so summing it would multiply the
+    budget by the number of scopes and understate utilisation. The consumed figure IS
+    the sum, because each row carries that scope's own share of the one bill.
+
+    One helper for both reads that need the pair - ``/cost``'s headline and
+    ``/business``'s cap - because the ``ai_budget`` alert is evaluated against exactly
+    this pair and two copies of the rule is two places for them to disagree.
+    """
+    cap = max((budget.monthly_limit_paise for budget in budgets), default=0)
+    return cap, sum(budget.current_spend_paise for budget in budgets)
 
 
 def _earliest_period_start(budgets: Sequence[CostBudgetView]) -> date | None:
@@ -2351,6 +2429,382 @@ async def query_error_feed(
     )
 
 
+class ProjectionBasis(BaseModel):
+    """The assumption a projected month-end burn was computed from.
+
+    Carried on the wire beside the projection rather than described in prose,
+    because a projection with no stated basis is a guess with a decimal in it: an
+    operator cannot tell "we project 400,000" from "we project 400,000 because
+    200,000 went out over 16 of 31 days" without knowing which it is. The model
+    is a straight line - spend to date spread evenly across the elapsed days and
+    scaled to the period's length - so both day counts are what makes it checkable.
+    """
+
+    period_start: date
+    period_end: date
+    elapsed_days: int
+    period_days: int
+
+
+class ProviderSpend(BaseModel):
+    """One model provider's spend over the period.
+
+    Input and output are separate columns with separate figures, never a blended
+    one. See :func:`_per_1k_paise` for what each side's figure is and is not.
+    """
+
+    provider: str
+    jobs: int
+    spend_paise: int
+    input_tokens: int
+    output_tokens: int
+    paise_per_1k_input_tokens: Decimal | None
+    paise_per_1k_output_tokens: Decimal | None
+
+
+class ModelSpend(ProviderSpend):
+    """One model's spend, WITHIN its provider.
+
+    Repeats ``provider`` rather than nesting under
+    :class:`ProviderSpend`: a flat row list keyed by ``(provider, model)`` is the
+    same shape ``/usage`` already serves, it costs one table scan rather than a
+    join, and a routing change shows up as a model moving between providers
+    instead of a subtree quietly rebalancing.
+    """
+
+    model: str
+
+
+class TaskTypeSpend(BaseModel):
+    """One task type's spend over the period.
+
+    Whatever the pipeline actually produced - ``transcribe``, ``structure`` and
+    ``draft`` alike, since #722 made the drafting leg metered. The read filters on
+    nothing but the period and the actor kind, so a task type nobody has declared
+    anywhere still shows up rather than being dropped by a vocabulary this module
+    would have to be taught about.
+    """
+
+    task_type: str
+    jobs: int
+    spend_paise: int
+    input_tokens: int
+    output_tokens: int
+    paise_per_1k_input_tokens: Decimal | None
+    paise_per_1k_output_tokens: Decimal | None
+
+
+class BusinessRead(BaseModel):
+    """Spend for one period, against the monthly cap, with the breakdown.
+
+    ``period``/``period_start``/``period_end`` echo the window the figures were read
+    for, so a client rendering three of these knows which is which without keeping
+    its own clock. Every window ends today and differs only in where it starts.
+
+    ``spend_paise`` and the token volumes describe THE SELECTED PERIOD. The cap
+    figures beside them describe the BILLING PERIOD, which is the month and not the
+    selection: asking for ``today`` and learning nothing about how much of the month
+    is already gone is how an operator finds out on the last day of the month.
+    ``monthly_cap_paise`` and ``cap_consumed_paise`` are the pair the ``ai_budget``
+    alert is evaluated against, taken from the same snapshot rows, so the headline
+    and the alert cannot disagree.
+
+    The projection is the "before the cap, not after" half of the question:
+    ``projected_month_end_paise`` says where the month lands if the elapsed days
+    are representative, ``projected_over_cap`` says whether that is past the cap,
+    and ``projection_basis`` says what was assumed. Both are ``None`` when there is
+    nothing to project from - an unstamped budget row has no period to spread spend
+    across - which is an answer rather than a failure.
+    """
+
+    period: BusinessPeriod
+    period_start: date
+    period_end: date
+    spend_paise: int
+    jobs: int
+    input_tokens: int
+    output_tokens: int
+    paise_per_1k_input_tokens: Decimal | None
+    paise_per_1k_output_tokens: Decimal | None
+    monthly_cap_paise: int
+    cap_consumed_paise: int
+    cap_consumed_pct: Decimal
+    projected_month_end_paise: int | None
+    projected_over_cap: bool
+    projection_basis: ProjectionBasis | None
+    by_provider: list[ProviderSpend]
+    by_model: list[ModelSpend]
+    by_task_type: list[TaskTypeSpend]
+
+
+#: Four-decimal scale of the cost-per-thousand-token figures (``0.1234``). The rate
+#: scale rather than the percentage scale because the figure is not a percentage and
+#: at 2dp most distinct rates collapse onto the same value: a cheap model's input
+#: rate is a fraction of a paise per thousand tokens, and rounding it to hundredths
+#: of a paise is a rounding that erases the difference it exists to show.
+_COST_PER_1K_QUANTUM = Decimal("0.0001")
+
+#: Paise is the unit money is rounded back into; see ``modules.intake.pricing``.
+_PAISE_QUANTUM = Decimal("1")
+
+_BreakdownKey = TypeVar("_BreakdownKey")
+
+
+def period_window(period: str, *, today: date | None = None) -> tuple[date, date]:
+    """The inclusive ``[start, end]`` window one ``period`` names, ending today.
+
+    The three periods differ ONLY in where they start - ``today`` is the day
+    itself, ``week_to_date`` starts at the ISO week's Monday, ``month_to_date`` at
+    the first of the calendar month - which is the whole reason one read serves all
+    three (#717 decision 11).
+
+    A week is the calendar week CONTAINING today, not a rolling seven days. "Week to
+    date" is a period an operator reasons about against a calendar, and a rolling
+    window reports a two-day-old Tuesday as a whole week of spend.
+    """
+    end = today if today is not None else datetime.now(UTC).date()
+    if period == BUSINESS_PERIOD_TODAY:
+        return end, end
+    if period == BUSINESS_PERIOD_WEEK:
+        return end - timedelta(days=end.weekday()), end
+    if period == BUSINESS_PERIOD_MONTH:
+        return end.replace(day=1), end
+    raise ValueError(
+        f"unknown business period {period!r}; expected one of {', '.join(BUSINESS_PERIODS)}"
+    )
+
+
+def _per_1k_paise(cost_paise: int, tokens: int) -> Decimal | None:
+    """``cost`` paise spread over ``tokens``, per thousand tokens, at 4dp.
+
+    ``None`` for an empty denominator, for the reason ``ratio`` and ``_per_minute``
+    give: a scope that sent no tokens has no per-token price to quote, and quoting
+    ``0.0000`` would be a claim about its pricing that nothing measured.
+
+    The numerator is the scope's WHOLE metered cost on BOTH sides, because that is
+    all the metered tables store - one ``cost_paise`` per job, not one per token side.
+    So these are two rates, not two prices: ``cost * 1000 / input_tokens`` and
+    ``cost * 1000 / output_tokens``, which between them carry the input:output MIX and
+    the cost level. That is the information the ticket needs - a single
+    ``cost / (input + output)`` figure averages the two denominators together and a
+    routing change from cheap-output to expensive-output models moves it far less than
+    it moves these - but it is NOT a per-side price, and the field names say so.
+
+    Splitting the bill into two per-side prices needs per-side metering: an
+    ``input_cost_paise``/``output_cost_paise`` pair carried from
+    ``modules.intake.pricing`` through the per-job row and the daily aggregate. Until
+    that exists, no honest read can quote two prices, and quoting two prices anyway
+    would be the worse defect.
+    """
+    if tokens <= 0:
+        return None
+    return (Decimal(cost_paise) * 1000 / Decimal(tokens)).quantize(
+        _COST_PER_1K_QUANTUM, rounding=ROUND_HALF_UP
+    )
+
+
+@dataclass
+class _BreakdownTotals:
+    """Additive totals for one breakdown row, folded up from the grain's rows.
+
+    Mutable and internal on purpose: the three breakdowns are roll-ups of ONE
+    aggregation at ``(provider, model, task_type)`` grain, so the fold has to
+    accumulate across rows rather than assign - which is what makes a provider row
+    the sum of its own model rows by construction rather than by agreement.
+    """
+
+    jobs: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_paise: int = 0
+
+    def add(self, row: RowMapping) -> None:
+        self.jobs += int(row["jobs"])
+        self.input_tokens += int(row["input_tokens"])
+        self.output_tokens += int(row["output_tokens"])
+        self.cost_paise += int(row["cost_paise"])
+
+
+def _spend_figures(totals: _BreakdownTotals) -> dict[str, Any]:
+    """The six figures every breakdown row carries, whatever its key column.
+
+    :class:`ProviderSpend`, :class:`ModelSpend` and :class:`TaskTypeSpend` differ only
+    in which column names them - provider, provider plus model, or task type - so the
+    measures are built ONCE here rather than restated per row type. That is also what
+    makes the three breakdowns comparable: they are the same six numbers, projected
+    three ways, so a caller summing one can compare it with a caller summing another.
+    """
+    return {
+        "spend_paise": totals.cost_paise,
+        "jobs": totals.jobs,
+        "input_tokens": totals.input_tokens,
+        "output_tokens": totals.output_tokens,
+        "paise_per_1k_input_tokens": _per_1k_paise(totals.cost_paise, totals.input_tokens),
+        "paise_per_1k_output_tokens": _per_1k_paise(totals.cost_paise, totals.output_tokens),
+    }
+
+
+def _accumulate(
+    bucket: dict[_BreakdownKey, _BreakdownTotals], key: _BreakdownKey, row: RowMapping
+) -> None:
+    """Fold one grain row into ``bucket``, creating its entry on first sight."""
+    bucket.setdefault(key, _BreakdownTotals()).add(row)
+
+
+def _projected_month_end(
+    *, consumed_paise: int, period_start: date | None, period_end: date | None, today: date
+) -> tuple[int | None, ProjectionBasis | None]:
+    """Where the month lands at a straight line, with the basis it was computed from.
+
+    Spend consumed so far, spread evenly over the ``elapsed_days`` of the billing
+    period that have actually happened and scaled up to the period's ``period_days``.
+    A straight line is a crude model - real spend is not uniform across a month -
+    and the only honest answer to that is to say so, which is what returning the
+    basis alongside the figure is for.
+
+    ``(None, None)`` when there is nothing to project from: an unstamped budget row
+    has no period to spread the spend across, and a period that has not started has
+    no elapsed days to divide by. ``today`` is clamped to ``period_end`` so a stale
+    snapshot stamped on a closed month projects its final figure rather than
+    extrapolating past a month that is over.
+    """
+    if period_start is None or period_end is None or period_end < period_start:
+        return None, None
+    period_days = (period_end - period_start).days + 1
+    elapsed_days = (min(today, period_end) - period_start).days + 1
+    if elapsed_days < 1:
+        return None, None
+    projected = Decimal(consumed_paise) * Decimal(period_days) / Decimal(elapsed_days)
+    return (
+        int(projected.quantize(_PAISE_QUANTUM, rounding=ROUND_HALF_UP)),
+        ProjectionBasis(
+            period_start=period_start,
+            period_end=period_end,
+            elapsed_days=elapsed_days,
+            period_days=period_days,
+        ),
+    )
+
+
+async def query_business(
+    connection: AsyncConnection,
+    *,
+    period: BusinessPeriod,
+    from_date: date,
+    to_date: date,
+    today: date,
+) -> BusinessRead:
+    """Read period spend, the cap it is measured against, and the breakdown.
+
+    ONE aggregation over ``observability_attribution_daily`` at
+    ``(provider, model, task_type)`` grain serves the headline, the provider rows,
+    the model rows and the task-type rows; the three breakdowns are folded up from
+    it in Python rather than issued as three queries that would have to be kept in
+    agreement by hand. Today, week-to-date and month-to-date are three windows over
+    this one read, not three reads (#717 decision 11).
+
+    Everything spend-shaped is computed here, at read time, out of the daily
+    per-actor aggregate - the same number is never stored twice (#717 decision 8),
+    so this read and the ``ai_budget`` alert cannot report different bills.
+
+    **Only ``patient`` rows are aggregated.** Every job contributes one patient row
+    and, when a doctor is known, one doctor row with identical figures - that is how
+    per-patient and per-doctor figures reconcile, not two halves of the bill. Summing
+    both kinds would count every rupee twice, so the kind is a filter on the money
+    and the doctor rows are a projection #732 reads rather than a second total.
+
+    The cap and the consumed figure come from ``observability_ai_cost_budget``,
+    through the SAME ``_budget_view`` projection and the same ``_budget_totals``
+    max-not-sum rule ``query_cost_summary`` uses, because that pair is the one the
+    ``ai_budget`` alert is evaluated against and a business panel reporting a different
+    cap - or a different bill - would contradict it. It is therefore read, not
+    recomputed: the aggregate and the snapshot carry the same month-to-date figure
+    because the rollup writes both from the same per-job rows, and reading one of them
+    keeps the two panels and the alert on one number.
+
+    The projection's period bounds are the snapshot's own stamps, taken as the widest
+    span the rows carry - the same rule ``/cost`` reads them by. That holds because the
+    rollup's period reset re-stamps every stale or unstamped row inside the same
+    transaction it snapshots in, so a mixed set of periods cannot survive a pass.
+    """
+    spend = observability_attribution_daily
+    rows = await connection.execute(
+        select(
+            spend.c.provider,
+            spend.c.model,
+            spend.c.task_type,
+            func.coalesce(func.sum(spend.c.jobs), 0).label("jobs"),
+            func.coalesce(func.sum(spend.c.input_tokens), 0).label("input_tokens"),
+            func.coalesce(func.sum(spend.c.output_tokens), 0).label("output_tokens"),
+            func.coalesce(func.sum(spend.c.cost_paise), 0).label("cost_paise"),
+        )
+        .where(
+            spend.c.actor_kind == ACTOR_KIND_PATIENT,
+            spend.c.usage_date.between(from_date, to_date),
+        )
+        .group_by(spend.c.provider, spend.c.model, spend.c.task_type)
+        .order_by(spend.c.provider, spend.c.model, spend.c.task_type)
+    )
+
+    totals = _BreakdownTotals()
+    by_provider: dict[str, _BreakdownTotals] = {}
+    by_model: dict[tuple[str, str], _BreakdownTotals] = {}
+    by_task_type: dict[str, _BreakdownTotals] = {}
+    for row in rows.mappings():
+        totals.add(row)
+        _accumulate(by_provider, str(row["provider"]), row)
+        _accumulate(by_model, (str(row["provider"]), str(row["model"])), row)
+        _accumulate(by_task_type, str(row["task_type"]), row)
+
+    budget_rows = await connection.execute(
+        select(
+            observability_ai_cost_budget.c.provider,
+            observability_ai_cost_budget.c.model,
+            observability_ai_cost_budget.c.monthly_limit_paise,
+            observability_ai_cost_budget.c.alert_threshold_pct,
+            observability_ai_cost_budget.c.current_spend_paise,
+            observability_ai_cost_budget.c.billing_period_start,
+            observability_ai_cost_budget.c.billing_period_end,
+        ).order_by(
+            observability_ai_cost_budget.c.provider,
+            observability_ai_cost_budget.c.model,
+        )
+    )
+    budgets = [_budget_view(row) for row in budget_rows.mappings()]
+    monthly_cap, cap_consumed = _budget_totals(budgets)
+    projected, basis = _projected_month_end(
+        consumed_paise=cap_consumed,
+        period_start=_earliest_period_start(budgets),
+        period_end=_latest_period_end(budgets),
+        today=today,
+    )
+
+    return BusinessRead(
+        period=period,
+        period_start=from_date,
+        period_end=to_date,
+        **_spend_figures(totals),
+        monthly_cap_paise=monthly_cap,
+        cap_consumed_paise=cap_consumed,
+        cap_consumed_pct=_utilization_pct(cap_consumed, monthly_cap),
+        projected_month_end_paise=projected,
+        projected_over_cap=monthly_cap > 0 and projected is not None and projected > monthly_cap,
+        projection_basis=basis,
+        by_provider=[
+            ProviderSpend(provider=provider, **_spend_figures(scope))
+            for provider, scope in sorted(by_provider.items())
+        ],
+        by_model=[
+            ModelSpend(provider=provider, model=model, **_spend_figures(scope))
+            for (provider, model), scope in sorted(by_model.items())
+        ],
+        by_task_type=[
+            TaskTypeSpend(task_type=task_type, **_spend_figures(scope))
+            for task_type, scope in sorted(by_task_type.items())
+        ],
+    )
+
+
 def build_deeplinks(
     *,
     grafana_url: str | None = None,
@@ -2380,10 +2834,10 @@ class ObservabilityFacade:
         ``get_cost_trend``, ``get_usage``, ``get_quality``, ``get_overview``,
         ``get_latency``, ``get_provider_board`` (#728), ``get_throughput``,
         ``get_health``, ``get_reliability`` (#729), ``get_alerts``,
-        ``get_error_feed`` (#730) and ``get_deeplinks`` are what the operator
-        observability routes call. Each opens the one settled engine connection and
-        delegates its aggregate to the module helper, so routes hold no SQL and the
-        reads stay in this module.
+        ``get_error_feed`` (#730), ``get_business`` (#731) and ``get_deeplinks``
+        are what the operator observability routes call. Each opens the one settled
+        engine connection and delegates its aggregate to the module helper, so routes
+        hold no SQL and the reads stay in this module.
 
         The windowed reads take ``days`` (or, for the per-minute counter, ``minutes``)
         and an optional pinned instant so the caller - or a test - can pin the window;
@@ -2530,6 +2984,39 @@ class ObservabilityFacade:
                 status=status,
                 now=to_ts,
                 window_minutes=minutes,
+            )
+
+    async def get_business(
+        self, *, period: BusinessPeriod, today: date | None = None
+    ) -> BusinessRead:
+        """Read spend for ``period`` against the monthly cap, with the breakdown.
+
+        B2 (#731). One method for all three periods: ``today``, ``week_to_date`` and
+        ``month_to_date`` are three windows of this read, and the alternative - a
+        method each - would be three copies of the aggregation to keep in agreement
+        (#717 decision 11).
+
+        The clock is resolved HERE and the window resolved off it, for the same
+        reason every other windowed read does: the route owns the default and the
+        facade owns the clock, so a test can pin ``today`` and get the identical
+        window production would have taken at that date. ``today`` is resolved ONCE
+        and used both for the window and for the projection's elapsed-day count -
+        two reads of the clock could straddle midnight and put this month's spend
+        into tomorrow's window.
+
+        ``period`` is NOT validated here: :func:`period_window` owns that check and
+        every path into this read goes through it, so a second copy would only be a
+        second place for the two to disagree about what a valid period is.
+        """
+        resolved_today = today if today is not None else datetime.now(UTC).date()
+        from_date, to_date = period_window(period, today=resolved_today)
+        async with self._engine.begin() as connection:
+            return await query_business(
+                connection,
+                period=period,
+                from_date=from_date,
+                to_date=to_date,
+                today=resolved_today,
             )
 
     def get_deeplinks(

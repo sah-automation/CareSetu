@@ -26,11 +26,13 @@ from app.gateway.jwt_verify import JWTVerifyMiddleware
 from app.main import create_app
 from modules.iam.domain.jwt import issue_token
 from modules.observability.facade import (
+    BUSINESS_PERIODS,
     ERROR_STATUS_VOCABULARY,
     AlertEntry,
     AlertPage,
     BreakerHealthRow,
     BusinessCountView,
+    BusinessRead,
     CaptureLiveness,
     CostBudgetView,
     CostSummary,
@@ -42,16 +44,20 @@ from modules.observability.facade import (
     ErrorFeedPage,
     LatencyReport,
     LatencyRow,
+    ModelSpend,
     OutboxHealthRow,
     Overview,
+    ProjectionBasis,
     ProviderBoardReport,
     ProviderBoardRow,
     ProviderQualityRow,
+    ProviderSpend,
     QualityReport,
     QueueDepthRow,
     ReliabilityReport,
     RouteThroughputRow,
     SystemHealth,
+    TaskTypeSpend,
     ThroughputPoint,
     ThroughputReport,
     UsageReport,
@@ -78,6 +84,7 @@ RELIABILITY_PATH = "/v1/operator/observability/reliability"
 ALERTS_PATH = "/v1/operator/observability/alerts"
 ERRORS_PATH = "/v1/operator/observability/errors"
 DEEPLINKS_PATH = "/v1/operator/observability/deeplinks"
+BUSINESS_PATH = "/v1/operator/observability/business"
 
 _ALERT_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 
@@ -395,6 +402,64 @@ _ERRORS = ErrorFeedPage(
 )
 
 
+_BUSINESS = BusinessRead(
+    period="month_to_date",
+    period_start=date(2026, 10, 1),
+    period_end=date(2026, 10, 12),
+    spend_paise=90_000,
+    jobs=10,
+    input_tokens=440_000,
+    output_tokens=50_000,
+    paise_per_1k_input_tokens=Decimal("204.5455"),
+    paise_per_1k_output_tokens=Decimal("1800.0000"),
+    monthly_cap_paise=150_000,
+    cap_consumed_paise=90_000,
+    cap_consumed_pct=Decimal("60.00"),
+    projected_month_end_paise=232_500,
+    projected_over_cap=True,
+    projection_basis=ProjectionBasis(
+        period_start=date(2026, 10, 1),
+        period_end=date(2026, 10, 31),
+        elapsed_days=12,
+        period_days=31,
+    ),
+    by_provider=[
+        ProviderSpend(
+            provider="openai",
+            jobs=7,
+            spend_paise=30_000,
+            input_tokens=140_000,
+            output_tokens=20_000,
+            paise_per_1k_input_tokens=Decimal("214.2857"),
+            paise_per_1k_output_tokens=Decimal("1500.0000"),
+        )
+    ],
+    by_model=[
+        ModelSpend(
+            provider="openai",
+            model="gpt-4o-mini",
+            jobs=7,
+            spend_paise=30_000,
+            input_tokens=140_000,
+            output_tokens=20_000,
+            paise_per_1k_input_tokens=Decimal("214.2857"),
+            paise_per_1k_output_tokens=Decimal("1500.0000"),
+        )
+    ],
+    by_task_type=[
+        TaskTypeSpend(
+            task_type="draft",
+            jobs=2,
+            spend_paise=20_000,
+            input_tokens=40_000,
+            output_tokens=20_000,
+            paise_per_1k_input_tokens=Decimal("500.0000"),
+            paise_per_1k_output_tokens=Decimal("1000.0000"),
+        )
+    ],
+)
+
+
 class StubObservabilityFacade:
     """Facade stand-in recording the calls each route made.
 
@@ -418,6 +483,7 @@ class StubObservabilityFacade:
         self.alert_statuses: list[str | None] = []
         self.error_feed_calls: list[tuple[int, int, str | None, int]] = []
         self.deeplink_settings: list[dict[str, Any]] = []
+        self.business_periods: list[str] = []
 
     async def get_cost_summary(self) -> CostSummary:
         self.summary_calls += 1
@@ -480,6 +546,10 @@ class StubObservabilityFacade:
     ) -> ErrorFeedPage:
         self.error_feed_calls.append((page, page_size, status, minutes))
         return _ERRORS.model_copy(update={"window_minutes": minutes})
+
+    async def get_business(self, *, period: str) -> BusinessRead:
+        self.business_periods.append(period)
+        return _BUSINESS.model_copy(update={"period": period})
 
     def get_deeplinks(
         self,
@@ -1116,6 +1186,114 @@ def test_an_unrecognised_alert_status_is_rejected_at_the_edge(status: str) -> No
     assert facade.alert_statuses == []
 
 
+# ------------------------------------------------------------------ business
+
+
+def test_operator_reads_period_spend_against_the_cap_with_its_breakdown() -> None:
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(BUSINESS_PATH, headers=_operator())
+
+    assert response.status_code == 200
+    # The cap figures ride every period, so a panel opened on "today" still says where
+    # the month lands - which is the whole "before the cap, not after" answer.
+    body = response.json()
+    assert body["spend_paise"] == 90_000
+    assert body["monthly_cap_paise"] == 150_000
+    assert body["cap_consumed_pct"] == "60.00"
+    assert body["projected_month_end_paise"] == 232_500
+    assert body["projected_over_cap"] is True
+    assert body["projection_basis"]["elapsed_days"] == 12
+    assert body["projection_basis"]["period_days"] == 31
+    # The per-thousand-token figures are quoted decimals as STRINGS too, at the rate
+    # scale the other ratios use.
+    assert body["paise_per_1k_input_tokens"] == "204.5455"
+    assert body["paise_per_1k_output_tokens"] == "1800.0000"
+    assert [row["task_type"] for row in body["by_task_type"]] == ["draft"]
+    assert [(row["provider"], row["model"]) for row in body["by_model"]] == [
+        ("openai", "gpt-4o-mini")
+    ]
+    assert [row["provider"] for row in body["by_provider"]] == ["openai"]
+
+
+def test_the_business_read_defaults_to_the_month_the_cap_is_measured_against() -> None:
+    """No period means "how is this month going", not "what did today cost".
+
+    The cap it is compared against is a MONTHLY cap, so answering with a single day
+    would compare one day against a month-long budget and look alarming every day.
+    """
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(BUSINESS_PATH, headers=_operator())
+
+    assert response.status_code == 200
+    assert facade.business_periods == ["month_to_date"]
+
+
+@pytest.mark.parametrize("period", BUSINESS_PERIODS)
+def test_every_business_period_is_served_by_the_one_endpoint(period: str) -> None:
+    """Three periods, one route, one facade call each - not three routes (#717 dec. 11).
+
+    ``period`` is a window selection, so a fourth window is another value on this
+    query string rather than another handler, another facade method and another
+    aggregation to keep in agreement with the first three.
+    """
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(f"{BUSINESS_PATH}?period={period}", headers=_operator())
+
+    assert response.status_code == 200
+    assert facade.business_periods == [period]
+    assert response.json()["period"] == period
+
+
+def test_a_business_period_off_the_closed_list_is_refused_at_the_edge() -> None:
+    """A misspelled period must not 200 with SOME period's spend.
+
+    This is the read where a permissive fallback is worst: an operator would read
+    another window's rupee figure as fact, with nothing in the response to contradict
+    it. So the gate refuses at the edge, before the facade is reached.
+    """
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(f"{BUSINESS_PATH}?period=yesterday", headers=_operator())
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "VALIDATION_ERROR"
+    assert facade.business_periods == []
+
+
+def test_the_business_period_gate_matches_the_facade_vocabulary() -> None:
+    """The edge gate and the facade's vocabulary are written twice, so tie them here.
+
+    FastAPI needs a static ``Literal`` to render the accepted values into OpenAPI, so
+    ``/business`` cannot derive its gate from ``BUSINESS_PERIODS``. That makes adding
+    a period two edits, and this is what makes it two edits rather than a silent
+    drift: read the enum off the rendered schema and compare it to the one place the
+    set is written down.
+    """
+    client = _client()
+
+    schema = client.get("/openapi.json").json()
+    period_param = next(
+        parameter
+        for parameter in schema["paths"][BUSINESS_PATH]["get"]["parameters"]
+        if parameter["name"] == "period"
+    )
+    # Read off the RENDERED schema rather than the annotation, so this also proves the
+    # values reach a client reading the spec. ``period`` is a plain ``Literal`` (it is
+    # never nullable), so the values land directly under ``enum`` rather than in an
+    # ``anyOf`` the way the feeds' optional status does.
+    rendered = period_param["schema"]["enum"]
+
+    assert tuple(rendered) == BUSINESS_PERIODS
+    assert set(rendered) == {"today", "week_to_date", "month_to_date"}
+
+
 # ------------------------------------------------------------------ refuses
 
 
@@ -1133,6 +1311,7 @@ _ALL_PATHS = [
     ALERTS_PATH,
     ERRORS_PATH,
     DEEPLINKS_PATH,
+    BUSINESS_PATH,
 ]
 
 
@@ -1175,6 +1354,7 @@ def _facade_untouched(facade: StubObservabilityFacade) -> bool:
         and facade.alert_pages == []
         and facade.error_feed_calls == []
         and facade.deeplink_settings == []
+        and facade.business_periods == []
     )
 
 
