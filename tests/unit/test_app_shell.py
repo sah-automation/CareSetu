@@ -232,6 +232,9 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         # the oldest queued item, the per-outbox backlog breakdown, the RECENT-activity
         # figure, and the link out to true concurrency.
         "/v1/operator/observability/reliability",
+        # PHASE-14A B8 (#730): the live error feed, served from the capture's own
+        # collapsed rows because Postgres is the system of record.
+        "/v1/operator/observability/errors",
     }
 
 

@@ -56,6 +56,14 @@ is the leading one, and an alert that waits for a row count cannot see a queue
 that has stopped draining. The same read serves the per-outbox backlog breakdown
 and the recent-ACTIVITY figure, and LINKS to the tracing backend for true
 concurrency rather than approximating it in Postgres (#717 decision 17).
+
+B8 (#730) adds the ``/errors`` read: the live, collapsed error stream, served from
+``observability_error_events`` because Postgres is the system of record and Sentry
+is not a queryable store (#717 Out of Scope). Nothing about it is new aggregation -
+the capture already collapsed repeats into one row per fingerprint with an
+occurrence count - so the read's work is paging, the open/resolved split, and
+carrying each entry's route TEMPLATE, method, status and trace identifier to the
+wire without ever touching a concrete request path.
 """
 
 from __future__ import annotations
@@ -68,7 +76,17 @@ from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel
-from sqlalchemy import Integer, cast, delete, func, literal, literal_column, select, true
+from sqlalchemy import (
+    ColumnElement,
+    Integer,
+    cast,
+    delete,
+    func,
+    literal,
+    literal_column,
+    select,
+    true,
+)
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -101,6 +119,7 @@ from modules.observability.domain.pseudonym import (
 )
 from modules.observability.domain.rollup import (
     ALERT_STATUS_OPEN,
+    ALERT_STATUS_RESOLVED,
     BREAKER_STATE_OPEN,
     ROLLUP_MODE_BACKFILL,
     ROLLUP_MODE_DAILY,
@@ -128,6 +147,7 @@ from modules.observability.schema.models import (
     observability_business_daily,
     observability_care_attribution_edges,
     observability_consumed_events,
+    observability_error_events,
     observability_http_minute,
     observability_rollup_runs,
 )
@@ -167,15 +187,56 @@ MAX_THROUGHPUT_ROUTE_ROWS = 20
 DEFAULT_ACTIVITY_WINDOW_MINUTES = 60
 MAX_ACTIVITY_WINDOW_MINUTES = 1440
 
+#: Paging of the ``/errors`` read (#730), on the api-standards §4 default of 25 and
+#: ceiling of 100. It carries its OWN pair rather than borrowing the alert feed's:
+#: the two feeds are separate decisions that happen to agree on the convention, and a
+#: shared constant would let a change to one silently reshape the other's response.
+DEFAULT_ERROR_PAGE_SIZE = 25
+MAX_ERROR_PAGE_SIZE = 100
+
+#: How recently a failure has to have happened for its entry to read as ``open``
+#: (#730). The window IS this read's whole notion of "live", because a captured
+#: error carries no lifecycle of its own: nothing marks a failure handled, so
+#: recency is the only signal available that separates a problem happening now from
+#: one that has stopped happening. It matches ``/throughput``'s "recent past" so the
+#: feed and the counter an operator reads beside it describe the same period, and the
+#: ceiling is a full day - long enough for a nightly batch's failure to stay visible
+#: through the morning it is investigated.
+DEFAULT_ERROR_WINDOW_MINUTES = 60
+MAX_ERROR_WINDOW_MINUTES = 1440
+
+#: The statuses a captured error can read as (#730) - the statuses the CAPTURE can
+#: produce, named from the alert vocabulary's own constants so the two feeds are
+#: guaranteed to say ``open`` and ``resolved`` with the same words.
+#:
+#: It is deliberately narrower than the alert vocabulary, and that is a fact about
+#: the data rather than a choice: acknowledgement is an action against
+#: ``observability_alert_events`` and nothing writes one to a captured error, so an
+#: ``acknowledged`` filter here would select rows no writer can ever create - an
+#: option that only ever returns nothing.
+#:
+#: This is the ONE place the set is written down, but it cannot be the only place it
+#: is ENFORCED: FastAPI needs a static ``Literal`` to render the accepted values into
+#: OpenAPI, so the route spells the edge gate separately. That is exactly why
+#: ``test_the_error_status_gate_matches_the_facade_vocabulary`` asserts the two agree -
+#: widening this filter takes two edits and the test fails if only one is made.
+#: #735 widens it when acknowledgement reaches captured errors.
+ERROR_STATUS_VOCABULARY: tuple[str, ...] = (ALERT_STATUS_OPEN, ALERT_STATUS_RESOLVED)
+
 __all__ = [
     "AI_JOB_SPEND_STATUS_COMPLETED",
     "AI_JOB_SPEND_STATUS_FAILED",
     "DEFAULT_ACTIVITY_WINDOW_MINUTES",
     "DEFAULT_ALERT_PAGE_SIZE",
+    "DEFAULT_ERROR_PAGE_SIZE",
+    "DEFAULT_ERROR_WINDOW_MINUTES",
     "DEFAULT_THROUGHPUT_WINDOW_MINUTES",
     "DEFAULT_WINDOW_DAYS",
+    "ERROR_STATUS_VOCABULARY",
     "MAX_ACTIVITY_WINDOW_MINUTES",
     "MAX_ALERT_PAGE_SIZE",
+    "MAX_ERROR_PAGE_SIZE",
+    "MAX_ERROR_WINDOW_MINUTES",
     "MAX_THROUGHPUT_ROUTE_ROWS",
     "MAX_THROUGHPUT_WINDOW_MINUTES",
     "OBSERVABILITY_SCHEMA",
@@ -193,6 +254,8 @@ __all__ = [
     "Deeplinks",
     "DependencyHealth",
     "ErrorDrainReport",
+    "ErrorFeedEntry",
+    "ErrorFeedPage",
     "HttpCounterDrainReport",
     "LatencyReport",
     "LatencyRow",
@@ -218,11 +281,13 @@ __all__ = [
     "close_ai_queue_item",
     "drain_error_buffer",
     "drain_http_counter",
+    "error_status",
     "load_rollup_state",
     "plan_rollup_dates",
     "query_alerts",
     "query_cost_summary",
     "query_cost_trend",
+    "query_error_feed",
     "query_health",
     "query_latency",
     "query_overview",
@@ -1511,6 +1576,75 @@ class AlertPage(BaseModel):
     total_count: int
 
 
+class ErrorFeedEntry(BaseModel):
+    """One DISTINCT captured failure, as the live error feed answers it.
+
+    ``fingerprint`` is the collapse key the drain already upserts on, and it is the
+    row's identity here: one entry per failure, with ``occurrences`` saying how many
+    times it happened and ``last_seen_at`` when it last did. An operator reading a
+    feed wants to know when the failure LAST occurred, so the entry is ordered and
+    timestamped on the most recent sighting and never on ``first_seen_at`` - which is
+    carried too, because "started this morning" is a different question from
+    "happening again right now".
+
+    ``status`` is DERIVED at read time from ``last_seen_at`` against the read's
+    window (:func:`error_status`), never stored: there is no writer that marks a
+    captured error handled, so a stored status would be a column nothing could ever
+    move off its default, which is the same second-source-of-truth problem
+    ``provider_status`` refuses.
+
+    ``route_template`` is the TEMPLATE. The capture seam is what keeps this column
+    free of concrete request paths, and this model is the other half of that promise:
+    it has no field a concrete path could be projected into, so no identifier can
+    reach the wire even if a row ever held one (ADR-0025 D7).
+
+    ``trace_id`` is the cross-tool join key (#717 decision 41) - the most recent
+    occurrence's, which is the one an operator jumping from this entry wants to land
+    on.
+    """
+
+    fingerprint: str
+    route_template: str
+    method: str
+    status_code: int
+    status_class: str
+    kind: str
+    code: str
+    trace_id: str
+    occurrences: int
+    first_seen_at: datetime
+    last_seen_at: datetime
+    status: str
+
+
+class ErrorFeedPage(BaseModel):
+    """One page of the live error feed, most recently seen first, plus both totals.
+
+    Paged as api-standards §4 asks, and - because this feed collapses repeats - the
+    page carries TWO counts, which are different questions and must not be conflated:
+    ``total_count`` is the number of DISTINCT failures matching the filter, which is
+    how many entries the feed has; ``total_occurrences`` is the sum of their counts,
+    which is how many times the platform actually failed. A single bug that threw four
+    hundred times is one entry over four hundred occurrences, and a client labelling
+    the page has to know which of the two it is looking at (#717 story 32).
+
+    ``window_minutes`` is echoed so the ``status`` on each entry is interpretable
+    without the client having to know the read's default: an entry is ``open`` because
+    it was seen inside THAT window, and a caller that widened the window changes which
+    entries qualify.
+
+    The page carries NO capture-liveness block. "No errors" and "nothing was watched"
+    produce the same empty page, and only ``/throughput``'s ``capture`` distinguishes
+    them (#717 story 35); duplicating the verdict here would make two places to keep
+    honest for one answer.
+    """
+
+    errors: list[ErrorFeedEntry]
+    total_count: int
+    total_occurrences: int
+    window_minutes: int
+
+
 class Deeplinks(BaseModel):
     """The operator page's outbound vendor links (plan-phase14 §9.1).
 
@@ -2085,6 +2219,138 @@ async def query_alerts(
     return AlertPage(alerts=alerts, total_count=total)
 
 
+def error_status(last_seen_at: datetime, *, opened_after: datetime) -> str:
+    """Whether a failure last seen at ``last_seen_at`` is still ``open``.
+
+    Derived, not stored, and the derivation is the whole argument: a captured error
+    has no lifecycle. Nothing resolves it - the drain only counts repeats - so a
+    status column could only ever hold whatever default its insert carried, which
+    makes it a second source of truth that no writer can contradict and every reader
+    has to trust. Recency against the read's own window is derivable from data the row
+    already has, which is the same rule ``provider_status`` follows (#717 decision
+    18).
+
+    It is a statement about WHEN, not about WHY: ``open`` means the failure was seen
+    inside the window, ``resolved`` means it has not been seen since. The words are
+    the alert vocabulary's because an operator switching between the two feeds should
+    not have to learn that one says "resolved" and the other says "stopped".
+    """
+    return ALERT_STATUS_OPEN if last_seen_at >= opened_after else ALERT_STATUS_RESOLVED
+
+
+def _error_status_clause(status: str | None, *, opened_after: datetime) -> ColumnElement[bool]:
+    """The WHERE fragment ``status`` selects, or ``true()`` when unfiltered.
+
+    Expressed against ``last_seen_at`` rather than a column so the filter and the
+    per-entry ``status`` are the SAME judgement in the database and in
+    :func:`error_status`: a filtered page can never return an entry labelled ``open``
+    when it was ``resolved``, which is the drift a derived column silently invites.
+
+    An unrecognised status is refused rather than folded into one arm, because the
+    failure mode of getting it wrong is an empty feed that reads as "nothing is
+    failing" - the same reason the route's ``Literal`` refuses it at the edge.
+    """
+    if status is None:
+        return true()
+    if status == ALERT_STATUS_OPEN:
+        return observability_error_events.c.last_seen_at >= opened_after
+    if status == ALERT_STATUS_RESOLVED:
+        return observability_error_events.c.last_seen_at < opened_after
+    raise ValueError(
+        f"unknown error status {status!r}; expected one of {', '.join(ERROR_STATUS_VOCABULARY)}"
+    )
+
+
+async def query_error_feed(
+    connection: AsyncConnection,
+    *,
+    page: int,
+    page_size: int,
+    status: str | None = None,
+    now: datetime,
+    window_minutes: int,
+) -> ErrorFeedPage:
+    """Read one page of the live collapsed error feed, most recently seen first.
+
+    Served from ``observability_error_events``, which is already one row per distinct
+    fingerprint - the collapse happened at the drain, so this query does no grouping
+    and cannot produce a different answer than the capture recorded.
+
+    ``now`` is passed in rather than read from the clock, and ``window_minutes`` is
+    validated HERE, the one place, for the same two reasons as
+    :func:`query_reliability`: a test can pin the instant and get the statuses
+    production would report at it, and a caller arriving by neither the route nor the
+    facade still cannot ask for a window that decides liveness with a negative span.
+
+    The totals come from ONE aggregate over the same filter the page carries, so
+    ``total_count`` and ``total_occurrences`` cannot describe different sets of
+    failures - and both are over the FILTER, so a paged client can tell a full page
+    from the end of the feed.
+
+    Ordering is ``last_seen_at`` descending, with ``fingerprint`` as the tiebreak
+    rather than ``id``: a drain updates a repeat in place, so two failures can share a
+    last sighting and the tiebreak is what keeps a page from shuffling while the feed
+    is being written.
+    """
+    if window_minutes < 1:
+        raise ValueError("window_minutes must be positive")
+    opened_after = now - timedelta(minutes=window_minutes)
+    table = observability_error_events
+    filter_clause = _error_status_clause(status, opened_after=opened_after)
+
+    counted = await connection.execute(
+        select(
+            func.count().label("entries"),
+            func.coalesce(func.sum(table.c.occurrences), 0).label("occurrences"),
+        )
+        .select_from(table)
+        .where(filter_clause)
+    )
+    totals = counted.mappings().one()
+
+    rows = await connection.execute(
+        select(
+            table.c.fingerprint,
+            table.c.route_template,
+            table.c.method,
+            table.c.status_code,
+            table.c.status_class,
+            table.c.kind,
+            table.c.code,
+            table.c.trace_id,
+            table.c.occurrences,
+            table.c.first_seen_at,
+            table.c.last_seen_at,
+        )
+        .where(filter_clause)
+        .order_by(table.c.last_seen_at.desc(), table.c.fingerprint.asc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    return ErrorFeedPage(
+        errors=[
+            ErrorFeedEntry(
+                fingerprint=entry["fingerprint"],
+                route_template=entry["route_template"],
+                method=entry["method"],
+                status_code=entry["status_code"],
+                status_class=entry["status_class"],
+                kind=entry["kind"],
+                code=entry["code"],
+                trace_id=entry["trace_id"],
+                occurrences=entry["occurrences"],
+                first_seen_at=entry["first_seen_at"],
+                last_seen_at=entry["last_seen_at"],
+                status=error_status(entry["last_seen_at"], opened_after=opened_after),
+            )
+            for entry in rows.mappings()
+        ],
+        total_count=int(totals["entries"]),
+        total_occurrences=int(totals["occurrences"]),
+        window_minutes=window_minutes,
+    )
+
+
 def build_deeplinks(
     *,
     grafana_url: str | None = None,
@@ -2113,7 +2379,8 @@ class ObservabilityFacade:
         (``#706``/``#707``) read seam joins it: ``get_cost_summary``,
         ``get_cost_trend``, ``get_usage``, ``get_quality``, ``get_overview``,
         ``get_latency``, ``get_provider_board`` (#728), ``get_throughput``,
-        ``get_health``, ``get_alerts`` and ``get_deeplinks`` are what the operator
+        ``get_health``, ``get_reliability`` (#729), ``get_alerts``,
+        ``get_error_feed`` (#730) and ``get_deeplinks`` are what the operator
         observability routes call. Each opens the one settled engine connection and
         delegates its aggregate to the module helper, so routes hold no SQL and the
         reads stay in this module.
@@ -2232,6 +2499,38 @@ class ObservabilityFacade:
         """Read one page of the alert feed, optionally narrowed by status."""
         async with self._engine.begin() as connection:
             return await query_alerts(connection, page=page, page_size=page_size, status=status)
+
+    async def get_error_feed(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        status: str | None = None,
+        minutes: int,
+        now: datetime | None = None,
+    ) -> ErrorFeedPage:
+        """Read one page of the live collapsed error feed (``/errors``, #730).
+
+        The clock is resolved HERE, against the current UTC instant, for the same
+        reason ``/throughput`` and ``/reliability`` resolve theirs here: the route
+        owns the default and the facade owns the clock, so a test can pin ``now`` and
+        get the identical open/resolved split production would have reported at that
+        instant.
+
+        ``minutes`` is NOT validated here: :func:`query_error_feed` owns that check
+        and every path into this read goes through it, so a second copy would only be
+        a second place for the two to disagree about what a valid window is.
+        """
+        to_ts = now if now is not None else datetime.now(UTC)
+        async with self._engine.begin() as connection:
+            return await query_error_feed(
+                connection,
+                page=page,
+                page_size=page_size,
+                status=status,
+                now=to_ts,
+                window_minutes=minutes,
+            )
 
     def get_deeplinks(
         self,

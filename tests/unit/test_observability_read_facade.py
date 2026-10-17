@@ -27,13 +27,18 @@ from urllib.parse import unquote
 import pytest
 
 from bus.dispatcher import OutboxRowCounts, OutboxTable
+from modules.observability.domain.rollup import ALERT_STATUS_OPEN, ALERT_STATUS_RESOLVED
 from modules.observability.facade import (
+    DEFAULT_ERROR_WINDOW_MINUTES,
+    ERROR_STATUS_VOCABULARY,
     BusinessCountView,
     ObservabilityFacade,
     build_deeplinks,
+    error_status,
     query_alerts,
     query_cost_summary,
     query_cost_trend,
+    query_error_feed,
     query_health,
     query_latency,
     query_overview,
@@ -1193,6 +1198,250 @@ async def test_alerts_are_empty_before_any_finding() -> None:
 
     assert page.total_count == 0
     assert page.alerts == []
+
+
+# ------------------------------------------------------------------ errors
+
+
+#: The instant the feed's open/resolved split is decided against, and a failure
+#: five minutes before it (inside the default hour) and three hours before it
+#: (outside). Two arms of one judgement, so a test can show the boundary is the
+#: window rather than a stored column.
+_ERROR_NOW = datetime(2026, 10, 14, 12, 34, 56, tzinfo=UTC)
+
+
+def _error_row(
+    fingerprint: str, *, route_template: str, minutes_ago: int, occurrences: int
+) -> dict[str, object]:
+    """One collapsed error row as the capture left it, placed ``minutes_ago`` back."""
+    seen = _ERROR_NOW - timedelta(minutes=minutes_ago)
+    return {
+        "fingerprint": fingerprint,
+        "route_template": route_template,
+        "method": "POST",
+        "status_code": 500,
+        "status_class": "5xx",
+        "kind": "unhandled_exception",
+        "code": "INTERNAL_SERVER_ERROR",
+        "trace_id": f"trace-{fingerprint}",
+        "occurrences": occurrences,
+        "first_seen_at": seen - timedelta(minutes=30),
+        "last_seen_at": seen,
+    }
+
+
+_ERROR_OPEN = _error_row(
+    "a" * 64, route_template="/v1/cases/{case_id}/entries", minutes_ago=5, occurrences=412
+)
+_ERROR_RESOLVED = _error_row(
+    "b" * 64, route_template="/v1/intakes/{intake_id}/media", minutes_ago=180, occurrences=1
+)
+_ERROR_ROWS = [_ERROR_OPEN, _ERROR_RESOLVED]
+#: What the single aggregate over the unfiltered feed reports for those two rows:
+#: two DISTINCT failures, 413 occurrences between them.
+_ERROR_TOTALS = [{"entries": 2, "occurrences": 413}]
+
+
+async def _error_feed(
+    *,
+    rows: list[dict[str, object]] | None = None,
+    totals: list[dict[str, object]] | None = None,
+    page: int = 1,
+    page_size: int = 25,
+    status: str | None = None,
+    window_minutes: int = DEFAULT_ERROR_WINDOW_MINUTES,
+) -> tuple[object, AsyncMock]:
+    """Run the read over a mocked connection and hand back the page and the mock."""
+    connection = _connection(
+        totals if totals is not None else _ERROR_TOTALS,
+        rows if rows is not None else [],
+    )
+    view = await query_error_feed(
+        connection,
+        page=page,
+        page_size=page_size,
+        status=status,
+        now=_ERROR_NOW,
+        window_minutes=window_minutes,
+    )
+    return view, connection
+
+
+async def test_the_error_feed_names_the_template_method_status_and_trace() -> None:
+    """The four things an operator needs to act, and never a concrete request path."""
+    view, _ = await _error_feed(rows=[_ERROR_OPEN])
+
+    (entry,) = view.errors
+    assert entry.route_template == "/v1/cases/{case_id}/entries"
+    assert entry.method == "POST"
+    assert entry.status_code == 500
+    assert entry.status_class == "5xx"
+    assert entry.kind == "unhandled_exception"
+    # The cross-tool join key, the way the capture recorded it.
+    assert entry.trace_id == f"trace-{'a' * 64}"
+    assert entry.code == "INTERNAL_SERVER_ERROR"
+
+
+async def test_a_repeat_is_one_entry_carrying_its_count_and_its_most_recent_sighting() -> None:
+    """A loop is a count, not a wall - and the stamp is when it LAST happened."""
+    view, _ = await _error_feed(rows=[_ERROR_OPEN])
+
+    (entry,) = view.errors
+    assert entry.occurrences == 412
+    assert entry.last_seen_at == _ERROR_NOW - timedelta(minutes=5)
+    # ``first_seen_at`` is carried too: "started this morning" is a different
+    # question from "happening again right now", and only one stamp answers both.
+    assert entry.first_seen_at == _ERROR_NOW - timedelta(minutes=35)
+
+
+async def test_the_feed_reports_distinct_failures_and_occurrences_as_two_figures() -> None:
+    """They are different questions, and a client labelling the page needs both."""
+    view, _ = await _error_feed()
+
+    assert (view.total_count, view.total_occurrences) == (2, 413)
+
+
+async def test_the_feed_totals_are_one_aggregate_over_the_same_filter_as_the_page() -> None:
+    """Two aggregates could describe two different sets of failures."""
+    _, connection = await _error_feed(status="open")
+
+    aggregate = _compiled(connection, 0)
+    assert "count(*) AS entries" in aggregate
+    # COALESCE, not a bare SUM: an empty filter is 0 occurrences, and summing NULL
+    # over it would answer the same "nothing happened" with two different numbers.
+    assert "coalesce(sum(" in aggregate
+    assert "observability_error_events.occurrences), 0) AS occurrences" in aggregate
+    # The filter reaches BOTH statements, so the count is the filter's count.
+    for index in (0, 1):
+        assert "last_seen_at >=" in _compiled(connection, index)
+
+
+async def test_the_feed_is_most_recently_seen_first_with_a_stable_tiebreak() -> None:
+    _, connection = await _error_feed(rows=_ERROR_ROWS)
+
+    sql = _compiled(connection, 1)
+    assert re.search(
+        r"ORDER BY\s+observability\.observability_error_events\.last_seen_at DESC",
+        sql,
+    )
+    # Two failures can share a last sighting - a drain updates a repeat in place - so
+    # the tiebreak is what stops a page shuffling under a client paging back.
+    assert "observability.observability_error_events.fingerprint ASC" in sql
+    assert "LIMIT" in sql
+
+
+async def test_the_feed_pages() -> None:
+    _, connection = await _error_feed(page=3, page_size=10)
+
+    assert "OFFSET 20" in _compiled(connection, 1)
+
+
+async def test_the_open_filter_keeps_only_what_happened_inside_the_window() -> None:
+    _, connection = await _error_feed(status="open")
+
+    for index in (0, 1):
+        assert "WHERE observability.observability_error_events.last_seen_at >=" in _compiled(
+            connection, index
+        )
+
+
+async def test_the_resolved_filter_keeps_only_what_stopped_happening_before_it() -> None:
+    """Complement, not a second column: an entry is one or the other, never both."""
+    _, connection = await _error_feed(status="resolved")
+
+    for index in (0, 1):
+        assert "WHERE observability.observability_error_events.last_seen_at <" in _compiled(
+            connection, index
+        )
+
+
+async def test_unfiltered_the_feed_carries_no_status_predicate_at_all() -> None:
+    _, connection = await _error_feed()
+
+    for index in (0, 1):
+        sql = _compiled(connection, index)
+        assert "last_seen_at >=" not in sql
+        assert "last_seen_at <" not in sql
+
+
+@pytest.mark.parametrize(
+    ("minutes_ago", "expected"),
+    [
+        (5, ALERT_STATUS_OPEN),
+        (60, ALERT_STATUS_OPEN),
+        (61, ALERT_STATUS_RESOLVED),
+        (180, ALERT_STATUS_RESOLVED),
+    ],
+)
+def test_a_status_is_when_the_failure_last_happened_not_who_handled_it(
+    minutes_ago: int, expected: str
+) -> None:
+    seen = _ERROR_NOW - timedelta(minutes=minutes_ago)
+
+    assert error_status(seen, opened_after=_ERROR_NOW - timedelta(hours=1)) == expected
+
+
+def test_the_feed_speaks_the_alert_facilities_own_vocabulary() -> None:
+    """Two feeds, one set of words - an operator switches between them constantly."""
+    assert ERROR_STATUS_VOCABULARY == (ALERT_STATUS_OPEN, ALERT_STATUS_RESOLVED)
+
+
+async def test_the_page_labels_every_entry_with_the_status_its_own_stamp_derives() -> None:
+    view, _ = await _error_feed(rows=_ERROR_ROWS)
+
+    assert [entry.status for entry in view.errors] == [
+        ALERT_STATUS_OPEN,
+        ALERT_STATUS_RESOLVED,
+    ]
+    assert view.window_minutes == DEFAULT_ERROR_WINDOW_MINUTES
+
+
+async def test_the_window_decides_which_failures_read_as_open() -> None:
+    """The same three-hour-old failure, still open under a wider lens."""
+    view, _ = await _error_feed(rows=[_ERROR_RESOLVED], window_minutes=240)
+
+    assert [entry.status for entry in view.errors] == [ALERT_STATUS_OPEN]
+
+
+async def test_an_unrecognised_status_is_refused_rather_than_reading_as_an_empty_feed() -> None:
+    """The failure mode of getting this wrong is a page that says nothing is failing."""
+    with pytest.raises(ValueError, match="unknown error status"):
+        await _error_feed(status="acknowledged")
+
+
+async def test_the_feed_window_refuses_a_non_positive_span() -> None:
+    for minutes in (0, -5):
+        with pytest.raises(ValueError, match="window_minutes must be positive"):
+            await _error_feed(window_minutes=minutes)
+
+
+async def test_an_empty_feed_is_an_empty_page_not_a_failure() -> None:
+    view, _ = await _error_feed(rows=[], totals=[{"entries": 0, "occurrences": 0}])
+
+    assert view.errors == []
+    assert (view.total_count, view.total_occurrences) == (0, 0)
+
+
+async def test_the_facade_resolves_the_feed_window_against_a_pinned_clock() -> None:
+    """The route owns the default; the facade owns the clock. See ``get_throughput``."""
+    facade = ObservabilityFacade(_engine(_connection(_ERROR_TOTALS, [_ERROR_RESOLVED])))
+
+    view = await facade.get_error_feed(
+        page=1, page_size=25, status="open", minutes=240, now=_ERROR_NOW
+    )
+
+    assert view.window_minutes == 240
+    assert [entry.status for entry in view.errors] == [ALERT_STATUS_OPEN]
+
+
+async def test_the_error_feed_reads_the_observability_schema_only() -> None:
+    """ADR-0003 module isolation, for the tenth read: no join, no other schema."""
+    connection = _connection(_ERROR_TOTALS, _ERROR_ROWS)
+
+    await query_error_feed(connection, page=1, page_size=25, now=_ERROR_NOW, window_minutes=60)
+
+    for index in (0, 1):
+        assert _from_target(connection, index) == ("observability.observability_error_events")
 
 
 # --------------------------------------------------------------- deeplinks

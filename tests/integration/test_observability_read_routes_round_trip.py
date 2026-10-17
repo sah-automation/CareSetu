@@ -21,7 +21,8 @@ HTTP counter into it the same way, and additionally drives ``/throughput`` over 
 rows that fold produced, so the aggregate read is proven against the exact shape
 the capture writes rather than a hand-written seed. B9 (#728) adds
 ``/providers`` over the same seeded health rows, which carry the two failure
-columns and the named last error the board reads.
+columns and the named last error the board reads, and B8 (#730) adds ``/errors``
+over the rows a real 5xx left behind - the same seam reached from the read's end.
 
 Requires the native PostgreSQL; the suite skips cleanly when it is unreachable.
 The shared integration conftest migrates to head once per file, empties the
@@ -79,6 +80,7 @@ PROVIDERS_PATH = "/v1/operator/observability/providers"
 THROUGHPUT_PATH = "/v1/operator/observability/throughput"
 HEALTH_PATH = "/v1/operator/observability/health"
 ALERTS_PATH = "/v1/operator/observability/alerts"
+ERRORS_PATH = "/v1/operator/observability/errors"
 DEEPLINKS_PATH = "/v1/operator/observability/deeplinks"
 RELIABILITY_PATH = "/v1/operator/observability/reliability"
 
@@ -1384,4 +1386,248 @@ async def test_the_reliability_route_refuses_anonymous_and_non_operator_callers(
 ) -> None:
     assert _client(database_url).get(RELIABILITY_PATH).status_code == 401
     forbidden = _client(database_url).get(RELIABILITY_PATH, headers=_bearer("patient"))
+    assert forbidden.status_code == 403
+
+
+# ------------------------------------------------------- B8 #730: the error feed
+#
+# Served from Postgres because Postgres is the system of record: Sentry stays a crash
+# tracker and a deep-link target, and nothing here queries it (spec #717 Out of
+# Scope). Every row is produced by driving a REAL 5xx through the real ASGI
+# application and draining through the module facade, then read back through the
+# operator HTTP API - so the aggregate is proven over the exact shape the capture
+# writes rather than a hand-written seed.
+
+
+async def _fail_and_drain(database_url: str, engine: AsyncEngine, *paths: str) -> None:
+    """Drive each failing path through the real app, then drain the real buffer."""
+    with _failing_client(database_url) as client:
+        for path in paths:
+            client.get(path, headers={"X-Request-Id": _TRACE_ID})
+    await drain_error_buffer(engine)
+
+
+async def _age_the_entry_named(engine: AsyncEngine, route_template: str, *, hours: int) -> None:
+    """Move one captured failure's last sighting back, standing in for elapsed time.
+
+    There is no clock a test can wait on, and the capture seam stamps every record
+    with the moment it happened. Aging the stored sighting is the only way to put a
+    failure OUTSIDE the read's window without faking the capture itself - and it is
+    precisely what three passing hours would have done to that column.
+    """
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "UPDATE observability.observability_error_events "
+                "SET last_seen_at = last_seen_at - make_interval(hours => :hours) "
+                "WHERE route_template = :route"
+            ),
+            {"hours": hours, "route": route_template},
+        )
+
+
+async def test_the_error_feed_serves_what_the_capture_actually_collapsed(
+    engine: AsyncEngine, database_url: str
+) -> None:
+    """Four failures of two kinds are two entries, and the counts say four.
+
+    The point of the read is that the count is not lost: three identical failures and
+    one different one produce four occurrences over two entries, and a client has to
+    be able to say which number it is looking at.
+    """
+    reset_error_capture()
+
+    await _fail_and_drain(
+        database_url,
+        engine,
+        "/v1/cases/912/entries/boom",
+        "/v1/cases/912/entries/boom",
+        "/v1/cases/913/entries/boom",
+        "/v1/cases/912/entries/unavailable",
+    )
+
+    with _client(database_url) as client:
+        body = client.get(ERRORS_PATH, headers=_bearer()).json()
+
+    assert (body["total_count"], body["total_occurrences"]) == (2, 4)
+    assert body["window_minutes"] == 60
+    # Newest sighting first, so the failure still happening leads the feed.
+    newest, oldest = body["errors"]
+    assert (newest["occurrences"], oldest["occurrences"]) == (1, 3)
+    assert newest["route_template"] == "/v1/cases/{case_id}/entries/unavailable"
+    assert newest["status_code"] == 503
+    assert oldest["route_template"] == "/v1/cases/{case_id}/entries/boom"
+    assert oldest["method"] == "GET"
+    assert oldest["status_class"] == "5xx"
+    assert oldest["kind"] == "unhandled_exception"
+    assert oldest["code"] == "INTERNAL_SERVER_ERROR"
+    # The caller-presented trace survives capture AND the read.
+    assert {entry["trace_id"] for entry in body["errors"]} == {_TRACE_ID}
+
+
+async def test_the_error_feed_never_carries_a_concrete_request_path(
+    engine: AsyncEngine, database_url: str
+) -> None:
+    """The identifiers the two failing requests differed by are nowhere on the wire."""
+    reset_error_capture()
+
+    await _fail_and_drain(
+        database_url,
+        engine,
+        "/v1/cases/912/entries/boom",
+        "/v1/cases/913/entries/boom",
+    )
+
+    with _client(database_url) as client:
+        body = client.get(ERRORS_PATH, headers=_bearer()).json()
+
+    # Two different case ids, one entry - collapsed, and carrying neither.
+    assert body["total_count"] == 1
+    (entry,) = body["errors"]
+    assert entry["route_template"] == "/v1/cases/{case_id}/entries/boom"
+    assert "912" not in json.dumps(body)
+    assert "913" not in json.dumps(body)
+
+
+async def test_the_error_feed_pages_a_long_failure_run(
+    engine: AsyncEngine, database_url: str
+) -> None:
+    """Navigable, and the totals describe the whole filter rather than the page."""
+    reset_error_capture()
+
+    await _fail_and_drain(
+        database_url,
+        engine,
+        "/v1/cases/912/entries/boom",
+        "/v1/cases/912/entries/unavailable",
+        "/v1/cases/912/entries/both-ways",
+        "/v1/cases/912/entries/both-ways",
+    )
+
+    with _client(database_url) as client:
+        first = client.get(f"{ERRORS_PATH}?page_size=2", headers=_bearer()).json()
+        second = client.get(f"{ERRORS_PATH}?page=2&page_size=2", headers=_bearer()).json()
+
+    assert len(first["errors"]) == 2
+    assert len(second["errors"]) == 2
+    # Four calls, four DISTINCT failures: ``both-ways`` raised on one call and gave
+    # up on the next, and ``kind`` is what keeps those two apart rather than merging
+    # them into one entry whose count cannot say which happened.
+    assert first["total_count"] == second["total_count"] == 4
+    assert first["total_occurrences"] == second["total_occurrences"] == 4
+    # The two pages do not overlap.
+    assert not {e["fingerprint"] for e in first["errors"]} & {
+        e["fingerprint"] for e in second["errors"]
+    }
+
+
+async def test_the_error_feed_separates_a_live_failure_from_one_that_stopped(
+    engine: AsyncEngine, database_url: str
+) -> None:
+    """The open/resolved split, which is what makes a live problem separable.
+
+    Nothing marks a captured error handled, so the split is recency: a failure seen
+    three hours ago is history, one seen moments ago is not. Both filters are asked
+    for explicitly, because an unfiltered page that mixes the two is the thing an
+    operator has to page through to get around.
+    """
+    reset_error_capture()
+
+    await _fail_and_drain(
+        database_url,
+        engine,
+        "/v1/cases/912/entries/boom",
+        "/v1/cases/912/entries/unavailable",
+    )
+    await _age_the_entry_named(engine, "/v1/cases/{case_id}/entries/unavailable", hours=3)
+
+    with _client(database_url) as client:
+        unfiltered = client.get(ERRORS_PATH, headers=_bearer()).json()
+        live = client.get(f"{ERRORS_PATH}?status=open", headers=_bearer()).json()
+        handled = client.get(f"{ERRORS_PATH}?status=resolved", headers=_bearer()).json()
+
+    assert unfiltered["total_count"] == 2
+    assert live["total_count"] == 1
+    assert handled["total_count"] == 1
+    assert live["errors"][0]["route_template"] == "/v1/cases/{case_id}/entries/boom"
+    assert live["errors"][0]["status"] == "open"
+    assert handled["errors"][0]["route_template"] == "/v1/cases/{case_id}/entries/unavailable"
+    assert handled["errors"][0]["status"] == "resolved"
+    # Each page's own entries agree with the filter that selected them.
+    assert {e["status"] for e in live["errors"]} == {"open"}
+    assert {e["status"] for e in handled["errors"]} == {"resolved"}
+
+
+async def test_widening_the_error_feed_window_reopens_an_aged_failure(
+    engine: AsyncEngine, database_url: str
+) -> None:
+    """The window is the read's whole notion of live, so it has to be a parameter.
+
+    A nightly batch's failure is still yesterday's problem at lunchtime; a fixed
+    one-hour default would hide it exactly when someone is looking for it.
+    """
+    reset_error_capture()
+
+    await _fail_and_drain(database_url, engine, "/v1/cases/912/entries/boom")
+    await _age_the_entry_named(engine, "/v1/cases/{case_id}/entries/boom", hours=3)
+
+    with _client(database_url) as client:
+        narrow = client.get(f"{ERRORS_PATH}?status=open", headers=_bearer()).json()
+        wide = client.get(f"{ERRORS_PATH}?status=open&minutes=240", headers=_bearer()).json()
+
+    assert narrow["total_count"] == 0
+    assert narrow["errors"] == []
+    assert wide["total_count"] == 1
+    assert wide["window_minutes"] == 240
+    assert wide["errors"][0]["status"] == "open"
+
+
+async def test_the_error_feed_is_empty_before_anything_has_failed(
+    engine: AsyncEngine, database_url: str
+) -> None:
+    """A fresh deployment reads an empty page rather than erroring.
+
+    Empty is NOT the same as healthy - only ``/throughput``'s capture block says
+    which - so the page carries no verdict of its own to get wrong. ``engine`` is
+    requested for its truncation, not for anything it does: "before anything has
+    failed" has to mean an emptied table, not an ordering accident.
+    """
+    del engine
+    with _client(database_url) as client:
+        body = client.get(ERRORS_PATH, headers=_bearer()).json()
+
+    assert body == {
+        "errors": [],
+        "total_count": 0,
+        "total_occurrences": 0,
+        "window_minutes": 60,
+    }
+
+
+async def test_the_error_feed_route_refuses_a_window_outside_its_bounds(
+    database_url: str,
+) -> None:
+    """The window is clamped by the contract: 1..1440 minutes, 422 outside."""
+    with _client(database_url) as client:
+        assert client.get(f"{ERRORS_PATH}?minutes=0", headers=_bearer()).status_code == 422
+        assert client.get(f"{ERRORS_PATH}?minutes=1441", headers=_bearer()).status_code == 422
+
+
+async def test_the_error_feed_route_refuses_an_unrecognised_status(
+    database_url: str,
+) -> None:
+    """A typo must not 200 with an empty page, which reads as "nothing is failing"."""
+    with _client(database_url) as client:
+        response = client.get(f"{ERRORS_PATH}?status=acknowledged", headers=_bearer())
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "VALIDATION_ERROR"
+
+
+async def test_the_error_feed_route_refuses_anonymous_and_non_operator_callers(
+    database_url: str,
+) -> None:
+    """The tenth read, behind the same flat operator requirement as the other nine."""
+    assert _client(database_url).get(ERRORS_PATH).status_code == 401
+    forbidden = _client(database_url).get(ERRORS_PATH, headers=_bearer("patient"))
     assert forbidden.status_code == 403

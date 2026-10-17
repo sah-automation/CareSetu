@@ -26,6 +26,7 @@ from app.gateway.jwt_verify import JWTVerifyMiddleware
 from app.main import create_app
 from modules.iam.domain.jwt import issue_token
 from modules.observability.facade import (
+    ERROR_STATUS_VOCABULARY,
     AlertEntry,
     AlertPage,
     BreakerHealthRow,
@@ -37,6 +38,8 @@ from modules.observability.facade import (
     CostTrendPoint,
     Deeplinks,
     DependencyHealth,
+    ErrorFeedEntry,
+    ErrorFeedPage,
     LatencyReport,
     LatencyRow,
     OutboxHealthRow,
@@ -73,6 +76,7 @@ THROUGHPUT_PATH = "/v1/operator/observability/throughput"
 HEALTH_PATH = "/v1/operator/observability/health"
 RELIABILITY_PATH = "/v1/operator/observability/reliability"
 ALERTS_PATH = "/v1/operator/observability/alerts"
+ERRORS_PATH = "/v1/operator/observability/errors"
 DEEPLINKS_PATH = "/v1/operator/observability/deeplinks"
 
 _ALERT_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
@@ -366,6 +370,30 @@ _ALERTS = AlertPage(
     ],
 )
 
+_ERRORS = ErrorFeedPage(
+    total_count=1,
+    total_occurrences=412,
+    window_minutes=60,
+    errors=[
+        ErrorFeedEntry(
+            fingerprint="a" * 64,
+            # The TEMPLATE: the shape below is what keeps a concrete request path -
+            # and the identifier in it - out of the response.
+            route_template="/v1/cases/{case_id}/entries",
+            method="POST",
+            status_code=500,
+            status_class="5xx",
+            kind="unhandled_exception",
+            code="INTERNAL_SERVER_ERROR",
+            trace_id="trace-abc123",
+            occurrences=412,
+            first_seen_at=datetime(2026, 10, 14, 11, 30, tzinfo=UTC),
+            last_seen_at=datetime(2026, 10, 14, 12, 30, tzinfo=UTC),
+            status="open",
+        )
+    ],
+)
+
 
 class StubObservabilityFacade:
     """Facade stand-in recording the calls each route made.
@@ -388,6 +416,7 @@ class StubObservabilityFacade:
         self.reliability_calls: list[tuple[int, str | None]] = []
         self.alert_pages: list[tuple[int, int]] = []
         self.alert_statuses: list[str | None] = []
+        self.error_feed_calls: list[tuple[int, int, str | None, int]] = []
         self.deeplink_settings: list[dict[str, Any]] = []
 
     async def get_cost_summary(self) -> CostSummary:
@@ -439,6 +468,18 @@ class StubObservabilityFacade:
         self.alert_pages.append((page, page_size))
         self.alert_statuses.append(status)
         return _ALERTS
+
+    async def get_error_feed(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        status: str | None = None,
+        minutes: int,
+        now: datetime | None = None,
+    ) -> ErrorFeedPage:
+        self.error_feed_calls.append((page, page_size, status, minutes))
+        return _ERRORS.model_copy(update={"window_minutes": minutes})
 
     def get_deeplinks(
         self,
@@ -859,6 +900,131 @@ def test_alerts_narrow_to_a_recognised_status(status: str) -> None:
     assert facade.alert_pages == [(3, 5)]
 
 
+# ------------------------------------------------------------------ errors
+
+
+def test_the_error_feed_defaults_to_the_first_page_over_the_last_hour() -> None:
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(ERRORS_PATH, headers=_operator())
+
+    assert response.status_code == 200
+    assert facade.error_feed_calls == [(1, 25, None, 60)]
+    body = response.json()
+    # Two counts, because "one failure 412 times" and "412 failures" are different
+    # pages and a client labelling it has to know which it is holding.
+    assert (body["total_count"], body["total_occurrences"]) == (1, 412)
+    assert body["window_minutes"] == 60
+    entry = body["errors"][0]
+    assert entry["route_template"] == "/v1/cases/{case_id}/entries"
+    assert (entry["method"], entry["status_code"], entry["status_class"]) == ("POST", 500, "5xx")
+    # The join key that reaches the trace, and the collapse count behind the entry.
+    assert entry["trace_id"] == "trace-abc123"
+    assert entry["occurrences"] == 412
+    assert entry["status"] == "open"
+
+
+@pytest.mark.parametrize("status", ["open", "resolved"])
+def test_the_error_feed_narrows_to_a_recognised_status(status: str) -> None:
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(
+        f"{ERRORS_PATH}?status={status}&page=3&page_size=5&minutes=240", headers=_operator()
+    )
+
+    assert response.status_code == 200
+    assert facade.error_feed_calls == [(3, 5, status, 240)]
+
+
+def test_the_error_feed_carries_no_capture_verdict_of_its_own() -> None:
+    """An empty page is ambiguous; ``/throughput``'s ``capture`` is what says which.
+
+    Answering it here too would make two places to keep honest for one verdict, and
+    two that could disagree is worse than one the operator has to look beside.
+    """
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    body = client.get(ERRORS_PATH, headers=_operator()).json()
+
+    assert "capture" not in body
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["page_size=0", "page_size=101", "page=0", "page=abc", "minutes=0", "minutes=1441"],
+)
+def test_out_of_range_error_feed_paging_is_rejected_at_the_edge(query: str) -> None:
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(f"{ERRORS_PATH}?{query}", headers=_operator())
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "VALIDATION_ERROR"
+    assert facade.error_feed_calls == []
+
+
+@pytest.mark.parametrize("status", ["acked", "OPEN", "all"])
+def test_an_unrecognised_error_status_is_rejected_at_the_edge(status: str) -> None:
+    """A typo must not read as an empty feed, which would say "nothing is failing"."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(f"{ERRORS_PATH}?status={status}", headers=_operator())
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "VALIDATION_ERROR"
+    assert facade.error_feed_calls == []
+
+
+def test_an_error_status_no_writer_can_produce_is_not_offered_as_a_filter() -> None:
+    """``acknowledged`` is 422 today, and that is a fact about the DATA, not a cap.
+
+    Acknowledgement is an action against ``observability_alert_events``; nothing
+    writes one to a captured error, so accepting the filter would hand an operator a
+    button that can only ever return nothing. Kept as its own named assertion - rather
+    than folded into the typo list above - so that whoever makes acknowledgement reach
+    captured errors has exactly one line to change, and so the change is a deliberate
+    one rather than something the set happens to allow.
+    """
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(f"{ERRORS_PATH}?status=acknowledged", headers=_operator())
+
+    assert response.status_code == 422
+    assert facade.error_feed_calls == []
+
+
+def test_the_error_status_gate_matches_the_facade_vocabulary() -> None:
+    """The edge gate and the facade's vocabulary are written twice, so tie them here.
+
+    FastAPI needs a static ``Literal`` to render the accepted values into OpenAPI, so
+    ``/errors`` cannot derive its gate from
+    ``ERROR_STATUS_VOCABULARY``. That makes widening the filter two edits, and this is
+    what makes it two edits rather than a silent drift: read the enum off the rendered
+    schema and compare it to the one place the set is written down.
+    """
+    client = _client()
+
+    schema = client.get("/openapi.json").json()
+    status_param = next(
+        parameter
+        for parameter in schema["paths"][ERRORS_PATH]["get"]["parameters"]
+        if parameter["name"] == "status"
+    )
+    # Read off the RENDERED schema rather than the annotation, so this also proves the
+    # values reach a client reading the spec - which is the whole reason the gate is a
+    # ``Literal`` instead of a hand-rolled check.
+    rendered = next(entry for entry in status_param["schema"]["anyOf"] if "enum" in entry)["enum"]
+
+    assert tuple(rendered) == ERROR_STATUS_VOCABULARY
+    assert "open" in rendered and "resolved" in rendered
+
+
 def test_deeplinks_answer_the_configured_vendors() -> None:
     facade = StubObservabilityFacade()
     client = _client(
@@ -965,6 +1131,7 @@ _ALL_PATHS = [
     HEALTH_PATH,
     RELIABILITY_PATH,
     ALERTS_PATH,
+    ERRORS_PATH,
     DEEPLINKS_PATH,
 ]
 
@@ -1006,6 +1173,7 @@ def _facade_untouched(facade: StubObservabilityFacade) -> bool:
         and facade.throughput_minutes == []
         and facade.health_cache_flags == []
         and facade.alert_pages == []
+        and facade.error_feed_calls == []
         and facade.deeplink_settings == []
     )
 

@@ -19,7 +19,8 @@ Scope: the whole plan-phase14 §9.1 read table. C1a (#706) serves ``cost``,
 ``throughput``, the per-minute request counter and the capture-liveness answer;
 B9 (#728) adds ``providers``, the degraded-provider board; B5 (#729) adds
 ``reliability``, the queue depth/age read with the per-outbox breakdown, the
-recent-activity figure and the link out to true concurrency.
+recent-activity figure and the link out to true concurrency; B8 (#730) adds
+``errors``, the live collapsed error stream with its open/resolved split.
 """
 
 from __future__ import annotations
@@ -34,15 +35,20 @@ from app.gateway.rbac import require_operator
 from modules.observability.facade import (
     DEFAULT_ACTIVITY_WINDOW_MINUTES,
     DEFAULT_ALERT_PAGE_SIZE,
+    DEFAULT_ERROR_PAGE_SIZE,
+    DEFAULT_ERROR_WINDOW_MINUTES,
     DEFAULT_THROUGHPUT_WINDOW_MINUTES,
     DEFAULT_WINDOW_DAYS,
     MAX_ACTIVITY_WINDOW_MINUTES,
     MAX_ALERT_PAGE_SIZE,
+    MAX_ERROR_PAGE_SIZE,
+    MAX_ERROR_WINDOW_MINUTES,
     MAX_THROUGHPUT_WINDOW_MINUTES,
     AlertPage,
     CostSummary,
     CostTrend,
     Deeplinks,
+    ErrorFeedPage,
     LatencyReport,
     ObservabilityFacade,
     Overview,
@@ -78,14 +84,37 @@ _MinuteWindow = Annotated[int, Query(ge=1, le=MAX_THROUGHPUT_WINDOW_MINUTES)]
 #: that this window deliberately does not apply to.
 _ActivityWindow = Annotated[int, Query(ge=1, le=MAX_ACTIVITY_WINDOW_MINUTES)]
 
+#: The ``/errors`` recency window, in minutes against ``last_seen_at``. It decides
+#: what reads as ``open``, so it carries its own ceiling for the reason
+#: :data:`_MinuteWindow` does: it bounds the RESPONSE, which makes it a module
+#: constant rather than an env-driven limit.
+_ErrorWindow = Annotated[int, Query(ge=1, le=MAX_ERROR_WINDOW_MINUTES)]
+
 #: The alert statuses ``observability_alert_events.status`` can hold. Spelled as a
 #: ``Literal`` rather than imported from the domain so FastAPI can render the
 #: accepted values into the OpenAPI schema and refuse a typo at the edge: a
 #: misspelled status that 200'd with an empty feed would read as "nothing is wrong".
 _AlertStatus = Annotated[Literal["open", "resolved"] | None, Query(alias="status")]
 
+#: The statuses ``/errors`` accepts, same reasoning as :data:`_AlertStatus` and the
+#: same words - an operator moving between the alert feed and the error feed should
+#: not have to learn two vocabularies.
+#:
+#: Spelled as a static ``Literal`` because that is what puts the accepted values into
+#: the OpenAPI schema and makes FastAPI refuse a typo at the edge, which is why this
+#: cannot simply be derived from
+#: :data:`~modules.observability.facade.ERROR_STATUS_VOCABULARY`. A test asserts the
+#: two agree so the duplication cannot drift.
+#:
+#: Deliberately NOT the whole alert set: acknowledgement is written against the alert
+#: table and no writer can acknowledge a CAPTURED error, so accepting ``acknowledged``
+#: would offer a filter that can only ever return nothing. #735 widens this when that
+#: changes.
+_ErrorStatus = Annotated[Literal["open", "resolved"] | None, Query(alias="status")]
+
 _Page = Annotated[int, Query(ge=1)]
 _PageSize = Annotated[int, Query(ge=1, le=MAX_ALERT_PAGE_SIZE)]
+_ErrorPageSize = Annotated[int, Query(ge=1, le=MAX_ERROR_PAGE_SIZE)]
 
 
 def _facade(request: Request) -> ObservabilityFacade:
@@ -360,6 +389,50 @@ async def read_alerts(
     """
     del principal
     return await _facade(request).get_alerts(page=page, page_size=page_size, status=alert_status)
+
+
+@router.get(
+    "/v1/operator/observability/errors",
+    response_model=ErrorFeedPage,
+    status_code=status.HTTP_200_OK,
+    summary="Read the live collapsed error feed (operator only)",
+)
+async def read_errors(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_operator)],
+    page: _Page = 1,
+    page_size: _ErrorPageSize = DEFAULT_ERROR_PAGE_SIZE,
+    error_status: _ErrorStatus = None,
+    minutes: _ErrorWindow = DEFAULT_ERROR_WINDOW_MINUTES,
+) -> ErrorFeedPage:
+    """One page of captured server errors, most recently seen first, PHI-free.
+
+    Paged as api-standards §4 asks - ``page``/``page_size`` (default 25, max 100)
+    - over a feed that is already collapsed: one entry per DISTINCT failure, with
+    ``occurrences`` saying how many times it happened. The response carries both
+    counts (``total_count`` over ``total_occurrences``) because "four hundred
+    failures" and "one failure, four hundred times" are different pages and a client
+    labelling it has to know which it is looking at.
+
+    Every entry names the ROUTE TEMPLATE, the method, the status code and the trace
+    identifier - never a concrete request path - so the feed can be rendered with no
+    identifier in it, and one click reaches the trace.
+
+    ``status`` narrows to ``open`` or ``resolved``. Neither is stored: a captured
+    error has no lifecycle and nothing marks one handled, so a status column could
+    only ever hold its insert default. The read derives both from ``last_seen_at``
+    against ``minutes``, which is therefore the read's whole notion of "live" and is
+    why it is a parameter and not a constant.
+
+    The response carries no capture-liveness block. An empty page is ambiguous - "no
+    errors" and "nothing was watched" look identical - and ``/throughput``'s
+    ``capture`` is what says which; answering it here too would make two places to
+    keep honest for one verdict.
+    """
+    del principal
+    return await _facade(request).get_error_feed(
+        page=page, page_size=page_size, status=error_status, minutes=minutes
+    )
 
 
 @router.get(
