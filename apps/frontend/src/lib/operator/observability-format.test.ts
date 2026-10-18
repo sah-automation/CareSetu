@@ -6,9 +6,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   DASH,
+  formatAge,
+  formatCount,
   formatDuration,
   formatMoney,
   formatPct,
+  formatRate,
   formatUnitCost,
   rupeesFromPaise,
 } from "./observability-format";
@@ -67,5 +70,49 @@ describe("formatUnitCost", () => {
     expect(formatUnitCost(40)).toBe("₹0.40");
     expect(formatUnitCost(40)).not.toBe(formatMoney(40));
     expect(formatUnitCost(0.4)).toBe("₹0.00");
+  });
+});
+
+// #738: the second percentage scale. The backend stores `success_rate` and
+// `error_rate` as FRACTIONS - "0.8750" means 87.5% of calls succeeded - while
+// `cap_consumed_pct` arrives already on the 0-100 scale. Two formatters, one per
+// scale, so neither can be used for the other's field.
+describe("formatRate", () => {
+  it("scales a fraction the backend sent", () => {
+    expect(formatRate(0.875)).toBe("87.5%");
+    expect(formatRate(0.1818)).toBe("18.2%");
+    expect(formatRate(1)).toBe("100%");
+  });
+
+  it("reads very differently from the percentage-scale formatter it must not be confused with", () => {
+    // The failure this exists to prevent: a provider that is 87.5% healthy
+    // reported as "0.9%".
+    expect(formatRate(0.875)).not.toBe(formatPct(0.875));
+    expect(formatPct(0.875)).toBe("0.9%");
+  });
+
+  it("renders an unmeasured rate as an em dash, never as zero", () => {
+    expect(formatRate(null)).toBe(DASH);
+    expect(formatRate(null)).not.toBe("0%");
+  });
+});
+
+describe("formatCount", () => {
+  it("groups in the console's own convention", () => {
+    expect(formatCount(1234)).toBe("1,234");
+    expect(formatCount(1200000)).toBe("12,00,000");
+    expect(formatCount(0)).toBe("0");
+  });
+});
+
+describe("formatAge", () => {
+  const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+
+  it("reads in the operator queue's register", () => {
+    expect(formatAge(ago(30_000))).toBe("< 1m");
+    expect(formatAge(ago(5 * 60_000))).toBe("5m");
+    expect(formatAge(ago(3 * 3_600_000))).toBe("3h");
+    expect(formatAge(ago(26 * 3_600_000))).toBe("1 day");
+    expect(formatAge(ago(72 * 3_600_000))).toBe("3 days");
   });
 });

@@ -27,6 +27,55 @@ export function formatPct(value: number | null): string {
   return `${Number(value.toFixed(1))}%`;
 }
 
+/**
+ * A RATE, which the backend stores as a FRACTION: `success_rate` of `"0.8750"`
+ * means 87.5% of calls succeeded, and `error_rate` of `"0.1818"` means 18.18%
+ * of requests failed.
+ *
+ * DELIBERATELY NOT `formatPct`. That formatter takes a figure already on the
+ * 0-100 scale - `cap_consumed_pct` arrives as `"25.00"` - and a fraction
+ * printed through it reports a provider that is 87.5% healthy as "0.9%", which
+ * is not a rounding difference but the opposite of the fact. Two names for two
+ * scales is the whole point: reach for the one that matches the field's `_pct`
+ * suffix, and neither here.
+ */
+export function formatRate(fraction: number | null): string {
+  if (fraction === null) return DASH;
+  return `${Number((fraction * 100).toFixed(1))}%`;
+}
+
+/**
+ * A count, grouped the way the console's money already is.
+ *
+ * `toLocaleString("en-IN")` spelled inline is one authority per call site, and
+ * two tables on one page that group 1,234 and 1,23,4 differently is exactly
+ * the drift the money formatter exists to prevent.
+ */
+export function formatCount(value: number): string {
+  return value.toLocaleString("en-IN");
+}
+
+/**
+ * How long ago something happened, in the operator queue's register ("2h",
+ * "3 days").
+ *
+ * Shared because two panels already needed it and had each written their own:
+ * the alert feed's rows and the error feed's rows are both timelines, and "when"
+ * is the question an operator asks before "what". The exact timestamp stays in
+ * the element's `title`/`dateTime` for anyone who needs it. No PHI is involved
+ * - the value is a clock time.
+ */
+export function formatAge(timestamp: string): string {
+  const ms = Date.now() - new Date(timestamp).getTime();
+  if (ms < 60_000) return "< 1m";
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  return days === 1 ? "1 day" : `${days} days`;
+}
+
 /** Latency in seconds past a second ("4.2s"), whole milliseconds below that. */
 export function formatDuration(ms: number | null): string {
   if (ms === null) return DASH;

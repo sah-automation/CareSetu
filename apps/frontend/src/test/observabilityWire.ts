@@ -60,15 +60,38 @@ export function jsonResponse(body: unknown, status = 200): Response {
 }
 
 /**
- * The JSON body for the first route suffix `path` ends with. A URL matching no
- * stubbed suffix answers `{}` rather than hanging: an unrouted read then fails
- * its own shape guard, which is the honest signal that the page asked for
- * something the test did not stage - better than a promise that never settles
- * and a test that times out.
+ * The path a route suffix should be matched against: the URL with its query
+ * string removed.
+ *
+ * A page that asks a read a question sends that question in the query - the
+ * Reliability feed's `?page=1&status=open` - and a suffix match against the
+ * whole URL would miss, handing the read `{}` and failing its shape guard.
+ */
+function pathWithoutQuery(path: string): string {
+  return path.split("?")[0];
+}
+
+/**
+ * Whether a request path is the route a suffix names.
+ *
+ * Both forms are tried so a suffix matches a URL that carries a query AND a
+ * suffix that names one (a query string is not a path, but a test that cares
+ * about the query should still be able to name the whole thing).
+ */
+function matchesSuffix(path: string, suffix: string): boolean {
+  return path.endsWith(suffix) || pathWithoutQuery(path).endsWith(suffix);
+}
+
+/**
+ * The JSON body for the first route suffix the request names, or `{}` for a URL
+ * matching none. The `{}` is deliberate: an unrouted read then fails its own
+ * shape guard, which is the honest signal that the page asked for something the
+ * test did not stage - better than a promise that never settles and a test that
+ * times out.
  */
 function bodyFor(path: string, routes: Record<string, unknown>): unknown {
   const match = Object.entries(routes).find(([suffix]) =>
-    path.endsWith(suffix),
+    matchesSuffix(path, suffix),
   );
   return match ? match[1] : {};
 }
@@ -89,10 +112,9 @@ export function stubBodyWire(body: unknown): ReturnType<typeof vi.fn> {
 
 /**
  * Answer each route by path suffix, so a page with several panels can give each
- * read its own body. A URL matching no suffix answers `{}` rather than hanging:
- * an unrouted read fails its own shape guard, which is the honest signal that
- * the page asked for something the test did not stage - better than a promise
- * that never settles and a test that times out.
+ * read its own body. A suffix matches whether or not the URL carries a query -
+ * see `matchesSuffix`. An unrouted URL answers `{}`, which fails that read's own
+ * shape guard rather than hanging the test.
  */
 export function stubRouteWire(
   routes: Record<string, unknown>,
@@ -119,7 +141,7 @@ export function stubFailingRoute(
 ): ReturnType<typeof vi.fn> {
   const fetchMock = vi.fn((input: RequestInfo | URL) => {
     const path = String(input);
-    if (path.endsWith(failingSuffix)) {
+    if (matchesSuffix(path, failingSuffix)) {
       return Promise.resolve(
         jsonResponse({ code: "NOT_FOUND", message: "no such read" }, status),
       );

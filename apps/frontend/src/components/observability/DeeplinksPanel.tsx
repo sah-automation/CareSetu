@@ -100,22 +100,40 @@ function noLinksConfigured(links: Deeplinks): boolean {
   );
 }
 
-export function DeeplinksPanel({ read }: { read: PanelRead<Deeplinks> }) {
+export function DeeplinksPanel({
+  read,
+  testId = "observability-deeplinks",
+  linkIdPrefix = "observability-deeplink",
+  title = "Open in your tools",
+  emptyTitle = "No vendor links configured",
+  emptyBody = "Grafana, Sentry and Langfuse are switched off for this deployment.",
+}: {
+  read: PanelRead<Deeplinks>;
+  /** Names the panel in tests, and the frame's own test ids hang off it. */
+  testId?: string;
+  /**
+   * Prefixes each rendered link's test id. A page that renders its own scoped
+   * links (the Reliability error feed hands the read one trace and one error
+   * type) needs its links distinguishable from the page-level ones, which would
+   * otherwise carry the same ids and collide.
+   */
+  linkIdPrefix?: string;
+  title?: string;
+  emptyTitle?: string;
+  emptyBody?: string;
+}) {
   return (
     <ReadPanel
-      testId="observability-deeplinks"
-      title="Open in your tools"
+      testId={testId}
+      title={title}
       read={read}
       isEmpty={noLinksConfigured}
-      emptyTitle="No vendor links configured"
-      emptyBody="Grafana, Sentry and Langfuse are switched off for this deployment."
+      emptyTitle={emptyTitle}
+      emptyBody={emptyBody}
       errorMessage="Could not load the vendor links."
     >
       {(links) => (
-        <ul
-          className="flex flex-col gap-3"
-          data-testid="observability-deeplinks-list"
-        >
+        <ul className="flex flex-col gap-3" data-testid={`${testId}-list`}>
           {VENDORS.flatMap((vendor) => {
             const vendorLinks = renderableLinks(links, vendor.key);
             if (vendorLinks.length === 0) return [];
@@ -133,7 +151,7 @@ export function DeeplinksPanel({ read }: { read: PanelRead<Deeplinks> }) {
                     href={link.href}
                     target="_blank"
                     rel="noopener noreferrer"
-                    data-testid={`observability-deeplink-${link.id}`}
+                    data-testid={`${linkIdPrefix}-${link.id}`}
                     className="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-hairline bg-surface px-3 text-sm font-medium text-txt-sub transition-colors hover:border-accent-border hover:bg-accent-soft hover:text-accent-strong"
                   >
                     {link.label}

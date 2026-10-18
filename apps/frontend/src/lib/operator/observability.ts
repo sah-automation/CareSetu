@@ -2,7 +2,10 @@
 // §9.1/§9.2, PHASE-14A BATCH 1). Nine operator-only GETs over the MOD-013
 // telemetry the nightly rollup writes: the headline overview, the AI bill, the
 // usage/quality/latency breakdowns, dependency health, the alert feed and the
-// outbound vendor links.
+// outbound vendor links. Batch 2 and 3 add the reliability lens's reads (#727
+// throughput, #728 provider board, #729 queues, #730 error feed, #734/#735
+// alerts) and the business read (#731/#732), plus the one acknowledgement
+// write.
 //
 // The same thin `request` + `guardShape` seam as lib/operator/api.ts: every
 // fetcher resolves the exact response model
@@ -24,6 +27,7 @@
 // A rate whose denominator is empty stays `null` through the decode, which
 // means "not yet measured" and never reads as zero.
 
+import { IDEMPOTENCY_KEY_HEADER, idempotencyKey } from "@/lib/idempotency";
 import { guardShape, request } from "@/lib/request";
 
 /** The observability read routes' shared prefix (plan §9.1). */
@@ -254,6 +258,187 @@ export interface AlertEntry {
 export interface AlertPage {
   alerts: AlertEntry[];
   total_count: number;
+}
+
+/**
+ * What one acknowledgement wrote (#735).
+ *
+ * `already_acknowledged` is the idempotent answer, not an error: a repeat call
+ * is a 200 whose first acknowledgement stands and cannot be overwritten. A
+ * client that treated it as a failure would tell an operator their click did
+ * nothing when in fact it was the second one.
+ */
+export interface AlertAcknowledgement {
+  alert: AlertEntry;
+  already_acknowledged: boolean;
+}
+
+/**
+ * Whether the runtime capture is switched on and whether anything has landed in
+ * it (#727). This is the panel's answer to "the numbers say zero - is that
+ * quiet, or is the recorder off?", which a request count alone cannot give.
+ */
+export interface CaptureLiveness {
+  capturing: boolean;
+  requests_recorded: number;
+  last_recorded_at: string | null;
+}
+
+/**
+ * One minute of captured traffic. A minute with no traffic carries NO point at
+ * all rather than a zero, so a gap in the series is an absence of traffic
+ * instead of a dip drawn to the floor.
+ */
+export interface ThroughputPoint {
+  minute_ts: string;
+  requests: number;
+  errors: number;
+  error_rate: number | null;
+}
+
+/**
+ * One route's share of the window. `error_rate` is null when the route served
+ * no requests - "not measured", never "0% of nothing went wrong".
+ */
+export interface RouteThroughputRow {
+  route_template: string;
+  method: string;
+  requests: number;
+  errors: number;
+  error_rate: number | null;
+}
+
+/**
+ * Requests per minute and error rate over the capture window (#727).
+ *
+ * `requests_per_minute` and `error_rate` are null when nothing was recorded:
+ * they are averages, and an average over no samples has no value. Rendering
+ * that as `0` would say "the API served nothing, cleanly" - two claims at once,
+ * neither of them measured.
+ *
+ * `routes` is capped by the route and `routes_total` is the untruncated count,
+ * so a client can say how many of how many it is showing.
+ */
+export interface ThroughputReport {
+  minutes: number;
+  from_ts: string;
+  to_ts: string;
+  requests: number;
+  errors: number;
+  error_rate: number | null;
+  requests_per_minute: number | null;
+  points: ThroughputPoint[];
+  routes: RouteThroughputRow[];
+  routes_total: number;
+  capture: CaptureLiveness;
+}
+
+/**
+ * How one provider is doing, DERIVED at read time rather than stored (#728).
+ *
+ * `last_error` is the newest failure's sanitised reason in the window, and it is
+ * deliberately NOT an input to `status`: a provider can be perfectly healthy
+ * with one stale error message still sitting on the board, and reading the two
+ * as the same fact turns a recovery into an incident.
+ */
+export type ProviderStatus = "healthy" | "degraded" | "down";
+
+/** One provider's health row on the board (#728). */
+export interface ProviderBoardRow {
+  provider: string;
+  status: ProviderStatus;
+  breaker_state: string;
+  success_rate: number | null;
+  sample_count: number;
+  timeout_count: number;
+  rate_limit_count: number;
+  p50_duration_ms: number | null;
+  p95_duration_ms: number | null;
+  p99_duration_ms: number | null;
+  last_error: string | null;
+  window_start: string | null;
+  window_end: string | null;
+}
+
+/** The provider board, plus how fresh the rollup behind it is. */
+export interface ProviderBoardReport {
+  last_rolled_date: string | null;
+  providers: ProviderBoardRow[];
+}
+
+/**
+ * One AI pipeline leg's backlog (#729). `oldest_age_s` is null on an empty
+ * queue - a queue with nothing in it has no oldest job, and printing `0s`
+ * would make a drained queue look like the one thing it is not.
+ */
+export interface QueueDepthRow {
+  queue: string;
+  depth: number;
+  oldest_enqueued_at: string | null;
+  oldest_age_s: number | null;
+}
+
+/**
+ * Queue depth, the age of the oldest queued job, and recent activity (#729).
+ *
+ * `recent_active_actors` is a DISTINCT-actor count over
+ * `activity_window_minutes`, NOT simultaneous concurrency: true concurrency is
+ * an OpenTelemetry gauge that lives in the tracing backend, and the only honest
+ * way to show it is `concurrency_grafana_link`. Presenting the actor count under
+ * a concurrency label would be a number the platform cannot stand behind
+ * (spec #717 decision 17).
+ */
+export interface ReliabilityReport {
+  queues: QueueDepthRow[];
+  queue_depth: number;
+  oldest_queued_age_s: number | null;
+  outbox: OutboxHealthRow[];
+  outbox_backlog: number;
+  dead_letter_rows: number;
+  recent_active_actors: number;
+  activity_window_minutes: number;
+  concurrency_grafana_link: string | null;
+}
+
+/**
+ * The statuses the live error feed filters to (#730). NARROWER than
+ * `AlertStatus` on purpose: an acknowledged FAILURE is not a resolved one -
+ * the request still failed - so the route refuses `acknowledged` with a 422
+ * rather than answering a filter the word does not support.
+ */
+export type ErrorFeedStatus = "open" | "resolved";
+
+/**
+ * One collapsed failure (#730). `occurrences` is how many times this exact
+ * fingerprint was seen in the window, so a page of rows reports far more
+ * failures than it lists.
+ */
+export interface ErrorFeedEntry {
+  fingerprint: string;
+  route_template: string;
+  method: string;
+  status_code: number;
+  status_class: string;
+  kind: string;
+  code: string;
+  trace_id: string;
+  occurrences: number;
+  first_seen_at: string;
+  last_seen_at: string;
+  status: string;
+}
+
+/**
+ * One page of the collapsed feed, plus BOTH totals: `total_count` is the number
+ * of distinct failures and `total_occurrences` is every occurrence behind them.
+ * A panel that reported only the row count would understate an outage by the
+ * repetition factor.
+ */
+export interface ErrorFeedPage {
+  errors: ErrorFeedEntry[];
+  total_count: number;
+  total_occurrences: number;
+  window_minutes: number;
 }
 
 /**
@@ -624,6 +809,22 @@ const DISTRIBUTION_DECIMALS = [
 ] as const;
 
 /** `max_spend_paise` is deliberately NOT here: it is an observed integer. */
+
+/**
+ * The reliability lens's quoted rates (#727 throughput, #728 provider board).
+ * Every one of them is an average or a percentage the backend computes as a
+ * `Decimal`, so all five arrive as JSON strings - and all five land on a
+ * formatter or a chart axis on the Reliability page.
+ */
+const THROUGHPUT_DECIMALS = ["error_rate", "requests_per_minute"] as const;
+const THROUGHPUT_POINT_DECIMALS = ["error_rate"] as const;
+const THROUGHPUT_ROUTE_DECIMALS = ["error_rate"] as const;
+const PROVIDER_BOARD_DECIMALS = [
+  "success_rate",
+  "p50_duration_ms",
+  "p95_duration_ms",
+  "p99_duration_ms",
+] as const;
 
 function isBusinessCountView(value: unknown): value is BusinessCountView {
   return isRecord(value) && hasKeys(value, ["metric_key", "count"]);
@@ -1069,6 +1270,155 @@ function isAlertPage(value: unknown): value is AlertPage {
   );
 }
 
+function isAlertAcknowledgement(value: unknown): value is AlertAcknowledgement {
+  return (
+    isRecord(value) &&
+    hasKeys(value, ["alert", "already_acknowledged"]) &&
+    isAlertEntry(value.alert)
+  );
+}
+
+function isCaptureLiveness(value: unknown): value is CaptureLiveness {
+  return (
+    isRecord(value) &&
+    hasKeys(value, ["capturing", "requests_recorded", "last_recorded_at"])
+  );
+}
+
+function isThroughputPoint(value: unknown): value is ThroughputPoint {
+  return (
+    isRecord(value) &&
+    hasKeys(value, ["minute_ts", "requests", "errors", "error_rate"]) &&
+    hasWireDecimals(value, THROUGHPUT_POINT_DECIMALS)
+  );
+}
+
+function isRouteThroughputRow(value: unknown): value is RouteThroughputRow {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "route_template",
+      "method",
+      "requests",
+      "errors",
+      "error_rate",
+    ]) &&
+    hasWireDecimals(value, THROUGHPUT_ROUTE_DECIMALS)
+  );
+}
+
+function isThroughputReport(value: unknown): value is ThroughputReport {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "minutes",
+      "from_ts",
+      "to_ts",
+      "requests",
+      "errors",
+      "error_rate",
+      "requests_per_minute",
+      "points",
+      "routes",
+      "routes_total",
+      "capture",
+    ]) &&
+    hasWireDecimals(value, THROUGHPUT_DECIMALS) &&
+    isArrayOf(value.points, isThroughputPoint) &&
+    isArrayOf(value.routes, isRouteThroughputRow) &&
+    isCaptureLiveness(value.capture)
+  );
+}
+
+function isProviderBoardRow(value: unknown): value is ProviderBoardRow {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "provider",
+      "status",
+      "breaker_state",
+      "success_rate",
+      "sample_count",
+      "timeout_count",
+      "rate_limit_count",
+      "p50_duration_ms",
+      "p95_duration_ms",
+      "p99_duration_ms",
+      "last_error",
+      "window_start",
+      "window_end",
+    ]) &&
+    hasWireDecimals(value, PROVIDER_BOARD_DECIMALS)
+  );
+}
+
+function isProviderBoardReport(value: unknown): value is ProviderBoardReport {
+  return (
+    isRecord(value) &&
+    hasKeys(value, ["last_rolled_date", "providers"]) &&
+    isArrayOf(value.providers, isProviderBoardRow)
+  );
+}
+
+function isQueueDepthRow(value: unknown): value is QueueDepthRow {
+  return (
+    isRecord(value) &&
+    hasKeys(value, ["queue", "depth", "oldest_enqueued_at", "oldest_age_s"])
+  );
+}
+
+function isReliabilityReport(value: unknown): value is ReliabilityReport {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "queues",
+      "queue_depth",
+      "oldest_queued_age_s",
+      "outbox",
+      "outbox_backlog",
+      "dead_letter_rows",
+      "recent_active_actors",
+      "activity_window_minutes",
+      "concurrency_grafana_link",
+    ]) &&
+    isArrayOf(value.queues, isQueueDepthRow) &&
+    isArrayOf(value.outbox, isOutboxHealthRow)
+  );
+}
+
+function isErrorFeedEntry(value: unknown): value is ErrorFeedEntry {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "fingerprint",
+      "route_template",
+      "method",
+      "status_code",
+      "status_class",
+      "kind",
+      "code",
+      "trace_id",
+      "occurrences",
+      "first_seen_at",
+      "last_seen_at",
+      "status",
+    ])
+  );
+}
+
+function isErrorFeedPage(value: unknown): value is ErrorFeedPage {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "errors",
+      "total_count",
+      "total_occurrences",
+      "window_minutes",
+    ]) &&
+    isArrayOf(value.errors, isErrorFeedEntry)
+  );
+}
+
 /**
  * One vendor's group, or absent because the deployment does not ship it.
  *
@@ -1278,6 +1628,121 @@ export async function fetchHealth(): Promise<SystemHealth> {
   };
 }
 
+/**
+ * The degraded-provider board (#728): every provider the rollup knows about,
+ * with its derived status, its failure counts and the newest failure's reason.
+ *
+ * Unwindowed, because the row's status is derived from the latest health row
+ * rather than re-derived from a requested range - the same reasoning the
+ * latency read gives.
+ */
+export async function fetchProviders(): Promise<ProviderBoardReport> {
+  const data = await request<unknown>(`${OBSERVABILITY_BASE}/providers`);
+  const report = guardShape(
+    data,
+    isProviderBoardReport,
+    "The API returned an unexpected observability provider board shape",
+  );
+  return {
+    ...report,
+    providers: report.providers.map((provider) =>
+      withDecimals(provider, PROVIDER_BOARD_DECIMALS),
+    ),
+  };
+}
+
+/**
+ * Requests per minute and error rate over the capture window (#727).
+ *
+ * `minutes` is omitted when the caller has no preference, so the route's own
+ * default is the one authority on what "no window asked for" means. The
+ * `ge=1, le=1440` bounds are not restated here (coding-standards §9.2).
+ */
+export async function fetchThroughput(
+  params: { minutes?: number } = {},
+): Promise<ThroughputReport> {
+  const search = new URLSearchParams();
+  if (params.minutes !== undefined)
+    search.set("minutes", String(params.minutes));
+  const query = search.toString();
+  const data = await request<unknown>(
+    `${OBSERVABILITY_BASE}/throughput${query ? `?${query}` : ""}`,
+  );
+  const report = guardShape(
+    data,
+    isThroughputReport,
+    "The API returned an unexpected observability throughput shape",
+  );
+  return {
+    ...withDecimals(report, THROUGHPUT_DECIMALS),
+    points: report.points.map((point) =>
+      withDecimals(point, THROUGHPUT_POINT_DECIMALS),
+    ),
+    routes: report.routes.map((route) =>
+      withDecimals(route, THROUGHPUT_ROUTE_DECIMALS),
+    ),
+  };
+}
+
+/**
+ * Queue depth, the oldest queued job's age and recent actor activity (#729) -
+ * the read behind the Reliability page's two queue panels.
+ *
+ * `minutes` narrows ONLY the recent-activity window; the queue figures are a
+ * now-reading and are the same whatever window the caller asked for.
+ */
+export async function fetchReliability(
+  params: { minutes?: number } = {},
+): Promise<ReliabilityReport> {
+  const search = new URLSearchParams();
+  if (params.minutes !== undefined)
+    search.set("minutes", String(params.minutes));
+  const query = search.toString();
+  const data = await request<unknown>(
+    `${OBSERVABILITY_BASE}/reliability${query ? `?${query}` : ""}`,
+  );
+  return guardShape(
+    data,
+    isReliabilityReport,
+    "The API returned an unexpected observability reliability shape",
+  );
+}
+
+/**
+ * One page of the collapsed live error feed (#730).
+ *
+ * `status` is narrow on purpose: the route takes `open` and `resolved` and
+ * answers anything else with a 422, because an acknowledged FAILURE is still a
+ * failure. `page` and `status` are omitted when unset so the route's own
+ * defaults decide.
+ */
+export async function fetchErrors(
+  params: {
+    page?: number;
+    page_size?: number;
+    status?: ErrorFeedStatus;
+    minutes?: number;
+  } = {},
+): Promise<ErrorFeedPage> {
+  const search = new URLSearchParams();
+  if (params.page !== undefined) search.set("page", String(params.page));
+  if (params.page_size !== undefined) {
+    search.set("page_size", String(params.page_size));
+  }
+  if (params.status) search.set("status", params.status);
+  if (params.minutes !== undefined)
+    search.set("minutes", String(params.minutes));
+  const query = search.toString();
+  const data = await request<unknown>(
+    `${OBSERVABILITY_BASE}/errors${query ? `?${query}` : ""}`,
+  );
+  return guardShape(
+    data,
+    isErrorFeedPage,
+    "The API returned an unexpected observability error feed shape",
+  );
+}
+
 /** The paged alert feed, newest first. */
 export async function fetchAlerts(
   params: { page?: number; page_size?: number; status?: AlertStatus } = {},
@@ -1296,6 +1761,36 @@ export async function fetchAlerts(
     data,
     isAlertPage,
     "The API returned an unexpected observability alerts shape",
+  );
+}
+
+/**
+ * Acknowledge one alert (#735) and return the row as it now stands.
+ *
+ * A POST with NO body, deliberately: the route derives the acknowledging
+ * operator from the caller's identity and would let a client write its own
+ * `status` if one were sent. The caller still sends an `Idempotency-Key`
+ * (api-standards §5) so a retry after a lost response cannot double-issue -
+ * and the route is idempotent anyway, answering a repeat with
+ * `already_acknowledged: true` rather than a second write.
+ */
+export async function acknowledgeAlert(
+  alertId: string,
+  retryKey?: string,
+): Promise<AlertAcknowledgement> {
+  const data = await request<unknown>(
+    `${OBSERVABILITY_BASE}/alerts/${encodeURIComponent(alertId)}/acknowledge`,
+    {
+      method: "POST",
+      headers: {
+        [IDEMPOTENCY_KEY_HEADER]: idempotencyKey(retryKey),
+      },
+    },
+  );
+  return guardShape(
+    data,
+    isAlertAcknowledgement,
+    "The API returned an unexpected alert acknowledgement shape",
   );
 }
 

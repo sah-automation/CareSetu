@@ -28,6 +28,11 @@ const CHANNELS = [
   // imported `recharts` directly instead of through components/ui/chart would
   // carry a SECOND copy of the chart runtime, and this gate is what reports it.
   '/operator/observability/business',
+  // #738: the Reliability lens page. Same reason as the Business lens above:
+  // a chart route that imported `recharts` directly instead of through
+  // components/ui/chart would carry a second copy of the chart runtime, and
+  // this gate is what reports it.
+  '/operator/observability/reliability',
   '/doctor/profile',
 ];
 const WORKSPACE = '@caresetu/frontend';

@@ -52,6 +52,14 @@ export const PANEL_ROUTES = [
     href: "/operator/observability/business",
     label: "Business",
   },
+  // #738: the Reliability lens destination. Ordered after Business to match the
+  // console IA spec #717 decision 28 declares, even though #744 owns the
+  // sidebar that will eventually render it.
+  {
+    key: "reliability",
+    href: "/operator/observability/reliability",
+    label: "Reliability",
+  },
 ] as const;
 
 export type PanelKey = (typeof PANEL_ROUTES)[number]["key"];
@@ -123,6 +131,18 @@ interface ReadPanelProps<T> {
   title: ReactNode;
   /** The one line an operator reads before the plot ("₹1,250 of ₹5,000"). */
   takeaway?: ReactNode;
+  /**
+   * The questions an operator can ask this panel - a status filter, a window
+   * picker - rendered under the title in EVERY state.
+   *
+   * Not inside the body, and that is the whole point. A body renders only when
+   * the read came back with something in it, so a filter living there
+   * disappears exactly when its current slice is empty - which is the one
+   * moment an operator most needs to switch to a different one. These are
+   * questions about the read, not results of it, so they sit outside the
+   * result.
+   */
+  controls?: ReactNode;
   read: PanelRead<T>;
   /** Whether this read came back with nothing worth plotting. */
   isEmpty: (data: T) => boolean;
@@ -143,6 +163,7 @@ export function ReadPanel<T>({
   testId,
   title,
   takeaway,
+  controls,
   read,
   isEmpty,
   emptyTitle,
@@ -169,6 +190,12 @@ export function ReadPanel<T>({
       >
         {title}
       </h2>
+
+      {controls && (
+        <div className="mt-3" data-testid={`${testId}-controls`}>
+          {controls}
+        </div>
+      )}
 
       {read.status === "loading" && (
         <div className="mt-3" data-testid={`${testId}-loading`}>

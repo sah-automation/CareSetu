@@ -7,25 +7,34 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  acknowledgeAlert,
   fetchAlerts,
   fetchBusiness,
   fetchCost,
   fetchCostTrend,
   fetchDeeplinks,
+  fetchErrors,
   fetchHealth,
   fetchLatency,
   fetchOverview,
+  fetchProviders,
   fetchQuality,
+  fetchReliability,
+  fetchThroughput,
   fetchUsage,
   type AlertPage,
   type BusinessRead,
   type CostSummary,
   type CostTrend,
   type Deeplinks,
+  type ErrorFeedPage,
   type LatencyReport,
   type Overview,
+  type ProviderBoardReport,
   type QualityReport,
+  type ReliabilityReport,
   type SystemHealth,
+  type ThroughputReport,
   type UsageReport,
 } from "./observability";
 
@@ -828,5 +837,458 @@ describe("decimal wire values", () => {
     await expect(fetchCost()).rejects.toMatchObject({
       code: "UNEXPECTED_ERROR",
     });
+  });
+});
+
+// #738: the Reliability lens client reads. Four new GETs and the one write, and
+// the same decimal contract as every other read here - the reliability page's
+// rates all reach a formatter or a chart axis, so a quoted Decimal that is not
+// decoded is a panel that does not render.
+describe("fetchProviders", () => {
+  const PROVIDERS: ProviderBoardReport = {
+    last_rolled_date: "2026-10-11",
+    providers: [
+      {
+        provider: "openai_compatible",
+        status: "healthy",
+        breaker_state: "closed",
+        success_rate: 99.2,
+        sample_count: 900,
+        timeout_count: 0,
+        rate_limit_count: 3,
+        p50_duration_ms: 1200,
+        p95_duration_ms: 4100,
+        p99_duration_ms: 7000,
+        last_error: null,
+        window_start: "2026-10-05T00:00:00Z",
+        window_end: "2026-10-11T23:59:59Z",
+      },
+      {
+        provider: "sarvam",
+        status: "degraded",
+        breaker_state: "open",
+        success_rate: 61.5,
+        sample_count: 200,
+        timeout_count: 40,
+        rate_limit_count: 0,
+        p50_duration_ms: 900,
+        p95_duration_ms: 12000,
+        p99_duration_ms: 30000,
+        last_error: "rate_limit",
+        window_start: "2026-10-05T00:00:00Z",
+        window_end: "2026-10-11T23:59:59Z",
+      },
+    ],
+  };
+
+  const PROVIDERS_WIRE = {
+    ...PROVIDERS,
+    providers: PROVIDERS.providers.map((row) => ({
+      ...row,
+      success_rate: row.success_rate === null ? null : `${row.success_rate}`,
+      p50_duration_ms: `${row.p50_duration_ms}`,
+      p95_duration_ms: `${row.p95_duration_ms}`,
+      p99_duration_ms: `${row.p99_duration_ms}`,
+    })),
+  };
+
+  it("asks the board route with no window to invent", async () => {
+    const fetchMock = stubFetch(PROVIDERS_WIRE);
+
+    await fetchProviders();
+
+    expect(requestedUrl(fetchMock)).toBe(`${BASE}/providers`);
+  });
+
+  it("decodes each row's quoted rates and percentiles", async () => {
+    stubFetch(PROVIDERS_WIRE);
+
+    const report = await fetchProviders();
+
+    expect(report.providers[1].success_rate).toBeCloseTo(61.5, 5);
+    expect(report.providers[1].p95_duration_ms).toBe(12000);
+    expect(report.providers[1].status).toBe("degraded");
+  });
+
+  it("keeps an unsampled provider's rates null rather than zero", async () => {
+    stubFetch({
+      ...PROVIDERS_WIRE,
+      providers: [
+        {
+          ...PROVIDERS_WIRE.providers[0],
+          success_rate: null,
+          p50_duration_ms: null,
+          p95_duration_ms: null,
+          p99_duration_ms: null,
+        },
+      ],
+    });
+
+    const report = await fetchProviders();
+
+    expect(report.providers[0].success_rate).toBeNull();
+    expect(report.providers[0].p99_duration_ms).toBeNull();
+  });
+
+  it("rejects a provider row whose rate is not a number", async () => {
+    stubFetch({
+      ...PROVIDERS_WIRE,
+      providers: [{ ...PROVIDERS_WIRE.providers[0], success_rate: "NaN-ish" }],
+    });
+
+    await expect(fetchProviders()).rejects.toMatchObject({
+      code: "UNEXPECTED_ERROR",
+    });
+  });
+});
+
+describe("fetchThroughput", () => {
+  const THROUGHPUT: ThroughputReport = {
+    minutes: 60,
+    from_ts: "2026-10-12T10:00:00Z",
+    to_ts: "2026-10-12T11:00:00Z",
+    requests: 300,
+    errors: 3,
+    error_rate: 1,
+    requests_per_minute: 5,
+    points: [
+      {
+        minute_ts: "2026-10-12T10:00:00Z",
+        requests: 10,
+        errors: 0,
+        error_rate: 0,
+      },
+      {
+        minute_ts: "2026-10-12T10:01:00Z",
+        requests: 8,
+        errors: 3,
+        error_rate: 37.5,
+      },
+    ],
+    routes: [
+      {
+        route_template: "/v1/ai/draft",
+        method: "POST",
+        requests: 120,
+        errors: 3,
+        error_rate: 2.5,
+      },
+    ],
+    routes_total: 34,
+    capture: {
+      capturing: true,
+      requests_recorded: 300,
+      last_recorded_at: "2026-10-12T10:59:00Z",
+    },
+  };
+
+  const THROUGHPUT_WIRE = {
+    ...THROUGHPUT,
+    error_rate: "1.0000",
+    requests_per_minute: "5.0000",
+    points: THROUGHPUT.points.map((point) => ({
+      ...point,
+      error_rate: `${point.error_rate}`,
+    })),
+    routes: THROUGHPUT.routes.map((route) => ({
+      ...route,
+      error_rate: `${route.error_rate}`,
+    })),
+  };
+
+  it("lets the route own its default window when none is asked for", async () => {
+    const fetchMock = stubFetch(THROUGHPUT_WIRE);
+
+    await fetchThroughput();
+
+    expect(requestedUrl(fetchMock)).toBe(`${BASE}/throughput`);
+  });
+
+  it("sends the window it is given", async () => {
+    const fetchMock = stubFetch(THROUGHPUT_WIRE);
+
+    await fetchThroughput({ minutes: 15 });
+
+    expect(requestedUrl(fetchMock)).toBe(`${BASE}/throughput?minutes=15`);
+  });
+
+  it("decodes the report's rate, its per-minute average and both nested rates", async () => {
+    stubFetch(THROUGHPUT_WIRE);
+
+    const report = await fetchThroughput();
+
+    expect(report.error_rate).toBe(1);
+    expect(report.requests_per_minute).toBe(5);
+    expect(report.points[1].error_rate).toBeCloseTo(37.5, 5);
+    expect(report.routes[0].error_rate).toBeCloseTo(2.5, 5);
+  });
+
+  it("keeps an unrecorded window's averages null rather than zero", async () => {
+    stubFetch({
+      ...THROUGHPUT_WIRE,
+      requests: 0,
+      errors: 0,
+      error_rate: null,
+      requests_per_minute: null,
+      points: [],
+    });
+
+    const report = await fetchThroughput();
+
+    expect(report.requests_per_minute).toBeNull();
+    expect(report.error_rate).toBeNull();
+    expect(report.capture.capturing).toBe(true);
+  });
+
+  it("rejects a nested point rate that will not decode", async () => {
+    stubFetch({
+      ...THROUGHPUT_WIRE,
+      points: [{ ...THROUGHPUT_WIRE.points[0], error_rate: "one percent" }],
+    });
+
+    await expect(fetchThroughput()).rejects.toMatchObject({
+      code: "UNEXPECTED_ERROR",
+    });
+  });
+});
+
+describe("fetchReliability", () => {
+  const RELIABILITY: ReliabilityReport = {
+    queues: [
+      {
+        queue: "draft",
+        depth: 4,
+        oldest_enqueued_at: "2026-10-12T10:30:00Z",
+        oldest_age_s: 900,
+      },
+    ],
+    queue_depth: 4,
+    oldest_queued_age_s: 900,
+    outbox: [
+      {
+        table_schema: "billing",
+        table: "ai_usage_outbox",
+        pending: 2,
+        inflight: 0,
+        dead_letter: 0,
+        backlog: 2,
+      },
+    ],
+    outbox_backlog: 2,
+    dead_letter_rows: 0,
+    recent_active_actors: 12,
+    activity_window_minutes: 60,
+    concurrency_grafana_link:
+      "https://acme.grafana.net/explore?left=%7B%22queries%22%3A%5B%7B%22expr%22",
+  };
+
+  it("reads the queue report and keeps the concurrency gauge link whole", async () => {
+    const fetchMock = stubFetch(RELIABILITY);
+
+    const report = await fetchReliability();
+
+    expect(requestedUrl(fetchMock)).toBe(`${BASE}/reliability`);
+    expect(report.recent_active_actors).toBe(12);
+    expect(report.oldest_queued_age_s).toBe(900);
+    expect(report.concurrency_grafana_link).toBe(
+      RELIABILITY.concurrency_grafana_link,
+    );
+  });
+
+  it("sends the activity window when the caller narrows it", async () => {
+    const fetchMock = stubFetch(RELIABILITY);
+
+    await fetchReliability({ minutes: 5 });
+
+    expect(requestedUrl(fetchMock)).toBe(`${BASE}/reliability?minutes=5`);
+  });
+
+  it("keeps a drained queue's oldest age null and an absent gauge null", async () => {
+    stubFetch({
+      ...RELIABILITY,
+      queues: [],
+      queue_depth: 0,
+      oldest_queued_age_s: null,
+      concurrency_grafana_link: null,
+    });
+
+    const report = await fetchReliability();
+
+    expect(report.oldest_queued_age_s).toBeNull();
+    expect(report.concurrency_grafana_link).toBeNull();
+  });
+});
+
+describe("fetchErrors", () => {
+  const ERRORS: ErrorFeedPage = {
+    errors: [
+      {
+        fingerprint: "fp-1",
+        route_template: "/v1/ai/draft",
+        method: "POST",
+        status_code: 500,
+        status_class: "5xx",
+        kind: "unhandled_exception",
+        code: "ai_provider_timeout",
+        trace_id: "trace-abc",
+        occurrences: 42,
+        first_seen_at: "2026-10-12T09:00:00Z",
+        last_seen_at: "2026-10-12T10:55:00Z",
+        status: "open",
+      },
+    ],
+    total_count: 1,
+    total_occurrences: 42,
+    window_minutes: 60,
+  };
+
+  it("lets the route own its paging defaults", async () => {
+    const fetchMock = stubFetch(ERRORS);
+
+    await fetchErrors();
+
+    expect(requestedUrl(fetchMock)).toBe(`${BASE}/errors`);
+  });
+
+  it("sends the page, the size, the status and the window together", async () => {
+    const fetchMock = stubFetch(ERRORS);
+
+    await fetchErrors({
+      page: 3,
+      page_size: 10,
+      status: "resolved",
+      minutes: 15,
+    });
+
+    expect(requestedUrl(fetchMock)).toBe(
+      `${BASE}/errors?page=3&page_size=10&status=resolved&minutes=15`,
+    );
+  });
+
+  it("keeps the occurrence total beside the row count", async () => {
+    stubFetch(ERRORS);
+
+    const page = await fetchErrors();
+
+    expect(page.total_count).toBe(1);
+    expect(page.total_occurrences).toBe(42);
+    expect(page.errors[0].occurrences).toBe(42);
+  });
+
+  it("rejects a page missing the occurrence total", async () => {
+    const { total_occurrences, ...withoutTotals } = ERRORS;
+
+    stubFetch(withoutTotals);
+
+    await expect(fetchErrors()).rejects.toMatchObject({
+      code: "UNEXPECTED_ERROR",
+    });
+  });
+});
+
+describe("acknowledgeAlert", () => {
+  const OPEN_ALERT: AlertPage["alerts"][number] = {
+    id: "6f1c0f0e-0b1a-4a5e-9a1f-2b3c4d5e6f70",
+    severity: "critical",
+    kind: "breaker_open",
+    title: "OpenAI circuit breaker is open",
+    payload: { provider: "openai_compatible" },
+    status: "open",
+    created_at: "2026-10-12T10:00:00Z",
+    acked_by: null,
+    acked_at: null,
+  };
+
+  it("posts to the alert's acknowledge route with no body", async () => {
+    const fetchMock = stubFetch({
+      alert: { ...OPEN_ALERT, status: "acknowledged", acked_by: 42 },
+      already_acknowledged: false,
+    });
+
+    await acknowledgeAlert(OPEN_ALERT.id);
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(url).toBe(`${BASE}/alerts/${OPEN_ALERT.id}/acknowledge`);
+    expect(init.method).toBe("POST");
+    // No body: the route derives the acknowledging operator from the caller's
+    // identity, and a body would let a client write its own status.
+    expect(init.body).toBeUndefined();
+  });
+
+  it("carries an Idempotency-Key, and the caller's key across a retry", async () => {
+    // A fresh Response per call: the shared `stubFetch` hands back one body, and
+    // a second `.json()` on it throws before the key is ever compared.
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve(
+          jsonResponse({ alert: OPEN_ALERT, already_acknowledged: false }),
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await acknowledgeAlert(OPEN_ALERT.id, "retry-key-1");
+    await acknowledgeAlert(OPEN_ALERT.id, "retry-key-1");
+
+    // `authedFetch` rebuilds the headers as a `Headers` object, so that is what
+    // a test reads - the key travels, but not as the plain object handed in.
+    const first = new Headers(
+      (fetchMock.mock.calls[0][1] as RequestInit).headers,
+    );
+    const second = new Headers(
+      (fetchMock.mock.calls[1][1] as RequestInit).headers,
+    );
+    expect(first.get("Idempotency-Key")).toBe("retry-key-1");
+    expect(second.get("Idempotency-Key")).toBe("retry-key-1");
+  });
+
+  it("mints a fresh Idempotency-Key for a new acknowledgement", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve(
+          jsonResponse({ alert: OPEN_ALERT, already_acknowledged: false }),
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await acknowledgeAlert(OPEN_ALERT.id);
+    await acknowledgeAlert(OPEN_ALERT.id);
+
+    const first = new Headers(
+      (fetchMock.mock.calls[0][1] as RequestInit).headers,
+    ).get("Idempotency-Key");
+    const second = new Headers(
+      (fetchMock.mock.calls[1][1] as RequestInit).headers,
+    ).get("Idempotency-Key");
+    expect(first).not.toBe(second);
+  });
+
+  it("returns the idempotent repeat rather than treating it as a failure", async () => {
+    stubFetch({
+      alert: { ...OPEN_ALERT, status: "acknowledged", acked_by: 42 },
+      already_acknowledged: true,
+    });
+
+    const result = await acknowledgeAlert(OPEN_ALERT.id);
+
+    expect(result.already_acknowledged).toBe(true);
+    expect(result.alert.status).toBe("acknowledged");
+  });
+
+  it("escapes the alert id into the path", async () => {
+    const fetchMock = stubFetch({
+      alert: OPEN_ALERT,
+      already_acknowledged: false,
+    });
+
+    await acknowledgeAlert("id with/slash");
+
+    expect(requestedUrl(fetchMock)).toBe(
+      `${BASE}/alerts/id%20with%2Fslash/acknowledge`,
+    );
   });
 });
