@@ -47,6 +47,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
+import modules.observability.domain.product as product_module
 from bus.dispatch import dispatch
 from bus.dispatcher import (
     DEFAULT_DISPATCHER_CONFIG,
@@ -61,7 +62,11 @@ from bus.events import (
     EVENT_AUDIT_TAMPER_DETECTED,
     EVENT_CASE_CONSULT_COMPLETE,
     EVENT_CONSENT_GRANTED,
+    EVENT_INTAKE_CAPTURED,
+    EVENT_INTAKE_COMPOSER_OPENED,
     EVENT_INTAKE_DOCTOR_ASSIGNED,
+    EVENT_INTAKE_RETRY_REQUESTED,
+    EVENT_PRESCRIPTION_REVIEWED,
 )
 from bus.outbox_writer import write_outbox
 from bus.registry import HandlerRegistry
@@ -78,6 +83,7 @@ from modules.intake.domain.events import (
     AiJobQueuedPayload,
     AiTaskType,
     IntakeDoctorAssignedPayload,
+    intake_composer_opened_envelope,
 )
 from modules.intake.facade import IntakeFacade
 from modules.intake.outbox import INTAKE_OUTBOX_TABLE
@@ -86,20 +92,37 @@ from modules.observability.adapters import (
 )
 from modules.observability.domain.consumer import (
     MAX_FAILURE_REASON_CHARS,
+    PRODUCT_EVENT_MIRRORS,
     CaseConsultCompleteTelemetryPayload,
     ConsentLifecycleTelemetryPayload,
+    IntakeCapturedTelemetryPayload,
+    IntakeComposerOpenedTelemetryPayload,
+    IntakeRetryRequestedTelemetryPayload,
     TamperDetectedTelemetryPayload,
+)
+from modules.observability.domain.product import (
+    FUNNEL_INTAKE,
+    PRODUCT_OUTCOME_COMPLETED,
+    ProductStep,
+    ProductStepPayload,
+    register_product_step,
 )
 from modules.observability.domain.pseudonym import (
     ACTOR_KIND_DOCTOR,
     ACTOR_KIND_PATIENT,
     actor_key,
 )
+from modules.observability.domain.rollup import RollupThresholds
+from modules.observability.facade import run_rollup
 
 _NOW = datetime(2026, 10, 13, 8, 15, 0, tzinfo=UTC)
 
 #: A well-formed W3C trace-id (32 lowercase hex) the widened payloads carry (#719).
 _TRACE_ID = "a" * 32
+
+#: The rollup's alert thresholds, at the values plan-phase14 §11 names. Only the
+#: budget cap is required; everything else defaults.
+_THRESHOLDS = RollupThresholds(monthly_budget_paise=100_000)
 
 
 def _registry() -> HandlerRegistry:
@@ -252,6 +275,8 @@ async def _row_counts(connection: AsyncConnection) -> dict[str, int]:
         "observability.observability_ai_queue_open",
         "observability.observability_care_attribution_edges",
         "observability.observability_attribution_daily",
+        "observability.observability_product_events",
+        "observability.observability_product_daily",
         "observability.consumed_events",
     ):
         counts[table] = int(await connection.scalar(text(f"SELECT COUNT(*) FROM {table}")))
@@ -467,6 +492,8 @@ async def test_ai_job_events_round_trip_accumulate_and_dedupe_on_replay(
             "observability.observability_ai_queue_open": 0,
             "observability.observability_care_attribution_edges": 0,
             "observability.observability_attribution_daily": 0,
+            "observability.observability_product_events": 0,
+            "observability.observability_product_daily": 0,
             "observability.consumed_events": 4,
         }
     finally:
@@ -1142,5 +1169,368 @@ async def test_business_counts_and_tamper_alert_round_trip_replay_safe(
         assert business == {EVENT_CASE_CONSULT_COMPLETE: 2, EVENT_CONSENT_GRANTED: 1}
         assert alert_count == 1
         assert ledger == 4
+    finally:
+        await engine.dispose()
+
+
+# ------------------------------------------------------ B4e #739: the product ledger
+
+
+async def _product_rows(connection: AsyncConnection) -> list[dict[str, object]]:
+    result = await connection.execute(
+        text(
+            "SELECT event_id, occurred_at, actor_kind, actor_key, session_key, trace_id, "
+            "funnel, step, outcome, duration_ms "
+            "FROM observability.observability_product_events ORDER BY id"
+        )
+    )
+    return [dict(mapping) for mapping in result.mappings().all()]
+
+
+async def _product_table_text(connection: AsyncConnection) -> str:
+    """Every stored value of the product tables, flattened to one string.
+
+    The rule being proven is an ABSENCE - this schema carries no raw identity
+    reference and no clinical content - so it has to be asserted over the whole
+    tables rather than over the columns one read happens to select.
+    """
+    rows = await connection.execute(
+        text(
+            "SELECT to_jsonb(e)::text AS row FROM observability.observability_product_events e "
+            "UNION ALL "
+            "SELECT to_jsonb(d)::text FROM observability.observability_product_daily d "
+        )
+    )
+    return " ".join(str(row[0]) for row in rows.all())
+
+
+@pytest.mark.asyncio
+async def test_the_composers_entry_step_lands_in_the_ledger_and_replay_changes_nothing(
+    database_url: str, clean_tables: None
+) -> None:
+    """AC (#739): the funnel's HEAD lands, carries a trace, and is replay-safe.
+
+    The entry step is the whole reason #721 exists: ``intake.started`` rides the
+    capture transaction, so a patient who opened the composer and walked away left
+    no trace at all and the funnel had no head to drop off from. This drives the REAL
+    producer - ``IntakeFacade.record_composer_opened`` writes its own outbox row in
+    its own transaction - then the real dispatcher with the real registry, so the
+    entry step is PUBLISHED and consumed, not hand-written into the ledger here.
+
+    Proved at the real-database seam:
+
+    1. The composer's opening becomes one ``intake.composer_opened`` product row,
+       attributed to the hashed patient and carrying the published trace.
+    2. A care step sharing an event type with the business counter writes BOTH rows
+       from one seat - they cannot be separated, because the consumed-event ledger
+       is keyed by ``event_id`` alone and a second seat would be told it is a replay.
+    3. Replaying every ``event_id`` changes no row count anywhere.
+    4. Nothing PHI and no raw reference reaches any of the three tables.
+    """
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    facade_engine = create_async_engine(database_url, poolclass=NullPool)
+    patient_ref = 700_000_021
+    doctor_ref = 900_000_011
+    try:
+        facade = IntakeFacade(engine=facade_engine, ai_gateway=MockAiProvider())
+        await facade.record_composer_opened(patient_id=patient_ref, trace_id=_TRACE_ID)
+
+        # The producer minted the event_id; keep it so the replay below is a genuine
+        # redelivery of the same delivery rather than a second event.
+        async with engine.connect() as connection:
+            composer_event_id = await connection.scalar(
+                text(f"SELECT event_id FROM intake.{INTAKE_OUTBOX_TABLE}")
+            )
+        assert composer_event_id is not None
+
+        registry = _registry()
+        async with engine.connect() as connection:
+            tables = await discover_outbox_tables(connection, ("intake",))
+        for table in tables:
+            await process_outbox_table(engine, table, registry, DEFAULT_DISPATCHER_CONFIG)
+
+        consult = Envelope[CaseConsultCompleteTelemetryPayload](
+            event_id=uuid4(),
+            event_type=EVENT_CASE_CONSULT_COMPLETE,
+            producer="care",
+            occurred_at=_NOW,
+            payload=CaseConsultCompleteTelemetryPayload(
+                case_id=1, patient_id=patient_ref, doctor_id=doctor_ref
+            ),
+        )
+        await dispatch(registry, consult)
+
+        async with engine.connect() as connection:
+            rows = await _product_rows(connection)
+            business = await _business_rows(connection)
+        assert [row["step"] for row in rows] == ["composer_opened", "consult_complete"]
+
+        entry = rows[0]
+        assert entry["event_id"] == composer_event_id
+        assert entry["funnel"] == "intake"
+        assert entry["outcome"] == "completed"
+        assert entry["trace_id"] == _TRACE_ID
+        # #721's convention: the session scope IS the request's trace. Both columns
+        # are NOT NULL precisely because an untraceable row is not useful.
+        assert entry["session_key"] == _TRACE_ID
+        assert entry["actor_kind"] == ACTOR_KIND_PATIENT
+        assert entry["actor_key"] == actor_key(ACTOR_KIND_PATIENT, patient_ref)
+        # The composer opening is an instant, not a span - NULL, never a zero.
+        assert entry["duration_ms"] is None
+
+        consult_row = rows[1]
+        assert consult_row["step"] == "consult_complete"
+        assert consult_row["actor_kind"] == ACTOR_KIND_DOCTOR
+        assert consult_row["actor_key"] == actor_key(ACTOR_KIND_DOCTOR, doctor_ref)
+        assert business == {EVENT_CASE_CONSULT_COMPLETE: 1}
+
+        async with engine.connect() as connection:
+            stored = await _product_table_text(connection)
+        assert str(patient_ref) not in stored
+        assert str(doctor_ref) not in stored
+
+        # Replay BOTH event ids - the composer's, redelivered verbatim, and the
+        # consult's - and prove no row count moved anywhere.
+        async with engine.connect() as connection:
+            before_replay = await _row_counts(connection)
+        await dispatch(
+            registry,
+            Envelope[IntakeComposerOpenedTelemetryPayload](
+                event_id=composer_event_id,
+                event_type=EVENT_INTAKE_COMPOSER_OPENED,
+                producer="intake",
+                occurred_at=_NOW,
+                payload=IntakeComposerOpenedTelemetryPayload(
+                    patient_id=patient_ref, session_key=_TRACE_ID, trace_id=_TRACE_ID
+                ),
+            ),
+        )
+        await dispatch(registry, consult)
+
+        async with engine.connect() as connection:
+            after_replay = await _row_counts(connection)
+        assert after_replay == before_replay
+        assert after_replay["observability.observability_product_events"] == 2
+    finally:
+        await facade_engine.dispose()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_daily_rollup_turns_the_ledger_into_two_grains_and_survives_a_rerun(
+    database_url: str, clean_tables: None
+) -> None:
+    """AC (#739): the daily rollup is what a long window reads, and it recomputes whole.
+
+    The ledger is the append-only record; these two daily tables are the answer. They
+    the day is derived from ONE read of the ledger, not from per-grain queries:
+
+    * ``observability_product_daily`` - per ``(funnel, step, outcome)``, carrying a
+      DISTINCT actor count beside the event count. One actor who opens the composer
+      and then captures is two events and one active actor.
+
+    Re-running the pass must land on the identical rows rather than adding to them,
+    which is the property a step that arrives after the day's first pass depends on.
+    """
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    patient_ref = 700_000_031
+    other_patient_ref = 700_000_032
+    doctor_ref = 900_000_021
+    try:
+        registry = _registry()
+        composer = intake_composer_opened_envelope(
+            patient_id=patient_ref, session_key=_TRACE_ID, trace_id=_TRACE_ID
+        )
+        second_composer = intake_composer_opened_envelope(
+            patient_id=other_patient_ref, session_key=_TRACE_ID, trace_id=_TRACE_ID
+        )
+        # #722's re-record: no identity reference behind it, so it must count as an
+        # event with NO actor rather than as a placeholder actor.
+        retry = Envelope[IntakeRetryRequestedTelemetryPayload](
+            event_id=uuid4(),
+            event_type=EVENT_INTAKE_RETRY_REQUESTED,
+            producer="intake",
+            occurred_at=_NOW,
+            payload=IntakeRetryRequestedTelemetryPayload(intake_id=1, record_attempt=2),
+        )
+        captured = Envelope[IntakeCapturedTelemetryPayload](
+            event_id=uuid4(),
+            event_type=EVENT_INTAKE_CAPTURED,
+            producer="intake",
+            occurred_at=_NOW,
+            payload=IntakeCapturedTelemetryPayload(
+                intake_id=1, patient_id=patient_ref, duration_s=12.5
+            ),
+        )
+        consult = Envelope[CaseConsultCompleteTelemetryPayload](
+            event_id=uuid4(),
+            event_type=EVENT_CASE_CONSULT_COMPLETE,
+            producer="care",
+            occurred_at=_NOW,
+            payload=CaseConsultCompleteTelemetryPayload(
+                case_id=1, patient_id=patient_ref, doctor_id=doctor_ref
+            ),
+        )
+        # ``intake_composer_opened_envelope`` stamps ``occurred_at`` at the wall clock,
+        # and the rollup is keyed by the day - so the envelopes are re-stamped onto
+        # the day under test rather than rolled wherever today happens to be.
+        for envelope in (
+            _at(composer, _NOW),
+            _at(second_composer, _NOW),
+            retry,
+            captured,
+            consult,
+        ):
+            await dispatch(registry, envelope)
+
+        async with engine.connect() as connection:
+            landed = await _product_rows(connection)
+        # The ledger itself, before any rollup: five deliveries, five rows, each
+        # attributed to the registry entry rather than to a hand-written step name.
+        assert [(row["step"], row["actor_key"]) for row in landed] == [
+            ("composer_opened", actor_key(ACTOR_KIND_PATIENT, patient_ref)),
+            ("composer_opened", actor_key(ACTOR_KIND_PATIENT, other_patient_ref)),
+            ("re_recorded", None),
+            ("intake_captured", actor_key(ACTOR_KIND_PATIENT, patient_ref)),
+            ("consult_complete", actor_key(ACTOR_KIND_DOCTOR, doctor_ref)),
+        ]
+
+        first = await run_rollup(engine, _NOW.date(), thresholds=_THRESHOLDS)
+        # One row per (funnel, step, outcome) scope: four steps, four scopes.
+        assert first.product_rows == 4
+
+        async with engine.connect() as connection:
+            daily = (
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT step, outcome, events, actor_count, total_duration_ms, "
+                            "duration_samples FROM observability.observability_product_daily "
+                            "WHERE event_date = :day ORDER BY step"
+                        ),
+                        {"day": _NOW.date()},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+
+        assert [dict(row) for row in daily] == [
+            {
+                "step": "composer_opened",
+                "outcome": "completed",
+                "events": 2,
+                "actor_count": 2,
+                "total_duration_ms": 0,
+                "duration_samples": 0,
+            },
+            {
+                "step": "consult_complete",
+                "outcome": "completed",
+                "events": 1,
+                "actor_count": 1,
+                "total_duration_ms": 0,
+                "duration_samples": 0,
+            },
+            {
+                "step": "intake_captured",
+                "outcome": "completed",
+                "events": 1,
+                "actor_count": 1,
+                # The only measured span in the funnel; the composer entry has none.
+                "total_duration_ms": 12500,
+                "duration_samples": 1,
+            },
+            {
+                "step": "re_recorded",
+                "outcome": "re_recorded",
+                "events": 1,
+                "actor_count": 0,
+                "total_duration_ms": 0,
+                "duration_samples": 0,
+            },
+        ]
+        # Recompute, never accumulate: a second pass over the same ledger lands on
+        # the identical rows, so a step that arrives late is picked up rather than
+        # added to.
+        second = await run_rollup(engine, _NOW.date(), thresholds=_THRESHOLDS)
+        assert second.product_rows == first.product_rows
+        async with engine.connect() as connection:
+            rerun_daily = await connection.scalar(
+                text("SELECT COUNT(*) FROM observability.observability_product_daily")
+            )
+        assert rerun_daily == 4
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_step_added_to_the_registry_lands_with_no_migration(
+    database_url: str, clean_tables: None
+) -> None:
+    """The criterion that distinguishes #739: adding a step touches NO table.
+
+    ``prescription.reviewed`` is a real MOD-006 event with no MOD-013 subscription
+    yet. Registering it as a funnel step - one registry line and one mirror - has to
+    be enough for the ledger to record it and for the nightly rollup to aggregate
+    it, against a schema that was migrated before the step existed. Nothing here runs
+    alembic; if the funnel needed a migration for a new step, this test could not
+    pass without one.
+    """
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    doctor_ref = 900_000_041
+    try:
+
+        class PrescriptionReviewedMirror(ProductStepPayload):
+            case_id: int
+            prescription_id: int
+            patient_id: int
+            doctor_id: int
+
+        step = ProductStep(
+            funnel=FUNNEL_INTAKE,
+            step="prescription_reviewed",
+            event_type=EVENT_PRESCRIPTION_REVIEWED,
+            outcome=PRODUCT_OUTCOME_COMPLETED,
+            allowed_outcomes=(PRODUCT_OUTCOME_COMPLETED,),
+            actor_kind=ACTOR_KIND_DOCTOR,
+        )
+        register_product_step(step)
+        PRODUCT_EVENT_MIRRORS[EVENT_PRESCRIPTION_REVIEWED] = PrescriptionReviewedMirror
+        try:
+            registry = HandlerRegistry()
+            register_observability_handlers(registry)
+
+            envelope = Envelope[PrescriptionReviewedMirror](
+                event_id=uuid4(),
+                event_type=EVENT_PRESCRIPTION_REVIEWED,
+                producer="care",
+                occurred_at=_NOW,
+                payload=PrescriptionReviewedMirror(
+                    case_id=1, prescription_id=2, patient_id=700_000_041, doctor_id=doctor_ref
+                ),
+            )
+            await dispatch(registry, envelope)
+
+            async with engine.connect() as connection:
+                rows = await _product_rows(connection)
+            assert [row["step"] for row in rows] == ["prescription_reviewed"]
+            assert rows[0]["actor_key"] == actor_key(ACTOR_KIND_DOCTOR, doctor_ref)
+
+            report = await run_rollup(engine, _NOW.date(), thresholds=_THRESHOLDS)
+            assert report.product_rows == 1
+            async with engine.connect() as connection:
+                step_name = await connection.scalar(
+                    text(
+                        "SELECT step FROM observability.observability_product_daily "
+                        "WHERE event_date = :day"
+                    ),
+                    {"day": _NOW.date()},
+                )
+            assert step_name == "prescription_reviewed"
+        finally:
+            PRODUCT_EVENT_MIRRORS.pop(EVENT_PRESCRIPTION_REVIEWED, None)
+            product_module.PRODUCT_STEP_REGISTRY.pop((FUNNEL_INTAKE, step.step), None)
+            product_module._EVENT_STEP_INDEX.pop(EVENT_PRESCRIPTION_REVIEWED, None)
     finally:
         await engine.dispose()

@@ -46,6 +46,10 @@ events no module has claimed (``partner.verification_started``,
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import cast
+
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -75,6 +79,7 @@ from bus.handler_harness import run_handler
 from bus.registry import HandlerRegistry
 from modules.observability.domain.consumer import (
     BUSINESS_EVENT_METRICS,
+    PRODUCT_EVENT_MIRRORS,
     AiEgressRecordedTelemetryPayload,
     AiJobCompletedUsagePayload,
     AiJobFailedUsagePayload,
@@ -94,6 +99,11 @@ from modules.observability.domain.consumer import (
     build_ai_egress_alert,
     build_tamper_alert,
 )
+from modules.observability.domain.product import (
+    ProductStep,
+    ProductStepPayload,
+    product_steps,
+)
 from modules.observability.domain.pseudonym import ACTOR_KIND_PATIENT, actor_key
 from modules.observability.facade import (
     OBSERVABILITY_SCHEMA,
@@ -104,6 +114,7 @@ from modules.observability.facade import (
     record_ai_queue_open,
     record_alert_event,
     record_care_attribution_edge,
+    record_product_event,
 )
 
 #: B4b (#703): the consumed event types that roll into ``obs_business_daily``,
@@ -154,32 +165,119 @@ def _patient_actor(payload: BaseModel) -> str:
     return actor_key(ACTOR_KIND_PATIENT, reference)
 
 
-def _register_business_counter(
-    registry: HandlerRegistry, event_type: str, mirror: type[BaseModel]
-) -> None:
-    """Register one business-count handler for ``event_type`` (B4b #703).
+@dataclass(frozen=True)
+class _Seat:
+    """The ONE handler seat an event type gets in this module, and its effects.
 
-    A distinct closure per event type (the registry rejects a reused handler
-    seat on the same type). The handler writes its ledger row FIRST via
-    ``run_handler``, then increments the registry's ``metric_key`` - so a
-    replayed ``event_id`` is a no-op.
+    ``event_type`` -> seat, built from the two registries this module reads
+    (:data:`BUSINESS_EVENT_METRICS` and the funnel-step registry) rather than
+    written out by hand.
+
+    **One seat per event type, not one per effect** - and that is forced rather than
+    chosen. ``observability.consumed_events`` is keyed by ``event_id`` ALONE within
+    a schema, so the second handler to be delivered an envelope finds the ledger row
+    the first one wrote, is correctly told it is a replay, and skips its own effect
+    forever. Two effects on one event type therefore have to share one
+    ``run_handler`` transaction, which is exactly how the three AI-job effects
+    (#723) and the attribution edge (#724) already work.
+
+    Getting this wrong is invisible: the second effect simply never runs, and its
+    table stays empty with nothing failing.
     """
-    metric_key = BUSINESS_EVENT_METRICS[event_type]
+
+    event_type: str
+    mirror: type[BaseModel]
+    #: The ``metric_key`` this event increments in ``observability_business_daily``,
+    #: or ``None`` when it is not a business event.
+    business_metric: str | None
+    #: The funnel step this event is recorded as, or ``None`` when it is not a step.
+    product_step: ProductStep | None
+
+    @property
+    def handler_name(self) -> str:
+        """What the ``consumed_events`` row records this seat as having been.
+
+        Names the EFFECTS, not the event, because an operator reading the ledger is
+        asking what this module did with the delivery - and a seat carrying two
+        effects must not be filed under one of them.
+        """
+        effects = []
+        if self.business_metric is not None:
+            effects.append("business_count")
+        if self.product_step is not None:
+            effects.append(f"product_event_{self.product_step.funnel}_{self.product_step.step}")
+        return "record_" + "_and_".join(effects)
+
+
+def _seats() -> tuple[_Seat, ...]:
+    """Every seat this module registers for an event it merely CONSUMES.
+
+    The registry-driven path, and the reason "adding a funnel step is a registry
+    entry, not a schema change" is true in fact rather than in intent: nothing here
+    enumerates the funnel, and a step registered tomorrow gets its seat from this
+    same function with no edit to this file.
+
+    Where an event is both a business event and a funnel step
+    (``case.consult_complete`` / ``case.closed`` today) it gets ONE seat carrying
+    both effects - see :class:`_Seat`.
+    """
+    steps = {step.event_type: step for step in product_steps()}
+    event_types = set(BUSINESS_EVENT_METRICS) | set(steps)
+    return tuple(
+        _Seat(
+            event_type=event_type,
+            mirror=_mirror_for(event_type, steps),
+            business_metric=BUSINESS_EVENT_METRICS.get(event_type),
+            product_step=steps.get(event_type),
+        )
+        for event_type in sorted(event_types)
+    )
+
+
+def _mirror_for(event_type: str, steps: Mapping[str, ProductStep]) -> type[BaseModel]:
+    """The mirror a seat re-validates the dispatched payload into.
+
+    The product registry's mirror when the event is a funnel step - it carries the
+    identity fields the ledger row needs - and the business mirror otherwise. The
+    two registries overlap on the two ``case.*`` events, and the product mirror is
+    the wider of the two because it inherits ``ProductStepPayload``.
+    """
+    if event_type in steps:
+        return PRODUCT_EVENT_MIRRORS[event_type]
+    return _BUSINESS_EVENT_MIRRORS[event_type]
+
+
+def _register_seat(registry: HandlerRegistry, seat: _Seat) -> None:
+    """Register ``seat``'s single handler closure for its event type.
+
+    The handler writes its ``consumed_events`` ledger row FIRST via ``run_handler``
+    and only then its effects, in ONE transaction - so a replayed ``event_id`` is a
+    no-op for all of them together and a crash rolls them all back together.
+    """
+    business_metric = seat.business_metric
+    product_step = seat.product_step
 
     async def handler(envelope: Envelope[BaseModel]) -> None:
         async def _impl(connection: AsyncConnection, payload: BaseModel) -> None:
-            del payload
-            await accumulate_business_count(connection, envelope, metric_key)
+            if business_metric is not None:
+                await accumulate_business_count(connection, envelope, business_metric)
+            if product_step is not None:
+                await record_product_event(
+                    connection,
+                    envelope,
+                    product_step,
+                    cast("ProductStepPayload", payload),
+                )
 
         await run_handler(
             envelope,
-            mirror,
+            seat.mirror,
             _impl,
-            f"accumulate_business_metric_{event_type.replace('.', '_')}",
+            seat.handler_name,
             OBSERVABILITY_SCHEMA,
         )
 
-    registry.register(event_type, handler)
+    registry.register(seat.event_type, handler)
 
 
 def register_handlers(registry: HandlerRegistry) -> None:
@@ -270,14 +368,19 @@ def register_handlers(registry: HandlerRegistry) -> None:
 
     registry.register(EVENT_AI_JOB_FAILED, accumulate_ai_job_failed)
 
-    # B4b (#703): the rest of MOD-013's subscriptions. The registry-driven
-    # business counts roll each event family into ``obs_business_daily``; the
-    # two alert families surface the tamper guard and the AI-egress guardrail.
+    # The event types no module has claimed a payload model for, so MOD-013 registers
+    # its mirror. Declared SEPARATELY from the seats above because claiming a registry
+    # model is a different act from taking a handler seat: it changes what the
+    # dispatcher reconstructs a claimed outbox row with, not what this module does on
+    # delivery. Both are registry-driven, so neither is a hand-maintained list.
     for event_type, mirror in _UNCLAIMED_EVENT_MIRRORS.items():
         registry.register_payload_model(event_type, mirror)
 
-    for event_type, mirror in _BUSINESS_EVENT_MIRRORS.items():
-        _register_business_counter(registry, event_type, mirror)
+    # B4b (#703) + B4e (#739): the registry-driven seats for the events this module
+    # merely CONSUMES - the business counts and the product event ledger's funnel
+    # steps, from one seat per event type carrying whichever effects apply.
+    for seat in _seats():
+        _register_seat(registry, seat)
 
     async def record_tamper_alert(envelope: Envelope[BaseModel]) -> None:
         """Consume ``audit.tamper_detected``: write one PHI-free alert row.

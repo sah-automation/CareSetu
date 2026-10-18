@@ -147,6 +147,13 @@ from modules.observability.domain.deeplinks import (
 from modules.observability.domain.exceptions import (
     AlertAlreadyResolvedError,
     AlertNotFoundError,
+    ProductOutcomeNotAllowed,
+)
+from modules.observability.domain.product import (
+    ProductStep,
+    ProductStepPayload,
+    duration_ms_of,
+    product_event_keys,
 )
 from modules.observability.domain.pseudonym import (
     ACTOR_KIND_DOCTOR,
@@ -189,6 +196,7 @@ from modules.observability.schema.models import (
     observability_consumed_events,
     observability_error_events,
     observability_http_minute,
+    observability_product_events,
     observability_rollup_runs,
 )
 from observability.logging import SERVICE_API
@@ -664,6 +672,93 @@ async def record_ai_queue_open(
         )
         .on_conflict_do_nothing(index_elements=["ai_job_ref"])
     )
+    await connection.execute(statement)
+
+
+def _product_actor(step: ProductStep, payload: ProductStepPayload) -> tuple[str | None, str | None]:
+    """The ``(actor_kind, actor_key)`` pair one funnel step's row carries.
+
+    Both columns or neither, which is what the table's CHECK enforces and what keeps
+    "distinct active actors" from counting a half-filled row. The kind comes from the
+    registry entry and the key from the mirror field that kind names, so a step that
+    declares an actor kind and a mirror that carries no matching reference produce an
+    honest NULL pair rather than a key with no actor behind it.
+
+    The key is hashed through :func:`~modules.observability.domain.pseudonym.actor_key`
+    before it is written - the same helper #723's attribution rows use, verbatim, so
+    an actor key means one thing across this whole schema (ADR-0025 D7).
+    """
+    if step.actor_kind is None:
+        return None, None
+    reference = payload.patient_id if step.actor_kind == ACTOR_KIND_PATIENT else payload.doctor_id
+    if reference is None:
+        return None, None
+    return step.actor_kind, actor_key(step.actor_kind, reference)
+
+
+async def record_product_event(
+    connection: AsyncConnection,
+    envelope: Envelope[BaseModel],
+    step: ProductStep,
+    payload: ProductStepPayload,
+) -> None:
+    """Write ONE ``observability_product_events`` row for one funnel step.
+
+    B4e (#739), the writer half of #717 decisions 22, 23 and 41. Everything about
+    the row - which funnel, which step, which outcome, which actor - comes from the
+    ``step`` REGISTRY ENTRY, never from the payload. That is the whole point of the
+    registry: a funnel's vocabulary is declared once, in one place, and neither this
+    writer nor the daily rollup enumerates steps anywhere else, so adding one is a
+    registry line and not a migration.
+
+    Runs inside the handler's SAME transaction as the ``consumed_events`` ledger row,
+    which ``run_handler`` writes FIRST and uses to gate this effect. Replay safety is
+    therefore enforced twice over, and the second one is the one that matters if the
+    first is ever bypassed: ``event_id`` is UNIQUE on this table and the insert is
+    ``ON CONFLICT DO NOTHING``, so replaying the same identifiers changes nothing
+    whether or not a redelivery is treated as one.
+
+    ``ON CONFLICT DO NOTHING`` rather than an upsert, deliberately. A funnel row is an
+    append-only record of one journey moment: overwriting it would let a late
+    delivery rewrite a step that already happened, which is the one thing a funnel
+    must not do. The daily rollup is where late arrivals are reconciled, because it
+    recomputes each day in full rather than accumulating.
+
+    **PHI-free by construction.** No field here is clinical content and no identity
+    reference is stored raw: the actor columns hold a one-way hash of the reference
+    the producer published, the step/outcome names come from a closed registry
+    vocabulary, and ``duration_ms`` is a number the producer measured about its own
+    action (security-phii-standards).
+
+    Raises ``ProductOutcomeNotAllowed`` when the registry entry's own outcome is not
+    one it declared. That check is not redundant with the registration guard: the
+    guard proves the REGISTRY is coherent, and this proves the WRITER is reading that
+    same entry - a writer that invented or defaulted an outcome would slip past a
+    coherent registry entirely. Decision 24 ("a degraded fallback is ``errored``, not
+    a quiet abandonment") and decision 25 ("a re-record is its own outcome") live in
+    ``allowed_outcomes``, so this is where they are enforced rather than merely
+    documented.
+    """
+    if step.outcome not in step.allowed_outcomes:
+        raise ProductOutcomeNotAllowed(step.step, step.outcome, step.allowed_outcomes)
+    actor_kind, actor_key_value = _product_actor(step, payload)
+    trace_id, session_key = product_event_keys(payload, event_id=envelope.event_id)
+    statement = insert(observability_product_events).values(
+        event_id=envelope.event_id,
+        # The ENVELOPE's occurrence, never a payload field: a step-to-step gap has to
+        # be measured from when the delivery was stamped, so it cannot depend on a
+        # second value a producer might disagree with.
+        occurred_at=envelope.occurred_at,
+        actor_kind=actor_kind,
+        actor_key=actor_key_value,
+        session_key=session_key,
+        trace_id=trace_id,
+        funnel=step.funnel,
+        step=step.step,
+        outcome=step.outcome,
+        duration_ms=duration_ms_of(payload),
+    )
+    statement = statement.on_conflict_do_nothing(index_elements=["event_id"])
     await connection.execute(statement)
 
 

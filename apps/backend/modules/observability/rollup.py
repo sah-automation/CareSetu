@@ -15,6 +15,11 @@ they decide -
   recomputed in full from ``observability_ai_job_spend`` and its
   ``observability_care_attribution_edges``, never incremented, so a care-attribution
   edge that lands after its AI job fills the doctor key in without double counting;
+* ``observability_product_daily``: the per-``(step, outcome)`` daily product
+  aggregate recomputed in full from one read of ``observability_product_events``
+  (B4e #739). This is the only place the raw product ledger is ever read, once a
+  night, one day at a time - so the reads that answer a long window are served from
+  these aggregates rather than from thirty days of deliveries;
 * ``observability_alert_events``: the threshold alerts from the minimum alert set,
   including the ``cost_outlier`` rule that compares one actor's day against that
   SAME actor's trailing seven-day average rather than against any rupee amount
@@ -62,6 +67,11 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from bus.bootstrap import MODULE_SCHEMAS
 from bus.dispatcher import count_outbox_rows, discover_outbox_tables
 from modules.observability.domain.consumer import AI_JOB_SPEND_STATUS_FAILED, AlertRow
+from modules.observability.domain.product import (
+    ProductDaily,
+    ProductEventFact,
+    build_product_daily,
+)
 from modules.observability.domain.rollup import (
     ALERT_KIND_COST_OUTLIER,
     ALERT_KIND_QUEUE_AGE,
@@ -111,6 +121,8 @@ from modules.observability.schema.models import (
     observability_business_daily,
     observability_care_attribution_edges,
     observability_http_minute,
+    observability_product_daily,
+    observability_product_events,
     observability_rollup_runs,
 )
 
@@ -141,6 +153,7 @@ class RollupReport:
     health_rows: int
     metric_rows: int
     attribution_rows: int
+    product_rows: int
     budget_snapshots: int
     alerts_raised: int
     alerts_resolved: int
@@ -719,6 +732,83 @@ async def _upsert_attribution_daily(
     await connection.execute(statement)
 
 
+async def _upsert_product_daily(
+    connection: AsyncConnection, target_date: date, row: ProductDaily
+) -> None:
+    """Write one step-scope day row of ``observability_product_daily``, recomputed whole.
+
+    B4e (#739), decision 22. Every counter is written as the value this pass
+    recomputed from the day's ledger rows and the conflict target is the table's full
+    UNIQUE key, so a rerun converges on the same figures instead of adding to them.
+    That is what makes a step that landed after the day's first pass idempotent: the
+    next pass re-derives the day and the step is simply there.
+
+    ``actor_count`` is a distinct-actor count recomputed with the rest, never summed
+    from a column - which is why this pass writes it in full rather than incrementing
+    it by one.
+    """
+    values: dict[str, Any] = {
+        "event_date": target_date,
+        "funnel": row.funnel,
+        "step": row.step,
+        "outcome": row.outcome,
+        "events": row.events,
+        "actor_count": row.actor_count,
+        "total_duration_ms": row.total_duration_ms,
+        "duration_samples": row.duration_samples,
+    }
+    statement = _upsert_statement(
+        observability_product_daily,
+        values,
+        ("event_date", "funnel", "step", "outcome"),
+    )
+    await connection.execute(statement)
+
+
+async def _load_product_events(
+    connection: AsyncConnection, window_start: datetime, window_end: datetime
+) -> list[ProductEventFact]:
+    """Load one calendar day of ``observability_product_events``, the product source.
+
+    The raw ledger is read HERE and only here, once a night, for one day at a time -
+    which is the property that keeps a thirty-day query from ever scanning it: the
+    reads that answer a long window (#740 funnel, #741 active users, #742 retention
+    cohorts) are served from the two daily aggregates this feeds.
+
+    Ordered by the ledger's own identity column so the loaded sequence - and
+    therefore the recompute - does not depend on the planner's choice of scan order.
+    The aggregates' own output is sorted too; this keeps the INPUT deterministic for
+    the same reason.
+    """
+    table = observability_product_events
+    statement = (
+        select(
+            table.c.occurred_at,
+            table.c.actor_kind,
+            table.c.actor_key,
+            table.c.funnel,
+            table.c.step,
+            table.c.outcome,
+            table.c.duration_ms,
+        )
+        .where(table.c.occurred_at >= window_start, table.c.occurred_at < window_end)
+        .order_by(table.c.id)
+    )
+    rows = (await connection.execute(statement)).all()
+    return [
+        ProductEventFact(
+            occurred_at=row.occurred_at,
+            actor_kind=row.actor_kind,
+            actor_key=row.actor_key,
+            funnel=row.funnel,
+            step=row.step,
+            outcome=row.outcome,
+            duration_ms=row.duration_ms,
+        )
+        for row in rows
+    ]
+
+
 async def _upsert_budget_snapshot(connection: AsyncConnection, snapshot: BudgetSnapshot) -> None:
     """Snapshot one ``(provider, model)`` budget row's spend for the billing period."""
     values: dict[str, Any] = {
@@ -911,6 +1001,10 @@ async def run_rollup(
         # doctor key is simply there.
         actor_spend = await _load_actor_spend(connection, target_date)
         doctor_by_intake = await _load_doctor_by_intake(connection, actor_spend)
+        # The product ledger, read once for the day. Both daily product grains below
+        # are recomputed from this ONE read, so the funnel's step counts and its
+        # active-actor counts can never describe different journeys (B4e #739).
+        product_events = await _load_product_events(connection, window_start, window_end)
 
         alerts: list[AlertRow] = []
         health_rows = 0
@@ -945,6 +1039,11 @@ async def run_rollup(
         ):
             await _upsert_attribution_daily(connection, target_date, actor_row)
             attribution_rows += 1
+
+        product_rows = 0
+        for product_row in build_product_daily(events=product_events, target_date=target_date):
+            await _upsert_product_daily(connection, target_date, product_row)
+            product_rows += 1
 
         # Read AFTER the upserts above, in the same transaction, so the day under
         # test is the aggregate this pass just wrote rather than whatever was there
@@ -1053,6 +1152,7 @@ async def run_rollup(
             health_rows=health_rows,
             metric_rows=metric_rows,
             attribution_rows=attribution_rows,
+            product_rows=product_rows,
             budget_snapshots=snapshots,
             alerts_raised=raised,
             alerts_resolved=resolved,
@@ -1061,14 +1161,15 @@ async def run_rollup(
 
     logger.info(
         "rollup for %s (%s, period %s) refreshed %d provider health row(s), %d metric "
-        "row(s), %d actor aggregate row(s) and %d budget snapshot(s); raised %d alert(s), "
-        "resolved %d",
+        "row(s), %d actor aggregate row(s), %d product step row(s) and %d product actor "
+        "row(s) and %d budget snapshot(s); raised %d alert(s), resolved %d",
         report.target_date,
         mode,
         period_start,
         report.health_rows,
         report.metric_rows,
         report.attribution_rows,
+        report.product_rows,
         report.budget_snapshots,
         report.alerts_raised,
         report.alerts_resolved,

@@ -40,14 +40,21 @@ from bus.events import (
     EVENT_CONSENT_GRANTED,
     EVENT_CONSENT_REQUESTED,
     EVENT_CONSENT_REVOKED,
+    EVENT_INTAKE_CAPTURED,
+    EVENT_INTAKE_COMPOSER_OPENED,
+    EVENT_INTAKE_RETRY_REQUESTED,
     EVENT_PARTNER_ACTIVATED,
     EVENT_PARTNER_CREDENTIAL_REVIEWED,
     EVENT_PARTNER_REGISTERED,
     EVENT_PARTNER_REJECTED,
     EVENT_PARTNER_SELECTED,
     EVENT_PARTNER_VERIFICATION_STARTED,
+    EVENT_PRE_SUMMARY_READY,
+    EVENT_PRESCRIPTION_APPROVED,
+    EVENT_PRESCRIPTION_DRAFT_CREATED,
     EVENT_RECORD_ACCESSED,
 )
+from modules.observability.domain.product import ProductStepPayload
 
 #: The two outcomes ``observability_ai_job_spend.status`` can hold - a closed
 #: vocabulary the migration's CHECK constraint enforces, so a third state is a
@@ -245,13 +252,19 @@ class IntakeDoctorAssignedTelemetryPayload(BaseModel):
     doctor_id: int
 
 
-class CaseConsultCompleteTelemetryPayload(BaseModel):
+class CaseConsultCompleteTelemetryPayload(ProductStepPayload):
     """MOD-013's mirror of MOD-006's ``case.consult_complete`` payload.
 
-    B4b (#703): the observability consumer counts this business event. Its
-    field contract mirrors what MOD-006 publishes; MOD-006 owns the registry
+    B4b (#703) counts it as a business event; B4e (#739) also records it as the
+    funnel's ``consult_complete`` step, attributed to the doctor. That makes it ONE
+    event with two effects, and the two effects MUST share ONE handler seat: the
+    product ledger is keyed by ``event_id`` alone and ``run_handler`` writes the
+    ``consumed_events`` row first, so a second seat would be told it is a replay and
+    would skip its own effect forever - with no error, because a replay is supposed to
+    be silent.
+    Its field contract mirrors what MOD-006 publishes; MOD-006 owns the registry
     model, so MOD-013 registers no duplicate - ``run_handler`` re-validates the
-    dispatched care payload into this local mirror before the count runs.
+    dispatched care payload into this local mirror before either effect runs.
     """
 
     case_id: int
@@ -260,8 +273,12 @@ class CaseConsultCompleteTelemetryPayload(BaseModel):
     pre_summary_id: int | None = None
 
 
-class CaseClosedTelemetryPayload(BaseModel):
-    """MOD-013's mirror of MOD-006's ``case.closed`` payload (B4b #703)."""
+class CaseClosedTelemetryPayload(ProductStepPayload):
+    """MOD-013's mirror of MOD-006's ``case.closed`` payload.
+
+    Counted as a business event by B4b (#703) and recorded as the funnel's
+    ``case_closed`` step by B4e (#739).
+    """
 
     case_id: int
     patient_id: int
@@ -404,6 +421,83 @@ class AiEgressRecordedTelemetryPayload(BaseModel):
     reason: str
 
 
+class IntakeComposerOpenedTelemetryPayload(ProductStepPayload):
+    """MOD-013's mirror of MOD-005's ``intake.composer_opened`` payload (B4e #739).
+
+    The funnel's real ENTRY step, and the only one whose producer publishes a
+    ``trace_id``: this event fires when the composer opens, in its own transaction,
+    BEFORE any capture exists - so it is the only step that can tell an abandoned
+    draft apart from a submit (#717 decision 4, #721).
+
+    ``patient_id`` is re-declared REQUIRED because the producer guarantees it: the
+    entry step is the head of an active-actor count, and a composer open with no
+    patient behind it is not a thing this producer can emit. The three identity
+    fields ``ProductStepPayload`` defaults are inherited, not repeated.
+    """
+
+    patient_id: int
+
+
+class IntakeCapturedTelemetryPayload(ProductStepPayload):
+    """MOD-013's mirror of MOD-005's ``intake.captured`` payload (B4e #739).
+
+    ``duration_s`` is the step's own span - how long the capture took - and is the
+    only duration in the funnel: the composer entry is an instant, not a span, so
+    its row records NULL rather than a zero that would read as "took no time".
+    """
+
+    intake_id: int
+    patient_id: int
+    duration_s: float | None = None
+
+
+class IntakeRetryRequestedTelemetryPayload(ProductStepPayload):
+    """MOD-013's mirror of MOD-005's ``intake.retry_requested`` payload (B4e #739).
+
+    The ``re_recorded`` step's source, and the only funnel event with NO identity
+    reference at all: it names an intake, a round and a reason. The registry entry
+    declares no actor kind for it, so the ledger row records none - a step with no
+    human behind it is a machine outcome, not a null-filled placeholder that would
+    inflate the active-actor count.
+    """
+
+    intake_id: int
+    record_attempt: int
+
+
+class PreSummaryReadyTelemetryPayload(ProductStepPayload):
+    """MOD-013's mirror of MOD-005's ``pre_summary.ready`` payload (B4e #739)."""
+
+    intake_id: int
+    pre_summary_id: int
+    patient_id: int
+
+
+class PrescriptionDraftCreatedTelemetryPayload(ProductStepPayload):
+    """MOD-013's mirror of MOD-006's ``prescription.draft_created`` payload (B4e #739).
+
+    ``source`` is widened from the producer's ``PrescriptionSource`` literal to
+    ``str``: the funnel records that a draft exists, and a producer that grows a
+    source must not make this consumer fail to record a step (ADR-0003).
+    """
+
+    case_id: int
+    prescription_id: int
+    patient_id: int
+    doctor_id: int
+    source: str
+    attempt_no: int
+
+
+class PrescriptionApprovedTelemetryPayload(ProductStepPayload):
+    """MOD-013's mirror of MOD-006's ``prescription.approved`` payload (B4e #739)."""
+
+    case_id: int
+    prescription_id: int
+    patient_id: int
+    doctor_id: int
+
+
 #: Registry: the consumed event types that roll into ``obs_business_daily`` and
 #: the stable ``metric_key`` each increments. ``metric_key`` mirrors the
 #: canonical event-type name so a later phase can add a business metric by
@@ -424,6 +518,24 @@ BUSINESS_EVENT_METRICS: dict[str, str] = {
     EVENT_CONSENT_REVOKED: EVENT_CONSENT_REVOKED,
     EVENT_RECORD_ACCESSED: EVENT_RECORD_ACCESSED,
     EVENT_AUDIT_EVENT: EVENT_AUDIT_EVENT,
+}
+
+#: Registry: the consumed event types that land in the product event ledger, each
+#: mapped to the local mirror ``run_handler`` re-validates the dispatched payload
+#: into. The key set is exactly ``PRODUCT_STEP_REGISTRY``'s event types - the funnel
+#: registry names WHAT each event means, this one names the payload shape to read it
+#: from, and the two are asserted equal rather than allowed to drift: a step with no
+#: mirror has nowhere to read its actor from, and a mirror with no step is a payload
+#: nobody consumes.
+PRODUCT_EVENT_MIRRORS: dict[str, type[ProductStepPayload]] = {
+    EVENT_INTAKE_COMPOSER_OPENED: IntakeComposerOpenedTelemetryPayload,
+    EVENT_INTAKE_CAPTURED: IntakeCapturedTelemetryPayload,
+    EVENT_INTAKE_RETRY_REQUESTED: IntakeRetryRequestedTelemetryPayload,
+    EVENT_PRE_SUMMARY_READY: PreSummaryReadyTelemetryPayload,
+    EVENT_CASE_CONSULT_COMPLETE: CaseConsultCompleteTelemetryPayload,
+    EVENT_CASE_CLOSED: CaseClosedTelemetryPayload,
+    EVENT_PRESCRIPTION_DRAFT_CREATED: PrescriptionDraftCreatedTelemetryPayload,
+    EVENT_PRESCRIPTION_APPROVED: PrescriptionApprovedTelemetryPayload,
 }
 
 #: Alert severities (``obs_alert_events.severity``) - low-cardinality vocabulary
