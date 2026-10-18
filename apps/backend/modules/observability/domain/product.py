@@ -193,6 +193,68 @@ PRODUCT_STEP_REGISTRY: dict[tuple[str, str], ProductStep] = {}
 #: steps of the same funnel.
 _EVENT_STEP_INDEX: dict[str, ProductStep] = {}
 
+#: Words that make an event an AUTHENTICATION, session or logout signal rather than a
+#: clinical action. Matched against a NAME SEGMENT - see :func:`_non_clinical_word`
+#: for why - so the platform's own namespacing cannot hide one and a clinical word that
+#: merely starts the same way cannot trip the rule.
+#:
+#: This is a REFUSAL, not a filter, and it exists because "who was active" is derived
+#: from this registry (decision 26). A login counts a person who opened a browser; a
+#: qualifying clinical action counts a person who did the work. The moment a login
+#: event could be registered, every adoption figure would quietly become a login
+#: count while still calling itself an active user - so the registry refuses the shape
+#: outright and the answer to "we need a login event for this" is a clinical action,
+#: which is what already exists.
+#:
+#: ``credential`` is here for the same reason and not by accident of spelling: a
+#: partner's credential lifecycle is an activation signal, never a care action, and
+#: counting it would inflate the doctor base with partners who never treated anyone.
+NON_CLINICAL_EVENT_WORDS: tuple[str, ...] = (
+    "auth",
+    "credential",
+    "login",
+    "logout",
+    "otp",
+    "password",
+    "session",
+)
+
+#: ``word`` plus the separator that opens a qualified name - ``auth_failed`` is an
+#: authentication attempt, ``authorized`` is an e-prescription that went out. Built
+#: from the vocabulary rather than written out so adding a word cannot add a second,
+#: differently-spelled list.
+_NON_CLINICAL_SEGMENT_PREFIXES: tuple[str, ...] = tuple(
+    f"{word}_" for word in NON_CLINICAL_EVENT_WORDS
+)
+
+
+def non_clinical_event_word(event_type: str) -> str | None:
+    """The :data:`NON_CLINICAL_EVENT_WORDS` entry ``event_type`` names, or ``None``.
+
+    Matched per SEGMENT - an exact segment, or one that opens with ``word_`` - and
+    lower-cased on both sides so the vocabulary is spelled in one case and a
+    differently-cased publisher is caught rather than quietly admitted.
+
+    Segment matching rather than a free substring is the whole design here. A bare
+    ``"auth" in event_type`` also refuses ``prescription.authorized`` and
+    ``pharmacy.authority``, and a prefix rule over the WHOLE name misses
+    ``patient.auth_failed`` because the platform namespaces authentication under
+    ``patient.``. Splitting on the dot gets both right: ``auth_failed`` is a
+    qualified ``auth``, and ``authorized`` is neither ``auth`` nor ``auth_``-shaped.
+
+    The line it does draw is at ``word_``: an event that calls itself
+    ``session_``-something is refused, because a session in this platform is an
+    authentication session and a clinical step wanting that word has to say what kind
+    of session it is (``counselling.held``) before it may join the registry.
+    """
+    for segment in event_type.lower().split("."):
+        if segment in NON_CLINICAL_EVENT_WORDS:
+            return segment
+        for prefix in _NON_CLINICAL_SEGMENT_PREFIXES:
+            if segment.startswith(prefix):
+                return prefix.removesuffix("_")
+    return None
+
 
 def register_product_step(step: ProductStep) -> ProductStep:
     """Add ``step`` to the registry and return it.
@@ -211,7 +273,14 @@ def register_product_step(step: ProductStep) -> ProductStep:
     A declared ``outcome`` outside ``allowed_outcomes`` is refused too: a step whose
     vocabulary and recorded outcome disagree describes itself one way and is counted
     another, which is how "which step loses people" quietly answers a different
-    question from the one asked.
+    question from the one asked. That check keeps its original position, so a step
+    that breaks two rules at once still fails on the one that predates this ticket.
+
+    An event carrying a :data:`NON_CLINICAL_EVENT_WORDS` segment is refused for a
+    third reason: the registry is the ONLY definition of what counts as activity
+    (decision 26), so an authentication, session or logout event registered here
+    would not add a signal - it would REPLACE the clinical one every adoption figure
+    is built from.
     """
     scope = (step.funnel, step.step)
     if scope in PRODUCT_STEP_REGISTRY:
@@ -222,10 +291,17 @@ def register_product_step(step: ProductStep) -> ProductStep:
             f"event type {step.event_type!r} is already registered as product step "
             f"{existing.funnel}.{existing.step}"
         )
+    non_clinical = non_clinical_event_word(step.event_type)
     if step.outcome not in step.allowed_outcomes:
         raise ValueError(
             f"product step {step.funnel}.{step.step} records outcome {step.outcome!r}, "
             "which it does not declare in allowed_outcomes"
+        )
+    if non_clinical is not None:
+        raise ValueError(
+            f"event type {step.event_type!r} names {non_clinical!r} and is not a "
+            "qualifying clinical action; active users count clinical activity, not "
+            "authentication (decision 26)"
         )
     PRODUCT_STEP_REGISTRY[scope] = step
     _EVENT_STEP_INDEX[step.event_type] = step
@@ -240,6 +316,47 @@ def product_steps() -> tuple[ProductStep, ...]:
 def product_step_for_event(event_type: str) -> ProductStep | None:
     """The step ``event_type`` is recorded as, or ``None`` when it is not consumed."""
     return _EVENT_STEP_INDEX.get(event_type)
+
+
+def is_active_actor_step(step: ProductStep) -> bool:
+    """Whether this step's rows make their actor an ACTIVE USER.
+
+    **A qualifying clinical action, never a login** (decision 26). The test is the
+    step's own ``actor_kind``: a step that names one is attributed to a person who
+    did clinical work - a patient who opened the composer or submitted an intake, a
+    doctor who completed a consult, drafted or approved a prescription - and a step
+    that names none (``re_recorded`` today) is a machine finishing a step on an
+    intake's behalf and contributes no actor.
+
+    Stating it as a predicate over the registry rather than as a filter a read
+    remembers is the whole point: "who was active" cannot drift into "who logged in"
+    because there is no login to count (:data:`NON_CLINICAL_EVENT_WORDS` refuses the
+    registration), and a step added later becomes a qualifying action by declaring an
+    actor kind, with no edit to any read.
+    """
+    return step.actor_kind is not None
+
+
+def active_actor_steps() -> tuple[ProductStep, ...]:
+    """Every registered step whose rows count toward an active-user figure.
+
+    Across all funnels, in registration order: "was anyone here" is a question about
+    the product, not about one funnel, and a second funnel's clinical steps have to
+    count without a read being taught about them.
+    """
+    return tuple(step for step in product_steps() if is_active_actor_step(step))
+
+
+def active_actor_step_names() -> tuple[str, ...]:
+    """The bare ``step`` names of :func:`active_actor_steps`, for a SQL ``IN`` list.
+
+    The registry's own vocabulary rather than a literal list, which is what makes a
+    new step a registry line: the active-user read reads these names off the registry
+    rather than naming steps itself. Empty when nothing qualifies, which the read
+    treats as "nobody was active" rather than as "no filter" - the two must not
+    collapse, or an empty registry would silently widen the set to every row.
+    """
+    return tuple(step.step for step in active_actor_steps())
 
 
 #: Separates the derived key from every other digest in the codebase, so a step key

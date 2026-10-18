@@ -32,6 +32,7 @@ from modules.observability.domain.exceptions import (
     AlertAlreadyResolvedError,
     AlertNotFoundError,
 )
+from modules.observability.domain.product import active_actor_step_names
 from modules.observability.domain.rollup import ALERT_STATUS_OPEN, ALERT_STATUS_RESOLVED
 from modules.observability.facade import (
     BUSINESS_PERIOD_MONTH,
@@ -56,6 +57,7 @@ from modules.observability.facade import (
     build_deeplinks,
     error_status,
     period_window,
+    query_active_users,
     query_alerts,
     query_business,
     query_cost_summary,
@@ -3235,3 +3237,206 @@ async def test_the_headline_month_bill_is_null_when_no_budget_row_exists() -> No
 
     assert view.spend_paise == 90_000
     assert view.margin.headline_month_cost_of_goods_paise is None
+
+
+# ------------------------------------------------------- active users (#741)
+
+
+#: An instant ON ``_TODAY``, so these assertions are about the read's window arithmetic
+#: rather than about the day the suite happens to run on.
+_ACTIVE_NOW = datetime(2026, 10, 12, 9, 0, tzinfo=UTC)
+
+
+def _active_users_connection(
+    *,
+    windows: list[dict[str, object]] | None = None,
+    daily_actors: list[dict[str, object]] | None = None,
+    daily_requests: list[dict[str, object]] | None = None,
+) -> AsyncMock:
+    """The three results ``query_active_users`` issues, in the order it issues them."""
+    return _connection(
+        windows if windows is not None else [],
+        daily_actors if daily_actors is not None else [],
+        daily_requests if daily_requests is not None else [],
+    )
+
+
+def _actor_rows(*, window: int, week: int, month: int) -> list[dict[str, object]]:
+    """One row per actor kind, carrying all three nested window counts."""
+    return [
+        {"actor_kind": "patient", "window_total": window, "week_total": week, "month_total": month},
+        {"actor_kind": "doctor", "window_total": 2, "week_total": 2, "month_total": 2},
+    ]
+
+
+async def test_active_users_reports_three_windows_of_distinct_actors() -> None:
+    """AC1: the three counts are separate figures, and each carries its own dates."""
+    connection = _active_users_connection(
+        windows=_actor_rows(window=30, week=29, month=31),
+        daily_actors=[{"day": _TODAY, "actor_kind": "patient", "actors": 6}],
+    )
+
+    view = await query_active_users(connection, days=30, now=_ACTIVE_NOW)
+
+    assert view.daily_active_users.total == 6
+    assert view.weekly_active_users.total == 31
+    assert view.monthly_active_users.total == 33
+    assert view.window_active_users.total == 32
+    assert view.monthly_active_users.from_date == _TODAY - timedelta(days=29)
+    assert view.weekly_active_users.from_date == _TODAY - timedelta(days=6)
+
+
+async def test_stickiness_is_daily_over_monthly_at_the_rate_scale() -> None:
+    """AC1: the usual definition, rendered as a fraction the way every other rate is."""
+    connection = _active_users_connection(
+        windows=_actor_rows(window=30, week=29, month=28),
+        daily_actors=[
+            {"day": _TODAY, "actor_kind": "patient", "actors": 4},
+            {"day": _TODAY, "actor_kind": "doctor", "actors": 2},
+        ],
+    )
+
+    view = await query_active_users(connection, days=30, now=_ACTIVE_NOW)
+
+    # 6 daily over 30 monthly, at the module's four-decimal rate scale.
+    assert view.daily_active_users.total == 6
+    assert view.monthly_active_users.total == 30
+    assert view.stickiness == Decimal("0.2000")
+
+
+async def test_stickiness_is_null_rather_than_zero_without_a_monthly_base() -> None:
+    """Nobody active in the month is no base to divide by, not a measured absence."""
+    connection = _active_users_connection(
+        windows=[{"actor_kind": "patient", "window_total": 3, "week_total": 1, "month_total": 0}],
+        daily_actors=[{"day": _TODAY, "actor_kind": "patient", "actors": 1}],
+    )
+
+    view = await query_active_users(connection, days=30, now=_ACTIVE_NOW)
+
+    assert view.monthly_active_users.total == 0
+    assert view.stickiness is None
+
+
+async def test_requests_per_active_user_divides_the_window_by_the_window() -> None:
+    """AC3: both sides of the division cover the same days, at the 2dp count scale."""
+    connection = _active_users_connection(
+        windows=_actor_rows(window=4, week=5, month=6),
+        daily_requests=[
+            {"day": _TODAY, "requests": 30},
+            {"day": _TODAY - timedelta(days=1), "requests": 10},
+        ],
+    )
+
+    view = await query_active_users(connection, days=30, now=_ACTIVE_NOW)
+
+    assert view.requests == 40
+    assert view.window_active_users.total == 6
+    assert view.requests_per_active_user == Decimal("6.67")
+
+
+async def test_per_active_user_is_null_when_either_side_is_empty() -> None:
+    """No actors and no traffic are unmeasured, which is not a measured zero."""
+    connection = _active_users_connection(windows=[], daily_requests=[])
+
+    view = await query_active_users(connection, days=30, now=_ACTIVE_NOW)
+
+    assert view.requests == 0
+    assert view.requests_per_active_user is None
+    assert view.stickiness is None
+
+
+async def test_the_throughput_trend_merges_both_tables_at_day_grain() -> None:
+    """AC3: one point per day, carrying the load and the people behind it.
+
+    The counter and the ledger are read as two separate statements and merged here,
+    never joined - so a day with traffic but no clinical work, and a day with clinical
+    work but no traffic, each report what they actually hold.
+    """
+    connection = _active_users_connection(
+        daily_actors=[
+            {"day": _TODAY - timedelta(days=1), "actor_kind": "patient", "actors": 3},
+            {"day": _TODAY, "actor_kind": "patient", "actors": 2},
+        ],
+        daily_requests=[
+            {"day": _TODAY - timedelta(days=2), "requests": 5},
+            {"day": _TODAY, "requests": 8},
+        ],
+    )
+
+    view = await query_active_users(connection, days=30, now=_ACTIVE_NOW)
+
+    assert [point.day for point in view.trend] == [
+        _TODAY - timedelta(days=2),
+        _TODAY - timedelta(days=1),
+        _TODAY,
+    ]
+    # Traffic and no clinical work: present, with a null rather than a division.
+    quiet, busy, today = view.trend
+    assert (quiet.requests, quiet.active_users) == (5, 0)
+    assert quiet.requests_per_active_user is None
+    assert (busy.requests, busy.active_users) == (0, 3)
+    assert busy.requests_per_active_user is None
+    assert (today.requests, today.active_users) == (8, 2)
+    assert today.requests_per_active_user == Decimal("4.00")
+    assert view.requests == 13
+
+
+async def test_days_below_one_is_refused_by_the_read_that_owns_the_check() -> None:
+    connection = _active_users_connection()
+
+    with pytest.raises(ValueError, match=r"days must be positive"):
+        await query_active_users(connection, days=0, now=_ACTIVE_NOW)
+
+
+async def test_active_users_reads_two_tables_of_its_own_schema_never_a_join() -> None:
+    """ADR-0003: two statements of this module's own storage, never one joined query."""
+    connection = _active_users_connection()
+
+    await query_active_users(connection, days=30, now=_ACTIVE_NOW)
+
+    assert _from_target(connection, 0) == "observability.observability_product_events"
+    assert _from_target(connection, 1) == "observability.observability_product_events"
+    assert _from_target(connection, 2) == "observability.observability_http_minute"
+
+
+async def test_the_active_users_scan_reaches_the_widest_window_and_bounds_each_count() -> None:
+    """The scan starts at the EARLIEST window, and each count carries its own floor.
+
+    A sixty-day request widens the scan, so a monthly count that trusted the scan's
+    lower bound rather than filtering on its own would quietly report sixty days under
+    a "monthly" label - the exact truncation this read exists to prevent.
+    """
+    connection = _active_users_connection()
+
+    await query_active_users(connection, days=60, now=_ACTIVE_NOW)
+
+    window_sql = " ".join(_compiled(connection, 0).split())
+    # Three nested windows, so three filtered distinct counts, not three queries.
+    assert window_sql.count("FILTER (WHERE") == 3
+    # The scan reaches the WIDEST window - sixty days - and each count still carries
+    # its own floor, so the monthly figure cannot inherit the extra thirty days.
+    assert "2026-08-14" in window_sql
+    assert "2026-09-13" in window_sql
+
+
+async def test_the_active_user_step_filter_is_the_registrys_own_vocabulary() -> None:
+    """A new clinical step counts toward adoption without an edit to this read."""
+    connection = _active_users_connection()
+
+    await query_active_users(connection, days=30, now=_ACTIVE_NOW)
+
+    compiled = _compiled(connection, 0)
+    for step in active_actor_step_names():
+        assert step in compiled
+    assert "re_recorded" not in compiled
+
+
+async def test_active_users_resolve_the_window_against_a_pinned_instant() -> None:
+    """The route owns the default; the facade owns the clock."""
+    facade = ObservabilityFacade(_engine(_active_users_connection()))
+
+    view = await facade.get_active_users(days=7, now=_ACTIVE_NOW)
+
+    assert view.days == 7
+    assert view.to_date == _TODAY
+    assert view.from_date == _TODAY - timedelta(days=6)

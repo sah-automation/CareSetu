@@ -32,8 +32,14 @@ from modules.observability.domain.exceptions import (
     AlertAlreadyResolvedError,
     AlertNotFoundError,
 )
-from modules.observability.domain.product import PRODUCT_OUTCOMES
+from modules.observability.domain.product import (
+    PRODUCT_OUTCOMES,
+    non_clinical_event_word,
+    product_steps,
+)
 from modules.observability.facade import (
+    ACTIVE_USER_SOURCE_CONVENTION,
+    ACTIVE_USER_WINDOW_CONVENTION,
     ALERT_STATUS_VOCABULARY,
     BUSINESS_PERIODS,
     ERROR_STATUS_VOCABULARY,
@@ -42,6 +48,11 @@ from modules.observability.facade import (
     FUNNEL_RATE_CONVENTION,
     GAP_BASIS_ACTOR,
     GAP_BASIS_NO_PREDECESSOR,
+    REQUESTS_PER_ACTIVE_USER_CONVENTION,
+    STICKINESS_CONVENTION,
+    ActiveUsersDayPoint,
+    ActiveUsersRead,
+    ActiveUserWindow,
     ActorSpendDistribution,
     AlertAcknowledgement,
     AlertEntry,
@@ -110,6 +121,7 @@ ERRORS_PATH = "/v1/operator/observability/errors"
 DEEPLINKS_PATH = "/v1/operator/observability/deeplinks"
 BUSINESS_PATH = "/v1/operator/observability/business"
 FUNNEL_PATH = "/v1/operator/observability/product/funnel"
+ACTIVE_USERS_PATH = "/v1/operator/observability/product/active-users"
 
 _ALERT_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 
@@ -668,6 +680,7 @@ class StubObservabilityFacade:
         self.deeplink_settings: list[dict[str, Any]] = []
         self.business_periods: list[str] = []
         self.funnel_calls: list[tuple[int, str | None]] = []
+        self.active_user_days: list[int] = []
 
     async def get_cost_summary(self) -> CostSummary:
         self.summary_calls += 1
@@ -755,6 +768,10 @@ class StubObservabilityFacade:
     async def get_funnel(self, *, days: int, outcome: str | None = None) -> FunnelRead:
         self.funnel_calls.append((days, outcome))
         return _FUNNEL.model_copy(update={"window_days": days, "outcome": outcome})
+
+    async def get_active_users(self, *, days: int) -> ActiveUsersRead:
+        self.active_user_days.append(days)
+        return _ACTIVE_USERS.model_copy(update={"days": days})
 
     def get_deeplinks(
         self,
@@ -1931,6 +1948,185 @@ def test_the_funnel_outcome_gate_matches_the_registry_vocabulary() -> None:
     assert tuple(rendered) == PRODUCT_OUTCOMES
 
 
+# ------------------------------------------------------------- active users (#741)
+
+
+def _window(days: int, patients: int, doctors: int) -> ActiveUserWindow:
+    """One window's figures, with the total the response derives from the two kinds."""
+    return ActiveUserWindow(
+        window_days=days,
+        from_date=_TODAY - timedelta(days=days - 1),
+        to_date=_TODAY,
+        patients=patients,
+        doctors=doctors,
+        total=patients + doctors,
+    )
+
+
+#: The adoption stub the route serialises. The numbers are deliberately NOT multiples
+#: of one another - a weekly figure of seven times the daily one, or a monthly one of
+#: thirty times it, would be the shortcut this read exists to make impossible, so a
+#: fixture built that way could not tell a correct read from a wrong one.
+_ACTIVE_USERS = ActiveUsersRead(
+    days=30,
+    from_date=_FROM,
+    to_date=_TODAY,
+    daily_active_users=_window(1, 6, 3),
+    weekly_active_users=_window(7, 19, 11),
+    monthly_active_users=_window(30, 41, 24),
+    window_active_users=_window(30, 44, 26),
+    stickiness=Decimal("0.4600"),
+    requests=420,
+    requests_per_active_user=Decimal("6.00"),
+    trend=[
+        ActiveUsersDayPoint(
+            day=_TODAY - timedelta(days=1),
+            requests=18,
+            active_users=11,
+            requests_per_active_user=Decimal("1.64"),
+        ),
+        ActiveUsersDayPoint(
+            day=_TODAY,
+            requests=12,
+            active_users=9,
+            requests_per_active_user=Decimal("1.33"),
+        ),
+    ],
+    window_convention=ACTIVE_USER_WINDOW_CONVENTION,
+    source_convention=ACTIVE_USER_SOURCE_CONVENTION,
+    stickiness_convention=STICKINESS_CONVENTION,
+    requests_per_active_user_convention=REQUESTS_PER_ACTIVE_USER_CONVENTION,
+)
+
+
+def test_the_active_users_route_defaults_to_the_thirty_day_window() -> None:
+    """A panel opened without parameters is asking how the last month has gone."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(ACTIVE_USERS_PATH, headers=_bearer(_token()))
+
+    assert response.status_code == 200
+    assert facade.active_user_days == [30]
+    assert response.json()["days"] == 30
+
+
+def test_the_active_users_route_passes_a_validated_window_through() -> None:
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(f"{ACTIVE_USERS_PATH}?days=45", headers=_bearer(_token()))
+
+    assert response.status_code == 200
+    assert facade.active_user_days == [45]
+
+
+@pytest.mark.parametrize("days", [0, 366])
+def test_the_active_users_route_refuses_a_window_outside_its_bounds(days: int) -> None:
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(f"{ACTIVE_USERS_PATH}?days={days}", headers=_bearer(_token()))
+
+    assert response.status_code == 422
+    assert facade.active_user_days == []
+
+
+def test_the_three_active_user_counts_are_three_different_actor_sets() -> None:
+    """AC1: nothing here is a multiple of anything else.
+
+    Each figure travels with its own window, because a client that cannot see which
+    days a count covers is exactly the client that will quote a fortnight as a month.
+    """
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    body = client.get(ACTIVE_USERS_PATH, headers=_bearer(_token())).json()
+
+    daily, weekly, monthly = (
+        body["daily_active_users"],
+        body["weekly_active_users"],
+        (body["monthly_active_users"]),
+    )
+    assert [daily["window_days"], weekly["window_days"], monthly["window_days"]] == [1, 7, 30]
+    assert daily["total"] == 9
+    assert weekly["total"] == 30
+    assert monthly["total"] == 65
+    # Nested windows, so the totals only grow outwards - and none is a product of the
+    # one inside it, which is what the "seven times daily" shortcut would produce.
+    assert daily["total"] * 7 != weekly["total"]
+    assert daily["total"] * 30 != monthly["total"]
+
+
+def test_the_active_user_totals_split_by_kind_and_reconcile() -> None:
+    """Patients and doctors are disjoint pseudonymous namespaces, so they add up."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    body = client.get(ACTIVE_USERS_PATH, headers=_bearer(_token())).json()
+
+    for key in ("daily_active_users", "weekly_active_users", "monthly_active_users"):
+        window = body[key]
+        assert window["total"] == window["patients"] + window["doctors"]
+    assert body["monthly_active_users"]["patients"] == 41
+    assert body["monthly_active_users"]["doctors"] == 24
+
+
+def test_stickiness_and_load_per_head_are_quoted_decimals_not_binary_floats() -> None:
+    """AC5: the wire decimals follow the convention every other rate here uses."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    body = client.get(ACTIVE_USERS_PATH, headers=_bearer(_token())).json()
+
+    # A rate at the module's four-decimal rate scale, a per-person count at two.
+    assert body["stickiness"] == "0.4600"
+    assert body["requests_per_active_user"] == "6.00"
+    assert body["trend"][0]["requests_per_active_user"] == "1.64"
+    assert body["requests"] == 420
+
+
+def test_the_active_users_route_returns_the_conventions_the_figures_rest_on() -> None:
+    """A bare ratio quoted out of context is how stickiness changes meaning."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    body = client.get(ACTIVE_USERS_PATH, headers=_bearer(_token())).json()
+
+    assert body["window_convention"] == ACTIVE_USER_WINDOW_CONVENTION
+    assert body["source_convention"] == ACTIVE_USER_SOURCE_CONVENTION
+    assert body["stickiness_convention"] == STICKINESS_CONVENTION
+    assert body["requests_per_active_user_convention"] == (REQUESTS_PER_ACTIVE_USER_CONVENTION)
+    # AC2, stated on the wire rather than only in a docstring.
+    assert "never from a login" in body["source_convention"]
+
+
+def test_the_active_users_route_returns_a_daily_throughput_trend() -> None:
+    """AC3: the trend carries the load and the people behind each day."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    body = client.get(ACTIVE_USERS_PATH, headers=_bearer(_token())).json()
+
+    assert [point["day"] for point in body["trend"]] == [
+        str(_TODAY - timedelta(days=1)),
+        str(_TODAY),
+    ]
+    assert body["trend"][1]["requests"] == 12
+    assert body["trend"][1]["active_users"] == 9
+
+
+def test_the_active_users_read_carries_no_login_or_session_event() -> None:
+    """AC2: the registry that defines the active set has no authentication signal."""
+    offenders = [
+        event_type
+        for event_type in (step.event_type for step in product_steps())
+        if non_clinical_event_word(event_type)
+    ]
+
+    assert offenders == []
+
+
 # ------------------------------------------------------------------ refuses
 
 
@@ -1950,6 +2146,7 @@ _ALL_PATHS = [
     DEEPLINKS_PATH,
     BUSINESS_PATH,
     FUNNEL_PATH,
+    ACTIVE_USERS_PATH,
 ]
 
 

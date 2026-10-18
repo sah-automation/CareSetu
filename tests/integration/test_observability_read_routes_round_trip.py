@@ -49,11 +49,12 @@ import calendar
 import json
 import uuid
 from collections.abc import AsyncIterator
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 from urllib.parse import unquote
 
+import pytest
 import pytest_asyncio
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
@@ -108,6 +109,7 @@ DEEPLINKS_PATH = "/v1/operator/observability/deeplinks"
 RELIABILITY_PATH = "/v1/operator/observability/reliability"
 BUSINESS_PATH = "/v1/operator/observability/business"
 FUNNEL_PATH = "/v1/operator/observability/product/funnel"
+ACTIVE_USERS_PATH = "/v1/operator/observability/product/active-users"
 
 
 async def _seed(connection: AsyncConnection) -> None:
@@ -2663,3 +2665,324 @@ async def test_the_funnel_route_refuses_anonymous_and_non_operator_callers(
     assert _client(database_url).get(FUNNEL_PATH).status_code == 401
     forbidden = _client(database_url).get(FUNNEL_PATH, headers=_bearer("patient"))
     assert forbidden.status_code == 403
+
+
+# --------------------------------------------------------- the active users read (#741)
+
+#: The ledger rows, as days before today. Each entry is
+#: ``(actor reference, actor kind, step)`` and the arithmetic every assertion below
+#: rests on is written out rather than left to be derived by eye:
+#:
+#:   today       p1 + p2 + d1                              -> DAU  2 patients, 1 doctor
+#:   3 days ago  p3 + p2 + d2                              -> adds p3 and d2 to the week
+#:   5 days ago  p1                                         -> p1 again, still one actor
+#:   10 days ago p4 + d1                                    -> adds p4 to the month
+#:   20 days ago p5                                         -> adds p5 to the month
+#:   45 days ago p6                                         -> outside every rolling window
+#:   2 days ago  a re-record, which records NO actor         -> counts nobody
+#:
+#: So daily is 3, weekly is 5 (3 patients + 2 doctors), monthly is 7 (5 + 2), and a
+#: sixty-day window is 8 once p6 is inside it. None of the three is a multiple of
+#: another, which is the whole point: a read that multiplied the daily figure by
+#: thirty would report 90 monthly users from this seed.
+#:
+#: Each entry is ``(days ago, patient reference, doctor reference, step)`` - one
+#: reference per row because the ledger's actor pair is nullable TOGETHER, and both
+#: NULL is the machine-finished re-record. ``p``/``d`` are the identity references the
+#: producer publishes; the keys the row stores are their pseudonymous hashes.
+_ACTIVE_ACTOR_ROWS: tuple[tuple[int, int | None, int | None, str], ...] = (
+    (0, 301, None, "composer_opened"),
+    (0, 302, None, "composer_opened"),
+    (0, None, 401, "consult_complete"),
+    (3, 303, None, "intake_captured"),
+    (3, 302, None, "composer_opened"),
+    (3, None, 402, "case_closed"),
+    (5, 301, None, "intake_captured"),
+    (10, 304, None, "composer_opened"),
+    (10, None, 401, "consult_complete"),
+    (20, 305, None, "composer_opened"),
+    (45, 306, None, "composer_opened"),
+    (2, None, None, "re_recorded"),
+)
+
+_ACTIVE_ACTOR_INSERT = text(
+    "INSERT INTO observability.observability_product_events "
+    "(event_id, occurred_at, actor_kind, actor_key, session_key, trace_id, funnel, "
+    "step, outcome, duration_ms) VALUES "
+    "(:event_id, :occurred_at, :actor_kind, :actor_key, :session_key, :trace_id, "
+    ":funnel, :step, :outcome, :duration_ms)"
+)
+
+#: The per-minute counter rows that same seed makes: midday UTC on the named day. The
+#: thirty-day total is 10 + 5 + 8 = 23, and the sixty-day total adds the 99 from the
+#: stale route, giving 122.
+#:
+#: Each entry is ``(days ago, route template, method, requests, errors)``.
+_THROUGHPUT_ROWS: tuple[tuple[int, str, str, int, int], ...] = (
+    (0, "/v1/patients", "GET", 10, 0),
+    (1, "/v1/patients", "GET", 5, 0),
+    (3, "/v1/cases", "POST", 8, 1),
+    (45, "/v1/legacy", "GET", 99, 0),
+)
+
+_THROUGHPUT_INSERT = text(
+    "INSERT INTO observability.observability_http_minute "
+    "(minute_ts, route_template, method, status_class, requests, errors) VALUES "
+    "(:minute_ts, :route_template, :method, '2xx', :requests, :errors)"
+)
+
+
+@pytest_asyncio.fixture
+async def active_users_engine(engine: AsyncEngine) -> AsyncIterator[AsyncEngine]:
+    """The ledger and the request counter as #739 and #727 write them.
+
+    The rows are stamped at midday UTC on their day, which matters: the read buckets
+    by the UTC calendar day, so a row at 00:30 would be testing the bucket rather than
+    the adoption.
+    """
+    today = datetime.now(UTC).date()
+
+    def at(days_ago: int) -> datetime:
+        return datetime.combine(today - timedelta(days=days_ago), time(12, 0), tzinfo=UTC)
+
+    ledger: list[dict[str, Any]] = []
+    for index, (days_ago, patient_ref, doctor_ref, step) in enumerate(_ACTIVE_ACTOR_ROWS):
+        machine_finished = patient_ref is None and doctor_ref is None
+        ledger.append(
+            {
+                "event_id": uuid.uuid4(),
+                "occurred_at": at(days_ago),
+                "actor_kind": None
+                if machine_finished
+                else (ACTOR_KIND_PATIENT if patient_ref is not None else ACTOR_KIND_DOCTOR),
+                "actor_key": None
+                if machine_finished
+                else actor_key(
+                    ACTOR_KIND_PATIENT if patient_ref is not None else ACTOR_KIND_DOCTOR,
+                    patient_ref if patient_ref is not None else doctor_ref,  # type: ignore[arg-type]
+                ),
+                "session_key": f"sess-{index}",
+                "trace_id": f"trace-{index}",
+                "funnel": "intake",
+                "step": step,
+                "outcome": "re_recorded" if machine_finished else "completed",
+                "duration_ms": 900000 if step == "consult_complete" else None,
+            }
+        )
+    counter = [
+        {
+            "minute_ts": at(days_ago),
+            "route_template": route_template,
+            "method": method,
+            "requests": requests,
+            "errors": errors,
+        }
+        for days_ago, route_template, method, requests, errors in _THROUGHPUT_ROWS
+    ]
+    async with engine.begin() as connection:
+        await connection.execute(_ACTIVE_ACTOR_INSERT, ledger)
+        await connection.execute(_THROUGHPUT_INSERT, counter)
+    yield engine
+
+
+def _active_users_body(database_url: str, query: str = "") -> dict[str, Any]:
+    path = ACTIVE_USERS_PATH if not query else f"{ACTIVE_USERS_PATH}?{query}"
+    with _client(database_url) as client:
+        return client.get(path, headers=_bearer()).json()
+
+
+async def test_the_three_active_user_counts_are_three_different_actor_sets(
+    active_users_engine: AsyncEngine, database_url: str
+) -> None:
+    """AC1: daily, weekly and monthly are distinct actors over their own windows.
+
+    The seed is built so the shortcut a careless implementation would take - the daily
+    figure times seven and times thirty - lands on 21 and 90, against the real 5 and 7.
+    """
+    del active_users_engine
+    body = _active_users_body(database_url)
+
+    daily, weekly, monthly = (
+        body["daily_active_users"],
+        body["weekly_active_users"],
+        body["monthly_active_users"],
+    )
+    assert (daily["patients"], daily["doctors"], daily["total"]) == (2, 1, 3)
+    assert (weekly["patients"], weekly["doctors"], weekly["total"]) == (3, 2, 5)
+    assert (monthly["patients"], monthly["doctors"], monthly["total"]) == (5, 2, 7)
+    # The shortcut this read must not take: seven times the daily figure, or thirty
+    # times it, against a weekly base of 5 and a monthly base of 7.
+    assert weekly["total"] not in {daily["total"] * 7, daily["total"] * 2}
+    assert monthly["total"] not in {daily["total"] * 30, weekly["total"] * 4}
+
+
+async def test_each_active_user_count_travels_with_its_own_window(
+    active_users_engine: AsyncEngine, database_url: str
+) -> None:
+    """A count quoted without the days it covers is how a fortnight becomes a month."""
+    del active_users_engine
+    body = _active_users_body(database_url)
+    today = datetime.now(UTC).date()
+
+    assert body["daily_active_users"]["window_days"] == 1
+    assert body["daily_active_users"]["from_date"] == str(today)
+    assert body["weekly_active_users"]["from_date"] == str(today - timedelta(days=6))
+    assert body["monthly_active_users"]["from_date"] == str(today - timedelta(days=29))
+    assert body["monthly_active_users"]["to_date"] == str(today)
+    assert body["from_date"] == str(today - timedelta(days=29))
+
+
+async def test_stickiness_is_the_daily_base_over_the_monthly_base(
+    active_users_engine: AsyncEngine, database_url: str
+) -> None:
+    """AC1: the ratio, with the definition it is measured by, on the response."""
+    del active_users_engine
+    body = _active_users_body(database_url)
+
+    assert body["daily_active_users"]["total"] == 3
+    assert body["monthly_active_users"]["total"] == 7
+    assert body["stickiness"] == "0.4286"
+    assert (
+        "daily_active_users.total over monthly_active_users.total"
+        in (body["stickiness_convention"])
+    )
+
+
+async def test_a_month_is_answered_over_thirty_days_not_the_vendors_fourteen(
+    active_users_engine: AsyncEngine, database_url: str
+) -> None:
+    """AC4: the figure is computed in Postgres, so widening past 14 days still answers.
+
+    p6 is 45 days back - outside the free tier's retention by three weeks and outside
+    the rolling month. A sixty-day request must find them, and the monthly count must
+    stay at 7 because the rolling month did not move: the wide window widens the
+    THROUGHPUT figures and the window's own actor count, not the headline trio.
+    """
+    del active_users_engine
+
+    narrow = _active_users_body(database_url, "days=30")
+    wide = _active_users_body(database_url, "days=60")
+
+    assert wide["days"] == 60
+    assert wide["monthly_active_users"]["total"] == 7
+    assert wide["daily_active_users"]["total"] == 3
+    # The window's OWN actor count follows ``days`` and does find the older actor.
+    assert narrow["window_active_users"]["total"] == 7
+    assert wide["window_active_users"]["total"] == 8
+    assert wide["window_active_users"]["patients"] == 6
+
+
+async def test_the_counts_hold_across_a_month_boundary(
+    active_users_engine: AsyncEngine, database_url: str
+) -> None:
+    """AC1 with the window the brief names: one that CROSSES a calendar month.
+
+    A rolling thirty-day window only straddles a month boundary for part of the month,
+    so the fixture would not reliably be exercising the case. The window requested here
+    is sized off the day of the month, which puts its opening day in the previous
+    calendar month whatever day the suite runs on - and that is the arrangement that
+    catches the "monthly = thirty times today" shortcut, because a month edge is
+    exactly where a calendar-month and a rolling-month read disagree.
+    """
+    del active_users_engine
+    today = datetime.now(UTC).date()
+    crossing = today.day + 5
+
+    body = _active_users_body(database_url, f"days={crossing}")
+
+    assert body["from_date"][:7] != body["to_date"][:7]
+    assert body["monthly_active_users"]["total"] == 7
+    assert body["weekly_active_users"]["total"] == 5
+    assert body["daily_active_users"]["total"] == 3
+    # The rolling windows are anchored on today, not on the requested window's start.
+    assert body["monthly_active_users"]["to_date"] == body["to_date"]
+    assert body["monthly_active_users"]["from_date"] == str(today - timedelta(days=29))
+
+
+async def test_requests_and_requests_per_active_user_cover_the_same_window(
+    active_users_engine: AsyncEngine, database_url: str
+) -> None:
+    """AC3: total load and load per head, over the days the window names."""
+    del active_users_engine
+    body = _active_users_body(database_url, "days=30")
+
+    assert body["requests"] == 23
+    assert body["window_active_users"]["total"] == 7
+    # 23 requests over the 7 people who were there, at the module's 2dp count scale.
+    assert body["requests_per_active_user"] == "3.29"
+    assert "over the window's own" in body["requests_per_active_user_convention"]
+
+
+async def test_the_throughput_trend_is_a_day_series_of_load_and_people(
+    active_users_engine: AsyncEngine, database_url: str
+) -> None:
+    """AC3: a trend an operator can read a climb out of, at day grain.
+
+    Day grain rather than the counter's minute grain because a thirty-day window at
+    minute grain is forty-three thousand points and no chart draws them.
+    """
+    del active_users_engine
+    today = datetime.now(UTC).date()
+    trend = {point["day"]: point for point in _active_users_body(database_url)["trend"]}
+
+    assert trend[str(today)]["requests"] == 10
+    assert trend[str(today)]["active_users"] == 3
+    assert trend[str(today)]["requests_per_active_user"] == "3.33"
+    assert trend[str(today - timedelta(days=3))]["requests_per_active_user"] == "2.67"
+    # A day with clinical work but no traffic, and a day with traffic but no clinical
+    # work: both are present, and neither gets a division by zero.
+    assert trend[str(today - timedelta(days=20))]["requests"] == 0
+    assert trend[str(today - timedelta(days=20))]["requests_per_active_user"] is None
+    assert trend[str(today - timedelta(days=1))]["active_users"] == 0
+    assert trend[str(today - timedelta(days=1))]["requests_per_active_user"] is None
+    # Nothing was recorded on these days at all, so they are absent rather than zero.
+    assert str(today - timedelta(days=15)) not in trend
+    assert str(today - timedelta(days=45)) not in trend
+
+
+async def test_a_machine_finished_step_counts_nobody(
+    active_users_engine: AsyncEngine, database_url: str
+) -> None:
+    """AC2: the re-record records no actor, so it cannot inflate any of the figures."""
+    del active_users_engine
+    body = _active_users_body(database_url, "days=30")
+
+    # Two days ago the only ledger row is the re-record, which carries no actor pair.
+    assert body["daily_active_users"]["total"] == 3
+    assert body["weekly_active_users"]["patients"] == 3
+    assert "never from a login" in body["source_convention"]
+
+
+async def test_the_active_users_read_is_empty_before_anything_is_recorded(
+    engine: AsyncEngine, database_url: str
+) -> None:
+    """No activity is an answer with no measurement in it, never an error or a zero rate."""
+    del engine
+    body = _active_users_body(database_url)
+
+    assert body["daily_active_users"]["total"] == 0
+    assert body["monthly_active_users"]["total"] == 0
+    # Nothing to divide by, which is not the same as measured absence of stickiness.
+    assert body["stickiness"] is None
+    assert body["requests"] == 0
+    assert body["requests_per_active_user"] is None
+    assert body["trend"] == []
+
+
+async def test_the_active_users_route_refuses_anonymous_and_non_operator_callers(
+    database_url: str,
+) -> None:
+    """AC5: the same flat operator requirement as every other read in the module."""
+    assert _client(database_url).get(ACTIVE_USERS_PATH).status_code == 401
+    forbidden = _client(database_url).get(ACTIVE_USERS_PATH, headers=_bearer("patient"))
+    assert forbidden.status_code == 403
+
+
+@pytest.mark.parametrize("days", [0, 366])
+async def test_the_active_users_route_refuses_a_window_outside_its_bounds(
+    database_url: str, days: int
+) -> None:
+    """The window is bounded in the query parameter, so an over-wide read is a 422."""
+    with _client(database_url) as client:
+        response = client.get(f"{ACTIVE_USERS_PATH}?days={days}", headers=_bearer())
+    assert response.status_code == 422

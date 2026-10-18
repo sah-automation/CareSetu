@@ -37,6 +37,10 @@ more fully, because a second endpoint would re-read the same aggregate and the t
 answers would have to be kept in agreement by hand.
 B5 (#735) adds the one WRITE, ``/alerts/{alert_id}/acknowledge``, and widens the
 alert feed's status filter to the three statuses that write can now produce.
+B4f (#741) adds ``/product/active-users``, the adoption read - DAU, WAU, MAU, the
+stickiness between them and the load per head - which is the one read whose figures
+cannot come from a vendor at all, because the free metrics tier's fourteen-day
+retention makes a monthly active user structurally impossible there.
 """
 
 from __future__ import annotations
@@ -74,6 +78,7 @@ from modules.observability.facade import (
     MAX_ERROR_PAGE_SIZE,
     MAX_ERROR_WINDOW_MINUTES,
     MAX_THROUGHPUT_WINDOW_MINUTES,
+    ActiveUsersRead,
     AlertAcknowledgement,
     AlertPage,
     BusinessRead,
@@ -657,6 +662,51 @@ async def read_product_funnel(
     """
     del principal
     return await _facade(request).get_funnel(days=days, outcome=outcome)
+
+
+@router.get(
+    "/v1/operator/observability/product/active-users",
+    response_model=ActiveUsersRead,
+    status_code=status.HTTP_200_OK,
+    summary="Read daily, weekly and monthly active users with stickiness and load per head",
+)
+async def read_active_users(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_operator)],
+    days: _Window = DEFAULT_WINDOW_DAYS,
+) -> ActiveUsersRead:
+    """Is adoption growing? - DAU, WAU, MAU, the stickiness between them and the load.
+
+    One response carries the five figures that only mean anything read together: how
+    many people were here today, how many came back inside the week and the month,
+    how the daily habit holds against the monthly base, and how much of the platform's
+    throughput each of those people accounts for.
+
+    **The three counts are three different actor SETS, never multiples of one
+    another.** A person active on three days of the week is one weekly user, and a
+    read that multiplied today's figure by thirty would report a product that grew
+    because its arithmetic did.
+
+    **They are counted in Postgres, in the system of record, over a rolling window
+    ending today.** The free metrics tier keeps fourteen days, so a monthly figure is
+    not a question the vendor can answer - the data is gone before it is asked - and
+    the number this route returns is deliberately NOT truncated to whatever the
+    vendor still holds.
+
+    ``days`` governs the throughput figures and the trend, not the three headline
+    counts: those keep their own one-, seven- and thirty-day windows, because a
+    ``days=7`` request answered with a "monthly" figure of seven days would be the
+    exact truncation this read exists to prevent. ``window_active_users`` is the one
+    count that follows ``days`` - it is the denominator of ``requests_per_active_user``,
+    so both sides of that division span the same days.
+
+    The four conventions the figures rest on - which window, which events, how
+    stickiness is defined and what the per-user figure divides - ride the response
+    rather than living only in this docstring, because a client rendering the numbers
+    has to be able to say what they mean.
+    """
+    del principal
+    return await _facade(request).get_active_users(days=days)
 
 
 @router.get(

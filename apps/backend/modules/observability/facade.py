@@ -101,14 +101,17 @@ from uuid import UUID
 from pydantic import BaseModel, model_validator
 from sqlalchemy import (
     ColumnElement,
+    Date,
     Integer,
     cast,
     delete,
+    distinct,
     extract,
     func,
     literal,
     literal_column,
     select,
+    text,
     true,
 )
 from sqlalchemy.dialects.postgresql import insert
@@ -162,6 +165,7 @@ from modules.observability.domain.product import (
     ProductOutcome,
     ProductStep,
     ProductStepPayload,
+    active_actor_step_names,
     duration_ms_of,
     funnel_stages,
     product_event_keys,
@@ -376,6 +380,11 @@ _UNAVAILABLE_DETAIL: dict[str, str] = {
 }
 
 __all__ = [
+    "ACTIVE_USER_DAY_WINDOW",
+    "ACTIVE_USER_MONTH_WINDOW",
+    "ACTIVE_USER_SOURCE_CONVENTION",
+    "ACTIVE_USER_WEEK_WINDOW",
+    "ACTIVE_USER_WINDOW_CONVENTION",
     "AI_JOB_SPEND_STATUS_COMPLETED",
     "AI_JOB_SPEND_STATUS_FAILED",
     "ALERT_STATUS_VOCABULARY",
@@ -404,11 +413,16 @@ __all__ = [
     "MAX_THROUGHPUT_ROUTE_ROWS",
     "MAX_THROUGHPUT_WINDOW_MINUTES",
     "OBSERVABILITY_SCHEMA",
+    "REQUESTS_PER_ACTIVE_USER_CONVENTION",
     "ROLLUP_MODE_BACKFILL",
     "ROLLUP_MODE_DAILY",
+    "STICKINESS_CONVENTION",
     "UNAVAILABLE_REASONS",
     "UNAVAILABLE_REVENUE_NOT_CAPTURED",
     "UNAVAILABLE_REVENUE_ZERO",
+    "ActiveUserWindow",
+    "ActiveUsersDayPoint",
+    "ActiveUsersRead",
     "ActorSpendDistribution",
     "AlertAcknowledgement",
     "AlertEntry",
@@ -468,6 +482,7 @@ __all__ = [
     "load_rollup_state",
     "period_window",
     "plan_rollup_dates",
+    "query_active_users",
     "query_alerts",
     "query_business",
     "query_cost_summary",
@@ -1096,6 +1111,11 @@ _PCT_QUANTUM = Decimal("0.01")
 #: reading a name that does not describe what it quantizes.
 _PER_MINUTE_QUANTUM = Decimal("0.01")
 
+#: Two-decimal scale of the requests-per-ACTIVE-USER average, for the same reason as
+#: :data:`_PER_MINUTE_QUANTUM`: it is a count per person, not a percentage, and the
+#: name says which.
+_PER_USER_QUANTUM = Decimal("0.01")
+
 
 def window_for(days: int, *, today: date | None = None) -> tuple[date, date]:
     """The inclusive ``[from_date, to_date]`` window of ``days`` UTC days ending today.
@@ -1146,6 +1166,22 @@ def _per_minute(requests: int, minutes: int) -> Decimal | None:
         return None
     return (Decimal(requests) / Decimal(minutes)).quantize(
         _PER_MINUTE_QUANTUM, rounding=ROUND_HALF_UP
+    )
+
+
+def _per_active_user(requests: int, active_users: int) -> Decimal | None:
+    """``requests`` per active user at 2dp; ``None`` when either side is zero.
+
+    The same two ``None`` cases as :func:`_per_minute` and for the same reasons: an
+    empty denominator has no rate, and a window where nobody was active has no
+    per-person figure to report. A measured ``0.00`` is a real answer here - requests
+    were served by the actors who were there - while ``None`` says the figure was
+    never measured.
+    """
+    if requests <= 0 or active_users <= 0:
+        return None
+    return (Decimal(requests) / Decimal(active_users)).quantize(
+        _PER_USER_QUANTUM, rounding=ROUND_HALF_UP
     )
 
 
@@ -2122,6 +2158,152 @@ class FunnelRead(BaseModel):
     gap_convention: str
     steps: list[FunnelStepRow]
     outcomes: FunnelOutcomeTotals
+
+
+# ------------------------------------------------------- the active users read (#741)
+
+
+#: The three rolling windows, in DAYS, that "daily, weekly and monthly active users"
+#: name. Spelled as constants rather than as literal 1/7/30 at the call sites because
+#: they are a stated convention (see :data:`ACTIVE_USER_WINDOW_CONVENTION`) and a
+#: reader comparing two responses has to be able to check them.
+ACTIVE_USER_DAY_WINDOW = 1
+ACTIVE_USER_WEEK_WINDOW = 7
+ACTIVE_USER_MONTH_WINDOW = 30
+
+#: What each of the three figures counts and over which window. A daily, weekly and
+#: monthly figure quoted without its window is three numbers nobody can compare, and
+#: the mistake this read exists to prevent is reading a rolling MONTHLY base off a
+#: fourteen-day vendor window and reporting the gap as a collapse in adoption.
+ACTIVE_USER_WINDOW_CONVENTION = (
+    "each figure counts DISTINCT pseudonymous actors who performed a qualifying clinical "
+    "action, over a rolling window ENDING ON to_date: daily is to_date alone, weekly is "
+    "the seven days to_date - 6 .. to_date, monthly is the thirty days to_date - 29 .. "
+    "to_date. They are three different actor SETS, never multiples of one another - a "
+    "person active on three days of the week counts once"
+)
+
+#: Where the actor set comes from, and what it is not. There is no authentication,
+#: session or logout event anywhere in the product-step registry and
+#: ``register_product_step`` refuses one, so a login could not be counted here even by
+#: accident (spec decision 26).
+ACTIVE_USER_SOURCE_CONVENTION = (
+    "active users are counted from the product event ledger's qualifying clinical steps - "
+    "the registered steps that name an actor kind - and never from a login: there is no "
+    "authentication, session or logout event in the registry, and registering one is "
+    "refused. A step a machine finished records no actor and counts nobody. Actors are "
+    "pseudonymous keys domain-separated per kind, so patients and doctors are disjoint "
+    "sets and total is their sum"
+)
+
+#: How stickiness is defined. The usual one is daily over monthly; the response says
+#: so rather than leaving a bare ratio to be quoted out of context, which is how a
+#: stickiness figure ends up meaning daily-over-weekly in one deck and daily-over-monthly
+#: in another.
+STICKINESS_CONVENTION = (
+    "stickiness is daily_active_users.total over monthly_active_users.total - the usual "
+    "DAU/MAU definition - rendered as a fraction at 4dp, not a percentage. It is null "
+    "when nobody was active in the rolling month, which is 'no base to divide by' rather "
+    "than zero"
+)
+
+#: What requests-per-active-user divides. The denominator is the WINDOW's active users,
+#: not the day's, so the numerator and the denominator span the same days; a per-user
+#: figure whose two halves cover different windows is not a per-user figure.
+REQUESTS_PER_ACTIVE_USER_CONVENTION = (
+    "requests_per_active_user is the window's total requests over the window's own "
+    "distinct active users - both sides covering the same days - rendered at 2dp. It is "
+    "null when either side is zero: no traffic and no actors are unmeasured, not a "
+    "measured zero. The total is the sum of the days the counter actually recorded; a "
+    "day with no row contributes nothing and is ABSENT from the trend rather than "
+    "zero-filled, so the figure and the series cannot disagree. Requests are counted "
+    "over every route, the same sum the throughput read reports, and include the "
+    "operator console's own traffic"
+)
+
+
+class ActiveUserWindow(BaseModel):
+    """One window's distinct active actors, split by the kind of person.
+
+    ``window_days``/``from_date``/``to_date`` travel with the counts rather than being
+    assumed by the reader, because the three headline figures are three DIFFERENT
+    windows and the one that makes a daily number look like a monthly one is quoting
+    it without saying which.
+
+    ``total`` is ``patients + doctors``, which is exact rather than approximate: an
+    actor key is a hash whose preimage includes its actor kind
+    (:func:`~modules.observability.domain.pseudonym.actor_key`), so a patient and a
+    doctor sharing a database serial cannot share a key, and no actor is counted twice
+    by summing the two columns.
+    """
+
+    window_days: int
+    from_date: date
+    to_date: date
+    patients: int
+    doctors: int
+    total: int
+
+
+class ActiveUsersDayPoint(BaseModel):
+    """One day of the window: the load served and the people who caused it.
+
+    A day with NOTHING recorded is ABSENT rather than zero-filled, following
+    :class:`ThroughputPoint`: a run of zeros across a quiet stretch and a counter that
+    stopped recording produce the same flat line, and only the gap tells them apart.
+    The window's ``requests`` total beside the series says how much the series is
+    missing.
+
+    A day that recorded traffic but no actor is present with ``active_users`` 0, which
+    is the honest reading of an operator console poll, and its
+    ``requests_per_active_user`` is ``null`` rather than a division by zero.
+    """
+
+    day: date
+    requests: int
+    active_users: int
+    requests_per_active_user: Decimal | None
+
+
+class ActiveUsersRead(BaseModel):
+    """Is adoption growing? - DAU, WAU, MAU, stickiness and load per head (#741).
+
+    Five questions on one surface because they are one question: are more people here
+    than last week, do they come back, does the daily habit hold against the monthly
+    base, and how much of the platform's load is each of them responsible for.
+
+    **Every figure here is computed in Postgres, and that is the point.** The free
+    metrics tier keeps fourteen days, so a monthly active-user number is not a query
+    the vendor can answer - the data is gone before the question is asked - and a
+    report that silently returned a fourteen-day base labelled "monthly" would be
+    worse than no report. The product event ledger is the system of record, so a
+    thirty-day window returns a real number rather than a truncated one.
+
+    ``window_active_users`` is the requested window's own distinct actors and is the
+    denominator of ``requests_per_active_user``; it is NOT a fourth DAU/WAU/MAU
+    figure, and it is the one that follows the ``days`` parameter - see
+    :data:`REQUESTS_PER_ACTIVE_USER_CONVENTION`.
+
+    ``trend`` is at DAY grain rather than the counter's minute grain, because a
+    thirty-day window at minute grain is forty-three thousand points and no chart draws
+    them. The per-minute series is ``/throughput``'s job and stays there.
+    """
+
+    days: int
+    from_date: date
+    to_date: date
+    daily_active_users: ActiveUserWindow
+    weekly_active_users: ActiveUserWindow
+    monthly_active_users: ActiveUserWindow
+    window_active_users: ActiveUserWindow
+    stickiness: Decimal | None
+    requests: int
+    requests_per_active_user: Decimal | None
+    trend: list[ActiveUsersDayPoint]
+    window_convention: str
+    source_convention: str
+    stickiness_convention: str
+    requests_per_active_user_convention: str
 
 
 class GrafanaDeeplinks(BaseModel):
@@ -3355,6 +3537,256 @@ async def query_funnel(
     )
 
 
+def _day_start(day: date) -> datetime:
+    """Midnight UTC on ``day`` - the instant every window here opens on."""
+    return datetime.combine(day, datetime.min.time(), tzinfo=UTC)
+
+
+def _utc_day(column: ColumnElement[Any]) -> ColumnElement[date]:
+    """``column`` (a ``timestamptz``) reduced to its UTC calendar day.
+
+    Explicitly UTC rather than the session's time zone, because every window this
+    module reads is a UTC day (``window_for``, ``usage_date``, ``event_date``) and a
+    deployment whose database runs on local time would otherwise bucket a
+    midnight-UTC event into yesterday - quietly moving a day of traffic and a day of
+    active users across the boundary, which is exactly the class of bug the last-day
+    figure cannot recover from.
+    """
+    return cast(func.timezone(text("'UTC'"), column), Date)
+
+
+def _row_day(value: object) -> date:
+    """One ``day`` cell of an active-users result as a calendar date.
+
+    The query casts to ``Date`` so the DATABASE does the UTC truncation rather than
+    Python doing it from a zone-naive timestamp, but a driver is free to hand a bare
+    ``timestamp`` back, and keying the daily maps by an instant would silently split
+    one day into two - a trend that is wrong in a way no assertion about its totals
+    would catch. Anything that is neither is a driver contract break, raised on
+    rather than coerced into a plausible date.
+    """
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    raise TypeError(f"expected a date from the day column, got {type(value).__name__}")
+
+
+def _actor_window(
+    *, window_days: int, from_date: date, to_date: date, counts: Mapping[str, int]
+) -> ActiveUserWindow:
+    """One window's per-kind actor counts as the response carries them.
+
+    ``total`` is the SUM of the two kinds rather than a distinct count of the
+    combined set, and that is exact: an actor key is hashed with its actor kind in
+    the preimage (:func:`~modules.observability.domain.pseudonym.actor_key`), so the
+    two kinds hold disjoint keys and no person is counted twice.
+    """
+    patients = counts.get(ACTOR_KIND_PATIENT, 0)
+    doctors = counts.get(ACTOR_KIND_DOCTOR, 0)
+    return ActiveUserWindow(
+        window_days=window_days,
+        from_date=from_date,
+        to_date=to_date,
+        patients=patients,
+        doctors=doctors,
+        total=patients + doctors,
+    )
+
+
+async def query_active_users(
+    connection: AsyncConnection, *, days: int, now: datetime
+) -> ActiveUsersRead:
+    """Read DAU, WAU, MAU, stickiness and load per head (``/product/active-users``).
+
+    **Every figure is counted in Postgres, and that is the reason the read exists.**
+    The free metrics tier keeps fourteen days, so a monthly active-user number is not
+    a question the vendor can answer - the data is gone before it is asked - and the
+    honest alternative to computing it here would be reporting a fourteen-day base
+    under a "monthly" label, which is a decline in adoption nobody reported.
+
+    **Why the ledger and not the daily rollup.** ``observability_product_daily``'
+    ``actor_count`` is a distinct count per ``(funnel, step, outcome, day)``, and
+    summing it cannot produce a distinct count over a window: one patient who opened
+    the composer and then submitted is two rows and one active actor, so a summed
+    daily figure doubles the people who got further than the first step and is
+    largest exactly where the product works best. Distinctness only exists before the
+    aggregation, so the three headline figures count DISTINCT ``actor_key`` against
+    ``observability_product_events`` directly, on the index its ``occurred_at``
+    column carries. The daily rollup stays the answer for per-step funnel questions,
+    which is what its grain is for.
+
+    **The actor set is the registry's, not this query's.** ``step IN (...)`` is built
+    from :func:`~modules.observability.domain.product.active_actor_step_names`, so a
+    newly registered step counts toward adoption by declaring an actor kind, with no
+    edit here - and ``actor_key IS NOT NULL`` keeps a row that carries no actor from
+    inflating anything even if one arrived.
+
+    **Three windows, one scan.** The daily, weekly and monthly figures are nested
+    (today is inside the week is inside the month), so one grouped ``count(DISTINCT)``
+    with three ``FILTER`` clauses answers all three plus the requested window's own
+    count, over a scan that starts at the OLDEST of the windows rather than being
+    issued three times.
+
+    The throughput trend is a SECOND table read at DAY grain, merged with the daily
+    actor counts in Python. Summing the merged series in Python rather than issuing a
+    separate total aggregate follows ``query_throughput``: the rows in the series are
+    the window's truth, so a total computed from them cannot disagree with the chart
+    beside them, while a separately issued aggregate could.
+
+    ``days`` is validated here rather than at the route, because every path into this
+    read goes through here and two copies of the check are two places for them to
+    disagree about what a valid window is.
+    """
+    if days < 1:
+        raise ValueError("days must be positive")
+
+    events = observability_product_events
+    counter = observability_http_minute
+    qualifying = active_actor_step_names()
+
+    to_date = now.date()
+    from_date = to_date - timedelta(days=days - 1)
+    week_from = to_date - timedelta(days=ACTIVE_USER_WEEK_WINDOW - 1)
+    month_from = to_date - timedelta(days=ACTIVE_USER_MONTH_WINDOW - 1)
+    # One exclusive end for all four windows: the ledger and the counter both store
+    # instants, so "today" has to mean the whole of today rather than up to the
+    # instant the read happened to run at.
+    to_ts = _day_start(to_date + timedelta(days=1))
+    # The scan starts at the EARLIEST of the three windows, which is the requested one
+    # whenever ``days`` exceeds thirty. Every count then carries its own lower bound as
+    # a FILTER rather than trusting the scan, so a sixty-day request cannot leak its
+    # extra days into the rolling monthly figure.
+    scan_from_ts = _day_start(min(from_date, month_from))
+    ledger_scan = (
+        (events.c.occurred_at >= scan_from_ts),
+        (events.c.occurred_at < to_ts),
+        events.c.actor_key.is_not(None),
+        events.c.step.in_(qualifying),
+    )
+
+    windows: dict[str, dict[str, int]] = {"window": {}, "week": {}, "month": {}}
+    daily_actors: dict[date, dict[str, int]] = {}
+    daily_requests: dict[date, int] = {}
+    # Nothing in the registry qualifies, so the queries are not issued at all. An
+    # empty ``IN`` list would match nothing and read as "nobody was active", which is
+    # the right answer - but letting Postgres decide it would put a registry fact
+    # behind a query planner detail, and every answer below would then be built from
+    # three results nobody asked for.
+    if qualifying:
+        window_rows = await connection.execute(
+            select(
+                events.c.actor_kind,
+                func.count(distinct(events.c.actor_key))
+                .filter(events.c.occurred_at >= _day_start(from_date))
+                .label("window_total"),
+                func.count(distinct(events.c.actor_key))
+                .filter(events.c.occurred_at >= _day_start(week_from))
+                .label("week_total"),
+                func.count(distinct(events.c.actor_key))
+                .filter(events.c.occurred_at >= _day_start(month_from))
+                .label("month_total"),
+            )
+            .where(*ledger_scan)
+            .group_by(events.c.actor_kind)
+        )
+        for entry in window_rows.mappings():
+            kind = str(entry["actor_kind"])
+            windows["window"][kind] = int(entry["window_total"])
+            windows["week"][kind] = int(entry["week_total"])
+            windows["month"][kind] = int(entry["month_total"])
+
+        event_day = _utc_day(events.c.occurred_at)
+        daily_actor_rows = await connection.execute(
+            select(
+                event_day.label("day"),
+                events.c.actor_kind,
+                func.count(distinct(events.c.actor_key)).label("actors"),
+            )
+            .where(*ledger_scan)
+            .group_by(event_day, events.c.actor_kind)
+            .order_by(event_day)
+        )
+        for entry in daily_actor_rows.mappings():
+            kind = str(entry["actor_kind"])
+            daily_actors.setdefault(_row_day(entry["day"]), {})[kind] = int(entry["actors"])
+
+        counter_day = _utc_day(counter.c.minute_ts)
+        request_rows = await connection.execute(
+            select(counter_day.label("day"), func.sum(counter.c.requests).label("requests"))
+            .where(
+                (counter.c.minute_ts >= _day_start(from_date)),
+                (counter.c.minute_ts < to_ts),
+            )
+            .group_by(counter_day)
+            .order_by(counter_day)
+        )
+        for entry in request_rows.mappings():
+            daily_requests[_row_day(entry["day"])] = int(entry["requests"])
+
+    trend: list[ActiveUsersDayPoint] = []
+    for day in sorted(set(daily_actors) | set(daily_requests)):
+        if day < from_date:
+            # The daily series is read over the widest scan the nested windows need;
+            # only the requested window's own days belong on the trend.
+            continue
+        actors = daily_actors.get(day, {})
+        patients = actors.get(ACTOR_KIND_PATIENT, 0)
+        doctors = actors.get(ACTOR_KIND_DOCTOR, 0)
+        requests = daily_requests.get(day, 0)
+        active_users = patients + doctors
+        trend.append(
+            ActiveUsersDayPoint(
+                day=day,
+                requests=requests,
+                active_users=active_users,
+                requests_per_active_user=_per_active_user(requests, active_users),
+            )
+        )
+
+    daily = _actor_window(
+        window_days=ACTIVE_USER_DAY_WINDOW,
+        from_date=to_date,
+        to_date=to_date,
+        counts=daily_actors.get(to_date, {}),
+    )
+    monthly = _actor_window(
+        window_days=ACTIVE_USER_MONTH_WINDOW,
+        from_date=month_from,
+        to_date=to_date,
+        counts=windows["month"],
+    )
+    requested = _actor_window(
+        window_days=days, from_date=from_date, to_date=to_date, counts=windows["window"]
+    )
+    requests = sum(point.requests for point in trend)
+    return ActiveUsersRead(
+        days=days,
+        from_date=from_date,
+        to_date=to_date,
+        daily_active_users=daily,
+        weekly_active_users=_actor_window(
+            window_days=ACTIVE_USER_WEEK_WINDOW,
+            from_date=week_from,
+            to_date=to_date,
+            counts=windows["week"],
+        ),
+        monthly_active_users=monthly,
+        window_active_users=requested,
+        # The usual definition - daily over monthly - and ``None`` rather than zero
+        # when the monthly base is empty, which is "nothing to divide by" rather than
+        # a measured absence of stickiness.
+        stickiness=ratio(daily.total, monthly.total),
+        requests=requests,
+        requests_per_active_user=_per_active_user(requests, requested.total),
+        trend=trend,
+        window_convention=ACTIVE_USER_WINDOW_CONVENTION,
+        source_convention=ACTIVE_USER_SOURCE_CONVENTION,
+        stickiness_convention=STICKINESS_CONVENTION,
+        requests_per_active_user_convention=REQUESTS_PER_ACTIVE_USER_CONVENTION,
+    )
+
+
 class ProjectionBasis(BaseModel):
     """The assumption a projected month-end burn was computed from.
 
@@ -4461,7 +4893,8 @@ class ObservabilityFacade:
         ``get_cost_trend``, ``get_usage``, ``get_quality``, ``get_overview``,
         ``get_latency``, ``get_provider_board`` (#728), ``get_throughput``,
         ``get_health``, ``get_reliability`` (#729), ``get_alerts``,
-        ``get_error_feed`` (#730), ``get_business`` (#731), ``get_funnel`` (#740) and
+        ``get_error_feed`` (#730), ``get_business`` (#731), ``get_funnel`` (#740),
+        ``get_active_users`` (#741) and
         ``get_deeplinks`` are what the operator observability routes call. Each opens
         the one settled engine connection and delegates its aggregate to the module
         helper, so routes hold no SQL and the reads stay in this module.
@@ -4666,6 +5099,30 @@ class ObservabilityFacade:
                 now=to_ts,
                 window_days=days,
             )
+
+    async def get_active_users(self, *, days: int, now: datetime | None = None) -> ActiveUsersRead:
+        """Read DAU, WAU, MAU, stickiness and load per head (``/product/active-users``).
+
+        B4f (#741). "Is adoption growing?" answered from the product event ledger
+        (#739) and the per-minute request counter (#727), both of them Postgres: the
+        free metrics tier's fourteen-day retention makes a monthly figure structurally
+        impossible in the vendor, so this read exists precisely to compute it in the
+        system of record instead of quietly reporting a fortnight as a month.
+
+        The clock is resolved HERE, for the same reason every other windowed read
+        resolves its own: the route owns the default and the facade owns the clock, so
+        a test can pin ``now`` and get the identical windows production would have
+        taken at that instant. It is resolved once and read four times - the day, the
+        week and the month all end on the SAME ``now``, so two reads seconds apart
+        cannot report two different stickiness figures for one screen.
+
+        ``days`` is NOT validated here: :func:`query_active_users` owns that check and
+        every path into this read goes through it, so a second copy would only be a
+        second place for the two to disagree about what a valid window is.
+        """
+        to_ts = now if now is not None else datetime.now(UTC)
+        async with self._engine.begin() as connection:
+            return await query_active_users(connection, days=days, now=to_ts)
 
     async def get_business(
         self, *, period: BusinessPeriod, today: date | None = None

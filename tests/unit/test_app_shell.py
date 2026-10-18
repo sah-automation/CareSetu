@@ -244,6 +244,11 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         # median gap to the step before it, and success and abandonment over one
         # denominator.
         "/v1/operator/observability/product/funnel",
+        # PHASE-14A B4f (#741): the adoption read - daily, weekly and monthly active
+        # users with the stickiness ratio between them, plus the window's throughput,
+        # requests per active user and a daily load trend, all computed in Postgres
+        # because the free metrics tier's fourteen-day retention cannot answer a month.
+        "/v1/operator/observability/product/active-users",
         # PHASE-14A B5 (#735): the one operator WRITE in the module - the
         # acknowledgement that fills the alert row's acked_by/acked_at columns.
         "/v1/operator/observability/alerts/{alert_id}/acknowledge",

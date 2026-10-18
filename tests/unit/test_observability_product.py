@@ -39,6 +39,7 @@ from modules.observability.domain.product import (
     FUNNEL_INTAKE,
     FUNNEL_TERMINAL_CASE_CLOSED,
     FUNNEL_TERMINAL_PRESCRIPTION,
+    NON_CLINICAL_EVENT_WORDS,
     PRODUCT_OUTCOME_ABANDONED,
     PRODUCT_OUTCOME_COMPLETED,
     PRODUCT_OUTCOME_ERRORED,
@@ -47,10 +48,14 @@ from modules.observability.domain.product import (
     ProductEventFact,
     ProductStep,
     ProductStepPayload,
+    active_actor_step_names,
+    active_actor_steps,
     build_product_daily,
     derived_step_key,
     duration_ms_of,
     funnel_stages,
+    is_active_actor_step,
+    non_clinical_event_word,
     product_event_keys,
     product_step_for_event,
     product_steps,
@@ -256,6 +261,168 @@ def test_a_step_may_not_record_an_outcome_it_does_not_declare() -> None:
                 funnel="prescription",
                 step="issued",
                 event_type="prescription.issued",
+                outcome=PRODUCT_OUTCOME_ERRORED,
+                allowed_outcomes=(PRODUCT_OUTCOME_COMPLETED,),
+            )
+        )
+
+
+# ------------------------------------------------------------- the active set (#741)
+
+
+def test_an_active_user_is_someone_who_did_a_clinical_action() -> None:
+    """AC2: the qualifying set is every step that names an actor kind, and no other.
+
+    Seven of the eight registered steps qualify. The one that does not is the
+    re-record, which a machine finishes on an intake's behalf - counting it would
+    inflate the base with intakes nobody is behind.
+    """
+    qualifying = {step.step for step in active_actor_steps()}
+
+    assert qualifying == {
+        "composer_opened",
+        "intake_captured",
+        "pre_summary_ready",
+        "consult_complete",
+        "prescription_drafted",
+        "prescription_approved",
+        "case_closed",
+    }
+    assert _RE_RECORDED not in qualifying
+    assert not is_active_actor_step(product_step_for_event(EVENT_INTAKE_RETRY_REQUESTED))
+    # Both halves of the funnel are represented, so "who was here" is not a patient
+    # count wearing a doctor's name.
+    assert {step.actor_kind for step in active_actor_steps()} == {
+        ACTOR_KIND_PATIENT,
+        ACTOR_KIND_DOCTOR,
+    }
+
+
+def test_the_active_step_names_are_the_registrys_own_and_never_a_literal() -> None:
+    """A newly registered clinical step becomes active by declaring an actor kind."""
+    assert active_actor_step_names() == tuple(step.step for step in active_actor_steps())
+
+    sentinel = ProductStep(
+        funnel="prescription",
+        step="pharmacy_delivered",
+        event_type="prescription.delivered",
+        outcome=PRODUCT_OUTCOME_COMPLETED,
+        allowed_outcomes=(PRODUCT_OUTCOME_COMPLETED,),
+        actor_kind="patient",
+    )
+    try:
+        register_product_step(sentinel)
+        assert sentinel.step in active_actor_step_names()
+    finally:
+        product_module.PRODUCT_STEP_REGISTRY.pop(("prescription", "pharmacy_delivered"), None)
+        product_module._EVENT_STEP_INDEX.pop("prescription.delivered", None)
+    assert sentinel.step not in active_actor_step_names()
+
+
+def test_registering_an_authentication_or_session_event_is_refused() -> None:
+    """AC2: no login, logout or session event can enter the registry.
+
+    A refusal rather than a filter, because this registry is the ONLY definition of
+    what counts as activity: admitting a login would not add a signal, it would
+    replace the clinical one every adoption figure is built from.
+    """
+    for word in NON_CLINICAL_EVENT_WORDS:
+        with pytest.raises(ValueError, match=rf"{word}"):
+            register_product_step(
+                ProductStep(
+                    funnel=FUNNEL_INTAKE,
+                    step=f"tried_{word}",
+                    event_type=f"patient.{word}_attempted",
+                    outcome=PRODUCT_OUTCOME_COMPLETED,
+                    allowed_outcomes=(PRODUCT_OUTCOME_COMPLETED,),
+                    actor_kind="patient",
+                )
+            )
+    assert "tried_auth" not in active_actor_step_names()
+
+
+def test_no_registered_step_names_an_authentication_session_or_logout_event() -> None:
+    """The guard above is the mechanism; this is the property the report is written against."""
+    offenders = [
+        step.event_type for step in product_steps() if non_clinical_event_word(step.event_type)
+    ]
+
+    assert offenders == []
+
+
+def test_the_guard_refuses_a_login_shape_whatever_module_publishes_it() -> None:
+    """``patient.auth_failed`` and ``auth.session_opened`` are caught by the same rule.
+
+    Matched per SEGMENT rather than as a free substring: a whole-name prefix rule
+    misses ``patient.auth_failed`` because the platform namespaces authentication
+    under ``patient.``, and a bare ``"auth" in name`` refuses ``prescription.
+    authorized`` - which is an e-prescription going out, the opposite of a login.
+    """
+    for event_type in ("patient.auth_failed", "auth.session_opened", "logout.recorded"):
+        with pytest.raises(ValueError, match=r"qualifying clinical action"):
+            register_product_step(
+                ProductStep(
+                    funnel=FUNNEL_INTAKE,
+                    step="never_registered",
+                    event_type=event_type,
+                    outcome=PRODUCT_OUTCOME_COMPLETED,
+                    allowed_outcomes=(PRODUCT_OUTCOME_COMPLETED,),
+                )
+            )
+    assert ("intake", "never_registered") not in product_module.PRODUCT_STEP_REGISTRY
+    assert "never_registered" not in active_actor_step_names()
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "prescription.authorized",
+        "pharmacy.authority_granted",
+        "patient.consent_granted",
+    ],
+)
+def test_a_clinical_event_is_never_refused_for_merely_sharing_a_prefix(event_type: str) -> None:
+    """The guard exists to keep logins out, not to police spelling.
+
+    Three names a free-substring rule would get wrong in both directions: two start
+    with an authentication word without being one, and ``consent.granted`` proves the
+    rule is not simply "refuse anything unfamiliar".
+
+    What it WILL refuse is a name that calls itself ``session_``-something, which is
+    deliberate rather than a limitation: in this platform a session is an
+    authentication session, so a clinical event wanting that word has to say what kind
+    of session it is (``counselling.held``) before it may join the registry.
+    """
+    step = ProductStep(
+        funnel="probe",
+        step="probe",
+        event_type=event_type,
+        outcome=PRODUCT_OUTCOME_COMPLETED,
+        allowed_outcomes=(PRODUCT_OUTCOME_COMPLETED,),
+        actor_kind="patient",
+    )
+    try:
+        register_product_step(step)
+        assert product_step_for_event(event_type) is step
+    finally:
+        product_module.PRODUCT_STEP_REGISTRY.pop(("probe", "probe"), None)
+        product_module._EVENT_STEP_INDEX.pop(event_type, None)
+    assert product_step_for_event(event_type) is None
+
+
+def test_the_outcome_vocabulary_is_checked_before_the_authentication_shape() -> None:
+    """A step that breaks two rules fails on the one that predates this ticket.
+
+    Ordering is not a behaviour anyone should depend on, but a caller that already
+    handled "the outcome is not declared" should not start seeing a different error
+    because an unrelated guard moved in front of it.
+    """
+    with pytest.raises(ValueError, match=r"allowed_outcomes"):
+        register_product_step(
+            ProductStep(
+                funnel=FUNNEL_INTAKE,
+                step="both_wrong",
+                event_type="patient.auth_failed",
                 outcome=PRODUCT_OUTCOME_ERRORED,
                 allowed_outcomes=(PRODUCT_OUTCOME_COMPLETED,),
             )
