@@ -865,6 +865,39 @@ async def test_the_acknowledgement_endpoint_refuses_anonymous_and_non_operator_c
 
 
 async def test_deeplinks_answer_the_configured_vendors(database_url: str) -> None:
+    """The whole wire shape, against a real app and a real configured deployment."""
+    with _client(
+        database_url,
+        grafana_url="https://caresetu.grafana.net",
+        sentry_dsn="https://key@o4242.ingest.us-central1.sentry.io/7654321",
+        langfuse_public_key="pk-lf-1234",
+        langfuse_secret_key="sk-lf-1234",
+        app_environment="staging",
+    ) as client:
+        body = client.get(DEEPLINKS_PATH, headers=_bearer()).json()
+
+    assert body["grafana"]["dashboard_uid"] == "caresetu-observability"
+    assert "var-env=staging" in body["grafana"]["dashboard_url"]
+    assert "from=now-6h" in body["grafana"]["dashboard_url"]
+    assert "explore_url" not in body["grafana"]
+    assert body["sentry"] == {
+        "project_id": "7654321",
+        "issues_url": (
+            "https://o4242.sentry.io/issues/?project=7654321&query=service%3A%22caresetu-api%22"
+        ),
+    }
+    # Langfuse needs context to filter on, and this deployment supplied none.
+    assert "langfuse" not in body
+
+
+async def test_deeplinks_carry_the_platforms_own_trace_id_to_every_vendor(
+    database_url: str,
+) -> None:
+    """One trace, three tools: the join key has to survive the whole round trip.
+
+    The id is the one the error feed hands an operator, so the links below are the
+    ones a click on that row produces.
+    """
     with _client(
         database_url,
         grafana_url="https://caresetu.grafana.net",
@@ -872,24 +905,46 @@ async def test_deeplinks_answer_the_configured_vendors(database_url: str) -> Non
         langfuse_public_key="pk-lf-1234",
         langfuse_secret_key="sk-lf-1234",
     ) as client:
-        body = client.get(DEEPLINKS_PATH, headers=_bearer()).json()
+        body = client.get(
+            DEEPLINKS_PATH,
+            params={
+                "trace_id": "c7f2a1b0d3e4f5061728394a5b6c7d8e",
+                "model": "gpt-4o",
+                "task_type": "draft",
+                "error_type": "ValueError",
+                "actor_key": "a" * 64,
+                "session_key": "b" * 64,
+            },
+            headers=_bearer(),
+        ).json()
 
-    assert body == {
-        "grafana": "https://caresetu.grafana.net",
-        "sentry": "https://o4242.sentry.io/issues/?project=7654321",
-        "langfuse": "https://us.cloud.langfuse.com/project/pk-lf-1234",
-    }
+    trace = "c7f2a1b0d3e4f5061728394a5b6c7d8e"
+    assert body["trace_id"] == trace
+    assert trace in body["grafana"]["explore_url"]
+    assert trace in body["sentry"]["trace_url"]
+    assert body["sentry"]["issues_url"].endswith(
+        "query=service%3A%22caresetu-api%22%20error.type%3A%22ValueError%22"
+    )
+    assert body["langfuse"]["trace_url"].endswith(f"/trace/{trace}")
+    assert "model=gpt-4o" in body["langfuse"]["traces_url"]
+    assert "name=ai_draft_rx" in body["langfuse"]["traces_url"]
+    assert body["langfuse"]["actor_url"].endswith(f"users?userId={'a' * 64}")
+    assert body["langfuse"]["session_url"].endswith(f"sessions?sessionId={'b' * 64}")
 
 
 async def test_deeplinks_with_no_vendor_configured_answer_absent_links(
     database_url: str,
 ) -> None:
-    """No vendor configured is the default deployment; it must never be a 5xx."""
+    """No vendor configured is the default deployment; it must never be a 5xx.
+
+    And it answers with nothing at all: the wire carries no ``grafana``/``sentry``/
+    ``langfuse`` key, so a client cannot read "switched off" as "broken link".
+    """
     with _client(database_url) as client:
         response = client.get(DEEPLINKS_PATH, headers=_bearer())
 
     assert response.status_code == 200
-    assert response.json() == {"grafana": None, "sentry": None, "langfuse": None}
+    assert response.json() == {}
 
 
 async def test_c1b_routes_refuse_anonymous_and_non_operator_callers(

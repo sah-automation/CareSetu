@@ -16,7 +16,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, get_args
 from uuid import UUID
 
 import pytest
@@ -26,6 +26,8 @@ from app.config import Settings
 from app.gateway.jwt_verify import JWTVerifyMiddleware
 from app.main import create_app
 from modules.iam.domain.jwt import issue_token
+from modules.intake.domain.events import AiTaskType
+from modules.observability.domain.deeplinks import DEFAULT_GRAFANA_WINDOW
 from modules.observability.domain.exceptions import (
     AlertAlreadyResolvedError,
     AlertNotFoundError,
@@ -51,6 +53,7 @@ from modules.observability.facade import (
     DoctorSpend,
     ErrorFeedEntry,
     ErrorFeedPage,
+    GrafanaDeeplinks,
     LatencyReport,
     LatencyRow,
     MarginPercent,
@@ -669,6 +672,14 @@ class StubObservabilityFacade:
         sentry_dsn: str | None = None,
         langfuse_host: str | None = None,
         langfuse_public_key: str | None = None,
+        environment: str | None = None,
+        window: str = DEFAULT_GRAFANA_WINDOW,
+        trace_id: str | None = None,
+        actor_key: str | None = None,
+        session_key: str | None = None,
+        model: str | None = None,
+        task_type: str | None = None,
+        error_type: str | None = None,
     ) -> Deeplinks:
         self.deeplink_settings.append(
             {
@@ -676,9 +687,23 @@ class StubObservabilityFacade:
                 "sentry_dsn": sentry_dsn,
                 "langfuse_host": langfuse_host,
                 "langfuse_public_key": langfuse_public_key,
+                "environment": environment,
+                "window": window,
+                "trace_id": trace_id,
+                "actor_key": actor_key,
+                "session_key": session_key,
+                "model": model,
+                "task_type": task_type,
+                "error_type": error_type,
             }
         )
-        return Deeplinks(grafana=grafana_url or None)
+        return (
+            Deeplinks(
+                grafana=GrafanaDeeplinks(dashboard_uid="caresetu-observability", dashboard_url="d")
+            )
+            if grafana_url
+            else Deeplinks()
+        )
 
 
 def _token(*, subject_id: int = 1, scope: str = "operator") -> str:
@@ -1334,6 +1359,22 @@ def test_the_error_status_gate_matches_the_facade_vocabulary() -> None:
     assert "open" in rendered and "resolved" in rendered
 
 
+_DEEPLINK_SETTINGS_OFF = {
+    "grafana_url": "",
+    "sentry_dsn": "",
+    "langfuse_host": Settings().langfuse_host,
+    "langfuse_public_key": "",
+    "environment": Settings().app_environment,
+    "window": DEFAULT_GRAFANA_WINDOW,
+    "trace_id": None,
+    "actor_key": None,
+    "session_key": None,
+    "model": None,
+    "task_type": None,
+    "error_type": None,
+}
+
+
 def test_deeplinks_answer_the_configured_vendors() -> None:
     facade = StubObservabilityFacade()
     client = _client(
@@ -1349,29 +1390,103 @@ def test_deeplinks_answer_the_configured_vendors() -> None:
 
     assert response.status_code == 200
     assert facade.deeplink_settings == [
-        {
-            "grafana_url": "https://caresetu.grafana.net",
-            "sentry_dsn": "",
-            "langfuse_host": Settings().langfuse_host,
-            "langfuse_public_key": "",
-        }
+        {**_DEEPLINK_SETTINGS_OFF, "grafana_url": "https://caresetu.grafana.net"}
     ]
     assert response.json() == {
-        "grafana": "https://caresetu.grafana.net",
-        "sentry": None,
-        "langfuse": None,
+        "grafana": {"dashboard_uid": "caresetu-observability", "dashboard_url": "d"}
     }
 
 
 def test_no_configured_vendor_answers_absent_links_not_an_error() -> None:
-    """The plan's vendors are env-gated; an unconfigured one is a null link, not a 5xx."""
+    """The plan's vendors are env-gated; an unconfigured one is ABSENT, not a 5xx.
+
+    Absent from the response rather than ``null`` in it: the wire carries no key for a
+    vendor this deployment does not ship, so a client cannot mistake "switched off"
+    for "this link is broken" (decision 44).
+    """
     facade = StubObservabilityFacade()
     client = _client(facade)
 
     response = client.get(DEEPLINKS_PATH, headers=_operator())
 
     assert response.status_code == 200
-    assert response.json() == {"grafana": None, "sentry": None, "langfuse": None}
+    assert response.json() == {}
+    assert facade.deeplink_settings == [_DEEPLINK_SETTINGS_OFF]
+
+
+def test_deeplinks_forward_the_context_each_link_needs() -> None:
+    """A panel holding a trace must be able to hand that trace to every vendor at once."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(
+        DEEPLINKS_PATH,
+        params={
+            "trace_id": "c7f2a1b0d3e4f5061728394a5b6c7d8e",
+            "actor_key": "a" * 64,
+            "session_key": "b" * 64,
+            "model": "gpt-4o",
+            "task_type": "structure",
+            "error_type": "ValueError",
+            "window": "now-24h",
+        },
+        headers=_operator(),
+    )
+
+    assert response.status_code == 200
+    assert facade.deeplink_settings == [
+        {
+            **_DEEPLINK_SETTINGS_OFF,
+            "trace_id": "c7f2a1b0d3e4f5061728394a5b6c7d8e",
+            "actor_key": "a" * 64,
+            "session_key": "b" * 64,
+            "model": "gpt-4o",
+            "task_type": "structure",
+            "error_type": "ValueError",
+            "window": "now-24h",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"trace_id": "a" * 65},
+        {"actor_key": "a" * 65},
+        {"session_key": "b" * 65},
+        {"window": "w" * 65},
+        # A task type the platform does not declare would name a span nobody writes,
+        # so the edge refuses it rather than 200ing with a link to an empty list.
+        {"task_type": "not-a-task"},
+    ],
+)
+def test_deeplinks_refuse_context_the_platform_could_never_have_stored(
+    params: dict[str, str],
+) -> None:
+    client = _client(StubObservabilityFacade())
+
+    response = client.get(DEEPLINKS_PATH, params=params, headers=_operator())
+
+    assert response.status_code == 422
+
+
+def test_the_deeplink_task_vocabulary_matches_the_platforms_own() -> None:
+    """The route's ``Literal`` and ``AiTaskType`` are one vocabulary, not two.
+
+    Same reasoning as :func:`test_the_error_status_gate_matches_the_facade_vocabulary`:
+    a static ``Literal`` is the only way FastAPI renders the accepted values, so the
+    vocabulary is written twice and this is what makes that duplication safe.
+    """
+    schema = _client().get("/openapi.json").json()
+
+    task_param = next(
+        parameter
+        for parameter in schema["paths"][DEEPLINKS_PATH]["get"]["parameters"]
+        if parameter["name"] == "task_type"
+    )
+    rendered = next(entry for entry in task_param["schema"]["anyOf"] if "enum" in entry)["enum"]
+
+    assert tuple(rendered) == get_args(AiTaskType)
 
 
 # ------------------------------------------------------------------ validation

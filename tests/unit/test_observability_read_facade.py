@@ -1605,6 +1605,8 @@ async def test_the_error_feed_reads_the_observability_schema_only() -> None:
 
 # --------------------------------------------------------------- deeplinks
 
+_TRACE = "c7f2a1b0d3e4f5061728394a5b6c7d8e"
+
 
 def test_deeplinks_derive_each_vendor_independently() -> None:
     links = build_deeplinks(
@@ -1612,17 +1614,31 @@ def test_deeplinks_derive_each_vendor_independently() -> None:
         sentry_dsn="https://key@o4242.ingest.us-central1.sentry.io/7654321",
         langfuse_host="https://us.cloud.langfuse.com",
         langfuse_public_key="pk-lf-1234",
+        environment="production",
+        model="gpt-4o",
+        task_type="structure",
     )
 
-    assert links.grafana == "https://caresetu.grafana.net"
-    assert links.sentry == "https://o4242.sentry.io/issues/?project=7654321"
-    assert links.langfuse == "https://us.cloud.langfuse.com/project/pk-lf-1234"
+    assert links.grafana is not None
+    assert links.grafana.dashboard_uid == "caresetu-observability"
+    assert "var-env=production" in links.grafana.dashboard_url
+    assert "var-service=caresetu-api" in links.grafana.dashboard_url
+    assert links.grafana.explore_url is None
+    assert links.sentry is not None
+    assert links.sentry.project_id == "7654321"
+    assert links.sentry.issues_url is not None
+    assert "service%3A%22caresetu-api%22" in links.sentry.issues_url
+    assert links.sentry.trace_url is None
+    assert links.langfuse is not None
+    assert links.langfuse.traces_url is not None
+    assert "model=gpt-4o" in links.langfuse.traces_url
+    assert "name=ai_structure" in links.langfuse.traces_url
 
 
 def test_an_unconfigured_vendor_is_an_absent_link_not_a_failure() -> None:
     links = build_deeplinks(grafana_url="https://caresetu.grafana.net")
 
-    assert links.grafana == "https://caresetu.grafana.net"
+    assert links.grafana is not None
     assert links.sentry is None
     assert links.langfuse is None
 
@@ -1631,6 +1647,84 @@ def test_deeplinks_with_nothing_configured_answer_absent_everywhere() -> None:
     links = ObservabilityFacade(MagicMock()).get_deeplinks()
 
     assert links == build_deeplinks()
+    assert (links.grafana, links.sentry, links.langfuse) == (None, None, None)
+
+
+def test_a_vendor_with_no_context_is_absent_rather_than_a_set_of_empty_links() -> None:
+    """Langfuse has no bare project view left to answer with, so it has no group.
+
+    A group of nulls would have to be read by every client to learn the same thing
+    the absence already says: there is nothing to open here.
+    """
+    links = build_deeplinks(langfuse_host="https://us.cloud.langfuse.com", langfuse_public_key="pk")
+
+    assert links.langfuse is None
+
+
+def test_every_link_of_a_contextual_read_carries_the_platforms_own_trace_id() -> None:
+    """One identifier, three tools - the join key has to be the same everywhere.
+
+    The trace id is the caller's, straight off the row it was reading, so the links
+    can only agree with each other and with what the operator was looking at.
+    """
+    links = build_deeplinks(
+        grafana_url="https://caresetu.grafana.net",
+        sentry_dsn="https://key@o4242.ingest.us-central1.sentry.io/7654321",
+        langfuse_host="https://us.cloud.langfuse.com",
+        langfuse_public_key="pk-lf-1234",
+        trace_id=_TRACE,
+        actor_key="a" * 64,
+        session_key="b" * 64,
+    )
+
+    assert links.trace_id == _TRACE
+    assert links.grafana is not None
+    assert _TRACE in (links.grafana.explore_url or "")
+    assert links.sentry is not None
+    assert _TRACE in (links.sentry.trace_url or "")
+    assert links.langfuse is not None
+    assert _TRACE in (links.langfuse.trace_url or "")
+    assert links.langfuse.actor_url == (
+        f"https://us.cloud.langfuse.com/project/pk-lf-1234/users?userId={'a' * 64}"
+    )
+    assert links.langfuse.session_url == (
+        f"https://us.cloud.langfuse.com/project/pk-lf-1234/sessions?sessionId={'b' * 64}"
+    )
+
+
+def test_an_unstoreable_trace_id_yields_no_trace_link_rather_than_a_broken_one() -> None:
+    """A trace id the platform never stored cannot join to anything."""
+    links = build_deeplinks(
+        grafana_url="https://caresetu.grafana.net",
+        langfuse_host="https://us.cloud.langfuse.com",
+        langfuse_public_key="pk-lf-1234",
+        trace_id="../etc/passwd",
+    )
+
+    assert links.trace_id is None
+    assert links.grafana is not None and links.grafana.explore_url is None
+    assert links.langfuse is None
+
+
+def test_the_sentry_error_type_narrows_the_issue_query_when_the_caller_knows_one() -> None:
+    links = build_deeplinks(
+        sentry_dsn="https://key@o4242.ingest.us-central1.sentry.io/7654321",
+        error_type="ValueError",
+    )
+
+    assert links.sentry is not None and links.sentry.issues_url is not None
+    assert "error.type%3A%22ValueError%22" in links.sentry.issues_url
+
+
+def test_deeplinks_drops_context_it_cannot_store_rather_than_escaping_it() -> None:
+    """A caller-supplied string must not be able to rewrite the query around it."""
+    links = build_deeplinks(
+        langfuse_host="https://us.cloud.langfuse.com",
+        langfuse_public_key="pk-lf-1234",
+        actor_key="a&sessionId=somebody-else",
+    )
+
+    assert links.langfuse is None
 
 
 # --------------------------------------------------------------- business

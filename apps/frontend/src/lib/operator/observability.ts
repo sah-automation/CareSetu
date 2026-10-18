@@ -257,13 +257,75 @@ export interface AlertPage {
 }
 
 /**
- * The outbound vendor links. Every key is independently nullable: a deployment
- * with Sentry but no Grafana answers with a Sentry link and an absent one.
+ * The Grafana views, each already carrying its own filter (#736). The dashboard
+ * link always exists when the vendor is configured - it can always carry its range
+ * and variables - while `explore_url` needs a trace, so it is optional.
+ */
+export interface GrafanaDeeplinks {
+  dashboard_uid: string;
+  dashboard_url: string;
+  explore_url?: string;
+}
+
+/**
+ * The Sentry views, pre-filtered to this service and (when the caller knew one) to
+ * an error type. `project_id` is the label for the link; the URLs never carry the
+ * DSN's key half.
+ */
+export interface SentryDeeplinks {
+  project_id: string;
+  issues_url: string;
+  trace_url?: string;
+}
+
+/**
+ * The Langfuse views, each filtered by the context the panel was showing. Every
+ * key is optional because every view needs context - a model, a task, a trace, an
+ * actor, a session - so a panel that has none simply has no Langfuse group.
+ */
+export interface LangfuseDeeplinks {
+  traces_url?: string;
+  trace_url?: string;
+  actor_url?: string;
+  session_url?: string;
+}
+
+/**
+ * The outbound vendor link SETS (#736 - a wire change; decision 44). Three bare
+ * base URLs became three groups of links that each land on the answer.
+ *
+ * A vendor that is switched off is **absent from the response**, not `null` in
+ * it: the backend answers with `exclude_none`, so an unconfigured deployment's
+ * payload has no `grafana` key at all and no link object full of nulls. Every key
+ * is therefore optional and there is no such thing as a link here that points
+ * nowhere - which is exactly what `isDeeplinks` holds the client to.
+ *
+ * `trace_id` echoes the platform's own stored identifier so every rendered link
+ * can be labelled with the join key they all share.
  */
 export interface Deeplinks {
-  grafana: string | null;
-  sentry: string | null;
-  langfuse: string | null;
+  trace_id?: string;
+  grafana?: GrafanaDeeplinks;
+  sentry?: SentryDeeplinks;
+  langfuse?: LangfuseDeeplinks;
+}
+
+/**
+ * The context a panel can hand the read so its links point at what the operator
+ * was looking at. Every field comes from a platform read - the error feed's
+ * `trace_id`, a product row's pseudonymous `actor_key`, a usage row's
+ * `model`/`task_type` - and is passed through untouched. Nothing here is derived
+ * in the browser: a trace id this platform never stored opens a view with nothing
+ * in it.
+ */
+export interface DeeplinkContext {
+  trace_id?: string;
+  actor_key?: string;
+  session_key?: string;
+  model?: string;
+  task_type?: string;
+  error_type?: string;
+  window?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -615,8 +677,32 @@ function isAlertPage(value: unknown): value is AlertPage {
   );
 }
 
+/**
+ * One vendor's group, or absent because the deployment does not ship it.
+ *
+ * The required keys are the ones a group cannot be missing - a Grafana group with
+ * no `dashboard_url`, or a Sentry group with no `issues_url`, would render nothing
+ * while claiming a vendor is present. The optional keys are the contextual views,
+ * and their absence is the normal case: no trace, no Explore pane.
+ *
+ * `undefined` is the only acceptable "not configured". The backend answers with
+ * `exclude_none`, so a `null` here means the wire and the client disagree about
+ * the contract, and refusing it is what turns that disagreement into an error the
+ * page can show rather than an empty panel an operator has to interpret.
+ */
+function isOptionalLinks(value: unknown, required: readonly string[]): boolean {
+  if (value === undefined) return true;
+  return isRecord(value) && hasKeys(value, required);
+}
+
 function isDeeplinks(value: unknown): value is Deeplinks {
-  return isRecord(value) && hasKeys(value, ["grafana", "sentry", "langfuse"]);
+  return (
+    isRecord(value) &&
+    (value.trace_id === undefined || typeof value.trace_id === "string") &&
+    isOptionalLinks(value.grafana, ["dashboard_uid", "dashboard_url"]) &&
+    isOptionalLinks(value.sentry, ["project_id", "issues_url"]) &&
+    isOptionalLinks(value.langfuse, [])
+  );
 }
 
 /**
@@ -769,9 +855,25 @@ export async function fetchAlerts(
   );
 }
 
-/** The configured Grafana/Sentry/Langfuse links; every key is nullable. */
-export async function fetchDeeplinks(): Promise<Deeplinks> {
-  const data = await request<unknown>(`${OBSERVABILITY_BASE}/deeplinks`);
+/**
+ * The configured Grafana/Sentry/Langfuse link sets (#736). A vendor that is
+ * switched off is absent from the response, and a vendor with nothing to filter on
+ * is absent too - so a panel renders what it gets and never a broken href.
+ *
+ * `context` is optional and is passed straight through: the read derives every
+ * filter from it, and nothing here reconstructs an identifier.
+ */
+export async function fetchDeeplinks(
+  context: DeeplinkContext = {},
+): Promise<Deeplinks> {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(context)) {
+    if (value !== undefined) search.set(key, value);
+  }
+  const query = search.toString();
+  const data = await request<unknown>(
+    `${OBSERVABILITY_BASE}/deeplinks${query ? `?${query}` : ""}`,
+  );
   return guardShape(
     data,
     isDeeplinks,

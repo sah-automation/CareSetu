@@ -123,9 +123,20 @@ const OPEN_ALERTS: AlertPage = {
 
 /** All three vendors configured, so the links panel renders populated. */
 const DEEPLINKS: Deeplinks = {
-  grafana: "https://acme.grafana.net",
-  sentry: "https://o123.sentry.io/issues/?project=456",
-  langfuse: "https://cloud.langfuse.com/project/pk-lf-1",
+  grafana: {
+    dashboard_uid: "caresetu-observability",
+    dashboard_url:
+      "https://acme.grafana.net/d/caresetu-observability/caresetu-observability",
+  },
+  sentry: {
+    project_id: "456",
+    issues_url:
+      "https://o123.sentry.io/issues/?project=456&query=service%3A%22api%22",
+  },
+  langfuse: {
+    traces_url:
+      "https://cloud.langfuse.com/project/pk-lf-1/traces?model=gpt-4o",
+  },
 };
 
 function resolveAlertsWith(data: AlertPage | null) {
@@ -355,20 +366,29 @@ describe("ObservabilityOverviewPage", () => {
     expect(mockFetchAlerts).toHaveBeenCalledTimes(1);
   });
 
-  it("renders a deep-link per configured vendor and omits absent ones", async () => {
+  it("renders each configured vendor's links and omits the absent vendors", async () => {
+    // Absent means the key was never sent - decision 44's widened wire shape.
     resolveDeeplinksWith({
-      grafana: "https://acme.grafana.net",
-      sentry: null,
-      langfuse: null,
+      grafana: {
+        dashboard_uid: "caresetu-observability",
+        dashboard_url:
+          "https://acme.grafana.net/d/caresetu-observability/caresetu-observability",
+      },
     });
 
     render(<ObservabilityOverviewPage />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("observability-deeplink-grafana")).toBeTruthy();
+      expect(
+        screen.getByTestId("observability-deeplink-grafana.dashboard_url"),
+      ).toBeTruthy();
     });
-    expect(screen.queryByTestId("observability-deeplink-sentry")).toBeNull();
-    expect(screen.queryByTestId("observability-deeplink-langfuse")).toBeNull();
+    expect(
+      screen.queryByTestId("observability-deeplink-sentry.issues_url"),
+    ).toBeNull();
+    expect(
+      screen.queryByTestId("observability-deeplink-langfuse.traces_url"),
+    ).toBeNull();
   });
 
   it("shows the alert feed's empty state when there are no alerts", async () => {

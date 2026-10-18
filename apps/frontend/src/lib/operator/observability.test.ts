@@ -28,6 +28,7 @@ import {
 } from "./observability";
 
 const BASE = "http://localhost:8000/v1/operator/observability";
+const BASE_ORIGIN = "http://localhost:8000";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -162,11 +163,33 @@ const ALERTS: AlertPage = {
   total_count: 1,
 };
 
+/**
+ * The widened wire shape (#736, decision 44): three bare base URLs became three
+ * link SETS, each carrying its own filters, and an unconfigured vendor is absent
+ * from the object rather than `null` in it.
+ */
 const DEEPLINKS: Deeplinks = {
-  grafana: "https://grafana.example/d/caresetu",
-  sentry: null,
-  langfuse: null,
+  trace_id: "c7f2a1b0d3e4f5061728394a5b6c7d8e",
+  grafana: {
+    dashboard_uid: "caresetu-observability",
+    dashboard_url:
+      "https://grafana.example/d/caresetu-observability/caresetu-observability?from=now-6h&to=now",
+    explore_url:
+      "https://grafana.example/explore?left=%7B%22traceId%22%3A%22c7f2a1b0%22%7D",
+  },
+  sentry: {
+    project_id: "7654321",
+    issues_url:
+      "https://o4242.sentry.io/issues/?project=7654321&query=service%3A%22api%22",
+  },
+  langfuse: {
+    traces_url:
+      "https://lf.example/project/pk/traces?model=gpt-4o&name=ai_structure",
+  },
 };
+
+/** What the backend answers for a deployment with nothing configured at all. */
+const NO_VENDORS_CONFIGURED = {};
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -335,20 +358,72 @@ describe("fetchAlerts", () => {
 });
 
 describe("fetchDeeplinks", () => {
-  it("resolves the configured vendor links", async () => {
+  it("resolves the parameterised vendor link sets", async () => {
     const fetchMock = stubFetch(DEEPLINKS);
 
     await expect(fetchDeeplinks()).resolves.toEqual(DEEPLINKS);
     expect(requestedUrl(fetchMock)).toBe(`${BASE}/deeplinks`);
   });
 
-  it("resolves an entirely unconfigured deployment", async () => {
-    stubFetch({ grafana: null, sentry: null, langfuse: null });
+  it("resolves an entirely unconfigured deployment as an empty object", async () => {
+    // Every vendor key is ABSENT rather than null: the backend answers with
+    // `exclude_none`, so there is no `null` here for a client to interpret as
+    // "a link that goes nowhere".
+    stubFetch(NO_VENDORS_CONFIGURED);
 
-    await expect(fetchDeeplinks()).resolves.toEqual({
-      grafana: null,
-      sentry: null,
-      langfuse: null,
+    await expect(fetchDeeplinks()).resolves.toEqual(NO_VENDORS_CONFIGURED);
+  });
+
+  it("passes a panel's context straight through as query params", async () => {
+    const fetchMock = stubFetch(DEEPLINKS);
+
+    await fetchDeeplinks({
+      trace_id: "c7f2a1b0d3e4f5061728394a5b6c7d8e",
+      model: "gpt-4o",
+      task_type: "structure",
+    });
+
+    const url = new URL(requestedUrl(fetchMock)!, BASE_ORIGIN);
+    expect(url.pathname).toBe("/v1/operator/observability/deeplinks");
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      trace_id: "c7f2a1b0d3e4f5061728394a5b6c7d8e",
+      model: "gpt-4o",
+      task_type: "structure",
+    });
+  });
+
+  it("omits context a panel does not have, leaving the route's defaults in charge", async () => {
+    const fetchMock = stubFetch(DEEPLINKS);
+
+    await fetchDeeplinks({ model: "gpt-4o" });
+
+    expect(requestedUrl(fetchMock)).toBe(`${BASE}/deeplinks?model=gpt-4o`);
+  });
+
+  it("refuses a body whose vendor group is not a link set", async () => {
+    // The guard's whole job now that no vendor key is required: `{}` is a valid
+    // all-off answer, but `{"grafana": 42}` is a contract mismatch and has to say so
+    // rather than render a silently empty panel.
+    stubFetch({ grafana: 42 });
+
+    await expect(fetchDeeplinks()).rejects.toMatchObject({
+      code: "UNEXPECTED_ERROR",
+    });
+  });
+
+  it("refuses a vendor group that is missing a link it must have", async () => {
+    stubFetch({ sentry: { project_id: "1" } });
+
+    await expect(fetchDeeplinks()).rejects.toMatchObject({
+      code: "UNEXPECTED_ERROR",
+    });
+  });
+
+  it("refuses a null vendor, which the exclude-none wire can never send", async () => {
+    stubFetch({ langfuse: null });
+
+    await expect(fetchDeeplinks()).rejects.toMatchObject({
+      code: "UNEXPECTED_ERROR",
     });
   });
 });

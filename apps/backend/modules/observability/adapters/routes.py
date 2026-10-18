@@ -52,6 +52,11 @@ from app.gateway.errors import error_response
 from app.gateway.idempotency import run_idempotent
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_operator
+from modules.observability.domain.deeplinks import (
+    DEFAULT_GRAFANA_WINDOW,
+    MAX_KEY_LENGTH,
+    MAX_TRACE_ID_LENGTH,
+)
 from modules.observability.domain.exceptions import (
     AlertAlreadyResolvedError,
     AlertNotFoundError,
@@ -142,6 +147,31 @@ _AlertStatus = Annotated[Literal["open", "acknowledged", "resolved"] | None, Que
 #: error, so accepting ``acknowledged`` here would offer a filter that can only ever
 #: return nothing.
 _ErrorStatus = Annotated[Literal["open", "resolved"] | None, Query(alias="status")]
+
+#: The AI task types ``/deeplinks`` accepts for its Langfuse view. Spelled as a
+#: static ``Literal`` for the reason :data:`_ErrorStatus` is - FastAPI renders the
+#: accepted values into OpenAPI and refuses a typo at the edge. A misspelled task
+#: would otherwise 200 with a Langfuse link filtered by a span nobody records, which
+#: is a link that opens an empty list and looks like "no AI activity".
+#:
+#: The same ``Literal`` the intake module declares as ``AiTaskType``
+#: (``modules.intake.domain.events``); a test asserts the two agree so the
+#: duplication cannot drift.
+_DeeplinkTaskType = Annotated[
+    Literal["transcribe", "structure", "draft", "summarize"] | None, Query()
+]
+
+#: The identifiers ``/deeplinks`` will put in a link. Each is capped at the width of
+#: the column the platform stores it in - ``trace_id VARCHAR(64)`` on every
+#: observability table, and ``actor_key`` / ``session_key VARCHAR(64)`` on the
+#: product-event ledger - so an over-long value is a 422 at the edge rather than a
+#: link built from something the platform could never have written. The narrower rule
+#: (no spaces, no separators) is :func:`clean_trace_id`, which drops the value rather
+#: than escaping it into a vendor's query grammar.
+_LinkTraceId = Annotated[str | None, Query(max_length=MAX_TRACE_ID_LENGTH)]
+_LinkActorKey = Annotated[str | None, Query(max_length=MAX_KEY_LENGTH)]
+_LinkSessionKey = Annotated[str | None, Query(max_length=MAX_KEY_LENGTH)]
+_LinkFilter = Annotated[str | None, Query(max_length=MAX_KEY_LENGTH)]
 
 #: The periods ``/business`` accepts. Spelled as a static ``Literal`` for the reason
 #: :data:`_ErrorStatus` is: FastAPI renders the accepted values into OpenAPI and
@@ -570,18 +600,36 @@ async def read_errors(
 @router.get(
     "/v1/operator/observability/deeplinks",
     response_model=Deeplinks,
+    response_model_exclude_none=True,
     status_code=status.HTTP_200_OK,
     summary="Read the configured vendor deep links (operator only)",
 )
 async def read_deeplinks(
     request: Request,
     principal: Annotated[Principal, Depends(require_operator)],
+    trace_id: _LinkTraceId = None,
+    actor_key: _LinkActorKey = None,
+    session_key: _LinkSessionKey = None,
+    model: _LinkFilter = None,
+    task_type: _DeeplinkTaskType = None,
+    error_type: _LinkFilter = None,
+    window: Annotated[str, Query(max_length=MAX_KEY_LENGTH)] = DEFAULT_GRAFANA_WINDOW,
 ) -> Deeplinks:
-    """Grafana / Sentry / Langfuse URLs derived from the deployment's Settings.
+    """Grafana / Sentry / Langfuse link SETS derived from the deployment's Settings.
 
-    Vendor-gated and no-op when unconfigured (plan-phase14 §4): each link is
-    derived independently and an absent vendor leaves its key ``null`` rather than
-    failing the read, so a deployment with none of the three still answers 200.
+    Vendor-gated and no-op when unconfigured (plan-phase14 A§4): each vendor is
+    derived independently and an unconfigured one is **absent from the JSON
+    entirely** - ``response_model_exclude_none`` drops the key rather than answering
+    ``null`` - so a deployment with none of the three still answers 200 and a client
+    never has to tell "switched off" from "broken".
+
+    #736 widened the three bare URLs into parameterised link sets (decision 44: a wire
+    change, and the frontend client contract moves with it). Every query param is
+    CONTEXT for the links and every one is optional: the read is still a projection of
+    configuration, so a panel that knows nothing extra still gets the dashboard and
+    the service-filtered issue list, while a panel holding a trace, a model, an actor
+    or a session gets those views too - each carrying the platform's own stored
+    identifier, never one reconstructed here.
     """
     del principal
     settings = _settings(request)
@@ -590,6 +638,14 @@ async def read_deeplinks(
         sentry_dsn=settings.sentry_dsn,
         langfuse_host=settings.langfuse_host,
         langfuse_public_key=settings.langfuse_public_key,
+        environment=settings.app_environment,
+        window=window,
+        trace_id=trace_id,
+        actor_key=actor_key,
+        session_key=session_key,
+        model=model,
+        task_type=task_type,
+        error_type=error_type,
     )
 
 

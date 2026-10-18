@@ -130,10 +130,19 @@ from modules.observability.domain.consumer import (
     sanitize_failure_reason,
 )
 from modules.observability.domain.deeplinks import (
-    grafana_link,
+    DEFAULT_GRAFANA_WINDOW,
+    GRAFANA_DASHBOARD_UID,
+    clean_trace_id,
+    grafana_dashboard_link,
+    grafana_explore_link,
     grafana_metric_link,
-    langfuse_link,
-    sentry_link,
+    langfuse_actor_link,
+    langfuse_session_link,
+    langfuse_trace_link,
+    langfuse_traces_link,
+    sentry_issues_link,
+    sentry_project,
+    sentry_trace_link,
 )
 from modules.observability.domain.exceptions import (
     AlertAlreadyResolvedError,
@@ -182,6 +191,7 @@ from modules.observability.schema.models import (
     observability_http_minute,
     observability_rollup_runs,
 )
+from observability.logging import SERVICE_API
 
 OBSERVABILITY_SCHEMA = "observability"
 
@@ -1818,18 +1828,67 @@ class ErrorFeedPage(BaseModel):
     window_minutes: int
 
 
-class Deeplinks(BaseModel):
-    """The operator page's outbound vendor links (plan-phase14 §9.1).
+class GrafanaDeeplinks(BaseModel):
+    """The Grafana views, each already narrowed (#736).
 
-    Every key is optional and independently ``None``: a deployment with Sentry but
-    no Grafana answers with a Sentry link and an absent Grafana one. The route
-    never fails over an unconfigured vendor - see
-    :mod:`modules.observability.domain.deeplinks`.
+    ``dashboard_url`` is always present when the vendor is configured - the
+    dashboard link can always carry its range and variables. ``explore_url`` needs a
+    trace, so it is absent until the caller supplies one.
     """
 
-    grafana: str | None = None
-    sentry: str | None = None
-    langfuse: str | None = None
+    dashboard_uid: str
+    dashboard_url: str
+    explore_url: str | None = None
+
+
+class SentryDeeplinks(BaseModel):
+    """The Sentry views, each already filtered to this service (#736).
+
+    ``project_id`` is carried beside the URLs so a client can label the link with the
+    project it points into without re-deriving it from a DSN it has never seen.
+    """
+
+    project_id: str
+    issues_url: str
+    trace_url: str | None = None
+
+
+class LangfuseDeeplinks(BaseModel):
+    """The Langfuse views, each already filtered (#736).
+
+    Every key here needs context - a model, a task, a trace, an actor or a session -
+    so this group is present only when the caller supplied at least one. There is no
+    bare project view: that was the link #736 removed.
+    """
+
+    traces_url: str | None = None
+    trace_url: str | None = None
+    actor_url: str | None = None
+    session_url: str | None = None
+
+
+class Deeplinks(BaseModel):
+    """The operator page's outbound vendor links (plan-phase14 A§9.1), widened (#736).
+
+    A WIRE CHANGE (decision 44): three bare URL strings became three link SETS, each
+    carrying its own filters. The frontend client contract moves with it in the same
+    change - there is no compatibility window.
+
+    Every key is optional and independently ``None``, and the route answers with
+    ``exclude_none`` so an unconfigured vendor is **absent from the JSON entirely**
+    rather than a ``null`` the client has to interpret: a deployment with Sentry but
+    no Grafana has no ``grafana`` key at all, and there is no such thing as a link
+    here that points nowhere. See :mod:`modules.observability.domain.deeplinks`.
+
+    ``trace_id`` echoes the platform's own stored identifier so a client can label
+    every link it renders with the join key they all share - and so a link set is
+    self-describing once it has been passed around or logged.
+    """
+
+    trace_id: str | None = None
+    grafana: GrafanaDeeplinks | None = None
+    sentry: SentryDeeplinks | None = None
+    langfuse: LangfuseDeeplinks | None = None
 
 
 # ------------------------------------------------------- operator read API (C1b)
@@ -3597,18 +3656,101 @@ def build_deeplinks(
     sentry_dsn: str | None = None,
     langfuse_host: str | None = None,
     langfuse_public_key: str | None = None,
+    # The Sentry ``service`` filter and the dashboard's ``var-service`` both name the
+    # platform's own service identity. It is a constant rather than configuration
+    # because there is exactly one: ``observability.otel`` says so at
+    # ``SERVICE_NAME`` - the composition roots pass the SAME ``SERVICE_API`` /
+    # ``SERVICE_WORKER`` identities precisely "so a process has one name across
+    # logs and traces". A configurable service name here would let the links filter
+    # on something telemetry never reported.
+    service: str = SERVICE_API,
+    environment: str | None = None,
+    window: str = DEFAULT_GRAFANA_WINDOW,
+    trace_id: str | None = None,
+    actor_key: str | None = None,
+    session_key: str | None = None,
+    model: str | None = None,
+    task_type: str | None = None,
+    error_type: str | None = None,
 ) -> Deeplinks:
-    """Derive the vendor deep links from Settings (``/deeplinks``).
+    """Derive the parameterised vendor link sets from Settings (``/deeplinks``).
 
-    No database and no network: the read is a projection of configuration, so it
-    cannot fail because a vendor is absent or unreachable. Each key is derived
-    independently, which is what lets a Sentry-only deployment answer with a
-    Sentry link and nothing else.
+    No database and no network: the read is a projection of configuration plus the
+    caller's context, so it cannot fail because a vendor is absent or unreachable.
+    Each vendor is derived independently, which is what lets a Sentry-only
+    deployment answer with a Sentry link and nothing else.
+
+    The context arguments are all OPTIONAL and all come from the caller, never from
+    here: ``trace_id`` is the platform's own stored identifier handed over by whichever
+    read the operator was looking at, ``actor_key``/``session_key`` are the
+    pseudonymous keys the product ledger stores, and ``model``/``task_type``/
+    ``error_type`` name what the panel in front of the operator was showing. This
+    function never looks one of them up and never invents one - a link built from a
+    guessed identifier opens a trace that does not exist, which is worse than no
+    link.
+
+    A vendor whose links are ALL empty is left ``None`` rather than answered with an
+    object of nulls, so "this deployment ships no Grafana" and "this deployment ships
+    Grafana but nothing to link to" are one absence the client renders the same way:
+    as nothing.
     """
+    trace = clean_trace_id(trace_id)
+
+    grafana_links: GrafanaDeeplinks | None = None
+    dashboard_url = grafana_dashboard_link(
+        grafana_url,
+        dashboard_uid=GRAFANA_DASHBOARD_UID,
+        window=window,
+        service=service,
+        environment=environment,
+    )
+    if dashboard_url is not None:
+        # ``GRAFANA_DASHBOARD_UID`` is the default the dashboard derivation used, so
+        # the uid the model carries cannot name a different dashboard than the URL
+        # does. It is carried anyway so a client can label the link without parsing
+        # a path segment back out of it.
+        grafana_links = GrafanaDeeplinks(
+            dashboard_uid=GRAFANA_DASHBOARD_UID,
+            dashboard_url=dashboard_url,
+            explore_url=grafana_explore_link(grafana_url, trace_id=trace, window=window),
+        )
+
+    sentry_links: SentryDeeplinks | None = None
+    project = sentry_project(sentry_dsn)
+    issues_url = sentry_issues_link(sentry_dsn, service=service, error_type=error_type)
+    if project is not None and issues_url is not None:
+        sentry_links = SentryDeeplinks(
+            project_id=project[1],
+            issues_url=issues_url,
+            trace_url=sentry_trace_link(sentry_dsn, trace_id=trace),
+        )
+
+    traces_url = langfuse_traces_link(
+        langfuse_host, langfuse_public_key, model=model, task_type=task_type
+    )
+    lf_trace_url = langfuse_trace_link(langfuse_host, langfuse_public_key, trace_id=trace)
+    lf_actor_url = langfuse_actor_link(langfuse_host, langfuse_public_key, actor_key=actor_key)
+    lf_session_url = langfuse_session_link(
+        langfuse_host, langfuse_public_key, session_key=session_key
+    )
+
+    # Langfuse has no bare project view to fall back on, so a caller that supplied no
+    # model, task, trace, actor or session gets no group at all - the same absence an
+    # unconfigured workspace produces, and the same thing for the client to render.
+    langfuse_links: LangfuseDeeplinks | None = None
+    if any(url is not None for url in (traces_url, lf_trace_url, lf_actor_url, lf_session_url)):
+        langfuse_links = LangfuseDeeplinks(
+            traces_url=traces_url,
+            trace_url=lf_trace_url,
+            actor_url=lf_actor_url,
+            session_url=lf_session_url,
+        )
+
     return Deeplinks(
-        grafana=grafana_link(grafana_url),
-        sentry=sentry_link(sentry_dsn),
-        langfuse=langfuse_link(langfuse_host, langfuse_public_key),
+        trace_id=trace,
+        grafana=grafana_links,
+        sentry=sentry_links,
+        langfuse=langfuse_links,
     )
 
 
@@ -3833,16 +3975,41 @@ class ObservabilityFacade:
         sentry_dsn: str | None = None,
         langfuse_host: str | None = None,
         langfuse_public_key: str | None = None,
+        service: str = SERVICE_API,
+        environment: str | None = None,
+        window: str = DEFAULT_GRAFANA_WINDOW,
+        trace_id: str | None = None,
+        actor_key: str | None = None,
+        session_key: str | None = None,
+        model: str | None = None,
+        task_type: str | None = None,
+        error_type: str | None = None,
     ) -> Deeplinks:
-        """Derive the vendor deep links from the configured Settings.
+        """Derive the parameterised vendor link sets from the configured Settings.
 
-        Synchronous: it reads configuration, never storage. It stays on the facade
-        so the routes keep the one seam every other read goes through and the
-        derivation has one home to be tested in.
+        Synchronous: it reads configuration and the caller's context, never storage.
+        It stays on the facade so the routes keep the one seam every other read goes
+        through and the derivation has one home to be tested in.
+
+        ``trace_id`` and the rest of the context are the CALLER's, taken from whatever
+        platform read put the operator on the panel they are looking at - the error
+        feed's stored ``trace_id``, a product-event row's pseudonymous ``actor_key``,
+        a usage row's ``model``/``task_type``. This method looks none of them up, and
+        that is deliberate: a link built from an identifier the platform never stored
+        opens an empty view and is worse than no link.
         """
         return build_deeplinks(
             grafana_url=grafana_url,
             sentry_dsn=sentry_dsn,
             langfuse_host=langfuse_host,
             langfuse_public_key=langfuse_public_key,
+            service=service,
+            environment=environment,
+            window=window,
+            trace_id=trace_id,
+            actor_key=actor_key,
+            session_key=session_key,
+            model=model,
+            task_type=task_type,
+            error_type=error_type,
         )
