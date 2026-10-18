@@ -257,6 +257,169 @@ export interface AlertPage {
 }
 
 /**
+ * The window the business read reports on (#731). Every window ends today and
+ * differs only in where it starts, so they are three views of one running month
+ * rather than three unrelated reports - which is why the cap and the projection
+ * ride every one of them unchanged.
+ */
+export type BusinessPeriod = "today" | "week_to_date" | "month_to_date";
+
+/**
+ * Why a margin figure is absent. The read reports a figure OR a reason, never a
+ * zero: a deployment that has not written revenue yet has no gross margin, and
+ * rendering that as 0% would read as "the AI costs nothing".
+ */
+export type MarginUnavailableReason = "revenue_not_captured" | "revenue_zero";
+
+/** A percentage that is either measured or explained, never zero-by-default. */
+export interface MarginPercent {
+  value: number | null;
+  reason: MarginUnavailableReason | null;
+  detail: string | null;
+}
+
+/**
+ * What the projection was extrapolated from. Carried on the wire rather than
+ * assumed by the page: "₹32,000 by month end" is a claim, and the elapsed/total
+ * day counts are what let an operator judge it.
+ */
+export interface ProjectionBasis {
+  period_start: string;
+  period_end: string;
+  elapsed_days: number;
+  period_days: number;
+}
+
+/** One scope's token bill. The shared shape of all three breakdowns. */
+interface SpendBreakdownRow {
+  jobs: number;
+  spend_paise: number;
+  input_tokens: number;
+  output_tokens: number;
+  paise_per_1k_input_tokens: number | null;
+  paise_per_1k_output_tokens: number | null;
+}
+
+/** One provider's share of the bill. */
+export interface ProviderSpend extends SpendBreakdownRow {
+  provider: string;
+}
+
+/**
+ * One model's share. `provider` repeats rather than nesting: the (provider, model)
+ * pair is the key, and a nested object would make the axis label a lookup.
+ */
+export interface ModelSpend extends SpendBreakdownRow {
+  provider: string;
+  model: string;
+}
+
+/**
+ * One task type's share. `task_type` is an OPEN vocabulary - the AI task legs are
+ * added by features, not by a migration - so it is a string here and the axis
+ * carries whatever the platform actually ran.
+ */
+export interface TaskTypeSpend extends SpendBreakdownRow {
+  task_type: string;
+}
+
+/**
+ * How heavy the actors are, over the WHOLE population. `actors` is the
+ * population count, not the length of the capped top-N lists below it - a client
+ * that read it as "how many rows I got" would report 10 actors for a deployment
+ * with 400.
+ */
+export interface ActorSpendDistribution {
+  actors: number;
+  total_spend_paise: number;
+  median_spend_paise: number | null;
+  p95_spend_paise: number | null;
+  max_spend_paise: number | null;
+}
+
+/**
+ * One heavy patient. `patient_key` is the platform's own pseudonymous hash - an
+ * identifier for joining, never an identity to display, and never a name.
+ */
+export interface PatientSpend {
+  patient_key: string;
+  /** Null when no edge settles it, or when a re-pick left two doctors. */
+  attributed_doctor_key: string | null;
+  jobs: number;
+  completed_jobs: number;
+  failed_jobs: number;
+  spend_paise: number;
+}
+
+/** One heavy doctor. `patients` is null when no edge was recorded. */
+export interface DoctorSpend {
+  doctor_key: string;
+  patients: number | null;
+  jobs: number;
+  completed_jobs: number;
+  failed_jobs: number;
+  spend_paise: number;
+}
+
+/**
+ * The margin view. Today the platform captures no revenue, so the two headline
+ * percentages arrive as `null` with a reason - which is why the page renders a
+ * stated "not captured yet" rather than a figure.
+ */
+export interface MarginRead {
+  revenue_paise: number;
+  cost_of_goods_paise: number;
+  headline_month_cost_of_goods_paise: number | null;
+  revenue_captured: boolean;
+  tiers_captured: boolean;
+  tier_keys: string[];
+  gross_margin: MarginPercent;
+  ai_cost_pct_of_revenue: MarginPercent;
+}
+
+/**
+ * The whole business read (#731 spend and breakdown, #732 unit costs and
+ * attribution) over one window. One route, so one `usePanelRead` and one
+ * failure: every panel on the Business page answers from the same numbers and
+ * cannot disagree with each other.
+ */
+export interface BusinessRead {
+  period: BusinessPeriod;
+  period_start: string;
+  period_end: string;
+  spend_paise: number;
+  jobs: number;
+  completed_jobs: number;
+  failed_jobs: number;
+  input_tokens: number;
+  output_tokens: number;
+  paise_per_1k_input_tokens: number | null;
+  paise_per_1k_output_tokens: number | null;
+  monthly_cap_paise: number;
+  cap_consumed_paise: number;
+  cap_consumed_pct: number;
+  projected_month_end_paise: number | null;
+  /** Always present, even when there is no projection to compare it against. */
+  projected_over_cap: boolean;
+  projection_basis: ProjectionBasis | null;
+  by_provider: ProviderSpend[];
+  by_model: ModelSpend[];
+  by_task_type: TaskTypeSpend[];
+  cost_per_request_paise: number | null;
+  cost_per_completed_task_paise: number | null;
+  cost_per_patient_paise: number | null;
+  cost_per_doctor_paise: number | null;
+  cost_of_pass_paise: number | null;
+  patient_spend: ActorSpendDistribution;
+  doctor_spend: ActorSpendDistribution;
+  /** Capped at the ten heaviest; NOT a page of a larger list. */
+  top_patients: PatientSpend[];
+  /** Capped at the ten heaviest; NOT a page of a larger list. */
+  top_doctors: DoctorSpend[];
+  margin: MarginRead;
+}
+
+/**
  * The Grafana views, each already carrying its own filter (#736). The dashboard
  * link always exists when the vendor is configured - it can always carry its range
  * and variables - while `explore_url` needs a trace, so it is optional.
@@ -419,8 +582,237 @@ const LATENCY_DECIMALS = [
 ] as const;
 const DEPENDENCY_DECIMALS = ["latency_ms"] as const;
 
+/**
+ * The business read's `Decimal` fields (#731/#732) - EIGHT at the top level,
+ * plus two more inside each of three breakdown rows and two interpolated
+ * percentiles on each distribution.
+ *
+ * `cap_consumed_pct` is non-nullable on the wire even with no cap configured (the
+ * read sends "0.00"), so it is the one field in this list that must decode rather
+ * than stay `null`. Every other unit cost is nullable because the read divides at
+ * read time and a zero denominator means "not measured", never zero.
+ */
+const BUSINESS_DECIMALS = [
+  "paise_per_1k_input_tokens",
+  "paise_per_1k_output_tokens",
+  "cap_consumed_pct",
+  "cost_per_request_paise",
+  "cost_per_completed_task_paise",
+  "cost_per_patient_paise",
+  "cost_per_doctor_paise",
+  "cost_of_pass_paise",
+] as const;
+
+/** The one percentage on a `MarginPercent`. */
+const MARGIN_PERCENT_DECIMALS = ["value"] as const;
+
+/** The token rates, shared by all three breakdowns. */
+const SPEND_ROW_DECIMALS = [
+  "paise_per_1k_input_tokens",
+  "paise_per_1k_output_tokens",
+] as const;
+
+/**
+ * The distribution percentiles. These come from rank interpolation, so they
+ * carry NO fixed scale - the wire sends "20000", not "20000.0000" - which is why
+ * `wireDecimal` takes a bare integer string and why they are not in the same
+ * list as the 4dp unit costs.
+ */
+const DISTRIBUTION_DECIMALS = [
+  "median_spend_paise",
+  "p95_spend_paise",
+] as const;
+
+/** `max_spend_paise` is deliberately NOT here: it is an observed integer. */
+
 function isBusinessCountView(value: unknown): value is BusinessCountView {
   return isRecord(value) && hasKeys(value, ["metric_key", "count"]);
+}
+
+/**
+ * The key set every spend breakdown row shares. One declaration for all three
+ * breakdowns: they differ only in how a row is NAMED, and restating these six
+ * keys three times is how the task-type row quietly stops carrying its rates
+ * while the panel still type-checks.
+ *
+ * This narrows to `Record<string, unknown>` rather than to one of the three row
+ * types: it answers "does a breakdown row look right", and which row it is
+ * depends on a key the three guards below each add.
+ */
+const SPEND_ROW_KEYS = [
+  "jobs",
+  "spend_paise",
+  "input_tokens",
+  "output_tokens",
+  "paise_per_1k_input_tokens",
+  "paise_per_1k_output_tokens",
+] as const;
+
+function isSpendBreakdownRow(value: unknown): value is Record<string, unknown> {
+  return (
+    isRecord(value) &&
+    hasKeys(value, SPEND_ROW_KEYS) &&
+    hasWireDecimals(value, SPEND_ROW_DECIMALS)
+  );
+}
+
+function isProviderSpend(value: unknown): value is ProviderSpend {
+  return isSpendBreakdownRow(value) && "provider" in value;
+}
+
+function isModelSpend(value: unknown): value is ModelSpend {
+  return isSpendBreakdownRow(value) && hasKeys(value, ["provider", "model"]);
+}
+
+function isTaskTypeSpend(value: unknown): value is TaskTypeSpend {
+  return isSpendBreakdownRow(value) && "task_type" in value;
+}
+
+function isProjectionBasis(value: unknown): value is ProjectionBasis {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "period_start",
+      "period_end",
+      "elapsed_days",
+      "period_days",
+    ])
+  );
+}
+
+/**
+ * The distribution's own interpolations, decoded. `max_spend_paise` is left
+ * alone: it is an observed figure, an integer the read did not interpolate.
+ */
+function isActorSpendDistribution(
+  value: unknown,
+): value is ActorSpendDistribution {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "actors",
+      "total_spend_paise",
+      "median_spend_paise",
+      "p95_spend_paise",
+      "max_spend_paise",
+    ]) &&
+    hasWireDecimals(value, DISTRIBUTION_DECIMALS)
+  );
+}
+
+function isPatientSpend(value: unknown): value is PatientSpend {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "patient_key",
+      "attributed_doctor_key",
+      "jobs",
+      "completed_jobs",
+      "failed_jobs",
+      "spend_paise",
+    ])
+  );
+}
+
+function isDoctorSpend(value: unknown): value is DoctorSpend {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "doctor_key",
+      "patients",
+      "jobs",
+      "completed_jobs",
+      "failed_jobs",
+      "spend_paise",
+    ])
+  );
+}
+
+/**
+ * A margin percentage that must DECODE. It may be null - that is the
+ * revenue-not-captured case - but it may not be an empty or unparseable string:
+ * `""` is what a `Decimal` serialises to when the value was never set, and
+ * letting it through would put `NaN` in a percentage an operator reads as fact.
+ */
+function isMarginPercent(value: unknown): value is MarginPercent {
+  return (
+    isRecord(value) &&
+    hasKeys(value, ["value", "reason", "detail"]) &&
+    hasWireDecimals(value, MARGIN_PERCENT_DECIMALS)
+  );
+}
+
+function isMarginRead(value: unknown): value is MarginRead {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "revenue_paise",
+      "cost_of_goods_paise",
+      "headline_month_cost_of_goods_paise",
+      "revenue_captured",
+      "tiers_captured",
+      "tier_keys",
+      "gross_margin",
+      "ai_cost_pct_of_revenue",
+    ]) &&
+    isMarginPercent(value.gross_margin) &&
+    isMarginPercent(value.ai_cost_pct_of_revenue)
+  );
+}
+
+/**
+ * The business read. Key presence plus decodability, like every other guard
+ * here, with one addition: `cap_consumed_pct` must decode to a NUMBER rather
+ * than to null. The route always sends it - "0.00" when nothing is capped - so a
+ * null there is a wire this client cannot honestly model, and the model promises
+ * `number` because the page prints it without a null check.
+ */
+function isBusinessRead(value: unknown): value is BusinessRead {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "period",
+      "period_start",
+      "period_end",
+      "spend_paise",
+      "jobs",
+      "completed_jobs",
+      "failed_jobs",
+      "input_tokens",
+      "output_tokens",
+      "paise_per_1k_input_tokens",
+      "paise_per_1k_output_tokens",
+      "monthly_cap_paise",
+      "cap_consumed_paise",
+      "cap_consumed_pct",
+      "projected_month_end_paise",
+      "projected_over_cap",
+      "projection_basis",
+      "by_provider",
+      "by_model",
+      "by_task_type",
+      "cost_per_request_paise",
+      "cost_per_completed_task_paise",
+      "cost_per_patient_paise",
+      "cost_per_doctor_paise",
+      "cost_of_pass_paise",
+      "patient_spend",
+      "doctor_spend",
+      "top_patients",
+      "top_doctors",
+      "margin",
+    ]) &&
+    hasWireDecimals(value, BUSINESS_DECIMALS) &&
+    value.cap_consumed_pct !== null &&
+    isArrayOf(value.by_provider, isProviderSpend) &&
+    isArrayOf(value.by_model, isModelSpend) &&
+    isArrayOf(value.by_task_type, isTaskTypeSpend) &&
+    isActorSpendDistribution(value.patient_spend) &&
+    isActorSpendDistribution(value.doctor_spend) &&
+    isArrayOf(value.top_patients, isPatientSpend) &&
+    isArrayOf(value.top_doctors, isDoctorSpend) &&
+    isMarginRead(value.margin)
+  );
 }
 
 /**
@@ -763,6 +1155,58 @@ export async function fetchCostTrend(
     isCostTrend,
     "The API returned an unexpected observability cost trend shape",
   );
+}
+
+/**
+ * The business read (#731 spend and breakdown, #732 unit costs and
+ * attribution) over one window.
+ *
+ * The whole page is ONE read on purpose. Spend, cap, breakdown, unit costs and
+ * attribution are five answers to five questions about the same month, and
+ * splitting them across routes would let the panels disagree - a breakdown
+ * that reconciles to a spend figure the headline no longer shows is worse than
+ * one panel reporting a single honest failure.
+ *
+ * `period` is omitted when the caller has no preference, so the route's own
+ * default is the one authority on what "no window asked for" means.
+ */
+export async function fetchBusiness(
+  params: { period?: BusinessPeriod } = {},
+): Promise<BusinessRead> {
+  const search = new URLSearchParams();
+  if (params.period !== undefined) search.set("period", params.period);
+  const query = search.toString();
+  const data = await request<unknown>(
+    `${OBSERVABILITY_BASE}/business${query ? `?${query}` : ""}`,
+  );
+  const read = guardShape(
+    data,
+    isBusinessRead,
+    "The API returned an unexpected observability business shape",
+  );
+  return {
+    ...withDecimals(read, BUSINESS_DECIMALS),
+    by_provider: read.by_provider.map((row) =>
+      withDecimals(row, SPEND_ROW_DECIMALS),
+    ),
+    by_model: read.by_model.map((row) => withDecimals(row, SPEND_ROW_DECIMALS)),
+    by_task_type: read.by_task_type.map((row) =>
+      withDecimals(row, SPEND_ROW_DECIMALS),
+    ),
+    patient_spend: withDecimals(read.patient_spend, DISTRIBUTION_DECIMALS),
+    doctor_spend: withDecimals(read.doctor_spend, DISTRIBUTION_DECIMALS),
+    margin: {
+      ...read.margin,
+      gross_margin: withDecimals(
+        read.margin.gross_margin,
+        MARGIN_PERCENT_DECIMALS,
+      ),
+      ai_cost_pct_of_revenue: withDecimals(
+        read.margin.ai_cost_pct_of_revenue,
+        MARGIN_PERCENT_DECIMALS,
+      ),
+    },
+  };
 }
 
 /** Calls, tokens and cost by provider, model and task over the window. */

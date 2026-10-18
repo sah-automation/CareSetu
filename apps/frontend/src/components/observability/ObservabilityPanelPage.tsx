@@ -31,9 +31,11 @@ import { cn } from "@/lib/utils";
 
 /**
  * The console's panels, in the order an operator reads them: is the bill on
- * plan, is the AI being used, is its output any good, is the system up. One
- * declaration drives the tab strip on every panel page, so a new panel cannot
- * be reachable from three of the four pages.
+ * plan, is the AI being used, is its output any good, is the system up, what
+ * does a case earn against what it costs. One declaration drives the tab strip
+ * on every panel page, so a new panel cannot be reachable from a subset of the
+ * pages. #747 replaces this strip with a sub-navigation, at which point this
+ * table stops being the console's navigation at all.
  */
 export const PANEL_ROUTES = [
   { key: "overview", href: "/operator/observability", label: "Overview" },
@@ -45,6 +47,11 @@ export const PANEL_ROUTES = [
     label: "Quality",
   },
   { key: "health", href: "/operator/observability/health", label: "Health" },
+  {
+    key: "business",
+    href: "/operator/observability/business",
+    label: "Business",
+  },
 ] as const;
 
 export type PanelKey = (typeof PANEL_ROUTES)[number]["key"];

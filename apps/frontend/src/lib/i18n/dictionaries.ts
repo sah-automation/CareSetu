@@ -1056,6 +1056,12 @@ const en = {
     // #708: the operator Observability console (plan-phase14 §9.2). A live
     // entry, so it needs a label in both locales like every other destination.
     observability: "Observability",
+    // #737: the Business lens destination inside the Observability console. The
+    // label lands here ahead of the sidebar destination that renders it (#744
+    // owns the console's IA): spec #717 decision 34 makes a new nav label a
+    // both-locales build gate, so shipping the English half alone would fail the
+    // parity test rather than quietly fall back.
+    business: "Business",
     // #538: section-group labels for the redesigned full-shell sidebar. Nav
     // items declare a group via NavItemDef.group; the sidebar composes ordered
     // labeled groups from these keys.
@@ -2802,6 +2808,9 @@ export const STRINGS: Record<Lang, Dictionary> = {
       disputes: "विवाद",
       audit: "ऑडिट",
       observability: "प्रेक्षण",
+      // #737: the Business lens destination. Both locales ship together - spec
+      // #717 decision 34, and the parity test is what holds them to it.
+      business: "व्यवसाय",
       sections: {
         work: "कार्य",
         account: "खाता",

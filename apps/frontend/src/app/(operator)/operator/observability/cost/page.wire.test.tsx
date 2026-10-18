@@ -20,6 +20,12 @@ import {
 } from "vitest";
 
 import { useChartDom } from "@/test/chartDom";
+import {
+  clearOperatorSession,
+  signInOperator,
+  stubFailingRoute,
+  stubRouteWire,
+} from "@/test/observabilityWire";
 
 import ObservabilityCostPage from "./page";
 
@@ -59,34 +65,16 @@ const TREND_WIRE = {
   ],
 };
 
-function stubRouteWire(routes: Record<string, unknown>) {
-  const fetchMock = vi.fn((input: RequestInfo | URL) => {
-    const path = String(input);
-    const match = Object.entries(routes).find(([suffix]) =>
-      path.endsWith(suffix),
-    );
-    const body = match ? match[1] : {};
-    return Promise.resolve(
-      new Response(JSON.stringify(body), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
-    );
-  });
-  vi.stubGlobal("fetch", fetchMock);
-  return fetchMock;
-}
-
 beforeAll(() => useChartDom());
 
 beforeEach(() => {
-  window.localStorage.setItem("caresetu.access_jwt", "operator.jwt.value");
+  signInOperator();
 });
 
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
-  window.localStorage.clear();
+  clearOperatorSession();
 });
 
 describe("ObservabilityCostPage over the real wire", () => {
@@ -108,21 +96,9 @@ describe("ObservabilityCostPage over the real wire", () => {
   });
 
   it("does not blank the budget panel when the trend read fails", async () => {
-    const fetchMock = vi.fn((input: RequestInfo | URL) => {
-      const path = String(input);
-      if (path.endsWith("/observability/cost/trend")) {
-        return Promise.resolve(
-          new Response(JSON.stringify({ code: "NOT_FOUND" }), { status: 404 }),
-        );
-      }
-      return Promise.resolve(
-        new Response(JSON.stringify(COST_WIRE), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
+    stubFailingRoute("/observability/cost/trend", {
+      "/observability/cost": COST_WIRE,
     });
-    vi.stubGlobal("fetch", fetchMock);
 
     render(<ObservabilityCostPage />);
 

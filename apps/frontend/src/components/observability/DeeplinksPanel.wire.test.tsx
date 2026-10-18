@@ -17,6 +17,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { fetchDeeplinks } from "@/lib/operator/observability";
 import { usePanelRead } from "@/lib/operator/usePanelRead";
+import {
+  clearOperatorSession,
+  signInOperator,
+  stubBodyWire,
+} from "@/test/observabilityWire";
 
 import { DeeplinksPanel } from "./DeeplinksPanel";
 
@@ -56,19 +61,6 @@ const DEEPLINKS_WIRE = {
   },
 };
 
-function stubRouteWire(body: unknown) {
-  const fetchMock = vi.fn((_input: RequestInfo | URL) =>
-    Promise.resolve(
-      new Response(JSON.stringify(body), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
-    ),
-  );
-  vi.stubGlobal("fetch", fetchMock);
-  return fetchMock;
-}
-
 /** The panel exactly as a page mounts it: the real hook over the real client. */
 function Panel({
   context = {},
@@ -84,18 +76,18 @@ function hrefOf(testId: string): string | null {
 }
 
 beforeEach(() => {
-  window.localStorage.setItem("caresetu.access_jwt", "operator.jwt.value");
+  signInOperator();
 });
 
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
-  window.localStorage.clear();
+  clearOperatorSession();
 });
 
 describe("DeeplinksPanel over the real wire", () => {
   it("asks for the trace it was given and links it into all three tools", async () => {
-    const fetchMock = stubRouteWire(DEEPLINKS_WIRE);
+    const fetchMock = stubBodyWire(DEEPLINKS_WIRE);
 
     render(<Panel context={{ trace_id: TRACE }} />);
 
@@ -129,7 +121,7 @@ describe("DeeplinksPanel over the real wire", () => {
   it("renders an unconfigured vendor as nothing at all", async () => {
     // The wire carries no `langfuse` key - a deployment without Langfuse configured.
     const { langfuse: _absent, ...twoVendors } = DEEPLINKS_WIRE;
-    stubRouteWire(twoVendors);
+    stubBodyWire(twoVendors);
 
     render(<Panel context={{ trace_id: TRACE }} />);
 
@@ -147,7 +139,7 @@ describe("DeeplinksPanel over the real wire", () => {
 
   it("says the deployment has no vendor links when nothing is configured", async () => {
     // What the route sends with every vendor off: `{}`, not three nulls.
-    stubRouteWire({});
+    stubBodyWire({});
 
     render(<Panel />);
 

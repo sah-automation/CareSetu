@@ -13,7 +13,7 @@
 //     rupees through lib/money.ts; the charts divide before they plot, so a
 //     y-axis of "1250000" never reaches an operator's screen.
 
-import { formatInrPaise } from "@/lib/money";
+import { formatInrPaise, formatInrPaisePrecise } from "@/lib/money";
 
 /** An unmeasured figure (see facade.Overview: a `null` rate, never a zero). */
 export const DASH = "\u2014";
@@ -60,4 +60,20 @@ export function rupeesFromPaise(paise: number): number {
  */
 export function formatRupees(rupees: number): string {
   return formatInrPaise(rupees * 100);
+}
+
+/**
+ * A unit cost, in rupees, at paise precision.
+ *
+ * Deliberately NOT `formatMoney`. That formatter drops fractions because every
+ * CareSetu PRICE is a whole-rupee amount (lib/money.ts), and a price is what it
+ * was written for. A unit cost is a RATE: AI runs at roughly ten paise a
+ * request, so the whole-rupee rule reports "₹10" for 10.42 paise.
+ *
+ * Both go through the one Intl configuration in lib/money.ts, so the two
+ * renderings of one currency cannot drift. Two decimals always, so a column of
+ * unit costs lines up.
+ */
+export function formatUnitCost(paise: number): string {
+  return formatInrPaisePrecise(paise);
 }

@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   fetchAlerts,
+  fetchBusiness,
   fetchCost,
   fetchCostTrend,
   fetchDeeplinks,
@@ -17,6 +18,7 @@ import {
   fetchQuality,
   fetchUsage,
   type AlertPage,
+  type BusinessRead,
   type CostSummary,
   type CostTrend,
   type Deeplinks,
@@ -423,6 +425,304 @@ describe("fetchDeeplinks", () => {
     stubFetch({ langfuse: null });
 
     await expect(fetchDeeplinks()).rejects.toMatchObject({
+      code: "UNEXPECTED_ERROR",
+    });
+  });
+});
+
+/**
+ * The business read as the DOMAIN model: every rate and unit cost a number,
+ * every not-yet-measured figure a `null`. #731/#732 built it so the page never
+ * has to know a `Decimal` crossed the wire.
+ */
+const BUSINESS: BusinessRead = {
+  period: "month_to_date",
+  period_start: "2026-10-01",
+  period_end: "2026-10-12",
+  spend_paise: 125000,
+  jobs: 120,
+  completed_jobs: 114,
+  failed_jobs: 6,
+  input_tokens: 100000,
+  output_tokens: 40000,
+  paise_per_1k_input_tokens: 90,
+  paise_per_1k_output_tokens: 300,
+  monthly_cap_paise: 500000,
+  cap_consumed_paise: 125000,
+  cap_consumed_pct: 25,
+  projected_month_end_paise: 320000,
+  projected_over_cap: false,
+  projection_basis: {
+    period_start: "2026-10-01",
+    period_end: "2026-10-31",
+    elapsed_days: 12,
+    period_days: 31,
+  },
+  by_provider: [
+    {
+      provider: "openai_compatible",
+      jobs: 120,
+      spend_paise: 125000,
+      input_tokens: 100000,
+      output_tokens: 40000,
+      paise_per_1k_input_tokens: 90,
+      paise_per_1k_output_tokens: 300,
+    },
+  ],
+  by_model: [
+    {
+      provider: "openai_compatible",
+      model: "gpt-4o-mini",
+      jobs: 120,
+      spend_paise: 125000,
+      input_tokens: 100000,
+      output_tokens: 40000,
+      paise_per_1k_input_tokens: 90,
+      paise_per_1k_output_tokens: 300,
+    },
+  ],
+  by_task_type: [
+    {
+      task_type: "transcribe",
+      jobs: 120,
+      spend_paise: 125000,
+      input_tokens: 100000,
+      output_tokens: 40000,
+      paise_per_1k_input_tokens: 90,
+      paise_per_1k_output_tokens: 300,
+    },
+  ],
+  cost_per_request_paise: 1041.6667,
+  cost_per_completed_task_paise: 1096.4912,
+  cost_per_patient_paise: 25000,
+  cost_per_doctor_paise: 41666.6667,
+  cost_of_pass_paise: 1096.4912,
+  patient_spend: {
+    actors: 5,
+    total_spend_paise: 90000,
+    median_spend_paise: 20000,
+    p95_spend_paise: 56000,
+    max_spend_paise: 56000,
+  },
+  doctor_spend: {
+    actors: 3,
+    total_spend_paise: 125000,
+    median_spend_paise: 40000,
+    p95_spend_paise: 80000,
+    max_spend_paise: 80000,
+  },
+  top_patients: [
+    {
+      patient_key: "sha256:patient-a",
+      attributed_doctor_key: "sha256:doctor-a",
+      jobs: 40,
+      completed_jobs: 38,
+      failed_jobs: 2,
+      spend_paise: 56000,
+    },
+  ],
+  top_doctors: [
+    {
+      doctor_key: "sha256:doctor-a",
+      patients: 5,
+      jobs: 120,
+      completed_jobs: 114,
+      failed_jobs: 6,
+      spend_paise: 125000,
+    },
+  ],
+  margin: {
+    revenue_paise: 0,
+    cost_of_goods_paise: 125000,
+    headline_month_cost_of_goods_paise: 125000,
+    revenue_captured: false,
+    tiers_captured: false,
+    tier_keys: [],
+    gross_margin: {
+      value: null,
+      reason: "revenue_not_captured",
+      detail: "No revenue recorded yet.",
+    },
+    ai_cost_pct_of_revenue: {
+      value: null,
+      reason: "revenue_not_captured",
+      detail: "No revenue recorded yet.",
+    },
+  },
+};
+
+describe("fetchBusiness", () => {
+  it("resolves the spend, unit-cost and attribution read", async () => {
+    const fetchMock = stubFetch(BUSINESS);
+
+    await expect(fetchBusiness()).resolves.toEqual(BUSINESS);
+    expect(requestedUrl(fetchMock)).toBe(`${BASE}/business`);
+  });
+
+  it("names the window it wants, and leaves the default to the route when none is asked for", async () => {
+    const fetchMock = stubFetch(BUSINESS);
+
+    await fetchBusiness({ period: "today" });
+
+    expect(requestedUrl(fetchMock)).toBe(`${BASE}/business?period=today`);
+  });
+
+  it("rejects a read that is missing a breakdown it must have", async () => {
+    stubFetch({ ...BUSINESS, by_provider: undefined });
+
+    await expect(fetchBusiness()).rejects.toMatchObject({
+      code: "UNEXPECTED_ERROR",
+    });
+  });
+
+  it("rejects a provider row whose rate is not a number, rather than rendering NaN", async () => {
+    stubFetch({
+      ...BUSINESS,
+      by_provider: [
+        {
+          ...BUSINESS.by_provider[0],
+          paise_per_1k_input_tokens: "not-a-number",
+        },
+      ],
+    });
+
+    await expect(fetchBusiness()).rejects.toMatchObject({
+      code: "UNEXPECTED_ERROR",
+    });
+  });
+});
+
+// #737: the business read carries NINE quoted decimals across four models -
+// more than any read before it - and every one of them reaches a formatter on
+// the Business page. The wire bodies below are exactly what `/business` emits.
+describe("business decimal wire values", () => {
+  const BUSINESS_WIRE = {
+    ...BUSINESS,
+    paise_per_1k_input_tokens: "90.0000",
+    paise_per_1k_output_tokens: "300.0000",
+    cap_consumed_pct: "25.00",
+    cost_per_request_paise: "1041.6667",
+    cost_per_completed_task_paise: "1096.4912",
+    cost_per_patient_paise: "25000.0000",
+    cost_per_doctor_paise: "41666.6667",
+    cost_of_pass_paise: "1096.4912",
+    by_provider: [
+      {
+        ...BUSINESS.by_provider[0],
+        paise_per_1k_input_tokens: "90.0000",
+        paise_per_1k_output_tokens: "300.0000",
+      },
+    ],
+    by_model: [
+      {
+        ...BUSINESS.by_model[0],
+        paise_per_1k_input_tokens: "90.0000",
+        paise_per_1k_output_tokens: "300.0000",
+      },
+    ],
+    by_task_type: [
+      {
+        ...BUSINESS.by_task_type[0],
+        paise_per_1k_input_tokens: "90.0000",
+        paise_per_1k_output_tokens: "300.0000",
+      },
+    ],
+    patient_spend: {
+      ...BUSINESS.patient_spend,
+      median_spend_paise: "20000",
+      p95_spend_paise: "56000",
+    },
+    doctor_spend: {
+      ...BUSINESS.doctor_spend,
+      median_spend_paise: "40000",
+      p95_spend_paise: "80000",
+    },
+  };
+
+  it("resolves the headline rates as numbers, not quoted strings", async () => {
+    stubFetch(BUSINESS_WIRE);
+
+    const read = await fetchBusiness();
+
+    expect(typeof read.paise_per_1k_input_tokens).toBe("number");
+    expect(read.paise_per_1k_input_tokens).toBe(90);
+    expect(read.paise_per_1k_output_tokens).toBe(300);
+    expect(read.cap_consumed_pct).toBe(25);
+  });
+
+  it("resolves every unit cost, which is what the page's headline figures are", async () => {
+    stubFetch(BUSINESS_WIRE);
+
+    const read = await fetchBusiness();
+
+    expect(read.cost_per_request_paise).toBeCloseTo(1041.6667, 4);
+    expect(read.cost_per_completed_task_paise).toBeCloseTo(1096.4912, 4);
+    expect(read.cost_per_patient_paise).toBe(25000);
+    expect(read.cost_per_doctor_paise).toBeCloseTo(41666.6667, 4);
+    expect(read.cost_of_pass_paise).toBeCloseTo(1096.4912, 4);
+  });
+
+  it("resolves the per-token rates inside every breakdown row", async () => {
+    stubFetch(BUSINESS_WIRE);
+
+    const read = await fetchBusiness();
+
+    for (const row of [
+      read.by_provider[0],
+      read.by_model[0],
+      read.by_task_type[0],
+    ]) {
+      expect(typeof row.paise_per_1k_input_tokens).toBe("number");
+      expect(row.paise_per_1k_input_tokens).toBe(90);
+      expect(row.paise_per_1k_output_tokens).toBe(300);
+    }
+  });
+
+  it("resolves the interpolated percentiles, which carry no fixed scale", async () => {
+    stubFetch(BUSINESS_WIRE);
+
+    const read = await fetchBusiness();
+
+    // Rank interpolation emits "20000", not "20000.0000" - the guard has to take
+    // the bare integer string too or the distribution panel never renders.
+    expect(read.patient_spend.median_spend_paise).toBe(20000);
+    expect(read.patient_spend.p95_spend_paise).toBe(56000);
+    expect(read.doctor_spend.median_spend_paise).toBe(40000);
+    expect(read.doctor_spend.p95_spend_paise).toBe(80000);
+  });
+
+  it("keeps an unmeasured unit cost null rather than coercing it to zero", async () => {
+    // A patient with no recorded AI job divides by zero; "not yet measured" and
+    // "free" are different facts and only the first one is true.
+    stubFetch({
+      ...BUSINESS_WIRE,
+      cost_per_patient_paise: null,
+      cost_per_doctor_paise: null,
+      patient_spend: {
+        ...BUSINESS.patient_spend,
+        median_spend_paise: null,
+        p95_spend_paise: null,
+      },
+    });
+
+    const read = await fetchBusiness();
+
+    expect(read.cost_per_patient_paise).toBeNull();
+    expect(read.cost_per_doctor_paise).toBeNull();
+    expect(read.patient_spend.median_spend_paise).toBeNull();
+    expect(read.patient_spend.p95_spend_paise).toBeNull();
+  });
+
+  it("rejects a margin percentage that is neither a figure nor null", async () => {
+    stubFetch({
+      ...BUSINESS_WIRE,
+      margin: {
+        ...BUSINESS.margin,
+        gross_margin: { value: "", reason: null, detail: null },
+      },
+    });
+
+    await expect(fetchBusiness()).rejects.toMatchObject({
       code: "UNEXPECTED_ERROR",
     });
   });

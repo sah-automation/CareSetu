@@ -23,6 +23,11 @@ const CHANNELS = [
   '/operator/observability/usage',
   '/operator/observability/quality',
   '/operator/observability/health',
+  // #737: the Business lens page. It shares the chart runtime with the four
+  // panels above, so it is measured for the same reason: a lens page that
+  // imported `recharts` directly instead of through components/ui/chart would
+  // carry a SECOND copy of the chart runtime, and this gate is what reports it.
+  '/operator/observability/business',
   '/doctor/profile',
 ];
 const WORKSPACE = '@caresetu/frontend';
