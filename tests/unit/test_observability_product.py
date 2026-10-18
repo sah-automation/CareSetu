@@ -37,20 +37,25 @@ from modules.observability.domain.consumer import (
 )
 from modules.observability.domain.product import (
     FUNNEL_INTAKE,
+    FUNNEL_TERMINAL_CASE_CLOSED,
+    FUNNEL_TERMINAL_PRESCRIPTION,
     PRODUCT_OUTCOME_ABANDONED,
     PRODUCT_OUTCOME_COMPLETED,
     PRODUCT_OUTCOME_ERRORED,
     PRODUCT_OUTCOME_RE_RECORDED,
+    PRODUCT_OUTCOMES,
     ProductEventFact,
     ProductStep,
     ProductStepPayload,
     build_product_daily,
     derived_step_key,
     duration_ms_of,
+    funnel_stages,
     product_event_keys,
     product_step_for_event,
     product_steps,
     register_product_step,
+    stage_predecessor,
 )
 from modules.observability.domain.pseudonym import (
     ACTOR_KIND_DOCTOR,
@@ -80,6 +85,57 @@ def test_the_intake_funnel_is_declared_head_to_tail_in_patient_order() -> None:
         "re_recorded",
     ]
     assert {step.funnel for step in steps} == {FUNNEL_INTAKE}
+
+
+def test_the_outcome_vocabulary_is_enumerable_so_a_read_can_gate_on_it() -> None:
+    """The closed vocabulary is also a LIST, for the routes that have to enumerate it."""
+    assert PRODUCT_OUTCOMES == (
+        PRODUCT_OUTCOME_COMPLETED,
+        PRODUCT_OUTCOME_ABANDONED,
+        PRODUCT_OUTCOME_ERRORED,
+        PRODUCT_OUTCOME_RE_RECORDED,
+    )
+
+
+def test_the_walk_is_the_funnel_without_the_re_record_step() -> None:
+    """A corrected attempt is not a stage an attempt passes through; it is its own row."""
+    assert [step.step for step in funnel_stages()] == [
+        "composer_opened",
+        "intake_captured",
+        "pre_summary_ready",
+        "consult_complete",
+        "prescription_drafted",
+        "prescription_approved",
+        "case_closed",
+    ]
+
+
+def test_both_ends_of_the_funnel_are_declared_terminal() -> None:
+    """An issued prescription and a closed case are both ends, and neither is a drop-off."""
+    terminals = [step.step for step in funnel_stages() if step.terminal]
+    assert terminals == [FUNNEL_TERMINAL_PRESCRIPTION, FUNNEL_TERMINAL_CASE_CLOSED]
+    # Nothing else is an end: a step a workflow can still walk past cannot be terminal.
+    assert len(terminals) == 2
+
+
+def test_both_terminals_take_their_denominator_from_the_last_non_terminal_step() -> None:
+    """Otherwise a case closed without one reads as the step AFTER an issued prescription."""
+    stages = funnel_stages()
+    for terminal in (FUNNEL_TERMINAL_PRESCRIPTION, FUNNEL_TERMINAL_CASE_CLOSED):
+        step = next(stage for stage in stages if stage.step == terminal)
+        assert stage_predecessor(step, stages).step == "prescription_drafted"  # type: ignore[union-attr]
+
+
+def test_the_first_stage_has_no_predecessor_to_divide_by() -> None:
+    """The entry step is where a funnel starts, so its conversion has no denominator."""
+    assert stage_predecessor(funnel_stages()[0]) is None
+
+
+def test_a_step_outside_the_walk_has_no_predecessor_to_divide_by() -> None:
+    """The re-record is not in the walk, so nothing in the walk follows it."""
+    re_recorded = product_step_for_event(EVENT_INTAKE_RETRY_REQUESTED)
+    assert re_recorded is not None
+    assert stage_predecessor(re_recorded) is None
 
 
 def test_every_step_declares_a_closed_outcome_vocabulary() -> None:

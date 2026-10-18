@@ -30,6 +30,12 @@ the budget snapshot. It is the only read whose window follows the clock rather t
 pinned fixture date, so the assertions derive the projection ARITHMETIC instead of a
 figure that would only hold on one day of the month.
 
+B8 (#740) adds ``/product/funnel`` over the product event ledger #739 writes: two
+patient journeys that run to a prescription and to a closed case, one patient who
+walked away, one whose capture degraded, and one re-record. The seeded timestamps are
+placed so each step's median gap has ONE arithmetic answer, and the assertions check
+that arithmetic rather than a figure.
+
 Requires the native PostgreSQL; the suite skips cleanly when it is unreachable.
 The shared integration conftest migrates to head once per file, empties the
 observability aggregates and every module's outbox before each test (``/health``
@@ -101,6 +107,7 @@ ERRORS_PATH = "/v1/operator/observability/errors"
 DEEPLINKS_PATH = "/v1/operator/observability/deeplinks"
 RELIABILITY_PATH = "/v1/operator/observability/reliability"
 BUSINESS_PATH = "/v1/operator/observability/business"
+FUNNEL_PATH = "/v1/operator/observability/product/funnel"
 
 
 async def _seed(connection: AsyncConnection) -> None:
@@ -2323,3 +2330,336 @@ async def test_the_business_read_reports_the_headline_month_cost_of_goods(
     assert month["margin"]["headline_month_cost_of_goods_paise"] == _BUSINESS_CONSUMED_PAISE
     assert month["margin"]["headline_month_cost_of_goods_paise"] == month["cap_consumed_paise"]
     assert month["margin"]["cost_of_goods_paise"] == month["spend_paise"]
+
+
+# ------------------------------------------------------------- the funnel read (#740)
+
+#: Two patients walk the funnel end to end, one walks away at the entry step, one has
+#: a capture that degrades, and one corrects a round. The timestamps are seconds before
+#: the seed ran, so every row is inside the default thirty-day window whatever day the
+#: suite runs on - and each step's median gap has exactly one arithmetic answer:
+#:
+#:   intake_captured     60s and 300s apart from the composer  -> median 180
+#:   pre_summary_ready    30s after the capture                  -> median 30
+#:   consult_complete     none - the handoff shares no key       -> median null
+#:   prescription_drafted 600s and 300s after the consult        -> median 450
+#:   prescription_approved 120s after the draft                  -> median 120
+#:   case_closed          600s after the draft                   -> median 600
+#:
+#: The stamps are named rather than written inline in the SQL so the table above and
+#: the rows below cannot drift apart.
+_FUNNEL_STAMPS: dict[str, int] = {
+    "at100000": 100_000,
+    "at99940": 99_940,
+    "at99910": 99_910,
+    "at99900": 99_900,
+    "at50000": 50_000,
+    "at49900": 49_900,
+    "at49700": 49_700,
+    "at40000": 40_000,
+    "at39400": 39_400,
+    "at39280": 39_280,
+    "at20000": 20_000,
+    "at19700": 19_700,
+    "at19100": 19_100,
+    "at3000000": 3_000_000,
+}
+
+_FUNNEL_SEED = """
+INSERT INTO observability.observability_product_events
+(event_id, occurred_at, actor_kind, actor_key, session_key, trace_id, funnel, step,
+ outcome, duration_ms) VALUES
+-- One patient opens, records and leaves: the funnel's head, abandoned.
+(:e1, :at100000, 'patient', :p1, 'sess-p1-open', 'trace-p1-open', 'intake',
+ 'composer_opened', 'completed', NULL),
+(:e2, :at100000, 'patient', :p3, 'sess-p3-open', 'trace-p3-open', 'intake',
+ 'composer_opened', 'abandoned', NULL),
+-- One patient completes a round and then asks to redo it: a correction, not a failure.
+(:e3, :at99900, NULL, NULL, 'sess-p1-retry', 'trace-p1-retry', 'intake',
+ 're_recorded', 're_recorded', NULL),
+-- The second patient's capture degraded: scored errored, never as a quiet drop-off.
+(:e4, :at49900, 'patient', :p4, 'sess-p4-cap', 'trace-p4-cap', 'intake',
+ 'intake_captured', 'errored', NULL),
+-- Patient one, in order.
+(:e5, :at99940, 'patient', :p1, 'sess-p1-cap', 'trace-p1-cap', 'intake',
+ 'intake_captured', 'completed', NULL),
+(:e6, :at99910, 'patient', :p1, 'sess-p1-sum', 'trace-p1-sum', 'intake',
+ 'pre_summary_ready', 'completed', 4200),
+(:e7, :at40000, 'doctor', :d1, 'sess-d1-consult-1', 'trace-d1-consult-1', 'intake',
+ 'consult_complete', 'completed', 1500000),
+(:e8, :at39400, 'doctor', :d1, 'sess-d1-draft-1', 'trace-d1-draft-1', 'intake',
+ 'prescription_drafted', 'completed', 22000),
+(:e9, :at39280, 'doctor', :d1, 'sess-d1-approve', 'trace-d1-approve', 'intake',
+ 'prescription_approved', 'completed', NULL),
+-- Patient two, whose case ends closed without a prescription.
+(:e10, :at50000, 'patient', :p2, 'sess-p2-open', 'trace-p2-open', 'intake',
+ 'composer_opened', 'completed', NULL),
+(:e11, :at49700, 'patient', :p2, 'sess-p2-cap', 'trace-p2-cap', 'intake',
+ 'intake_captured', 'completed', NULL),
+(:e12, :at20000, 'doctor', :d1, 'sess-d1-consult-2', 'trace-d1-consult-2', 'intake',
+ 'consult_complete', 'completed', 900000),
+(:e13, :at19700, 'doctor', :d1, 'sess-d1-draft-2', 'trace-d1-draft-2', 'intake',
+ 'prescription_drafted', 'completed', 19000),
+(:e14, :at19100, 'doctor', :d1, 'sess-d1-close', 'trace-d1-close', 'intake',
+ 'case_closed', 'completed', NULL),
+-- A step recorded before the window opened: every read must ignore it.
+(:e15, :at3000000, 'patient', :p1, 'sess-old', 'trace-old', 'intake',
+ 'composer_opened', 'completed', NULL)
+"""
+
+
+@pytest_asyncio.fixture
+async def funnel_engine(engine: AsyncEngine) -> AsyncIterator[AsyncEngine]:
+    """The product event ledger as #739's consumer writes it, over two journeys."""
+    now = datetime.now(UTC)
+    keys: dict[str, Any] = {
+        "p1": actor_key(ACTOR_KIND_PATIENT, 101),
+        "p2": actor_key(ACTOR_KIND_PATIENT, 102),
+        "p3": actor_key(ACTOR_KIND_PATIENT, 103),
+        "p4": actor_key(ACTOR_KIND_PATIENT, 104),
+        "d1": actor_key(ACTOR_KIND_DOCTOR, 201),
+    }
+    keys.update(
+        {name: now - timedelta(seconds=seconds) for name, seconds in _FUNNEL_STAMPS.items()}
+    )
+    # One distinct ``event_id`` per row, as the consumer writes: the ledger is keyed on
+    # it and a replay of any one of them changes nothing.
+    keys.update({f"e{index}": uuid.uuid4() for index in range(1, 16)})
+    async with engine.begin() as connection:
+        await connection.execute(text(_FUNNEL_SEED), keys)
+    yield engine
+
+
+def _funnel_body(database_url: str, query: str = "") -> dict[str, Any]:
+    path = FUNNEL_PATH if not query else f"{FUNNEL_PATH}?{query}"
+    with _client(database_url) as client:
+        return client.get(path, headers=_bearer()).json()
+
+
+def _steps_by_name(body: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {row["step"]: row for row in body["steps"]}
+
+
+async def test_the_funnel_read_runs_the_walk_from_the_composer_to_both_ends(
+    funnel_engine: AsyncEngine, database_url: str
+) -> None:
+    """The whole question in one call: which step, how many, and how they left.
+
+    Without it, a workflow that dies silently at transcription and one that runs to a
+    completed prescription look identical - and the counts below are the ledger's own
+    rows, so the step that loses the patient is visible rather than inferred.
+    """
+    del funnel_engine
+    body = _funnel_body(database_url)
+
+    assert [row["step"] for row in body["steps"]] == [
+        "composer_opened",
+        "intake_captured",
+        "pre_summary_ready",
+        "consult_complete",
+        "prescription_drafted",
+        "prescription_approved",
+        "case_closed",
+    ]
+    # The re-record is registered and written, but it is not a stage of the walk.
+    assert "re_recorded" not in [row["step"] for row in body["steps"]]
+    assert body["outcomes"]["re_recorded"] == 1
+
+
+async def test_each_step_is_counted_completed_and_abandoned(
+    funnel_engine: AsyncEngine, database_url: str
+) -> None:
+    """Step-to-step conversion is only computable if both figures are on the row."""
+    del funnel_engine
+    steps = _steps_by_name(_funnel_body(database_url))
+
+    assert (steps["composer_opened"]["entered"], steps["composer_opened"]["abandoned"]) == (
+        3,
+        1,
+    )
+    # The degraded capture is errored, so it is never counted as a walk-away.
+    assert (steps["intake_captured"]["entered"], steps["intake_captured"]["errored"]) == (3, 1)
+    assert steps["intake_captured"]["abandoned"] == 0
+    assert steps["intake_captured"]["completed"] == 2
+
+
+async def test_the_degraded_step_and_the_reattempt_are_scored_as_what_they_are(
+    funnel_engine: AsyncEngine, database_url: str
+) -> None:
+    """Decision 24 scores a fallback as an error; decision 25 makes a re-record its own.
+
+    Together they are what stops a broken path reading as a quiet drop-off and a
+    corrected attempt reading as a failure of the attempt it replaces.
+    """
+    del funnel_engine
+    body = _funnel_body(database_url)
+    steps = _steps_by_name(body)
+
+    assert steps["intake_captured"]["errored"] == 1
+    assert body["outcomes"]["errored"] == 1
+    assert body["outcomes"]["re_recorded"] == 1
+    # Neither is folded into the other: the abandoned figure counts the walk-away only.
+    assert body["outcomes"]["abandoned"] == 1
+
+
+async def test_the_median_gap_between_two_steps_is_the_thinking_time_between_them(
+    funnel_engine: AsyncEngine, database_url: str
+) -> None:
+    """The seeded gaps: 60s and 300s from the composer, 600s and 300s from the consult.
+
+    Reported as strings at the gap scale (api-standards §3), the same shape the other
+    reads' decimals already take on the wire.
+    """
+    del funnel_engine
+    steps = _steps_by_name(_funnel_body(database_url))
+
+    assert steps["intake_captured"]["median_gap_from_previous_s"] == "180.0"
+    assert steps["intake_captured"]["gap_samples"] == 2
+    assert steps["pre_summary_ready"]["median_gap_from_previous_s"] == "30.0"
+    assert steps["prescription_drafted"]["median_gap_from_previous_s"] == "450.0"
+    assert steps["prescription_approved"]["median_gap_from_previous_s"] == "120.0"
+    assert steps["case_closed"]["median_gap_from_previous_s"] == "600.0"
+
+
+async def test_the_gap_that_the_ledger_cannot_measure_is_reported_as_unmeasured(
+    funnel_engine: AsyncEngine, database_url: str
+) -> None:
+    """The handoff from the patient to the doctor shares no key the ledger stores.
+
+    Reported as ``null`` with its basis named, because a zero would read as an instant
+    handoff and an absent figure with no reason is the thing operators stop trusting.
+    """
+    del funnel_engine
+    steps = _steps_by_name(_funnel_body(database_url))
+
+    consult = steps["consult_complete"]
+    assert consult["median_gap_from_previous_s"] is None
+    assert consult["gap_samples"] == 0
+    assert consult["gap_basis"] == "unavailable"
+    # Every other pair says what it was measured on, and the entry step says it has no
+    # predecessor at all - a different fact from the ledger failing to join one.
+    assert steps["intake_captured"]["gap_basis"] == "actor_key"
+    assert steps["composer_opened"]["gap_basis"] == "no_predecessor"
+
+
+async def test_the_conventions_the_figures_rest_on_ride_the_response(
+    funnel_engine: AsyncEngine, database_url: str
+) -> None:
+    """A panel drawing this has to be able to say what its numbers mean."""
+    del funnel_engine
+    body = _funnel_body(database_url)
+
+    assert "non-terminal" in body["denominator_convention"]
+    assert "started" in body["rate_convention"]
+    assert "unavailable" in body["gap_convention"]
+
+
+async def test_a_step_reached_without_its_predecessor_is_not_clamped_to_one(
+    funnel_engine: AsyncEngine, database_url: str
+) -> None:
+    """Two consults against one pre-summary is what the ledger recorded, so it is said.
+
+    Clamping would make a broken step look like a perfect one and hide the very thing
+    the funnel exists to surface.
+    """
+    del funnel_engine
+    steps = _steps_by_name(_funnel_body(database_url))
+
+    assert (steps["pre_summary_ready"]["entered"], steps["consult_complete"]["entered"]) == (
+        1,
+        2,
+    )
+    assert steps["consult_complete"]["conversion_from_previous"] == "2.0000"
+    # And the entry step has no denominator at all rather than a division by zero.
+    assert steps["composer_opened"]["previous_step"] is None
+    assert steps["composer_opened"]["conversion_from_previous"] is None
+
+
+async def test_both_terminal_outcomes_are_successes_and_are_told_apart(
+    funnel_engine: AsyncEngine, database_url: str
+) -> None:
+    """An issued prescription and a closed case are both ends, and neither is a failure."""
+    del funnel_engine
+    body = _funnel_body(database_url)
+    steps = _steps_by_name(body)
+
+    assert steps["prescription_approved"]["terminal"] is True
+    assert steps["case_closed"]["terminal"] is True
+    # Both take their denominator from the last non-terminal step, so a case closed
+    # without a prescription is not a step after an issued one.
+    assert steps["prescription_approved"]["previous_step"] == "prescription_drafted"
+    assert steps["case_closed"]["previous_step"] == "prescription_drafted"
+    assert body["outcomes"]["issued_e_prescriptions"] == 1
+    assert body["outcomes"]["cases_closed"] == 1
+    assert body["outcomes"]["task_success_rate"] == "0.6667"
+
+
+async def test_success_and_abandonment_come_back_over_one_denominator(
+    funnel_engine: AsyncEngine, database_url: str
+) -> None:
+    """Two of three journeys finished and one was abandoned - and both are said.
+
+    The two rates share ``started`` so they can be read against each other, and they
+    are one object so a client cannot be handed one without the other.
+    """
+    del funnel_engine
+    outcomes = _funnel_body(database_url)["outcomes"]
+
+    assert outcomes["started"] == 3
+    assert outcomes["task_success_rate"] == "0.6667"
+    assert outcomes["abandonment_rate"] == "0.3333"
+
+
+async def test_the_funnel_is_filterable_to_the_steps_that_can_end_abandoned(
+    funnel_engine: AsyncEngine, database_url: str
+) -> None:
+    """Isolating the abandoned path is the filter's job: nothing else is on the row."""
+    del funnel_engine
+    body = _funnel_body(database_url, "outcome=abandoned")
+
+    assert body["outcome"] == "abandoned"
+    assert [row["step"] for row in body["steps"]] == [
+        "composer_opened",
+        "consult_complete",
+        "case_closed",
+    ]
+    # Only the abandoned arrivals are counted, so there is no completed figure beside
+    # them to quote instead.
+    assert body["steps"][0]["entered"] == 1
+    assert body["steps"][0]["abandoned"] == 1
+    assert body["steps"][0]["completed"] == 0
+    # The headline rates stay the window's verdict and are not narrowed with the filter.
+    assert body["outcomes"]["started"] == 3
+    assert body["outcomes"]["task_success_rate"] == "0.6667"
+
+
+async def test_each_step_carries_the_trace_behind_its_own_figures(
+    funnel_engine: AsyncEngine, database_url: str
+) -> None:
+    """Story 81: every count here is backed by a journey an operator can open."""
+    del funnel_engine
+    steps = _steps_by_name(_funnel_body(database_url))
+
+    assert steps["composer_opened"]["latest_trace_id"] == "trace-p2-open"
+    assert steps["consult_complete"]["latest_trace_id"] == "trace-d1-consult-2"
+    assert steps["prescription_approved"]["latest_trace_id"] == "trace-d1-approve"
+
+
+async def test_the_funnel_window_excludes_rows_older_than_it(
+    funnel_engine: AsyncEngine, database_url: str
+) -> None:
+    """The seed holds one entry step 34 days back, and no window may count it."""
+    del funnel_engine
+
+    assert _funnel_body(database_url)["outcomes"]["started"] == 3
+    # A one-day window sees only the most recent entry, and still never the stale row.
+    assert _funnel_body(database_url, "days=1")["outcomes"]["started"] == 1
+
+
+async def test_the_funnel_route_refuses_anonymous_and_non_operator_callers(
+    database_url: str,
+) -> None:
+    """This read sits behind the same flat operator requirement as the other reads."""
+    assert _client(database_url).get(FUNNEL_PATH).status_code == 401
+    forbidden = _client(database_url).get(FUNNEL_PATH, headers=_bearer("patient"))
+    assert forbidden.status_code == 403

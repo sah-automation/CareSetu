@@ -32,10 +32,16 @@ from modules.observability.domain.exceptions import (
     AlertAlreadyResolvedError,
     AlertNotFoundError,
 )
+from modules.observability.domain.product import PRODUCT_OUTCOMES
 from modules.observability.facade import (
     ALERT_STATUS_VOCABULARY,
     BUSINESS_PERIODS,
     ERROR_STATUS_VOCABULARY,
+    FUNNEL_DENOMINATOR_CONVENTION,
+    FUNNEL_GAP_CONVENTION,
+    FUNNEL_RATE_CONVENTION,
+    GAP_BASIS_ACTOR,
+    GAP_BASIS_NO_PREDECESSOR,
     ActorSpendDistribution,
     AlertAcknowledgement,
     AlertEntry,
@@ -53,6 +59,9 @@ from modules.observability.facade import (
     DoctorSpend,
     ErrorFeedEntry,
     ErrorFeedPage,
+    FunnelOutcomeTotals,
+    FunnelRead,
+    FunnelStepRow,
     GrafanaDeeplinks,
     LatencyReport,
     LatencyRow,
@@ -100,6 +109,7 @@ ALERTS_PATH = "/v1/operator/observability/alerts"
 ERRORS_PATH = "/v1/operator/observability/errors"
 DEEPLINKS_PATH = "/v1/operator/observability/deeplinks"
 BUSINESS_PATH = "/v1/operator/observability/business"
+FUNNEL_PATH = "/v1/operator/observability/product/funnel"
 
 _ALERT_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 
@@ -551,6 +561,82 @@ _BUSINESS = BusinessRead(
 )
 
 
+#: The funnel stub the route serialises, carrying a walk with both terminals, an
+#: errored step, a re-record and the unmeasured handoff - an operator-facing shape
+#: tested only with nulls would pass even if the fields were wired to the wrong thing.
+_FUNNEL = FunnelRead(
+    funnel="intake",
+    window_start=_FROM_TS,
+    window_end=_TO_TS,
+    window_days=30,
+    outcome=None,
+    denominator_convention=FUNNEL_DENOMINATOR_CONVENTION,
+    rate_convention=FUNNEL_RATE_CONVENTION,
+    gap_convention=FUNNEL_GAP_CONVENTION,
+    steps=[
+        FunnelStepRow(
+            step="composer_opened",
+            event_type="intake.composer_opened",
+            terminal=False,
+            previous_step=None,
+            entered=14,
+            completed=10,
+            abandoned=4,
+            errored=0,
+            re_recorded=0,
+            conversion_from_previous=None,
+            median_gap_from_previous_s=None,
+            gap_samples=0,
+            gap_basis=GAP_BASIS_NO_PREDECESSOR,
+            latest_trace_id="trace-entered",
+        ),
+        FunnelStepRow(
+            step="intake_captured",
+            event_type="intake.captured",
+            terminal=False,
+            previous_step="composer_opened",
+            entered=12,
+            completed=10,
+            abandoned=0,
+            # A degraded fallback scored as an error, never as a quiet abandonment.
+            errored=2,
+            re_recorded=0,
+            conversion_from_previous=Decimal("0.8571"),
+            median_gap_from_previous_s=Decimal("94.5"),
+            gap_samples=9,
+            gap_basis=GAP_BASIS_ACTOR,
+            latest_trace_id="trace-captured",
+        ),
+        FunnelStepRow(
+            step="prescription_approved",
+            event_type="prescription.approved",
+            terminal=True,
+            previous_step="prescription_drafted",
+            entered=3,
+            completed=3,
+            abandoned=0,
+            errored=0,
+            re_recorded=0,
+            conversion_from_previous=Decimal("0.6000"),
+            median_gap_from_previous_s=Decimal("480.5"),
+            gap_samples=3,
+            gap_basis=GAP_BASIS_ACTOR,
+            latest_trace_id="trace-approved",
+        ),
+    ],
+    outcomes=FunnelOutcomeTotals(
+        started=14,
+        task_success_rate=Decimal("0.3571"),
+        abandonment_rate=Decimal("0.3571"),
+        issued_e_prescriptions=3,
+        cases_closed=2,
+        abandoned=5,
+        errored=3,
+        re_recorded=3,
+    ),
+)
+
+
 class StubObservabilityFacade:
     """Facade stand-in recording the calls each route made.
 
@@ -581,6 +667,7 @@ class StubObservabilityFacade:
         self.error_feed_calls: list[tuple[int, int, str | None, int]] = []
         self.deeplink_settings: list[dict[str, Any]] = []
         self.business_periods: list[str] = []
+        self.funnel_calls: list[tuple[int, str | None]] = []
 
     async def get_cost_summary(self) -> CostSummary:
         self.summary_calls += 1
@@ -664,6 +751,10 @@ class StubObservabilityFacade:
     async def get_business(self, *, period: str) -> BusinessRead:
         self.business_periods.append(period)
         return _BUSINESS.model_copy(update={"period": period})
+
+    async def get_funnel(self, *, days: int, outcome: str | None = None) -> FunnelRead:
+        self.funnel_calls.append((days, outcome))
+        return _FUNNEL.model_copy(update={"window_days": days, "outcome": outcome})
 
     def get_deeplinks(
         self,
@@ -1710,6 +1801,136 @@ def test_the_business_period_gate_matches_the_facade_vocabulary() -> None:
     assert set(rendered) == {"today", "week_to_date", "month_to_date"}
 
 
+# ------------------------------------------------------------------- funnel (#740)
+
+
+def test_the_funnel_route_defaults_to_thirty_days_with_no_outcome_filter() -> None:
+    """A panel opened without parameters is asking how the last month has gone."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(FUNNEL_PATH, headers=_bearer(_token()))
+
+    assert response.status_code == 200
+    assert facade.funnel_calls == [(30, None)]
+
+
+def test_the_funnel_route_passes_the_window_and_the_outcome_through() -> None:
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(f"{FUNNEL_PATH}?days=7&outcome=abandoned", headers=_bearer(_token()))
+
+    assert response.status_code == 200
+    assert facade.funnel_calls == [(7, "abandoned")]
+
+
+@pytest.mark.parametrize("outcome", PRODUCT_OUTCOMES)
+def test_every_registered_outcome_is_filterable(outcome: str) -> None:
+    """The filter accepts the registry's whole vocabulary, and each one is an answer."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(f"{FUNNEL_PATH}?outcome={outcome}", headers=_bearer(_token()))
+
+    assert response.status_code == 200
+    assert facade.funnel_calls == [(30, outcome)]
+
+
+def test_an_outcome_outside_the_vocabulary_is_refused_at_the_edge() -> None:
+    """A misspelled outcome would 200 with an empty funnel, which reads as good news."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(f"{FUNNEL_PATH}?outcome=dropped", headers=_bearer(_token()))
+
+    assert response.status_code == 422
+    assert facade.funnel_calls == []
+
+
+@pytest.mark.parametrize("days", [0, 366])
+def test_a_window_outside_the_bounds_is_refused_at_the_edge(days: int) -> None:
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(f"{FUNNEL_PATH}?days={days}", headers=_bearer(_token()))
+
+    assert response.status_code == 422
+    assert facade.funnel_calls == []
+
+
+def test_the_funnel_route_returns_success_and_abandonment_in_one_body() -> None:
+    """The two figures must be impossible to take apart: they share one object."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    body = client.get(FUNNEL_PATH, headers=_bearer(_token())).json()
+
+    outcomes = body["outcomes"]
+    assert outcomes["task_success_rate"] == "0.3571"
+    assert outcomes["abandonment_rate"] == "0.3571"
+    assert outcomes["started"] == 14
+    # Both terminal ends are reported apart, and both are successes.
+    assert outcomes["issued_e_prescriptions"] == 3
+    assert outcomes["cases_closed"] == 2
+
+
+def test_the_funnel_route_returns_the_conventions_the_figures_rest_on() -> None:
+    """A client drawing the funnel has to be able to say what its numbers mean."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    body = client.get(FUNNEL_PATH, headers=_bearer(_token())).json()
+
+    assert body["denominator_convention"] == FUNNEL_DENOMINATOR_CONVENTION
+    assert body["rate_convention"] == FUNNEL_RATE_CONVENTION
+    assert body["gap_convention"] == FUNNEL_GAP_CONVENTION
+
+
+def test_the_funnel_route_returns_the_steps_with_their_gaps_and_traces() -> None:
+    """Per-step counts, per-step gap, and the trace behind them - all on one row."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    body = client.get(FUNNEL_PATH, headers=_bearer(_token())).json()
+
+    captured = body["steps"][1]
+    assert captured["step"] == "intake_captured"
+    assert (captured["entered"], captured["completed"], captured["errored"]) == (12, 10, 2)
+    assert captured["median_gap_from_previous_s"] == "94.5"
+    assert captured["gap_basis"] == GAP_BASIS_ACTOR
+    assert captured["latest_trace_id"] == "trace-captured"
+    # The entry step has nothing before it, so both are absent rather than zero.
+    assert body["steps"][0]["previous_step"] is None
+    assert body["steps"][0]["conversion_from_previous"] is None
+
+
+def test_the_funnel_outcome_gate_matches_the_registry_vocabulary() -> None:
+    """The edge gate and the registry's vocabulary are written twice, so tie them here.
+
+    FastAPI needs a static ``Literal`` to render the accepted values into OpenAPI, so
+    this route cannot derive its gate from ``PRODUCT_OUTCOMES``. That makes adding an
+    outcome two edits, and this is what makes it two edits rather than a silent drift:
+    read the enum off the rendered schema and compare it to the one place the closed
+    vocabulary is written down.
+    """
+    client = _client()
+
+    schema = client.get("/openapi.json").json()
+    outcome_param = next(
+        parameter
+        for parameter in schema["paths"][FUNNEL_PATH]["get"]["parameters"]
+        if parameter["name"] == "outcome"
+    )
+    # An OPTIONAL filter renders as a nullable enum: one branch carrying the whole
+    # vocabulary and one for the null, so the values are read off the branch.
+    rendered = next(
+        branch["enum"] for branch in outcome_param["schema"]["anyOf"] if "enum" in branch
+    )
+
+    assert tuple(rendered) == PRODUCT_OUTCOMES
+
+
 # ------------------------------------------------------------------ refuses
 
 
@@ -1728,6 +1949,7 @@ _ALL_PATHS = [
     ERRORS_PATH,
     DEEPLINKS_PATH,
     BUSINESS_PATH,
+    FUNNEL_PATH,
 ]
 
 
@@ -1771,6 +1993,7 @@ def _facade_untouched(facade: StubObservabilityFacade) -> bool:
         and facade.error_feed_calls == []
         and facade.deeplink_settings == []
         and facade.business_periods == []
+        and facade.funnel_calls == []
     )
 
 

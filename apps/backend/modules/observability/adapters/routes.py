@@ -81,6 +81,7 @@ from modules.observability.facade import (
     CostTrend,
     Deeplinks,
     ErrorFeedPage,
+    FunnelRead,
     LatencyReport,
     ObservabilityFacade,
     Overview,
@@ -182,6 +183,17 @@ _LinkFilter = Annotated[str | None, Query(max_length=MAX_KEY_LENGTH)]
 #: :data:`~modules.observability.facade.BUSINESS_PERIODS` constants, and
 #: ``test_the_business_period_gate_matches_the_facade_vocabulary`` asserts the two agree.
 _BusinessPeriod = Annotated[Literal["today", "week_to_date", "month_to_date"], Query()]
+
+#: The outcomes ``/product/funnel`` accepts, spelled as a static ``Literal`` for the
+#: reason :data:`_ErrorStatus` is - FastAPI renders the accepted values into the
+#: OpenAPI schema and refuses a typo at the edge. A misspelled outcome would otherwise
+#: 200 with an empty funnel, which reads as "nobody is being abandoned" rather than as
+#: a bad query. The values are the registry's own ``PRODUCT_OUTCOMES`` in closed
+#: order, and ``test_the_funnel_outcome_gate_matches_the_registry_vocabulary``
+#: asserts the two agree so the duplication cannot drift.
+_FunnelOutcome = Annotated[
+    Literal["completed", "abandoned", "errored", "re_recorded"] | None, Query()
+]
 
 _Page = Annotated[int, Query(ge=1)]
 _PageSize = Annotated[int, Query(ge=1, le=MAX_ALERT_PAGE_SIZE)]
@@ -595,6 +607,56 @@ async def read_errors(
     return await _facade(request).get_error_feed(
         page=page, page_size=page_size, status=error_status, minutes=minutes
     )
+
+
+@router.get(
+    "/v1/operator/observability/product/funnel",
+    response_model=FunnelRead,
+    status_code=status.HTTP_200_OK,
+    summary="Read the intake funnel, step by step, with its outcomes and gaps (operator only)",
+)
+async def read_product_funnel(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_operator)],
+    days: _Window = DEFAULT_WINDOW_DAYS,
+    outcome: _FunnelOutcome = None,
+) -> FunnelRead:
+    """Is the product working? - the funnel from the moment a patient opened the composer.
+
+    One response carries the four things that only mean anything together: how many
+    arrived at each step, how they left it (``completed``, ``abandoned``, ``errored``,
+    and ``re_recorded`` for a corrected attempt), how long they thought between this
+    step and the last, and whether the workflow ended in an issued e-prescription or a
+    closed case. A workflow that dies silently at transcription and one that runs to a
+    completed prescription stop looking identical without this.
+
+    **Success rate and abandonment rate ride one block.** They are two halves of the
+    same verdict over the same ``started``, and a client that can be handed either one
+    without the other will eventually quote it alone.
+
+    ``outcome`` narrows the STEPS to those whose declared vocabulary holds that
+    outcome - so ``outcome=abandoned`` is the abandoned path on its own - and narrows
+    each reported step's counts to that outcome too, so nothing else is on the row to
+    quote instead. It deliberately does not narrow the headline rates: those are the
+    window's verdict, and narrowing one of them to a single outcome would leave two
+    rates measured over two different populations.
+
+    A step's conversion is over the nearest preceding NON-TERMINAL step, which is why
+    both ``prescription_approved`` and ``case_closed`` count as successes from
+    ``prescription_drafted``: a case closed without a prescription is a completed
+    consultation, not a drop-off. The conventions behind the conversion, the rates and
+    the gap are carried in the response (``denominator_convention``,
+    ``rate_convention``, ``gap_convention``) rather than promised here, because a client
+    rendering the numbers has to be able to say what they mean.
+
+    The median gap is ``null`` - with ``gap_basis`` saying ``unavailable`` - for the
+    handoff from the patient's intake into the doctor's consult, because those two
+    steps share no key the ledger stores today, and ``no_predecessor`` on the entry
+    step, which has nothing before it to measure from. Both are reported as unmeasured
+    rather than as zero seconds.
+    """
+    del principal
+    return await _facade(request).get_funnel(days=days, outcome=outcome)
 
 
 @router.get(

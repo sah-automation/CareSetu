@@ -39,6 +39,12 @@ from modules.observability.facade import (
     BUSINESS_PERIOD_WEEK,
     DEFAULT_ERROR_WINDOW_MINUTES,
     ERROR_STATUS_VOCABULARY,
+    FUNNEL_DENOMINATOR_CONVENTION,
+    FUNNEL_GAP_CONVENTION,
+    FUNNEL_RATE_CONVENTION,
+    GAP_BASIS_ACTOR,
+    GAP_BASIS_NO_PREDECESSOR,
+    GAP_BASIS_UNAVAILABLE,
     MAX_BUSINESS_TOP_ACTORS,
     UNAVAILABLE_REASONS,
     UNAVAILABLE_REVENUE_NOT_CAPTURED,
@@ -55,6 +61,7 @@ from modules.observability.facade import (
     query_cost_summary,
     query_cost_trend,
     query_error_feed,
+    query_funnel,
     query_health,
     query_latency,
     query_overview,
@@ -1601,6 +1608,346 @@ async def test_the_error_feed_reads_the_observability_schema_only() -> None:
 
     for index in (0, 1):
         assert _from_target(connection, index) == ("observability.observability_error_events")
+
+
+# ------------------------------------------------------------------ funnel (#740)
+
+#: The instant the funnel read is pinned at, and the start of its thirty-day window.
+_FUNNEL_NOW = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
+_FUNNEL_FROM_TS = _FUNNEL_NOW - timedelta(days=30)
+
+#: One aggregate row per ``(step, outcome)`` in the window: what the ledger recorded.
+#: Four patients reach ``intake_captured``, two are handed on, three come back to
+#: ``pre_summary_ready`` because the first one degraded, two are corrected, one
+#: consult ends without a prescription and one with one. It is deliberately lumpy:
+#: every branch the acceptance criteria name appears in it.
+_FUNNEL_COUNT_ROWS: list[dict[str, object]] = [
+    {"step": "composer_opened", "outcome": "completed", "events": 10},
+    {"step": "composer_opened", "outcome": "abandoned", "events": 4},
+    {"step": "intake_captured", "outcome": "completed", "events": 10},
+    {"step": "intake_captured", "outcome": "errored", "events": 2},
+    {"step": "pre_summary_ready", "outcome": "completed", "events": 6},
+    {"step": "pre_summary_ready", "outcome": "errored", "events": 1},
+    {"step": "re_recorded", "outcome": "re_recorded", "events": 3},
+    {"step": "consult_complete", "outcome": "completed", "events": 5},
+    {"step": "consult_complete", "outcome": "abandoned", "events": 1},
+    {"step": "prescription_drafted", "outcome": "completed", "events": 4},
+    {"step": "prescription_drafted", "outcome": "errored", "events": 1},
+    {"step": "prescription_approved", "outcome": "completed", "events": 3},
+    {"step": "case_closed", "outcome": "completed", "events": 2},
+    # Two cases that ended closed under an error: a broken end, not a finished
+    # consultation, and the reason the success rate counts COMPLETED rows only.
+    {"step": "case_closed", "outcome": "errored", "events": 2},
+]
+
+#: The most recent trace per step, as the ledger's own ``DISTINCT ON`` returns them.
+_FUNNEL_TRACE_ROWS: list[dict[str, object]] = [
+    {"step": "composer_opened", "trace_id": "trace-entered"},
+    {"step": "intake_captured", "trace_id": "trace-captured"},
+    {"step": "pre_summary_ready", "trace_id": "trace-summary"},
+    {"step": "re_recorded", "trace_id": "trace-rerecord"},
+    {"step": "consult_complete", "trace_id": "trace-consult"},
+    {"step": "prescription_drafted", "trace_id": "trace-drafted"},
+    {"step": "prescription_approved", "trace_id": "trace-approved"},
+    {"step": "case_closed", "trace_id": "trace-closed"},
+]
+
+
+def _gap(samples: int, median: float | None) -> list[dict[str, object]]:
+    """One step pair's ``(samples, median_gap_s)`` aggregate row."""
+    return [{"samples": samples, "median_gap_s": median}]
+
+
+#: The step pairs the ledger can join on, in the order the read asks for them. The
+#: entry step has no predecessor, and the patient-to-doctor handoff shares no key the
+#: ledger stores, so neither spends a gap query.
+_FUNNEL_GAP_STEPS = [
+    "intake_captured",
+    "pre_summary_ready",
+    "prescription_drafted",
+    "prescription_approved",
+    "case_closed",
+]
+#: ``step -> (paired rows, median gap in seconds)`` for those pairs. The medians are
+#: seconds of THINKING time - a patient reading their own answers, a doctor writing
+#: out a prescription - which is the whole reason the read measures the gap at all.
+_FUNNEL_GAPS: dict[str, tuple[int, float | None]] = {
+    "intake_captured": (9, 94.53),
+    "pre_summary_ready": (6, 12.04),
+    "prescription_drafted": (5, 640.0),
+    "prescription_approved": (3, 480.5),
+    "case_closed": (2, 900.25),
+}
+
+
+async def _funnel(
+    *,
+    counts: list[dict[str, object]] | None = None,
+    traces: list[dict[str, object]] | None = None,
+    outcome: str | None = None,
+    window_days: int = 30,
+    gaps: dict[str, tuple[int, float | None]] | None = None,
+) -> tuple[object, AsyncMock]:
+    """Run the funnel read over a mocked connection, in the order it queries.
+
+    The read asks its questions in a fixed order - the counts, the traces, then one
+    gap aggregate per joinable step pair - so a caller can hand back the results per
+    step name rather than counting them.
+    """
+    walked = _FUNNEL_GAPS if gaps is None else gaps
+    connection = _connection(
+        counts if counts is not None else _FUNNEL_COUNT_ROWS,
+        traces if traces is not None else _FUNNEL_TRACE_ROWS,
+        *[_gap(*walked[step]) for step in _FUNNEL_GAP_STEPS if step in walked],
+    )
+    view = await query_funnel(connection, outcome=outcome, now=_FUNNEL_NOW, window_days=window_days)
+    return view, connection
+
+
+async def test_the_funnel_runs_the_whole_walk_in_registry_order() -> None:
+    """Entry to both terminals - and the re-record is not a stage of the walk."""
+    view, _ = await _funnel()
+
+    assert [row.step for row in view.steps] == [
+        "composer_opened",
+        "intake_captured",
+        "pre_summary_ready",
+        "consult_complete",
+        "prescription_drafted",
+        "prescription_approved",
+        "case_closed",
+    ]
+    assert [row.terminal for row in view.steps[-2:]] == [True, True]
+    assert "re_recorded" not in [row.step for row in view.steps]
+    assert view.outcomes.re_recorded == 3
+
+
+async def test_each_step_is_counted_and_split_by_the_outcome_that_ended_it() -> None:
+    """Step-to-step conversion is only computable if entered and completed are both there."""
+    view, _ = await _funnel()
+
+    (opened, captured) = view.steps[0], view.steps[1]
+    assert (opened.entered, opened.completed, opened.abandoned, opened.errored) == (14, 10, 4, 0)
+    # The degraded capture scored errored, never as a quiet abandonment.
+    assert (captured.entered, captured.completed, captured.errored, captured.abandoned) == (
+        12,
+        10,
+        2,
+        0,
+    )
+    assert captured.conversion_from_previous == Decimal("0.8571")
+
+
+async def test_a_step_reached_without_its_predecessor_reports_a_conversion_above_one() -> None:
+    """Five summaries against three captures is a fact about the window, not a clamp."""
+    view, _ = await _funnel(
+        counts=[
+            {"step": "intake_captured", "outcome": "completed", "events": 3},
+            {"step": "pre_summary_ready", "outcome": "completed", "events": 5},
+        ]
+    )
+
+    summary = view.steps[2]
+    assert (summary.entered, summary.previous_step) == (5, "intake_captured")
+    assert summary.conversion_from_previous == Decimal("1.6667")
+
+
+async def test_both_terminals_convert_from_the_last_non_terminal_step() -> None:
+    """An issued prescription and a closed case are two ends, not two steps in a line."""
+    view, _ = await _funnel()
+
+    approved, closed = view.steps[-2], view.steps[-1]
+    assert (approved.previous_step, closed.previous_step) == (
+        "prescription_drafted",
+        "prescription_drafted",
+    )
+    assert approved.conversion_from_previous == Decimal("0.6000")
+    # Four rows at the terminal step - two completed, two errored - over five drafted.
+    assert closed.conversion_from_previous == Decimal("0.8000")
+
+
+async def test_success_and_abandonment_come_back_in_one_block_over_one_denominator() -> None:
+    """The two figures are one verdict; either alone would be the wrong half of it."""
+    view, _ = await _funnel()
+
+    outcomes = view.outcomes
+    assert outcomes.started == 14
+    # Five COMPLETED terminal rows: three prescriptions issued and two cases closed.
+    # The two cases that ended under an error are NOT successes, though they arrived.
+    assert (outcomes.issued_e_prescriptions, outcomes.cases_closed) == (3, 2)
+    assert outcomes.task_success_rate == Decimal("0.3571")
+    assert outcomes.abandonment_rate == Decimal("0.3571")
+
+
+async def test_a_case_that_ended_closed_under_an_error_is_not_a_completed_consultation() -> None:
+    """Both ends are legitimate; one of them happening BROKENLY is not a success."""
+    view, _ = await _funnel()
+
+    closed = view.steps[-1]
+    assert (closed.entered, closed.completed, closed.errored) == (4, 2, 2)
+    assert view.outcomes.cases_closed == 2
+
+
+async def test_a_reattempt_is_counted_as_a_correction_and_never_as_a_drop_off() -> None:
+    """Decision 25 as a shape: three re-records, and no abandonment to match them with."""
+    view, _ = await _funnel()
+
+    assert view.outcomes.re_recorded == 3
+    assert view.outcomes.abandoned == 5
+
+
+async def test_the_funnel_is_filterable_to_the_steps_that_can_end_abandoned() -> None:
+    """Isolating the abandoned path is the filter's whole job - and nothing else is on the row."""
+    view, _ = await _funnel(outcome="abandoned")
+
+    assert view.outcome == "abandoned"
+    # Only the three steps whose declared vocabulary holds an abandonment, and each
+    # counts abandoned arrivals alone, so there is no second figure to quote instead.
+    assert [row.step for row in view.steps] == [
+        "composer_opened",
+        "consult_complete",
+        "case_closed",
+    ]
+    (opened,) = [row for row in view.steps if row.step == "composer_opened"]
+    assert (opened.entered, opened.abandoned, opened.completed) == (4, 4, 0)
+    # The headline rates are the window's verdict and do not narrow with the filter.
+    assert view.outcomes.started == 14
+    assert view.outcomes.task_success_rate == Decimal("0.3571")
+
+
+async def test_filtering_by_the_rerecord_outcome_reports_the_rerecord_row() -> None:
+    """An accepted outcome must never be a filter that returns an empty funnel."""
+    view, _ = await _funnel(outcome="re_recorded")
+
+    assert [row.step for row in view.steps] == ["re_recorded"]
+    # Its ``entered`` is its own rows, not zero beside a count of three.
+    assert (view.steps[0].entered, view.steps[0].re_recorded) == (3, 3)
+
+
+async def test_each_step_carries_the_trace_behind_its_own_figures() -> None:
+    """Story 81: a funnel number a reader can walk back into a real journey."""
+    view, _ = await _funnel()
+
+    assert [row.latest_trace_id for row in view.steps] == [
+        "trace-entered",
+        "trace-captured",
+        "trace-summary",
+        "trace-consult",
+        "trace-drafted",
+        "trace-approved",
+        "trace-closed",
+    ]
+
+
+async def test_the_median_gap_between_two_steps_is_reported_with_its_sample_size() -> None:
+    """Thinking time, not machine time - and how many pairs it was taken over."""
+    view, _ = await _funnel()
+
+    captured = view.steps[1]
+    assert (captured.median_gap_from_previous_s, captured.gap_samples) == (
+        Decimal("94.5"),
+        9,
+    )
+    assert captured.gap_basis == GAP_BASIS_ACTOR
+
+
+async def test_the_handoff_from_the_patient_to_the_doctor_reports_no_gap_rather_than_a_zero() -> (
+    None
+):
+    """Those two steps share no key the ledger stores; a zero would read as instant."""
+    view, connection = await _funnel()
+
+    consult = view.steps[3]
+    assert (consult.median_gap_from_previous_s, consult.gap_samples) == (None, 0)
+    assert consult.gap_basis == GAP_BASIS_UNAVAILABLE
+    # And no gap query is spent on a pair the ledger cannot join: the read asks for
+    # the four pairs it can measure and never for the handoff.
+    asked = [_compiled(connection, index) for index in range(2, connection.execute.await_count)]
+    assert not any("arrived.step = 'consult_complete'" in statement for statement in asked)
+
+
+async def test_an_unpaired_step_reports_no_median_rather_than_a_zero_second_gap() -> None:
+    """No predecessor row inside the window is a fact about the window, not a fast step."""
+    view, _ = await _funnel(gaps={**_FUNNEL_GAPS, "intake_captured": (0, None)})
+
+    captured = view.steps[1]
+    assert captured.median_gap_from_previous_s is None
+    assert (captured.gap_samples, captured.gap_basis) == (0, GAP_BASIS_ACTOR)
+
+
+async def test_the_entry_step_says_it_has_no_predecessor_rather_than_no_key() -> None:
+    """ "Unavailable" means the ledger cannot join the pair; the entry step has no pair."""
+    view, _ = await _funnel()
+
+    opened = view.steps[0]
+    assert (opened.previous_step, opened.gap_basis) == (None, GAP_BASIS_NO_PREDECESSOR)
+    assert (opened.median_gap_from_previous_s, opened.gap_samples) == (None, 0)
+
+
+async def test_the_denominator_gap_and_rate_conventions_travel_with_the_numbers() -> None:
+    """A client rendering this has to be able to say what the figures mean."""
+    view, _ = await _funnel()
+
+    assert view.denominator_convention == FUNNEL_DENOMINATOR_CONVENTION
+    assert view.gap_convention == FUNNEL_GAP_CONVENTION
+    assert view.rate_convention == FUNNEL_RATE_CONVENTION
+    assert "non-terminal" in view.denominator_convention
+    assert "unavailable" in view.gap_convention
+    assert "started" in view.rate_convention
+
+
+async def test_the_read_echoes_the_window_it_was_asked_for() -> None:
+    """A panel drawing a funnel should not have to keep its own clock to label it."""
+    view, _ = await _funnel(window_days=7)
+
+    assert (view.window_start, view.window_end, view.window_days) == (
+        _FUNNEL_NOW - timedelta(days=7),
+        _FUNNEL_NOW,
+        7,
+    )
+
+
+async def test_a_window_that_ends_before_it_starts_is_refused() -> None:
+    """The one place the window is validated, so no caller can ask for the impossible."""
+    with pytest.raises(ValueError, match="window_days must be positive"):
+        await query_funnel(_connection(), now=_FUNNEL_NOW, window_days=0)
+
+
+async def test_an_outcome_no_step_declares_is_refused_rather_than_answering_zero() -> None:
+    """A funnel of zeroes reads as "nothing is being abandoned" - the wrong answer."""
+    with pytest.raises(ValueError, match="unknown funnel outcome"):
+        await query_funnel(_connection(), outcome="dropped", now=_FUNNEL_NOW, window_days=30)
+
+
+@pytest.mark.filterwarnings("ignore::sqlalchemy.exc.SADeprecationWarning")
+async def test_the_funnel_reads_the_observability_schema_only() -> None:
+    """ADR-0003 module isolation, for the eleventh read: every gap is the same table."""
+    _, connection = await _funnel()
+
+    assert connection.execute.await_count == 2 + len(_FUNNEL_GAPS)
+    for index in range(connection.execute.await_count):
+        statement = _compiled(connection, index)
+        assert "observability.observability_product_events" in statement
+        assert "FROM observability_product_events" not in statement
+    # The gap is a median over the pairs themselves, taken where they are: pulling one
+    # row per ledger row into the process would make the read cost scale with traffic.
+    assert "percentile_cont(0.5) WITHIN GROUP" in _compiled(connection, 2)
+    assert _from_target(connection, 0) == "observability.observability_product_events"
+
+
+async def test_the_facade_reads_the_funnel_and_owns_the_clock() -> None:
+    """The route owns the default and the facade owns ``now``, like every other read."""
+    connection = _connection(
+        _FUNNEL_COUNT_ROWS,
+        _FUNNEL_TRACE_ROWS,
+        *[_gap(*_FUNNEL_GAPS[step]) for step in _FUNNEL_GAP_STEPS],
+    )
+    facade = ObservabilityFacade(_engine(connection))
+
+    view = await facade.get_funnel(days=30, now=_FUNNEL_NOW)
+
+    assert view.funnel == "intake"
+    assert view.window_end == _FUNNEL_NOW
 
 
 # --------------------------------------------------------------- deeplinks

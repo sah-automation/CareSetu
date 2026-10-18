@@ -86,11 +86,34 @@ PRODUCT_OUTCOME_RE_RECORDED: ProductOutcome = "re_recorded"
 #: migration's CHECK constraint by eye.
 ProductOutcome = Literal["completed", "abandoned", "errored", "re_recorded"]
 
+#: The same vocabulary as an ORDERED TUPLE, for the places that have to enumerate it
+#: rather than type it: the ``/product/funnel`` route's ``Literal`` cannot be built
+#: from the ``Literal`` above, and a test asserts the two agree so a fifth state
+#: cannot reach the wire without reaching this list first. The migration's CHECK
+#: constraint is the third copy and this one is the one a reader can check by eye
+#: against :data:`PRODUCT_OUTCOME_*`.
+PRODUCT_OUTCOMES: tuple[ProductOutcome, ...] = (
+    PRODUCT_OUTCOME_COMPLETED,
+    PRODUCT_OUTCOME_ABANDONED,
+    PRODUCT_OUTCOME_ERRORED,
+    PRODUCT_OUTCOME_RE_RECORDED,
+)
+
 #: The funnel the registry describes today: a patient opening the composer through
 #: to a prescription approved or the case closed. Declared as data rather than
 #: threaded through every entry so a second funnel is a second constant, not a
 #: second rewrite.
 FUNNEL_INTAKE = "intake"
+
+#: The two steps that legitimately END a workflow, named rather than matched on
+#: position. A funnel that ran to an issued e-prescription and a funnel that ended
+#: with the case closed are BOTH successes, and a reader has to be able to tell them
+#: apart rather than see one folded into the other's number (#717 decision 23). They
+#: are named because the two outcomes are a business fact - an issued prescription and
+#: a closed case are different things a practice counts - and not a position in a
+#: list, so a step inserted before them must not silently relabel them.
+FUNNEL_TERMINAL_PRESCRIPTION = "prescription_approved"
+FUNNEL_TERMINAL_CASE_CLOSED = "case_closed"
 
 
 class ProductStepPayload(BaseModel):
@@ -150,6 +173,14 @@ class ProductStep:
     #: matching reference on its mirror, so an active-actor count can never be built
     #: from a row that cannot say who it was.
     actor_kind: ActorKind | None = None
+    #: Whether this step ENDS a workflow rather than leading to another one. Declared
+    #: per step because the intake funnel has TWO legitimate ends - the prescription
+    #: approved and the case closed - and a reader walking the funnel needs to know
+    #: that they branch from the last step before them rather than sit in a line
+    #: behind each other. Without it, ``case_closed`` would be scored as a conversion
+    #: of ``prescription_approved``, and a case closed without one would read as the
+    #: step after an issued prescription (#717 decision 23).
+    terminal: bool = False
 
 
 #: The live registry, in FUNNEL order - registration order IS the order a patient
@@ -459,6 +490,10 @@ register_product_step(
         outcome=PRODUCT_OUTCOME_COMPLETED,
         allowed_outcomes=(PRODUCT_OUTCOME_COMPLETED,),
         actor_kind="doctor",
+        # One of the funnel's two legitimate ENDS: the prescription was issued. A step
+        # that declares only ``completed`` cannot end any other way, which is what
+        # makes it a clean success terminal rather than a branch.
+        terminal=True,
     )
 )
 
@@ -474,6 +509,10 @@ register_product_step(
             PRODUCT_OUTCOME_ERRORED,
         ),
         actor_kind="doctor",
+        # The OTHER legitimate end, and a case closed without an e-prescription is a
+        # completed consultation rather than a drop-off. It is terminal for the same
+        # reason ``prescription_approved`` is: nothing follows it in the walk.
+        terminal=True,
     )
 )
 
@@ -494,3 +533,78 @@ register_product_step(
         actor_kind=None,
     )
 )
+
+
+# ------------------------------------------------------------- the funnel's shape
+
+
+def registered_steps(funnel: str = FUNNEL_INTAKE) -> tuple[ProductStep, ...]:
+    """Every step registered for ``funnel``, in registration order.
+
+    The whole registry as one question asks it: :func:`funnel_stages` answers "which
+    steps does a reader walk" and this answers "which steps exist", and a reader that
+    needs the second - to count every row the ledger holds for the funnel, including
+    the ones no journey walks through - must not re-derive it by filtering the registry
+    itself.
+    """
+    return tuple(step for (scope, _), step in PRODUCT_STEP_REGISTRY.items() if scope == funnel)
+
+
+def funnel_stages(funnel: str = FUNNEL_INTAKE) -> tuple[ProductStep, ...]:
+    """The steps a reader WALKS, in the order they are walked.
+
+    Not the same list as :func:`product_steps`, for two reasons, and both of them are
+    what keeps a funnel from scoring something twice:
+
+    * a step that records the ``re_recorded`` outcome is not a stage. The re-record is
+      a correction of an attempt, not a stage the attempt passes through, so counting
+      it as one would either add a stage after every terminal or push the walk's end
+      past the ends of the journey. It stays registered - its rows are still written
+      and still counted - and a read reports it on its own;
+    * the terminal steps stay IN the walk, because a funnel whose reader cannot see
+      the step a workflow ended on cannot tell a completed consultation from an
+      abandoned one. They are flagged ``terminal`` rather than removed, so
+      :func:`stage_predecessor` knows they branch rather than queue.
+
+    Registration order is walk order, the same claim :func:`product_steps` makes and
+    for the same reason: the registry IS the funnel, so a step inserted in the wrong
+    place is a one-line mistake rather than a set of queries that quietly disagree.
+    """
+    return tuple(
+        step for step in registered_steps(funnel) if step.outcome != PRODUCT_OUTCOME_RE_RECORDED
+    )
+
+
+def stage_predecessor(
+    step: ProductStep, stages: Sequence[ProductStep] | None = None
+) -> ProductStep | None:
+    """The step whose count is this one's conversion denominator, or ``None``.
+
+    **This is the denominator convention of the funnel read, stated in one place
+    rather than chosen per query.** A step's denominator is the nearest step BEFORE it
+    in the walk that is not itself terminal - so the first stage has none, and both
+    terminals share the last non-terminal stage as theirs.
+
+    Terminal steps are skipped rather than used because they end a branch: with
+    ``prescription_approved`` as the denominator of ``case_closed``, every case closed
+    without an issued prescription would read as a step after one, and the funnel
+    would score a legitimate end as a drop-off. That is the conflation decision 23
+    exists to prevent, and it is why ``terminal`` is declared on the step rather than
+    inferred from position.
+
+    The convention does NOT require a step to have passed its predecessor. The ledger
+    records what happened, not a promise about order, and a step reached without the
+    previous one produces a conversion above ``1`` rather than being clamped - a
+    number above one is a fact about the window, and silently capping it is how a
+    funnel starts lying.
+    """
+    walk = tuple(stages) if stages is not None else funnel_stages(step.funnel)
+    names = [stage.step for stage in walk]
+    try:
+        index = names.index(step.step)
+    except ValueError:
+        return None
+    for candidate in reversed(walk[:index]):
+        if not candidate.terminal:
+            return candidate
+    return None

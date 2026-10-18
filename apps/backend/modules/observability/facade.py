@@ -104,6 +104,7 @@ from sqlalchemy import (
     Integer,
     cast,
     delete,
+    extract,
     func,
     literal,
     literal_column,
@@ -150,10 +151,22 @@ from modules.observability.domain.exceptions import (
     ProductOutcomeNotAllowed,
 )
 from modules.observability.domain.product import (
+    FUNNEL_INTAKE,
+    FUNNEL_TERMINAL_CASE_CLOSED,
+    FUNNEL_TERMINAL_PRESCRIPTION,
+    PRODUCT_OUTCOME_ABANDONED,
+    PRODUCT_OUTCOME_COMPLETED,
+    PRODUCT_OUTCOME_ERRORED,
+    PRODUCT_OUTCOME_RE_RECORDED,
+    PRODUCT_OUTCOMES,
+    ProductOutcome,
     ProductStep,
     ProductStepPayload,
     duration_ms_of,
+    funnel_stages,
     product_event_keys,
+    registered_steps,
+    stage_predecessor,
 )
 from modules.observability.domain.pseudonym import (
     ACTOR_KIND_DOCTOR,
@@ -377,6 +390,12 @@ __all__ = [
     "DEFAULT_THROUGHPUT_WINDOW_MINUTES",
     "DEFAULT_WINDOW_DAYS",
     "ERROR_STATUS_VOCABULARY",
+    "FUNNEL_DENOMINATOR_CONVENTION",
+    "FUNNEL_GAP_CONVENTION",
+    "FUNNEL_RATE_CONVENTION",
+    "GAP_BASIS_ACTOR",
+    "GAP_BASIS_NO_PREDECESSOR",
+    "GAP_BASIS_UNAVAILABLE",
     "MAX_ACTIVITY_WINDOW_MINUTES",
     "MAX_ALERT_PAGE_SIZE",
     "MAX_BUSINESS_TOP_ACTORS",
@@ -409,6 +428,9 @@ __all__ = [
     "ErrorDrainReport",
     "ErrorFeedEntry",
     "ErrorFeedPage",
+    "FunnelOutcomeTotals",
+    "FunnelRead",
+    "FunnelStepRow",
     "HttpCounterDrainReport",
     "LatencyReport",
     "LatencyRow",
@@ -451,6 +473,7 @@ __all__ = [
     "query_cost_summary",
     "query_cost_trend",
     "query_error_feed",
+    "query_funnel",
     "query_health",
     "query_latency",
     "query_overview",
@@ -1923,6 +1946,184 @@ class ErrorFeedPage(BaseModel):
     window_minutes: int
 
 
+#: How a step's ``entered`` and its conversion relate, in the words a client can put
+#: on screen. Sent rather than documented, because the convention is the one thing a
+#: reader cannot derive from the numbers: two funnels can agree on every count and
+#: still disagree about what a conversion is a fraction OF, and a client that picked
+#: its own convention would silently publish a different product.
+FUNNEL_DENOMINATOR_CONVENTION = (
+    "entered is every ledger row the step wrote in the window that is in scope - every "
+    "outcome when no outcome filter is given, and only that outcome when one is - and "
+    "conversion_from_previous is this step's entered over the entered of the nearest "
+    "preceding non-terminal step, which may exceed 1 where a step was reached without "
+    "passing its predecessor"
+)
+
+#: What the two headline rates divide, which is a different convention from the steps'
+#: and just as un-guessable: the numerator of a rate is the one figure a reader has to
+#: be told, because "abandonment rate" means anything from "of the journeys that
+#: started" to "of the arrivals at each step" and the two disagree whenever anyone
+#: abandons more than once.
+FUNNEL_RATE_CONVENTION = (
+    "both rates divide started, the entry step's entered count: task_success_rate's "
+    "numerator is every COMPLETED row at a terminal step, and abandonment_rate's is "
+    "every abandoned row across the funnel's steps. They are not complementary - a "
+    "journey that abandoned, re-recorded and carried on is counted in both"
+)
+
+#: How the median gap was measured, in the same spirit. A gap with no stated basis
+#: is a gap nobody can defend, and the one the ledger cannot measure today is named
+#: here rather than reported as a zero.
+FUNNEL_GAP_CONVENTION = (
+    "median_gap_from_previous_s pairs each row of a step with the most recent COMPLETED "
+    "row of its predecessor step for the same pseudonymous actor at or before it, "
+    "inside the same window - which on the doctor half of the funnel pairs a doctor's "
+    "own consecutive clinical actions rather than one case's journey, because the "
+    "ledger stores no case identifier to pair on. gap_basis says which key paired them: "
+    "'actor_key' where they share one, 'no_predecessor' where there is no step before "
+    "it, and 'unavailable' where they share none - which today is the "
+    "patient-to-doctor handoff into consult_complete"
+)
+
+#: The ``gap_basis`` values. One says the pair was measured on the actor key, one says
+#: there was nothing before it to measure from, and the last says the ledger holds no
+#: key the two steps share - which is a different fact from a step nobody passed, and
+#: a null median with either of the last two is unmeasured rather than zero.
+GAP_BASIS_ACTOR = "actor_key"
+GAP_BASIS_NO_PREDECESSOR = "no_predecessor"
+GAP_BASIS_UNAVAILABLE = "unavailable"
+
+
+class FunnelStepRow(BaseModel):
+    """One step of the walk: how many arrived, how they ended, how long they took.
+
+    ``entered`` counts EVERY row the step wrote in the window and ``completed``,
+    ``abandoned`` and ``errored`` split it by outcome, so the step's own figures can
+    never describe different populations. A step whose journey was corrected is
+    counted ``re_recorded`` on its own row rather than against either failure
+    outcome, which is decision 25's rule arriving as a shape rather than as prose.
+
+    With an ``outcome`` filter on the read, every one of those counters is narrowed to
+    THAT outcome and the row is the abandoned (or errored, or corrected) arrivals at
+    this step on their own - which is what isolating that path means.
+    :data:`FUNNEL_DENOMINATOR_CONVENTION`, which the response carries verbatim, says
+    so in the same words.
+
+    **``conversion_from_previous`` is not a percentage of successes.** Its denominator
+    is the nearest preceding NON-TERMINAL step's ``entered`` - see
+    :data:`FUNNEL_DENOMINATOR_CONVENTION` - so a step reached without passing its
+    predecessor reports a figure above ``1`` instead of being clamped.
+    ``previous_step`` is in the row so the denominator is readable without walking the
+    list, and is ``null`` on the first stage, whose conversion is ``null`` rather than
+    a division by zero.
+
+    ``median_gap_from_previous_s`` is the THINKING time between the two steps, not
+    the step's own machine time (``duration_ms`` on the ledger row is that, and this
+    read deliberately does not repeat it): the gap pairs this step's row with its
+    predecessor's row for the same actor, so it includes the time a patient spent
+    deciding. ``gap_samples`` says how many pairs the median was taken over, and
+    ``gap_basis`` says what paired them; a ``null`` median with a basis other than
+    ``actor_key`` is unmeasured rather than instant.
+
+    ``latest_trace_id`` is the most recent row's, from the same window as the counts.
+    It is what makes the number defensible: every count here is backed by a journey an
+    operator can open (#717 story 81).
+    """
+
+    step: str
+    event_type: str
+    terminal: bool
+    previous_step: str | None
+    entered: int
+    completed: int
+    abandoned: int
+    errored: int
+    re_recorded: int
+    conversion_from_previous: Decimal | None
+    median_gap_from_previous_s: Decimal | None
+    gap_samples: int
+    gap_basis: str
+    latest_trace_id: str | None
+
+
+class FunnelOutcomeTotals(BaseModel):
+    """Did the workflows finish? Success and abandonment, over ONE denominator.
+
+    **The two rates are one block because they must never be quoted apart.** A reader
+    shown "92% task success" and no abandonment rate concludes the product works;
+    shown "8% abandonment" and no success rate concludes it does not. Both live here,
+    over the same ``started``, so the pair is the answer rather than two numbers a
+    client picks one of.
+
+    Both divide ``started`` - the funnel's entry step's ``entered`` - so they are
+    directly comparable. They are deliberately NOT complementary and their sum need
+    not be ``1``: a workflow that abandons, re-records and carries on to an issued
+    prescription is counted in both figures, which is the honest reading of a funnel
+    measured in arrivals rather than in people. Forcing them to partition would mean
+    choosing which one the re-record belongs to, and decision 25 already refused that
+    choice.
+
+    ``issued_e_prescriptions`` and ``cases_closed`` are reported apart and BOTH count
+    towards ``task_success_rate``: an issued e-prescription and a closed case are two
+    legitimate ends of the same journey, and a shape that folded them together could
+    not tell a practice whether its consultations ended in a prescription or not
+    (#717 decision 23). Both count their COMPLETED rows only - a case closed under an
+    error or abandoned on the way out is not a finished consultation, and scoring it as
+    one would make a broken end look like the good one.
+
+    ``errored`` and ``re_recorded`` ride the same block for the same reason. An
+    ``errored`` count is a degraded fallback the registry scored as an error rather
+    than as a quiet abandonment (decision 24), and a ``re_recorded`` count is a
+    correction rather than a failure of the attempt it replaces (decision 25).
+    """
+
+    started: int
+    task_success_rate: Decimal | None
+    abandonment_rate: Decimal | None
+    issued_e_prescriptions: int
+    cases_closed: int
+    abandoned: int
+    errored: int
+    re_recorded: int
+
+
+class FunnelRead(BaseModel):
+    """The funnel from the moment a patient opened the composer, with its conventions.
+
+    ``steps`` is the walk in order - the entry step through the terminal branch -
+    and each row carries its own completion, abandonment, conversion and gap. The
+    walk is driven from the funnel-step registry rather than restated here, so a step
+    registered tomorrow appears here without a second list to forget.
+
+    ``outcome`` narrows the STEPS to those that can end in that outcome and narrows
+    each reported row to that outcome's own counts, which is how an operator isolates
+    the abandoned path: ``outcome=abandoned`` answers "where do people walk away, and
+    how many of them", with nothing else on the row to quote instead.
+
+    It deliberately does NOT narrow ``outcomes``: success and abandonment are the
+    headline verdict on the whole window, and quoting either of them measured over a
+    different population than the other would be the exact failure
+    :class:`FunnelOutcomeTotals` exists to prevent. The response carries
+    ``denominator_convention``, ``rate_convention`` and ``gap_convention`` because all
+    three are conventions a reader cannot derive from the numbers.
+
+    ``window_start``/``window_end`` echo the instants the figures were read for, and
+    ``window_days`` the span between them, so a client drawing the funnel does not
+    have to keep its own clock to label what it is showing.
+    """
+
+    funnel: str
+    window_start: datetime
+    window_end: datetime
+    window_days: int
+    outcome: str | None
+    denominator_convention: str
+    rate_convention: str
+    gap_convention: str
+    steps: list[FunnelStepRow]
+    outcomes: FunnelOutcomeTotals
+
+
 class GrafanaDeeplinks(BaseModel):
     """The Grafana views, each already narrowed (#736).
 
@@ -2748,6 +2949,409 @@ async def query_error_feed(
         total_count=int(totals["entries"]),
         total_occurrences=int(totals["occurrences"]),
         window_minutes=window_minutes,
+    )
+
+
+#: One-decimal scale of the median step gap (``94.5``, not ``94.5123``). A gap is a
+#: human pause measured in seconds, so a tenth of a second is the resolution worth
+#: spending; the ledger keeps milliseconds and the pairs behind this figure are one
+#: per row, so the extra places would be noise a reader cannot act on.
+_GAP_QUANTUM = Decimal("0.1")
+
+
+def _seconds(value: float) -> Decimal:
+    """An epoch-second gap at the gap scale.
+
+    Quantized rather than formatted, the way :func:`~modules.observability.domain.rollup.ratio`
+    and the spend ranks are: formatting a float through ``.1f`` rounds half to EVEN,
+    which is not the rule any other figure on these surfaces uses.
+    """
+    return Decimal(repr(value)).quantize(_GAP_QUANTUM, rounding=ROUND_HALF_UP)
+
+
+def _gap_basis(step: ProductStep, predecessor: ProductStep | None) -> str:
+    """Which key paired this step with the one before it - or why nothing did.
+
+    Three answers, because "no number" has three different reasons and a reader does
+    something different with each: nothing came before this step at all, something came
+    before it and the ledger cannot join the two, or the pair was measured. Folding the
+    first two into one ``unavailable`` would tell an operator the funnel has no entry
+    step, which is not what happened.
+    """
+    if predecessor is None:
+        return GAP_BASIS_NO_PREDECESSOR
+    return GAP_BASIS_ACTOR if _gap_is_joinable(step, predecessor) else GAP_BASIS_UNAVAILABLE
+
+
+def _gap_is_joinable(step: ProductStep, predecessor: ProductStep) -> bool:
+    """Whether the ledger holds a key these two steps can be paired on.
+
+    The pairing key today is ``actor_key`` (see
+    :func:`_median_step_gap_seconds`), so two steps are joinable exactly when they are
+    attributed to the SAME kind of actor. The intake funnel's three patient steps and
+    its four doctor steps pair within themselves; the handoff from
+    ``pre_summary_ready`` to ``consult_complete`` crosses from the patient to the
+    doctor and shares no key the ledger stores, so its gap is reported as unmeasured.
+
+    This is the seam a future stable session key drops into: when producers publish
+    one, the pairing key becomes ``session_key`` on both sides of this comparison and
+    the handoff measures like every other step, with no change to the shape.
+    """
+    return (
+        step.actor_kind is not None
+        and predecessor.actor_kind is not None
+        and step.actor_kind == predecessor.actor_kind
+    )
+
+
+async def _median_step_gap_seconds(
+    connection: AsyncConnection,
+    *,
+    funnel: str,
+    step: ProductStep,
+    predecessor: ProductStep,
+    window_start: datetime,
+    window_end: datetime,
+) -> tuple[Decimal | None, int]:
+    """The median gap between ``predecessor`` and ``step`` in seconds, and its size.
+
+    Each row of ``step`` is paired with the MOST RECENT completed row of
+    ``predecessor`` for the same pseudonymous actor at or before it - a lateral join
+    rather than a plain one, because "the step before this one" is the NEAREST
+    matching row, not the first row of the day. That matters because the browser
+    fires ``intake.composer_opened`` on every composer mount, so one patient can hold
+    several entry rows and only the nearest of them is the step this row followed.
+
+    The predecessor is bounded by the same window as the rows it pairs with, on
+    purpose. Widening the search backwards would report a gap measured over a longer
+    horizon than the window the operator asked for - a thirty-day funnel answering
+    with a gap measured from nine months back is a number nobody can place - so a
+    workflow straddling the window edge reports no gap, and ``gap_samples`` of zero
+    says so.
+
+    Only a COMPLETED predecessor row is paired from: the gap answers "how long after
+    finishing the step before did the next one happen", so an abandoned or errored
+    predecessor is not a finish and pairing from it would measure the wrong interval.
+
+    **The median is taken in the database, not in Python.** The rollup's own
+    :func:`~modules.observability.domain.rollup.percentile` exists because what it
+    serves is a bounded number of daily rows; the pairs here are one per ledger row in
+    the window, and pulling them into the process to rank would make the query cost
+    depend on how busy the product is. ``percentile_cont`` returns one number for the
+    whole population, which is what a read wants.
+
+    ``(None, 0)`` when nothing paired: no completed predecessor row precedes any row of
+    this step inside the window. That is a fact about the window, not a failure, and
+    the caller turns it into a ``null`` median beside a ``gap_samples`` of zero.
+    """
+    table = observability_product_events
+    arrived = table.alias("arrived")
+    before = table.alias("before")
+    # An INNER lateral: a row of this step with no predecessor row to pair against is
+    # not a gap of zero, it is an unmeasured gap, and counting it as one would drag
+    # every median toward zero.
+    nearest_before = (
+        select(before.c.occurred_at.label("occurred_at"))
+        .where(
+            (before.c.funnel == predecessor.funnel)
+            & (before.c.step == predecessor.step)
+            & (before.c.outcome == PRODUCT_OUTCOME_COMPLETED)
+            & (before.c.actor_key == arrived.c.actor_key)
+            & (before.c.occurred_at <= arrived.c.occurred_at)
+            & (before.c.occurred_at >= window_start)
+        )
+        .order_by(before.c.occurred_at.desc())
+        .limit(1)
+        .lateral()
+    )
+    gap_seconds = extract("epoch", arrived.c.occurred_at) - extract(
+        "epoch", nearest_before.c.occurred_at
+    )
+    statement = (
+        select(
+            func.count().label("samples"),
+            func.percentile_cont(0.5).within_group(gap_seconds).label("median_gap_s"),
+        )
+        .select_from(arrived.join(nearest_before, true()))
+        .where(
+            (arrived.c.funnel == funnel)
+            & (arrived.c.step == step.step)
+            & (arrived.c.actor_key.is_not(None))
+            & (arrived.c.occurred_at >= window_start)
+            & (arrived.c.occurred_at <= window_end)
+        )
+    )
+    result = await connection.execute(statement)
+    row = result.mappings().one()
+    samples = int(row["samples"])
+    if samples == 0 or row["median_gap_s"] is None:
+        return None, 0
+    return _seconds(float(row["median_gap_s"])), samples
+
+
+def _in_scope(
+    counts: Mapping[ProductOutcome, int], candidate: ProductOutcome, outcome: ProductOutcome | None
+) -> int:
+    """One step's count for ``candidate``, or zero when a filter excludes it.
+
+    The narrowing half of :data:`FUNNEL_DENOMINATOR_CONVENTION`: with the read filtered
+    to one outcome, every counter on a row counts that outcome alone, so a row filtered
+    to ``abandoned`` cannot be quoted as a completed step that happened to also lose
+    people.
+    """
+    if outcome is not None and outcome != candidate:
+        return 0
+    return counts.get(candidate, 0)
+
+
+def _step_conversion(
+    entered: int, counts: Mapping[str, int], predecessor: ProductStep | None
+) -> Decimal | None:
+    """``entered`` over the predecessor's, or ``None`` when there is no denominator.
+
+    Reads the predecessor's figure off the same counts the steps were built from
+    rather than re-querying or re-deriving it, so a step's conversion and its
+    neighbour's ``entered`` can never describe different populations - the drift a
+    funnel cannot afford, since the two numbers are read as a fraction of each other.
+    """
+    if predecessor is None:
+        return None
+    return ratio(entered, counts.get(predecessor.step, 0))
+
+
+def _step_entered(
+    by_step: Mapping[str, Mapping[ProductOutcome, int]],
+    steps: Sequence[ProductStep],
+    outcome: ProductOutcome | None,
+) -> Mapping[str, int]:
+    """One ``entered`` per step: every row it wrote, or only the outcome asked for.
+
+    Which of the two is :data:`FUNNEL_DENOMINATOR_CONVENTION` made mechanical. With no
+    filter it is EVERY row the step wrote - an arrival that was abandoned still ARRIVED,
+    and removing it would let a broken step look like a step nobody reached. With a
+    filter it is that outcome's rows alone, which is what isolating one path means, and
+    it stays coherent because every counter on the row narrows with it.
+
+    Read per STEP rather than per walk, so a step the walk does not include - the
+    re-record - reports its own rows instead of an ``entered`` of zero beside a
+    ``re_recorded`` of three.
+    """
+    if outcome is None:
+        return {step.step: sum(by_step.get(step.step, {}).values()) for step in steps}
+    return {step.step: by_step.get(step.step, {}).get(outcome, 0) for step in steps}
+
+
+def _outcome_total(
+    by_step: Mapping[str, Mapping[ProductOutcome, int]],
+    steps: Sequence[ProductStep],
+    outcome: ProductOutcome,
+) -> int:
+    """How many rows across ``steps`` ended with ``outcome``."""
+    return sum(by_step.get(step.step, {}).get(outcome, 0) for step in steps)
+
+
+def _completed_at(by_step: Mapping[str, Mapping[ProductOutcome, int]], step_name: str) -> int:
+    """How many COMPLETED rows one step recorded: a finished end, not an arrival."""
+    return by_step.get(step_name, {}).get(PRODUCT_OUTCOME_COMPLETED, 0)
+
+
+def _terminal_entered(
+    by_step: Mapping[str, Mapping[ProductOutcome, int]], stages: Sequence[ProductStep]
+) -> int:
+    """How many workflows REACHED an end: a COMPLETED row at a terminal step.
+
+    Every terminal, not the two named ones, so a terminal registered tomorrow is in the
+    rate without this function being taught its name. Completed rows only: a case closed
+    under an error or abandoned on the way out is not a finished consultation, and
+    counting it as one is exactly the conflation decision 23 refuses.
+    """
+    return sum(_completed_at(by_step, stage.step) for stage in stages if stage.terminal)
+
+
+def _funnel_totals(
+    by_step: Mapping[str, Mapping[ProductOutcome, int]],
+    funnel: str,
+    stages: Sequence[ProductStep],
+) -> FunnelOutcomeTotals:
+    """The headline verdict: did the workflows finish, and how many did not.
+
+    Computed from the UNFILTERED counts, always, and over the WHOLE walk rather than
+    the filtered step list. An ``outcome`` filter narrows the steps that are reported
+    and what each of them counts; narrowing the success rate to the abandoned rows as
+    well would leave a client comparing two rates measured over two different
+    populations, which is the failure :class:`FunnelOutcomeTotals` exists to prevent.
+
+    The three outcome counters run over EVERY registered step rather than over the
+    walk, because the re-record step is not a stage of the walk and its rows are still
+    the funnel's rows. An abandoned attempt that was then corrected is counted in
+    ``abandoned`` and in ``re_recorded`` alike, which is decision 25's rule made
+    arithmetic: the correction does not erase the abandonment, and neither figure is
+    scored as a failure of the other.
+
+    ``started`` is the walk's own first step, which is why the walk and not the
+    registry: a funnel that grew a step before its entry step would still be counted
+    from where journeys actually begin.
+    """
+    every = registered_steps(funnel)
+    entered = _step_entered(by_step, every, None)
+    started = entered.get(stages[0].step, 0) if stages else 0
+    abandoned = _outcome_total(by_step, every, PRODUCT_OUTCOME_ABANDONED)
+    return FunnelOutcomeTotals(
+        started=started,
+        task_success_rate=ratio(_terminal_entered(by_step, stages), started),
+        abandonment_rate=ratio(abandoned, started),
+        issued_e_prescriptions=_completed_at(by_step, FUNNEL_TERMINAL_PRESCRIPTION),
+        cases_closed=_completed_at(by_step, FUNNEL_TERMINAL_CASE_CLOSED),
+        abandoned=abandoned,
+        errored=_outcome_total(by_step, every, PRODUCT_OUTCOME_ERRORED),
+        re_recorded=_outcome_total(by_step, every, PRODUCT_OUTCOME_RE_RECORDED),
+    )
+
+
+def _funnel_steps(funnel: str, outcome: ProductOutcome | None) -> tuple[ProductStep, ...]:
+    """The steps this read reports: the walk, narrowed to an outcome's own vocabulary.
+
+    **The filter narrows the step LIST and the counts together.** A step's declared
+    ``allowed_outcomes`` says which outcomes can end it, so filtering by ``abandoned``
+    returns the steps that can be abandoned - which is what "isolate the abandoned
+    path" means - and each of those rows then counts abandoned arrivals and nothing
+    else, so there is no second figure on the row to quote instead.
+
+    The re-record step is not in the walk, so an ``outcome=re_recorded`` filter would
+    otherwise select nothing and return an empty funnel. Falling back to the whole
+    registry keeps every accepted outcome an answer rather than a dead filter: the
+    re-record is reported on its own row, which is exactly what decision 25 asks for.
+    """
+    if outcome is None:
+        return funnel_stages(funnel)
+    selected = tuple(stage for stage in funnel_stages(funnel) if outcome in stage.allowed_outcomes)
+    if selected:
+        return selected
+    return tuple(step for step in registered_steps(funnel) if outcome in step.allowed_outcomes)
+
+
+async def query_funnel(
+    connection: AsyncConnection,
+    *,
+    funnel: str = FUNNEL_INTAKE,
+    outcome: ProductOutcome | None = None,
+    now: datetime,
+    window_days: int,
+) -> FunnelRead:
+    """The funnel from the moment a patient opened the composer, over its window.
+
+    Served from ``observability_product_events``, the ledger, rather than from the
+    daily rollup - and the reason is that this read asks three things a daily row
+    cannot answer: the median gap between two steps needs those two rows' own
+    ``occurred_at``, the trace behind a count needs the row carrying it, and neither
+    survives being summed. The rollup is the right table for a thirty-day COUNT and
+    this is not a thirty-day count.
+
+    ``now`` is passed in rather than read from the clock and ``window_days`` is
+    validated HERE, the one place, for the same two reasons as
+    :func:`query_error_feed`: a test can pin the instant, and no caller can ask for a
+    window that ends before it starts.
+
+    **Three conventions travel with the numbers and all of them are on the wire.**
+    Which rows a step's ``entered`` covers and what its conversion divides by
+    (:data:`FUNNEL_DENOMINATOR_CONVENTION`), what each rate's numerator is
+    (:data:`FUNNEL_RATE_CONVENTION`), and what the gap between two steps was measured
+    against (:data:`FUNNEL_GAP_CONVENTION`). They are fields rather than docstrings
+    because a client rendering this response has to be able to say what it means - and
+    because the gap the ledger CANNOT measure today, the patient-to-doctor handoff into
+    ``consult_complete``, has to be reported as unmeasured rather than as a fast, happy
+    step.
+    """
+    if window_days < 1:
+        raise ValueError("window_days must be positive")
+    if outcome is not None and outcome not in PRODUCT_OUTCOMES:
+        raise ValueError(
+            f"unknown funnel outcome {outcome!r}; expected one of {', '.join(PRODUCT_OUTCOMES)}"
+        )
+    window_start = now - timedelta(days=window_days)
+    table = observability_product_events
+    stages = funnel_stages(funnel)
+    reported = _funnel_steps(funnel, outcome)
+
+    counted = await connection.execute(
+        select(
+            table.c.step,
+            table.c.outcome,
+            func.count().label("events"),
+        )
+        .select_from(table)
+        .where(
+            (table.c.funnel == funnel)
+            & (table.c.occurred_at >= window_start)
+            & (table.c.occurred_at <= now)
+        )
+        .group_by(table.c.step, table.c.outcome)
+    )
+    by_step: dict[str, dict[ProductOutcome, int]] = {}
+    for row in counted.mappings():
+        by_step.setdefault(str(row["step"]), {})[row["outcome"]] = int(row["events"])
+    entered_by_step = _step_entered(by_step, registered_steps(funnel), outcome)
+
+    traced = await connection.execute(
+        select(table.c.step, table.c.trace_id)
+        .select_from(table)
+        .where(
+            (table.c.funnel == funnel)
+            & (table.c.occurred_at >= window_start)
+            & (table.c.occurred_at <= now)
+        )
+        .distinct(table.c.step)
+        .order_by(table.c.step, table.c.occurred_at.desc(), table.c.id.desc())
+    )
+    latest_trace = {str(row["step"]): str(row["trace_id"]) for row in traced.mappings()}
+
+    rows: list[FunnelStepRow] = []
+    for stage in reported:
+        counts = by_step.get(stage.step, {})
+        predecessor = stage_predecessor(stage, stages)
+        basis = _gap_basis(stage, predecessor)
+        median_gap: Decimal | None = None
+        gap_samples = 0
+        if predecessor is not None and basis == GAP_BASIS_ACTOR:
+            median_gap, gap_samples = await _median_step_gap_seconds(
+                connection,
+                funnel=funnel,
+                step=stage,
+                predecessor=predecessor,
+                window_start=window_start,
+                window_end=now,
+            )
+        entered = entered_by_step.get(stage.step, 0)
+        rows.append(
+            FunnelStepRow(
+                step=stage.step,
+                event_type=stage.event_type,
+                terminal=stage.terminal,
+                previous_step=predecessor.step if predecessor is not None else None,
+                entered=entered,
+                completed=_in_scope(counts, PRODUCT_OUTCOME_COMPLETED, outcome),
+                abandoned=_in_scope(counts, PRODUCT_OUTCOME_ABANDONED, outcome),
+                errored=_in_scope(counts, PRODUCT_OUTCOME_ERRORED, outcome),
+                re_recorded=_in_scope(counts, PRODUCT_OUTCOME_RE_RECORDED, outcome),
+                conversion_from_previous=_step_conversion(entered, entered_by_step, predecessor),
+                median_gap_from_previous_s=median_gap,
+                gap_samples=gap_samples,
+                gap_basis=basis,
+                latest_trace_id=latest_trace.get(stage.step),
+            )
+        )
+
+    return FunnelRead(
+        funnel=funnel,
+        window_start=window_start,
+        window_end=now,
+        window_days=window_days,
+        outcome=outcome,
+        denominator_convention=FUNNEL_DENOMINATOR_CONVENTION,
+        rate_convention=FUNNEL_RATE_CONVENTION,
+        gap_convention=FUNNEL_GAP_CONVENTION,
+        steps=rows,
+        outcomes=_funnel_totals(by_step, funnel, stages),
     )
 
 
@@ -3857,10 +4461,10 @@ class ObservabilityFacade:
         ``get_cost_trend``, ``get_usage``, ``get_quality``, ``get_overview``,
         ``get_latency``, ``get_provider_board`` (#728), ``get_throughput``,
         ``get_health``, ``get_reliability`` (#729), ``get_alerts``,
-        ``get_error_feed`` (#730), ``get_business`` (#731) and ``get_deeplinks``
-        are what the operator observability routes call. Each opens the one settled
-        engine connection and delegates its aggregate to the module helper, so routes
-        hold no SQL and the reads stay in this module.
+        ``get_error_feed`` (#730), ``get_business`` (#731), ``get_funnel`` (#740) and
+        ``get_deeplinks`` are what the operator observability routes call. Each opens
+        the one settled engine connection and delegates its aggregate to the module
+        helper, so routes hold no SQL and the reads stay in this module.
 
         The windowed reads take ``days`` (or, for the per-minute counter, ``minutes``)
         and an optional pinned instant so the caller - or a test - can pin the window;
@@ -4026,6 +4630,41 @@ class ObservabilityFacade:
                 status=status,
                 now=to_ts,
                 window_minutes=minutes,
+            )
+
+    async def get_funnel(
+        self,
+        *,
+        days: int,
+        outcome: ProductOutcome | None = None,
+        funnel: str = FUNNEL_INTAKE,
+        now: datetime | None = None,
+    ) -> FunnelRead:
+        """Read the intake funnel over its window (``/product/funnel``, #740).
+
+        "Is the product working?" answered from the product event ledger (#739): the
+        per-step counts, the completion and abandonment that end each one, the median
+        gap between one step and the next, and the terminal it reached - in one
+        response, because the figures only mean something read together.
+
+        The clock is resolved HERE, for the same reason every other windowed read
+        resolves its own: the route owns the default and the facade owns the clock, so
+        a test can pin ``now`` and get the identical window production would have
+        taken at that instant.
+
+        Neither ``days`` nor ``outcome`` is validated here:
+        :func:`query_funnel` owns both checks and every path into this read goes
+        through it, so a second copy would only be a second place for the two to
+        disagree about what a valid window or a known outcome is.
+        """
+        to_ts = now if now is not None else datetime.now(UTC)
+        async with self._engine.begin() as connection:
+            return await query_funnel(
+                connection,
+                funnel=funnel,
+                outcome=outcome,
+                now=to_ts,
+                window_days=days,
             )
 
     async def get_business(
