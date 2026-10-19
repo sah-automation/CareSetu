@@ -33,6 +33,9 @@ const CHANNELS = [
   // components/ui/chart would carry a second copy of the chart runtime, and
   // this gate is what reports it.
   '/operator/observability/reliability',
+  // #743: the Product lens page, on the same terms again - one chart runtime
+  // shared through components/ui/chart, never a second copy imported directly.
+  '/operator/observability/product',
   '/doctor/profile',
 ];
 const WORKSPACE = '@caresetu/frontend';

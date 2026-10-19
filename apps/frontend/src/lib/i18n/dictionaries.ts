@@ -1065,6 +1065,9 @@ const en = {
     // #738: the Reliability lens destination, on the same terms as `business`
     // above - both locales ship together or the parity test fails.
     reliability: "Reliability",
+    // #743: the Product lens destination. Same both-locales gate as the two
+    // labels above (#717 decision 34).
+    product: "Product",
     // #538: section-group labels for the redesigned full-shell sidebar. Nav
     // items declare a group via NavItemDef.group; the sidebar composes ordered
     // labeled groups from these keys.
@@ -2816,6 +2819,8 @@ export const STRINGS: Record<Lang, Dictionary> = {
       business: "व्यवसाय",
       // #738: the Reliability lens destination, on the same terms as `business`.
       reliability: "विश्वसनीयता",
+      // #743: the Product lens destination, on the same both-locales terms.
+      product: "उत्पाद",
       sections: {
         work: "कार्य",
         account: "खाता",

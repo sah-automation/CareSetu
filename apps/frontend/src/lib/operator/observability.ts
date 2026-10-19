@@ -604,6 +604,183 @@ export interface BusinessRead {
   margin: MarginRead;
 }
 
+// ------------------------------------------------ the product lenses (#740-#742)
+
+/**
+ * The funnel's outcome vocabulary, in the registry's closed order (#740).
+ *
+ * The route refuses anything else at the edge rather than answering 200 with an
+ * empty funnel, because an empty funnel reads as "nobody abandons" rather than
+ * as a bad query.
+ */
+export type ProductOutcome =
+  | "completed"
+  | "abandoned"
+  | "errored"
+  | "re_recorded";
+
+/** One window's distinct actors, split by kind (#741). */
+export interface ActiveUserWindow {
+  window_days: number;
+  from_date: string;
+  to_date: string;
+  patients: number;
+  doctors: number;
+  /** `patients + doctors`; the two kinds share no actor key. */
+  total: number;
+}
+
+/**
+ * One day of the adoption trend. A day with nothing recorded is ABSENT, not
+ * zero-filled, so a quiet stretch and a stopped counter do not look alike.
+ */
+export interface ActiveUsersDayPoint {
+  day: string;
+  requests: number;
+  active_users: number;
+  requests_per_active_user: number | null;
+}
+
+/**
+ * The adoption read: DAU, WAU, MAU, stickiness and load per head (#741).
+ *
+ * Every figure is computed in Postgres, in the product event ledger - the
+ * system of record - rather than over a vendor window. That matters most for
+ * `monthly_active_users`: the free metrics tier keeps fourteen days, so a
+ * vendor answer to a thirty-day question does not exist, and the read must not
+ * truncate itself to what the vendor still holds.
+ *
+ * `window_active_users` is the requested window's own set and the denominator
+ * of `requests_per_active_user`; it is not a fourth DAU/WAU/MAU figure.
+ */
+export interface ActiveUsersRead {
+  days: number;
+  from_date: string;
+  to_date: string;
+  daily_active_users: ActiveUserWindow;
+  weekly_active_users: ActiveUserWindow;
+  monthly_active_users: ActiveUserWindow;
+  window_active_users: ActiveUserWindow;
+  /** DAU/MAU as a FRACTION at 4dp, or null when there is no monthly base. */
+  stickiness: number | null;
+  requests: number;
+  requests_per_active_user: number | null;
+  trend: ActiveUsersDayPoint[];
+  window_convention: string;
+  source_convention: string;
+  stickiness_convention: string;
+  requests_per_active_user_convention: string;
+}
+
+/**
+ * One step of the walked funnel (#740).
+ *
+ * `entered` counts every row the step wrote and the four outcome counters split
+ * it, so a row can never describe two populations. `completed` is the only one
+ * of the four that counts as success; `errored` is a degraded fallback (not a
+ * quiet abandonment) and `re_recorded` is a correction (not a failure).
+ *
+ * `conversion_from_previous` is a fraction over the nearest preceding
+ * NON-TERMINAL step's `entered`, not over successes, so it can exceed 1 and is
+ * `null` on the first step. `median_gap_from_previous_s` is thinking time, and a
+ * null with any `gap_basis` other than `actor_key` is unmeasured rather than
+ * instant.
+ */
+export interface FunnelStepRow {
+  step: string;
+  event_type: string;
+  terminal: boolean;
+  previous_step: string | null;
+  entered: number;
+  completed: number;
+  abandoned: number;
+  errored: number;
+  re_recorded: number;
+  conversion_from_previous: number | null;
+  median_gap_from_previous_s: number | null;
+  gap_samples: number;
+  gap_basis: string;
+  latest_trace_id: string | null;
+}
+
+/**
+ * Did the workflows finish? Success and abandonment, over ONE denominator.
+ *
+ * The two rates ride one block because they must never be quoted apart: both
+ * divide `started`, are deliberately not complementary, and can both count the
+ * same journey (a re-record that carries on to an issued prescription).
+ * `issued_e_prescriptions` and `cases_closed` are both legitimate successes and
+ * are reported apart.
+ */
+export interface FunnelOutcomeTotals {
+  started: number;
+  task_success_rate: number | null;
+  abandonment_rate: number | null;
+  issued_e_prescriptions: number;
+  cases_closed: number;
+  abandoned: number;
+  errored: number;
+  re_recorded: number;
+}
+
+/**
+ * The intake funnel, from the moment a patient opened the composer (#740).
+ *
+ * `outcome` narrows the STEPS to that path and each row's counts to it. It does
+ * NOT narrow `outcomes`: success and abandonment are the whole window's verdict
+ * and measuring one over a different population than the other is the failure
+ * `FunnelOutcomeTotals` exists to prevent.
+ */
+export interface FunnelRead {
+  funnel: string;
+  window_start: string;
+  window_end: string;
+  window_days: number;
+  outcome: ProductOutcome | null;
+  denominator_convention: string;
+  rate_convention: string;
+  gap_convention: string;
+  steps: FunnelStepRow[];
+  outcomes: FunnelOutcomeTotals;
+}
+
+/**
+ * One arrival date's cohort and how much of it was still here later (#742).
+ *
+ * `retained_*d` and `retention_*d` are null when that horizon has not arrived
+ * yet, and null - never zero. Zero means observed and nobody came back; null
+ * means the question cannot be asked yet. A cohort of size 0 is null for the
+ * same reason: there is no such thing as a rate on an empty base.
+ */
+export interface RetentionCohortDay {
+  cohort_date: string;
+  cohort_size: number;
+  retained_7d: number | null;
+  retention_7d: number | null;
+  retained_30d: number | null;
+  retention_30d: number | null;
+}
+
+/**
+ * Seven- and thirty-day retention, one row per arrival day (#742).
+ *
+ * A cohort is a GROUP, not a window: everyone whose first-ever qualifying
+ * action fell on one date. Derived at read time from the nightly per-actor day
+ * aggregate, so the thirty-day answer outlives the vendor's fourteen-day
+ * retention and the raw ledger is never scanned.
+ */
+export interface RetentionCohortsRead {
+  days: number;
+  from_date: string;
+  to_date: string;
+  horizons: [number, number];
+  cohorts: RetentionCohortDay[];
+  window_convention: string;
+  maturity_convention: string;
+  source_convention: string;
+  actor_convention: string;
+}
+
 /**
  * The Grafana views, each already carrying its own filter (#736). The dashboard
  * link always exists when the vendor is configured - it can always carry its range
@@ -826,6 +1003,30 @@ const PROVIDER_BOARD_DECIMALS = [
   "p99_duration_ms",
 ] as const;
 
+/**
+ * The product lenses' quoted fields (#740-#742).
+ *
+ * Every rate here is a FRACTION the backend computes as a `Decimal`, so it
+ * arrives as a JSON string and must reach `formatRate` as a number. The nulls
+ * are the important half: stickiness has no base to divide by, a gap has no
+ * shared key to pair on, and a retention horizon has not arrived yet - all are
+ * "not measured", and a false zero would be a claim about the product.
+ */
+const ACTIVE_USERS_DECIMALS = [
+  "stickiness",
+  "requests_per_active_user",
+] as const;
+const ACTIVE_USERS_POINT_DECIMALS = ["requests_per_active_user"] as const;
+const FUNNEL_STEP_DECIMALS = [
+  "conversion_from_previous",
+  "median_gap_from_previous_s",
+] as const;
+const FUNNEL_OUTCOME_DECIMALS = [
+  "task_success_rate",
+  "abandonment_rate",
+] as const;
+const RETENTION_COHORT_DECIMALS = ["retention_7d", "retention_30d"] as const;
+
 function isBusinessCountView(value: unknown): value is BusinessCountView {
   return isRecord(value) && hasKeys(value, ["metric_key", "count"]);
 }
@@ -1013,6 +1214,141 @@ function isBusinessRead(value: unknown): value is BusinessRead {
     isArrayOf(value.top_patients, isPatientSpend) &&
     isArrayOf(value.top_doctors, isDoctorSpend) &&
     isMarginRead(value.margin)
+  );
+}
+
+function isActiveUserWindow(value: unknown): value is ActiveUserWindow {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "window_days",
+      "from_date",
+      "to_date",
+      "patients",
+      "doctors",
+      "total",
+    ])
+  );
+}
+
+function isActiveUsersDayPoint(value: unknown): value is ActiveUsersDayPoint {
+  return (
+    isRecord(value) &&
+    hasKeys(value, ["day", "requests", "active_users"]) &&
+    hasWireDecimals(value, ACTIVE_USERS_POINT_DECIMALS)
+  );
+}
+
+function isActiveUsersRead(value: unknown): value is ActiveUsersRead {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "days",
+      "from_date",
+      "to_date",
+      "daily_active_users",
+      "weekly_active_users",
+      "monthly_active_users",
+      "window_active_users",
+      "requests",
+      "trend",
+      "window_convention",
+      "source_convention",
+      "stickiness_convention",
+      "requests_per_active_user_convention",
+    ]) &&
+    hasWireDecimals(value, ACTIVE_USERS_DECIMALS) &&
+    isActiveUserWindow(value.daily_active_users) &&
+    isActiveUserWindow(value.weekly_active_users) &&
+    isActiveUserWindow(value.monthly_active_users) &&
+    isActiveUserWindow(value.window_active_users) &&
+    isArrayOf(value.trend, isActiveUsersDayPoint)
+  );
+}
+
+function isFunnelStepRow(value: unknown): value is FunnelStepRow {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "step",
+      "event_type",
+      "terminal",
+      "previous_step",
+      "entered",
+      "completed",
+      "abandoned",
+      "errored",
+      "re_recorded",
+      "gap_samples",
+      "gap_basis",
+      "latest_trace_id",
+    ]) &&
+    hasWireDecimals(value, FUNNEL_STEP_DECIMALS)
+  );
+}
+
+function isFunnelOutcomeTotals(value: unknown): value is FunnelOutcomeTotals {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "started",
+      "issued_e_prescriptions",
+      "cases_closed",
+      "abandoned",
+      "errored",
+      "re_recorded",
+    ]) &&
+    hasWireDecimals(value, FUNNEL_OUTCOME_DECIMALS)
+  );
+}
+
+function isFunnelRead(value: unknown): value is FunnelRead {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "funnel",
+      "window_start",
+      "window_end",
+      "window_days",
+      "outcome",
+      "denominator_convention",
+      "rate_convention",
+      "gap_convention",
+      "steps",
+    ]) &&
+    isFunnelOutcomeTotals(value.outcomes) &&
+    isArrayOf(value.steps, isFunnelStepRow)
+  );
+}
+
+function isRetentionCohortDay(value: unknown): value is RetentionCohortDay {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "cohort_date",
+      "cohort_size",
+      "retained_7d",
+      "retained_30d",
+    ]) &&
+    hasWireDecimals(value, RETENTION_COHORT_DECIMALS)
+  );
+}
+
+function isRetentionCohortsRead(value: unknown): value is RetentionCohortsRead {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "days",
+      "from_date",
+      "to_date",
+      "horizons",
+      "cohorts",
+      "window_convention",
+      "maturity_convention",
+      "source_convention",
+      "actor_convention",
+    ]) &&
+    isArrayOf(value.cohorts, isRetentionCohortDay)
   );
 }
 
@@ -1556,6 +1892,90 @@ export async function fetchBusiness(
         MARGIN_PERCENT_DECIMALS,
       ),
     },
+  };
+}
+
+/**
+ * DAU, WAU, MAU, stickiness and load per head over one window (#741).
+ *
+ * `days` is omitted when unset so the route's own default is the one authority
+ * on what "no window asked for" means. The MAU figure is the system-of-record
+ * answer, not a vendor-retention-truncated one - see `ActiveUsersRead`.
+ */
+export async function fetchActiveUsers(
+  params: { days?: number } = {},
+): Promise<ActiveUsersRead> {
+  const data = await request<unknown>(
+    `${OBSERVABILITY_BASE}/product/active-users${windowQuery(params.days)}`,
+  );
+  const read = guardShape(
+    data,
+    isActiveUsersRead,
+    "The API returned an unexpected observability active users shape",
+  );
+  return {
+    ...withDecimals(read, ACTIVE_USERS_DECIMALS),
+    trend: read.trend.map((point) =>
+      withDecimals(point, ACTIVE_USERS_POINT_DECIMALS),
+    ),
+  };
+}
+
+/**
+ * The intake funnel and its outcome totals (#740), optionally narrowed to one
+ * outcome's path.
+ *
+ * The filter narrows the STEPS, not the outcome block - the route is explicit
+ * about that, and the page says so beside the control. `outcome` is omitted
+ * when the caller wants the whole funnel.
+ */
+export async function fetchFunnel(
+  params: { days?: number; outcome?: ProductOutcome } = {},
+): Promise<FunnelRead> {
+  const search = new URLSearchParams();
+  if (params.days !== undefined) search.set("days", String(params.days));
+  if (params.outcome !== undefined) search.set("outcome", params.outcome);
+  const query = search.toString();
+  const data = await request<unknown>(
+    `${OBSERVABILITY_BASE}/product/funnel${query ? `?${query}` : ""}`,
+  );
+  const read = guardShape(
+    data,
+    isFunnelRead,
+    "The API returned an unexpected observability funnel shape",
+  );
+  return {
+    ...read,
+    steps: read.steps.map((step) => withDecimals(step, FUNNEL_STEP_DECIMALS)),
+    outcomes: withDecimals(read.outcomes, FUNNEL_OUTCOME_DECIMALS),
+  };
+}
+
+/**
+ * Seven- and thirty-day retention, one row per arrival date (#742).
+ *
+ * `days` counts COHORT DATES, not days of series, and the route's default is
+ * sixty for that reason. A row whose horizon has not arrived is left `null`;
+ * the page renders it as unmeasured rather than as a collapse to zero.
+ */
+export async function fetchRetentionCohorts(
+  params: { days?: number } = {},
+): Promise<RetentionCohortsRead> {
+  const data = await request<unknown>(
+    `${OBSERVABILITY_BASE}/product/retention-cohorts${windowQuery(
+      params.days,
+    )}`,
+  );
+  const read = guardShape(
+    data,
+    isRetentionCohortsRead,
+    "The API returned an unexpected observability retention cohorts shape",
+  );
+  return {
+    ...read,
+    cohorts: read.cohorts.map((cohort) =>
+      withDecimals(cohort, RETENTION_COHORT_DECIMALS),
+    ),
   };
 }
 

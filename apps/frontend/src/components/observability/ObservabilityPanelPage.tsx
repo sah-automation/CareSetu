@@ -60,6 +60,14 @@ export const PANEL_ROUTES = [
     href: "/operator/observability/reliability",
     label: "Reliability",
   },
+  // #743: the Product lens destination, the last lens before #744 restructures
+  // the console's navigation. Appended rather than reordered so the two lens
+  // destinations already shipped keep their order.
+  {
+    key: "product",
+    href: "/operator/observability/product",
+    label: "Product",
+  },
 ] as const;
 
 export type PanelKey = (typeof PANEL_ROUTES)[number]["key"];

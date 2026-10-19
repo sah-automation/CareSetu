@@ -8,31 +8,37 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   acknowledgeAlert,
+  fetchActiveUsers,
   fetchAlerts,
   fetchBusiness,
   fetchCost,
   fetchCostTrend,
   fetchDeeplinks,
   fetchErrors,
+  fetchFunnel,
   fetchHealth,
   fetchLatency,
   fetchOverview,
   fetchProviders,
   fetchQuality,
   fetchReliability,
+  fetchRetentionCohorts,
   fetchThroughput,
   fetchUsage,
+  type ActiveUsersRead,
   type AlertPage,
   type BusinessRead,
   type CostSummary,
   type CostTrend,
   type Deeplinks,
   type ErrorFeedPage,
+  type FunnelRead,
   type LatencyReport,
   type Overview,
   type ProviderBoardReport,
   type QualityReport,
   type ReliabilityReport,
+  type RetentionCohortsRead,
   type SystemHealth,
   type ThroughputReport,
   type UsageReport,
@@ -732,6 +738,355 @@ describe("business decimal wire values", () => {
     });
 
     await expect(fetchBusiness()).rejects.toMatchObject({
+      code: "UNEXPECTED_ERROR",
+    });
+  });
+});
+
+describe("fetchActiveUsers", () => {
+  const ACTIVE_USERS: ActiveUsersRead = {
+    days: 30,
+    from_date: "2026-09-13",
+    to_date: "2026-10-12",
+    daily_active_users: {
+      window_days: 1,
+      from_date: "2026-10-12",
+      to_date: "2026-10-12",
+      patients: 8,
+      doctors: 2,
+      total: 10,
+    },
+    weekly_active_users: {
+      window_days: 7,
+      from_date: "2026-10-06",
+      to_date: "2026-10-12",
+      patients: 34,
+      doctors: 8,
+      total: 42,
+    },
+    monthly_active_users: {
+      window_days: 30,
+      from_date: "2026-09-13",
+      to_date: "2026-10-12",
+      patients: 96,
+      doctors: 24,
+      total: 120,
+    },
+    window_active_users: {
+      window_days: 30,
+      from_date: "2026-09-13",
+      to_date: "2026-10-12",
+      patients: 120,
+      doctors: 30,
+      total: 150,
+    },
+    stickiness: 0.0833,
+    requests: 3000,
+    requests_per_active_user: 20,
+    trend: [
+      {
+        day: "2026-10-12",
+        requests: 120,
+        active_users: 10,
+        requests_per_active_user: 12,
+      },
+    ],
+    window_convention: "window",
+    source_convention: "source",
+    stickiness_convention: "stickiness",
+    requests_per_active_user_convention: "per head",
+  };
+
+  const ACTIVE_USERS_WIRE = {
+    ...ACTIVE_USERS,
+    stickiness: "0.0833",
+    requests_per_active_user: "20.00",
+    trend: ACTIVE_USERS.trend.map((point) => ({
+      ...point,
+      requests_per_active_user: `${point.requests_per_active_user}`,
+    })),
+  };
+
+  it("lets the route own its default window when none is asked for", async () => {
+    const fetchMock = stubFetch(ACTIVE_USERS_WIRE);
+
+    await fetchActiveUsers();
+
+    expect(requestedUrl(fetchMock)).toBe(`${BASE}/product/active-users`);
+  });
+
+  it("sends the window it is given", async () => {
+    const fetchMock = stubFetch(ACTIVE_USERS_WIRE);
+
+    await fetchActiveUsers({ days: 7 });
+
+    expect(requestedUrl(fetchMock)).toBe(`${BASE}/product/active-users?days=7`);
+  });
+
+  it("decodes stickiness, load per head and the nested daily figure", async () => {
+    stubFetch(ACTIVE_USERS_WIRE);
+
+    const read = await fetchActiveUsers();
+
+    expect(read.stickiness).toBeCloseTo(0.0833, 5);
+    expect(read.requests_per_active_user).toBe(20);
+    expect(read.trend[0].requests_per_active_user).toBe(12);
+    expect(read.monthly_active_users.total).toBe(120);
+  });
+
+  it("keeps an absent monthly base and a quiet actor set null, not zero", async () => {
+    stubFetch({
+      ...ACTIVE_USERS_WIRE,
+      stickiness: null,
+      requests_per_active_user: null,
+      trend: [
+        { ...ACTIVE_USERS_WIRE.trend[0], requests_per_active_user: null },
+      ],
+    });
+
+    const read = await fetchActiveUsers();
+
+    expect(read.stickiness).toBeNull();
+    expect(read.requests_per_active_user).toBeNull();
+    expect(read.trend[0].requests_per_active_user).toBeNull();
+  });
+
+  it("rejects a nested per-head figure that will not decode", async () => {
+    stubFetch({
+      ...ACTIVE_USERS_WIRE,
+      trend: [
+        { ...ACTIVE_USERS_WIRE.trend[0], requests_per_active_user: "nope" },
+      ],
+    });
+
+    await expect(fetchActiveUsers()).rejects.toMatchObject({
+      code: "UNEXPECTED_ERROR",
+    });
+  });
+});
+
+describe("fetchFunnel", () => {
+  const FUNNEL: FunnelRead = {
+    funnel: "intake",
+    window_start: "2026-10-12T00:00:00Z",
+    window_end: "2026-10-12T23:59:59Z",
+    window_days: 1,
+    outcome: null,
+    denominator_convention: "denominator",
+    rate_convention: "rates",
+    gap_convention: "gaps",
+    steps: [
+      {
+        step: "composer_opened",
+        event_type: "composer_opened",
+        terminal: false,
+        previous_step: null,
+        entered: 100,
+        completed: 90,
+        abandoned: 6,
+        errored: 2,
+        re_recorded: 2,
+        conversion_from_previous: null,
+        median_gap_from_previous_s: null,
+        gap_samples: 0,
+        gap_basis: "no_predecessor",
+        latest_trace_id: "trace-a",
+      },
+      {
+        step: "consult_complete",
+        event_type: "consult_complete",
+        terminal: true,
+        previous_step: "composer_opened",
+        entered: 80,
+        completed: 72,
+        abandoned: 4,
+        errored: 2,
+        re_recorded: 2,
+        conversion_from_previous: 0.8,
+        median_gap_from_previous_s: 45,
+        gap_samples: 70,
+        gap_basis: "actor_key",
+        latest_trace_id: null,
+      },
+    ],
+    outcomes: {
+      started: 100,
+      task_success_rate: 0.72,
+      abandonment_rate: 0.1,
+      issued_e_prescriptions: 60,
+      cases_closed: 12,
+      abandoned: 10,
+      errored: 4,
+      re_recorded: 4,
+    },
+  };
+
+  const FUNNEL_WIRE = {
+    ...FUNNEL,
+    steps: FUNNEL.steps.map((step) => ({
+      ...step,
+      conversion_from_previous:
+        step.conversion_from_previous === null
+          ? null
+          : `${step.conversion_from_previous}`,
+      median_gap_from_previous_s:
+        step.median_gap_from_previous_s === null
+          ? null
+          : `${step.median_gap_from_previous_s}`,
+    })),
+    outcomes: {
+      ...FUNNEL.outcomes,
+      task_success_rate: "0.7200",
+      abandonment_rate: "0.1000",
+    },
+  };
+
+  it("lets the route own its default window and the whole funnel", async () => {
+    const fetchMock = stubFetch(FUNNEL_WIRE);
+
+    await fetchFunnel();
+
+    expect(requestedUrl(fetchMock)).toBe(`${BASE}/product/funnel`);
+  });
+
+  it("sends the window and the outcome filter together", async () => {
+    const fetchMock = stubFetch(FUNNEL_WIRE);
+
+    await fetchFunnel({ days: 14, outcome: "abandoned" });
+
+    expect(requestedUrl(fetchMock)).toBe(
+      `${BASE}/product/funnel?days=14&outcome=abandoned`,
+    );
+  });
+
+  it("decodes the step conversion and gap and both headline rates", async () => {
+    stubFetch(FUNNEL_WIRE);
+
+    const read = await fetchFunnel();
+
+    expect(read.steps[1].conversion_from_previous).toBeCloseTo(0.8, 5);
+    expect(read.steps[1].median_gap_from_previous_s).toBe(45);
+    expect(read.outcomes.task_success_rate).toBeCloseTo(0.72, 5);
+    expect(read.outcomes.abandonment_rate).toBeCloseTo(0.1, 5);
+  });
+
+  it("keeps the first step's absent conversion and unmeasured gap null", async () => {
+    stubFetch(FUNNEL_WIRE);
+
+    const read = await fetchFunnel();
+
+    expect(read.steps[0].conversion_from_previous).toBeNull();
+    expect(read.steps[0].median_gap_from_previous_s).toBeNull();
+  });
+
+  it("rejects a step gap that will not decode rather than rendering NaN", async () => {
+    stubFetch({
+      ...FUNNEL_WIRE,
+      steps: [
+        { ...FUNNEL_WIRE.steps[1], median_gap_from_previous_s: "a while" },
+      ],
+    });
+
+    await expect(fetchFunnel()).rejects.toMatchObject({
+      code: "UNEXPECTED_ERROR",
+    });
+  });
+});
+
+describe("fetchRetentionCohorts", () => {
+  const RETENTION: RetentionCohortsRead = {
+    days: 60,
+    from_date: "2026-08-14",
+    to_date: "2026-10-12",
+    horizons: [7, 30],
+    cohorts: [
+      {
+        cohort_date: "2026-09-01",
+        cohort_size: 40,
+        retained_7d: 12,
+        retention_7d: 0.3,
+        retained_30d: 6,
+        retention_30d: 0.15,
+      },
+      {
+        cohort_date: "2026-10-10",
+        cohort_size: 5,
+        retained_7d: null,
+        retention_7d: null,
+        retained_30d: null,
+        retention_30d: null,
+      },
+      {
+        cohort_date: "2026-10-11",
+        cohort_size: 0,
+        retained_7d: null,
+        retention_7d: null,
+        retained_30d: null,
+        retention_30d: null,
+      },
+    ],
+    window_convention: "window",
+    maturity_convention: "maturity",
+    source_convention: "source",
+    actor_convention: "actors",
+  };
+
+  const RETENTION_WIRE = {
+    ...RETENTION,
+    cohorts: RETENTION.cohorts.map((cohort) => ({
+      ...cohort,
+      retention_7d:
+        cohort.retention_7d === null ? null : `${cohort.retention_7d}`,
+      retention_30d:
+        cohort.retention_30d === null ? null : `${cohort.retention_30d}`,
+    })),
+  };
+
+  it("lets the route own its sixty-date default", async () => {
+    const fetchMock = stubFetch(RETENTION_WIRE);
+
+    await fetchRetentionCohorts();
+
+    expect(requestedUrl(fetchMock)).toBe(`${BASE}/product/retention-cohorts`);
+  });
+
+  it("sends the cohort-date window it is given", async () => {
+    const fetchMock = stubFetch(RETENTION_WIRE);
+
+    await fetchRetentionCohorts({ days: 7 });
+
+    expect(requestedUrl(fetchMock)).toBe(
+      `${BASE}/product/retention-cohorts?days=7`,
+    );
+  });
+
+  it("decodes both horizons' rates beside their retained counts", async () => {
+    stubFetch(RETENTION_WIRE);
+
+    const read = await fetchRetentionCohorts();
+
+    expect(read.cohorts[0].retention_7d).toBeCloseTo(0.3, 5);
+    expect(read.cohorts[0].retention_30d).toBeCloseTo(0.15, 5);
+    expect(read.cohorts[0].retained_30d).toBe(6);
+  });
+
+  it("keeps an unarrived horizon null, never zero", async () => {
+    stubFetch(RETENTION_WIRE);
+
+    const read = await fetchRetentionCohorts();
+
+    expect(read.cohorts[1].retained_7d).toBeNull();
+    expect(read.cohorts[1].retention_7d).toBeNull();
+    expect(read.cohorts[1].retention_30d).toBeNull();
+  });
+
+  it("rejects a retention rate that will not decode", async () => {
+    stubFetch({
+      ...RETENTION_WIRE,
+      cohorts: [{ ...RETENTION_WIRE.cohorts[0], retention_7d: "three tenths" }],
+    });
+
+    await expect(fetchRetentionCohorts()).rejects.toMatchObject({
       code: "UNEXPECTED_ERROR",
     });
   });
