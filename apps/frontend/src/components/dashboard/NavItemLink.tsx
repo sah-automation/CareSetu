@@ -16,6 +16,7 @@ import { useLang } from "@/lib/i18n/LangContext";
 import { cn } from "@/lib/utils";
 
 import type { NavItemDef } from "./nav-config";
+import { isNavItemActive } from "./nav-config";
 
 export type NavVariant = "sidebar" | "topnav";
 
@@ -70,7 +71,7 @@ export function NavItemLink({ item, variant }: NavItemLinkProps) {
   const { lang } = useLang();
   const label = STRINGS[lang].nav[item.labelKey];
   const Icon = item.icon;
-  const active = !item.soon && pathname === item.href;
+  const active = isNavItemActive(item, pathname);
 
   const className = cn(
     VARIANT_BASE[variant],

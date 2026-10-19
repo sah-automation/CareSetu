@@ -1068,12 +1068,25 @@ const en = {
     // #743: the Product lens destination. Same both-locales gate as the two
     // labels above (#717 decision 34).
     product: "Product",
+    // #744: the Observability group's own sub-destination labels - its landing
+    // Overview, the four existing AI panels and the Batch 2 Settings
+    // placeholder. Both locales ship together (#717 decisions 27/34); the
+    // parity test plus the Dictionary type are the gate.
+    overview: "Overview",
+    cost: "Cost",
+    usage: "Usage",
+    quality: "Quality",
+    health: "Health",
+    settings: "Settings",
     // #538: section-group labels for the redesigned full-shell sidebar. Nav
     // items declare a group via NavItemDef.group; the sidebar composes ordered
     // labeled groups from these keys.
     sections: {
       work: "Work",
       account: "Account",
+      // #744: the operator console's Observability section (spec #717
+      // decision 28) - the disclosure parent's group membership.
+      observability: "Observability",
     },
     // #574: the sidebar's collapse control. Two flat keys, not one conditional
     // function - this namespace carries plain strings only, like `logOut`,
@@ -2821,9 +2834,19 @@ export const STRINGS: Record<Lang, Dictionary> = {
       reliability: "विश्वसनीयता",
       // #743: the Product lens destination, on the same both-locales terms.
       product: "उत्पाद",
+      // #744: the Observability group's sub-destination labels, shipping with
+      // their English halves or not at all (#717 decisions 27/34).
+      overview: "अवलोकन",
+      cost: "लागत",
+      usage: "उपयोग",
+      quality: "गुणवत्ता",
+      health: "स्वास्थ्य",
+      settings: "सेटिंग्स",
       sections: {
         work: "कार्य",
         account: "खाता",
+        // #744: the operator console's Observability section label.
+        observability: "प्रेक्षण",
       },
       // #574: the sidebar's collapse control, action-named like the English
       // pair above. Blueprint §9.2 line 578: neither locale ships alone.

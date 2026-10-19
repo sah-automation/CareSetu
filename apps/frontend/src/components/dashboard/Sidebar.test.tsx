@@ -162,6 +162,29 @@ describe("Sidebar", () => {
     expect(disputes.tagName).toBe("SPAN");
     expect(disputes).toHaveAttribute("aria-disabled", "true");
   });
+
+  it("lights a disclosure parent while inside its group, expanded and collapsed (#744)", () => {
+    mockPathname.mockReturnValue("/operator/observability/business");
+
+    const { unmount } = render(
+      <Sidebar role="operator" collapsed={false} onToggleCollapse={vi.fn()} />,
+    );
+    expect(screen.getByTestId("nav-observability")).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    unmount();
+
+    render(
+      <Sidebar role="operator" collapsed={true} onToggleCollapse={vi.fn()} />,
+    );
+    // The collapsed icon rail reads the same predicate, so the group can never
+    // look inactive in one surface and current in the other.
+    expect(screen.getByTestId("nav-observability")).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+  });
 });
 
 // #538: the doctor-chrome sidebar redesign - labeled section groups, the

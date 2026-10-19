@@ -43,7 +43,7 @@ import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { cn } from "@/lib/utils";
 
-import { NAV_CONFIG, sidebarSections } from "./nav-config";
+import { NAV_CONFIG, isNavItemActive, sidebarSections } from "./nav-config";
 import {
   ActiveIndicator,
   CountPill,
@@ -219,7 +219,7 @@ function CollapsedNavItem({ item }: { item: NavItemDef }) {
 
   const label = STRINGS[lang].nav[item.labelKey];
   const Icon = item.icon;
-  const active = !item.soon && pathname === item.href;
+  const active = isNavItemActive(item, pathname);
 
   function openFlyout() {
     const rect = anchorRef.current?.getBoundingClientRect();

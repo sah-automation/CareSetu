@@ -774,6 +774,31 @@ describe.each(["doctor", "partner", "operator"] as const)(
   },
 );
 
+// #744: the operator's Observability disclosure parent reads as current while
+// the operator is anywhere inside the group - and both the sidebar row and the
+// phone tab column consume the one shared predicate, so the two surfaces can
+// never disagree about where the operator is.
+describe("AppShell operator Observability parent (#744)", () => {
+  it("marks the parent current on a nested sub-destination in both surfaces", () => {
+    renderShell("operator", "/operator/observability/business");
+
+    for (const testid of ["nav-observability", "tab-observability"]) {
+      expect(screen.getByTestId(testid)).toHaveAttribute(
+        "aria-current",
+        "page",
+      );
+    }
+  });
+
+  it("stays unlit on a sibling that merely shares a string prefix", () => {
+    renderShell("operator", "/operator/observability-archive");
+
+    for (const testid of ["nav-observability", "tab-observability"]) {
+      expect(screen.getByTestId(testid)).not.toHaveAttribute("aria-current");
+    }
+  });
+});
+
 // #567: the whole thread, end to end, with no prop hand-fed at any step. The
 // doctor shell knows its own role (its route group pins it), so the account
 // menu inherits it - which is the only way a doctor-only affordance can be

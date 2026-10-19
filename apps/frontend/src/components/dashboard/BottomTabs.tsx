@@ -26,7 +26,7 @@ import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { cn } from "@/lib/utils";
 
-import { NAV_CONFIG, splitMobileTabs } from "./nav-config";
+import { NAV_CONFIG, isNavItemActive, splitMobileTabs } from "./nav-config";
 import { CountPill, SoonBadge } from "./NavItemLink";
 import type { NavItemDef } from "./nav-config";
 import type { Role } from "./types";
@@ -75,7 +75,7 @@ export function BottomTabs({
           <TabColumn
             key={item.key}
             item={item}
-            active={!item.soon && pathname === item.href}
+            active={isNavItemActive(item, pathname)}
             label={strings[item.labelKey]}
           />
         ))}
