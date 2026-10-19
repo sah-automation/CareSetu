@@ -799,6 +799,52 @@ describe("AppShell operator Observability parent (#744)", () => {
   });
 });
 
+// #745: the grouped operator sidebar end to end through the shell - the
+// disclosure's sub-destinations render under their parent while the operator is
+// inside the group, and the collapsed rail still offers a way back in.
+describe("AppShell operator grouped sidebar (#745)", () => {
+  it("renders the Observability sub-destinations under their parent inside the group", () => {
+    renderShell("operator", "/operator/observability/business");
+
+    expect(screen.getByTestId("nav-observability")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    const group = screen.getByTestId("sidebar-group-observability");
+    for (const key of [
+      "overview",
+      "business",
+      "product",
+      "reliability",
+      "cost",
+      "usage",
+      "quality",
+      "health",
+      "settings",
+    ]) {
+      expect(within(group).getByTestId(`nav-${key}`)).toBeInTheDocument();
+    }
+  });
+
+  it("keeps the collapsed rail a route into the group", () => {
+    localStorage.setItem("caresetu.sidebar.operator", "collapsed");
+    renderShell("operator", "/operator");
+
+    const anchor = screen.getByTestId("nav-observability");
+    expect(anchor.tagName).toBe("A");
+    expect(anchor).toHaveAttribute("href", "/operator/observability");
+
+    fireEvent.mouseEnter(
+      screen.getByTestId("sidebar-group-observability-collapsed"),
+    );
+    expect(
+      within(screen.getByTestId("sidebar-flyout")).getByRole("link", {
+        name: "Business",
+      }),
+    ).toHaveAttribute("href", "/operator/observability/business");
+  });
+});
+
 // #567: the whole thread, end to end, with no prop hand-fed at any step. The
 // doctor shell knows its own role (its route group pins it), so the account
 // menu inherits it - which is the only way a doctor-only affordance can be
@@ -1103,7 +1149,9 @@ describe("full-shell collapse preference persistence", () => {
 
     const sidebar = screen.getByTestId("sidebar");
     expect(sidebar.getAttribute("data-collapsed")).toBeNull();
-    expect(sidebar.className).toContain("w-52");
+    // #745: the operator rail widens to 240px for the disclosure's indented
+    // sub-labels; the collapsed width below is what must stay unchanged.
+    expect(sidebar.className).toContain("w-60");
 
     fireEvent.click(screen.getByTestId("sidebar-toggle"));
 

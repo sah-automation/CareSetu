@@ -103,9 +103,11 @@ export interface NavItemDef {
   // #744: a disclosure parent's sub-destinations. Sub-membership is declared
   // here ONCE and read by every renderer that has a nested surface (the
   // sidebar disclosure and the mobile More sheet), never re-listed by hand. A
-  // parent's own `href` is its group landing - the page the collapsed rail and
-  // the disclosure header navigate to - and also the prefix that makes the
+  // parent's own `href` is its group landing - the page the collapsed rail
+  // (and the mobile tab) navigate to - and also the prefix that makes the
   // parent read as current while an operator is inside any sub-destination.
+  // #745 renders the expanded parent as a disclosure toggle, not a link, so
+  // the group's landing is reached through its Overview child there.
   children?: NavItemDef[];
 }
 

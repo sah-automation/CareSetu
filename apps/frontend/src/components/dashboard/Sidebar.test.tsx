@@ -546,3 +546,135 @@ describe("Sidebar #574 collapse control placement", () => {
     },
   );
 });
+
+// #745: the operator console's grouped sidebar. Work and Observability are two
+// sections separated by a hairline divider; Observability is a hand-rolled
+// disclosure whose sub-menu holds the nine decision-28 sub-destinations behind
+// a hairline guide rail. The collapsed rail keeps a way into the group.
+describe("Sidebar #745 operator groups and disclosure", () => {
+  function renderOperator({
+    collapsed = false,
+    pathname = "/operator",
+  }: {
+    collapsed?: boolean;
+    pathname?: string;
+  } = {}) {
+    mockPathname.mockReturnValue(pathname);
+    return render(
+      <Sidebar
+        role="operator"
+        collapsed={collapsed}
+        onToggleCollapse={vi.fn()}
+      />,
+    );
+  }
+
+  it("labels the navigation landmark", () => {
+    renderOperator();
+    expect(screen.getByRole("navigation", { name: "Primary" })).toBe(
+      screen.getByTestId("sidebar-nav"),
+    );
+  });
+
+  it("separates the two operator sections with a hairline divider", () => {
+    renderOperator();
+    const divider = screen.getByTestId("sidebar-section-divider");
+    expect(divider.className).toContain("border-hairline");
+  });
+
+  it("renders the nine sub-destinations under their parent behind a guide rail", () => {
+    renderOperator({ pathname: "/operator/observability/business" });
+
+    const group = screen.getByTestId("sidebar-group-observability");
+    const menu = within(group).getByTestId("sidebar-group-observability-menu");
+    expect(menu.className).toContain("border-hairline");
+    for (const key of [
+      "overview",
+      "business",
+      "product",
+      "reliability",
+      "cost",
+      "usage",
+      "quality",
+      "health",
+      "settings",
+    ]) {
+      expect(within(menu).getByTestId(`nav-${key}`)).toBeInTheDocument();
+    }
+  });
+
+  it("reports its expanded state to assistive technology and rotates its arrow", () => {
+    renderOperator();
+
+    const toggle = screen.getByTestId("nav-observability");
+    const chevron = screen.getByTestId("observability-disclosure-chevron");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(chevron.getAttribute("class")).not.toContain("rotate-180");
+
+    fireEvent.click(toggle);
+
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(chevron.getAttribute("class")).toContain("rotate-180");
+    expect(toggle).toHaveAttribute(
+      "aria-controls",
+      screen.getByTestId("sidebar-group-observability-menu").id,
+    );
+  });
+
+  it("opens itself when the operator lands inside the group", () => {
+    renderOperator({ pathname: "/operator/observability/reliability" });
+    expect(screen.getByTestId("nav-observability")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+  });
+
+  it("highlights the parent while a sub-destination is current", () => {
+    renderOperator({ pathname: "/operator/observability/reliability" });
+
+    const toggle = screen.getByTestId("nav-observability");
+    expect(toggle).toHaveAttribute("aria-current", "page");
+    expect(toggle).toHaveAttribute("data-active", "true");
+  });
+
+  it("keeps coming-soon sub-destinations non-interactive inside the sub-menu", () => {
+    renderOperator({ pathname: "/operator/observability" });
+
+    const settings = within(
+      screen.getByTestId("sidebar-group-observability-menu"),
+    ).getByTestId("nav-settings");
+    expect(settings.tagName).toBe("SPAN");
+    expect(settings).toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("keeps the collapsed rail a way into the group, with its sub-destinations", () => {
+    renderOperator({ collapsed: true });
+
+    const anchor = screen.getByTestId("nav-observability");
+    expect(anchor.tagName).toBe("A");
+    expect(anchor).toHaveAttribute("href", "/operator/observability");
+
+    fireEvent.mouseEnter(
+      screen.getByTestId("sidebar-group-observability-collapsed"),
+    );
+
+    const flyout = screen.getByTestId("sidebar-flyout");
+    expect(
+      within(flyout).getByRole("link", { name: "Business" }),
+    ).toHaveAttribute("href", "/operator/observability/business");
+  });
+
+  it("keeps a coming-soon sub-destination non-interactive in the collapsed flyout", () => {
+    renderOperator({ collapsed: true, pathname: "/operator/observability" });
+
+    fireEvent.mouseEnter(
+      screen.getByTestId("sidebar-group-observability-collapsed"),
+    );
+
+    const settings = within(screen.getByTestId("sidebar-flyout")).getByTestId(
+      "nav-settings",
+    );
+    expect(settings.tagName).toBe("SPAN");
+    expect(settings).toHaveAttribute("aria-disabled", "true");
+  });
+});

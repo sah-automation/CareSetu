@@ -18,11 +18,17 @@ import { cn } from "@/lib/utils";
 import type { NavItemDef } from "./nav-config";
 import { isNavItemActive } from "./nav-config";
 
-export type NavVariant = "sidebar" | "topnav";
+export type NavVariant = "sidebar" | "sidebar-sub" | "topnav";
 
 const VARIANT_BASE: Record<NavVariant, string> = {
   sidebar:
     "relative flex min-h-11 items-center gap-3 whitespace-nowrap rounded px-3 py-2 text-sm",
+  // #745: a disclosure's sub-destination. Same row shape as a top-level
+  // sidebar row (the 44px touch target is not negotiable, §9.4); the
+  // indentation and the hairline guide rail come from the group that wraps it,
+  // so this variant only trims the icon.
+  "sidebar-sub":
+    "relative flex min-h-11 items-center gap-2.5 whitespace-nowrap rounded px-3 py-2 text-sm",
   topnav: "flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm",
 };
 
@@ -86,7 +92,10 @@ export function NavItemLink({ item, variant }: NavItemLinkProps) {
           sidebar variant marks the current destination alongside the soft
           accent fill. */}
       {variant === "sidebar" && active && <ActiveIndicator />}
-      <Icon size={variant === "sidebar" ? 20 : 16} className="shrink-0" />
+      <Icon
+        size={variant === "topnav" ? 16 : variant === "sidebar-sub" ? 18 : 20}
+        className="shrink-0"
+      />
       <span className="min-w-0 flex-1 truncate">{label}</span>
       {item.soon && <SoonBadge />}
       {typeof item.count === "number" && !item.soon && (
