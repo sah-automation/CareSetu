@@ -608,17 +608,19 @@ describe("Sidebar #745 operator groups and disclosure", () => {
 
     const toggle = screen.getByTestId("nav-observability");
     const chevron = screen.getByTestId("observability-disclosure-chevron");
+    const menu = screen.getByTestId("sidebar-group-observability-menu");
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(chevron.getAttribute("class")).not.toContain("rotate-180");
+    // The menu stays mounted while closed so `aria-controls` always resolves;
+    // a class hides it rather than the `hidden` attribute.
+    expect(toggle).toHaveAttribute("aria-controls", menu.id);
+    expect(menu).toHaveClass("hidden");
 
     fireEvent.click(toggle);
 
     expect(toggle).toHaveAttribute("aria-expanded", "true");
     expect(chevron.getAttribute("class")).toContain("rotate-180");
-    expect(toggle).toHaveAttribute(
-      "aria-controls",
-      screen.getByTestId("sidebar-group-observability-menu").id,
-    );
+    expect(menu).not.toHaveClass("hidden");
   });
 
   it("opens itself when the operator lands inside the group", () => {
@@ -633,6 +635,8 @@ describe("Sidebar #745 operator groups and disclosure", () => {
     renderOperator({ pathname: "/operator/observability/reliability" });
 
     const toggle = screen.getByTestId("nav-observability");
+    // The toggle carries the same current marker #744 asserts on the collapsed
+    // rail, so both group forms agree on where the operator is.
     expect(toggle).toHaveAttribute("aria-current", "page");
     expect(toggle).toHaveAttribute("data-active", "true");
   });

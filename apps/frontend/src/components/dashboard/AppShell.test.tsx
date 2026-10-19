@@ -826,6 +826,16 @@ describe("AppShell operator grouped sidebar (#745)", () => {
     }
   });
 
+  it("keeps a coming-soon sub-destination non-interactive inside the sub-menu", () => {
+    renderShell("operator", "/operator/observability/business");
+
+    const settings = within(
+      screen.getByTestId("sidebar-group-observability-menu"),
+    ).getByTestId("nav-settings");
+    expect(settings.tagName).toBe("SPAN");
+    expect(settings).toHaveAttribute("aria-disabled", "true");
+  });
+
   it("keeps the collapsed rail a route into the group", () => {
     localStorage.setItem("caresetu.sidebar.operator", "collapsed");
     renderShell("operator", "/operator");

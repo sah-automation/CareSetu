@@ -265,9 +265,11 @@ function DisclosureNavItem({ item }: { item: NavItemDef }) {
         type="button"
         aria-expanded={open}
         aria-controls={submenuId}
-        // The parent reads as current while any sub-destination is current, so
-        // the operator can see which group they are inside even when it is
-        // collapsed. Same predicate as the collapsed rail and the phone tab.
+        // The parent reads as current while any sub-destination is current - the
+        // same shared predicate (#744) the collapsed rail and the phone tab
+        // consume, so the surfaces can never disagree about where the operator
+        // is. #744's contract asserts this attribute on `nav-observability` in
+        // both the expanded and collapsed forms.
         aria-current={active ? "page" : undefined}
         data-active={active || undefined}
         data-testid={`nav-${item.key}`}
@@ -289,21 +291,25 @@ function DisclosureNavItem({ item }: { item: NavItemDef }) {
           className={cn("shrink-0 transition-transform", open && "rotate-180")}
         />
       </button>
-      {open && (
-        // The guide rail: a hairline left border aligned under the parent's
-        // icon, with the rows inset past it. Existing tokens only.
-        <ul
-          id={submenuId}
-          data-testid={`sidebar-group-${item.key}-menu`}
-          className="mt-1 ml-5 space-y-1 border-l border-hairline pl-1"
-        >
-          {children.map((child) => (
-            <li key={child.key}>
-              <NavItemLink item={child} variant="sidebar-sub" />
-            </li>
-          ))}
-        </ul>
-      )}
+      {/* The guide rail: a hairline left border aligned under the parent's
+          icon, with the rows inset past it. Existing tokens only. The menu
+          stays mounted and toggles a class rather than the `hidden` attribute
+          (the same shape the doctor-profile disclosure uses), so the toggle's
+          `aria-controls` always resolves to a real element. */}
+      <ul
+        id={submenuId}
+        data-testid={`sidebar-group-${item.key}-menu`}
+        className={cn(
+          "mt-1 ml-5 space-y-1 border-l border-hairline pl-1",
+          !open && "hidden",
+        )}
+      >
+        {children.map((child) => (
+          <li key={child.key}>
+            <NavItemLink item={child} variant="sidebar-sub" />
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
