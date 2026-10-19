@@ -32,7 +32,6 @@ import { ErrorBanner } from "@/components/layout/ErrorBanner";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { AlertsFeed } from "@/components/observability/AlertsFeed";
 import { DeeplinksPanel } from "@/components/observability/DeeplinksPanel";
-import { PanelTabs } from "@/components/observability/ObservabilityPanelPage";
 import { formatInrPaise } from "@/lib/money";
 import {
   fetchAlerts,
@@ -320,8 +319,6 @@ export default function ObservabilityOverviewPage() {
             : "AI spend, quality and reliability."
         }
       />
-
-      <PanelTabs current="overview" />
 
       {status === "error" && bannerOpen && (
         <ErrorBanner

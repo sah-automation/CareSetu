@@ -271,7 +271,8 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
     // and read by both the sidebar disclosure (#745) and the mobile More sheet
     // (#746). Overview is the group landing (same route as the parent), the
     // three lenses and the four AI panels have live pages, and Settings is the
-    // Batch 2 placeholder shell until it ships - so it stays Soon.
+    // #747 placeholder shell: a real page carrying no configuration until the
+    // Batch 2 settings surface ships, so it is live rather than Soon.
     //
     // Decision 28 says the parent has "no destination of its own"; decision 29
     // and ticket criterion 2 make parent highlighting key off "its own
@@ -341,7 +342,6 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
           labelKey: "settings",
           href: "/operator/observability/settings",
           icon: Settings,
-          soon: true,
         },
       ],
     },

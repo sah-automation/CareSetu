@@ -255,12 +255,11 @@ describe("ObservabilityQualityPage", () => {
     expect(screen.queryByTestId("quality-report-error")).toBeNull();
   });
 
-  it("marks the quality tab as the current panel", () => {
+  it("renders the panel without the page-level tab strip (#747)", () => {
     render(<ObservabilityQualityPage />);
 
-    expect(screen.getByTestId("observability-tab-quality")).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
+    expect(screen.getByTestId("page-header")).toBeInTheDocument();
+    expect(screen.queryByTestId("observability-panel-tabs")).toBeNull();
+    expect(screen.queryByTestId("observability-tab-quality")).toBeNull();
   });
 });

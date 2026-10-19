@@ -853,16 +853,24 @@ describe("AppShell operator mobile More sheet (#746)", () => {
   it("keeps coming-soon destinations non-interactive and dimmed", () => {
     const sheet = openMore();
 
-    const settings = within(sheet).getByTestId("more-settings");
-    expect(settings.tagName).toBe("SPAN");
-    expect(settings).toHaveAttribute("aria-disabled", "true");
+    const disputes = within(sheet).getByTestId("more-disputes");
+    expect(disputes.tagName).toBe("SPAN");
+    expect(disputes).toHaveAttribute("aria-disabled", "true");
     // Dimmed, with the same Soon badge the sidebar shows: the shared
     // coming-soon convention, not a second rendering.
-    expect(settings.className).toContain("opacity-60");
-    expect(within(settings).getByTestId("soon-badge")).toBeInTheDocument();
-    // A live top-level destination and a live sub-destination stay real links.
+    expect(disputes.className).toContain("opacity-60");
+    expect(within(disputes).getByTestId("soon-badge")).toBeInTheDocument();
+    // A live top-level destination and live sub-destinations stay real links.
+    // #747: Settings is a live placeholder shell, so it is a link, not a
+    // coming-soon stub like the Work entries that still lack pages.
     expect(within(sheet).getByTestId("more-home").tagName).toBe("A");
     expect(within(sheet).getByTestId("more-business").tagName).toBe("A");
+    const settings = within(sheet).getByTestId("more-settings");
+    expect(settings.tagName).toBe("A");
+    expect(settings).toHaveAttribute(
+      "href",
+      "/operator/observability/settings",
+    );
   });
 
   it("keeps a disclosure parent off the phone bar, behind More", () => {
@@ -903,14 +911,20 @@ describe("AppShell operator grouped sidebar (#745)", () => {
     }
   });
 
-  it("keeps a coming-soon sub-destination non-interactive inside the sub-menu", () => {
+  it("renders every sub-destination as a live link inside the sub-menu", () => {
     renderShell("operator", "/operator/observability/business");
 
     const settings = within(
       screen.getByTestId("sidebar-group-observability-menu"),
     ).getByTestId("nav-settings");
-    expect(settings.tagName).toBe("SPAN");
-    expect(settings).toHaveAttribute("aria-disabled", "true");
+    // #747: Settings is a live placeholder shell, so it is a real link rather
+    // than the coming-soon span it used to be. No operator sub-destination is
+    // coming-soon any more.
+    expect(settings.tagName).toBe("A");
+    expect(settings).toHaveAttribute(
+      "href",
+      "/operator/observability/settings",
+    );
   });
 
   it("keeps the collapsed rail a route into the group", () => {

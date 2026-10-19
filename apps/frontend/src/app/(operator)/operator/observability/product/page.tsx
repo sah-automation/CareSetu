@@ -194,7 +194,6 @@ export default function ObservabilityProductPage() {
 
   return (
     <ObservabilityPanelPage
-      current="product"
       title="Product"
       description="Whether people arrive, keep coming back and finish what they start."
     >

@@ -37,7 +37,6 @@ export default function ObservabilityCostPage() {
 
   return (
     <ObservabilityPanelPage
-      current="cost"
       title="AI cost"
       description="Spend against the monthly cap, and how the bill has moved."
     >

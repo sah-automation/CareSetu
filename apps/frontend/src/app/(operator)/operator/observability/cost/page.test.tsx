@@ -254,20 +254,13 @@ describe("ObservabilityCostPage", () => {
     expect(chart.querySelectorAll(".recharts-bar-rectangle").length).toBe(4);
   });
 
-  it("marks the current panel tab and links the others", () => {
+  it("renders the panel without the page-level tab strip (#747)", () => {
     render(<ObservabilityCostPage />);
 
-    expect(screen.getByTestId("observability-tab-cost")).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
-    expect(screen.getByTestId("observability-tab-overview")).toHaveAttribute(
-      "href",
-      "/operator/observability",
-    );
-    expect(screen.getByTestId("observability-tab-health")).toHaveAttribute(
-      "href",
-      "/operator/observability/health",
-    );
+    // The strip is replaced by the sub-menu, which the nav configuration
+    // renders; the page keeps only its header and its panels.
+    expect(screen.getByTestId("page-header")).toBeInTheDocument();
+    expect(screen.queryByTestId("observability-panel-tabs")).toBeNull();
+    expect(screen.queryByTestId("observability-tab-cost")).toBeNull();
   });
 });

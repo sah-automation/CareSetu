@@ -641,14 +641,19 @@ describe("Sidebar #745 operator groups and disclosure", () => {
     expect(toggle).toHaveAttribute("data-active", "true");
   });
 
-  it("keeps coming-soon sub-destinations non-interactive inside the sub-menu", () => {
+  it("renders the sub-destinations as live links inside the sub-menu", () => {
     renderOperator({ pathname: "/operator/observability" });
 
     const settings = within(
       screen.getByTestId("sidebar-group-observability-menu"),
     ).getByTestId("nav-settings");
-    expect(settings.tagName).toBe("SPAN");
-    expect(settings).toHaveAttribute("aria-disabled", "true");
+    // #747: Settings is a live placeholder shell, not a coming-soon stub, so
+    // it renders as a real link like every other sub-destination.
+    expect(settings.tagName).toBe("A");
+    expect(settings).toHaveAttribute(
+      "href",
+      "/operator/observability/settings",
+    );
   });
 
   it("keeps the collapsed rail a way into the group, with its sub-destinations", () => {
@@ -668,7 +673,7 @@ describe("Sidebar #745 operator groups and disclosure", () => {
     ).toHaveAttribute("href", "/operator/observability/business");
   });
 
-  it("keeps a coming-soon sub-destination non-interactive in the collapsed flyout", () => {
+  it("renders the sub-destinations as live links in the collapsed flyout", () => {
     renderOperator({ collapsed: true, pathname: "/operator/observability" });
 
     fireEvent.mouseEnter(
@@ -678,7 +683,12 @@ describe("Sidebar #745 operator groups and disclosure", () => {
     const settings = within(screen.getByTestId("sidebar-flyout")).getByTestId(
       "nav-settings",
     );
-    expect(settings.tagName).toBe("SPAN");
-    expect(settings).toHaveAttribute("aria-disabled", "true");
+    // #747: Settings un-sooned to a live placeholder shell, so the flyout
+    // carries it as a link too.
+    expect(settings.tagName).toBe("A");
+    expect(settings).toHaveAttribute(
+      "href",
+      "/operator/observability/settings",
+    );
   });
 });

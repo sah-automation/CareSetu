@@ -247,11 +247,20 @@ describe("operator Observability group (#744)", () => {
       "health",
       "settings",
     ]);
-    // Only Settings is a coming-soon placeholder; every other sub-destination
-    // has a live page behind it.
+    // #747: no sub-destination is a coming-soon stub any more. Settings is the
+    // placeholder shell behind a live page, so the whole sub-menu is clickable.
     expect(
       parent?.children?.filter((child) => child.soon).map((child) => child.key),
-    ).toEqual(["settings"]);
+    ).toEqual([]);
+  });
+
+  it("keeps Settings live as the #747 placeholder shell", () => {
+    const settings = parent?.children?.find(
+      (child) => child.key === "settings",
+    );
+
+    expect(settings?.href).toBe("/operator/observability/settings");
+    expect(settings?.soon).toBeUndefined();
   });
 
   it("keeps the Work entries as they were and adds Observability as a second section", () => {

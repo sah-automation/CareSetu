@@ -73,7 +73,6 @@ export default function ObservabilityHealthPage() {
 
   return (
     <ObservabilityPanelPage
-      current="health"
       title="System health"
       description="How slow the AI is, and whether the dependencies behind it are up."
     >

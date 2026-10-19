@@ -335,7 +335,6 @@ export default function ObservabilityReliabilityPage() {
 
   return (
     <ObservabilityPanelPage
-      current="reliability"
       title="Reliability"
       description="Which providers are failing, what is failing, how fast it is arriving and what is piling up."
     >
@@ -576,7 +575,7 @@ export default function ObservabilityReliabilityPage() {
           writeError={ackError}
         />
 
-        <DeeplinksPanel read={deeplinks} />
+        <DeeplinksPanel read={deeplinks} testId="reliability-deeplinks" />
       </div>
     </ObservabilityPanelPage>
   );

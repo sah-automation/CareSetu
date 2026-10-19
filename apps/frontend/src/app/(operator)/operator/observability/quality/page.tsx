@@ -35,7 +35,6 @@ export default function ObservabilityQualityPage() {
 
   return (
     <ObservabilityPanelPage
-      current="quality"
       title="AI quality"
       description="Whether the AI is completing work, and how often its output needs a second look."
     >

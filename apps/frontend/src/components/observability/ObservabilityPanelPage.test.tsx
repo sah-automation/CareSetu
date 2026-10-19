@@ -1,6 +1,9 @@
-// #709 C2b: the shared Observability panel shell (tabs + read-scoped panel) and
-// the load-state hook behind it. These are the pieces every C2b page composes,
-// so their states are pinned once here rather than four times over in the pages.
+// #709 C2b: the shared Observability panel shell (page frame + read-scoped
+// panel) and the load-state hook behind it. These are the pieces every C2b page
+// composes, so their states are pinned once here rather than four times over in
+// the pages. #747 removed the page-level tab strip from this file; its
+// replacement (the nav configuration's children) is pinned here so the strip's
+// regression protection survives the move.
 
 import type { ReactElement } from "react";
 import {
@@ -12,37 +15,57 @@ import {
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { NAV_CONFIG } from "@/components/dashboard/nav-config";
 import { ApiError } from "@/lib/api-errors";
 import { usePanelRead } from "@/lib/operator/usePanelRead";
 
-import { PanelTabs, ReadPanel } from "./ObservabilityPanelPage";
+import { ObservabilityPanelPage, ReadPanel } from "./ObservabilityPanelPage";
 
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
 });
 
-describe("PanelTabs", () => {
-  it("renders the current panel as text and the rest as links", () => {
-    render(<PanelTabs current="usage" />);
+describe("ObservabilityPanelPage", () => {
+  it("renders the header and the panels with no page-level strip", () => {
+    render(
+      <ObservabilityPanelPage
+        title="AI cost"
+        description="Spend against the cap."
+      >
+        <p>panel body</p>
+      </ObservabilityPanelPage>,
+    );
 
-    expect(screen.getByTestId("observability-tab-usage")).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
-    expect(screen.getByTestId("observability-tab-usage").tagName).toBe("SPAN");
-    expect(screen.getByTestId("observability-tab-cost")).toHaveAttribute(
-      "href",
-      "/operator/observability/cost",
-    );
+    expect(screen.getByTestId("page-header")).toBeInTheDocument();
+    expect(screen.getByText("panel body")).toBeInTheDocument();
+    // #747 (spec #717 decision 35): the sub-menu carries the destinations, so
+    // the page-level strip must be gone rather than merely unlinked.
+    expect(screen.queryByTestId("observability-panel-tabs")).toBeNull();
+    expect(screen.queryByTestId("observability-tab-overview")).toBeNull();
   });
 
-  it("reaches every panel from every panel", () => {
-    render(<PanelTabs current="overview" />);
+  it("reaches every panel from the nav configuration the sub-menu renders", () => {
+    // The strip used to be pinned here; the destinations now live once in the
+    // nav configuration's children, so the same reachability guarantee is
+    // pinned against that declaration.
+    const parent = NAV_CONFIG.operator.find(
+      (item) => item.key === "observability",
+    );
 
-    for (const key of ["overview", "cost", "usage", "quality", "health"]) {
-      expect(screen.getByTestId(`observability-tab-${key}`)).toBeTruthy();
-    }
+    expect(parent?.children?.map((child) => child.href)).toEqual(
+      expect.arrayContaining([
+        "/operator/observability",
+        "/operator/observability/cost",
+        "/operator/observability/usage",
+        "/operator/observability/quality",
+        "/operator/observability/health",
+        "/operator/observability/business",
+        "/operator/observability/reliability",
+        "/operator/observability/product",
+        "/operator/observability/settings",
+      ]),
+    );
   });
 });
 

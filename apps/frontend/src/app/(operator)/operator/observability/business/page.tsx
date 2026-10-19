@@ -180,7 +180,6 @@ export default function ObservabilityBusinessPage() {
 
   return (
     <ObservabilityPanelPage
-      current="business"
       title="Business"
       description="Whether this spend is healthy, where it goes, what a unit of value costs and who is heavy."
     >

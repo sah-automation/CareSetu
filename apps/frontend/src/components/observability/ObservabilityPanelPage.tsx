@@ -21,7 +21,6 @@
 //     cost trend and the budget in two panels rather than one "Cost" read.
 
 import type { ReactNode } from "react";
-import Link from "next/link";
 
 import { EmptyState } from "@/components/layout/EmptyState";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -30,96 +29,20 @@ import type { PanelRead } from "@/lib/operator/usePanelRead";
 import { cn } from "@/lib/utils";
 
 /**
- * The console's panels, in the order an operator reads them: is the bill on
- * plan, is the AI being used, is its output any good, is the system up, what
- * does a case earn against what it costs. One declaration drives the tab strip
- * on every panel page, so a new panel cannot be reachable from a subset of the
- * pages. #747 replaces this strip with a sub-navigation, at which point this
- * table stops being the console's navigation at all.
- */
-export const PANEL_ROUTES = [
-  { key: "overview", href: "/operator/observability", label: "Overview" },
-  { key: "cost", href: "/operator/observability/cost", label: "Cost" },
-  { key: "usage", href: "/operator/observability/usage", label: "Usage" },
-  {
-    key: "quality",
-    href: "/operator/observability/quality",
-    label: "Quality",
-  },
-  { key: "health", href: "/operator/observability/health", label: "Health" },
-  {
-    key: "business",
-    href: "/operator/observability/business",
-    label: "Business",
-  },
-  // #738: the Reliability lens destination. Ordered after Business to match the
-  // console IA spec #717 decision 28 declares, even though #744 owns the
-  // sidebar that will eventually render it.
-  {
-    key: "reliability",
-    href: "/operator/observability/reliability",
-    label: "Reliability",
-  },
-  // #743: the Product lens destination, the last lens before #744 restructures
-  // the console's navigation. Appended rather than reordered so the two lens
-  // destinations already shipped keep their order.
-  {
-    key: "product",
-    href: "/operator/observability/product",
-    label: "Product",
-  },
-] as const;
-
-export type PanelKey = (typeof PANEL_ROUTES)[number]["key"];
-
-/**
- * The cross-panel tab strip. `current` renders as plain text with
- * `aria-current`, matching the breadcrumb rule (§2.5): the page you are on is
- * not a link to itself.
- */
-export function PanelTabs({ current }: { current: PanelKey }) {
-  return (
-    <nav
-      aria-label="Observability panels"
-      data-testid="observability-panel-tabs"
-      className="mb-6 flex flex-wrap gap-2"
-    >
-      {PANEL_ROUTES.map((route) =>
-        route.key === current ? (
-          <span
-            key={route.key}
-            aria-current="page"
-            data-testid={`observability-tab-${route.key}`}
-            className="rounded-md border border-accent-border bg-accent-soft px-3 py-1.5 text-sm font-medium text-accent-strong"
-          >
-            {route.label}
-          </span>
-        ) : (
-          <Link
-            key={route.key}
-            href={route.href}
-            data-testid={`observability-tab-${route.key}`}
-            className="rounded-md border border-hairline bg-surface px-3 py-1.5 text-sm font-medium text-txt-sub hover:bg-hairline-soft"
-          >
-            {route.label}
-          </Link>
-        ),
-      )}
-    </nav>
-  );
-}
-
-/**
- * The page frame: header, tabs, then the panels. Deliberately thin - every
+ * The page frame: header, then the panels. Deliberately thin - every
  * state decision belongs to the panel that owns the read, not to the page.
+ *
+ * #747 (spec #717 decision 35): it no longer renders a page-level panel strip.
+ * The observability destinations live once in the nav configuration's children
+ * (`nav-config.ts`), which both the sidebar disclosure and the mobile More
+ * sheet render, so the two navigations no longer duplicate each other and a
+ * new panel adds a destination by declaring it there.
  */
 export function ObservabilityPanelPage({
-  current,
   title,
   description,
   children,
 }: {
-  current: PanelKey;
   title: ReactNode;
   description: ReactNode;
   children: ReactNode;
@@ -127,7 +50,6 @@ export function ObservabilityPanelPage({
   return (
     <>
       <PageHeader title={title} description={description} />
-      <PanelTabs current={current} />
       {children}
     </>
   );

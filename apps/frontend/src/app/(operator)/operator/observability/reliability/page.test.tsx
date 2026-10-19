@@ -15,6 +15,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import {
   afterEach,
@@ -992,9 +993,15 @@ describe("ObservabilityReliabilityPage", () => {
     render(<ObservabilityReliabilityPage />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("empty-state-title").textContent).toBe(
-        "No vendor links configured",
-      );
+      // #747 removed the page-level strip and shifted render timing. The feed's
+      // own deep-links panel shares the generic `empty-state-title` id, so
+      // removing the strip turned a latent ambiguity into a reliable failure;
+      // scope the assertion to the page-level panel rather than the first title.
+      expect(
+        within(screen.getByTestId("reliability-deeplinks")).getByTestId(
+          "empty-state-title",
+        ).textContent,
+      ).toBe("No vendor links configured");
     });
   });
 

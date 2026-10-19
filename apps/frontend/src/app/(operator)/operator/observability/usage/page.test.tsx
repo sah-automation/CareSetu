@@ -188,13 +188,11 @@ describe("ObservabilityUsagePage", () => {
     expect(screen.queryByTestId("usage-breakdown-error")).toBeNull();
   });
 
-  it("marks the usage tab as the current panel", () => {
+  it("renders the panel without the page-level tab strip (#747)", () => {
     render(<ObservabilityUsagePage />);
 
-    expect(screen.getByTestId("observability-tab-usage")).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
-    expect(screen.getByTestId("observability-tab-usage").tagName).toBe("SPAN");
+    expect(screen.getByTestId("page-header")).toBeInTheDocument();
+    expect(screen.queryByTestId("observability-panel-tabs")).toBeNull();
+    expect(screen.queryByTestId("observability-tab-usage")).toBeNull();
   });
 });

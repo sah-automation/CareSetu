@@ -575,16 +575,11 @@ describe("ObservabilityBusinessPage", () => {
     });
   });
 
-  it("marks the current panel tab and links the others", () => {
+  it("renders the panel without the page-level tab strip (#747)", () => {
     render(<ObservabilityBusinessPage />);
 
-    expect(screen.getByTestId("observability-tab-business")).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
-    expect(screen.getByTestId("observability-tab-cost")).toHaveAttribute(
-      "href",
-      "/operator/observability/cost",
-    );
+    expect(screen.getByTestId("page-header")).toBeInTheDocument();
+    expect(screen.queryByTestId("observability-panel-tabs")).toBeNull();
+    expect(screen.queryByTestId("observability-tab-business")).toBeNull();
   });
 });

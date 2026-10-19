@@ -32,7 +32,6 @@ export default function ObservabilityUsagePage() {
 
   return (
     <ObservabilityPanelPage
-      current="usage"
       title="AI usage"
       description="Where the AI calls, tokens and rupees are going."
     >

@@ -262,12 +262,11 @@ describe("ObservabilityHealthPage", () => {
     expect(mockFetchHealth).toHaveBeenCalledTimes(1);
   });
 
-  it("marks the health tab as the current panel", () => {
+  it("renders the panel without the page-level tab strip (#747)", () => {
     render(<ObservabilityHealthPage />);
 
-    expect(screen.getByTestId("observability-tab-health")).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
+    expect(screen.getByTestId("page-header")).toBeInTheDocument();
+    expect(screen.queryByTestId("observability-panel-tabs")).toBeNull();
+    expect(screen.queryByTestId("observability-tab-health")).toBeNull();
   });
 });
