@@ -390,10 +390,19 @@ function weaveCenter(
 
 export function splitMobileTabs(items: NavItemDef[]): MobileTabSplit {
   const center = items.find((item) => item.center);
+  // #746: the pinned-overflow rule now also covers disclosure parents. A tab
+  // column is a single flat destination and cannot expand a group, so an item
+  // carrying `children` is pinned into the More sheet exactly like a
+  // `mobileOverflow` destination - where the group (and every sub-destination)
+  // renders. This is what makes adding nine sub-destinations change what fits
+  // on the operator bar: the parent leaves the bar for the More sheet.
   const pinnedOverflow = items.filter(
-    (item) => item.mobileOverflow && !item.center,
+    (item) =>
+      (item.mobileOverflow || Boolean(item.children?.length)) && !item.center,
   );
-  const regular = items.filter((item) => !item.center && !item.mobileOverflow);
+  const regular = items.filter(
+    (item) => !item.center && !item.mobileOverflow && !item.children?.length,
+  );
   const capacity = center
     ? TABBAR_MAX_DESTINATIONS - 1
     : TABBAR_MAX_DESTINATIONS;
@@ -406,6 +415,15 @@ export function splitMobileTabs(items: NavItemDef[]): MobileTabSplit {
     overflow: [...pinnedOverflow, ...regular.slice(capacity)],
     hasMore: true,
   };
+}
+
+// #746: whether a configuration declares disclosure groups. When it does, the
+// mobile More sheet renders the full grouped navigation (mirroring the sidebar)
+// rather than the flat overflow list, so every destination - parents and
+// sub-destinations alike - is reachable from the sheet. A config with no
+// nesting keeps the sheet as the overflow list it has always been.
+export function hasNestedDestinations(items: NavItemDef[]): boolean {
+  return items.some((item) => Boolean(item.children?.length));
 }
 
 // Collapse preference persists per role (spec decision 6): the storage key is

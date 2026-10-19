@@ -330,7 +330,7 @@ describe("splitMobileTabs", () => {
     expect(overflow.map((item) => item.key)).toEqual(["pinned"]);
   });
 
-  it.each(["doctor", "partner", "operator"] as const)(
+  it.each(["doctor", "partner"] as const)(
     "%s fits its entries below the cap without a More sheet",
     (role) => {
       const { tabs, overflow, hasMore } = splitMobileTabs(NAV_CONFIG[role]);
@@ -338,15 +338,29 @@ describe("splitMobileTabs", () => {
       expect(tabs.map((item) => item.key)).toEqual(
         NAV_CONFIG[role].map((item) => item.key),
       );
-      // #708: the operator bar grew to five destinations with the live
-      // Observability entry - still the cap, still no More sheet. What this
-      // asserts is the RULE (every staff role's destinations fit the bar),
-      // not one role's count, so the next role to grow needs no edit here.
       expect(tabs.length).toBeLessThanOrEqual(TABBAR_MAX_DESTINATIONS);
       expect(hasMore).toBe(false);
       expect(overflow).toHaveLength(0);
     },
   );
+
+  // #746: a disclosure parent (an item carrying `children`) is not a flat tab -
+  // a tab column cannot expand a group - so the pinned-overflow rule sends it
+  // into the More sheet. The operator bar keeps the four Work destinations plus
+  // More; the parent and its nine sub-destinations live in the sheet.
+  it("pins the operator's disclosure parent into More (#746)", () => {
+    const { tabs, overflow, hasMore } = splitMobileTabs(NAV_CONFIG.operator);
+
+    expect(tabs.map((item) => item.key)).toEqual([
+      "home",
+      "verifications",
+      "disputes",
+      "audit",
+    ]);
+    expect(tabs.length).toBeLessThanOrEqual(TABBAR_MAX_DESTINATIONS);
+    expect(hasMore).toBe(true);
+    expect(overflow.map((item) => item.key)).toEqual(["observability"]);
+  });
 
   it("keeps the first five destinations visible and pushes the rest into More", () => {
     const synthetic: NavItemDef[] = Array.from({ length: 7 }, (_, i) => ({

@@ -34,6 +34,7 @@ import * as axe from "axe-core";
 
 import { AppShell } from "./AppShell";
 import { maskedPhone } from "./BottomTabs";
+import { NAV_CONFIG, splitMobileTabs } from "./nav-config";
 import { DoctorProfileProvider } from "@/lib/doctor/DoctorProfileContext";
 import {
   ProfileProvider,
@@ -728,23 +729,17 @@ describe.each(["doctor", "partner", "operator"] as const)(
     it("renders the role's nav-config entries with active highlighting", () => {
       setup();
 
-      const expected = {
-        doctor: ["queue", "cases", "patients", "profile"],
-        partner: ["orders", "history", "settlements", "profile"],
-        operator: [
-          "home",
-          "verifications",
-          "disputes",
-          "audit",
-          "observability",
-        ],
-      }[role];
-
-      expected.forEach((key) => {
-        expect(screen.getByTestId(`nav-${key}`)).toBeInTheDocument();
-        expect(screen.getByTestId(`tab-${key}`)).toBeInTheDocument();
-      });
-      expect(screen.getByTestId(`nav-${expected[0]}`)).toHaveAttribute(
+      const config = NAV_CONFIG[role];
+      // Walk the configuration rather than a hand-kept list: every destination
+      // is in the sidebar (nav-<key>), and the phone bar columns are exactly
+      // what the split helper keeps off the More sheet (#746).
+      for (const item of config) {
+        expect(screen.getByTestId(`nav-${item.key}`)).toBeInTheDocument();
+      }
+      for (const item of splitMobileTabs(config).tabs) {
+        expect(screen.getByTestId(`tab-${item.key}`)).toBeInTheDocument();
+      }
+      expect(screen.getByTestId(`nav-${config[0].key}`)).toHaveAttribute(
         "aria-current",
         "page",
       );
@@ -775,26 +770,103 @@ describe.each(["doctor", "partner", "operator"] as const)(
 );
 
 // #744: the operator's Observability disclosure parent reads as current while
-// the operator is anywhere inside the group - and both the sidebar row and the
-// phone tab column consume the one shared predicate, so the two surfaces can
-// never disagree about where the operator is.
+// the operator is anywhere inside the group. #746 moved the group off the phone
+// bar, so the two surfaces are now the sidebar row and the More-sheet row - the
+// one shared predicate keeps them from disagreeing about where the operator is.
 describe("AppShell operator Observability parent (#744)", () => {
+  function openMore() {
+    fireEvent.click(screen.getByTestId("more-trigger"));
+    return screen.getByTestId("more-sheet");
+  }
+
   it("marks the parent current on a nested sub-destination in both surfaces", () => {
     renderShell("operator", "/operator/observability/business");
 
-    for (const testid of ["nav-observability", "tab-observability"]) {
-      expect(screen.getByTestId(testid)).toHaveAttribute(
-        "aria-current",
-        "page",
-      );
-    }
+    expect(screen.getByTestId("nav-observability")).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    const sheet = openMore();
+    expect(within(sheet).getByTestId("more-observability")).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
   });
 
   it("stays unlit on a sibling that merely shares a string prefix", () => {
     renderShell("operator", "/operator/observability-archive");
 
-    for (const testid of ["nav-observability", "tab-observability"]) {
-      expect(screen.getByTestId(testid)).not.toHaveAttribute("aria-current");
+    expect(screen.getByTestId("nav-observability")).not.toHaveAttribute(
+      "aria-current",
+    );
+    const sheet = openMore();
+    expect(within(sheet).getByTestId("more-observability")).not.toHaveAttribute(
+      "aria-current",
+    );
+  });
+});
+
+// #746: the phone bar keeps a small fixed set plus More, and the More sheet
+// mirrors the sidebar exactly - every destination in the configuration, grouped
+// and indented, so nothing is unreachable on a phone. The assertions walk the
+// configuration rather than listing names: a hard-coded list would pass while
+// the sheet silently dropped a destination.
+describe("AppShell operator mobile More sheet (#746)", () => {
+  function openMore(pathname = "/operator/observability/business") {
+    renderShell("operator", pathname);
+    fireEvent.click(screen.getByTestId("more-trigger"));
+    return screen.getByTestId("more-sheet");
+  }
+
+  it("reaches every destination in the configuration, grouped and indented", () => {
+    const sheet = openMore();
+
+    for (const item of NAV_CONFIG.operator) {
+      expect(within(sheet).getByTestId(`more-${item.key}`)).toBeInTheDocument();
+      for (const child of item.children ?? []) {
+        expect(
+          within(sheet).getByTestId(`more-${child.key}`),
+        ).toBeInTheDocument();
+      }
+    }
+
+    // Group headers mirror the sidebar's sections.
+    expect(within(sheet).getByTestId("more-section-work")).toHaveTextContent(
+      "Work",
+    );
+    expect(
+      within(sheet).getByTestId("more-section-observability"),
+    ).toHaveTextContent("Observability");
+
+    // Indentation: the sub-destinations sit inside the parent group's menu.
+    const menu = within(sheet).getByTestId("more-group-observability-menu");
+    expect(within(menu).getByTestId("more-business")).toHaveAttribute(
+      "href",
+      "/operator/observability/business",
+    );
+    expect(within(menu).getByTestId("more-overview")).toHaveAttribute(
+      "href",
+      "/operator/observability",
+    );
+  });
+
+  it("keeps coming-soon destinations non-interactive and dimmed", () => {
+    const sheet = openMore();
+
+    const settings = within(sheet).getByTestId("more-settings");
+    expect(settings.tagName).toBe("SPAN");
+    expect(settings).toHaveAttribute("aria-disabled", "true");
+    // A live sub-destination stays a real link.
+    expect(within(sheet).getByTestId("more-business").tagName).toBe("A");
+  });
+
+  it("keeps a disclosure parent off the phone bar, behind More", () => {
+    renderShell("operator", "/operator");
+
+    expect(screen.getByTestId("more-trigger")).toBeInTheDocument();
+    expect(screen.queryByTestId("tab-observability")).not.toBeInTheDocument();
+    for (const key of ["home", "verifications", "disputes", "audit"]) {
+      expect(screen.getByTestId(`tab-${key}`)).toBeInTheDocument();
     }
   });
 });
