@@ -856,7 +856,12 @@ describe("AppShell operator mobile More sheet (#746)", () => {
     const settings = within(sheet).getByTestId("more-settings");
     expect(settings.tagName).toBe("SPAN");
     expect(settings).toHaveAttribute("aria-disabled", "true");
-    // A live sub-destination stays a real link.
+    // Dimmed, with the same Soon badge the sidebar shows: the shared
+    // coming-soon convention, not a second rendering.
+    expect(settings.className).toContain("opacity-60");
+    expect(within(settings).getByTestId("soon-badge")).toBeInTheDocument();
+    // A live top-level destination and a live sub-destination stay real links.
+    expect(within(sheet).getByTestId("more-home").tagName).toBe("A");
     expect(within(sheet).getByTestId("more-business").tagName).toBe("A");
   });
 

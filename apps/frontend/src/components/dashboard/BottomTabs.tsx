@@ -28,6 +28,7 @@ import { cn } from "@/lib/utils";
 
 import {
   hasNestedDestinations,
+  isGroupParent,
   isNavItemActive,
   NAV_CONFIG,
   sidebarSections,
@@ -407,7 +408,7 @@ function SheetNavSections({
             </p>
           )}
           {section.items.map((item) =>
-            item.children?.length ? (
+            isGroupParent(item) ? (
               <SheetGroupNavItem
                 key={item.key}
                 item={item}
